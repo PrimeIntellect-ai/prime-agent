@@ -85,7 +85,13 @@ prime-agent mcp remove remote
 
 Use the same forms after `/mcp` in the TUI. Add `--oauth` for the existing OAuth
 login flow and then use `/mcp login <name>`; use `--force` to replace a complete
-existing entry. Static secret values are not accepted: bearer and stdio secrets
+existing entry. OAuth discovery refuses loopback, private (RFC 1918), link-local
+and local-network destinations (`127.0.0.1`, `10.x`, `localhost`, `*.local`,
+`*.internal`, ...) for the MCP endpoint and for every authorization-server,
+metadata, registration, authorization and token URL it discovers, so a hostile
+server cannot steer the login at internal services. For a genuinely internal
+OAuth-protected server, add `--allow-private-network` (settings key
+`allowPrivateNetwork: true`) to that one entry. Static secret values are not accepted: bearer and stdio secrets
 are environment-variable references. Project `.prime/agent/settings.json` MCP
 entries are ignored for execution, so a repository cannot start a local process
 or shadow a user server.
@@ -132,7 +138,9 @@ result = await mcp.call_tool("remote", "search", {"query": "example"})
 ```
 
 HTTP servers may be anonymous, use static `headers`, use a token named by
-`bearerTokenEnvVar`, or opt into the existing OAuth login with `oauth: true`.
+`bearerTokenEnvVar`, or opt into the existing OAuth login with `oauth: true`
+(add `allowPrivateNetwork: true` only for an internal OAuth server whose
+endpoints live on private or loopback addresses).
 For stdio, `command` and `args` are executed directly without a shell. `env`
 accepts only tagged references to existing environment variables; literal
 secrets are not supported. The runtime passes a small ambient environment plus

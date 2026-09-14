@@ -1,0 +1,1 @@
+- Fixed MCP OAuth discovery accepting loopback, private, link-local and local-network hosts (`127.0.0.1`, `10.x`, `localhost`, `*.internal`, ...) for the MCP endpoint and every discovered authorization-server, metadata, registration, authorization and token URL; `allowPrivateNetwork: true` opts a server back in.

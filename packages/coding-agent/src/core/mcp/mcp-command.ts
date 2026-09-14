@@ -102,6 +102,7 @@ export function parseMcpAddArgs(args: readonly string[]): {
 	let url: string | undefined;
 	let bearerTokenEnvVar: string | undefined;
 	let oauth = false;
+	let allowPrivateNetwork = false;
 	let force = false;
 	let cwd: string | undefined;
 	const env: Record<string, { env: string }> = Object.create(null);
@@ -111,8 +112,9 @@ export function parseMcpAddArgs(args: readonly string[]): {
 		const option = optionArgs[index]!;
 		if (option !== "--env" && seenOptions.has(option)) throw new Error(`Duplicate MCP add option: ${option}`);
 		seenOptions.add(option);
-		if (option === "--oauth" || option === "--force") {
+		if (option === "--oauth" || option === "--force" || option === "--allow-private-network") {
 			if (option === "--oauth") oauth = true;
+			else if (option === "--allow-private-network") allowPrivateNetwork = true;
 			else force = true;
 			continue;
 		}
@@ -137,7 +139,9 @@ export function parseMcpAddArgs(args: readonly string[]): {
 	}
 
 	if (separator !== -1) {
-		if (url || bearerTokenEnvVar || oauth) throw new Error("Stdio MCP servers cannot use HTTP options.");
+		if (url || bearerTokenEnvVar || oauth || allowPrivateNetwork) {
+			throw new Error("Stdio MCP servers cannot use HTTP options.");
+		}
 		if (commandArgs.length === 0 || !commandArgs[0]?.trim()) {
 			throw new Error("A command is required after --.");
 		}
@@ -158,6 +162,7 @@ export function parseMcpAddArgs(args: readonly string[]): {
 	if (cwd || Object.keys(env).length > 0) throw new Error("--cwd and --env require a stdio command after --.");
 	if (!url) throw new Error("Use --url <url> for HTTP or -- <command> [args...] for stdio.");
 	if (bearerTokenEnvVar && oauth) throw new Error("--oauth and --bearer-token-env-var cannot be combined.");
+	if (allowPrivateNetwork && !oauth) throw new Error("--allow-private-network requires --oauth.");
 	return {
 		name,
 		force,
@@ -166,6 +171,7 @@ export function parseMcpAddArgs(args: readonly string[]): {
 			url: validateHttpUrl(url),
 			...(bearerTokenEnvVar ? { bearerTokenEnvVar } : {}),
 			...(oauth ? { oauth: true } : {}),
+			...(allowPrivateNetwork ? { allowPrivateNetwork: true } : {}),
 		},
 	};
 }

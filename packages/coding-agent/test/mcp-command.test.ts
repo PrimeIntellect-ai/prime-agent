@@ -63,6 +63,23 @@ describe("MCP management commands", () => {
 		}
 	});
 
+	it("records --allow-private-network only for OAuth HTTP servers", () => {
+		expect(
+			parseMcpAddArgs(["internal", "--url", "https://mcp.internal/mcp", "--oauth", "--allow-private-network"])
+				.config,
+		).toEqual({ type: "http", url: "https://mcp.internal/mcp", oauth: true, allowPrivateNetwork: true });
+		expect(parseMcpAddArgs(["remote", "--url", "https://example.com/mcp", "--oauth"]).config).not.toHaveProperty(
+			"allowPrivateNetwork",
+		);
+		for (const args of [
+			["remote", "--url", "https://example.com/mcp", "--allow-private-network"],
+			["remote", "--url", "https://example.com/mcp", "--bearer-token-env-var", "TOKEN", "--allow-private-network"],
+			["local", "--allow-private-network", "--", "node"],
+		] as string[][]) {
+			expect(() => parseMcpAddArgs(args)).toThrow();
+		}
+	});
+
 	it("shows only the server name and transport at the public output boundary", () => {
 		const output = formatMcpServer("remote", {
 			type: "http",

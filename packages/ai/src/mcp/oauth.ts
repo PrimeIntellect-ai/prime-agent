@@ -2,6 +2,7 @@ import type { Server } from "node:http";
 import { oauthErrorHtml, oauthSuccessHtml } from "../utils/oauth/oauth-page.js";
 import { generatePKCE } from "../utils/oauth/pkce.js";
 import type { OAuthCredentials, OAuthLoginCallbacks, OAuthProviderInterface } from "../utils/oauth/types.js";
+import { isPublicHost } from "./host-policy.js";
 
 const CALLBACK_HOST = process.env.PI_OAUTH_CALLBACK_HOST || "127.0.0.1";
 // A range (not one port) so a leaked/concurrent login can't wedge all logins with EADDRINUSE.
@@ -33,6 +34,11 @@ interface Discovery {
 	issuer?: string;
 }
 
+/** Host restrictions applied to every URL the OAuth flow contacts or opens. */
+interface UrlPolicy {
+	allowPrivateNetwork: boolean;
+}
+
 export interface McpOAuthConfig {
 	/** MCP server name; provider id becomes `mcp:<server>`. */
 	server: string;
@@ -44,6 +50,12 @@ export interface McpOAuthConfig {
 	clientId?: string;
 	/** Requested OAuth scopes; defaults to the server's advertised scopes. */
 	scopes?: string;
+	/**
+	 * Permit loopback, private, link-local and local-network hostnames (e.g. `127.0.0.1`,
+	 * `10.0.0.7`, `localhost`, `*.internal`) for the MCP endpoint and every OAuth URL discovered
+	 * from it. Off by default so hostile metadata cannot steer the flow at internal services.
+	 */
+	allowPrivateNetwork?: boolean;
 }
 
 interface McpCredentials extends OAuthCredentials {
@@ -57,7 +69,7 @@ interface McpCredentials extends OAuthCredentials {
 	issuer?: string;
 }
 
-function validatedHttpsUrl(value: string, name: string): URL {
+function validatedHttpsUrl(value: string, name: string, policy: UrlPolicy): URL {
 	let url: URL;
 	try {
 		url = new URL(value);
@@ -67,6 +79,12 @@ function validatedHttpsUrl(value: string, name: string): URL {
 	if (url.protocol !== "https:" || url.username || url.password || url.hash) {
 		throw new Error(`${name} must be an absolute HTTPS URL without credentials or a fragment`);
 	}
+	if (!policy.allowPrivateNetwork && !isPublicHost(url.hostname)) {
+		throw new Error(
+			`${name} ${url.origin} points at a private, loopback or local-network host; ` +
+				`set allowPrivateNetwork: true for this MCP server to allow it`,
+		);
+	}
 	return url;
 }
 
@@ -75,8 +93,8 @@ function canonicalResource(url: URL): string {
 	return `${url.origin}${url.pathname}${url.search}`;
 }
 
-function authorizationServerMetadataUrls(issuer: string): string[] {
-	const url = validatedHttpsUrl(issuer, "Authorization server issuer");
+function authorizationServerMetadataUrls(issuer: string, policy: UrlPolicy): string[] {
+	const url = validatedHttpsUrl(issuer, "Authorization server issuer", policy);
 	if (url.search) throw new Error("Authorization server issuer must not contain a query string");
 	const path = url.pathname === "/" ? "" : url.pathname.replace(/\/$/, "");
 	return [
@@ -97,7 +115,12 @@ async function fetchJson(url: string, init?: RequestInit): Promise<unknown> {
 	return res.json();
 }
 
-function authorizationServerMetadata(value: unknown, issuer: string, requireExactIssuer: boolean): AuthServerMetadata {
+function authorizationServerMetadata(
+	value: unknown,
+	issuer: string,
+	requireExactIssuer: boolean,
+	policy: UrlPolicy,
+): AuthServerMetadata {
 	if (!value || typeof value !== "object") throw new Error(`Authorization server metadata for ${issuer} is invalid`);
 	const metadata = value as Partial<AuthServerMetadata>;
 	if (typeof metadata.issuer !== "string") {
@@ -108,7 +131,7 @@ function authorizationServerMetadata(value: unknown, issuer: string, requireExac
 			throw new Error(`Authorization server metadata issuer does not exactly match ${issuer}`);
 		}
 	} else {
-		const advertisedIssuer = validatedHttpsUrl(metadata.issuer, "Authorization server metadata issuer");
+		const advertisedIssuer = validatedHttpsUrl(metadata.issuer, "Authorization server metadata issuer", policy);
 		if (advertisedIssuer.origin !== new URL(issuer).origin || advertisedIssuer.search) {
 			throw new Error(`Origin authorization server metadata issuer must stay on ${new URL(issuer).origin}`);
 		}
@@ -116,9 +139,11 @@ function authorizationServerMetadata(value: unknown, issuer: string, requireExac
 	if (typeof metadata.authorization_endpoint !== "string" || typeof metadata.token_endpoint !== "string") {
 		throw new Error(`Authorization server metadata for ${issuer} is missing required endpoints`);
 	}
-	validatedHttpsUrl(metadata.authorization_endpoint, "Authorization endpoint");
-	validatedHttpsUrl(metadata.token_endpoint, "Token endpoint");
-	if (metadata.registration_endpoint) validatedHttpsUrl(metadata.registration_endpoint, "Registration endpoint");
+	validatedHttpsUrl(metadata.authorization_endpoint, "Authorization endpoint", policy);
+	validatedHttpsUrl(metadata.token_endpoint, "Token endpoint", policy);
+	if (metadata.registration_endpoint) {
+		validatedHttpsUrl(metadata.registration_endpoint, "Registration endpoint", policy);
+	}
 	return metadata as AuthServerMetadata;
 }
 
@@ -129,14 +154,23 @@ async function jsonMetadata(response: Response, url: string): Promise<unknown> {
 	return response.json();
 }
 
-async function discoverAuthorizationServer(issuer: string, requireExactIssuer: boolean): Promise<AuthServerMetadata> {
-	const candidates = authorizationServerMetadataUrls(issuer);
+async function discoverAuthorizationServer(
+	issuer: string,
+	requireExactIssuer: boolean,
+	policy: UrlPolicy,
+): Promise<AuthServerMetadata> {
+	const candidates = authorizationServerMetadataUrls(issuer, policy);
 	let lastError: unknown;
 	for (const candidate of candidates) {
 		try {
 			const response = await fetchResponse(candidate);
 			if (response.status === 404) continue;
-			return authorizationServerMetadata(await jsonMetadata(response, candidate), issuer, requireExactIssuer);
+			return authorizationServerMetadata(
+				await jsonMetadata(response, candidate),
+				issuer,
+				requireExactIssuer,
+				policy,
+			);
 		} catch (error) {
 			lastError = error;
 		}
@@ -156,7 +190,7 @@ function randomState(): string {
 		.replace(/=/g, "");
 }
 
-function resourceMetadata(value: unknown, resource: string): ProtectedResourceMetadata {
+function resourceMetadata(value: unknown, resource: string, policy: UrlPolicy): ProtectedResourceMetadata {
 	if (!value || typeof value !== "object") throw new Error("Protected-resource metadata is invalid");
 	const metadata = value as Partial<ProtectedResourceMetadata>;
 	if (metadata.resource !== resource)
@@ -167,7 +201,7 @@ function resourceMetadata(value: unknown, resource: string): ProtectedResourceMe
 	for (const issuer of metadata.authorization_servers) {
 		if (typeof issuer !== "string")
 			throw new Error("Protected-resource metadata has an invalid authorization server");
-		validatedHttpsUrl(issuer, "Authorization server issuer");
+		validatedHttpsUrl(issuer, "Authorization server issuer", policy);
 	}
 	return metadata as ProtectedResourceMetadata;
 }
@@ -183,8 +217,11 @@ function headerResourceMetadata(value: string | null): string | undefined {
 	return match[1].replace(/\\(.)/g, "$1");
 }
 
-async function tryProtectedResourceMetadata(url: string): Promise<ProtectedResourceMetadata | undefined> {
-	const resource = validatedHttpsUrl(url, "MCP endpoint");
+async function tryProtectedResourceMetadata(
+	url: string,
+	policy: UrlPolicy,
+): Promise<ProtectedResourceMetadata | undefined> {
+	const resource = validatedHttpsUrl(url, "MCP endpoint", policy);
 	let headerUrl: string | undefined;
 	try {
 		// This probe deliberately has no Authorization header. It must not leak an existing token.
@@ -196,30 +233,30 @@ async function tryProtectedResourceMetadata(url: string): Promise<ProtectedResou
 	}
 
 	const candidate = headerUrl
-		? validatedHttpsUrl(headerUrl, "resource_metadata").toString()
+		? validatedHttpsUrl(headerUrl, "resource_metadata", policy).toString()
 		: resourceMetadataUrl(resource);
 	const response = await fetchResponse(candidate);
 	if (response.status === 404 && !headerUrl) return undefined;
-	return resourceMetadata(await jsonMetadata(response, candidate), canonicalResource(resource));
+	return resourceMetadata(await jsonMetadata(response, candidate), canonicalResource(resource), policy);
 }
 
 /** Discover RFC 9728 protected-resource metadata before the origin-level authorization server fallback. */
-async function discover(url: string): Promise<Discovery> {
-	const protectedResource = await tryProtectedResourceMetadata(url);
+async function discover(url: string, policy: UrlPolicy): Promise<Discovery> {
+	const protectedResource = await tryProtectedResourceMetadata(url, policy);
 	if (protectedResource) {
 		const issuer = protectedResource.authorization_servers[0];
 		return {
-			metadata: await discoverAuthorizationServer(issuer, true),
+			metadata: await discoverAuthorizationServer(issuer, true, policy),
 			resource: protectedResource.resource,
 			issuer,
 		};
 	}
-	const issuer = validatedHttpsUrl(url, "MCP endpoint").origin;
-	return { metadata: await discoverAuthorizationServer(issuer, false) };
+	const issuer = validatedHttpsUrl(url, "MCP endpoint", policy).origin;
+	return { metadata: await discoverAuthorizationServer(issuer, false, policy) };
 }
 
-async function registerClient(registrationEndpoint: string, label: string): Promise<string> {
-	validatedHttpsUrl(registrationEndpoint, "Registration endpoint");
+async function registerClient(registrationEndpoint: string, label: string, policy: UrlPolicy): Promise<string> {
+	validatedHttpsUrl(registrationEndpoint, "Registration endpoint", policy);
 	const body = {
 		client_name: label,
 		redirect_uris: ALL_REDIRECT_URIS,
@@ -346,8 +383,9 @@ function parseRedirectInput(input: string, expectedState: string): { code: strin
 async function exchangeToken(
 	tokenEndpoint: string,
 	params: Record<string, string>,
+	policy: UrlPolicy,
 ): Promise<{ access_token: string; refresh_token?: string; expires_in?: number }> {
-	validatedHttpsUrl(tokenEndpoint, "Token endpoint");
+	validatedHttpsUrl(tokenEndpoint, "Token endpoint", policy);
 	const res = await fetchResponse(tokenEndpoint, {
 		method: "POST",
 		headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -406,9 +444,10 @@ function toCredentials(
 
 export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInterface {
 	const label = config.label ?? config.server;
+	const policy: UrlPolicy = { allowPrivateNetwork: config.allowPrivateNetwork === true };
 
 	async function login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
-		const discovery = await discover(config.url);
+		const discovery = await discover(config.url, policy);
 		const { metadata: meta } = discovery;
 		callbacks.onProgress?.(`Discovered ${discovery.issuer ?? meta.issuer}`);
 
@@ -421,7 +460,7 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 				);
 			}
 			callbacks.onProgress?.("Registering OAuth client…");
-			clientId = await registerClient(meta.registration_endpoint, `Prime Agent (${label})`);
+			clientId = await registerClient(meta.registration_endpoint, `Prime Agent (${label})`, policy);
 		}
 
 		const { verifier, challenge } = await generatePKCE();
@@ -502,14 +541,18 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 			}
 
 			callbacks.onProgress?.("Exchanging authorization code for tokens…");
-			const token = await exchangeToken(meta.token_endpoint, {
-				grant_type: "authorization_code",
-				code: result.code,
-				redirect_uri: cb.redirectUri,
-				client_id: clientId,
-				code_verifier: verifier,
-				...(discovery.resource ? { resource: discovery.resource } : {}),
-			});
+			const token = await exchangeToken(
+				meta.token_endpoint,
+				{
+					grant_type: "authorization_code",
+					code: result.code,
+					redirect_uri: cb.redirectUri,
+					client_id: clientId,
+					code_verifier: verifier,
+					...(discovery.resource ? { resource: discovery.resource } : {}),
+				},
+				policy,
+			);
 			return toCredentials(token, meta.token_endpoint, clientId, config.url, discovery.resource, discovery.issuer);
 		} finally {
 			cb.server.close();
@@ -521,7 +564,7 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 		if (creds.endpoint !== config.url) {
 			throw new Error(`Stored OAuth credentials are not bound to ${config.url}; re-run /mcp login ${config.server}`);
 		}
-		const configuredResource = canonicalResource(validatedHttpsUrl(config.url, "MCP endpoint"));
+		const configuredResource = canonicalResource(validatedHttpsUrl(config.url, "MCP endpoint", policy));
 		if (creds.resource !== undefined && creds.resource !== configuredResource) {
 			throw new Error(
 				`Stored OAuth credentials are not bound to ${configuredResource}; re-run /mcp login ${config.server}`,
@@ -532,11 +575,11 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 				`Stored OAuth credentials for ${label} have incomplete resource binding; re-run /mcp login ${config.server}`,
 			);
 		}
-		if (creds.issuer !== undefined) validatedHttpsUrl(creds.issuer, "Stored authorization server issuer");
+		if (creds.issuer !== undefined) validatedHttpsUrl(creds.issuer, "Stored authorization server issuer", policy);
 		if (!creds.refresh) {
 			throw new Error(`No refresh token stored for ${label}; re-run /mcp login ${config.server}`);
 		}
-		const discovery = await discover(config.url);
+		const discovery = await discover(config.url, policy);
 		if ((creds.resource === undefined) !== (discovery.resource === undefined)) {
 			throw new Error(`OAuth discovery mode changed for ${config.url}; re-run /mcp login ${config.server}`);
 		}
@@ -555,12 +598,16 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 		}
 		const clientId = creds.clientId ?? config.clientId;
 		if (!tokenEndpoint) throw new Error(`No token endpoint stored for ${label}; re-run /mcp login ${config.server}`);
-		const token = await exchangeToken(tokenEndpoint, {
-			grant_type: "refresh_token",
-			refresh_token: creds.refresh,
-			...(clientId ? { client_id: clientId } : {}),
-			...(creds.resource ? { resource: creds.resource } : {}),
-		});
+		const token = await exchangeToken(
+			tokenEndpoint,
+			{
+				grant_type: "refresh_token",
+				refresh_token: creds.refresh,
+				...(clientId ? { client_id: clientId } : {}),
+				...(creds.resource ? { resource: creds.resource } : {}),
+			},
+			policy,
+		);
 		return toCredentials(
 			token,
 			tokenEndpoint,

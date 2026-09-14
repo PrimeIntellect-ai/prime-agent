@@ -119,6 +119,39 @@ describe("LoginDialogComponent", () => {
 		}
 	});
 
+	it.each([
+		["file URL", "file:///etc/passwd"],
+		["javascript URL", "javascript:alert(1)"],
+		["URL with embedded credentials", "https://user:secret@example.com/oauth"],
+		["URL carrying an OSC 52 payload", `https://x.test/${"\x1b"}]52;c;QUFB${"\x07"}`],
+		["over-long URL", `https://example.com/${"a".repeat(9000)}`],
+	])("does not open or hyperlink a %s and shows it as text instead", (_label, url) => {
+		setCapabilities({ images: null, trueColor: true, hyperlinks: true });
+		const dialog = new LoginDialogComponent(createFakeTui(), "anthropic", () => {}, "Anthropic");
+
+		dialog.showAuth(url, "Complete login in your browser.");
+		const rawOutput = dialog.render(120).join("\n");
+		const output = stripAnsi(rawOutput);
+
+		expect(mocks.execFile).not.toHaveBeenCalled();
+		expect(rawOutput).not.toContain("\x1b]8;;");
+		expect(rawOutput).not.toContain("\x1b]52");
+		expect(output).toContain("Sign-in link (not opened)");
+		expect(output).toContain("not a valid http(s) URL");
+		expect(output).not.toContain("should already be opening");
+		expect(output).not.toContain("copy");
+
+		dialog.handleInput("c");
+		expect(mocks.copyToClipboard).not.toHaveBeenCalled();
+	});
+
+	it("still opens plain http URLs such as a loopback callback page", () => {
+		const dialog = new LoginDialogComponent(createFakeTui(), "anthropic", () => {}, "Anthropic");
+		dialog.showAuth("http://localhost:53700/start");
+		expect(mocks.execFile).toHaveBeenCalledTimes(1);
+		expect(mocks.execFile.mock.calls[0]?.[1]).toContain("http://localhost:53700/start");
+	});
+
 	it("renders sign-in URLs as OSC 8 hyperlinks when supported", () => {
 		setCapabilities({ images: null, trueColor: true, hyperlinks: true });
 		const dialog = new LoginDialogComponent(createFakeTui(), "anthropic", () => {}, "Anthropic");
