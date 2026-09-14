@@ -276,6 +276,7 @@ import {
 	ToolExecutionComponent,
 	type ToolExecutionDefinition,
 } from "./components/tool-execution.js";
+import { TopBar } from "./components/top-bar.js";
 import { TreeSelectorComponent } from "./components/tree-selector.js";
 import { UserMessageComponent } from "./components/user-message.js";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.js";
@@ -1154,6 +1155,8 @@ export class InteractiveMode {
 	private customFooter: (Component & { dispose?(): void }) | undefined = undefined;
 
 	private headerContainer: Container;
+	/** Pinned fullscreen top bar identifying the chat by name while scrolling. */
+	private topBar: TopBar;
 
 	private builtInHeader: Component | undefined = undefined;
 
@@ -1202,6 +1205,9 @@ export class InteractiveMode {
 			void this.copyFullscreenSelection(text);
 		};
 		this.headerContainer = new Container();
+		this.topBar = new TopBar({
+			getChatName: () => this.getCurrentSessionName() ?? path.basename(this.getCurrentCwd()),
+		});
 		this.chatContainer = new Container();
 		this.shortcutGuideContainer = new Container();
 		this.pendingMessagesContainer = new Container();
@@ -7441,6 +7447,7 @@ export class InteractiveMode {
 					this.widgetContainerBelow,
 				],
 				dock: this.promptDock,
+				pin: this.topBar,
 				mouse: this.settingsManager.getFullscreenMouse(),
 			});
 		} else {

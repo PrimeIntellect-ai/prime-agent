@@ -86,6 +86,8 @@ export interface TuiStopOptions {
 export interface FullscreenOptions {
 	scroll: Component[];
 	dock: Component;
+	/** Pinned above the scrolling transcript — stays on top while scrolling. */
+	pin?: Component;
 	mouse?: boolean;
 	viewportControls?: boolean;
 }
@@ -339,6 +341,7 @@ export class TUI extends Container {
 		viewport: FullscreenViewport;
 		scroll: Component[];
 		dock: Component;
+		pin: Component | undefined;
 		mouse: boolean;
 		viewportControls: boolean;
 		inlineState: {
@@ -686,6 +689,7 @@ export class TUI extends Container {
 			viewport: new FullscreenViewport(),
 			scroll: options.scroll,
 			dock: options.dock,
+			pin: options.pin,
 			mouse: options.mouse !== false,
 			viewportControls: options.viewportControls !== false,
 			inlineState: {
@@ -1301,13 +1305,9 @@ export class TUI extends Container {
 		return visibleContentSpan(line, maxWidth);
 	}
 
-	private createDockSelectionRegions(
-		frame: string[],
-		transcriptWindowHeight: number,
-		width: number,
-	): FrameSelectionRegion[] {
+	private createDockSelectionRegions(frame: string[], firstDockRow: number, width: number): FrameSelectionRegion[] {
 		const regions: FrameSelectionRegion[] = [];
-		for (let row = Math.max(0, transcriptWindowHeight); row < frame.length; row++) {
+		for (let row = Math.max(0, firstDockRow); row < frame.length; row++) {
 			const span = this.selectableSpan(frame[row] ?? "", width);
 			if (span) {
 				regions.push({ line: row, col: span.from, width: span.to - span.from });
@@ -1508,10 +1508,15 @@ export class TUI extends Container {
 			}
 			return fullscreen.dock.render(width);
 		});
+		const header = withFullscreenImageFallback(() => fullscreen.pin?.render(width) ?? []);
 
-		let frame = fullscreen.viewport.composeFrame(transcript, dock, height, selectionRegions);
+		let frame = fullscreen.viewport.composeFrame(transcript, dock, height, selectionRegions, header);
 		this.overlaySelectionRegions.push(
-			...this.createDockSelectionRegions(frame, fullscreen.viewport.windowHeight(), width),
+			...this.createDockSelectionRegions(
+				frame,
+				fullscreen.viewport.headerHeight() + fullscreen.viewport.windowHeight(),
+				width,
+			),
 		);
 		const scrollInfo = fullscreen.viewport.scrollInfo();
 		if (fullscreen.viewportControls && !scrollInfo.following) {
@@ -1520,7 +1525,7 @@ export class TUI extends Container {
 			const followKey = getKeybindings().getKeys("tui.viewport.follow")[0] ?? "ctrl+shift+down";
 			const label = ` ${followKey} to follow `;
 			const labelWidth = visibleWidth(label);
-			const row = fullscreen.viewport.windowHeight() - 1;
+			const row = fullscreen.viewport.headerHeight() + fullscreen.viewport.windowHeight() - 1;
 			if (row >= 0 && row < frame.length && labelWidth <= width) {
 				const col = Math.floor((width - labelWidth) / 2);
 				frame[row] = this.compositeLineAt(frame[row], `\x1b[7m${label}\x1b[27m`, col, labelWidth, width);

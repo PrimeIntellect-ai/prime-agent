@@ -79,6 +79,7 @@ export class FullscreenViewport {
 	private prevHeight = 0;
 	private lastMaxScroll = 0;
 	private lastWindowHeight = 0;
+	private lastHeaderHeight = 0;
 	private lastTranscript: string[] = [];
 	private lastFrame: string[] = [];
 	private lastFrameVisibleStart = 0;
@@ -92,22 +93,33 @@ export class FullscreenViewport {
 	private selectionMode: SelectionMode | null = null;
 
 	/**
-	 * Compose a frame of exactly `height` lines: scrolled transcript window on
-	 * top, dock pinned to the bottom. Following pins the window to the
-	 * transcript end; otherwise it stays frozen while content appends.
+	 * Compose a frame of exactly `height` lines: an optional pinned header on
+	 * top, the scrolled transcript window in the middle, and the dock pinned
+	 * to the bottom. Following pins the window to the transcript end;
+	 * otherwise it stays frozen while content appends.
 	 */
 	composeFrame(
 		transcript: string[],
 		dock: string[],
 		height: number,
 		tableCellSelectionRegions: ReadonlyArray<TableCellSelectionRegion> = [],
+		header?: string[],
 	): string[] {
 		let dockLines = dock;
 		const dockHeight = clippedFullscreenDockHeight(dockLines.length, height);
 		if (dockLines.length > dockHeight) {
 			dockLines = dockLines.slice(dockLines.length - dockHeight);
 		}
-		const windowHeight = height - dockLines.length;
+		let headerLines = header ?? [];
+		// Header rows are taken away from the transcript window, never from the
+		// dock; a too-tall header is clipped from the top like the dock clips
+		// from its bottom, so the bar keeps its bottom rows.
+		const maxHeader = Math.max(0, height - dockLines.length - FULLSCREEN_MIN_TRANSCRIPT_ROWS);
+		const headerHeight = Math.min(headerLines.length, maxHeader);
+		if (headerLines.length > headerHeight) {
+			headerLines = headerLines.slice(headerLines.length - headerHeight);
+		}
+		const windowHeight = height - dockLines.length - headerLines.length;
 		const maxScroll = Math.max(0, transcript.length - windowHeight);
 
 		if (this.following) {
@@ -117,6 +129,7 @@ export class FullscreenViewport {
 		}
 		this.lastMaxScroll = maxScroll;
 		this.lastWindowHeight = windowHeight;
+		this.lastHeaderHeight = headerLines.length;
 		this.lastTranscript = transcript;
 		this.tableCellSelectionRegions = tableCellSelectionRegions;
 
@@ -128,7 +141,7 @@ export class FullscreenViewport {
 		while (window.length < windowHeight) {
 			window.push("");
 		}
-		return [...window, ...dockLines];
+		return [...headerLines, ...window, ...dockLines];
 	}
 
 	private orderedSelection(): { start: SelectionPoint; end: SelectionPoint } | null {
@@ -361,8 +374,12 @@ export class FullscreenViewport {
 		if (visibleHeight <= 0) return null;
 		const visibleStart = this.lastFrameVisibleHeight > 0 ? this.lastFrameVisibleStart : 0;
 		const visibleEnd = visibleStart + visibleHeight - 1;
-		const transcriptStart = Math.max(0, visibleStart);
-		const transcriptEnd = Math.min(this.lastWindowHeight - 1, visibleEnd);
+		// The transcript window occupies frame rows [headerHeight, headerHeight +
+		// windowHeight); the pinned header sits above it and the dock below.
+		const windowStart = this.lastHeaderHeight;
+		const windowEnd = this.lastHeaderHeight + this.lastWindowHeight - 1;
+		const transcriptStart = Math.max(windowStart, visibleStart);
+		const transcriptEnd = Math.min(windowEnd, visibleEnd);
 		if (transcriptStart > transcriptEnd) return null;
 		return {
 			firstRow: transcriptStart - visibleStart,
@@ -381,7 +398,8 @@ export class FullscreenViewport {
 		const row = clamp ? Math.max(0, Math.min(screenRow, bounds.visibleHeight - 1)) : screenRow;
 		const frameLine = bounds.visibleStart + row;
 		if (!clamp && (frameLine < bounds.transcriptStart || frameLine > bounds.transcriptEnd)) return null;
-		return this.scrollTop + Math.max(bounds.transcriptStart, Math.min(frameLine, bounds.transcriptEnd));
+		const clampedFrameLine = Math.max(bounds.transcriptStart, Math.min(frameLine, bounds.transcriptEnd));
+		return this.scrollTop + clampedFrameLine - this.lastHeaderHeight;
 	}
 
 	private isFrameSelectable(point: SelectionPoint): boolean {
@@ -699,6 +717,11 @@ export class FullscreenViewport {
 
 	windowHeight(): number {
 		return this.lastWindowHeight;
+	}
+
+	/** Rows the pinned header currently occupies at the top of the frame. */
+	headerHeight(): number {
+		return this.lastHeaderHeight;
 	}
 
 	isFollowing(): boolean {
