@@ -81,3 +81,14 @@ npx tsx ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts
 ```
 
 If you create or modify a test file, run that file and iterate until it passes. Coding-agent suite regressions belong under `test/suite/regressions/` and use the suite harness and faux provider rather than live provider credentials.
+
+## Capability Evals
+
+Real-model capability evals live in `scripts/evals/`. The
+`swe-fix-loop` harness measures the end-to-end software-engineering loop:
+a headless agent run on a seeded-bug fixture repo, scored on target-test
+resolution, no regressions, diff containment, and transcript evidence of
+an actual test run. The harness itself is validated (fixture integrity,
+golden patches, scorer rubric) by model-free self-tests; real-model runs
+are manual and require provider credentials. See
+`scripts/evals/README.md`.

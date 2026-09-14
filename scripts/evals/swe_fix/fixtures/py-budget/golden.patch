@@ -1,0 +1,18 @@
+diff --git a/budget.py b/budget.py
+index a35f788..e356c2a 100644
+--- a/budget.py
++++ b/budget.py
+@@ -12,5 +12,12 @@ def allocate(income, weights):
+     if any(w < 0 for w in weights.values()) or sum(weights.values()) == 0:
+         raise ValueError("weights must be positive")
+     total_w = sum(weights.values())
+-    shares = {name: round(income * w / total_w) for name, w in weights.items()}
++    raw = {name: income * w / total_w for name, w in weights.items()}
++    shares = {name: int(value) for name, value in raw.items()}
++    remainder = income - sum(shares.values())
++    # Largest-remainder distribution: hand leftover cents to the shares
++    # with the largest fractional parts first.
++    order = sorted(raw, key=lambda name: raw[name] - shares[name], reverse=True)
++    for name in order[:remainder] if remainder > 0 else []:
++        shares[name] += 1
+     return shares
