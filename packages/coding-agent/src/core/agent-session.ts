@@ -6948,25 +6948,30 @@ export class AgentSession {
 		}
 		if (options?.signal) {
 			const cancel = () => {
-				const error = new Error("Extension-owned follow-up was aborted before delivery.");
-				const removed = this._cancelSessionActions((candidate) => candidate === action, error, [action]);
-				if (removed.length > 0) this._emitQueueUpdate();
+				this.cancelExtensionFollowUp(owner, key);
 			};
 			options.signal.addEventListener("abort", cancel, { once: true });
-			void result.ticket.completed.finally(() => options.signal?.removeEventListener("abort", cancel));
+			void result.ticket.completed.then(
+				() => options.signal?.removeEventListener("abort", cancel),
+				() => options.signal?.removeEventListener("abort", cancel),
+			);
 			if (options.signal.aborted) cancel();
 		}
 		return { actionId: action.id, disposition: result.disposition };
 	}
 	cancelExtensionFollowUp(owner: object, key?: string): boolean {
 		const matching = this._actionStore
-			.clearableActions()
+			.ownedActions()
 			.filter(
 				(action) =>
 					action.payload.kind === "turn" &&
 					action.extensionOwner === owner &&
 					action.delivery === "when_run_idle" &&
-					(key === undefined || action.queueKey === key),
+					(key === undefined || action.queueKey === key) &&
+					(action.lifecycle.state === "queued" ||
+						action.lifecycle.state === "selected" ||
+						action.lifecycle.state === "preparing" ||
+						(action.lifecycle.state === "committing" && !primaryDeliveryRecord(action).started)),
 			);
 		if (matching.length === 0) return false;
 		const ids = new Set(matching.map((action) => action.id));
