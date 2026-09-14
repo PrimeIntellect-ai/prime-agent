@@ -164,6 +164,23 @@ describe("extension-owned keyed follow-ups", () => {
 		},
 	);
 
+	it.each([
+		["signal", (_api: ExtensionAPI, controller: AbortController) => controller.abort()],
+		["dispose", (_api: ExtensionAPI, _controller: AbortController, harness: Harness) => harness.session.dispose()],
+	] as const)("%s cancels an extension action at the committing checkpoint", async (_kind, cancel) => {
+		const setup = setupApis();
+		const harness = await createHarness({ extensionFactories: setup.factories });
+		harnesses.push(harness);
+		const held = holdPump(harness);
+		const controller = new AbortController();
+		await setup.apis[0]!.queueFollowUp("goal", "continue", { signal: controller.signal });
+		const action = held.internals._actionStore.unfinishedActions()[0]!;
+		setActionState(action, "committing");
+		cancel(setup.apis[0]!, controller, harness);
+		expect(action.lifecycle.state).toBe("cancelled");
+		held.restore();
+	});
+
 	it("an old started action's signal cannot cancel its newer same-key successor", async () => {
 		const setup = setupApis();
 		const harness = await createHarness({ extensionFactories: setup.factories });
@@ -173,7 +190,7 @@ describe("extension-owned keyed follow-ups", () => {
 		await setup.apis[0]!.queueFollowUp("goal", "old", { signal: oldSignal.signal });
 		const oldAction = held.internals._actionStore.unfinishedActions()[0]!;
 		setActionState(oldAction, "committing");
-		if (oldAction.payload.kind === "turn") oldAction.payload.records[0]!.started = true;
+		oldAction.extensionDeliveryState = "delivering";
 		transitionSessionAction(oldAction, { state: "running", execution: "agent_turn" });
 		await setup.apis[0]!.queueFollowUp("goal", "new");
 
@@ -198,7 +215,7 @@ describe("extension-owned keyed follow-ups", () => {
 		expect(getUserTexts(harness)).toEqual(["new"]);
 	});
 
-	it("marks an entire handed-off batch started before publishing committing", async () => {
+	it("keeps a handed-off extension batch cancellable until the delivery fence closes", async () => {
 		const setup = setupApis();
 		const harness = await createHarness({ extensionFactories: setup.factories });
 		harnesses.push(harness);
@@ -225,8 +242,8 @@ describe("extension-owned keyed follow-ups", () => {
 		held.restore();
 		held.internals._scheduleSessionInputPump();
 		await harness.session.waitForIdle();
-		expect(cancellationAtHandoff).toBe(false);
-		expect(getUserTexts(harness)).toEqual(["first", "second"]);
+		expect(cancellationAtHandoff).toBe(true);
+		expect(getUserTexts(harness)).toEqual(["first"]);
 	});
 
 	it.each(["committing", "running"] as const)("cannot cancel a started %s action", async (state) => {
@@ -237,7 +254,7 @@ describe("extension-owned keyed follow-ups", () => {
 		await setup.apis[0]!.queueFollowUp("goal", "continue");
 		const action = held.internals._actionStore.unfinishedActions()[0]!;
 		setActionState(action, "committing");
-		if (action.payload.kind === "turn") action.payload.records[0]!.started = true;
+		action.extensionDeliveryState = "delivering";
 		if (state === "running") transitionSessionAction(action, { state: "running", execution: "agent_turn" });
 		expect(setup.apis[0]!.cancelFollowUp("goal")).toBe(false);
 		expect(action.lifecycle.state).toBe(state);

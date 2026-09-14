@@ -74,6 +74,8 @@ export interface SessionAction<TPayload extends SessionActionPayload = SessionAc
 	queueKey?: string;
 	/** Ephemeral ownership token. Intentionally excluded from recovery snapshots. */
 	extensionOwner?: object;
+	/** Extension-only handoff fence. Cancellation is allowed only while cancellable. */
+	extensionDeliveryState?: "cancellable" | "delivering";
 	agentMessageId?: string;
 	suppressAutonomousContinuation?: boolean;
 }

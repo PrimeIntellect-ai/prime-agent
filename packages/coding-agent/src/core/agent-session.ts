@@ -779,14 +779,14 @@ function primaryDeliveryRecord(action: QueuedSessionAction): DeliveryRecord {
 	return record;
 }
 
-function isNotStartedTurnAction(action: QueuedSessionAction): action is SessionAction<PreparedTurnPayload> {
+function isCancellableExtensionTurn(action: QueuedSessionAction): action is SessionAction<PreparedTurnPayload> {
 	return (
 		action.payload.kind === "turn" &&
+		action.extensionDeliveryState === "cancellable" &&
 		(action.lifecycle.state === "queued" ||
 			action.lifecycle.state === "selected" ||
 			action.lifecycle.state === "preparing" ||
-			action.lifecycle.state === "committing") &&
-		!primaryDeliveryRecord(action).started
+			action.lifecycle.state === "committing")
 	);
 }
 
@@ -2045,7 +2045,10 @@ export class AgentSession {
 				ticket.settleDelivered({ status: "not_applicable" });
 			}
 			ticket.settleCompleted(error);
-			const dispatched = previousStates.get(action.id) === "committing" && action.payload.kind === "turn";
+			const dispatched =
+				previousStates.get(action.id) === "committing" &&
+				action.payload.kind === "turn" &&
+				action.extensionDeliveryState !== "cancellable";
 			if (action.payload.kind === "turn") {
 				const payload = action.payload;
 				const restorable = payload.records
@@ -5989,6 +5992,7 @@ export class AgentSession {
 			agentMessageId?: string;
 			queueKey?: string;
 			extensionOwner?: object;
+			extensionDeliveryState?: "cancellable" | "delivering";
 			content?: (TextContent | ImageContent)[];
 			message?: QueuedAgentMessage;
 			prefixMessages?: CustomMessage[];
@@ -6043,6 +6047,7 @@ export class AgentSession {
 			lifecycle: { state: "queued" },
 			queueKey: options.queueKey,
 			extensionOwner: options.extensionOwner,
+			extensionDeliveryState: options.extensionDeliveryState,
 			agentMessageId: options.agentMessageId,
 			suppressAutonomousContinuation: options.suppressAutonomousContinuation,
 		};
@@ -6583,27 +6588,35 @@ export class AgentSession {
 					);
 					const firstPrimaryIndex = turns[0].payload.records.indexOf(primaryDeliveryRecord(turns[0]));
 					turns[0].payload.records.splice(firstPrimaryIndex, 0, ...contextRecords);
-					const preparedMessages: AgentMessage[] = turns.flatMap((action) =>
-						action.payload.records.map((record) => record.message),
-					);
 					for (const action of turns) {
 						if (action.suppressAutonomousContinuation) {
 							this._markAutonomousContinuationSuppressed(primaryDeliveryRecord(action).message);
 						}
 					}
 					if (executionPolicy.runBeforeAgentStart) {
-						this._appendBeforeAgentStartMessages(preparedMessages, prepared?.result);
 						this._applyPreparedSystemPrompt(prepared, executionPolicy.preserveEmptyExtensionPrompt);
 					} else if (executionPolicy.nextTurnContextTiming !== "skip") {
 						this.agent.state.systemPrompt = this._baseSystemPrompt;
 					}
 					for (const action of turns) transitionSessionAction(action, { state: "committing" });
-					// `started` is the hand-off boundary, not an eventual UI-event acknowledgement.
-					// Mark every batched primary before publishing `committing`, so cancellation
-					// cannot remove one item after the complete batch has been handed to agent.prompt().
-					for (const action of turns) primaryDeliveryRecord(action).started = true;
 					this._notifySessionInputCheckpointChange();
 					this._emitQueueUpdate();
+					// Extension follow-ups remain cancellable through the public committing
+					// checkpoint. Close only their private fence immediately before delivery.
+					// Delivery records retain their original message_start semantics.
+					const deliveringTurns = turns.filter((action) => action.lifecycle.state === "committing");
+					for (const action of deliveringTurns) {
+						if (action.extensionDeliveryState === "cancellable") {
+							action.extensionDeliveryState = "delivering";
+						}
+					}
+					const preparedMessages: AgentMessage[] = deliveringTurns.flatMap((action) =>
+						action.payload.records.map((record) => record.message),
+					);
+					if (executionPolicy.runBeforeAgentStart) {
+						this._appendBeforeAgentStartMessages(preparedMessages, prepared?.result);
+					}
+					if (deliveringTurns.length === 0) return Promise.resolve();
 					// The public prompt() returns once the input is accepted, so the trace
 					// root lives here instead: agent.prompt() settles only when the whole
 					// run (every agent.turn, tool call and kernel cell it spawns) is done.
@@ -6615,7 +6628,7 @@ export class AgentSession {
 								this.agent.prompt(preparedMessages),
 							),
 						);
-					return turns.some((action) => action.suppressAutonomousContinuation)
+					return deliveringTurns.some((action) => action.suppressAutonomousContinuation)
 						? this._runWithAutonomousContinuationSuppressed(runPrompt)
 						: runPrompt();
 				});
@@ -6949,6 +6962,7 @@ export class AgentSession {
 			content: typeof content === "string" ? undefined : content,
 			queueKey: key,
 			extensionOwner: owner,
+			extensionDeliveryState: "cancellable",
 			resumeIfIdle: true,
 			source: "extension",
 			queueVisible: true,
@@ -6963,7 +6977,7 @@ export class AgentSession {
 		}
 		if (options?.signal) {
 			const cancel = () => {
-				if (!isNotStartedTurnAction(action)) return;
+				if (!isCancellableExtensionTurn(action)) return;
 				const error = new Error("Extension-owned follow-up was aborted before delivery.");
 				const removed = this._cancelSessionActions((candidate) => candidate === action, error, [action]);
 				if (removed.length > 0) this._emitQueueUpdate();
@@ -6985,7 +6999,7 @@ export class AgentSession {
 					action.extensionOwner === owner &&
 					action.delivery === "when_run_idle" &&
 					(key === undefined || action.queueKey === key) &&
-					isNotStartedTurnAction(action),
+					isCancellableExtensionTurn(action),
 			);
 		if (matching.length === 0) return false;
 		const ids = new Set(matching.map((action) => action.id));
