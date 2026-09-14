@@ -21,7 +21,7 @@ class StageEvidenceTests(unittest.TestCase):
             self.assertEqual((root / "upload/raw-eval/trace.jsonl").read_text(), "trace")
             self.assertEqual((root / "upload/raw-eval/eval.log").read_bytes(), b"x" * 20)
 
-    def test_stage_rejects_symlinks_and_oversized_files(self):
+    def test_stage_skips_symlinks_and_rejects_oversized_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "results"
@@ -30,9 +30,11 @@ class StageEvidenceTests(unittest.TestCase):
             target.write_text("data")
             link = source / "link"
             link.symlink_to(target)
-            with self.assertRaisesRegex(ValueError, "symlinks"):
-                stage_evidence.stage([source], root / "links")
-            self.assertFalse((root / "links").exists())
+
+            stage_evidence.stage([source], root / "links")
+
+            self.assertEqual((root / "links/results/target").read_text(), "data")
+            self.assertFalse((root / "links/results/link").exists())
             link.unlink()
             with (
                 patch.object(stage_evidence, "FILE_LIMIT", 2),

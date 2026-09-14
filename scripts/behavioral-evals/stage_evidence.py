@@ -27,7 +27,7 @@ def _plan(sources: list[Path]) -> list[tuple[Path, Path, int]]:
             raise ValueError(f"evidence source must be a directory: {source}")
         for path in sorted(source.rglob("*")):
             if path.is_symlink():
-                raise ValueError(f"evidence must not contain symlinks: {path}")
+                continue
             if not path.is_file():
                 continue
             size = path.stat().st_size
