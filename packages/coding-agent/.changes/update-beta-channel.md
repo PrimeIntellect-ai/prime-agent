@@ -1,0 +1,1 @@
+- Added a persistent update channel. `/beta` (or `prime-agent update --beta`) switches self-updates to the beta release manifest and updates immediately; `/beta off` or `--stable` returns to stable. Startup version notices follow the chosen channel.

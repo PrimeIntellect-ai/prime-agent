@@ -5,6 +5,7 @@ import {
 	getLatestPiRelease,
 	getLatestPiVersion,
 	isNewerPackageVersion,
+	resolveUpdateChannel,
 } from "../src/utils/version-check.js";
 
 const defaultPrimeAgentDownloadBaseUrl = "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev";
@@ -93,5 +94,42 @@ describe("version checks", () => {
 
 		await expect(getLatestPiVersion("1.2.3")).resolves.toBeUndefined();
 		expect(fetchMock).not.toHaveBeenCalled();
+	});
+});
+
+describe("update channel preference", () => {
+	it("infers the channel from the running version when none is preferred", () => {
+		expect(resolveUpdateChannel("1.2.4")).toBe("stable");
+		expect(resolveUpdateChannel("1.2.4-beta.123.1.1234567")).toBe("beta");
+		expect(resolveUpdateChannel("1.2.4-beta.123.1.1234567", "stable")).toBe("stable");
+		expect(resolveUpdateChannel("1.2.4", "beta")).toBe("beta");
+	});
+
+	it("follows a preferred beta channel from a stable installation", async () => {
+		delete process.env.PI_SKIP_VERSION_CHECK;
+		delete process.env.PI_OFFLINE;
+		const fetchMock = vi.fn(async () => Response.json({ version: "v1.2.5-beta.130.1.abcdef0" }));
+		vi.stubGlobal("fetch", fetchMock);
+		await expect(getLatestPiVersion("1.2.4", { channel: "beta" })).resolves.toBe("1.2.5-beta.130.1.abcdef0");
+		expect(fetchMock).toHaveBeenCalledWith(`${defaultPrimeAgentDownloadBaseUrl}/beta.json`, expect.any(Object));
+	});
+
+	it("follows a preferred stable channel from a beta installation", async () => {
+		delete process.env.PI_SKIP_VERSION_CHECK;
+		delete process.env.PI_OFFLINE;
+		const fetchMock = vi.fn(async () => Response.json({ version: "v1.2.4" }));
+		vi.stubGlobal("fetch", fetchMock);
+		await expect(getLatestPiVersion("1.2.4-beta.123.1.1234567", { channel: "stable" })).resolves.toBe("1.2.4");
+		expect(fetchMock).toHaveBeenCalledWith(`${defaultPrimeAgentDownloadBaseUrl}/latest.json`, expect.any(Object));
+	});
+
+	it("reports a newer beta when the channel is preferred", async () => {
+		delete process.env.PI_SKIP_VERSION_CHECK;
+		delete process.env.PI_OFFLINE;
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => Response.json({ version: "v1.2.5-beta.1.1.abcdef0" })),
+		);
+		await expect(checkForNewPiVersion("1.2.4", "beta")).resolves.toBe("1.2.5-beta.1.1.abcdef0");
 	});
 });

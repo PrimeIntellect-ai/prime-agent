@@ -7,7 +7,7 @@ import {
 	readNativeInstallation,
 	readNativeRollbackInstallation,
 } from "../utils/native-installation.js";
-import { getLatestPiRelease, isNewerPackageVersion } from "../utils/version-check.js";
+import { getLatestPiRelease, isNewerPackageVersion, type UpdateChannel } from "../utils/version-check.js";
 
 export interface NativeUpdatePlan {
 	command?: SelfUpdateCommand;
@@ -17,6 +17,7 @@ export interface NativeUpdatePlan {
 export async function getNativeUpdatePlan(options: {
 	force: boolean;
 	rollback: boolean;
+	channel?: UpdateChannel;
 	executable?: string;
 }): Promise<NativeUpdatePlan> {
 	const current = getNativeInstallationTarget(options.executable);
@@ -64,7 +65,7 @@ export async function getNativeUpdatePlan(options: {
 		version = previous.version;
 		previousTarget = relative(join(installation.root, "bin"), previous.executable);
 	} else {
-		const release = await getLatestPiRelease(current.version, { baseUrl });
+		const release = await getLatestPiRelease(current.version, { baseUrl, channel: options.channel });
 		if (!release || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(release.version))
 			throw new Error("Could not resolve a compiled release. The installed version was kept.");
 		if (active && !options.force && !isNewerPackageVersion(release.version, current.version))

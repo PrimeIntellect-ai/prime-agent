@@ -70,7 +70,7 @@ import {
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
 } from "./modes/daemon/daemon-worker-protocol.js";
 import { shouldUseWindowsShell } from "./utils/child-process.js";
-import { getLatestPiRelease, isNewerPackageVersion } from "./utils/version-check.js";
+import { getLatestPiRelease, isNewerPackageVersion, type UpdateChannel } from "./utils/version-check.js";
 
 export type PackageCommand = "install" | "remove" | "update" | "list";
 
@@ -89,6 +89,7 @@ interface PackageCommandOptions {
 	local: boolean;
 	force: boolean;
 	rollback: boolean;
+	channel?: UpdateChannel;
 	help: boolean;
 	daemonSocketPath?: string;
 	restartCoordinator: boolean;
@@ -117,7 +118,7 @@ function getPackageCommandUsage(command: PackageCommand): string {
 		case "remove":
 			return `${APP_NAME} package remove <source> [--local]`;
 		case "update":
-			return `${APP_NAME} update [--force] or ${APP_NAME} package update [source]`;
+			return `${APP_NAME} update [--force] [--rollback] [--beta|--stable] or ${APP_NAME} package update [source]`;
 		case "list":
 			return `${APP_NAME} package list`;
 	}
@@ -204,6 +205,7 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 	let local = false;
 	let force = false;
 	let rollback = false;
+	let channel: UpdateChannel | undefined;
 	let help = false;
 	let invalidOption: string | undefined;
 	let invalidArgument: string | undefined;
@@ -265,6 +267,19 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 				rollback = true;
 				selfFlag = true;
 			} else invalidOption = invalidOption ?? arg;
+			continue;
+		}
+
+		if (arg === "--beta" || arg === "--stable") {
+			if (command !== "update") {
+				invalidOption = invalidOption ?? arg;
+				continue;
+			}
+			const requested: UpdateChannel = arg === "--beta" ? "beta" : "stable";
+			if (channel && channel !== requested) {
+				conflictingOptions = conflictingOptions ?? "--beta and --stable cannot be combined";
+			}
+			channel = requested;
 			continue;
 		}
 
@@ -386,6 +401,7 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 		local,
 		force,
 		rollback,
+		channel,
 		help,
 		daemonSocketPath,
 		restartCoordinator,
@@ -454,15 +470,15 @@ function setSelfUpdateNoChangeExitCode(): void {
 		process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] === "1" ? SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE : undefined;
 }
 
-async function getSelfUpdatePlan(force: boolean, rollback = false): Promise<SelfUpdatePlan> {
+async function getSelfUpdatePlan(force: boolean, rollback = false, channel?: UpdateChannel): Promise<SelfUpdatePlan> {
 	if (isBunBinary) {
-		const plan = await getNativeUpdatePlan({ force, rollback });
+		const plan = await getNativeUpdatePlan({ force, rollback, channel });
 		if (!plan.command) console.log(chalk.green(`${APP_NAME} is already up to date (v${plan.targetVersion})`));
 		return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: !!plan.command, ...plan };
 	}
 	if (rollback) throw new Error("Rollback is only available for managed compiled installations.");
 	try {
-		const latestRelease = await getLatestPiRelease(VERSION);
+		const latestRelease = await getLatestPiRelease(VERSION, { channel });
 		const packageName = latestRelease?.packageName ?? PACKAGE_NAME;
 		const installSpec = latestRelease?.installSpec ?? packageName;
 		const packageRenameRequiresUpdate = !latestRelease?.installSpec && packageName !== PACKAGE_NAME;
@@ -1587,7 +1603,12 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 					}
 				}
 				if (updateTargetIncludesSelf(target)) {
-					const selfUpdatePlan = await getSelfUpdatePlan(options.force, options.rollback);
+					if (options.channel) {
+						settingsManager.setUpdateChannel(options.channel);
+						console.log(chalk.dim(`Updates now follow the ${options.channel} channel.`));
+					}
+					const updateChannel = options.channel ?? settingsManager.getUpdateChannel();
+					const selfUpdatePlan = await getSelfUpdatePlan(options.force, options.rollback, updateChannel);
 					if (!selfUpdatePlan.shouldRun) {
 						setSelfUpdateNoChangeExitCode();
 						return true;

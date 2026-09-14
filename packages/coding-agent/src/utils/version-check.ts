@@ -5,6 +5,8 @@ const STABLE_VERSION_MANIFEST_PATH = "latest.json";
 const BETA_VERSION_MANIFEST_PATH = "beta.json";
 const DEFAULT_VERSION_CHECK_TIMEOUT_MS = 10000;
 
+export type UpdateChannel = "stable" | "beta";
+
 export interface LatestPiRelease {
 	version: string;
 	packageName?: string;
@@ -103,9 +105,17 @@ function normalizeReleaseVersion(version: string): string {
 	return version.trim().replace(/^v/, "");
 }
 
-function getReleaseManifestPath(currentVersion: string): string {
+/** A preferred channel wins; otherwise a beta build stays on beta and anything else follows stable. */
+export function resolveUpdateChannel(currentVersion: string, preferred?: UpdateChannel): UpdateChannel {
+	if (preferred) return preferred;
 	const prerelease = parsePackageVersion(currentVersion)?.prerelease;
-	return prerelease?.match(/^beta(?:\.|$)/) ? BETA_VERSION_MANIFEST_PATH : STABLE_VERSION_MANIFEST_PATH;
+	return prerelease?.match(/^beta(?:\.|$)/) ? "beta" : "stable";
+}
+
+function getReleaseManifestPath(currentVersion: string, channel?: UpdateChannel): string {
+	return resolveUpdateChannel(currentVersion, channel) === "beta"
+		? BETA_VERSION_MANIFEST_PATH
+		: STABLE_VERSION_MANIFEST_PATH;
 }
 
 function resolveReleaseUrl(baseUrl: string, pathOrUrl: string): string | undefined {
@@ -120,12 +130,12 @@ function resolveReleaseUrl(baseUrl: string, pathOrUrl: string): string | undefin
 
 export async function getLatestPiRelease(
 	currentVersion: string,
-	options: { timeoutMs?: number; baseUrl?: string } = {},
+	options: { timeoutMs?: number; baseUrl?: string; channel?: UpdateChannel } = {},
 ): Promise<LatestPiRelease | undefined> {
 	if (process.env.PI_SKIP_VERSION_CHECK || process.env.PI_OFFLINE) return undefined;
 
 	const baseUrl = options.baseUrl?.replace(/\/+$/, "") ?? getPrimeAgentDownloadBaseUrl();
-	const response = await fetch(`${baseUrl}/${getReleaseManifestPath(currentVersion)}`, {
+	const response = await fetch(`${baseUrl}/${getReleaseManifestPath(currentVersion, options.channel)}`, {
 		headers: {
 			"User-Agent": getPiUserAgent(currentVersion),
 			accept: "application/json",
@@ -185,14 +195,17 @@ export async function getLatestPiRelease(
 
 export async function getLatestPiVersion(
 	currentVersion: string,
-	options: { timeoutMs?: number } = {},
+	options: { timeoutMs?: number; channel?: UpdateChannel } = {},
 ): Promise<string | undefined> {
 	return (await getLatestPiRelease(currentVersion, options))?.version;
 }
 
-export async function checkForNewPiVersion(currentVersion: string): Promise<string | undefined> {
+export async function checkForNewPiVersion(
+	currentVersion: string,
+	channel?: UpdateChannel,
+): Promise<string | undefined> {
 	try {
-		const latestVersion = await getLatestPiVersion(currentVersion);
+		const latestVersion = await getLatestPiVersion(currentVersion, { channel });
 		if (latestVersion && isNewerPackageVersion(latestVersion, currentVersion)) {
 			return latestVersion;
 		}

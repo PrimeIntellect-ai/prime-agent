@@ -32,7 +32,7 @@ export interface StartupNoticeCheckOptions {
 /** Run every startup check in parallel and collect the results. */
 export async function gatherStartupNotices(options: StartupNoticeCheckOptions): Promise<StartupNotices> {
 	const [newVersion, packageUpdates, tmuxWarning] = await Promise.all([
-		checkForNewPiVersion(options.version),
+		checkForNewPiVersion(options.version, options.settingsManager.getUpdateChannel()),
 		checkForPackageUpdates(options),
 		checkTmuxKeyboardSetup(),
 	]);

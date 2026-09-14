@@ -129,7 +129,13 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{
 		name: "update",
 		description: `Update ${APP_NAME} and installed packages`,
-		argumentHint: "[source|--self|--extensions]",
+		argumentHint: "[source|--self|--extensions|--beta|--stable]",
+		takesArgument: true,
+	},
+	{
+		name: "beta",
+		description: `Follow the beta release channel and update ${APP_NAME} now`,
+		argumentHint: "[on|off|status]",
 		takesArgument: true,
 	},
 	{ name: "hotkeys", description: "Show all keyboard shortcuts" },

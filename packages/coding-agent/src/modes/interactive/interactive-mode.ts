@@ -173,7 +173,7 @@ import { resizeImage } from "../../utils/image-resize.js";
 import { getCwdRelativePath } from "../../utils/paths.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";
 import { ensureTool, ensureToolWithStatus, formatMissingRipgrepMessage } from "../../utils/tools-manager.js";
-import { checkForNewPiVersion } from "../../utils/version-check.js";
+import { checkForNewPiVersion, resolveUpdateChannel } from "../../utils/version-check.js";
 import type {
 	AgentConnection,
 	AgentConnectionExtensionUiRequest,
@@ -1590,7 +1590,9 @@ export class InteractiveMode {
 		// `returnToAgentsView`, which is also set for direct daemon attaches that never
 		// rendered the agents view and still want the in-session fallback.)
 		const ownsGlobalStartupNotices = !this.options.agentsViewOwnsStartupNotices;
-		const newVersionPromise = ownsGlobalStartupNotices ? checkForNewPiVersion(this.version) : undefined;
+		const newVersionPromise = ownsGlobalStartupNotices
+			? checkForNewPiVersion(this.version, this.settingsManager.getUpdateChannel())
+			: undefined;
 		const packageUpdatesPromise = ownsGlobalStartupNotices
 			? checkForPackageUpdates({
 					cwd: this.getCurrentCwd(),
@@ -4955,6 +4957,36 @@ export class InteractiveMode {
 					}
 					this.editor.setText("");
 					await this.handleReloadCommand();
+					return;
+				}
+				if (commandName === "beta") {
+					this.editor.setText("");
+					const betaArg = commandArgs?.trim().toLowerCase();
+					if (betaArg === "status") {
+						const channel = resolveUpdateChannel(this.version, this.settingsManager.getUpdateChannel());
+						const source = this.settingsManager.getUpdateChannel()
+							? "set in settings"
+							: "inferred from the running version";
+						this.showStatus(`Updates follow the ${channel} channel (${source}). v${this.version} installed.`);
+						return;
+					}
+					if (betaArg === "off" || betaArg === "stable") {
+						this.settingsManager.setUpdateChannel("stable");
+						this.showStatus(
+							"Updates now follow the stable channel. Run /update to install the latest stable release.",
+						);
+						return;
+					}
+					if (betaArg && betaArg !== "on") {
+						this.showError("Usage: /beta [on|off|status]");
+						return;
+					}
+					if (this.isAgentCompacting() || this.isAgentStreaming() || this.isBashRunning()) {
+						this.showWarning("Wait for the current work to finish before updating.");
+						return;
+					}
+					this.settingsManager.setUpdateChannel("beta");
+					await this.handleUpdateCommand("--self --beta");
 					return;
 				}
 				if (commandName === "update") {
