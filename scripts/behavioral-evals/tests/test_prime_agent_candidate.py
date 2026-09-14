@@ -134,6 +134,8 @@ class CandidateSetupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["env"]["VF_PRIME_AGENT_SHA256SUMS"], expected)
         self.assertNotIn("curl", kwargs["install"])
         self.assertIn("sha256sum -c", kwargs["install"])
+        self.assertIn('manifest.dependencies["@earendil-works/pi-ai"]', kwargs["install"])
+        self.assertIn("repacked-core", kwargs["install"])
         self.assertIn("npm install -g", kwargs["install"])
 
     async def test_accepts_matching_checksums_and_strips_prime_api_key(self):

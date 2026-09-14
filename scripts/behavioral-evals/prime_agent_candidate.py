@@ -79,20 +79,36 @@ core_tarball="prime-agent-core-$PRIME_AGENT_RELEASE_VERSION.tgz"
 tui_tarball="prime-agent-tui-$PRIME_AGENT_RELEASE_VERSION.tgz"
 printf '%s\n' "$VF_PRIME_AGENT_SHA256SUMS" > "$source_dir/SHA256SUMS"
 (cd "$source_dir" && sha256sum -c SHA256SUMS)
+mkdir "$source_dir/core-root" "$source_dir/repacked-core"
+tar -xzf "$source_dir/$core_tarball" -C "$source_dir/core-root"
+node - \
+    "$source_dir/core-root/package/package.json" \
+    "$source_dir/$ai_tarball" <<'NODE'
+const fs = require("node:fs");
+const [manifestPath, ai] = process.argv.slice(2);
+const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+manifest.dependencies["@earendil-works/pi-ai"] = `file:${ai}`;
+fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+NODE
+repacked_core="$(npm pack "$source_dir/core-root/package" \
+    --pack-destination "$source_dir/repacked-core" --silent)"
+
 mkdir "$source_dir/package-root"
 tar -xzf "$source_dir/$agent_tarball" -C "$source_dir/package-root"
 node - \
     "$source_dir/package-root/package/package.json" \
-    "$source_dir" "$ai_tarball" "$core_tarball" "$tui_tarball" <<'NODE'
+    "$source_dir/$ai_tarball" \
+    "$source_dir/repacked-core/$repacked_core" \
+    "$source_dir/$tui_tarball" <<'NODE'
 const fs = require("node:fs");
-const [manifestPath, artifactDir, ai, core, tui] = process.argv.slice(2);
+const [manifestPath, ai, core, tui] = process.argv.slice(2);
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 for (const [name, file] of [
     ["@earendil-works/pi-ai", ai],
     ["@earendil-works/pi-agent-core", core],
     ["@earendil-works/pi-tui", tui],
 ]) {
-    manifest.dependencies[name] = `file:${artifactDir}/${file}`;
+    manifest.dependencies[name] = `file:${file}`;
 }
 fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 NODE
