@@ -16,6 +16,7 @@ import ui
 from report import UI_METRICS, render
 from schema import UI_METRIC_KEYS, Config, Metric, Observation, ProcessMemory, Report, Request, Side
 from ui import (
+    cpu_delta,
     expand_subagents,
     expected_roster_inactive,
     fixture_spec,
@@ -437,3 +438,12 @@ class SchemaTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CpuDeltaTests(unittest.TestCase):
+    def test_reports_cpu_consumed_since_start(self):
+        self.assertAlmostEqual(cpu_delta(1.0, 1.5), 0.5)
+
+    def test_clamps_negative_deltas_from_exited_processes_to_zero(self):
+        self.assertEqual(cpu_delta(5.0, 4.9996), 0.0)
+        Observation(trial=0, value=cpu_delta(5.0, 4.9996))

@@ -343,6 +343,17 @@ def total_cpu(stats: list[ProcessMemory]) -> float:
     return sum(process.cpu or 0.0 for process in stats)
 
 
+def cpu_delta(start: float, total: float) -> float:
+    """CPU seconds consumed since ``start``.
+
+    ``total`` sums the live process tree, so a child that exits between the two
+    samples takes its CPU time with it and the raw difference can dip slightly
+    below zero. That is measurement noise, not negative work, and the report
+    schema rejects negative observations, so clamp at zero.
+    """
+    return max(0.0, total - start)
+
+
 def input_ready(terminal: Terminal, marker: str, *, timeout: float = 120) -> float:
     """Return the first successful editor-echo timestamp after the transcript tail appears."""
     terminal.until(lambda display: marker in display.text(), timeout)
@@ -637,7 +648,7 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
             bytes_start = terminal.bytes
             input_ready(terminal, tail_marker("large", 2))
             elapsed = time.perf_counter() - terminal.started
-            cpu = cpu_total() - cpu_start
+            cpu = cpu_delta(cpu_start, cpu_total())
             record(side, "resume_large", trial, elapsed)  # type: ignore[arg-type]
             record(side, "resume_large_cpu", trial, cpu)  # type: ignore[arg-type]
             note("resume_large", seconds=elapsed, cpu=cpu, pty_bytes=terminal.bytes - bytes_start)
@@ -660,7 +671,7 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
             terminal.child.send(f"/resume {spec.switch_id}{ENTER}")
             input_ready(terminal, tail_marker("large", 3))
             elapsed = time.perf_counter() - started
-            cpu = cpu_total() - cpu_start
+            cpu = cpu_delta(cpu_start, cpu_total())
             record(side, "switch_large", trial, elapsed)  # type: ignore[arg-type]
             record(side, "switch_large_cpu", trial, cpu)  # type: ignore[arg-type]
             note("switch_large", seconds=elapsed, cpu=cpu, pty_bytes=terminal.bytes - bytes_start)
@@ -672,7 +683,7 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
             bytes_start = terminal.bytes
             open_agents_view(terminal, clear=False)
             elapsed = time.perf_counter() - started
-            cpu = cpu_total() - cpu_start
+            cpu = cpu_delta(cpu_start, cpu_total())
             record(side, "agents_view", trial, elapsed)  # type: ignore[arg-type]
             record(side, "agents_view_cpu", trial, cpu)  # type: ignore[arg-type]
             note("agents_view", seconds=elapsed, cpu=cpu, pty_bytes=terminal.bytes - bytes_start)
@@ -682,7 +693,7 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
             cpu_start = cpu_total()
             bytes_start = terminal.bytes
             roster_seconds = wait_for_roster(terminal, minimum=expected_roster_inactive())
-            cpu = cpu_total() - cpu_start
+            cpu = cpu_delta(cpu_start, cpu_total())
             record(side, "agents_roster", trial, roster_seconds)  # type: ignore[arg-type]
             record(side, "agents_roster_cpu", trial, cpu)  # type: ignore[arg-type]
             note("agents_roster", seconds=roster_seconds, cpu=cpu, pty_bytes=terminal.bytes - bytes_start)
@@ -698,7 +709,7 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
             terminal.child.send(RIGHT_ARROW)
             input_ready(terminal, tail_marker("large", 1))
             elapsed = time.perf_counter() - started
-            cpu = cpu_total() - cpu_start
+            cpu = cpu_delta(cpu_start, cpu_total())
             record(side, "agents_open", trial, elapsed)  # type: ignore[arg-type]
             record(side, "agents_open_cpu", trial, cpu)  # type: ignore[arg-type]
             note("agents_open", seconds=elapsed, cpu=cpu, pty_bytes=terminal.bytes - bytes_start)
@@ -715,7 +726,7 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
             terminal.child.send(RIGHT_ARROW)
             ready_at = input_ready(terminal, tail_marker("large", 1))
             elapsed = ready_at - started
-            cpu = cpu_total() - cpu_start
+            cpu = cpu_delta(cpu_start, cpu_total())
             record(side, "agents_reopen", trial, elapsed)
             record(side, "agents_reopen_cpu", trial, cpu)
             note("agents_reopen", seconds=elapsed, cpu=cpu, pty_bytes=terminal.bytes - bytes_start)
@@ -733,7 +744,7 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
             terminal.child.send(RIGHT_ARROW)
             input_ready(terminal, tail_marker("root", 0))
             elapsed = time.perf_counter() - started
-            cpu = cpu_total() - cpu_start
+            cpu = cpu_delta(cpu_start, cpu_total())
             record(side, "parent_open", trial, elapsed)  # type: ignore[arg-type]
             record(side, "parent_open_cpu", trial, cpu)  # type: ignore[arg-type]
             note("parent_open", seconds=elapsed, cpu=cpu, pty_bytes=terminal.bytes - bytes_start)
@@ -763,7 +774,7 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
             terminal.child.send(RIGHT_ARROW)
             input_ready(terminal, tail_marker("sub", SUBAGENT_DEPTH))
             elapsed = time.perf_counter() - started
-            cpu = cpu_total() - cpu_start
+            cpu = cpu_delta(cpu_start, cpu_total())
             record(side, "subagent_open", trial, elapsed)  # type: ignore[arg-type]
             record(side, "subagent_open_cpu", trial, cpu)  # type: ignore[arg-type]
             note("subagent_open", seconds=elapsed, cpu=cpu, pty_bytes=terminal.bytes - bytes_start)
@@ -823,7 +834,7 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
                     cpu_start = cpu_total()
                     started = client.send(metric, {"type": "heartbeats_list"})
                     data, finished = client.wait(metric)
-                    cpu = cpu_total() - cpu_start
+                    cpu = cpu_delta(cpu_start, cpu_total())
                     check_scheduled_jobs(data, expected_jobs)
                     record(side, metric, trial, finished - started)
                     record(side, metric + "_cpu", trial, cpu)
@@ -850,7 +861,7 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
                     },
                 )
                 summary, finished = client.wait("cold-open")
-                cpu = cpu_total() - cpu_start
+                cpu = cpu_delta(cpu_start, cpu_total())
                 if summary.get("sessionId") != cold_id or summary.get("workerState") != "ready":
                     raise RuntimeError("Cold worker did not return the expected ready session")
                 replies_before_open = len(client.responses)
