@@ -1915,7 +1915,8 @@ describe("AgentSession queue characterization", () => {
 			{ deliverAs: "nextTurn" },
 		);
 		await harness.session.queueAgentMessagePrompt(firstPrompt, "followUp");
-		await harness.session.followUp("surviving");
+		// Both inputs stay in one priority class so the agent message keeps the batch anchor.
+		await harness.session.followUp("surviving", undefined, { priority: "background" });
 		pause.release();
 		await harness.session.waitForIdle();
 
@@ -2038,9 +2039,10 @@ describe("AgentSession queue characterization", () => {
 		gatePreparation = false;
 		expect(pause).toBeDefined();
 
+		// The prompt without an agent message id is human input, so it queues ahead.
 		expect(harness.session.clearQueue()).toEqual({
 			steering: [],
-			followUp: ["clear first while preparing", "clear second while preparing"],
+			followUp: ["clear second while preparing", "clear first while preparing"],
 		});
 		pause?.release();
 		await firstCompletionRejection;
@@ -3355,7 +3357,11 @@ describe("AgentSession scheduler scenarios", () => {
 		await harness.session.followUp("ordinary");
 		await harness.session.queueAgentMessagePrompt(removedAgentMessage, "followUp", undefined);
 		await harness.session.queueAgentMessagePrompt(keptAgentMessage, "followUp", undefined);
-		await harness.session.followUp("last anchor", undefined, { queueKey: "heartbeat:one" });
+		await harness.session.followUp("last anchor", undefined, {
+			queueKey: "heartbeat:one",
+			// A heartbeat follow-up is machine input, so it queues behind the agent messages.
+			priority: "background",
+		});
 		expect(prepared).toEqual([]);
 		expect(getUserTexts(harness)).toEqual([]);
 

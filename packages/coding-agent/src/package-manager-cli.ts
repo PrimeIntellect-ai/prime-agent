@@ -636,6 +636,7 @@ function isSessionActionRecoveryAction(value: unknown): value is SessionActionRe
 		typeof value.id !== "string" ||
 		typeof value.source !== "string" ||
 		(value.delivery !== "next_turn_boundary" && value.delivery !== "when_run_idle") ||
+		(value.priority !== undefined && !isStringEnum(value.priority, ["pinned", "user", "background"])) ||
 		(value.wake !== "immediate" && value.wake !== "on_lower_boundary" && value.wake !== "external_resume") ||
 		!isRecord(value.payload) ||
 		typeof value.payload.text !== "string" ||

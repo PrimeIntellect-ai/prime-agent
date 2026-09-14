@@ -121,6 +121,71 @@ describe("TUI fullscreen mode", () => {
 		tui.stop();
 	});
 
+	it("pins a header above the transcript that stays on top while scrolling", async () => {
+		const { terminal, tui, chat, dock } = setup(lines(20));
+		const pin = new TestComponent();
+		pin.lines = ["== chat name =="];
+		tui.enterFullscreen({ scroll: [chat], dock, pin });
+		await terminal.waitForRender();
+
+		let viewport = terminal.getViewport();
+		assert.strictEqual(viewport[0], "== chat name ==", "pin renders as the top row");
+		assert.strictEqual(viewport[1], "Line 13", "transcript window starts below the pin");
+		assert.strictEqual(viewport[7], "Line 19");
+		assert.strictEqual(viewport[8], "> prompt");
+		assert.strictEqual(viewport[9], "footer", "dock stays at the bottom");
+
+		terminal.sendInput(WHEEL_UP);
+		await terminal.waitForRender();
+		viewport = terminal.getViewport();
+		assert.strictEqual(viewport[0], "== chat name ==", "pin stays on top after scrolling");
+		assert.notStrictEqual(viewport[1], "Line 13", "transcript scrolled under the pin");
+
+		tui.stop();
+	});
+
+	it("maps drag selection to transcript rows below the pinned header", async () => {
+		const { terminal, tui, chat, dock } = setup(lines(20));
+		const pin = new TestComponent();
+		pin.lines = ["pinned"];
+		const copies: string[] = [];
+		tui.onCopy = (text) => copies.push(text);
+		tui.enterFullscreen({ scroll: [chat], dock, pin });
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;1;2M");
+		terminal.sendInput("\x1b[<32;6;3M");
+		await terminal.waitForRender();
+		assert.ok(terminal.getWrites().includes("\x1b[7m"), "selection highlighted while dragging");
+
+		terminal.sendInput("\x1b[<0;6;3m");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(copies, ["Line 13\nLine"]);
+
+		tui.stop();
+	});
+
+	it("drag-selecting dock text still copies with a pinned header", async () => {
+		const { terminal, tui, chat, dock } = setup(lines(20));
+		const pin = new TestComponent();
+		pin.lines = ["pinned"];
+		const copies: string[] = [];
+		tui.onCopy = (text) => copies.push(text);
+		tui.enterFullscreen({ scroll: [chat], dock, pin });
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;3;9M");
+		terminal.sendInput("\x1b[<32;9;9M");
+		await terminal.waitForRender();
+		assert.ok(terminal.getWrites().includes("\x1b[7m"), "dock selection highlighted while dragging");
+
+		terminal.sendInput("\x1b[<0;9;9m");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(copies, ["prompt"]);
+
+		tui.stop();
+	});
+
 	it("renders terminal images as compact metadata fallbacks", async () => {
 		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 		setCellDimensions({ widthPx: 10, heightPx: 10 });

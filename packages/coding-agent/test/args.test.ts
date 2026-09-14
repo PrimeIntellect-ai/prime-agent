@@ -610,6 +610,19 @@ describe("parseArgs", () => {
 			expect(result.unknownFlags.size).toBe(0);
 		});
 
+		test("value flags do not consume the end-of-options delimiter as a value", () => {
+			const prompt = parseArgs(["--system-prompt", "--", "--model", "foo"]);
+			expect(prompt.systemPrompt).toBeUndefined();
+			expect(prompt.model).toBeUndefined();
+			expect(prompt.messages).toEqual(["--model", "foo"]);
+			expect(prompt.diagnostics).toEqual([{ type: "error", message: "--system-prompt requires a value" }]);
+
+			const appended = parseArgs(["--append-system-prompt", "--", "Run the suite"]);
+			expect(appended.appendSystemPrompt).toBeUndefined();
+			expect(appended.messages).toEqual(["Run the suite"]);
+			expect(appended.diagnostics).toEqual([{ type: "error", message: "--append-system-prompt requires a value" }]);
+		});
+
 		test("parses --goal as a string", () => {
 			const result = parseArgs(["--goal", "Write a paper"]);
 			expect(result.goal).toBe("Write a paper");
@@ -678,5 +691,149 @@ describe("parseArgs", () => {
 				message: "--goal requires a non-empty objective",
 			});
 		});
+	});
+});
+
+describe("value flags require values", () => {
+	test("--model without a value is an error, not an extension flag", () => {
+		const result = parseArgs(["--model"]);
+		expect(result.model).toBeUndefined();
+		expect(result.unknownFlags.has("model")).toBe(false);
+		expect(result.diagnostics).toContainEqual({
+			type: "error",
+			message: "--model requires a value",
+		});
+	});
+
+	test("value flags followed by another flag report missing values", () => {
+		const result = parseArgs(["--model", "--provider", "anthropic"]);
+		expect(result.provider).toBe("anthropic");
+		expect(result.model).toBeUndefined();
+		expect(result.diagnostics).toContainEqual({
+			type: "error",
+			message: "--model requires a value",
+		});
+	});
+
+	test.each([
+		"--provider",
+		"--api-key",
+		"--cwd",
+		"--fork",
+		"--session-dir",
+		"--models",
+		"--daemon-socket",
+		"--system-prompt",
+	])("%s without a value reports a missing-value error", (flag) => {
+		const result = parseArgs([flag]);
+		expect(result.diagnostics).toContainEqual({
+			type: "error",
+			message: `${flag} requires a value`,
+		});
+		expect(result.unknownFlags.has(flag.slice(2))).toBe(false);
+	});
+
+	test("invalid --mode reports valid values instead of being ignored", () => {
+		const result = parseArgs(["--mode", "interactive"]);
+		expect(result.mode).toBeUndefined();
+		expect(result.diagnostics).toContainEqual({
+			type: "error",
+			message: 'Invalid --mode "interactive". Valid values: text, json, rpc, acp, daemon',
+		});
+	});
+
+	test("--mode still accepts valid values", () => {
+		const result = parseArgs(["--mode", "json"]);
+		expect(result.mode).toBe("json");
+		expect(result.diagnostics.some((d) => d.type === "error")).toBe(false);
+	});
+
+	test("list-style flags without values report missing values", () => {
+		const result = parseArgs(["--theme"]);
+		expect(result.diagnostics).toContainEqual({
+			type: "error",
+			message: "--theme requires a value",
+		});
+	});
+
+	test("values are still consumed when present", () => {
+		const result = parseArgs(["--model", "claude-sonnet-4-5", "--fork", "abc"]);
+		expect(result.model).toBe("claude-sonnet-4-5");
+		expect(result.fork).toBe("abc");
+		expect(result.diagnostics.some((d) => d.type === "error")).toBe(false);
+	});
+
+	test("--model followed by a short option is not consumed as its value", () => {
+		const result = parseArgs(["--model", "-t", "ipython"]);
+
+		expect(result.model).toBeUndefined();
+		expect(result.tools).toEqual(["ipython"]);
+		expect(result.diagnostics).toContainEqual({
+			type: "error",
+			message: "--model requires a value",
+		});
+	});
+
+	test("value flags followed by a short option report missing values", () => {
+		const result = parseArgs(["--thinking", "-x"]);
+
+		expect(result.thinking).toBeUndefined();
+		expect(result.diagnostics).toContainEqual({
+			type: "error",
+			message: "--thinking requires a value",
+		});
+	});
+
+	test.each(["--provider", "--api-key", "--cwd", "--fork", "--session-dir", "--models", "--daemon-socket"])(
+		"%s followed by a short option reports a missing value",
+		(flag) => {
+			const result = parseArgs([flag, "-x"]);
+
+			expect(result.diagnostics).toContainEqual({
+				type: "error",
+				message: `${flag} requires a value`,
+			});
+		},
+	);
+
+	test("free-form value flags keep accepting dash-prefixed values", () => {
+		const goal = parseArgs(["--goal", "-p"]);
+		expect(goal.goal).toBe("-p");
+		expect(goal.print).toBeUndefined();
+		expect(goal.diagnostics.some((d) => d.type === "error")).toBe(false);
+
+		const gate = parseArgs(["--autonomous-gate", "-x npm test"]);
+		expect(gate.autonomousGates).toEqual(["-x npm test"]);
+		expect(gate.diagnostics.some((d) => d.type === "error")).toBe(false);
+
+		const prompt = parseArgs(["--system-prompt", "- Respond only with JSON"]);
+		expect(prompt.systemPrompt).toBe("- Respond only with JSON");
+		expect(prompt.diagnostics.some((d) => d.type === "error")).toBe(false);
+
+		const appended = parseArgs(["--append-system-prompt", "- Be terse"]);
+		expect(appended.appendSystemPrompt).toEqual(["- Be terse"]);
+		expect(appended.diagnostics.some((d) => d.type === "error")).toBe(false);
+	});
+
+	test("prompt value flags keep accepting YAML frontmatter", () => {
+		const frontmatter = "---\nname: strict\n---\nYou output only JSON.";
+
+		const prompt = parseArgs(["--system-prompt", frontmatter]);
+		expect(prompt.systemPrompt).toBe(frontmatter);
+		expect(prompt.diagnostics.some((d) => d.type === "error")).toBe(false);
+
+		const appended = parseArgs(["--append-system-prompt", frontmatter]);
+		expect(appended.appendSystemPrompt).toEqual([frontmatter]);
+		expect(appended.diagnostics.some((d) => d.type === "error")).toBe(false);
+	});
+
+	test("goal and gate flags still reject long-option-looking values", () => {
+		const goal = parseArgs(["--goal", "--verbose"]);
+		expect(goal.goal).toBeUndefined();
+		expect(goal.diagnostics).toContainEqual({ type: "error", message: "--goal requires a value" });
+
+		const gate = parseArgs(["--autonomous-gate", "---run"]);
+		expect(gate.autonomousGates).toBeUndefined();
+		expect(gate.diagnostics).toContainEqual({ type: "error", message: "--autonomous-gate requires a value" });
 	});
 });

@@ -8885,7 +8885,10 @@ describe("daemon mode helpers", () => {
 
 		await fixture.runCronJob(makeCronJob({ id: "cron-1", source: "cron", activeSessionId: fixture.activeSessionId }));
 
-		expect(fixture.followUp).toHaveBeenCalledWith("heartbeat prompt", undefined, { resumeIfIdle: true });
+		expect(fixture.followUp).toHaveBeenCalledWith("heartbeat prompt", undefined, {
+			resumeIfIdle: true,
+			priority: "background",
+		});
 		expect(fixture.prompt).not.toHaveBeenCalled();
 		expect(fixture.promptHeartbeat).not.toHaveBeenCalled();
 	});
