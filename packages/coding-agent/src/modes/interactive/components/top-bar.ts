@@ -26,7 +26,9 @@ export class TopBar implements Component {
 
 	render(width: number): string[] {
 		const safeWidth = Math.max(1, width);
-		const name = (this.options.getChatName() ?? "").trim();
+		// Collapse all whitespace: an embedded newline in the name would emit
+		// multiple rows and break the fixed fullscreen frame.
+		const name = (this.options.getChatName() ?? "").replace(/\s+/g, " ").trim();
 		if (!name) {
 			return [""];
 		}

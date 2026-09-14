@@ -1157,8 +1157,10 @@ export class InteractiveMode {
 	private headerContainer: Container;
 	/** Pinned fullscreen top bar identifying the chat by name while scrolling. */
 	private topBar: TopBar;
-	/** Cached session spend (USD) for the top bar; refreshed on lifecycle and status events. */
-	private topBarCostUsd: number | undefined;
+	/** Cached session spend (USD) for the top bar, keyed to the session it was fetched for. */
+	private topBarCost: { sessionId?: string; total?: number } = {};
+	/** Stale-discard state for top bar cost refreshes (mirrors contextUsageRefresh). */
+	private topBarCostRefresh = { generation: 0, lastSuccessGeneration: 0 };
 
 	private builtInHeader: Component | undefined = undefined;
 
@@ -1209,7 +1211,11 @@ export class InteractiveMode {
 		this.headerContainer = new Container();
 		this.topBar = new TopBar({
 			getChatName: () => this.getCurrentSessionName() ?? path.basename(this.getCurrentCwd()),
-			getCostUsd: () => this.topBarCostUsd,
+			// Hide the cached spend unless it was fetched for the session now bound:
+			// a pending or failed refresh must not attribute the previous
+			// session's spend to the new chat.
+			getCostUsd: () =>
+				this.topBarCost.sessionId === this.connectionState?.sessionId ? this.topBarCost.total : undefined,
 		});
 		this.chatContainer = new Container();
 		this.shortcutGuideContainer = new Container();
@@ -1578,18 +1584,34 @@ export class InteractiveMode {
 		await this.updateAvailableProviderCount();
 	}
 
-	/** Refresh the top bar's cached session spend from the context tree. */
+	/**
+	 * Refresh the top bar's cached session spend from the context tree.
+	 * Results for a replaced session, or superseded by a newer successful
+	 * refresh, are discarded — mirroring refreshConnectionContextUsage.
+	 */
 	private refreshTopBarCost(): void {
+		const generation = ++this.topBarCostRefresh.generation;
+		const connection = this.agentConnection;
+		const sessionId = this.connectionState?.sessionId;
 		void (async () => {
 			try {
-				const tree = await this.agentConnection.getContextTree();
+				const tree = await connection.getContextTree();
 				const total = tree?.totalUsage?.cost?.total;
-				if (typeof total === "number" && Number.isFinite(total)) {
-					this.topBarCostUsd = total;
-					this.ui.requestRender();
+				if (
+					typeof total !== "number" ||
+					!Number.isFinite(total) ||
+					generation < this.topBarCostRefresh.lastSuccessGeneration ||
+					this.agentConnection !== connection ||
+					this.connectionState?.sessionId !== sessionId
+				) {
+					return;
 				}
+				this.topBarCostRefresh.lastSuccessGeneration = generation;
+				this.topBarCost = { sessionId, total };
+				this.ui.requestRender();
 			} catch {
-				// Cost is cosmetic; leave the previous value in place.
+				// Cost is cosmetic; a failed fetch keeps the previous value
+				// (the session-keyed getter still hides cross-session leaks).
 			}
 		})();
 	}
@@ -5776,6 +5798,7 @@ export class InteractiveMode {
 					this.ui.terminal.setProgress(false);
 				}
 				this.turnStartedAt = undefined;
+				this.refreshTopBarCost();
 				// Drops the loader; background subagents are shown by the tree, not the loader.
 				this.syncWorkingLoader();
 				if (this.streamingComponent) {
