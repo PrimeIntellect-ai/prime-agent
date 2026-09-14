@@ -367,6 +367,10 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     needs: [release-context, build, validate-macos]
+    # Production publication writes the stable channel, latest.json and install.sh,
+    # so it waits for a reviewer in the protected `release` environment. Beta-only
+    # runs use the unprotected `beta-publish` environment and never wait.
+    environment: ${{ needs.release-context.outputs.publish_production == 'true' && 'release' || 'beta-publish' }}
     permissions:
       contents: write
     env:
