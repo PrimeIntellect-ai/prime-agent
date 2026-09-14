@@ -3094,8 +3094,7 @@ describe("InteractiveMode model selection persistence", () => {
 
 		expect(loginProvider).toHaveBeenCalledWith(provider);
 		expect(prepareForModelSelection).toHaveBeenCalledTimes(1);
-		// Finishing a login stays on the providers tab with the provider
-		// configured instead of jumping to the models picker.
+		// Finishing a login stays on the providers tab with the provider configured.
 		expect(getSelector().getActiveTab()).toBe("providers");
 		expect(fakeThis.editorContainer.children).toEqual([getSelector()]);
 		expect(fakeThis.ui.setFocus).toHaveBeenLastCalledWith(getSelector());
@@ -5802,4 +5801,166 @@ test("session teardown removes a running refine loader without remounting anythi
 	expect(statusContainer.children).toHaveLength(0);
 	expect((fakeThis as unknown as { refineLoader?: unknown }).refineLoader).toBeUndefined();
 	expect((fakeThis as unknown as { syncWorkingLoader: () => void }).syncWorkingLoader).not.toHaveBeenCalled();
+});
+
+test("session reset tears down an inline auth panel and restores the editor", () => {
+	initTheme("dark");
+	const editor = new Input();
+	const editorContainer = new Container();
+	editorContainer.addChild(editor);
+	const setFocus = vi.fn();
+	const fakeThis = {
+		editor,
+		editorContainer,
+		ui: { requestRender: vi.fn(), setFocus, hideOverlay: vi.fn(), terminal: { rows: 24 } } as unknown as TUI,
+		inlineAuthPanelClosers: [] as Array<() => void>,
+		cancelActiveConnectionExtensionUiRequests: vi.fn(),
+		closeHeartbeatManager: vi.fn(),
+		clearExtensionTerminalInputListeners: vi.fn(),
+		setExtensionFooter: vi.fn(),
+		setExtensionHeader: vi.fn(),
+		clearExtensionWidgets: vi.fn(),
+		footerDataProvider: { clearExtensionStatuses: vi.fn() },
+		footer: { invalidate: vi.fn() },
+		autocompleteProviderWrappers: [],
+		setCustomEditorComponent: vi.fn(),
+		setupAutocompleteProvider: vi.fn(),
+		defaultEditor: {},
+		updateTerminalTitle: vi.fn(),
+		refreshTopBarCost: vi.fn(),
+		setWorkingIndicator: vi.fn(),
+	} as unknown as InteractiveMode;
+	Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+	const prototype = InteractiveMode.prototype as unknown as {
+		showInlineAuthPanel(component: Component): () => void;
+		resetExtensionUI(): void;
+	};
+	const closers = () => (fakeThis as unknown as { inlineAuthPanelClosers: unknown[] }).inlineAuthPanelClosers;
+
+	const panel = new Container();
+	const close = prototype.showInlineAuthPanel.call(fakeThis, panel);
+
+	expect(editorContainer.children).toEqual([panel]);
+	expect(closers()).toEqual([close]);
+
+	prototype.resetExtensionUI.call(fakeThis);
+
+	expect(editorContainer.children).toEqual([editor]);
+	expect(setFocus).toHaveBeenLastCalledWith(editor);
+	expect(closers()).toEqual([]);
+
+	// The auth flow's own close runs after the reset and must not restore the
+	// stale pre-panel content over a picker opened in the meantime.
+	const otherPicker = new Container();
+	editorContainer.clear();
+	editorContainer.addChild(otherPicker);
+	close();
+	expect(editorContainer.children).toEqual([otherPicker]);
+});
+
+test("session reset tears down stacked inline auth panels innermost first", () => {
+	initTheme("dark");
+	const editor = new Input();
+	const editorContainer = new Container();
+	editorContainer.addChild(editor);
+	const fakeThis = {
+		editor,
+		editorContainer,
+		ui: { requestRender: vi.fn(), setFocus: vi.fn(), hideOverlay: vi.fn(), terminal: { rows: 24 } } as unknown as TUI,
+		inlineAuthPanelClosers: [] as Array<() => void>,
+		cancelActiveConnectionExtensionUiRequests: vi.fn(),
+		closeHeartbeatManager: vi.fn(),
+		clearExtensionTerminalInputListeners: vi.fn(),
+		setExtensionFooter: vi.fn(),
+		setExtensionHeader: vi.fn(),
+		clearExtensionWidgets: vi.fn(),
+		footerDataProvider: { clearExtensionStatuses: vi.fn() },
+		footer: { invalidate: vi.fn() },
+		autocompleteProviderWrappers: [],
+		setCustomEditorComponent: vi.fn(),
+		setupAutocompleteProvider: vi.fn(),
+		defaultEditor: {},
+		updateTerminalTitle: vi.fn(),
+		refreshTopBarCost: vi.fn(),
+		setWorkingIndicator: vi.fn(),
+	} as unknown as InteractiveMode;
+	Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+	const prototype = InteractiveMode.prototype as unknown as {
+		showInlineAuthPanel(component: Component): () => void;
+		resetExtensionUI(): void;
+	};
+	const closers = () => (fakeThis as unknown as { inlineAuthPanelClosers: unknown[] }).inlineAuthPanelClosers;
+
+	const dialog = new Container();
+	const closeDialog = prototype.showInlineAuthPanel.call(fakeThis, dialog);
+	const teamSelector = new Container();
+	const closeSelector = prototype.showInlineAuthPanel.call(fakeThis, teamSelector);
+	expect(editorContainer.children).toEqual([teamSelector]);
+	expect(closers()).toEqual([closeDialog, closeSelector]);
+
+	prototype.resetExtensionUI.call(fakeThis);
+
+	expect(editorContainer.children).toEqual([editor]);
+	expect(closers()).toEqual([]);
+
+	// Late closes from the interrupted flows stay no-ops.
+	editorContainer.clear();
+	editorContainer.addChild(new Container());
+	closeSelector();
+	closeDialog();
+	expect(editorContainer.children).toHaveLength(1);
+});
+
+test("normal inline auth panel close unwinds the tracked session-reset stack", () => {
+	initTheme("dark");
+	const editor = new Input();
+	const editorContainer = new Container();
+	editorContainer.addChild(editor);
+	const fakeThis = {
+		editor,
+		editorContainer,
+		ui: { requestRender: vi.fn(), setFocus: vi.fn(), hideOverlay: vi.fn(), terminal: { rows: 24 } } as unknown as TUI,
+		inlineAuthPanelClosers: [] as Array<() => void>,
+		cancelActiveConnectionExtensionUiRequests: vi.fn(),
+		closeHeartbeatManager: vi.fn(),
+		clearExtensionTerminalInputListeners: vi.fn(),
+		setExtensionFooter: vi.fn(),
+		setExtensionHeader: vi.fn(),
+		clearExtensionWidgets: vi.fn(),
+		footerDataProvider: { clearExtensionStatuses: vi.fn() },
+		footer: { invalidate: vi.fn() },
+		autocompleteProviderWrappers: [],
+		setCustomEditorComponent: vi.fn(),
+		setupAutocompleteProvider: vi.fn(),
+		defaultEditor: {},
+		updateTerminalTitle: vi.fn(),
+		refreshTopBarCost: vi.fn(),
+		setWorkingIndicator: vi.fn(),
+	} as unknown as InteractiveMode;
+	Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+	const prototype = InteractiveMode.prototype as unknown as {
+		showInlineAuthPanel(component: Component): () => void;
+		resetExtensionUI(): void;
+	};
+	const closers = () => (fakeThis as unknown as { inlineAuthPanelClosers: unknown[] }).inlineAuthPanelClosers;
+
+	const dialog = new Container();
+	const closeDialog = prototype.showInlineAuthPanel.call(fakeThis, dialog);
+	const teamSelector = new Container();
+	const closeSelector = prototype.showInlineAuthPanel.call(fakeThis, teamSelector);
+
+	// The selector unwinds first and re-tracks the dialog underneath it.
+	closeSelector();
+	expect(editorContainer.children).toEqual([dialog]);
+	expect(closers()).toEqual([closeDialog]);
+
+	closeDialog();
+	expect(editorContainer.children).toEqual([editor]);
+	expect(closers()).toEqual([]);
+
+	// A session reset after the panels already closed restores nothing extra.
+	editorContainer.clear();
+	editorContainer.addChild(new Container());
+	prototype.resetExtensionUI.call(fakeThis);
+	expect(editorContainer.children).toHaveLength(1);
 });

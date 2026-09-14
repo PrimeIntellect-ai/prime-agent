@@ -46,7 +46,6 @@ export class PrimeTeamSelectorComponent extends Container implements Focusable {
 		this.allOptions = [{ type: "personal", team: null }, ...teams.map((team) => ({ type: "team" as const, team }))];
 		this.filteredOptions = this.allOptions;
 
-		// Rendered inline under the chat alongside the other auth pickers.
 		const panel = new MenuPanel({
 			title: "Select a Prime Team:",
 			subtitle: "Choose which account pays for Prime Inference usage.",

@@ -33,6 +33,7 @@ interface ConfigurationHarness {
 	editor: Input;
 	editorContainer: Container;
 	ui: TUI;
+	inlineAuthPanelClosers: Array<() => void>;
 	uiServices: {
 		modelRegistry: ModelRegistry;
 		settingsManager: Harness["settingsManager"];
@@ -142,6 +143,7 @@ describe("ENG-4658 onboarding transitions", () => {
 			requestRender: vi.fn(),
 			setFocus: vi.fn(),
 		} as unknown as TUI;
+		fakeThis.inlineAuthPanelClosers = [];
 		fakeThis.uiServices = {
 			modelRegistry: harness.session.modelRegistry,
 			settingsManager: harness.settingsManager,
@@ -159,7 +161,6 @@ describe("ENG-4658 onboarding transitions", () => {
 		fakeThis.createAuthFlows = () => ({
 			getLoginProviderOptions: () => [{ id: model.provider, name: model.provider, authType: "api_key" }],
 			loginProvider: () => {
-				// The login panel replaces the inline picker for the duration.
 				const close = showInlineAuthPanel.call(fakeThis, loginPanel);
 				void login.promise.then(() => close());
 				return login.promise;

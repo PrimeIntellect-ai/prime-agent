@@ -70,9 +70,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 		const providerName = providerNameOverride || providerInfo?.name || providerId;
 		const title = titleOverride ?? `Login to ${providerName}`;
 
-		// Renders with the compact inline picker style; hosts mount it in place
-		// of the prompt area or as a centered overlay during onboarding. The top
-		// rule separates the login section from the transcript above it.
+		// The top rule keeps the inline login section separate from the transcript.
 		const panel = new MenuPanel({ title, inline: true, topRule: true });
 		this.addChild(panel);
 
@@ -118,8 +116,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 		this.authUrl = url;
 		const linkedUrl = getCapabilities().hyperlinks ? `\x1b]8;;${url}\x07${url}\x1b]8;;\x07` : url;
 		this.contentContainer.addChild(new Text(theme.fg("text", linkedUrl), 0, 0));
-		// The provider instructions already describe the browser step; only add
-		// our own line when they do not.
+		// Provider instructions already describe the browser step.
 		if (instructions) {
 			this.addInstructions(instructions);
 		} else {

@@ -1051,6 +1051,7 @@ export class InteractiveMode {
 	private connectionModelsRefreshVersion = 0;
 	private connectionModelsRefreshInFlight: { version: number; promise: Promise<AgentConnectionModel[]> } | undefined;
 	private closeConfigurationMenu: (() => void) | undefined;
+	private inlineAuthPanelClosers: (() => void)[] = [];
 	private configurationModelSelection: Promise<void> | undefined;
 	private connectionState: AgentConnectionState | undefined;
 	private connectionResourceSnapshot: AgentConnectionResourceSnapshot | undefined;
@@ -3579,6 +3580,12 @@ export class InteractiveMode {
 	}
 
 	private resetExtensionUI(): void {
+		// Close inline auth panels before the configuration menu so a restored
+		// menu is still torn down by the closeConfigurationMenu call below.
+		// Innermost panels close first, ending at the pre-login content.
+		for (const close of this.inlineAuthPanelClosers.splice(0).reverse()) {
+			close();
+		}
 		this.closeConfigurationMenu?.();
 		this.cancelActiveConnectionExtensionUiRequests();
 		this.closeHeartbeatManager();
@@ -8342,8 +8349,6 @@ export class InteractiveMode {
 							this.getCachedModelCandidates(),
 							this.connectionConfiguredProviders,
 						);
-						// Keep the user on the tab they logged in from; the models tab
-						// stays fresh through refreshModels for when they open it.
 						refreshModels(true);
 					})
 					.catch((error) => {
@@ -8853,7 +8858,10 @@ export class InteractiveMode {
 	/**
 	 * Mount a provider-auth panel inline in place of the prompt area, matching
 	 * the inline pickers. Returns a callback that unmounts the panel and
-	 * restores the previous content and focus.
+	 * restores the previous content and focus. Closers are tracked in a stack
+	 * because in-flow selectors mount on top of the login dialog;
+	 * resetExtensionUI tears the whole stack down on session resets. Each
+	 * closer runs once, so a reset cannot stomp a picker opened afterwards.
 	 */
 	private showInlineAuthPanel(component: Component): () => void {
 		const previousChildren = [...this.editorContainer.children];
@@ -8862,7 +8870,14 @@ export class InteractiveMode {
 		this.editorContainer.addChild(component);
 		this.ui.setFocus(component);
 		this.ui.requestRender();
-		return () => {
+		let closed = false;
+		const close = () => {
+			if (closed) return;
+			closed = true;
+			const index = this.inlineAuthPanelClosers.indexOf(close);
+			if (index !== -1) {
+				this.inlineAuthPanelClosers.splice(index, 1);
+			}
 			this.editorContainer.clear();
 			for (const child of previousChildren) {
 				this.editorContainer.addChild(child);
@@ -8870,6 +8885,8 @@ export class InteractiveMode {
 			this.ui.setFocus(previousFocus);
 			this.ui.requestRender();
 		};
+		this.inlineAuthPanelClosers.push(close);
+		return close;
 	}
 
 	private async prepareForModelSelectionAfterLogin(authResult: AuthenticationResult): Promise<boolean> {
