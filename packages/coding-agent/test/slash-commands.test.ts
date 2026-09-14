@@ -57,10 +57,15 @@ describe("built-in slash commands", () => {
 		expect(builtinSlashCommandTakesArgument("side")).toBe(true);
 	});
 
-	test("describes /mcp as the MCP Connections menu entry point", () => {
+	test("describes /mcp and /plugins as the external-services entry points", () => {
 		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "mcp")).toMatchObject({
-			description: "Open MCP Connections or manage MCP integrations",
+			description: "Browse external services or manage MCP integrations",
 			argumentHint: "[add|list|get|remove|login|logout]",
+			takesArgument: true,
+		});
+		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "plugins")).toMatchObject({
+			description: "Browse and connect external services",
+			argumentHint: "[search]",
 			takesArgument: true,
 		});
 	});

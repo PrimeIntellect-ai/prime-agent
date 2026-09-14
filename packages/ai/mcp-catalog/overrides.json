@@ -1,0 +1,319 @@
+{
+	"$comment": "Prime-curated adjustments layered on the deterministic import. Keys are '<source>/<plugin>/<server>' identity triples from the pinned fixtures (stdio adapters are keyed '<source>/<plugin>'). This file is review data, never credentials: it can rename ids/labels, group brands, and mark verified/dynamic-registration knowledge, but cannot add OAuth client ids or secrets.",
+	"servers": {
+		"openai-plugins/linear/linear": {
+			"verification": "metadata-reviewed",
+			"clientRegistration": "dynamic",
+			"note": "legacy built-in integration; OAuth dynamic client registration (plus CIMD) reviewed against public provider metadata",
+			"aliases": [
+				"linear-app"
+			],
+			"legacyBuiltin": true
+		},
+		"openai-plugins/notion/notion": {
+			"verification": "metadata-reviewed",
+			"clientRegistration": "dynamic",
+			"note": "legacy built-in integration; OAuth dynamic client registration (plus CIMD) reviewed against public provider metadata",
+			"aliases": [
+				"notion-workspace"
+			],
+			"legacyBuiltin": true
+		},
+		"openai-plugins/slack/slack": {
+			"clientRegistration": "pre-registered",
+			"requirement": "registered-client",
+			"readiness": "prime-restricted",
+			"setupReason": "Slack MCP requires a Slack-registered app client (Marketplace or internal; unlisted distribution prohibited); it has no dynamic client registration, and upstream configs carry OpenAI/Claude-branded client ids that Prime must not reuse",
+			"setupFields": [
+				{
+					"id": "SLACK_MCP_CLIENT_ID",
+					"label": "Slack app client ID",
+					"description": "Client ID of your own registered Slack app (required because Slack has no dynamic client registration)",
+					"required": true,
+					"kind": "client-id"
+				},
+				{
+					"id": "SLACK_MCP_CLIENT_SECRET",
+					"label": "Slack app client secret",
+					"description": "Client secret of your own registered Slack app (Slack's authorization server accepts confidential client auth only)",
+					"required": true,
+					"kind": "client-secret"
+				}
+			],
+			"metadataNote": "no dynamic client registration advertised; confidential-only client auth (client_secret_post) observed",
+			"note": "branded OAuth client ids stripped from both upstream configs; see https://docs.slack.dev/ai/slack-mcp-server"
+		},
+		"openai-plugins/zoom/zoom": {
+			"id": "zoom-meetings",
+			"label": "Zoom Meetings",
+			"note": "the upstream OpenAI zoom plugin targets the Zoom meetings MCP endpoint; renamed to keep the general zoom endpoint distinct"
+		},
+		"claude-plugins-official/zoom-plugin/zoom-mcp": {
+			"label": "Zoom"
+		},
+		"claude-plugins-official/zoom-plugin/zoom-chat-mcp": {
+			"label": "Zoom Chat"
+		},
+		"claude-plugins-official/zoom-plugin/zoom-canvas-mcp": {
+			"label": "Zoom Canvas"
+		},
+		"claude-plugins-official/zoom-plugin/zoom-tasks-mcp": {
+			"label": "Zoom Tasks"
+		},
+		"claude-plugins-official/zoom-plugin/zoom-whiteboard-mcp": {
+			"label": "Zoom Whiteboard"
+		},
+		"claude-plugins-official/zoom-plugin/zoom-revenue-accelerator-mcp": {
+			"label": "Zoom Revenue Accelerator"
+		},
+		"claude-plugins-official/vanta/vanta-us": {
+			"id": "vanta",
+			"label": "Vanta (US)"
+		},
+		"claude-plugins-official/vanta/vanta-eu": {
+			"label": "Vanta (EU)"
+		},
+		"claude-plugins-official/vanta/vanta-aus": {
+			"label": "Vanta (Australia)"
+		},
+		"claude-plugins-official/airwallex-agentos/airwallex-agentos": {
+			"id": "airwallex",
+			"label": "Airwallex"
+		},
+		"claude-plugins-official/airwallex-agentos/airwallex-dev": {
+			"id": "airwallex-sandbox",
+			"label": "Airwallex (Sandbox)"
+		},
+		"claude-plugins-official/cloudinary/cloudinary-asset-mgmt": {
+			"label": "Cloudinary Asset Management"
+		},
+		"claude-plugins-official/cloudinary/cloudinary-env-config": {
+			"label": "Cloudinary Environment Config"
+		},
+		"claude-plugins-official/cloudinary/cloudinary-smd": {
+			"label": "Cloudinary Structured Metadata"
+		},
+		"claude-plugins-official/cloudinary/cloudinary-analysis": {
+			"label": "Cloudinary Analysis"
+		},
+		"claude-plugins-official/cloudinary/cloudinary-mediaflows": {
+			"label": "Cloudinary MediaFlows"
+		},
+		"claude-plugins-official/mapbox/mapbox": {
+			"label": "Mapbox"
+		},
+		"claude-plugins-official/mapbox/mapbox-devkit": {
+			"label": "Mapbox DevKit"
+		},
+		"claude-plugins-official/mapbox/mapbox-docs": {
+			"label": "Mapbox Docs"
+		},
+		"claude-plugins-official/confidence/confidence-flags": {
+			"label": "Spotify Confidence Flags"
+		},
+		"claude-plugins-official/confidence/confidence-docs": {
+			"label": "Spotify Confidence Docs"
+		},
+		"claude-plugins-official/synthflow/synthflow": {
+			"label": "Synthflow"
+		},
+		"claude-plugins-official/synthflow/synthflow-docs": {
+			"label": "Synthflow Docs"
+		},
+		"claude-plugins-official/atlassian/atlassian": {
+			"label": "Atlassian"
+		},
+		"claude-plugins-official/paypal/paypal-sandbox": {
+			"id": "paypal-sandbox",
+			"label": "PayPal (Sandbox)"
+		},
+		"claude-plugins-official/cockroachdb/cockroachdb-cloud": {
+			"id": "cockroachdb",
+			"label": "CockroachDB Cloud"
+		},
+		"claude-plugins-official/prisma/Prisma-Remote": {
+			"id": "prisma",
+			"label": "Prisma"
+		},
+		"claude-plugins-official/adobe-for-creativity/Adobe for creativity": {
+			"label": "Adobe for Creativity"
+		},
+		"claude-plugins-official/hubspot-sales/hubspot": {
+			"note": "endpoint path is scoped to the Claude connector catalog"
+		},
+		"claude-plugins-official/lusha/lusha": {
+			"note": "endpoint path is scoped to the Claude connector catalog"
+		},
+		"claude-plugins-official/legalzoom/legalzoom": {
+			"note": "endpoint path is scoped to the Claude connector catalog"
+		},
+		"claude-plugins-official/firebase": {
+			"service": "firebase",
+			"label": "Firebase"
+		},
+		"claude-plugins-official/looker": {
+			"service": "looker",
+			"label": "Looker"
+		},
+		"claude-plugins-official/data-agent-kit-starter-pack": {
+			"service": "google-cloud",
+			"label": "Google Data Agent Kit"
+		},
+		"claude-plugins-official/mongodb-atlas/mongodb-atlas": {
+			"requirement": "registered-client",
+			"readiness": "prime-restricted",
+			"setupReason": "MongoDB's hosted MCP requires a pre-registered OAuth client for the default interactive path (provider access-model docs); the upstream config relies on a Claude-specific OAuth client identity that Prime must not reuse",
+			"alternatives": [
+				{
+					"kind": "service-account",
+					"readiness": "user-setup",
+					"note": "MongoDB documents a dedicated service-account (machine-to-machine) access model for its hosted MCP as a distinct path from the interactive OAuth flow",
+					"sourceUrl": "https://www.mongodb.com/docs/mcp-server/remote-mcp/access-models/"
+				}
+			],
+			"metadataNote": "no dynamic client registration advertised; a client-id metadata document is advertised but no Prime-controlled identity document is deployed or authorized, so CIMD alone is not oauth-readiness"
+		},
+		"openai-plugins/datadog/datadog": {
+			"label": "Datadog"
+		},
+		"claude-plugins-official/aws-agents-for-devsecops/aws-devops-agent": {
+			"label": "AWS Agents for DevSecOps"
+		},
+		"claude-plugins-official/alloydb": {
+			"label": "AlloyDB",
+			"service": "alloydb"
+		},
+		"claude-plugins-official/cloud-sql-mysql": {
+			"label": "Cloud SQL for MySQL",
+			"service": "cloud-sql"
+		},
+		"claude-plugins-official/cloud-sql-postgresql": {
+			"label": "Cloud SQL for PostgreSQL",
+			"service": "cloud-sql"
+		},
+		"claude-plugins-official/cloud-sql-sqlserver": {
+			"label": "Cloud SQL for SQL Server",
+			"service": "cloud-sql"
+		},
+		"claude-plugins-official/spanner": {
+			"label": "Spanner",
+			"service": "spanner"
+		},
+		"claude-plugins-official/dataproc": {
+			"label": "Dataproc",
+			"service": "dataproc"
+		},
+		"claude-plugins-official/bigquery-data-analytics": {
+			"label": "BigQuery",
+			"service": "bigquery"
+		},
+		"claude-plugins-official/firestore-native": {
+			"label": "Firestore",
+			"service": "firebase"
+		},
+		"claude-plugins-official/google-cloud-storage": {
+			"label": "Google Cloud Storage",
+			"service": "google-cloud"
+		},
+		"claude-plugins-official/knowledge-catalog": {
+			"label": "Knowledge Catalog",
+			"service": "google-cloud"
+		},
+		"claude-plugins-official/amazon-location-service": {
+			"label": "Amazon Location Service"
+		},
+		"claude-plugins-official/aws-amplify": {
+			"label": "AWS Amplify"
+		},
+		"claude-plugins-official/aws-core": {
+			"label": "AWS Core"
+		},
+		"claude-plugins-official/aws-data-analytics": {
+			"label": "AWS Data Analytics"
+		},
+		"claude-plugins-official/aws-serverless": {
+			"label": "AWS Serverless"
+		},
+		"claude-plugins-official/aws-transform": {
+			"label": "AWS Transform"
+		},
+		"claude-plugins-official/sagemaker-ai": {
+			"label": "Amazon SageMaker AI"
+		},
+		"claude-plugins-official/deploy-on-aws": {
+			"label": "Deploy on AWS"
+		},
+		"openai-plugins/airtable/airtable": {
+			"setup": "ready",
+			"note": "placeholder-only upstream OAuth blocks cleared: provider docs confirm OAuth for the Airtable MCP server and the committed audit evidence confirms a live registration endpoint",
+			"alternatives": [
+				{
+					"kind": "api-key",
+					"readiness": "user-setup",
+					"note": "Airtable also documents personal access tokens as a distinct API access path; OAuth dynamic client registration is the default route for the MCP server",
+					"sourceUrl": "https://airtable.com/developers/agents/mcp/getting-started"
+				}
+			]
+		},
+		"openai-plugins/shopify/shopify": {
+			"setup": "ready",
+			"note": "placeholder-only upstream OAuth blocks cleared: unknown is not proof of a restriction; connect attempts surface real errors honestly",
+			"metadataNote": "the origin-level protected-resource document and authorization-server metadata are served; no dynamic client registration is advertised, so readiness stays unknown and connect attempts surface real errors"
+		},
+		"openai-plugins/gmail/gmail": {
+			"requirement": "registered-client",
+			"readiness": "prime-restricted",
+			"setupReason": "Google MCP endpoints are gated behind Developer Preview terms with one shared OAuth client workstream and require Google-registered clients; no dynamic client registration is advertised",
+			"note": "genuine restriction kept (research-anchored): Google MCP endpoints run under Developer Preview terms (no public use before GA) with one shared OAuth client workstream and Google-registered clients \u2014 see https://developers.google.com/workspace/preview",
+			"metadataNote": "no dynamic client registration advertised; confidential-only client auth (client_secret_basic/client_secret_post) observed"
+		},
+		"openai-plugins/google-calendar/google-calendar": {
+			"requirement": "registered-client",
+			"readiness": "prime-restricted",
+			"setupReason": "Google MCP endpoints are gated behind Developer Preview terms with one shared OAuth client workstream and require Google-registered clients; no dynamic client registration is advertised",
+			"note": "genuine restriction kept (research-anchored): Google MCP endpoints run under Developer Preview terms (no public use before GA) with one shared OAuth client workstream and Google-registered clients \u2014 see https://developers.google.com/workspace/preview",
+			"metadataNote": "no dynamic client registration advertised; confidential-only client auth (client_secret_basic/client_secret_post) observed"
+		},
+		"openai-plugins/google-drive/google-drive": {
+			"requirement": "registered-client",
+			"readiness": "prime-restricted",
+			"setupReason": "Google MCP endpoints are gated behind Developer Preview terms with one shared OAuth client workstream and require Google-registered clients; no dynamic client registration is advertised",
+			"note": "genuine restriction kept (research-anchored): Google MCP endpoints run under Developer Preview terms (no public use before GA) with one shared OAuth client workstream and Google-registered clients \u2014 see https://developers.google.com/workspace/preview",
+			"metadataNote": "no dynamic client registration advertised; confidential-only client auth (client_secret_basic/client_secret_post) observed"
+		},
+		"claude-plugins-official/render/render": {
+			"requirement": "api-key",
+			"readiness": "user-setup",
+			"setupReason": "Render's documented MCP authentication route is a user-supplied API key; the upstream config relies on a Claude-specific OAuth client identity that Prime must not reuse",
+			"alternatives": [
+				{
+					"kind": "oauth",
+					"readiness": "unknown",
+					"note": "Render also announced OAuth onboarding for specific partner clients (Claude Code, Codex, Cursor); Prime's client registration path is unknown",
+					"sourceUrl": "https://render.com/changelog/render-mcp-now-supports-oauth-for-claude-code-codex-and-cursor"
+				}
+			],
+			"metadataNote": "no dynamic client registration advertised; only public-client token auth ('none') is advertised"
+		},
+		"openai-plugins/github/github": {
+			"alternatives": [
+				{
+					"kind": "oauth",
+					"readiness": "unknown",
+					"note": "GitHub's MCP endpoint advertises standard OAuth (PKCE S256 observed) but no dynamic client registration; a Prime-controlled registered client is not established",
+					"sourceUrl": "https://github.com/login/oauth/.well-known/oauth-authorization-server"
+				}
+			]
+		}
+	},
+	"excludedServers": [
+		{
+			"key": "claude-plugins-official/dropbox/claude_app_mcp",
+			"reason": "Claude-app-specific endpoint variant; the official Dropbox endpoint is imported from the openai catalog"
+		},
+		{
+			"key": "claude-plugins-official/deploy-on-aws/awsknowledge",
+			"reason": "docs-only server per upstream plugin notes; the AWS IaC stdio adapter is recorded for the plugin"
+		}
+	]
+}
