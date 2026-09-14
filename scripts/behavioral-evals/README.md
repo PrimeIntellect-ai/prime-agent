@@ -184,8 +184,8 @@ For each task, `evaluate.py` extracts:
 - model-induced timeout and infrastructure-error flags;
 - deterministic trace fact counts and trace-completion state.
 
-Fact counts include all sampled branches. Call/result completeness uses the final model-call
-ancestry, so abandoned request forks do not look like lossy traces.
+Fact counts and call/result completeness use the final model-call ancestry plus every
+branch with an executed tool result. Abandoned request forks do not look like lossy traces.
 
 The PR comment shows overall and per-taskset pass rates, uncached input, cached-input,
 and output tokens, end-to-end seconds, model-induced timeouts, infrastructure retries,

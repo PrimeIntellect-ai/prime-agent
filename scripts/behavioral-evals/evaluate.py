@@ -174,22 +174,36 @@ def tool_result_event(message: dict) -> dict:
     }
 
 
-def active_branch_nodes(trace: dict) -> list[dict]:
-    """Return the ancestry that produced the final committed model response."""
+def observed_branch_nodes(trace: dict) -> list[dict]:
+    """Keep the final response branch and every branch with an executed tool result."""
     nodes = trace.get("nodes") or []
     calls = trace.get("calls") or []
-    node_id = calls[-1].get("node") if calls else None
-    if not isinstance(node_id, int) or isinstance(node_id, bool) or not 0 <= node_id < len(nodes):
+    final_node = calls[-1].get("node") if calls else None
+    if not isinstance(final_node, int) or isinstance(final_node, bool) or not 0 <= final_node < len(nodes):
         return nodes
-    path = []
-    seen = set()
-    while node_id is not None:
-        if node_id in seen or not isinstance(node_id, int) or not 0 <= node_id < len(nodes):
-            raise ValueError("invalid trace node ancestry")
-        seen.add(node_id)
-        path.append(nodes[node_id])
-        node_id = nodes[node_id].get("parent")
-    return list(reversed(path))
+
+    retained = set()
+
+    def retain_ancestry(node_id: int) -> None:
+        path = set()
+        while node_id is not None:
+            if (
+                node_id in path
+                or not isinstance(node_id, int)
+                or isinstance(node_id, bool)
+                or not 0 <= node_id < len(nodes)
+            ):
+                raise ValueError("invalid trace node ancestry")
+            path.add(node_id)
+            retained.add(node_id)
+            node_id = nodes[node_id].get("parent")
+
+    retain_ancestry(final_node)
+    for node_id, node in enumerate(nodes):
+        message = node.get("message") or node
+        if message.get("role") == "tool":
+            retain_ancestry(node_id)
+    return [node for node_id, node in enumerate(nodes) if node_id in retained]
 
 
 def analyzer_input(trace: dict) -> dict:
@@ -308,7 +322,7 @@ def error_flags(trace: dict) -> tuple[bool, bool]:
 
 def tool_call_count(trace: dict) -> int:
     count = 0
-    for node in trace.get("nodes", []):
+    for node in observed_branch_nodes(trace):
         if node.get("sampled") is False:
             continue
         message = node.get("message") or node
@@ -341,7 +355,7 @@ def trace_record(episode: dict, taskset: str) -> dict:
     usage = usage_tokens(trace)
     facts = analyze_trace(analyzer_input(trace), ANALYZER_LIMITS)
     active_facts = analyze_trace(
-        analyzer_input({**trace, "nodes": active_branch_nodes(trace)}), ANALYZER_LIMITS
+        analyzer_input({**trace, "nodes": observed_branch_nodes(trace)}), ANALYZER_LIMITS
     )
     active_meta = active_facts.get("meta") if isinstance(active_facts.get("meta"), dict) else {}
     unanswered = int(active_meta.get("unanswered_calls") or 0)

@@ -184,7 +184,7 @@ class TraceConversionTests(unittest.TestCase):
             ],
         )
 
-    def test_active_branch_excludes_abandoned_tool_call_forks(self):
+    def test_observed_branches_exclude_abandoned_forks_and_keep_executed_compaction_branches(self):
         trace = {
             "tools": [{"name": "ipython"}],
             "nodes": [
@@ -215,16 +215,37 @@ class TraceConversionTests(unittest.TestCase):
                     "sampled": True,
                     "message": {"role": "assistant", "content": "finished"},
                 },
+                {
+                    "parent": None,
+                    "sampled": True,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{"id": "earlier", "name": "ipython", "arguments": {}}],
+                    },
+                },
+                {
+                    "parent": 5,
+                    "sampled": False,
+                    "message": {"role": "tool", "tool_call_id": "earlier", "content": "done"},
+                },
             ],
-            "calls": [{"node": 1}, {"node": 4}],
+            "calls": [{"node": 5}, {"node": 1}, {"node": 4}],
         }
         full = evaluate.analyze_trace(evaluate.analyzer_input(trace), evaluate.ANALYZER_LIMITS)
-        active = evaluate.analyze_trace(
-            evaluate.analyzer_input({**trace, "nodes": evaluate.active_branch_nodes(trace)}),
+        observed_nodes = evaluate.observed_branch_nodes(trace)
+        observed = evaluate.analyze_trace(
+            evaluate.analyzer_input({**trace, "nodes": observed_nodes}),
             evaluate.ANALYZER_LIMITS,
         )
+        observed_call_ids = {
+            event["id"]
+            for event in evaluate.analyzer_input({**trace, "nodes": observed_nodes})["events"]
+            if event["type"] == "tool_call"
+        }
         self.assertEqual(full["meta"]["unanswered_calls"], 1)
-        self.assertEqual(active["meta"]["unanswered_calls"], 0)
+        self.assertEqual(observed["meta"]["unanswered_calls"], 0)
+        self.assertEqual(observed_call_ids, {"active", "earlier"})
+        self.assertEqual(evaluate.tool_call_count(trace), 2)
 
     def test_analyzer_ignores_replayed_context_without_losing_late_results(self):
         trace = {
