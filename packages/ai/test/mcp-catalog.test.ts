@@ -10,6 +10,7 @@ import {
 	buildCatalog,
 	type ClaudeFixture,
 	evidenceSupportsStandardOauth,
+	evidenceSupportsUserRegisteredOauth,
 	type OpenAiFixture,
 	type Overrides,
 } from "../scripts/import-mcp-catalog.js";
@@ -214,8 +215,11 @@ describe("MCP service catalog", () => {
 		expect(notion?.setup.readiness).toBe("oauth-ready");
 		expect(notion?.auth.metadata?.note).toBeUndefined();
 		// The component comparison accepts exact-origin resources (root-slash
-		// normalized): the 9 DCR-capable origin-mismatched entries flipped.
-		for (const server of ["amplitude", "appwrite", "lovable", "miro", "rootly", "vercel", "windsor-ai", "zoominfo"]) {
+		// normalized): DCR-capable origin-mismatched entries flipped — and stay
+		// one-click only where the advertised token auth methods still serve
+		// the engine's public client (the demoted subset — miro, vercel,
+		// windsor-ai, zoominfo — moved to the user-setup OAuth path below).
+		for (const server of ["amplitude", "appwrite", "lovable", "rootly"]) {
 			expect(getServiceCatalogEntry(server)?.setup.readiness).toBe("oauth-ready");
 		}
 		// The SDK-parity origin-level fallback makes previously unreachable PRM
@@ -246,13 +250,14 @@ describe("MCP service catalog", () => {
 		expect(getServiceCatalogEntry("aikido")?.setup.requirement).toBe("local-runtime");
 		expect(getServiceCatalogEntry("zoom")?.setup.requirement).toBe("bearer-token");
 		// Readiness is informational-only data; the raw counts are in the file.
-		// Zero-app cut state (2026-09-14): the catalog ships exactly the two
-		// self-serve classes and nothing else — the sums must stay exact so any
-		// drift forces a conscious update here.
+		// Zero-app cut state (2026-09-14) + engine auth-method compatibility
+		// (2026-09-14, live Hugging Face gap): the catalog ships exactly the two self-serve classes
+		// and nothing else — the sums must stay exact so any drift forces a
+		// conscious update here.
 		const committed = JSON.parse(rawCatalogJson);
 		expect(committed.counts.total).toBe(124);
-		expect(committed.counts.readinessOauthReady).toBe(71);
-		expect(committed.counts.readinessUserSetup).toBe(53);
+		expect(committed.counts.readinessOauthReady).toBe(57);
+		expect(committed.counts.readinessUserSetup).toBe(67);
 		expect(committed.counts.readinessPrimeRestricted).toBe(0);
 		expect(committed.counts.readinessUnknown).toBe(0);
 		expect(
@@ -540,6 +545,116 @@ describe("MCP service catalog", () => {
 		delete ungated.authorizationServer.registrationAttempt;
 		expect(advertisedRegistrationGated(ungated.authorizationServer)).toBe(false);
 		expect(evidenceSupportsStandardOauth(ungated)).toBe(true);
+	});
+
+	it("demotes confidential-only authorization servers to the user-setup OAuth path (engine auth-method parity)", () => {
+		// Live-verified gap (2026-09-14 dogfooding): Hugging Face /mcp login
+		// failed at connect with "no compatible client authentication method
+		// (advertised: client_secret_basic, client_secret_post)" — the engine's
+		// standard no-credentials flow is a PUBLIC client, and the catalog had
+		// classified the entry one-click without ever checking the advertised
+		// token auth methods. Readiness now runs the SAME engine decision
+		// (decideClientAuthMethod, shared from oauth.ts), so such entries
+		// demote honestly to the user-setup OAuth path: the user registers
+		// their OWN app (client-id/client-secret setup fields, requirement
+		// "registered-client") — zero-app compliant self-serve, never an
+		// exclusion, never prime-restricted.
+		const huggingface = getServiceCatalogEntry("huggingface-skills");
+		expect(huggingface?.setup.status).toBe("requires-setup");
+		expect(huggingface?.setup.readiness).toBe("user-setup");
+		expect(huggingface?.setup.requirement).toBe("registered-client");
+		expect(huggingface?.setup.reason).toMatch(/^requires your own OAuth app/);
+		expect(huggingface?.setup.reason).toContain("client_secret_basic, client_secret_post");
+		expect(huggingface?.setup.fields?.map((field) => field.kind)).toEqual(["client-id", "client-secret"]);
+		expect(huggingface?.auth.metadata?.tokenAuthMethods).toEqual(["client_secret_basic", "client_secret_post"]);
+		expect(huggingface?.auth.metadata?.dynamicClientRegistration).toBe(true);
+		expect(huggingface?.auth.metadata?.note).toMatch(/classifies as user-setup with your own registered OAuth app/);
+		// The committed confidential-only evidence demotes the same way across
+		// the full set: DCR advertisement intact, no "none" advertised, and
+		// the user-app setup shape on every entry.
+		const confidentialOnly = [
+			"airwallex",
+			"airwallex-sandbox",
+			"atlan",
+			"gitlab",
+			"huggingface-skills",
+			"legalzoom",
+			"lusha",
+			"miro",
+			"monday-com",
+			"planetscale",
+			"supabase",
+			"vercel",
+			"windsor-ai",
+			"zoominfo",
+		];
+		expect(
+			SERVICE_CATALOG.filter(
+				(entry) => entry.setup.readiness === "user-setup" && entry.setup.requirement === "registered-client",
+			).map((entry) => entry.server),
+		).toEqual(confidentialOnly);
+		for (const server of confidentialOnly) {
+			const entry = getServiceCatalogEntry(server);
+			expect(entry?.setup.status, server).toBe("requires-setup");
+			expect(entry?.setup.readiness, server).toBe("user-setup");
+			expect(entry?.setup.requirement, server).toBe("registered-client");
+			expect(entry?.setup.reason, server).toMatch(/^requires your own OAuth app/);
+			expect(entry?.setup.fields?.map((field) => field.kind).sort(), server).toEqual(["client-id", "client-secret"]);
+			expect(entry?.auth.metadata?.dynamicClientRegistration, server).toBe(true);
+			expect(entry?.auth.metadata?.tokenAuthMethods, server).not.toContain("none");
+			expect(entry?.auth.metadata?.note, server).toMatch(/only secret-based client authentication/);
+		}
+		// The shared engine decision drives the synthetic classification matrix:
+		// coherent DCR evidence with confidential-only methods demotes (never
+		// one-click); adding "none" restores one-click; omitted methods stay
+		// one-click (the engine applies the public-client spec default); a list
+		// that serves not even a configured secret-bearing client (mTLS-only)
+		// stays honestly unknown — fail closed as before.
+		const coherentEvidence = (tokenAuthMethods?: string[]): AuditResult => ({
+			server: "synthetic",
+			endpoint: "https://mcp.example.test/mcp",
+			probe: { url: "https://mcp.example.test/mcp", httpStatus: 401 },
+			protectedResource: {
+				attempts: [
+					{
+						sourceUrl: "https://mcp.example.test/.well-known/oauth-protected-resource/mcp",
+						kind: "pathful",
+						status: "available",
+						audienceMatches: true,
+						evidence: {
+							resource: "https://mcp.example.test/mcp",
+							authorizationServers: ["https://as.example.test"],
+						},
+					},
+				],
+				engineVisible: "available",
+				engineSelectedSourceUrl: "https://mcp.example.test/.well-known/oauth-protected-resource/mcp",
+			},
+			authorizationServer: {
+				issuer: "https://as.example.test",
+				sourceUrls: ["https://as.example.test/.well-known/oauth-authorization-server"],
+				status: "available",
+				evidence: {
+					issuer: "https://as.example.test",
+					authorizationEndpoint: "https://as.example.test/authorize",
+					tokenEndpoint: "https://as.example.test/token",
+					registrationEndpoint: "https://as.example.test/register",
+					...(tokenAuthMethods ? { tokenAuthMethods } : {}),
+				},
+			},
+		});
+		const confidential = coherentEvidence(["client_secret_basic", "client_secret_post"]);
+		expect(evidenceSupportsStandardOauth(confidential)).toBe(false);
+		expect(evidenceSupportsUserRegisteredOauth(confidential)).toBe(true);
+		const publicCompatible = coherentEvidence(["client_secret_basic", "client_secret_post", "none"]);
+		expect(evidenceSupportsStandardOauth(publicCompatible)).toBe(true);
+		expect(evidenceSupportsUserRegisteredOauth(publicCompatible)).toBe(false);
+		const omitted = coherentEvidence(undefined);
+		expect(evidenceSupportsStandardOauth(omitted)).toBe(true);
+		expect(evidenceSupportsUserRegisteredOauth(omitted)).toBe(false);
+		const mtlsOnly = coherentEvidence(["tls_client_auth", "self_signed_tls_client_auth"]);
+		expect(evidenceSupportsStandardOauth(mtlsOnly)).toBe(false);
+		expect(evidenceSupportsUserRegisteredOauth(mtlsOnly)).toBe(false);
 	});
 
 	it("counts the sources before dedupe and records every exclusion", () => {

@@ -23,14 +23,14 @@ export const CATALOG_DATA: CatalogFileShape = {
 		"httpTemplate": 5,
 		"sse": 1,
 		"stdio": 32,
-		"ready": 71,
-		"requiresSetup": 53,
+		"ready": 57,
+		"requiresSetup": 67,
 		"metadataReviewed": 2,
 		"oauthStrategy": 7,
 		"apiKeyStrategy": 32,
 		"mergedFromBothSources": 14,
-		"readinessOauthReady": 71,
-		"readinessUserSetup": 53,
+		"readinessOauthReady": 57,
+		"readinessUserSetup": 67,
 		"readinessPrimeRestricted": 0,
 		"readinessUnknown": 0,
 		"metadataAvailable": 84,
@@ -323,12 +323,31 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.airwallex.com/.well-known/oauth-authorization-server/mcp",
 						"https://mcp.airwallex.com/mcp/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "the authorization server advertises only secret-based client authentication (client_secret_post, client_secret_basic); the engine's no-credentials flow fails its client-auth compatibility gate at connect, so the entry classifies as user-setup with your own registered OAuth app"
 				}
 			},
 			"setup": {
-				"status": "ready",
-				"readiness": "oauth-ready"
+				"status": "requires-setup",
+				"reason": "requires your own OAuth app: the authorization server accepts only secret-based client authentication (client_secret_post, client_secret_basic); register an app with the provider and configure its client id and secret",
+				"fields": [
+					{
+						"id": "oauthClientId",
+						"label": "OAuth client id",
+						"description": "Client id of your own registered OAuth app (settings mcpServers oauthClientId)",
+						"required": true,
+						"kind": "client-id"
+					},
+					{
+						"id": "oauthClientSecretEnvVar",
+						"label": "OAuth client secret",
+						"description": "Environment variable holding your app's client secret (settings mcpServers oauthClientSecretEnvVar)",
+						"required": true,
+						"kind": "client-secret"
+					}
+				],
+				"requirement": "registered-client",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -448,12 +467,31 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.sandbox.airwallex.com/.well-known/oauth-authorization-server/developer",
 						"https://mcp.sandbox.airwallex.com/developer/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "the authorization server advertises only secret-based client authentication (client_secret_post, client_secret_basic); the engine's no-credentials flow fails its client-auth compatibility gate at connect, so the entry classifies as user-setup with your own registered OAuth app"
 				}
 			},
 			"setup": {
-				"status": "ready",
-				"readiness": "oauth-ready"
+				"status": "requires-setup",
+				"reason": "requires your own OAuth app: the authorization server accepts only secret-based client authentication (client_secret_post, client_secret_basic); register an app with the provider and configure its client id and secret",
+				"fields": [
+					{
+						"id": "oauthClientId",
+						"label": "OAuth client id",
+						"description": "Client id of your own registered OAuth app (settings mcpServers oauthClientId)",
+						"required": true,
+						"kind": "client-id"
+					},
+					{
+						"id": "oauthClientSecretEnvVar",
+						"label": "OAuth client secret",
+						"description": "Environment variable holding your app's client secret (settings mcpServers oauthClientSecretEnvVar)",
+						"required": true,
+						"kind": "client-secret"
+					}
+				],
+				"requirement": "registered-client",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -1039,12 +1077,31 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.atlan.com/.well-known/oauth-authorization-server",
 						"https://mcp.atlan.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "the authorization server advertises only secret-based client authentication (client_secret_post, client_secret_basic); the engine's no-credentials flow fails its client-auth compatibility gate at connect, so the entry classifies as user-setup with your own registered OAuth app"
 				}
 			},
 			"setup": {
-				"status": "ready",
-				"readiness": "oauth-ready"
+				"status": "requires-setup",
+				"reason": "requires your own OAuth app: the authorization server accepts only secret-based client authentication (client_secret_post, client_secret_basic); register an app with the provider and configure its client id and secret",
+				"fields": [
+					{
+						"id": "oauthClientId",
+						"label": "OAuth client id",
+						"description": "Client id of your own registered OAuth app (settings mcpServers oauthClientId)",
+						"required": true,
+						"kind": "client-id"
+					},
+					{
+						"id": "oauthClientSecretEnvVar",
+						"label": "OAuth client secret",
+						"description": "Environment variable holding your app's client secret (settings mcpServers oauthClientSecretEnvVar)",
+						"required": true,
+						"kind": "client-secret"
+					}
+				],
+				"requirement": "registered-client",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4170,12 +4227,31 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://gitlab.com/.well-known/oauth-authorization-server",
 						"https://gitlab.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "the authorization server advertises only secret-based client authentication (client_secret_basic, client_secret_post); the engine's no-credentials flow fails its client-auth compatibility gate at connect, so the entry classifies as user-setup with your own registered OAuth app"
 				}
 			},
 			"setup": {
-				"status": "ready",
-				"readiness": "oauth-ready"
+				"status": "requires-setup",
+				"reason": "requires your own OAuth app: the authorization server accepts only secret-based client authentication (client_secret_basic, client_secret_post); register an app with the provider and configure its client id and secret",
+				"fields": [
+					{
+						"id": "oauthClientId",
+						"label": "OAuth client id",
+						"description": "Client id of your own registered OAuth app (settings mcpServers oauthClientId)",
+						"required": true,
+						"kind": "client-id"
+					},
+					{
+						"id": "oauthClientSecretEnvVar",
+						"label": "OAuth client secret",
+						"description": "Environment variable holding your app's client secret (settings mcpServers oauthClientSecretEnvVar)",
+						"required": true,
+						"kind": "client-secret"
+					}
+				],
+				"requirement": "registered-client",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4684,12 +4760,31 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://huggingface.co/.well-known/oauth-authorization-server",
 						"https://huggingface.co/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "the authorization server advertises only secret-based client authentication (client_secret_basic, client_secret_post); the engine's no-credentials flow fails its client-auth compatibility gate at connect, so the entry classifies as user-setup with your own registered OAuth app"
 				}
 			},
 			"setup": {
-				"status": "ready",
-				"readiness": "oauth-ready"
+				"status": "requires-setup",
+				"reason": "requires your own OAuth app: the authorization server accepts only secret-based client authentication (client_secret_basic, client_secret_post); register an app with the provider and configure its client id and secret",
+				"fields": [
+					{
+						"id": "oauthClientId",
+						"label": "OAuth client id",
+						"description": "Client id of your own registered OAuth app (settings mcpServers oauthClientId)",
+						"required": true,
+						"kind": "client-id"
+					},
+					{
+						"id": "oauthClientSecretEnvVar",
+						"label": "OAuth client secret",
+						"description": "Environment variable holding your app's client secret (settings mcpServers oauthClientSecretEnvVar)",
+						"required": true,
+						"kind": "client-secret"
+					}
+				],
+				"requirement": "registered-client",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -4977,12 +5072,31 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://auth.apigw.legalzoom.com/.well-known/oauth-authorization-server",
 						"https://auth.apigw.legalzoom.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "the authorization server advertises only secret-based client authentication (client_secret_basic, client_secret_post, client_secret_jwt, private_key_jwt, tls_client_auth, self_signed_tls_client_auth); the engine's no-credentials flow fails its client-auth compatibility gate at connect, so the entry classifies as user-setup with your own registered OAuth app"
 				}
 			},
 			"setup": {
-				"status": "ready",
-				"readiness": "oauth-ready"
+				"status": "requires-setup",
+				"reason": "requires your own OAuth app: the authorization server accepts only secret-based client authentication (client_secret_basic, client_secret_post, client_secret_jwt, private_key_jwt, tls_client_auth, self_signed_tls_client_auth); register an app with the provider and configure its client id and secret",
+				"fields": [
+					{
+						"id": "oauthClientId",
+						"label": "OAuth client id",
+						"description": "Client id of your own registered OAuth app (settings mcpServers oauthClientId)",
+						"required": true,
+						"kind": "client-id"
+					},
+					{
+						"id": "oauthClientSecretEnvVar",
+						"label": "OAuth client secret",
+						"description": "Environment variable holding your app's client secret (settings mcpServers oauthClientSecretEnvVar)",
+						"required": true,
+						"kind": "client-secret"
+					}
+				],
+				"requirement": "registered-client",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5431,12 +5545,31 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://auth.lusha.com/.well-known/oauth-authorization-server",
 						"https://auth.lusha.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "the authorization server advertises only secret-based client authentication (client_secret_post, client_secret_basic); the engine's no-credentials flow fails its client-auth compatibility gate at connect, so the entry classifies as user-setup with your own registered OAuth app"
 				}
 			},
 			"setup": {
-				"status": "ready",
-				"readiness": "oauth-ready"
+				"status": "requires-setup",
+				"reason": "requires your own OAuth app: the authorization server accepts only secret-based client authentication (client_secret_post, client_secret_basic); register an app with the provider and configure its client id and secret",
+				"fields": [
+					{
+						"id": "oauthClientId",
+						"label": "OAuth client id",
+						"description": "Client id of your own registered OAuth app (settings mcpServers oauthClientId)",
+						"required": true,
+						"kind": "client-id"
+					},
+					{
+						"id": "oauthClientSecretEnvVar",
+						"label": "OAuth client secret",
+						"description": "Environment variable holding your app's client secret (settings mcpServers oauthClientSecretEnvVar)",
+						"required": true,
+						"kind": "client-secret"
+					}
+				],
+				"requirement": "registered-client",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5711,12 +5844,31 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.miro.com/.well-known/oauth-authorization-server",
 						"https://mcp.miro.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "the authorization server advertises only secret-based client authentication (client_secret_post, client_secret_basic); the engine's no-credentials flow fails its client-auth compatibility gate at connect, so the entry classifies as user-setup with your own registered OAuth app"
 				}
 			},
 			"setup": {
-				"status": "ready",
-				"readiness": "oauth-ready"
+				"status": "requires-setup",
+				"reason": "requires your own OAuth app: the authorization server accepts only secret-based client authentication (client_secret_post, client_secret_basic); register an app with the provider and configure its client id and secret",
+				"fields": [
+					{
+						"id": "oauthClientId",
+						"label": "OAuth client id",
+						"description": "Client id of your own registered OAuth app (settings mcpServers oauthClientId)",
+						"required": true,
+						"kind": "client-id"
+					},
+					{
+						"id": "oauthClientSecretEnvVar",
+						"label": "OAuth client secret",
+						"description": "Environment variable holding your app's client secret (settings mcpServers oauthClientSecretEnvVar)",
+						"required": true,
+						"kind": "client-secret"
+					}
+				],
+				"requirement": "registered-client",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -5768,12 +5920,31 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://auth.monday.com/.well-known/oauth-authorization-server/mcp",
 						"https://auth.monday.com/mcp/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "the authorization server advertises only secret-based client authentication (client_secret_post, client_secret_basic); the engine's no-credentials flow fails its client-auth compatibility gate at connect, so the entry classifies as user-setup with your own registered OAuth app"
 				}
 			},
 			"setup": {
-				"status": "ready",
-				"readiness": "oauth-ready"
+				"status": "requires-setup",
+				"reason": "requires your own OAuth app: the authorization server accepts only secret-based client authentication (client_secret_post, client_secret_basic); register an app with the provider and configure its client id and secret",
+				"fields": [
+					{
+						"id": "oauthClientId",
+						"label": "OAuth client id",
+						"description": "Client id of your own registered OAuth app (settings mcpServers oauthClientId)",
+						"required": true,
+						"kind": "client-id"
+					},
+					{
+						"id": "oauthClientSecretEnvVar",
+						"label": "OAuth client secret",
+						"description": "Environment variable holding your app's client secret (settings mcpServers oauthClientSecretEnvVar)",
+						"required": true,
+						"kind": "client-secret"
+					}
+				],
+				"requirement": "registered-client",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -6435,12 +6606,31 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://api.planetscale.com/.well-known/oauth-authorization-server",
 						"https://api.planetscale.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "the authorization server advertises only secret-based client authentication (client_secret_basic, client_secret_post); the engine's no-credentials flow fails its client-auth compatibility gate at connect, so the entry classifies as user-setup with your own registered OAuth app"
 				}
 			},
 			"setup": {
-				"status": "ready",
-				"readiness": "oauth-ready"
+				"status": "requires-setup",
+				"reason": "requires your own OAuth app: the authorization server accepts only secret-based client authentication (client_secret_basic, client_secret_post); register an app with the provider and configure its client id and secret",
+				"fields": [
+					{
+						"id": "oauthClientId",
+						"label": "OAuth client id",
+						"description": "Client id of your own registered OAuth app (settings mcpServers oauthClientId)",
+						"required": true,
+						"kind": "client-id"
+					},
+					{
+						"id": "oauthClientSecretEnvVar",
+						"label": "OAuth client secret",
+						"description": "Environment variable holding your app's client secret (settings mcpServers oauthClientSecretEnvVar)",
+						"required": true,
+						"kind": "client-secret"
+					}
+				],
+				"requirement": "registered-client",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -7668,12 +7858,31 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://api.supabase.com/.well-known/oauth-authorization-server",
 						"https://api.supabase.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "the authorization server advertises only secret-based client authentication (client_secret_basic, client_secret_post); the engine's no-credentials flow fails its client-auth compatibility gate at connect, so the entry classifies as user-setup with your own registered OAuth app"
 				}
 			},
 			"setup": {
-				"status": "ready",
-				"readiness": "oauth-ready"
+				"status": "requires-setup",
+				"reason": "requires your own OAuth app: the authorization server accepts only secret-based client authentication (client_secret_basic, client_secret_post); register an app with the provider and configure its client id and secret",
+				"fields": [
+					{
+						"id": "oauthClientId",
+						"label": "OAuth client id",
+						"description": "Client id of your own registered OAuth app (settings mcpServers oauthClientId)",
+						"required": true,
+						"kind": "client-id"
+					},
+					{
+						"id": "oauthClientSecretEnvVar",
+						"label": "OAuth client secret",
+						"description": "Environment variable holding your app's client secret (settings mcpServers oauthClientSecretEnvVar)",
+						"required": true,
+						"kind": "client-secret"
+					}
+				],
+				"requirement": "registered-client",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -8129,12 +8338,31 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://vercel.com/.well-known/oauth-authorization-server",
 						"https://vercel.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "the authorization server advertises only secret-based client authentication (client_secret_basic, client_secret_post, client_secret_jwt, private_key_jwt); the engine's no-credentials flow fails its client-auth compatibility gate at connect, so the entry classifies as user-setup with your own registered OAuth app"
 				}
 			},
 			"setup": {
-				"status": "ready",
-				"readiness": "oauth-ready"
+				"status": "requires-setup",
+				"reason": "requires your own OAuth app: the authorization server accepts only secret-based client authentication (client_secret_basic, client_secret_post, client_secret_jwt, private_key_jwt); register an app with the provider and configure its client id and secret",
+				"fields": [
+					{
+						"id": "oauthClientId",
+						"label": "OAuth client id",
+						"description": "Client id of your own registered OAuth app (settings mcpServers oauthClientId)",
+						"required": true,
+						"kind": "client-id"
+					},
+					{
+						"id": "oauthClientSecretEnvVar",
+						"label": "OAuth client secret",
+						"description": "Environment variable holding your app's client secret (settings mcpServers oauthClientSecretEnvVar)",
+						"required": true,
+						"kind": "client-secret"
+					}
+				],
+				"requirement": "registered-client",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -8203,12 +8431,31 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.windsor.ai/.well-known/oauth-authorization-server",
 						"https://mcp.windsor.ai/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "the authorization server advertises only secret-based client authentication (client_secret_post, client_secret_basic); the engine's no-credentials flow fails its client-auth compatibility gate at connect, so the entry classifies as user-setup with your own registered OAuth app"
 				}
 			},
 			"setup": {
-				"status": "ready",
-				"readiness": "oauth-ready"
+				"status": "requires-setup",
+				"reason": "requires your own OAuth app: the authorization server accepts only secret-based client authentication (client_secret_post, client_secret_basic); register an app with the provider and configure its client id and secret",
+				"fields": [
+					{
+						"id": "oauthClientId",
+						"label": "OAuth client id",
+						"description": "Client id of your own registered OAuth app (settings mcpServers oauthClientId)",
+						"required": true,
+						"kind": "client-id"
+					},
+					{
+						"id": "oauthClientSecretEnvVar",
+						"label": "OAuth client secret",
+						"description": "Environment variable holding your app's client secret (settings mcpServers oauthClientSecretEnvVar)",
+						"required": true,
+						"kind": "client-secret"
+					}
+				],
+				"requirement": "registered-client",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"
@@ -8998,12 +9245,31 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"https://mcp.zoominfo.com/.well-known/oauth-authorization-server",
 						"https://mcp.zoominfo.com/.well-known/openid-configuration"
 					],
-					"fetchedAt": "2026-09-12"
+					"fetchedAt": "2026-09-12",
+					"note": "the authorization server advertises only secret-based client authentication (client_secret_basic, client_secret_post); the engine's no-credentials flow fails its client-auth compatibility gate at connect, so the entry classifies as user-setup with your own registered OAuth app"
 				}
 			},
 			"setup": {
-				"status": "ready",
-				"readiness": "oauth-ready"
+				"status": "requires-setup",
+				"reason": "requires your own OAuth app: the authorization server accepts only secret-based client authentication (client_secret_basic, client_secret_post); register an app with the provider and configure its client id and secret",
+				"fields": [
+					{
+						"id": "oauthClientId",
+						"label": "OAuth client id",
+						"description": "Client id of your own registered OAuth app (settings mcpServers oauthClientId)",
+						"required": true,
+						"kind": "client-id"
+					},
+					{
+						"id": "oauthClientSecretEnvVar",
+						"label": "OAuth client secret",
+						"description": "Environment variable holding your app's client secret (settings mcpServers oauthClientSecretEnvVar)",
+						"required": true,
+						"kind": "client-secret"
+					}
+				],
+				"requirement": "registered-client",
+				"readiness": "user-setup"
 			},
 			"verification": {
 				"status": "unverified"

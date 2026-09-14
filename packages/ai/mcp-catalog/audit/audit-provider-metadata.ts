@@ -9,6 +9,19 @@
  * (oauth-authorization-server / openid-configuration). It records DCR, CIMD,
  * PKCE, scopes and client-auth support per endpoint.
  *
+ * tokenAuthMethods is ENGINE-COMPATIBILITY evidence, and future audits MUST
+ * keep capturing it verbatim: the importer's readiness classification runs the
+ * engine's own client-auth decision (packages/ai/src/mcp/oauth.ts
+ * decideClientAuthMethod, shared via tokenAuthMethodsSupportPublicClient /
+ * tokenAuthMethodsSupportConfiguredClient) over the captured list. A list that
+ * omits the field, or includes "none", keeps the standard no-credentials flow
+ * one-click (oauth-ready); a list with ONLY secret-bearing methods (e.g.
+ * Hugging Face: client_secret_basic, client_secret_post) fails the engine's
+ * gate at connect time and demotes the entry honestly to the user-setup OAuth
+ * path (the user's own registered app) — never a silent oauth-ready claim. A
+ * future audit that drops this field would silently re-classify such
+ * providers as one-click, so it stays a required capture.
+ *
  * HARD LINES: no Authorization headers, no cookies, no registration POST, no
  * OAuth or browser flow, no MCP tool calls, no stored credentials, no writes.
  * A successful metadata GET is NEVER proof that live OAuth works; audit results
@@ -68,7 +81,14 @@ export interface AsEvidence {
 	clientIdMetadataDocument?: boolean;
 	/** scopes_supported from the AS document — observational only; NEVER fed to the requested scopes (reviewed/config > PRM > omit). */
 	authorizationServerScopes?: string[];
-	/** token_endpoint_auth_methods_supported; absent field = omitted (engine applies spec defaults). */
+	/**
+	 * token_endpoint_auth_methods_supported; absent field = omitted (engine
+	 * applies spec defaults). ENGINE-COMPATIBILITY evidence: the importer runs
+	 * the engine's shared client-auth decision (decideClientAuthMethod in
+	 * packages/ai/src/mcp/oauth.ts) over this captured list — a list without
+	 * "none" (public clients) fails the engine's standard no-credentials flow
+	 * at connect time and demotes the entry to the user-setup OAuth path.
+	 */
 	tokenAuthMethods?: string[];
 	httpStatus?: number;
 	contentType?: string;

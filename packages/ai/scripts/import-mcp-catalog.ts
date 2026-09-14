@@ -30,6 +30,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+	tokenAuthMethodsSupportConfiguredClient,
+	tokenAuthMethodsSupportPublicClient,
+} from "../src/mcp/oauth.js";
 import { isLiteralPrivateOrLoopbackHost } from "../src/mcp/url-checks.js";
 
 // ---------------------------------------------------------------------------
@@ -709,12 +713,22 @@ export function advertisedRegistrationGated(as: AuditResult["authorizationServer
 	);
 }
 
-export function evidenceSupportsStandardOauth(result: AuditResult): boolean {
+/**
+ * Coherent standard-OAuth evidence, independent of the client-auth-method
+ * compatibility gate: a served, structurally valid authorization-server
+ * document with an advertised dynamic registration endpoint that a live
+ * anonymous registration attempt was not recorded as rejected at, plus a
+ * reachable endpoint/AS audience association. This is the evidence the
+ * ENGINE itself needs to reach the token request; whether the standard
+ * no-credentials flow then survives client-auth negotiation is decided by
+ * the shared engine decision (see evidenceSupportsStandardOauth).
+ */
+function standardOauthEvidenceCoherent(result: AuditResult): boolean {
 	// oauth-ready needs a coherent authorization server AND dynamic client
 	// registration. CIMD alone is NOT sufficient: no Prime-controlled identity
 	// document is deployed or authorized today (root decision), and foreign
-	// client ids must never be copied. Omitted PKCE/auth-method lists are
-	// omitted evidence, never unsupported — they do not block oauth-ready.
+	// client ids must never be copied. Omitted PKCE lists are omitted
+	// evidence, never unsupported — they do not block oauth-ready.
 	const as = result.authorizationServer;
 	if (as.status !== "available" || !as.evidence) return false;
 	if (
@@ -743,6 +757,43 @@ export function evidenceSupportsStandardOauth(result: AuditResult): boolean {
 	// 4xx. Served-but-invalid documents, 5xx responses and fetch errors all
 	// throw with no fallback — the entry stays honestly unknown.
 	return engineFallsBackToOriginAs(result);
+}
+
+export function evidenceSupportsStandardOauth(result: AuditResult): boolean {
+	// The engine's no-credentials flow logs in as a PUBLIC client (DCR/CIMD, no
+	// configured secret), so oauth-ready additionally requires the advertised
+	// token auth methods to be compatible with exactly that client shape —
+	// the SAME shared engine decision the runtime login runs
+	// (tokenAuthMethodsSupportPublicClient → decideClientAuthMethod). A
+	// confidential-only authorization server (e.g. Hugging Face: "advertised:
+	// client_secret_basic, client_secret_post") fails the engine's gate at
+	// connect time, so it can never classify one-click. Omitted lists are
+	// omitted evidence: the engine applies the public-client spec default.
+	return (
+		standardOauthEvidenceCoherent(result) &&
+		tokenAuthMethodsSupportPublicClient(result.authorizationServer.evidence?.tokenAuthMethods)
+	);
+}
+
+/**
+ * The honest self-serve fallback when the standard no-credentials flow cannot
+ * authenticate: the evidence is fully coherent for standard OAuth (same
+ * checks as evidenceSupportsStandardOauth) but the authorization server
+ * advertises only secret-bearing client auth methods. The SAME standard flow
+ * completes with a user-registered confidential app (configured client id +
+ * secret), so these entries demote from oauth-ready to the user-setup OAuth
+ * path with client-id/client-secret setup fields — the user's OWN registered
+ * app, zero-app compliant, never an exclusion. Entries whose advertised
+ * methods serve not even a secret-bearing client (e.g. mTLS-only) stay
+ * honestly unknown and fail closed as today.
+ */
+export function evidenceSupportsUserRegisteredOauth(result: AuditResult): boolean {
+	const methods = result.authorizationServer.evidence?.tokenAuthMethods;
+	return (
+		standardOauthEvidenceCoherent(result) &&
+		!tokenAuthMethodsSupportPublicClient(methods) &&
+		tokenAuthMethodsSupportConfiguredClient(methods)
+	);
 }
 
 /** The engine's canonicalResource rule: bare origins collapse, paths and searches stay. */
@@ -798,7 +849,61 @@ function metadataNote(result: AuditResult, overrideNote?: string): string | unde
 	if (audienceMismatched(result)) {
 		return "the engine-visible protected-resource document's resource matches neither the exact endpoint nor the origin under the engine's component comparison; the engine fails closed on this entry";
 	}
+	if (evidenceSupportsUserRegisteredOauth(result)) {
+		const methods = result.authorizationServer.evidence?.tokenAuthMethods ?? [];
+		return `the authorization server advertises only secret-based client authentication (${methods.join(", ")}); the engine's no-credentials flow fails its client-auth compatibility gate at connect, so the entry classifies as user-setup with your own registered OAuth app`;
+	}
 	return undefined;
+}
+
+/**
+ * Setup fields for the user-registered OAuth app path (readiness user-setup,
+ * requirement registered-client): the user registers their OWN app with the
+ * provider and configures its identity exactly the way the host's settings
+ * shape does (oauthClientId + oauthClientSecretEnvVar on an mcpServers
+ * entry). Zero-app compliant: Prime still registers nothing.
+ */
+const OAUTH_USER_APP_FIELDS: CatalogSetupField[] = [
+	{
+		id: "oauthClientId",
+		label: "OAuth client id",
+		description: "Client id of your own registered OAuth app (settings mcpServers oauthClientId)",
+		required: true,
+		kind: "client-id",
+	},
+	{
+		id: "oauthClientSecretEnvVar",
+		label: "OAuth client secret",
+		description:
+			"Environment variable holding your app's client secret (settings mcpServers oauthClientSecretEnvVar)",
+		required: true,
+		kind: "client-secret",
+	},
+];
+
+/** Honest per-entry demotion reason quoting the advertised auth-method evidence. */
+function userRegisteredOauthReason(result: AuditResult): string {
+	const methods = result.authorizationServer.evidence?.tokenAuthMethods ?? [];
+	const advertised = methods.length > 0 ? ` (${methods.join(", ")})` : "";
+	return `requires your own OAuth app: the authorization server accepts only secret-based client authentication${advertised}; register an app with the provider and configure its client id and secret`;
+}
+
+/**
+ * Demote a would-be-one-click entry to the user-setup OAuth path. The engine's
+ * standard no-credentials flow fails its client-auth compatibility gate against
+ * this authorization server (live evidence: Hugging Face /mcp login fails with
+ * "no compatible client authentication method"), but the same standard flow
+ * completes with a user-registered confidential app, so the honest
+ * classification is user-setup with client-id/client-secret setup fields — NOT
+ * the exclusions list, and never prime-restricted: Prime registers nothing,
+ * the user registers their own app.
+ */
+function demoteToUserRegisteredOauth(entry: CatalogEntry, result: AuditResult): void {
+	entry.setup.status = "requires-setup";
+	entry.setup.reason = userRegisteredOauthReason(result);
+	entry.setup.fields = dedupeFields([...(entry.setup.fields ?? []), ...OAUTH_USER_APP_FIELDS.map((field) => ({ ...field }))]);
+	entry.setup.requirement = "registered-client";
+	entry.setup.readiness = "user-setup";
 }
 
 function applyAuditEvidence(built: BuiltEntry[], audit: AuditFile | undefined, overrides?: Overrides): void {
@@ -856,8 +961,21 @@ function applyAuditEvidence(built: BuiltEntry[], audit: AuditFile | undefined, o
 		if (entry.setup.readiness) continue; // curated override wins
 		if (entry.setup.status === "ready") {
 			// Metadata availability never downgrades a ready entry; oauth-ready
-			// requires positive evidence, everything else stays unknown.
-			entry.setup.readiness = evidenceSupportsStandardOauth(result) ? "oauth-ready" : "unknown";
+			// requires positive evidence — including the engine's
+			// client-auth compatibility gate. A coherent DCR entry whose
+			// authorization server advertises only secret-bearing methods
+			// demotes honestly to the user-setup OAuth path (the user's own
+			// registered app, zero-app compliant); everything else stays
+			// unknown.
+			if (evidenceSupportsStandardOauth(result)) {
+				entry.setup.readiness = "oauth-ready";
+				continue;
+			}
+			if (evidenceSupportsUserRegisteredOauth(result)) {
+				demoteToUserRegisteredOauth(entry, result);
+				continue;
+			}
+			entry.setup.readiness = "unknown";
 			continue;
 		}
 		const requirement = entry.setup.requirement ?? deriveRequirement(entry);
@@ -1210,7 +1328,9 @@ export function buildCatalog(
 	// Zero-app shipping policy (2026-09-14 product decision): Prime maintains
 	// ZERO provider OAuth apps, so the shipped catalog advertises only what
 	// works self-serve — dynamic client registration (readiness "oauth-ready")
-	// or user-supplied tokens/keys ("user-setup"). Any entry that still
+	// or user-supplied credentials ("user-setup": tokens/keys, or the user's
+	// OWN registered OAuth app for providers whose authorization server
+	// accepts only secret-bearing client auth methods). Any entry that still
 	// classifies "prime-restricted" (needs a provider-registered client) or
 	// "unknown" (no verified self-serve path) fails the import on purpose: cut
 	// it via overrides.json `excludedServers` with a documented per-entry

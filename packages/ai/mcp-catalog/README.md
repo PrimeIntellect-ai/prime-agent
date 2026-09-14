@@ -119,26 +119,41 @@ deterministically:
   Connect gate. Omitted fields mean "not advertised", never "unsupported";
   an explicit `dynamicClientRegistration: false` means the endpoint IS
   advertised but its live anonymous registration was rejected (gated), so the
-  engine's standard no-credentials flow fails.
+  engine's standard no-credentials flow fails. `tokenAuthMethods` is
+  ENGINE-COMPATIBILITY evidence: classification runs the engine's own shared
+  client-auth decision (`decideClientAuthMethod` in `packages/ai/src/mcp/oauth.ts`)
+  over the captured list, so the shipped readiness can never diverge from the
+  connect-time gate.
 - `setup.readiness` (`oauth-ready` / `user-setup` / `prime-restricted` /
   `unknown`) is informational-only; `setup.status` stays the only hard lever.
   `oauth-ready` requires the engine's audience rule (component comparison:
   exact canonical endpoint or exact origin, root-slash normalized) plus
   dynamic-client-registration evidence — a CIMD flag alone is never sufficient
-  (no Prime-controlled identity document is deployed). A served document that
-  fails the engine's audience or structure validation fails closed (no
-  origin-AS fallback) and keeps the entry honestly `unknown` with the
-  fail-closed reason in the metadata note; an endpoint with no valid
-  protected-resource document anywhere follows the engine's origin-level
-  authorization-server fallback, so captured AS evidence still decides. An
-  advertised registration endpoint whose live anonymous registration was
-  rejected (gated DCR, e.g. Figma's HTTP 403) can never be `oauth-ready`: the
-  entry classifies like DCR-less providers. Since the 2026-09-14 zero-app cut
-  neither class ships at all — the importer refuses to emit a
-  `prime-restricted` or `unknown` entry, and providers that classify there
-  are excluded with documented reasons instead (Figma was the live gated-DCR
-  case: pre-registered, `registered-client`, then cut; its live evidence stays
-  in the audit store).
+  (no Prime-controlled identity document is deployed) — plus the engine's
+  client-auth compatibility gate: the standard no-credentials flow logs in as
+  a PUBLIC client, so the captured token auth methods must include `none` or
+  be omitted (the engine applies the public-client spec default). A coherent
+  DCR entry whose authorization server advertises ONLY secret-bearing methods
+  (live evidence: Hugging Face — `client_secret_basic`, `client_secret_post`)
+  fails the engine's gate at connect time and demotes honestly to the
+  `user-setup` OAuth path with client-id/client-secret setup fields
+  (`requirement: registered-client`, reason "requires your own OAuth app"):
+  the user registers their OWN app with the provider, which is zero-app
+  compliant self-serve — a demotion, never an exclusion. Entries whose
+  advertised methods serve not even a configured secret-bearing client (e.g.
+  mTLS-only) stay honestly `unknown`. A served document that fails the
+  engine's audience or structure validation fails closed (no origin-AS
+  fallback) and keeps the entry honestly `unknown` with the fail-closed reason
+  in the metadata note; an endpoint with no valid protected-resource document
+  anywhere follows the engine's origin-level authorization-server fallback, so
+  captured AS evidence still decides. An advertised registration endpoint
+  whose live anonymous registration was rejected (gated DCR, e.g. Figma's
+  HTTP 403) can never be `oauth-ready`: the entry classifies like DCR-less
+  providers. Since the 2026-09-14 zero-app cut the `prime-restricted` and
+  `unknown` classes do not ship at all — the importer refuses to emit them,
+  and providers that classify there are excluded with documented reasons
+  instead (Figma was the live gated-DCR case: pre-registered,
+  `registered-client`, then cut; its live evidence stays in the audit store).
 - Placeholder/branded-client-only blockers were cleared with evidence where
   the provider supports self-serve OAuth (Airtable stays Connect-attemptable);
   genuine documented requirements stay hard for kept providers — API

@@ -395,30 +395,84 @@ function configuredSecret(config: McpOAuthConfig, label: string): string | undef
 }
 
 /**
- * SDK-standard client auth method negotiation, plus a compatibility gate: we never
- * silently downgrade a server that only supports secret-based methods to a doomed
- * no-auth request — we fail early with setup guidance instead.
+ * The engine's fail-closed client-auth compatibility decision — the single
+ * source of truth for "can this client authenticate against the advertised
+ * token_endpoint_auth_methods_supported". The runtime login/refresh flows and
+ * the catalog importer's readiness classification both run THIS decision, so
+ * the shipped classification can never diverge from the connect-time gate.
+ *
+ * SDK-standard method selection, plus a compatibility gate: we never silently
+ * downgrade a server that only supports secret-based methods to a doomed
+ * no-auth request — the flow fails early with setup guidance instead.
  */
-function negotiateAuthMethod(
+export interface ClientAuthDecision {
+	/** The method the SDK selects for this client against the advertised list. */
+	method: ClientAuthMethod;
+	/** False when the advertised list cannot serve this client at all (fail closed). */
+	compatible: boolean;
+	/** Why the decision failed closed; undefined when compatible. */
+	reason?: "unsupported-method" | "missing-secret";
+}
+
+export function decideClientAuthMethod(
 	clientInfo: { client_id: string; client_secret?: string; token_endpoint_auth_method?: string },
 	supported: string[] | undefined,
-	label: string,
-): ClientAuthMethod {
+): ClientAuthDecision {
 	const method = selectClientAuthMethod(
 		clientInfo,
 		supported === undefined || supported.length === 0 ? [] : supported,
 	) as ClientAuthMethod;
 	if (supported && supported.length > 0 && !supported.includes(method)) {
-		throw new McpOAuthClientError(
-			`${label} does not support any compatible client authentication method (advertised: ${supported.join(", ")}); re-run /mcp login with an explicit client id or secret configured.`,
-		);
+		return { method, compatible: false, reason: "unsupported-method" };
 	}
 	if (method !== "none" && !clientInfo.client_secret) {
+		return { method, compatible: false, reason: "missing-secret" };
+	}
+	return { method, compatible: true };
+}
+
+function negotiateAuthMethod(
+	clientInfo: { client_id: string; client_secret?: string; token_endpoint_auth_method?: string },
+	supported: string[] | undefined,
+	label: string,
+): ClientAuthMethod {
+	const decision = decideClientAuthMethod(clientInfo, supported);
+	if (!decision.compatible) {
 		throw new McpOAuthClientError(
-			`${label} requires client authentication method ${method} but no client secret is available; configure the client secret and re-run /mcp login.`,
+			decision.reason === "unsupported-method"
+				? `${label} does not support any compatible client authentication method (advertised: ${supported?.join(", ")}); re-run /mcp login with an explicit client id or secret configured.`
+				: `${label} requires client authentication method ${decision.method} but no client secret is available; configure the client secret and re-run /mcp login.`,
 		);
 	}
-	return method;
+	return decision.method;
+}
+
+/**
+ * Catalog readiness mirror of the engine's runtime gate: the standard
+ * no-credentials login runs as a PUBLIC client (dynamic client registration
+ * or client-initiated metadata, no configured secret), so `oauth-ready` means
+ * the advertised token auth methods must be compatible with exactly that
+ * client shape. A confidential-only authorization server fails this gate at
+ * connect time (live evidence: Hugging Face /mcp login) and can never classify
+ * one-click. Omitted lists are omitted evidence — the engine applies the
+ * public-client spec default and stays compatible. `client_id` is a shape
+ * placeholder: the decision reads only the secret and any registration hint.
+ */
+export function tokenAuthMethodsSupportPublicClient(supported: string[] | undefined): boolean {
+	return decideClientAuthMethod({ client_id: "engine-standard-flow" }, supported).compatible;
+}
+
+/**
+ * The user-setup OAuth mirror of the same engine gate: a user-registered
+ * confidential app (configured client id + secret) negotiates through the
+ * identical decision, so an authorization server that advertises
+ * secret-bearing methods is honestly classifiable as user-setup — the user's
+ * own app completes the standard flow. Omitted lists stay compatible (the
+ * engine's spec default for a secret-bearing client).
+ */
+export function tokenAuthMethodsSupportConfiguredClient(supported: string[] | undefined): boolean {
+	return decideClientAuthMethod({ client_id: "user-registered-app", client_secret: "configured" }, supported)
+		.compatible;
 }
 
 /** RFC 6749/6750 error codes that are safe to surface; unknown server strings are omitted. */

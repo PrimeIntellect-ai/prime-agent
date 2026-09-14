@@ -1,6 +1,10 @@
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createMcpOAuthProvider } from "../src/mcp/oauth.js";
+import {
+	createMcpOAuthProvider,
+	tokenAuthMethodsSupportConfiguredClient,
+	tokenAuthMethodsSupportPublicClient,
+} from "../src/mcp/oauth.js";
 
 function jsonResponse(body: unknown, status = 200, headers?: Record<string, string>): Response {
 	return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", ...headers } });
@@ -1129,5 +1133,32 @@ describe.sequential("MCP OAuth provider", () => {
 		await new Promise((r) => setTimeout(r, 50));
 		controller.abort();
 		await expect(promise).rejects.toThrow();
+	});
+});
+
+describe("client-auth compatibility predicates (shared with the catalog importer)", () => {
+	it("mirrors the runtime gate for the engine's client shapes", () => {
+		// The engine's standard no-credentials flow is a PUBLIC client: it
+		// survives only when the advertised methods include "none" or the list
+		// is omitted (the SDK applies the public-client spec default). This is
+		// the exact gate that failed live for Hugging Face
+		// ("client_secret_basic, client_secret_post").
+		expect(tokenAuthMethodsSupportPublicClient(["client_secret_basic", "client_secret_post"])).toBe(false);
+		expect(tokenAuthMethodsSupportPublicClient(["client_secret_basic", "none"])).toBe(true);
+		expect(tokenAuthMethodsSupportPublicClient(["none"])).toBe(true);
+		expect(tokenAuthMethodsSupportPublicClient(undefined)).toBe(true);
+		expect(tokenAuthMethodsSupportPublicClient([])).toBe(true);
+		// A user-registered confidential app (configured client id + secret)
+		// negotiates through the same decision and survives exactly the
+		// secret-bearing shapes — omitted lists included (spec default basic).
+		expect(tokenAuthMethodsSupportConfiguredClient(["client_secret_basic", "client_secret_post"])).toBe(true);
+		expect(tokenAuthMethodsSupportConfiguredClient(["client_secret_post"])).toBe(true);
+		expect(tokenAuthMethodsSupportConfiguredClient(["client_secret_basic", "none"])).toBe(true);
+		expect(tokenAuthMethodsSupportConfiguredClient(undefined)).toBe(true);
+		expect(tokenAuthMethodsSupportConfiguredClient([])).toBe(true);
+		// Methods that serve not even a secret-bearing client (mTLS-only) are
+		// compatible with neither client shape — fail closed everywhere.
+		expect(tokenAuthMethodsSupportPublicClient(["tls_client_auth", "self_signed_tls_client_auth"])).toBe(false);
+		expect(tokenAuthMethodsSupportConfiguredClient(["tls_client_auth", "self_signed_tls_client_auth"])).toBe(false);
 	});
 });
