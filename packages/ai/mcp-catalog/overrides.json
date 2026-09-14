@@ -52,14 +52,6 @@
 		"claude-plugins-official/vanta/vanta-aus": {
 			"label": "Vanta (Australia)"
 		},
-		"claude-plugins-official/airwallex-agentos/airwallex-agentos": {
-			"id": "airwallex",
-			"label": "Airwallex"
-		},
-		"claude-plugins-official/airwallex-agentos/airwallex-dev": {
-			"id": "airwallex-sandbox",
-			"label": "Airwallex (Sandbox)"
-		},
 		"claude-plugins-official/cloudinary/cloudinary-asset-mgmt": {
 			"label": "Cloudinary Asset Management"
 		},
@@ -96,93 +88,11 @@
 			"id": "prisma",
 			"label": "Prisma"
 		},
-		"claude-plugins-official/lusha/lusha": {
-			"note": "endpoint path is scoped to the Claude connector catalog"
-		},
-		"claude-plugins-official/legalzoom/legalzoom": {
-			"note": "endpoint path is scoped to the Claude connector catalog"
-		},
-		"claude-plugins-official/firebase": {
-			"service": "firebase",
-			"label": "Firebase"
-		},
-		"claude-plugins-official/looker": {
-			"service": "looker",
-			"label": "Looker"
-		},
-		"claude-plugins-official/data-agent-kit-starter-pack": {
-			"service": "google-cloud",
-			"label": "Google Data Agent Kit"
-		},
 		"openai-plugins/datadog/datadog": {
 			"label": "Datadog"
 		},
 		"claude-plugins-official/aws-agents-for-devsecops/aws-devops-agent": {
 			"label": "AWS Agents for DevSecOps"
-		},
-		"claude-plugins-official/alloydb": {
-			"label": "AlloyDB",
-			"service": "alloydb"
-		},
-		"claude-plugins-official/cloud-sql-mysql": {
-			"label": "Cloud SQL for MySQL",
-			"service": "cloud-sql"
-		},
-		"claude-plugins-official/cloud-sql-postgresql": {
-			"label": "Cloud SQL for PostgreSQL",
-			"service": "cloud-sql"
-		},
-		"claude-plugins-official/cloud-sql-sqlserver": {
-			"label": "Cloud SQL for SQL Server",
-			"service": "cloud-sql"
-		},
-		"claude-plugins-official/spanner": {
-			"label": "Spanner",
-			"service": "spanner"
-		},
-		"claude-plugins-official/dataproc": {
-			"label": "Dataproc",
-			"service": "dataproc"
-		},
-		"claude-plugins-official/bigquery-data-analytics": {
-			"label": "BigQuery",
-			"service": "bigquery"
-		},
-		"claude-plugins-official/firestore-native": {
-			"label": "Firestore",
-			"service": "firebase"
-		},
-		"claude-plugins-official/google-cloud-storage": {
-			"label": "Google Cloud Storage",
-			"service": "google-cloud"
-		},
-		"claude-plugins-official/knowledge-catalog": {
-			"label": "Knowledge Catalog",
-			"service": "google-cloud"
-		},
-		"claude-plugins-official/amazon-location-service": {
-			"label": "Amazon Location Service"
-		},
-		"claude-plugins-official/aws-amplify": {
-			"label": "AWS Amplify"
-		},
-		"claude-plugins-official/aws-core": {
-			"label": "AWS Core"
-		},
-		"claude-plugins-official/aws-data-analytics": {
-			"label": "AWS Data Analytics"
-		},
-		"claude-plugins-official/aws-serverless": {
-			"label": "AWS Serverless"
-		},
-		"claude-plugins-official/aws-transform": {
-			"label": "AWS Transform"
-		},
-		"claude-plugins-official/sagemaker-ai": {
-			"label": "Amazon SageMaker AI"
-		},
-		"claude-plugins-official/deploy-on-aws": {
-			"label": "Deploy on AWS"
 		},
 		"openai-plugins/airtable/airtable": {
 			"setup": "ready",
@@ -302,6 +212,262 @@
 		{
 			"key": "claude-plugins-official/synthflow/synthflow-docs",
 			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors \u2014 dynamic client registration or user-supplied tokens/keys): no authorization-server metadata is reachable for the docs endpoint (well-known responses were 404) and no dynamic client registration is advertised, so no self-serve OAuth path could be verified (readiness stayed unknown)"
+		},
+		{
+			"key": "claude-plugins-official/airwallex-agentos/airwallex-agentos",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Airwallex needs the user's own pre-registered confidential OAuth app\u2014the authorization server accepts only secret-bearing client auth (client_secret_post, client_secret_basic), so the engine's no-credentials public-client flow fails its client-auth compatibility gate and the only self-serve path is a client-id/client-secret pair, neither one-click DCR nor a user token/api key"
+		},
+		{
+			"key": "claude-plugins-official/airwallex-agentos/airwallex-dev",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Airwallex (Sandbox) needs the user's own pre-registered confidential OAuth app\u2014the authorization server accepts only secret-bearing client auth (client_secret_post, client_secret_basic), so the engine's no-credentials public-client flow fails its client-auth compatibility gate and the only self-serve path is a client-id/client-secret pair, neither one-click DCR nor a user token/api key"
+		},
+		{
+			"key": "claude-plugins-official/airwallex-dev/airwallex-dev",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Airwallex (Sandbox) needs the user's own pre-registered confidential OAuth app\u2014the authorization server accepts only secret-bearing client auth (client_secret_post, client_secret_basic), so the engine's no-credentials public-client flow fails its client-auth compatibility gate and the only self-serve path is a client-id/client-secret pair, neither one-click DCR nor a user token/api key"
+		},
+		{
+			"key": "claude-plugins-official/atlan/atlan",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Atlan needs the user's own pre-registered confidential OAuth app\u2014the authorization server accepts only secret-bearing client auth (client_secret_post, client_secret_basic), so the engine's no-credentials public-client flow fails its client-auth compatibility gate and the only self-serve path is a client-id/client-secret pair, neither one-click DCR nor a user token/api key"
+		},
+		{
+			"key": "claude-plugins-official/gitlab/gitlab",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): GitLab needs the user's own pre-registered confidential OAuth app\u2014the authorization server accepts only secret-bearing client auth (client_secret_basic, client_secret_post), so the engine's no-credentials public-client flow fails its client-auth compatibility gate and the only self-serve path is a client-id/client-secret pair, neither one-click DCR nor a user token/api key"
+		},
+		{
+			"key": "claude-plugins-official/huggingface-skills/huggingface-skills",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Hugging Face needs the user's own pre-registered confidential OAuth app\u2014the authorization server accepts only secret-bearing client auth (client_secret_basic, client_secret_post), so the engine's no-credentials public-client flow fails its client-auth compatibility gate and the only self-serve path is a client-id/client-secret pair, neither one-click DCR nor a user token/api key"
+		},
+		{
+			"key": "claude-plugins-official/legalzoom/legalzoom",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): LegalZoom needs the user's own pre-registered confidential OAuth app\u2014the authorization server accepts only secret-bearing client auth (client_secret_basic, client_secret_post, client_secret_jwt, private_key_jwt, tls_client_auth, self_signed_tls_client_auth), so the engine's no-credentials public-client flow fails its client-auth compatibility gate and the only self-serve path is a client-id/client-secret pair; the endpoint path is scoped to the Claude connector catalog, neither one-click DCR nor a user token/api key"
+		},
+		{
+			"key": "claude-plugins-official/lusha/lusha",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Lusha needs the user's own pre-registered confidential OAuth app\u2014the authorization server accepts only secret-bearing client auth (client_secret_post, client_secret_basic), so the engine's no-credentials public-client flow fails its client-auth compatibility gate and the only self-serve path is a client-id/client-secret pair; the endpoint path is scoped to the Claude connector catalog, neither one-click DCR nor a user token/api key"
+		},
+		{
+			"key": "claude-plugins-official/miro/miro",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Miro needs the user's own pre-registered confidential OAuth app\u2014the authorization server accepts only secret-bearing client auth (client_secret_post, client_secret_basic), so the engine's no-credentials public-client flow fails its client-auth compatibility gate and the only self-serve path is a client-id/client-secret pair, neither one-click DCR nor a user token/api key"
+		},
+		{
+			"key": "claude-plugins-official/monday-crm/monday",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): monday.com needs the user's own pre-registered confidential OAuth app\u2014the authorization server accepts only secret-bearing client auth (client_secret_post, client_secret_basic), so the engine's no-credentials public-client flow fails its client-auth compatibility gate and the only self-serve path is a client-id/client-secret pair, neither one-click DCR nor a user token/api key"
+		},
+		{
+			"key": "openai-plugins/monday-com/monday-com",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): monday.com needs the user's own pre-registered confidential OAuth app\u2014the authorization server accepts only secret-bearing client auth (client_secret_post, client_secret_basic), so the engine's no-credentials public-client flow fails its client-auth compatibility gate and the only self-serve path is a client-id/client-secret pair, neither one-click DCR nor a user token/api key"
+		},
+		{
+			"key": "claude-plugins-official/planetscale/planetscale",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): PlanetScale needs the user's own pre-registered confidential OAuth app\u2014the authorization server accepts only secret-bearing client auth (client_secret_basic, client_secret_post), so the engine's no-credentials public-client flow fails its client-auth compatibility gate and the only self-serve path is a client-id/client-secret pair, neither one-click DCR nor a user token/api key"
+		},
+		{
+			"key": "claude-plugins-official/supabase/supabase",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Supabase needs the user's own pre-registered confidential OAuth app\u2014the authorization server accepts only secret-bearing client auth (client_secret_basic, client_secret_post), so the engine's no-credentials public-client flow fails its client-auth compatibility gate and the only self-serve path is a client-id/client-secret pair, neither one-click DCR nor a user token/api key"
+		},
+		{
+			"key": "openai-plugins/supabase/supabase",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Supabase needs the user's own pre-registered confidential OAuth app\u2014the authorization server accepts only secret-bearing client auth (client_secret_basic, client_secret_post), so the engine's no-credentials public-client flow fails its client-auth compatibility gate and the only self-serve path is a client-id/client-secret pair, neither one-click DCR nor a user token/api key"
+		},
+		{
+			"key": "claude-plugins-official/vercel/vercel",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Vercel needs the user's own pre-registered confidential OAuth app\u2014the authorization server accepts only secret-bearing client auth (client_secret_basic, client_secret_post, client_secret_jwt, private_key_jwt), so the engine's no-credentials public-client flow fails its client-auth compatibility gate and the only self-serve path is a client-id/client-secret pair, neither one-click DCR nor a user token/api key"
+		},
+		{
+			"key": "openai-plugins/vercel/vercel",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Vercel needs the user's own pre-registered confidential OAuth app\u2014the authorization server accepts only secret-bearing client auth (client_secret_basic, client_secret_post, client_secret_jwt, private_key_jwt), so the engine's no-credentials public-client flow fails its client-auth compatibility gate and the only self-serve path is a client-id/client-secret pair, neither one-click DCR nor a user token/api key"
+		},
+		{
+			"key": "claude-plugins-official/windsor-ai/windsor-ai",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Windsor.ai needs the user's own pre-registered confidential OAuth app\u2014the authorization server accepts only secret-bearing client auth (client_secret_post, client_secret_basic), so the engine's no-credentials public-client flow fails its client-auth compatibility gate and the only self-serve path is a client-id/client-secret pair, neither one-click DCR nor a user token/api key"
+		},
+		{
+			"key": "claude-plugins-official/zoominfo/zoominfo",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): ZoomInfo needs the user's own pre-registered confidential OAuth app\u2014the authorization server accepts only secret-bearing client auth (client_secret_basic, client_secret_post), so the engine's no-credentials public-client flow fails its client-auth compatibility gate and the only self-serve path is a client-id/client-secret pair, neither one-click DCR nor a user token/api key"
+		},
+		{
+			"key": "claude-plugins-official/aikido/aikido-mcp",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Aikido is a local stdio adapter (`npx -y @aikidosec/mcp@1.0.22`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/alloydb/alloydb-postgres",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): AlloyDB is a local stdio adapter (`npx -y @toolbox-sdk/server@1.9.0 --prebuilt alloydb-postgres --stdio`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/amazon-location-service/aws-mcp",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Amazon Location Service is a local stdio adapter (`uvx mcp-proxy-for-aws@latest https://aws-mcp.us-east-1.api.aws/mcp`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/aws-amplify/aws-mcp",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): AWS Amplify is a local stdio adapter (`uvx mcp-proxy-for-aws@latest https://aws-mcp.us-east-1.api.aws/mcp`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/aws-core/aws-mcp",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): AWS Core is a local stdio adapter (`uvx mcp-proxy-for-aws-cli@latest https://aws-mcp.us-east-1.api.aws/mcp --skip-auth --metadata INSTALL_SOURCE=agent-toolkit-core`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/aws-data-analytics/aws-mcp",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): AWS Data Analytics is a local stdio adapter (`uvx mcp-proxy-for-aws-cli@latest https://aws-mcp.us-east-1.api.aws/mcp --skip-auth --metadata INSTALL_SOURCE=agent-toolkit-data-analytics`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/aws-serverless/aws-serverless-mcp",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): AWS Serverless is a local stdio adapter (`uvx awslabs.aws-serverless-mcp-server@latest --allow-write`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/aws-transform/aws-transform-mcp",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): AWS Transform is a local stdio adapter (`uvx awslabs.aws-transform-mcp-server@latest`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/azure/azure",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Microsoft Azure is a local stdio adapter (`npx -y @azure/mcp@latest server start`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/bigquery-data-analytics/bigquery",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): BigQuery is a local stdio adapter (`npx -y @toolbox-sdk/server@1.10.0 --prebuilt bigquery --stdio`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/cloud-sql-mysql/cloud-sql-mysql",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Cloud SQL for MySQL is a local stdio adapter (`npx -y @toolbox-sdk/server@1.9.0 --prebuilt cloud-sql-mysql --stdio`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/cloud-sql-postgresql/cloud-sql-postgres",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Cloud SQL for PostgreSQL is a local stdio adapter (`npx -y @toolbox-sdk/server@1.9.0 --prebuilt cloud-sql-postgres --stdio`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/cloud-sql-sqlserver/cloud-sql-mssql",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Cloud SQL for SQL Server is a local stdio adapter (`npx -y @toolbox-sdk/server@1.9.0 --prebuilt cloud-sql-mssql --stdio`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/convex/convex",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Convex is a local stdio adapter (`npx -y convex@latest mcp start`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/data-agent-kit-starter-pack/alloydb-postgres",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Google Data Agent Kit is a local stdio adapter pack (10 bundled local servers)\u2014each runs in the user's local environment with local toolchain/credential-chain auth, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/data-agent-kit-starter-pack/bigquery",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Google Data Agent Kit is a local stdio adapter pack (10 bundled local servers)\u2014each runs in the user's local environment with local toolchain/credential-chain auth, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/data-agent-kit-starter-pack/bigtable",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Google Data Agent Kit is a local stdio adapter pack (10 bundled local servers)\u2014each runs in the user's local environment with local toolchain/credential-chain auth, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/data-agent-kit-starter-pack/cloud-sql-postgresql",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Google Data Agent Kit is a local stdio adapter pack (10 bundled local servers)\u2014each runs in the user's local environment with local toolchain/credential-chain auth, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/data-agent-kit-starter-pack/cloud-storage",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Google Data Agent Kit is a local stdio adapter pack (10 bundled local servers)\u2014each runs in the user's local environment with local toolchain/credential-chain auth, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/data-agent-kit-starter-pack/dataproc",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Google Data Agent Kit is a local stdio adapter pack (10 bundled local servers)\u2014each runs in the user's local environment with local toolchain/credential-chain auth, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/data-agent-kit-starter-pack/knowledge_catalog",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Google Data Agent Kit is a local stdio adapter pack (10 bundled local servers)\u2014each runs in the user's local environment with local toolchain/credential-chain auth, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/data-agent-kit-starter-pack/notebook",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Google Data Agent Kit is a local stdio adapter pack (10 bundled local servers)\u2014each runs in the user's local environment with local toolchain/credential-chain auth, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/data-agent-kit-starter-pack/spanner",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Google Data Agent Kit is a local stdio adapter pack (10 bundled local servers)\u2014each runs in the user's local environment with local toolchain/credential-chain auth, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/data-agent-kit-starter-pack/visualization",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Google Data Agent Kit is a local stdio adapter pack (10 bundled local servers)\u2014each runs in the user's local environment with local toolchain/credential-chain auth, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/dataproc/dataproc",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Dataproc is a local stdio adapter (`npx -y @toolbox-sdk/server@1.9.0 --prebuilt dataproc --stdio`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/deploy-on-aws/awsiac",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Deploy on AWS is a local stdio adapter pack (`uvx awslabs.aws-iac-mcp-server@latest`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/deploy-on-aws/awspricing",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Deploy on AWS is a local stdio adapter pack (`uvx awslabs.aws-iac-mcp-server@latest`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/discord/discord",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Discord is a local stdio adapter (`bun run --cwd ${CLAUDE_PLUGIN_ROOT} --shell=bun --silent start`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/dominodatalab/domino_server",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Domino Data Lab is a local stdio adapter (`uv --directory $/mnt/code/.claude/mcp-servers/domino_mcp_server run domino_mcp_server.py`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/firebase/firebase",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Firebase is a local stdio adapter (`npx -y firebase-tools@latest mcp`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/firestore-native/firestore",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Firestore is a local stdio adapter (`npx -y @toolbox-sdk/server@1.9.0 --prebuilt firestore --stdio`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/gitkraken/gitkraken",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): GitKraken is a local stdio adapter (`npx -y @gitkraken/gk mcp --plugin --host=claude`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/google-cloud-storage/cloud-storage",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Google Cloud Storage is a local stdio adapter (`npx -y @toolbox-sdk/server@1.9.0 --prebuilt cloud-storage --stdio`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/knowledge-catalog/dataplex",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Knowledge Catalog is a local stdio adapter (`npx -y @toolbox-sdk/server@1.9.0 --prebuilt dataplex --stdio`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/looker/looker",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Looker is a local stdio adapter pack (`npx -y @toolbox-sdk/server@1.9.0 --prebuilt looker --stdio`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/looker/looker-dev",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Looker is a local stdio adapter pack (`npx -y @toolbox-sdk/server@1.9.0 --prebuilt looker --stdio`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/pinecone/pinecone",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Pinecone is a local stdio adapter (`npx -y @pinecone-database/mcp`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/sagemaker-ai/aws-mcp",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Amazon SageMaker AI is a local stdio adapter (`uvx mcp-proxy-for-aws@latest https://aws-mcp.us-east-1.api.aws/mcp`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/semgrep/guardian",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Semgrep is a local stdio adapter (`<plugin root>/scripts/hook claude mcp`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/spanner/spanner",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Spanner is a local stdio adapter (`npx -y @toolbox-sdk/server@1.9.0 --prebuilt spanner --stdio`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/telegram/telegram",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Telegram is a local stdio adapter (`bun run --cwd ${CLAUDE_PLUGIN_ROOT} --shell=bun --silent start`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/terraform/terraform",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): HashiCorp HCP Terraform is a local stdio adapter (`docker run -i --rm -e TFE_TOKEN=${TFE_TOKEN} hashicorp/terraform-mcp-server:0.4.0`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/zscaler/zscaler-mcp-server",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Zscaler is a local stdio adapter (`uvx --env-file ${CLAUDE_PLUGIN_ROOT}/.env zscaler-mcp@0.15.4`)\u2014it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/activecampaign/activecampaign",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): ActiveCampaign is a tenant-URL endpoint (template `${user_config.server_url}`)\u2014its only setup input is the instance URL, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/jfrog/jfrog",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): JFrog is a tenant-URL endpoint (template `${JFROG_URL}/mcp`)\u2014its only setup input is the instance URL, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/pigment/pigment",
+			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Pigment is a tenant-URL endpoint (template `https://pigment.app/api/mcp/public/${your-mcp-id}`)\u2014its only setup input is the instance URL, with no one-click DCR and no provider token/api key"
 		}
 	]
 }

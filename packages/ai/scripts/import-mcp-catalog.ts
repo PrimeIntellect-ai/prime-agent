@@ -24,6 +24,15 @@
  * structurally and refuses to ship such entries. Source snapshots and audit
  * evidence stay committed as history and are never deleted by the cut.
  *
+ * Final catalog cut (2026-09-15 product decision): the catalog ships one-click
+ * DCR or user token/key auth ONLY. Beyond the zero-app classes, every
+ * user-setup survivor must be token/key-shaped (bearer-token/api-key
+ * credentials, a tenant config with a genuine non-url field, or a
+ * legacy-transport entry that still collects a token/key): registered-client
+ * (the user's own confidential OAuth app), local-runtime stdio adapters and
+ * url-only tenant templates are cut the same documented way, and the importer
+ * fails the import on any other requirement shape instead of shipping it.
+ *
  * Run from the repository root: npx tsx packages/ai/scripts/import-mcp-catalog.ts
  */
 
@@ -1342,6 +1351,37 @@ export function buildCatalog(
 		if (entry.setup.readiness === "prime-restricted" || entry.setup.readiness === "unknown") {
 			throw new Error(
 				`entry ${entry.server} classifies readiness "${entry.setup.readiness}"; the zero-app catalog ships only self-serve (oauth-ready/user-setup) entries — add it to overrides.json excludedServers with a documented reason, or curate its readiness with evidence`,
+			);
+		}
+	}
+
+	// Final catalog cut (2026-09-15 product decision, "remove everything
+	// that's not one-click auth or api key"): the catalog ships one-click
+	// dynamic client registration ("oauth-ready") or user token/key auth
+	// ONLY. A user-setup survivor is shippable only when its requirement is
+	// token/key-shaped: bearer-token / api-key credentials, a tenant config
+	// that carries at least one non-url setup field (a token or a genuine
+	// per-instance value), or a legacy-transport entry that still collects a
+	// token/key field. Registered-client (the user's own confidential OAuth
+	// app), local-runtime stdio adapters and url-only tenant templates can
+	// never silently re-derive into the catalog: cut them via overrides.json
+	// `excludedServers` with a documented per-entry reason, or curate the
+	// requirement with evidence. The auth-methods honesty machinery that
+	// derives these requirements (decideClientAuthMethod parity, demotion,
+	// tokenAuthMethods capture) is unchanged — only shipping is policed.
+	for (const { entry } of built) {
+		if (entry.setup.readiness !== "user-setup") continue;
+		const requirement = entry.setup.requirement;
+		const fields = entry.setup.fields ?? [];
+		const tokenKeyShaped =
+			requirement === "bearer-token" ||
+			requirement === "api-key" ||
+			(requirement === "tenant" && fields.some((field) => field.kind !== "url")) ||
+			(requirement === "unsupported-transport" &&
+				fields.some((field) => field.kind === "bearer-token" || field.kind === "api-key"));
+		if (!tokenKeyShaped) {
+			throw new Error(
+				`entry ${entry.server} has requirement "${requirement ?? "undefined"}"; the catalog ships one-click DCR or user token/key only (2026-09-15 decision) — add it to overrides.json excludedServers with a documented reason, or curate its requirement with evidence`,
 			);
 		}
 	}

@@ -966,11 +966,12 @@ describe("defaultServiceCatalogProvider", () => {
 		const services = defaultServiceCatalogProvider()();
 		const ids = new Set(services.map((service) => service.serviceId));
 		// The merged catalog supersedes the legacy-only slice; the full entry set
-		// (124 today, after the 2026-09-14 zero-app cut) still contains the
-		// reserved legacy built-ins.
+		// (75 today, after the 2026-09-14 zero-app cut and the 2026-09-15
+		// final cut to one-click DCR or user token/key only) still contains
+		// the reserved legacy built-ins.
 		expect(ids.has("linear")).toBe(true);
 		expect(ids.has("notion")).toBe(true);
-		expect(services.length).toBeGreaterThan(100);
+		expect(services.length).toBeGreaterThan(50);
 		const legacy = services.filter((service) => service.legacyBuiltin);
 		expect(legacy.map((service) => service.serviceId).sort()).toEqual(["linear", "notion"]);
 		// Imported entries are never reviewed by construction.

@@ -112,9 +112,11 @@ describe("MCP catalog eligibility (authoritative real-data regressions)", () => 
 		// The sweep must actually cover the strategies Bugbot found divergent:
 		// real api_key rows and real unknown rows. none+ready is asserted to be
 		// exactly zero TODAY so catalog drift forces a conscious update here.
-		expect(descriptors.length).toBeGreaterThan(100);
+		// Post-2026-09-15 final cut: 75 rows (57 one-click DCR, 18 token/key
+		// user-setup), of which 16 are api_key strategy and 53 unknown.
+		expect(descriptors.length).toBeGreaterThan(50);
 		expect(descriptors.filter((d) => d.authStrategy === "api_key").length).toBeGreaterThanOrEqual(10);
-		expect(descriptors.filter((d) => d.authStrategy === "unknown").length).toBeGreaterThanOrEqual(70);
+		expect(descriptors.filter((d) => d.authStrategy === "unknown").length).toBeGreaterThanOrEqual(50);
 		expect(descriptors.filter((d) => d.authStrategy === "none").length).toBe(0);
 
 		const manager = managerFor({ services: descriptors });

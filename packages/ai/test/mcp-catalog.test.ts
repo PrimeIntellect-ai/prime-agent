@@ -52,7 +52,7 @@ function loadInputs(): {
 
 describe("MCP service catalog", () => {
 	it("loads, validates and orders the merged catalog", () => {
-		expect(SERVICE_CATALOG.length).toBeGreaterThan(100);
+		expect(SERVICE_CATALOG.length).toBeGreaterThan(50);
 		const ids = SERVICE_CATALOG.map((entry) => entry.server);
 		for (let index = 1; index < ids.length; index++) {
 			expect(ids[index - 1] < ids[index]).toBe(true);
@@ -104,11 +104,13 @@ describe("MCP service catalog", () => {
 		for (const server of ["zoom", "zoom-meetings", "zoom-chat", "zoom-whiteboard"]) {
 			expect(zoomServers).toContain(server);
 		}
-		// Substring search also surfaces the distinct ZoomInfo brand; that is expected.
-		expect(zoomServers).toContain("zoominfo");
+		// The distinct ZoomInfo brand was cut by the 2026-09-15 final cut
+		// (user-own-app OAuth is neither one-click DCR nor token/key), so a
+		// zoom search stays zoom-only.
+		expect(zoomServers).not.toContain("zoominfo");
 		expect(zoomHits.filter((entry) => entry.service === "zoom")).toHaveLength(7);
-		// A merged upstream plugin name still finds the canonical entry.
-		expect(searchServiceCatalog("monday-crm").map((entry) => entry.server)).toEqual(["monday-com"]);
+		// The monday-crm plugin was cut by the same decision: no entry surfaces.
+		expect(searchServiceCatalog("monday-crm")).toEqual([]);
 	});
 
 	it("merges the same service across sources into one canonical entry", () => {
@@ -217,8 +219,10 @@ describe("MCP service catalog", () => {
 		// The component comparison accepts exact-origin resources (root-slash
 		// normalized): DCR-capable origin-mismatched entries flipped — and stay
 		// one-click only where the advertised token auth methods still serve
-		// the engine's public client (the demoted subset — miro, vercel,
-		// windsor-ai, zoominfo — moved to the user-setup OAuth path below).
+		// the engine's public client (the confidential-only subset — miro,
+		// vercel, windsor-ai, zoominfo, … — demotes to the user-own-app OAuth
+		// path, and the 2026-09-15 final cut excludes those entries with
+		// documented reasons).
 		for (const server of ["amplitude", "appwrite", "lovable", "rootly"]) {
 			expect(getServiceCatalogEntry(server)?.setup.readiness).toBe("oauth-ready");
 		}
@@ -243,21 +247,52 @@ describe("MCP service catalog", () => {
 		for (const field of github?.setup.fields ?? []) {
 			expect(field.kind).toBe("bearer-token");
 		}
-		// Tenant, transport and local-runtime requirements are classified.
+		// The surviving requirement shapes are exactly the token/key ones
+		// (2026-09-15 final cut): bearer tokens, api keys, token-bearing
+		// tenant config and the token-collecting legacy-transport entry.
 		expect(getServiceCatalogEntry("cockroachdb")?.setup.requirement).toBe("tenant");
-		expect(getServiceCatalogEntry("jfrog")?.setup.requirement).toBe("tenant");
 		expect(getServiceCatalogEntry("paypal-sandbox")?.setup.requirement).toBe("unsupported-transport");
-		expect(getServiceCatalogEntry("aikido")?.setup.requirement).toBe("local-runtime");
 		expect(getServiceCatalogEntry("zoom")?.setup.requirement).toBe("bearer-token");
+		expect(getServiceCatalogEntry("datadog")?.setup.requirement).toBe("api-key");
+		expect(
+			getServiceCatalogEntry("dynatrace")
+				?.setup.fields?.map((field) => field.kind)
+				.sort(),
+		).toEqual(["bearer-token", "url"]);
+		expect(
+			SERVICE_CATALOG.filter((entry) => entry.setup.readiness === "user-setup")
+				.map((entry) => entry.server)
+				.sort(),
+		).toEqual([
+			"aws-devops-agent",
+			"cloudinary-mediaflows",
+			"cockroachdb",
+			"datadog",
+			"dynatrace",
+			"github",
+			"pagerduty",
+			"paypal-sandbox",
+			"render",
+			"sonatype-guide",
+			"sourcegraph",
+			"zoom",
+			"zoom-canvas",
+			"zoom-chat",
+			"zoom-meetings",
+			"zoom-revenue-accelerator",
+			"zoom-tasks",
+			"zoom-whiteboard",
+		]);
 		// Readiness is informational-only data; the raw counts are in the file.
 		// Zero-app cut state (2026-09-14) + engine auth-method compatibility
-		// (2026-09-14, live Hugging Face gap): the catalog ships exactly the two self-serve classes
-		// and nothing else — the sums must stay exact so any drift forces a
-		// conscious update here.
+		// (2026-09-14, live Hugging Face gap) + final catalog cut (2026-09-15,
+		// one-click DCR or user token/key only): the catalog ships exactly the
+		// two self-serve classes, with the user-setup class fully token/key —
+		// the sums must stay exact so any drift forces a conscious update here.
 		const committed = JSON.parse(rawCatalogJson);
-		expect(committed.counts.total).toBe(124);
+		expect(committed.counts.total).toBe(75);
 		expect(committed.counts.readinessOauthReady).toBe(57);
-		expect(committed.counts.readinessUserSetup).toBe(67);
+		expect(committed.counts.readinessUserSetup).toBe(18);
 		expect(committed.counts.readinessPrimeRestricted).toBe(0);
 		expect(committed.counts.readinessUnknown).toBe(0);
 		expect(
@@ -295,22 +330,26 @@ describe("MCP service catalog", () => {
 		}
 	});
 
-	it("flags stdio, sse and tenant-URL adapters as not one-click", () => {
+	it("ships no stdio or url-only tenant adapter; token-collecting non-http shapes stay flagged not one-click", () => {
+		// 2026-09-15 final cut: local stdio adapters and url-only tenant
+		// templates are excluded entirely — only token/key-bearing shapes ship.
 		const stdio = SERVICE_CATALOG.filter((entry) => entry.transport.type === "stdio");
-		expect(stdio.length).toBe(32);
-		for (const entry of stdio) {
-			expect(entry.setup.status).toBe("requires-setup");
-			expect(entry.url).toBe("");
-			expect(entry.setup.reason).toMatch(/local stdio adapter/i);
+		expect(stdio).toEqual([]);
+		for (const server of ["activecampaign", "jfrog", "pigment"]) {
+			expect(getServiceCatalogEntry(server), `${server} must be cut from the catalog`).toBeUndefined();
 		}
+		// The legacy SSE entry ships only because it collects a user token.
 		const paypal = getServiceCatalogEntry("paypal-sandbox");
 		expect(paypal?.transport.type).toBe("sse");
 		expect(paypal?.setup.status).toBe("requires-setup");
-		for (const server of ["jfrog", "sourcegraph", "dynatrace", "activecampaign", "pigment"]) {
+		expect(paypal?.setup.fields?.map((field) => field.kind)).toEqual(["bearer-token"]);
+		// The surviving tenant templates carry a token field next to the URL.
+		for (const server of ["sourcegraph", "dynatrace"]) {
 			const entry = getServiceCatalogEntry(server);
 			expect(entry?.transport.type).toBe("http-template");
 			expect(entry?.setup.status).toBe("requires-setup");
 			expect(entry?.url).toBe("");
+			expect(entry?.setup.fields?.some((field) => field.kind === "bearer-token")).toBe(true);
 		}
 	});
 
@@ -465,6 +504,191 @@ describe("MCP service catalog", () => {
 		expect(figma?.authorizationServer.registrationAttempt?.httpStatus).toBe(403);
 	});
 
+	it("cuts the catalog to one-click DCR or user token/key only, with documented exclusions and kept evidence", () => {
+		// 2026-09-15 product decision ("remove everything that's not
+		// one-click auth or api key"): the shipped catalog advertises ONLY
+		// one-click dynamic client registration (readiness "oauth-ready") and
+		// user token/key entries. The 49 entries that are neither — the 14
+		// registered-client entries (the user's own confidential OAuth app is
+		// not a token/key), the 32 local-runtime stdio adapters and the 3
+		// url-only tenant templates — are EXCLUDED with a documented
+		// per-entry reason, not shipped mislabeled.
+		const registeredClient = [
+			"airwallex",
+			"airwallex-sandbox",
+			"atlan",
+			"gitlab",
+			"huggingface-skills",
+			"legalzoom",
+			"lusha",
+			"miro",
+			"monday-com",
+			"planetscale",
+			"supabase",
+			"vercel",
+			"windsor-ai",
+			"zoominfo",
+		];
+		const localRuntime = [
+			"aikido",
+			"alloydb",
+			"amazon-location-service",
+			"aws-amplify",
+			"aws-core",
+			"aws-data-analytics",
+			"aws-serverless",
+			"aws-transform",
+			"azure",
+			"bigquery-data-analytics",
+			"cloud-sql-mysql",
+			"cloud-sql-postgresql",
+			"cloud-sql-sqlserver",
+			"convex",
+			"data-agent-kit-starter-pack",
+			"dataproc",
+			"deploy-on-aws",
+			"discord",
+			"dominodatalab",
+			"firebase",
+			"firestore-native",
+			"gitkraken",
+			"google-cloud-storage",
+			"knowledge-catalog",
+			"looker",
+			"pinecone",
+			"sagemaker-ai",
+			"semgrep",
+			"spanner",
+			"telegram",
+			"terraform",
+			"zscaler",
+		];
+		const urlOnlyTenant = ["activecampaign", "jfrog", "pigment"];
+		for (const server of [...registeredClient, ...localRuntime, ...urlOnlyTenant]) {
+			expect(getServiceCatalogEntry(server), `${server} must be cut from the catalog`).toBeUndefined();
+		}
+		// No ghost re-entry from the other upstream side of merged providers
+		// (gitlab stays single-source; monday-com, supabase and vercel were
+		// merged from both upstreams, so both sides are cut), and neither can
+		// any alias or label fragment of the cut brands resurface.
+		for (const term of [
+			"gitlab",
+			"supabase",
+			"vercel",
+			"monday",
+			"zoominfo",
+			"miro",
+			"planetscale",
+			"huggingface",
+			"airwallex",
+			"aikido",
+			"alloydb",
+			"bigquery",
+			"firebase",
+			"pinecone",
+			"semgrep",
+			"activecampaign",
+			"jfrog",
+			"pigment",
+			"discord",
+			"telegram",
+			"zscaler",
+			"looker",
+		]) {
+			expect(searchServiceCatalog(term), `${term} must not surface a cut entry`).toEqual([]);
+		}
+		const inputs = loadInputs();
+		const { report } = buildCatalog(inputs.openAi, inputs.claude, inputs.overrides, inputs.audit);
+		const excluded = new Map(report.excluded.map((entry) => [entry.key, entry.reason]));
+		// One exclusion per upstream record: 64 keys cover the 49 entries,
+		// including both upstream sides of the merged providers and every
+		// stdio server of the multi-server adapter plugins.
+		for (const key of [
+			"claude-plugins-official/airwallex-agentos/airwallex-agentos",
+			"claude-plugins-official/airwallex-agentos/airwallex-dev",
+			"claude-plugins-official/airwallex-dev/airwallex-dev",
+			"claude-plugins-official/atlan/atlan",
+			"claude-plugins-official/gitlab/gitlab",
+			"claude-plugins-official/huggingface-skills/huggingface-skills",
+			"claude-plugins-official/legalzoom/legalzoom",
+			"claude-plugins-official/lusha/lusha",
+			"claude-plugins-official/miro/miro",
+			"claude-plugins-official/monday-crm/monday",
+			"openai-plugins/monday-com/monday-com",
+			"claude-plugins-official/planetscale/planetscale",
+			"claude-plugins-official/supabase/supabase",
+			"openai-plugins/supabase/supabase",
+			"claude-plugins-official/vercel/vercel",
+			"openai-plugins/vercel/vercel",
+			"claude-plugins-official/windsor-ai/windsor-ai",
+			"claude-plugins-official/zoominfo/zoominfo",
+			"claude-plugins-official/aikido/aikido-mcp",
+			"claude-plugins-official/alloydb/alloydb-postgres",
+			"claude-plugins-official/amazon-location-service/aws-mcp",
+			"claude-plugins-official/aws-amplify/aws-mcp",
+			"claude-plugins-official/aws-core/aws-mcp",
+			"claude-plugins-official/aws-data-analytics/aws-mcp",
+			"claude-plugins-official/aws-serverless/aws-serverless-mcp",
+			"claude-plugins-official/aws-transform/aws-transform-mcp",
+			"claude-plugins-official/azure/azure",
+			"claude-plugins-official/bigquery-data-analytics/bigquery",
+			"claude-plugins-official/cloud-sql-mysql/cloud-sql-mysql",
+			"claude-plugins-official/cloud-sql-postgresql/cloud-sql-postgres",
+			"claude-plugins-official/cloud-sql-sqlserver/cloud-sql-mssql",
+			"claude-plugins-official/convex/convex",
+			"claude-plugins-official/data-agent-kit-starter-pack/alloydb-postgres",
+			"claude-plugins-official/data-agent-kit-starter-pack/bigquery",
+			"claude-plugins-official/data-agent-kit-starter-pack/bigtable",
+			"claude-plugins-official/data-agent-kit-starter-pack/cloud-sql-postgresql",
+			"claude-plugins-official/data-agent-kit-starter-pack/cloud-storage",
+			"claude-plugins-official/data-agent-kit-starter-pack/dataproc",
+			"claude-plugins-official/data-agent-kit-starter-pack/knowledge_catalog",
+			"claude-plugins-official/data-agent-kit-starter-pack/notebook",
+			"claude-plugins-official/data-agent-kit-starter-pack/spanner",
+			"claude-plugins-official/data-agent-kit-starter-pack/visualization",
+			"claude-plugins-official/dataproc/dataproc",
+			"claude-plugins-official/deploy-on-aws/awsiac",
+			"claude-plugins-official/deploy-on-aws/awspricing",
+			"claude-plugins-official/discord/discord",
+			"claude-plugins-official/dominodatalab/domino_server",
+			"claude-plugins-official/firebase/firebase",
+			"claude-plugins-official/firestore-native/firestore",
+			"claude-plugins-official/gitkraken/gitkraken",
+			"claude-plugins-official/google-cloud-storage/cloud-storage",
+			"claude-plugins-official/knowledge-catalog/dataplex",
+			"claude-plugins-official/looker/looker",
+			"claude-plugins-official/looker/looker-dev",
+			"claude-plugins-official/pinecone/pinecone",
+			"claude-plugins-official/sagemaker-ai/aws-mcp",
+			"claude-plugins-official/semgrep/guardian",
+			"claude-plugins-official/spanner/spanner",
+			"claude-plugins-official/telegram/telegram",
+			"claude-plugins-official/terraform/terraform",
+			"claude-plugins-official/zscaler/zscaler-mcp-server",
+			"claude-plugins-official/activecampaign/activecampaign",
+			"claude-plugins-official/jfrog/jfrog",
+			"claude-plugins-official/pigment/pigment",
+		]) {
+			expect(excluded.has(key), `${key} must be a documented exclusion`).toBe(true);
+			expect(excluded.get(key), `${key} must cite the final catalog cut decision`).toMatch(
+				/2026-09-15 product decision: the catalog ships one-click DCR or user token\/key only/,
+			);
+		}
+		// The cut is a shipping decision, not an evidence deletion: the
+		// pinned source snapshots still carry the excluded upstream configs
+		// (remote, templated and stdio) and the committed audit store still
+		// holds every excluded remote endpoint's metadata.
+		expect(inputs.claude.plugins.some((plugin) => plugin.name === "gitlab")).toBe(true);
+		expect(inputs.claude.plugins.some((plugin) => plugin.name === "miro")).toBe(true);
+		expect(inputs.claude.plugins.filter((plugin) => plugin.category === "stdio_service_adapter")).toHaveLength(32);
+		const gitlabPlugin = inputs.claude.plugins.find((plugin) => plugin.name === "gitlab");
+		expect(gitlabPlugin?.mcpServers.gitlab?.url).toBeDefined();
+		const auditedServers = new Set(inputs.audit.results.map((result) => result.server));
+		for (const server of registeredClient) {
+			expect(auditedServers.has(server), `${server} audit evidence must stay committed`).toBe(true);
+		}
+	});
+
 	it("keeps the gated-DCR machinery: live-rejected advertised registration is explicit-false and never oauth-ready", () => {
 		// The figma entry that exercised this predicate live is now excluded by
 		// the zero-app cut (its evidence stays in the audit store), so the
@@ -547,31 +771,21 @@ describe("MCP service catalog", () => {
 		expect(evidenceSupportsStandardOauth(ungated)).toBe(true);
 	});
 
-	it("demotes confidential-only authorization servers to the user-setup OAuth path (engine auth-method parity)", () => {
+	it("keeps the confidential-only demotion machinery and cuts its output from the shipped catalog (engine auth-method parity)", () => {
 		// Live-verified gap (2026-09-14 dogfooding): Hugging Face /mcp login
 		// failed at connect with "no compatible client authentication method
 		// (advertised: client_secret_basic, client_secret_post)" — the engine's
 		// standard no-credentials flow is a PUBLIC client, and the catalog had
 		// classified the entry one-click without ever checking the advertised
-		// token auth methods. Readiness now runs the SAME engine decision
+		// token auth methods. Readiness runs the SAME engine decision
 		// (decideClientAuthMethod, shared from oauth.ts), so such entries
 		// demote honestly to the user-setup OAuth path: the user registers
 		// their OWN app (client-id/client-secret setup fields, requirement
-		// "registered-client") — zero-app compliant self-serve, never an
-		// exclusion, never prime-restricted.
-		const huggingface = getServiceCatalogEntry("huggingface-skills");
-		expect(huggingface?.setup.status).toBe("requires-setup");
-		expect(huggingface?.setup.readiness).toBe("user-setup");
-		expect(huggingface?.setup.requirement).toBe("registered-client");
-		expect(huggingface?.setup.reason).toMatch(/^requires your own OAuth app/);
-		expect(huggingface?.setup.reason).toContain("client_secret_basic, client_secret_post");
-		expect(huggingface?.setup.fields?.map((field) => field.kind)).toEqual(["client-id", "client-secret"]);
-		expect(huggingface?.auth.metadata?.tokenAuthMethods).toEqual(["client_secret_basic", "client_secret_post"]);
-		expect(huggingface?.auth.metadata?.dynamicClientRegistration).toBe(true);
-		expect(huggingface?.auth.metadata?.note).toMatch(/classifies as user-setup with your own registered OAuth app/);
-		// The committed confidential-only evidence demotes the same way across
-		// the full set: DCR advertisement intact, no "none" advertised, and
-		// the user-app setup shape on every entry.
+		// "registered-client") — zero-app compliant self-serve, never
+		// prime-restricted. Since the 2026-09-15 final cut ("one-click DCR or
+		// user token/key only") none of those demoted entries ships: the 14
+		// are excluded per upstream record with documented reasons (see the
+		// final-cut test), and no registered-client requirement survives.
 		const confidentialOnly = [
 			"airwallex",
 			"airwallex-sandbox",
@@ -588,22 +802,35 @@ describe("MCP service catalog", () => {
 			"windsor-ai",
 			"zoominfo",
 		];
-		expect(
-			SERVICE_CATALOG.filter(
-				(entry) => entry.setup.readiness === "user-setup" && entry.setup.requirement === "registered-client",
-			).map((entry) => entry.server),
-		).toEqual(confidentialOnly);
 		for (const server of confidentialOnly) {
-			const entry = getServiceCatalogEntry(server);
-			expect(entry?.setup.status, server).toBe("requires-setup");
-			expect(entry?.setup.readiness, server).toBe("user-setup");
-			expect(entry?.setup.requirement, server).toBe("registered-client");
-			expect(entry?.setup.reason, server).toMatch(/^requires your own OAuth app/);
-			expect(entry?.setup.fields?.map((field) => field.kind).sort(), server).toEqual(["client-id", "client-secret"]);
-			expect(entry?.auth.metadata?.dynamicClientRegistration, server).toBe(true);
-			expect(entry?.auth.metadata?.tokenAuthMethods, server).not.toContain("none");
-			expect(entry?.auth.metadata?.note, server).toMatch(/only secret-based client authentication/);
+			expect(getServiceCatalogEntry(server), `${server} must be cut from the catalog`).toBeUndefined();
 		}
+		expect(SERVICE_CATALOG.filter((entry) => entry.setup.requirement === "registered-client")).toEqual([]);
+		// The demotion itself still derives from the committed evidence: the
+		// huggingface-skills audit result still fails the engine's public-
+		// client gate and still supports the user-own-app path — the cut is a
+		// shipping decision, not an evidence change.
+		const huggingfaceAudit = loadInputs().audit.results.find((result) => result.server === "huggingface-skills");
+		if (!huggingfaceAudit) throw new Error("huggingface-skills audit evidence must stay committed");
+		expect(huggingfaceAudit.authorizationServer.evidence?.tokenAuthMethods).toEqual([
+			"client_secret_basic",
+			"client_secret_post",
+		]);
+		expect(evidenceSupportsStandardOauth(huggingfaceAudit)).toBe(false);
+		expect(evidenceSupportsUserRegisteredOauth(huggingfaceAudit)).toBe(true);
+		// The importer enforces the cut structurally: lift one exclusion and
+		// the demoted entry fails the import with a curation prompt instead of
+		// shipping — a registered-client shape can never silently re-derive.
+		const inputs = loadInputs();
+		const withoutGitlab: Overrides = {
+			...inputs.overrides,
+			excludedServers: inputs.overrides.excludedServers.filter(
+				(entry) => entry.key !== "claude-plugins-official/gitlab/gitlab",
+			),
+		};
+		expect(() => buildCatalog(inputs.openAi, inputs.claude, withoutGitlab, inputs.audit)).toThrow(
+			/entry gitlab has requirement "registered-client"; the catalog ships one-click DCR or user token\/key only/,
+		);
 		// The shared engine decision drives the synthetic classification matrix:
 		// coherent DCR evidence with confidential-only methods demotes (never
 		// one-click); adding "none" restores one-click; omitted methods stay
@@ -662,8 +889,8 @@ describe("MCP service catalog", () => {
 		const { report } = buildCatalog(inputs.openAi, inputs.claude, inputs.overrides, inputs.audit);
 		expect(inputs.openAi.plugins).toHaveLength(25);
 		expect(inputs.claude.plugins).toHaveLength(118);
-		expect(report.sources["openai-plugins"].remoteServers).toBe(19);
-		expect(report.sources["claude-plugins-official"].stdioServers).toBe(43);
+		expect(report.sources["openai-plugins"].remoteServers).toBe(16);
+		expect(report.sources["claude-plugins-official"].stdioServers).toBe(0);
 		// Documented exclusions are all present with reasons.
 		expect(report.excluded.length).toBeGreaterThan(0);
 		for (const exclusion of report.excluded) {

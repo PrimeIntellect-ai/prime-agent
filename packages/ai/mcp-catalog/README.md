@@ -41,9 +41,10 @@ rebuilds the catalog offline and deterministically:
 - No upstream scope lists are imported (`reviewedScopes` stays unset); the
   host requests provider-advertised scopes at discovery and owns minimum-scope
   policy.
-- stdio SaaS adapters (the Claude catalog's 32) are recorded with their
-  commands and flagged `requires-setup`; they are not part of the remote
-  one-click lane. A legacy SSE transport is recorded and flagged the same way.
+- stdio SaaS adapters (the Claude catalog's 32) are recorded in the pinned
+  fixtures with their commands; since the 2026-09-15 final cut none of them
+  ships (see below). A legacy SSE transport is recorded and flagged the same
+  way — it ships only when it collects a user token/key.
 - Zero-app shipping policy (2026-09-14 product decision): Prime maintains ZERO
   provider OAuth apps, so the catalog ships only self-serve connectors —
   dynamic client registration (readiness `oauth-ready`) or user-supplied
@@ -57,6 +58,25 @@ rebuilds the catalog offline and deterministically:
   `prime-restricted` or `unknown` entry at all, so an unverified provider can
   never ship silently. The pinned source snapshots and the audit evidence for
   excluded endpoints stay committed as history.
+- Final catalog cut (2026-09-15 product decision: the catalog ships one-click
+  DCR or user token/key only): beyond the zero-app classes, a `user-setup`
+  entry ships only when its requirement is token/key-shaped — bearer-token /
+  api-key credentials, a tenant config carrying a genuine non-url field (a
+  token or per-instance value), or a legacy-transport entry that still
+  collects a token/key. The 49 entries that are not (the 14
+  registered-client entries whose authorization servers accept only
+  secret-bearing client auth — Airwallex, Atlan, GitLab, Hugging Face,
+  LegalZoom, Lusha, Miro, monday.com, PlanetScale, Supabase, Vercel,
+  Windsor.ai, ZoomInfo and the Airwallex sandbox; the 32 local-runtime
+  stdio adapters; and the 3 url-only tenant templates — ActiveCampaign,
+  JFrog, Pigment) are excluded via the documented `excludedServers` list —
+  one entry per upstream record (64 keys), each with a per-entry reason
+  citing the decision and the specific evidence — and the importer refuses
+  to emit any other requirement shape, so a registered-client demotion, a
+  local-runtime adapter or a url-only template can never silently re-derive
+  into the catalog. The demotion/auth-methods honesty machinery that derives
+  these requirements stays active for the survivors; the pinned source
+  snapshots and audit evidence stay committed as history.
 - Everything except the pre-existing `linear`/`notion` integrations ships
   `verification: "unverified"`. Import success is never a readiness claim.
 
@@ -68,8 +88,9 @@ these fixtures and fails on drift.
 
 `audit/metadata-audit.json` is a committed, reproducible snapshot of public
 OAuth metadata for the remote endpoints (102 http + 1 sse at capture time,
-including the endpoints later removed by the 2026-09-14 zero-app cut — the
-excluded endpoints' results stay committed as evidence), captured by
+including the endpoints later removed by the 2026-09-14 zero-app cut and the
+2026-09-15 final cut — the excluded endpoints' results stay committed as
+evidence), captured by
 `audit/audit-provider-metadata.ts`. Re-runs audit the current catalog target
 set and retire, never delete, registration-attempt evidence for servers that
 left it:
@@ -157,11 +178,15 @@ deterministically:
 - Placeholder/branded-client-only blockers were cleared with evidence where
   the provider supports self-serve OAuth (Airtable stays Connect-attemptable);
   genuine documented requirements stay hard for kept providers — API
-  keys/bearer tokens (GitHub PAT, Zoom, Render, datadog…), tenant config
-  (tenant URLs, cluster ids), transport and local-runtime limits.
-  Provider-client requirements (Google, Slack, MongoDB) and honest unknowns
-  (Shopify, HubSpot, LogRocket, …) no longer ship: the zero-app cut excluded
-  those providers with per-entry reasons.
+  keys/bearer tokens (GitHub PAT, Zoom, Render, datadog…), token-bearing
+  tenant config (Dynatrace, Sourcegraph) and per-instance values (CockroachDB
+  cluster id), and the legacy-transport sandbox entry that still collects a
+  token (PayPal Sandbox). Provider-client requirements (Google, Slack,
+  MongoDB), honest unknowns (Shopify, HubSpot, LogRocket, …), the
+  user-own-app OAuth path (GitLab, Miro, Supabase, …), local-runtime stdio
+  adapters and url-only tenant templates no longer ship: the 2026-09-14
+  zero-app cut and the 2026-09-15 final cut excluded those providers with
+  per-entry reasons.
 - `auth.alternatives` records documented per-path alternatives with their own
   readiness (Airtable PAT, GitHub standard OAuth, Render partner OAuth).
 - Ready entries are never downgraded by unavailable audit evidence, and
