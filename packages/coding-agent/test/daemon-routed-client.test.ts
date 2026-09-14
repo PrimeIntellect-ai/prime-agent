@@ -45,6 +45,27 @@ function makeFakeEndpoint(hello: unknown = HELLO) {
 }
 
 describe("DaemonRoutedClient routing", () => {
+	it("drops optional metadata independently for the actual direct or supervisor route", async () => {
+		const supervisor = makeFakeEndpoint({ ...HELLO, schemaRevision: 27 });
+		const direct = makeFakeEndpoint({
+			...HELLO,
+			schemaRevision: 28,
+			serverCapabilities: ["session_input_admission", "telemetry_input"],
+		});
+		const routed = new DaemonRoutedClient(supervisor.client as never, direct.client as unknown as DaemonWorkerClient);
+		const command = {
+			type: "prompt" as const,
+			activeSessionId: "active",
+			message: "hello",
+			telemetryInput: { inputId: "10000000-0000-4000-8000-000000000001" },
+		};
+		await routed.request(command);
+		expect(direct.requests[0]).toHaveProperty("telemetryInput", command.telemetryInput);
+		routed.fallbackToSupervisor();
+		await routed.request(command);
+		expect(supervisor.requests[0]).not.toHaveProperty("telemetryInput");
+		routed.close();
+	});
 	it("routes only session-plane commands the worker's own hello serves to the direct socket", async () => {
 		const supervisor = makeFakeEndpoint();
 		const direct = makeFakeEndpoint({ ...HELLO, serverCapabilities: [] });

@@ -288,6 +288,7 @@ describe("ENG-4645 internal GLM configuration", () => {
 		expect(await registry.getApiKeyAndHeaders(model!)).toEqual({
 			ok: true,
 			apiKey: "prime-key",
+			authSource: "stored",
 			headers: { "X-Prime-Team-ID": "engineering-team" },
 		});
 	});

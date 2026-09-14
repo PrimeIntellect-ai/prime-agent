@@ -58,6 +58,8 @@ export interface DaemonUpdateRestartStatus {
 	predecessor?: DaemonUpdateRestartProcessIdentity;
 	successor?: DaemonUpdateRestartProcessIdentity;
 	counts: DaemonUpdateRestartCounts;
+	/** Recreated sessions whose pending work could not be fully restored; absent in older coordinators. */
+	incompleteRestores?: number;
 	failures?: DaemonUpdateRestartFailure[];
 	message?: string;
 	startedAt: string;
@@ -229,7 +231,17 @@ function isDaemonUpdateRestartStatus(value: unknown): value is DaemonUpdateResta
 export function readDaemonUpdateRestartStatus(path: string): DaemonUpdateRestartStatus | undefined {
 	try {
 		const value = JSON.parse(readFileSync(path, "utf8")) as unknown;
-		return isDaemonUpdateRestartStatus(value) ? value : undefined;
+		if (!isDaemonUpdateRestartStatus(value)) return undefined;
+		const { incompleteRestores, ...status } = value;
+		return {
+			...status,
+			...(Number.isInteger(incompleteRestores) &&
+			incompleteRestores !== undefined &&
+			incompleteRestores >= 0 &&
+			incompleteRestores <= status.counts.restored
+				? { incompleteRestores }
+				: {}),
+		};
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
 			return undefined;
@@ -260,6 +272,7 @@ export class DaemonUpdateRestartStatusWriter {
 			phase: "starting",
 			coordinator: { pid: process.pid, ...(processStartId ? { processStartId } : {}) },
 			counts: { total: 0, restored: 0, resumed: 0, failed: 0 },
+			incompleteRestores: 0,
 			startedAt: now,
 			updatedAt: now,
 			heartbeatAt: now,

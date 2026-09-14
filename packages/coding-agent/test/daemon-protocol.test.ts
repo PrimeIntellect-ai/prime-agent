@@ -22,6 +22,8 @@ import {
 	isDaemonCommandEnvelope,
 	isDaemonMutatingCommand,
 	isSessionPlaneDaemonCommand,
+	meetsDaemonCommandCompatibility,
+	omitUnsupportedTelemetryInput,
 	salvageDaemonCommandId,
 } from "../src/modes/daemon/daemon-protocol.js";
 import {
@@ -30,6 +32,27 @@ import {
 } from "../src/modes/daemon/daemon-worker-protocol.js";
 
 describe("daemon protocol helpers", () => {
+	it("gates only prompts carrying optional telemetry metadata and accepts legacy prompts", () => {
+		const legacy: DaemonCommand = { type: "prompt", activeSessionId: "active", message: "hello" };
+		const enriched = { ...legacy, telemetryInput: { inputId: "10000000-0000-4000-8000-000000000001" } };
+		const oldHello = {
+			protocol: DAEMON_PROTOCOL_INFO,
+			schemaRevision: 27,
+			serverCapabilities: ["session_input_admission"] as const,
+		};
+		const newHello = { ...oldHello, schemaRevision: 28, serverCapabilities: DAEMON_DEFAULT_SERVER_CAPABILITIES };
+		expect(getDaemonCommandCompatibilities(enriched)).toContainEqual({
+			minProtocol: 7,
+			minSchemaRevision: 28,
+			capability: "telemetry_input",
+		});
+		expect(
+			getDaemonCommandCompatibilities(legacy).every((rule) => meetsDaemonCommandCompatibility(newHello, rule)),
+		).toBe(true);
+		expect(omitUnsupportedTelemetryInput(enriched, oldHello)).toEqual(legacy);
+		expect(omitUnsupportedTelemetryInput(enriched, newHello)).toEqual(enriched);
+		expect(DAEMON_OUTBOUND_COMPATIBILITY.session_event).toEqual({ minProtocol: 7 });
+	});
 	it("serializes worker descriptors as identity-only version 2 state", () => {
 		const descriptor = {
 			version: 1,

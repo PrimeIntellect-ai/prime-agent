@@ -192,7 +192,7 @@ describe.skipIf(!archive)("extracted standalone archive", () => {
 		}
 		for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
 		children.clear();
-	});
+	}, 30_000);
 	afterAll(() => {
 		if (root) rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	});

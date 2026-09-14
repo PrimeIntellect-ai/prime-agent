@@ -1,0 +1,20 @@
+[
+  {"name":"plain daemon error","input":"Worker exited before session attachment (exit 17).","expected":"Worker exited before session attachment (exit 17)."},
+  {"name":"bearer token","input":"Request failed with Bearer synthetic_canary_token; retry later","expected":"Request failed with Bearer [REDACTED]; retry later"},
+  {"name":"basic token","input":"Basic c3ludGhldGljOnNlY3JldA==","expected":"Basic [REDACTED]"},
+  {"name":"json key","input":"{\"api_key\":\"synthetic-canary\",\"error\":\"denied\"}","expected":"{\"api_key\":\"[REDACTED]\",\"error\":\"denied\"}"},
+  {"name":"multiline secret","input":"client_secret=\"synthetic\ncanary\"\nconnection refused","expected":"client_secret=\"[REDACTED]\"\nconnection refused"},
+  {"name":"unterminated secret","input":"refresh_token=\"synthetic\ncanary","expected":"refresh_token=\"[REDACTED]\""},
+  {"name":"url credentials","input":"Unable to connect to https://synthetic:canary@example.test/api?token=synthetic-canary&retry=1","expected":"Unable to connect to https://[REDACTED]@example.test/api?token=[REDACTED]&retry=1"},
+  {"name":"authorization header","input":"Authorization: Bearer synthetic-canary\nFailed to authenticate","expected":"Authorization: [REDACTED]\nFailed to authenticate"},
+  {"name":"cookie header","input":"Cookie: session=synthetic-canary; other=second-canary\nDenied","expected":"Cookie: [REDACTED]\nDenied"},
+  {"name":"pem key","input":"Invalid key: -----BEGIN PRIVATE KEY-----\nsynthetic-canary\n-----END PRIVATE KEY-----\nDenied","expected":"Invalid key: [REDACTED]\nDenied"},
+  {"name":"vendor token","input":"Rejected sk-synthetic_canary_0123456789 and ghp_synthetic_canary_0123456789","expected":"Rejected [REDACTED] and [REDACTED]"},
+  {"name":"jwt","input":"Expired eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzeW50aGV0aWMifQ.c3ludGhldGljX3NpZ25hdHVyZQ","expected":"Expired [REDACTED]"},
+  {"name":"cli secret","input":"Rejected --api-key synthetic-canary --verbose","expected":"Rejected --api-key [REDACTED] --verbose"},
+  {"name":"control obfuscation","input":"tok\u0000en=synthetic-canary\nFailed","expected":"token=[REDACTED]\nFailed"},
+  {"name":"ansi obfuscation","input":"api\u001b[31m_key=synthetic-canary\u001b[0m\nFailed","expected":"api_key=[REDACTED]\nFailed"},
+  {"name":"unicode and multiline","input":"File could not be read 😕\nCheck permissions.\tRetry","expected":"File could not be read 😕\nCheck permissions.\tRetry"},
+  {"name":"lone surrogate","input":"Failed \ud800 retry","expected":"Failed � retry"},
+  {"name":"already redacted","input":"api_key=[REDACTED] token=\"[REDACTED]\" Bearer [REDACTED]","expected":"api_key=[REDACTED] token=\"[REDACTED]\" Bearer [REDACTED]"}
+]

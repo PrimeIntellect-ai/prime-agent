@@ -1962,6 +1962,19 @@ describe("AgentsViewMode catalog performance", () => {
 			workingIconFrame: 0,
 			savedCatalogGeneration: 0,
 			heartbeatCatalogGeneration: 0,
+			// run() observes installed-runtime readiness; telemetry stays disabled so
+			// the observation is a no-op against a path that never exists.
+			options: {
+				config: {
+					agentDir: "/nonexistent-prime-agent-agents-view-installation",
+					cwd: "/nonexistent-prime-agent-agents-view-installation",
+					telemetryDisabled: true,
+				},
+				uiServices: {
+					settingsManager: {} as never,
+					getInitialCwd: () => "/nonexistent-prime-agent-agents-view-installation",
+				},
+			},
 			persistentState: {
 				rosterClient: { isConnected: true, onMessage: vi.fn(() => vi.fn()) },
 				rosterStore: {

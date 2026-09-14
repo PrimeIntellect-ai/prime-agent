@@ -17,6 +17,7 @@ import type { ResourceLoader } from "./resource-loader.js";
 import { DefaultResourceLoader } from "./resource-loader.js";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.js";
 import { SettingsManager } from "./settings-manager.js";
+import { observeTelemetryRequestContext } from "./telemetry-execution-context.js";
 import { time } from "./timings.js";
 import { createBashTool, createEditTool, createIpythonTool, withFileMutationQueue } from "./tools/index.js";
 
@@ -297,6 +298,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				throw new Error(auth.error);
 			}
 			const providerRetrySettings = settingsManager.getProviderRetrySettings();
+			observeTelemetryRequestContext(session, modelRegistry, model, auth);
 			const requestModel = auth.requestModel ?? model;
 			return streamSimple(requestModel, context, {
 				...options,

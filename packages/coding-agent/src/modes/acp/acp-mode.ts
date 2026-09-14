@@ -9,6 +9,8 @@ import { VERSION } from "../../config.js";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
 import { takeOverStdout, writeRawStdout } from "../../core/output-guard.js";
+import type { TelemetryErrorOperation } from "../../core/telemetry-error-classification.js";
+import { reportTelemetryError, withTelemetryErrorContext } from "../../core/telemetry-errors.js";
 import { InProcessAgentConnection } from "../agent-connection/in-process-agent-connection.js";
 import type {
 	AgentConnection,
@@ -21,6 +23,19 @@ import { type AcpEventMappingState, acpUpdatesForSessionEvent } from "./acp-even
 import { resolveAcpMcpServers } from "./acp-mcp.js";
 import { PRIME_AGENT_META_NAMESPACE, type PrimeAgentAutonomousMeta, primeAgentMeta } from "./acp-meta.js";
 import { type AcpStopReason, acpStopReason } from "./acp-stop-reason.js";
+
+function reportAcpError(error: unknown, operation: TelemetryErrorOperation = "execute"): void {
+	reportTelemetryError({
+		error,
+		component: "acp",
+		operation,
+		stage: operation === "shutdown" ? "shutdown" : "background",
+	});
+}
+
+function reportAcpCleanupError(error: unknown): void {
+	reportAcpError(error, "shutdown");
+}
 
 /**
  * ACP frames must reach real stdout.
@@ -89,6 +104,7 @@ function sameCwd(left: string, right: string): boolean {
 }
 
 export interface AcpModeOptions {
+	onReady?: () => Promise<void>;
 	/** Bind headless extensions once the connection is live (in-process mode). */
 	bindHeadlessExtensions?: () => Promise<void>;
 	/**
@@ -295,7 +311,8 @@ class AcpUpdateProducer {
 					update: correlatedUpdate,
 				});
 				published = true;
-			} catch {
+			} catch (error) {
+				reportAcpError(error, "request");
 				// Drop only this update; a rejected queue tail would strand later updates.
 			}
 		});
@@ -454,11 +471,15 @@ async function turnFailure(connection: AgentConnection, boundary: TurnBoundary):
 	return undefined;
 }
 
-export async function runAcpMode(runtimeHost: AgentSessionRuntime): Promise<never> {
+export async function runAcpMode(runtimeHost: AgentSessionRuntime, options: AcpModeOptions = {}): Promise<never> {
 	const connection = new InProcessAgentConnection(runtimeHost);
-	return runAcpModeWithConnection(connection, {
-		bindHeadlessExtensions: () => connection.bindHeadlessExtensions({}),
-	});
+	const run = () =>
+		runAcpModeWithConnection(connection, {
+			...options,
+			bindHeadlessExtensions: options.bindHeadlessExtensions ?? (() => connection.bindHeadlessExtensions({})),
+		});
+	const context = runtimeHost.services?.telemetryErrorContext;
+	return context ? withTelemetryErrorContext({ ...context, executionMode: "acp" }, run) : run();
 }
 
 export async function runAcpModeWithConnection(
@@ -495,6 +516,7 @@ export async function runAcpModeWithConnection(
 		try {
 			await connection.replaceAcpMcpServers(resolved, acpMcpOwnerId);
 		} catch (error) {
+			reportTelemetryError({ error, component: "mcp", operation: "connect", stage: "configuration" });
 			// The daemon may have applied the configuration before its acknowledgement
 			// was lost. Always attempt owner-scoped cleanup before rejecting admission.
 			await clearAcpMcpServers(serverNames).catch(() => undefined);
@@ -540,11 +562,23 @@ export async function runAcpModeWithConnection(
 		readable: baseStream.readable,
 		writable: new WritableStream<AcpStreamMessage>({
 			async write(message) {
+				if (message && typeof message === "object" && "error" in message) {
+					const failure = message.error;
+					if (
+						failure &&
+						typeof failure === "object" &&
+						"code" in failure &&
+						(failure.code === -32700 || failure.code === -32600)
+					) {
+						reportAcpError(failure, "parse");
+					}
+				}
 				let writer: WritableStreamDefaultWriter<AcpStreamMessage> | undefined;
 				try {
 					writer = baseStream.writable.getWriter();
 					await writer.write(message);
 				} catch (error) {
+					reportAcpError(error, "request");
 					failPendingSessionNewResponse();
 					throw error;
 				} finally {
@@ -567,6 +601,7 @@ export async function runAcpModeWithConnection(
 							admission.entry.inputPauseRelease?.resolve();
 							admission.entry.inputPauseRelease = undefined;
 						} catch (error) {
+							reportAcpError(error);
 							admission.entry.stopFailure = error instanceof Error ? error.message : String(error);
 							admission.entry.inputPauseRelease?.reject(error);
 						}
@@ -580,6 +615,7 @@ export async function runAcpModeWithConnection(
 					writer = baseStream.writable.getWriter();
 					await writer.close();
 				} catch (error) {
+					reportAcpError(error, "shutdown");
 					failPendingSessionNewResponse();
 					throw error;
 				} finally {
@@ -593,6 +629,7 @@ export async function runAcpModeWithConnection(
 					writer = baseStream.writable.getWriter();
 					await writer.abort(reason);
 				} catch (error) {
+					reportAcpError(error, "shutdown");
 					failPendingSessionNewResponse();
 					throw error;
 				} finally {
@@ -667,6 +704,7 @@ export async function runAcpModeWithConnection(
 		})()
 			.catch((error: unknown) => {
 				if (pending.abort.signal.aborted || entry.pendingTerminal !== pending) return;
+				reportAcpError(error);
 				pending.failure = error instanceof Error ? error.message : String(error);
 			})
 			.finally(() => {
@@ -832,6 +870,9 @@ export async function runAcpModeWithConnection(
 					inputPause: closedInputPause,
 				};
 				return response;
+			} catch (error) {
+				reportAcpError(error, "connect");
+				throw error;
 			} finally {
 				sessionNewInFlight = false;
 			}
@@ -871,6 +912,7 @@ export async function runAcpModeWithConnection(
 			const promptTurnId = entry.producer.beginPrompt();
 			let responseBoundaryEmitted = false;
 			let terminalSettlementCancelled = false;
+			let previouslyReportedFailure = false;
 			try {
 				const { text, images } = promptContent(params.prompt);
 				const priorMessages = turnBoundary(await connection.getMessages());
@@ -943,14 +985,19 @@ export async function runAcpModeWithConnection(
 					await pending.task;
 					terminalSettlementCancelled = abort.signal.aborted;
 					if (pending.failure) {
+						previouslyReportedFailure = true;
 						throw new Error(`ACP lifecycle reconciliation failed: ${pending.failure}`);
 					}
 					if (pending.turnFailure) {
+						previouslyReportedFailure = true;
 						throw new Error(`prime-agent turn failed: ${pending.turnFailure}`);
 					}
 					terminalStatus = pending.status ?? status;
 				}
-				if (failure) throw new Error(`prime-agent turn failed: ${failure}`);
+				if (failure) {
+					previouslyReportedFailure = true;
+					throw new Error(`prime-agent turn failed: ${failure}`);
+				}
 				return {
 					stopReason: acpStopReason({
 						cancelled: terminalSettlementCancelled,
@@ -962,6 +1009,7 @@ export async function runAcpModeWithConnection(
 					await entry.producer.drain();
 					return { stopReason: "cancelled" satisfies AcpStopReason };
 				}
+				if (!previouslyReportedFailure) reportAcpError(error);
 				// Failed prompt/snapshot admission gets one correlated error boundary;
 				// it never gets an invented terminal-quiescence update.
 				if (!responseBoundaryEmitted) {
@@ -1027,6 +1075,7 @@ export async function runAcpModeWithConnection(
 					}
 					closing.stopFailure = undefined;
 				} catch (error) {
+					reportAcpError(error, "shutdown");
 					closing.stopFailure = error instanceof Error ? error.message : String(error);
 					throw error;
 				}
@@ -1075,6 +1124,7 @@ export async function runAcpModeWithConnection(
 					if (pending && cancelling.pendingTerminal === pending) cancelling.pendingTerminal = undefined;
 					if (abort && cancelling.abort === abort) cancelling.abort = undefined;
 				} catch (error) {
+					reportAcpError(error, "shutdown");
 					cancelling.stopFailure = error instanceof Error ? error.message : String(error);
 					throw error;
 				}
@@ -1088,20 +1138,27 @@ export async function runAcpModeWithConnection(
 			}
 		})
 		.connect(stream);
+	let ready: Promise<void> | undefined;
+	try {
+		ready = options.onReady?.().catch(() => {});
+	} catch {
+		// Optional readiness reporting must not change ACP behavior.
+	}
 
 	// Exit when the client disconnects (stdin EOF or a closed transport). Blocking
 	// forever would leave an orphaned agent per run, which matters most for a
 	// harness that spawns many short-lived sessions.
-	await handle.closed.catch(() => undefined);
+	await handle.closed.catch((error: unknown) => reportAcpError(error, "connect"));
 	session?.abort?.abort();
 	session?.unsubscribe?.();
-	await session?.inputPause?.release().catch(() => undefined);
+	await session?.inputPause?.release().catch(reportAcpCleanupError);
 	session = undefined;
-	await closedInputPause?.release().catch(() => undefined);
+	await closedInputPause?.release().catch(reportAcpCleanupError);
 	closedInputPause = undefined;
 	closedInputPauseKey = undefined;
-	await clearAcpMcpServers().catch(() => undefined);
-	await connection.dispose().catch(() => undefined);
+	await clearAcpMcpServers().catch(reportAcpCleanupError);
+	await connection.dispose().catch(reportAcpCleanupError);
+	await ready;
 	// Only the real stdio entrypoint owns the process; a caller-supplied transport
 	// (tests, embedding) must never have its host exited from under it.
 	if (options.stream) return undefined as never;

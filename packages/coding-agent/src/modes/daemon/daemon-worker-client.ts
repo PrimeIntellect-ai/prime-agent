@@ -6,13 +6,14 @@ import {
 	type DaemonClientRequestOptions,
 	DaemonSocketClosedError,
 } from "./daemon-client.js";
-import type {
-	DaemonClosingReason,
-	DaemonCommand,
-	DaemonOutbound,
-	DaemonPeerTransportTicket,
-	DaemonResponse,
-	DaemonServerCapability,
+import {
+	type DaemonClosingReason,
+	type DaemonCommand,
+	type DaemonOutbound,
+	type DaemonPeerTransportTicket,
+	type DaemonResponse,
+	type DaemonServerCapability,
+	omitUnsupportedTelemetryInput,
 } from "./daemon-protocol.js";
 import {
 	type DaemonPeerCommand,
@@ -155,7 +156,7 @@ export class DaemonWorkerClient {
 		// Progress/recovery options are supervisor-transport features; a direct request fails fast instead of replaying (no double execution).
 		options: DaemonClientRequestOptions = {},
 	): Promise<DaemonResponse> {
-		return this.requestWire(command, timeoutMs, options.onResponse);
+		return this.requestWire(omitUnsupportedTelemetryInput(command, this.helloMessage), timeoutMs, options.onResponse);
 	}
 
 	requestWorker(command: DaemonWorkerCommandBody, timeoutMs = 30_000): Promise<DaemonResponse> {

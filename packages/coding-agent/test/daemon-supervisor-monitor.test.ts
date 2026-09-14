@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as realSleep } from "node:timers/promises";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as orphanProcessModule from "../src/core/orphan-process-journal.js";
@@ -1236,10 +1237,16 @@ describe("daemon worker supervisor monitoring", () => {
 			return result ?? false;
 		});
 		// Drive the fake clock until the expected number of probes have run;
-		// one advance alone does not flush the availability check chain.
+		// one advance alone does not flush the availability check chain. The
+		// chain also interleaves fake timers with real registry-lock I/O, and
+		// fake timers mock every in-process clock (Date, performance, hrtime),
+		// so wall-clock budgeting is impossible here: yield real time between
+		// advances instead — node:timers/promises stays unfaked — so the lock
+		// work can settle on slow runners before the budget runs out.
 		const advanceUntilProbes = async (expected: number) => {
-			for (let step = 0; probeCount < expected && step < 200; step++) {
+			for (let step = 0; probeCount < expected && step < 1000; step++) {
 				await vi.advanceTimersByTimeAsync(100);
+				if (probeCount < expected) await realSleep(2);
 			}
 			expect(probeCount).toBe(expected);
 		};

@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
@@ -8,10 +9,17 @@ import { ENV_AGENT_DIR } from "../src/config.js";
 import { createAgentSessionServices } from "../src/core/agent-session-services.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
-import { PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
+import { PRIME_AGENT_TRACES_PROVIDER_ID, PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import { createAgentSession } from "../src/core/sdk.js";
 import { SessionManager } from "../src/core/session-manager.js";
-import { ProviderAuthFlows, type ProviderAuthFlowsHost } from "../src/modes/interactive/auth-flows.js";
+import { SettingsManager } from "../src/core/settings-manager.js";
+import type { TelemetryProperties } from "../src/core/telemetry.js";
+import { reportTelemetryError, withTelemetryErrorContext } from "../src/core/telemetry-errors.js";
+import {
+	type AuthFlowObservation,
+	ProviderAuthFlows,
+	type ProviderAuthFlowsHost,
+} from "../src/modes/interactive/auth-flows.js";
 import { ExtensionSelectorComponent } from "../src/modes/interactive/components/extension-selector.js";
 import { LoginDialogComponent } from "../src/modes/interactive/components/login-dialog.js";
 import { OAuthSelectorComponent } from "../src/modes/interactive/components/oauth-selector.js";
@@ -182,12 +190,34 @@ describe("ProviderAuthFlows", () => {
 			}),
 		);
 		const { host, statusMessages, errorMessages } = createHost(authStorage);
+		const observations: AuthFlowObservation[] = [];
+		host.onAuthObservation = (observation) => observations.push(observation);
+		const finish = vi.fn();
+		host.onAuthenticationStarted = vi.fn(() => finish);
 
 		const result = await new ProviderAuthFlows({ ...host, modelRegistry }).runPrimeInferenceLogin();
 
 		expect(errorMessages).toEqual([]);
 		expect(result.status).toBe("success");
 		expect(fetchMock).toHaveBeenCalledOnce();
+		expect(finish).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ status: "success" }));
+		expect(observations).toContainEqual(
+			expect.objectContaining({
+				stage: "credential_validation",
+				outcome: "completed",
+				method: "existing_configuration",
+				validationScope: "identity_scope",
+				durationMs: expect.any(Number),
+				systemWork: true,
+			}),
+		);
+		expect(
+			observations.some(
+				(observation) =>
+					observation.validationScope === "inference" || observation.validationScope === "selected_context",
+			),
+		).toBe(false);
+		expect(JSON.stringify(observations)).not.toContain("prime-cli-key");
 		expect(statusMessages.join("\n")).toContain("Using team from PRIME_TEAM_ID.");
 
 		const config = JSON.parse(readFileSync(primeConfigPath, "utf-8")) as Record<string, unknown>;
@@ -219,6 +249,27 @@ describe("ProviderAuthFlows", () => {
 		expect(authStorage.has(PRIME_INFERENCE_PROVIDER_ID)).toBe(false);
 		// The login dialog mounts inline in the host, never as an overlay.
 		expect(overlays).toHaveLength(0);
+	});
+
+	it("keeps trace login credentials and access checks separate from inference", async () => {
+		process.env.HOME = tempDir;
+		mkdirSync(join(tempDir, ".prime"));
+		const config = JSON.stringify({ api_key: "trace-key", team_id: "existing-team" });
+		const configPath = join(tempDir, ".prime", "config.json");
+		writeFileSync(configPath, config);
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: true });
+		const { host } = createHost(authStorage);
+		const fetchMock = vi
+			.spyOn(globalThis, "fetch")
+			.mockResolvedValue(jsonResponse({ data: { scope: { agent_traces: { write: true } } } }));
+
+		await expect(new ProviderAuthFlows(host).runPrimeAgentTracesLogin()).resolves.toMatchObject({
+			status: "success",
+		});
+		expect(fetchMock).toHaveBeenCalledOnce();
+		await expect(authStorage.getApiKey(PRIME_AGENT_TRACES_PROVIDER_ID)).resolves.toBe("trace-key");
+		expect(authStorage.has(PRIME_INFERENCE_PROVIDER_ID)).toBe(false);
+		expect(readFileSync(configPath, "utf8")).toBe(config);
 	});
 
 	it("does not offer logout for credentials owned only by the Prime CLI", async () => {
@@ -366,5 +417,160 @@ describe("ProviderAuthFlows", () => {
 		// which is then unmounted when the flow finishes.
 		expect(panels).toHaveLength(0);
 		expect(loginSpy).toHaveBeenCalledOnce();
+	});
+
+	it("reports an API key save as configured without claiming a provider check", async () => {
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		const { host } = createHost(authStorage);
+		const observations: AuthFlowObservation[] = [];
+		host.onAuthObservation = (observation) => observations.push(observation);
+		const finish = vi.fn();
+		host.onAuthenticationStarted = () => finish;
+		const fetchMock = vi.spyOn(globalThis, "fetch");
+		vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockResolvedValue("private-api-key");
+
+		const result = await new ProviderAuthFlows(host).loginProvider({
+			id: "openai",
+			name: "OpenAI",
+			authType: "api_key",
+		});
+
+		expect(result.status).toBe("success");
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(finish).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ status: "success" }));
+		expect(observations).toEqual([
+			{
+				providerId: "openai",
+				stage: "credential_discovery",
+				outcome: "configured",
+				method: "api_key_entry",
+				validationScope: "configuration",
+			},
+			{
+				providerId: "openai",
+				stage: "credential_validation",
+				outcome: "unavailable",
+				method: "api_key_entry",
+				validationScope: "unchecked",
+			},
+		]);
+		expect(JSON.stringify(observations)).not.toContain("private-api-key");
+	});
+
+	it("reports cancellation without manufacturing a failed authentication check", async () => {
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		const { host } = createHost(authStorage);
+		const finish = vi.fn();
+		host.onAuthenticationStarted = () => finish;
+		host.onAuthObservation = vi.fn();
+		host.onAuthError = vi.fn();
+		vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockRejectedValue(new Error("Login cancelled"));
+
+		await expect(
+			new ProviderAuthFlows(host).loginProvider({ id: "openai", name: "OpenAI", authType: "api_key" }),
+		).resolves.toEqual({ status: "cancelled" });
+		expect(finish).toHaveBeenCalledExactlyOnceWith({ status: "cancelled" });
+		expect(host.onAuthObservation).not.toHaveBeenCalled();
+		expect(host.onAuthError).not.toHaveBeenCalled();
+	});
+
+	it("reports failed logout separately from cancel and unavailable credentials", async () => {
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		authStorage.set("openai", { type: "api_key", key: "private-api-key" });
+		const { host, panels } = createHost(authStorage);
+		const failure = new Error("Permission denied");
+		vi.spyOn(authStorage, "logout").mockImplementation(() => {
+			throw failure;
+		});
+		host.onAuthError = vi.fn();
+		const finish = vi.fn();
+
+		const result = new ProviderAuthFlows(host).runLogout(finish);
+		// The logout selector renders inline under the chat, not as an overlay.
+		panels[0]?.handleInput?.("\r");
+
+		await expect(result).resolves.toBeNull();
+		expect(finish).toHaveBeenCalledExactlyOnceWith("failed");
+		expect(host.onAuthError).toHaveBeenCalledExactlyOnceWith(failure, "openai", "logout");
+	});
+
+	it("does not let optional observation callbacks interrupt a login", async () => {
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		const { host } = createHost(authStorage);
+		host.onAuthenticationStarted = () => {
+			throw new Error("observer failed");
+		};
+		host.onAuthObservation = () => {
+			throw new Error("observer failed");
+		};
+		vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockResolvedValue("private-api-key");
+
+		await expect(
+			new ProviderAuthFlows(host).loginProvider({ id: "openai", name: "OpenAI", authType: "api_key" }),
+		).resolves.toMatchObject({ status: "success" });
+	});
+
+	it("reports a failed OAuth login once, from the UI scope only", async () => {
+		vi.stubEnv("DO_NOT_TRACK", "0");
+		vi.stubEnv("PI_OFFLINE", "0");
+		vi.stubEnv("PRIME_AGENT_TELEMETRY", "");
+		const reports: TelemetryProperties[] = [];
+		const authStorage = AuthStorage.create(authJsonPath, {
+			usePrimeCliConfig: false,
+			telemetryErrorContext: {
+				agentDir: tempDir,
+				settingsManager: SettingsManager.inMemory(),
+				sink: { capture: (_name, properties) => reports.push(properties), flush: async () => {} },
+			},
+		});
+		const failure = new Error("Provider denied the login");
+		registerOAuthProvider({
+			id: "faux-oauth",
+			name: "Faux",
+			login: async () => {
+				throw failure;
+			},
+		} as never);
+		onTestFinished(() => unregisterOAuthProvider("faux-oauth"));
+
+		await expect(authStorage.login("faux-oauth" as never, {} as never)).rejects.toThrow(failure);
+
+		// The login UI reports this failure inside the authentication scope, so a
+		// storage-level report would upload the same failure under a second scope.
+		expect(reports).toEqual([]);
+	});
+
+	it("wraps source and host error observations in the same UI authentication scope", async () => {
+		vi.stubEnv("DO_NOT_TRACK", "0");
+		vi.stubEnv("PI_OFFLINE", "0");
+		vi.stubEnv("PRIME_AGENT_TELEMETRY", "");
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		const { host } = createHost(authStorage);
+		const reports: TelemetryProperties[] = [];
+		const error = new Error("Provider authentication failed");
+		const report = () =>
+			reportTelemetryError({ error, component: "authentication", operation: "login", provider: "openai" });
+		host.runWithAuthTelemetry = (run) =>
+			withTelemetryErrorContext(
+				{
+					agentDir: tempDir,
+					settingsManager: SettingsManager.inMemory(),
+					clientSessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+					sink: { capture: (_name, properties) => reports.push(properties), flush: async () => {} },
+				},
+				run,
+			);
+		host.onAuthError = report;
+		vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockResolvedValue("private-api-key");
+		vi.spyOn(authStorage, "set").mockImplementation(() => {
+			report();
+			throw error;
+		});
+		await expect(
+			new ProviderAuthFlows(host).loginProvider({ id: "openai", name: "OpenAI", authType: "api_key" }),
+		).resolves.toEqual({ status: "failed" });
+		expect(reports).toHaveLength(1);
+		expect(reports[0].client_session_id).toBe("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+		expect(JSON.stringify(reports)).not.toContain("private-api-key");
 	});
 });

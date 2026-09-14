@@ -22,6 +22,8 @@ import { getAgentDir } from "../config.js";
 import { realpathIfPresentSync, writeFileAtomicSync } from "../utils/atomic-file.js";
 import { getPrimeCliConfigPath, PRIME_INFERENCE_PROVIDER_ID, type PrimeTeam } from "./prime-inference-auth.js";
 import { resolveConfigValue, resolveConfigValueUncached } from "./resolve-config-value.js";
+import type { TelemetryErrorOperation } from "./telemetry-error-classification.js";
+import { captureTelemetryError, reportTelemetryError, type TelemetryErrorContext } from "./telemetry-errors.js";
 
 export type PrimeTeamCredential = {
 	teamId: string;
@@ -62,6 +64,7 @@ export type AuthStatus = {
 export type AuthStorageOptions = {
 	primeCliConfigPath?: string;
 	usePrimeCliConfig?: boolean;
+	telemetryErrorContext?: TelemetryErrorContext;
 };
 
 type LockResult<T> = {
@@ -317,9 +320,17 @@ export class AuthStorage {
 		this.fallbackResolver = resolver;
 	}
 
-	private recordError(error: unknown): void {
+	setTelemetryErrorContext(context: TelemetryErrorContext): void {
+		this.options.telemetryErrorContext = context;
+	}
+
+	private recordError(error: unknown, operation: TelemetryErrorOperation, provider?: string): void {
 		const normalizedError = error instanceof Error ? error : new Error(String(error));
 		this.errors.push(normalizedError);
+		const details = { error, component: "authentication", operation, stage: "authentication", provider } as const;
+		if (this.options.telemetryErrorContext)
+			captureTelemetryError({ ...this.options.telemetryErrorContext, ...details });
+		else reportTelemetryError(details);
 	}
 
 	private fingerprintAuthSource(source: ActiveAuthStatusSource, material: string): string {
@@ -646,7 +657,7 @@ export class AuthStorage {
 			this.loadError = null;
 		} catch (error) {
 			this.loadError = error as Error;
-			this.recordError(error);
+			this.recordError(error, "load");
 		}
 	}
 
@@ -667,7 +678,7 @@ export class AuthStorage {
 				return { result: undefined, next: JSON.stringify(merged, null, 2) };
 			});
 		} catch (error) {
-			this.recordError(error);
+			this.recordError(error, "save", provider);
 		}
 	}
 
@@ -766,6 +777,9 @@ export class AuthStorage {
 			throw new Error(`Unknown OAuth provider: ${providerId}`);
 		}
 
+		// The login UI owns failure reporting: it runs inside the authentication
+		// telemetry scope, so reporting here as well would upload the same
+		// failure twice under two different scopes.
 		const credentials = await provider.login(callbacks);
 		this.set(providerId, { type: "oauth", ...credentials });
 	}
@@ -915,7 +929,7 @@ export class AuthStorage {
 							};
 						}
 					} catch (error) {
-						this.recordError(error);
+						this.recordError(error, "refresh", providerId);
 						// A peer may have refreshed successfully; reload before treating this refresh as failed.
 						this.reload();
 						const updatedCred = this.data[providerId];
@@ -994,7 +1008,7 @@ export class AuthStorage {
 			this.data = data;
 			this.loadError = null;
 		} catch (error) {
-			this.recordError(error);
+			this.recordError(error, "save", PRIME_INFERENCE_PROVIDER_ID);
 			throw error;
 		}
 	}
