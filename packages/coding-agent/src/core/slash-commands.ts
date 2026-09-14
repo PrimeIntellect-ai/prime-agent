@@ -134,7 +134,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	},
 	{
 		name: "beta",
-		description: `Follow the beta release channel and update ${APP_NAME} now`,
+		description: `Switch ${APP_NAME} updates to the beta channel (unreleased builds, may be broken)`,
 		argumentHint: "[on|off|status]",
 		takesArgument: true,
 	},

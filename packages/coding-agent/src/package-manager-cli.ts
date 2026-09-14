@@ -12,7 +12,12 @@ import {
 	type RunningDaemonProbe,
 	shutdownConnectedDaemonAndWait,
 } from "./cli/daemon-launch.js";
-import { confirmDaemonSessionLoss, type DaemonSessionLossCopy, pluralizeSessions } from "./cli/daemon-stop-confirm.js";
+import {
+	confirmDaemonSessionLoss,
+	type DaemonSessionLossCopy,
+	pluralizeSessions,
+	promptYesNo,
+} from "./cli/daemon-stop-confirm.js";
 import {
 	acquireDaemonUpdateRestartCoordinator,
 	buildDaemonUpdateRestartReport,
@@ -1603,6 +1608,29 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 					}
 				}
 				if (updateTargetIncludesSelf(target)) {
+					if (options.channel === "beta" && settingsManager.getUpdateChannel() !== "beta") {
+						console.log(
+							chalk.yellow(
+								`Beta releases are unreleased ${APP_NAME} builds. They can be broken, and a broken update can leave ${APP_NAME} unusable until you roll back or reinstall.`,
+							),
+						);
+						if (!options.force) {
+							if (!process.stdin.isTTY) {
+								console.error(
+									chalk.red(
+										"Switching to the beta channel needs confirmation. Re-run with --force to proceed.",
+									),
+								);
+								process.exitCode = 1;
+								return true;
+							}
+							if (!(await promptYesNo("Switch to the beta channel and continue with the update?"))) {
+								console.log(chalk.dim("Update cancelled. The update channel was not changed."));
+								process.exitCode = 1;
+								return true;
+							}
+						}
+					}
 					if (options.channel) {
 						settingsManager.setUpdateChannel(options.channel);
 						console.log(chalk.dim(`Updates now follow the ${options.channel} channel.`));

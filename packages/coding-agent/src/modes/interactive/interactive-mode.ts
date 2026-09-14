@@ -4985,7 +4985,8 @@ export class InteractiveMode {
 						this.showWarning("Wait for the current work to finish before updating.");
 						return;
 					}
-					this.settingsManager.setUpdateChannel("beta");
+					// The update command owns the beta warning, the channel switch, and the
+					// busy-session confirmation, so declining either leaves settings untouched.
 					await this.handleUpdateCommand("--self --beta");
 					return;
 				}
