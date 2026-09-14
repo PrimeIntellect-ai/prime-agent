@@ -44,6 +44,19 @@ rebuilds the catalog offline and deterministically:
 - stdio SaaS adapters (the Claude catalog's 32) are recorded with their
   commands and flagged `requires-setup`; they are not part of the remote
   one-click lane. A legacy SSE transport is recorded and flagged the same way.
+- Zero-app shipping policy (2026-09-14 product decision): Prime maintains ZERO
+  provider OAuth apps, so the catalog ships only self-serve connectors —
+  dynamic client registration (readiness `oauth-ready`) or user-supplied
+  tokens/keys (`user-setup`). The 16 providers that require a
+  provider-registered OAuth client (Figma, Slack, Gmail, Google Calendar,
+  Google Drive, MongoDB Atlas) or whose self-serve path stayed honestly
+  unknown (Shopify, HubSpot, LogRocket, Mapbox Docs, Adobe for Creativity,
+  Spotify Confidence, SumUp, Synthflow) are excluded via the documented
+  `excludedServers` list — one entry per upstream record, each with a
+  per-entry reason citing the decision — and the importer refuses to emit a
+  `prime-restricted` or `unknown` entry at all, so an unverified provider can
+  never ship silently. The pinned source snapshots and the audit evidence for
+  excluded endpoints stay committed as history.
 - Everything except the pre-existing `linear`/`notion` integrations ships
   `verification: "unverified"`. Import success is never a readiness claim.
 
@@ -54,8 +67,12 @@ these fixtures and fails on drift.
 ## Read-only public metadata audit
 
 `audit/metadata-audit.json` is a committed, reproducible snapshot of public
-OAuth metadata for every remote endpoint (102 http + 1 sse), captured by
-`audit/audit-provider-metadata.ts`:
+OAuth metadata for the remote endpoints (102 http + 1 sse at capture time,
+including the endpoints later removed by the 2026-09-14 zero-app cut — the
+excluded endpoints' results stay committed as evidence), captured by
+`audit/audit-provider-metadata.ts`. Re-runs audit the current catalog target
+set and retire, never delete, registration-attempt evidence for servers that
+left it:
 
 - public unauthenticated GETs only — no Authorization headers, no cookies, no
   registration POSTs, no OAuth or browser flows, no MCP tool calls, no stored
@@ -88,6 +105,10 @@ OAuth metadata for every remote endpoint (102 http + 1 sse), captured by
   registration endpoints — each carrying explicit provenance and preserved
   verbatim across re-runs (Figma: its advertised DCR endpoint returned HTTP
   403 to the engine's anonymous registration during dogfooding, 2026-09-13).
+  Blocks for servers that later left the audit target set — e.g. Figma after
+  the zero-app catalog cut — are carried forward verbatim in the top-level
+  `retiredRegistrationAttempts` array, so live evidence is history and a
+  re-run can never silently drop it.
 
 The importer merges this evidence into `catalog.json` offline and
 deterministically:
@@ -112,16 +133,22 @@ deterministically:
   authorization-server fallback, so captured AS evidence still decides. An
   advertised registration endpoint whose live anonymous registration was
   rejected (gated DCR, e.g. Figma's HTTP 403) can never be `oauth-ready`: the
-  entry classifies like DCR-less providers (Slack, HubSpot) unless curation
-  says more (Figma is `prime-restricted`, `registered-client`).
-- Placeholder/branded-client-only blockers were cleared with evidence
-  (Airtable and Shopify stay Connect-attemptable); genuine documented
-  requirements stay hard — API keys/bearer tokens (GitHub PAT, Zoom, Render,
-  datadog…), tenant config (tenant URLs, cluster ids), registered-client and
-  preview gates (Google, Slack, MongoDB), transport and local-runtime limits.
+  entry classifies like DCR-less providers. Since the 2026-09-14 zero-app cut
+  neither class ships at all — the importer refuses to emit a
+  `prime-restricted` or `unknown` entry, and providers that classify there
+  are excluded with documented reasons instead (Figma was the live gated-DCR
+  case: pre-registered, `registered-client`, then cut; its live evidence stays
+  in the audit store).
+- Placeholder/branded-client-only blockers were cleared with evidence where
+  the provider supports self-serve OAuth (Airtable stays Connect-attemptable);
+  genuine documented requirements stay hard for kept providers — API
+  keys/bearer tokens (GitHub PAT, Zoom, Render, datadog…), tenant config
+  (tenant URLs, cluster ids), transport and local-runtime limits.
+  Provider-client requirements (Google, Slack, MongoDB) and honest unknowns
+  (Shopify, HubSpot, LogRocket, …) no longer ship: the zero-app cut excluded
+  those providers with per-entry reasons.
 - `auth.alternatives` records documented per-path alternatives with their own
-  readiness (Airtable PAT, MongoDB service-account, GitHub standard OAuth,
-  Render partner OAuth).
+  readiness (Airtable PAT, GitHub standard OAuth, Render partner OAuth).
 - Ready entries are never downgraded by unavailable audit evidence, and
   unknown is never treated as proof of a restriction.
 

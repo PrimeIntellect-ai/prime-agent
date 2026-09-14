@@ -5,8 +5,11 @@ import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	type AuditFile,
+	type AuditResult,
+	advertisedRegistrationGated,
 	buildCatalog,
 	type ClaudeFixture,
+	evidenceSupportsStandardOauth,
 	type OpenAiFixture,
 	type Overrides,
 } from "../scripts/import-mcp-catalog.js";
@@ -82,9 +85,10 @@ describe("MCP service catalog", () => {
 		registerBuiltinMcpOAuthProviders();
 		expect(getOAuthProvider("mcp:linear")).toBeDefined();
 		expect(getOAuthProvider("mcp:notion")).toBeDefined();
-		// Imported catalog services are not eagerly registered.
-		expect(getOAuthProvider("mcp:figma")).toBeUndefined();
-		expect(getOAuthProvider("mcp:slack")).toBeUndefined();
+		// Imported catalog services are not eagerly registered (figma and slack
+		// were cut from the catalog entirely by the 2026-09-14 zero-app decision).
+		expect(getOAuthProvider("mcp:stripe")).toBeUndefined();
+		expect(getOAuthProvider("mcp:github")).toBeUndefined();
 	});
 
 	it("resolves and searches services deterministically", () => {
@@ -107,7 +111,7 @@ describe("MCP service catalog", () => {
 	});
 
 	it("merges the same service across sources into one canonical entry", () => {
-		for (const server of ["notion", "linear", "github", "figma", "stripe"]) {
+		for (const server of ["notion", "linear", "github", "stripe"]) {
 			const entry = getServiceCatalogEntry(server);
 			const sources = new Set(entry?.provenance.map((prov) => prov.source));
 			expect(sources.has("openai-plugins")).toBe(true);
@@ -120,10 +124,12 @@ describe("MCP service catalog", () => {
 	});
 
 	it("keeps distinct products and reviewed endpoint variants separate", () => {
-		for (const server of ["gmail", "google-drive", "google-calendar"]) {
-			expect(getServiceCatalogEntry(server)).toBeDefined();
+		// Distinct Google products (Gmail / Drive / Calendar) were never merged
+		// upstream, so after the zero-app cut they are simply gone — no merged
+		// or recombined ghost of them may remain.
+		for (const term of ["gmail", "google-drive", "google-calendar"]) {
+			expect(searchServiceCatalog(term)).toEqual([]);
 		}
-		expect(getServiceCatalogEntry("gmail")?.url).not.toBe(getServiceCatalogEntry("google-drive")?.url);
 		// Zoom product endpoints stay distinct; the merged meeting endpoint keeps both sources.
 		expect(getServiceCatalogEntry("zoom")?.url).toBe("https://mcp.zoom.us/mcp/zoom/streamable");
 		const meetings = getServiceCatalogEntry("zoom-meetings");
@@ -164,49 +170,26 @@ describe("MCP service catalog", () => {
 	});
 
 	it("marks known setup blockers honestly and imports no reviewed scope lists", () => {
-		const slack = getServiceCatalogEntry("slack");
-		expect(slack?.auth).toMatchObject({ strategy: "oauth", clientRegistration: "pre-registered" });
-		expect(slack?.setup.status).toBe("requires-setup");
-		expect(slack?.setup.reason).toMatch(/dynamic client registration/i);
-		// Figma advertises a DCR endpoint, but it is 403-gated for anonymous
-		// registrations (live-verified during dogfooding, recorded in the audit
-		// store), so it classifies like Slack: pre-registered, registered-client.
-		const figma = getServiceCatalogEntry("figma");
-		expect(figma?.auth).toMatchObject({ strategy: "oauth", clientRegistration: "pre-registered" });
-		expect(figma?.setup.status).toBe("requires-setup");
-		expect(figma?.setup.requirement).toBe("registered-client");
-		expect(figma?.setup.reason).toMatch(/HTTP 403 for anonymous registrations/);
-		expect(figma?.setup.fields?.map((field) => field.id).sort()).toEqual([
-			"FIGMA_MCP_CLIENT_ID",
-			"FIGMA_MCP_CLIENT_SECRET",
-		]);
-		// Placeholder-only upstream blocks were cleared with evidence: Airtable
-		// now Connects with OAuth DCR, Shopify stays attemptable with honest unknowns.
-		for (const server of ["airtable", "shopify"]) {
-			const entry = getServiceCatalogEntry(server);
-			expect(entry?.setup.status).toBe("ready");
-			expect(entry?.setup.reason).toBeUndefined();
-			expect(entry?.setup.reason ?? "").not.toMatch(/placeholder/i);
-		}
-		// Genuine docs-anchored restrictions are kept, with research-anchored reasons.
-		for (const server of ["gmail", "google-calendar", "google-drive"]) {
-			const entry = getServiceCatalogEntry(server);
-			expect(entry?.setup.status).toBe("requires-setup");
-			expect(entry?.setup.requirement).toBe("registered-client");
-			expect(entry?.setup.reason).toMatch(/Developer Preview/i);
-			expect(entry?.setup.reason ?? "").not.toMatch(/placeholder/i);
-		}
-		for (const server of ["gmail", "google-calendar", "google-drive"]) {
-			const entry = getServiceCatalogEntry(server);
-			expect(entry?.auth.reviewedScopes).toBeUndefined();
-			expect(entry?.oauth?.scopes).toBeUndefined();
-		}
+		// Provider-client gates (Slack, Figma, Google, MongoDB) and honest
+		// unknowns are no longer in-catalog classifications: the zero-app cut
+		// (2026-09-14) excludes those providers with documented per-entry
+		// reasons (see the cut test below).
+		// Placeholder-only upstream blocks were cleared with evidence where the
+		// provider supports self-serve OAuth: Airtable Connects with OAuth DCR.
+		const airtable = getServiceCatalogEntry("airtable");
+		expect(airtable?.setup.status).toBe("ready");
+		expect(airtable?.setup.reason).toBeUndefined();
+		expect(airtable?.setup.reason ?? "").not.toMatch(/placeholder/i);
+		// Genuine documented restrictions stay hard for kept providers, with
+		// research-anchored reasons: GitHub needs a user-supplied PAT.
 		const github = getServiceCatalogEntry("github");
 		expect(github?.auth.strategy).toBe("api_key");
 		expect(github?.setup.fields?.map((field) => field.id).sort()).toEqual([
 			"GITHUB_PAT_TOKEN",
 			"GITHUB_PERSONAL_ACCESS_TOKEN",
 		]);
+		expect(github?.auth.reviewedScopes).toBeUndefined();
+		expect(github?.oauth?.scopes).toBeUndefined();
 	});
 
 	it("classifies readiness from committed audit evidence without blanket bans", () => {
@@ -221,12 +204,6 @@ describe("MCP service catalog", () => {
 		expect(airtable?.auth.alternatives).toEqual([
 			expect.objectContaining({ kind: "api-key", readiness: "user-setup" }),
 		]);
-		const shopify = getServiceCatalogEntry("shopify");
-		expect(shopify?.setup.status).toBe("ready");
-		expect(shopify?.setup.readiness).toBe("unknown");
-		expect(shopify?.auth.metadata?.status).toBe("available");
-		expect(shopify?.auth.metadata?.dynamicClientRegistration).toBeUndefined();
-		expect(shopify?.auth.metadata?.note).toMatch(/no dynamic client registration is advertised/);
 		const linear = getServiceCatalogEntry("linear");
 		expect(linear?.setup.readiness).toBe("oauth-ready");
 		expect(linear?.auth.metadata?.dynamicClientRegistration).toBe(true);
@@ -236,53 +213,19 @@ describe("MCP service catalog", () => {
 		const notion = getServiceCatalogEntry("notion");
 		expect(notion?.setup.readiness).toBe("oauth-ready");
 		expect(notion?.auth.metadata?.note).toBeUndefined();
-		// CIMD alone is never oauth-ready (no Prime-controlled identity deployed).
-		const synthflow = getServiceCatalogEntry("synthflow");
-		expect(synthflow?.setup.readiness).toBe("unknown");
 		// The component comparison accepts exact-origin resources (root-slash
 		// normalized): the 9 DCR-capable origin-mismatched entries flipped.
 		for (const server of ["amplitude", "appwrite", "lovable", "miro", "rootly", "vercel", "windsor-ai", "zoominfo"]) {
 			expect(getServiceCatalogEntry(server)?.setup.readiness).toBe("oauth-ready");
 		}
-		// LogRocket fails closed even under the component rule: its resource keeps
-		// the path but drops the ?toolsets=all query, so the header-pointed
-		// document fails the engine's validation with no well-known fall-through.
-		const logrocket = getServiceCatalogEntry("logrocket");
-		expect(logrocket?.setup.readiness).toBe("unknown");
-		expect(logrocket?.auth.metadata?.note).toMatch(
-			/header-pointed document fails the engine's protected-resource validation/,
-		);
-		// DCR-less mismatched providers never become oauth-ready.
-		expect(getServiceCatalogEntry("hubspot")?.setup.readiness).toBe("unknown");
 		// The SDK-parity origin-level fallback makes previously unreachable PRM
 		// documents engine-visible: valid documents with DCR flip (Codspeed,
 		// Resend), served-but-invalid ones fail closed (Confidence).
 		expect(getServiceCatalogEntry("codspeed")?.setup.readiness).toBe("oauth-ready");
 		expect(getServiceCatalogEntry("resend")?.setup.readiness).toBe("oauth-ready");
-		for (const server of ["confidence-docs", "confidence-flags"]) {
-			const entry = getServiceCatalogEntry(server);
-			expect(entry?.setup.readiness).toBe("unknown");
-			expect(entry?.auth.metadata?.note).toMatch(/fails the engine's audience\/structure validation/);
-		}
-		// Prime-restricted: registered-client requirements stay hard, research-anchored.
-		for (const server of ["gmail", "google-calendar", "google-drive", "slack", "figma", "mongodb-atlas"]) {
-			const entry = getServiceCatalogEntry(server);
-			expect(entry?.setup.status).toBe("requires-setup");
-			expect(entry?.setup.readiness).toBe("prime-restricted");
-			expect(entry?.setup.requirement).toBe("registered-client");
-		}
-		// The gated-DCR flip: Figma still advertises the endpoint (kept in the
-		// audit evidence), but the live anonymous registration attempt was
-		// rejected (HTTP 403), so the honest metadata flag is explicit false —
-		// gated, distinguishable from omitted (not advertised) — with the live
-		// finding in the note.
-		const figmaMetadata = getServiceCatalogEntry("figma");
-		expect(figmaMetadata?.auth.metadata?.dynamicClientRegistration).toBe(false);
-		expect(figmaMetadata?.auth.metadata?.note).toMatch(/rejected \(HTTP 403, live-verified/);
-		const mongo = getServiceCatalogEntry("mongodb-atlas");
-		expect(mongo?.auth.alternatives).toEqual([
-			expect.objectContaining({ kind: "service-account", readiness: "user-setup" }),
-		]);
+		// Prime-restricted and unknown classifications no longer ship at all:
+		// the zero-app cut (2026-09-14) excludes those providers (see the cut
+		// test), and the importer now refuses to emit either class.
 		// Documented user-supplied credentials stay primary; OAuth alternatives stay unknown.
 		const render = getServiceCatalogEntry("render");
 		expect(render?.setup.status).toBe("requires-setup");
@@ -303,7 +246,15 @@ describe("MCP service catalog", () => {
 		expect(getServiceCatalogEntry("aikido")?.setup.requirement).toBe("local-runtime");
 		expect(getServiceCatalogEntry("zoom")?.setup.requirement).toBe("bearer-token");
 		// Readiness is informational-only data; the raw counts are in the file.
+		// Zero-app cut state (2026-09-14): the catalog ships exactly the two
+		// self-serve classes and nothing else — the sums must stay exact so any
+		// drift forces a conscious update here.
 		const committed = JSON.parse(rawCatalogJson);
+		expect(committed.counts.total).toBe(124);
+		expect(committed.counts.readinessOauthReady).toBe(71);
+		expect(committed.counts.readinessUserSetup).toBe(53);
+		expect(committed.counts.readinessPrimeRestricted).toBe(0);
+		expect(committed.counts.readinessUnknown).toBe(0);
 		expect(
 			committed.counts.readinessOauthReady +
 				committed.counts.readinessUserSetup +
@@ -332,10 +283,6 @@ describe("MCP service catalog", () => {
 		expect(intercom?.auth.metadata?.note).toBeUndefined();
 		expect(intercom?.auth.metadata?.dynamicClientRegistration).toBe(true);
 		expect(intercom?.setup.readiness).toBe("oauth-ready");
-		const adobe = getServiceCatalogEntry("adobe-for-creativity");
-		expect(adobe?.auth.metadata?.note).toBeUndefined();
-		expect(adobe?.auth.metadata?.status).toBe("unavailable");
-		expect(adobe?.setup.readiness).toBe("unknown");
 		// Observational AS scope universes are recorded but never imported as
 		// reviewed scopes, and no entry ever auto-requests them.
 		for (const entry of SERVICE_CATALOG) {
@@ -442,12 +389,165 @@ describe("MCP service catalog", () => {
 		expect(JSON.stringify(again.catalog)).toBe(JSON.stringify(catalog));
 	});
 
+	it("cuts the catalog to zero-app self-serve only, with documented exclusions and kept evidence", () => {
+		// 2026-09-14 product decision: Prime maintains ZERO provider OAuth apps.
+		// The shipped catalog advertises only self-serve connectors — dynamic
+		// client registration (readiness "oauth-ready") or user-supplied
+		// tokens/keys ("user-setup"). Providers that require a
+		// provider-registered client and providers whose self-serve path stayed
+		// honestly unknown are EXCLUDED with a documented per-entry reason, not
+		// shipped mislabeled.
+		const providerClient = ["figma", "gmail", "google-calendar", "google-drive", "mongodb-atlas", "slack"];
+		const unverified = [
+			"adobe-for-creativity",
+			"confidence-docs",
+			"confidence-flags",
+			"hubspot",
+			"logrocket",
+			"mapbox-docs",
+			"shopify",
+			"sumup",
+			"synthflow",
+			"synthflow-docs",
+		];
+		for (const server of [...providerClient, ...unverified]) {
+			expect(getServiceCatalogEntry(server), `${server} must be cut from the catalog`).toBeUndefined();
+		}
+		// Providers merged from both upstreams were cut on BOTH sides, so no
+		// ghost entry can re-enter from the other source — and neither can any
+		// alias or label fragment of the cut brands.
+		for (const term of ["figma", "slack", "shopify", "gmail", "mongodb", "synthflow", "hubspot"]) {
+			expect(searchServiceCatalog(term)).toEqual([]);
+		}
+		const inputs = loadInputs();
+		const { report } = buildCatalog(inputs.openAi, inputs.claude, inputs.overrides, inputs.audit);
+		const excluded = new Map(report.excluded.map((entry) => [entry.key, entry.reason]));
+		for (const key of [
+			"openai-plugins/figma/figma",
+			"claude-plugins-official/figma/figma",
+			"openai-plugins/slack/slack",
+			"claude-plugins-official/slack/slack",
+			"openai-plugins/gmail/gmail",
+			"openai-plugins/google-calendar/google-calendar",
+			"openai-plugins/google-drive/google-drive",
+			"claude-plugins-official/mongodb-atlas/mongodb-atlas",
+			"openai-plugins/shopify/shopify",
+			"claude-plugins-official/adobe-for-creativity/Adobe for creativity",
+			"claude-plugins-official/confidence/confidence-docs",
+			"claude-plugins-official/confidence/confidence-flags",
+			"claude-plugins-official/hubspot-sales/hubspot",
+			"claude-plugins-official/logrocket/logrocket",
+			"claude-plugins-official/mapbox/mapbox-docs",
+			"claude-plugins-official/sumup/sumup",
+			"claude-plugins-official/synthflow/synthflow",
+			"claude-plugins-official/synthflow/synthflow-docs",
+		]) {
+			expect(excluded.has(key), `${key} must be a documented exclusion`).toBe(true);
+			expect(excluded.get(key), `${key} must cite the zero-app decision`).toMatch(/zero-app/);
+		}
+		// The cut is a shipping decision, not an evidence deletion: the pinned
+		// source snapshots still carry the excluded upstream configs and the
+		// committed audit store still holds every excluded endpoint's metadata —
+		// including Figma's live gated-DCR evidence.
+		expect(inputs.openAi.plugins.some((plugin) => plugin.name === "figma")).toBe(true);
+		expect(inputs.openAi.plugins.some((plugin) => plugin.name === "slack")).toBe(true);
+		expect(inputs.claude.plugins.some((plugin) => plugin.name === "mongodb-atlas")).toBe(true);
+		const auditedServers = new Set(inputs.audit.results.map((result) => result.server));
+		for (const server of [...providerClient, ...unverified]) {
+			expect(auditedServers.has(server), `${server} audit evidence must stay committed`).toBe(true);
+		}
+		const figma = inputs.audit.results.find((result) => result.server === "figma");
+		expect(figma?.authorizationServer.registrationAttempt?.httpStatus).toBe(403);
+	});
+
+	it("keeps the gated-DCR machinery: live-rejected advertised registration is explicit-false and never oauth-ready", () => {
+		// The figma entry that exercised this predicate live is now excluded by
+		// the zero-app cut (its evidence stays in the audit store), so the
+		// machinery is pinned directly with synthetic evidence mirroring the
+		// preserved figma attempt: an advertisement alone is NOT usable-DCR
+		// evidence once the real no-credentials flow is known to be rejected.
+		const registrationEndpoint = "https://as.example.test/register";
+		const gatedAttempt = {
+			provenance: "live dogfooding login",
+			date: "2026-09-13",
+			method: "POST",
+			url: registrationEndpoint,
+			httpStatus: 403,
+		};
+		const gatedResult: AuditResult = {
+			server: "gated",
+			endpoint: "https://mcp.example.test/mcp",
+			probe: { url: "https://mcp.example.test/mcp", httpStatus: 401 },
+			protectedResource: {
+				attempts: [
+					{
+						sourceUrl: "https://mcp.example.test/.well-known/oauth-protected-resource/mcp",
+						kind: "pathful",
+						status: "available",
+						audienceMatches: true,
+						evidence: { resource: "https://mcp.example.test/mcp", authorizationServers: [registrationEndpoint] },
+					},
+				],
+				engineVisible: "available",
+				engineSelectedSourceUrl: "https://mcp.example.test/.well-known/oauth-protected-resource/mcp",
+			},
+			authorizationServer: {
+				issuer: "https://as.example.test",
+				sourceUrls: [registrationEndpoint],
+				status: "available",
+				evidence: {
+					issuer: "https://as.example.test",
+					authorizationEndpoint: "https://as.example.test/authorize",
+					tokenEndpoint: "https://as.example.test/token",
+					registrationEndpoint,
+				},
+				registrationAttempt: gatedAttempt,
+			},
+		};
+		// A POST to exactly the advertised endpoint rejected with 401/403 gates.
+		expect(advertisedRegistrationGated(gatedResult.authorizationServer)).toBe(true);
+		expect(evidenceSupportsStandardOauth(gatedResult)).toBe(false);
+		expect(
+			advertisedRegistrationGated({
+				...gatedResult.authorizationServer,
+				registrationAttempt: { ...gatedAttempt, httpStatus: 401 },
+			}),
+		).toBe(true);
+		// 404 is a real answer, not a client-forbidden rejection: not gated.
+		expect(
+			advertisedRegistrationGated({
+				...gatedResult.authorizationServer,
+				registrationAttempt: { ...gatedAttempt, httpStatus: 404 },
+			}),
+		).toBe(false);
+		// Only an anonymous POST to exactly the advertised endpoint counts: a
+		// different URL or method never gates the advertisement.
+		expect(
+			advertisedRegistrationGated({
+				...gatedResult.authorizationServer,
+				registrationAttempt: { ...gatedAttempt, url: "https://as.example.test/other" },
+			}),
+		).toBe(false);
+		expect(
+			advertisedRegistrationGated({
+				...gatedResult.authorizationServer,
+				registrationAttempt: { ...gatedAttempt, method: "GET" },
+			}),
+		).toBe(false);
+		// Without a live attempt the advertisement is evidence: not gated, and
+		// the same coherent metadata is oauth-ready.
+		const ungated = { ...gatedResult, authorizationServer: { ...gatedResult.authorizationServer } };
+		delete ungated.authorizationServer.registrationAttempt;
+		expect(advertisedRegistrationGated(ungated.authorizationServer)).toBe(false);
+		expect(evidenceSupportsStandardOauth(ungated)).toBe(true);
+	});
+
 	it("counts the sources before dedupe and records every exclusion", () => {
 		const inputs = loadInputs();
 		const { report } = buildCatalog(inputs.openAi, inputs.claude, inputs.overrides, inputs.audit);
 		expect(inputs.openAi.plugins).toHaveLength(25);
 		expect(inputs.claude.plugins).toHaveLength(118);
-		expect(report.sources["openai-plugins"].remoteServers).toBe(25);
+		expect(report.sources["openai-plugins"].remoteServers).toBe(19);
 		expect(report.sources["claude-plugins-official"].stdioServers).toBe(43);
 		// Documented exclusions are all present with reasons.
 		expect(report.excluded.length).toBeGreaterThan(0);

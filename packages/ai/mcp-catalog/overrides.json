@@ -19,55 +19,6 @@
 			],
 			"legacyBuiltin": true
 		},
-		"openai-plugins/slack/slack": {
-			"clientRegistration": "pre-registered",
-			"requirement": "registered-client",
-			"readiness": "prime-restricted",
-			"setupReason": "Slack MCP requires a Slack-registered app client (Marketplace or internal; unlisted distribution prohibited); it has no dynamic client registration, and upstream configs carry OpenAI/Claude-branded client ids that Prime must not reuse",
-			"setupFields": [
-				{
-					"id": "SLACK_MCP_CLIENT_ID",
-					"label": "Slack app client ID",
-					"description": "Client ID of your own registered Slack app (required because Slack has no dynamic client registration)",
-					"required": true,
-					"kind": "client-id"
-				},
-				{
-					"id": "SLACK_MCP_CLIENT_SECRET",
-					"label": "Slack app client secret",
-					"description": "Client secret of your own registered Slack app (Slack's authorization server accepts confidential client auth only)",
-					"required": true,
-					"kind": "client-secret"
-				}
-			],
-			"metadataNote": "no dynamic client registration advertised; confidential-only client auth (client_secret_post) observed",
-			"note": "branded OAuth client ids stripped from both upstream configs; see https://docs.slack.dev/ai/slack-mcp-server"
-		},
-		"openai-plugins/figma/figma": {
-			"clientRegistration": "pre-registered",
-			"requirement": "registered-client",
-			"readiness": "prime-restricted",
-			"setup": "requires-setup",
-			"setupReason": "Figma MCP requires a Figma-authorized pre-registered app client: it advertises a dynamic-client-registration endpoint but that endpoint returns HTTP 403 for anonymous registrations (live-verified 2026-09-13 during dogfooding; corroborated by public reports), and its authorization server accepts confidential client auth only (mcp:connect interop unverified)",
-			"setupFields": [
-				{
-					"id": "FIGMA_MCP_CLIENT_ID",
-					"label": "Figma app client ID",
-					"description": "Client ID of your own Figma-authorized app client (required because Figma's advertised dynamic client registration is 403-gated for anonymous registrations)",
-					"required": true,
-					"kind": "client-id"
-				},
-				{
-					"id": "FIGMA_MCP_CLIENT_SECRET",
-					"label": "Figma app client secret",
-					"description": "Client secret of your own Figma-authorized app client (Figma's authorization server accepts confidential client auth only)",
-					"required": true,
-					"kind": "client-secret"
-				}
-			],
-			"metadataNote": "advertises a registration endpoint but anonymous dynamic client registration is rejected (HTTP 403, live-verified 2026-09-13 during dogfooding); confidential-only client auth (client_secret_basic/client_secret_post) observed",
-			"note": "advertised dynamic client registration is 403-gated for anonymous registrations (live-verified 2026-09-13 during dogfooding); classified pre-registered like Slack — a Figma-authorized app client is required and mcp:connect interop is unverified"
-		},
 		"openai-plugins/zoom/zoom": {
 			"id": "zoom-meetings",
 			"label": "Zoom Meetings",
@@ -130,21 +81,6 @@
 		"claude-plugins-official/mapbox/mapbox-devkit": {
 			"label": "Mapbox DevKit"
 		},
-		"claude-plugins-official/mapbox/mapbox-docs": {
-			"label": "Mapbox Docs"
-		},
-		"claude-plugins-official/confidence/confidence-flags": {
-			"label": "Spotify Confidence Flags"
-		},
-		"claude-plugins-official/confidence/confidence-docs": {
-			"label": "Spotify Confidence Docs"
-		},
-		"claude-plugins-official/synthflow/synthflow": {
-			"label": "Synthflow"
-		},
-		"claude-plugins-official/synthflow/synthflow-docs": {
-			"label": "Synthflow Docs"
-		},
 		"claude-plugins-official/atlassian/atlassian": {
 			"label": "Atlassian"
 		},
@@ -159,12 +95,6 @@
 		"claude-plugins-official/prisma/Prisma-Remote": {
 			"id": "prisma",
 			"label": "Prisma"
-		},
-		"claude-plugins-official/adobe-for-creativity/Adobe for creativity": {
-			"label": "Adobe for Creativity"
-		},
-		"claude-plugins-official/hubspot-sales/hubspot": {
-			"note": "endpoint path is scoped to the Claude connector catalog"
 		},
 		"claude-plugins-official/lusha/lusha": {
 			"note": "endpoint path is scoped to the Claude connector catalog"
@@ -183,20 +113,6 @@
 		"claude-plugins-official/data-agent-kit-starter-pack": {
 			"service": "google-cloud",
 			"label": "Google Data Agent Kit"
-		},
-		"claude-plugins-official/mongodb-atlas/mongodb-atlas": {
-			"requirement": "registered-client",
-			"readiness": "prime-restricted",
-			"setupReason": "MongoDB's hosted MCP requires a pre-registered OAuth client for the default interactive path (provider access-model docs); the upstream config relies on a Claude-specific OAuth client identity that Prime must not reuse",
-			"alternatives": [
-				{
-					"kind": "service-account",
-					"readiness": "user-setup",
-					"note": "MongoDB documents a dedicated service-account (machine-to-machine) access model for its hosted MCP as a distinct path from the interactive OAuth flow",
-					"sourceUrl": "https://www.mongodb.com/docs/mcp-server/remote-mcp/access-models/"
-				}
-			],
-			"metadataNote": "no dynamic client registration advertised; a client-id metadata document is advertised but no Prime-controlled identity document is deployed or authorized, so CIMD alone is not oauth-readiness"
 		},
 		"openai-plugins/datadog/datadog": {
 			"label": "Datadog"
@@ -280,32 +196,6 @@
 				}
 			]
 		},
-		"openai-plugins/shopify/shopify": {
-			"setup": "ready",
-			"note": "placeholder-only upstream OAuth blocks cleared: unknown is not proof of a restriction; connect attempts surface real errors honestly",
-			"metadataNote": "the origin-level protected-resource document and authorization-server metadata are served; no dynamic client registration is advertised, so readiness stays unknown and connect attempts surface real errors"
-		},
-		"openai-plugins/gmail/gmail": {
-			"requirement": "registered-client",
-			"readiness": "prime-restricted",
-			"setupReason": "Google MCP endpoints are gated behind Developer Preview terms with one shared OAuth client workstream and require Google-registered clients; no dynamic client registration is advertised",
-			"note": "genuine restriction kept (research-anchored): Google MCP endpoints run under Developer Preview terms (no public use before GA) with one shared OAuth client workstream and Google-registered clients \u2014 see https://developers.google.com/workspace/preview",
-			"metadataNote": "no dynamic client registration advertised; confidential-only client auth (client_secret_basic/client_secret_post) observed"
-		},
-		"openai-plugins/google-calendar/google-calendar": {
-			"requirement": "registered-client",
-			"readiness": "prime-restricted",
-			"setupReason": "Google MCP endpoints are gated behind Developer Preview terms with one shared OAuth client workstream and require Google-registered clients; no dynamic client registration is advertised",
-			"note": "genuine restriction kept (research-anchored): Google MCP endpoints run under Developer Preview terms (no public use before GA) with one shared OAuth client workstream and Google-registered clients \u2014 see https://developers.google.com/workspace/preview",
-			"metadataNote": "no dynamic client registration advertised; confidential-only client auth (client_secret_basic/client_secret_post) observed"
-		},
-		"openai-plugins/google-drive/google-drive": {
-			"requirement": "registered-client",
-			"readiness": "prime-restricted",
-			"setupReason": "Google MCP endpoints are gated behind Developer Preview terms with one shared OAuth client workstream and require Google-registered clients; no dynamic client registration is advertised",
-			"note": "genuine restriction kept (research-anchored): Google MCP endpoints run under Developer Preview terms (no public use before GA) with one shared OAuth client workstream and Google-registered clients \u2014 see https://developers.google.com/workspace/preview",
-			"metadataNote": "no dynamic client registration advertised; confidential-only client auth (client_secret_basic/client_secret_post) observed"
-		},
 		"claude-plugins-official/render/render": {
 			"requirement": "api-key",
 			"readiness": "user-setup",
@@ -339,6 +229,79 @@
 		{
 			"key": "claude-plugins-official/deploy-on-aws/awsknowledge",
 			"reason": "docs-only server per upstream plugin notes; the AWS IaC stdio adapter is recorded for the plugin"
+		}
+,
+		{
+			"key": "openai-plugins/figma/figma",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors \u2014 dynamic client registration or user-supplied tokens/keys): Figma requires a provider-authorized pre-registered app client \u2014 its advertised dynamic client registration is 403-gated for anonymous registrations (live-verified 2026-09-13 during dogfooding; the attempt is kept as evidence in the committed audit store) and its authorization server accepts confidential client auth only"
+		},
+		{
+			"key": "claude-plugins-official/figma/figma",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors \u2014 dynamic client registration or user-supplied tokens/keys): the Claude-side record of the same Figma endpoint excluded via openai-plugins/figma/figma \u2014 Figma requires a provider-authorized pre-registered app client (its advertised dynamic client registration is 403-gated for anonymous registrations, live-verified 2026-09-13; evidence kept in the committed audit store)"
+		},
+		{
+			"key": "openai-plugins/slack/slack",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors \u2014 dynamic client registration or user-supplied tokens/keys): Slack requires a Slack-registered app client \u2014 no dynamic client registration is advertised and the authorization server accepts confidential client auth only, while the upstream config carries branded OAuth client ids Prime must not reuse"
+		},
+		{
+			"key": "claude-plugins-official/slack/slack",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors \u2014 dynamic client registration or user-supplied tokens/keys): the Claude-side record of the same Slack endpoint excluded via openai-plugins/slack/slack \u2014 Slack requires a Slack-registered app client (no dynamic client registration advertised; confidential-only client auth observed)"
+		},
+		{
+			"key": "openai-plugins/gmail/gmail",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors \u2014 dynamic client registration or user-supplied tokens/keys): Google MCP endpoints are gated behind Developer Preview terms and require Google-registered clients \u2014 no dynamic client registration is advertised (confidential-only client auth observed)"
+		},
+		{
+			"key": "openai-plugins/google-calendar/google-calendar",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors \u2014 dynamic client registration or user-supplied tokens/keys): Google MCP endpoints are gated behind Developer Preview terms and require Google-registered clients \u2014 no dynamic client registration is advertised (confidential-only client auth observed)"
+		},
+		{
+			"key": "openai-plugins/google-drive/google-drive",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors \u2014 dynamic client registration or user-supplied tokens/keys): Google MCP endpoints are gated behind Developer Preview terms and require Google-registered clients \u2014 no dynamic client registration is advertised (confidential-only client auth observed)"
+		},
+		{
+			"key": "claude-plugins-official/mongodb-atlas/mongodb-atlas",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors \u2014 dynamic client registration or user-supplied tokens/keys): MongoDB's hosted MCP requires a pre-registered OAuth client for the default interactive path \u2014 no dynamic client registration is advertised and a client-id metadata document alone is not oauth-readiness (the documented service-account model is an alternative, not the audited default path)"
+		},
+		{
+			"key": "openai-plugins/shopify/shopify",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors \u2014 dynamic client registration or user-supplied tokens/keys): no dynamic client registration is advertised for the Shopify MCP endpoint and no self-serve OAuth path could be verified, so readiness stayed honestly unknown"
+		},
+		{
+			"key": "claude-plugins-official/adobe-for-creativity/Adobe for creativity",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors \u2014 dynamic client registration or user-supplied tokens/keys): no authorization-server metadata is reachable for the endpoint (well-known responses were 403) and no dynamic client registration is advertised, so no self-serve OAuth path could be verified (readiness stayed unknown)"
+		},
+		{
+			"key": "claude-plugins-official/confidence/confidence-docs",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors \u2014 dynamic client registration or user-supplied tokens/keys): the served origin-level protected-resource document fails the engine's audience/structure validation (PRM discovery fails closed), so no self-serve OAuth path could be verified (readiness stayed unknown)"
+		},
+		{
+			"key": "claude-plugins-official/confidence/confidence-flags",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors \u2014 dynamic client registration or user-supplied tokens/keys): the served origin-level protected-resource document fails the engine's audience/structure validation (PRM discovery fails closed), so no self-serve OAuth path could be verified (readiness stayed unknown)"
+		},
+		{
+			"key": "claude-plugins-official/hubspot-sales/hubspot",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors \u2014 dynamic client registration or user-supplied tokens/keys): no dynamic client registration is advertised and no self-serve OAuth path could be verified, so readiness stayed honestly unknown"
+		},
+		{
+			"key": "claude-plugins-official/logrocket/logrocket",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors \u2014 dynamic client registration or user-supplied tokens/keys): the header-pointed protected-resource document fails the engine's protected-resource validation (its resource keeps the path but drops the query string, so the engine fails closed with no well-known fall-through), so no self-serve OAuth path could be verified"
+		},
+		{
+			"key": "claude-plugins-official/mapbox/mapbox-docs",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors \u2014 dynamic client registration or user-supplied tokens/keys): no authorization-server metadata is reachable for the docs endpoint (well-known responses were 404) and no dynamic client registration is advertised, so no self-serve OAuth path could be verified (readiness stayed unknown)"
+		},
+		{
+			"key": "claude-plugins-official/sumup/sumup",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors \u2014 dynamic client registration or user-supplied tokens/keys): no dynamic client registration is advertised and no self-serve OAuth path could be verified, so readiness stayed honestly unknown"
+		},
+		{
+			"key": "claude-plugins-official/synthflow/synthflow",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors \u2014 dynamic client registration or user-supplied tokens/keys): a client-id metadata document is advertised but no dynamic client registration endpoint is, and CIMD alone is never oauth-readiness (no Prime-controlled identity document is deployed), so readiness stayed honestly unknown"
+		},
+		{
+			"key": "claude-plugins-official/synthflow/synthflow-docs",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors \u2014 dynamic client registration or user-supplied tokens/keys): no authorization-server metadata is reachable for the docs endpoint (well-known responses were 404) and no dynamic client registration is advertised, so no self-serve OAuth path could be verified (readiness stayed unknown)"
 		}
 	]
 }

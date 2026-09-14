@@ -14,6 +14,16 @@
  * stripping and dedup rules below stay reproducible and testable; the emitted
  * catalog must contain none of them.
  *
+ * Zero-app shipping policy (2026-09-14 product decision): Prime maintains ZERO
+ * provider OAuth apps, so the catalog advertises only what works self-serve —
+ * dynamic client registration (readiness "oauth-ready") or user-supplied
+ * tokens/keys ("user-setup"). Providers that require a provider-registered
+ * client ("prime-restricted") or whose self-serve path could not be verified
+ * ("unknown") are cut via the documented `excludedServers` list in
+ * overrides.json, each with a per-entry reason; the importer enforces the cut
+ * structurally and refuses to ship such entries. Source snapshots and audit
+ * evidence stay committed as history and are never deleted by the cut.
+ *
  * Run from the repository root: npx tsx packages/ai/scripts/import-mcp-catalog.ts
  */
 
@@ -290,6 +300,18 @@ export interface AuditFile {
 	fetchedAt: string;
 	targets: { server: string; endpoint: string }[];
 	results: AuditResult[];
+	/**
+	 * Live registration-attempt evidence for servers that later left the audit
+	 * target set (e.g. a server cut from the catalog by the 2026-09-14
+	 * zero-app decision): the audit script carries these blocks forward
+	 * verbatim on re-runs so live evidence is never silently dropped.
+	 * Evidence/history only — the importer never classifies from them.
+	 */
+	retiredRegistrationAttempts?: {
+		server: string;
+		endpoint: string;
+		registrationAttempt: AuditRegistrationAttempt;
+	}[];
 	counts: Record<string, number>;
 	bounds: Record<string, string>;
 }
@@ -671,8 +693,13 @@ function deriveRequirement(entry: CatalogEntry): CatalogSetupRequirement | undef
  * store (the read-only audit itself never POSTs registration endpoints); an
  * advertisement alone is NOT usable-DCR evidence once the real flow is known
  * to fail.
+ *
+ * Exported for offline machinery tests: since the 2026-09-14 zero-app cut the
+ * gated entry that exercised this predicate live (Figma) is excluded from the
+ * shipped catalog (the evidence stays in the audit store), so the predicate
+ * now guards future entries and is unit-tested directly.
  */
-function advertisedRegistrationGated(as: AuditResult["authorizationServer"]): boolean {
+export function advertisedRegistrationGated(as: AuditResult["authorizationServer"]): boolean {
 	const attempt = as.registrationAttempt;
 	if (!attempt || !as.evidence?.registrationEndpoint) return false;
 	return (
@@ -682,7 +709,7 @@ function advertisedRegistrationGated(as: AuditResult["authorizationServer"]): bo
 	);
 }
 
-function evidenceSupportsStandardOauth(result: AuditResult): boolean {
+export function evidenceSupportsStandardOauth(result: AuditResult): boolean {
 	// oauth-ready needs a coherent authorization server AND dynamic client
 	// registration. CIMD alone is NOT sufficient: no Prime-controlled identity
 	// document is deployed or authorized today (root decision), and foreign
@@ -1179,6 +1206,25 @@ export function buildCatalog(
 	}
 
 	applyAuditEvidence(built, audit, overrides);
+
+	// Zero-app shipping policy (2026-09-14 product decision): Prime maintains
+	// ZERO provider OAuth apps, so the shipped catalog advertises only what
+	// works self-serve — dynamic client registration (readiness "oauth-ready")
+	// or user-supplied tokens/keys ("user-setup"). Any entry that still
+	// classifies "prime-restricted" (needs a provider-registered client) or
+	// "unknown" (no verified self-serve path) fails the import on purpose: cut
+	// it via overrides.json `excludedServers` with a documented per-entry
+	// reason, or curate its readiness with evidence. The readiness vocabulary
+	// and the fail-closed audit machinery that derives it are unchanged — only
+	// shipping is policed; the excluded source snapshots and audit evidence
+	// stay committed as history.
+	for (const { entry } of built) {
+		if (entry.setup.readiness === "prime-restricted" || entry.setup.readiness === "unknown") {
+			throw new Error(
+				`entry ${entry.server} classifies readiness "${entry.setup.readiness}"; the zero-app catalog ships only self-serve (oauth-ready/user-setup) entries — add it to overrides.json excludedServers with a documented reason, or curate its readiness with evidence`,
+			);
+		}
+	}
 
 	const entries = built.map((item) => item.entry).sort((a, b) => a.server.localeCompare(b.server));
 

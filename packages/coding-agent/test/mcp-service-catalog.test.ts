@@ -966,7 +966,8 @@ describe("defaultServiceCatalogProvider", () => {
 		const services = defaultServiceCatalogProvider()();
 		const ids = new Set(services.map((service) => service.serviceId));
 		// The merged catalog supersedes the legacy-only slice; the full entry set
-		// (140 today) still contains the reserved legacy built-ins.
+		// (124 today, after the 2026-09-14 zero-app cut) still contains the
+		// reserved legacy built-ins.
 		expect(ids.has("linear")).toBe(true);
 		expect(ids.has("notion")).toBe(true);
 		expect(services.length).toBeGreaterThan(100);

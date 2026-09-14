@@ -2,15 +2,15 @@
 	"sources": {
 		"openai-plugins": {
 			"plugins": 25,
-			"remoteServers": 25,
+			"remoteServers": 19,
 			"stdioServers": 0,
-			"excluded": 0
+			"excluded": 6
 		},
 		"claude-plugins-official": {
 			"plugins": 118,
-			"remoteServers": 98,
+			"remoteServers": 86,
 			"stdioServers": 43,
-			"excluded": 5
+			"excluded": 17
 		}
 	},
 	"merged": [
@@ -51,16 +51,6 @@
 			],
 			"urls": [
 				"https://mcp.datadoghq.com/v1/mcp"
-			]
-		},
-		{
-			"server": "figma",
-			"sources": [
-				"openai-plugins",
-				"claude-plugins-official"
-			],
-			"urls": [
-				"https://mcp.figma.com/mcp"
 			]
 		},
 		{
@@ -122,16 +112,6 @@
 			"urls": [
 				"https://mcp.sentry.dev/mcp",
 				"https://mcp.sentry.dev/mcp?utm_source=plugin"
-			]
-		},
-		{
-			"server": "slack",
-			"sources": [
-				"openai-plugins",
-				"claude-plugins-official"
-			],
-			"urls": [
-				"https://mcp.slack.com/mcp"
 			]
 		},
 		{
@@ -222,12 +202,24 @@
 	],
 	"excluded": [
 		{
+			"key": "claude-plugins-official/adobe-for-creativity/Adobe for creativity",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): no authorization-server metadata is reachable for the endpoint (well-known responses were 403) and no dynamic client registration is advertised, so no self-serve OAuth path could be verified (readiness stayed unknown)"
+		},
+		{
 			"key": "claude-plugins-official/cockroachdb/cockroachdb-toolbox",
 			"reason": "local stdio utility inside a remote-service plugin; outside the remote service lane"
 		},
 		{
 			"key": "claude-plugins-official/cockroachdb/cockroachdb-toolbox-http",
 			"reason": "loopback/private endpoint; local server, not a remote service"
+		},
+		{
+			"key": "claude-plugins-official/confidence/confidence-docs",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): the served origin-level protected-resource document fails the engine's audience/structure validation (PRM discovery fails closed), so no self-serve OAuth path could be verified (readiness stayed unknown)"
+		},
+		{
+			"key": "claude-plugins-official/confidence/confidence-flags",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): the served origin-level protected-resource document fails the engine's audience/structure validation (PRM discovery fails closed), so no self-serve OAuth path could be verified (readiness stayed unknown)"
 		},
 		{
 			"key": "claude-plugins-official/deploy-on-aws/awsknowledge",
@@ -238,27 +230,87 @@
 			"reason": "Claude-app-specific endpoint variant; the official Dropbox endpoint is imported from the openai catalog"
 		},
 		{
+			"key": "claude-plugins-official/figma/figma",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): the Claude-side record of the same Figma endpoint excluded via openai-plugins/figma/figma — Figma requires a provider-authorized pre-registered app client (its advertised dynamic client registration is 403-gated for anonymous registrations, live-verified 2026-09-13; evidence kept in the committed audit store)"
+		},
+		{
+			"key": "claude-plugins-official/hubspot-sales/hubspot",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): no dynamic client registration is advertised and no self-serve OAuth path could be verified, so readiness stayed honestly unknown"
+		},
+		{
+			"key": "claude-plugins-official/logrocket/logrocket",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): the header-pointed protected-resource document fails the engine's protected-resource validation (its resource keeps the path but drops the query string, so the engine fails closed with no well-known fall-through), so no self-serve OAuth path could be verified"
+		},
+		{
+			"key": "claude-plugins-official/mapbox/mapbox-docs",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): no authorization-server metadata is reachable for the docs endpoint (well-known responses were 404) and no dynamic client registration is advertised, so no self-serve OAuth path could be verified (readiness stayed unknown)"
+		},
+		{
+			"key": "claude-plugins-official/mongodb-atlas/mongodb-atlas",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): MongoDB's hosted MCP requires a pre-registered OAuth client for the default interactive path — no dynamic client registration is advertised and a client-id metadata document alone is not oauth-readiness (the documented service-account model is an alternative, not the audited default path)"
+		},
+		{
 			"key": "claude-plugins-official/prisma/Prisma-Local",
 			"reason": "local stdio utility inside a remote-service plugin; outside the remote service lane"
+		},
+		{
+			"key": "claude-plugins-official/slack/slack",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): the Claude-side record of the same Slack endpoint excluded via openai-plugins/slack/slack — Slack requires a Slack-registered app client (no dynamic client registration advertised; confidential-only client auth observed)"
+		},
+		{
+			"key": "claude-plugins-official/sumup/sumup",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): no dynamic client registration is advertised and no self-serve OAuth path could be verified, so readiness stayed honestly unknown"
+		},
+		{
+			"key": "claude-plugins-official/synthflow/synthflow",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): a client-id metadata document is advertised but no dynamic client registration endpoint is, and CIMD alone is never oauth-readiness (no Prime-controlled identity document is deployed), so readiness stayed honestly unknown"
+		},
+		{
+			"key": "claude-plugins-official/synthflow/synthflow-docs",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): no authorization-server metadata is reachable for the docs endpoint (well-known responses were 404) and no dynamic client registration is advertised, so no self-serve OAuth path could be verified (readiness stayed unknown)"
+		},
+		{
+			"key": "openai-plugins/figma/figma",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): Figma requires a provider-authorized pre-registered app client — its advertised dynamic client registration is 403-gated for anonymous registrations (live-verified 2026-09-13 during dogfooding; the attempt is kept as evidence in the committed audit store) and its authorization server accepts confidential client auth only"
+		},
+		{
+			"key": "openai-plugins/gmail/gmail",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): Google MCP endpoints are gated behind Developer Preview terms and require Google-registered clients — no dynamic client registration is advertised (confidential-only client auth observed)"
+		},
+		{
+			"key": "openai-plugins/google-calendar/google-calendar",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): Google MCP endpoints are gated behind Developer Preview terms and require Google-registered clients — no dynamic client registration is advertised (confidential-only client auth observed)"
+		},
+		{
+			"key": "openai-plugins/google-drive/google-drive",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): Google MCP endpoints are gated behind Developer Preview terms and require Google-registered clients — no dynamic client registration is advertised (confidential-only client auth observed)"
+		},
+		{
+			"key": "openai-plugins/shopify/shopify",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): no dynamic client registration is advertised for the Shopify MCP endpoint and no self-serve OAuth path could be verified, so readiness stayed honestly unknown"
+		},
+		{
+			"key": "openai-plugins/slack/slack",
+			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): Slack requires a Slack-registered app client — no dynamic client registration is advertised and the authorization server accepts confidential client auth only, while the upstream config carries branded OAuth client ids Prime must not reuse"
 		}
 	],
 	"counts": {
-		"total": 140,
-		"http": 102,
+		"total": 124,
+		"http": 86,
 		"httpTemplate": 5,
 		"sse": 1,
 		"stdio": 32,
-		"ready": 81,
-		"requiresSetup": 59,
+		"ready": 71,
+		"requiresSetup": 53,
 		"metadataReviewed": 2,
-		"oauthStrategy": 14,
+		"oauthStrategy": 7,
 		"apiKeyStrategy": 32,
-		"mergedFromBothSources": 16,
+		"mergedFromBothSources": 14,
 		"readinessOauthReady": 71,
 		"readinessUserSetup": 53,
-		"readinessPrimeRestricted": 6,
-		"readinessUnknown": 10,
-		"metadataAvailable": 97,
-		"metadataUnavailable": 6
+		"readinessPrimeRestricted": 0,
+		"readinessUnknown": 0,
+		"metadataAvailable": 84,
+		"metadataUnavailable": 3
 	}
 }
