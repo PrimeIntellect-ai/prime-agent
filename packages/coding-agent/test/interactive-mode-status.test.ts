@@ -1181,6 +1181,17 @@ describe("InteractiveMode MCP command", () => {
 		expect(manager.getGlobalMcpServers()).toHaveProperty("fetch");
 	});
 
+	test("prefixes showError output with the warning icon like showWarning", () => {
+		const fakeThis = createRenderedMcpHarness(SettingsManager.inMemory({}));
+
+		fakeThis.showError("boom");
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toContain("⚠ Error: boom");
+
+		fakeThis.chatContainer.clear();
+		fakeThis.showWarning("careful");
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toContain("⚠ careful");
+	});
+
 	test("refreshes MCP providers before deferring a changed command while busy", async () => {
 		const manager = SettingsManager.inMemory({});
 		const events: string[] = [];

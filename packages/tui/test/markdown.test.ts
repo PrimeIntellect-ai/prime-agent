@@ -1032,6 +1032,58 @@ bar`,
 		});
 	});
 
+	describe("Heading levels", () => {
+		it("should render every heading level without a raw # prefix", () => {
+			const markdown = new Markdown("# H1\n## H2\n### H3\n#### H4\n##### H5\n###### H6", 0, 0, defaultMarkdownTheme);
+
+			const plainLines = markdown.render(80).map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").trimEnd());
+
+			for (const heading of ["H1", "H2", "H3", "H4", "H5", "H6"]) {
+				assert.ok(plainLines.includes(heading), `Should render "${heading}" as heading content`);
+			}
+			for (const line of plainLines) {
+				assert.ok(!/^#{1,6} /.test(line), `Raw heading prefix should not render: ${JSON.stringify(line)}`);
+			}
+		});
+
+		it("should taper emphasis with heading depth", () => {
+			const markdown = new Markdown("# h1\n## h2\n### h3\n#### h4\n##### h5\n###### h6", 0, 0, defaultMarkdownTheme);
+
+			const lines = markdown.render(80);
+			const byContent: Record<string, string> = {};
+			for (const line of lines) {
+				const plain = line.replace(/\x1b\[[0-9;]*m/g, "").trimEnd();
+				byContent[plain] = line;
+			}
+
+			assert.ok(byContent.h1.includes("\x1b[4m"), "h1 should be underlined");
+			assert.ok(byContent.h2.includes("\x1b[1m"), "h2 should be bold");
+			assert.ok(byContent.h3.includes("\x1b[1m"), "h3 should be bold");
+			assert.ok(!byContent.h3.includes("\x1b[3m"), "h3 should not be italic");
+			assert.ok(!byContent.h3.includes("\x1b[4m"), "h3 should not be underlined");
+			assert.ok(byContent.h4.includes("\x1b[3m"), "h4 should be italic");
+			assert.ok(byContent.h4.includes("\x1b[1m"), "h4 should keep bold");
+			assert.ok(byContent.h5.includes("\x1b[3m"), "h5 should be italic");
+			assert.ok(byContent.h6.includes("\x1b[3m"), "h6 should be italic");
+		});
+
+		it("should keep deep heading styling across inline code spans", () => {
+			const markdown = new Markdown("##### Deep heading with `code` inside", 0, 0, defaultMarkdownTheme);
+
+			const lines = markdown.render(80);
+			const joinedOutput = lines.join("\n");
+
+			assert.ok(joinedOutput.includes("\x1b[33m"), "Should have yellow for inline code");
+
+			const afterCodeIndex = joinedOutput.indexOf("inside");
+			assert.ok(afterCodeIndex > 0, "Should contain text after inline code");
+
+			const precedingChunk = joinedOutput.slice(Math.max(0, afterCodeIndex - 40), afterCodeIndex);
+			assert.ok(precedingChunk.includes("\x1b[3m"), `Should re-apply italic for h5: ${precedingChunk}`);
+			assert.ok(precedingChunk.includes("\x1b[36m"), `Should re-apply heading color for h5: ${precedingChunk}`);
+		});
+	});
+
 	describe("Strikethrough syntax", () => {
 		it("should render ~~text~~ as strikethrough", () => {
 			const markdown = new Markdown("Use ~~strikethrough~~ here", 0, 0, defaultMarkdownTheme);
