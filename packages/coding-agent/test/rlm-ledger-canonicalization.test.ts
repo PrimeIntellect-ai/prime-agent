@@ -426,6 +426,66 @@ describe("RLM ledger read-side canonicalization", () => {
 		if (!deleted) expect(family[1].name).toBe("fresh");
 	});
 
+	it.each(["rename", "delete"])(
+		"keeps a recorded $operation applied after a restart under a retargeted alias",
+		async (operation) => {
+			const { root, sessionsDir, ledger } = fixture();
+			const parent = makeSession(root, sessionsDir, "parent");
+			const first = makeSession(root, join(root, "first"), "first", parent);
+			const second = makeSession(root, join(root, "second"), "second", parent);
+			const alias = join(root, "child-alias.jsonl");
+			// The spawn record stores the alias while it is missing; the update
+			// below records its then-canonical target once the symlink exists.
+			writeRecords(ledger, [spawn(parent, alias)]);
+			symlinkSync(first, alias, "file");
+			if (operation === "delete") {
+				await ledger.appendDelete({ childId: "sub-worker", child: alias, reason: "user" });
+			} else {
+				await ledger.appendRename({ childId: "sub-worker", child: alias, name: "fresh" });
+			}
+			const applied = [
+				{ childId: "sub-worker", ...(operation === "delete" ? { deleted: "user" } : { name: "fresh" }) },
+			];
+			expect(await ledger.edges(true)).toMatchObject(applied);
+
+			// Retarget the alias after the update was recorded: the historical
+			// target no longer canonicalizes to the spawn's stored alias. A fresh
+			// replay (restart) must not lose the update or resurrect the edge.
+			rmSync(alias);
+			symlinkSync(second, alias, "file");
+			const restarted = new RlmSpawnLedger(root, sessionsDir);
+			expect(await restarted.edges(true)).toMatchObject(applied);
+			expect(await restarted.edges()).toEqual(
+				operation === "delete" ? [] : [expect.objectContaining({ name: "fresh" })],
+			);
+			expect(await restarted.liveEdges()).toEqual(
+				operation === "delete" ? [] : [expect.objectContaining({ name: "fresh" })],
+			);
+		},
+	);
+
+	it("keeps a recorded delete applied after an unrelated append under a retargeted alias", async () => {
+		const { root, sessionsDir, ledger } = fixture();
+		const parent = makeSession(root, sessionsDir, "parent");
+		const first = makeSession(root, join(root, "first"), "first", parent);
+		const second = makeSession(root, join(root, "second"), "second", parent);
+		const third = makeSession(root, join(root, "third"), "third", parent);
+		const alias = join(root, "child-alias.jsonl");
+		writeRecords(ledger, [spawn(parent, alias)]);
+		symlinkSync(first, alias, "file");
+		await ledger.appendDelete({ childId: "sub-worker", child: alias, reason: "user" });
+		rmSync(alias);
+		symlinkSync(second, alias, "file");
+		// An unrelated append from another process forces a fresh replay of the
+		// same ledger instance under the retargeted filesystem.
+		appendFileSync(ledger.ledgerPath, `${JSON.stringify(spawn(parent, third, "sub-other"))}\n`);
+		expect(await ledger.edges()).toEqual([expect.objectContaining({ childId: "sub-other" })]);
+		expect(await ledger.edges(true)).toMatchObject([
+			{ childId: "sub-worker", deleted: "user" },
+			{ childId: "sub-other" },
+		]);
+	});
+
 	it("checks duplicate spawn paths freshly even when the existing edge has a cached missing alias", async () => {
 		const { root, sessionsDir, ledger } = fixture();
 		const parent = makeSession(root, sessionsDir, "parent");

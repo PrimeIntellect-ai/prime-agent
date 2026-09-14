@@ -850,18 +850,39 @@ export class RlmSpawnLedger {
 					});
 					break;
 				case "rename": {
-					const existing = edges.get(key);
+					const existing = this.edgeForKey(edges, key, record.childId);
 					if (existing) existing.name = record.name;
 					break;
 				}
 				case "delete": {
-					const existing = edges.get(key);
+					const existing = this.edgeForKey(edges, key, record.childId);
 					if (existing) existing.deleted = record.reason;
 					break;
 				}
 			}
 		}
 		return edges;
+	}
+
+	/**
+	 * Resolve a rename/delete record against the replayed edges. The canonical
+	 * key joins a record written through an alias while the filesystem still
+	 * agrees with its edge. A symlink retargeted after the record was written
+	 * moves the spawn's key away from the recorded target; with no path left
+	 * to join on, a childId carried by exactly one edge is the last durable
+	 * identity the records share (childIds are only unique per parent, so an
+	 * ambiguous id strands the record exactly as before).
+	 */
+	private edgeForKey(edges: Map<string, RlmLedgerEdge>, key: string, childId: string): RlmLedgerEdge | undefined {
+		const direct = edges.get(key);
+		if (direct !== undefined) return direct;
+		let sole: RlmLedgerEdge | undefined;
+		for (const edge of edges.values()) {
+			if (edge.childId !== childId) continue;
+			if (sole !== undefined) return undefined;
+			sole = edge;
+		}
+		return sole;
 	}
 }
 
