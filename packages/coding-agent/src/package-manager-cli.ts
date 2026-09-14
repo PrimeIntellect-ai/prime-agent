@@ -79,6 +79,7 @@ import {
 	getLatestPiRelease,
 	isBaseVersionDowngrade,
 	isReleaseUpdateCandidate,
+	resolveUpdateChannel,
 	type UpdateChannel,
 } from "./utils/version-check.js";
 
@@ -486,6 +487,29 @@ function setSelfUpdateAbortedExitCode(): void {
 	process.exitCode = process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] === "1" ? SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE : 1;
 }
 
+/**
+ * The channel's current release has a lower base version than what is installed. Never install
+ * it. Without --force that is simply "nothing to update"; with --force it is an explicit request
+ * we refuse, since --force is also how a channel switch is scripted without a TTY.
+ */
+function behindChannelPlan(latestVersion: string, force: boolean, channel: UpdateChannel | undefined): SelfUpdatePlan {
+	const plan = { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME };
+	if (force) {
+		console.error(
+			chalk.red(
+				`Refusing to move from v${VERSION} to v${latestVersion}: that is a downgrade, and --force does not override it. Nothing was installed and the update channel was not changed.${isBunBinary ? " Use --rollback to restore the previous compiled release." : ""}`,
+			),
+		);
+		return { ...plan, shouldRun: false, unavailable: true };
+	}
+	console.log(
+		chalk.green(
+			`${APP_NAME} v${VERSION} is ahead of the ${resolveUpdateChannel(VERSION, channel)} channel (v${latestVersion}); nothing to update.`,
+		),
+	);
+	return { ...plan, shouldRun: false };
+}
+
 function nightlyReleaseUnavailablePlan(): SelfUpdatePlan {
 	console.error(
 		chalk.red(
@@ -504,6 +528,7 @@ async function getSelfUpdatePlan(force: boolean, rollback = false, channel?: Upd
 	if (isBunBinary) {
 		try {
 			const plan = await getNativeUpdatePlan({ force, rollback, channel });
+			if (plan.refusedDowngradeTo) return behindChannelPlan(plan.refusedDowngradeTo, force, channel);
 			if (!plan.command) console.log(chalk.green(`${APP_NAME} is already up to date (v${plan.targetVersion})`));
 			return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: !!plan.command, ...plan };
 		} catch (error) {
@@ -520,16 +545,8 @@ async function getSelfUpdatePlan(force: boolean, rollback = false, channel?: Upd
 		const packageName = latestRelease?.packageName ?? PACKAGE_NAME;
 		const installSpec = latestRelease?.installSpec ?? packageName;
 		const packageRenameRequiresUpdate = !latestRelease?.installSpec && packageName !== PACKAGE_NAME;
-		// A channel whose current release is behind the installed base version is never installed,
-		// --force included: --force is also how a channel switch is scripted without a TTY.
-		if (latestRelease && isBaseVersionDowngrade(latestRelease.version, VERSION)) {
-			console.error(
-				chalk.red(
-					`Refusing to move from v${VERSION} to v${latestRelease.version}: that is a downgrade, and --force does not override it. Nothing was installed and the update channel was not changed.`,
-				),
-			);
-			return { installSpec, packageName, shouldRun: false, unavailable: true };
-		}
+		if (latestRelease && isBaseVersionDowngrade(latestRelease.version, VERSION))
+			return behindChannelPlan(latestRelease.version, force, channel);
 		if (
 			force ||
 			!latestRelease ||

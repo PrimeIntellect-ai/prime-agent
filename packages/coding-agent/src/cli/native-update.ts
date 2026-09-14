@@ -30,6 +30,8 @@ export class NativeReleaseUnavailableError extends Error {
 export interface NativeUpdatePlan {
 	command?: SelfUpdateCommand;
 	targetVersion: string;
+	/** Set when the channel's current release has a lower base version than the installed one; nothing is planned. */
+	refusedDowngradeTo?: string;
 }
 
 export async function getNativeUpdatePlan(options: {
@@ -93,9 +95,7 @@ export async function getNativeUpdatePlan(options: {
 		if (!release || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(release.version))
 			throw new NativeReleaseUnavailableError();
 		if (active && isBaseVersionDowngrade(release.version, current.version))
-			throw new Error(
-				`Refusing to move from v${current.version} to v${release.version}: that is a downgrade, and --force does not override it. Use --rollback to restore the previous compiled release.`,
-			);
+			return { targetVersion: current.version, refusedDowngradeTo: release.version };
 		if (active && !options.force && !isReleaseUpdateCandidate(release.version, current.version, options.channel))
 			return { targetVersion: current.version };
 		const artifact = release.binaries?.find((entry) => entry.platform === current.platform);

@@ -2,7 +2,14 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { APP_NAME, ENV_AGENT_DIR, PACKAGE_NAME, SELF_UPDATE_INTERACTIVE_CHILD_ENV, VERSION } from "../src/config.js";
+import {
+	APP_NAME,
+	ENV_AGENT_DIR,
+	PACKAGE_NAME,
+	SELF_UPDATE_INTERACTIVE_CHILD_ENV,
+	SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE,
+	VERSION,
+} from "../src/config.js";
 import { main } from "../src/main.js";
 import { handlePackageCommand } from "../src/package-manager-cli.js";
 
@@ -368,6 +375,55 @@ else {
 				expect.arrayContaining(["uninstall", "-g", PACKAGE_NAME]),
 				expect.arrayContaining(["install", "-g", activePackageName]),
 			]);
+		} finally {
+			logSpy.mockRestore();
+			errorSpy.mockRestore();
+		}
+	});
+
+	it("treats a channel that is behind the installed version as nothing to update", async () => {
+		const globalPrefix = join(tempDir, "global-prefix");
+		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@earendil-works", "pi-coding-agent");
+		const fakeNpmPath = join(tempDir, "fake-npm.cjs");
+		const recordPath = join(tempDir, "self-update.json");
+		mkdirSync(selfPackageDir, { recursive: true });
+		writeFileSync(
+			fakeNpmPath,
+			`const fs=require("node:fs"),path=require("node:path"),args=process.argv.slice(2),prefix=args[args.indexOf("--prefix")+1];
+if(args.includes("root")) console.log(path.join(prefix,"lib","node_modules"));
+else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
+`,
+		);
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({ npmCommand: [originalExecPath, fakeNpmPath, "--prefix", globalPrefix] }, null, 2),
+		);
+		process.env.PI_PACKAGE_DIR = selfPackageDir;
+		process.env.PRIME_AGENT_DOWNLOAD_BASE_URL = "https://downloads.example.test/prime-agent";
+		Object.defineProperty(process, "execPath", {
+			value: join(selfPackageDir, "dist", "cli.js"),
+			configurable: true,
+		});
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () =>
+				Response.json({
+					package: "prime-agent",
+					tarball: "releases/v0.0.1/prime-agent-0.0.1.tgz",
+					version: "0.0.1",
+				}),
+			),
+		);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			await expect(runSelfUpdateInstallChild(["update", "--self"])).resolves.toBeUndefined();
+
+			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(stdout).toContain("is ahead of the stable channel");
+			expect(process.exitCode).toBe(SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE);
+			expect(existsSync(recordPath)).toBe(false);
 		} finally {
 			logSpy.mockRestore();
 			errorSpy.mockRestore();
