@@ -1157,6 +1157,8 @@ export class InteractiveMode {
 	private headerContainer: Container;
 	/** Pinned fullscreen top bar identifying the chat by name while scrolling. */
 	private topBar: TopBar;
+	/** Cached session spend (USD) for the top bar; refreshed on lifecycle and status events. */
+	private topBarCostUsd: number | undefined;
 
 	private builtInHeader: Component | undefined = undefined;
 
@@ -1207,6 +1209,7 @@ export class InteractiveMode {
 		this.headerContainer = new Container();
 		this.topBar = new TopBar({
 			getChatName: () => this.getCurrentSessionName() ?? path.basename(this.getCurrentCwd()),
+			getCostUsd: () => this.topBarCostUsd,
 		});
 		this.chatContainer = new Container();
 		this.shortcutGuideContainer = new Container();
@@ -1573,6 +1576,22 @@ export class InteractiveMode {
 		});
 
 		await this.updateAvailableProviderCount();
+	}
+
+	/** Refresh the top bar's cached session spend from the context tree. */
+	private refreshTopBarCost(): void {
+		void (async () => {
+			try {
+				const tree = await this.agentConnection.getContextTree();
+				const total = tree?.totalUsage?.cost?.total;
+				if (typeof total === "number" && Number.isFinite(total)) {
+					this.topBarCostUsd = total;
+					this.ui.requestRender();
+				}
+			} catch {
+				// Cost is cosmetic; leave the previous value in place.
+			}
+		})();
 	}
 
 	private updateTerminalTitle(): void {
@@ -2950,6 +2969,7 @@ export class InteractiveMode {
 		await this.updateAvailableProviderCount();
 		this.updateEditorBorderColor();
 		this.updateTerminalTitle();
+		this.refreshTopBarCost();
 		this.setGoalAnnouncementBaseline(this.getGoalState());
 		this.syncGoalTray(this.getGoalState());
 		this.syncWorkingLoader();
@@ -3074,6 +3094,7 @@ export class InteractiveMode {
 			this.sideQuestionBashDiscarded = undefined;
 		}
 		this.updateTerminalTitle();
+		this.refreshTopBarCost();
 		this.setGoalAnnouncementBaseline(this.getGoalState());
 		this.syncGoalTray(this.getGoalState());
 		this.syncWorkingLoader();
@@ -3605,6 +3626,7 @@ export class InteractiveMode {
 		this.setupAutocompleteProvider();
 		this.defaultEditor.onExtensionShortcut = undefined;
 		this.updateTerminalTitle();
+		this.refreshTopBarCost();
 		this.workingMessage = undefined;
 		this.workingVisible = true;
 		this.setWorkingIndicator();
@@ -5262,6 +5284,7 @@ export class InteractiveMode {
 					this.sessionRecap = event.recap;
 					this.patchConnectionState({ recap: event.recap });
 					this.renderRecap();
+					this.refreshTopBarCost();
 				} else if (event.type === "side_question_event") {
 					this.handleSideQuestionEvent(event.event);
 				} else if (event.type === "extension_ui_request") {
@@ -5508,6 +5531,7 @@ export class InteractiveMode {
 
 			case "session_info_changed":
 				this.updateTerminalTitle();
+				this.refreshTopBarCost();
 				this.footer.invalidate();
 				this.ui.requestRender();
 				break;

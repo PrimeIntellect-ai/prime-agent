@@ -3,12 +3,15 @@ import { theme } from "../theme/theme.js";
 
 export interface TopBarOptions {
 	getChatName: () => string | undefined;
+	/** Total session spend in USD (branch total, subagents included). */
+	getCostUsd?: () => number | undefined;
 }
 
 /**
- * Pinned top bar for fullscreen chats: identifies the chat by name while the
- * transcript scrolls underneath. Rendered as the fullscreen viewport's pinned
- * header, so it stays on screen in every scroll position.
+ * Pinned top bar for fullscreen chats: the chat name centered in plain text on
+ * the terminal background, with the session's spend beside it. Rendered as the
+ * fullscreen viewport's pinned header, so it stays on screen in every scroll
+ * position.
  */
 export class TopBar implements Component {
 	private readonly options: TopBarOptions;
@@ -27,12 +30,14 @@ export class TopBar implements Component {
 		if (!name) {
 			return [""];
 		}
-		const label = theme.fg("accent", name);
-		const lead = theme.fg("border", "─ ");
-		const labelWidth = visibleWidth(name);
-		const ruleWidth = Math.max(0, safeWidth - 2 - labelWidth);
-		const rule = theme.fg("border", "─".repeat(ruleWidth));
-		const line = `${lead}${label} ${rule}`;
+		// Center the name; the cost trails it with a small gap. No background,
+		// no rules: the bar should read as plain text on the terminal.
+		const nameWidth = visibleWidth(name);
+		const cost = this.options.getCostUsd?.();
+		const costText =
+			typeof cost === "number" && Number.isFinite(cost) && cost >= 0 ? theme.fg("dim", `$${cost.toFixed(2)}`) : "";
+		const start = Math.max(0, Math.floor((safeWidth - nameWidth) / 2));
+		const line = `${" ".repeat(start)}${theme.fg("text", name)}${costText ? `  ${costText}` : ""}`;
 		return [truncateToWidth(line, safeWidth, "")];
 	}
 }
