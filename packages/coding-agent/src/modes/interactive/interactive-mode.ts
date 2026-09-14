@@ -8283,7 +8283,8 @@ export class InteractiveMode {
 							this.getCachedModelCandidates(),
 							this.connectionConfiguredProviders,
 						);
-						menu.setActiveTab("models");
+						// Keep the user on the tab they logged in from; the models tab
+						// stays fresh through refreshModels for when they open it.
 						refreshModels(true);
 					})
 					.catch((error) => {

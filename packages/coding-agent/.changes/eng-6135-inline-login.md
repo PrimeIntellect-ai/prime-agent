@@ -1,1 +1,2 @@
 - Changed provider logins, including the in-flow team and account selectors, to render inline under the chat in the compact picker style instead of a centered full-pane modal.
+- Changed finishing a provider login to stay on the providers tab instead of forcing the models picker open; the models tab refreshes in the background so it is ready when opened.

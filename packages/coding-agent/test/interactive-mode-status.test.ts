@@ -2503,6 +2503,7 @@ describe("InteractiveMode model selection persistence", () => {
 			getLoginProviderOptions(): ReadonlyArray<AuthSelectorProvider>;
 			loginProvider(provider: AuthSelectorProvider): Promise<AuthenticationResult>;
 		};
+		prepareForModelSelectionAfterLogin(authResult: AuthenticationResult): Promise<boolean>;
 		ensureModelProviderConfigured(
 			model: AgentConnectionModel,
 			authFlows: ReturnType<ModelSelectorHarness["createAuthFlows"]>,
@@ -2622,6 +2623,7 @@ describe("InteractiveMode model selection persistence", () => {
 			getLoginProviderOptions: () => options.providerOptions ?? [],
 			loginProvider: options.loginProvider ?? (async () => ({ status: "cancelled" as const })),
 		}));
+		fakeThis.prepareForModelSelectionAfterLogin = selectorPrototype.prepareForModelSelectionAfterLogin;
 		fakeThis.applySelectedModel = options.applySelectedModel ?? vi.fn(async () => {});
 		fakeThis.ensureModelProviderConfigured = selectorPrototype.ensureModelProviderConfigured;
 		fakeThis.completeModelSelection = selectorPrototype.completeModelSelection;
@@ -3056,6 +3058,48 @@ describe("InteractiveMode model selection persistence", () => {
 
 		getSelector().handleInput("\x1b");
 		await expect(result).resolves.toBeUndefined();
+	});
+
+	test("keeps the providers tab after a successful provider login", async () => {
+		const provider: AuthSelectorProvider = { id: "openai", name: "OpenAI", authType: "api_key" };
+		const loginProvider = vi.fn(async (): Promise<AuthenticationResult> => {
+			// Successful logins store the credential, so the row flips to configured.
+			fakeThis.uiServices.modelRegistry.authStorage.set(provider.id, {
+				type: "api_key",
+				key: "test-key",
+			});
+			return {
+				status: "success",
+				providerId: provider.id,
+				providerName: provider.name,
+				authType: provider.authType,
+			};
+		});
+		const { fakeThis, getSelector } = createSelectorHarness({
+			connectionModels: [createModel("openai", "gpt-5.5")],
+			providerOptions: [provider],
+			loginProvider,
+		});
+		const prepareForModelSelection = vi.spyOn(fakeThis, "prepareForModelSelectionAfterLogin");
+
+		const result = fakeThis.showConfigurationMenu("providers");
+
+		expect(getSelector().getActiveTab()).toBe("providers");
+		getSelector().handleInput("\r");
+		await flushAsyncWork();
+
+		expect(loginProvider).toHaveBeenCalledWith(provider);
+		expect(prepareForModelSelection).toHaveBeenCalledTimes(1);
+		// Finishing a login stays on the providers tab with the provider
+		// configured instead of jumping to the models picker.
+		expect(getSelector().getActiveTab()).toBe("providers");
+		expect(fakeThis.editorContainer.children).toEqual([getSelector()]);
+		expect(fakeThis.ui.setFocus).toHaveBeenLastCalledWith(getSelector());
+		expect(stripAnsi(getSelector().render(120).join("\n"))).toContain("configured");
+
+		getSelector().handleInput("\x1b");
+		await expect(result).resolves.toBeUndefined();
+		expect(fakeThis.editorContainer.children).toEqual([fakeThis.editor]);
 	});
 
 	test("refreshes model selector results in the background without clearing search", async () => {
