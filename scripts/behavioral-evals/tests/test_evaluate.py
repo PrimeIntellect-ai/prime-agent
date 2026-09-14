@@ -271,6 +271,37 @@ class TraceConversionTests(unittest.TestCase):
         self.assertFalse(record["trace_complete"])
         self.assertEqual(record["trace_facts"]["trace_integrity_issues"], 1)
 
+    def test_trace_record_preserves_pending_calls_at_framework_limit(self):
+        trace = {
+            "task": {"data": {"name": "task-limited"}},
+            "calls": [{}],
+            "nodes": [],
+            "is_completed": True,
+            "ok": True,
+            "stop_condition": "max_turns",
+        }
+        facts = {
+            "tests_after_final_edit": {
+                "count": 0,
+                "ran_after_final_edit": None,
+            },
+            "meta": {
+                "dropped_events": {},
+                "truncated_input": False,
+                "truncated_strings": 0,
+                "unanswered_calls": 1,
+            },
+        }
+        with patch.object(evaluate, "analyze_trace", return_value=facts):
+            record = evaluate.trace_record(
+                {"task": trace["task"], "traces": [trace], "ok": True},
+                "taskset",
+            )
+
+        self.assertTrue(record["trace_complete"])
+        self.assertEqual(record["trace_facts"]["pending_calls_at_limit"], 1)
+        self.assertNotIn("trace_integrity_issues", record["trace_facts"])
+
     def test_trace_record_marks_errors_before_any_model_call_as_infrastructure(self):
         episode = {
             "task": {"data": {"name": "task-two"}},

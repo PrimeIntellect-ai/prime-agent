@@ -21,6 +21,7 @@ TRACE_LINE_LIMIT = 10_000_000
 TRACE_RECORD_LIMIT = 1_000
 ANALYZER_LIMITS = Limits(max_events=20_000, max_string=100_000, max_list=20)
 EXIT_CODE_RE = re.compile(r"\bexit_code\s*[=:]\s*(-?\d+)\b")
+FRAMEWORK_LIMIT_STOPS = frozenset({"max_turns", "max_input_tokens", "max_output_tokens", "max_total_tokens"})
 
 
 def completion_tokens(trace: dict) -> int:
@@ -223,7 +224,7 @@ def analyzer_input(trace: dict) -> dict:
     return {"supported_tools": supported, "events": events}
 
 
-def analyzer_integrity_issues(facts: dict) -> int:
+def analyzer_integrity_issues(facts: dict, *, allow_unanswered: bool = False) -> int:
     meta = facts.get("meta")
     if not isinstance(meta, dict):
         return 0
@@ -231,11 +232,12 @@ def analyzer_integrity_issues(facts: dict) -> int:
     dropped_count = (
         sum(value for value in dropped.values() if isinstance(value, int)) if isinstance(dropped, dict) else 0
     )
+    unanswered = 0 if allow_unanswered else int(meta.get("unanswered_calls") or 0)
     return (
         dropped_count
         + int(bool(meta.get("truncated_input")))
         + int(meta.get("truncated_strings") or 0)
-        + int(meta.get("unanswered_calls") or 0)
+        + unanswered
     )
 
 
@@ -303,7 +305,10 @@ def trace_record(episode: dict, taskset: str) -> dict:
     if not traces and episode.get("errors"):
         infrastructure = True
     facts = analyze_trace(analyzer_input(trace), ANALYZER_LIMITS)
-    integrity_issues = analyzer_integrity_issues(facts)
+    meta = facts.get("meta") if isinstance(facts.get("meta"), dict) else {}
+    unanswered = int(meta.get("unanswered_calls") or 0)
+    limit_stop = trace.get("stop_condition") in FRAMEWORK_LIMIT_STOPS
+    integrity_issues = analyzer_integrity_issues(facts, allow_unanswered=limit_stop)
     fact_counts = {
         key: value["count"]
         for key, value in facts.items()
@@ -312,6 +317,8 @@ def trace_record(episode: dict, taskset: str) -> dict:
     after_edit = facts["tests_after_final_edit"]["ran_after_final_edit"]
     if after_edit is False:
         fact_counts["no_test_after_final_edit"] = 1
+    if limit_stop and unanswered:
+        fact_counts["pending_calls_at_limit"] = unanswered
     if integrity_issues:
         fact_counts["trace_integrity_issues"] = integrity_issues
     trace_complete = (
