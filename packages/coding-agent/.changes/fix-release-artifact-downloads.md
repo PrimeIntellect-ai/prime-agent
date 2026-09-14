@@ -1,0 +1,1 @@
+- Fixed beta-only and stable-only releases failing macOS validation because their artifacts were downloaded to the wrong directory.

@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -87,6 +87,64 @@ describe("release workflow signature gates", () => {
 		expect(writes.length).toBeGreaterThan(0);
 		for (const write of writes) expect(publish.steps.indexOf(gate)).toBeLessThan(publish.steps.indexOf(write));
 	});
+
+	it.each([{ channels: ["production"] }, { channels: ["beta"] }, { channels: ["production", "beta"] }])(
+		"finds the downloaded manifests when publishing $channels",
+		({ channels }) => {
+			const validation = release.jobs["validate-macos"]!;
+			const directory = mkdtempSync(join(tmpdir(), "prime-release-downloads-"));
+			try {
+				mkdirSync(join(directory, "packages/coding-agent"), { recursive: true });
+				for (const channel of channels) {
+					const name = `prime-agent-${channel}`;
+					const download = validation.steps.find(
+						(entry) =>
+							entry.uses?.startsWith("actions/download-artifact@") &&
+							(entry.with?.name === name || entry.with?.pattern === "prime-agent-*"),
+					);
+					expect(download, `Missing download for ${channel}`).toBeDefined();
+					if (download!.if) expect(download!.if).toBe(`env.PUBLISH_${channel.toUpperCase()} == 'true'`);
+					// download-artifact nests pattern matches only when more than one artifact matches.
+					const destination = download!.with!.path!.replace(`\${{ runner.temp }}`, directory);
+					const path = download!.with!.name || channels.length === 1 ? destination : join(destination, name);
+					mkdirSync(path, { recursive: true });
+					writeFileSync(join(path, channel === "production" ? "latest.json" : "beta.json"), "{}");
+					writeFileSync(join(path, "prime-agent-1.2.3-darwin-arm64.tar.gz"), "");
+				}
+				const result = spawnSync(
+					"bash",
+					[
+						"-e",
+						"-o",
+						"pipefail",
+						"-c",
+						`node() { test -f "$2/latest.json" || test -f "$2/beta.json"; }
+npx() { test -f "$PRIME_AGENT_TEST_ARCHIVE"; printf '%s\\n' "$PRIME_AGENT_TEST_ARCHIVE"; }
+${step(validation, "Verify and exercise exact final Mac archives").run}`,
+					],
+					{
+						cwd: directory,
+						env: {
+							...process.env,
+							RUNNER_TEMP: directory,
+							TARGET_PLATFORM: "darwin-arm64",
+							PUBLISH_PRODUCTION: String(channels.includes("production")),
+							PUBLISH_BETA: String(channels.includes("beta")),
+						},
+						encoding: "utf8",
+					},
+				);
+				expect(result.status, result.stderr).toBe(0);
+				expect(result.stdout.trim().split("\n")).toEqual(
+					channels.map((channel) =>
+						join(directory, `final-artifacts/prime-agent-${channel}/prime-agent-1.2.3-darwin-arm64.tar.gz`),
+					),
+				);
+			} finally {
+				rmSync(directory, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("retains all four standalone targets and only uploads tested executable identities", () => {
 		const build = standalone.jobs.build!;
