@@ -4,6 +4,7 @@ import {
 	comparePackageVersions,
 	getLatestPiRelease,
 	getLatestPiVersion,
+	isBaseVersionDowngrade,
 	isNewerPackageVersion,
 	isReleaseUpdateCandidate,
 	resolveUpdateChannel,
@@ -134,6 +135,15 @@ describe("update channel preference", () => {
 		expect(isReleaseUpdateCandidate("1.2.2-beta.9.1.abcdef0", "1.2.3", "nightly")).toBe(false);
 		expect(isReleaseUpdateCandidate("1.2.2", "1.2.3-beta.5.1.abcdef0", "stable")).toBe(false);
 		expect(isReleaseUpdateCandidate("1.2.3", "1.2.3-beta.5.1.abcdef0", "stable")).toBe(true);
+	});
+
+	it("flags only a lower base version as a downgrade", () => {
+		expect(isBaseVersionDowngrade("1.2.2-beta.9.1.abcdef0", "1.2.3")).toBe(true);
+		expect(isBaseVersionDowngrade("1.2.2", "1.2.3-beta.5.1.abcdef0")).toBe(true);
+		expect(isBaseVersionDowngrade("1.2.3-beta.5.1.abcdef0", "1.2.3")).toBe(false);
+		expect(isBaseVersionDowngrade("1.2.3", "1.2.3-beta.5.1.abcdef0")).toBe(false);
+		expect(isBaseVersionDowngrade("1.3.0", "1.2.9")).toBe(false);
+		expect(isBaseVersionDowngrade("not-a-version", "1.2.3")).toBe(false);
 	});
 
 	it("keeps same-channel updates strictly newer", () => {

@@ -137,6 +137,16 @@ export function isReleaseUpdateCandidate(
 	return candidate.patch >= current.patch;
 }
 
+/** True when installing `candidateVersion` would lower the major.minor.patch base, prerelease tags aside. */
+export function isBaseVersionDowngrade(candidateVersion: string, currentVersion: string): boolean {
+	const candidate = parsePackageVersion(candidateVersion);
+	const current = parsePackageVersion(currentVersion);
+	if (!candidate || !current) return false;
+	if (candidate.major !== current.major) return candidate.major < current.major;
+	if (candidate.minor !== current.minor) return candidate.minor < current.minor;
+	return candidate.patch < current.patch;
+}
+
 function getReleaseManifestPath(currentVersion: string, channel?: UpdateChannel): string {
 	return resolveUpdateChannel(currentVersion, channel) === "nightly"
 		? BETA_VERSION_MANIFEST_PATH

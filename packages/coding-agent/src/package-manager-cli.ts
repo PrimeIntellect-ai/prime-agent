@@ -75,7 +75,12 @@ import {
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
 } from "./modes/daemon/daemon-worker-protocol.js";
 import { shouldUseWindowsShell } from "./utils/child-process.js";
-import { getLatestPiRelease, isReleaseUpdateCandidate, type UpdateChannel } from "./utils/version-check.js";
+import {
+	getLatestPiRelease,
+	isBaseVersionDowngrade,
+	isReleaseUpdateCandidate,
+	type UpdateChannel,
+} from "./utils/version-check.js";
 
 export type PackageCommand = "install" | "remove" | "update" | "list";
 
@@ -515,6 +520,16 @@ async function getSelfUpdatePlan(force: boolean, rollback = false, channel?: Upd
 		const packageName = latestRelease?.packageName ?? PACKAGE_NAME;
 		const installSpec = latestRelease?.installSpec ?? packageName;
 		const packageRenameRequiresUpdate = !latestRelease?.installSpec && packageName !== PACKAGE_NAME;
+		// A channel whose current release is behind the installed base version is never installed,
+		// --force included: --force is also how a channel switch is scripted without a TTY.
+		if (latestRelease && isBaseVersionDowngrade(latestRelease.version, VERSION)) {
+			console.error(
+				chalk.red(
+					`Refusing to move from v${VERSION} to v${latestRelease.version}: that is a downgrade, and --force does not override it. Nothing was installed and the update channel was not changed.`,
+				),
+			);
+			return { installSpec, packageName, shouldRun: false, unavailable: true };
+		}
 		if (
 			force ||
 			!latestRelease ||
