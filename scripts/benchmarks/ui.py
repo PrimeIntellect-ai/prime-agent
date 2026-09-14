@@ -548,8 +548,7 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
 
             # Reattach to the worker just opened, excluding search/navigation setup from timing.
             metric = "agents_reopen"
-            terminal.child.send(LEFT_ARROW)
-            terminal.until(lambda display: roster_inactive(display) is not None, 60)
+            open_agents_view(terminal, clear=True)
             type_query(terminal, spec.open_id[:8])
             terminal.until(lambda display: session_name("large", 1) in display.text(), 60)
             terminal.settle(0.8)
