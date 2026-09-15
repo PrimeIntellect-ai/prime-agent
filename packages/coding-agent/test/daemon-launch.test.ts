@@ -217,6 +217,9 @@ describe("shouldStartDaemonEarly", () => {
 		["json", ["--mode", "json", "hello"]],
 		["rpc", ["--mode", "rpc"]],
 		["no-session", ["--no-session"]],
+		["escaped command word", ["--", "status"]],
+		["print with a command word", ["--print", "status"]],
+		["prompt that only starts like a command", ["--offline", "statuses", "of", "my", "agents"]],
 	])("starts early for the %s client", (_label, args) => {
 		expect(shouldStartDaemonEarly(args, false)).toBe(true);
 	});
@@ -227,6 +230,7 @@ describe("shouldStartDaemonEarly", () => {
 		["version", ["--version"]],
 		["model listing", ["--list-models"]],
 		["management command after global flags", ["--daemon-socket", "/tmp/prime.sock", "status"]],
+		["nested command after global flags", ["--offline", "model", "list"]],
 		["startup benchmark", []],
 	])("does not start early for %s", (label, args) => {
 		expect(shouldStartDaemonEarly(args, label === "startup benchmark")).toBe(false);

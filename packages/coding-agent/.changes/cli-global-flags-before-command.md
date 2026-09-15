@@ -1,0 +1,1 @@
+- Fixed global flags written before a command routing the command to the model as a chat message; `prime-agent --offline model list` now runs the command, `--` still sends the word as a message, and a global flag a command does not accept fails with a clear error.

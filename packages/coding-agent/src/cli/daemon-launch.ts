@@ -23,7 +23,8 @@ import {
 	DAEMON_WORKER_TOKEN_ENV,
 } from "../modes/daemon/daemon-worker-protocol.js";
 import { spawnHidden } from "../utils/child-process.js";
-import { isHelpCommandRequest, PUBLIC_COMMAND_NAMES, REMOVED_COMMAND_NAMES } from "./command-registry.js";
+import { isHelpCommandRequest, REMOVED_COMMAND_NAMES } from "./command-registry.js";
+import { findFirstPositionalArgument, isCommandPositional } from "./global-flags.js";
 import { createCliSubprocessEnv, formatCurrentCliCommand } from "./subprocess-launch.js";
 
 const DAEMON_STARTUP_TIMEOUT_MS = 30_000;
@@ -505,59 +506,6 @@ export function ensureInteractiveDaemonRunning(socketPath: string, spawnCwd?: st
 }
 
 const EARLY_LAUNCH_EXCLUDED_FLAGS = new Set(["--help", "-h", "--version", "-v", "--list-models", "--export"]);
-const EARLY_LAUNCH_VALUE_FLAGS = new Set([
-	"--mode",
-	"--daemon-socket",
-	"--provider",
-	"--model",
-	"--api-key",
-	"--cwd",
-	"--system-prompt",
-	"--append-system-prompt",
-	"--fork",
-	"--session-dir",
-	"--models",
-	"--tools",
-	"-t",
-	"--thinking",
-	"--extension",
-	"-e",
-	"--skill",
-	"--prompt-template",
-	"--theme",
-	"--autonomous-gate",
-	"--autonomous-gate-retries",
-	"--autonomous-gate-timeout-ms",
-	"--autonomous-max-continuations",
-	"--autonomous-max-turns",
-	"--autonomous-max-tokens",
-	"--autonomous-timeout-ms",
-	"--goal",
-	"--goal-token-budget",
-]);
-
-function findFirstEarlyLaunchPositional(args: readonly string[]): { index: number; value: string } | undefined {
-	for (let index = 0; index < args.length; index++) {
-		const arg = args[index]!;
-		if (arg === "--") {
-			return args[index + 1] === undefined ? undefined : { index: index + 1, value: args[index + 1]! };
-		}
-		if (EARLY_LAUNCH_VALUE_FLAGS.has(arg)) {
-			index++;
-			continue;
-		}
-		if (arg === "--resume" || arg === "-r") {
-			if (args[index + 1] && !args[index + 1]!.startsWith("-")) {
-				index++;
-			}
-			continue;
-		}
-		if (!arg.startsWith("-")) {
-			return { index, value: arg };
-		}
-	}
-	return undefined;
-}
 
 export function shouldStartDaemonEarly(args: readonly string[], startupBenchmark: boolean): boolean {
 	if (startupBenchmark) {
@@ -573,15 +521,15 @@ export function shouldStartDaemonEarly(args: readonly string[], startupBenchmark
 	if (args.includes("--print") || args.includes("-p")) {
 		return true;
 	}
-	const firstPositional = findFirstEarlyLaunchPositional(args);
+	const firstPositional = findFirstPositionalArgument(args);
+	if (!firstPositional || !isCommandPositional(firstPositional)) {
+		return true;
+	}
 	const isHelpCommand =
-		firstPositional?.value === "help" && isHelpCommandRequest(args.slice(firstPositional.index + 1));
+		firstPositional.value === "help" && isHelpCommandRequest(args.slice(firstPositional.index + 1));
 	if (
-		firstPositional &&
-		(REMOVED_COMMAND_NAMES.has(firstPositional.value) ||
-			(PUBLIC_COMMAND_NAMES.has(firstPositional.value) &&
-				firstPositional.value !== "agents" &&
-				(firstPositional.value !== "help" || isHelpCommand)))
+		REMOVED_COMMAND_NAMES.has(firstPositional.value) ||
+		(firstPositional.value !== "agents" && (firstPositional.value !== "help" || isHelpCommand))
 	) {
 		return false;
 	}

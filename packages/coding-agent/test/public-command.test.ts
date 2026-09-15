@@ -120,6 +120,72 @@ describe("public command routing", () => {
 		expect(mocks.mcpCommands).toEqual([["add", "local", "--", "node", "server file.js", "--stdio"]]);
 	});
 
+	it("runs a management command written after global flags", async () => {
+		await expect(handlePublicCommand(["--offline", "model", "list", "sonnet"])).resolves.toMatchObject({
+			handled: false,
+			args: [INTERNAL_RUNTIME_COMMAND_MARKER, "--list-models", "sonnet", "--offline"],
+		});
+		await expect(handlePublicCommand(["--offline", "list", "--json"])).resolves.toMatchObject({ handled: true });
+		expect(mocks.daemonCommands).toEqual([["daemon", "list", "--json", "--offline"]]);
+	});
+
+	it("rejects a rotated global flag the command does not accept instead of chatting", async () => {
+		await expect(
+			handlePublicCommand(["--daemon-socket", "/tmp/prime.sock", "status", "--json"]),
+		).resolves.toMatchObject({ handled: true });
+		expect(mocks.psCalls).toEqual([]);
+		expect(process.exitCode).toBe(1);
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("Unknown option for status: --daemon-socket"));
+	});
+
+	it("forwards a custom daemon socket written before stop", async () => {
+		await expect(
+			handlePublicCommand(["--daemon-socket", "/tmp/custom-daemon.sock", "stop", "worker"]),
+		).resolves.toMatchObject({ handled: true });
+		expect(mocks.daemonCommands).toEqual([
+			["daemon", "kill", "worker", "--daemon-socket", "/tmp/custom-daemon.sock"],
+		]);
+	});
+
+	it("keeps a command word after -- as message text", async () => {
+		await expect(handlePublicCommand(["--", "status"])).resolves.toEqual({
+			handled: false,
+			args: ["--", "status"],
+			explicitAgentsView: false,
+		});
+		expect(mocks.psCalls).toEqual([]);
+	});
+
+	it("keeps the positional of a print run as the message", async () => {
+		await expect(handlePublicCommand(["--print", "status"])).resolves.toEqual({
+			handled: false,
+			args: ["--print", "status"],
+			explicitAgentsView: false,
+		});
+		await expect(handlePublicCommand(["-p", "--offline", "list"])).resolves.toEqual({
+			handled: false,
+			args: ["-p", "--offline", "list"],
+			explicitAgentsView: false,
+		});
+		expect(mocks.psCalls).toEqual([]);
+		expect(mocks.daemonCommands).toEqual([]);
+	});
+
+	it("leaves a prompt that only starts like a command alone", async () => {
+		await expect(handlePublicCommand(["--offline", "statuses", "of", "my", "agents"])).resolves.toEqual({
+			handled: false,
+			args: ["--offline", "statuses", "of", "my", "agents"],
+			explicitAgentsView: false,
+		});
+		expect(mocks.psCalls).toEqual([]);
+	});
+
+	it("rejects a removed command written after global flags", async () => {
+		await expect(handlePublicCommand(["--offline", "install", "pkg"])).resolves.toMatchObject({ handled: true });
+		expect(process.exitCode).toBe(1);
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("Unknown command: install"));
+	});
+
 	it("routes agent operations through the internal protocol adapter", async () => {
 		await expect(handlePublicCommand(["list", "--all", "--json"])).resolves.toMatchObject({ handled: true });
 		expect(mocks.daemonCommands).toEqual([["daemon", "list", "--all", "--json"]]);
