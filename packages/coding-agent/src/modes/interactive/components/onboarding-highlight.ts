@@ -6,7 +6,7 @@ const HIGHLIGHT_LIFT = 0.08;
 const DARK_CANVAS: Rgb = { r: 16, g: 16, b: 16 };
 const LIGHT_CANVAS: Rgb = { r: 255, g: 255, b: 255 };
 
-export function parseHexColor(value: string | undefined): Rgb | undefined {
+function parseHexColor(value: string | undefined): Rgb | undefined {
 	const match = /^#?([0-9a-f]{6})$/i.exec(value?.trim() ?? "");
 	if (!match?.[1]) {
 		return undefined;

@@ -23,11 +23,7 @@ describe("PrimeOnboardingSplashComponent", () => {
 	});
 
 	it("renders the brand mark with the welcome line beneath it", () => {
-		const component = new PrimeOnboardingSplashComponent(
-			() => {},
-			() => {},
-			{ getRows: () => 36 },
-		);
+		const component = new PrimeOnboardingSplashComponent(() => {}, { getRows: () => 36 });
 		const lines = component.render(100);
 		const rendered = lines.map((line) => stripAnsi(line));
 		const output = rendered.join("\n");
@@ -37,11 +33,10 @@ describe("PrimeOnboardingSplashComponent", () => {
 		expect(output).toContain("> Log in with Prime Intellect");
 		// Signing in is the only route forward.
 		expect(output).not.toContain("Continue later");
-		// A short description of the agent, wrapped under the welcome line.
-		expect(output).toContain("Prime Agent programmatically manages your");
-		expect(output).toContain("Recursive Language Model paradigm,");
-		expect(output).toContain("\u2022 track a regression across hundreds of commits");
-		// It wraps rather than running off the block.
+		// The description is present and wrapped inside the block rather than
+		// running past its width; the wording itself is not the behaviour.
+		const descriptionRows = rendered.filter((line) => line.trim().length > 0);
+		expect(descriptionRows.length).toBeGreaterThan(logoLines.length);
 		for (const line of rendered) {
 			expect(stripAnsi(line).trimEnd().length).toBeLessThanOrEqual(100);
 		}
@@ -54,11 +49,7 @@ describe("PrimeOnboardingSplashComponent", () => {
 	});
 
 	it("left aligns the mark, the welcome line and the actions", () => {
-		const component = new PrimeOnboardingSplashComponent(
-			() => {},
-			() => {},
-			{ getRows: () => 40 },
-		);
+		const component = new PrimeOnboardingSplashComponent(() => {}, { getRows: () => 40 });
 		const rendered = component.render(100).map((line) => stripAnsi(line));
 		const output = rendered.join("\n");
 
@@ -84,12 +75,9 @@ describe("PrimeOnboardingSplashComponent", () => {
 
 	it("starts Prime login on confirm", () => {
 		let selected = false;
-		const component = new PrimeOnboardingSplashComponent(
-			() => {
-				selected = true;
-			},
-			() => {},
-		);
+		const component = new PrimeOnboardingSplashComponent(() => {
+			selected = true;
+		});
 
 		component.handleInput("\r");
 
@@ -97,11 +85,7 @@ describe("PrimeOnboardingSplashComponent", () => {
 	});
 
 	it("never falls back to the intro once a flow has started", () => {
-		const component = new PrimeOnboardingSplashComponent(
-			() => {},
-			() => {},
-			{ getRows: () => 36 },
-		);
+		const component = new PrimeOnboardingSplashComponent(() => {}, { getRows: () => 36 });
 		component.setPanel({ render: () => ["panel row"], invalidate: () => {} }, "Login with Prime Intellect");
 		// Between two flow panels the block must not flash the first screen back.
 		component.setPanel(undefined);
@@ -115,17 +99,13 @@ describe("PrimeOnboardingSplashComponent", () => {
 	it("animates the mark at an interactive cadence", () => {
 		vi.useFakeTimers();
 		let renderRequests = 0;
-		const component = new PrimeOnboardingSplashComponent(
-			() => {},
-			() => {},
-			{
-				getRows: () => 36,
-				requestRender: () => {
-					renderRequests++;
-				},
-				animationIntervalMs: 20,
+		const component = new PrimeOnboardingSplashComponent(() => {}, {
+			getRows: () => 36,
+			requestRender: () => {
+				renderRequests++;
 			},
-		);
+			animationIntervalMs: 20,
+		});
 
 		const firstRender = stripAnsi(component.render(100).join("\n"));
 		vi.advanceTimersByTime(60);

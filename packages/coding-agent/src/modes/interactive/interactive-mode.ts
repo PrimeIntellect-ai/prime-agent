@@ -1124,6 +1124,9 @@ export class InteractiveMode {
 	/** The mounted onboarding block, so flow panels can render inside it. */
 	private onboardingSplash: PrimeOnboardingSplashComponent | undefined = undefined;
 
+	/** Tears the block down and settles the pending flow, e.g. on a session reset. */
+	private onboardingAbort: (() => void) | undefined = undefined;
+
 	private customHeader: (Component & { dispose?(): void }) | undefined = undefined;
 
 	private getLocalSessionHost(): InteractiveModeLocalSessionHost {
@@ -1847,9 +1850,8 @@ export class InteractiveMode {
 			await this.runOnboardingFlow();
 			outcome = isOnboardingModelReady(this.getOnboardingState()) ? "success" : "aborted";
 			if (outcome === "success") {
-				// Only a completed onboarding counts as seen: an escaped splash or a
-				// failed login leaves the flag unset so the next launch retries, and
-				// shouldRunOnboarding already skips users who configured a model.
+				// Only a completed onboarding counts as seen: a cancelled sign-in
+				// leaves the flag unset so the next launch retries the flow.
 				this.markOnboardingShown();
 				await this.settingsManager.flush();
 			}
@@ -3674,6 +3676,9 @@ export class InteractiveMode {
 		for (const close of this.inlineAuthPanelClosers.splice(0).reverse()) {
 			close();
 		}
+		// A reset mid-onboarding leaves the block with no flow to host: tear it
+		// down too, so the overlay, its animation and the pending step all end.
+		this.onboardingAbort?.();
 		this.closeConfigurationMenu?.();
 		this.cancelActiveConnectionExtensionUiRequests();
 		this.closeHeartbeatManager();
@@ -8894,7 +8899,7 @@ export class InteractiveMode {
 		}
 	}
 
-	private showOnboardingSplash(continueActionLabel?: string): Promise<OnboardingSplashHandle | undefined> {
+	private showOnboardingSplash(): Promise<OnboardingSplashHandle | undefined> {
 		return new Promise((resolve) => {
 			let settled = false;
 			let dismissed = false;
@@ -8915,6 +8920,7 @@ export class InteractiveMode {
 				selector?.dispose();
 				handle?.hide();
 				this.onboardingSplash = undefined;
+				this.onboardingAbort = undefined;
 				this.onboardingUiActive = false;
 				this.builtInHeader?.invalidate();
 				this.ui.requestRender();
@@ -8928,19 +8934,17 @@ export class InteractiveMode {
 						dismiss,
 					});
 				},
-				() => {
-					dismiss();
-					settle(undefined);
-				},
 				{
 					getRows: () => this.ui.terminal.rows,
 					requestRender: () => this.ui.requestRender(),
-					...(continueActionLabel ? { continueActionLabel } : {}),
 				},
 			);
-			// Inline block: anchored top-left and only as tall as its own content, so
-			// the editor and footer stay visible. The brand header hides while it is
-			// mounted so the two marks never stack.
+			// The block owns the pane while onboarding runs: the brand header hides
+			// so the two marks never stack, and flow panels mount inside the block.
+			this.onboardingAbort = () => {
+				dismiss();
+				settle(undefined);
+			};
 			this.onboardingUiActive = true;
 			this.onboardingSplash = selector;
 			this.builtInHeader?.invalidate();

@@ -10,12 +10,10 @@ import { getResolvedThemeColors, type ThemeColor, theme } from "../theme/theme.j
 import { onboardingHighlightBackground } from "./onboarding-highlight.js";
 
 interface PrimeOnboardingSplashOptions {
-	/** Kept for call-site compatibility; the block sizes itself to its content. */
+	/** Terminal rows; the block fills them so the prompt dock stays covered. */
 	getRows?: () => number;
 	requestRender?: () => void;
 	animationIntervalMs?: number;
-	/** Primary action wording when the account is already authenticated. */
-	continueActionLabel?: string;
 }
 
 const LOGO_LINES = PRIME_COMPACT_BUTTERFLY_LOGO.split("\n");
@@ -25,6 +23,7 @@ const ANIMATION_INTERVAL_MS = 120;
 const PADDING_X = 1;
 /** The mark sits a little further right than the text column. */
 const LOGO_INDENT = 5;
+const LOGIN_ACTION_LABEL = "Log in with Prime Intellect";
 const MARKER_WIDTH = 2;
 /** What sets the agent apart, wrapped under the welcome line. */
 const DESCRIPTION_PARAGRAPHS = [
@@ -66,14 +65,13 @@ export class PrimeOnboardingSplashComponent implements Component {
 	private frame = 0;
 	private animationInterval?: ReturnType<typeof setInterval>;
 	private progressMessage?: string;
-	private panel?: Component;
-	private panelHeading?: string;
+	/** Stack, so a nested panel restores the one it covered when it closes. */
+	private panels: { panel: Component; heading?: string }[] = [];
 	/** Once a flow owns the block, the intro never comes back. */
 	private flowStarted = false;
 
 	constructor(
 		private readonly onSelect: () => void,
-		private readonly onCancel: () => void,
 		private readonly options: PrimeOnboardingSplashOptions = {},
 	) {
 		if (options.requestRender) {
@@ -102,31 +100,30 @@ export class PrimeOnboardingSplashComponent implements Component {
 	}
 
 	/**
-	 * Mount a flow panel (provider login) inside the block, directly under the
-	 * welcome line, so onboarding keeps the top of the screen instead of handing
-	 * it to the prompt dock.
+	 * Mount a flow panel (a provider login, a question) inside the block, under
+	 * the welcome line. Panels nest: a selector opened on top of a login dialog
+	 * restores that dialog when it closes. Passing undefined pops the top panel.
 	 */
 	setPanel(panel: Component | undefined, heading?: string): void {
-		this.panel = panel;
-		this.panelHeading = panel ? heading : undefined;
 		if (panel) {
+			this.panels.push({ panel, ...(heading ? { heading } : {}) });
 			this.flowStarted = true;
+		} else {
+			this.panels.pop();
 		}
 		this.options.requestRender?.();
 	}
 
 	handleInput(keyData: string): void {
-		if (this.panel || this.progressMessage) {
+		if (this.getPanel() || this.progressMessage) {
 			return;
 		}
 		const kb = getKeybindings();
 		if (kb.matches(keyData, "tui.select.confirm")) {
 			this.onSelect();
-			return;
 		}
-		if (kb.matches(keyData, "tui.select.cancel")) {
-			this.onCancel();
-		}
+		// Cancel is deliberately unbound: signing in is the only way forward, and
+		// the gaps between steps must not drop the user into an unconfigured chat.
 	}
 
 	render(width: number): string[] {
@@ -136,7 +133,7 @@ export class PrimeOnboardingSplashComponent implements Component {
 		lines.push(...this.renderMarkRows(layout.fieldWidth).map((row) => this.line(safeWidth, layout.fieldLeft, row)));
 		lines.push(this.line(safeWidth, 0, ""));
 		lines.push(this.line(safeWidth, layout.contentLeft, this.renderHeadingLine()));
-		if (!this.panel && !this.progressMessage && !this.flowStarted) {
+		if (!this.getPanel() && !this.progressMessage && !this.flowStarted) {
 			lines.push(this.line(safeWidth, 0, ""));
 			const descriptionWidth = Math.max(1, Math.min(DESCRIPTION_WIDTH, safeWidth - layout.contentLeft));
 			DESCRIPTION_PARAGRAPHS.forEach((paragraph, index) => {
@@ -154,15 +151,16 @@ export class PrimeOnboardingSplashComponent implements Component {
 			}
 		}
 		// The panel brings its own leading padding; a second blank row reads as a gap.
-		if (!this.panel) {
+		if (!this.getPanel()) {
 			lines.push(this.line(safeWidth, 0, ""));
 		}
-		if (this.panel) {
+		const activePanel = this.getPanel();
+		if (activePanel) {
 			// The inline panel indents its own content by one column, so drop one
 			// here to keep it flush with the welcome line.
 			const panelLeft = Math.max(0, layout.contentLeft - 1);
 			const panelWidth = Math.max(1, safeWidth - panelLeft);
-			for (const row of this.panel.render(panelWidth)) {
+			for (const row of activePanel.render(panelWidth)) {
 				lines.push(this.line(safeWidth, panelLeft, row));
 			}
 		} else if (this.progressMessage) {
@@ -175,7 +173,7 @@ export class PrimeOnboardingSplashComponent implements Component {
 		// (login, model preparation) the block collapses to its content so the
 		// inline auth panel can mount underneath it.
 		const rows =
-			this.progressMessage === undefined || this.panel !== undefined ? this.options.getRows?.() : undefined;
+			this.progressMessage === undefined || this.getPanel() !== undefined ? this.options.getRows?.() : undefined;
 		if (rows !== undefined && Number.isFinite(rows)) {
 			while (lines.length < Math.floor(rows)) {
 				lines.push(this.line(safeWidth, 0, ""));
@@ -194,7 +192,7 @@ export class PrimeOnboardingSplashComponent implements Component {
 		fieldLeft: number;
 		fieldWidth: number;
 	} {
-		const labels = [this.getPrimaryActionLabel(), "Continue later"];
+		const labels = [LOGIN_ACTION_LABEL, "Continue later"];
 		const labelWidth = labels.reduce((max, label) => Math.max(max, visibleWidth(label)), 0);
 		const contentWidth = Math.min(
 			Math.max(1, width - PADDING_X * 2),
@@ -205,9 +203,14 @@ export class PrimeOnboardingSplashComponent implements Component {
 	}
 
 	/** The panel that owns the block names itself; otherwise the brand line. */
+	private getPanel(): Component | undefined {
+		return this.panels[this.panels.length - 1]?.panel;
+	}
+
 	private renderHeadingLine(): string {
-		if (this.panelHeading) {
-			return theme.bold(theme.fg("text", this.panelHeading));
+		const heading = this.panels[this.panels.length - 1]?.heading;
+		if (heading) {
+			return theme.bold(theme.fg("text", heading));
 		}
 		return this.renderBrandLine();
 	}
@@ -220,18 +223,10 @@ export class PrimeOnboardingSplashComponent implements Component {
 		);
 	}
 
-	private getPrimaryActionLabel(): string {
-		const label = this.options.continueActionLabel;
-		if (!label) {
-			return "Log in with Prime Intellect";
-		}
-		return label.charAt(0).toUpperCase() + label.slice(1);
-	}
-
 	/** Signing in is the only way forward, so the block offers a single action. */
 	private renderActions(width: number, layout: { contentLeft: number; contentWidth: number }): string[] {
 		const highlightWidth = layout.contentWidth;
-		const content = truncateToWidth(`> ${this.getPrimaryActionLabel()}`, highlightWidth, "");
+		const content = truncateToWidth(`> ${LOGIN_ACTION_LABEL}`, highlightWidth, "");
 		const padded = content + " ".repeat(Math.max(0, highlightWidth - visibleWidth(content)));
 		const styled = this.getHighlightBackground()(theme.bold(theme.fg("text", padded)));
 		return [this.line(width, layout.contentLeft, styled)];

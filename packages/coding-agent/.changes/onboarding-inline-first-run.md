@@ -2,6 +2,6 @@
 - Changed onboarding to run every step inside that block: the Prime Intellect login, team selection, and the new questions all mount under the mark instead of opening full-pane modals or dropping to the prompt dock.
 - Added a provider step after login where several providers can be connected in one pass, with a search field, a scrolling list, and check marks on providers already signed in.
 - Added a trace-sharing question at the end of onboarding, which writes the agent traces setting and notes it can be changed later with /traces.
-- Changed first launch to run one sequence for everyone: users arriving with a Prime CLI token are signed in without a browser round trip and still reach the account, provider and trace questions instead of being dropped at the model picker.
+- Changed first launch to run one sequence for everyone: credentials already on disk (a Prime CLI token, an API key in the environment) no longer skip onboarding or divert it to the model picker; they only make the sign-in step instant.
 - Changed team selection to be skipped when the account has no team or exactly one, and to list accounts by name with their handle.
 - Changed onboarding to stay quiet: provider progress chatter, the credentials-saved status line, and the telemetry notice no longer appear during first launch; the telemetry notice surfaces on the next launch instead.

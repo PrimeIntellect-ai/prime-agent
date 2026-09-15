@@ -476,8 +476,9 @@ export class ProviderAuthFlows {
 				this.host.modelRegistry.authStorage.setPrimeInferenceTeamSelection(null, apiKey);
 				return "Using personal account.";
 			}
-			// A single team is not a choice: adopt it instead of asking.
-			if (teams.length === 1 && teams[0]) {
+			// A single team is not a choice during onboarding; /login still offers it
+			// alongside the personal account so the selection stays reversible.
+			if (this.isOnboarding() && teams.length === 1 && teams[0]) {
 				const onlyTeam = teams[0];
 				this.host.modelRegistry.authStorage.setPrimeInferenceTeamSelection(onlyTeam, apiKey);
 				return `Using team "${onlyTeam.name}".`;
