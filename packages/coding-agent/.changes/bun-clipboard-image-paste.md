@@ -1,0 +1,1 @@
+- Fixed image paste in standalone native releases by embedding the platform clipboard addon.

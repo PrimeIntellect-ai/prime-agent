@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { releasePlatforms } from "../../../scripts/release-platforms.mjs";
+import { writeClipboardBinaryBinding } from "./clipboard-binary-binding.mjs";
 import { copyBinaryAssets, validateBinaryAssets } from "./copy-binary-assets.mjs";
 import { signMacosBinary } from "./macos-signature.mjs";
 
@@ -35,6 +36,7 @@ mkdirSync(outputRoot, { recursive: true });
 for (const target of platform === "all" ? platforms : [platform]) {
 	const staging = mkdtempSync(join(outputRoot, ".build-"));
 	try {
+		writeClipboardBinaryBinding(join(packageDir, "dist/utils/clipboard-binary-binding.js"), target);
 		execFileSync(
 			bun,
 			[
