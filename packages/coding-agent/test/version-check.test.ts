@@ -161,3 +161,129 @@ describe("update channel preference", () => {
 		await expect(checkForNewPiVersion("1.2.4", "nightly")).resolves.toBe("1.2.5-beta.1.1.abcdef0");
 	});
 });
+
+describe("manifest binary forward compatibility", () => {
+	it("skips unknown future platform entries and keeps valid known binaries", async () => {
+		const fetchMock = vi.fn(async () =>
+			Response.json({
+				version: "v1.2.4",
+				package: "prime-agent",
+				tarball: "releases/v1.2.4/prime-agent-1.2.4.tgz",
+				binaries: [
+					{ platform: "darwin-arm64", file: "prime-agent-1.2.4-darwin-arm64.tar.gz", sha256: "a".repeat(64) },
+					{
+						platform: "future-riscv128",
+						file: "prime-agent-1.2.4-future-riscv128.tar.gz",
+						sha256: "b".repeat(64),
+					},
+				],
+			}),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		const release = await getLatestPiRelease("1.2.3");
+		expect(release).toBeDefined();
+		expect(release!.binaries).toEqual([
+			{ platform: "darwin-arm64", file: "prime-agent-1.2.4-darwin-arm64.tar.gz", sha256: "a".repeat(64) },
+		]);
+	});
+
+	it("skips non-object and missing-platform entries without discarding valid ones", async () => {
+		const fetchMock = vi.fn(async () =>
+			Response.json({
+				version: "v1.2.4",
+				package: "prime-agent",
+				tarball: "releases/v1.2.4/prime-agent-1.2.4.tgz",
+				binaries: [
+					null,
+					42,
+					{ file: "no-platform.tar.gz", sha256: "c".repeat(64) },
+					{ platform: "darwin-arm64", file: "prime-agent-1.2.4-darwin-arm64.tar.gz", sha256: "a".repeat(64) },
+				],
+			}),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		const release = await getLatestPiRelease("1.2.3");
+		expect(release).toBeDefined();
+		expect(release!.binaries).toEqual([
+			{ platform: "darwin-arm64", file: "prime-agent-1.2.4-darwin-arm64.tar.gz", sha256: "a".repeat(64) },
+		]);
+	});
+
+	it("still rejects all binaries when a known platform has a bad sha256", async () => {
+		const fetchMock = vi.fn(async () =>
+			Response.json({
+				version: "v1.2.4",
+				package: "prime-agent",
+				tarball: "releases/v1.2.4/prime-agent-1.2.4.tgz",
+				binaries: [{ platform: "darwin-arm64", file: "prime-agent-1.2.4-darwin-arm64.tar.gz", sha256: "not-hex" }],
+			}),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		const release = await getLatestPiRelease("1.2.3");
+		expect(release).toBeDefined();
+		expect(release!.version).toBe("1.2.4");
+		expect(release!.binaries).toBeUndefined();
+	});
+
+	it("still rejects all binaries when a known platform has a wrong filename", async () => {
+		const fetchMock = vi.fn(async () =>
+			Response.json({
+				version: "v1.2.4",
+				package: "prime-agent",
+				tarball: "releases/v1.2.4/prime-agent-1.2.4.tgz",
+				binaries: [{ platform: "darwin-arm64", file: "wrong-name.tar.gz", sha256: "a".repeat(64) }],
+			}),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		const release = await getLatestPiRelease("1.2.3");
+		expect(release).toBeDefined();
+		expect(release!.binaries).toBeUndefined();
+	});
+
+	it("still rejects all binaries when a known platform is duplicated", async () => {
+		const fetchMock = vi.fn(async () =>
+			Response.json({
+				version: "v1.2.4",
+				package: "prime-agent",
+				tarball: "releases/v1.2.4/prime-agent-1.2.4.tgz",
+				binaries: [
+					{ platform: "darwin-arm64", file: "prime-agent-1.2.4-darwin-arm64.tar.gz", sha256: "a".repeat(64) },
+					{ platform: "darwin-arm64", file: "prime-agent-1.2.4-darwin-arm64.tar.gz", sha256: "b".repeat(64) },
+				],
+			}),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		const release = await getLatestPiRelease("1.2.3");
+		expect(release).toBeDefined();
+		expect(release!.binaries).toBeUndefined();
+	});
+
+	it("preserves npm release info even when all binary entries are unknown platforms", async () => {
+		const fetchMock = vi.fn(async () =>
+			Response.json({
+				version: "v1.2.4",
+				package: "prime-agent",
+				tarball: "releases/v1.2.4/prime-agent-1.2.4.tgz",
+				binaries: [
+					{
+						platform: "future-riscv128",
+						file: "prime-agent-1.2.4-future-riscv128.tar.gz",
+						sha256: "b".repeat(64),
+					},
+				],
+			}),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		const release = await getLatestPiRelease("1.2.3");
+		expect(release).toBeDefined();
+		expect(release!.version).toBe("1.2.4");
+		expect(release!.packageName).toBe("prime-agent");
+		expect(release!.binaries).toBeUndefined();
+	});
+});

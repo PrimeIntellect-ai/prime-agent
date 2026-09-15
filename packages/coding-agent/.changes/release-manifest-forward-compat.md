@@ -1,0 +1,2 @@
+- Fixed release manifest parsing rejecting all native binary entries when encountering an unknown future platform; unknown platforms are now skipped while known-platform entries remain strictly validated.
+- Changed client-facing release manifests to advertise only the four legacy platforms so pre-fix clients are not bricked by the new musl and baseline archive entries.

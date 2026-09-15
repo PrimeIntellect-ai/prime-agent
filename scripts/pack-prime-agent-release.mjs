@@ -15,6 +15,7 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assembleBinaryArchives } from "./assemble-release-archives.mjs";
+import { manifestPlatforms } from "./release-platforms.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultOutputDir = join(root, "packages", "coding-agent", "release");
@@ -346,11 +347,16 @@ function main() {
 	);
 	writeFileSync(join(artifactsDir, args.channel), `v${releaseVersion}\n`);
 	const manifestName = args.channel === "stable" ? "latest.json" : "beta.json";
+	// Advertise only the legacy four platforms in the client-facing manifest so
+	// pre-0.9.5 clients (which reject the whole list on an unknown entry) still
+	// find their platform. All archives remain in SHA256SUMS for the installer.
+	const manifestSafe = new Set(manifestPlatforms);
+	const manifestBinaries = binaries.filter((entry) => manifestSafe.has(entry.platform));
 	writeJson(join(artifactsDir, manifestName), {
 		version: `v${releaseVersion}`,
 		package: publicPackageName,
 		tarball: `releases/v${releaseVersion}/${artifactFiles.get("coding-agent")}`,
-		...(binaries.length > 0 ? { binaries } : {}),
+		...(manifestBinaries.length > 0 ? { binaries: manifestBinaries } : {}),
 		tarballs: tarballs.map((tarball) => ({
 			package: tarball.name,
 			file: tarball.file,

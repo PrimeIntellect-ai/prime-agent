@@ -206,15 +206,16 @@ export async function getLatestPiRelease(
 	}
 	if (Array.isArray(data.binaries)) {
 		// Invalid optional native metadata must not discard a valid npm release.
-		// Publish the list only after every entry passes validation.
+		// Publish the list only after every known-platform entry passes validation.
+		// Unknown future platforms are silently skipped so that adding a new
+		// platform to the manifest never bricks older clients.
 		const binaries: NativeReleaseArtifact[] = [];
 		const platforms = new Set<string>();
 		for (const candidate of data.binaries) {
-			if (!candidate || typeof candidate !== "object") return release;
+			if (!candidate || typeof candidate !== "object") continue;
 			const artifact = candidate as Partial<NativeReleaseArtifact>;
+			if (typeof artifact.platform !== "string" || !isNativePlatform(artifact.platform)) continue;
 			if (
-				typeof artifact.platform !== "string" ||
-				!isNativePlatform(artifact.platform) ||
 				platforms.has(artifact.platform) ||
 				artifact.file !== `prime-agent-${release.version}-${artifact.platform}.tar.gz` ||
 				typeof artifact.sha256 !== "string" ||
@@ -224,7 +225,7 @@ export async function getLatestPiRelease(
 			platforms.add(artifact.platform);
 			binaries.push({ platform: artifact.platform, file: artifact.file, sha256: artifact.sha256 });
 		}
-		release.binaries = binaries;
+		if (binaries.length > 0) release.binaries = binaries;
 	}
 	return release;
 }

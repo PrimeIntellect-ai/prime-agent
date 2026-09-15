@@ -245,3 +245,37 @@ ${step(validation, "Verify and exercise exact final Mac archives").run}`,
 		},
 	);
 });
+
+describe("manifest platform compatibility", () => {
+	const manifestPlatformsResult = spawnSync(
+		process.execPath,
+		[
+			"--input-type=module",
+			"-e",
+			`import { manifestPlatforms } from ${JSON.stringify(join(repository, "scripts/release-platforms.mjs"))}; console.log(JSON.stringify(manifestPlatforms));`,
+		],
+		{ encoding: "utf8" },
+	);
+	const manifestPlatforms: string[] =
+		manifestPlatformsResult.status === 0 ? JSON.parse(manifestPlatformsResult.stdout.trim()) : [];
+
+	it("exports the four legacy manifest platforms that pre-fix clients accept", () => {
+		expect(manifestPlatformsResult.status, manifestPlatformsResult.stderr).toBe(0);
+		expect(manifestPlatforms).toEqual(["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"]);
+	});
+
+	it("manifest platforms are a strict subset of the full release platform set", () => {
+		for (const platform of manifestPlatforms) expect(releasePlatforms).toContain(platform);
+		expect(manifestPlatforms.length).toBeLessThan(releasePlatforms.length);
+	});
+
+	it("the pack script filters manifest binaries to the legacy subset while SHA256SUMS covers all", () => {
+		const packScript = readFileSync(join(repository, "scripts/pack-prime-agent-release.mjs"), "utf8");
+		// The pack script must import the manifest subset.
+		expect(packScript).toContain("manifestPlatforms");
+		// SHA256SUMS must be written from the unfiltered binaries array.
+		expect(packScript).toMatch(/SHA256SUMS.*\n.*\[.*tarballs.*binaries\]/s);
+		// The manifest JSON must use the filtered array, not the raw binaries.
+		expect(packScript).toContain("manifestBinaries");
+	});
+});

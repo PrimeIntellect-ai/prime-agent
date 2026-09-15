@@ -22,6 +22,17 @@ export const releasePlatforms = [
 	"linux-x64-musl-baseline",
 ];
 
+// Platforms advertised in client-facing manifests (beta.json / latest.json).
+// Pre-0.9.5 clients reject the entire binaries list when they encounter an
+// unknown platform entry, so the manifest must stay limited to the four
+// platforms every shipped client accepts.
+export const manifestPlatforms = [
+	"darwin-arm64",
+	"darwin-x64",
+	"linux-arm64",
+	"linux-x64",
+];
+
 export const darwinReleasePlatforms = releasePlatforms.filter((platform) => platform.startsWith("darwin-"));
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
