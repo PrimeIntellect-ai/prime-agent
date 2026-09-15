@@ -103,12 +103,23 @@ export class McpConnectionOutcomeMessageComponent extends ExpandableEventMessage
 
 	protected updateDisplay(): void {
 		const { details } = this.message;
-		const disconnect = isMcpDisconnectionOutcome(details);
+		// The diamond colour follows the OUTCOME, not the flow: purple is
+		// success (connected), warning orange is anything that needs attention
+		// (a rejected token, an unfinished verification, a disconnect) — Kevin,
+		// live testing: "things like this should not be purple... it should be
+		// orange like the warning colour. purple is success." Same for
+		// "Disconnected".
+		const headerColor =
+			isMcpDisconnectionOutcome(details) || details.verification !== "connected" ? "warning" : "refinementHeader";
 		this.clear();
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg(disconnect ? "muted" : "refinementHeader", `◆ ${outcomeHeader(details)}`), 1, 0));
+		this.addChild(new Text(theme.fg(headerColor, `◆ ${outcomeHeader(details)}`), 1, 0));
 		const body = outcomeBody(details);
-		if (body) this.addSummary(body, undefined, disconnect ? "dim" : "refinementSummary");
+		// Purple summary is the success tone; warning outcomes get the dim
+		// grey so nothing purple reads as a failure (Kevin, live testing).
+		const bodyTone =
+			isMcpDisconnectionOutcome(details) || details.verification !== "connected" ? "dim" : "refinementSummary";
+		if (body) this.addSummary(body, undefined, bodyTone);
 		if (this.expanded) {
 			this.addChild(new Text(theme.fg("dim", outcomeMetadata(details)), 1, 0));
 		}

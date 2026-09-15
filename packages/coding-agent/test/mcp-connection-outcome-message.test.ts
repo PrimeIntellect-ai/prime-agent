@@ -211,11 +211,30 @@ describe("McpConnectionOutcomeMessageComponent", () => {
 		);
 	});
 
-	test("renders a disconnect as a muted diamond header, in neither the connect purple nor the error red", () => {
+	test("warning outcomes never render the success purple", () => {
+		// Kevin: purple means success. An unfinished verification, a rejected
+		// token, and a disconnect are warnings — the diamond must be orange.
+		const unverified = {
+			label: "GitHub",
+			source: "paste",
+			verification: "unverified",
+			issue: "the endpoint returned an HTTP error",
+			activation: "active",
+		} as const;
+		const lines = outcomeComponent(unverified).render(120);
+		expect(stripAnsi(lines.join("\n"))).toContain("◆ Verification did not complete · GitHub saved");
+		// Not the success purple header, and not the purple summary body.
+		expect(lines.join("\n")).not.toContain(
+			theme.fg("refinementHeader", "◆ Verification did not complete · GitHub saved"),
+		);
+		expect(lines.join("\n")).not.toContain(theme.fg("refinementSummary", " The endpoint returned an HTTP error"));
+	});
+
+	test("renders a disconnect as a warning diamond header, in neither the connect purple nor the error red", () => {
 		const component = outcomeComponent({ kind: "disconnect", label: "Granola", removal: "removed" });
 		expect(flat(component)).toBe("◆ Disconnected Granola");
 		const raw = component.render(120).join("\n");
-		expect(raw).toContain(theme.fg("muted", "◆ Disconnected Granola"));
+		expect(raw).toContain(theme.fg("warning", "◆ Disconnected Granola"));
 		expect(raw).not.toContain(theme.fg("refinementHeader", "◆ Disconnected Granola"));
 		expect(raw).not.toContain(theme.fg("error", "◆ Disconnected Granola"));
 	});
