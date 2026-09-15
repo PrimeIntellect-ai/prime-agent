@@ -223,6 +223,8 @@ describe("shouldStartDaemonEarly", () => {
 		["extension flag with a command-like value", ["--extension-option", "status"]],
 		["value flag before a -- separator", ["--cwd", "--", "status"]],
 		["resume selector that is an @file reference", ["--resume", "@prompt.md", "status"]],
+		["prompt-value flag before a command word", ["--system-prompt", "be terse", "status"]],
+		["appended prompt-value flag before a command word", ["--append-system-prompt", "be terse", "status"]],
 	])("starts early for the %s client", (_label, args) => {
 		expect(shouldStartDaemonEarly(args, false)).toBe(true);
 	});
