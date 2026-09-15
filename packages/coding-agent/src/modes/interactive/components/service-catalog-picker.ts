@@ -29,6 +29,19 @@ export interface ServiceCatalogPickerOptions extends MenuViewportProvider {
 	getRowPresentation?: (service: McpPluginView) => { action?: string; status?: string; detail?: string } | undefined;
 }
 
+/**
+ * Catalog copy (descriptions, setup hints) is imported verbatim from upstream
+ * plugin manifests and routinely contains newlines — Canva's description, for
+ * example, lists its skills one per line. A rendered line must be exactly one
+ * terminal line: an embedded newline paints extra physical rows that the
+ * differential renderer never accounted for, so every row below it drifts and
+ * stale rows survive (duplicated entries, doubled scroll counters). Flatten all
+ * whitespace runs before the text becomes a line.
+ */
+function flattenToSingleLine(text: string): string {
+	return text.replace(/\s+/g, " ").trim();
+}
+
 const PREFERRED_VISIBLE_SERVICES = 8;
 const SEARCH_AND_FOOTER_ROWS = 4;
 const SCROLL_INDICATOR_ROWS = 1;
@@ -177,8 +190,10 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 			if (!service) continue;
 			this.listContainer.addChild(
 				new MenuRow({
-					primary: service.label,
-					trailing: [this.getRowPresentation?.(service)?.status ?? this.statusText(service)],
+					// Labels and host-provided status are catalog copy too: flatten
+					// them so a stray newline can never split a row.
+					primary: flattenToSingleLine(service.label),
+					trailing: [flattenToSingleLine(this.getRowPresentation?.(service)?.status ?? this.statusText(service))],
 					selected: index === this.selectedIndex,
 					inline: true,
 				}),
@@ -203,7 +218,11 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 					truncateToWidth(
 						theme.fg(
 							"muted",
-							` ${this.getRowPresentation?.(selected)?.detail ?? this.secondaryText(selected) ?? this.statusText(selected)}`,
+							` ${flattenToSingleLine(
+								this.getRowPresentation?.(selected)?.detail ??
+									this.secondaryText(selected) ??
+									this.statusText(selected),
+							)}`,
 						),
 						width,
 						"…",

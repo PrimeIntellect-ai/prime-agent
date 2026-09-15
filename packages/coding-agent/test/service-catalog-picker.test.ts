@@ -32,6 +32,44 @@ describe("ServiceCatalogPickerComponent", () => {
 		setKeybindings(new KeybindingsManager());
 	});
 
+	it("never emits an embedded newline, even when catalog copy is multi-line", () => {
+		// Real catalog copy (Canva's description) lists skills one per line. A
+		// rendered line containing "\n" paints extra physical rows that the
+		// differential renderer never counted, so rows below it drift and stale
+		// rows survive — duplicated entries and doubled scroll counters.
+		const multiline =
+			"Bring your Canva design workflow into Codex.\nAvailable skills:\nResize for social media: Adapt a design.\nBulk create: Generate designs.";
+		const picker = new ServiceCatalogPickerComponent(
+			[
+				viewFixture({
+					serviceId: "canva",
+					label: "Canva",
+					description: multiline,
+					connectionStatus: "connected",
+					toolCount: 34,
+				}),
+				viewFixture({ serviceId: "cloudflare", label: "Cloudflare", description: "Cloudflare platform plugin." }),
+			],
+			() => {},
+			() => {},
+			{ getRows: () => 20 },
+		);
+
+		const first = picker.render(120);
+		expect(first.some((line) => line.includes("\n"))).toBe(false);
+		// The whole description occupies exactly one row: flattened, not split.
+		expect(first.filter((line) => stripAnsi(line).includes("Bring your Canva design workflow"))).toHaveLength(1);
+		const detail = first.find((line) => stripAnsi(line).includes("Bring your Canva design workflow"));
+		expect(visibleWidth(detail ?? "")).toBeLessThanOrEqual(120);
+
+		// Moving the selection must not change the frame height: a multi-line
+		// description and a short one both occupy exactly one detail row.
+		picker.handleInput("\u001b[B");
+		const second = picker.render(120);
+		expect(second.some((line) => line.includes("\n"))).toBe(false);
+		expect(second).toHaveLength(first.length);
+	});
+
 	it("renders compact inline rows with honest status text", () => {
 		const picker = new ServiceCatalogPickerComponent(
 			[
