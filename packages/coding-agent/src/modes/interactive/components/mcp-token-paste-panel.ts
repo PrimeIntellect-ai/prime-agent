@@ -12,7 +12,6 @@ import { keyText } from "./keybinding-hints.js";
 import { MenuPanel, MenuSearchInput } from "./menu-panel.js";
 import { shouldTreatAsBack } from "./modal-back.js";
 
-/** One prompt of the paste panel: a credential field with its human label. */
 export interface McpTokenPasteField {
 	/** Catalog setup field id (the env var the manifest names — display only). */
 	id: string;
@@ -25,15 +24,14 @@ export interface McpTokenPastePanelOptions {
 	serviceLabel: string;
 	/** The service's own one-line setup reason, shown as context when present. */
 	reason?: string;
-	/** Credential fields to prompt, in order; every one is required. */
-	fields: readonly McpTokenPasteField[];
+	/** The ONE credential the panel collects — the flow is single-credential by construction. */
+	field: McpTokenPasteField;
 	/**
-	 * Completes with every pasted value keyed by field id, in prompt order.
-	 * The secret values exist only in memory and the credential store: this
-	 * component never renders them, and they never reach a status line, log,
-	 * or transcript on any path.
+	 * Completes with the pasted value. The value exists only in memory and the
+	 * credential store: this component never renders it, and it never reaches a
+	 * status line, log, or transcript on any path.
 	 */
-	onSubmit: (values: Record<string, string>) => void;
+	onSubmit: (value: string) => void;
 	/** Esc: nothing was stored, nothing is echoed. */
 	onCancel: () => void;
 }
@@ -41,13 +39,12 @@ export interface McpTokenPastePanelOptions {
 /** Live projection the body renders from — no secrets, only labels. */
 interface TokenPasteRenderState {
 	reason?: string;
-	completedLabels: readonly string[];
 	promptLabel: string;
 	notice?: string;
 	input: MenuSearchInput;
 }
 
-/** The one muted line every field of the panel shares. */
+/** The one muted line the panel shares across renders. */
 const STORAGE_HINT =
 	"Input is hidden; it is saved only to the agent credential store — never settings, never the transcript.";
 
@@ -56,17 +53,16 @@ const STORAGE_HINT =
  * OAuth login panel (showInlineAuthPanel) and in the #2331/#2340 visual
  * language: one separator rule, a prompt-style header, a muted context line,
  * then the input. Input is MASKED — a rendered line never contains the pasted
- * secret, only bullets — while edits and submit keep the real buffer.
+ * secret, only bullets — while edits and submit keep the real buffer. Exactly
+ * ONE credential is collected: the paste flow prompts once, so a multi-value
+ * credential (named header pairs) can never reach this panel.
  */
 export class McpTokenPastePanelComponent extends Container implements Focusable {
-	private readonly serviceLabel: string;
 	private readonly reason: string | undefined;
-	private readonly fields: readonly McpTokenPasteField[];
-	private readonly values: Record<string, string> = {};
-	private fieldIndex = 0;
+	private readonly field: McpTokenPasteField;
 	private notice: string | undefined;
 	private readonly input: MenuSearchInput;
-	private readonly onSubmitCallback: (values: Record<string, string>) => void;
+	private readonly onSubmitCallback: (value: string) => void;
 	private readonly onCancelCallback: () => void;
 	private settled = false;
 
@@ -82,12 +78,8 @@ export class McpTokenPastePanelComponent extends Container implements Focusable 
 
 	constructor(options: McpTokenPastePanelOptions) {
 		super();
-		if (options.fields.length === 0) {
-			throw new Error("The token paste panel requires at least one field");
-		}
-		this.serviceLabel = options.serviceLabel;
 		this.reason = options.reason?.trim() || undefined;
-		this.fields = [...options.fields];
+		this.field = options.field;
 		this.onSubmitCallback = options.onSubmit;
 		this.onCancelCallback = options.onCancel;
 		// Same inline panel shape as the OAuth login dialog: rule + title, and
@@ -95,38 +87,29 @@ export class McpTokenPastePanelComponent extends Container implements Focusable 
 		const panel = new MenuPanel({ title: `Connect ${options.serviceLabel}`, inline: true, topRule: true });
 		this.addChild(panel);
 		this.input = new MenuSearchInput("Paste token", true, { masked: true });
-		this.input.onSubmit = () => this.submitCurrent();
+		this.input.onSubmit = () => this.submit();
 		panel.addChild(new TokenPasteBody(() => this.renderState()));
 	}
 
 	private renderState(): TokenPasteRenderState {
 		return {
 			...(this.reason ? { reason: this.reason } : {}),
-			completedLabels: this.fields.slice(0, this.fieldIndex).map((field) => field.label),
-			promptLabel: this.fields[this.fieldIndex]?.label ?? "",
+			promptLabel: this.field.label,
 			...(this.notice ? { notice: this.notice } : {}),
 			input: this.input,
 		};
 	}
 
-	/** Submit the current field: an empty value stays on the field, never a dead end. */
-	private submitCurrent(): void {
+	/** Submit the credential: an empty value stays on the field, never a dead end. */
+	private submit(): void {
 		if (this.settled) return;
 		const value = this.input.getValue().trim();
 		if (!value) {
 			this.notice = "The value cannot be empty.";
 			return;
 		}
-		const field = this.fields[this.fieldIndex];
-		if (!field) return;
-		this.values[field.id] = value;
-		this.input.setValue("");
-		this.notice = undefined;
-		this.fieldIndex += 1;
-		if (this.fieldIndex >= this.fields.length) {
-			this.settled = true;
-			this.onSubmitCallback({ ...this.values });
-		}
+		this.settled = true;
+		this.onSubmitCallback(value);
 	}
 
 	private cancel(): void {
@@ -150,7 +133,7 @@ export class McpTokenPastePanelComponent extends Container implements Focusable 
 	}
 }
 
-/** Full-width panel body in the #2340 shape: blank, context, completed rows, prompt, input, hints. */
+/** Full-width panel body in the #2340 shape: blank, context, prompt, masked input, hints. */
 class TokenPasteBody implements Component {
 	readonly fillsMenuPanel = true;
 
@@ -174,10 +157,6 @@ class TokenPasteBody implements Component {
 			for (const row of wrapped) lines.push(this.line(safeWidth, theme.fg("muted", row)));
 			lines.push(this.line(safeWidth, ""));
 		}
-		for (const label of state.completedLabels) {
-			lines.push(this.line(safeWidth, theme.fg("muted", `✓ ${label}`)));
-		}
-		if (state.completedLabels.length > 0) lines.push(this.line(safeWidth, ""));
 		if (state.notice) lines.push(this.line(safeWidth, theme.fg("error", state.notice)));
 		lines.push(this.line(safeWidth, theme.fg("text", state.promptLabel)));
 		lines.push(...state.input.render(safeWidth));

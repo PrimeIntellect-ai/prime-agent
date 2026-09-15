@@ -1226,7 +1226,6 @@ describe("McpManager token services (paste flow)", () => {
 			endpoint: TOKEN_URL,
 			bearer: "ghp_stored-token",
 			bearerFieldId: "TOKEN_SERVICE_TOKEN",
-			values: { TOKEN_SERVICE_TOKEN: "ghp_stored-token" },
 			createdAt: Date.now(),
 		});
 		const probed: string[] = [];
@@ -1252,7 +1251,6 @@ describe("McpManager token services (paste flow)", () => {
 			endpoint: TOKEN_URL,
 			bearer: "ghp_stored-token",
 			bearerFieldId: "TOKEN_SERVICE_TOKEN",
-			values: { TOKEN_SERVICE_TOKEN: "ghp_stored-token" },
 			createdAt: Date.now(),
 		});
 		const probes: string[] = [];

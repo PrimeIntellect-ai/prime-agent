@@ -21,6 +21,7 @@ import {
 	mcpCredentialFields,
 	mcpCredentialKey,
 	mcpLoginEligibility,
+	mcpPasteCredential,
 	mcpStaticTokenUsable,
 	nextMcpConnectionId,
 	pagePluginViews,
@@ -1476,14 +1477,15 @@ describe("resolveMcpServiceCatalog", () => {
 });
 
 describe("/mcp and /plugins picker row counts", () => {
-	it("ships exactly 70 catalog services after the ENG-6108 token-only cut", () => {
+	it("ships exactly 68 catalog services after the ENG-6108 single-credential cut", () => {
 		// The live /mcp picker counter read /77 against the earlier shipped 75:
 		// the extra rows are installed connections pinned from records (below),
 		// never catalog growth or duplicated rows. The 2026-09-16 token-only cut
 		// dropped 5 more non-pasteable survivors (CockroachDB Cloud, Dynatrace,
-		// Sourcegraph, PayPal Sandbox, Render). Pin the shipped length so silent
-		// re-growth changes the counter loudly.
-		expect(SERVICE_CATALOG.length).toBe(70);
+		// Sourcegraph, PayPal Sandbox, Render), and the single-credential cut
+		// dropped the two named-header pairs (Datadog, Cloudinary MediaFlows).
+		// Pin the shipped length so silent re-growth changes the counter loudly.
+		expect(SERVICE_CATALOG.length).toBe(68);
 	});
 
 	it("counts rows as the shipped catalog plus pinned installed connections — unique, no off-by-N", () => {
@@ -1540,10 +1542,26 @@ describe("catalog token services: the paste flow (storage, views, verification)"
 			endpoint: GITHUB_URL,
 			bearer: "ghp_pasted-token",
 			bearerFieldId: "GITHUB_PAT_TOKEN",
-			values: { GITHUB_PAT_TOKEN: "ghp_pasted-token" },
 			createdAt: Date.now(),
 			...overrides,
 		};
+	}
+
+	/** A service collecting two GENUINELY DISTINCT required credentials. */
+	function twoDistinctCredentialsService(): McpServiceDescriptor {
+		return serviceFixture({
+			serviceId: "named-headers",
+			label: "Named Headers",
+			authStrategy: "api_key",
+			setup: {
+				status: "requires-setup",
+				reason: "paste your API key and application key",
+				fields: [
+					{ id: "SVC_API_KEY", label: "SVC_API_KEY", required: true, kind: "api-key" },
+					{ id: "SVC_APPLICATION_KEY", label: "SVC_APPLICATION_KEY", required: true, kind: "api-key" },
+				],
+			},
+		});
 	}
 
 	beforeEach(() => {
@@ -1556,15 +1574,15 @@ describe("catalog token services: the paste flow (storage, views, verification)"
 		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 	});
 
-	it("identifies exactly the catalog's paste-an-api-key/token services and their credential fields", () => {
+	it("identifies exactly the catalog's paste-an-api-key/token services — single-credential by construction", () => {
 		const descriptors = defaultServiceCatalogProvider()();
 		const pasteable = descriptors.filter((descriptor) => isPasteableTokenService(descriptor));
-		// The 2026-09-16 token-only cut: 13 requires-setup token services.
+		// The 2026-09-16 single-credential cut: 11 one-paste services (the
+		// named-header pairs datadog and cloudinary-mediaflows are cut from the
+		// catalog; the importer refuses to re-ship them).
 		expect(pasteable.map((descriptor) => descriptor.serviceId).sort()).toEqual(
 			[
 				"aws-devops-agent",
-				"cloudinary-mediaflows",
-				"datadog",
 				"github",
 				"pagerduty",
 				"sonatype-guide",
@@ -1577,21 +1595,56 @@ describe("catalog token services: the paste flow (storage, views, verification)"
 				"zoom-whiteboard",
 			].sort(),
 		);
-		// GitHub prompts BOTH declared credential fields, in catalog order.
+		// GitHub's two fields are ALTERNATIVE NAMES for one PAT (a shared
+		// credentialSet): the paste flow collects ONE credential, stored under
+		// the first alternative's id.
 		const github = pasteable.find((descriptor) => descriptor.serviceId === "github");
 		expect(github ? mcpCredentialFields(github).map((field) => field.id) : []).toEqual([
 			"GITHUB_PAT_TOKEN",
 			"GITHUB_PERSONAL_ACCESS_TOKEN",
 		]);
-		// Datadog prompts its two API keys; the non-credential env-var field
-		// (DD_MCP_TOOLSETS) is NEVER prompted and never stored by the flow.
-		const datadog = pasteable.find((descriptor) => descriptor.serviceId === "datadog");
-		expect(datadog ? mcpCredentialFields(datadog).map((field) => field.id) : []).toEqual([
-			"DD_API_KEY",
-			"DD_APPLICATION_KEY",
-		]);
+		expect(github ? mcpPasteCredential(github) : undefined).toMatchObject({
+			field: expect.objectContaining({ id: "GITHUB_PAT_TOKEN" }),
+			fieldIds: ["GITHUB_PAT_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN"],
+		});
 		// Non-token services are not pasteable.
 		expect(isPasteableTokenService(serviceFixture())).toBe(false);
+	});
+
+	it("collapses alternative names to ONE credential; genuinely distinct credentials stay un-pasteable", () => {
+		// A shared credentialSet across several fields = one credential.
+		const alternatives = serviceFixture({
+			serviceId: "alt-names",
+			label: "Alt Names",
+			authStrategy: "api_key",
+			setup: {
+				status: "requires-setup",
+				fields: [
+					{ id: "ALT_A", label: "ALT_A", required: true, kind: "bearer-token", credentialSet: "one-token" },
+					{ id: "ALT_B", label: "ALT_B", required: true, kind: "bearer-token", credentialSet: "one-token" },
+				],
+			},
+		});
+		expect(mcpPasteCredential(alternatives)).toMatchObject({
+			field: expect.objectContaining({ id: "ALT_A" }),
+			fieldIds: ["ALT_A", "ALT_B"],
+		});
+		expect(isPasteableTokenService(alternatives)).toBe(true);
+		// Two UNMARKED distinct credential fields = two credentials: the single
+		// bearer runtime cannot represent them, so the flow fails closed.
+		const distinct = twoDistinctCredentialsService();
+		expect(mcpPasteCredential(distinct)).toBeUndefined();
+		expect(isPasteableTokenService(distinct)).toBe(false);
+		// The row stays honest setup_required with NO paste action — the
+		// dead-end hint, not a multi-prompt that can never authenticate.
+		const views = buildPluginViews({
+			services: [distinct],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views[0]?.connectionStatus).toBe("setup_required");
+		expect(views[0]?.pasteToken).toBeUndefined();
 	});
 
 	it("derives human prompt labels from the field, never the raw env var alone", () => {
@@ -1599,12 +1652,10 @@ describe("catalog token services: the paste flow (storage, views, verification)"
 		const byId = (id: string) => descriptors.find((descriptor) => descriptor.serviceId === id);
 		const github = byId("github");
 		expect(github).toBeDefined();
-		const githubFields = github ? mcpCredentialFields(github) : [];
-		expect(mcpCredentialFieldPromptLabel(github!, githubFields[0]!, true)).toBe(
-			"GitHub personal access token (GITHUB_PAT_TOKEN)",
-		);
-		expect(mcpCredentialFieldPromptLabel(github!, githubFields[1]!, true)).toBe(
-			"GitHub personal access token (GITHUB_PERSONAL_ACCESS_TOKEN)",
+		const githubCredential = github ? mcpPasteCredential(github) : undefined;
+		expect(githubCredential).toBeDefined();
+		expect(github && githubCredential ? mcpCredentialFieldPromptLabel(github, githubCredential.field) : "").toBe(
+			"GitHub personal access token",
 		);
 		// Single-field services keep the plain noun (Kevin's live-testing example).
 		expect(mcpCredentialFieldPromptLabel(byId("pagerduty")!, mcpCredentialFields(byId("pagerduty")!)[0]!)).toBe(

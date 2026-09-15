@@ -45,21 +45,20 @@ export type OAuthCredential = {
  * A static token pasted for one MCP connection through the inline paste flow.
  * Deliberately NOT the OAuth shape: there is no refresh token, no expiry, and
  * no client identity to fake — the handshake sends `bearer` as
- * `Authorization: Bearer` and the remaining collected values (e.g. an
- * application key) stay in `values`. Bound to the exact endpoint it was pasted
- * for, stored only in the credential store under the owning connection's
+ * `Authorization: Bearer`. Exactly ONE credential per connection (the paste
+ * flow prompts once; multiple catalog fields may only be alternative names for
+ * that one credential). Bound to the exact endpoint it was pasted for, stored
+ * only in the credential store under the owning connection's
  * `mcp:<connectionId>` key — never in settings.json.
  */
 export type McpStaticTokenCredential = {
 	type: "mcp_static_token";
-	/** The endpoint the pasted values are bound to; a retargeted entry fails closed. */
+	/** The endpoint the pasted token is bound to; a retargeted entry fails closed. */
 	endpoint: string;
 	/** The value the MCP handshake sends as the bearer. */
 	bearer: string;
-	/** The catalog setup field id the bearer value was pasted for. */
+	/** The catalog setup field id the token was collected for (the first alternative name). */
 	bearerFieldId: string;
-	/** Every collected value keyed by catalog setup field id. */
-	values: Record<string, string>;
 	createdAt: number;
 };
 

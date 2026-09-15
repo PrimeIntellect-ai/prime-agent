@@ -112,10 +112,10 @@ describe("MCP catalog eligibility (authoritative real-data regressions)", () => 
 		// The sweep must actually cover the strategies Bugbot found divergent:
 		// real api_key rows and real unknown rows. none+ready is asserted to be
 		// exactly zero TODAY so catalog drift forces a conscious update here.
-		// Post-2026-09-16 token-only cut: 70 rows (57 one-click DCR, 13
-		// paste-an-api-key/token user-setup), of which 12 are api_key strategy
-		// and 53 unknown. The thresholds below stay where they were — the cut
-		// removed 4 api_key rows and 1 oauth row, no unknown rows.
+		// Post-2026-09-16 single-credential cut: 68 rows (57 one-click DCR, 11
+		// one-paste user-setup), of which 10 are api_key strategy and 53
+		// unknown. The thresholds below stay where they were — the cuts removed
+		// 6 api_key rows, 1 oauth row, and no unknown rows.
 		expect(descriptors.length).toBeGreaterThan(50);
 		expect(descriptors.filter((d) => d.authStrategy === "api_key").length).toBeGreaterThanOrEqual(10);
 		expect(descriptors.filter((d) => d.authStrategy === "unknown").length).toBeGreaterThanOrEqual(50);
@@ -567,7 +567,6 @@ describe("MCP catalog token services (paste flow) eligibility and dispatch", () 
 			endpoint: GITHUB_URL,
 			bearer: "ghp_pasted-token",
 			bearerFieldId: "GITHUB_PAT_TOKEN",
-			values: { GITHUB_PAT_TOKEN: "ghp_pasted-token" },
 			createdAt: Date.now(),
 			...overrides,
 		};
@@ -600,7 +599,7 @@ describe("MCP catalog token services (paste flow) eligibility and dispatch", () 
 		const enabled = manager.getEnabledPersistentGenericServers();
 		expect(enabled).toContain("github");
 		// Every other token service stays closed (its id has no credential).
-		for (const serviceId of ["pagerduty", "datadog", "zoom"]) {
+		for (const serviceId of ["pagerduty", "sonatype-guide", "zoom"]) {
 			expect(enabled, serviceId).not.toContain(serviceId);
 		}
 		// A token bound to another endpoint never serves this row.
@@ -666,7 +665,6 @@ describe("MCP catalog token services (paste flow) eligibility and dispatch", () 
 			endpoint: "https://shadow.example.test/mcp",
 			bearer: "shadow-token",
 			bearerFieldId: "LINEAR_TOKEN",
-			values: { LINEAR_TOKEN: "shadow-token" },
 			createdAt: Date.now(),
 		});
 		const manager = managerFor({

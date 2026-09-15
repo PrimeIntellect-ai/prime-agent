@@ -2,15 +2,15 @@
 	"sources": {
 		"openai-plugins": {
 			"plugins": 25,
-			"remoteServers": 16,
+			"remoteServers": 15,
 			"stdioServers": 0,
-			"excluded": 9
+			"excluded": 10
 		},
 		"claude-plugins-official": {
 			"plugins": 118,
-			"remoteServers": 68,
+			"remoteServers": 67,
 			"stdioServers": 0,
-			"excluded": 83
+			"excluded": 85
 		}
 	},
 	"merged": [
@@ -42,15 +42,6 @@
 			],
 			"urls": [
 				"https://mcp.cloudflare.com/mcp"
-			]
-		},
-		{
-			"server": "datadog",
-			"sources": [
-				"openai-plugins"
-			],
-			"urls": [
-				"https://mcp.datadoghq.com/v1/mcp"
 			]
 		},
 		{
@@ -239,6 +230,10 @@
 			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Cloud SQL for SQL Server is a local stdio adapter (`npx -y @toolbox-sdk/server@1.9.0 --prebuilt cloud-sql-mssql --stdio`)—it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
 		},
 		{
+			"key": "claude-plugins-official/cloudinary/cloudinary-mediaflows",
+			"reason": "single-credential catalog cut (2026-09-16 product decision, Bugbot findings \"extra pasted credentials never sent\" / \"GitHub alternative tokens both required\": the generic runtime sends exactly ONE Authorization: Bearer per connection, so the shipped paste class collects exactly ONE credential, with multiple fields allowed only as curated alternative names for it): Cloudinary MediaFlows authenticates with the NAMED HEADER pair cld-api-key/cld-secret (upstream cloudinary-devs/cloudinary-plugin manifest at 86be534: `https://mediaflows.mcp.cloudinary.com/v2/mcp` with headers cld-cloud-name, cld-api-key, cld-secret), which a single bearer cannot represent—a complete paste of the key and secret cannot authenticate through the generic runtime, so the entry ships cut rather than mislabeled as pasteable"
+		},
+		{
 			"key": "claude-plugins-official/cockroachdb/cockroachdb-cloud",
 			"reason": "token-only catalog cut (2026-09-16 product decision: the catalog ships one-click DCR connectors and simple paste-an-API-key/token services only — Kevin, live testing: \"things like cockroachdb cloud still need mcp/ 'requires provider credentials supplied as headers'? i told you to remove all that stuff?\"): CockroachDB Cloud is a tenant config, not a key paste—its only setup input is the per-cluster header `mcp-cluster-id: ${COCKROACHDB_CLUSTER_ID}` (requirement `tenant`, one `env-var` field, no api-key/token field at all), and it shipped the scary derived reason `requires provider credentials supplied as headers` that Kevin named in the callout above"
 		},
@@ -301,6 +296,10 @@
 		{
 			"key": "claude-plugins-official/data-agent-kit-starter-pack/visualization",
 			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Google Data Agent Kit is a local stdio adapter pack (10 bundled local servers)—each runs in the user's local environment with local toolchain/credential-chain auth, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/datadog/mcp",
+			"reason": "single-credential catalog cut (2026-09-16 product decision, Bugbot findings \"extra pasted credentials never sent\" / \"GitHub alternative tokens both required\": the generic runtime sends exactly ONE Authorization: Bearer per connection, so the shipped paste class collects exactly ONE credential, with multiple fields allowed only as curated alternative names for it): the Claude-side record of the same Datadog endpoint excluded via openai-plugins/datadog/datadog—its manifest authenticates with the NAMED HEADER pair DD_API_KEY/DD_APPLICATION_KEY plus the X-Datadog-MCP-Toolsets setting and its URL is the `${DD_MCP_DOMAIN}` template, which a single bearer and a concrete endpoint cannot represent"
 		},
 		{
 			"key": "claude-plugins-official/dataproc/dataproc",
@@ -495,6 +494,10 @@
 			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Zscaler is a local stdio adapter (`uvx --env-file ${CLAUDE_PLUGIN_ROOT}/.env zscaler-mcp@0.15.4`)—it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
 		},
 		{
+			"key": "openai-plugins/datadog/datadog",
+			"reason": "single-credential catalog cut (2026-09-16 product decision, Bugbot findings \"extra pasted credentials never sent\" / \"GitHub alternative tokens both required\": the generic runtime sends exactly ONE Authorization: Bearer per connection, so the shipped paste class collects exactly ONE credential, with multiple fields allowed only as curated alternative names for it): Datadog's endpoint authenticates with the NAMED HEADER pair DD_API_KEY/DD_APPLICATION_KEY plus the X-Datadog-MCP-Toolsets setting (upstream datadog-labs/claude-code-plugin manifest at 195f570c: `https://mcp.datadoghq.com/v1/mcp?...` with headers DD_API_KEY, DD_APPLICATION_KEY), which a single bearer cannot represent—a complete paste of both keys cannot authenticate through the generic runtime, so the entry ships cut rather than mislabeled as pasteable"
+		},
+		{
 			"key": "openai-plugins/figma/figma",
 			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): Figma requires a provider-authorized pre-registered app client — its advertised dynamic client registration is 403-gated for anonymous registrations (live-verified 2026-09-13 during dogfooding; the attempt is kept as evidence in the committed audit store) and its authorization server accepts confidential client auth only"
 		},
@@ -532,22 +535,22 @@
 		}
 	],
 	"counts": {
-		"total": 70,
-		"http": 70,
+		"total": 68,
+		"http": 68,
 		"httpTemplate": 0,
 		"sse": 0,
 		"stdio": 0,
 		"ready": 57,
-		"requiresSetup": 13,
+		"requiresSetup": 11,
 		"metadataReviewed": 2,
 		"oauthStrategy": 5,
-		"apiKeyStrategy": 12,
-		"mergedFromBothSources": 11,
+		"apiKeyStrategy": 10,
+		"mergedFromBothSources": 10,
 		"readinessOauthReady": 57,
-		"readinessUserSetup": 13,
+		"readinessUserSetup": 11,
 		"readinessPrimeRestricted": 0,
 		"readinessUnknown": 0,
-		"metadataAvailable": 67,
-		"metadataUnavailable": 3
+		"metadataAvailable": 66,
+		"metadataUnavailable": 2
 	}
 }

@@ -18,23 +18,23 @@ export const CATALOG_DATA: CatalogFileShape = {
 		}
 	],
 	"counts": {
-		"total": 70,
-		"http": 70,
+		"total": 68,
+		"http": 68,
 		"httpTemplate": 0,
 		"sse": 0,
 		"stdio": 0,
 		"ready": 57,
-		"requiresSetup": 13,
+		"requiresSetup": 11,
 		"metadataReviewed": 2,
 		"oauthStrategy": 5,
-		"apiKeyStrategy": 12,
-		"mergedFromBothSources": 11,
+		"apiKeyStrategy": 10,
+		"mergedFromBothSources": 10,
 		"readinessOauthReady": 57,
-		"readinessUserSetup": 13,
+		"readinessUserSetup": 11,
 		"readinessPrimeRestricted": 0,
 		"readinessUnknown": 0,
-		"metadataAvailable": 67,
-		"metadataUnavailable": 3
+		"metadataAvailable": 66,
+		"metadataUnavailable": 2
 	},
 	"entries": [
 		{
@@ -1399,73 +1399,6 @@ export const CATALOG_DATA: CatalogFileShape = {
 			]
 		},
 		{
-			"server": "cloudinary-mediaflows",
-			"service": "cloudinary",
-			"label": "Cloudinary MediaFlows",
-			"url": "https://mediaflows.mcp.cloudinary.com/v2/mcp",
-			"aliases": [
-				"cloudinary"
-			],
-			"publisher": "Cloudinary",
-			"transport": {
-				"type": "http",
-				"url": "https://mediaflows.mcp.cloudinary.com/v2/mcp"
-			},
-			"auth": {
-				"strategy": "api_key",
-				"clientRegistration": "unknown",
-				"metadata": {
-					"status": "unavailable",
-					"sourceUrls": [
-						"https://mediaflows.mcp.cloudinary.com/v2/mcp",
-						"https://mediaflows.mcp.cloudinary.com/.well-known/oauth-protected-resource/v2/mcp",
-						"https://mediaflows.mcp.cloudinary.com/.well-known/oauth-protected-resource",
-						"https://mediaflows.mcp.cloudinary.com/.well-known/oauth-authorization-server",
-						"https://mediaflows.mcp.cloudinary.com/.well-known/openid-configuration"
-					],
-					"fetchedAt": "2026-09-12"
-				}
-			},
-			"setup": {
-				"status": "requires-setup",
-				"reason": "paste your Cloudinary API key and API secret (cld-api-key, cld-secret)",
-				"fields": [
-					{
-						"id": "cld-api-key",
-						"label": "cld-api-key",
-						"description": "Environment variable cld-api-key",
-						"required": true,
-						"kind": "api-key"
-					},
-					{
-						"id": "cld-secret",
-						"label": "cld-secret",
-						"description": "Environment variable cld-secret",
-						"required": true,
-						"kind": "api-key"
-					}
-				],
-				"requirement": "api-key",
-				"readiness": "user-setup"
-			},
-			"verification": {
-				"status": "unverified"
-			},
-			"legacyBuiltin": false,
-			"provenance": [
-				{
-					"source": "claude-plugins-official",
-					"repository": "https://github.com/cloudinary-devs/cloudinary-plugin.git",
-					"commit": "86be53409e3fb1c465cd5ff4d1dc937a2860f45c",
-					"url": "https://raw.githubusercontent.com/cloudinary-devs/cloudinary-plugin/86be53409e3fb1c465cd5ff4d1dc937a2860f45c/mcp.json"
-				},
-				{
-					"source": "prime",
-					"note": "curated override applied; see mcp-catalog/overrides.json"
-				}
-			]
-		},
-		{
 			"server": "cloudinary-smd",
 			"service": "cloudinary",
 			"label": "Cloudinary Structured Metadata",
@@ -1589,100 +1522,6 @@ export const CATALOG_DATA: CatalogFileShape = {
 					"url": "https://raw.githubusercontent.com/CodSpeedHQ/codspeed/37eba9ed92b0f1a17cf386303446475df380af37/.mcp.json"
 				}
 			]
-		},
-		{
-			"server": "datadog",
-			"service": "datadog",
-			"label": "Datadog",
-			"url": "https://mcp.datadoghq.com/v1/mcp",
-			"description": "Available for US1 customers only. Analyze, investigate, and act on your Datadog telemetry directly from ChatGPT using natural language. Ask questions about your production applications, identify, visualize, and remediate issues in your critical services. Run agentic loops to ensure you continue to maintain good observability and service management posture.",
-			"category": "Developer Tools",
-			"aliases": [],
-			"transport": {
-				"type": "http",
-				"url": "https://mcp.datadoghq.com/v1/mcp"
-			},
-			"auth": {
-				"strategy": "api_key",
-				"clientRegistration": "unknown",
-				"metadata": {
-					"status": "available",
-					"authorizationServer": "https://mcp.datadoghq.com/v1/mcp",
-					"resource": "https://mcp.datadoghq.com/v1/mcp",
-					"pkceS256": true,
-					"dynamicClientRegistration": true,
-					"authorizationServerScopes": [
-						"mcp_all"
-					],
-					"tokenAuthMethods": [
-						"none"
-					],
-					"sourceUrls": [
-						"https://mcp.datadoghq.com/v1/mcp",
-						"https://mcp.datadoghq.com/.well-known/oauth-protected-resource/v1/mcp",
-						"https://mcp.datadoghq.com/.well-known/oauth-protected-resource",
-						"https://mcp.datadoghq.com/.well-known/oauth-authorization-server/v1/mcp",
-						"https://mcp.datadoghq.com/v1/mcp/.well-known/openid-configuration"
-					],
-					"fetchedAt": "2026-09-12"
-				}
-			},
-			"setup": {
-				"status": "requires-setup",
-				"reason": "paste your Datadog API key and application key (DD_API_KEY, DD_APPLICATION_KEY)",
-				"fields": [
-					{
-						"id": "DD_API_KEY",
-						"label": "DD_API_KEY",
-						"description": "Environment variable DD_API_KEY",
-						"required": true,
-						"kind": "api-key"
-					},
-					{
-						"id": "DD_APPLICATION_KEY",
-						"label": "DD_APPLICATION_KEY",
-						"description": "Environment variable DD_APPLICATION_KEY",
-						"required": true,
-						"kind": "api-key"
-					},
-					{
-						"id": "DD_MCP_TOOLSETS",
-						"label": "DD_MCP_TOOLSETS",
-						"description": "Environment variable DD_MCP_TOOLSETS",
-						"required": true,
-						"kind": "env-var"
-					}
-				],
-				"requirement": "api-key",
-				"readiness": "user-setup"
-			},
-			"verification": {
-				"status": "unverified"
-			},
-			"legacyBuiltin": false,
-			"provenance": [
-				{
-					"source": "openai-plugins",
-					"repository": "openai/plugins",
-					"commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
-					"path": "plugins/datadog/.mcp.json",
-					"url": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/datadog/.mcp.json"
-				},
-				{
-					"source": "claude-plugins-official",
-					"repository": "https://github.com/datadog-labs/claude-code-plugin.git",
-					"commit": "195f570c002beab3d7bd342739034d0019aa4863",
-					"url": "https://raw.githubusercontent.com/datadog-labs/claude-code-plugin/195f570c002beab3d7bd342739034d0019aa4863/.dd_claude-code_mcp.json",
-					"note": "templated endpoint excluded; upstream requires per-tenant configuration"
-				},
-				{
-					"source": "prime",
-					"note": "curated override applied; see mcp-catalog/overrides.json"
-				}
-			],
-			"homepage": "https://www.datadoghq.com",
-			"privacyUrl": "https://www.datadoghq.com/legal/privacy/",
-			"supportUrl": "https://www.datadoghq.com/support/"
 		},
 		{
 			"server": "dropbox",
@@ -2024,14 +1863,16 @@ export const CATALOG_DATA: CatalogFileShape = {
 						"label": "GITHUB_PAT_TOKEN",
 						"description": "Environment variable GITHUB_PAT_TOKEN",
 						"required": true,
-						"kind": "bearer-token"
+						"kind": "bearer-token",
+						"credentialSet": "github-pat"
 					},
 					{
 						"id": "GITHUB_PERSONAL_ACCESS_TOKEN",
 						"label": "GITHUB_PERSONAL_ACCESS_TOKEN",
 						"description": "Environment variable GITHUB_PERSONAL_ACCESS_TOKEN",
 						"required": true,
-						"kind": "bearer-token"
+						"kind": "bearer-token",
+						"credentialSet": "github-pat"
 					}
 				],
 				"requirement": "bearer-token",

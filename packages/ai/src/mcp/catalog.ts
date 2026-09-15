@@ -32,6 +32,16 @@ export interface McpServiceSetupField {
 	required: boolean;
 	/** What the field collects. Absent means the importer had no signal (legacy generic env-var). */
 	kind?: McpServiceSetupFieldKind;
+	/**
+	 * Fields sharing a credential-set id are ALTERNATIVE NAMES for one
+	 * credential (GitHub's GITHUB_PAT_TOKEN and GITHUB_PERSONAL_ACCESS_TOKEN
+	 * name the same PAT). The paste flow prompts ONCE for the credential and
+	 * stores the value under the first alternative; the importer refuses to
+	 * ship a requires-setup entry whose required credential fields resolve to
+	 * more than one distinct credential, because the runtime sends exactly one
+	 * Authorization: Bearer per connection.
+	 */
+	credentialSet?: string;
 }
 
 /**
@@ -255,12 +265,18 @@ function requireSetupFields(entryId: string, value: unknown): McpServiceSetupFie
 		if (field.kind !== undefined && (typeof field.kind !== "string" || !SETUP_FIELD_KINDS.has(field.kind))) {
 			return fail(entryId, `setup.fields[].kind must be one of ${[...SETUP_FIELD_KINDS].join(", ")}`);
 		}
+		if (field.credentialSet !== undefined && (typeof field.credentialSet !== "string" || !field.credentialSet)) {
+			return fail(entryId, "setup.fields[].credentialSet must be a non-empty string");
+		}
 		return {
 			id: requireString(entryId, "setup.fields[].id", field.id),
 			label: requireString(entryId, "setup.fields[].label", field.label),
 			description: typeof field.description === "string" ? field.description : undefined,
 			required: field.required === true,
 			...(typeof field.kind === "string" ? { kind: field.kind as McpServiceSetupFieldKind } : {}),
+			...(typeof field.credentialSet === "string" && field.credentialSet
+				? { credentialSet: field.credentialSet }
+				: {}),
 		};
 	});
 }

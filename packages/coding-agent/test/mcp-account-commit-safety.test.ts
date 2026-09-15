@@ -1932,7 +1932,6 @@ describe("MCP token paste flow (inline panel, credential store, honest verificat
 	let realFetch: typeof globalThis.fetch;
 
 	const GITHUB_URL = "https://api.githubcopilot.com/mcp/";
-	const DATADOG_URL = "https://mcp.datadoghq.com/v1/mcp";
 	const SECRET = "ghp_live-secret-token-value";
 
 	type FakeThis = Record<string, unknown>;
@@ -2017,11 +2016,11 @@ describe("MCP token paste flow (inline panel, credential store, honest verificat
 	});
 
 	it("stores the pasted token under the owning connection's credential key and connects after verification", async () => {
-		const fieldsSeen: unknown[] = [];
+		const credentialsSeen: unknown[] = [];
 		const fake = buildFake(
-			vi.fn(async (_definition: unknown, fields: unknown[]) => {
-				fieldsSeen.push(fields);
-				return { GITHUB_PAT_TOKEN: SECRET, GITHUB_PERSONAL_ACCESS_TOKEN: SECRET };
+			vi.fn(async (_definition: unknown, credential: unknown) => {
+				credentialsSeen.push(credential);
+				return SECRET;
 			}),
 		);
 		verifyMock.mockResolvedValue({
@@ -2038,15 +2037,23 @@ describe("MCP token paste flow (inline panel, credential store, honest verificat
 
 		await expect(callPaste(fake, "github", GITHUB_URL, "GitHub")).resolves.toBe(true);
 
+		// The seam receives the ONE credential — GitHub's two fields collapse
+		// to a single PAT under its first alternative id.
+		expect(credentialsSeen).toHaveLength(1);
+		expect(credentialsSeen[0]).toMatchObject({
+			field: expect.objectContaining({ id: "GITHUB_PAT_TOKEN" }),
+			fieldIds: ["GITHUB_PAT_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN"],
+		});
 		// The credential lands under the SAME key OAuth uses, with the honest
-		// static-token shape: bound to the endpoint, no oauth fields faked.
+		// single-credential static-token shape: bound to the endpoint, no
+		// oauth fields faked, no multi-value map.
 		expect(authStorage.get("mcp:github")).toMatchObject({
 			type: "mcp_static_token",
 			endpoint: GITHUB_URL,
 			bearer: SECRET,
 			bearerFieldId: "GITHUB_PAT_TOKEN",
-			values: { GITHUB_PAT_TOKEN: SECRET, GITHUB_PERSONAL_ACCESS_TOKEN: SECRET },
 		});
+		expect(Object.keys(authStorage.get("mcp:github") ?? {})).not.toContain("values");
 		// Verification ran with the stored token as the source, never the env.
 		expect(verifyMock).toHaveBeenCalledWith(
 			expect.objectContaining({
@@ -2062,10 +2069,9 @@ describe("MCP token paste flow (inline panel, credential store, honest verificat
 		// THE leak test: the raw secret appears in NO status, warning, or
 		// error call, and never in the outcome entry's persisted content.
 		expect(emittedText.includes(SECRET)).toBe(false);
-		expect(fieldsSeen).toHaveLength(1);
 	});
 
-	it("the real panel seam prompts the derived labels in order and collects masked values (datadog)", async () => {
+	it("the real panel seam prompts ONCE with the derived label and collects the masked value", async () => {
 		initTheme("dark");
 		await preloadCodeHighlighter();
 		const captured: McpTokenPastePanelComponent[] = [];
@@ -2077,10 +2083,10 @@ describe("MCP token paste flow (inline panel, credential store, honest verificat
 			return closePanel;
 		});
 		verifyMock.mockResolvedValue({
-			connectionId: "datadog",
-			serviceId: "datadog",
-			endpoint: DATADOG_URL,
-			label: "Datadog",
+			connectionId: "github",
+			serviceId: "github",
+			endpoint: GITHUB_URL,
+			label: "GitHub",
 			status: "connected",
 			toolCount: 6,
 			verifiedAt: Date.now(),
@@ -2088,7 +2094,7 @@ describe("MCP token paste flow (inline panel, credential store, honest verificat
 			updatedAt: Date.now(),
 		});
 
-		const flow = callPaste(fake, "datadog", DATADOG_URL, "Datadog");
+		const flow = callPaste(fake, "github", GITHUB_URL, "GitHub");
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		expect(captured).toHaveLength(1);
 		const panel = captured[0]!;
@@ -2098,27 +2104,23 @@ describe("MCP token paste flow (inline panel, credential store, honest verificat
 				.map((line) => stripAnsi(line))
 				.join("\n");
 
-		// First field: the derived label, not the raw env-var id alone.
-		expect(frame()).toContain("Datadog API key (DD_API_KEY)");
-		for (const character of "dd-api-key-value") panel.handleInput(character);
-		panel.handleInput("\r");
-		// Second field in order; the first value appears nowhere in the frame.
-		expect(frame()).toContain("Datadog application key (DD_APPLICATION_KEY)");
-		expect(frame().includes("dd-api-key-value")).toBe(false);
-		for (const character of "dd-application-key-value") panel.handleInput(character);
+		// ONE prompt with the honest derived label (the alternatives are one
+		// credential; no id suffix, no second prompt).
+		expect(frame()).toContain("GitHub personal access token");
+		expect(frame()).not.toContain("(GITHUB_PAT_TOKEN)");
+		for (const character of SECRET) panel.handleInput(character);
 		panel.handleInput("\r");
 
 		await expect(flow).resolves.toBe(true);
-		expect(authStorage.get("mcp:datadog")).toMatchObject({
+		expect(authStorage.get("mcp:github")).toMatchObject({
 			type: "mcp_static_token",
-			endpoint: DATADOG_URL,
-			bearer: "dd-api-key-value",
-			bearerFieldId: "DD_API_KEY",
-			values: { DD_API_KEY: "dd-api-key-value", DD_APPLICATION_KEY: "dd-application-key-value" },
+			endpoint: GITHUB_URL,
+			bearer: SECRET,
+			bearerFieldId: "GITHUB_PAT_TOKEN",
 		});
 		// The panel closed exactly once, and no raw value was ever emitted.
 		expect(closePanel).toHaveBeenCalledTimes(1);
-		expect(emitted(fake).includes("dd-api-key-value")).toBe(false);
+		expect(emitted(fake).includes(SECRET)).toBe(false);
 	});
 
 	it("Esc cancels: nothing stored, no record, no verification, no claims", async () => {
@@ -2132,60 +2134,12 @@ describe("MCP token paste flow (inline panel, credential store, honest verificat
 		expect(emittedText).not.toContain("saved");
 	});
 
-	it("multi-field services prompt in catalog order and store every collected value (datadog)", async () => {
-		const prompts: Array<{ id: string }[]> = [];
-		const fake = buildFake(
-			vi.fn(async (_definition: unknown, fields: Array<{ id: string }>) => {
-				prompts.push(fields);
-				return { DD_API_KEY: "dd-api-key-value", DD_APPLICATION_KEY: "dd-application-key-value" };
-			}),
-		);
-		verifyMock.mockResolvedValue({
-			connectionId: "datadog",
-			serviceId: "datadog",
-			endpoint: DATADOG_URL,
-			label: "Datadog",
-			status: "error",
-			lastError: "http-unauthorized",
-			createdAt: Date.now(),
-			updatedAt: Date.now(),
-		});
-
-		await expect(callPaste(fake, "datadog", DATADOG_URL, "Datadog")).resolves.toBe(false);
-
-		// The prompt order is the catalog order (credential fields only —
-		// DD_MCP_TOOLSETS is never prompted); the derived labels are pinned
-		// by the real-panel test above.
-		expect(prompts).toHaveLength(1);
-		expect(prompts[0]).toEqual([
-			expect.objectContaining({ id: "DD_API_KEY", kind: "api-key" }),
-			expect.objectContaining({ id: "DD_APPLICATION_KEY", kind: "api-key" }),
-		]);
-		expect(prompts[0]?.map((field) => field.id)).not.toContain("DD_MCP_TOOLSETS");
-		// Both values are stored; the FIRST credential field is the bearer.
-		expect(authStorage.get("mcp:datadog")).toMatchObject({
-			type: "mcp_static_token",
-			endpoint: DATADOG_URL,
-			bearer: "dd-api-key-value",
-			bearerFieldId: "DD_API_KEY",
-			values: { DD_API_KEY: "dd-api-key-value", DD_APPLICATION_KEY: "dd-application-key-value" },
-		});
-		// Verification failure reports unverified honestly — never Connected.
-		const emittedText = emitted(fake);
-		expect(emittedText).toContain(
-			"Token saved for Datadog, but connection verification did not complete: the endpoint rejected the stored credentials (reconnect)",
-		);
-		expect(emittedText).not.toContain("Connected Datadog");
-		// The rejected credential is reported, but its value never surfaces.
-		expect(emittedText.includes("dd-api-key-value")).toBe(false);
-	});
-
-	it("an incomplete set of pasted values stores nothing and says so", async () => {
-		const fake = buildFake(vi.fn(async () => ({ DD_API_KEY: "only-one-key" })));
-		await expect(callPaste(fake, "datadog", DATADOG_URL, "Datadog")).resolves.toBe(false);
-		expect(authStorage.get("mcp:datadog")).toBeUndefined();
+	it("an empty value from the seam stores nothing and claims nothing", async () => {
+		const fake = buildFake(vi.fn(async () => ""));
+		await expect(callPaste(fake, "github", GITHUB_URL, "GitHub")).resolves.toBe(false);
+		expect(authStorage.get("mcp:github")).toBeUndefined();
 		expect(verifyMock).not.toHaveBeenCalled();
-		expect(emitted(fake)).toContain("incomplete");
+		expect(emitted(fake)).not.toContain("Connected");
 	});
 
 	it("refuses to paste when a login attempt owns the account", async () => {
@@ -2200,7 +2154,7 @@ describe("MCP token paste flow (inline panel, credential store, honest verificat
 			updatedAt: now,
 			attemptId: "attempt-in-progress",
 		});
-		const prompt = vi.fn(async () => ({ GITHUB_PAT_TOKEN: SECRET }));
+		const prompt = vi.fn(async () => SECRET);
 		const fake = buildFake(prompt);
 		await expect(callPaste(fake, "github", GITHUB_URL, "GitHub")).resolves.toBe(false);
 		expect(prompt).not.toHaveBeenCalled();
@@ -2209,7 +2163,7 @@ describe("MCP token paste flow (inline panel, credential store, honest verificat
 	});
 
 	it("refuses to paste when the picker's target no longer matches the catalog definition", async () => {
-		const prompt = vi.fn(async () => ({ GITHUB_PAT_TOKEN: SECRET }));
+		const prompt = vi.fn(async () => SECRET);
 		const fake = buildFake(prompt);
 		await expect(callPaste(fake, "github", "https://moved.example.test/mcp", "GitHub")).resolves.toBe(false);
 		expect(prompt).not.toHaveBeenCalled();

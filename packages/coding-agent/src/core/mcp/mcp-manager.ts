@@ -75,10 +75,11 @@ interface ResolvedIntegration {
 	 */
 	credentialFreeEligible?: boolean;
 	/**
-	 * Catalog token services only: the entry collects pasteable credential
-	 * fields, so a stored `mcp_static_token` credential under this exact id is
-	 * a valid credential source — bound to this endpoint, never inferred from
-	 * the setup field ids (those env vars are NOT read).
+	 * Catalog token services only: the entry collects exactly ONE credential
+	 * (alternative field names collapse to one prompt), so a stored
+	 * `mcp_static_token` credential under this exact id is a valid credential
+	 * source — bound to this endpoint, never inferred from the setup field
+	 * ids (those env vars are NOT read).
 	 */
 	staticTokenEligible?: boolean;
 	/** Parent catalog service id for per-account connections (records keep it). */

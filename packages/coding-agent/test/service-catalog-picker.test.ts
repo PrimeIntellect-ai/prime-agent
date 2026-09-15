@@ -916,14 +916,14 @@ describe("McpTokenPastePanelComponent (inline masked paste panel)", () => {
 	}
 
 	it("renders the prompt label and never the raw secret in any rendered line", () => {
-		let submitted: Record<string, string> | undefined;
+		let submitted: string | undefined;
 		let cancelled = false;
 		const panel = new McpTokenPastePanelComponent({
 			serviceLabel: "GitHub",
 			reason: "paste a GitHub personal access token (GITHUB_PAT_TOKEN or GITHUB_PERSONAL_ACCESS_TOKEN)",
-			fields: [{ id: "GITHUB_PAT_TOKEN", label: "GitHub personal access token" }],
-			onSubmit: (values) => {
-				submitted = values;
+			field: { id: "GITHUB_PAT_TOKEN", label: "GitHub personal access token" },
+			onSubmit: (value) => {
+				submitted = value;
 			},
 			onCancel: () => {
 				cancelled = true;
@@ -946,53 +946,38 @@ describe("McpTokenPastePanelComponent (inline masked paste panel)", () => {
 		}
 
 		panel.handleInput("\r");
-		expect(submitted).toEqual({ GITHUB_PAT_TOKEN: SECRET });
+		expect(submitted).toBe(SECRET);
 		expect(cancelled).toBe(false);
 		// After submit the panel renders no raw value either.
 		expect(rendered(panel).includes(SECRET)).toBe(false);
 	});
 
-	it("prompts every required field in order and submits both stored values (datadog shape)", () => {
-		const submitted: Record<string, string>[] = [];
+	it("prompts exactly ONCE — the flow is single-credential by construction", () => {
+		const submitted: string[] = [];
 		const panel = new McpTokenPastePanelComponent({
-			serviceLabel: "Datadog",
-			fields: [
-				{ id: "DD_API_KEY", label: "Datadog API key (DD_API_KEY)" },
-				{ id: "DD_APPLICATION_KEY", label: "Datadog application key (DD_APPLICATION_KEY)" },
-			],
-			onSubmit: (values) => {
-				submitted.push(values);
+			serviceLabel: "Some Service",
+			field: { id: "SOME_SERVICE_TOKEN", label: "Single credential" },
+			onSubmit: (value) => {
+				submitted.push(value);
 			},
 			onCancel: () => {},
 		});
 		panel.focused = true;
-		// First prompt shows the API key label only.
-		let flat = rendered(panel);
-		expect(flat).toContain("Datadog API key (DD_API_KEY)");
-		expect(flat).not.toContain("Datadog application key");
-
-		type(panel, "dd-api-key-value");
+		expect(rendered(panel)).toContain("Single credential");
+		type(panel, "one-value");
 		panel.handleInput("\r");
-		// The second field prompts in order; the completed first field is
-		// visible as context and its value is nowhere in the frame.
-		flat = rendered(panel);
-		expect(flat).toContain("Datadog application key (DD_APPLICATION_KEY)");
-		expect(flat).toContain("✓ Datadog API key (DD_API_KEY)");
-		expect(flat.includes("dd-api-key-value")).toBe(false);
-
-		type(panel, "dd-application-key-value");
-		panel.handleInput("\r");
-		expect(submitted).toEqual([{ DD_API_KEY: "dd-api-key-value", DD_APPLICATION_KEY: "dd-application-key-value" }]);
+		// One submit completes the panel — there is never a second prompt.
+		expect(submitted).toEqual(["one-value"]);
 	});
 
 	it("Esc cancels: nothing submitted, nothing echoed", () => {
 		let cancelled = false;
-		let submitted: Record<string, string> | undefined;
+		let submitted: string | undefined;
 		const panel = new McpTokenPastePanelComponent({
 			serviceLabel: "PagerDuty",
-			fields: [{ id: "PAGERDUTY_API_KEY", label: "PagerDuty API key" }],
-			onSubmit: (values) => {
-				submitted = values;
+			field: { id: "PAGERDUTY_API_KEY", label: "PagerDuty API key" },
+			onSubmit: (value) => {
+				submitted = value;
 			},
 			onCancel: () => {
 				cancelled = true;
@@ -1006,12 +991,12 @@ describe("McpTokenPastePanelComponent (inline masked paste panel)", () => {
 	});
 
 	it("an empty submit stays on the field with an honest notice, never advancing", () => {
-		let submitted: Record<string, string> | undefined;
+		let submitted: string | undefined;
 		const panel = new McpTokenPastePanelComponent({
 			serviceLabel: "Zoom",
-			fields: [{ id: "ZOOM_MCP_ACCESS_TOKEN", label: "Zoom access token" }],
-			onSubmit: (values) => {
-				submitted = values;
+			field: { id: "ZOOM_MCP_ACCESS_TOKEN", label: "Zoom access token" },
+			onSubmit: (value) => {
+				submitted = value;
 			},
 			onCancel: () => {},
 		});

@@ -13,7 +13,7 @@ import {
 	supportsFastMode,
 	type ToolCall,
 } from "@earendil-works/pi-ai";
-import { BUILTIN_MCP_CATALOG, type McpServiceSetupField } from "@earendil-works/pi-ai/mcp";
+import { BUILTIN_MCP_CATALOG } from "@earendil-works/pi-ai/mcp";
 import { registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import type {
 	AutocompleteItem,
@@ -82,7 +82,7 @@ import {
 	uploadAllAgentTraces,
 } from "../../core/agent-traces.js";
 import { isNoModelsAvailableMessage } from "../../core/auth-guidance.js";
-import type { AuthCredential, McpStaticTokenCredential } from "../../core/auth-storage.js";
+import type { AuthCredential } from "../../core/auth-storage.js";
 import {
 	type AgentCronJob,
 	type AgentHeartbeatManagementAction,
@@ -117,12 +117,13 @@ import {
 	buildPluginViews,
 	createConfiguredMcpProvider,
 	isPasteableTokenService,
+	type McpPasteCredential,
 	type McpPluginView,
 	type McpServiceDescriptor,
 	mcpCredentialFieldPromptLabel,
-	mcpCredentialFields,
 	mcpCredentialKey,
 	mcpLoginEligibility,
+	mcpPasteCredential,
 	nextMcpConnectionId,
 	reservedMcpOwnership,
 	resolveMcpOAuthIdentity,
@@ -10234,25 +10235,28 @@ export class InteractiveMode {
 			this.showStatus("Login in progress. Finish it or remove the account to cancel.");
 			return false;
 		}
-		const fields = mcpCredentialFields(definition);
-		const values = await this.promptForMcpTokenValues(definition, fields);
-		// Esc: nothing stored, no record, no status line.
-		if (!values) return false;
-		if (fields.some((field) => !values[field.id])) {
-			this.showStatus("The pasted values were incomplete. Nothing was stored; retry from /plugins.");
+		// The ONE credential the runtime can send a bearer for; entries whose
+		// credential fields are genuinely DISTINCT stay un-pasteable (the
+		// catalog importer refuses to ship them at all).
+		const credential = mcpPasteCredential(definition);
+		if (!credential) {
+			this.showStatus(
+				`${service.label} needs more than one credential; it cannot be connected by pasting a single token.`,
+			);
 			return false;
 		}
-		const credential: McpStaticTokenCredential = {
-			type: "mcp_static_token",
-			endpoint: definition.transport.url,
-			bearer: values[fields[0]?.id ?? ""] ?? "",
-			bearerFieldId: fields[0]?.id ?? "",
-			values,
-			createdAt: Date.now(),
-		};
+		const value = await this.promptForMcpTokenValues(definition, credential);
+		// Esc (or an empty submit): nothing stored, no record, no status line.
+		if (!value) return false;
 		// Stored ONLY in the agent credential store (auth.json), under the SAME
 		// key OAuth uses — never settings.json, never a status line or log.
-		this.modelRegistry.authStorage.set(mcpCredentialKey(connectionId), credential);
+		this.modelRegistry.authStorage.set(mcpCredentialKey(connectionId), {
+			type: "mcp_static_token",
+			endpoint: definition.transport.url,
+			bearer: value,
+			bearerFieldId: credential.field.id,
+			createdAt: Date.now(),
+		});
 		// A stored token is not "Connected": verify with a real MCP handshake
 		// that uses the stored token as the bearer.
 		let verification: McpConnectionRecord | undefined;
@@ -10294,29 +10298,28 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * The masked inline prompt for one service's credential fields, in catalog
-	 * order — the same inline surface as the OAuth login panel
-	 * (showInlineAuthPanel), in the #2331/#2340 panel language. Resolves with
-	 * every pasted value keyed by field id, or undefined when the user
-	 * cancelled. The raw values never leave this seam: no status line, no log,
-	 * no transcript entry, and no rendered line contains them.
+	 * The masked inline prompt for a service's ONE credential — the same inline
+	 * surface as the OAuth login panel (showInlineAuthPanel), in the
+	 * #2331/#2340 panel language. Resolves with the pasted value, or undefined
+	 * when the user cancelled. The raw value never leaves this seam: no status
+	 * line, no log, no transcript entry, and no rendered line contains it.
 	 */
 	private promptForMcpTokenValues(
 		definition: McpServiceDescriptor,
-		fields: readonly McpServiceSetupField[],
-	): Promise<Record<string, string> | undefined> {
+		credential: McpPasteCredential,
+	): Promise<string | undefined> {
 		return new Promise((resolve) => {
 			let close: (() => void) | undefined;
 			const panel = new McpTokenPastePanelComponent({
 				serviceLabel: definition.label,
 				...(definition.setup.reason ? { reason: definition.setup.reason } : {}),
-				fields: fields.map((field) => ({
-					id: field.id,
-					label: mcpCredentialFieldPromptLabel(definition, field, fields.length > 1),
-				})),
-				onSubmit: (values) => {
+				field: {
+					id: credential.field.id,
+					label: mcpCredentialFieldPromptLabel(definition, credential.field),
+				},
+				onSubmit: (value) => {
 					close?.();
-					resolve(values);
+					resolve(value);
 				},
 				onCancel: () => {
 					close?.();

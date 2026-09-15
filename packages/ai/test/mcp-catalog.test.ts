@@ -246,8 +246,18 @@ describe("MCP service catalog", () => {
 		// credential field the user can actually fill in. Tenant configs,
 		// legacy-transport entries and field-less api-key promises are gone.
 		expect(getServiceCatalogEntry("zoom")?.setup.requirement).toBe("bearer-token");
-		expect(getServiceCatalogEntry("datadog")?.setup.requirement).toBe("api-key");
-		for (const server of ["cockroachdb", "dynatrace", "sourcegraph", "paypal-sandbox", "render"]) {
+		// Both named-header api-key pairs (Datadog's DD_API_KEY +
+		// DD_APPLICATION_KEY, Cloudinary MediaFlows' cld-api-key + cld-secret)
+		// are cut by the single-credential cut — see the cut test below.
+		for (const server of [
+			"cockroachdb",
+			"dynatrace",
+			"sourcegraph",
+			"paypal-sandbox",
+			"render",
+			"datadog",
+			"cloudinary-mediaflows",
+		]) {
 			expect(getServiceCatalogEntry(server), `${server} must be cut from the catalog`).toBeUndefined();
 		}
 		for (const entry of SERVICE_CATALOG) {
@@ -258,25 +268,30 @@ describe("MCP service catalog", () => {
 				`${entry.server} must collect a credential the user can paste`,
 			).toBe(true);
 		}
-		// The multi-key survivors say what to paste instead of "requires
-		// provider credentials supplied as headers" (2026-09-16 wording fix).
-		expect(getServiceCatalogEntry("datadog")?.setup.reason).toBe(
-			"paste your Datadog API key and application key (DD_API_KEY, DD_APPLICATION_KEY)",
-		);
-		expect(getServiceCatalogEntry("cloudinary-mediaflows")?.setup.reason).toBe(
-			"paste your Cloudinary API key and API secret (cld-api-key, cld-secret)",
-		);
+		// Every survivor says what to paste in one honest line — no
+		// "requires provider credentials supplied as headers" restatements
+		// (2026-09-16 wording fix), and no multi-credential reasons (the
+		// single-credential cut removed the named-header pairs).
 		for (const entry of SERVICE_CATALOG) {
 			expect(entry.setup.reason ?? "").not.toContain("requires provider credentials supplied as headers");
+			if (entry.setup.readiness === "user-setup") {
+				expect(entry.setup.reason ?? "", `${entry.server} reason`).toMatch(/^paste /);
+			}
 		}
+		// GitHub's two setup fields are curated ALTERNATIVE NAMES for one PAT
+		// (a shared credentialSet): the paste flow prompts once and stores the
+		// value under the first alternative's id.
+		const githubAlternatives = getServiceCatalogEntry("github");
+		expect(githubAlternatives?.setup.fields).toEqual([
+			expect.objectContaining({ id: "GITHUB_PAT_TOKEN", credentialSet: "github-pat" }),
+			expect.objectContaining({ id: "GITHUB_PERSONAL_ACCESS_TOKEN", credentialSet: "github-pat" }),
+		]);
 		expect(
 			SERVICE_CATALOG.filter((entry) => entry.setup.readiness === "user-setup")
 				.map((entry) => entry.server)
 				.sort(),
 		).toEqual([
 			"aws-devops-agent",
-			"cloudinary-mediaflows",
-			"datadog",
 			"github",
 			"pagerduty",
 			"sonatype-guide",
@@ -292,13 +307,15 @@ describe("MCP service catalog", () => {
 		// Zero-app cut state (2026-09-14) + engine auth-method compatibility
 		// (2026-09-14, live Hugging Face gap) + final catalog cut (2026-09-15,
 		// one-click DCR or user token/key only) + token-only cut (2026-09-16,
-		// paste-an-api-key/token survivors only): the catalog ships exactly the
-		// two self-serve classes, with the user-setup class fully pasteable —
-		// the sums must stay exact so any drift forces a conscious update here.
+		// paste-an-api-key/token survivors only) + single-credential cut
+		// (2026-09-16, one prompt/one bearer: named-header pairs cut): the
+		// catalog ships exactly the two self-serve classes, with the
+		// user-setup class fully pasteable — the sums must stay exact so any
+		// drift forces a conscious update here.
 		const committed = JSON.parse(rawCatalogJson);
-		expect(committed.counts.total).toBe(70);
+		expect(committed.counts.total).toBe(68);
 		expect(committed.counts.readinessOauthReady).toBe(57);
-		expect(committed.counts.readinessUserSetup).toBe(13);
+		expect(committed.counts.readinessUserSetup).toBe(11);
 		expect(committed.counts.readinessPrimeRestricted).toBe(0);
 		expect(committed.counts.readinessUnknown).toBe(0);
 		expect(
@@ -358,7 +375,7 @@ describe("MCP service catalog", () => {
 		// and appended upstream-config notes that changed nothing for the user
 		// (zoom-meetings).
 		const setupEntries = SERVICE_CATALOG.filter((entry) => entry.setup.status === "requires-setup");
-		expect(setupEntries).toHaveLength(13);
+		expect(setupEntries).toHaveLength(11);
 		for (const entry of setupEntries) {
 			const reason = entry.setup.reason ?? "";
 			expect(reason, `${entry.server} must carry setup copy`).not.toBe("");
@@ -825,6 +842,73 @@ describe("MCP service catalog", () => {
 		}
 	});
 
+	it("cuts genuinely distinct credential pairs, structurally: the shipped paste class collects exactly ONE credential", () => {
+		// 2026-09-16 single-credential cut (Bugbot findings "extra pasted
+		// credentials never sent" / "GitHub alternative tokens both
+		// required"): the generic runtime sends exactly ONE
+		// Authorization: Bearer per connection, so the shipped user-setup
+		// class collects exactly one credential. Named-header pairs —
+		// Datadog's DD_API_KEY + DD_APPLICATION_KEY, Cloudinary MediaFlows'
+		// cld-api-key + cld-secret — cannot authenticate through a single
+		// bearer even with a complete paste, so both entries are EXCLUDED with
+		// documented reasons instead of shipping mislabeled as pasteable.
+		for (const server of ["datadog", "cloudinary-mediaflows"]) {
+			expect(getServiceCatalogEntry(server), `${server} must be cut from the catalog`).toBeUndefined();
+		}
+		// (The other Cloudinary endpoints legitimately ship; only the
+		// named-header mediaflows entry is cut.)
+		for (const term of ["datadog", "cloudinary-mediaflows"]) {
+			expect(searchServiceCatalog(term), `${term} must not surface a cut entry`).toEqual([]);
+		}
+		const inputs = loadInputs();
+		const { report } = buildCatalog(inputs.openAi, inputs.claude, inputs.overrides, inputs.audit);
+		const excluded = new Map(report.excluded.map((entry) => [entry.key, entry.reason]));
+		for (const key of [
+			"openai-plugins/datadog/datadog",
+			"claude-plugins-official/datadog/mcp",
+			"claude-plugins-official/cloudinary/cloudinary-mediaflows",
+		]) {
+			expect(excluded.has(key), `${key} must be a documented exclusion`).toBe(true);
+			expect(excluded.get(key), `${key} must cite the single-credential cut decision`).toMatch(
+				/single-credential catalog cut \(2026-09-16 product decision/,
+			);
+		}
+		// The importer enforces the cut structurally: lift any exclusion and
+		// the import fails with a curation prompt instead of shipping, so no
+		// unmarked multi-credential entry can ever silently re-derive.
+		const withoutExclusions = (keys: string[]): Overrides => ({
+			...inputs.overrides,
+			excludedServers: inputs.overrides.excludedServers.filter((entry) => !keys.includes(entry.key)),
+		});
+		const build = (overrides: Overrides): void => {
+			buildCatalog(inputs.openAi, inputs.claude, overrides, inputs.audit);
+		};
+		// Datadog's user-setup shape exists only when BOTH upstream sides ship
+		// (the openai side supplies the endpoint, the claude side the named
+		// header evidence): lifting both exclusions re-derives the two-key
+		// entry and the import fails instead of shipping it.
+		expect(() =>
+			build(withoutExclusions(["openai-plugins/datadog/datadog", "claude-plugins-official/datadog/mcp"])),
+		).toThrow(
+			/entry datadog collects 2 distinct required credentials \(DD_API_KEY, DD_APPLICATION_KEY\); the generic runtime sends a single bearer per connection/,
+		);
+		expect(() => build(withoutExclusions(["claude-plugins-official/cloudinary/cloudinary-mediaflows"]))).toThrow(
+			/entry cloudinary-mediaflows collects 2 distinct required credentials \(cld-api-key, cld-secret\); the generic runtime sends a single bearer per connection/,
+		);
+		// Marked alternatives are the ONE multi-field shape that ships: GitHub
+		// fields share the curated credentialSet "github-pat", and the shipped
+		// entries resolve to at most one distinct credential each.
+		for (const entry of SERVICE_CATALOG) {
+			if (entry.setup.readiness !== "user-setup") continue;
+			const credentials = new Set(
+				(entry.setup.fields ?? [])
+					.filter((field) => field.required && (field.kind === "bearer-token" || field.kind === "api-key"))
+					.map((field) => field.credentialSet ?? field.id),
+			);
+			expect(credentials.size, `${entry.server} must collect exactly one credential`).toBeLessThanOrEqual(1);
+		}
+	});
+
 	it("keeps the gated-DCR machinery: live-rejected advertised registration is explicit-false and never oauth-ready", () => {
 		// The figma entry that exercised this predicate live is now excluded by
 		// the zero-app cut (its evidence stays in the audit store), so the
@@ -1025,7 +1109,8 @@ describe("MCP service catalog", () => {
 		const { report } = buildCatalog(inputs.openAi, inputs.claude, inputs.overrides, inputs.audit);
 		expect(inputs.openAi.plugins).toHaveLength(25);
 		expect(inputs.claude.plugins).toHaveLength(118);
-		expect(report.sources["openai-plugins"].remoteServers).toBe(16);
+		// The single-credential cut excluded datadog from the openai side.
+		expect(report.sources["openai-plugins"].remoteServers).toBe(15);
 		expect(report.sources["claude-plugins-official"].stdioServers).toBe(0);
 		// Documented exclusions are all present with reasons.
 		expect(report.excluded.length).toBeGreaterThan(0);

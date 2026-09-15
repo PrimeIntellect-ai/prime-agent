@@ -348,10 +348,10 @@ export function freshMcpLoginAllowed(service: McpServiceDescriptor): boolean {
 const PASTE_CREDENTIAL_FIELD_KINDS: ReadonlySet<string> = new Set(["bearer-token", "api-key"]);
 
 /**
- * The required credential fields a service collects, in catalog order — the
- * paste flow's prompt order. Non-credential fields (env-var kind, url, tenant)
- * are NOT returned: the flow never prompts for them and never stores values for
- * them; setup field ids are metadata, never environment variables to read.
+ * The required credential fields a service collects, in catalog order.
+ * Non-credential fields (env-var kind, url, tenant) are NOT returned: the flow
+ * never prompts for them and never stores values for them; setup field ids are
+ * metadata, never environment variables to read.
  */
 export function mcpCredentialFields(service: McpServiceDescriptor): readonly McpServiceSetupField[] {
 	const fields = service.setup.fields ?? [];
@@ -360,18 +360,42 @@ export function mcpCredentialFields(service: McpServiceDescriptor): readonly Mcp
 	);
 }
 
+/** The ONE credential a paste flow collects for a service. */
+export interface McpPasteCredential {
+	/** The field the prompt labels (the first alternative, in catalog order). */
+	field: McpServiceSetupField;
+	/** Every alternative id naming the SAME credential, first first. */
+	fieldIds: readonly string[];
+}
+
+/**
+ * The single credential the inline paste flow collects for a service, or
+ * undefined when the service does not collect exactly one. The runtime sends
+ * ONE Authorization: Bearer per connection, so multiple fields are collectable
+ * ONLY as alternative names for the same credential (a shared credentialSet id
+ * — GitHub's GITHUB_PAT_TOKEN and GITHUB_PERSONAL_ACCESS_TOKEN); genuinely
+ * distinct credentials stay NOT pasteable, fail closed.
+ */
+export function mcpPasteCredential(service: McpServiceDescriptor): McpPasteCredential | undefined {
+	const fields = mcpCredentialFields(service);
+	if (fields.length === 0) return undefined;
+	const distinctCredentials = new Set(fields.map((field) => field.credentialSet ?? field.id));
+	if (distinctCredentials.size > 1) return undefined;
+	return { field: fields[0]!, fieldIds: fields.map((field) => field.id) };
+}
+
 /**
  * True when selecting this catalog entry opens the inline paste panel: an HTTP
- * endpoint that requires setup and collects at least one required credential
- * field. These are the "paste a key" services — Connect-by-OAuth stays the
- * freshMcpLoginAllowed path; entries without a concrete endpoint are not
- * pasteable (no URL, no handshake to verify against).
+ * endpoint that requires setup and collects EXACTLY ONE credential (possibly
+ * under several alternative names). These are the "paste a key" services —
+ * Connect-by-OAuth stays the freshMcpLoginAllowed path; entries without a
+ * concrete endpoint are not pasteable (no URL, no handshake to verify against).
  */
 export function isPasteableTokenService(service: McpServiceDescriptor | undefined): boolean {
 	if (!service) return false;
 	if (service.transport.type !== "http" || !service.transport.url) return false;
 	if (service.setup.status !== "requires-setup") return false;
-	return mcpCredentialFields(service).length > 0;
+	return mcpPasteCredential(service) !== undefined;
 }
 
 /**
@@ -379,11 +403,7 @@ export function isPasteableTokenService(service: McpServiceDescriptor | undefine
  * service identity ("GitHub personal access token"). The derivation is display
  * copy only — it never influences what is stored or sent.
  */
-export function mcpCredentialFieldPromptLabel(
-	service: McpServiceDescriptor,
-	field: McpServiceSetupField,
-	multiField = false,
-): string {
+export function mcpCredentialFieldPromptLabel(service: McpServiceDescriptor, field: McpServiceSetupField): string {
 	const stripWords = new Set(
 		[
 			...service.serviceId.split(/[^a-z0-9]+/i),
@@ -431,8 +451,7 @@ export function mcpCredentialFieldPromptLabel(
 			.replace(/\btoken\s+token\b/gi, "token")
 			.trim();
 	}
-	const suffix = multiField ? ` (${field.id})` : "";
-	return `${service.label} ${noun}${suffix}`;
+	return `${service.label} ${noun}`;
 }
 
 /**
