@@ -70,7 +70,12 @@ jobs:
 
       - name: Install locked npm dependencies
         working-directory: source
-        run: npm ci
+        run: |
+          if [[ "${{ matrix.platform }}" == *musl* ]]; then
+            npm ci --libc=musl
+          else
+            npm ci
+          fi
 
       - name: Compile standalone application
         working-directory: source/packages/coding-agent
