@@ -129,6 +129,37 @@ describe("public command routing", () => {
 		expect(mocks.daemonCommands).toEqual([["daemon", "list", "--json", "--offline"]]);
 	});
 
+	it("keeps rotated global flags ahead of a -- separator", async () => {
+		await expect(
+			handlePublicCommand(["--offline", "mcp", "add", "local", "--", "node", "server file.js", "--stdio"]),
+		).resolves.toMatchObject({ handled: true });
+		expect(mocks.mcpCommands).toEqual([["add", "local", "--offline", "--", "node", "server file.js", "--stdio"]]);
+
+		await expect(
+			handlePublicCommand([
+				"--daemon-socket",
+				"/tmp/prime.sock",
+				"schedule",
+				"add",
+				"worker",
+				"0 9 * * 1-5",
+				"--",
+				"Check open work",
+			]),
+		).resolves.toMatchObject({ handled: true });
+		expect(mocks.daemonCommands.at(-1)).toEqual([
+			"daemon",
+			"cron",
+			"add",
+			"worker",
+			"0 9 * * 1-5",
+			"--daemon-socket",
+			"/tmp/prime.sock",
+			"--",
+			"Check open work",
+		]);
+	});
+
 	it("rejects a rotated global flag the command does not accept instead of chatting", async () => {
 		await expect(
 			handlePublicCommand(["--daemon-socket", "/tmp/prime.sock", "status", "--json"]),
