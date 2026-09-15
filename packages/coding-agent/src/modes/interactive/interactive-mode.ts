@@ -1908,7 +1908,7 @@ export class InteractiveMode {
 		if (abort.signal.aborted) {
 			return false;
 		}
-		await this.askOnboardingProviders();
+		await this.askOnboardingProviders(abort.signal);
 		if (abort.signal.aborted) {
 			return false;
 		}
@@ -1924,7 +1924,7 @@ export class InteractiveMode {
 	 * Optional step: connect more providers before the first chat. The picker
 	 * stays mounted between logins so several can be connected in one pass.
 	 */
-	private async askOnboardingProviders(): Promise<void> {
+	private async askOnboardingProviders(signal: AbortSignal): Promise<void> {
 		if (!this.onboardingSplash) {
 			return;
 		}
@@ -1932,7 +1932,8 @@ export class InteractiveMode {
 		for (;;) {
 			// A reset that cancels a provider login must end the question too,
 			// otherwise the next picker opens in the editor and waits for input.
-			if (this.onboardingFlowAbort?.signal.aborted) {
+			// The signal is passed in: tearing the block down clears the field.
+			if (signal.aborted) {
 				return;
 			}
 			// One row per provider: a provider offering both a subscription and an

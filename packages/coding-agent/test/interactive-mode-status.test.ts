@@ -3480,7 +3480,7 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 		runOnboardingFlow(): Promise<boolean>;
 		applySelectedModel(model: AgentConnectionModel): Promise<void>;
 		prepareForModelSelectionAfterLogin(authResult: AuthenticationResult): Promise<boolean>;
-		askOnboardingProviders(): Promise<void>;
+		askOnboardingProviders(signal: AbortSignal): Promise<void>;
 		askOnboardingTraceOptIn(): Promise<void>;
 		setupAutocompleteProvider(): void;
 	};
@@ -4327,16 +4327,23 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 	test("stops asking for providers once the flow is aborted", async () => {
 		const askOnboardingProviders = (InteractiveMode.prototype as unknown as OnboardingHarness).askOnboardingProviders;
 		const abort = new AbortController();
-		abort.abort();
 		const showInlineAuthPanel = vi.fn();
 		const fakeThis = {
 			onboardingSplash: { setPanel: vi.fn(), getActivePanel: () => undefined },
 			onboardingFlowAbort: abort,
-			createAuthFlows: vi.fn(() => ({ getLoginProviderOptions: vi.fn(() => []) })),
+			createAuthFlows: vi.fn(() => ({
+				getLoginProviderOptions: vi.fn(() => [{ id: "openai", name: "OpenAI", category: "provider" }]),
+			})),
+			modelRegistry: { getProviderAuthStatus: vi.fn(() => ({ configured: false })) },
+			ui: { requestRender: vi.fn() },
 			showInlineAuthPanel,
 		};
+		// A reset aborts the flow and then tears the block down, which clears the
+		// field: the question has to end on the signal it was handed.
+		abort.abort();
+		fakeThis.onboardingFlowAbort = undefined as unknown as AbortController;
 
-		await expect(askOnboardingProviders.call(fakeThis)).resolves.toBeUndefined();
+		await expect(askOnboardingProviders.call(fakeThis, abort.signal)).resolves.toBeUndefined();
 
 		expect(showInlineAuthPanel).not.toHaveBeenCalled();
 	});
