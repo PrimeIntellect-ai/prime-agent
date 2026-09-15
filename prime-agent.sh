@@ -3,6 +3,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PRIME_AGENT_LAUNCHER_PATH="$SCRIPT_DIR/prime-agent.sh"
+# Pin tsx to THIS checkout's tsconfig. An inherited TSX_TSCONFIG_PATH from a
+# different checkout (agent kernels, other worktrees, terminal apps) makes tsx
+# resolve the wrong tsconfig paths or crash on a dead extends chain. The
+# launcher knows its own root, so discovery is never needed.
+if [[ -f "$SCRIPT_DIR/tsconfig.json" ]]; then
+  export TSX_TSCONFIG_PATH="$SCRIPT_DIR/tsconfig.json"
+else
+  unset TSX_TSCONFIG_PATH
+fi
 if BUILD_ID="$(git -C "$SCRIPT_DIR" describe --tags --always --dirty 2>/dev/null)"; then
   export PRIME_AGENT_BUILD_ID="$BUILD_ID"
 fi

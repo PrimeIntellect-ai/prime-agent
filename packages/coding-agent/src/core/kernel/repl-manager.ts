@@ -51,6 +51,30 @@ import {
 	type SnapshotResult,
 } from "./state-snapshot.js";
 
+/**
+ * Environment for the Python kernel process. The kernel is Python and never
+ * consumes TSX_TSCONFIG_PATH, but bash() children inherit it: carrying the host
+ * CLI's tsconfig into shells makes tsx/node commands run from the kernel in
+ * OTHER checkouts resolve a stale config instead of discovering per-cwd.
+ * Strip it so kernel-spawned shells always discover from their own cwd.
+ */
+export function kernelSpawnEnv(
+	source: NodeJS.ProcessEnv,
+	optionsEnv: Record<string, string | undefined> | undefined,
+	ownerPid: number | undefined = process.pid,
+): NodeJS.ProcessEnv {
+	const env: NodeJS.ProcessEnv = {
+		...source,
+		...optionsEnv,
+		...(process.platform === "win32" ? { PYTHONUTF8: "1" } : {}),
+	};
+	if (ownerPid !== undefined) {
+		env.PRIME_AGENT_KERNEL_OWNER_PID = String(ownerPid);
+	}
+	delete env.TSX_TSCONFIG_PATH;
+	return env;
+}
+
 const REPL_PROTOCOL_VERSION = 3;
 const READY_TIMEOUT_MS = 30_000;
 const REPAIR_STEP_TIMEOUT_MS = 30_000;
@@ -316,12 +340,7 @@ export class ReplKernelManager {
 			cwd: this.options.cwd,
 			// bash.py journals its process groups under this pid so the host can
 			// reap them if the runtime dies without running its shutdown hook.
-			env: {
-				...process.env,
-				...this.options.env,
-				...(process.platform === "win32" ? { PYTHONUTF8: "1" } : {}),
-				PRIME_AGENT_KERNEL_OWNER_PID: String(process.pid),
-			},
+			env: kernelSpawnEnv(process.env, this.options.env),
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 		this.child = child;

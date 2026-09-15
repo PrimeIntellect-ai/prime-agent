@@ -19,13 +19,17 @@ export function createCliSubprocessEnv(
 	execArgs: readonly string[] = process.execArgv,
 ): NodeJS.ProcessEnv {
 	const environment = { ...source };
-	if (environment.TSX_TSCONFIG_PATH !== undefined || !entrypoint || !execArgs.some((arg) => arg.includes("tsx"))) {
+	if (!entrypoint || !execArgs.some((arg) => arg.includes("tsx"))) {
 		return environment;
 	}
 	let directory = dirname(resolve(entrypoint));
 	while (true) {
 		const tsconfigPath = join(directory, "tsconfig.json");
 		if (existsSync(tsconfigPath) && existsSync(join(directory, "node_modules", "tsx", "package.json"))) {
+			// Pin this checkout's tsconfig even when the inherited environment already
+			// carries one: a stale TSX_TSCONFIG_PATH from a different checkout makes
+			// spawned tsx processes resolve the wrong paths or fail on a dead
+			// tsconfig extends chain.
 			environment.TSX_TSCONFIG_PATH = tsconfigPath;
 			return environment;
 		}
