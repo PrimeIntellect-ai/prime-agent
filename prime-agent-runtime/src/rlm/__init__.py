@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 from dataclasses import dataclass
@@ -383,6 +384,104 @@ async def inbox_list() -> dict[str, Any]:
     return await host_request("rlm.inbox.list")
 
 
+_JOB_WATCHES: dict[int, dict[str, Any]] = {}
+
+
+async def _job_watch_loop(handle: Any, interval: float) -> None:
+    pid = int(getattr(handle, "pid"))
+    command = str(getattr(handle, "command", "") or "")
+    try:
+        last = len(handle.output())
+        while pid in _JOB_WATCHES:
+            await asyncio.sleep(interval)
+            if pid not in _JOB_WATCHES:
+                break
+            current = len(handle.output())
+            if current > last:
+                await host_request(
+                    "bash.progress",
+                    {"pid": pid, "command": command, "fromBytes": last, "toBytes": current},
+                )
+                last = current
+            if not handle.running:
+                break
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # A dead bridge or a reaped job just ends the watch; the handle stays usable.
+        _JOB_WATCHES.pop(pid, None)
+
+
+async def watch_job(handle: Any, interval_seconds: float = 5.0) -> dict[str, Any]:
+    """Watch an async bash job's output growth.
+
+    Emits quiet byte-range progress notices (``[watch-job pid:N] output +K
+    bytes (a..b)``) every ``interval_seconds`` while the job runs; the notice
+    pipeline lands them in the digest inbox when that lane is on. Cancel with
+    ``rlm.watch.job_cancel(pid)``.
+    """
+    pid = getattr(handle, "pid", None)
+    if not isinstance(pid, int):
+        raise TypeError("rlm.watch.job requires a bash handle returned by bash()")
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    if pid in _JOB_WATCHES:
+        return {"pid": pid, "watching": True, "already_watched": True}
+    task = asyncio.get_running_loop().create_task(_job_watch_loop(handle, float(interval_seconds)))
+    _JOB_WATCHES[pid] = {"task": task, "interval": float(interval_seconds)}
+    return {"pid": pid, "watching": True}
+
+
+def watch_job_list() -> list[dict[str, Any]]:
+    return [{"pid": pid, "interval": entry["interval"]} for pid, entry in sorted(_JOB_WATCHES.items())]
+
+
+def watch_job_cancel(pid: int) -> bool:
+    entry = _JOB_WATCHES.pop(pid, None)
+    if entry is None:
+        return False
+    entry["task"].cancel()
+    return True
+
+
+async def watch_agent(target: str) -> dict[str, Any]:
+    """Watch a direct child's activity: quiet notices with message-index ranges.
+
+    Registering again re-baselines; cancel with ``rlm.watch.agent_cancel(id)``.
+    """
+    return await host_request("rlm.watch.agent", {"target": target})
+
+
+async def watch_agent_list() -> dict[str, Any]:
+    return await host_request("rlm.watch.agent_list")
+
+
+async def watch_agent_cancel(watch_id: str) -> dict[str, Any]:
+    return await host_request("rlm.watch.agent_cancel", {"id": watch_id})
+
+
+class _RLMWatch:
+    """Quiet watches: child activity as message-index ranges, job output as byte ranges."""
+
+    async def agent(self, target: str) -> dict[str, Any]:
+        return await watch_agent(target)
+
+    async def agent_list(self) -> dict[str, Any]:
+        return await watch_agent_list()
+
+    async def agent_cancel(self, watch_id: str) -> dict[str, Any]:
+        return await watch_agent_cancel(watch_id)
+
+    async def job(self, handle: Any, interval_seconds: float = 5.0) -> dict[str, Any]:
+        return await watch_job(handle, interval_seconds)
+
+    def job_list(self) -> list[dict[str, Any]]:
+        return watch_job_list()
+
+    def job_cancel(self, pid: int) -> bool:
+        return watch_job_cancel(pid)
+
+
 async def inbox_configure(mode: str) -> dict[str, Any]:
     """Pin this session's agent-message delivery lane.
 
@@ -519,6 +618,10 @@ class _RLMNamespace:
     def inbox(self) -> _RLMInbox:
         return _RLMInbox()
 
+    @property
+    def watch(self) -> _RLMWatch:
+        return _RLMWatch()
+
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         raise TypeError(_NOT_CALLABLE_MESSAGE)
 
@@ -565,6 +668,12 @@ __all__ = [
     "inbox_configure",
     "inbox_list",
     "inbox_read",
+    "watch_agent",
+    "watch_agent_cancel",
+    "watch_agent_list",
+    "watch_job",
+    "watch_job_cancel",
+    "watch_job_list",
     "list_subagents",
     "messaging_stats",
     "rlm",

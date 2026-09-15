@@ -190,6 +190,9 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 		parts.push(
 			'The daemon decides the delivery lane per recipient; a user may pin it per session with `await rlm.inbox.configure("auto"|"push"|"digest")`.',
 		);
+		parts.push(
+			"Subscribe to quiet watches with `await rlm.watch.agent(childNameOrId)` (child activity as message-index ranges) and `await rlm.watch.job(handle)` (job output as byte ranges); notices carry ranges, not content.",
+		);
 	}
 
 	if (hasIpython) {

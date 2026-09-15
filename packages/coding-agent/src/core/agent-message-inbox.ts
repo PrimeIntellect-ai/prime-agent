@@ -24,6 +24,10 @@ export interface AgentMessageInboxEntryData {
 	fromRelationship: string;
 	target: { activeSessionId: string; sessionId: string; sessionName?: string };
 	receivedAt: string;
+	/** "agent_message" for delivered reports; "watch" for watch events on the digest lane. */
+	kind: "agent_message" | "watch";
+	/** Present for watch entries: which watch produced the event. */
+	watch?: "agent" | "job";
 }
 
 export interface AgentMessageInboxEntryView {
@@ -36,6 +40,8 @@ export interface AgentMessageInboxEntryView {
 	read: boolean;
 	preview: string;
 	content: string;
+	kind: "agent_message" | "watch";
+	watch?: "agent" | "job";
 }
 
 /** Narrow store port so the inbox is testable without a full session. */
@@ -112,6 +118,25 @@ export class AgentMessageInbox {
 				...(message.details.target?.sessionName ? { sessionName: message.details.target.sessionName } : {}),
 			},
 			receivedAt: new Date().toISOString(),
+			kind: "agent_message",
+		};
+		const id = this.store.appendCustomEntryWithRollback(AGENT_MESSAGE_INBOX_ENTRY_CUSTOM_TYPE, data);
+		this.records.push({ id, data, read: false });
+		return id;
+	}
+
+	/** Store one watch event (agent or job) on the digest lane; returns the entry id. */
+	appendWatch(watch: "agent" | "job", content: string): string {
+		this.ensureLoaded();
+		const data: AgentMessageInboxEntryData = {
+			messageId: `watch-${watch}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+			content,
+			from: { activeSessionId: "watch" },
+			fromRelationship: "watch",
+			target: { activeSessionId: "watch", sessionId: "watch" },
+			receivedAt: new Date().toISOString(),
+			kind: "watch",
+			watch,
 		};
 		const id = this.store.appendCustomEntryWithRollback(AGENT_MESSAGE_INBOX_ENTRY_CUSTOM_TYPE, data);
 		this.records.push({ id, data, read: false });
@@ -169,15 +194,17 @@ export class AgentMessageInbox {
 					? `${record.data.content.slice(0, PREVIEW_MAX_CHARS)}...`
 					: record.data.content,
 			content: record.data.content,
+			kind: record.data.kind ?? "agent_message",
+			...(record.data.watch ? { watch: record.data.watch } : {}),
 		};
 	}
 }
 
-/** Notice prompt delivered once per batch of digest-lane messages. */
+/** Notice prompt delivered once per batch of digest-lane items. */
 export function createAgentMessageDigestNoticeContent(unreadCount: number, senders: string[]): string {
 	const senderList = senders.slice(0, 5).join(", ");
 	return [
-		`You have ${unreadCount} unread agent message${unreadCount === 1 ? "" : "s"} in your inbox${
+		`You have ${unreadCount} unread inbox item${unreadCount === 1 ? "" : "s"}${
 			senderList ? ` (from: ${senderList}${senders.length > 5 ? ", ..." : ""})` : ""
 		}.`,
 		"List them with `await rlm.inbox.list()` or read all of them with `await rlm.inbox.read()`.",

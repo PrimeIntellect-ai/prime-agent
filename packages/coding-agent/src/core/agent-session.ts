@@ -78,6 +78,13 @@ import {
 	ORCHESTRATION_HEARTBEAT_SKILL_NAME,
 } from "./agent-observe.js";
 import {
+	AGENT_WATCH_NOTICE_CUSTOM_TYPE,
+	AGENT_WATCH_POLL_INTERVAL_MS,
+	AgentWatchRegistry,
+	formatAgentWatchNotice,
+	formatJobWatchNotice,
+} from "./agent-watch.js";
+import {
 	addLoginGuidanceToAuthError,
 	formatAuthenticationFailedMessage,
 	formatNoApiKeyFoundMessage,
@@ -1505,6 +1512,9 @@ export class AgentSession {
 	private _agentMessageDigestPin: "auto" | "push" | "digest" = "auto";
 	private readonly _agentMessageInbox: AgentMessageInbox;
 	private readonly _digestNoticeActionIds = new Set<string>();
+	/** Direct-child activity watches (PR E); quiet, index ranges only. */
+	private readonly _agentWatchRegistry = new AgentWatchRegistry();
+	private _agentWatchPollTimer: ReturnType<typeof setInterval> | undefined;
 	/** Latest recap for this session, written by the daemon summarizer; read by a parent to label its child snapshots. */
 	private _currentRecap?: string;
 
@@ -4787,6 +4797,7 @@ export class AgentSession {
 		for (const run of this._unsettledRlmChildRuns) run.suppressTerminalNotice = true;
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
 		this._sessionActionCommitDisposeAbortController.abort();
+		this._clearAgentWatchPoll();
 		try {
 			// Invalidate scheduled timers and abort any in-flight review so a late
 			// resolution cannot write harness state or re-subscribe handlers.
@@ -5526,6 +5537,112 @@ export class AgentSession {
 		this._digestNoticeActionIds.clear();
 		this._emitQueueUpdate();
 		this.resumeQueuedWork();
+	}
+
+	/**
+	 * Route one watch event (agent or job) through the notice pipeline: ranges
+	 * only, and on the digest lane the event lands in the inbox instead of
+	 * waking the session immediately.
+	 */
+	private async _emitWatchNotice(watch: "agent" | "job", content: string): Promise<void> {
+		if (this._disposed || this._disposing) return;
+		if (this._agentMessageDigestMode) {
+			this._agentMessageInbox.appendWatch(watch, content);
+			this._ensureAgentMessageDigestNotice();
+			return;
+		}
+		const message: CustomMessage = {
+			role: "custom",
+			customType: AGENT_WATCH_NOTICE_CUSTOM_TYPE,
+			content,
+			display: false,
+			details: { watch },
+			timestamp: Date.now(),
+		};
+		const disposeSignal = this._sessionActionCommitDisposeAbortController.signal;
+		while (true) {
+			let admissionCommitted = false;
+			try {
+				await this._promptInjectedMessage(content, message, {
+					streamingBehavior: "steer",
+					queueIfBusy: true,
+					resumeIfIdle: true,
+					returnAfterAccepted: true,
+					suppressAutonomousContinuation: true,
+					admissionCommitted: () => {
+						admissionCommitted = true;
+					},
+				});
+				return;
+			} catch (error) {
+				if (admissionCommitted || !(error instanceof SessionInputAdmissionPausedError)) throw error;
+				while (this._sessionInputAdmissionPauses.size > 0 && !disposeSignal.aborted) {
+					await this._waitForSessionActivityChange(disposeSignal);
+				}
+			}
+		}
+	}
+
+	/** Register an activity watch on a direct child; quiet index-range notices only. */
+	async registerAgentWatch(target: string): Promise<{ id: string; childName: string; messages: number }> {
+		const subs = await this.listRlmSubagents();
+		const row = subs.subagents.find(
+			(candidate) => candidate.rlm_child_id === target || candidate.session_name === target,
+		);
+		if (!row?.rlm_child_id) throw new Error(`No direct child matches "${target}"`);
+		const child = this.getRlmChildSession(row.rlm_child_id);
+		if (!child) throw new Error(`Child "${target}" is not inspectable in-process`);
+		const id = `watch-agent-${row.rlm_child_id}`;
+		const initial = {
+			messageCount: child.agent.state.messages.length,
+			status: child.isStreaming ? "running" : "idle",
+		};
+		this._agentWatchRegistry.cancel(id);
+		this._agentWatchRegistry.register(id, row.rlm_child_id, row.session_name, initial);
+		this._scheduleAgentWatchPoll();
+		return { id, childName: row.session_name, messages: initial.messageCount };
+	}
+
+	cancelAgentWatch(id: string): boolean {
+		const cancelled = this._agentWatchRegistry.cancel(id);
+		if (this._agentWatchRegistry.size === 0) this._clearAgentWatchPoll();
+		return cancelled;
+	}
+
+	listAgentWatches() {
+		return this._agentWatchRegistry.list().map((subscription) => ({
+			id: subscription.id,
+			childName: subscription.childName,
+			messages: subscription.lastSeenMessages,
+			status: subscription.lastStatus,
+		}));
+	}
+
+	private _scheduleAgentWatchPoll(): void {
+		if (this._agentWatchPollTimer || this._agentWatchRegistry.size === 0) return;
+		this._agentWatchPollTimer = setInterval(() => {
+			this._agentWatchRegistry.poll({
+				messageCount: (childId) => {
+					const child = this.getRlmChildSession(childId);
+					if (!child) return undefined;
+					return {
+						messageCount: child.agent.state.messages.length,
+						status: child.isStreaming ? "running" : "idle",
+					};
+				},
+				onEvent: (event) => {
+					void this._emitWatchNotice("agent", formatAgentWatchNotice(event));
+				},
+			});
+		}, AGENT_WATCH_POLL_INTERVAL_MS);
+		// Never hold the process open for a quiet watch (matches path watches).
+		this._agentWatchPollTimer.unref?.();
+	}
+
+	private _clearAgentWatchPoll(): void {
+		if (!this._agentWatchPollTimer) return;
+		clearInterval(this._agentWatchPollTimer);
+		this._agentWatchPollTimer = undefined;
 	}
 
 	private async _acquireRlmTerminalNoticeRetentionFence(): Promise<{ owner: symbol; release(): void } | undefined> {
@@ -10479,6 +10596,29 @@ export class AgentSession {
 				const result = this._agentMessageInbox.read(ids);
 				if (result.unread === 0) this._cancelPendingDigestNotices();
 				return result as unknown as Record<string, unknown>;
+			},
+			"rlm.watch.agent": async (payload: Record<string, unknown>) => {
+				const target = typeof payload?.target === "string" ? payload.target : "";
+				if (!target) throw new Error("rlm.watch.agent requires a target child name or id");
+				return (await this.registerAgentWatch(target)) as unknown as Record<string, unknown>;
+			},
+			"rlm.watch.agent_list": async () => this.listAgentWatches() as unknown as Record<string, unknown>,
+			"rlm.watch.agent_cancel": async (payload: Record<string, unknown>) => {
+				const id = typeof payload?.id === "string" ? payload.id : "";
+				if (!id) throw new Error("rlm.watch.agent_cancel requires an id");
+				return { cancelled: this.cancelAgentWatch(id) } as unknown as Record<string, unknown>;
+			},
+			"bash.progress": async (payload: Record<string, unknown>) => {
+				const pid = payload?.pid;
+				const fromBytes = payload?.fromBytes;
+				const toBytes = payload?.toBytes;
+				const command = typeof payload?.command === "string" ? payload.command : "";
+				if (typeof pid !== "number" || typeof fromBytes !== "number" || typeof toBytes !== "number") {
+					throw new Error("bash.progress requires numeric pid, fromBytes, toBytes");
+				}
+				if (toBytes <= fromBytes) return { status: "ok" };
+				await this._emitWatchNotice("job", formatJobWatchNotice(pid, fromBytes, toBytes, command));
+				return { status: "ok" };
 			},
 			"rlm.inbox.configure": async (payload: Record<string, unknown>) => {
 				const mode = payload?.mode;
