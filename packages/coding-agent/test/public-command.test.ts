@@ -187,6 +187,17 @@ describe("public command routing", () => {
 		expect(mocks.psCalls).toEqual([]);
 	});
 
+	it("keeps a positional after a prompt-value flag on the message path", async () => {
+		for (const flag of ["--system-prompt", "--append-system-prompt"]) {
+			const args = [flag, "--offline", "status"];
+			await expect(handlePublicCommand(args)).resolves.toEqual({
+				handled: false,
+				args,
+				explicitAgentsView: false,
+			});
+		}
+	});
+
 	it("keeps a version request ahead of command routing instead of rotating it", async () => {
 		const args = ["--version", "status"];
 		await expect(handlePublicCommand(args)).resolves.toEqual({
