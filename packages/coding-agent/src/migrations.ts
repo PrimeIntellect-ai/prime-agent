@@ -4,6 +4,7 @@
 
 import chalk from "chalk";
 import {
+	chmodSync,
 	type Dirent,
 	existsSync,
 	mkdirSync,
@@ -26,10 +27,57 @@ const MIGRATION_GUIDE_URL =
 const EXTENSIONS_DOC_URL =
 	"https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/extensions.md";
 
+type CredentialRecord = Record<string, unknown>;
+
+function readJsonObjectSync(path: string): CredentialRecord | undefined {
+	try {
+		const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+		return parsed as CredentialRecord;
+	} catch {
+		return undefined;
+	}
+}
+
+function containsProviders(auth: CredentialRecord | undefined, providers: Iterable<string>): boolean {
+	if (!auth) return false;
+	for (const provider of providers) {
+		if (!(provider in auth)) return false;
+	}
+	return true;
+}
+
+/** Remove a legacy plaintext credential file; a symlinked file loses both the link and its target. */
+function removeCredentialFileSync(path: string): void {
+	const target = realpathIfPresentSync(path);
+	rmSync(target, { force: true });
+	if (target !== path) rmSync(path, { force: true });
+}
+
+function restrictCredentialFileSync(path: string): void {
+	try {
+		chmodSync(realpathIfPresentSync(path), 0o600);
+	} catch {
+		// Best effort; the warning still tells the user the file is there.
+	}
+}
+
+function warnLeftoverCredentialFile(path: string, reason: string): void {
+	console.error(
+		chalk.yellow(
+			`Warning: ${path} still holds plaintext credentials (${reason}). It was restricted to 0600; delete it once you have confirmed auth.json is complete.`,
+		),
+	);
+}
+
 /**
  * Migrate legacy oauth.json and settings.json apiKeys to auth.json.
  *
- * @returns Array of provider names that were migrated
+ * Providers missing from auth.json are merged in; existing entries are never
+ * overwritten. Legacy sources are removed only after auth.json has been
+ * durably written and re-read with every legacy provider present.
+ *
+ * @returns Array of provider names that were added to auth.json
  */
 export function migrateAuthToAuthJson(): string[] {
 	const agentDir = getAgentDir();
@@ -37,23 +85,36 @@ export function migrateAuthToAuthJson(): string[] {
 	const oauthPath = join(agentDir, "oauth.json");
 	const settingsPath = join(agentDir, "settings.json");
 
-	// Skip if auth.json already exists
-	if (existsSync(authPath)) return [];
+	let existing: CredentialRecord = {};
+	if (existsSync(authPath)) {
+		const parsed = readJsonObjectSync(authPath);
+		// An unreadable destination must never be replaced; leave every source alone.
+		if (!parsed) {
+			if (existsSync(oauthPath)) {
+				restrictCredentialFileSync(oauthPath);
+				warnLeftoverCredentialFile(oauthPath, "auth.json could not be parsed, so nothing was migrated");
+			}
+			cleanupMigratedOauthBackup(oauthPath, undefined);
+			return [];
+		}
+		existing = parsed;
+	}
 
-	const migrated: Record<string, unknown> = {};
+	const added: CredentialRecord = {};
 	const providers: string[] = [];
+	const legacyProviders = new Set<string>();
 
 	let oauthReadable = false;
 	if (existsSync(oauthPath)) {
-		try {
-			const oauth = JSON.parse(readFileSync(oauthPath, "utf-8"));
+		const oauth = readJsonObjectSync(oauthPath);
+		if (oauth) {
+			oauthReadable = true;
 			for (const [provider, cred] of Object.entries(oauth)) {
-				migrated[provider] = { type: "oauth", ...(cred as object) };
+				legacyProviders.add(provider);
+				if (provider in existing) continue;
+				added[provider] = { type: "oauth", ...(cred as object) };
 				providers.push(provider);
 			}
-			oauthReadable = true;
-		} catch {
-			// Skip on error
 		}
 	}
 
@@ -65,10 +126,11 @@ export function migrateAuthToAuthJson(): string[] {
 			const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 			if (settings.apiKeys && typeof settings.apiKeys === "object") {
 				for (const [provider, key] of Object.entries(settings.apiKeys)) {
-					if (!migrated[provider] && typeof key === "string") {
-						migrated[provider] = { type: "api_key", key };
-						providers.push(provider);
-					}
+					if (typeof key !== "string") continue;
+					legacyProviders.add(provider);
+					if (provider in existing || provider in added) continue;
+					added[provider] = { type: "api_key", key };
+					providers.push(provider);
 				}
 				delete settings.apiKeys;
 				settingsWithoutApiKeys = JSON.stringify(settings, null, 2);
@@ -79,35 +141,74 @@ export function migrateAuthToAuthJson(): string[] {
 	}
 
 	// The destination must be durable before any source is destroyed.
-	if (Object.keys(migrated).length > 0) {
+	if (providers.length > 0) {
 		mkdirSync(dirname(authPath), { recursive: true });
-		writeFileAtomicSync(realpathIfPresentSync(authPath), JSON.stringify(migrated, null, 2), {
+		writeFileAtomicSync(realpathIfPresentSync(authPath), JSON.stringify({ ...existing, ...added }, null, 2), {
 			mode: 0o600,
 			fsync: true,
 			fsyncDir: true,
 		});
 	}
-	// Source cleanup is best-effort: with auth.json durable, leftovers are inert.
-	try {
-		if (oauthReadable) {
-			renameSync(oauthPath, `${oauthPath}.migrated`);
+
+	// Re-read what actually landed; the sources go only once every legacy provider is there.
+	const verified = legacyProviders.size > 0 ? readJsonObjectSync(authPath) : existing;
+	const destinationComplete = containsProviders(verified, legacyProviders);
+
+	if (oauthReadable) {
+		if (destinationComplete) {
+			try {
+				removeCredentialFileSync(oauthPath);
+			} catch {
+				restrictCredentialFileSync(oauthPath);
+				warnLeftoverCredentialFile(oauthPath, "could not be deleted");
+			}
+		} else {
+			restrictCredentialFileSync(oauthPath);
+			warnLeftoverCredentialFile(oauthPath, "auth.json could not be verified after migration");
 		}
-	} catch {
-		// Skip on error
 	}
-	try {
-		if (settingsWithoutApiKeys !== undefined) {
+	if (settingsWithoutApiKeys !== undefined && destinationComplete) {
+		try {
 			writeFileAtomicSync(
 				realpathIfPresentSync(settingsPath),
 				settingsWithoutApiKeys,
 				settingsMode === undefined ? {} : { mode: settingsMode },
 			);
+		} catch {
+			// Skip on error
 		}
-	} catch {
-		// Skip on error
 	}
 
+	cleanupMigratedOauthBackup(oauthPath, verified);
+
 	return providers;
+}
+
+/**
+ * Earlier releases renamed oauth.json to oauth.json.migrated at its original mode.
+ * Remove that backup once auth.json holds its providers; otherwise lock it down and warn.
+ */
+function cleanupMigratedOauthBackup(oauthPath: string, auth: CredentialRecord | undefined): void {
+	const backupPath = `${oauthPath}.migrated`;
+	if (!existsSync(backupPath)) return;
+
+	const backup = readJsonObjectSync(backupPath);
+	if (!backup) {
+		restrictCredentialFileSync(backupPath);
+		warnLeftoverCredentialFile(backupPath, "it could not be parsed");
+		return;
+	}
+	if (!containsProviders(auth, Object.keys(backup))) {
+		restrictCredentialFileSync(backupPath);
+		warnLeftoverCredentialFile(backupPath, "auth.json is missing some of its providers");
+		return;
+	}
+	try {
+		removeCredentialFileSync(backupPath);
+	} catch {
+		restrictCredentialFileSync(backupPath);
+		warnLeftoverCredentialFile(backupPath, "could not be deleted");
+	}
 }
 
 /**
