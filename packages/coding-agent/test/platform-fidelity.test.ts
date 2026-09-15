@@ -58,11 +58,13 @@ describe("detectLibc", () => {
 		});
 	});
 
-	it("prefers musl over a glibc runtime version when both look present", () => {
+	it("prefers the glibc runtime over a musl loader file when both look present", () => {
+		// A glibc process on Debian/Ubuntu with the musl package installed
+		// still reports glibc: the runtime header sees the actual linkage.
 		const result = detectLibc(
 			probe({ fileExists: (path) => path.includes("ld-musl"), glibcVersionRuntime: () => "2.39" }),
 		);
-		expect(result.libc).toBe("musl");
+		expect(result).toEqual({ libc: "glibc", version: "2.39" });
 	});
 
 	it("reports glibc with the runtime version when the report header exposes it", () => {
@@ -74,6 +76,13 @@ describe("detectLibc", () => {
 
 	it("falls back to the glibc loader when no runtime version is exposed", () => {
 		expect(detectLibc(probe({ fileExists: (path) => path === "/lib64/ld-linux-x86-64.so.1" }))).toEqual({
+			libc: "glibc",
+			version: "unknown",
+		});
+	});
+
+	it("falls back to the 32-bit glibc loader path on ia32", () => {
+		expect(detectLibc(probe({ arch: "ia32", fileExists: (path) => path === "/lib/ld-linux.so.2" }))).toEqual({
 			libc: "glibc",
 			version: "unknown",
 		});
@@ -158,6 +167,25 @@ describe("detectPlatformFidelity", () => {
 			libc_version: "unknown",
 			cpu_baseline: "no_avx2",
 			os_release: "5.15.0-alpine",
+			os_product_version: "unknown",
+		});
+	});
+
+	it("describes a glibc host that merely has the musl package installed", () => {
+		expect(
+			detectPlatformFidelity(
+				probe({
+					fileExists: (path) => path === "/lib/ld-musl-x86_64.so.1",
+					readTextFile: () => AVX2_CPUINFO,
+					glibcVersionRuntime: () => "2.39",
+					release: () => "6.8.0-45-generic",
+				}),
+			),
+		).toEqual({
+			libc: "glibc",
+			libc_version: "2.39",
+			cpu_baseline: "avx2",
+			os_release: "6.8.0-45-generic",
 			os_product_version: "unknown",
 		});
 	});
