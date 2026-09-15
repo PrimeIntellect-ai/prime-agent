@@ -7,7 +7,7 @@ import type { AgentSessionCreationOptions } from "./agent-session-services.js";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.js";
 import { AuthStorage } from "./auth-storage.js";
 import type { AgentAutonomousConfig } from "./autonomous.js";
-import { DEFAULT_THINKING_LEVEL } from "./defaults.js";
+import { defaultThinkingLevelForModel } from "./defaults.js";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.js";
 import { McpManager } from "./mcp/mcp-manager.js";
 import { convertToLlm } from "./messages.js";
@@ -33,7 +33,7 @@ export interface CreateAgentSessionOptions extends AgentSessionCreationOptions {
 
 	/** Model to use. Default: from settings, else first available */
 	model?: Model<any>;
-	/** Thinking level. Default: from settings, else 'medium' (clamped to model capabilities) */
+	/** Thinking level. Default: from settings, else the model default (max for open-weight models, else 'medium'), clamped to model capabilities */
 	thinkingLevel?: ThinkingLevel;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
@@ -221,11 +221,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	if (thinkingLevel === undefined && hasExistingSession) {
 		thinkingLevel = hasThinkingEntry
 			? (existingSession.thinkingLevel as ThinkingLevel)
-			: (settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL);
+			: (settingsManager.getDefaultThinkingLevel() ?? defaultThinkingLevelForModel(model));
 	}
 
 	if (thinkingLevel === undefined) {
-		thinkingLevel = settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
+		thinkingLevel = settingsManager.getDefaultThinkingLevel() ?? defaultThinkingLevelForModel(model);
 	}
 
 	if (!model) {

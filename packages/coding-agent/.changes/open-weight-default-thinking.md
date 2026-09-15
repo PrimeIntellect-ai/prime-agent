@@ -1,0 +1,1 @@
+- Changed the default reasoning effort for open-weight models (GLM/Z.ai, Qwen, DeepSeek, Kimi/Moonshot, MiniMax, Llama, gpt-oss, including internal routes) to the highest level each model supports, while other models keep medium and an explicit `defaultThinkingLevel` setting still wins.
