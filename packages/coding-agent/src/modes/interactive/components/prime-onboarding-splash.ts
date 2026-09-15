@@ -25,18 +25,12 @@ const PADDING_X = 1;
 const LOGO_INDENT = 5;
 const LOGIN_ACTION_LABEL = "Log in with Prime Intellect";
 const MARKER_WIDTH = 2;
-/** What sets the agent apart, wrapped under the welcome line. */
+/** What the agent is, wrapped under the welcome line. */
 const DESCRIPTION_PARAGRAPHS = [
-	"Prime Agent programmatically manages your context and learns from your workflows.",
-	"Leveraging the Recursive Language Model paradigm, it parallelizes your long-running tasks with subagents, allowing you to:",
+	"A self-improving RLM harness with persistent context, recursive subagents, and direct swarm communication.",
+	"It learns from its history by refining its own memories, skills, prompts, and subagent specifications.",
 ];
-const DESCRIPTION_BULLETS = [
-	"monitor dozens of experiments concurrently",
-	"track a regression across hundreds of commits",
-	"audit thousands of documents in a single run",
-	"and much more",
-];
-const DESCRIPTION_WIDTH = 50;
+const DESCRIPTION_WIDTH = 56;
 const MIN_HIGHLIGHT_WIDTH = 30;
 const HIGHLIGHT_TRAILING = 6;
 
@@ -138,11 +132,6 @@ export class PrimeOnboardingSplashComponent implements Component {
 					lines.push(this.line(safeWidth, layout.contentLeft, theme.fg("muted", row)));
 				}
 			});
-			for (const bullet of DESCRIPTION_BULLETS) {
-				lines.push(
-					this.line(safeWidth, layout.contentLeft, theme.fg("dim", "\u2022 ") + theme.fg("muted", bullet)),
-				);
-			}
 		}
 		// The panel brings its own leading padding; a second blank row reads as a gap.
 		if (!this.getActivePanel()) {
