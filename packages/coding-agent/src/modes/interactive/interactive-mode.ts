@@ -130,7 +130,6 @@ import {
 	resolveServiceCatalogWithDiagnostics,
 	verifyMcpConnection,
 } from "../../core/mcp/service-catalog.js";
-
 import {
 	ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
 	bashOutputToText,
@@ -161,6 +160,7 @@ import { parseCommandArgs } from "../../core/prompt-templates.js";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.js";
 import { SessionImportFileNotFoundError } from "../../core/session-import-errors.js";
 import { resolveSessionPath, SessionSelectorError, SessionSelectorNotFoundError } from "../../core/session-resolver.js";
+import type { McpServerConfig } from "../../core/settings-manager.js";
 import { parseSkillBlock } from "../../core/skill-blocks.js";
 import {
 	BUILTIN_SLASH_COMMANDS,
@@ -571,6 +571,74 @@ type GoalAnnouncementSnapshot = {
 };
 
 type ModelFallbackWarningAction = "show" | "suppress";
+
+/** The connection target a picker row dispatches to: a concrete endpoint and
+ * its auth shape, or a settings-managed stdio server. */
+interface McpPickerTarget {
+	url?: string;
+	usesOAuth: boolean;
+	bearerTokenEnvVar?: string;
+	managedBySettings: boolean;
+	transport?: "stdio";
+	name?: string;
+}
+
+/**
+ * What a picker action means for the picker chain that launched it. `ran`
+ * marks an action that STARTED a real flow — a login or paste panel, a
+ * verification, a removal, a settings change — so the chain re-enters the
+ * right surface, rebuilt from the live stores. `ran: false` is a status-only
+ * dead end: the transient line is the outcome and the chain ends, so an
+ * action that cannot proceed never reopens the picker (no re-entry loop).
+ */
+type McpPickerActionOutcome = { ran: boolean };
+
+/** Where the accounts surface sends the picker chain when it returns. */
+type McpAccountsSurfaceExit = "closed" | "catalog";
+
+/**
+ * Connect targets keyed by serviceId: catalog services with a concrete HTTP
+ * endpoint (built-ins keep their bundled endpoint unless the user configured
+ * that id) and every user-declared server, HTTP or stdio.
+ */
+function buildMcpPickerTargets(
+	services: readonly McpServiceDescriptor[],
+	userServers: Record<string, McpServerConfig>,
+): Map<string, McpPickerTarget> {
+	const targets = new Map<string, McpPickerTarget>();
+	for (const service of services) {
+		if (
+			service.transport.type === "http" &&
+			service.transport.url &&
+			(service.legacyBuiltin || !userServers[service.serviceId])
+		) {
+			targets.set(service.serviceId, {
+				url: service.transport.url,
+				usesOAuth: service.authStrategy === "oauth" || service.authStrategy === "unknown",
+				managedBySettings: false,
+			});
+		}
+	}
+	for (const [name, config] of Object.entries(userServers)) {
+		if (services.some((entry) => entry.serviceId === name && entry.legacyBuiltin)) continue;
+		if (config.type === "http") {
+			targets.set(name, {
+				url: config.url,
+				usesOAuth: config.oauth === true,
+				...(config.bearerTokenEnvVar ? { bearerTokenEnvVar: config.bearerTokenEnvVar } : {}),
+				managedBySettings: true,
+			});
+		} else if (config.type === "stdio") {
+			targets.set(name, {
+				usesOAuth: false,
+				managedBySettings: true,
+				transport: "stdio",
+				name,
+			});
+		}
+	}
+	return targets;
+}
 
 interface OnboardingSplashHandle {
 	showProgress(message: string): void;
@@ -9328,112 +9396,109 @@ export class InteractiveMode {
 	}
 
 	private async showServiceCatalogPicker(initialSearch?: string): Promise<void> {
-		const { services, views, diagnostics } = this.buildServiceCatalogViews();
-		// Wiring problems (a declared local source that vanished, duplicate ids,
-		// truncation) are visible, never silent.
-		if (diagnostics.length > 0) {
-			this.showWarning(`Service catalog notice: ${diagnostics[0]}`);
-		}
-		// Connect targets keyed by serviceId; user-declared servers resolve from settings.
-		const userServers = this.settingsManager.getGlobalMcpServers() ?? {};
-		const targets = new Map<
-			string,
-			{
-				url?: string;
-				usesOAuth: boolean;
-				bearerTokenEnvVar?: string;
-				managedBySettings: boolean;
-				transport?: "stdio";
-				name?: string;
+		// The picker CHAIN, not a one-shot (Kevin, live testing): an action that
+		// ran lands the user back in the right surface — that service's
+		// accounts menu while it still owns an account, otherwise the catalog —
+		// never the bare prompt. Every entry rebuilds views, targets, and
+		// routing from the LIVE catalog + connection store, so a removed
+		// account is gone and a fresh one shows; Esc anywhere closes the whole
+		// chain.
+		let surface: { kind: "catalog"; search?: string } | { kind: "accounts"; service: McpPluginView } = {
+			kind: "catalog",
+			search: initialSearch,
+		};
+		while (true) {
+			const { services, views, diagnostics } = this.buildServiceCatalogViews();
+			// Wiring problems (a declared local source that vanished, duplicate ids,
+			// truncation) are visible, never silent.
+			if (diagnostics.length > 0) {
+				this.showWarning(`Service catalog notice: ${diagnostics[0]}`);
 			}
-		>();
-		for (const service of services) {
-			if (
-				service.transport.type === "http" &&
-				service.transport.url &&
-				(service.legacyBuiltin || !userServers[service.serviceId])
-			) {
-				targets.set(service.serviceId, {
-					url: service.transport.url,
-					usesOAuth: service.authStrategy === "oauth" || service.authStrategy === "unknown",
-					managedBySettings: false,
-				});
+			// Connect targets keyed by serviceId; user-declared servers resolve from settings.
+			const userServers = this.settingsManager.getGlobalMcpServers() ?? {};
+			const targets = buildMcpPickerTargets(services, userServers);
+			// Freeze the displayed intent: guidance must never become a mutation
+			// when settings change while the picker is open.
+			const settingsActions = new Map<
+				string,
+				"disable local server" | "settings guidance" | "verify" | "manage saved account"
+			>();
+			for (const [name, config] of Object.entries(userServers)) {
+				if (views.find((view) => view.serviceId === name)?.source !== "user") continue;
+				if (config.type === "stdio") {
+					settingsActions.set(name, config.enabled === false ? "settings guidance" : "disable local server");
+				} else if (!config.oauth) {
+					const hasSavedAccount =
+						this.getMcpConnectionStore().get(name) !== undefined ||
+						this.modelRegistry.authStorage.getVerified(mcpCredentialKey(name)) !== undefined;
+					const pending =
+						config.enabled !== false &&
+						views.find((view) => view.serviceId === name)?.connectionStatus === "pending";
+					settingsActions.set(
+						name,
+						hasSavedAccount ? "manage saved account" : pending ? "verify" : "settings guidance",
+					);
+				}
 			}
-		}
-		for (const [name, config] of Object.entries(userServers)) {
-			if (services.some((entry) => entry.serviceId === name && entry.legacyBuiltin)) continue;
-			if (config.type === "http") {
-				targets.set(name, {
-					url: config.url,
-					usesOAuth: config.oauth === true,
-					...(config.bearerTokenEnvVar ? { bearerTokenEnvVar: config.bearerTokenEnvVar } : {}),
-					managedBySettings: true,
-				});
-			} else if (config.type === "stdio") {
-				targets.set(name, {
-					usesOAuth: false,
-					managedBySettings: true,
-					transport: "stdio",
-					name,
-				});
-			}
-		}
-
-		// Freeze the displayed intent: guidance must never become a mutation
-		// when settings change while the picker is open.
-		const settingsActions = new Map<
-			string,
-			"disable local server" | "settings guidance" | "verify" | "manage saved account"
-		>();
-		for (const [name, config] of Object.entries(userServers)) {
-			if (views.find((view) => view.serviceId === name)?.source !== "user") continue;
-			if (config.type === "stdio") {
-				settingsActions.set(name, config.enabled === false ? "settings guidance" : "disable local server");
-			} else if (!config.oauth) {
-				const hasSavedAccount =
-					this.getMcpConnectionStore().get(name) !== undefined ||
-					this.modelRegistry.authStorage.getVerified(mcpCredentialKey(name)) !== undefined;
-				const pending =
-					config.enabled !== false &&
-					views.find((view) => view.serviceId === name)?.connectionStatus === "pending";
-				settingsActions.set(
-					name,
-					hasSavedAccount ? "manage saved account" : pending ? "verify" : "settings guidance",
+			if (surface.kind === "accounts") {
+				// The accounts surface handed the chain back: re-enter through the
+				// same freshly built targets every catalog entry uses.
+				const exit = await this.showAccountPickerForService(
+					surface.service,
+					targets.get(surface.service.serviceId),
+					{
+						knownIds: new Set<string>([...services.map((entry) => entry.serviceId), ...Object.keys(userServers)]),
+					},
 				);
+				if (exit === "closed") return;
+				surface = { kind: "catalog" };
+				continue;
 			}
-		}
-		const service = await this.selectServiceCatalogRow(views, {
-			initialSearch,
-			getRowPresentation: (view) => {
-				const action = settingsActions.get(view.serviceId);
-				return action ? { action } : undefined;
-			},
-		});
-		if (!service) return;
-		try {
-			const settingsAction = settingsActions.get(service.serviceId);
-			if (settingsAction === "settings guidance") {
-				this.showStatus(
-					service.setupHint ??
-						`${service.label} is configured through settings; manage it with /mcp or your settings file.`,
-				);
-				return;
-			}
-			if (settingsAction === "disable local server" || settingsAction === "verify") {
-				await this.connectServiceFromPicker(service, targets.get(service.serviceId));
-				return;
-			}
+			const service = await this.selectServiceCatalogRow(views, {
+				...(surface.search !== undefined ? { initialSearch: surface.search } : {}),
+				getRowPresentation: (view) => {
+					const action = settingsActions.get(view.serviceId);
+					return action ? { action } : undefined;
+				},
+			});
+			if (!service) return;
 			// Every configured id is off-limits for new account ids.
 			const knownIds = new Set<string>([...services.map((entry) => entry.serviceId), ...Object.keys(userServers)]);
-			if (settingsAction === "manage saved account" || service.connectionIds.length > 0) {
-				const accountService =
-					settingsAction === "manage saved account" ? { ...service, connectionIds: [service.serviceId] } : service;
-				await this.showAccountPickerForService(accountService, targets.get(service.serviceId), { knownIds });
+			try {
+				const settingsAction = settingsActions.get(service.serviceId);
+				if (settingsAction === "settings guidance") {
+					this.showStatus(
+						service.setupHint ??
+							`${service.label} is configured through settings; manage it with /mcp or your settings file.`,
+					);
+					return;
+				}
+				if (settingsAction === "disable local server" || settingsAction === "verify") {
+					const { ran } = await this.connectServiceFromPicker(service, targets.get(service.serviceId));
+					// A blocked action (status-only dead end) ends the chain: its
+					// transient message is the outcome, and reopening forever would
+					// trap the user — an action that cannot proceed never re-enters.
+					if (!ran) return;
+					const disableReentry = this.mcpAccountsReentrySurface(service.serviceId);
+					surface = disableReentry ? { kind: "accounts", service: disableReentry.service } : { kind: "catalog" };
+					continue;
+				}
+				if (settingsAction === "manage saved account" || service.connectionIds.length > 0) {
+					const accountService =
+						settingsAction === "manage saved account"
+							? { ...service, connectionIds: [service.serviceId] }
+							: service;
+					surface = { kind: "accounts", service: accountService };
+					continue;
+				}
+				const { ran } = await this.connectServiceFromPicker(service, targets.get(service.serviceId), { knownIds });
+				if (!ran) return;
+				const reentry = this.mcpAccountsReentrySurface(service.serviceId);
+				surface = reentry ? { kind: "accounts", service: reentry.service } : { kind: "catalog" };
+			} catch {
+				this.showError("MCP connection action did not complete. Try again.");
 				return;
 			}
-			await this.connectServiceFromPicker(service, targets.get(service.serviceId), { knownIds });
-		} catch {
-			this.showError("MCP connection action did not complete. Try again.");
 		}
 	}
 
@@ -9442,159 +9507,215 @@ export class InteractiveMode {
 	 * same picker lists the accounts (each row reconnects or disconnects THAT
 	 * connection id) plus an "Add another account" row that allocates a new id
 	 * and runs a fresh login — a second account never overwrites the first.
+	 *
+	 * Re-entry (Kevin, live testing): after an action that ran, the SAME
+	 * accounts menu is rebuilt from the live stores and shown again — a
+	 * disconnected account is gone, a fresh one shows, statuses refresh —
+	 * until the service loses its last account, at which point the chain
+	 * hands the user back to the catalog. Esc, blocked status-only actions,
+	 * and failures close the whole chain.
 	 */
 	private async showAccountPickerForService(
 		service: McpPluginView,
-		target: { url?: string; usesOAuth: boolean; bearerTokenEnvVar?: string; managedBySettings: boolean } | undefined,
+		target: McpPickerTarget | undefined,
 		options: { knownIds: Set<string> },
-	): Promise<void> {
-		const catalogServiceId = service.serviceId;
-		const settingsOnly = service.source === "user" && !service.usesOAuth;
-		const definition = this.buildServiceCatalogViews().services.find((entry) => entry.serviceId === catalogServiceId);
-		const ownership = reservedMcpOwnership(
-			definition,
-			this.settingsManager.getGlobalMcpServers()?.[catalogServiceId],
-		);
-		const accountCards: McpPluginView[] = [];
-		const accountTargets = new Map<string, typeof target>();
-		// Multiple accounts need the connection id on every row to tell the
-		// pairs apart; a single account reads cleaner without it (Kevin).
-		const multiAccount = service.connectionIds.length > 1;
-		for (const connectionId of service.connectionIds) {
-			// Centralized per-account state: credential binding, expiry, and the
-			// record combine through the SAME computation as the plugin aggregate
-			// and the inventory — the picker never trusts a raw record.status.
-			const admission = this.getMcpLoginEligibility(connectionId, catalogServiceId);
-			const accountTarget = target && admission.endpoint ? { ...target, url: admission.endpoint } : target;
-			accountTargets.set(connectionId, accountTarget);
-			const state = settingsOnly
-				? { status: service.connectionStatus, setupHint: service.setupHint, toolCount: service.toolCount }
-				: accountStateFor({
-						connectionId,
-						endpoint: accountTarget?.url ?? "",
-						authStorage: this.modelRegistry.authStorage,
-						connectionStore: this.getMcpConnectionStore(),
-						usesOAuth: service.usesOAuth,
-					});
-			const blocked = ownership.status !== "canonical" || service.connectionStatus === "disabled";
-			const status = blocked ? service.connectionStatus : state.status;
-			const loginPending = "loginPending" in state && state.loginPending === true;
-			const repairHint =
-				admission.repair && admission.endpoint
-					? `Saved endpoint: ${new URL(admission.endpoint).origin}${new URL(admission.endpoint).pathname}`
-					: undefined;
-			// The old account-name row, relabelled as the explicit Reconnect
-			// option at the top of the list (Kevin, live testing): Enter keeps
-			// running the SAME re-verify path — verifyMcpConnection plus the
-			// existing retry outcome — and never disconnects. Settings-managed
-			// servers keep an honest label: pending re-verifies, anything else
-			// only shows management guidance.
-			const reconnectLabel = settingsOnly
-				? status === "pending"
-					? "Reconnect"
-					: `Manage ${connectionId}`
-				: multiAccount
-					? `Reconnect ${connectionId}`
-					: "Reconnect";
-			accountCards.push({
-				...service,
-				serviceId: connectionId,
-				label: reconnectLabel,
-				connectionIds: [connectionId],
-				connectionStatus: status,
-				connectable:
-					!blocked && !loginPending && admission.allowed && (status === "error" || status === "not_connected"),
-				loginPending,
-				setupHint: blocked
-					? service.setupHint
-					: !admission.allowed
-						? admission.setupHint
-						: [repairHint, state.setupHint].filter(Boolean).join(" · ") || undefined,
-				...(state.toolCount !== undefined ? { toolCount: state.toolCount } : {}),
-			});
-			// Explicit per-account disconnect action, state-independent. For
-			// settings-managed servers the honest action stays "remove saved
-			// data": the server config and its environment token survive.
-			accountCards.push({
-				...service,
-				serviceId: connectionId,
-				label: settingsOnly ? `Remove saved data for ${connectionId}` : `Disconnect ${connectionId}`,
-				connectionIds: [connectionId],
-				connectionStatus: status,
-				connectable: false,
-				removeAction: true,
-			});
-		}
-		if (
-			service.usesOAuth &&
-			target?.usesOAuth &&
-			!service.loginPending &&
-			this.getMcpLoginEligibility(catalogServiceId, catalogServiceId, true, undefined, false, definition).allowed
-		) {
-			accountCards.push({
-				...service,
-				label: "Add another account",
-				connectionIds: [],
-				connectionStatus: "not_connected",
-				connectable: true,
-				setupHint: undefined,
-			});
-		}
-		// Token services keep a paste entry point: a stored token the handshake
-		// rejected needs a NEW paste, not a re-verify of the same value.
-		if (definition && isPasteableTokenService(definition) && !service.loginPending) {
-			accountCards.push({
-				...service,
-				label: "Paste a new token",
-				connectionIds: [],
-				connectionStatus: "not_connected",
-				connectable: false,
-				pasteToken: true,
-				setupHint: undefined,
-			});
-		}
-		const card = await this.selectServiceCatalogRow(accountCards, {
-			// Kevin (live testing): "Accounts — Cloudflare" reads as a caption;
-			// the menu is just the service, with the description above the
-			// options instead of under the list.
-			title: `${service.label} MCP`,
-			mode: "accounts",
-			description: settingsOnly
-				? "Saved account data for a settings-managed server. Removing it keeps the server settings and environment token."
-				: service.description,
-			// The accounts redesign renders no trailing status or per-row detail;
-			// the hint names the action and the description block carries the
-			// panel-level explanation.
-			getRowPresentation: (row) =>
-				settingsOnly
-					? row.removeAction
-						? { action: "remove saved data" }
-						: { action: row.connectionStatus === "pending" ? "verify" : "settings guidance" }
-					: undefined,
-		});
-		if (!card) return;
-		try {
-			if (settingsOnly && !card.removeAction && card.connectionStatus !== "pending") {
-				this.showStatus(
-					card.setupHint ??
-						`${service.label} is configured through settings; manage it with /mcp or your settings file.`,
-				);
-				return;
-			}
-			if (card.connectionIds.length === 0) {
-				await this.connectServiceFromPicker(card, target, {
-					catalogServiceId,
-					addAccount: true,
-					knownIds: options.knownIds,
+	): Promise<McpAccountsSurfaceExit> {
+		let currentService = service;
+		let currentTarget = target;
+		while (true) {
+			const catalogServiceId = currentService.serviceId;
+			const settingsOnly = currentService.source === "user" && !currentService.usesOAuth;
+			const definition = this.buildServiceCatalogViews().services.find(
+				(entry) => entry.serviceId === catalogServiceId,
+			);
+			const ownership = reservedMcpOwnership(
+				definition,
+				this.settingsManager.getGlobalMcpServers()?.[catalogServiceId],
+			);
+			const accountCards: McpPluginView[] = [];
+			const accountTargets = new Map<string, McpPickerTarget | undefined>();
+			// Multiple accounts need the connection id on every row to tell the
+			// pairs apart; a single account reads cleaner without it (Kevin).
+			const multiAccount = currentService.connectionIds.length > 1;
+			for (const connectionId of currentService.connectionIds) {
+				// Centralized per-account state: credential binding, expiry, and the
+				// record combine through the SAME computation as the plugin aggregate
+				// and the inventory — the picker never trusts a raw record.status.
+				const admission = this.getMcpLoginEligibility(connectionId, catalogServiceId);
+				const accountTarget =
+					currentTarget && admission.endpoint ? { ...currentTarget, url: admission.endpoint } : currentTarget;
+				accountTargets.set(connectionId, accountTarget);
+				const state = settingsOnly
+					? {
+							status: currentService.connectionStatus,
+							setupHint: currentService.setupHint,
+							toolCount: currentService.toolCount,
+						}
+					: accountStateFor({
+							connectionId,
+							endpoint: accountTarget?.url ?? "",
+							authStorage: this.modelRegistry.authStorage,
+							connectionStore: this.getMcpConnectionStore(),
+							usesOAuth: currentService.usesOAuth,
+						});
+				const blocked = ownership.status !== "canonical" || currentService.connectionStatus === "disabled";
+				const status = blocked ? currentService.connectionStatus : state.status;
+				const loginPending = "loginPending" in state && state.loginPending === true;
+				const repairHint =
+					admission.repair && admission.endpoint
+						? `Saved endpoint: ${new URL(admission.endpoint).origin}${new URL(admission.endpoint).pathname}`
+						: undefined;
+				// The old account-name row, relabelled as the explicit Reconnect
+				// option at the top of the list (Kevin, live testing): Enter keeps
+				// running the SAME re-verify path — verifyMcpConnection plus the
+				// existing retry outcome — and never disconnects. Settings-managed
+				// servers keep an honest label: pending re-verifies, anything else
+				// only shows management guidance.
+				const reconnectLabel = settingsOnly
+					? status === "pending"
+						? "Reconnect"
+						: `Manage ${connectionId}`
+					: multiAccount
+						? `Reconnect ${connectionId}`
+						: "Reconnect";
+				accountCards.push({
+					...currentService,
+					serviceId: connectionId,
+					label: reconnectLabel,
+					connectionIds: [connectionId],
+					connectionStatus: status,
+					connectable:
+						!blocked && !loginPending && admission.allowed && (status === "error" || status === "not_connected"),
+					loginPending,
+					setupHint: blocked
+						? currentService.setupHint
+						: !admission.allowed
+							? admission.setupHint
+							: [repairHint, state.setupHint].filter(Boolean).join(" · ") || undefined,
+					...(state.toolCount !== undefined ? { toolCount: state.toolCount } : {}),
 				});
-				return;
+				// Explicit per-account disconnect action, state-independent. For
+				// settings-managed servers the honest action stays "remove saved
+				// data": the server config and its environment token survive.
+				accountCards.push({
+					...currentService,
+					serviceId: connectionId,
+					label: settingsOnly ? `Remove saved data for ${connectionId}` : `Disconnect ${connectionId}`,
+					connectionIds: [connectionId],
+					connectionStatus: status,
+					connectable: false,
+					removeAction: true,
+				});
 			}
-			await this.connectServiceFromPicker(card, accountTargets.get(card.serviceId), { catalogServiceId });
-		} catch {
-			this.showError("MCP connection action did not complete. Try again.");
+			if (
+				currentService.usesOAuth &&
+				currentTarget?.usesOAuth &&
+				!currentService.loginPending &&
+				this.getMcpLoginEligibility(catalogServiceId, catalogServiceId, true, undefined, false, definition).allowed
+			) {
+				accountCards.push({
+					...currentService,
+					label: "Add another account",
+					connectionIds: [],
+					connectionStatus: "not_connected",
+					connectable: true,
+					setupHint: undefined,
+				});
+			}
+			// Token services keep a paste entry point: a stored token the handshake
+			// rejected needs a NEW paste, not a re-verify of the same value.
+			if (definition && isPasteableTokenService(definition) && !currentService.loginPending) {
+				accountCards.push({
+					...currentService,
+					label: "Paste a new token",
+					connectionIds: [],
+					connectionStatus: "not_connected",
+					connectable: false,
+					pasteToken: true,
+					setupHint: undefined,
+				});
+			}
+			const card = await this.selectServiceCatalogRow(accountCards, {
+				// Kevin (live testing): "Accounts — Cloudflare" reads as a caption;
+				// the menu is just the service, with the description above the
+				// options instead of under the list.
+				title: `${currentService.label} MCP`,
+				mode: "accounts",
+				description: settingsOnly
+					? "Saved account data for a settings-managed server. Removing it keeps the server settings and environment token."
+					: currentService.description,
+				// The accounts redesign renders no trailing status or per-row detail;
+				// the hint names the action and the description block carries the
+				// panel-level explanation.
+				getRowPresentation: (row) =>
+					settingsOnly
+						? row.removeAction
+							? { action: "remove saved data" }
+							: { action: row.connectionStatus === "pending" ? "verify" : "settings guidance" }
+						: undefined,
+			});
+			if (!card) return "closed";
+			try {
+				if (settingsOnly && !card.removeAction && card.connectionStatus !== "pending") {
+					this.showStatus(
+						card.setupHint ??
+							`${currentService.label} is configured through settings; manage it with /mcp or your settings file.`,
+					);
+					return "closed";
+				}
+				const { ran } =
+					card.connectionIds.length === 0
+						? await this.connectServiceFromPicker(card, currentTarget, {
+								catalogServiceId,
+								addAccount: true,
+								knownIds: options.knownIds,
+							})
+						: await this.connectServiceFromPicker(card, accountTargets.get(card.serviceId), { catalogServiceId });
+				// A blocked action (status-only dead end) ends the chain: its
+				// transient message is the outcome, and reopening forever would
+				// trap the user — an action that cannot proceed never re-enters.
+				if (!ran) return "closed";
+			} catch {
+				this.showError("MCP connection action did not complete. Try again.");
+				return "closed";
+			}
+			// The action ran: land back in the RIGHT surface, freshly rebuilt
+			// from the live catalog + connection store. When the last account
+			// is gone, hand the chain back to the catalog.
+			const reentry = this.mcpAccountsReentrySurface(catalogServiceId);
+			if (!reentry) return "catalog";
+			currentService = reentry.service;
+			currentTarget = reentry.target;
 		}
 	}
 
+	/**
+	 * The re-entry surface after a picker action on `catalogServiceId` (Kevin,
+	 * live testing): stay in that service's accounts menu while it still owns
+	 * an account, otherwise fall back to the catalog. Everything is rebuilt
+	 * from the LIVE catalog + connection store — the re-entered menu must not
+	 * show a row the action just removed, and a freshly added account must
+	 * show. Settings-managed servers keep saved data manageable even when the
+	 * core view carries no connectionIds — the same discovery that routes a
+	 * catalog row to "manage saved account".
+	 */
+	private mcpAccountsReentrySurface(
+		catalogServiceId: string,
+	): { service: McpPluginView; target: McpPickerTarget | undefined } | undefined {
+		const { services, views } = this.buildServiceCatalogViews();
+		const view = views.find((entry) => entry.serviceId === catalogServiceId);
+		if (!view) return undefined;
+		const target = buildMcpPickerTargets(services, this.settingsManager.getGlobalMcpServers() ?? {}).get(
+			catalogServiceId,
+		);
+		if (view.source === "user" && !view.usesOAuth) {
+			const hasSavedAccount =
+				this.getMcpConnectionStore().get(catalogServiceId) !== undefined ||
+				this.modelRegistry.authStorage.getVerified(mcpCredentialKey(catalogServiceId)) !== undefined;
+			return hasSavedAccount ? { service: { ...view, connectionIds: [catalogServiceId] }, target } : undefined;
+		}
+		return view.connectionIds.length > 0 ? { service: view, target } : undefined;
+	}
 	/**
 	 * Route a user-facing MCP login by NAME (/mcp login, the generic /login
 	 * service options, the config menu) through the ONE guarded connect
@@ -9624,7 +9745,7 @@ export class InteractiveMode {
 			this.showStatus(admission.setupHint ?? "This service cannot be connected automatically.");
 			return { resolved: true, result: { status: "failed" } };
 		}
-		const result = await this.guardedMcpLogin(
+		const { result } = await this.guardedMcpLogin(
 			{
 				serviceId: connectionId,
 				label: record?.label ?? service?.label ?? connectionId,
@@ -9649,34 +9770,25 @@ export class InteractiveMode {
 
 	private async connectServiceFromPicker(
 		service: McpPluginView,
-		target:
-			| {
-					url?: string;
-					usesOAuth: boolean;
-					bearerTokenEnvVar?: string;
-					managedBySettings: boolean;
-					transport?: "stdio";
-					name?: string;
-			  }
-			| undefined,
+		target: McpPickerTarget | undefined,
 		options: {
 			catalogServiceId?: string;
 			addAccount?: boolean;
 			knownIds?: ReadonlySet<string>;
 		} = {},
-	): Promise<boolean> {
+	): Promise<McpPickerActionOutcome> {
 		if (target?.transport === "stdio" && target.name) {
 			const serverName = target.name;
 			const config = this.settingsManager.getGlobalMcpServers()?.[serverName];
 			if (!config) {
 				this.showStatus(`${service.label} is no longer present in settings.`);
-				return false;
+				return { ran: false };
 			}
 			if (config.type !== "stdio" || config.enabled === false) {
 				this.showStatus(
 					`${service.label} is disabled. Re-enable or remove it with /mcp, or edit your settings file.`,
 				);
-				return false;
+				return { ran: false };
 			}
 			this.settingsManager.setGlobalMcpServer(serverName, { ...config, enabled: false }, true);
 			await this.settingsManager.flush();
@@ -9684,7 +9796,7 @@ export class InteractiveMode {
 			await this.reloadAfterMcpChange(
 				`Disabled local server ${service.label}. Manage it with /mcp or your settings file.`,
 			);
-			return false;
+			return { ran: true };
 		}
 		// Explicit per-account remove: credential AND record removal in ONE
 		// store-locked step (the same lock ordering finalize uses), then reload.
@@ -9709,17 +9821,17 @@ export class InteractiveMode {
 			// not have run — it never claims a specific state).
 			if (removed === "failed") {
 				this.showWarning(`The change could not be saved; try removing account ${service.serviceId} again.`);
-				return false;
+				return { ran: true };
 			}
 			if (removed === "logged-out") {
 				this.showWarning(
 					`Logged out account ${service.serviceId}, but the change could not be saved. It may still appear in the list; try again to finish cleanup.`,
 				);
-				return false;
+				return { ran: true };
 			}
 			if (removed === "missing") {
 				this.showStatus(`Account ${service.serviceId} is no longer present.`);
-				return false;
+				return { ran: true };
 			}
 			// The explicit Remove row is the picker's primary disconnect gesture,
 			// so it records the same durable entry the /logout routes do instead
@@ -9732,14 +9844,14 @@ export class InteractiveMode {
 					removal,
 					connectionId: service.serviceId,
 				});
-				return false;
+				return { ran: true };
 			}
 			await this.reloadAfterMcpChange(`Removed account ${service.serviceId}.`);
-			return false;
+			return { ran: true };
 		}
 		if (service.loginPending || this.getMcpConnectionStore().get(service.serviceId)?.attemptId !== undefined) {
 			this.showStatus("Login in progress. Finish it or remove the account to cancel.");
-			return false;
+			return { ran: false };
 		}
 		// A requires-setup token service connects through the inline paste
 		// panel: nothing is stored until the panel completes, and the stored
@@ -9760,13 +9872,13 @@ export class InteractiveMode {
 		);
 		if (ownership.status !== "canonical" || service.connectionStatus === "disabled") {
 			this.showStatus(ownership.setupHint ?? service.setupHint ?? "Disabled in settings.");
-			return false;
+			return { ran: false };
 		}
 		if (service.connectionStatus === "connected" && target?.managedBySettings && !service.usesOAuth) {
 			this.showStatus(
 				`${service.label} is configured through settings; manage it with /mcp remove ${service.serviceId}.`,
 			);
-			return false;
+			return { ran: false };
 		}
 		// Connected and pending accounts retry verification explicitly — no
 		// login needed, the grant already exists; "retry from /plugins" must
@@ -9808,14 +9920,15 @@ export class InteractiveMode {
 							}
 						: { label: service.label, source: "retry", verification: "unsaved" },
 			);
-			return false;
+			return { ran: true };
 		}
 
 		// Actual connects route through the ONE guarded OAuth operation —
 		// separate from the picker's disconnect/verify actions above, so LOGIN
 		// intent (from any route) never dispatches a disconnect by record
 		// status.
-		return (await this.guardedMcpLogin(service, target, options)).status === "success";
+		const login = await this.guardedMcpLogin(service, target, options);
+		return { ran: login.ran };
 	}
 
 	/**
@@ -9828,26 +9941,17 @@ export class InteractiveMode {
 	 */
 	private async guardedMcpLogin(
 		service: McpPluginView,
-		target:
-			| {
-					url?: string;
-					usesOAuth: boolean;
-					bearerTokenEnvVar?: string;
-					managedBySettings: boolean;
-					transport?: "stdio";
-					name?: string;
-			  }
-			| undefined,
+		target: McpPickerTarget | undefined,
 		options: {
 			catalogServiceId?: string;
 			addAccount?: boolean;
 			knownIds?: ReadonlySet<string>;
 			explicitLogin?: boolean;
 		} = {},
-	): Promise<AuthenticationResult> {
+	): Promise<{ ran: boolean; result: AuthenticationResult }> {
 		if (!service.connectable || !target) {
 			this.showStatus(service.setupHint ?? `${service.label} cannot be connected automatically in this build.`);
-			return { status: "failed" };
+			return { ran: false, result: { status: "failed" } };
 		}
 		const currentServices = this.resolveCurrentServiceCatalog();
 		const definition = currentServices.find(
@@ -9867,7 +9971,7 @@ export class InteractiveMode {
 		const targetUrl = admission.endpoint;
 		if (!admission.allowed || !targetUrl || target.url !== targetUrl || !target.usesOAuth) {
 			this.showStatus(admission.setupHint ?? "The connection target changed. Open the catalog again to review it.");
-			return { status: "failed" };
+			return { ran: false, result: { status: "failed" } };
 		}
 		// EVERY user-facing MCP login is guarded (initial connect, reconnect,
 		// add account): the account is claimed under the store's file lock first
@@ -9915,7 +10019,7 @@ export class InteractiveMode {
 			}
 			if (attemptId === undefined) {
 				this.showStatus(`Could not allocate a free account id for ${service.label}.`);
-				return { status: "failed" };
+				return { ran: true, result: { status: "failed" } };
 			}
 		} else {
 			const store = this.getMcpConnectionStore();
@@ -9939,7 +10043,7 @@ export class InteractiveMode {
 				});
 				if (!won) {
 					this.showStatus(`${service.label} is already being connected from another client.`);
-					return { status: "failed" };
+					return { ran: true, result: { status: "failed" } };
 				}
 			} else {
 				const claimed = await store.claimConnectionId({
@@ -9958,7 +10062,7 @@ export class InteractiveMode {
 				});
 				if (!claimed) {
 					this.showStatus(`${service.label} is already being connected from another client.`);
-					return { status: "failed" };
+					return { ran: true, result: { status: "failed" } };
 				}
 			}
 			attemptId = nonce;
@@ -10025,7 +10129,7 @@ export class InteractiveMode {
 				this.showStatus(
 					`Login did not complete. Account settings for ${connectionId} were kept; reconnect or remove the account from /plugins.`,
 				);
-			return cleaned ? result : { status: "failed" };
+			return cleaned ? { ran: true, result } : { ran: true, result: { status: "failed" } };
 		}
 		{
 			const stagedKey = mcpCredentialKey(stagedServerId);
@@ -10110,14 +10214,14 @@ export class InteractiveMode {
 				this.showWarning(
 					`The login for account ${connectionId} could not be committed. The credential is retained and can be recovered; retry from /plugins or remove the placeholder account.`,
 				);
-				return { status: "failed" };
+				return { ran: true, result: { status: "failed" } };
 			}
 			if (finalization !== "committed") {
 				this.showStatus(
 					`The account ${connectionId} was logged out or replaced during login, or the change could not be saved; login was not committed.`,
 				);
 				await releaseAttempt();
-				return { status: "failed" };
+				return { ran: true, result: { status: "failed" } };
 			}
 			// Committed: the real id now owns the credential — register its
 			// provider and drop the staged registration.
@@ -10177,11 +10281,14 @@ export class InteractiveMode {
 						},
 		);
 		return {
-			status: "success",
-			providerId: mcpCredentialKey(connectionId),
-			providerName: loginLabel,
-			authType: "oauth",
-			kind: "service",
+			ran: true,
+			result: {
+				status: "success",
+				providerId: mcpCredentialKey(connectionId),
+				providerName: loginLabel,
+				authType: "oauth",
+				kind: "service",
+			},
 		};
 	}
 
@@ -10197,23 +10304,14 @@ export class InteractiveMode {
 	 */
 	private async pasteTokenForService(
 		service: McpPluginView,
-		target:
-			| {
-					url?: string;
-					usesOAuth: boolean;
-					bearerTokenEnvVar?: string;
-					managedBySettings: boolean;
-					transport?: "stdio";
-					name?: string;
-			  }
-			| undefined,
+		target: McpPickerTarget | undefined,
 		options: { catalogServiceId?: string } = {},
-	): Promise<boolean> {
+	): Promise<McpPickerActionOutcome> {
 		const serviceId = options.catalogServiceId ?? service.serviceId;
 		const definition = this.resolveCurrentServiceCatalog().find((entry) => entry.serviceId === serviceId);
 		if (!definition || !isPasteableTokenService(definition)) {
 			this.showStatus(service.setupHint ?? `${service.label} cannot be connected by pasting a token.`);
-			return false;
+			return { ran: false };
 		}
 		const ownership = reservedMcpOwnership(
 			definition,
@@ -10221,13 +10319,13 @@ export class InteractiveMode {
 		);
 		if (ownership.status !== "canonical" || service.connectionStatus === "disabled") {
 			this.showStatus(ownership.setupHint ?? "Disabled in settings.");
-			return false;
+			return { ran: false };
 		}
 		// The paste flow serves CATALOG definitions; a settings-managed server
 		// owns its id and keeps its settings-managed authentication.
 		if (target?.managedBySettings) {
 			this.showStatus(`${service.label} is configured through settings; manage it with /mcp or your settings file.`);
-			return false;
+			return { ran: false };
 		}
 		if (
 			definition.transport.type !== "http" ||
@@ -10235,20 +10333,21 @@ export class InteractiveMode {
 			target?.url !== definition.transport.url
 		) {
 			this.showStatus("The connection target changed. Open the catalog again to review it.");
-			return false;
+			return { ran: false };
 		}
 		const connectionId = definition.serviceId;
 		if (this.getMcpConnectionStore().get(connectionId)?.attemptId !== undefined) {
 			this.showStatus("Login in progress. Finish it or remove the account to cancel.");
-			return false;
+			return { ran: false };
 		}
 		// The ONE credential the runtime sends as the bearer. isPasteableTokenService
 		// above already established that this resolves, so it is read, not re-checked.
 		const credential = mcpPasteCredential(definition);
-		if (!credential) return false;
+		if (!credential) return { ran: false };
 		const value = await this.promptForMcpTokenValues(definition, credential);
-		// Esc (or an empty submit): nothing stored, no record, no status line.
-		if (!value) return false;
+		// Esc (or an empty submit): nothing stored, no record, no status line —
+		// the paste panel ran, so the surface that opened it re-enters.
+		if (!value) return { ran: true };
 		// Stored ONLY in the agent credential store (auth.json), under the SAME
 		// key OAuth uses — never settings.json, never a status line or log.
 		this.modelRegistry.authStorage.set(mcpCredentialKey(connectionId), {
@@ -10296,7 +10395,9 @@ export class InteractiveMode {
 						}
 					: { label: service.label, source: "paste", verification: "unsaved" },
 		);
-		return verification?.status === "connected";
+		// Success or failure, the paste RAN: the re-entry decision is state,
+		// not the verification verdict.
+		return { ran: true };
 	}
 
 	/**

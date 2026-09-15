@@ -1960,7 +1960,10 @@ describe("MCP token paste flow (inline panel, credential store, honest verificat
 		return fake;
 	}
 
-	function callPaste(fake: FakeThis, serviceId: string, url: string, label: string): Promise<boolean> {
+	/** The picker action outcome: `ran` marks a flow that started (the paste
+	 * panel opened), so the picker chain re-enters; a blocked paste reports
+	 * ran: false and the status line is the outcome. */
+	function callPaste(fake: FakeThis, serviceId: string, url: string, label: string): Promise<{ ran: boolean }> {
 		return (
 			fake as unknown as {
 				connectServiceFromPicker: (
@@ -1968,7 +1971,7 @@ describe("MCP token paste flow (inline panel, credential store, honest verificat
 					service: unknown,
 					target: unknown,
 					options?: unknown,
-				) => Promise<boolean>;
+				) => Promise<{ ran: boolean }>;
 			}
 		).connectServiceFromPicker.call(
 			fake,
@@ -2035,7 +2038,9 @@ describe("MCP token paste flow (inline panel, credential store, honest verificat
 			updatedAt: Date.now(),
 		});
 
-		await expect(callPaste(fake, "github", GITHUB_URL, "GitHub")).resolves.toBe(true);
+		// The paste RAN and verified connected (the "Connected" claim itself is
+		// asserted through the durable outcome entry below).
+		await expect(callPaste(fake, "github", GITHUB_URL, "GitHub")).resolves.toEqual({ ran: true });
 
 		// The seam receives the ONE credential — GitHub's two fields collapse
 		// to a single PAT under its first alternative id.
@@ -2111,7 +2116,7 @@ describe("MCP token paste flow (inline panel, credential store, honest verificat
 		for (const character of SECRET) panel.handleInput(character);
 		panel.handleInput("\r");
 
-		await expect(flow).resolves.toBe(true);
+		await expect(flow).resolves.toEqual({ ran: true });
 		expect(authStorage.get("mcp:github")).toMatchObject({
 			type: "mcp_static_token",
 			endpoint: GITHUB_URL,
@@ -2125,7 +2130,10 @@ describe("MCP token paste flow (inline panel, credential store, honest verificat
 
 	it("Esc cancels: nothing stored, no record, no verification, no claims", async () => {
 		const fake = buildFake(vi.fn(async () => undefined));
-		await expect(callPaste(fake, "github", GITHUB_URL, "GitHub")).resolves.toBe(false);
+		// The panel RAN and the user cancelled: nothing stored, yet the action
+		// still counts as ran — the picker chain re-enters the surface that
+		// opened the panel instead of dropping to the prompt.
+		await expect(callPaste(fake, "github", GITHUB_URL, "GitHub")).resolves.toEqual({ ran: true });
 		expect(authStorage.get("mcp:github")).toBeUndefined();
 		expect(store.get("github")).toBeUndefined();
 		expect(verifyMock).not.toHaveBeenCalled();
@@ -2136,7 +2144,9 @@ describe("MCP token paste flow (inline panel, credential store, honest verificat
 
 	it("an empty value from the seam stores nothing and claims nothing", async () => {
 		const fake = buildFake(vi.fn(async () => ""));
-		await expect(callPaste(fake, "github", GITHUB_URL, "GitHub")).resolves.toBe(false);
+		// An empty submit is a cancel-shaped completion: the flow ran, nothing
+		// was stored, and the chain still re-enters.
+		await expect(callPaste(fake, "github", GITHUB_URL, "GitHub")).resolves.toEqual({ ran: true });
 		expect(authStorage.get("mcp:github")).toBeUndefined();
 		expect(verifyMock).not.toHaveBeenCalled();
 		expect(emitted(fake)).not.toContain("Connected");
@@ -2156,7 +2166,9 @@ describe("MCP token paste flow (inline panel, credential store, honest verificat
 		});
 		const prompt = vi.fn(async () => SECRET);
 		const fake = buildFake(prompt);
-		await expect(callPaste(fake, "github", GITHUB_URL, "GitHub")).resolves.toBe(false);
+		// Blocked BEFORE the panel opened: ran is false, so the status line is
+		// the outcome and the picker chain does not re-enter.
+		await expect(callPaste(fake, "github", GITHUB_URL, "GitHub")).resolves.toEqual({ ran: false });
 		expect(prompt).not.toHaveBeenCalled();
 		expect(authStorage.get("mcp:github")).toBeUndefined();
 		expect(emitted(fake)).toContain("Login in progress");
@@ -2165,7 +2177,9 @@ describe("MCP token paste flow (inline panel, credential store, honest verificat
 	it("refuses to paste when the picker's target no longer matches the catalog definition", async () => {
 		const prompt = vi.fn(async () => SECRET);
 		const fake = buildFake(prompt);
-		await expect(callPaste(fake, "github", "https://moved.example.test/mcp", "GitHub")).resolves.toBe(false);
+		await expect(callPaste(fake, "github", "https://moved.example.test/mcp", "GitHub")).resolves.toEqual({
+			ran: false,
+		});
 		expect(prompt).not.toHaveBeenCalled();
 		expect(authStorage.get("mcp:github")).toBeUndefined();
 		expect(emitted(fake)).toContain("target changed");
