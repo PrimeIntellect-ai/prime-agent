@@ -621,7 +621,10 @@ describe("MCP disconnect outcome emit sites", () => {
 		initTheme("dark");
 	});
 
-	test("disconnecting from the /plugins picker records the durable entry", async () => {
+	test("the picker's Remove row records the durable entry", async () => {
+		// Disconnecting from the picker is the explicit Remove row's job: Enter on
+		// the account NAME row re-verifies and must never disconnect (Kevin, live
+		// testing), so the durable entry rides the removeAction path.
 		const { fake, appendCustomMessage, store, authStorage, showStatus } = createOutcomeFake();
 		seedConnectedAccount(store, authStorage, "granola");
 
@@ -635,6 +638,7 @@ describe("MCP disconnect outcome emit sites", () => {
 				connectionIds: ["granola"],
 				connectable: false,
 				usesOAuth: true,
+				removeAction: true,
 			},
 			{ url: "https://mcp.granola.test/mcp", usesOAuth: true, managedBySettings: false },
 			{},

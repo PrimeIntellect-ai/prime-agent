@@ -1335,7 +1335,7 @@ describe("ENG-6108 /plugins account state actions", () => {
 	});
 
 	test("remove action logs out and removes that account's record only", async () => {
-		const { fake, store, authStorage, showStatus: removedStatus } = fakeFor({});
+		const { fake, store, authStorage, appendCustomMessage } = fakeFor({});
 		const at = Date.now();
 		store.upsert({
 			connectionId: "acme-2",
@@ -1366,7 +1366,11 @@ describe("ENG-6108 /plugins account state actions", () => {
 		);
 		expect(removeVerified).toHaveBeenCalledWith("mcp:acme-2");
 		expect(store.get("acme-2")).toBeUndefined();
-		expect(JSON.stringify(removedStatus.mock.calls)).toContain("Removed account acme-2");
+		// The Remove row records a durable Disconnected entry instead of a status
+		// line that scrolls away (Kevin, live testing).
+		expect(appendCustomMessage).toHaveBeenCalledTimes(1);
+		const [appended] = appendCustomMessage.mock.calls[0]!;
+		expect(appended.details).toMatchObject({ kind: "disconnect", removal: "removed", connectionId: "acme-2" });
 	});
 
 	test("a login whose verification result cannot be saved reports pending, never Connected", async () => {
