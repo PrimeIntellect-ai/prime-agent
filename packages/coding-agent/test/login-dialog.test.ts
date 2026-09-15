@@ -192,6 +192,39 @@ describe("LoginDialogComponent", () => {
 		}
 	});
 
+	it("keeps one blank row above the key hints across repeated prompts", () => {
+		const dialog = new LoginDialogComponent(createFakeTui(), "prime-inference", () => {}, "Prime Inference");
+		dialog.showPrompt("Enter API key:");
+		const first = dialog.render(80).length;
+		dialog.showPrompt("Enter API key:");
+
+		// The second prompt adds its own separator and title, and moves the blank
+		// row above the key hints instead of stacking another one.
+		expect(dialog.render(80).length - first).toBe(2);
+	});
+
+	it("quits the app from ctrl+c only while onboarding passes onExit", async () => {
+		const dialog = new LoginDialogComponent(
+			createFakeTui(),
+			"prime-inference",
+			() => {},
+			"Prime Inference",
+			undefined,
+			{ onExit: () => onExitCalls.push("exit") },
+		);
+		const onExitCalls: string[] = [];
+
+		dialog.handleInput("\x03");
+
+		expect(onExitCalls).toEqual(["exit"]);
+
+		const plain = new LoginDialogComponent(createFakeTui(), "prime-inference", () => {}, "Prime Inference");
+		const prompt = plain.showPrompt("Enter API key:");
+		plain.handleInput("\x03");
+		// Outside onboarding, ctrl+c keeps cancelling the prompt.
+		await expect(prompt).rejects.toThrow("Login cancelled");
+	});
+
 	it("cancels the prompt with esc and ctrl+c", async () => {
 		for (const key of ["\x1b", "\x03"]) {
 			const dialog = new LoginDialogComponent(createFakeTui(), "prime-inference", () => {}, "Prime Inference");

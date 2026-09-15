@@ -1,3 +1,4 @@
+import { isNativePlatform } from "./native-installation.js";
 import { getPiUserAgent } from "./pi-user-agent.js";
 
 const DEFAULT_PRIME_AGENT_DOWNLOAD_BASE_URL = "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev";
@@ -213,7 +214,7 @@ export async function getLatestPiRelease(
 			const artifact = candidate as Partial<NativeReleaseArtifact>;
 			if (
 				typeof artifact.platform !== "string" ||
-				!/^(darwin|linux)-(arm64|x64)$/.test(artifact.platform) ||
+				!isNativePlatform(artifact.platform) ||
 				platforms.has(artifact.platform) ||
 				artifact.file !== `prime-agent-${release.version}-${artifact.platform}.tar.gz` ||
 				typeof artifact.sha256 !== "string" ||

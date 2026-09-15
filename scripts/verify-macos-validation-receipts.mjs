@@ -3,10 +3,11 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { readReleaseBinary } from "./release-artifact-integrity.mjs";
+import { darwinReleasePlatforms } from "./release-platforms.mjs";
 
 export function verifyMacosValidationReceipts(artifactsDir, receiptsDir, channel) {
 	if (!["production", "beta"].includes(channel)) throw new Error("Expected production or beta channel");
-	for (const platform of ["darwin-arm64", "darwin-x64"]) {
+	for (const platform of darwinReleasePlatforms) {
 		const release = readReleaseBinary(artifactsDir, platform);
 		const receipt = JSON.parse(readFileSync(join(receiptsDir, `${channel}-${platform}.json`), "utf8"));
 		if (receipt.schemaVersion !== 1) throw new Error("Unsupported validation receipt");

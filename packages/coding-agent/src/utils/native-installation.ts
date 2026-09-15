@@ -1,6 +1,33 @@
 import { lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
+/**
+ * Compiled release platforms, mirroring scripts/release-platforms.mjs. Linux
+ * publishes glibc and musl builds, plus Bun baseline builds for x64 CPUs
+ * without AVX2, so every supported host has a runnable archive.
+ */
+export const NATIVE_PLATFORMS = [
+	"darwin-arm64",
+	"darwin-x64",
+	"linux-arm64",
+	"linux-arm64-musl",
+	"linux-x64",
+	"linux-x64-baseline",
+	"linux-x64-musl",
+	"linux-x64-musl-baseline",
+] as const;
+
+// Longest name first so `linux-x64-musl` never matches as `linux-x64`.
+const NATIVE_PLATFORM_PATTERN = [...NATIVE_PLATFORMS].sort((left, right) => right.length - left.length).join("|");
+
+const NATIVE_RELEASE_DIRECTORY = new RegExp(
+	`^\\.\\./releases/(\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?)-(${NATIVE_PLATFORM_PATTERN})-([a-f0-9]{64})(?:\\.[A-Za-z0-9]{6})?/prime-agent$`,
+);
+
+export function isNativePlatform(platform: string): boolean {
+	return (NATIVE_PLATFORMS as readonly string[]).includes(platform);
+}
+
 export const NATIVE_RELEASE_ASSETS = [
 	"prime-agent",
 	"package.json",
@@ -37,10 +64,7 @@ function readNativeTarget(root: string, link: string, recoveredTarget?: string):
 		if (readFileSync(join(root, ".managed"), "utf8").trim() !== "prime-agent-native-v1") return undefined;
 		const launcher = join(root, "bin", link);
 		const target = recoveredTarget ?? readlinkSync(launcher);
-		const match =
-			/^\.\.\/releases\/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)-(darwin|linux)-(arm64|x64)-([a-f0-9]{64})(?:\.[A-Za-z0-9]{6})?\/prime-agent$/.exec(
-				target,
-			);
+		const match = NATIVE_RELEASE_DIRECTORY.exec(target);
 		if (!match) return undefined;
 		const executable = resolve(dirname(launcher), target);
 		const releaseDir = dirname(executable);
@@ -50,8 +74,8 @@ function readNativeTarget(root: string, link: string, recoveredTarget?: string):
 			executable,
 			releaseDir,
 			version: match[1],
-			platform: `${match[2]}-${match[3]}`,
-			sha256: match[4],
+			platform: match[2],
+			sha256: match[3],
 		};
 	} catch {
 		return undefined;

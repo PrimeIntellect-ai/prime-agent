@@ -16,6 +16,7 @@ import { theme } from "../theme/theme.js";
 import { formatKeyText, keyHint } from "./keybinding-hints.js";
 import { MenuPanel, MenuSearchInput } from "./menu-panel.js";
 import { shouldTreatAsBack } from "./modal-back.js";
+import { isOnboardingExitKey } from "./onboarding-exit.js";
 
 function isTextEntryKeybinding(key: string): boolean {
 	const parts = key.toLowerCase().split("+");
@@ -45,6 +46,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 	private continueRejecter?: (error: Error) => void;
 	private authUrl?: string;
 	private authActions?: Text;
+	private inputSpacer?: Spacer;
 
 	// Focusable implementation - propagate to input for IME cursor positioning
 	private _focused = false;
@@ -62,6 +64,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 		private onComplete: (success: boolean, message?: string) => void,
 		providerNameOverride?: string,
 		titleOverride?: string,
+		private dialogOptions: { topRule?: boolean; hideTitle?: boolean; onExit?: () => void } = {},
 	) {
 		super();
 		this.tui = tui;
@@ -71,7 +74,13 @@ export class LoginDialogComponent extends Container implements Focusable {
 		const title = titleOverride ?? `Login to ${providerName}`;
 
 		// The top rule keeps the inline login section separate from the transcript.
-		const panel = new MenuPanel({ title, inline: true, topRule: true });
+		// Surfaces that own the screen above the panel (onboarding) turn both the
+		// rule and the title off: they already say where the user is.
+		const panel = new MenuPanel({
+			title: this.dialogOptions.hideTitle ? "" : title,
+			inline: true,
+			topRule: this.dialogOptions.topRule ?? true,
+		});
 		this.addChild(panel);
 
 		// Dynamic content area
@@ -79,7 +88,8 @@ export class LoginDialogComponent extends Container implements Focusable {
 		panel.addChild(this.contentContainer);
 
 		// Input (always present, used when needed)
-		this.input = new MenuSearchInput("Paste value", true);
+		// Plain field: the enclosing rules read as clutter in the login panel.
+		this.input = new MenuSearchInput("Paste value", true, true);
 		this.input.onSubmit = () => {
 			if (this.inputResolver) {
 				this.inputResolver(this.input.getValue());
@@ -91,6 +101,11 @@ export class LoginDialogComponent extends Container implements Focusable {
 
 	get signal(): AbortSignal {
 		return this.abortController.signal;
+	}
+
+	/** Cancel from outside the panel, e.g. when a session reset unmounts it. */
+	abort(): void {
+		this.cancel();
 	}
 
 	private cancel(): void {
@@ -168,6 +183,13 @@ export class LoginDialogComponent extends Container implements Focusable {
 	/** Append the paste field plus the single key-hint line at the panel bottom. */
 	private addInputField(): void {
 		this.contentContainer.removeChild(this.input);
+		if (this.inputSpacer) {
+			this.contentContainer.removeChild(this.inputSpacer);
+		} else {
+			// A blank row keeps the key hints off the field. It is retained so a
+			// second prompt moves it instead of stacking another blank row.
+			this.inputSpacer = new Spacer(1);
+		}
 		if (this.authActions) {
 			this.contentContainer.removeChild(this.authActions);
 		} else {
@@ -175,6 +197,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 		}
 		this.contentContainer.addChild(this.input);
 		this.inputVisible = true;
+		this.contentContainer.addChild(this.inputSpacer);
 		this.contentContainer.addChild(this.authActions);
 		this.authActions.setText(this.getAuthActionsText());
 	}
@@ -273,6 +296,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 		this.contentContainer.clear();
 		this.authUrl = undefined;
 		this.authActions = undefined;
+		this.inputSpacer = undefined;
 		// The cleared panel no longer shows the paste field.
 		this.inputVisible = false;
 		this.contentContainer.addChild(new Spacer(1));
@@ -289,6 +313,8 @@ export class LoginDialogComponent extends Container implements Focusable {
 	private addInstructions(instructions: string): void {
 		const codeMatch = /^(?:Code|Enter code):\s*(.+)$/i.exec(instructions.trim());
 		if (codeMatch?.[1]) {
+			// A blank row separates the sign-in link from the code below it.
+			this.contentContainer.addChild(new Spacer(1));
 			this.addLabel("Verification code");
 			this.contentContainer.addChild(new Text(theme.bold(theme.fg("text", codeMatch[1])), 0, 0));
 			return;
@@ -351,6 +377,13 @@ export class LoginDialogComponent extends Container implements Focusable {
 
 	handleInput(data: string): void {
 		const kb = getKeybindings();
+
+		// On the onboarding surface the exit keys must quit the app; cancel
+		// would drop the user into an unconfigured chat instead.
+		if (this.dialogOptions.onExit && isOnboardingExitKey(data)) {
+			this.dialogOptions.onExit();
+			return;
+		}
 
 		if (
 			this.authUrl &&

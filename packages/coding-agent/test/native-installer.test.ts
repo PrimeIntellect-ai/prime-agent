@@ -21,6 +21,8 @@ import { Agent, getGlobalDispatcher, setGlobalDispatcher } from "undici";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getNativeUpdatePlan } from "../src/cli/native-update.js";
 import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
+import { NATIVE_PLATFORMS } from "../src/utils/native-installation.js";
+import { archiveNativePlatform, hostNativePlatform } from "./installer-platform.js";
 
 const installer = resolve(__dirname, "../../../install.sh");
 const assets = [
@@ -32,7 +34,10 @@ const assets = [
 	"export-html/template.html",
 	"photon_rs_bg.wasm",
 ];
-const platform = `${process.platform}-${process.arch}`;
+// Fixtures follow the installer's own selection so the suite also runs on musl
+// and non-AVX2 hosts, where that is no longer `${process.platform}-${process.arch}`.
+const platform = hostNativePlatform();
+const testArchive = process.env.PRIME_AGENT_TEST_ARCHIVE;
 const feed = new Map<string, Buffer>();
 let beforeArchiveResponse: (() => void) | undefined;
 let redirectToHttp = false;
@@ -55,7 +60,14 @@ let fixtureDispatcher: Agent;
 
 function publish(
 	version: string,
-	options: { broken?: boolean; missing?: boolean; link?: boolean; installer?: string; slow?: number } = {},
+	options: {
+		broken?: boolean;
+		missing?: boolean;
+		link?: boolean;
+		installer?: string;
+		libstdcxx?: boolean;
+		slow?: number;
+	} = {},
 ) {
 	const source = mkdtempSync(join(root, "archive-"));
 	for (const asset of assets) {
@@ -66,9 +78,21 @@ function publish(
 	writeFileSync(join(source, "package.json"), JSON.stringify({ version }));
 	writeFileSync(join(source, "install.sh"), options.installer ?? readFileSync(installer));
 	const startup = options.slow ? `sleep ${options.slow}\n` : "";
+	// A musl host without libstdc++ fails in the loader, exactly as reproduced on Alpine.
+	const missingLibstdcxx = `#!/bin/sh
+printf 'Error loading shared library libstdc++.so.6: No such file or directory (needed by %s)\\n' "$0" >&2
+printf 'Error relocating %s: _ZSt17__throw_bad_allocv: symbol not found\\n' "$0" >&2
+printf 'Error relocating %s: __cxa_pure_virtual: symbol not found\\n' "$0" >&2
+exit 1
+`;
 	writeFileSync(
 		join(source, "prime-agent"),
-		options.broken ? "#!/bin/sh\nexit 1\n" : `#!/bin/sh\n${startup}printf '%s\\n' '${version}'\n`,
+		options.libstdcxx
+			? missingLibstdcxx
+			: options.broken
+				? "#!/bin/sh\nexit 1\n"
+				: `#!/bin/sh\n${startup}printf '%s\\n' '${version}'\n`,
+
 		{ mode: 0o755 },
 	);
 	if (options.link) symlinkSync("/tmp", join(source, "outside"));
@@ -151,6 +175,29 @@ function releaseDirectories() {
 	return readdirSync(join(installationRoot(), "releases"), { withFileTypes: true })
 		.filter((entry) => entry.isDirectory())
 		.map((entry) => join(installationRoot(), "releases", entry.name));
+}
+
+// Stands in for the npm route so a test can prove whether the installer took it.
+function nodeFallbackHarness() {
+	const harness = join(home, "fallback-installer.sh");
+	writeFileSync(
+		harness,
+		readFileSync(installer, "utf8").replace(
+			/\nmain "\$@"\s*$/,
+			() => `
+prime_agent_install_node() {
+ mkdir -p "$HOME/.local/bin" "$HOME/.local/lib/node_modules/prime-agent/dist/bundle"
+ printf '%s\\n' "$1" > "$HOME/.local/lib/node_modules/prime-agent/dist/bundle/cli.js"
+ if [ ! -L "$HOME/.local/bin/prime-agent" ]; then
+  ln -s ../lib/node_modules/prime-agent/dist/bundle/cli.js "$HOME/.local/bin/prime-agent"
+ fi
+ printf 'node-route:%s\\n' "$1"
+}
+main "$@"
+`,
+		),
+	);
+	return harness;
 }
 
 function createLsofShim() {
@@ -636,24 +683,7 @@ download_prime_agent_package "$1" "$prime_agent_base_url/releases/v$1/$prime_age
 	it.each(["1.0.0", "1.0.1"])("retries the Node fallback when reinstalling or upgrading to %s", async (version) => {
 		publish("1.0.0", { broken: true });
 		publish("1.0.1", { broken: true });
-		const harness = join(home, "fallback-installer.sh");
-		writeFileSync(
-			harness,
-			readFileSync(installer, "utf8").replace(
-				/\nmain "\$@"\s*$/,
-				() => `
-prime_agent_install_node() {
- mkdir -p "$HOME/.local/bin" "$HOME/.local/lib/node_modules/prime-agent/dist/bundle"
- printf '%s\\n' "$1" > "$HOME/.local/lib/node_modules/prime-agent/dist/bundle/cli.js"
- if [ ! -L "$HOME/.local/bin/prime-agent" ]; then
-  ln -s ../lib/node_modules/prime-agent/dist/bundle/cli.js "$HOME/.local/bin/prime-agent"
- fi
- printf 'node-route:%s\\n' "$1"
-}
-main "$@"
-`,
-			),
-		);
+		const harness = nodeFallbackHarness();
 		const first = await install("1.0.0", { PRIME_AGENT_INSTALL_METHOD: "auto" }, harness);
 		expect(first.code, first.output).toBe(0);
 		expect(first.output).toContain("node-route:1.0.0");
@@ -676,6 +706,43 @@ main "$@"
 		expect(readlinkSync(publicCommand)).toBe(npmLink);
 		expect(readFileSync(publicCommand, "utf8")).toBe(`${version}\n`);
 		expect(existsSync(command())).toBe(false);
+	});
+
+	it.each(["auto", "binary"])(
+		"names the missing libstdc++ package instead of falling back to Node with method=%s",
+		async (method) => {
+			publish("1.0.0", { libstdcxx: true });
+			const harness = nodeFallbackHarness();
+			const result = await install("1.0.0", { PRIME_AGENT_INSTALL_METHOD: method }, harness);
+			expect(result.code, result.output).not.toBe(0);
+			expect(result.output).toContain("needs the libstdc++ runtime library");
+			expect(result.output).toContain("apk add --no-cache libstdc++");
+			expect(result.output).toContain("PRIME_AGENT_INSTALL_METHOD=node");
+			// Sixty relocation errors and the false "cannot run" claim stay out of the terminal.
+			expect(result.output).not.toContain("Error relocating");
+			expect(result.output).not.toContain("cannot run");
+			expect(result.output).not.toContain("node-route:");
+			expect(existsSync(join(home, ".local/bin/prime-agent"))).toBe(false);
+			expect(existsSync(installationRoot())).toBe(false);
+		},
+	);
+
+	it("gives back an installation root it adopted when no release is ever activated", async () => {
+		publish("1.0.0", { broken: true });
+		const failed = await install("1.0.0");
+		expect(failed.code, failed.output).not.toBe(0);
+		expect(existsSync(installationRoot())).toBe(false);
+		// The next run must still be able to install into the same place.
+		publish("1.0.1");
+		const installed = await install("1.0.1");
+		expect(installed.code, installed.output).toBe(0);
+		expect(execFileSync(command(), ["--version"], { encoding: "utf8" })).toBe("1.0.1\n");
+		// A root an earlier install legitimately owns survives a later failure.
+		publish("1.0.2", { broken: true });
+		const later = await install("1.0.2");
+		expect(later.code, later.output).not.toBe(0);
+		expect(readFileSync(join(installationRoot(), ".managed"), "utf8")).toBe("prime-agent-native-v1\n");
+		expect(execFileSync(command(), ["--version"], { encoding: "utf8" })).toBe("1.0.1\n");
 	});
 
 	it("refuses to replace an unrelated public command", async () => {
@@ -1090,10 +1157,12 @@ exec /bin/${operation} "$@"
 		expect(existsSync(join(home, "data/prime-agent"))).toBe(false);
 	});
 
-	it.skipIf(!process.env.PRIME_AGENT_TEST_ARCHIVE)(
+	// The installer downloads the archive for the platform it selects, so an archive
+	// built for another platform (a baseline or musl cross-build) cannot be installed here.
+	it.skipIf(!testArchive || archiveNativePlatform(testArchive) !== platform)(
 		"installs, updates, and rolls back actual compiled releases without Node",
 		async () => {
-			const archive = process.env.PRIME_AGENT_TEST_ARCHIVE!;
+			const archive = testArchive!;
 			const name = basename(archive);
 			const version = name.slice("prime-agent-".length, -`-${platform}.tar.gz`.length);
 			const manifestPath = /-beta(?:\.|$)/.test(version) ? "/beta.json" : "/latest.json";
@@ -1188,4 +1257,134 @@ exec /bin/${operation} "$@"
 		},
 		120000,
 	);
+});
+
+describe.skipIf(process.platform === "win32")("installer platform selection", () => {
+	let sandbox: string;
+	let harness: string;
+	let shims: string;
+
+	function sysroot(name: string, contents: { cpuinfo?: string; muslLoader?: string }): string {
+		const directory = join(sandbox, name);
+		if (contents.cpuinfo !== undefined) {
+			mkdirSync(join(directory, "proc"), { recursive: true });
+			writeFileSync(join(directory, "proc/cpuinfo"), contents.cpuinfo);
+		}
+		if (contents.muslLoader) {
+			mkdirSync(join(directory, "lib"), { recursive: true });
+			writeFileSync(join(directory, "lib", contents.muslLoader), "");
+		}
+		mkdirSync(directory, { recursive: true });
+		return directory;
+	}
+
+	function detect(host: { os: string; arch: string; glibc?: string; ldd?: string; root: string }) {
+		return execFileSync("sh", [harness], {
+			encoding: "utf8",
+			env: {
+				PATH: `${shims}:/usr/bin:/bin`,
+				FAKE_OS: host.os,
+				FAKE_ARCH: host.arch,
+				FAKE_GLIBC: host.glibc ?? "",
+				FAKE_LDD: host.ldd ?? "ldd: missing file arguments",
+				PRIME_AGENT_NATIVE_SYSROOT_FOR_TESTS: host.root,
+			},
+		});
+	}
+
+	beforeAll(() => {
+		sandbox = mkdtempSync(join(tmpdir(), "installer-platform-"));
+		harness = join(sandbox, "detect.sh");
+		writeFileSync(
+			harness,
+			readFileSync(installer, "utf8").replace(/\nmain "\$@"\s*$/, () => "\nprime_agent_native_platform\n"),
+		);
+		shims = join(sandbox, "shims");
+		mkdirSync(shims);
+		writeFileSync(
+			join(shims, "uname"),
+			'#!/bin/sh\ncase "$1" in -s) printf \'%s\\n\' "$FAKE_OS" ;; -m) printf \'%s\\n\' "$FAKE_ARCH" ;; esac\n',
+			{ mode: 0o755 },
+		);
+		writeFileSync(
+			join(shims, "getconf"),
+			'#!/bin/sh\n[ -n "$FAKE_GLIBC" ] || exit 1\nprintf \'glibc %s\\n\' "$FAKE_GLIBC"\n',
+			{ mode: 0o755 },
+		);
+		writeFileSync(join(shims, "ldd"), "#!/bin/sh\nprintf '%s\\n' \"$FAKE_LDD\" >&2\nexit 1\n", { mode: 0o755 });
+		writeFileSync(join(shims, "sw_vers"), "#!/bin/sh\nprintf '%s\\n' \"$FAKE_OS_VERSION\"\n", { mode: 0o755 });
+	});
+	afterAll(() => rmSync(sandbox, { recursive: true, force: true }));
+
+	const avx2 = "processor\t: 0\nflags\t\t: fpu vme de avx avx2 bmi2\n";
+	const withoutAvx2 = "processor\t: 0\nflags\t\t: fpu vme de sse4_2 avx\n";
+
+	it("selects the AVX2 build only when the CPU advertises avx2", () => {
+		expect(
+			detect({ os: "Linux", arch: "x86_64", glibc: "2.39", root: sysroot("glibc-avx2", { cpuinfo: avx2 }) }),
+		).toBe("linux-x64");
+		expect(
+			detect({ os: "Linux", arch: "x86_64", glibc: "2.39", root: sysroot("glibc-plain", { cpuinfo: withoutAvx2 }) }),
+		).toBe("linux-x64-baseline");
+		// An unreadable CPU inventory must select the build that runs on every x86-64 CPU.
+		expect(detect({ os: "Linux", arch: "x86_64", glibc: "2.39", root: sysroot("glibc-bare", {}) })).toBe(
+			"linux-x64-baseline",
+		);
+	});
+
+	it("selects musl builds from the musl loader or the ldd banner", () => {
+		const loader = sysroot("musl-x64", { cpuinfo: avx2, muslLoader: "ld-musl-x86_64.so.1" });
+		expect(detect({ os: "Linux", arch: "x86_64", root: loader })).toBe("linux-x64-musl");
+		expect(
+			detect({
+				os: "Linux",
+				arch: "x86_64",
+				root: sysroot("musl-x64-plain", { cpuinfo: withoutAvx2, muslLoader: "ld-musl-x86_64.so.1" }),
+			}),
+		).toBe("linux-x64-musl-baseline");
+		expect(
+			detect({ os: "Linux", arch: "aarch64", root: sysroot("musl-arm64", { muslLoader: "ld-musl-aarch64.so.1" }) }),
+		).toBe("linux-arm64-musl");
+		expect(
+			detect({
+				os: "Linux",
+				arch: "x86_64",
+				ldd: "musl libc (x86_64)",
+				root: sysroot("stripped", { cpuinfo: avx2 }),
+			}),
+		).toBe("linux-x64-musl");
+	});
+
+	it("keeps glibc ahead of musl and leaves arm64 glibc unsuffixed", () => {
+		const both = sysroot("glibc-and-musl", { cpuinfo: avx2, muslLoader: "ld-musl-x86_64.so.1" });
+		expect(detect({ os: "Linux", arch: "x86_64", glibc: "2.39", ldd: "musl libc", root: both })).toBe("linux-x64");
+		expect(detect({ os: "Linux", arch: "aarch64", glibc: "2.39", root: both })).toBe("linux-arm64");
+	});
+
+	it.each([
+		["glibc older than 2.17", { os: "Linux", arch: "x86_64", glibc: "2.12" }],
+		["no recognisable libc", { os: "Linux", arch: "x86_64" }],
+		["an unsupported architecture", { os: "Linux", arch: "riscv64", glibc: "2.39" }],
+		["an unsupported operating system", { os: "FreeBSD", arch: "x86_64", glibc: "2.39" }],
+	])("reports no compiled platform for %s", (_label, host) => {
+		const root = sysroot("unsupported", { cpuinfo: avx2 });
+		expect(() => detect({ ...host, root })).toThrow();
+	});
+
+	it.each(NATIVE_PLATFORMS)("parses the %s release directory name without confusing platform suffixes", (target) => {
+		const parser = join(sandbox, "parse.sh");
+		writeFileSync(
+			parser,
+			readFileSync(installer, "utf8").replace(
+				/\nmain "\$@"\s*$/,
+				() =>
+					'\nnative_root=/tmp\nprime_agent_native_parse_target "$1"\nprintf \'%s %s\\n\' "$native_parsed_version" "$native_parsed_platform"\n',
+			),
+		);
+		const digest = "a".repeat(64);
+		const parsed = execFileSync("sh", [parser, `../releases/1.2.3-beta.4-${target}-${digest}/prime-agent`], {
+			encoding: "utf8",
+		});
+		expect(parsed).toBe(`1.2.3-beta.4 ${target}\n`);
+	});
 });

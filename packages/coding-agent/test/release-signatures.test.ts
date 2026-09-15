@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { NATIVE_PLATFORMS } from "../src/utils/native-installation.js";
 
 const repository = resolve(__dirname, "../../..");
 const signatureScript = join(repository, "packages/coding-agent/scripts/macos-signature.mjs");
@@ -69,16 +70,19 @@ afterAll(() => {
 });
 
 describe("release signature command", () => {
-	it.each(["linux-arm64", "linux-x64"])("leaves %s binaries untouched", (target) => {
-		const binary = join(root, target);
-		writeFileSync(binary, `Linux fixture ${target}`);
-		const original = sha256(binary);
-		for (const command of ["sign", "verify"]) {
-			const result = signature(command, binary, target);
-			expect(result.status, result.stderr).toBe(0);
-			expect(sha256(binary)).toBe(original);
-		}
-	});
+	it.each(NATIVE_PLATFORMS.filter((target) => target.startsWith("linux-")))(
+		"leaves %s binaries untouched",
+		(target) => {
+			const binary = join(root, target);
+			writeFileSync(binary, `Linux fixture ${target}`);
+			const original = sha256(binary);
+			for (const command of ["sign", "verify"]) {
+				const result = signature(command, binary, target);
+				expect(result.status, result.stderr).toBe(0);
+				expect(sha256(binary)).toBe(original);
+			}
+		},
+	);
 
 	it("rejects unsupported targets and invalid commands", () => {
 		expect(signature("sign", "unused", "windows-x64").status).not.toBe(0);
@@ -195,9 +199,9 @@ interface BinaryManifest {
 }
 
 describe.skipIf(process.platform === "win32")("release archive executable identity", () => {
-	it("keeps all four executable bytes identical across stable and beta metadata rewrites", () => {
+	it("keeps every executable's bytes identical across stable and beta metadata rewrites", () => {
 		const binaries = join(root, "binaries");
-		const targets = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"];
+		const targets = [...NATIVE_PLATFORMS];
 		for (const target of targets) binaryAssets(join(binaries, target), Buffer.from(`unchanged ${target} executable`));
 		for (const version of ["1.2.3", "1.2.3-beta.4.1.abcdef0"]) {
 			const output = join(root, version);

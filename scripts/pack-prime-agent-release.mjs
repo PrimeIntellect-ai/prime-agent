@@ -110,7 +110,7 @@ Creates private npm tarballs for R2 distribution:
   <out-dir>/artifacts/<channel>
   <out-dir>/artifacts/latest.json (stable) or beta.json (beta)
 
-Add --binary-dir packages/coding-agent/binaries to include all four standalone platform archives.
+Add --binary-dir packages/coding-agent/binaries to include every standalone platform archive.
 `);
 }
 
