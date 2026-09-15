@@ -16,6 +16,7 @@ import type {
 	AgentHeartbeatUpdateAction,
 } from "../../core/cron-jobs.js";
 import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
+import type { CustomMessage } from "../../core/messages.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { SessionAlreadyActiveError } from "../../core/session-lease.js";
@@ -1317,6 +1318,16 @@ export class DaemonAgentConnection implements AgentConnection {
 			},
 			DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS,
 		);
+	}
+
+	async appendCustomMessage(
+		message: Pick<CustomMessage, "customType" | "content" | "display" | "details">,
+	): Promise<void> {
+		await this.requestOk({
+			type: "append_custom_message",
+			activeSessionId: this.activeSessionId,
+			message,
+		});
 	}
 
 	async executeBash(command: string, options?: AgentConnectionExecuteBashOptions): Promise<void> {

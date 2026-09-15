@@ -456,6 +456,9 @@ export function telemetryAuthCategory(
 ): TelemetryAuthCategory {
 	switch (source) {
 		case "stored":
+			// A pasted MCP static token is a stored credential like any other;
+			// the category taxonomy stays model-provider-shaped.
+			if (storedCredentialType === "mcp_static_token") return "stored";
 			return storedCredentialType ?? "stored";
 		case "runtime":
 			return "runtime_api_key";

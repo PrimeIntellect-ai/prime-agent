@@ -1,0 +1,1858 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
+import type { McpServiceEntry } from "@earendil-works/pi-ai/mcp";
+import { createMcpOAuthProvider, SERVICE_CATALOG } from "@earendil-works/pi-ai/mcp";
+import { registerOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AuthStorage, type McpStaticTokenCredential } from "../src/core/auth-storage.js";
+import { MCP_PROBE_ERRORS } from "../src/core/mcp/connection-probe.js";
+import { type McpConnectionRecord, McpConnectionStore } from "../src/core/mcp/connection-store.js";
+import {
+	buildConnectionViews,
+	buildPluginViews,
+	decodePluginCursor,
+	defaultServiceCatalogProvider,
+	filterPluginViewsByStatus,
+	isPasteableTokenService,
+	type McpPluginView,
+	type McpServiceDescriptor,
+	mcpCredentialFieldPromptLabel,
+	mcpCredentialFields,
+	mcpCredentialKey,
+	mcpLoginEligibility,
+	mcpPasteCredential,
+	mcpStaticTokenUsable,
+	nextMcpConnectionId,
+	pagePluginViews,
+	resolveMcpOAuthIdentity,
+	resolveMcpServiceCatalog,
+	sameGrantToken,
+	searchPluginViews,
+	verifyMcpConnection,
+} from "../src/core/mcp/service-catalog.js";
+import type { McpServerConfig } from "../src/core/settings-manager.js";
+
+function serviceFixture(overrides: Partial<McpServiceDescriptor> = {}): McpServiceDescriptor {
+	return {
+		serviceId: "acme",
+		label: "Acme",
+		aliases: [],
+		transport: { type: "http", url: "https://mcp.acme.test/mcp" },
+		authStrategy: "oauth",
+		setup: { status: "ready" },
+		metadataReviewed: true,
+		legacyBuiltin: false,
+		...overrides,
+	};
+}
+
+function oauthCredential(expiresInMs = 3600_000, endpoint?: string) {
+	return {
+		type: "oauth" as const,
+		access: "tok",
+		refresh: "r",
+		expires: Date.now() + expiresInMs,
+		...(endpoint !== undefined ? { endpoint } : {}),
+	};
+}
+
+describe("service catalog views", () => {
+	let tempDir: string;
+	let authStorage: AuthStorage;
+	let store: McpConnectionStore;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "svc-catalog-"));
+		authStorage = AuthStorage.inMemory();
+		store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("lists a catalog service as not connected and connectable without credentials", () => {
+		const views = buildPluginViews({
+			services: [serviceFixture()],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views).toHaveLength(1);
+		expect(views[0]).toMatchObject({
+			serviceId: "acme",
+			label: "Acme",
+			connectionStatus: "not_connected",
+			connectable: true,
+			usesOAuth: true,
+			source: "catalog",
+			connectionIds: [],
+		});
+	});
+
+	it("keeps a cancelled account shell visible and connectable without implying an active login", async () => {
+		await store.reserveConnectionId({
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme",
+			status: "pending",
+			attemptId: "cancelled",
+			createdAt: 1,
+			updatedAt: 1,
+		});
+		await store.releaseClaim({ connectionId: "acme", attemptId: "cancelled" });
+		const options = { services: [serviceFixture()], userServers: undefined, authStorage, connectionStore: store };
+		const [view] = buildPluginViews(options);
+		expect(view).toMatchObject({ connectionStatus: "not_connected", connectable: true, connectionIds: ["acme"] });
+		expect(view.setupHint).toContain("settings kept");
+		expect(buildConnectionViews(options)[0]).toMatchObject({ connectionId: "acme", status: "not_connected" });
+		const userOptions = {
+			...options,
+			userServers: { acme: { type: "http" as const, url: "https://mcp.acme.test/mcp", oauth: true } },
+		};
+		expect(buildPluginViews(userOptions)[0]).toMatchObject({
+			connectionIds: ["acme"],
+			connectionStatus: "not_connected",
+			connectable: true,
+		});
+		expect(buildConnectionViews(userOptions)[0]).toMatchObject({ connectionId: "acme", status: "not_connected" });
+		expect(await store.claimConnectionId({ connectionId: "acme", attemptId: "retry" })).toBe(true);
+		expect(await store.removeAccount({ connectionId: "acme", authCleanup: () => false })).toBe("removed");
+	});
+
+	it("never reports connected from a stored token alone: bound grants without a verified record stay pending", () => {
+		authStorage.set(mcpCredentialKey("acme"), oauthCredential(3600_000, "https://mcp.acme.test/mcp"));
+		const views = buildPluginViews({
+			services: [serviceFixture()],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views[0]?.connectionStatus).toBe("pending");
+		expect(views[0]?.connectionIds).toEqual(["acme"]);
+	});
+
+	it("surfaces an unbound legacy grant as reconnect-required, never pending or connected", () => {
+		authStorage.set(mcpCredentialKey("acme"), oauthCredential());
+		const views = buildPluginViews({
+			services: [serviceFixture()],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views[0]?.connectionStatus).toBe("error");
+		expect(views[0]?.setupHint).toContain("not bound to this endpoint");
+	});
+
+	it("surfaces a cross-endpoint grant as reconnect-required", () => {
+		authStorage.set(mcpCredentialKey("acme"), oauthCredential(3600_000, "https://other.example/mcp"));
+		const views = buildPluginViews({
+			services: [serviceFixture()],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views[0]?.connectionStatus).toBe("error");
+		expect(views[0]?.setupHint).toContain("not bound to this endpoint");
+	});
+
+	it("reports connected only with a verified connection record", () => {
+		authStorage.set(mcpCredentialKey("acme"), oauthCredential(3600_000, "https://mcp.acme.test/mcp"));
+		store.upsert({
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme",
+			status: "connected",
+			verifiedAt: Date.now(),
+			toolCount: 7,
+			createdAt: Date.now(),
+			updatedAt: Date.now(),
+		});
+		const views = buildPluginViews({
+			services: [serviceFixture()],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views[0]?.connectionStatus).toBe("connected");
+		expect(views[0]?.toolCount).toBe(7);
+		expect(views[0]?.verifiedAt).toBeGreaterThan(0);
+	});
+
+	it("treats wrong-type and empty-access credentials as no usable grant (shared rule with dispatch)", () => {
+		authStorage.set(mcpCredentialKey("acme"), { type: "api_key", key: "not-an-oauth-grant" });
+		const options = { services: [serviceFixture()], userServers: undefined, authStorage, connectionStore: store };
+		// Wrong type, no record: never connected, never pending.
+		expect(buildPluginViews(options)[0]?.connectionStatus).toBe("not_connected");
+
+		authStorage.set(mcpCredentialKey("acme"), {
+			type: "oauth",
+			access: "",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		} as never);
+		store.upsert({
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme",
+			status: "connected",
+			createdAt: Date.now(),
+			updatedAt: Date.now(),
+		});
+		// Empty access with a record: the stale connection reports Reconnect,
+		// matching dispatch eligibility (the shared oauthGrantUsable rule).
+		expect(buildPluginViews(options)[0]?.connectionStatus).toBe("error");
+		expect(buildPluginViews(options)[0]?.setupHint).toContain("Stored credentials are missing");
+	});
+
+	it("downgrades a connected record when the credential disappears", () => {
+		store.upsert({
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme",
+			status: "connected",
+			verifiedAt: Date.now(),
+			toolCount: 3,
+			createdAt: Date.now(),
+			updatedAt: Date.now(),
+		});
+		const views = buildPluginViews({
+			services: [serviceFixture()],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views[0]?.connectionStatus).toBe("error");
+		expect(views[0]?.setupHint).toContain("Reconnect");
+	});
+
+	it("marks expired credentials without a refresh token as error", () => {
+		authStorage.set(mcpCredentialKey("acme"), {
+			type: "oauth",
+			access: "tok",
+			refresh: "",
+			expires: Date.now() - 1000,
+		});
+		const views = buildPluginViews({
+			services: [serviceFixture()],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views[0]?.connectionStatus).toBe("error");
+		// Error accounts stay listed so the account picker can manage them.
+		expect(views[0]?.connectionIds).toEqual(["acme"]);
+	});
+
+	it("surfaces requires-setup services honestly without a connect action", () => {
+		const views = buildPluginViews({
+			services: [
+				serviceFixture({
+					serviceId: "brandapp",
+					label: "BrandApp",
+					setup: { status: "requires-setup", reason: "Requires a developer app." },
+				}),
+			],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views[0]?.connectionStatus).toBe("setup_required");
+		expect(views[0]?.connectable).toBe(false);
+		expect(views[0]?.setupHint).toBe("Requires a developer app.");
+	});
+
+	it("never offers Connect for sse, stdio, or http-template transports", () => {
+		const views = buildPluginViews({
+			services: [
+				serviceFixture({ serviceId: "sse-svc", label: "SSE Svc", transport: { type: "other" } }),
+				serviceFixture({ serviceId: "stdio-svc", label: "Stdio Svc", transport: { type: "stdio" } }),
+				serviceFixture({ serviceId: "tmpl-svc", label: "Tmpl Svc", transport: { type: "http-template" } }),
+			],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views.every((view) => view.connectionStatus === "setup_required" && !view.connectable)).toBe(true);
+		expect(views.every((view) => typeof view.setupHint === "string" && view.setupHint.length > 0)).toBe(true);
+	});
+
+	it("offers explicit capability discovery for unverified imported OAuth candidates", () => {
+		const views = buildPluginViews({
+			services: [serviceFixture({ metadataReviewed: false })],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views[0]?.unverified).toBe(true);
+		expect(views[0]?.connectable).toBe(true);
+		expect(views[0]?.setupHint).toContain("not been verified");
+	});
+
+	it("keeps user-declared servers working when the catalog adds the same id (user owns non-legacy ids)", () => {
+		const userServers: Record<string, McpServerConfig> = {
+			acme: { type: "http", url: "https://custom.acme.test/mcp", oauth: true },
+		};
+		const views = buildPluginViews({
+			services: [serviceFixture()],
+			userServers,
+			authStorage,
+			connectionStore: store,
+		});
+		// One card, owned by the user's server entry — no duplicate catalog card.
+		expect(views).toHaveLength(1);
+		expect(views[0]).toMatchObject({ source: "user", serviceId: "acme" });
+	});
+
+	it("ignores dead user shadows of bundled catalog ids (catalog owns the name)", () => {
+		const userServers: Record<string, McpServerConfig> = {
+			notion: { type: "http", url: "https://proxy.test/mcp", oauth: true },
+		};
+		const views = buildPluginViews({
+			services: [serviceFixture({ serviceId: "notion", label: "Notion", legacyBuiltin: true })],
+			userServers,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views).toHaveLength(1);
+		expect(views[0]).toMatchObject({ source: "catalog", serviceId: "notion" });
+	});
+
+	it("builds connection views including pending and user servers, sorted by connectionId", () => {
+		authStorage.set(mcpCredentialKey("acme"), oauthCredential(3600_000, "https://mcp.acme.test/mcp"));
+		const connections = buildConnectionViews({
+			services: [serviceFixture()],
+			userServers: {
+				local: { type: "stdio", command: "node" },
+				remote: { type: "http", url: "https://remote.test/mcp" },
+			},
+			authStorage,
+			connectionStore: store,
+			acpServers: [{ name: "acp-tool", type: "http" }],
+		});
+		expect(
+			connections.map((connection) => `${connection.connectionId}:${connection.source}:${connection.status}`),
+		).toEqual(["acme:catalog:pending", "acp-tool:acp:connected", "local:user:connected", "remote:user:connected"]);
+	});
+
+	it("searches by label, alias, and description with bounded results", () => {
+		const views = buildPluginViews({
+			services: [
+				serviceFixture({ serviceId: "linear", label: "Linear", description: "Issue tracking" }),
+				serviceFixture({ serviceId: "notion", label: "Notion", aliases: ["docs"] }),
+				serviceFixture({ serviceId: "acme", label: "Acme" }),
+			],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(searchPluginViews(views, "issue", 10).map((view) => view.serviceId)).toEqual(["linear"]);
+		expect(searchPluginViews(views, "NOTION", 10).map((view) => view.serviceId)).toEqual(["notion"]);
+		expect(searchPluginViews(views, "n", 10).map((view) => view.serviceId)).toEqual(["linear", "notion"]);
+		expect(searchPluginViews(views, "n", 2)).toHaveLength(2);
+		// An empty query is a bounded first page, not an exhaustive claim.
+		expect(searchPluginViews(views, "", 2)).toHaveLength(2);
+	});
+
+	it("filters strictly by connection status and paginates with honest cursors", () => {
+		const views = buildPluginViews({
+			services: [
+				serviceFixture({ serviceId: "a", label: "A" }),
+				serviceFixture({ serviceId: "b", label: "B" }),
+				serviceFixture({ serviceId: "c", label: "C", setup: { status: "requires-setup" } }),
+			],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		const notConnected = filterPluginViewsByStatus(views, "not_connected");
+		expect(notConnected.map((view) => view.serviceId)).toEqual(["a", "b"]);
+
+		const page1 = pagePluginViews(notConnected, decodePluginCursor(undefined), 1);
+		expect(page1.plugins.map((view) => view.serviceId)).toEqual(["a"]);
+		expect(page1.nextCursor).toBe("1");
+		const page2 = pagePluginViews(notConnected, decodePluginCursor(page1.nextCursor), 1);
+		expect(page2.plugins.map((view) => view.serviceId)).toEqual(["b"]);
+		expect(page2.nextCursor).toBeNull();
+		expect(() => decodePluginCursor("bogus")).toThrow("invalid cursor");
+	});
+});
+
+describe("ENG-6108 active login ownership (distinct from pending verification)", () => {
+	let tempDir: string;
+	let authStorage: AuthStorage;
+	let store: McpConnectionStore;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "svc-login-pending-"));
+		authStorage = AuthStorage.inMemory();
+		store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("an active pending login (attemptId, no grant) stays visible and suppresses Connect actions, never reads as missing credentials", async () => {
+		await store.reserveConnectionId({
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme",
+			status: "pending",
+			attemptId: "live-owner",
+			createdAt: 1,
+			updatedAt: 1,
+		});
+		const options = { services: [serviceFixture()], userServers: undefined, authStorage, connectionStore: store };
+		const [view] = buildPluginViews(options);
+		// The account row is visible and honestly pending — but the aggregate
+		// never offers a second Connect/Reconnect while an attempt owns it.
+		expect(view.connectionStatus).toBe("pending");
+		expect(view.loginPending).toBe(true);
+		expect(view.connectable).toBe(false);
+		expect(view.addAccountAllowed).toBe(false);
+		expect(view.connectionIds).toEqual(["acme"]);
+		const [inventory] = buildConnectionViews(options);
+		expect(inventory).toMatchObject({ connectionId: "acme", status: "pending", loginPending: true });
+	});
+
+	it("a claimed reconnect on a connected record is active ownership too: Remove stays available, Reconnect does not", async () => {
+		const now = Date.now();
+		store.upsert({
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme",
+			status: "connected",
+			verifiedAt: now,
+			toolCount: 2,
+			createdAt: now,
+			updatedAt: now,
+		});
+		await store.flush();
+		authStorage.set(mcpCredentialKey("acme"), oauthCredential());
+		await expect(store.claimConnectionId({ connectionId: "acme", attemptId: "reconnect-owner" })).resolves.toBe(true);
+		const options = { services: [serviceFixture()], userServers: undefined, authStorage, connectionStore: store };
+		const [view] = buildPluginViews(options);
+		expect(view.connectionStatus).toBe("pending");
+		expect(view.loginPending).toBe(true);
+		expect(view.connectable).toBe(false);
+		// The account row itself stays listed for Remove; the state hints at the
+		// live attempt instead of a missing-credential Reconnect.
+		expect(view.setupHint).toContain("Login in progress");
+	});
+});
+
+describe("ENG-6108 reserved builtin ownership classification", () => {
+	let tempDir: string;
+	let authStorage: AuthStorage;
+	let store: McpConnectionStore;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "svc-reserved-"));
+		authStorage = AuthStorage.inMemory();
+		store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	const builtin = (): McpServiceDescriptor =>
+		serviceFixture({ serviceId: "linear", label: "Linear", legacyBuiltin: true, metadataReviewed: true });
+
+	it("a canonical-equivalent user declaration refers to the builtin: the catalog view stays connectable", () => {
+		const views = buildPluginViews({
+			services: [builtin()],
+			userServers: {
+				linear: { type: "http", url: "https://mcp.acme.test/mcp", oauth: true },
+			},
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views).toHaveLength(1);
+		expect(views[0]).toMatchObject({
+			serviceId: "linear",
+			connectionStatus: "not_connected",
+			connectable: true,
+			source: "catalog",
+		});
+	});
+
+	it("a same-name enabled:false declaration disables the reserved slot — no silent reactivation", () => {
+		const views = buildPluginViews({
+			services: [builtin()],
+			userServers: {
+				linear: { type: "http", url: "https://mcp.acme.test/mcp", enabled: false },
+			},
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views).toHaveLength(1);
+		expect(views[0]).toMatchObject({
+			serviceId: "linear",
+			connectionStatus: "disabled",
+			connectable: false,
+		});
+		expect(views[0].setupHint).toContain("Disabled in settings");
+	});
+
+	it("a conflicting same-name declaration is an honest error with a rename hint, never Connected-but-undispatchable", () => {
+		const views = buildPluginViews({
+			services: [builtin()],
+			userServers: {
+				linear: { type: "http", url: "https://other.example/mcp", oauth: true },
+			},
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views).toHaveLength(1);
+		expect(views[0]).toMatchObject({
+			serviceId: "linear",
+			connectionStatus: "error",
+			connectable: false,
+			addAccountAllowed: false,
+		});
+		expect(views[0].setupHint).toContain("Rename or remove the conflicting server settings");
+		// The conflict also surfaces in the connection inventory with the same
+		// diagnostic, so dispatch-target listings never imply a working alias.
+		const [inventory] = buildConnectionViews({
+			services: [builtin()],
+			userServers: {
+				linear: { type: "http", url: "https://other.example/mcp", oauth: true },
+			},
+			authStorage,
+			connectionStore: store,
+		});
+		expect(inventory).toMatchObject({ connectionId: "linear", status: "error" });
+		expect(inventory.setupHint).toContain("Rename or remove the conflicting server settings");
+	});
+
+	it("an installed account under a conflicting reserved name stays listed for cleanup", async () => {
+		const now = Date.now();
+		store.upsert({
+			connectionId: "linear",
+			serviceId: "linear",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Linear",
+			status: "connected",
+			verifiedAt: now,
+			createdAt: now,
+			updatedAt: now,
+		});
+		await store.flush();
+		const userServers = { linear: { type: "http" as const, url: "https://other.example/mcp", oauth: true } };
+		const [inventory] = buildConnectionViews({
+			services: [builtin()],
+			userServers,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(inventory).toMatchObject({ connectionId: "linear", status: "error" });
+		// The saved account remains removable through the store API.
+		expect(await store.removeAccount({ connectionId: "linear", authCleanup: () => false })).toBe("removed");
+	});
+});
+
+describe("ENG-6108 per-operation login eligibility (fresh vs exact-id repair)", () => {
+	let tempDir: string;
+	let authStorage: AuthStorage;
+	let store: McpConnectionStore;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "svc-eligibility-"));
+		authStorage = AuthStorage.inMemory();
+		store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("a changed catalog URL never retargets an installed repair: the durable record endpoint wins", async () => {
+		const now = Date.now();
+		store.upsert({
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://old.acme.test/mcp",
+			label: "Acme",
+			status: "connected",
+			verifiedAt: now,
+			createdAt: now,
+			updatedAt: now,
+		});
+		await store.flush();
+		authStorage.set(mcpCredentialKey("acme"), oauthCredential(3600_000, "https://old.acme.test/mcp"));
+		const eligibility = mcpLoginEligibility({
+			connectionId: "acme",
+			service: serviceFixture({ transport: { type: "http", url: "https://new.acme.test/mcp" } }),
+			record: store.get("acme"),
+			credential: authStorage.get(mcpCredentialKey("acme")),
+		});
+		expect(eligibility.allowed).toBe(true);
+		expect(eligibility.repair).toBe(true);
+		expect(eligibility.endpoint).toBe("https://old.acme.test/mcp");
+	});
+
+	it("a pending reservation shell alone is not repair evidence for a vanished-source service", async () => {
+		await store.reserveConnectionId({
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://old.acme.test/mcp",
+			label: "Acme",
+			status: "pending",
+			attemptId: "shell",
+			createdAt: 1,
+			updatedAt: 1,
+		});
+		await store.releaseClaim({ connectionId: "acme", attemptId: "shell" });
+		const eligibility = mcpLoginEligibility({
+			connectionId: "acme",
+			service: serviceFixture({
+				transport: { type: "http", url: "https://old.acme.test/mcp" },
+				pinnedFromRecord: true,
+			}),
+			record: store.get("acme"),
+			credential: undefined,
+		});
+		expect(eligibility.allowed).toBe(false);
+		expect(eligibility.setupHint).toContain("remove this account or restore its source");
+	});
+
+	it("a credential-only exact-id bound grant qualifies for repair at its bound endpoint", () => {
+		authStorage.set(mcpCredentialKey("acme"), oauthCredential(3600_000, "https://old.acme.test/mcp"));
+		const eligibility = mcpLoginEligibility({
+			connectionId: "acme",
+			service: serviceFixture({ transport: { type: "http", url: "https://new.acme.test/mcp" } }),
+			record: undefined,
+			credential: authStorage.get(mcpCredentialKey("acme")),
+		});
+		expect(eligibility).toMatchObject({ allowed: true, repair: true, endpoint: "https://old.acme.test/mcp" });
+	});
+
+	it("an active attempt denies every login route on that account", async () => {
+		await store.reserveConnectionId({
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme",
+			status: "pending",
+			attemptId: "live",
+			createdAt: 1,
+			updatedAt: 1,
+		});
+		const eligibility = mcpLoginEligibility({
+			connectionId: "acme",
+			service: serviceFixture(),
+			record: store.get("acme"),
+			credential: undefined,
+		});
+		expect(eligibility.allowed).toBe(false);
+		expect(eligibility.setupHint).toContain("Login in progress");
+	});
+
+	it("explicit login commands carry OAuth intent; picker fresh Connect keeps the stricter settings check", () => {
+		const config: McpServerConfig = { type: "http", url: "https://mcp.acme.test/mcp" };
+		const strict = mcpLoginEligibility({
+			connectionId: "acme",
+			userConfig: config,
+			record: undefined,
+			credential: undefined,
+		});
+		expect(strict.allowed).toBe(false);
+		const explicit = mcpLoginEligibility({
+			connectionId: "acme",
+			userConfig: config,
+			record: undefined,
+			credential: undefined,
+			explicitLogin: true,
+		});
+		expect(explicit).toMatchObject({ allowed: true, endpoint: "https://mcp.acme.test/mcp" });
+	});
+
+	it("bearer-token settings servers never take the OAuth login route", () => {
+		const eligibility = mcpLoginEligibility({
+			connectionId: "acme",
+			userConfig: { type: "http", url: "https://mcp.acme.test/mcp", oauth: true, bearerTokenEnvVar: "ACME_TOKEN" },
+			record: undefined,
+			credential: undefined,
+			explicitLogin: true,
+		});
+		expect(eligibility.allowed).toBe(false);
+		expect(eligibility.setupHint).toContain("settings-managed authentication");
+	});
+
+	it("unverified imported OAuth candidates stay explicitly connectable without a tested/certified claim", () => {
+		const service = serviceFixture({ metadataReviewed: false });
+		const eligibility = mcpLoginEligibility({
+			connectionId: "acme",
+			service,
+			record: undefined,
+			credential: undefined,
+		});
+		expect(eligibility).toMatchObject({ allowed: true, endpoint: "https://mcp.acme.test/mcp" });
+		expect(eligibility.repair).toBeUndefined();
+	});
+});
+
+describe("ENG-6108 catalog ordering and OAuth identity resolution", () => {
+	let tempDir: string;
+	let authStorage: AuthStorage;
+	let store: McpConnectionStore;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "svc-order-"));
+		authStorage = AuthStorage.inMemory();
+		store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("orders connected and ready-to-connect services first without hiding any row", () => {
+		const now = Date.now();
+		const connectedRecord: McpConnectionRecord = {
+			connectionId: "acme",
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme",
+			status: "connected",
+			verifiedAt: now,
+			toolCount: 1,
+			createdAt: now,
+			updatedAt: now,
+		};
+		store.upsert(connectedRecord);
+		authStorage.set(mcpCredentialKey("acme"), oauthCredential());
+		const views = buildPluginViews({
+			services: [
+				serviceFixture({ serviceId: "zeta", label: "Zeta", setup: { status: "requires-setup" } }),
+				serviceFixture({ serviceId: "acme", label: "Acme" }),
+				serviceFixture({ serviceId: "beta", label: "Beta" }),
+			],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views.map((view) => view.serviceId)).toEqual(["acme", "beta", "zeta"]);
+		expect(views.every((view) => ["acme", "beta", "zeta"].includes(view.serviceId))).toBe(true);
+	});
+
+	it("resolves a configured OAuth client identity with fail-closed secret semantics", () => {
+		const previous = process.env.ACME_OAUTH_SECRET;
+		process.env.ACME_OAUTH_SECRET = "configured-secret";
+		try {
+			const identity = resolveMcpOAuthIdentity({
+				type: "http",
+				url: "https://mcp.acme.test/mcp",
+				oauth: true,
+				oauthClientId: "my-client",
+				oauthClientSecretEnvVar: "ACME_OAUTH_SECRET",
+				oauthClientMetadataUrl: "https://mcp.acme.test/.well-known/oauth-client",
+				oauthScopes: ["read", "write"],
+			});
+			expect(identity).toEqual({
+				clientId: "my-client",
+				clientSecret: "configured-secret",
+				clientMetadataUrl: "https://mcp.acme.test/.well-known/oauth-client",
+				scopes: ["read", "write"],
+			});
+		} finally {
+			if (previous === undefined) delete process.env.ACME_OAUTH_SECRET;
+			else process.env.ACME_OAUTH_SECRET = previous;
+		}
+	});
+
+	it("a configured secret env that is missing resolves to the explicit empty string, never a stale fallback", () => {
+		const identity = resolveMcpOAuthIdentity({
+			type: "http",
+			url: "https://mcp.acme.test/mcp",
+			oauth: true,
+			oauthClientSecretEnvVar: "ACME_MISSING_SECRET",
+		});
+		expect(identity.clientSecret).toBe("");
+	});
+
+	it("identity stays empty for configs without OAuth fields or non-HTTP transports", () => {
+		expect(resolveMcpOAuthIdentity({ type: "http", url: "https://mcp.acme.test/mcp" })).toEqual({});
+		expect(resolveMcpOAuthIdentity(undefined)).toEqual({});
+		expect(
+			resolveMcpOAuthIdentity({
+				type: "http",
+				url: "https://mcp.acme.test/mcp",
+				oauthScopes: [],
+			}),
+		).toEqual({});
+	});
+});
+
+describe("verifyMcpConnection", () => {
+	let tempDir: string;
+	let authStorage: AuthStorage;
+	let store: McpConnectionStore;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "svc-verify-"));
+		authStorage = AuthStorage.inMemory();
+		store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+		resetOAuthProviders();
+		// Production registers the catalog OAuth provider before login, so
+		// authStorage.getApiKey resolves the stored grant.
+		registerOAuthProvider(
+			createMcpOAuthProvider({ server: "acme", label: "Acme", url: "https://mcp.acme.test/mcp" }),
+		);
+		authStorage.set(mcpCredentialKey("acme"), {
+			type: "oauth",
+			access: "grant-a",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+	});
+
+	afterEach(() => {
+		resetOAuthProviders();
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
+	it("records connected with the discovered tool count after a successful handshake", async () => {
+		const record = await verifyMcpConnection({
+			authStorage,
+			connectionStore: store,
+			connectionId: "acme",
+			serviceId: "acme",
+			label: "Acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			usesOAuth: true,
+			probe: async () => ({ ok: true, toolCount: 5 }),
+		});
+		expect(record.status).toBe("connected");
+		expect(record.toolCount).toBe(5);
+		expect(store.get("acme")?.status).toBe("connected");
+	});
+
+	it("records error with a fixed safe category when the server rejects the credential", async () => {
+		const record = await verifyMcpConnection({
+			authStorage,
+			connectionStore: store,
+			connectionId: "acme",
+			serviceId: "acme",
+			label: "Acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			usesOAuth: true,
+			probe: async () => ({ ok: false, error: MCP_PROBE_ERRORS.UNAUTHORIZED }),
+		});
+		expect(record.status).toBe("error");
+		// The failure is a fixed category; the endpoint URL never leaks into it.
+		expect(record.lastError).toBe("http-unauthorized");
+		expect(record.lastError).not.toContain("mcp.acme.test");
+	});
+
+	it("keeps pending (not error) when verification could not run — a broken probe is not a broken grant", async () => {
+		const record = await verifyMcpConnection({
+			authStorage,
+			connectionStore: store,
+			connectionId: "acme",
+			serviceId: "acme",
+			label: "Acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			usesOAuth: true,
+			probe: async () => ({ ok: false, error: MCP_PROBE_ERRORS.NETWORK }),
+		});
+		expect(record.status).toBe("pending");
+		expect(record.lastError).toBe("network-unreachable");
+	});
+
+	it("binds verification currency to the exact probed token (equal, different, empty, length)", async () => {
+		// Equal: the probed token matches the current grant.
+		expect(sameGrantToken("token-a", "token-a")).toBe(true);
+		// Different token of equal length: constant-time inequality.
+		expect(sameGrantToken("token-a", "token-b")).toBe(false);
+		// Empty grants stay current against empty (nothing to rotate).
+		expect(sameGrantToken("", "")).toBe(true);
+		// A rotated token of a different length must still compare unequal.
+		expect(sameGrantToken("short", "a-much-longer-rotated-token")).toBe(false);
+		// Replacement of the same length is still detected.
+		expect(sameGrantToken("token-a", "token-x")).toBe(false);
+	});
+
+	it("discards a stale verify result when the connection is logged out mid-probe", async () => {
+		let releaseProbe: (() => void) | undefined;
+		const probeGate = new Promise<void>((resolve) => {
+			releaseProbe = resolve;
+		});
+		const verifyPromise = verifyMcpConnection({
+			authStorage,
+			connectionStore: store,
+			connectionId: "acme",
+			serviceId: "acme",
+			label: "Acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			usesOAuth: true,
+			probe: async () => {
+				await probeGate;
+				return { ok: true, toolCount: 4 };
+			},
+		});
+		// Logout lands while the probe is in flight.
+		authStorage.logout(mcpCredentialKey("acme"));
+		releaseProbe?.();
+		const record = await verifyPromise;
+		expect(record.status).toBe("pending");
+		expect(record.lastError).toBe("credential-changed");
+		// The stale result must never persist a connected record.
+		expect(store.get("acme")).toBeUndefined();
+	});
+
+	it("discards a stale verify result when the grant rotates mid-probe", async () => {
+		let releaseProbe: (() => void) | undefined;
+		const probeGate = new Promise<void>((resolve) => {
+			releaseProbe = resolve;
+		});
+		const verifyPromise = verifyMcpConnection({
+			authStorage,
+			connectionStore: store,
+			connectionId: "acme",
+			serviceId: "acme",
+			label: "Acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			usesOAuth: true,
+			probe: async () => {
+				await probeGate;
+				return { ok: true, toolCount: 4 };
+			},
+		});
+		// The credential rotates (re-login/refresh) while the probe is in flight.
+		authStorage.set(mcpCredentialKey("acme"), {
+			type: "oauth",
+			access: "grant-b",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+		});
+		releaseProbe?.();
+		const record = await verifyPromise;
+		expect(record.status).toBe("pending");
+		expect(record.lastError).toBe("credential-changed");
+		expect(store.get("acme")?.status).not.toBe("connected");
+	});
+
+	it("persists records across store reloads", async () => {
+		await verifyMcpConnection({
+			authStorage,
+			connectionStore: store,
+			connectionId: "acme",
+			serviceId: "acme",
+			label: "Acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			usesOAuth: true,
+			probe: async () => ({ ok: true, toolCount: 2 }),
+		});
+		const reopened = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+		expect(reopened.get("acme")?.status).toBe("connected");
+	});
+
+	it("tolerates a corrupt connections file by resetting", () => {
+		writeFileSync(join(tempDir, "mcp-connections.json"), "{ not json", "utf8");
+		const reopened = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+		expect(reopened.records()).toEqual([]);
+	});
+});
+
+describe("defaultServiceCatalogProvider", () => {
+	it("derives descriptors from the merged catalog: legacy built-ins plus the imported entries", () => {
+		const services = defaultServiceCatalogProvider()();
+		const ids = new Set(services.map((service) => service.serviceId));
+		// The merged catalog supersedes the legacy-only slice; the full entry set
+		// (70 today, after the 2026-09-14 zero-app cut, the 2026-09-15 final cut
+		// to one-click DCR or user token/key only, and the 2026-09-16 token-only
+		// cut) still contains the reserved legacy built-ins.
+		expect(ids.has("linear")).toBe(true);
+		expect(ids.has("notion")).toBe(true);
+		expect(services.length).toBeGreaterThan(50);
+		const legacy = services.filter((service) => service.legacyBuiltin);
+		expect(legacy.map((service) => service.serviceId).sort()).toEqual(["linear", "notion"]);
+		// Imported entries are never reviewed by construction.
+		for (const service of services) {
+			if (!service.legacyBuiltin) {
+				expect(service.metadataReviewed).toBe(false);
+			}
+		}
+	});
+});
+
+describe("nextMcpConnectionId", () => {
+	it("keeps the service id for the first account and allocates -2, -3, ... after it", () => {
+		const taken = new Set<string>(["acme", "acme-2"]);
+		expect(nextMcpConnectionId("acme", (id) => taken.has(id))).toBe("acme-3");
+		taken.delete("acme");
+		expect(nextMcpConnectionId("acme", (id) => taken.has(id))).toBe("acme");
+		taken.add("acme");
+		taken.add("acme-3");
+		expect(nextMcpConnectionId("acme", (id) => taken.has(id))).toBe("acme-4");
+	});
+});
+
+describe("ENG-6108 computed per-account status (no stale Connected)", () => {
+	const URL = "https://mcp.acme.test/mcp";
+	function build(authStorage: AuthStorage, store: McpConnectionStore) {
+		return buildPluginViews({
+			services: [serviceFixture()],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+	}
+	function connectedRecord(connectionId: string, at: number) {
+		return {
+			connectionId,
+			serviceId: "acme",
+			endpoint: URL,
+			label: connectionId === "acme" ? "Acme" : `Acme (${connectionId})`,
+			status: "connected" as const,
+			verifiedAt: at,
+			toolCount: 2,
+			createdAt: at,
+			updatedAt: at,
+		};
+	}
+
+	for (const connectionId of ["acme", "acme-2"]) {
+		it(`a previously connected record with an UNBOUND credential reports Reconnect, not Connected (${connectionId})`, () => {
+			const authStorage = AuthStorage.inMemory();
+			authStorage.set(mcpCredentialKey(connectionId), {
+				type: "oauth",
+				access: "tok",
+				refresh: "r",
+				expires: Date.now() + 3600_000,
+			});
+			const store = McpConnectionStore.open(join(tmpdir(), `stale-unbound-${connectionId}/mcp-connections.json`));
+			store.upsert(connectedRecord(connectionId, Date.now()));
+			const views = build(authStorage, store);
+			expect(views[0]?.connectionStatus).toBe("error");
+			expect(views[0]?.setupHint).toContain("Reconnect required");
+			// The inventory row agrees (same computed status).
+			const connections = buildConnectionViews({
+				services: [serviceFixture()],
+				userServers: undefined,
+				authStorage,
+				connectionStore: store,
+			});
+			expect(connections.find((connection) => connection.connectionId === connectionId)?.status).toBe("error");
+		});
+
+		it(`a previously connected record with a RETARGETED credential reports Reconnect (${connectionId})`, () => {
+			const authStorage = AuthStorage.inMemory();
+			authStorage.set(mcpCredentialKey(connectionId), {
+				type: "oauth",
+				access: "tok",
+				refresh: "r",
+				expires: Date.now() + 3600_000,
+				endpoint: "https://retargeted.test/mcp",
+			});
+			const store = McpConnectionStore.open(join(tmpdir(), `stale-retarget-${connectionId}/mcp-connections.json`));
+			store.upsert(connectedRecord(connectionId, Date.now()));
+			const views = build(authStorage, store);
+			expect(views[0]?.connectionStatus).toBe("error");
+			expect(views[0]?.setupHint).toContain("Reconnect required");
+		});
+
+		it(`a previously connected record with an EXPIRED, no-refresh credential reports Reconnect (${connectionId})`, () => {
+			const authStorage = AuthStorage.inMemory();
+			authStorage.set(mcpCredentialKey(connectionId), {
+				type: "oauth",
+				access: "tok",
+				// Empty refresh token: expired AND unrecoverable.
+				refresh: "",
+				expires: Date.now() - 60_000,
+				endpoint: URL,
+			});
+			const store = McpConnectionStore.open(join(tmpdir(), `stale-expired-${connectionId}/mcp-connections.json`));
+			store.upsert(connectedRecord(connectionId, Date.now()));
+			const views = build(authStorage, store);
+			expect(views[0]?.connectionStatus).toBe("error");
+			expect(views[0]?.setupHint).toContain("expired without a refresh token");
+		});
+	}
+
+	it("catalog metadata aliases are searchable when absent from label, id, and description", () => {
+		const service = serviceFixture({
+			label: "Totally Different Name",
+			aliases: ["linear-app", "lnr"],
+		});
+		const views = buildPluginViews({
+			services: [service],
+			userServers: undefined,
+			authStorage: AuthStorage.inMemory(),
+			connectionStore: McpConnectionStore.open(join(tmpdir(), "alias-search/mcp-connections.json")),
+		});
+		expect(views[0]?.aliases).toEqual(["linear-app", "lnr"]);
+		// The alias hits nowhere else on the card.
+		expect(views[0]?.label).not.toContain("linear-app");
+		expect(views[0]?.serviceId).not.toContain("linear-app");
+		expect(views[0]?.description ?? "").not.toContain("linear-app");
+		// But it matches the search.
+		expect(searchPluginViews(views, "linear-app", 10)).toHaveLength(1);
+		expect(searchPluginViews(views, "lnr", 10)).toHaveLength(1);
+		expect(searchPluginViews(views, "no-such-thing", 10)).toHaveLength(0);
+	});
+});
+
+describe("ENG-6108 wave-4 resolver and account aggregation", () => {
+	function accountRecord(connectionId: string, status: "connected" | "pending" | "error", at: number) {
+		return {
+			connectionId,
+			serviceId: "acme",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Acme",
+			status,
+			createdAt: at,
+			updatedAt: at,
+		};
+	}
+
+	it("a failing local source never blocks the rest: built-ins and other sources survive with a visible diagnostic", () => {
+		const resolution = resolveMcpServiceCatalog({
+			localSources: ["/bad.json", "/good.json"],
+			loadLocal: (filePath: string) => {
+				if (filePath === "/bad.json") {
+					throw new Error("Unexpected token in JSON");
+				}
+				return {
+					entries: [
+						{
+							server: "goodlocal",
+							service: "goodlocal",
+							label: "Good Local",
+							url: "https://good.test/mcp",
+							aliases: [],
+							transport: { type: "http", url: "https://good.test/mcp" },
+							auth: { strategy: "oauth", clientRegistration: "dynamic" },
+							setup: { status: "ready" },
+							verification: { status: "unverified" },
+							legacyBuiltin: false,
+							provenance: [],
+						} as McpServiceEntry,
+					],
+					path: filePath,
+				};
+			},
+		});
+		expect(resolution.descriptors.some((service) => service.serviceId === "linear")).toBe(true);
+		expect(resolution.descriptors.some((service) => service.serviceId === "goodlocal")).toBe(true);
+		expect(resolution.diagnostics.some((line) => line.includes("/bad.json") && line.includes("failed to load"))).toBe(
+			true,
+		);
+	});
+
+	it("an installed connection whose source vanished keeps a pinned descriptor at the record's endpoint", () => {
+		const at = Date.now();
+		const resolution = resolveMcpServiceCatalog({
+			localSources: [],
+			records: [
+				{
+					connectionId: "vanishsvc",
+					serviceId: "vanishsvc",
+					endpoint: "https://mcp.acme.test/mcp",
+					label: "Vanished",
+					status: "connected",
+					createdAt: at,
+					updatedAt: at,
+				},
+			],
+		});
+		const pinned = resolution.descriptors.find((service) => service.serviceId === "vanishsvc");
+		expect(pinned).toMatchObject({
+			pinnedFromRecord: true,
+			transport: { type: "http", url: "https://mcp.acme.test/mcp" },
+		});
+		// Pinned-from-record is its own trust path: never user-placed trust.
+		expect(pinned?.localSource ?? false).toBe(false);
+		expect(pinned?.authStrategy).toBe("oauth");
+		// The pinned endpoint keeps the credential usable (binding preserved).
+		const authStorage = AuthStorage.inMemory();
+		authStorage.set(mcpCredentialKey("vanishsvc"), {
+			type: "oauth",
+			access: "tok",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		const store = McpConnectionStore.open(join(tmpdir(), `svc-pin-${at}/mcp-connections.json`));
+		store.upsert({
+			connectionId: "vanishsvc",
+			serviceId: "vanishsvc",
+			endpoint: "https://mcp.acme.test/mcp",
+			label: "Vanished",
+			status: "connected",
+			createdAt: at,
+			updatedAt: at,
+		});
+		const views = buildPluginViews({
+			services: [pinned ?? { ...serviceFixture(), serviceId: "vanishsvc" }],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views[0]?.connectionStatus).toBe("connected");
+		expect(views[0]?.connectionIds).toEqual(["vanishsvc"]);
+		expect(views[0]?.setupHint).toContain("catalog source is unavailable");
+	});
+
+	it("aggregates accounts: primary connected + alias pending stays connected and lists BOTH account ids", () => {
+		const authStorage = AuthStorage.inMemory();
+		authStorage.set(mcpCredentialKey("acme"), {
+			type: "oauth",
+			access: "primary",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		authStorage.set(mcpCredentialKey("acme-2"), {
+			type: "oauth",
+			access: "second",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		const store = McpConnectionStore.open(join(tmpdir(), "svc-agg/mcp-connections.json"));
+		const at = Date.now();
+		store.upsert({ ...accountRecord("acme", "connected", at), verifiedAt: at, toolCount: 4 });
+		store.upsert(accountRecord("acme-2", "pending", at));
+		const views = buildPluginViews({
+			services: [serviceFixture()],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views[0]?.connectionStatus).toBe("connected");
+		expect(views[0]?.connectionIds).toEqual(["acme", "acme-2"]);
+	});
+
+	it("after the default account disconnects, the remaining alias stays visible and manageable", () => {
+		const authStorage = AuthStorage.inMemory();
+		authStorage.set(mcpCredentialKey("acme-2"), {
+			type: "oauth",
+			access: "second",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		const store = McpConnectionStore.open(join(tmpdir(), "svc-alias-left/mcp-connections.json"));
+		const at = Date.now();
+		store.remove("acme");
+		store.upsert(accountRecord("acme-2", "pending", at));
+		const views = buildPluginViews({
+			services: [serviceFixture()],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		// The service card survives via the alias account, never vanishing.
+		expect(views).toHaveLength(1);
+		expect(views[0]?.connectionIds).toEqual(["acme-2"]);
+		// The alias is searchable by its account id.
+		expect(searchPluginViews(views, "acme-2", 10)).toHaveLength(1);
+		// The connection inventory lists the alias with its own status.
+		const connections = buildConnectionViews({
+			services: [serviceFixture()],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(connections.map((connection) => connection.connectionId)).toEqual(["acme-2"]);
+	});
+
+	it("an alias whose credential went missing is listed as reconnect-required, not silently dropped", () => {
+		const store = McpConnectionStore.open(join(tmpdir(), "svc-alias-stale/mcp-connections.json"));
+		const at = Date.now();
+		store.upsert(accountRecord("acme-2", "connected", at));
+		const views = buildPluginViews({
+			services: [serviceFixture()],
+			userServers: undefined,
+			authStorage: AuthStorage.inMemory(),
+			connectionStore: store,
+		});
+		expect(views[0]?.connectionIds).toContain("acme-2");
+		expect(views[0]?.connectionStatus).toBe("error");
+		expect(views[0]?.setupHint).toContain("Reconnect required");
+	});
+});
+
+describe("resolveMcpServiceCatalog", () => {
+	function bundledEntry(overrides: Record<string, unknown> = {}): McpServiceEntry {
+		return {
+			server: "brand",
+			service: "brand",
+			label: "Brand",
+			url: "https://brand.test/mcp",
+			aliases: ["brandapp"],
+			transport: { type: "http", url: "https://brand.test/mcp" },
+			auth: { strategy: "oauth", clientRegistration: "dynamic" },
+			setup: { status: "ready" },
+			verification: { status: "metadata-reviewed" },
+			legacyBuiltin: false,
+			...overrides,
+		} as McpServiceEntry;
+	}
+
+	function viewsFor(service: McpServiceDescriptor): McpPluginView[] {
+		return buildPluginViews({
+			services: [service],
+			userServers: undefined,
+			authStorage: AuthStorage.inMemory(),
+			connectionStore: McpConnectionStore.open(join(tmpdir(), `svc-resolver-${Date.now()}/mcp-connections.json`)),
+		});
+	}
+
+	it("maps the bundled catalog: metadata-reviewed OAuth entries stay one-click connectable", () => {
+		const resolution = resolveMcpServiceCatalog({ localSources: [] });
+		const linear = resolution.descriptors.find((service) => service.serviceId === "linear");
+		expect(linear).toMatchObject({
+			metadataReviewed: true,
+			legacyBuiltin: true,
+			authStrategy: "oauth",
+		});
+		if (linear) {
+			const views = viewsFor(linear);
+			expect(views[0]?.connectable).toBe(true);
+			expect(views[0]?.unverified ?? false).toBe(false);
+		}
+	});
+
+	it("keeps unverified OAuth candidates visible and explicitly connectable", () => {
+		const resolution = resolveMcpServiceCatalog({ localSources: [] });
+		// A real bundled import: unverified by construction, OAuth, ready, http.
+		const imported = resolution.descriptors.find(
+			(service) =>
+				!service.legacyBuiltin &&
+				!service.metadataReviewed &&
+				service.authStrategy === "oauth" &&
+				service.setup.status === "ready" &&
+				service.transport.type === "http",
+		);
+		expect(imported).toBeDefined();
+		if (imported) {
+			const views = viewsFor(imported);
+			expect(views[0]?.connectable).toBe(true);
+			expect(views[0]?.setupHint).toContain("not been verified");
+		}
+	});
+
+	it("loads declared local sources after the built-ins with ~ expansion", () => {
+		const resolution = resolveMcpServiceCatalog({
+			localSources: ["~/local-services.json"],
+			loadLocal: (filePath: string) => {
+				expect(filePath).toBe(join(homedir(), "local-services.json"));
+				return {
+					entries: [
+						bundledEntry({
+							server: "mylocal",
+							verification: { status: "unverified" },
+						}),
+					],
+					path: filePath,
+				};
+			},
+		});
+		const local = resolution.descriptors.find((service) => service.serviceId === "mylocal");
+		expect(local?.localSource).toBe(true);
+		expect(local?.metadataReviewed).toBe(false);
+		// Trusted local entries connect through the login dialog's explicit approval.
+		if (local) {
+			const views = viewsFor(local);
+			expect(views[0]?.connectable).toBe(true);
+		}
+	});
+
+	it("surfaces declared-but-missing sources and duplicate ids as visible diagnostics", () => {
+		const resolution = resolveMcpServiceCatalog({
+			localSources: ["/missing/services.json", "/dup/a.json", "/dup/b.json"],
+			loadLocal: (filePath: string) => {
+				if (filePath === "/missing/services.json") return { entries: [], path: "" };
+				return { entries: [bundledEntry({ server: "dupe" })], path: filePath };
+			},
+		});
+		expect(resolution.diagnostics.some((line) => line.includes("not found: /missing/services.json"))).toBe(true);
+		expect(resolution.diagnostics.some((line) => line.includes('"dupe"'))).toBe(true);
+		expect(resolution.descriptors.filter((service) => service.serviceId === "dupe")).toHaveLength(1);
+	});
+
+	it("enforces a total cap with a visible diagnostic", () => {
+		const huge: McpServiceEntry[] = Array.from({ length: 600 }, (_, index) =>
+			bundledEntry({ server: `bulk-${index}` }),
+		);
+		const capped = resolveMcpServiceCatalog({
+			localSources: ["/huge.json"],
+			loadLocal: () => ({ entries: huge, path: "/huge.json" }),
+		});
+		expect(capped.descriptors).toHaveLength(500);
+		expect(capped.diagnostics.some((line) => line.includes("capped at 500"))).toBe(true);
+	});
+	it("retains EVERY installed serviceId under cap pressure, in-source or pinned", () => {
+		const huge: McpServiceEntry[] = Array.from({ length: 600 }, (_, index) =>
+			bundledEntry({ server: `bulk-${index}` }),
+		);
+		const now = Date.now();
+		const records = [
+			{
+				connectionId: "bulk-550",
+				serviceId: "bulk-550",
+				endpoint: "https://bulk-550.example/mcp",
+				label: "In-Source",
+				status: "connected",
+				createdAt: now,
+				updatedAt: now,
+			},
+			{
+				connectionId: "pinned-svc",
+				serviceId: "pinned-svc",
+				endpoint: "https://pinned.example/mcp",
+				label: "Vanished Source",
+				status: "connected",
+				createdAt: now,
+				updatedAt: now,
+			},
+		] satisfies Array<McpConnectionRecord>;
+		const capped = resolveMcpServiceCatalog({
+			localSources: ["/huge.json"],
+			loadLocal: () => ({ entries: huge, path: "/huge.json" }),
+			records,
+		});
+		// The cap still binds (500), but BOTH installed serviceIds survive —
+		// the in-source one is retained instead of sliced away, the vanished-
+		// source pin is never the first thing discarded, and legacy builtins
+		// keep their reserved names.
+		expect(capped.descriptors).toHaveLength(500);
+		const kept = new Set(capped.descriptors.map((descriptor) => descriptor.serviceId));
+		expect(kept.has("bulk-550")).toBe(true);
+		expect(kept.has("pinned-svc")).toBe(true);
+		expect(kept.has("linear")).toBe(true);
+		expect(kept.has("notion")).toBe(true);
+		expect(capped.diagnostics.some((line) => line.includes("discovery capped at 500"))).toBe(true);
+		expect(
+			capped.diagnostics.some((line) =>
+				line.includes("Installed connections and built-in services are always kept"),
+			),
+		).toBe(true);
+	});
+
+	it("keeps an installed inventory that ALONE exceeds the cap, with an explicit diagnostic", () => {
+		const huge: McpServiceEntry[] = Array.from({ length: 50 }, (_, index) =>
+			bundledEntry({ server: `bulk-${index}` }),
+		);
+		const now = Date.now();
+		const records = Array.from({ length: 510 }, (_, index) => ({
+			connectionId: `installed-${index}`,
+			serviceId: `installed-${index}`,
+			endpoint: "https://installed.example/mcp",
+			label: `Installed ${index}`,
+			status: "connected" as const,
+			createdAt: now,
+			updatedAt: now,
+		}));
+		const capped = resolveMcpServiceCatalog({
+			localSources: ["/huge.json"],
+			loadLocal: () => ({ entries: huge, path: "/huge.json" }),
+			records,
+		});
+		// Manageability never drops: all 510 installed serviceIds AND the
+		// legacy builtins are kept even though the retained inventory alone
+		// exceeds the cap, the diagnostic says so explicitly, and only
+		// uninstalled candidates were trimmed.
+		const kept = capped.descriptors.map((descriptor) => descriptor.serviceId);
+		expect(kept.filter((id) => id.startsWith("installed-"))).toHaveLength(510);
+		expect(kept).toContain("linear");
+		expect(kept).toContain("notion");
+		expect(kept.filter((id) => id.startsWith("bulk-"))).toEqual([]);
+		expect(capped.diagnostics.some((line) => line.includes("retained inventory alone exceeded the cap"))).toBe(true);
+	});
+});
+
+describe("/mcp and /plugins picker row counts", () => {
+	it("ships exactly 68 catalog services after the ENG-6108 single-credential cut", () => {
+		// The live /mcp picker counter read /77 against the earlier shipped 75:
+		// the extra rows are installed connections pinned from records (below),
+		// never catalog growth or duplicated rows. The 2026-09-16 token-only cut
+		// dropped 5 more non-pasteable survivors (CockroachDB Cloud, Dynatrace,
+		// Sourcegraph, PayPal Sandbox, Render), and the single-credential cut
+		// dropped the two named-header pairs (Datadog, Cloudinary MediaFlows).
+		// Pin the shipped length so silent re-growth changes the counter loudly.
+		expect(SERVICE_CATALOG.length).toBe(68);
+	});
+
+	it("counts rows as the shipped catalog plus pinned installed connections — unique, no off-by-N", () => {
+		// Kevin's live state: figma and huggingface-skills were cut from the
+		// shipped catalog but their connections are installed, so their records
+		// pin durable descriptors and the picker legitimately lists 70 + 2 = 72
+		// rows. Every row is unique — the counter matches the rendered list.
+		const catalogIds = new Set(SERVICE_CATALOG.map((entry) => entry.server));
+		expect(catalogIds.has("figma")).toBe(false);
+		expect(catalogIds.has("huggingface-skills")).toBe(false);
+		const now = Date.now();
+		const tempDir = mkdtempSync(join(tmpdir(), "svc-catalog-count-"));
+		const store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+		try {
+			for (const id of ["figma", "huggingface-skills"]) {
+				store.upsert({
+					connectionId: id,
+					serviceId: id,
+					endpoint: `https://${id}.example.test/mcp`,
+					label: id,
+					status: "pending",
+					createdAt: now,
+					updatedAt: now,
+				});
+			}
+			const resolution = resolveMcpServiceCatalog({ records: store.records() });
+			expect(resolution.diagnostics).toEqual([]);
+			expect(resolution.descriptors).toHaveLength(SERVICE_CATALOG.length + 2);
+			expect(resolution.descriptors.filter((descriptor) => descriptor.pinnedFromRecord)).toHaveLength(2);
+			const views = buildPluginViews({
+				services: resolution.descriptors,
+				userServers: {},
+				authStorage: AuthStorage.inMemory(),
+				connectionStore: store,
+			});
+			expect(views).toHaveLength(SERVICE_CATALOG.length + 2);
+			expect(new Set(views.map((view) => view.serviceId)).size).toBe(SERVICE_CATALOG.length + 2);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("catalog token services: the paste flow (storage, views, verification)", () => {
+	let tempDir: string;
+	let authStorage: AuthStorage;
+	let store: McpConnectionStore;
+
+	const GITHUB_URL = "https://api.githubcopilot.com/mcp/";
+
+	function staticToken(overrides: Partial<McpStaticTokenCredential> = {}): McpStaticTokenCredential {
+		return {
+			type: "mcp_static_token",
+			endpoint: GITHUB_URL,
+			bearer: "ghp_pasted-token",
+			bearerFieldId: "GITHUB_PAT_TOKEN",
+			createdAt: Date.now(),
+			...overrides,
+		};
+	}
+
+	/** A service collecting two GENUINELY DISTINCT required credentials. */
+	function twoDistinctCredentialsService(): McpServiceDescriptor {
+		return serviceFixture({
+			serviceId: "named-headers",
+			label: "Named Headers",
+			authStrategy: "api_key",
+			setup: {
+				status: "requires-setup",
+				reason: "paste your API key and application key",
+				fields: [
+					{ id: "SVC_API_KEY", label: "SVC_API_KEY", required: true, kind: "api-key" },
+					{ id: "SVC_APPLICATION_KEY", label: "SVC_APPLICATION_KEY", required: true, kind: "api-key" },
+				],
+			},
+		});
+	}
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "svc-catalog-token-"));
+		authStorage = AuthStorage.inMemory();
+		store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
+	it("identifies exactly the catalog's paste-an-api-key/token services — single-credential by construction", () => {
+		const descriptors = defaultServiceCatalogProvider()();
+		const pasteable = descriptors.filter((descriptor) => isPasteableTokenService(descriptor));
+		// The 2026-09-16 single-credential cut: 11 one-paste services (the
+		// named-header pairs datadog and cloudinary-mediaflows are cut from the
+		// catalog; the importer refuses to re-ship them).
+		expect(pasteable.map((descriptor) => descriptor.serviceId).sort()).toEqual(
+			[
+				"aws-devops-agent",
+				"github",
+				"pagerduty",
+				"sonatype-guide",
+				"zoom",
+				"zoom-canvas",
+				"zoom-chat",
+				"zoom-meetings",
+				"zoom-revenue-accelerator",
+				"zoom-tasks",
+				"zoom-whiteboard",
+			].sort(),
+		);
+		// GitHub's two fields are ALTERNATIVE NAMES for one PAT (a shared
+		// credentialSet): the paste flow collects ONE credential, stored under
+		// the first alternative's id.
+		const github = pasteable.find((descriptor) => descriptor.serviceId === "github");
+		expect(github ? mcpCredentialFields(github).map((field) => field.id) : []).toEqual([
+			"GITHUB_PAT_TOKEN",
+			"GITHUB_PERSONAL_ACCESS_TOKEN",
+		]);
+		expect(github ? mcpPasteCredential(github) : undefined).toMatchObject({
+			field: expect.objectContaining({ id: "GITHUB_PAT_TOKEN" }),
+			fieldIds: ["GITHUB_PAT_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN"],
+		});
+		// Non-token services are not pasteable.
+		expect(isPasteableTokenService(serviceFixture())).toBe(false);
+	});
+
+	it("collapses alternative names to ONE credential; genuinely distinct credentials stay un-pasteable", () => {
+		// A shared credentialSet across several fields = one credential.
+		const alternatives = serviceFixture({
+			serviceId: "alt-names",
+			label: "Alt Names",
+			authStrategy: "api_key",
+			setup: {
+				status: "requires-setup",
+				fields: [
+					{ id: "ALT_A", label: "ALT_A", required: true, kind: "bearer-token", credentialSet: "one-token" },
+					{ id: "ALT_B", label: "ALT_B", required: true, kind: "bearer-token", credentialSet: "one-token" },
+				],
+			},
+		});
+		expect(mcpPasteCredential(alternatives)).toMatchObject({
+			field: expect.objectContaining({ id: "ALT_A" }),
+			fieldIds: ["ALT_A", "ALT_B"],
+		});
+		expect(isPasteableTokenService(alternatives)).toBe(true);
+		// Two UNMARKED distinct credential fields = two credentials: the single
+		// bearer runtime cannot represent them, so the flow fails closed.
+		const distinct = twoDistinctCredentialsService();
+		expect(mcpPasteCredential(distinct)).toBeUndefined();
+		expect(isPasteableTokenService(distinct)).toBe(false);
+		// The row stays honest setup_required with NO paste action — the
+		// dead-end hint, not a multi-prompt that can never authenticate.
+		const views = buildPluginViews({
+			services: [distinct],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views[0]?.connectionStatus).toBe("setup_required");
+		expect(views[0]?.pasteToken).toBeUndefined();
+	});
+
+	it("derives human prompt labels from the field, never the raw env var alone", () => {
+		const descriptors = defaultServiceCatalogProvider()();
+		const byId = (id: string) => descriptors.find((descriptor) => descriptor.serviceId === id);
+		const github = byId("github");
+		expect(github).toBeDefined();
+		const githubCredential = github ? mcpPasteCredential(github) : undefined;
+		expect(githubCredential).toBeDefined();
+		expect(github && githubCredential ? mcpCredentialFieldPromptLabel(github, githubCredential.field) : "").toBe(
+			"GitHub personal access token",
+		);
+		// Single-field services keep the plain noun (Kevin's live-testing example).
+		expect(mcpCredentialFieldPromptLabel(byId("pagerduty")!, mcpCredentialFields(byId("pagerduty")!)[0]!)).toBe(
+			"PagerDuty API key",
+		);
+		expect(mcpCredentialFieldPromptLabel(byId("zoom-chat")!, mcpCredentialFields(byId("zoom-chat")!)[0]!)).toBe(
+			"Zoom Chat access token",
+		);
+		expect(
+			mcpCredentialFieldPromptLabel(byId("sonatype-guide")!, mcpCredentialFields(byId("sonatype-guide")!)[0]!),
+		).toBe("Sonatype Guide token");
+	});
+
+	it("shares ONE static-token usability rule: type, endpoint binding, non-empty bearer", () => {
+		expect(mcpStaticTokenUsable(undefined, GITHUB_URL)).toMatchObject({ usable: false, reason: "missing" });
+		expect(mcpStaticTokenUsable(oauthCredential(), GITHUB_URL)).toMatchObject({
+			usable: false,
+			reason: "wrong-type",
+		});
+		expect(mcpStaticTokenUsable(staticToken({ endpoint: undefined as never }), GITHUB_URL)).toMatchObject({
+			usable: false,
+			reason: "unbound",
+		});
+		expect(mcpStaticTokenUsable(staticToken({ endpoint: "https://other.example/mcp" }), GITHUB_URL)).toMatchObject({
+			usable: false,
+			reason: "cross-endpoint",
+		});
+		expect(mcpStaticTokenUsable(staticToken({ bearer: "" }), GITHUB_URL)).toMatchObject({
+			usable: false,
+			reason: "empty-bearer",
+		});
+		expect(mcpStaticTokenUsable(staticToken(), GITHUB_URL)).toEqual({ usable: true });
+	});
+
+	it("renders the token service as setup_required with a paste action, and env presence never connects it", () => {
+		const github = defaultServiceCatalogProvider()().find((descriptor) => descriptor.serviceId === "github");
+		expect(github).toBeDefined();
+		const views = buildPluginViews({
+			services: [github!],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views[0]).toMatchObject({
+			connectionStatus: "setup_required",
+			connectable: false,
+			pasteToken: true,
+			connectionIds: [],
+		});
+		expect(views[0]?.setupHint).toBe(
+			"paste a GitHub personal access token (GITHUB_PAT_TOKEN or GITHUB_PERSONAL_ACCESS_TOKEN)",
+		);
+	});
+
+	it("never reports connected from a stored pasted token alone: pending until the handshake verifies", () => {
+		const github = defaultServiceCatalogProvider()().find((descriptor) => descriptor.serviceId === "github");
+		authStorage.set(mcpCredentialKey("github"), staticToken());
+		const views = buildPluginViews({
+			services: [github!],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views[0]).toMatchObject({ connectionStatus: "pending", connectionIds: ["github"] });
+	});
+
+	it("surfaces an unbound pasted token as reconnect-required, never pending or connected", () => {
+		const github = defaultServiceCatalogProvider()().find((descriptor) => descriptor.serviceId === "github");
+		authStorage.set(mcpCredentialKey("github"), staticToken({ endpoint: "https://moved.example/mcp" }));
+		const views = buildPluginViews({
+			services: [github!],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views[0]?.connectionStatus).toBe("error");
+		expect(views[0]?.setupHint).toContain("not bound to this endpoint");
+	});
+
+	it("verifies with the stored pasted token and records connected only after a real handshake", async () => {
+		authStorage.set(mcpCredentialKey("github"), staticToken());
+		const probedTokens: string[] = [];
+		const record = await verifyMcpConnection({
+			authStorage,
+			connectionStore: store,
+			connectionId: "github",
+			serviceId: "github",
+			label: "GitHub",
+			endpoint: GITHUB_URL,
+			usesOAuth: false,
+			staticToken: true,
+			probe: async (options) => {
+				probedTokens.push(await options.getToken());
+				return { ok: true, toolCount: 4 };
+			},
+		});
+		expect(probedTokens).toEqual(["ghp_pasted-token"]);
+		expect(record.status).toBe("connected");
+		expect(record.toolCount).toBe(4);
+		expect(store.get("github")).toMatchObject({ status: "connected", toolCount: 4 });
+	});
+
+	it("records error with a fixed safe category when the pasted token is rejected", async () => {
+		authStorage.set(mcpCredentialKey("github"), staticToken());
+		const record = await verifyMcpConnection({
+			authStorage,
+			connectionStore: store,
+			connectionId: "github",
+			serviceId: "github",
+			label: "GitHub",
+			endpoint: GITHUB_URL,
+			usesOAuth: false,
+			staticToken: true,
+			probe: async () => ({ ok: false, error: MCP_PROBE_ERRORS.UNAUTHORIZED }),
+		});
+		expect(record.status).toBe("error");
+		expect(record.lastError).toBe(MCP_PROBE_ERRORS.UNAUTHORIZED);
+		expect(store.get("github")?.status).toBe("error");
+	});
+
+	it("refuses to verify an unbound pasted token before any network operation", async () => {
+		authStorage.set(mcpCredentialKey("github"), staticToken({ endpoint: "https://moved.example/mcp" }));
+		const probe = vi.fn(async () => ({ ok: true as const, toolCount: 1 }));
+		const record = await verifyMcpConnection({
+			authStorage,
+			connectionStore: store,
+			connectionId: "github",
+			serviceId: "github",
+			label: "GitHub",
+			endpoint: GITHUB_URL,
+			usesOAuth: false,
+			staticToken: true,
+			probe,
+		});
+		expect(probe).not.toHaveBeenCalled();
+		expect(record.status).toBe("error");
+		expect(record.lastError).toBe(MCP_PROBE_ERRORS.UNBOUND_CREDENTIAL);
+	});
+
+	it("discards a verify result when the pasted token rotates or is removed mid-probe", async () => {
+		authStorage.set(mcpCredentialKey("github"), staticToken());
+		let releaseProbe: (() => void) | undefined;
+		const probeGate = new Promise<void>((resolve) => {
+			releaseProbe = resolve;
+		});
+		const verifyPromise = verifyMcpConnection({
+			authStorage,
+			connectionStore: store,
+			connectionId: "github",
+			serviceId: "github",
+			label: "GitHub",
+			endpoint: GITHUB_URL,
+			usesOAuth: false,
+			staticToken: true,
+			probe: async () => {
+				await probeGate;
+				return { ok: true, toolCount: 2 };
+			},
+		});
+		// A concurrent re-paste rotates the credential while the probe runs.
+		authStorage.set(mcpCredentialKey("github"), staticToken({ bearer: "ghp_rotated" }));
+		releaseProbe?.();
+		const record = await verifyPromise;
+		expect(record.status).toBe("pending");
+		expect(record.lastError).toBe(MCP_PROBE_ERRORS.CREDENTIAL_CHANGED);
+		expect(store.get("github")).toBeUndefined();
+	});
+
+	it("keeps verification honest when no usable credential exists: never connected, never a probe", async () => {
+		const probe = vi.fn(async () => ({ ok: true as const, toolCount: 1 }));
+		const cases: Array<McpStaticTokenCredential | ReturnType<typeof oauthCredential> | undefined> = [
+			undefined,
+			oauthCredential(3600_000, GITHUB_URL),
+			staticToken({ bearer: "" }),
+		];
+		for (const [index, credential] of cases.entries()) {
+			if (credential) authStorage.set(mcpCredentialKey("github"), credential);
+			else authStorage.remove(mcpCredentialKey("github"));
+			// Each case gets a fresh record state: the verdict is per-case, and
+			// a missing/wrong-typed/empty credential never inherits one.
+			const caseStore = McpConnectionStore.open(join(tempDir, `conns-${index}`, "mcp-connections.json"));
+			const record = await verifyMcpConnection({
+				authStorage,
+				connectionStore: caseStore,
+				connectionId: "github",
+				serviceId: "github",
+				label: "GitHub",
+				endpoint: GITHUB_URL,
+				usesOAuth: false,
+				staticToken: true,
+				probe,
+			});
+			expect(record.status).toBe("pending");
+			expect(record.lastError).toBe(MCP_PROBE_ERRORS.UNKNOWN);
+			expect(record.verifiedAt).toBeUndefined();
+			expect(record.toolCount).toBeUndefined();
+		}
+		expect(probe).not.toHaveBeenCalled();
+	});
+});

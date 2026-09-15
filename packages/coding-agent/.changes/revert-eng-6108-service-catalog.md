@@ -1,1 +1,0 @@
-- Removed the mcp service catalog picker, connection store, and oauth login flows (revert of #2256; the work will be relanded separately).

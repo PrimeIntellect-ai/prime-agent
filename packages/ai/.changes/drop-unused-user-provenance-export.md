@@ -1,0 +1,1 @@
+- Removed the unused `userProvenance` authoring helper from the public mcp exports.

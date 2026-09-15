@@ -1,9 +1,10 @@
-import { type Component, TruncatedText, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, Container, Text, TruncatedText, visibleWidth } from "@earendil-works/pi-tui";
 import chalk from "chalk";
 import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
 	getMenuListLayout,
+	inlineMenuPanelTopRuleRows,
 	MenuList,
 	MenuPanel,
 	MenuRow,
@@ -67,6 +68,24 @@ describe("MenuPanel", () => {
 		expect(withoutRule.join("")).not.toContain("─");
 	});
 
+	it("opens inline panels with exactly one rule by default", () => {
+		// A titled inline panel draws its separator rule above the title...
+		const titled = new MenuPanel({ title: "Accounts", inline: true });
+		titled.addChild(new StaticComponent());
+		const titledLines = titled.render(24).map(stripAnsi);
+		expect(titledLines[0]).toBe("─".repeat(24));
+		expect(titledLines[1]?.trim()).toBe("Accounts");
+
+		// ...and a headerless panel led by the bordered search input keeps the
+		// input's own top border as its one rule — never two adjacent rules.
+		const search = new MenuPanel({ title: "", inline: true });
+		search.addChild(new MenuSearchInput("Search", true));
+		const searchLines = search.render(24).map(stripAnsi);
+		expect(searchLines[0]).toBe("─".repeat(24));
+		expect(searchLines[1]).not.toBe("─".repeat(24));
+		expect(searchLines[1]).toContain("Search");
+	});
+
 	it("renders the subtitle under the title in inline panels", () => {
 		const panel = new MenuPanel({
 			title: "Choose an account",
@@ -78,9 +97,11 @@ describe("MenuPanel", () => {
 		const lines = panel.render(60);
 		const output = lines.map((line) => stripAnsi(line));
 
-		expect(output[0]?.trim()).toBe("Choose an account");
-		expect(output[1]?.trim()).toBe("Sign in with the account you want to use.");
-		expect(output[2]?.trim()).toBe("first");
+		// The default inline separator rule leads the panel, above the title.
+		expect(output[0]).toBe("─".repeat(60));
+		expect(output[1]?.trim()).toBe("Choose an account");
+		expect(output[2]?.trim()).toBe("Sign in with the account you want to use.");
+		expect(output[3]?.trim()).toBe("first");
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBe(60);
 		}
@@ -251,5 +272,33 @@ describe("MenuPanel", () => {
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBe(40);
 		}
+	});
+	it("an empty leading child never doubles the inline separator (bugbot #2330)", () => {
+		// The model picker adds an empty header-help Container before its search
+		// input; counting that placeholder as the panel opener drew the panel rule
+		// directly on top of the search box's own border (two stacked rules and a
+		// wasted list row).
+		const withPlaceholder = new MenuPanel({ title: "", inline: true });
+		withPlaceholder.addChild(new Container());
+		withPlaceholder.addChild(new MenuSearchInput("Search models", true));
+
+		const direct = new MenuPanel({ title: "", inline: true });
+		direct.addChild(new MenuSearchInput("Search models", true));
+
+		const rules = (panel: MenuPanel) =>
+			panel
+				.render(80)
+				.map((line) => stripAnsi(line))
+				.filter((line) => line.trim().startsWith("─")).length;
+
+		expect(rules(withPlaceholder)).toBe(rules(direct));
+		expect(inlineMenuPanelTopRuleRows({ children: withPlaceholder.children })).toBe(0);
+		// A populated header still owns the rule.
+		const populated = new MenuPanel({ title: "", inline: true });
+		const header = new Container();
+		header.addChild(new Text("Signed-in providers first.", 0, 0));
+		populated.addChild(header);
+		populated.addChild(new MenuSearchInput("Search models", true));
+		expect(inlineMenuPanelTopRuleRows({ children: populated.children })).toBe(1);
 	});
 });
