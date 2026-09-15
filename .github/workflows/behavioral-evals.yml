@@ -16,9 +16,9 @@ concurrency:
       github.event_name == 'pull_request_target' &&
       ((github.event.action == 'labeled' && github.event.label.name == 'pre-release') ||
        (github.event.action == 'unlabeled' && github.event.label.name == 'pre-release') ||
-       github.event.action == 'synchronize' ||
-       github.event.action == 'reopened' ||
-       (github.event.action == 'edited' && github.event.changes.base)) &&
+       ((github.event.action == 'synchronize' || github.event.action == 'reopened' ||
+         (github.event.action == 'edited' && github.event.changes.base)) &&
+        contains(github.event.pull_request.labels.*.name, 'pre-release'))) &&
       format('prime-agent-behavioral-{0}', github.event.pull_request.number) ||
       format('prime-agent-behavioral-skip-{0}', github.run_id)
     }}
@@ -31,9 +31,9 @@ jobs:
     if: >-
       github.event_name == 'pull_request_target' &&
       ((github.event.action == 'unlabeled' && github.event.label.name == 'pre-release') ||
-       github.event.action == 'synchronize' ||
-       github.event.action == 'reopened' ||
-       (github.event.action == 'edited' && github.event.changes.base))
+       ((github.event.action == 'synchronize' || github.event.action == 'reopened' ||
+         (github.event.action == 'edited' && github.event.changes.base)) &&
+        contains(github.event.pull_request.labels.*.name, 'pre-release')))
     runs-on: ubuntu-24.04
     permissions:
       statuses: write
@@ -285,9 +285,14 @@ jobs:
               repo: context.repo.repo,
               pull_number: context.payload.pull_request.number,
             });
-            const {data: rules} = await github.request(
+            const rules = await github.paginate(
               'GET /repos/{owner}/{repo}/rules/branches/{branch}',
-              {owner: context.repo.owner, repo: context.repo.repo, branch: pull.base.ref},
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                branch: pull.base.ref,
+                per_page: 100,
+              },
             );
             const requiredContexts = new Set([
               'Behavioral Eval / pre-release approval',

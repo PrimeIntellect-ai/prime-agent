@@ -27,23 +27,20 @@ def scored(trace) -> bool:
 
 
 def recognized_model_failure(trace) -> bool:
-    if not trace.errors:
+    if len(trace.errors) != 1:
         return False
-    terminal = trace.errors[-1]
-    if (
-        terminal.type == "ProviderError"
-        and terminal.status_code in {400, 413, 422}
-        and any(
-            call.error is not None
-            and call.error.type == terminal.type
-            and call.error.status_code == terminal.status_code
-            and call.error.message == terminal.message
-            for call in trace.calls
+    terminal = trace.errors[0]
+    call_errors = [call.error for call in trace.calls if call.error is not None]
+    if terminal.type == "ProviderError" and terminal.status_code in {400, 413, 422}:
+        return bool(call_errors) and all(
+            error.type == terminal.type
+            and error.status_code == terminal.status_code
+            and error.message == terminal.message
+            for error in call_errors
         )
-    ):
-        return True
     return (
-        terminal.type == "HarnessError"
+        not call_errors
+        and terminal.type == "HarnessError"
         and terminal.message.startswith("agent timeout: rollout exceeded its ")
         and terminal.message.endswith(" budget")
     )
@@ -216,16 +213,46 @@ def run_all(executable: Path, configs: Path, output: Path) -> dict[str, list[dic
     environment = {**os.environ, "PYTHONPATH": str(ROOT)}
     processes = {}
     output.mkdir(parents=True, exist_ok=True)
-    for side in ("base", "head"):
-        for config in sorted((configs / side).glob("*.toml")):
-            target = output / side / config.stem
-            target.mkdir(parents=True)
-            log = (target / "eval.log").open("w")
-            command = [str(executable), "@", str(config), "--output-dir", str(target), "--no-push"]
-            processes[(side, config.stem)] = (
-                subprocess.Popen(command, env=environment, stdout=log, stderr=subprocess.STDOUT),
-                log,
-            )
+    try:
+        for side in ("base", "head"):
+            for config in sorted((configs / side).glob("*.toml")):
+                target = output / side / config.stem
+                target.mkdir(parents=True)
+                log = (target / "eval.log").open("w")
+                command = [
+                    str(executable),
+                    "@",
+                    str(config),
+                    "--output-dir",
+                    str(target),
+                    "--no-push",
+                ]
+                try:
+                    process = subprocess.Popen(
+                        command,
+                        env=environment,
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                    )
+                except BaseException:
+                    log.close()
+                    raise
+                processes[(side, config.stem)] = (process, log)
+    except BaseException:
+        for process, _log in processes.values():
+            if process.poll() is None:
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+        for process, log in processes.values():
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            log.close()
+        raise
     failures = []
     for key, (process, log) in processes.items():
         code = process.wait()

@@ -42,6 +42,8 @@ def test_workflow_gates_and_revokes_durable_release_status() -> None:
     assert "strict_required_status_checks_policy !== true" in workflow
     assert "Behavioral Eval / pre-release approval" in workflow
     assert "[...requiredContexts].every" in workflow
+    assert "contains(github.event.pull_request.labels.*.name, 'pre-release')" in workflow
+    assert "const rules = await github.paginate(" in workflow
     assert "GET /repos/{owner}/{repo}/rules/branches/{branch}" in workflow
     assert workflow.index("Mark the requested head pending") < workflow.index("Check out trusted evaluator")
     assert "Behavioral Eval / pre-release" in workflow
@@ -59,6 +61,8 @@ def test_manifest_is_the_fixed_pinned_suite() -> None:
     }
     assert manifest["model"] == "internal/glm-5.3-fast"
     assert manifest["autonomous"] is False
+    assert manifest["max_concurrent"] == 5
+    assert manifest["max_concurrent"] * 6 <= 32
     tasksets = {item["id"]: item["tasks"] for item in manifest["tasksets"]}
     verified_repositories = {task.rsplit("-", 1)[0] for task in tasksets["swebench-verified"]}
     pro_repositories = {task.removeprefix("instance_").split("-", 1)[0] for task in tasksets["swebench-pro"]}
@@ -364,6 +368,17 @@ def test_scored_model_timeout_is_an_outcome_but_incomplete_trace_fails() -> None
         evaluate.trace_record(
             SimpleNamespace(traces=[transient_provider_failure], errors=[], ok=False), "suite"
         )
+    mixed_failure = fake_trace(ok=False, timeout=True)
+    mixed_failure.rewards = {}
+    mixed_failure.calls[0].error = None
+    mixed_failure.errors.insert(0, transient_error)
+    with pytest.raises(ValueError, match="complete trace or model outcome"):
+        evaluate.trace_record(SimpleNamespace(traces=[mixed_failure], errors=[], ok=False), "suite")
+    contaminated_timeout = fake_trace(ok=False, timeout=True)
+    contaminated_timeout.rewards = {}
+    contaminated_timeout.calls[0].error = transient_error
+    with pytest.raises(ValueError, match="complete trace or model outcome"):
+        evaluate.trace_record(SimpleNamespace(traces=[contaminated_timeout], errors=[], ok=False), "suite")
     credential_failure = fake_trace(ok=False, timeout=True)
     credential_failure.rewards = {}
     credential_error = SimpleNamespace(type="ProviderError", status_code=401, message="unauthorized")
@@ -407,6 +422,50 @@ def test_trace_graph_allows_uncommitted_successful_call() -> None:
     trace.calls[0].node = None
     trace.calls[0].error = None
     evaluate.validate_graph(trace)
+
+
+def test_run_all_stops_started_evaluators_when_a_later_launch_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configs = tmp_path / "configs"
+    for name in ("one", "two"):
+        path = configs / "base" / f"{name}.toml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("")
+    (configs / "head").mkdir()
+
+    started = []
+
+    class Process:
+        def __init__(self, log):
+            self.log = log
+            self.terminated = False
+            self.waited = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            self.waited = True
+            return 0
+
+    def popen(*_args, **kwargs):
+        if started:
+            raise OSError("launch failed")
+        process = Process(kwargs["stdout"])
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(evaluate.subprocess, "Popen", popen)
+    with pytest.raises(OSError, match="launch failed"):
+        evaluate.run_all(Path("/eval"), configs, tmp_path / "output")
+    assert len(started) == 1
+    assert started[0].terminated is True
+    assert started[0].waited is True
+    assert started[0].log.closed is True
 
 
 @pytest.mark.parametrize(
