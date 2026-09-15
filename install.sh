@@ -1896,6 +1896,18 @@ prime_agent_native_validate_release_metadata() {
 	case "$native_metadata_source" in http://*|https://*) ;; *) return 1 ;; esac
 }
 
+prime_agent_native_probe_timeout() {
+	# The first run of a freshly extracted executable can be slow: Rosetta 2 translates
+	# the whole binary before it prints anything, and a cold page cache adds more. A
+	# 51 MB x64 executable measured 11.3s cold and 0.2s warm on Apple Silicon.
+	native_probe_timeout=60
+	case "${PRIME_AGENT_PROBE_TIMEOUT_SECONDS:-}" in
+		''|*[!0-9]*|0) ;;
+		*) [ "$PRIME_AGENT_PROBE_TIMEOUT_SECONDS" -le 600 ] && native_probe_timeout="$PRIME_AGENT_PROBE_TIMEOUT_SECONDS" ;;
+	esac
+	printf '%s\n' "$native_probe_timeout"
+}
+
 prime_agent_native_probe() (
 	# macOS does not ship timeout; keep the deadline independent of Node and Python.
 	native_probe_pid=
@@ -1910,10 +1922,11 @@ prime_agent_native_probe() (
 	trap 'exit 129' HUP
 	"$@" &
 	native_probe_pid=$!
-	native_probe_deadline=$(($(date +%s) + 10))
+	native_probe_timeout=$(prime_agent_native_probe_timeout)
+	native_probe_deadline=$(($(date +%s) + native_probe_timeout))
 	while kill -0 "$native_probe_pid" 2>/dev/null; do
 		if [ "$(date +%s)" -ge "$native_probe_deadline" ]; then
-			printf 'error: executable probe timed out after 10 seconds.\n' >&2
+			printf 'error: executable probe timed out after %s seconds.\n' "$native_probe_timeout" >&2
 			kill -KILL "$native_probe_pid" 2>/dev/null || :
 			wait "$native_probe_pid" 2>/dev/null || :
 			native_probe_pid=
@@ -2153,9 +2166,24 @@ prime_agent_install_native() {
 	for native_asset in prime-agent package.json install.sh prime-agent-runtime/pyproject.toml prime-agent-runtime/src/rlm/repl.py theme/prime.json export-html/template.html photon_rs_bg.wasm; do
 		[ -f "$native_extracted/$native_asset" ] || { printf 'error: missing archive asset: %s\n' "$native_asset" >&2; exit 1; }
 	done
-	if ! prime_agent_native_probe "$native_extracted/prime-agent" --version >"$prime_agent_native_stage/version" 2>"$prime_agent_native_stage/probe.log"; then
+	native_probe_status=0
+	prime_agent_native_probe "$native_extracted/prime-agent" --version >"$prime_agent_native_stage/version" 2>"$prime_agent_native_stage/probe.log" ||
+		native_probe_status=$?
+	if [ "$native_probe_status" -ne 0 ]; then
 		cat "$prime_agent_native_stage/probe.log" >&2
 		prime_agent_native_cleanup
+		# A timeout means the executable never answered, not that it cannot run here.
+		if [ "$native_probe_status" -eq 124 ]; then
+			native_probe_hint="Set PRIME_AGENT_PROBE_TIMEOUT_SECONDS to a larger value and run the installer again."
+			if [ "${PRIME_AGENT_INSTALL_METHOD:-auto}" = auto ]; then
+				printf 'The compiled executable did not answer in time; using the Node installation. %s\n' "$native_probe_hint" >&2
+				prime_agent_install_node "$native_version"
+				return
+			fi
+			printf 'error: the compiled executable did not answer within %s seconds. %s\n' \
+				"$(prime_agent_native_probe_timeout)" "$native_probe_hint" >&2
+			exit 1
+		fi
 		if [ "${PRIME_AGENT_INSTALL_METHOD:-auto}" = auto ]; then
 			printf 'The compiled executable cannot run here; using the Node installation.\n' >&2
 			prime_agent_install_node "$native_version"

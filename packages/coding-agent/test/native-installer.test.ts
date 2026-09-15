@@ -55,7 +55,7 @@ let fixtureDispatcher: Agent;
 
 function publish(
 	version: string,
-	options: { broken?: boolean; missing?: boolean; link?: boolean; installer?: string } = {},
+	options: { broken?: boolean; missing?: boolean; link?: boolean; installer?: string; slow?: number } = {},
 ) {
 	const source = mkdtempSync(join(root, "archive-"));
 	for (const asset of assets) {
@@ -65,9 +65,10 @@ function publish(
 	}
 	writeFileSync(join(source, "package.json"), JSON.stringify({ version }));
 	writeFileSync(join(source, "install.sh"), options.installer ?? readFileSync(installer));
+	const startup = options.slow ? `sleep ${options.slow}\n` : "";
 	writeFileSync(
 		join(source, "prime-agent"),
-		options.broken ? "#!/bin/sh\nexit 1\n" : `#!/bin/sh\nprintf '%s\\n' '${version}'\n`,
+		options.broken ? "#!/bin/sh\nexit 1\n" : `#!/bin/sh\n${startup}printf '%s\\n' '${version}'\n`,
 		{ mode: 0o755 },
 	);
 	if (options.link) symlinkSync("/tmp", join(source, "outside"));
@@ -1039,6 +1040,19 @@ exec /bin/${operation} "$@"
 		expect(result.code, result.output).toBe(129);
 		expect(existsSync(join(home, "data/prime-agent/.install-lock"))).toBe(false);
 	});
+
+	it("reports a slow first run as a timeout and installs it within a larger budget", async () => {
+		publish("1.0.0", { slow: 5 });
+		const impatient = await install("1.0.0", { PRIME_AGENT_PROBE_TIMEOUT_SECONDS: "2" });
+		expect(impatient.code, impatient.output).not.toBe(0);
+		expect(impatient.output).toContain("probe timed out after 2 seconds");
+		expect(impatient.output).toContain("did not answer within 2 seconds");
+		expect(impatient.output).not.toContain("cannot run on this machine");
+		expect(existsSync(command())).toBe(false);
+		const patient = await install("1.0.0", { PRIME_AGENT_PROBE_TIMEOUT_SECONDS: "60" });
+		expect(patient.code, patient.output).toBe(0);
+		expect(existsSync(command())).toBe(true);
+	}, 90000);
 
 	it("reports the supported native platform without installation or release discovery", async () => {
 		const result = await install("--native-platform", { PRIME_AGENT_DOWNLOAD_BASE_URL: "http://127.0.0.1:1" });
