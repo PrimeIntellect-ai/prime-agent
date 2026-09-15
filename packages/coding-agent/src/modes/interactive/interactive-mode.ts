@@ -597,6 +597,14 @@ type McpPickerActionOutcome = { ran: boolean };
 type McpAccountsSurfaceExit = "closed" | "catalog";
 
 /**
+ * The settled outcome of one mounted catalog/accounts picker: a selected row,
+ * a cancellation (Esc / stale settle — the surface closes), or "back" (the
+ * left arrow / a sub-picker's Esc: hand control to the parent surface without
+ * acting).
+ */
+type McpPickerSelection = { status: "selected"; service: McpPluginView } | { status: "cancelled" } | { status: "back" };
+
+/**
  * Connect targets keyed by serviceId: catalog services with a concrete HTTP
  * endpoint (built-ins keep their bundled endpoint unless the user configured
  * that id) and every user-declared server, HTTP or stdio.
@@ -9367,12 +9375,13 @@ export class InteractiveMode {
 	private selectServiceCatalogRow(
 		views: readonly McpPluginView[],
 		options: Omit<ServiceCatalogPickerOptions, "getRows"> = {},
-	): Promise<McpPluginView | undefined> {
+	): Promise<McpPickerSelection> {
 		this.closeConfigurationMenu?.();
 		this.closeServiceCatalogPicker?.();
 		return new Promise((resolve) => {
 			this.showSelector((done) => {
 				let settled = false;
+				let wentBack = false;
 				const finish = (selection?: McpPluginView) => {
 					if (settled) return;
 					settled = true;
@@ -9382,12 +9391,24 @@ export class InteractiveMode {
 					this.ui.requestRender();
 					// A stale selection settles as cancellation without replacing the
 					// next picker or starting an operation from its old row.
-					resolve(ownsEditor ? selection : undefined);
+					if (!ownsEditor) return resolve({ status: "cancelled" });
+					if (wentBack) return resolve({ status: "back" });
+					resolve(selection ? { status: "selected", service: selection } : { status: "cancelled" });
 				};
 				const close = () => finish();
-				const picker = new ServiceCatalogPickerComponent(views, finish, close, {
+				// "Back" is a surface transition, never a cancellation: the
+				// accounts menu's left arrow and the account sub-picker's Esc both
+				// hand control to the parent surface with nothing acted on. An
+				// externally forced close (a newer picker taking over, teardown)
+				// still settles as cancellation.
+				const back = () => {
+					wentBack = true;
+					finish();
+				};
+				const picker = new ServiceCatalogPickerComponent(views, finish, options.cancelBack ? back : close, {
 					...options,
 					getRows: () => Math.max(1, Math.min(20, this.ui.terminal.rows - 3)),
+					...(options.back ? { onBack: back } : {}),
 				});
 				this.closeServiceCatalogPicker = close;
 				return { component: picker, focus: picker };
@@ -9454,14 +9475,17 @@ export class InteractiveMode {
 				surface = { kind: "catalog" };
 				continue;
 			}
-			const service = await this.selectServiceCatalogRow(views, {
+			const catalogSelection = await this.selectServiceCatalogRow(views, {
 				...(surface.search !== undefined ? { initialSearch: surface.search } : {}),
 				getRowPresentation: (view) => {
 					const action = settingsActions.get(view.serviceId);
 					return action ? { action } : undefined;
 				},
 			});
-			if (!service) return;
+			// The catalog is the chain's root: there is no parent surface to go
+			// back to, so any non-selection ends the chain.
+			if (catalogSelection.status !== "selected") return;
+			const service = catalogSelection.service;
 			// Every configured id is off-limits for new account ids.
 			const knownIds = new Set<string>([...services.map((entry) => entry.serviceId), ...Object.keys(userServers)]);
 			try {
@@ -9503,17 +9527,23 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Account management for a service with at least one existing account: the
-	 * same picker lists the accounts (each row reconnects or disconnects THAT
-	 * connection id) plus an "Add another account" row that allocates a new id
-	 * and runs a fresh login — a second account never overwrites the first.
+	 * Account management for a service with at least one existing account
+	 * (Kevin, live testing): the menu is exactly one "Reconnect" row, one
+	 * "Disconnect" row, and an "Add another account" row that allocates a new
+	 * id and runs a fresh login — a second account never overwrites the first.
 	 *
-	 * Re-entry (Kevin, live testing): after an action that ran, the SAME
-	 * accounts menu is rebuilt from the live stores and shown again — a
-	 * disconnected account is gone, a fresh one shows, statuses refresh —
-	 * until the service loses its last account, at which point the chain
-	 * hands the user back to the catalog. Esc, blocked status-only actions,
-	 * and failures close the whole chain.
+	 * One account acts directly: Reconnect runs the SAME re-verify path (never
+	 * a disconnect) and Disconnect the same remove path. Several accounts add
+	 * a second picker that picks the connection id first ("linear",
+	 * "linear-2"); Esc or left there returns to this menu with nothing acted
+	 * on, and the chosen account runs the action a single account would.
+	 *
+	 * Re-entry: after an action that ran, the SAME accounts menu is rebuilt
+	 * from the live stores and shown again — a disconnected account is gone, a
+	 * fresh one shows, statuses refresh — until the service loses its last
+	 * account, at which point the chain hands the user back to the catalog.
+	 * Esc, blocked status-only actions, and failures close the whole chain;
+	 * the left arrow goes back to the catalog, the chain's parent surface.
 	 */
 	private async showAccountPickerForService(
 		service: McpPluginView,
@@ -9534,9 +9564,11 @@ export class InteractiveMode {
 			);
 			const accountCards: McpPluginView[] = [];
 			const accountTargets = new Map<string, McpPickerTarget | undefined>();
-			// Multiple accounts need the connection id on every row to tell the
-			// pairs apart; a single account reads cleaner without it (Kevin).
-			const multiAccount = currentService.connectionIds.length > 1;
+			// Per-account acting rows, keyed by connection id: a single account's
+			// menu rows and every multi-account sub-picker row come from the SAME
+			// per-account state computation — only the label differs.
+			const reconnectRows = new Map<string, McpPluginView>();
+			const disconnectRows = new Map<string, McpPluginView>();
 			for (const connectionId of currentService.connectionIds) {
 				// Centralized per-account state: credential binding, expiry, and the
 				// record combine through the SAME computation as the plugin aggregate
@@ -9565,23 +9597,51 @@ export class InteractiveMode {
 					admission.repair && admission.endpoint
 						? `Saved endpoint: ${new URL(admission.endpoint).origin}${new URL(admission.endpoint).pathname}`
 						: undefined;
-				// The old account-name row, relabelled as the explicit Reconnect
-				// option at the top of the list (Kevin, live testing): Enter keeps
-				// running the SAME re-verify path — verifyMcpConnection plus the
-				// existing retry outcome — and never disconnects. Settings-managed
-				// servers keep an honest label: pending re-verifies, anything else
-				// only shows management guidance.
-				const reconnectLabel = settingsOnly
-					? status === "pending"
-						? "Reconnect"
-						: `Manage ${connectionId}`
-					: multiAccount
-						? `Reconnect ${connectionId}`
-						: "Reconnect";
-				accountCards.push({
+				if (settingsOnly) {
+					// Settings-managed servers are single-account by construction:
+					// pending re-verifies, anything else only shows management
+					// guidance, and remove keeps the server settings and its
+					// environment token ("remove saved data").
+					accountCards.push({
+						...currentService,
+						serviceId: connectionId,
+						label: status === "pending" ? "Reconnect" : `Manage ${connectionId}`,
+						connectionIds: [connectionId],
+						connectionStatus: status,
+						connectable:
+							!blocked &&
+							!loginPending &&
+							admission.allowed &&
+							(status === "error" || status === "not_connected"),
+						loginPending,
+						setupHint: blocked
+							? currentService.setupHint
+							: !admission.allowed
+								? admission.setupHint
+								: [repairHint, state.setupHint].filter(Boolean).join(" · ") || undefined,
+						...(state.toolCount !== undefined ? { toolCount: state.toolCount } : {}),
+					});
+					accountCards.push({
+						...currentService,
+						serviceId: connectionId,
+						label: `Remove saved data for ${connectionId}`,
+						connectionIds: [connectionId],
+						connectionStatus: status,
+						connectable: false,
+						removeAction: true,
+					});
+					continue;
+				}
+				// The sub-picker rows carry the account id; the single-account menu
+				// relabels them below ("Reconnect"/"Disconnect", Kevin, live
+				// testing). Enter keeps running the SAME re-verify path —
+				// verifyMcpConnection plus the existing retry outcome — and never
+				// disconnects; the disconnect row is the explicit remove action,
+				// state-independent.
+				reconnectRows.set(connectionId, {
 					...currentService,
 					serviceId: connectionId,
-					label: reconnectLabel,
+					label: connectionId,
 					connectionIds: [connectionId],
 					connectionStatus: status,
 					connectable:
@@ -9594,15 +9654,38 @@ export class InteractiveMode {
 							: [repairHint, state.setupHint].filter(Boolean).join(" · ") || undefined,
 					...(state.toolCount !== undefined ? { toolCount: state.toolCount } : {}),
 				});
-				// Explicit per-account disconnect action, state-independent. For
-				// settings-managed servers the honest action stays "remove saved
-				// data": the server config and its environment token survive.
-				accountCards.push({
+				disconnectRows.set(connectionId, {
 					...currentService,
 					serviceId: connectionId,
-					label: settingsOnly ? `Remove saved data for ${connectionId}` : `Disconnect ${connectionId}`,
+					label: connectionId,
 					connectionIds: [connectionId],
 					connectionStatus: status,
+					connectable: false,
+					removeAction: true,
+				});
+			}
+			if (!settingsOnly && currentService.connectionIds.length === 1) {
+				// Single account (Kevin, live testing): Enter acts on it directly —
+				// no id suffix on the labels, no sub-picker.
+				const only = currentService.connectionIds[0]!;
+				const reconnect = reconnectRows.get(only);
+				if (reconnect) accountCards.push({ ...reconnect, label: "Reconnect" });
+				const disconnect = disconnectRows.get(only);
+				if (disconnect) accountCards.push({ ...disconnect, label: "Disconnect" });
+			} else if (!settingsOnly && currentService.connectionIds.length > 1) {
+				// Several accounts (Kevin, live testing): ONE Reconnect row and ONE
+				// Disconnect row for the whole service — Enter opens the account
+				// sub-picker that picks the connection id first.
+				accountCards.push({
+					...currentService,
+					label: "Reconnect",
+					connectionIds: [...currentService.connectionIds],
+					connectable: false,
+				});
+				accountCards.push({
+					...currentService,
+					label: "Disconnect",
+					connectionIds: [...currentService.connectionIds],
 					connectable: false,
 					removeAction: true,
 				});
@@ -9635,7 +9718,7 @@ export class InteractiveMode {
 					setupHint: undefined,
 				});
 			}
-			const card = await this.selectServiceCatalogRow(accountCards, {
+			const selection = await this.selectServiceCatalogRow(accountCards, {
 				// Kevin (live testing): "Accounts — Cloudflare" reads as a caption;
 				// the menu is just the service, with the description above the
 				// options instead of under the list.
@@ -9653,8 +9736,40 @@ export class InteractiveMode {
 							? { action: "remove saved data" }
 							: { action: row.connectionStatus === "pending" ? "verify" : "settings guidance" }
 						: undefined,
+				// Kevin (live testing): left arrow goes BACK to the /mcp catalog —
+				// the picker chain's parent surface. Esc still closes the chain.
+				back: true,
 			});
-			if (!card) return "closed";
+			if (selection.status === "cancelled") return "closed";
+			if (selection.status === "back") return "catalog";
+			let card = selection.service;
+			if (card.connectionIds.length > 1) {
+				// The multi-account Reconnect/Disconnect chooser (Kevin, live
+				// testing): a second picker in the same choice-list shape picks
+				// WHICH account first. Esc or left there returns to this menu
+				// without acting — no status noise — and the chosen account runs
+				// the same action a single account would, so the picker never
+				// nests deeper than this.
+				const actionRows = card.removeAction === true ? disconnectRows : reconnectRows;
+				const chosen = await this.selectServiceCatalogRow([...actionRows.values()], {
+					title: "Accounts",
+					mode: "accounts",
+					// The accounts menu one surface up already carries the service
+					// description; the sub-picker is just the account list.
+					description: "",
+					back: true,
+					cancelBack: true,
+					closeHint: "back",
+				});
+				// Esc and left are the user's "back": return to the accounts
+				// menu, freshly rebuilt, with nothing acted on. An externally
+				// forced close (a newer picker taking over, teardown) settles as
+				// cancellation and ends the chain — the same rule every other
+				// surface follows.
+				if (chosen.status === "back") continue;
+				if (chosen.status === "cancelled") return "closed";
+				card = chosen.service;
+			}
 			try {
 				if (settingsOnly && !card.removeAction && card.connectionStatus !== "pending") {
 					this.showStatus(

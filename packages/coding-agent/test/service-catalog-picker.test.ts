@@ -263,6 +263,9 @@ describe("ServiceCatalogPickerComponent", () => {
 		// description moves above the options, the old account-name row becomes
 		// an explicit Reconnect option, and neither the search box nor the
 		// right-hand status column survives — the labels carry the actions.
+		// The menu is exactly three rows — Reconnect, Disconnect, Add another
+		// account — for one account AND for several (the account id then comes
+		// from the sub-picker, never the row label).
 		const reconnect = viewFixture({
 			serviceId: "acme-work",
 			label: "Reconnect",
@@ -274,7 +277,7 @@ describe("ServiceCatalogPickerComponent", () => {
 		const picker = new ServiceCatalogPickerComponent(
 			[
 				reconnect,
-				{ ...reconnect, label: "Disconnect acme-work", removeAction: true },
+				{ ...reconnect, label: "Disconnect", removeAction: true },
 				viewFixture({ label: "Add another account", connectionIds: [] }),
 			],
 			() => {},
@@ -286,8 +289,8 @@ describe("ServiceCatalogPickerComponent", () => {
 		let output = stripAnsi(picker.render(100).join("\n"));
 		expect(output).not.toContain("Search accounts");
 		// Row set and order: Reconnect first, then Disconnect, then Add.
-		expect(output.indexOf("Reconnect")).toBeLessThan(output.indexOf("Disconnect acme-work"));
-		expect(output.indexOf("Disconnect acme-work")).toBeLessThan(output.indexOf("Add another account"));
+		expect(output.indexOf("Reconnect")).toBeLessThan(output.indexOf("Disconnect"));
+		expect(output.indexOf("Disconnect")).toBeLessThan(output.indexOf("Add another account"));
 		// No right-side trailing text in accounts mode.
 		expect(output).not.toContain("Connected · 3 tools");
 		expect(output).not.toContain("Remove account");
@@ -352,6 +355,46 @@ describe("ServiceCatalogPickerComponent", () => {
 			{ mode: "accounts", getRows: () => budgetAtDescriptionCap - 1, title: "Acme MCP" },
 		);
 		expect(tight.render(120).length).toBeLessThanOrEqual(budgetAtDescriptionCap - 1);
+		// The three-row menu (Kevin, live testing: exactly Reconnect,
+		// Disconnect, Add another account) stays inside the SAME frame budget —
+		// the option count is the only thing that grows, never the fixed rows.
+		const threeRowMenu = [
+			viewFixture({
+				serviceId: "acme",
+				label: "Reconnect",
+				description: longDescription,
+				connectionStatus: "connected",
+				connectionIds: ["acme-1"],
+			}),
+			viewFixture({ serviceId: "acme", label: "Disconnect", removeAction: true, connectionIds: ["acme-1"] }),
+			viewFixture({ serviceId: "acme", label: "Add another account", connectionIds: [] }),
+		];
+		const threeRowBudget =
+			1 /* rule */ +
+			1 /* blank */ +
+			1 /* header */ +
+			1 /* blank */ +
+			3 /* description cap */ +
+			1 /* blank */ +
+			3 /* options */ +
+			1 /* trailing blank */ +
+			1 /* shortcuts */;
+		const three = new ServiceCatalogPickerComponent(
+			threeRowMenu,
+			() => {},
+			() => {},
+			{ mode: "accounts", getRows: () => threeRowBudget, title: "Acme MCP" },
+		);
+		const threeLines = three.render(120);
+		expect(threeLines).toHaveLength(threeRowBudget);
+		expect(stripAnsi(threeLines[threeLines.length - 1] ?? "")).toContain("Enter");
+		const threeTight = new ServiceCatalogPickerComponent(
+			threeRowMenu,
+			() => {},
+			() => {},
+			{ mode: "accounts", getRows: () => threeRowBudget - 1, title: "Acme MCP" },
+		);
+		expect(threeTight.render(120).length).toBeLessThanOrEqual(threeRowBudget - 1);
 	});
 
 	it("renders the accounts frame in the onboarding-choice shape (PR #2340)", () => {
@@ -365,7 +408,7 @@ describe("ServiceCatalogPickerComponent", () => {
 		const picker = new ServiceCatalogPickerComponent(
 			[
 				reconnect,
-				{ ...reconnect, label: "Disconnect acme-work", removeAction: true },
+				{ ...reconnect, label: "Disconnect", removeAction: true },
 				viewFixture({ label: "Add another account", connectionIds: [] }),
 			],
 			() => {},
@@ -384,7 +427,7 @@ describe("ServiceCatalogPickerComponent", () => {
 		expect(lines[descriptionIndex + 1].trim()).toBe("");
 		// Rows use the choice markers: `> label` selected, `  label` otherwise.
 		expect(lines[descriptionIndex + 2].trim()).toBe("> Reconnect");
-		expect(lines[descriptionIndex + 3].trim()).toBe("Disconnect acme-work");
+		expect(lines[descriptionIndex + 3].trim()).toBe("Disconnect");
 		expect(lines[descriptionIndex + 4].trim()).toBe("Add another account");
 		// A blank row separates the last option from the shortcuts line.
 		expect(lines[descriptionIndex + 5]?.trim()).toBe("");
@@ -395,7 +438,7 @@ describe("ServiceCatalogPickerComponent", () => {
 		const moved = picker.render(100).map(stripAnsi);
 		expect(moved).toHaveLength(lines.length);
 		expect(moved[descriptionIndex + 2].trim()).toBe("Reconnect");
-		expect(moved[descriptionIndex + 3].trim()).toBe("> Disconnect acme-work");
+		expect(moved[descriptionIndex + 3].trim()).toBe("> Disconnect");
 	});
 
 	it("caps the accounts description at three muted lines above the options", () => {
@@ -409,7 +452,7 @@ describe("ServiceCatalogPickerComponent", () => {
 			description: longDescription,
 		});
 		const picker = new ServiceCatalogPickerComponent(
-			[reconnect, { ...reconnect, label: "Disconnect acme-work", removeAction: true }],
+			[reconnect, { ...reconnect, label: "Disconnect", removeAction: true }],
 			() => {},
 			() => {},
 			{ mode: "accounts", title: "Acme MCP", getRows: () => 24 },
@@ -504,6 +547,12 @@ describe("ServiceCatalogPickerComponent", () => {
 			view: viewFixture({ connectionStatus: "disabled", connectable: false }),
 			mode: "catalog" as const,
 			action: "setup guidance",
+		},
+		{
+			// Several accounts: the row opens the account sub-picker first.
+			view: viewFixture({ connectionIds: ["acme-work", "acme-personal"], connectionStatus: "connected" }),
+			mode: "accounts" as const,
+			action: "choose account",
 		},
 	])("describes $action without invoking it on navigation", ({ view, mode, action }) => {
 		let calls = 0;
@@ -923,7 +972,7 @@ describe("ServiceCatalogPickerComponent", () => {
 		const picker = new ServiceCatalogPickerComponent(
 			[
 				reconnect,
-				{ ...reconnect, label: "Disconnect acme-work", removeAction: true },
+				{ ...reconnect, label: "Disconnect", removeAction: true },
 				viewFixture({ label: "Add another account", connectionIds: [] }),
 			],
 			() => {},
@@ -936,9 +985,136 @@ describe("ServiceCatalogPickerComponent", () => {
 		picker.handleInput("zzzz");
 		const output = stripAnsi(picker.render(100).join("\n"));
 		expect(output).toContain("Reconnect");
-		expect(output).toContain("Disconnect acme-work");
+		expect(output).toContain("Disconnect");
 		expect(output).toContain("Add another account");
 		expect(output).not.toContain("No matching services");
+	});
+
+	it("reports the left arrow as back in accounts mode and keeps Esc a close", () => {
+		// Kevin (live testing): left arrow from a service's accounts page goes
+		// back to the /mcp catalog — the same app.modal.back binding the
+		// dialogs use. Esc still closes the whole chain.
+		const reconnect = viewFixture({
+			serviceId: "acme-work",
+			label: "Reconnect",
+			connectionIds: ["acme-work"],
+			connectionStatus: "connected",
+		});
+		const rows = [reconnect, { ...reconnect, label: "Disconnect", removeAction: true }];
+		let backs = 0;
+		let cancels = 0;
+		const picker = new ServiceCatalogPickerComponent(
+			rows,
+			() => {},
+			() => cancels++,
+			{
+				mode: "accounts",
+				title: "Acme MCP",
+				back: true,
+				onBack: () => backs++,
+				getRows: () => 24,
+			},
+		);
+		// The hint teaches the back key next to the close key.
+		expect(stripAnsi(picker.render(100).join("\n"))).toContain("← back");
+		expect(stripAnsi(picker.render(100).join("\n"))).toContain("Esc close");
+		picker.handleInput("\x1b[D");
+		expect(backs).toBe(1);
+		expect(cancels).toBe(0);
+		picker.handleInput("\x1b");
+		expect(cancels).toBe(1);
+		expect(backs).toBe(1);
+		// Without a wired parent surface (the catalog is the chain root), the
+		// left arrow stays inert: no back, no cancel.
+		const root = new ServiceCatalogPickerComponent(
+			rows,
+			() => {},
+			() => cancels++,
+			{
+				mode: "accounts",
+				title: "Acme MCP",
+				getRows: () => 24,
+			},
+		);
+		root.handleInput("\x1b[D");
+		expect(backs).toBe(1);
+		expect(cancels).toBe(1);
+	});
+
+	it("keeps the left arrow with the search input in catalog mode", () => {
+		// The catalog has no parent surface: the host never wires a back
+		// callback there, so left just moves the search cursor (inert at
+		// column 0) like any other editor key.
+		const backs = 0;
+		const picker = new ServiceCatalogPickerComponent(
+			[viewFixture({ serviceId: "linear", label: "Linear" }), viewFixture({ serviceId: "notion", label: "Notion" })],
+			() => {},
+			() => {},
+			{},
+		);
+		picker.handleInput("\x1b[D");
+		expect(backs).toBe(0);
+		// Search still works after the left key: the key was an edit, not a
+		// navigation.
+		picker.handleInput("n");
+		picker.handleInput("o");
+		const output = stripAnsi(picker.render(100).join("\n"));
+		expect(output).toContain("Notion");
+		expect(output).not.toContain("Linear");
+	});
+
+	it("hints the account chooser and names back as the sub-picker's cancel word", () => {
+		// Kevin (live testing): with several accounts, ONE Reconnect row and
+		// ONE Disconnect row open a second picker that names the account — the
+		// hint names the step, and the sub-picker's Esc backs out to the
+		// accounts menu instead of closing the chain.
+		const chooser = viewFixture({
+			serviceId: "acme",
+			label: "Reconnect",
+			connectionIds: ["acme-work", "acme-personal"],
+			connectionStatus: "connected",
+		});
+		const accounts = new ServiceCatalogPickerComponent(
+			[chooser, { ...chooser, label: "Disconnect", removeAction: true }],
+			() => {},
+			() => {},
+			{ mode: "accounts", title: "Acme MCP", back: true, getRows: () => 24 },
+		);
+		expect(stripAnsi(accounts.render(100).join("\n"))).toContain("Enter choose account");
+		accounts.handleInput("\x1b[B");
+		// The disconnect chooser names the account-selection step too, not the
+		// action that runs on the picked account.
+		expect(stripAnsi(accounts.render(100).join("\n"))).toContain("Enter choose account");
+
+		// The sub-picker itself: account-id rows, a "back" cancel word, and Esc
+		// wired to the back path (the host resolves it as back, not close).
+		let backs = 0;
+		const subPicker = new ServiceCatalogPickerComponent(
+			[
+				viewFixture({
+					serviceId: "acme-work",
+					label: "acme-work",
+					connectionIds: ["acme-work"],
+					connectionStatus: "connected",
+				}),
+				viewFixture({
+					serviceId: "acme-personal",
+					label: "acme-personal",
+					connectionIds: ["acme-personal"],
+					connectionStatus: "connected",
+				}),
+			],
+			() => {},
+			() => backs++,
+			{ mode: "accounts", title: "Accounts", description: "", back: true, closeHint: "back", getRows: () => 24 },
+		);
+		const output = stripAnsi(subPicker.render(100).join("\n"));
+		expect(output).toContain("Accounts");
+		expect(output).toContain("acme-work");
+		expect(output).toContain("acme-personal");
+		expect(output).toContain("Esc back");
+		expect(output).not.toContain("Esc close");
+		expect(output).not.toContain("Enter choose account");
 	});
 });
 

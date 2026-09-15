@@ -76,7 +76,9 @@ interface PickerHost {
 		target: Target,
 		options: { knownIds: Set<string> },
 	): Promise<"catalog" | "closed">;
-	selectServiceCatalogRow(views: McpPluginView[]): Promise<McpPluginView | undefined>;
+	selectServiceCatalogRow(
+		views: McpPluginView[],
+	): Promise<{ status: "selected"; service: McpPluginView } | { status: "cancelled" } | { status: "back" }>;
 	closeServiceCatalogPicker?: () => void;
 }
 async function fixture(views: McpPluginView[] = [view()], options: { settings?: Record<string, unknown> } = {}) {
@@ -260,12 +262,12 @@ it("opening a replacement picker settles the old promise, whose late close canno
 	const oldClose = f.mode.closeServiceCatalogPicker;
 	const second = f.mode.selectServiceCatalogRow([view({ label: "Replacement" })]);
 	const next = f.picker();
-	await expect(first).resolves.toBeUndefined();
+	await expect(first).resolves.toEqual({ status: "cancelled" });
 	stale.handleInput("\r");
 	oldClose?.();
 	expect(f.editorContainer.children).toEqual([next]);
 	next.handleInput("\x1b");
-	await expect(second).resolves.toBeUndefined();
+	await expect(second).resolves.toEqual({ status: "cancelled" });
 });
 
 it("catalog to accounts preserves ownership, grouping and real per-account pending state", async () => {
@@ -478,10 +480,11 @@ it("Enter on the accounts Disconnect row still removes that account and records 
 	});
 });
 
-it("labels multi-account rows as id-suffixed reconnect/disconnect pairs, then one add row", async () => {
-	// Kevin (live testing): with several accounts every Reconnect/Disconnect
-	// pair carries the connection id, and a single "Add another account" row
-	// closes the list.
+it("shows exactly one Reconnect and one Disconnect row for the whole service, then one add row", async () => {
+	// Kevin (live testing): "instead of reconnect linear and linear-2 and
+	// disconnect linear and linear-2, make it just one reconnect and
+	// disconnect" — several accounts keep the menu THREE rows; the account id
+	// comes from the sub-picker opened on Enter, never the row label.
 	const f = await fixture();
 	const now = Date.now();
 	for (const id of ["acme-work", "acme-personal"]) {
@@ -513,15 +516,229 @@ it("labels multi-account rows as id-suffixed reconnect/disconnect pairs, then on
 	const accounts = f.picker();
 	const output = stripAnsi(accounts.render(100).join("\n"));
 	expect(output).toContain("Acme MCP");
-	expect(output.indexOf("Reconnect acme-work")).toBeLessThan(output.indexOf("Disconnect acme-work"));
-	expect(output.indexOf("Disconnect acme-work")).toBeLessThan(output.indexOf("Reconnect acme-personal"));
-	expect(output.indexOf("Reconnect acme-personal")).toBeLessThan(output.indexOf("Disconnect acme-personal"));
-	expect(output.indexOf("Disconnect acme-personal")).toBeLessThan(output.indexOf("Add another account"));
+	// Three rows, in order — no per-account pairs anywhere.
+	expect(output.indexOf("Reconnect")).toBeLessThan(output.indexOf("Disconnect"));
+	expect(output.indexOf("Disconnect")).toBeLessThan(output.indexOf("Add another account"));
+	expect(output).not.toContain("Reconnect acme-work");
+	expect(output).not.toContain("Disconnect acme-work");
+	expect(output).not.toContain("Reconnect acme-personal");
+	expect(output).not.toContain("Disconnect acme-personal");
+	// Enter on the multi-account rows names the account-selection step.
+	expect(output).toContain("Enter choose account");
 	// No account-name rows survive: every label is the action itself.
 	expect(output).not.toContain("Acme ·");
+	// Esc still closes the whole chain without acting.
+	accounts.handleInput("\x1b");
+	await done;
+	expect(f.editorContainer.children).toEqual([f.editor]);
+	expect(f.connect).not.toHaveBeenCalled();
+});
+
+it("pins the single-account accounts menu: Reconnect, Disconnect, Add another account", async () => {
+	// Kevin (live testing): the menu is exactly THREE rows for a single
+	// account too — Enter acts on it directly, with no id suffix on the
+	// labels and no sub-picker in between.
+	const f = await fixture();
+	const now = Date.now();
+	f.harness.authStorage.set("mcp:acme-work", {
+		type: "oauth",
+		access: "synthetic",
+		refresh: "r",
+		expires: now + 3600_000,
+		endpoint: ENDPOINT,
+	});
+	f.store.upsert({
+		connectionId: "acme-work",
+		serviceId: "acme",
+		endpoint: ENDPOINT,
+		label: "Work",
+		status: "connected",
+		verifiedAt: now,
+		toolCount: 2,
+		createdAt: now,
+		updatedAt: now,
+	});
+	await f.store.flush();
+	const done = f.mode.showAccountPickerForService(
+		view({ connectionIds: ["acme-work"], connectionStatus: "connected" }),
+		{ url: ENDPOINT, usesOAuth: true, managedBySettings: false },
+		{ knownIds: new Set(["acme"]) },
+	);
+	const accounts = f.picker();
+	const output = stripAnsi(accounts.render(100).join("\n"));
+	expect(output).toContain("Acme MCP");
+	expect(output.indexOf("Reconnect")).toBeLessThan(output.indexOf("Disconnect"));
+	expect(output.indexOf("Disconnect")).toBeLessThan(output.indexOf("Add another account"));
+	expect(output).not.toContain("Reconnect acme-work");
+	expect(output).not.toContain("Disconnect acme-work");
+	// Single account: Enter on Reconnect acts directly — the re-verify hint,
+	// not the account-selection step.
+	expect(output).toContain("Enter reconnect");
+	expect(output).not.toContain("Enter choose account");
 	accounts.handleInput("\x1b");
 	await done;
 	expect(f.connect).not.toHaveBeenCalled();
+});
+
+it("multi-account Reconnect opens an account sub-picker; picking one acts on THAT account", async () => {
+	// Kevin (live testing): with several accounts there is a second picker
+	// after Reconnect that selects one — "linear", "linear-2" — and the
+	// action runs on the picked connection id only. The fixture's view list
+	// is what re-entry reads, so the accounts menu re-enters after the
+	// (mocked) action ran.
+	const f = await fixture([view({ connectionIds: ["acme-work", "acme-personal"], connectionStatus: "connected" })]);
+	const now = Date.now();
+	for (const id of ["acme-work", "acme-personal"]) {
+		f.harness.authStorage.set(`mcp:${id}`, {
+			type: "oauth",
+			access: "synthetic",
+			refresh: "r",
+			expires: now + 3600_000,
+			endpoint: ENDPOINT,
+		});
+		f.store.upsert({
+			connectionId: id,
+			serviceId: "acme",
+			endpoint: ENDPOINT,
+			label: id,
+			status: "connected",
+			verifiedAt: now,
+			toolCount: 2,
+			createdAt: now,
+			updatedAt: now,
+		});
+	}
+	await f.store.flush();
+	const done = f.mode.showAccountPickerForService(
+		view({ connectionIds: ["acme-work", "acme-personal"], connectionStatus: "connected" }),
+		{ url: ENDPOINT, usesOAuth: true, managedBySettings: false },
+		{ knownIds: new Set(["acme"]) },
+	);
+	const accounts = f.picker();
+	accounts.handleInput("\r"); // → Reconnect: open the account sub-picker
+	const sub = await nextPicker(f, accounts);
+	expect(sub.getSearchInput()).toBeUndefined();
+	const subOutput = stripAnsi(sub.render(100).join("\n"));
+	expect(subOutput).toContain("Accounts");
+	expect(subOutput).toContain("acme-work");
+	expect(subOutput).toContain("acme-personal");
+	// The sub-picker never nests deeper: its rows are the accounts, so Enter
+	// acts — it does not open another picker.
+	sub.handleInput("\x1b[B"); // → acme-personal
+	expect(stripAnsi(sub.render(100).join("\n"))).toContain("Enter reconnect");
+	sub.handleInput("\r");
+	await vi.waitFor(() => expect(f.connect).toHaveBeenCalledOnce());
+	expect(f.connect.mock.calls[0]?.[0]).toMatchObject({
+		serviceId: "acme-personal",
+		connectionStatus: "connected",
+	});
+	expect(f.connect.mock.calls[0]?.[0]?.removeAction).toBeFalsy();
+	expect(f.connect.mock.calls[0]?.[2]).toEqual({ catalogServiceId: "acme" });
+	// The action ran: the accounts menu re-enters (the sub-picker is never a
+	// surface of its own), and Esc ends the chain.
+	const reopened = await nextPicker(f, sub);
+	expect(reopened.getSearchInput()).toBeUndefined();
+	const again = stripAnsi(reopened.render(100).join("\n"));
+	expect(again).toContain("Acme MCP");
+	expect(again).toContain("Enter choose account");
+	reopened.handleInput("\x1b");
+	await done;
+	expect(f.editorContainer.children).toEqual([f.editor]);
+});
+
+it.each([
+	{ key: "\x1b", label: "Esc" },
+	{ key: "\x1b[D", label: "left arrow" },
+])("the sub-picker's $label returns to the accounts menu without acting", async ({ key }) => {
+	const f = await fixture();
+	const now = Date.now();
+	for (const id of ["acme-work", "acme-personal"]) {
+		f.harness.authStorage.set(`mcp:${id}`, {
+			type: "oauth",
+			access: "synthetic",
+			refresh: "r",
+			expires: now + 3600_000,
+			endpoint: ENDPOINT,
+		});
+		f.store.upsert({
+			connectionId: id,
+			serviceId: "acme",
+			endpoint: ENDPOINT,
+			label: id,
+			status: "connected",
+			verifiedAt: now,
+			toolCount: 2,
+			createdAt: now,
+			updatedAt: now,
+		});
+	}
+	await f.store.flush();
+	const done = f.mode.showAccountPickerForService(
+		view({ connectionIds: ["acme-work", "acme-personal"], connectionStatus: "connected" }),
+		{ url: ENDPOINT, usesOAuth: true, managedBySettings: false },
+		{ knownIds: new Set(["acme"]) },
+	);
+	const accounts = f.picker();
+	accounts.handleInput("\r"); // → Reconnect: open the account sub-picker
+	const sub = await nextPicker(f, accounts);
+	sub.handleInput(key);
+	// Back, never close: the service's accounts menu re-mounts freshly built
+	// and nothing acted — no connect, no status noise.
+	const reopened = await nextPicker(f, sub);
+	expect(reopened.getSearchInput()).toBeUndefined();
+	const again = stripAnsi(reopened.render(100).join("\n"));
+	expect(again).toContain("Acme MCP");
+	expect(again).toContain("Reconnect");
+	expect(again).toContain("Enter choose account");
+	expect(f.connect).not.toHaveBeenCalled();
+	// The chain is still open: Esc from the accounts menu closes it.
+	reopened.handleInput("\x1b");
+	await done;
+	expect(f.editorContainer.children).toEqual([f.editor]);
+});
+
+it("left arrow from the accounts menu returns to a freshly mounted catalog", async () => {
+	// Kevin (live testing): "make it so left arrow from a /mcp config page
+	// goes to /mcp menu with all the mcps" — the catalog is the picker chain's
+	// parent surface, and it re-mounts fresh (no search prefill).
+	const f = await fixture([view({ connectionIds: ["acme-work"], connectionStatus: "connected" })]);
+	const done = f.mode.showServiceCatalogPicker("acme");
+	const catalog = f.picker();
+	catalog.handleInput("\r"); // → the service's accounts menu
+	const accounts = await nextPicker(f, catalog);
+	expect(accounts.getSearchInput()).toBeUndefined();
+	expect(stripAnsi(accounts.render(100).join("\n"))).toContain("← back");
+	accounts.handleInput("\x1b[D");
+	const reopened = await nextPicker(f, accounts);
+	// The catalog surface, freshly mounted: the search box is back and EMPTY —
+	// the "acme" prefill that opened the chain did not survive the back.
+	expect(reopened.getSearchInput()).toBeDefined();
+	expect(reopened.getSearchInput()?.getValue()).toBe("");
+	const output = stripAnsi(reopened.render(100).join("\n"));
+	expect(output).toContain("Acme");
+	reopened.handleInput("\x1b");
+	await done;
+	expect(f.editorContainer.children).toEqual([f.editor]);
+});
+
+it("left arrow in the catalog is inert: the chain stays open on the same picker", async () => {
+	// The catalog is the chain's root — there is no parent surface to go back
+	// to, so the left arrow stays with the search box.
+	const f = await fixture([view(), view({ serviceId: "other", label: "Other" })]);
+	const done = f.mode.showServiceCatalogPicker();
+	const catalog = f.picker();
+	catalog.handleInput("\x1b[D");
+	// Nothing settled and nothing re-mounted: the back key did not navigate.
+	expect(f.editorContainer.children[0]).toBe(catalog);
+	// The key was an edit, not navigation: search still filters afterwards.
+	catalog.handleInput("o");
+	catalog.handleInput("t");
+	const output = stripAnsi(catalog.render(100).join("\n"));
+	expect(output).toContain("Other");
+	expect(output).not.toContain("Acme");
+	catalog.handleInput("\x1b");
+	await done;
+	expect(f.editorContainer.children).toEqual([f.editor]);
 });
 
 async function settingsFixture() {
@@ -943,9 +1160,11 @@ it("a blocked action (login in progress) reports its status and never re-enters"
 });
 
 it("disconnecting one of several accounts re-enters that service's accounts menu without the removed row", async () => {
-	// Re-entry decision (Kevin, live testing): a sibling account survives the
-	// disconnect, so the SAME service's accounts menu reopens — freshly built,
-	// the removed row gone and a fresh status read.
+	// Re-entry decision (Kevin, live testing): the accounts menu is ONE
+	// Reconnect/Disconnect pair for the whole service, so Enter on Disconnect
+	// opens the account sub-picker; disconnecting the chosen account leaves a
+	// sibling, so the SAME service's accounts menu reopens — freshly built,
+	// the removed account gone and a fresh status read.
 	const f = await settingsFixture();
 	const now = Date.now();
 	// "acme-work" sorts before "acme-zzz", so the store's file (written sorted)
@@ -978,11 +1197,26 @@ it("disconnecting one of several accounts re-enters that service's accounts menu
 	catalog.handleInput("\r");
 	const accounts = await nextPicker(f, catalog);
 	const before = stripAnsi(accounts.render(100).join("\n"));
-	expect(before).toContain("Reconnect acme-work");
-	expect(before).toContain(`Reconnect ${second}`);
-	accounts.handleInput("\x1b[B"); // → Disconnect acme-work
+	// The real flow pins a vanished-source service from the store, so the
+	// header names the surviving record's label — the ROWS are what changed:
+	// one Reconnect and one Disconnect for the whole service, no id pairs.
+	expect(before).toContain("MCP");
+	expect(before.indexOf("Reconnect")).toBeLessThan(before.indexOf("Disconnect"));
+	expect(before).not.toContain("Reconnect acme-work");
+	expect(before).not.toContain(`Reconnect ${second}`);
+	accounts.handleInput("\x1b[B"); // → Disconnect (the service-wide chooser)
 	accounts.handleInput("\r");
-	const reopened = await nextPicker(f, accounts);
+	// The account sub-picker: same choice-list shape, one row per account,
+	// and Esc backs out instead of closing the chain.
+	const sub = await nextPicker(f, accounts);
+	expect(sub.getSearchInput()).toBeUndefined();
+	const subOutput = stripAnsi(sub.render(100).join("\n"));
+	expect(subOutput).toContain("Accounts");
+	expect(subOutput).toContain("Esc back");
+	expect(subOutput.indexOf("acme-work")).toBeLessThan(subOutput.indexOf(second));
+	expect(subOutput).toContain("Enter disconnect");
+	sub.handleInput("\r"); // → acme-work
+	const reopened = await nextPicker(f, sub);
 	// Same surface, rebuilt from the live store: acme-work is gone, the
 	// sibling remains (single-account labels lose the id suffix).
 	expect(reopened.getSearchInput()).toBeUndefined();

@@ -20,6 +20,7 @@ import {
 	MenuSearchInput,
 	type MenuViewportProvider,
 } from "./menu-panel.js";
+import { shouldTreatAsBack } from "./modal-back.js";
 
 export interface ServiceCatalogPickerOptions extends MenuViewportProvider {
 	/** Pre-filled search (e.g. from `/plugins notion`). */
@@ -35,6 +36,23 @@ export interface ServiceCatalogPickerOptions extends MenuViewportProvider {
 	mode?: "catalog" | "accounts";
 	/** Host-resolved intent and copy for settings-managed transports. */
 	getRowPresentation?: (service: McpPluginView) => { action?: string; status?: string; detail?: string } | undefined;
+	/**
+	 * The left arrow (app.modal.back) reports "back" to the host instead of
+	 * staying inert: the accounts menu uses it to return to the catalog, the
+	 * picker chain's parent surface. The catalog itself has no parent, so it
+	 * never sets this.
+	 */
+	back?: boolean;
+	/**
+	 * Esc reports "back" to the host's parent surface instead of cancelling
+	 * the chain: the multi-account sub-picker's Esc returns to the accounts
+	 * menu, it never closes the whole chain.
+	 */
+	cancelBack?: boolean;
+	/** The hint word after the cancel key: "close" (default) or "back". */
+	closeHint?: string;
+	/** Invoked for the back key when `back` is enabled; wired by the host. */
+	onBack?: () => void;
 }
 
 /**
@@ -315,6 +333,10 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 	private detailRows = 0;
 	private readonly onSelectCallback: (service: McpPluginView) => void;
 	private readonly onCancelCallback: () => void;
+	/** Set only when the host gave this picker a parent surface to go back to. */
+	private readonly onBackCallback: (() => void) | undefined;
+	/** The hint word after the cancel key: "close" unless Esc itself backs. */
+	private readonly closeHint: string;
 	private listLayout = getMenuListLayout({
 		preferredVisibleItems: PREFERRED_VISIBLE_SERVICES,
 		reservedRows: SEARCH_AND_FOOTER_ROWS,
@@ -336,6 +358,8 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 		this.getRowPresentation = options.getRowPresentation;
 		this.onSelectCallback = onSelect;
 		this.onCancelCallback = onCancel;
+		this.onBackCallback = options.onBack;
+		this.closeHint = options.closeHint ?? "close";
 
 		const panel = new MenuPanel({
 			title: this.mode === "accounts" ? "" : (options.title ?? ""),
@@ -437,11 +461,15 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 		const selected = this.filteredServices[this.selectedIndex];
 		const confirm = keyText("tui.select.confirm", { primaryOnly: true });
 		const cancel = keyText("tui.select.cancel", { primaryOnly: true });
+		// Back is a real navigation key when the host wired a parent surface;
+		// the cancel word says what THAT key does here (close the chain, or
+		// back out of a sub-picker).
+		const back = this.onBackCallback ? `${keyText("app.modal.back", { primaryOnly: true })} back · ` : "";
 		const action = selected
 			? `${confirm} ${this.getRowPresentation?.(selected)?.action ?? this.actionText(selected)} · `
 			: "";
 		const navigation = `${keyText("tui.select.up", { primaryOnly: true })}/${keyText("tui.select.down", { primaryOnly: true })} navigate · `;
-		const hint = `${width >= 70 ? navigation : ""}${action}${cancel} close`;
+		const hint = `${width >= 70 ? navigation : ""}${back}${action}${cancel} ${this.closeHint}`;
 		return [...super.render(width), truncateToWidth(theme.fg("dim", ` ${hint}`), width, "", true)];
 	}
 
@@ -532,6 +560,10 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 	}
 
 	private actionText(service: McpPluginView): string {
+		// A multi-account Reconnect/Disconnect row opens the account sub-picker
+		// first (Kevin, live testing): the hint names the step, not the action
+		// that runs on the account picked inside it.
+		if (this.mode === "accounts" && service.connectionIds.length > 1) return "choose account";
 		// The relabelled Disconnect row keeps the remove semantics; the hint
 		// names the row (Kevin, live testing).
 		if (service.removeAction) return "disconnect";
@@ -621,6 +653,11 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 			if (service) this.onSelectCallback(service);
 		} else if (keybindings.matches(keyData, "tui.select.cancel")) {
 			this.onCancelCallback();
+		} else if (this.onBackCallback && shouldTreatAsBack(keyData)) {
+			// Left arrow: a parent surface exists, so it goes back (the same
+			// binding the dialogs use, app.modal.back). Without a parent the
+			// key falls through to the branches below and stays inert.
+			this.onBackCallback();
 		} else if (this.mode === "accounts") {
 			// No search box in accounts mode: plain typing is inert.
 			return;
