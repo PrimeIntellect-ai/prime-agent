@@ -10235,16 +10235,10 @@ export class InteractiveMode {
 			this.showStatus("Login in progress. Finish it or remove the account to cancel.");
 			return false;
 		}
-		// The ONE credential the runtime can send a bearer for; entries whose
-		// credential fields are genuinely DISTINCT stay un-pasteable (the
-		// catalog importer refuses to ship them at all).
+		// The ONE credential the runtime sends as the bearer. isPasteableTokenService
+		// above already established that this resolves, so it is read, not re-checked.
 		const credential = mcpPasteCredential(definition);
-		if (!credential) {
-			this.showStatus(
-				`${service.label} needs more than one credential; it cannot be connected by pasting a single token.`,
-			);
-			return false;
-		}
+		if (!credential) return false;
 		const value = await this.promptForMcpTokenValues(definition, credential);
 		// Esc (or an empty submit): nothing stored, no record, no status line.
 		if (!value) return false;

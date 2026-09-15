@@ -1410,16 +1410,9 @@ export function buildCatalog(
 				`entry ${entry.server} has requirement "${requirement}" but collects no bearer-token/api-key field; a key/token entry the user cannot fill in is unusable (2026-09-16 decision) — add it to overrides.json excludedServers with a documented reason, or curate its setup fields with evidence`,
 			);
 		}
-		// Single-credential cut (2026-09-16 Bugbot resolution): the generic
-		// runtime sends exactly ONE Authorization: Bearer per connection, so a
-		// shipped paste-a-key service must collect exactly ONE credential.
-		// Multiple required credential fields ship only as ALTERNATIVE NAMES
-		// for that one credential — a shared `credentialSet` id curated in
-		// overrides.json (GitHub's GITHUB_PAT_TOKEN and
-		// GITHUB_PERSONAL_ACCESS_TOKEN name the same PAT). Genuinely distinct
-		// credentials (named header pairs like Datadog's DD_API_KEY +
-		// DD_APPLICATION_KEY) cannot authenticate through the single-bearer
-		// runtime and must be excluded with a documented reason.
+		// The runtime sends exactly ONE Authorization: Bearer per connection, so a
+		// shipped paste-a-key service collects exactly one credential. Fields that
+		// are alternative NAMES for it share a curated `credentialSet` id.
 		const credentialFields = fields.filter(
 			(field) => field.required && (field.kind === "bearer-token" || field.kind === "api-key"),
 		);
