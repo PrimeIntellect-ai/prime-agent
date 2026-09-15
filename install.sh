@@ -1796,6 +1796,22 @@ prime_agent_native_cleanup() {
 		rmdir "$prime_agent_native_lock"
 	fi
 	prime_agent_native_lock=
+	prime_agent_native_discard_adopted_root
+}
+
+# A first install that never activated a release must not keep the ownership
+# marker: the next run would find a managed tree holding no executable. Only a
+# root this run created, still empty apart from what this run created, is given up.
+prime_agent_native_discard_adopted_root() {
+	[ "${prime_agent_native_root_adopted:-0}" = 1 ] || return 0
+	prime_agent_native_root_adopted=0
+	[ -n "${native_root:-}" ] || return 0
+	if [ -e "$native_root/bin/prime-agent" ] || [ -L "$native_root/bin/prime-agent" ]; then return 0; fi
+	[ -z "$(ls -A "$native_root" 2>/dev/null | grep -vxE '\.managed|bin|releases' || :)" ] || return 0
+	rmdir "$native_root/bin" "$native_root/releases" 2>/dev/null || :
+	if [ -e "$native_root/bin" ] || [ -e "$native_root/releases" ]; then return 0; fi
+	rm -f "$native_root/.managed"
+	rmdir "$native_root" 2>/dev/null || :
 }
 
 prime_agent_native_prepare_root() {
@@ -1806,6 +1822,7 @@ prime_agent_native_prepare_root() {
 	if [ -L "$native_root/.managed" ] || [ -L "$native_root/releases" ] || [ -L "$native_root/bin" ]; then
 		printf 'error: managed installation directories must not be symlinks.\n' >&2; exit 1
 	fi
+	prime_agent_native_root_adopted=0
 	if [ -e "$native_root/.managed" ]; then
 		[ "$(cat "$native_root/.managed")" = prime-agent-native-v1 ] || {
 			printf 'error: unrecognized installation owner in %s.\n' "$native_root" >&2; exit 1;
@@ -1813,6 +1830,9 @@ prime_agent_native_prepare_root() {
 	elif [ -n "$(ls -A "$native_root")" ]; then
 		printf 'error: refusing to take ownership of nonempty directory %s.\n' "$native_root" >&2
 		exit 1
+	else
+		# Ownership taken now is given back if this run never activates a release.
+		prime_agent_native_root_adopted=1
 	fi
 	# Never steal a lock: even stale-lock recovery can race with another installer.
 	if ! mkdir "$native_root/.install-lock" 2>/dev/null; then
@@ -1969,6 +1989,24 @@ prime_agent_native_probe() (
 	native_probe_pid=
 	exit "$native_probe_status"
 )
+
+# Bun's musl executables link against libstdc++, which Alpine does not preinstall.
+# The loader either names the library or reports a wall of C++ relocation failures.
+prime_agent_native_probe_missing_libstdcxx() {
+	native_probe_log="$1"
+	[ -f "$native_probe_log" ] || return 1
+	grep -q 'libstdc++\.so\.6' "$native_probe_log" && return 0
+	# musl names no library when every C++ runtime symbol is unresolved, so match
+	# the mangled and Itanium ABI names it does report.
+	grep -Eq 'Error relocating .*: (_Z|__cxa_|__dynamic_cast|__once_proxy)[A-Za-z0-9_]*: symbol not found' "$native_probe_log"
+}
+
+# One actionable line beats sixty relocation errors the user cannot act on.
+prime_agent_native_report_missing_libstdcxx() {
+	printf 'error: the compiled executable needs the libstdc++ runtime library, which is missing here.\n' >&2
+	printf 'Install it and run this installer again (Alpine: apk add --no-cache libstdc++).\n' >&2
+	printf 'To install the Node.js build instead, set PRIME_AGENT_INSTALL_METHOD=node.\n' >&2
+}
 
 prime_agent_native_verify_release_target() {
 	native_verify_target="$1"
@@ -2198,6 +2236,12 @@ prime_agent_install_native() {
 		[ -f "$native_extracted/$native_asset" ] || { printf 'error: missing archive asset: %s\n' "$native_asset" >&2; exit 1; }
 	done
 	if ! prime_agent_native_probe "$native_extracted/prime-agent" --version >"$prime_agent_native_stage/version" 2>"$prime_agent_native_stage/probe.log"; then
+		# A missing libstdc++ is one package away, so name it instead of downloading Node.
+		if prime_agent_native_probe_missing_libstdcxx "$prime_agent_native_stage/probe.log"; then
+			prime_agent_native_cleanup
+			prime_agent_native_report_missing_libstdcxx
+			exit 1
+		fi
 		cat "$prime_agent_native_stage/probe.log" >&2
 		prime_agent_native_cleanup
 		if [ "${PRIME_AGENT_INSTALL_METHOD:-auto}" = auto ]; then

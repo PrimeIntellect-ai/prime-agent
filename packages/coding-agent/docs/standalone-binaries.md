@@ -23,7 +23,7 @@ On Linux, download `prime-agent-<version>-<platform>.tar.gz` and `SHA256SUMS` ov
 
 Bun's default x64 build requires AVX2, so hosts without it need the `baseline` archive; `grep -q avx2 /proc/cpuinfo` answers that question. Check the selected archive's SHA-256 against the release inventory, extract it into its own directory, and run `./prime-agent --help`.
 
-musl archives link against `libstdc++`, which Alpine does not preinstall. Run `apk add --no-cache libstdc++` first; without it the executable cannot start and the installer keeps the Node installation.
+musl archives link against `libstdc++`, which Alpine does not preinstall. Run `apk add --no-cache libstdc++` first; without it the executable cannot start. The installer recognizes that loader failure, names the package, and stops instead of downloading the much larger Node installation; set `PRIME_AGENT_INSTALL_METHOD=node` to take the Node route anyway.
 
 The Python tool uses the existing managed CPython setup. Its first use requires uv and network access to install Python and Python dependencies. The archive includes the matching `prime-agent-runtime` sources and built-in Python skills. It contains no prebuilt virtual environment or `node_modules` directory. External tools and extension-specific dependencies retain their own requirements.
 

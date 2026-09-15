@@ -60,7 +60,7 @@ let fixtureDispatcher: Agent;
 
 function publish(
 	version: string,
-	options: { broken?: boolean; missing?: boolean; link?: boolean; installer?: string } = {},
+	options: { broken?: boolean; missing?: boolean; link?: boolean; installer?: string; libstdcxx?: boolean } = {},
 ) {
 	const source = mkdtempSync(join(root, "archive-"));
 	for (const asset of assets) {
@@ -70,9 +70,20 @@ function publish(
 	}
 	writeFileSync(join(source, "package.json"), JSON.stringify({ version }));
 	writeFileSync(join(source, "install.sh"), options.installer ?? readFileSync(installer));
+	// A musl host without libstdc++ fails in the loader, exactly as reproduced on Alpine.
+	const missingLibstdcxx = `#!/bin/sh
+printf 'Error loading shared library libstdc++.so.6: No such file or directory (needed by %s)\\n' "$0" >&2
+printf 'Error relocating %s: _ZSt17__throw_bad_allocv: symbol not found\\n' "$0" >&2
+printf 'Error relocating %s: __cxa_pure_virtual: symbol not found\\n' "$0" >&2
+exit 1
+`;
 	writeFileSync(
 		join(source, "prime-agent"),
-		options.broken ? "#!/bin/sh\nexit 1\n" : `#!/bin/sh\nprintf '%s\\n' '${version}'\n`,
+		options.libstdcxx
+			? missingLibstdcxx
+			: options.broken
+				? "#!/bin/sh\nexit 1\n"
+				: `#!/bin/sh\nprintf '%s\\n' '${version}'\n`,
 		{ mode: 0o755 },
 	);
 	if (options.link) symlinkSync("/tmp", join(source, "outside"));
@@ -155,6 +166,29 @@ function releaseDirectories() {
 	return readdirSync(join(installationRoot(), "releases"), { withFileTypes: true })
 		.filter((entry) => entry.isDirectory())
 		.map((entry) => join(installationRoot(), "releases", entry.name));
+}
+
+// Stands in for the npm route so a test can prove whether the installer took it.
+function nodeFallbackHarness() {
+	const harness = join(home, "fallback-installer.sh");
+	writeFileSync(
+		harness,
+		readFileSync(installer, "utf8").replace(
+			/\nmain "\$@"\s*$/,
+			() => `
+prime_agent_install_node() {
+ mkdir -p "$HOME/.local/bin" "$HOME/.local/lib/node_modules/prime-agent/dist/bundle"
+ printf '%s\\n' "$1" > "$HOME/.local/lib/node_modules/prime-agent/dist/bundle/cli.js"
+ if [ ! -L "$HOME/.local/bin/prime-agent" ]; then
+  ln -s ../lib/node_modules/prime-agent/dist/bundle/cli.js "$HOME/.local/bin/prime-agent"
+ fi
+ printf 'node-route:%s\\n' "$1"
+}
+main "$@"
+`,
+		),
+	);
+	return harness;
 }
 
 function createLsofShim() {
@@ -640,24 +674,7 @@ download_prime_agent_package "$1" "$prime_agent_base_url/releases/v$1/$prime_age
 	it.each(["1.0.0", "1.0.1"])("retries the Node fallback when reinstalling or upgrading to %s", async (version) => {
 		publish("1.0.0", { broken: true });
 		publish("1.0.1", { broken: true });
-		const harness = join(home, "fallback-installer.sh");
-		writeFileSync(
-			harness,
-			readFileSync(installer, "utf8").replace(
-				/\nmain "\$@"\s*$/,
-				() => `
-prime_agent_install_node() {
- mkdir -p "$HOME/.local/bin" "$HOME/.local/lib/node_modules/prime-agent/dist/bundle"
- printf '%s\\n' "$1" > "$HOME/.local/lib/node_modules/prime-agent/dist/bundle/cli.js"
- if [ ! -L "$HOME/.local/bin/prime-agent" ]; then
-  ln -s ../lib/node_modules/prime-agent/dist/bundle/cli.js "$HOME/.local/bin/prime-agent"
- fi
- printf 'node-route:%s\\n' "$1"
-}
-main "$@"
-`,
-			),
-		);
+		const harness = nodeFallbackHarness();
 		const first = await install("1.0.0", { PRIME_AGENT_INSTALL_METHOD: "auto" }, harness);
 		expect(first.code, first.output).toBe(0);
 		expect(first.output).toContain("node-route:1.0.0");
@@ -680,6 +697,43 @@ main "$@"
 		expect(readlinkSync(publicCommand)).toBe(npmLink);
 		expect(readFileSync(publicCommand, "utf8")).toBe(`${version}\n`);
 		expect(existsSync(command())).toBe(false);
+	});
+
+	it.each(["auto", "binary"])(
+		"names the missing libstdc++ package instead of falling back to Node with method=%s",
+		async (method) => {
+			publish("1.0.0", { libstdcxx: true });
+			const harness = nodeFallbackHarness();
+			const result = await install("1.0.0", { PRIME_AGENT_INSTALL_METHOD: method }, harness);
+			expect(result.code, result.output).not.toBe(0);
+			expect(result.output).toContain("needs the libstdc++ runtime library");
+			expect(result.output).toContain("apk add --no-cache libstdc++");
+			expect(result.output).toContain("PRIME_AGENT_INSTALL_METHOD=node");
+			// Sixty relocation errors and the false "cannot run" claim stay out of the terminal.
+			expect(result.output).not.toContain("Error relocating");
+			expect(result.output).not.toContain("cannot run");
+			expect(result.output).not.toContain("node-route:");
+			expect(existsSync(join(home, ".local/bin/prime-agent"))).toBe(false);
+			expect(existsSync(installationRoot())).toBe(false);
+		},
+	);
+
+	it("gives back an installation root it adopted when no release is ever activated", async () => {
+		publish("1.0.0", { broken: true });
+		const failed = await install("1.0.0");
+		expect(failed.code, failed.output).not.toBe(0);
+		expect(existsSync(installationRoot())).toBe(false);
+		// The next run must still be able to install into the same place.
+		publish("1.0.1");
+		const installed = await install("1.0.1");
+		expect(installed.code, installed.output).toBe(0);
+		expect(execFileSync(command(), ["--version"], { encoding: "utf8" })).toBe("1.0.1\n");
+		// A root an earlier install legitimately owns survives a later failure.
+		publish("1.0.2", { broken: true });
+		const later = await install("1.0.2");
+		expect(later.code, later.output).not.toBe(0);
+		expect(readFileSync(join(installationRoot(), ".managed"), "utf8")).toBe("prime-agent-native-v1\n");
+		expect(execFileSync(command(), ["--version"], { encoding: "utf8" })).toBe("1.0.1\n");
 	});
 
 	it("refuses to replace an unrelated public command", async () => {
