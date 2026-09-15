@@ -1,8 +1,6 @@
 import { createRequire } from "module";
 import { type ClipboardModule, loadBundledClipboard } from "./clipboard-binary-binding.js";
 
-export type { ClipboardModule } from "./clipboard-binary-binding.js";
-
 const require = createRequire(import.meta.url);
 let clipboard: ClipboardModule | null = null;
 
