@@ -101,6 +101,11 @@ export class LoginDialogComponent extends Container implements Focusable {
 		return this.abortController.signal;
 	}
 
+	/** Cancel from outside the panel, e.g. when a session reset unmounts it. */
+	abort(): void {
+		this.cancel();
+	}
+
 	private cancel(): void {
 		this.abortController.abort();
 		if (this.inputRejecter) {

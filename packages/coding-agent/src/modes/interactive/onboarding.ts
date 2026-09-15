@@ -1,5 +1,4 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { AuthStatus } from "../../core/auth-storage.js";
 
 export interface OnboardingSettingsReader {
 	getOnboardingShown(): boolean;
@@ -8,7 +7,6 @@ export interface OnboardingSettingsReader {
 export interface OnboardingModelRegistryReader {
 	refresh(): void;
 	hasConfiguredAuth(model: Model<Api>): boolean;
-	getProviderAuthStatus(provider: string): AuthStatus;
 }
 
 export interface OnboardingStartupState {

@@ -19,7 +19,6 @@ function makeState(overrides: {
 		modelRegistry: {
 			refresh: () => {},
 			hasConfiguredAuth: () => overrides.modelHasAuth ?? false,
-			getProviderAuthStatus: () => ({ configured: overrides.modelHasAuth ?? false }),
 		},
 		model: overrides.model,
 	};

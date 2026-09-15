@@ -115,7 +115,7 @@ export class PrimeOnboardingSplashComponent implements Component {
 	}
 
 	handleInput(keyData: string): void {
-		if (this.getPanel() || this.progressMessage) {
+		if (this.getActivePanel() || this.progressMessage) {
 			return;
 		}
 		const kb = getKeybindings();
@@ -133,7 +133,7 @@ export class PrimeOnboardingSplashComponent implements Component {
 		lines.push(...this.renderMarkRows(layout.fieldWidth).map((row) => this.line(safeWidth, layout.fieldLeft, row)));
 		lines.push(this.line(safeWidth, 0, ""));
 		lines.push(this.line(safeWidth, layout.contentLeft, this.renderHeadingLine()));
-		if (!this.getPanel() && !this.progressMessage && !this.flowStarted) {
+		if (!this.getActivePanel() && !this.progressMessage && !this.flowStarted) {
 			lines.push(this.line(safeWidth, 0, ""));
 			const descriptionWidth = Math.max(1, Math.min(DESCRIPTION_WIDTH, safeWidth - layout.contentLeft));
 			DESCRIPTION_PARAGRAPHS.forEach((paragraph, index) => {
@@ -151,10 +151,10 @@ export class PrimeOnboardingSplashComponent implements Component {
 			}
 		}
 		// The panel brings its own leading padding; a second blank row reads as a gap.
-		if (!this.getPanel()) {
+		if (!this.getActivePanel()) {
 			lines.push(this.line(safeWidth, 0, ""));
 		}
-		const activePanel = this.getPanel();
+		const activePanel = this.getActivePanel();
 		if (activePanel) {
 			// The inline panel indents its own content by one column, so drop one
 			// here to keep it flush with the welcome line.
@@ -173,7 +173,9 @@ export class PrimeOnboardingSplashComponent implements Component {
 		// (login, model preparation) the block collapses to its content so the
 		// inline auth panel can mount underneath it.
 		const rows =
-			this.progressMessage === undefined || this.getPanel() !== undefined ? this.options.getRows?.() : undefined;
+			this.progressMessage === undefined || this.getActivePanel() !== undefined
+				? this.options.getRows?.()
+				: undefined;
 		if (rows !== undefined && Number.isFinite(rows)) {
 			while (lines.length < Math.floor(rows)) {
 				lines.push(this.line(safeWidth, 0, ""));
@@ -203,7 +205,8 @@ export class PrimeOnboardingSplashComponent implements Component {
 	}
 
 	/** The panel that owns the block names itself; otherwise the brand line. */
-	private getPanel(): Component | undefined {
+	/** The panel currently on top of the stack, if any. */
+	getActivePanel(): Component | undefined {
 		return this.panels[this.panels.length - 1]?.panel;
 	}
 

@@ -802,8 +802,6 @@ async function prepareRuntimeServices(options: {
 	sessionManager: SessionManager;
 	extensionFactories?: ExtensionFactory[];
 	sessionOptionsOverride?: CreateAgentSessionOptions;
-	/** Interactive launches hold the telemetry notice back for onboarding. */
-	deferTelemetryNoticeForOnboarding?: boolean;
 }): Promise<PreparedRuntimeServices> {
 	const { config, sessionManager } = options;
 	const effectiveAgentDir = config.agentDir ?? options.agentDir;
@@ -819,7 +817,11 @@ async function prepareRuntimeServices(options: {
 		// the parent's and a subagent quit would release the still-active pane.
 		noBuiltinHerdrReporter: (options.sessionOptionsOverride?.rlmDepth ?? 0) > 0,
 		telemetryDisabled: config.telemetryDisabled,
-		deferTelemetryNoticeForOnboarding: options.deferTelemetryNoticeForOnboarding ?? false,
+		// Interactive launches hold the notice back for onboarding, which marks
+		// itself shown; every other mode discloses immediately. Deriving it from
+		// the session config covers the daemon-hosted path too, which creates the
+		// session the TUI actually talks to.
+		deferTelemetryNoticeForOnboarding: config.executionMode === "interactive",
 		resourceLoaderOptions: {
 			additionalExtensionPaths: config.extensions,
 			additionalSkillPaths: config.skills,
@@ -1398,7 +1400,6 @@ export async function main(args: string[], options?: MainOptions) {
 			agentDir,
 			sessionManager,
 			extensionFactories: options?.extensionFactories,
-			deferTelemetryNoticeForOnboarding: true,
 		});
 		const { services, scopedModels } = prepared;
 		const { settingsManager } = services;
@@ -1461,7 +1462,6 @@ export async function main(args: string[], options?: MainOptions) {
 						agentDir,
 						sessionManager: attachedSessionManager,
 						extensionFactories: options?.extensionFactories,
-						deferTelemetryNoticeForOnboarding: true,
 					});
 					return createInteractiveModeUiServicesFromServices({
 						services: attachedPrepared.services,

@@ -434,6 +434,11 @@ export interface BrandSplashHeaderOptions {
 	getHidden?: () => boolean;
 }
 
+/** Flow panels that can settle their pending step when unmounted early. */
+function isAbortablePanel(component: Component): component is Component & { abort(): void } {
+	return typeof (component as { abort?: unknown }).abort === "function";
+}
+
 export class BrandSplashHeader implements Component {
 	private readonly logoRaw: string[];
 	private readonly logoCanvasWidth: number;
@@ -1053,7 +1058,7 @@ export class InteractiveMode {
 	private connectionModelsRefreshVersion = 0;
 	private connectionModelsRefreshInFlight: { version: number; promise: Promise<AgentConnectionModel[]> } | undefined;
 	private closeConfigurationMenu: (() => void) | undefined;
-	private inlineAuthPanelClosers: (() => void)[] = [];
+	private inlineAuthPanelClosers: ((reason?: "reset") => void)[] = [];
 	private configurationModelSelection: Promise<void> | undefined;
 	private connectionState: AgentConnectionState | undefined;
 	private connectionResourceSnapshot: AgentConnectionResourceSnapshot | undefined;
@@ -1126,6 +1131,9 @@ export class InteractiveMode {
 
 	/** Tears the block down and settles the pending flow, e.g. on a session reset. */
 	private onboardingAbort: (() => void) | undefined = undefined;
+
+	/** Aborted when onboarding is torn down so in-flight steps stop waiting. */
+	private onboardingFlowAbort: AbortController | undefined = undefined;
 
 	private customHeader: (Component & { dispose?(): void }) | undefined = undefined;
 
@@ -1877,6 +1885,8 @@ export class InteractiveMode {
 
 	private async runOnboardingFlow(): Promise<void> {
 		this.modelRegistry.refresh();
+		const abort = new AbortController();
+		this.onboardingFlowAbort = abort;
 		const splash = await this.showOnboardingSplash();
 		if (!splash) {
 			return;
@@ -1886,13 +1896,19 @@ export class InteractiveMode {
 		// CLI token is already on disk, so users who arrive with credentials still
 		// reach the same account, provider and trace questions.
 		const authResult = await this.createAuthFlows().runPrimeInferenceLogin();
-		if (authResult.status !== "success") {
+		if (abort.signal.aborted || authResult.status !== "success") {
 			splash.dismiss();
 			return;
 		}
 
 		await this.prepareForModelSelectionAfterLogin(authResult);
+		if (abort.signal.aborted) {
+			return;
+		}
 		await this.askOnboardingProviders();
+		if (abort.signal.aborted) {
+			return;
+		}
 		await this.askOnboardingTraceOptIn();
 		splash.dismiss();
 	}
@@ -3674,7 +3690,7 @@ export class InteractiveMode {
 		// menu is still torn down by the closeConfigurationMenu call below.
 		// Innermost panels close first, ending at the pre-login content.
 		for (const close of this.inlineAuthPanelClosers.splice(0).reverse()) {
-			close();
+			close("reset");
 		}
 		// A reset mid-onboarding leaves the block with no flow to host: tear it
 		// down too, so the overlay, its animation and the pending step all end.
@@ -8921,6 +8937,7 @@ export class InteractiveMode {
 				handle?.hide();
 				this.onboardingSplash = undefined;
 				this.onboardingAbort = undefined;
+				this.onboardingFlowAbort = undefined;
 				this.onboardingUiActive = false;
 				this.builtInHeader?.invalidate();
 				this.ui.requestRender();
@@ -8942,6 +8959,10 @@ export class InteractiveMode {
 			// The block owns the pane while onboarding runs: the brand header hides
 			// so the two marks never stack, and flow panels mount inside the block.
 			this.onboardingAbort = () => {
+				// Cancel the running step first: after Enter the splash promise is
+				// already settled, so dismissing alone would leave the login waiting
+				// on an unmounted dialog and remount later panels in the prompt dock.
+				this.onboardingFlowAbort?.abort();
 				dismiss();
 				settle(undefined);
 			};
@@ -8991,7 +9012,7 @@ export class InteractiveMode {
 	 * resetExtensionUI tears the whole stack down on session resets. Each
 	 * closer runs once, so a reset cannot stomp a picker opened afterwards.
 	 */
-	private showInlineAuthPanel(component: Component, options?: { heading?: string }): () => void {
+	private showInlineAuthPanel(component: Component, options?: { heading?: string }): (reason?: "reset") => void {
 		// Onboarding owns the top of the screen: mount the panel inside its block
 		// rather than down in the prompt dock.
 		const splash = this.onboardingSplash;
@@ -9000,15 +9021,22 @@ export class InteractiveMode {
 			this.ui.setFocus(component);
 			this.ui.requestRender();
 			let splashPanelClosed = false;
-			const closeSplashPanel = () => {
+			const closeSplashPanel = (reason?: "reset") => {
 				if (splashPanelClosed) return;
 				splashPanelClosed = true;
 				const index = this.inlineAuthPanelClosers.indexOf(closeSplashPanel);
 				if (index !== -1) {
 					this.inlineAuthPanelClosers.splice(index, 1);
 				}
+				// A reset unmounts the panel without its flow finishing; tell the
+				// component so the step it is awaiting settles instead of hanging.
+				if (reason === "reset" && isAbortablePanel(component)) {
+					component.abort();
+				}
 				splash.setPanel(undefined);
-				this.ui.setFocus(splash);
+				// The splash ignores keys while a panel is mounted, so focus has to
+				// land on whichever panel the pop restored, not on the block itself.
+				this.ui.setFocus(splash.getActivePanel() ?? splash);
 				this.ui.requestRender();
 			};
 			this.inlineAuthPanelClosers.push(closeSplashPanel);
@@ -9021,9 +9049,12 @@ export class InteractiveMode {
 		this.ui.setFocus(component);
 		this.ui.requestRender();
 		let closed = false;
-		const close = () => {
+		const close = (reason?: "reset") => {
 			if (closed) return;
 			closed = true;
+			if (reason === "reset" && isAbortablePanel(component)) {
+				component.abort();
+			}
 			const index = this.inlineAuthPanelClosers.indexOf(close);
 			if (index !== -1) {
 				this.inlineAuthPanelClosers.splice(index, 1);
