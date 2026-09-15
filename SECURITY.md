@@ -16,6 +16,15 @@ Include the following when possible:
 
 Do not include real API keys, tokens, personal data, or credentials in the report. Use redacted or disposable test values.
 
+## Verifying a Release
+
+Release archives are published with a `SHA256SUMS` inventory and a keyless cosign signature over that
+inventory (`SHA256SUMS.sigstore.json`), signed by this repository's release workflow. `prime-agent
+update` verifies that signature before installing anything and fails closed if it does not match.
+
+To check a download yourself, and for the full release trust model, see
+[Release Security](packages/coding-agent/docs/release-security.md).
+
 ## What to Expect
 
 Maintainers will assess the report, determine its scope, and coordinate remediation and disclosure when appropriate. Please allow time for investigation before publishing details that could put users at risk.

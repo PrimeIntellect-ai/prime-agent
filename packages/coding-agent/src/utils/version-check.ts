@@ -1,3 +1,4 @@
+import { parseDownloadBaseUrl } from "./download-url.js";
 import { getPiUserAgent } from "./pi-user-agent.js";
 
 const DEFAULT_PRIME_AGENT_DOWNLOAD_BASE_URL = "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev";
@@ -94,11 +95,14 @@ export function isNewerPackageVersion(candidateVersion: string, currentVersion: 
 	return candidateVersion.trim() !== currentVersion.trim();
 }
 
+/**
+ * The download origin. An override is validated like every other download base URL (https only, no
+ * credentials, no query or fragment) so a broken or hostile value fails here instead of producing
+ * malformed URLs downstream.
+ */
 function getPrimeAgentDownloadBaseUrl(): string {
-	return (process.env.PRIME_AGENT_DOWNLOAD_BASE_URL?.trim() || DEFAULT_PRIME_AGENT_DOWNLOAD_BASE_URL).replace(
-		/\/+$/,
-		"",
-	);
+	const override = process.env.PRIME_AGENT_DOWNLOAD_BASE_URL?.trim();
+	return parseDownloadBaseUrl(override || DEFAULT_PRIME_AGENT_DOWNLOAD_BASE_URL, "PRIME_AGENT_DOWNLOAD_BASE_URL");
 }
 
 function normalizeReleaseVersion(version: string): string {
@@ -153,14 +157,24 @@ function getReleaseManifestPath(currentVersion: string, channel?: UpdateChannel)
 		: STABLE_VERSION_MANIFEST_PATH;
 }
 
+/**
+ * Resolve a manifest-provided release location against the download origin. The manifest is
+ * fetched from that origin, so it may only name assets on the same origin: an absolute URL that
+ * points anywhere else is rejected rather than followed. Relative paths are joined with the URL API.
+ */
 function resolveReleaseUrl(baseUrl: string, pathOrUrl: string): string | undefined {
 	const trimmed = pathOrUrl.trim();
 	if (!trimmed) return undefined;
+	const base = new URL(`${baseUrl}/`);
+	let resolved: URL;
 	try {
-		return new URL(trimmed).toString();
+		resolved = new URL(trimmed, base);
 	} catch {
-		return `${baseUrl}/${trimmed.replace(/^\/+/, "")}`;
+		return undefined;
 	}
+	if (resolved.origin !== base.origin || !resolved.pathname.startsWith(base.pathname)) return undefined;
+	if (resolved.search || resolved.hash || resolved.username || resolved.password) return undefined;
+	return resolved.toString();
 }
 
 export async function getLatestPiRelease(
@@ -169,8 +183,9 @@ export async function getLatestPiRelease(
 ): Promise<LatestPiRelease | undefined> {
 	if (process.env.PI_SKIP_VERSION_CHECK || process.env.PI_OFFLINE) return undefined;
 
-	const baseUrl = options.baseUrl?.replace(/\/+$/, "") ?? getPrimeAgentDownloadBaseUrl();
-	const response = await fetch(`${baseUrl}/${getReleaseManifestPath(currentVersion, options.channel)}`, {
+	const baseUrl = options.baseUrl ? parseDownloadBaseUrl(options.baseUrl) : getPrimeAgentDownloadBaseUrl();
+	const manifestUrl = new URL(getReleaseManifestPath(currentVersion, options.channel), `${baseUrl}/`);
+	const response = await fetch(manifestUrl.toString(), {
 		headers: {
 			"User-Agent": getPiUserAgent(currentVersion),
 			accept: "application/json",

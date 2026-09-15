@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DownloadOriginError } from "../src/utils/download-url.js";
 import {
 	checkForNewPiVersion,
 	comparePackageVersions,
@@ -87,6 +88,70 @@ describe("version checks", () => {
 			packageName: "prime-agent",
 			version: "1.2.4",
 		});
+	});
+
+	it("rejects a manifest tarball on another origin", async () => {
+		const fetchMock = vi.fn(async () =>
+			Response.json({
+				package: "prime-agent",
+				tarball: "https://attacker.example/prime-agent-1.2.4.tgz",
+				version: "v1.2.4",
+			}),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		await expect(getLatestPiRelease("1.2.3")).resolves.toEqual({
+			installSpec: undefined,
+			packageName: "prime-agent",
+			version: "1.2.4",
+		});
+	});
+
+	it("rejects a manifest tarball that escapes the download prefix or carries a query", async () => {
+		for (const tarball of [
+			"../elsewhere/prime-agent.tgz",
+			"releases/v1.2.4/prime-agent-1.2.4.tgz?token=x",
+			"//attacker.example/x.tgz",
+		]) {
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => Response.json({ package: "prime-agent", tarball, version: "v1.2.4" })),
+			);
+			const release = await getLatestPiRelease("1.2.3", { baseUrl: `${defaultPrimeAgentDownloadBaseUrl}/mirror` });
+			expect(release?.installSpec, tarball).toBeUndefined();
+		}
+	});
+
+	it("accepts a same-origin absolute tarball url and builds relative ones with the url api", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () =>
+				Response.json({
+					package: "prime-agent",
+					tarball: `${defaultPrimeAgentDownloadBaseUrl}/releases/v1.2.4/prime-agent-1.2.4.tgz`,
+					version: "v1.2.4",
+				}),
+			),
+		);
+		await expect(getLatestPiRelease("1.2.3")).resolves.toMatchObject({
+			installSpec: `${defaultPrimeAgentDownloadBaseUrl}/releases/v1.2.4/prime-agent-1.2.4.tgz`,
+		});
+	});
+
+	it("refuses an insecure or malformed download base url override", async () => {
+		const fetchMock = vi.fn();
+		vi.stubGlobal("fetch", fetchMock);
+		for (const value of [
+			"http://mirror.example",
+			"https://user:pw@mirror.example",
+			"https://mirror.example/?x=1",
+			"https://mirror.example/#frag",
+		]) {
+			process.env.PRIME_AGENT_DOWNLOAD_BASE_URL = value;
+			await expect(getLatestPiRelease("1.2.3"), value).rejects.toThrow(DownloadOriginError);
+			await expect(getLatestPiRelease("1.2.3"), value).rejects.toThrow(/PRIME_AGENT_DOWNLOAD_BASE_URL/);
+		}
+		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
 	it("skips api calls when version checks are disabled", async () => {

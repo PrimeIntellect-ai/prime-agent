@@ -265,12 +265,56 @@ describe("package commands", () => {
 		}
 	});
 
+	it("refuses a forced self update when the download origin override is invalid instead of falling back to the registry", async () => {
+		const globalPrefix = join(tempDir, "global-prefix");
+		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@earendil-works", "pi-coding-agent");
+		const fakeNpmPath = join(tempDir, "fake-npm.cjs");
+		const recordPath = join(tempDir, "self-update.json");
+		mkdirSync(selfPackageDir, { recursive: true });
+		writeFileSync(
+			fakeNpmPath,
+			`const fs=require("node:fs"),path=require("node:path"),args=process.argv.slice(2),prefix=args[args.indexOf("--prefix")+1];
+if(args.includes("root")) console.log(path.join(prefix,"lib","node_modules"));
+else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
+`,
+		);
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({ npmCommand: [originalExecPath, fakeNpmPath, "--prefix", globalPrefix] }, null, 2),
+		);
+		process.env.PI_PACKAGE_DIR = selfPackageDir;
+		Object.defineProperty(process, "execPath", {
+			value: join(selfPackageDir, "dist", "cli.js"),
+			configurable: true,
+		});
+		process.env.PRIME_AGENT_DOWNLOAD_BASE_URL = "http://mirror.example/prime-agent";
+		const fetchMock = vi.fn();
+		vi.stubGlobal("fetch", fetchMock);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			await expect(runSelfUpdateInstallChild(["update", "--self", "--force"])).resolves.toBeUndefined();
+			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(stderr).toMatch(/PRIME_AGENT_DOWNLOAD_BASE_URL must use https/);
+			expect(process.exitCode).toBe(1);
+			expect(fetchMock).not.toHaveBeenCalled();
+			// The registry fallback never ran: nothing was recorded by the fake npm.
+			expect(existsSync(recordPath)).toBe(false);
+		} finally {
+			logSpy.mockRestore();
+			errorSpy.mockRestore();
+		}
+	});
+
 	it("uses global npmCommand and the release manifest install spec for forced self updates", async () => {
 		const globalPrefix = join(tempDir, "global-prefix");
 		const projectPrefix = join(tempDir, "project-prefix");
 		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@earendil-works", "pi-coding-agent");
 		const fakeNpmPath = join(tempDir, "fake-npm.cjs");
 		const recordPath = join(tempDir, "self-update.json");
+		// The manifest may only name tarballs on the origin it was fetched from.
+		process.env.PRIME_AGENT_DOWNLOAD_BASE_URL = "https://downloads.example.test/prime-agent";
 		const tarballUrl = "https://downloads.example.test/prime-agent/prime-agent-current.tgz";
 		mkdirSync(selfPackageDir, { recursive: true });
 		mkdirSync(join(projectDir, ".prime", "agent"), { recursive: true });

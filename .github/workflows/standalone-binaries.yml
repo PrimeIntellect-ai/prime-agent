@@ -1,5 +1,18 @@
 name: Standalone binaries
 
+# Compiles the four release binaries, exercises each one on its own platform with
+# no JavaScript runtime on PATH, and uploads exactly the tested archive.
+#
+# The job also holds `id-token: write`. That is NOT a release credential: a
+# keyless cosign signature minted here carries the identity
+# `<repo>/.github/workflows/standalone-binaries.yml@<ref>`, and the updater pins
+# `.github/workflows/build-binaries.yml` on main / v* tags
+# (packages/coding-agent/src/utils/release-trust.ts). The token exists so the job
+# can sign a SHA256SUMS for a TEST-ONLY binary compiled with a matching signer
+# override and run `prime-agent update` end to end against a real Sigstore
+# bundle. That binary lives under $RUNNER_TEMP and never enters the uploaded
+# artifact; scripts/check-release-workflow.mjs enforces both.
+
 on:
   workflow_call:
     inputs:
@@ -15,7 +28,16 @@ jobs:
   build:
     name: Standalone (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      # A pull request from a fork cannot mint an OIDC token, so the signed
+      # end-to-end updater test only runs for branches of this repository and
+      # for pushes; the push to main that follows a merge always runs it.
+      TEST_SIGNER: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false }}
+      TARGET_PLATFORM: ${{ matrix.platform }}
     strategy:
       fail-fast: false
       matrix:
@@ -50,6 +72,9 @@ jobs:
           version: '0.11.7'
           enable-cache: false
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
       - name: Install native development dependencies
         if: runner.os == 'Linux'
         run: |
@@ -58,7 +83,9 @@ jobs:
 
       - name: Install locked npm dependencies
         working-directory: source
-        run: npm ci
+        # The machine that compiles the shipped binary runs no dependency install
+        # scripts. Verified 2026-09-15: `npm run build:binary` needs none of them.
+        run: npm ci --ignore-scripts
 
       - name: Compile standalone application
         working-directory: source/packages/coding-agent
@@ -69,15 +96,142 @@ jobs:
         run: |
           version=$(node -p "require('./package.json').version")
           node scripts/assemble-release-archives.mjs packages/coding-agent/binaries "$RUNNER_TEMP/standalone" "$version"
-          echo "PRIME_AGENT_TEST_ARCHIVE=$RUNNER_TEMP/standalone/prime-agent-$version-${{ matrix.platform }}.tar.gz" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "RELEASE_ARCHIVE=$RUNNER_TEMP/standalone/prime-agent-$version-$TARGET_PLATFORM.tar.gz" >> "$GITHUB_ENV"
           echo "PRIME_AGENT_TEST_UV=$(command -v uv)" >> "$GITHUB_ENV"
+
+      - name: Resolve the signer identity of this job
+        if: env.TEST_SIGNER == 'true'
+        # Sign a probe and check which identity Fulcio put in the certificate.
+        # For a reusable workflow the subject is the CALLED workflow
+        # (job_workflow_ref, per GitHub's OIDC docs and sigstore/cosign#2936), so
+        # it is standalone-binaries.yml at this run's ref. If it were ever the
+        # CALLER, build-binaries.yml, this job - which runs repository code - could
+        # sign as the production release identity, so that case fails hard.
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/test-release"
+          probe="$RUNNER_TEMP/test-release/probe.txt"
+          printf 'prime-agent test signer probe %s %s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > "$probe"
+          cosign sign-blob --yes --bundle "$probe.sigstore.json" "$probe"
+          verifies() {
+            cosign verify-blob \
+              --bundle "$probe.sigstore.json" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity "$1" \
+              "$probe" >/dev/null 2>&1
+          }
+          workflow_path=.github/workflows/standalone-binaries.yml
+          caller_path=.github/workflows/build-binaries.yml
+          signer_ref=""
+          for candidate in "$GITHUB_REF" "$GITHUB_SHA"; do
+            if verifies "https://github.com/${GITHUB_REPOSITORY}/${workflow_path}@${candidate}"; then
+              signer_ref="$candidate"
+              break
+            fi
+          done
+          if [ -z "$signer_ref" ]; then
+            if verifies "https://github.com/${GITHUB_REPOSITORY}/${caller_path}@${GITHUB_REF}"; then
+              echo "::error::The certificate names the CALLER workflow ${caller_path}: this job could sign as the production release identity. Refusing to continue; move signing out of a job that runs repository code." >&2
+              exit 1
+            fi
+            echo "::error::The signing certificate names neither ${workflow_path}@${GITHUB_REF} nor ${workflow_path}@${GITHUB_SHA}." >&2
+            jq -r '.verificationMaterial.certificate.rawBytes' "$probe.sigstore.json" \
+              | base64 -d | openssl x509 -inform DER -noout -ext subjectAltName >&2 || true
+            exit 1
+          fi
+          identity="https://github.com/${GITHUB_REPOSITORY}/${workflow_path}@${signer_ref}"
+          echo "Signer identity: $identity"
+          echo "SIGNER_IDENTITY=$identity" >> "$GITHUB_ENV"
+          # An anchored regex that matches exactly this run's ref.
+          escaped_ref=$(printf '%s' "$signer_ref" | sed -e 's/[][\.^$*+?(){}|\\]/\\&/g')
+          jq -n \
+            --arg repository "https://github.com/${GITHUB_REPOSITORY}" \
+            --arg workflowPath "$workflow_path" \
+            --arg refPattern "^${escaped_ref}\$" \
+            '{
+              repositoryUri: $repository,
+              workflowRepositoryUri: $repository,
+              workflowPath: $workflowPath,
+              oidcIssuer: "https://token.actions.githubusercontent.com",
+              runnerEnvironment: "github-hosted",
+              refPattern: $refPattern
+            }' > "$RUNNER_TEMP/test-release/signer.json"
+          cat "$RUNNER_TEMP/test-release/signer.json"
+
+      - name: Compile a test-signer binary for the updater test
+        if: env.TEST_SIGNER == 'true'
+        working-directory: source
+        # This binary trusts THIS job's certificate instead of the production
+        # release signer. It is written to binaries-test-signer/, assembled into
+        # $RUNNER_TEMP/test-release, and deleted from the source tree; the
+        # uploaded artifact reads only $RUNNER_TEMP/standalone.
+        run: |
+          set -euo pipefail
+          test -f "$RELEASE_ARCHIVE"
+          node packages/coding-agent/scripts/build-binary.mjs --platform "$TARGET_PLATFORM" --test-signer-json "$RUNNER_TEMP/test-release/signer.json"
+          node scripts/assemble-release-archives.mjs packages/coding-agent/binaries-test-signer "$RUNNER_TEMP/test-release/current" "$RELEASE_VERSION"
+          node scripts/assemble-release-archives.mjs packages/coding-agent/binaries-test-signer "$RUNNER_TEMP/test-release/next" 99.0.0
+          rm -rf packages/coding-agent/binaries-test-signer
+          test -f "$RUNNER_TEMP/test-release/current/prime-agent-$RELEASE_VERSION-$TARGET_PLATFORM.tar.gz"
+          test -f "$RUNNER_TEMP/test-release/next/prime-agent-99.0.0-$TARGET_PLATFORM.tar.gz"
+          # The release archive and the test archive must differ: only the test binary carries the override.
+          if cmp -s "$RELEASE_ARCHIVE" "$RUNNER_TEMP/test-release/current/prime-agent-$RELEASE_VERSION-$TARGET_PLATFORM.tar.gz"; then
+            echo "::error::The test-signer archive is byte-identical to the release archive." >&2
+            exit 1
+          fi
+          # Nothing from the test build may sit next to the release archives.
+          test "$(find "$RUNNER_TEMP/standalone" -type f | wc -l | tr -d ' ')" -eq 3
+          ls -la "$RUNNER_TEMP/standalone" "$RUNNER_TEMP/test-release/current" "$RUNNER_TEMP/test-release/next"
+
+      - name: Sign the test archives with this job's identity
+        if: env.TEST_SIGNER == 'true'
+        run: |
+          set -euo pipefail
+          for channel in current next; do
+            sums="$RUNNER_TEMP/test-release/$channel/SHA256SUMS"
+            if command -v sha256sum >/dev/null 2>&1; then
+              (cd "$RUNNER_TEMP/test-release/$channel" && sha256sum --check SHA256SUMS)
+            else
+              (cd "$RUNNER_TEMP/test-release/$channel" && shasum -a 256 --check SHA256SUMS)
+            fi
+            cosign sign-blob --yes --bundle "$sums.sigstore.json" "$sums"
+            cosign verify-blob \
+              --bundle "$sums.sigstore.json" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity "$SIGNER_IDENTITY" \
+              "$sums"
+          done
+          {
+            echo "PRIME_AGENT_TEST_ARCHIVE=$RUNNER_TEMP/test-release/current/prime-agent-$RELEASE_VERSION-$TARGET_PLATFORM.tar.gz"
+            echo "PRIME_AGENT_TEST_SIGNATURE_BUNDLE=$RUNNER_TEMP/test-release/current/SHA256SUMS.sigstore.json"
+            echo "PRIME_AGENT_TEST_NEXT_ARCHIVE=$RUNNER_TEMP/test-release/next/prime-agent-99.0.0-$TARGET_PLATFORM.tar.gz"
+            echo "PRIME_AGENT_TEST_NEXT_SIGNATURE_BUNDLE=$RUNNER_TEMP/test-release/next/SHA256SUMS.sigstore.json"
+          } >> "$GITHUB_ENV"
 
       - name: Remove the build paths from the test machine
         run: mv "$GITHUB_WORKSPACE/source" "$RUNNER_TEMP/standalone-source"
 
       - name: Test extracted application without JavaScript runtimes on PATH
         working-directory: ${{ runner.temp }}/standalone-source/packages/coding-agent
-        run: npx tsx ../../node_modules/vitest/dist/cli.js --run test/release-signatures.test.ts test/compiled-artifact.test.ts test/native-installer.test.ts test/native-probe-timeout.test.ts
+        # Two runs on purpose. The release archive is what ships, so the artifact
+        # tests read it. The updater test needs a signature the production pin
+        # would reject, so it reads the test-signer archives and bundles instead.
+        run: |
+          set -euo pipefail
+          PRIME_AGENT_TEST_ARCHIVE="$RELEASE_ARCHIVE" \
+            npx --ignore-scripts tsx ../../node_modules/vitest/dist/cli.js --run test/release-signatures.test.ts test/compiled-artifact.test.ts test/native-probe-timeout.test.ts
+          if [ "$TEST_SIGNER" = true ]; then
+            test -f "$PRIME_AGENT_TEST_ARCHIVE"
+            test -f "$PRIME_AGENT_TEST_SIGNATURE_BUNDLE"
+            test -f "$PRIME_AGENT_TEST_NEXT_ARCHIVE"
+            test -f "$PRIME_AGENT_TEST_NEXT_SIGNATURE_BUNDLE"
+            npx --ignore-scripts tsx ../../node_modules/vitest/dist/cli.js --run test/native-installer.test.ts
+          else
+            echo "::warning::Fork pull request: no OIDC token, so the signed end-to-end updater test did not run. The push to main runs it."
+            unset PRIME_AGENT_TEST_ARCHIVE PRIME_AGENT_TEST_SIGNATURE_BUNDLE PRIME_AGENT_TEST_NEXT_ARCHIVE PRIME_AGENT_TEST_NEXT_SIGNATURE_BUNDLE
+            npx --ignore-scripts tsx ../../node_modules/vitest/dist/cli.js --run test/native-installer.test.ts
+          fi
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
