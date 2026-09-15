@@ -64,7 +64,6 @@ interface QuietZone {
 export class PrimeOnboardingSplashComponent implements Component {
 	private frame = 0;
 	private animationInterval?: ReturnType<typeof setInterval>;
-	private progressMessage?: string;
 	/** Stack, so a nested panel restores the one it covered when it closes. */
 	private panels: { panel: Component; heading?: string }[] = [];
 	/** Once a flow owns the block, the intro never comes back. */
@@ -94,11 +93,6 @@ export class PrimeOnboardingSplashComponent implements Component {
 		this.animationInterval = undefined;
 	}
 
-	showProgress(message: string): void {
-		this.progressMessage = message;
-		this.options.requestRender?.();
-	}
-
 	/**
 	 * Mount a flow panel (a provider login, a question) inside the block, under
 	 * the welcome line. Panels nest: a selector opened on top of a login dialog
@@ -115,7 +109,7 @@ export class PrimeOnboardingSplashComponent implements Component {
 	}
 
 	handleInput(keyData: string): void {
-		if (this.getActivePanel() || this.progressMessage) {
+		if (this.getActivePanel()) {
 			return;
 		}
 		const kb = getKeybindings();
@@ -133,7 +127,7 @@ export class PrimeOnboardingSplashComponent implements Component {
 		lines.push(...this.renderMarkRows(layout.fieldWidth).map((row) => this.line(safeWidth, layout.fieldLeft, row)));
 		lines.push(this.line(safeWidth, 0, ""));
 		lines.push(this.line(safeWidth, layout.contentLeft, this.renderHeadingLine()));
-		if (!this.getActivePanel() && !this.progressMessage && !this.flowStarted) {
+		if (!this.getActivePanel() && !this.flowStarted) {
 			lines.push(this.line(safeWidth, 0, ""));
 			const descriptionWidth = Math.max(1, Math.min(DESCRIPTION_WIDTH, safeWidth - layout.contentLeft));
 			DESCRIPTION_PARAGRAPHS.forEach((paragraph, index) => {
@@ -163,19 +157,12 @@ export class PrimeOnboardingSplashComponent implements Component {
 			for (const row of activePanel.render(panelWidth)) {
 				lines.push(this.line(safeWidth, panelLeft, row));
 			}
-		} else if (this.progressMessage) {
-			lines.push(this.line(safeWidth, layout.contentLeft + MARKER_WIDTH, theme.fg("muted", this.progressMessage)));
 		} else if (!this.flowStarted) {
 			lines.push(...this.renderActions(safeWidth, layout));
 		}
-		// The block owns the pane while the user is choosing: pad out the remaining
-		// rows so the prompt dock underneath stays covered. Once a flow is running
-		// (login, model preparation) the block collapses to its content so the
-		// inline auth panel can mount underneath it.
-		const rows =
-			this.progressMessage === undefined || this.getActivePanel() !== undefined
-				? this.options.getRows?.()
-				: undefined;
+		// Onboarding owns the pane from the welcome screen through the last
+		// question: pad out the remaining rows so the prompt dock stays covered.
+		const rows = this.options.getRows?.();
 		if (rows !== undefined && Number.isFinite(rows)) {
 			while (lines.length < Math.floor(rows)) {
 				lines.push(this.line(safeWidth, 0, ""));

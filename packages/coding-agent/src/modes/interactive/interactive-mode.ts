@@ -537,7 +537,6 @@ type GoalAnnouncementSnapshot = {
 type ModelFallbackWarningAction = "show" | "suppress";
 
 interface OnboardingSplashHandle {
-	showProgress(message: string): void;
 	dismiss(): void;
 }
 
@@ -8946,10 +8945,7 @@ export class InteractiveMode {
 				() => {
 					// The field keeps animating behind the flow panels; only dismissal
 					// stops it.
-					settle({
-						showProgress: (message) => selector?.showProgress(message),
-						dismiss,
-					});
+					settle({ dismiss });
 				},
 				{
 					getRows: () => this.ui.terminal.rows,

@@ -3471,7 +3471,6 @@ describe("InteractiveMode session switch command catalog", () => {
 
 describe("InteractiveMode Prime CLI onboarding", () => {
 	type OnboardingSplashHandle = {
-		showProgress(message: string): void;
 		dismiss(): void;
 	};
 	type OnboardingHarness = {
@@ -4241,7 +4240,7 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 	test("runs the sign-in flow even when Prime CLI credentials are on disk", async () => {
 		const fakeThis = createPrimeCliHarness(false);
 		const dismiss = vi.fn();
-		fakeThis.showOnboardingSplash = vi.fn(async () => ({ showProgress: vi.fn(), dismiss }));
+		fakeThis.showOnboardingSplash = vi.fn(async () => ({ dismiss }));
 		fakeThis.createAuthFlows = vi.fn(() => ({
 			runPrimeInferenceLogin: vi.fn(async () => ({
 				status: "success" as const,
@@ -4288,7 +4287,7 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 	test("ends the flow when the sign-in does not succeed", async () => {
 		const fakeThis = createPrimeCliHarness(false);
 		const dismiss = vi.fn();
-		fakeThis.showOnboardingSplash = vi.fn(async () => ({ showProgress: vi.fn(), dismiss }));
+		fakeThis.showOnboardingSplash = vi.fn(async () => ({ dismiss }));
 		fakeThis.createAuthFlows = vi.fn(() => ({
 			runPrimeInferenceLogin: vi.fn(async () => ({ status: "cancelled" as const })),
 		}));

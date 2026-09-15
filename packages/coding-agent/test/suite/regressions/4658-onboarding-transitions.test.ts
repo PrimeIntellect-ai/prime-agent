@@ -10,7 +10,6 @@ import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
 import { createHarness, type Harness } from "../harness.js";
 
 interface OnboardingSplashHandle {
-	showProgress(message: string): void;
 	dismiss(): void;
 }
 
@@ -77,7 +76,6 @@ describe("ENG-4658 onboarding transitions", () => {
 		harnesses.push(harness);
 		const order: string[] = [];
 		const splash: OnboardingSplashHandle = {
-			showProgress: (message) => order.push(`progress:${message}`),
 			dismiss: () => order.push("dismiss"),
 		};
 		const fakeThis = Object.create(InteractiveMode.prototype) as InteractiveOnboardingHarness;
