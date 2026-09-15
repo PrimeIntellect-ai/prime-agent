@@ -45,6 +45,72 @@ export const GLOBAL_VALUE_FLAGS: ReadonlySet<string> = new Set([
 /** Flags that mark the run as a one-shot prompt, so its positional is a message. */
 const PROMPT_RUN_FLAGS: ReadonlySet<string> = new Set(["--print", "-p"]);
 
+/**
+ * parseArgs-known long flags that take no separate value, so the token after
+ * them stays free. Keep in sync with the value-less branches in args.ts.
+ */
+const GLOBAL_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
+	"--help",
+	"--version",
+	"--continue",
+	"--no-session",
+	"--no-tools",
+	"--no-builtin-tools",
+	"--no-extensions",
+	"--no-skills",
+	"--no-prompt-templates",
+	"--no-themes",
+	"--no-context-files",
+	"--autonomous",
+	"--verbose",
+	"--offline",
+]);
+
+/** Value flags whose free-form text may start with a dash (args.ts). */
+const FREEFORM_VALUE_FLAGS: ReadonlySet<string> = new Set(["--goal", "--autonomous-gate"]);
+
+/** Value flags whose arbitrary prompt text may look like a long option (args.ts). */
+const PROMPT_VALUE_FLAGS: ReadonlySet<string> = new Set(["--system-prompt", "--append-system-prompt"]);
+
+/**
+ * True when parseArgs consumes the token after args[index] as part of the flag
+ * at args[index], so that token never becomes free for command routing.
+ * Mirrors args.ts exactly: `--` is never a value and stays an end-of-options
+ * marker; value flags take the next token unless it is option-like (free-form
+ * values only reject `--`-prefixed ones, prompt text accepts anything);
+ * --resume/-r take a selector only when it is neither option-like nor an
+ * @file reference; --print/-p take a message unless it is option-like text
+ * other than a `---` word or an @file reference; unknown long options take
+ * the following token as their value, while known boolean flags, `=`-attached
+ * values, and unknown short options take none.
+ */
+function consumesFollowingToken(args: readonly string[], index: number): boolean {
+	const next = args[index + 1];
+	if (next === undefined || next === "--") {
+		return false;
+	}
+	const arg = args[index]!;
+	if (GLOBAL_VALUE_FLAGS.has(arg)) {
+		if (PROMPT_VALUE_FLAGS.has(arg)) {
+			return true;
+		}
+		return FREEFORM_VALUE_FLAGS.has(arg) ? !next.startsWith("--") : !next.startsWith("-");
+	}
+	if (arg === "--resume" || arg === "-r") {
+		return !next.startsWith("-") && !next.startsWith("@");
+	}
+	if (arg === "--print" || arg === "-p") {
+		return !next.startsWith("@") && (!next.startsWith("-") || next.startsWith("---"));
+	}
+	return (
+		arg.startsWith("--") &&
+		!arg.includes("=") &&
+		!GLOBAL_BOOLEAN_FLAGS.has(arg) &&
+		!next.startsWith("-") &&
+		!next.startsWith("@")
+	);
+}
+
 export interface FirstPositionalArgument {
 	index: number;
 	value: string;
@@ -52,7 +118,11 @@ export interface FirstPositionalArgument {
 	afterSeparator: boolean;
 }
 
-/** Find the first positional argument, skipping global flags and their values. */
+/**
+ * Find the first positional argument, skipping global flags exactly the way
+ * parseArgs skips them: flags whose value parseArgs consumes never free that
+ * value for command routing, unknown long options included.
+ */
 export function findFirstPositionalArgument(args: readonly string[]): FirstPositionalArgument | undefined {
 	for (let index = 0; index < args.length; index++) {
 		const arg = args[index]!;
@@ -60,19 +130,13 @@ export function findFirstPositionalArgument(args: readonly string[]): FirstPosit
 			const value = args[index + 1];
 			return value === undefined ? undefined : { index: index + 1, value, afterSeparator: true };
 		}
-		if (GLOBAL_VALUE_FLAGS.has(arg)) {
-			index++;
-			continue;
-		}
-		if (arg === "--resume" || arg === "-r") {
-			if (args[index + 1] && !args[index + 1]!.startsWith("-")) {
+		if (arg.startsWith("-")) {
+			if (consumesFollowingToken(args, index)) {
 				index++;
 			}
 			continue;
 		}
-		if (!arg.startsWith("-")) {
-			return { index, value: arg, afterSeparator: false };
-		}
+		return { index, value: arg, afterSeparator: false };
 	}
 	return undefined;
 }
@@ -114,10 +178,13 @@ export function rotateGlobalFlagsBeforeCommand(args: readonly string[]): string[
 /**
  * The command path a `help` request names, with global run flags (and their
  * values) excluded: they are run options, not help arguments, so
- * `prime-agent --offline help status` asks about `status`. Returns undefined
- * when the tail contains `--` (everything behind it stays literal message
- * text) or an explicit --help/-h flag with no topic yet (the generic
- * per-command help path handles those).
+ * `prime-agent --offline help status` asks about `status`. Flag values
+ * parseArgs consumes are excluded the same way, so `help --resume status`
+ * asks about nothing (status is the resume selector) and `help --print hi`
+ * asks about nothing (hi is the print message). Returns undefined when the
+ * tail contains `--` (everything behind it stays literal message text) or
+ * an explicit --help/-h flag with no topic yet (the generic per-command help
+ * path handles those).
  */
 export function extractHelpCommandPath(args: readonly string[], from: number): string[] | undefined {
 	const path: string[] = [];
@@ -132,11 +199,10 @@ export function extractHelpCommandPath(args: readonly string[], from: number): s
 			// `help --help` keeps asking about help itself.
 			return path.length > 0 ? path : undefined;
 		}
-		if (GLOBAL_VALUE_FLAGS.has(arg)) {
-			index++;
-			continue;
-		}
 		if (arg.startsWith("-")) {
+			if (consumesFollowingToken(args, index)) {
+				index++;
+			}
 			continue;
 		}
 		path.push(arg);

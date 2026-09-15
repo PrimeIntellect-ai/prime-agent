@@ -220,6 +220,9 @@ describe("shouldStartDaemonEarly", () => {
 		["escaped command word", ["--", "status"]],
 		["print with a command word", ["--print", "status"]],
 		["prompt that only starts like a command", ["--offline", "statuses", "of", "my", "agents"]],
+		["extension flag with a command-like value", ["--extension-option", "status"]],
+		["value flag before a -- separator", ["--cwd", "--", "status"]],
+		["resume selector that is an @file reference", ["--resume", "@prompt.md", "status"]],
 	])("starts early for the %s client", (_label, args) => {
 		expect(shouldStartDaemonEarly(args, false)).toBe(true);
 	});
@@ -234,6 +237,9 @@ describe("shouldStartDaemonEarly", () => {
 		["help after global flags", ["--offline", "help"]],
 		["nested help after global flags", ["--offline", "help", "status"]],
 		["help before global flags", ["help", "--verbose"]],
+		["boolean run flag before the command", ["--verbose", "model", "list"]],
+		["unknown short option before the command", ["-x", "model", "list"]],
+		["inline extension flag before the command", ["--extension-option=status", "model", "list"]],
 		["startup benchmark", []],
 	])("does not start early for %s", (label, args) => {
 		expect(shouldStartDaemonEarly(args, label === "startup benchmark")).toBe(false);
