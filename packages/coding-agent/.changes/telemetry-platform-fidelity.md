@@ -1,0 +1,1 @@
+- Usage analytics now report `libc`, `libc_version`, `cpu_baseline`, `os_release`, and `os_product_version` so musl and non-AVX2 coverage is measurable before the standalone-Node install path is retired; every probe is memoized, non-identifying, and falls back to `unknown` on failure.
