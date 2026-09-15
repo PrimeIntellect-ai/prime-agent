@@ -1052,6 +1052,7 @@ exec /bin/${operation} "$@"
 			const archive = process.env.PRIME_AGENT_TEST_ARCHIVE!;
 			const name = basename(archive);
 			const version = name.slice("prime-agent-".length, -`-${platform}.tar.gz`.length);
+			const manifestPath = /-beta(?:\.|$)/.test(version) ? "/beta.json" : "/latest.json";
 			feed.set(`/releases/v${version}/${name}`, readFileSync(archive));
 			feed.set(`/releases/v${version}/SHA256SUMS`, readFileSync(join(dirname(archive), "SHA256SUMS")));
 			const result = await install(version);
@@ -1061,7 +1062,7 @@ exec /bin/${operation} "$@"
 			).toBe(`${version}\n`);
 			const originalTarget = readlinkSync(command());
 			feed.set(
-				"/latest.json",
+				manifestPath,
 				Buffer.from(
 					JSON.stringify({
 						version,
@@ -1092,10 +1093,10 @@ exec /bin/${operation} "$@"
 			const sha256 = createHash("sha256").update(bytes).digest("hex");
 			feed.set(`/releases/v99.0.0/${nextFile}`, bytes);
 			feed.set("/releases/v99.0.0/SHA256SUMS", Buffer.from(`${sha256}  ${nextFile}\n`));
-			feed.set(
-				"/latest.json",
-				Buffer.from(JSON.stringify({ version: "v99.0.0", binaries: [{ platform, file: nextFile, sha256 }] })),
+			const nextManifest = Buffer.from(
+				JSON.stringify({ version: "v99.0.0", binaries: [{ platform, file: nextFile, sha256 }] }),
 			);
+			feed.set(manifestPath, nextManifest);
 			mkdirSync(join(home, "agent"), { recursive: true });
 			writeFileSync(join(home, "agent/auth.json"), "{}\n");
 			writeFileSync(
@@ -1126,6 +1127,9 @@ exec /bin/${operation} "$@"
 			expect((await run(command(), ["--version"])).output).toBe("99.0.0\n");
 			expect(await daemonExecutable()).toBe(realpathSync(command()));
 			expect(readlinkSync(join(dirname(command()), "previous"))).toBe(previous);
+			// Update discovery follows the now-active stable version, not the original archive's channel.
+			feed.delete(manifestPath);
+			feed.set("/latest.json", nextManifest);
 			const unchanged = await run(command(), ["update"]);
 			expect(unchanged.code, unchanged.output).toBe(0);
 			expect(unchanged.output).toContain("already up to date");

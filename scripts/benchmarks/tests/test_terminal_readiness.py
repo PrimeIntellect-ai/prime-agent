@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 import pexpect
 
 from terminal import MAX_PENDING_INPUT, PROBE_INTERVAL, Display, Terminal
+from ui import input_ready
 
 
 class Clock:
@@ -126,6 +127,44 @@ class ReadinessTests(unittest.TestCase):
         # Different deterministic generations let the tests detect stale/buffered probes.
         patch("terminal.secrets.token_hex", side_effect=(f"{i:08x}" for i in range(1000))).start()
         return terminal, child, clock
+
+    def test_until_pumps_until_the_display_matches(self):
+        terminal, editor, clock = self.launch()
+        editor.schedule(clock.now + 0.03, "target")
+        terminal.until(lambda display: "target" in display.text(), 0.1)
+        self.assertIn("target", terminal.display.text())
+
+    def test_until_times_out_when_the_display_never_matches(self):
+        terminal, _, clock = self.launch()
+        with self.assertRaisesRegex(TimeoutError, "terminal display"):
+            terminal.until(lambda display: "missing" in display.text(), 0.1)
+        self.assertLess(clock.now - 4.0, 0.11)
+
+    def test_until_output_ignores_matching_text_already_on_screen(self):
+        terminal, editor, clock = self.launch()
+        terminal.display.feed("agents view")
+        editor.schedule(clock.now + 0.03, "fresh agents view")
+        terminal.until_output(lambda output: "fresh agents view" in output, 0.1)
+        self.assertIn("fresh agents view", terminal.display.text())
+
+    def test_transcript_readiness_uses_real_terminal_and_excludes_cleanup(self):
+        terminal, editor, clock = self.launch(label="target-tail", accept_after=0.1, cleanup_delay=0.2)
+        ready_at = input_ready(terminal, "target-tail", timeout=1)
+        self.assertLess(ready_at - editor.start, 0.15)
+        self.assertGreater(clock.now - ready_at, 0.19)
+        self.assertEqual(editor.editor, "")
+
+    def test_transcript_tail_is_required_before_editor_probe(self):
+        terminal, editor, _ = self.launch(label="other-tail")
+        with self.assertRaisesRegex(TimeoutError, "expected terminal state"):
+            input_ready(terminal, "target-tail", timeout=0.1)
+        self.assertEqual(editor.sent, [])
+
+    def test_until_does_not_accept_a_partial_synchronized_frame(self):
+        terminal, editor, clock = self.launch(label="\x1b[?2026htarget-tail")
+        editor.schedule(clock.now + 0.1, "\x1b[?2026l")
+        terminal.until(lambda display: "target-tail" in display.text(), 1)
+        self.assertGreaterEqual(clock.now - editor.start, 0.1)
 
     def test_changed_absent_and_stale_labels_do_not_gate_input(self):
         for label in ("agents/resume", "manage", "sessions / continue", "", "benchready"):
@@ -429,6 +468,13 @@ class RealPTYReadinessTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("close stopped child", result.stdout)
+
+    def test_real_pty_transcript_and_editor_readiness(self):
+        terminal = self.launch()
+        ready_at = input_ready(terminal, "changed startup header", timeout=3)
+        self.assertGreater(ready_at - terminal.started, 0.35)
+        self.assertIn("begin typing here", terminal.display.text())
+        self.assertNotIn("RuntimeError", "".join(terminal.raw))
 
     def test_real_pty_delayed_raw_mode_and_input_handler(self):
         terminal = self.launch()

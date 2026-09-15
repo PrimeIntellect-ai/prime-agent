@@ -55,6 +55,7 @@ import {
 	DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
 	formatAgentSessionNameUnavailable,
 	isAgentSessionMessage,
+	isAgentSessionMessageId,
 	isAgentSessionMessagePrompt,
 	normalizeAgentSessionMessage,
 	parseAgentSessionMessagePromptId,
@@ -159,6 +160,7 @@ import {
 	GOAL_CONTEXT_PREVIEW_LABEL,
 	GOAL_SKILL_NAME,
 	GOAL_STATE_CUSTOM_TYPE,
+	type GoalContextDetails,
 	type GoalHostResponse,
 	type GoalState,
 	type GoalStatus,
@@ -230,7 +232,9 @@ import {
 	getGlobalHarnessStateDir,
 	getLocalHarnessStateDir,
 	getRefinementHistory,
+	type HarnessQueryTerms,
 	type HarnessState,
+	harnessQueryTerms,
 	inferRefinementResultScope,
 	loadGlobalRefinementHistory,
 	loadHarnessState,
@@ -258,6 +262,8 @@ import {
 	createRlmListSubagentsHostHandler,
 	createRlmRunHostHandler,
 	findRlmModelMatches,
+	findUniqueRlmShortFormModelMatch,
+	formatRlmModelUnavailableError,
 	normalizeRequestedRlmSubagentModel,
 	normalizeRequestedRlmSubagentSessionName,
 	normalizeRequestedRlmSubagentThinkingLevel,
@@ -290,6 +296,8 @@ import {
 	queuedMessageLaneDeliveryPolicy,
 	type RuntimeActivity,
 	type SessionAction,
+	type SessionActionPlacement,
+	type SessionActionPriority,
 	type SessionActionSnapshot,
 	type SessionCommandPayload,
 	type SessionTurnPayload,
@@ -590,6 +598,8 @@ export interface PromptOptions {
 	agentMessageId?: string;
 	content?: (TextContent | ImageContent)[];
 	customMessage?: CustomMessage;
+	/** Overrides the queue priority inferred from the source and message. */
+	priority?: SessionActionPriority;
 }
 
 interface InternalPromptOptions extends PromptOptions {
@@ -750,6 +760,7 @@ export interface SessionActionRecoveryAction {
 	source: InputSource | "internal";
 	delivery: DeliveryPolicy;
 	wake: WakePolicy;
+	priority?: SessionActionPriority;
 	payload: SessionActionRecoveryPayload;
 	queueKey?: string;
 	agentMessageId?: string;
@@ -774,6 +785,25 @@ function cloneQueuedAgentMessage(message: QueuedAgentMessage): QueuedAgentMessag
 		...message,
 		content: Array.isArray(message.content) ? message.content.map((block) => ({ ...block })) : message.content,
 	};
+}
+
+function isHumanInputSource(source: InputSource | "internal"): boolean {
+	return source === "interactive" || source === "rpc";
+}
+
+/**
+ * Only input a person submits outranks the rest of the queue. Agent-to-agent prompts carry an
+ * agent message id, and every machine-generated turn (bash completions, heartbeats, continuations,
+ * restored internal input) is either a custom message or admitted from a non-human source. Ids
+ * callers mint to await their own prompt are not agent traffic and keep human priority.
+ */
+function sessionActionPriorityFor(
+	humanSource: boolean,
+	message: QueuedAgentMessage | undefined,
+	agentMessageId: string | undefined,
+): SessionActionPriority {
+	if (!humanSource || isAgentSessionMessageId(agentMessageId)) return "background";
+	return message === undefined || message.role === "user" ? "user" : "background";
 }
 
 function primaryDeliveryRecord(action: QueuedSessionAction): DeliveryRecord {
@@ -1555,6 +1585,7 @@ export class AgentSession {
 		this._subagentRuntimeHost = config.subagentRuntimeHost;
 		this._autonomousState = createAutonomousRuntimeState(config.autonomous, {
 			cwd: this._cwd,
+			defaultLimits: this.settingsManager.getAutonomousLimits(),
 		});
 		this._goalState = this._loadPersistedGoalState();
 		// Seed initial goal from CLI --goal flag, but only for top-level sessions
@@ -1945,8 +1976,25 @@ export class AgentSession {
 		return true;
 	}
 
-	private _reloadGoalStateFromBranch(): void {
-		this._goalState = this._loadPersistedGoalState();
+	private _reloadGoalStateFromBranch(options: { monotonicTokens?: boolean } = {}): void {
+		const previous = this._goalState;
+		const reloaded = this._loadPersistedGoalState();
+		if (options.monotonicTokens && reloaded.goalId !== undefined && reloaded.goalId === previous.goalId) {
+			// A context rebuild continues the same timeline, but the rebuilt branch's
+			// last persisted goal entry can lag the in-memory state (queue/flush
+			// races; child-usage attribution landing late). Neither the accounting
+			// counters nor an already-fired gate (budget limit, pause, completion)
+			// for the same logical goal may regress across the cold boundary. Tree
+			// navigation keeps faithful branch semantics by calling without the flag.
+			this._goalState = {
+				...previous,
+				tokensUsed: Math.max(previous.tokensUsed, reloaded.tokensUsed),
+				continuationsUsed: Math.max(previous.continuationsUsed, reloaded.continuationsUsed),
+				timeUsedSeconds: Math.max(previous.timeUsedSeconds, reloaded.timeUsedSeconds),
+			};
+		} else {
+			this._goalState = reloaded;
+		}
 		this._goalAccountingStartedAt = this._goalState.status === "active" ? Date.now() : undefined;
 		this._emitGoalUpdate();
 	}
@@ -2658,6 +2706,40 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * Queued goal continuations snapshot goal accounting at queue time, but
+	 * delivery can lag arbitrarily (a threshold compaction, admission pauses,
+	 * other queued work) while usage keeps accruing. A continuation's whole
+	 * purpose is "here is the current goal state — keep working", so stale
+	 * numbers misreport the budget and can mislead the model into stopping
+	 * early or ignoring limits. Refresh the frozen content in place at
+	 * delivery, preserving the message identity every queue/dedup marker
+	 * (post-compaction continuation tracking, threshold dedup) matches on.
+	 * Budget-limit steers are excluded: they are created immediately after the
+	 * accounting event they report, and `objective_updated` carries the
+	 * objective snapshot that was the event.
+	 */
+	private _refreshGoalContextMessageAtDelivery(message: AgentMessage): void {
+		if (message.role !== "custom" || message.customType !== GOAL_CONTEXT_CUSTOM_TYPE) return;
+		const custom = message as CustomMessage<GoalContextDetails | undefined>;
+		const details = custom.details;
+		if (details?.kind !== "continuation" || details.goalId === undefined) return;
+		if (
+			this._goalState.status !== "active" ||
+			this._goalState.goalId !== details.goalId ||
+			!this._goalState.objective
+		) {
+			return;
+		}
+		const images = Array.isArray(custom.content)
+			? custom.content.filter((block): block is ImageContent => block.type === "image")
+			: undefined;
+		const fresh = createGoalContextMessage(this._goalState, "continuation", images);
+		custom.content = fresh.content;
+		custom.details = fresh.details;
+		custom.timestamp = fresh.timestamp;
+	}
+
 	private _runOrQueueGoalContext(kind: "continuation" | "objective_updated", images?: ImageContent[]): void {
 		if (!this._goalState.objective) return;
 		this._ensureGoalRuntimeActive();
@@ -2666,6 +2748,8 @@ export class AgentSession {
 		const action = this._createPreparedTurnAction("followUp", normalized.text, normalized.images, {
 			message,
 			resumeIfIdle: true,
+			// Front insertion only holds while nothing can be admitted ahead of it.
+			priority: "pinned",
 		});
 		this._admitSessionInput(action, { front: true, wake: false });
 	}
@@ -5444,6 +5528,7 @@ export class AgentSession {
 					options?.resumeIfIdle ||
 					(options?.queueIfBusy === true && canSelectSessionAction(this._runtimeActivity())),
 				source: options?.source ?? "internal",
+				priority: options?.priority,
 				executionPolicy:
 					options?.executionPolicy ??
 					(visibleQueued ? this._turnExecutionPolicy("queued") : this._turnExecutionPolicy("injected")),
@@ -5547,6 +5632,7 @@ export class AgentSession {
 						{
 							agentMessageId: options?.agentMessageId,
 							source: isInternalPrompt ? "internal" : (options?.source ?? "interactive"),
+							priority: options?.priority,
 						},
 					);
 					const result = this._admitSessionInput(action, {
@@ -5601,6 +5687,7 @@ export class AgentSession {
 						options?.resumeIfIdle ||
 						(options?.queueIfBusy === true && canSelectSessionAction(this._runtimeActivity())),
 					source: isInternalPrompt ? "internal" : (options?.source ?? "interactive"),
+					priority: options?.priority,
 					executionPolicy: visibleQueued
 						? this._turnExecutionPolicy("queued")
 						: this._turnExecutionPolicy("directPrompt", {
@@ -5687,7 +5774,7 @@ export class AgentSession {
 
 		const command = this._extensionRunner.getCommand(commandName);
 		if (!command) return undefined;
-		const context = this._extensionRunner.createCommandContext();
+		const context = this._extensionRunner.createCommandContext(command.sourceInfo.path);
 		return Promise.resolve()
 			.then(() => command.handler(args, context))
 
@@ -5748,6 +5835,7 @@ export class AgentSession {
 			queueKey?: string;
 			agentMessageId?: string;
 			resumeIfIdle?: boolean;
+			priority?: SessionActionPriority;
 		} = {},
 	): Promise<void> {
 		const normalized = this._normalizeSubmission(text, images, {
@@ -5764,6 +5852,7 @@ export class AgentSession {
 			queueKey: options.queueKey,
 			agentMessageId: options.agentMessageId,
 			resumeIfIdle: options.resumeIfIdle,
+			priority: options.priority ?? sessionActionPriorityFor(true, undefined, options.agentMessageId),
 		});
 	}
 
@@ -5781,6 +5870,7 @@ export class AgentSession {
 			queueKey?: string;
 			agentMessageId?: string;
 			resumeIfIdle?: boolean;
+			priority?: SessionActionPriority;
 		} = {},
 	): Promise<boolean> {
 		const normalized = this._normalizeSubmission(text, images, {
@@ -5797,6 +5887,7 @@ export class AgentSession {
 			queueKey: options.queueKey,
 			agentMessageId: options.agentMessageId,
 			resumeIfIdle: options.resumeIfIdle,
+			priority: options.priority ?? sessionActionPriorityFor(true, undefined, options.agentMessageId),
 		});
 	}
 
@@ -5869,10 +5960,15 @@ export class AgentSession {
 									}
 								: {}),
 						};
+			const primaryMessage =
+				payload.kind === "turn" ? payload.records.find((record) => record.role === "primary")?.message : undefined;
 			return {
 				id: recovered.id,
 				source: recovered.source,
 				delivery: recovered.delivery,
+				priority:
+					recovered.priority ??
+					sessionActionPriorityFor(isHumanInputSource(recovered.source), primaryMessage, recovered.agentMessageId),
 				wake: recovered.wake,
 				payload,
 				lifecycle: { state: "queued" },
@@ -5908,6 +6004,7 @@ export class AgentSession {
 			this._createSessionCommandAction(text, customMessage.details.command, images, schedule, {
 				agentMessageId,
 				source: "internal",
+				priority: sessionActionPriorityFor(true, undefined, agentMessageId),
 			}),
 			{ restore: true },
 		).accepted;
@@ -5921,6 +6018,9 @@ export class AgentSession {
 			message: snapshot.customMessage,
 			prefixMessages: snapshot.prefixMessages,
 			source: "internal",
+			priority: sessionActionPriorityFor(true, snapshot.customMessage, snapshot.agentMessageId),
+			// Restored input replays the order it was admitted in.
+			preserveOrder: true,
 		});
 	}
 
@@ -6099,6 +6199,7 @@ export class AgentSession {
 			suppressAutonomousContinuation?: boolean;
 			resumeIfIdle?: boolean;
 			source?: InputSource | "internal";
+			priority?: SessionActionPriority;
 			executionPolicy?: TurnExecutionPolicy;
 			queueVisible?: boolean;
 			acceptedAgentMessage?: boolean;
@@ -6132,10 +6233,13 @@ export class AgentSession {
 			acceptedAgentMessage: options.acceptedAgentMessage ?? false,
 			acceptedBeforeCompletion: options.acceptedBeforeCompletion ?? false,
 		};
+		const source = options.source ?? "internal";
 		return {
 			id,
-			source: options.source ?? "internal",
+			source,
 			delivery: this._deliveryPolicy(schedule),
+			priority:
+				options.priority ?? sessionActionPriorityFor(isHumanInputSource(source), message, options.agentMessageId),
 			wake:
 				options.resumeIfIdle === true
 					? "immediate"
@@ -6158,12 +6262,16 @@ export class AgentSession {
 		options: {
 			agentMessageId?: string;
 			source?: InputSource | "internal";
+			priority?: SessionActionPriority;
 		} = {},
 	): QueuedSessionAction {
+		const source = options.source ?? "internal";
 		return {
 			id: randomUUID(),
-			source: options.source ?? "internal",
+			source,
 			delivery: this._deliveryPolicy(schedule),
+			priority:
+				options.priority ?? sessionActionPriorityFor(isHumanInputSource(source), undefined, options.agentMessageId),
 			wake: "immediate",
 			payload: { kind: "session_command", text, command, images },
 			lifecycle: { state: "queued" },
@@ -6203,6 +6311,7 @@ export class AgentSession {
 		options: {
 			restore?: boolean;
 			front?: boolean;
+			preserveOrder?: boolean;
 			wake?: boolean;
 			immediatelyEligible?: boolean;
 		} = {},
@@ -6242,8 +6351,12 @@ export class AgentSession {
 		const canStartImmediately =
 			options.immediatelyEligible === true &&
 			(this._actionStore.unfinishedActions().length === 0 || options.front === true);
-		if (options.front) this._actionStore.enqueueFront(action);
-		else this._actionStore.enqueue(action);
+		const placement: SessionActionPlacement = options.front
+			? "front"
+			: options.restore || options.preserveOrder
+				? "tail"
+				: "priority";
+		this._actionStore.enqueue(action, placement);
 		let disposition: "starts_when_admitted" | "queued" = "queued";
 		if (canStartImmediately && this._actionStore.selectFirst() === action) disposition = "starts_when_admitted";
 		const controller = this._actionStore.ticketFor(action);
@@ -6284,13 +6397,15 @@ export class AgentSession {
 			suppressAutonomousContinuation?: boolean;
 			resumeIfIdle?: boolean;
 			source?: InputSource | "internal";
+			priority?: SessionActionPriority;
+			preserveOrder?: boolean;
 		} = {},
 	): Promise<boolean> {
 		const action = this._createPreparedTurnAction(schedule, text, images, options);
 		if (action.suppressAutonomousContinuation) {
 			this._markAutonomousContinuationSuppressed(primaryDeliveryRecord(action).message);
 		}
-		return this._admitSessionInput(action).accepted;
+		return this._admitSessionInput(action, { preserveOrder: options.preserveOrder }).accepted;
 	}
 
 	private _runtimeActivity(): RuntimeActivity {
@@ -6553,6 +6668,12 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * Busy inputs: compaction, retry, bash, plus (for "pump") disposal,
+	 * suspension, queued-work pauses, and branch-summary mutation. Waiters
+	 * parked on this predicate rely on every clear site notifying the
+	 * session-input checkpoint waiters.
+	 */
 	private _isBusyForSessionInput(point: "preflight" | "pump"): boolean {
 		const externalBusy = this.isCompacting || this.isRetrying || this.isBashRunning;
 		if (point === "pump") {
@@ -6697,6 +6818,11 @@ export class AgentSession {
 					);
 					const firstPrimaryIndex = turns[0].payload.records.indexOf(primaryDeliveryRecord(turns[0]));
 					turns[0].payload.records.splice(firstPrimaryIndex, 0, ...contextRecords);
+					for (const action of turns) {
+						// Queued continuations must report goal accounting as of delivery,
+						// not as of queue time (see refresh rationale).
+						this._refreshGoalContextMessageAtDelivery(primaryDeliveryRecord(action).message);
+					}
 					const preparedMessages: AgentMessage[] = turns.flatMap((action) =>
 						action.payload.records.map((record) => record.message),
 					);
@@ -7239,6 +7365,7 @@ export class AgentSession {
 				id: action.id,
 				source: action.source,
 				delivery: action.delivery,
+				priority: action.priority,
 				wake: action.wake,
 				...(action.queueKey ? { queueKey: action.queueKey } : {}),
 				...(action.agentMessageId ? { agentMessageId: action.agentMessageId } : {}),
@@ -7544,7 +7671,10 @@ export class AgentSession {
 	private async _waitForIdleOrSettlement(settlement?: PostCompactionContinuationSettlement): Promise<void> {
 		while (settlement === undefined || this._postCompactionContinuationSettlement === settlement) {
 			if (this._actionStore.queuedActions().length > 0) {
-				if (this._sessionInputPumpSuspended || this._queuedWorkPauses.size > 0) {
+				// Park while the pump would refuse scheduling or selection: rescheduling
+				// a blocked pump completes on already-resolved promises, so looping here
+				// would spin on the microtask queue and starve the IO that ends the busy state.
+				if (this._isBusyForSessionInput("pump")) {
 					let wake = () => {};
 					const changed = new Promise<void>((resolve) => {
 						wake = resolve;
@@ -8768,23 +8898,59 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * Refinement passes (review and planning) run with their own prompts, so
+	 * issuing them on the session model evicts the provider's prefix-cache entry
+	 * for the session and forces a full context re-read on the next session
+	 * request. Route them to the configured auxiliary model when it is set and
+	 * usable; fall back to the session model otherwise.
+	 */
+	private async _resolveRefinementModel(): Promise<
+		{ model: Model<Api>; apiKey: string; headers?: Record<string, string> } | undefined
+	> {
+		const sessionModel = this.model;
+		if (!sessionModel) {
+			return undefined;
+		}
+		const selector = this.settingsManager.getAuxiliaryModel()?.trim().toLowerCase();
+		if (!selector || `${sessionModel.provider}/${sessionModel.id}`.toLowerCase() === selector) {
+			const { apiKey, headers, requestModel } = await this._getRequiredRequestAuth(sessionModel);
+			return { model: requestModel, apiKey, headers };
+		}
+		try {
+			const model = (await this._authenticatedRlmModels()).find(
+				(candidate) => `${candidate.provider}/${candidate.id}`.toLowerCase() === selector,
+			);
+			if (!model) {
+				throw new Error(`model "${selector}" is unavailable, unauthenticated, or expired`);
+			}
+			const { apiKey, headers, requestModel } = await this._getRequiredRequestAuth(model);
+			return { model: requestModel, apiKey, headers };
+		} catch {
+			// Error details from the auth stack can embed credential material, so only
+			// the selector is logged (CodeQL js/clear-text-logging).
+			console.warn(`Warning: auxiliaryModel "${selector}" unusable for refinement; using the session model.`);
+			const { apiKey, headers, requestModel } = await this._getRequiredRequestAuth(sessionModel);
+			return { model: requestModel, apiKey, headers };
+		}
+	}
+
 	private async _reviewAutoRefine(context: AutoRefineReviewRequest, signal?: AbortSignal): Promise<AutoRefineReview> {
 		if (this._autoRefineReviewer) {
 			return this._autoRefineReviewer(context, signal);
 		}
-		const model = this.model;
-		if (!model) {
+		const refinementModel = await this._resolveRefinementModel();
+		if (!refinementModel) {
 			return { shouldRefine: false, rationale: "No model selected." };
 		}
-		const { apiKey, headers, requestModel } = await this._getRequiredRequestAuth(model);
 		return reviewAutoRefine(
 			this.agent.state.messages,
 			this._loadMergedHarnessState(),
 			this._loadRefinementHistory(),
-			requestModel,
-			apiKey,
+			refinementModel.model,
+			refinementModel.apiKey,
 			context,
-			headers,
+			refinementModel.headers,
 			signal,
 			this.thinkingLevel,
 			providerRetryPolicy(this.settingsManager),
@@ -8802,7 +8968,47 @@ export class AgentSession {
 			includeIpythonExamples: hasIpython,
 			includeShellExamples: tools.includes("bash"),
 			includeRefineExamples: hasIpython && hasRefineSkill,
+			queryTerms: this._buildHarnessDigestQueryTerms(),
 		});
+	}
+
+	/**
+	 * Relevance signal for the harness digest: terms from the active goal
+	 * objective (strongest) and the last few user/assistant messages,
+	 * newest first. Term overlap is cheap and capped so scoring stays trivial.
+	 */
+	private _buildHarnessDigestQueryTerms(): HarnessQueryTerms {
+		const terms = new Map<string, number>();
+		const addText = (text: string | undefined, weight: number) => {
+			if (!text) return;
+			for (const raw of harnessQueryTerms(text)) {
+				if (terms.size >= 48 && !terms.has(raw)) return;
+				if (!terms.has(raw)) terms.set(raw, weight);
+			}
+		};
+		addText(this._goalState.objective, 3);
+		const recent = this.agent.state.messages
+			.filter(
+				(message): message is UserMessage | AssistantMessage =>
+					message.role === "user" || message.role === "assistant",
+			)
+			.slice(-4)
+			.reverse();
+		let recencyWeight = 2;
+		for (const message of recent) {
+			const text =
+				message.role === "assistant"
+					? readAssistantText(message)
+					: typeof message.content === "string"
+						? message.content
+						: message.content
+								.filter((block): block is TextContent => block.type === "text")
+								.map((block) => block.text)
+								.join(" ");
+			addText(text, recencyWeight);
+			recencyWeight = Math.max(1, recencyWeight - 0.5);
+		}
+		return terms;
 	}
 
 	/** Cold-boundary digest delivery: empty contexts defer to the first committed turn (untouched sessions must stay empty); non-empty contexts append only when the newest in-context digest mismatches disk. */
@@ -9023,7 +9229,10 @@ export class AgentSession {
 			throw new Error(formatNoModelSelectedMessage());
 		}
 
-		const { apiKey, headers, requestModel: model } = await this._getRequiredRequestAuth(this.model);
+		const refinementModel = await this._resolveRefinementModel();
+		if (!refinementModel) {
+			throw new Error(formatNoModelSelectedMessage());
+		}
 		const globalHarnessStateDir = getGlobalHarnessStateDir();
 		const localHarnessStateDir = this._localHarnessStateDir();
 		const requestedScope = options.global ? "global" : "local";
@@ -9085,10 +9294,10 @@ export class AgentSession {
 			this.agent.state.messages,
 			planningState,
 			history,
-			model,
-			apiKey,
+			refinementModel.model,
+			refinementModel.apiKey,
 			{ ...options, retry: providerRetryPolicy(this.settingsManager) },
-			headers,
+			refinementModel.headers,
 			signal,
 			this.thinkingLevel,
 			this.sessionId,
@@ -9995,6 +10204,7 @@ export class AgentSession {
 			extensionsResult.runtime.getExecEnv = this._execEnvProvider;
 		}
 
+		const previousRunner: ExtensionRunner | undefined = this._extensionRunner;
 		this._extensionRunner = new ExtensionRunner(
 			extensionsResult.extensions,
 			extensionsResult.runtime,
@@ -10002,6 +10212,14 @@ export class AgentSession {
 			this.sessionManager,
 			this._modelRegistry,
 		);
+		// Retire only when the extension world restarts (reload); runtime-only rebuilds adopt the timer host instead, so session_start timers survive and unload still cancels them.
+		if (previousRunner) {
+			if (previousRunner.builtFromSameExtensions(extensionsResult.extensions)) {
+				this._extensionRunner.adoptHostTimers(previousRunner);
+			} else {
+				previousRunner.retire();
+			}
+		}
 		if (this._extensionRunnerRef) {
 			this._extensionRunnerRef.current = this._extensionRunner;
 		}
@@ -11405,13 +11623,31 @@ export class AgentSession {
 
 		const normalizedReference = reference.toLowerCase();
 		if (`${parentModel.provider}/${parentModel.id}`.toLowerCase() === normalizedReference) {
+			// The parent model is in active use, so a catalog miss must not
+			// exclude it (e.g. an offline discovery refresh), but a stale or
+			// expired provider has to fail the spawn here instead of starting
+			// a child that fails its first model request.
+			const status = this._modelRegistry.getProviderAuthStatus(parentModel.provider);
+			if (status.source === "stale" || status.label === "expired") {
+				throw new Error(`Requested ${target} model "${reference}" is unavailable, unauthenticated, or expired`);
+			}
+			const auth = await this._modelRegistry.getApiKeyAndHeaders(parentModel);
+			if (!auth.ok) {
+				throw new Error(`Requested ${target} model "${reference}" failed authentication preflight`);
+			}
 			return { model: parentModel };
 		}
-		const model = (await this._authenticatedRlmModels()).find(
-			(candidate) => `${candidate.provider}/${candidate.id}`.toLowerCase() === normalizedReference,
-		);
+		const candidates = await this._authenticatedRlmModels();
+		// The parent model can be missing from the authenticated catalog (offline
+		// discovery or expired credentials) while staying selectable, so it backs
+		// the short-form lookup when the catalog has no match. Several catalog
+		// matches still leave the reference unresolved.
+		const model =
+			candidates.find(
+				(candidate) => `${candidate.provider}/${candidate.id}`.toLowerCase() === normalizedReference,
+			) ?? findUniqueRlmShortFormModelMatch(reference, candidates, parentModel);
 		if (!model) {
-			throw new Error(`Requested ${target} model "${reference}" is unavailable, unauthenticated, or expired`);
+			throw new Error(formatRlmModelUnavailableError(reference, target, candidates));
 		}
 
 		const auth = await this._modelRegistry.getApiKeyAndHeaders(model);
@@ -11453,7 +11689,12 @@ export class AgentSession {
 		let modelSelection: RlmSubagentModelSelection;
 		try {
 			if (requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(requestedSessionName, true);
-			modelSelection = await this._resolveRlmSubagentModel(requestedModel);
+			// An unpinned spawn model resolves against the persisted subagent
+			// default; an unavailable default fails the spawn instead of silently
+			// inheriting the parent model.
+			modelSelection = await this._resolveRlmSubagentModel(
+				requestedModel ?? this.settingsManager.getSubagentDefaultModel(),
+			);
 		} finally {
 			if (requestedSessionName) this._pendingRlmSubagentSessionNames.delete(requestedSessionName);
 		}
@@ -12993,8 +13234,11 @@ export class AgentSession {
 			this._mergeUnpersistedOutcomes(this.agent.state.messages);
 			this._restoreLateIpythonSentAgentMessages();
 			// Context rebuild = cold boundary: refresh the digest like resume.
+			// Summary navigation continues the same timeline (compaction), so the
+			// same goal's accounting must never regress; a plain branch move is
+			// time travel and keeps faithful branch semantics.
 			this._ensureHarnessDigestContext();
-			this._reloadGoalStateFromBranch();
+			this._reloadGoalStateFromBranch({ monotonicTokens: Boolean(summaryText) });
 			this._reloadRlmMaxDepthFromBranch();
 			this._invalidateQueuedPromptPreparation();
 
@@ -13304,9 +13548,10 @@ export class AgentSession {
 	// =========================================================================
 
 	createReplacedSessionContext(): ReplacedSessionContext {
+		// The initiating extension is not in scope here; label timers with the context kind instead.
 		const context = Object.defineProperties(
 			{},
-			Object.getOwnPropertyDescriptors(this._extensionRunner.createCommandContext()),
+			Object.getOwnPropertyDescriptors(this._extensionRunner.createCommandContext("<session-replacement>")),
 		) as ReplacedSessionContext;
 		context.sendMessage = (message, options) => this.sendCustomMessage(message, options);
 		context.sendUserMessage = (content, options) => this.sendUserMessage(content, options);

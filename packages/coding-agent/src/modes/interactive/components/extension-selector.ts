@@ -13,6 +13,7 @@ export interface ExtensionSelectorOptions {
 	tui?: TUI;
 	timeout?: number;
 	getRows?: () => number;
+	inline?: boolean;
 }
 
 const PREFERRED_VISIBLE_OPTIONS = 8;
@@ -49,6 +50,7 @@ export class ExtensionSelectorComponent extends Container {
 		compactItemRows: 1,
 	});
 	private readonly viewport: MenuViewportProvider;
+	private readonly inline: boolean;
 
 	constructor(
 		title: string,
@@ -62,6 +64,7 @@ export class ExtensionSelectorComponent extends Container {
 		this.options = options;
 		this.onSelectCallback = onSelect;
 		this.onCancelCallback = onCancel;
+		this.inline = opts?.inline === true;
 		const header = splitTitleAndDescription(title);
 		this.baseTitle = header.title;
 		this.reservedRows = OPTION_LIST_RESERVED_BASE_ROWS + header.descriptionRows;
@@ -71,6 +74,7 @@ export class ExtensionSelectorComponent extends Container {
 		this.panel = new MenuPanel({
 			title: header.title,
 			subtitle: header.description,
+			inline: this.inline,
 		});
 		this.addChild(this.panel);
 
@@ -83,9 +87,9 @@ export class ExtensionSelectorComponent extends Container {
 			);
 		}
 
-		this.listContainer = new MenuList({ compact: true });
+		this.listContainer = new MenuList({ compact: true, inline: this.inline });
 		this.panel.addChild(this.listContainer);
-		this.panel.addChild(new Spacer(1));
+		if (!this.inline) this.panel.addChild(new Spacer(1));
 		this.panel.addChild(
 			new Text(
 				rawKeyHint("↑↓", "navigate") +
@@ -128,6 +132,7 @@ export class ExtensionSelectorComponent extends Container {
 				new MenuRow({
 					primary: this.options[i] ?? "",
 					selected: isSelected,
+					inline: this.inline,
 				}),
 			);
 		}

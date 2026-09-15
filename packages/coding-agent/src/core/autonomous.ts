@@ -140,10 +140,24 @@ interface AutonomousOperationOptions {
 
 type GateFailure = AgentAutonomousGateFailure;
 
+export type AutonomousLimitDefaults = Pick<
+	AgentAutonomousConfig,
+	"maxContinuations" | "maxTurns" | "maxTokens" | "timeoutMs"
+>;
+
 export function createAutonomousRuntimeState(
 	config?: AgentAutonomousConfig,
-	_options: { cwd?: string } = {},
+	options: { cwd?: string; defaultLimits?: AutonomousLimitDefaults } = {},
 ): AutonomousRuntimeState {
+	// Settings-derived defaults sit between the built-in limits and the explicit
+	// config: explicit CLI/slash flags win, then persisted settings, then the
+	// built-in defaults.
+	const defaults: Required<AutonomousLimitDefaults> = {
+		maxContinuations: options.defaultLimits?.maxContinuations ?? DEFAULT_AUTONOMOUS_LIMITS.maxContinuations,
+		maxTurns: options.defaultLimits?.maxTurns ?? DEFAULT_AUTONOMOUS_LIMITS.maxTurns,
+		maxTokens: options.defaultLimits?.maxTokens ?? DEFAULT_AUTONOMOUS_LIMITS.maxTokens,
+		timeoutMs: options.defaultLimits?.timeoutMs ?? DEFAULT_AUTONOMOUS_LIMITS.timeoutMs,
+	};
 	const enabled = config?.enabled === true;
 	return {
 		enabled,
@@ -152,10 +166,10 @@ export function createAutonomousRuntimeState(
 		tokensUsed: 0,
 		startedAt: enabled ? Date.now() : undefined,
 		limits: {
-			maxContinuations: normalizeLimit(config?.maxContinuations, DEFAULT_AUTONOMOUS_LIMITS.maxContinuations),
-			maxTurns: normalizeLimit(config?.maxTurns, DEFAULT_AUTONOMOUS_LIMITS.maxTurns),
-			maxTokens: normalizeLimit(config?.maxTokens, DEFAULT_AUTONOMOUS_LIMITS.maxTokens),
-			timeoutMs: normalizeLimit(config?.timeoutMs, DEFAULT_AUTONOMOUS_LIMITS.timeoutMs),
+			maxContinuations: normalizeLimit(config?.maxContinuations, defaults.maxContinuations),
+			maxTurns: normalizeLimit(config?.maxTurns, defaults.maxTurns),
+			maxTokens: normalizeLimit(config?.maxTokens, defaults.maxTokens),
+			timeoutMs: normalizeLimit(config?.timeoutMs, defaults.timeoutMs),
 		},
 		continuationPrompt: config?.continuationPrompt?.trim() || DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT,
 		gates: {

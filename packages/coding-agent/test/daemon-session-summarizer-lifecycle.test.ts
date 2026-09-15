@@ -216,4 +216,39 @@ describe("DaemonSessionSummarizer lifecycle", () => {
 		summarizer.seed(state);
 		expect(state.summaryState).toEqual(persisted);
 	});
+
+	test("a session that errored before any work settles from the transcript, never the classifier", async () => {
+		vi.useFakeTimers();
+		// Every model request errored (e.g. provider 400s): no work was done, so a
+		// completed verdict would be fabricated. The real last event is the error.
+		const generate = vi.fn();
+		const onStatusChanged = vi.fn();
+		const summarizer = new DaemonSessionSummarizer(() => [], onStatusChanged, generate);
+		const state = makeState({ working: false });
+		Object.assign(state.runtime.session, {
+			messages: [
+				{ role: "user", content: "write a session marker and verify the file content" },
+				{ role: "assistant", content: [], stopReason: "error", errorMessage: "400 enable_thinking not supported" },
+			],
+		});
+
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS + 500);
+
+		// Zero work done: the classifier must not be paid to invent a verdict.
+		expect(generate).not.toHaveBeenCalled();
+		expect(state.summaryState).toMatchObject({
+			summary: "Model request failed: 400 enable_thinking not supported",
+			taskState: "error",
+			basedOnMessageCount: 2,
+		});
+		expect((state as unknown as { appendedStatuses: unknown[] }).appendedStatuses).toEqual([
+			{
+				summary: "Model request failed: 400 enable_thinking not supported",
+				taskState: "error",
+				basedOnMessageCount: 2,
+			},
+		]);
+		expect(onStatusChanged).toHaveBeenCalled();
+	});
 });

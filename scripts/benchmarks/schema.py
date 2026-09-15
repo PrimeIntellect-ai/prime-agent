@@ -27,7 +27,57 @@ Metric = Literal[
     "restore",
     "kernel_rss",
     "loaded_rss",
+    "resume_large",
+    "resume_large_cpu",
+    "switch_large",
+    "switch_large_cpu",
+    "agents_view",
+    "agents_view_cpu",
+    "agents_roster",
+    "agents_roster_cpu",
+    "agents_open",
+    "agents_open_cpu",
+    "agents_reopen",
+    "agents_reopen_cpu",
+    "subagent_open",
+    "subagent_open_cpu",
+    "parent_open",
+    "parent_open_cpu",
+    "ui_rss",
+    "scheduled_catalog",
+    "scheduled_catalog_cpu",
+    "scheduled_catalog_warm",
+    "scheduled_catalog_warm_cpu",
+    "cold_open_catalog",
+    "cold_open_catalog_cpu",
 ]
+UI_METRIC_KEYS = frozenset(
+    {
+        "resume_large",
+        "resume_large_cpu",
+        "switch_large",
+        "switch_large_cpu",
+        "agents_view",
+        "agents_view_cpu",
+        "agents_roster",
+        "agents_roster_cpu",
+        "agents_open",
+        "agents_open_cpu",
+        "agents_reopen",
+        "agents_reopen_cpu",
+        "subagent_open",
+        "subagent_open_cpu",
+        "parent_open",
+        "parent_open_cpu",
+        "ui_rss",
+        "scheduled_catalog",
+        "scheduled_catalog_cpu",
+        "scheduled_catalog_warm",
+        "scheduled_catalog_warm_cpu",
+        "cold_open_catalog",
+        "cold_open_catalog_cpu",
+    }
+)
 NonNegative = Annotated[float, Field(ge=0, le=1e15, allow_inf_nan=False)]
 ROOT = Path(__file__).resolve().parent
 UV_VERSION = "0.12.9"
@@ -46,6 +96,7 @@ class Config(StrictModel):
     trials: Annotated[int, Field(ge=3, le=50)]
     install_trials: Annotated[int, Field(ge=1, le=10)]
     failure_limit: Annotated[int, Field(ge=1, le=10)] = 2
+    ui_trials: Annotated[int, Field(ge=1, le=50)] = 3
     debounce_seconds: Annotated[int, Field(ge=0, le=300)]
     timeout_seconds: Annotated[int, Field(ge=60, le=3600)]
     ttl_minutes: Annotated[int, Field(ge=1, le=120)]
@@ -89,6 +140,7 @@ class ProcessMemory(StrictModel):
     name: Annotated[str, Field(max_length=80)]
     rss: NonNegative
     pss: NonNegative | None = None
+    cpu: NonNegative = 0.0
 
 
 class Side(StrictModel):
@@ -155,6 +207,8 @@ class Report(StrictModel):
                 expected = self.config.install_trials if metric == "install" else self.config.trials
                 if metric in ("bundle", "disk"):
                     expected = 1
+                if metric in UI_METRIC_KEYS:
+                    expected = self.config.ui_trials
                 if (
                     len(samples) > expected
                     or len({s.trial for s in samples}) != len(samples)
@@ -181,6 +235,31 @@ PHASE_METRICS: dict[str, tuple[Metric, ...]] = {
         "kernel_rss",
         "loaded_rss",
     ),
+    "ui": (
+        "resume_large",
+        "resume_large_cpu",
+        "switch_large",
+        "switch_large_cpu",
+        "agents_view",
+        "agents_view_cpu",
+        "agents_roster",
+        "agents_roster_cpu",
+        "agents_open",
+        "agents_open_cpu",
+        "agents_reopen",
+        "agents_reopen_cpu",
+        "subagent_open",
+        "subagent_open_cpu",
+        "parent_open",
+        "parent_open_cpu",
+        "ui_rss",
+        "scheduled_catalog",
+        "scheduled_catalog_cpu",
+        "scheduled_catalog_warm",
+        "scheduled_catalog_warm_cpu",
+        "cold_open_catalog",
+        "cold_open_catalog_cpu",
+    ),
 }
 
 
@@ -193,10 +272,18 @@ def trial_errors(side: Side, phase: str, trial: int) -> list[str]:
     return errors or [f"{metric}: measurement missing" for metric in metrics if not samples[metric]]
 
 
-def side_complete(side: Side, trials: int, installs: int) -> bool:
+def side_complete(side: Side, trials: int, installs: int, ui_trials: int) -> bool:
     for metrics in PHASE_METRICS.values():
         for metric in metrics:
-            count = 1 if metric in ("bundle", "disk") else installs if metric == "install" else trials
+            count = (
+                1
+                if metric in ("bundle", "disk")
+                else installs
+                if metric == "install"
+                else ui_trials
+                if metric in UI_METRIC_KEYS
+                else trials
+            )
             samples = side.metrics.get(metric, [])
             if (
                 {sample.trial for sample in samples} != set(range(count))
@@ -209,7 +296,7 @@ def side_complete(side: Side, trials: int, installs: int) -> bool:
 
 def report_complete(report: Report) -> bool:
     return not report.errors and all(
-        side_complete(side, report.config.trials, report.config.install_trials)
+        side_complete(side, report.config.trials, report.config.install_trials, report.config.ui_trials)
         for side in (report.main, report.pr_head)
     )
 

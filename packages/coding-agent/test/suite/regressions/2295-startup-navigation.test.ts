@@ -36,6 +36,7 @@ describe("back navigation during chat startup", () => {
 			updateAvailableProviderCount: vi.fn(async () => {}),
 			updateEditorBorderColor: vi.fn(),
 			updateTerminalTitle: vi.fn(),
+			refreshTopBarCost: vi.fn(),
 			setGoalAnnouncementBaseline: vi.fn(),
 			getGoalState: vi.fn(),
 			syncGoalTray: vi.fn(),

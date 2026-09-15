@@ -1,4 +1,4 @@
-import { getModels, type KnownProvider, type Model } from "@earendil-works/pi-ai";
+import { getModels, getSupportedThinkingLevels, type KnownProvider, type Model } from "@earendil-works/pi-ai";
 import { describe, expect, test, vi } from "vitest";
 import {
 	defaultModelPerProvider,
@@ -6,6 +6,7 @@ import {
 	resolveCliModel,
 	resolveModelScopeFromModels,
 } from "../src/core/model-resolver.js";
+import { getPrivatePrimeInferenceModels } from "../src/core/prime-inference-models.js";
 
 const mockModels: Model<"anthropic-messages">[] = [
 	{
@@ -293,6 +294,63 @@ describe("resolveCliModel", () => {
 		expect(result.error).toBeUndefined();
 		expect(result.model?.provider).toBe("openrouter");
 		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
+	});
+
+	test("derives unknown private Prime Inference ids from a private-route template", () => {
+		// The registry a daemon worker builds for a fresh session: bundled public
+		// catalog plus bundled private models, without the team-authorized private
+		// catalog that only loads after refreshAvailableModels().
+		const registry = {
+			getAll: () => [...getModels("prime-inference"), ...getPrivatePrimeInferenceModels()],
+		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+
+		const result = resolveCliModel({
+			cliProvider: "prime-inference",
+			cliModel: "internal/glm-5.3-fast",
+			modelRegistry: registry,
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.id).toBe("internal/glm-5.3-fast");
+		expect(result.model?.provider).toBe("prime-inference");
+		expect(result.model?.baseUrl).toBe("https://api.pinference.ai/api/v1");
+		const model = result.model as Model<"openai-completions">;
+		// The public provider default carries the zai thinking format; a private
+		// route must not inherit it (enable_thinking is a provider 400 there).
+		expect(model.compat?.thinkingFormat).toBeUndefined();
+		// The zai thinkingLevelMap would coerce thinking "off" to "low".
+		expect(getSupportedThinkingLevels(model).includes("off")).toBe(true);
+	});
+
+	test("still derives unknown public Prime Inference ids from the provider default", () => {
+		const registry = {
+			getAll: () => [...getModels("prime-inference"), ...getPrivatePrimeInferenceModels()],
+		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+
+		const result = resolveCliModel({
+			cliProvider: "prime-inference",
+			cliModel: "z-ai/glm-9",
+			modelRegistry: registry,
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.id).toBe("z-ai/glm-9");
+		expect((result.model as Model<"openai-completions">).compat?.thinkingFormat).toBe("zai");
+	});
+
+	test("keeps an unknown private Prime Inference id unresolved without a private template", () => {
+		const registry = {
+			getAll: () => getModels("prime-inference"),
+		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+
+		const result = resolveCliModel({
+			cliProvider: "prime-inference",
+			cliModel: "internal/glm-5.3-fast",
+			modelRegistry: registry,
+		});
+
+		expect(result.model).toBeUndefined();
+		expect(result.error).toContain("not found");
 	});
 });
 

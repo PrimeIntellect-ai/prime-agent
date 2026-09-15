@@ -29,6 +29,7 @@ import {
 	CombinedAutocompleteProvider,
 	type Component,
 	Container,
+	isFocusable,
 	Loader,
 	type LoaderIndicatorOptions,
 	Markdown,
@@ -150,7 +151,7 @@ import { resizeImage } from "../../utils/image-resize.js";
 import { getCwdRelativePath } from "../../utils/paths.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";
 import { ensureTool, ensureToolWithStatus, formatMissingRipgrepMessage } from "../../utils/tools-manager.js";
-import { checkForNewPiVersion } from "../../utils/version-check.js";
+import { checkForNewPiVersion, resolveUpdateChannel } from "../../utils/version-check.js";
 import type {
 	AgentConnection,
 	AgentConnectionExtensionUiRequest,
@@ -249,6 +250,7 @@ import {
 	ToolExecutionComponent,
 	type ToolExecutionDefinition,
 } from "./components/tool-execution.js";
+import { TopBar } from "./components/top-bar.js";
 import { TreeSelectorComponent } from "./components/tree-selector.js";
 import { UserMessageComponent } from "./components/user-message.js";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.js";
@@ -1049,6 +1051,7 @@ export class InteractiveMode {
 	private connectionModelsRefreshVersion = 0;
 	private connectionModelsRefreshInFlight: { version: number; promise: Promise<AgentConnectionModel[]> } | undefined;
 	private closeConfigurationMenu: (() => void) | undefined;
+	private inlineAuthPanelClosers: (() => void)[] = [];
 	private configurationModelSelection: Promise<void> | undefined;
 	private connectionState: AgentConnectionState | undefined;
 	private connectionResourceSnapshot: AgentConnectionResourceSnapshot | undefined;
@@ -1104,6 +1107,12 @@ export class InteractiveMode {
 	private customFooter: (Component & { dispose?(): void }) | undefined = undefined;
 
 	private headerContainer: Container;
+	/** Pinned fullscreen top bar identifying the chat by name while scrolling. */
+	private topBar: TopBar;
+	/** Cached session spend (USD) for the top bar, keyed to the session it was fetched for. */
+	private topBarCost: { sessionId?: string; total?: number } = {};
+	/** Stale-discard state for top bar cost refreshes (mirrors contextUsageRefresh). */
+	private topBarCostRefresh = { generation: 0, lastSuccessGeneration: 0 };
 
 	private builtInHeader: Component | undefined = undefined;
 
@@ -1152,6 +1161,14 @@ export class InteractiveMode {
 			void this.copyFullscreenSelection(text);
 		};
 		this.headerContainer = new Container();
+		this.topBar = new TopBar({
+			getChatName: () => this.getCurrentSessionName() ?? path.basename(this.getCurrentCwd()),
+			// Hide the cached spend unless it was fetched for the session now bound:
+			// a pending or failed refresh must not attribute the previous
+			// session's spend to the new chat.
+			getCostUsd: () =>
+				this.topBarCost.sessionId === this.connectionState?.sessionId ? this.topBarCost.total : undefined,
+		});
 		this.chatContainer = new Container();
 		this.shortcutGuideContainer = new Container();
 		this.pendingMessagesContainer = new Container();
@@ -1519,6 +1536,43 @@ export class InteractiveMode {
 		await this.updateAvailableProviderCount();
 	}
 
+	/**
+	 * Refresh the top bar's cached session spend from the context tree.
+	 * Results for a replaced session, or superseded by a newer successful
+	 * refresh, are discarded — mirroring refreshConnectionContextUsage.
+	 */
+	private refreshTopBarCost(): void {
+		// Partial-mode test harnesses skip the constructor, so the field
+		// initializer may be absent there; the refresh is cosmetic and must
+		// never crash a real flow on any `this`.
+		this.topBarCostRefresh ??= { generation: 0, lastSuccessGeneration: 0 };
+		const refresh = this.topBarCostRefresh;
+		const generation = ++refresh.generation;
+		const connection = this.agentConnection;
+		const sessionId = this.connectionState?.sessionId;
+		void (async () => {
+			try {
+				const tree = await connection.getContextTree();
+				const total = tree?.totalUsage?.cost?.total;
+				if (
+					typeof total !== "number" ||
+					!Number.isFinite(total) ||
+					generation < refresh.lastSuccessGeneration ||
+					this.agentConnection !== connection ||
+					this.connectionState?.sessionId !== sessionId
+				) {
+					return;
+				}
+				refresh.lastSuccessGeneration = generation;
+				this.topBarCost = { sessionId, total };
+				this.ui.requestRender();
+			} catch {
+				// Cost is cosmetic; a failed fetch keeps the previous value
+				// (the session-keyed getter still hides cross-session leaks).
+			}
+		})();
+	}
+
 	private updateTerminalTitle(): void {
 		const cwdBasename = path.basename(this.getCurrentCwd());
 		const sessionName = this.getCurrentSessionName();
@@ -1540,7 +1594,9 @@ export class InteractiveMode {
 		// `returnToAgentsView`, which is also set for direct daemon attaches that never
 		// rendered the agents view and still want the in-session fallback.)
 		const ownsGlobalStartupNotices = !this.options.agentsViewOwnsStartupNotices;
-		const newVersionPromise = ownsGlobalStartupNotices ? checkForNewPiVersion(this.version) : undefined;
+		const newVersionPromise = ownsGlobalStartupNotices
+			? checkForNewPiVersion(this.version, this.settingsManager.getUpdateChannel())
+			: undefined;
 		const packageUpdatesPromise = ownsGlobalStartupNotices
 			? checkForPackageUpdates({
 					cwd: this.getCurrentCwd(),
@@ -1842,7 +1898,9 @@ export class InteractiveMode {
 		}
 
 		splash.showProgress("Signing in to Prime Intellect...");
-		const authResult = await this.createAuthFlows().runPrimeInferenceLogin();
+		// The splash covers the whole screen, so the login panel must render as an
+		// overlay above it instead of inline behind it.
+		const authResult = await this.createAuthFlows({ overlay: true }).runPrimeInferenceLogin();
 		if (authResult.status !== "success") {
 			splash.dismiss();
 			return;
@@ -2892,6 +2950,7 @@ export class InteractiveMode {
 		await this.updateAvailableProviderCount();
 		this.updateEditorBorderColor();
 		this.updateTerminalTitle();
+		this.refreshTopBarCost();
 		this.setGoalAnnouncementBaseline(this.getGoalState());
 		this.syncGoalTray(this.getGoalState());
 		this.syncWorkingLoader();
@@ -3016,6 +3075,7 @@ export class InteractiveMode {
 			this.sideQuestionBashDiscarded = undefined;
 		}
 		this.updateTerminalTitle();
+		this.refreshTopBarCost();
 		this.setGoalAnnouncementBaseline(this.getGoalState());
 		this.syncGoalTray(this.getGoalState());
 		this.syncWorkingLoader();
@@ -3162,7 +3222,8 @@ export class InteractiveMode {
 		if (shortcuts.size === 0) return;
 
 		const localSessionHost = this.getLocalSessionHost();
-		const createContext = (): ExtensionContext => ({
+		const createContext = (ownerPath: string): ExtensionContext => ({
+			...extensionRunner.createTimerBindings(ownerPath),
 			ui: this.createExtensionUIContext(),
 			hasUI: true,
 			cwd: this.getCurrentCwd(),
@@ -3194,7 +3255,7 @@ export class InteractiveMode {
 		this.defaultEditor.onExtensionShortcut = (data: string) => {
 			for (const [shortcutStr, shortcut] of shortcuts) {
 				if (matchesKey(data, shortcutStr as KeyId)) {
-					Promise.resolve(shortcut.handler(createContext())).catch((err) => {
+					Promise.resolve(shortcut.handler(createContext(shortcut.extensionPath))).catch((err) => {
 						this.showError(`Shortcut handler error: ${err instanceof Error ? err.message : String(err)}`);
 					});
 					return true;
@@ -3521,6 +3582,12 @@ export class InteractiveMode {
 	}
 
 	private resetExtensionUI(): void {
+		// Close inline auth panels before the configuration menu so a restored
+		// menu is still torn down by the closeConfigurationMenu call below.
+		// Innermost panels close first, ending at the pre-login content.
+		for (const close of this.inlineAuthPanelClosers.splice(0).reverse()) {
+			close();
+		}
 		this.closeConfigurationMenu?.();
 		this.cancelActiveConnectionExtensionUiRequests();
 		this.closeHeartbeatManager();
@@ -3545,6 +3612,7 @@ export class InteractiveMode {
 		this.setupAutocompleteProvider();
 		this.defaultEditor.onExtensionShortcut = undefined;
 		this.updateTerminalTitle();
+		this.refreshTopBarCost();
 		this.workingMessage = undefined;
 		this.workingVisible = true;
 		this.setWorkingIndicator();
@@ -4898,6 +4966,37 @@ export class InteractiveMode {
 					await this.handleReloadCommand();
 					return;
 				}
+				if (commandName === "nightly") {
+					this.editor.setText("");
+					const nightlyArg = commandArgs?.trim().toLowerCase();
+					if (nightlyArg === "status") {
+						const channel = resolveUpdateChannel(this.version, this.settingsManager.getUpdateChannel());
+						const source = this.settingsManager.getUpdateChannel()
+							? "set in settings"
+							: "inferred from the running version";
+						this.showStatus(`Updates follow the ${channel} channel (${source}). v${this.version} installed.`);
+						return;
+					}
+					if (nightlyArg === "off" || nightlyArg === "stable") {
+						this.settingsManager.setUpdateChannel("stable");
+						this.showStatus(
+							"Updates now follow the stable channel. Run /update to install the latest stable release.",
+						);
+						return;
+					}
+					if (nightlyArg && nightlyArg !== "on") {
+						this.showError("Usage: /nightly [on|off|status]");
+						return;
+					}
+					if (this.isAgentCompacting() || this.isAgentStreaming() || this.isBashRunning()) {
+						this.showWarning("Wait for the current work to finish before updating.");
+						return;
+					}
+					// The update command owns the nightly warning, the channel switch, and the
+					// busy-session confirmation, so declining either leaves settings untouched.
+					await this.handleUpdateCommand("--self --nightly");
+					return;
+				}
 				if (commandName === "update") {
 					this.editor.setText("");
 					const updateArgs = parseCommandArgs(commandArgs);
@@ -5197,6 +5296,7 @@ export class InteractiveMode {
 					this.sessionRecap = event.recap;
 					this.patchConnectionState({ recap: event.recap });
 					this.renderRecap();
+					this.refreshTopBarCost();
 				} else if (event.type === "side_question_event") {
 					this.handleSideQuestionEvent(event.event);
 				} else if (event.type === "extension_ui_request") {
@@ -5443,6 +5543,7 @@ export class InteractiveMode {
 
 			case "session_info_changed":
 				this.updateTerminalTitle();
+				this.refreshTopBarCost();
 				this.footer.invalidate();
 				this.ui.requestRender();
 				break;
@@ -5687,6 +5788,7 @@ export class InteractiveMode {
 					this.ui.terminal.setProgress(false);
 				}
 				this.turnStartedAt = undefined;
+				this.refreshTopBarCost();
 				// Drops the loader; background subagents are shown by the tree, not the loader.
 				this.syncWorkingLoader();
 				if (this.streamingComponent) {
@@ -6082,7 +6184,9 @@ export class InteractiveMode {
 	private async openScopedAgentsView(): Promise<void> {
 		if (!this.options.returnToAgentsView) {
 			this.focusEditor();
-			this.showStatus("The agents view needs the daemon; start without --no-daemon to browse sessions");
+			this.showStatus(
+				"The agents view needs a daemon-hosted session; start normally (without --no-session) to browse sessions",
+			);
 			return;
 		}
 		await this.returnToAgentsView("scoped_agents_view");
@@ -6973,7 +7077,9 @@ export class InteractiveMode {
 
 	private async requestAgentsView(): Promise<void> {
 		if (!this.options.returnToAgentsView) {
-			this.showStatus("The agents view needs the daemon; start without --no-daemon to browse sessions");
+			this.showStatus(
+				"The agents view needs a daemon-hosted session; start normally (without --no-session) to browse sessions",
+			);
 			return;
 		}
 		await this.returnToAgentsView();
@@ -7378,6 +7484,7 @@ export class InteractiveMode {
 					this.widgetContainerBelow,
 				],
 				dock: this.promptDock,
+				pin: this.topBar,
 				mouse: this.settingsManager.getFullscreenMouse(),
 			});
 		} else {
@@ -7513,7 +7620,7 @@ export class InteractiveMode {
 
 	showError(errorMessage: string): void {
 		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Text(theme.fg("error", `Error: ${errorMessage}`), 1, 0));
+		this.chatContainer.addChild(new Text(theme.fg("error", `⚠ Error: ${errorMessage}`), 1, 0));
 		this.ui.requestRender();
 	}
 
@@ -8275,7 +8382,6 @@ export class InteractiveMode {
 							this.getCachedModelCandidates(),
 							this.connectionConfiguredProviders,
 						);
-						menu.setActiveTab("models");
 						refreshModels(true);
 					})
 					.catch((error) => {
@@ -8749,12 +8855,26 @@ export class InteractiveMode {
 		});
 	}
 
-	private createAuthFlows(): ProviderAuthFlows {
+	private createAuthFlows(options: { overlay?: boolean } = {}): ProviderAuthFlows {
+		const showAuthPanel = options.overlay
+			? (component: Component) => {
+					const handle = this.showFullPaneOverlay(component, {
+						maxContentWidth: 88,
+						suspendFullscreenMouse: true,
+					});
+					return () => {
+						handle.hide();
+						this.ui.requestRender();
+					};
+				}
+			: (component: Component) => this.showInlineAuthPanel(component);
 		return new ProviderAuthFlows({
 			ui: this.ui,
 			modelRegistry: this.modelRegistry,
 			showStatus: (message) => this.showStatus(message),
 			showError: (message) => this.showError(message),
+			showAuthPanel,
+			getAuthPanelRows: () => Math.max(1, Math.min(20, this.ui.terminal.rows - 3)),
 			getAvailableModels: () => this.getConnectionAvailableModels(),
 			onAuthChanged: async () => {
 				await this.refreshConnectionModelsAfterAuthChange();
@@ -8766,6 +8886,40 @@ export class InteractiveMode {
 				void this.maybeWarnAboutAnthropicSubscriptionAuth();
 			},
 		});
+	}
+
+	/**
+	 * Mount a provider-auth panel inline in place of the prompt area, matching
+	 * the inline pickers. Returns a callback that unmounts the panel and
+	 * restores the previous content and focus. Closers are tracked in a stack
+	 * because in-flow selectors mount on top of the login dialog;
+	 * resetExtensionUI tears the whole stack down on session resets. Each
+	 * closer runs once, so a reset cannot stomp a picker opened afterwards.
+	 */
+	private showInlineAuthPanel(component: Component): () => void {
+		const previousChildren = [...this.editorContainer.children];
+		const previousFocus = previousChildren.find((child) => isFocusable(child) && child.focused) ?? this.editor;
+		this.editorContainer.clear();
+		this.editorContainer.addChild(component);
+		this.ui.setFocus(component);
+		this.ui.requestRender();
+		let closed = false;
+		const close = () => {
+			if (closed) return;
+			closed = true;
+			const index = this.inlineAuthPanelClosers.indexOf(close);
+			if (index !== -1) {
+				this.inlineAuthPanelClosers.splice(index, 1);
+			}
+			this.editorContainer.clear();
+			for (const child of previousChildren) {
+				this.editorContainer.addChild(child);
+			}
+			this.ui.setFocus(previousFocus);
+			this.ui.requestRender();
+		};
+		this.inlineAuthPanelClosers.push(close);
+		return close;
 	}
 
 	private async prepareForModelSelectionAfterLogin(authResult: AuthenticationResult): Promise<boolean> {
@@ -9000,6 +9154,10 @@ export class InteractiveMode {
 			this.applyFullscreen(true);
 		}
 		this.ui.requestRender(true);
+
+		// The updater ran in a child process and may have persisted settings, for example the
+		// update channel, without installing anything. Pick those up before reporting.
+		await this.settingsManager.reload().catch(() => undefined);
 
 		if (selfUpdateNotAttempted) {
 			this.showStatus(`Update did not change ${APP_NAME}. Reloading resources...`);

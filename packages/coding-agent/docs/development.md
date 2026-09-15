@@ -81,3 +81,15 @@ npx tsx ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts
 ```
 
 If you create or modify a test file, run that file and iterate until it passes. Coding-agent suite regressions belong under `test/suite/regressions/` and use the suite harness and faux provider rather than live provider credentials.
+
+## Capability Evals
+
+End-to-end capability evals live under `scripts/evals/` and are not part of CI: a real-model run is a manual step with credentials in the environment. Each harness ships model-free self-tests that validate its fixtures and rubric without any model call - run them from the eval directory:
+
+```bash
+cd scripts/evals/swarm_fanout
+uv run --locked ruff check .
+uv run --locked python -m unittest discover -s tests -v
+```
+
+See `scripts/evals/README.md` for the rubric and the real-model run instructions.

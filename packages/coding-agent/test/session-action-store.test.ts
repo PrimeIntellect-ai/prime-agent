@@ -9,18 +9,24 @@ import {
 	type DeliveryPolicy,
 	type RuntimeActivity,
 	type SessionAction,
+	type SessionActionPriority,
 	transitionSessionAction,
 } from "../src/core/session-action-store.js";
 
 let nextId = 0;
 
-function turn(text: string, delivery: DeliveryPolicy = "when_run_idle"): SessionAction {
+function turn(
+	text: string,
+	delivery: DeliveryPolicy = "when_run_idle",
+	priority: SessionActionPriority = "background",
+): SessionAction {
 	const id = `action-${nextId++}`;
 	const message: UserMessage = { role: "user", content: text, timestamp: nextId };
 	return {
 		id,
 		source: "internal",
 		delivery,
+		priority,
 		wake: "external_resume",
 		payload: {
 			kind: "turn",
@@ -31,11 +37,16 @@ function turn(text: string, delivery: DeliveryPolicy = "when_run_idle"): Session
 	};
 }
 
-function command(text: string, delivery: DeliveryPolicy = "when_run_idle"): SessionAction {
+function command(
+	text: string,
+	delivery: DeliveryPolicy = "when_run_idle",
+	priority: SessionActionPriority = "background",
+): SessionAction {
 	return {
 		id: `action-${nextId++}`,
 		source: "internal",
 		delivery,
+		priority,
 		wake: "immediate",
 		payload: {
 			kind: "session_command",
@@ -115,6 +126,53 @@ describe("ActionStore selection", () => {
 		expect(store.activeActions()).toEqual([compact]);
 	});
 
+	it("queues human input ahead of background work and behind earlier human input", () => {
+		const store = new ActionStore();
+		const agentOne = turn("a1", "next_turn_boundary");
+		const agentTwo = turn("a2", "next_turn_boundary");
+		const humanOne = turn("h1", "next_turn_boundary", "user");
+		const agentThree = turn("a3", "next_turn_boundary");
+		const humanTwo = turn("h2", "next_turn_boundary", "user");
+		for (const action of [agentOne, agentTwo, humanOne, agentThree, humanTwo]) store.enqueue(action);
+
+		expect(store.queuedActions("next_turn_boundary")).toEqual([humanOne, humanTwo, agentOne, agentTwo, agentThree]);
+	});
+
+	it("never inserts ahead of an action that already left the queue", () => {
+		const store = new ActionStore();
+		const running = turn("running", "next_turn_boundary");
+		const agent = turn("a1", "next_turn_boundary");
+		store.enqueue(running);
+		store.enqueue(agent);
+		expect(store.selectFirst()).toBe(running);
+		const human = turn("h1", "next_turn_boundary", "user");
+		store.enqueue(human);
+
+		expect(store.ownedActions()).toEqual([running, human, agent]);
+	});
+
+	it("keeps pinned actions ahead of later human input", () => {
+		const store = new ActionStore();
+		const agent = turn("a1");
+		store.enqueue(agent);
+		const pinned = turn("goal context", "when_run_idle", "pinned");
+		store.enqueue(pinned, "front");
+		const human = turn("h1", "when_run_idle", "user");
+		store.enqueue(human);
+
+		expect(store.queuedActions()).toEqual([pinned, human, agent]);
+	});
+
+	it("appends restored actions verbatim", () => {
+		const store = new ActionStore();
+		const agent = turn("a1");
+		const human = turn("h1", "when_run_idle", "user");
+		store.enqueue(agent, "tail");
+		store.enqueue(human, "tail");
+
+		expect(store.queuedActions()).toEqual([agent, human]);
+	});
+
 	it("supports front insertion without changing rollback-at-original-position", () => {
 		const store = new ActionStore();
 		const selected = turn("selected");
@@ -123,7 +181,7 @@ describe("ActionStore selection", () => {
 		store.enqueue(tail);
 		expect(store.selectFirst()).toBe(selected);
 		const front = turn("goal context");
-		store.enqueueFront(front);
+		store.enqueue(front, "front");
 
 		store.rollback(selected);
 		expect(store.queuedActions()).toEqual([selected, front, tail]);

@@ -1394,6 +1394,10 @@ describe("agents view state", () => {
 		expect(buildAgentsViewRows([makeSummary({ workerState: "ready" })])[0]?.statusLabel).toBe("needs input");
 	});
 
+	test("labels an errored session with the error state, not a fabricated verdict", () => {
+		expect(buildAgentsViewRows([makeSummary({ taskState: "error" })])[0]?.statusLabel).toBe("error");
+	});
+
 	test("does not override saved session cwd when reopening inactive agents", () => {
 		const config: AgentSessionRuntimeConfig = {
 			cwd: "/tmp/dashboard",

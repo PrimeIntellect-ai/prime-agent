@@ -7,16 +7,37 @@ import {
 	readNativeInstallation,
 	readNativeRollbackInstallation,
 } from "../utils/native-installation.js";
-import { getLatestPiRelease, isNewerPackageVersion } from "../utils/version-check.js";
+import {
+	getLatestPiRelease,
+	isBaseVersionDowngrade,
+	isReleaseUpdateCandidate,
+	type UpdateChannel,
+} from "../utils/version-check.js";
+
+/** The release manifest for the requested channel could not be resolved; the installed version was kept. */
+export class NativeReleaseUnavailableError extends Error {
+	constructor(cause?: unknown) {
+		super(
+			cause instanceof Error
+				? `Could not resolve a compiled release: ${cause.message}. The installed version was kept.`
+				: "Could not resolve a compiled release. The installed version was kept.",
+			cause instanceof Error ? { cause } : undefined,
+		);
+		this.name = "NativeReleaseUnavailableError";
+	}
+}
 
 export interface NativeUpdatePlan {
 	command?: SelfUpdateCommand;
 	targetVersion: string;
+	/** Set when the channel's current release has a lower base version than the installed one; nothing is planned. */
+	refusedDowngradeTo?: string;
 }
 
 export async function getNativeUpdatePlan(options: {
 	force: boolean;
 	rollback: boolean;
+	channel?: UpdateChannel;
 	executable?: string;
 }): Promise<NativeUpdatePlan> {
 	const current = getNativeInstallationTarget(options.executable);
@@ -64,10 +85,18 @@ export async function getNativeUpdatePlan(options: {
 		version = previous.version;
 		previousTarget = relative(join(installation.root, "bin"), previous.executable);
 	} else {
-		const release = await getLatestPiRelease(current.version, { baseUrl });
+		let release: Awaited<ReturnType<typeof getLatestPiRelease>>;
+		try {
+			release = await getLatestPiRelease(current.version, { baseUrl, channel: options.channel });
+		} catch (error) {
+			// Network, timeout, and malformed-manifest failures all mean the same thing here: nothing to install.
+			throw new NativeReleaseUnavailableError(error);
+		}
 		if (!release || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(release.version))
-			throw new Error("Could not resolve a compiled release. The installed version was kept.");
-		if (active && !options.force && !isNewerPackageVersion(release.version, current.version))
+			throw new NativeReleaseUnavailableError();
+		if (active && isBaseVersionDowngrade(release.version, current.version))
+			return { targetVersion: current.version, refusedDowngradeTo: release.version };
+		if (active && !options.force && !isReleaseUpdateCandidate(release.version, current.version, options.channel))
 			return { targetVersion: current.version };
 		const artifact = release.binaries?.find((entry) => entry.platform === current.platform);
 		if (!artifact) throw new Error(`No verified compiled archive is available for ${current.platform}.`);

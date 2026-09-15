@@ -25,7 +25,7 @@ export default function (pi: ExtensionAPI) {
 
 	function stopAnimation(ctx: ExtensionContext) {
 		if (timer) {
-			clearInterval(timer);
+			ctx.clearInterval(timer);
 			timer = null;
 		}
 		frameIndex = 0;
@@ -34,7 +34,7 @@ export default function (pi: ExtensionAPI) {
 
 	function startAnimation(ctx: ExtensionContext) {
 		stopAnimation(ctx);
-		timer = setInterval(() => {
+		timer = ctx.setInterval(() => {
 			const frame = BRAILLE_FRAMES[frameIndex % BRAILLE_FRAMES.length];
 			const cwd = path.basename(process.cwd());
 			const session = pi.getSessionName();

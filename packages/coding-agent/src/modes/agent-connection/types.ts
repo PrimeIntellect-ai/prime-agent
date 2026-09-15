@@ -108,7 +108,7 @@ export interface AgentConnectionSavedSessionState {
 
 export interface AgentConnectionAgentStatus {
 	summary: string;
-	taskState?: "needs_input" | "completed";
+	taskState?: "needs_input" | "completed" | "error";
 	basedOnMessageCount: number;
 }
 

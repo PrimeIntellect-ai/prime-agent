@@ -108,6 +108,7 @@ export type RlmFindModelsHandler = (query: string, limit: number) => RlmFindMode
 const RLM_SUBAGENT_SESSION_NAME_MAX_LENGTH = 64;
 export const DEFAULT_RLM_MODEL_SEARCH_LIMIT = 8;
 export const MAX_RLM_MODEL_SEARCH_LIMIT = 20;
+const RLM_MODEL_ERROR_SUGGESTION_LIMIT = 3;
 
 export function normalizeRequestedRlmSubagentSessionName(value: unknown, operation = "rlm.spawn"): string | undefined {
 	if (value === undefined) {
@@ -212,6 +213,52 @@ export function findRlmModelMatches(query: string, models: Model<Api>[], limit: 
 			name: model.name || model.id,
 			selector,
 		}));
+}
+
+/**
+ * Models whose full selector ends with the reference, so a bare model id like
+ * "z-ai/glm-5.3" also matches "prime-inference/z-ai/glm-5.3".
+ */
+function findRlmShortFormModelMatches(reference: string, models: Model<Api>[]): Model<Api>[] {
+	const normalized = reference.trim().toLowerCase();
+	if (!normalized) return [];
+	return models.filter((model) => `${model.provider}/${model.id}`.toLowerCase().endsWith(`/${normalized}`));
+}
+
+/**
+ * The single model a short-form reference resolves to: its unique match among
+ * models, or the fallback model when no model matches. Stays undefined when
+ * several models match, so an ambiguous reference is never auto-resolved.
+ */
+export function findUniqueRlmShortFormModelMatch(
+	reference: string,
+	models: Model<Api>[],
+	fallback?: Model<Api>,
+): Model<Api> | undefined {
+	const matches = findRlmShortFormModelMatches(reference, models);
+	if (matches.length === 1) return matches[0];
+	if (matches.length === 0 && fallback && findRlmShortFormModelMatches(reference, [fallback]).length === 1) {
+		return fallback;
+	}
+	return undefined;
+}
+
+/**
+ * Rejection message for an unresolved model reference: states that the model is
+ * unavailable, unauthenticated, or expired, then the expected selector form and
+ * close matches so the user can retry with a full selector.
+ */
+export function formatRlmModelUnavailableError(reference: string, target: string, models: Model<Api>[]): string {
+	const base = `Requested ${target} model "${reference}" is unavailable, unauthenticated, or expired`;
+	const hint = `selectors use the form "provider/model-id" (e.g. "prime-inference/z-ai/glm-5.3")`;
+	const normalizedReference = normalizeModelSearchText(reference);
+	const closeMatches = normalizedReference
+		? findRlmModelMatches(reference, models, RLM_MODEL_ERROR_SUGGESTION_LIMIT).map((match) => match.selector)
+		: [];
+	if (closeMatches.length === 0) {
+		return `${base}; ${hint}`;
+	}
+	return `${base}; ${hint}; close matches: ${closeMatches.map((selector) => `"${selector}"`).join(", ")}`;
 }
 
 export function createRlmCreateSessionHostHandler(handler: RlmCreateSessionHandler): HostRequestHandler {

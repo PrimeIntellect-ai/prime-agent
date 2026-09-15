@@ -87,6 +87,18 @@ describe("Prime Inference model catalog", () => {
 		expect(live).not.toHaveProperty("headers");
 	});
 
+	test("marks anthropic models for anthropic-style cache control and leaves others untouched", () => {
+		const models =
+			buildPrimeInferenceModels(
+				[model("anthropic/claude-opus-4.8"), model("vendor/model")],
+				[entry("anthropic/claude-opus-4.8"), entry("vendor/model")],
+			) ?? [];
+		const anthropicModel = models.find((candidate) => candidate.id === "anthropic/claude-opus-4.8");
+		const vendorModel = models.find((candidate) => candidate.id === "vendor/model");
+		expect(anthropicModel?.compat?.cacheControlFormat).toBe("anthropic");
+		expect(vendorModel?.compat?.cacheControlFormat).toBeUndefined();
+	});
+
 	test("adds complete new models and skips incomplete unknown models", () => {
 		const models =
 			buildPrimeInferenceModels(

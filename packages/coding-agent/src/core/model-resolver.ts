@@ -16,6 +16,19 @@ const log = getLogger("coding-agent.model-resolver");
 
 export const PRIME_INFERENCE_DEFAULT_MODEL_ID = "z-ai/glm-5.3";
 
+/**
+ * How long a session-model restore may wait for in-flight Prime Inference
+ * catalog and private-authorization refreshes to settle before concluding
+ * that a saved model cannot be restored.
+ *
+ * Right after a daemon restart (e.g. a nightly update) the restore can run
+ * before auth storage has been picked up and before the catalog fetch has
+ * settled, which would silently substitute another provider's same-named
+ * model. The wait is bounded so a genuinely unrestorable model still falls
+ * back promptly.
+ */
+export const SESSION_MODEL_RESTORE_READINESS_TIMEOUT_MS = 5_000;
+
 /** Default model IDs for each known provider */
 export const defaultModelPerProvider: Record<KnownProvider, string> = {
 	"amazon-bedrock": "us.anthropic.claude-opus-4-6-v1",
@@ -157,6 +170,18 @@ interface ParsedModelResult {
 function buildFallbackModel(provider: string, modelId: string, availableModels: Model<Api>[]): Model<Api> | undefined {
 	const providerModels = availableModels.filter((m) => m.provider === provider);
 	if (providerModels.length === 0) return undefined;
+
+	// Daemon-created sessions (rlm.create_session) re-resolve their model from
+	// provider/id strings in a registry that has not refreshed the team-authorized
+	// private catalog, so unknown private ids reach this fallback. They must
+	// inherit a private-route template: the public provider default carries the
+	// zai thinking format, whose enable_thinking parameter the private endpoint
+	// rejects with a 400 on every request.
+	if (isPrivatePrimeInferenceModel({ provider, id: modelId })) {
+		const privateTemplate = providerModels.find((m) => isPrivatePrimeInferenceModel(m));
+		if (!privateTemplate) return undefined;
+		return { ...privateTemplate, id: modelId, name: modelId };
+	}
 
 	const defaultId = defaultModelPerProvider[provider as KnownProvider];
 	const baseModel = defaultId
@@ -576,6 +601,37 @@ export async function findInitialModel(options: {
 }
 
 /**
+ * Find a saved session model, giving in-flight catalog/auth refreshes a
+ * bounded window to settle before the lookup is allowed to fail.
+ *
+ * The fast path is a synchronous registry lookup (find +
+ * hasConfiguredAuth). Only when that fails do we refresh the registry,
+ * wait for the refreshes this call kicked off to settle (bounded by
+ * readinessTimeoutMs), and retry the lookup once. A model that still
+ * cannot be found after that returns undefined, leaving the caller to
+ * fall back to another model.
+ */
+export async function findSessionModelWithReadinessWait(
+	modelRegistry: ModelRegistry,
+	provider: string,
+	modelId: string,
+	readinessTimeoutMs: number = SESSION_MODEL_RESTORE_READINESS_TIMEOUT_MS,
+): Promise<Model<Api> | undefined> {
+	const findRestorable = (): Model<Api> | undefined => {
+		const registered = modelRegistry.find(provider, modelId);
+		return registered && modelRegistry.hasConfiguredAuth(registered) ? registered : undefined;
+	};
+
+	const direct = findRestorable();
+	if (direct) {
+		return direct;
+	}
+	await modelRegistry.refreshAvailableModels();
+	await modelRegistry.waitForPendingModelRefreshes(readinessTimeoutMs);
+	return findRestorable();
+}
+
+/**
  * Restore model from session, with fallback to available models
  */
 export async function restoreModelFromSession(
@@ -584,11 +640,24 @@ export async function restoreModelFromSession(
 	currentModel: Model<Api> | undefined,
 	shouldPrintMessages: boolean,
 	modelRegistry: ModelRegistry,
+	readinessTimeoutMs: number = SESSION_MODEL_RESTORE_READINESS_TIMEOUT_MS,
 ): Promise<{ model: Model<Api> | undefined; fallbackMessage: string | undefined }> {
-	const availableModels = await modelRegistry.refreshAvailableModels();
-	const restoredModel = availableModels.find(
+	let availableModels = await modelRegistry.refreshAvailableModels();
+	let restoredModel = availableModels.find(
 		(candidate) => candidate.provider === savedProvider && candidate.id === savedModelId,
 	);
+
+	if (!restoredModel) {
+		// refreshAvailableModels() may have resolved while the background catalog
+		// fetch or private-authorization refresh was still settling (e.g. right
+		// after a daemon restart). Wait for them, then retry the lookup once
+		// before concluding the restore failed.
+		await modelRegistry.waitForPendingModelRefreshes(readinessTimeoutMs);
+		availableModels = await modelRegistry.refreshAvailableModels();
+		restoredModel = availableModels.find(
+			(candidate) => candidate.provider === savedProvider && candidate.id === savedModelId,
+		);
+	}
 
 	if (restoredModel) {
 		if (shouldPrintMessages) {

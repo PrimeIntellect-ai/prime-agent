@@ -17,8 +17,31 @@ Edit directly or use `/settings` for common options.
 |---------|------|---------|-------------|
 | `defaultProvider` | string | - | Default provider (e.g., `"anthropic"`, `"openai"`) |
 | `defaultModel` | string | - | Default model ID |
+| `subagentDefaultModel` | string | - | Model selector (`"provider/id"`) used when `rlm.spawn` does not pin a model; unset inherits the parent model |
 | `defaultThinkingLevel` | string | `"xhigh"` | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level |
+
+`subagentDefaultModel` applies only to spawned subagents whose `rlm.spawn` call omits `model=`. An explicit `model=` per spawn always wins, and an unset setting keeps the inherit-parent behavior. If the configured default is unavailable, unauthenticated, or expired, the spawn fails with that error instead of silently falling back.
+
+### Autonomous Runs
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `autonomous.maxContinuations` | number or `"unlimited"` | `3` | Continuation budget for autonomous runs |
+| `autonomous.maxTurns` | number or `"unlimited"` | `12` | Turn budget for autonomous runs |
+| `autonomous.maxTokens` | number or `"unlimited"` | `80000` | Token budget for autonomous runs |
+| `autonomous.timeoutMs` | number or `"unlimited"` | `1800000` | Wall-clock budget in milliseconds |
+
+```json
+{
+  "autonomous": {
+    "maxContinuations": "unlimited",
+    "maxTokens": 1000000
+  }
+}
+```
+
+These are the persisted defaults for the same limits as the `--autonomous-*` CLI flags and `/autonomous on` budget flags. Set them once so every autonomous run starts with your budget instead of the built-in defaults; explicit flags on a given run still win. Invalid values are ignored per-field, falling back to the built-in defaults.
 
 #### thinkingBudgets
 

@@ -1,0 +1,16 @@
+{"ts": "2026-09-04T100:00:00Z", "user": "u5", "action": "login", "bytes": 0}
+{"ts": "2026-09-04T101:00:00Z", "user": "u1", "action": "logout", "bytes": 0}
+{"ts": "2026-09-04T102:00:00Z", "user": "u3", "action": "deploy", "bytes": 780}
+{"ts": "2026-09-04T103:00:00Z", "user": "u5", "action": "upload", "bytes": 871}
+{"ts": "2026-09-04T104:00:00Z", "user": "u1", "action": "login", "bytes": 0}
+{"ts": "2026-09-04T105:00:00Z", "user": "u3", "action": "logout", "bytes": 0}
+{"ts": "2026-09-04T106:00:00Z", "user": "u5", "action": "deploy", "bytes": 244}
+{"ts": "2026-09-04T107:00:00Z", "user": "u1", "action": "upload", "bytes": 335}
+{"ts": "2026-09-04T108:00:00Z", "user": "u3", "action": "login", "bytes": 0}
+{"ts": "2026-09-04T109:00:00Z", "user": "u5", "action": "logout", "bytes": 0}
+{"ts": "2026-09-04T110:00:00Z", "user": "u1", "action": "deploy", "bytes": 608}
+{"ts": "2026-09-04T111:00:00Z", "user": "u3", "action": "upload", "bytes": 699}
+{"ts": "2026-09-04T112:00:00Z", "user": "u5", "action": "login", "bytes": 0}
+{"ts": "2026-09-04T113:00:00Z", "user": "u1", "action": "logout", "bytes": 0}
+{"ts": "2026-09-04T114:00:00Z", "user": "u3", "action": "deploy", "bytes": 72}
+{"ts": "2026-09-04T115:00:00Z", "user": "u5", "action": "upload", "bytes": 163}

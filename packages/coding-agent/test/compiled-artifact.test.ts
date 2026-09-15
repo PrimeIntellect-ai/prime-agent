@@ -1,16 +1,20 @@
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+	closeSync,
 	copyFileSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	openSync,
 	readdirSync,
 	readFileSync,
+	readSync,
 	realpathSync,
 	rmSync,
 	symlinkSync,
 	writeFileSync,
+	writeSync,
 } from "node:fs";
 import { createServer } from "node:http2";
 import { tmpdir } from "node:os";
@@ -100,6 +104,9 @@ describe.skipIf(!archive)("extracted standalone archive", () => {
 		mkdirSync(extracted);
 		execFileSync("tar", ["-xzf", resolve(archive!), "-C", extracted]);
 		binary = join(extracted, "prime-agent");
+		if (process.platform === "darwin") {
+			execFileSync("/usr/bin/codesign", ["--verify", "--deep", "--strict", "--verbose=4", binary]);
+		}
 		const bin = join(root, "bin");
 		mkdirSync(bin);
 		for (const command of [
@@ -210,6 +217,47 @@ describe.skipIf(!archive)("extracted standalone archive", () => {
 		const help = await run(["--help"]);
 		expect(help.code, help.stderr).toBe(0);
 		expect(help.stdout).toContain("Python REPL");
+	});
+
+	it.skipIf(process.platform !== "darwin")("rejects a tampered copy without changing the verified executable", () => {
+		const originalHash = createHash("sha256").update(readFileSync(binary)).digest("hex");
+		const tampered = join(home, "tampered-prime-agent");
+		copyFileSync(binary, tampered);
+		const descriptor = openSync(tampered, "r+");
+		try {
+			const byte = Buffer.alloc(1);
+			expect(readSync(descriptor, byte, 0, 1, 4096)).toBe(1);
+			byte[0] ^= 1;
+			writeSync(descriptor, byte, 0, 1, 4096);
+		} finally {
+			closeSync(descriptor);
+		}
+		expect(() =>
+			execFileSync("/usr/bin/codesign", ["--verify", "--deep", "--strict", "--verbose=4", tampered], {
+				stdio: "pipe",
+			}),
+		).toThrow();
+		expect(createHash("sha256").update(readFileSync(binary)).digest("hex")).toBe(originalHash);
+	});
+
+	it("executes hot JavaScript in the extracted runtime, not only help/version startup", async () => {
+		const extensionPath = join(cwd, "extension.ts");
+		writeFileSync(
+			extensionPath,
+			`${readFileSync(extensionPath, "utf8")}
+const hot = new Function("value", "for (let i = 0; i < 128; i++) value = (Math.imul(value, 1664525) + 1013904223) >>> 0; return value;");
+let value = 1;
+for (let i = 0; i < 100000; i++) value = hot(value);
+writeFileSync(join(process.cwd(), "hot-runtime.json"), JSON.stringify({ value, executable: process.execPath }));
+`,
+		);
+		const result = await run([...sessionArgs(), "--no-tools", "-p", "artifact hot runtime"]);
+		expect(result.code, result.stderr).toBe(0);
+		expect(JSON.parse(readFileSync(join(cwd, "hot-runtime.json"), "utf8"))).toEqual({
+			value: 1000067073,
+			executable: binary,
+		});
+		expect(result.stdout.trim()).toBe(`artifact-ok:${"x".repeat(131072)}:complete`);
 	});
 
 	it("loads extensions and skills, flushes piped output, and starts an owned daemon", async () => {

@@ -1,0 +1,1 @@
+- Fixed codex websocket sessions repeatedly failing after a stale cached previous_response_id: the continuation chain is now connection-scoped (a reconnected connection always resends the full context), and a previous_response_not_found failure drops the cached chain and retries once with the full request body, re-anchoring on the successful response.

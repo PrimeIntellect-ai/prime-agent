@@ -142,50 +142,64 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 
 			if (transport !== "sse" && !websocketDisabledForSession) {
 				let websocketStarted = false;
-				try {
-					await processWebSocketStream(
-						resolveCodexWebSocketUrl(model.baseUrl),
-						body,
-						websocketHeaders,
-						output,
-						stream,
-						model,
-						() => {
-							websocketStarted = true;
-						},
-						options,
-					);
+				// Retry a stale previous_response_id once on a fresh connection: the
+				// failed attempt's error cleanup already dropped the cached connection
+				// entry, so the retry resends the full request body. Any further
+				// failure takes the shared error handling below.
+				let chainResetRetried = false;
+				for (;;) {
+					try {
+						await processWebSocketStream(
+							resolveCodexWebSocketUrl(model.baseUrl),
+							body,
+							websocketHeaders,
+							output,
+							stream,
+							model,
+							() => {
+								websocketStarted = true;
+							},
+							options,
+						);
 
-					if (options?.signal?.aborted) {
-						throw new Error("Request was aborted");
+						if (options?.signal?.aborted) {
+							throw new Error("Request was aborted");
+						}
+						stream.push({
+							type: "done",
+							reason: output.stopReason as "stop" | "length" | "toolUse",
+							message: output,
+						});
+						stream.end();
+						return;
+					} catch (error) {
+						const aborted = options?.signal?.aborted;
+						// Only reset the chain while nothing was streamed yet: after the
+						// first event the retry would duplicate "start"/content events.
+						if (!aborted && !websocketStarted && !chainResetRetried && isStaleCodexContinuationError(error)) {
+							chainResetRetried = true;
+							continue;
+						}
+						if (aborted || isCodexNonTransportError(error)) {
+							throw error;
+						}
+						appendAssistantMessageDiagnostic(
+							output,
+							createAssistantMessageDiagnostic("provider_transport_failure", error, {
+								configuredTransport: transport,
+								fallbackTransport: websocketStarted ? undefined : "sse",
+								eventsEmitted: websocketStarted,
+								phase: websocketStarted ? "after_message_stream_start" : "before_message_stream_start",
+								requestBytes: new TextEncoder().encode(bodyJson).byteLength,
+							}),
+						);
+						recordWebSocketFailure(options?.sessionId, error);
+						if (websocketStarted) {
+							throw error;
+						}
+						recordWebSocketSseFallback(options?.sessionId);
+						break;
 					}
-					stream.push({
-						type: "done",
-						reason: output.stopReason as "stop" | "length" | "toolUse",
-						message: output,
-					});
-					stream.end();
-					return;
-				} catch (error) {
-					const aborted = options?.signal?.aborted;
-					if (aborted || isCodexNonTransportError(error)) {
-						throw error;
-					}
-					appendAssistantMessageDiagnostic(
-						output,
-						createAssistantMessageDiagnostic("provider_transport_failure", error, {
-							configuredTransport: transport,
-							fallbackTransport: websocketStarted ? undefined : "sse",
-							eventsEmitted: websocketStarted,
-							phase: websocketStarted ? "after_message_stream_start" : "before_message_stream_start",
-							requestBytes: new TextEncoder().encode(bodyJson).byteLength,
-						}),
-					);
-					recordWebSocketFailure(options?.sessionId, error);
-					if (websocketStarted) {
-						throw error;
-					}
-					recordWebSocketSseFallback(options?.sessionId);
 				}
 			}
 
@@ -425,6 +439,16 @@ function isCodexNonTransportError(error: unknown): boolean {
 	return error instanceof CodexApiError || error instanceof CodexProtocolError;
 }
 
+const STALE_CONTINUATION_ERROR_CODE = "previous_response_not_found";
+
+/**
+ * Codex API error for a previous_response_id the server does not recognize;
+ * the request must be resent in full instead of chained.
+ */
+function isStaleCodexContinuationError(error: unknown): boolean {
+	return error instanceof CodexApiError && error.code?.toLowerCase() === STALE_CONTINUATION_ERROR_CODE;
+}
+
 async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): AsyncGenerator<ResponseStreamEvent> {
 	for await (const event of events) {
 		const type = typeof event.type === "string" ? event.type : undefined;
@@ -545,6 +569,8 @@ interface CachedWebSocketContinuationState {
 	lastRequestBody: RequestBody;
 	lastResponseId: string;
 	lastResponseItems: ResponseInput;
+	/** Connection whose server-side response state this chain is anchored to. */
+	connection: WebSocketLike;
 }
 
 interface CachedWebSocketConnection {
@@ -1051,6 +1077,13 @@ function buildCachedWebSocketRequestBody(entry: CachedWebSocketConnection, body:
 		return body;
 	}
 
+	// Continuations are anchored to the connection that produced the response;
+	// a different socket cannot resolve their previous_response_id.
+	if (continuation.connection !== entry.socket) {
+		entry.continuation = undefined;
+		return body;
+	}
+
 	const delta = getCachedWebSocketInputDelta(body, continuation);
 	if (!delta || !continuation.lastResponseId) {
 		entry.continuation = undefined;
@@ -1144,6 +1177,7 @@ async function processWebSocketStream(
 				lastRequestBody: fullBody,
 				lastResponseId: output.responseId,
 				lastResponseItems: responseItems,
+				connection: entry.socket,
 			};
 		}
 	} catch (error) {

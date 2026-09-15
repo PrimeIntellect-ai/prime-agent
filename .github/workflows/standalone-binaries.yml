@@ -2,6 +2,11 @@ name: Standalone binaries
 
 on:
   workflow_call:
+    inputs:
+      build_ref:
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -26,6 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ inputs.build_ref || github.sha }}
           persist-credentials: false
           path: source
 
@@ -71,7 +77,7 @@ jobs:
 
       - name: Test extracted application without JavaScript runtimes on PATH
         working-directory: ${{ runner.temp }}/standalone-source/packages/coding-agent
-        run: npx tsx ../../node_modules/vitest/dist/cli.js --run test/compiled-artifact.test.ts test/native-installer.test.ts test/native-probe-timeout.test.ts
+        run: npx tsx ../../node_modules/vitest/dist/cli.js --run test/release-signatures.test.ts test/compiled-artifact.test.ts test/native-installer.test.ts test/native-probe-timeout.test.ts
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -79,4 +85,5 @@ jobs:
           path: |
             ${{ runner.temp }}/standalone/*.tar.gz
             ${{ runner.temp }}/standalone/SHA256SUMS
+            ${{ runner.temp }}/standalone/binaries.json
           if-no-files-found: error

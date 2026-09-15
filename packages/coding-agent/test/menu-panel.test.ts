@@ -47,6 +47,45 @@ describe("MenuPanel", () => {
 		}
 	});
 
+	it("renders an optional top rule above inline panels", () => {
+		const createPanel = (topRule: boolean): MenuPanel => {
+			const panel = new MenuPanel({ title: "Login to Provider", inline: true, topRule });
+			panel.addChild(new StaticComponent());
+			return panel;
+		};
+
+		const withRule = createPanel(true).render(24);
+		expect(withRule[0]).toContain(theme.getFgAnsi("borderMuted"));
+		expect(stripAnsi(withRule[0] ?? "")).toBe("─".repeat(24));
+		expect(stripAnsi(withRule[1] ?? "").trim()).toBe("Login to Provider");
+		for (const line of withRule) {
+			expect(visibleWidth(line)).toBe(24);
+		}
+
+		const withoutRule = createPanel(false).render(24);
+		expect(stripAnsi(withoutRule[0] ?? "").trim()).toBe("Login to Provider");
+		expect(withoutRule.join("")).not.toContain("─");
+	});
+
+	it("renders the subtitle under the title in inline panels", () => {
+		const panel = new MenuPanel({
+			title: "Choose an account",
+			subtitle: "Sign in with the account you want to use.",
+			inline: true,
+		});
+		panel.addChild(new StaticComponent());
+
+		const lines = panel.render(60);
+		const output = lines.map((line) => stripAnsi(line));
+
+		expect(output[0]?.trim()).toBe("Choose an account");
+		expect(output[1]?.trim()).toBe("Sign in with the account you want to use.");
+		expect(output[2]?.trim()).toBe("first");
+		for (const line of lines) {
+			expect(visibleWidth(line)).toBe(60);
+		}
+	});
+
 	it("renders search fields without the shell prompt", () => {
 		const field = new MenuSearchInput("Search models");
 		const output = stripAnsi(field.render(24).join("\n"));

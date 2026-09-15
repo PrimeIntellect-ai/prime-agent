@@ -725,6 +725,7 @@ function isDaemonSavedSessionAgentStatus(value: unknown): boolean {
 		typeof candidate.basedOnMessageCount === "number" &&
 		(candidate.taskState === undefined ||
 			candidate.taskState === "needs_input" ||
-			candidate.taskState === "completed")
+			candidate.taskState === "completed" ||
+			candidate.taskState === "error")
 	);
 }

@@ -461,6 +461,7 @@ export class ModelRegistry {
 	private openAICodexModelsCache: { authFingerprint: string; modelIds: Set<string>; refreshedAt: number } | undefined;
 	private backgroundPrivatePrimeAuthorization: { fingerprint: string; promise: Promise<void> } | undefined;
 	private livePrimeInferenceModels: Model<"openai-completions">[] | undefined;
+	private pendingPrimeInferenceCatalogRefresh: Promise<void> | undefined;
 	private loadError: string | undefined = undefined;
 
 	/** Re-register dynamic OAuth providers (e.g. user MCP servers) after refresh() resets the registry. */
@@ -849,13 +850,23 @@ export class ModelRegistry {
 			this.refresh();
 			const cachePath = this.primeInferenceCatalogCachePath();
 			if (cachePath) {
-				void refreshPrimeInferenceModels(cachePath, this.bundledPrimeInferenceModels(), {
-					offline: isOfflineModeEnabled(),
-				}).then((models) => {
-					if (!models) return;
-					this.livePrimeInferenceModels = models;
-					this.reloadModelsAfterCatalogChange();
-				});
+				// Track the in-flight catalog refresh so waitForPendingModelRefreshes()
+				// can await it: session-model restore must observe the post-refresh
+				// catalog, not the pre-refresh fallback (bundled/disk snapshot).
+				this.pendingPrimeInferenceCatalogRefresh = refreshPrimeInferenceModels(
+					cachePath,
+					this.bundledPrimeInferenceModels(),
+					{
+						offline: isOfflineModeEnabled(),
+					},
+				)
+					.then((models) => {
+						if (!models) return;
+						this.livePrimeInferenceModels = models;
+						this.reloadModelsAfterCatalogChange();
+					})
+					// Settlement, not failure, is what the waiter observes.
+					.catch(() => undefined);
 			}
 			await this.refreshPrivatePrimeInferenceAuthorization(
 				previousPrivateModelIds,
@@ -864,6 +875,33 @@ export class ModelRegistry {
 			);
 			return this.getAvailable();
 		});
+	}
+
+	/**
+	 * Wait (bounded by timeoutMs) for in-flight Prime Inference catalog and
+	 * private-authorization refreshes to settle.
+	 *
+	 * refreshAvailableModels() returns while the catalog fetch and the stale-cache
+	 * authorization refresh keep running in the background, so a decision taken
+	 * right after it can still see pre-refresh state (e.g. restoring a session's
+	 * saved model on a freshly restarted daemon). Returns immediately when
+	 * nothing is pending; never waits longer than timeoutMs.
+	 */
+	async waitForPendingModelRefreshes(timeoutMs: number): Promise<void> {
+		const pending: Promise<unknown>[] = [];
+		if (this.pendingPrimeInferenceCatalogRefresh) pending.push(this.pendingPrimeInferenceCatalogRefresh);
+		if (this.backgroundPrivatePrimeAuthorization?.promise) {
+			pending.push(this.backgroundPrivatePrimeAuthorization.promise);
+		}
+		if (pending.length === 0) return;
+		await Promise.race([
+			Promise.allSettled(pending),
+			new Promise<void>((resolve) => {
+				const timer = setTimeout(resolve, timeoutMs);
+				// The bounded wait must never keep the process alive on its own.
+				if (typeof timer.unref === "function") timer.unref();
+			}),
+		]);
 	}
 
 	private entitlementRefreshChain: Promise<unknown> = Promise.resolve();

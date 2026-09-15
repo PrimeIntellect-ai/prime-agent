@@ -116,8 +116,11 @@ class FailureBudgetTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(len([c for c in calls if c[:2] == ("pr", "install")]), 2)
-            self.assertFalse(any(c[0] == "pr" and c[1] in ("measure", "runtime") for c in calls))
+            self.assertFalse(any(c[0] == "pr" and c[1] in ("measure", "runtime", "ui") for c in calls))
+            self.assertTrue(any(c[:2] == ("main", "ui") for c in calls))
             self.assertNotIn("cold", controller.report.pr_head.metrics)
+            self.assertNotIn("resume_large", controller.report.pr_head.metrics)
+            self.assertTrue(any("pr ui: skipped" in e for e in controller.report.errors))
             self.assertTrue(any("first installation" in e for e in controller.report.errors))
 
     @patch.dict(os.environ, {"PRIME_SANDBOX_API_KEY": "fake"})

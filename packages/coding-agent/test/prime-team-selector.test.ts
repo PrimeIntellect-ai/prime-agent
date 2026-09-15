@@ -27,7 +27,7 @@ describe("PrimeTeamSelectorComponent", () => {
 
 		const output = stripAnsi(selector.render(100).join("\n"));
 
-		expect(output).toContain("Prime Team");
+		expect(output).toContain("Select a Prime Team:");
 		expect(output).toContain("Personal");
 		expect(output).toContain("personal account");
 		expect(output).toContain("Research");

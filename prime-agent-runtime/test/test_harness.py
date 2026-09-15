@@ -1030,3 +1030,108 @@ class HarnessStateTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HarnessSearchTest(unittest.TestCase):
+    def test_search_ranks_relevant_entries_first(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Tea notes", "All about oolong brewing.", id="tea")
+            state.create_memory("Worktree policy", "Use git worktrees for parallel branches.", id="worktree")
+            state.create_prompt_note("RSI program", "Ship [RSI] PRs from worktrees.", id="rsi")
+
+            results = state.search("worktree branches")
+
+            self.assertTrue(results)
+            self.assertEqual(results[0].id, "worktree")
+            self.assertTrue(all(entry.id != "tea" for entry in results))
+
+    def test_search_filters_by_kind_and_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Worktree memory", "worktree workflow", id="m1")
+            state.create_prompt_note("Worktree prompt", "worktree workflow", id="p1")
+            state.create_prompt_note("Worktree prompt 2", "worktree workflow", id="p2")
+
+            prompts = state.search("worktree", kind="prompt")
+            self.assertTrue(prompts)
+            self.assertEqual({entry.kind for entry in prompts}, {"prompt"})
+
+            limited = state.search("worktree", kind="prompt", limit=1)
+            self.assertEqual(len(limited), 1)
+
+    def test_search_matches_non_ascii_queries(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Tokyo note", "東京ミーティングの議事録。", id="tokyo")
+
+            results = state.search("東京")
+            self.assertEqual([entry.id for entry in results], ["tokyo"])
+
+    def test_search_segments_whitespace_free_cjk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Login fix", "登录故障排查记录。", id="login")
+            state.create_memory("Tea notes", "All about oolong brewing.", id="tea")
+
+            results = state.search("修复登录")
+
+            self.assertEqual([entry.id for entry in results], ["login"])
+
+    def test_search_matches_supplementary_cjk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Ext B note", "𠀀𠀁 ideographs recorded.", id="extb")
+
+            self.assertEqual([entry.id for entry in state.search("𠀀")], ["extb"])
+            self.assertEqual([entry.id for entry in state.search("𠀀𠀁")], ["extb"])
+
+    def test_search_keeps_accented_latin_words_whole(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Review notes", "The naïve approach failed.", id="naive")
+
+            results = state.search("naïve")
+
+            self.assertEqual([entry.id for entry in results], ["naive"])
+
+    def test_search_matches_combining_mark_scripts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Book note", "किताब पढ़ रहा हूँ।", id="book")
+
+            results = state.search("किताब")
+
+            self.assertEqual([entry.id for entry in results], ["book"])
+
+    def test_search_drops_single_character_non_cjk_terms(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Russian note", "мир и согласие в команде.", id="mir")
+
+            self.assertEqual(state.search("и"), [])
+            self.assertEqual([entry.id for entry in state.search("мир")], ["mir"])
+
+    def test_search_treats_punctuation_as_separators(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Branch hygiene", "Use git worktrees for parallel branches.", id="worktree")
+            state.create_memory("Question", "Anything else left open?", id="question")
+
+            results = state.search("worktree?")
+            self.assertEqual([entry.id for entry in results], ["worktree"])
+
+            self.assertEqual(state.search("??? / . ,"), [])
+
+    def test_search_drops_zero_score_entries_and_validates_args(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Tea notes", "All about oolong brewing.", id="tea")
+
+            self.assertEqual(state.search("quantum"), [])
+            self.assertEqual(state.search("   "), [])
+            with self.assertRaises(TypeError):
+                state.search(42)
+            with self.assertRaises(TypeError):
+                state.search("worktree", limit=0)
+

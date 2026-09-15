@@ -589,6 +589,75 @@ describe("DaemonClient", () => {
 		client.close();
 	});
 
+	it("accepts an errored task state on the saved-session list wire", async () => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+
+		const connect = client.connect();
+		expect(netMock.sockets).toHaveLength(1);
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		emitHello(socket);
+
+		let discoveredStatus: unknown;
+		const response = client.request(
+			{ type: "list_saved_sessions", activeSessionId: "active-1", scope: "current" },
+			30000,
+			{
+				onProgress: (message) => {
+					if (message.type === "session_list_item") {
+						discoveredStatus = message.session.agentStatus;
+					}
+				},
+			},
+		);
+		expect(socket.writes).toHaveLength(1);
+		const envelope = JSON.parse(socket.writes[0]!.trim()) as { id?: string };
+
+		socket.emit(
+			"data",
+			`${JSON.stringify({
+				id: envelope.id,
+				type: "session_list_item",
+				command: "list_saved_sessions",
+				activeSessionId: "active-1",
+				session: {
+					path: "/tmp/session-errored.jsonl",
+					id: "session-errored",
+					cwd: "/tmp",
+					created: "2026-01-01T00:00:00.000Z",
+					modified: "2026-01-02T00:00:00.000Z",
+					messageCount: 2,
+					firstMessage: "hello",
+					allMessagesText: "hello",
+					agentStatus: {
+						summary: "Model request failed: 400 enable_thinking not supported",
+						taskState: "error",
+						basedOnMessageCount: 2,
+					},
+				},
+			})}\n`,
+		);
+		socket.emit(
+			"data",
+			`${JSON.stringify({
+				id: envelope.id,
+				type: "response",
+				command: "list_saved_sessions",
+				success: true,
+				data: { sessions: [] },
+			})}\n`,
+		);
+
+		await expect(response).resolves.toMatchObject({ success: true });
+		expect(discoveredStatus).toEqual({
+			summary: "Model request failed: 400 enable_thinking not supported",
+			taskState: "error",
+			basedOnMessageCount: 2,
+		});
+		client.close();
+	});
+
 	it("serializes per-session config for create commands", async () => {
 		const client = new DaemonClient("/tmp/prime-agent.sock");
 

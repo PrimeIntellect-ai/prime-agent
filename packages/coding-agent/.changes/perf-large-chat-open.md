@@ -1,0 +1,1 @@
+- Fixed large chats downloading their transcript again after refreshing the model catalog during startup.

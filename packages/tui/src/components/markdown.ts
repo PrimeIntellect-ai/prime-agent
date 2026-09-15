@@ -427,7 +427,6 @@ export class Markdown implements Component {
 		switch (token.type) {
 			case "heading": {
 				const headingLevel = token.depth;
-				const headingPrefix = `${"#".repeat(headingLevel)} `;
 
 				// Build a heading-specific style context so inline tokens (codespan, bold, etc.)
 				// restore heading styling after their own ANSI resets instead of falling back to
@@ -435,6 +434,10 @@ export class Markdown implements Component {
 				let headingStyleFn: (text: string) => string;
 				if (headingLevel === 1) {
 					headingStyleFn = (text: string) => this.theme.heading(this.theme.bold(this.theme.underline(text)));
+				} else if (headingLevel >= 5) {
+					headingStyleFn = (text: string) => this.theme.heading(this.theme.italic(text));
+				} else if (headingLevel === 4) {
+					headingStyleFn = (text: string) => this.theme.heading(this.theme.bold(this.theme.italic(text)));
 				} else {
 					headingStyleFn = (text: string) => this.theme.heading(this.theme.bold(text));
 				}
@@ -445,8 +448,7 @@ export class Markdown implements Component {
 				};
 
 				const headingText = this.renderInlineTokens(token.tokens || [], headingStyleContext);
-				const styledHeading = headingLevel >= 3 ? headingStyleFn(headingPrefix) + headingText : headingText;
-				lines.push(styledHeading);
+				lines.push(headingText);
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after headings (unless space token follows)
 				}

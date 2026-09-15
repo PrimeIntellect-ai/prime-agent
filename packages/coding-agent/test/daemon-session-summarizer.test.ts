@@ -4,6 +4,7 @@ import type { AgentStatus } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import type { ActiveSessionState } from "../src/modes/daemon/active-session-state.js";
 import {
+	type AgentStatusResult,
 	buildStatusContext,
 	DaemonSessionSummarizer,
 	parseAgentStatusResponse,
@@ -16,6 +17,16 @@ function userMessage(text: string): AgentMessage {
 function assistantMessage(text: string, tools: string[] = []): AgentMessage {
 	const content = [{ type: "text", text }, ...tools.map((name) => ({ type: "tool_use", name, id: name, input: {} }))];
 	return { role: "assistant", content, timestamp: 0 } as unknown as AgentMessage;
+}
+
+function assistantError(errorMessage?: string): AgentMessage {
+	return {
+		role: "assistant",
+		content: [],
+		stopReason: "error",
+		...(errorMessage !== undefined ? { errorMessage } : {}),
+		timestamp: 0,
+	} as unknown as AgentMessage;
 }
 
 describe("daemon session summarizer", () => {
@@ -324,6 +335,181 @@ describe("daemon session summarizer", () => {
 			const onStatusChanged = await settle(state, { summary: "Working on it" });
 
 			expect(onStatusChanged).not.toHaveBeenCalled();
+		});
+	});
+
+	describe("errored turn verdicts", () => {
+		const providerError = "400 enable_thinking is not supported for this model";
+
+		function erroredTranscript(errorMessage?: string): AgentMessage[] {
+			return [userMessage("write a session marker and verify the file content"), assistantError(errorMessage)];
+		}
+
+		// A journal-backed state: getLatestAgentStatus returns what appends recorded,
+		// falling back to a verdict that predates this run (e.g. written before a
+		// daemon restart).
+		function erroredState(options: {
+			messages: AgentMessage[];
+			isSessionActive?: boolean;
+			persistedStatus?: AgentStatus;
+		}): {
+			state: ActiveSessionState;
+			appended: AgentStatus[];
+		} {
+			const appended: AgentStatus[] = [];
+			const state = {
+				activeSessionId: "active-error",
+				summaryState: undefined,
+				runtime: {
+					session: {
+						isSessionActive: options.isSessionActive ?? false,
+						messages: options.messages,
+						modelRegistry: {},
+						settingsManager: SettingsManager.inMemory(),
+						state: { streamingMessage: undefined },
+						sessionManager: {
+							appendAgentStatus: (status: AgentStatus) => {
+								appended.push(status);
+							},
+							getLatestAgentStatus: () => appended.at(-1) ?? options.persistedStatus,
+							getLeafId: () => null,
+						},
+					},
+				},
+			} as unknown as ActiveSessionState;
+			return { state, appended };
+		}
+
+		async function runSummarize(
+			state: ActiveSessionState,
+			generate: () => Promise<AgentStatusResult | undefined>,
+		): Promise<ReturnType<typeof vi.fn>> {
+			const onStatusChanged = vi.fn();
+			const summarizer = new DaemonSessionSummarizer(() => [state], onStatusChanged, generate);
+			await (summarizer as unknown as { summarize(state: ActiveSessionState): Promise<void> }).summarize(state);
+			return onStatusChanged;
+		}
+
+		test("an errored session persists the real error as its verdict, never a completed one", async () => {
+			const { state, appended } = erroredState({ messages: erroredTranscript(providerError) });
+			// The classifier would only see the task text and invent completed work.
+			const generate = vi.fn(async () => ({
+				summary: "Writing session marker and verifying file content",
+				taskState: "completed" as const,
+			}));
+
+			const onStatusChanged = await runSummarize(state, generate);
+
+			expect(generate).not.toHaveBeenCalled();
+			expect(state.summaryState).toEqual({
+				summary: `Model request failed: ${providerError}`,
+				taskState: "error",
+				basedOnMessageCount: 2,
+			});
+			expect(appended).toEqual([
+				{ summary: `Model request failed: ${providerError}`, taskState: "error", basedOnMessageCount: 2 },
+			]);
+			expect(onStatusChanged).toHaveBeenCalledOnce();
+		});
+
+		test("repeated sweeps over an unchanged errored transcript append nothing more", async () => {
+			const { state, appended } = erroredState({ messages: erroredTranscript(providerError) });
+			const summarizer = new DaemonSessionSummarizer(() => [state], undefined, vi.fn());
+			const internal = summarizer as unknown as { summarize(state: ActiveSessionState): Promise<void> };
+
+			await internal.summarize(state);
+			await internal.summarize(state);
+			await internal.summarize(state);
+
+			expect(appended).toHaveLength(1);
+		});
+
+		test("a restart-seeded completed verdict for an errored transcript is repaired by the sweep", async () => {
+			// Pre-fix code fabricated a completed verdict for the errored transcript
+			// and the journal kept it; a daemon restart seeds it back before the
+			// first sweep. The unchanged-content fast path must not skip the repair.
+			const persisted: AgentStatus = {
+				summary: "Writing session marker and verifying file content",
+				taskState: "completed",
+				basedOnMessageCount: 2,
+			};
+			const { state, appended } = erroredState({
+				messages: erroredTranscript(providerError),
+				persistedStatus: persisted,
+			});
+			const generate = vi.fn(async () => ({ summary: "unreached", taskState: "completed" as const }));
+			const summarizer = new DaemonSessionSummarizer(() => [state], undefined, generate);
+			// Daemon-mode bind() restores the persisted verdict on restart.
+			summarizer.seed(state);
+			const internal = summarizer as unknown as { summarize(state: ActiveSessionState): Promise<void> };
+
+			await internal.summarize(state);
+
+			expect(generate).not.toHaveBeenCalled();
+			expect(state.summaryState).toEqual({
+				summary: `Model request failed: ${providerError}`,
+				taskState: "error",
+				basedOnMessageCount: 2,
+			});
+			expect(appended).toEqual([
+				{ summary: `Model request failed: ${providerError}`, taskState: "error", basedOnMessageCount: 2 },
+			]);
+
+			// Repaired once: later sweeps append nothing more.
+			await internal.summarize(state);
+			await internal.summarize(state);
+			expect(appended).toHaveLength(1);
+		});
+
+		test("an errored turn without an error message still settles to the error verdict", async () => {
+			const { state, appended } = erroredState({ messages: erroredTranscript(undefined) });
+
+			await runSummarize(state, async () => undefined);
+
+			expect(state.summaryState).toMatchObject({ summary: "Model request failed", taskState: "error" });
+			expect(appended).toHaveLength(1);
+		});
+
+		test("a successful final answer after an error earns a normal model verdict", async () => {
+			const { state, appended } = erroredState({ messages: erroredTranscript(providerError) });
+			const generate = vi.fn(async () => ({ summary: "Wrote the marker file", taskState: "completed" as const }));
+			const summarizer = new DaemonSessionSummarizer(() => [state], undefined, generate);
+			const internal = summarizer as unknown as { summarize(state: ActiveSessionState): Promise<void> };
+
+			await internal.summarize(state); // error verdict settles first
+			expect(state.summaryState?.taskState).toBe("error");
+
+			// The user retries and the turn succeeds: the classifier may judge again.
+			(state.runtime.session as unknown as { messages: AgentMessage[] }).messages = [
+				...erroredTranscript(providerError),
+				userMessage("retry the marker task"),
+				assistantMessage("Wrote .session-marker and verified its content"),
+			];
+			await internal.summarize(state);
+
+			expect(generate).toHaveBeenCalledTimes(1);
+			expect(state.summaryState).toMatchObject({ summary: "Wrote the marker file", taskState: "completed" });
+			expect(appended.at(-1)).toMatchObject({ taskState: "completed" });
+		});
+
+		test("a working session is never error-settled, even with an errored trailing assistant message", async () => {
+			// While working (e.g. mid-retry) the model refresh keeps recapping;
+			// verdicts settle only when the session goes idle.
+			const { state, appended } = erroredState({
+				messages: erroredTranscript(providerError),
+				isSessionActive: true,
+			});
+			const generate = vi.fn(async () => ({ summary: "Retrying the failed request" }));
+
+			await runSummarize(state, generate);
+
+			expect(generate).toHaveBeenCalledOnce();
+			expect(state.summaryState).toEqual({
+				summary: "Retrying the failed request",
+				taskState: undefined,
+				basedOnMessageCount: 2,
+			});
+			expect(appended).toHaveLength(0);
 		});
 	});
 });

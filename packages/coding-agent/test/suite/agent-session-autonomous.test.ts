@@ -249,6 +249,62 @@ describe("AgentSession autonomous mode", () => {
 		});
 	});
 
+	it("seeds autonomous limits from persisted settings when no run-level limits are set", async () => {
+		const harness = await createHarness({
+			settings: {
+				autonomous: { maxContinuations: 100, maxTurns: "unlimited", maxTokens: 1_000_000 },
+			},
+		});
+		harnesses.push(harness);
+
+		expect(harness.session.getAutonomousStatus().limits).toEqual({
+			maxContinuations: 100,
+			maxTurns: UNLIMITED_AUTONOMOUS_LIMIT,
+			maxTokens: 1_000_000,
+			timeoutMs: 30 * 60 * 1000,
+		});
+	});
+
+	it("keeps explicit run-level autonomous limits ahead of persisted settings", async () => {
+		const harness = await createHarness({
+			settings: { autonomous: { maxContinuations: 100, maxTokens: 1_000_000 } },
+			autonomous: { enabled: true, maxContinuations: 2, maxTokens: 20_000 },
+		});
+		harnesses.push(harness);
+
+		expect(harness.session.getAutonomousStatus()).toMatchObject({
+			enabled: true,
+			limits: { maxContinuations: 2, maxTokens: 20_000 },
+		});
+	});
+
+	it("drops invalid persisted autonomous limits back to the built-in defaults", async () => {
+		const harness = await createHarness({
+			settings: { autonomous: { maxContinuations: -3, maxTurns: 0.5, maxTokens: 0.5 } },
+		});
+		harnesses.push(harness);
+
+		expect(harness.session.getAutonomousStatus().limits).toMatchObject({
+			maxContinuations: 3,
+			maxTurns: 12,
+			maxTokens: 80_000,
+		});
+	});
+
+	it("keeps settings-derived limits when enabling autonomous mode without budget flags", async () => {
+		const harness = await createHarness({
+			settings: { autonomous: { maxContinuations: 100 } },
+		});
+		harnesses.push(harness);
+
+		await harness.session.prompt("/autonomous on");
+
+		expect(harness.session.getAutonomousStatus()).toMatchObject({
+			enabled: true,
+			limits: { maxContinuations: 100 },
+		});
+	});
+
 	it("keeps defaults when no budget flags are named and appends repeated gates", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);

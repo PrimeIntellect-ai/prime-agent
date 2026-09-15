@@ -13,6 +13,7 @@ import {
 	readFileSync,
 	readSync,
 	statSync,
+	writeSync,
 } from "fs";
 import { readdir, readFile, stat } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
@@ -182,7 +183,7 @@ export interface SessionStateEntry extends SessionEntryBase {
 	state: SessionState;
 }
 
-export type AgentTaskState = "needs_input" | "completed";
+export type AgentTaskState = "needs_input" | "completed" | "error";
 
 export interface AgentStatus {
 	summary: string;
@@ -301,6 +302,18 @@ function createUniqueSessionFileTarget(sessionDir: string): { sessionId: string;
 		}
 	}
 	throw new Error("Unable to create a unique session file");
+}
+
+// writeSync may return a short count without throwing; a torn line would
+// corrupt the forked JSONL on reopen, so loop until the whole buffer lands.
+function writeAllSync(descriptor: number, data: string, path: string): void {
+	const bytes = Buffer.from(data, "utf8");
+	let offset = 0;
+	while (offset < bytes.length) {
+		const written = writeSync(descriptor, bytes, offset, bytes.length - offset);
+		if (written <= 0) throw new Error(`Short write persisting ${path}`);
+		offset += written;
+	}
 }
 
 export function getSessionArtifactsRoot(sessionDir: string): string {
@@ -1083,9 +1096,9 @@ interface SessionScanState {
 
 const SESSION_SCAN_RESUME_TAIL_BYTES = 16;
 const NEWLINE_BUFFER = Buffer.from("\n");
-// Memory bound (~tens of MB): LRU whole-state eviction only while over it, so
-// small states never thrash and an evicted file just pays one full rescan.
-const SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES = 100_000;
+// Memory/performance budget: whole-state LRU eviction can force a full catalog rescan every refresh.
+// Keep large families (~2k sessions, 150k usage entries) and growth headroom resident.
+const SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES = 400_000;
 
 // Session files are append-only between whole-file rewrites, so scans resume
 // from the last consumed byte offset; rewrites are detected by shrink,
@@ -1437,6 +1450,10 @@ export class SessionManager {
 	private cwd: string;
 	private persist: boolean;
 	private flushed: boolean = false;
+	// Flip-once cache for the no-assistant guard in _persist: true from the first
+	// assistant message on. Refreshed on every fileEntries reassignment; hot
+	// appends only ever set it to true, keeping _persist O(1).
+	private hasAssistantEntry = false;
 	private fileEntries: FileEntry[] = [];
 	private byId: Map<string, SessionEntry> = new Map();
 	private labelsById: Map<string, string> = new Map();
@@ -1475,6 +1492,7 @@ export class SessionManager {
 		if (existsSync(this.sessionFile)) {
 			if (this.persist && preloadedEntries === undefined) repairJsonlDamage(this.sessionFile);
 			this.fileEntries = preloadedEntries ?? loadEntriesFromFile(this.sessionFile);
+			this._refreshHasAssistantEntry();
 
 			// If file was empty or corrupted (no valid header), truncate and start fresh
 			// to avoid appending messages without a session header (which breaks the session)
@@ -1552,6 +1570,7 @@ export class SessionManager {
 			git,
 		};
 		this.fileEntries = [header];
+		this.hasAssistantEntry = false;
 		this.byId.clear();
 		this.labelsById.clear();
 		this.labelTimestampsById.clear();
@@ -1562,6 +1581,13 @@ export class SessionManager {
 			this.sessionFile = sessionFile;
 		}
 		return this.sessionFile;
+	}
+
+	// Cold-path recompute of the flip-once has-assistant cache. Hot appends keep
+	// it O(1) in _appendEntry; every fileEntries reassignment (open, branch,
+	// rollback) refreshes it here.
+	private _refreshHasAssistantEntry(): void {
+		this.hasAssistantEntry = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
 	}
 
 	private _buildIndex(): void {
@@ -1668,6 +1694,7 @@ export class SessionManager {
 			git,
 		};
 		this.fileEntries = [header, ...this.getEntries()];
+		this._refreshHasAssistantEntry();
 		this._rewriteFile();
 		this.flushed = true;
 		return this.sessionFile;
@@ -1694,13 +1721,16 @@ export class SessionManager {
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
 
-		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
 		const shouldPersistWithoutAssistant = entry.type === "session_state" || entry.type === "session_info";
-		if (!hasAssistant && !shouldPersistWithoutAssistant) {
+		if (!this.hasAssistantEntry && !shouldPersistWithoutAssistant) {
 			this.flushed = false;
 			return;
 		}
 
+		// The existsSync check is what lets the next append recover from the session
+		// file being deleted underneath a live session: without it appendFileSync
+		// would recreate a headerless stub (pinned by session-state.test.ts's
+		// "rewrites the full session if the session file disappears after flushing").
 		if (!this.flushed || !existsSync(this.sessionFile)) {
 			this._rewriteFile();
 			this.flushed = true;
@@ -1713,6 +1743,9 @@ export class SessionManager {
 
 	private _appendEntry(entry: SessionEntry): void {
 		this.fileEntries.push(entry);
+		if (entry.type === "message" && entry.message.role === "assistant") {
+			this.hasAssistantEntry = true;
+		}
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
 		this._persist(entry);
@@ -2017,6 +2050,7 @@ export class SessionManager {
 			if (this.leafId !== null && this.leafId !== previousLeafId) {
 				this.byId.delete(this.leafId);
 				this.fileEntries.pop();
+				this._refreshHasAssistantEntry();
 				this.leafId = previousLeafId;
 				// The failed append may have left a torn line on disk. Restore the file
 				// from the rolled-back entries now; if that also fails (e.g. the disk is
@@ -2247,6 +2281,7 @@ export class SessionManager {
 			}
 
 			this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
+			this._refreshHasAssistantEntry();
 			this.sessionId = newSessionId;
 			this.sessionFile = newSessionFile;
 			this._buildIndex();
@@ -2256,8 +2291,7 @@ export class SessionManager {
 			// first assistant response, matching the newSession() contract
 			// and avoiding the duplicate-header bug when _persist()'s
 			// no-assistant guard later resets flushed to false.
-			const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
-			if (hasAssistant) {
+			if (this.hasAssistantEntry) {
 				this._rewriteFile();
 				this.flushed = true;
 			} else {
@@ -2282,6 +2316,7 @@ export class SessionManager {
 			parentId = labelEntry.id;
 		}
 		this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
+		this._refreshHasAssistantEntry();
 		this.sessionId = newSessionId;
 		this._buildIndex();
 		return undefined;
@@ -2378,24 +2413,34 @@ export class SessionManager {
 			rlmDepth: resolveSessionRlmDepth(sourceHeader, sourcePath),
 			git: captureGitContext(targetCwd) ?? undefined,
 		};
-		appendFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`);
+		// The whole fork flows through one descriptor: one openSync, one
+		// writeAllSync per line, one closeSync. writeAllSync loops past short
+		// counts so every JSONL line lands whole, and "w" creates the target
+		// fresh because createUniqueSessionFileTarget guarantees it does not
+		// exist yet.
+		const descriptor = openSync(newSessionFile, "w");
+		try {
+			writeAllSync(descriptor, `${JSON.stringify(newHeader)}\n`, newSessionFile);
 
-		// Drop the source's git_state entries (re-linking children): they describe the source repo,
-		// so the fork would otherwise report the source's git instead of its own target context.
-		const droppedParent = new Map<string, string | null>();
-		for (const entry of sourceEntries) {
-			if (entry.type === "git_state") droppedParent.set(entry.id, entry.parentId);
-		}
-		const liveParent = (parentId: string | null): string | null => {
-			let pid = parentId;
-			while (pid !== null && droppedParent.has(pid)) pid = droppedParent.get(pid) ?? null;
-			return pid;
-		};
-		for (const entry of sourceEntries) {
-			if (entry.type === "session" || entry.type === "git_state") continue;
-			const parentId = liveParent(entry.parentId);
-			const out = parentId === entry.parentId ? entry : { ...entry, parentId };
-			appendFileSync(newSessionFile, `${JSON.stringify(out)}\n`);
+			// Drop the source's git_state entries (re-linking children): they describe the source repo,
+			// so the fork would otherwise report the source's git instead of its own target context.
+			const droppedParent = new Map<string, string | null>();
+			for (const entry of sourceEntries) {
+				if (entry.type === "git_state") droppedParent.set(entry.id, entry.parentId);
+			}
+			const liveParent = (parentId: string | null): string | null => {
+				let pid = parentId;
+				while (pid !== null && droppedParent.has(pid)) pid = droppedParent.get(pid) ?? null;
+				return pid;
+			};
+			for (const entry of sourceEntries) {
+				if (entry.type === "session" || entry.type === "git_state") continue;
+				const parentId = liveParent(entry.parentId);
+				const out = parentId === entry.parentId ? entry : { ...entry, parentId };
+				writeAllSync(descriptor, `${JSON.stringify(out)}\n`, newSessionFile);
+			}
+		} finally {
+			closeSync(descriptor);
 		}
 
 		return new SessionManager(targetCwd, dir, newSessionFile, true);

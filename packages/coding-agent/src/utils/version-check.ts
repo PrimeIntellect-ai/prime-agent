@@ -5,6 +5,8 @@ const STABLE_VERSION_MANIFEST_PATH = "latest.json";
 const BETA_VERSION_MANIFEST_PATH = "beta.json";
 const DEFAULT_VERSION_CHECK_TIMEOUT_MS = 10000;
 
+export type UpdateChannel = "stable" | "nightly";
+
 export interface LatestPiRelease {
 	version: string;
 	packageName?: string;
@@ -103,9 +105,52 @@ function normalizeReleaseVersion(version: string): string {
 	return version.trim().replace(/^v/, "");
 }
 
-function getReleaseManifestPath(currentVersion: string): string {
+/**
+ * A preferred channel wins; otherwise a build tagged `-beta` stays on nightly and anything else
+ * follows stable. Nightly builds are what the release bucket publishes as beta.
+ */
+export function resolveUpdateChannel(currentVersion: string, preferred?: UpdateChannel): UpdateChannel {
+	if (preferred) return preferred;
 	const prerelease = parsePackageVersion(currentVersion)?.prerelease;
-	return prerelease?.match(/^beta(?:\.|$)/) ? BETA_VERSION_MANIFEST_PATH : STABLE_VERSION_MANIFEST_PATH;
+	return prerelease?.match(/^beta(?:\.|$)/) ? "nightly" : "stable";
+}
+
+/**
+ * Whether `candidateVersion` should replace `currentVersion` on the effective channel.
+ * Same-channel updates must be strictly newer. An explicit switch to another channel
+ * accepts any different version whose base version is not older, so a stable 1.2.3
+ * can move onto 1.2.3-beta.5 even though prerelease ordering ranks that lower.
+ */
+export function isReleaseUpdateCandidate(
+	candidateVersion: string,
+	currentVersion: string,
+	channel?: UpdateChannel,
+): boolean {
+	if (isNewerPackageVersion(candidateVersion, currentVersion)) return true;
+	if (!channel || channel === resolveUpdateChannel(currentVersion)) return false;
+	if (normalizeReleaseVersion(candidateVersion) === normalizeReleaseVersion(currentVersion)) return false;
+	const candidate = parsePackageVersion(candidateVersion);
+	const current = parsePackageVersion(currentVersion);
+	if (!candidate || !current) return true;
+	if (candidate.major !== current.major) return candidate.major > current.major;
+	if (candidate.minor !== current.minor) return candidate.minor > current.minor;
+	return candidate.patch >= current.patch;
+}
+
+/** True when installing `candidateVersion` would lower the major.minor.patch base, prerelease tags aside. */
+export function isBaseVersionDowngrade(candidateVersion: string, currentVersion: string): boolean {
+	const candidate = parsePackageVersion(candidateVersion);
+	const current = parsePackageVersion(currentVersion);
+	if (!candidate || !current) return false;
+	if (candidate.major !== current.major) return candidate.major < current.major;
+	if (candidate.minor !== current.minor) return candidate.minor < current.minor;
+	return candidate.patch < current.patch;
+}
+
+function getReleaseManifestPath(currentVersion: string, channel?: UpdateChannel): string {
+	return resolveUpdateChannel(currentVersion, channel) === "nightly"
+		? BETA_VERSION_MANIFEST_PATH
+		: STABLE_VERSION_MANIFEST_PATH;
 }
 
 function resolveReleaseUrl(baseUrl: string, pathOrUrl: string): string | undefined {
@@ -120,12 +165,12 @@ function resolveReleaseUrl(baseUrl: string, pathOrUrl: string): string | undefin
 
 export async function getLatestPiRelease(
 	currentVersion: string,
-	options: { timeoutMs?: number; baseUrl?: string } = {},
+	options: { timeoutMs?: number; baseUrl?: string; channel?: UpdateChannel } = {},
 ): Promise<LatestPiRelease | undefined> {
 	if (process.env.PI_SKIP_VERSION_CHECK || process.env.PI_OFFLINE) return undefined;
 
 	const baseUrl = options.baseUrl?.replace(/\/+$/, "") ?? getPrimeAgentDownloadBaseUrl();
-	const response = await fetch(`${baseUrl}/${getReleaseManifestPath(currentVersion)}`, {
+	const response = await fetch(`${baseUrl}/${getReleaseManifestPath(currentVersion, options.channel)}`, {
 		headers: {
 			"User-Agent": getPiUserAgent(currentVersion),
 			accept: "application/json",
@@ -185,15 +230,18 @@ export async function getLatestPiRelease(
 
 export async function getLatestPiVersion(
 	currentVersion: string,
-	options: { timeoutMs?: number } = {},
+	options: { timeoutMs?: number; channel?: UpdateChannel } = {},
 ): Promise<string | undefined> {
 	return (await getLatestPiRelease(currentVersion, options))?.version;
 }
 
-export async function checkForNewPiVersion(currentVersion: string): Promise<string | undefined> {
+export async function checkForNewPiVersion(
+	currentVersion: string,
+	channel?: UpdateChannel,
+): Promise<string | undefined> {
 	try {
-		const latestVersion = await getLatestPiVersion(currentVersion);
-		if (latestVersion && isNewerPackageVersion(latestVersion, currentVersion)) {
+		const latestVersion = await getLatestPiVersion(currentVersion, { channel });
+		if (latestVersion && isReleaseUpdateCandidate(latestVersion, currentVersion, channel)) {
 			return latestVersion;
 		}
 		return undefined;

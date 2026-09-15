@@ -18,6 +18,10 @@ function createContext(tokens: number | null, compact = vi.fn()): ExtensionConte
 		getContextUsage: () => ({ tokens, contextWindow: 200_000, percent: tokens === null ? null : tokens / 2000 }),
 		compact,
 		getSystemPrompt: () => "",
+		setTimeout: (callback, ms) => setTimeout(callback, ms),
+		clearTimeout: (handle) => clearTimeout(handle),
+		setInterval: (callback, ms) => setInterval(callback, ms),
+		clearInterval: (handle) => clearInterval(handle),
 	};
 }
 

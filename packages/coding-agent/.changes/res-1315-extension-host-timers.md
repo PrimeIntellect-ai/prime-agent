@@ -1,0 +1,1 @@
+- Added host-owned `ctx.setTimeout`/`ctx.setInterval` (plus matching clears) for extensions: throwing callbacks are reported through the extension error boundary instead of crashing the process, and pending timers are cancelled on unload. Raw global timers remain unsupported for scheduling extension work.

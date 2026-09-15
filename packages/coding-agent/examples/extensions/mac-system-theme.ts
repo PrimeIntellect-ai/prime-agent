@@ -29,7 +29,7 @@ export default function (pi: ExtensionAPI) {
 		let currentTheme = (await isDarkMode()) ? "dark" : "light";
 		ctx.ui.setTheme(currentTheme);
 
-		intervalId = setInterval(async () => {
+		intervalId = ctx.setInterval(async () => {
 			const newTheme = (await isDarkMode()) ? "dark" : "light";
 			if (newTheme !== currentTheme) {
 				currentTheme = newTheme;
@@ -38,9 +38,9 @@ export default function (pi: ExtensionAPI) {
 		}, 2000);
 	});
 
-	pi.on("session_shutdown", () => {
+	pi.on("session_shutdown", (_event, ctx) => {
 		if (intervalId) {
-			clearInterval(intervalId);
+			ctx.clearInterval(intervalId);
 			intervalId = null;
 		}
 	});

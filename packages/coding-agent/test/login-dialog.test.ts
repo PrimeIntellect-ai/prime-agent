@@ -51,18 +51,20 @@ describe("LoginDialogComponent", () => {
 		const dialog = new LoginDialogComponent(createFakeTui(), "anthropic", () => {}, "Anthropic");
 
 		dialog.showAuth("https://example.com/oauth?client_id=test", "Complete login in your browser.");
-		const output = stripAnsi(dialog.render(88).join("\n"));
+		const lines = dialog.render(88);
+		const output = stripAnsi(lines.join("\n"));
 
 		expect(output).toContain("Login to Anthropic");
-		expect(output).toContain("Browser sign-in");
-		expect(output).toContain("Sign-in link");
 		expect(output).toContain("https://example.com/oauth?client_id=test");
 		expect(output).toContain("C copy");
-		expect(output).toContain("Next step");
 		expect(output).toContain("Complete login in your browser.");
 		expect(output).not.toContain("click to open");
-		expect(output).not.toContain("─");
 		expect(output).not.toContain("> ");
+		// The top rule separates the inline login section from the chat above;
+		// no other borders surround the content.
+		const ruleLines = lines.filter((line) => stripAnsi(line).includes("─"));
+		expect(ruleLines).toHaveLength(1);
+		expect(stripAnsi(lines[0] ?? "")).toBe("─".repeat(88));
 	});
 
 	it("copies the raw sign-in URL with the configured shortcut", async () => {
@@ -152,7 +154,9 @@ describe("LoginDialogComponent", () => {
 		const firstLogoLine = PRIME_BUTTERFLY_LOGO.split("\n")[0]?.trim() ?? "";
 
 		expect(output).toContain("Login to Prime Inference");
-		expect(output).toContain(firstLogoLine);
+		// The compact inline panel never renders the butterfly logo.
+		expect(firstLogoLine).not.toBe("");
+		expect(output).not.toContain(firstLogoLine);
 		expect(output).toContain("Verification code");
 		expect(output).toContain("abc-123");
 		expect(output).not.toContain("click to open");
@@ -170,7 +174,7 @@ describe("LoginDialogComponent", () => {
 		expect(output).not.toContain("Status");
 	});
 
-	it("keeps the Prime Inference brand header centered and within the panel", () => {
+	it("renders the Prime Inference login with the compact inline header", () => {
 		const dialog = new LoginDialogComponent(createFakeTui(), "prime-inference", () => {}, "Prime Inference");
 
 		dialog.showProgress("Checking existing Prime CLI credentials...");
@@ -179,11 +183,12 @@ describe("LoginDialogComponent", () => {
 		const titleLine = output.split("\n").find((line) => line.includes("Login to Prime Inference"));
 		const titleOffset = titleLine?.indexOf("Login to Prime Inference") ?? -1;
 
-		expect(titleOffset).toBeGreaterThan(20);
-		expect(output).toContain("Connect your Prime Intellect account to enable Prime Inference models.");
+		// The title leads the inline panel.
+		expect(titleOffset).toBe(1);
+		expect(output).not.toContain("Connect your Prime Intellect account to enable Prime Inference models.");
 		expect(output).toContain("Preparing authentication");
 		for (const line of lines) {
-			expect(visibleWidth(line)).toBe(88);
+			expect(visibleWidth(line)).toBeLessThanOrEqual(88);
 		}
 	});
 
@@ -211,7 +216,7 @@ describe("LoginDialogComponent", () => {
 		await expect(second).resolves.toBe("pk");
 	});
 
-	it("renders API key prompts without shell input markers", () => {
+	it("renders API key prompts with the bordered inline input", () => {
 		const dialog = new LoginDialogComponent(createFakeTui(), "openai", () => {}, "OpenAI");
 
 		void dialog.showPrompt("Enter API key:");
@@ -219,7 +224,55 @@ describe("LoginDialogComponent", () => {
 
 		expect(output).toContain("Login to OpenAI");
 		expect(output).toContain("Enter API key:");
-		expect(output).not.toContain("─");
-		expect(output).not.toContain("> ");
+		// The paste field matches the inline picker search box.
+		expect(output).toContain("─");
+		expect(output).toContain("Paste value");
+		// One key-hint line carries submit and cancel.
+		expect(output).toContain("Enter submit");
+		expect(output).toContain("Esc/Ctrl+C cancel");
+	});
+
+	it("keeps the key-hint row last while waiting and polling", () => {
+		const dialog = new LoginDialogComponent(createFakeTui(), "github-copilot", () => {}, "GitHub Copilot");
+
+		dialog.showAuth("https://example.com/device");
+		dialog.showWaiting("Waiting for browser authentication...");
+		let rows = stripAnsi(dialog.render(88).join("\n"))
+			.split("\n")
+			.filter((line) => line.trim().length > 0);
+
+		expect(rows.at(-1)).toContain("cancel");
+		expect(rows.at(-1)).toContain("copy");
+		expect(rows.at(-2)).toContain("Waiting for browser authentication...");
+
+		dialog.showProgress("Waiting for browser sign-in...");
+		rows = stripAnsi(dialog.render(88).join("\n"))
+			.split("\n")
+			.filter((line) => line.trim().length > 0);
+
+		expect(rows.at(-1)).toContain("cancel");
+		expect(rows.at(-2)).toContain("Waiting for browser sign-in...");
+		expect(rows.at(-3)).toContain("Waiting for browser authentication...");
+	});
+
+	it("wraps long sign-in URLs into per-line hyperlinks with the full url", () => {
+		setCapabilities({ images: null, trueColor: true, hyperlinks: true });
+		const dialog = new LoginDialogComponent(createFakeTui(), "anthropic", () => {}, "Anthropic");
+		const url = "https://example.com/oauth/authorize?client_id=test-client-123456&response_type=code&scope=openid";
+
+		dialog.showAuth(url);
+		const lines = dialog.render(40);
+		const urlLines = lines.filter((line) => line.includes("\x1b]8;;"));
+
+		// The wrapped URL keeps its hyperlink on every line: each segment re-opens
+		// with the full url and closes again, so any line opens the whole link.
+		expect(urlLines.length).toBeGreaterThan(1);
+		for (const line of urlLines) {
+			expect(line).toContain(`\x1b]8;;${url}\x07`);
+			expect(line).toContain("\x1b]8;;\x07");
+			expect(visibleWidth(line)).toBe(40);
+		}
+		const visibleUrl = urlLines.map((line) => stripAnsi(line).trim()).join("");
+		expect(visibleUrl).toContain(url);
 	});
 });

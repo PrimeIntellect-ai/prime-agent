@@ -276,6 +276,22 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("auxiliaryModel", () => {
+		it("returns a valid persisted selector", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ auxiliaryModel: "faux/aux-model" }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getAuxiliaryModel()).toBe("faux/aux-model");
+		});
+
+		it("treats malformed persisted values as unset", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ auxiliaryModel: 42 }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getAuxiliaryModel()).toBeUndefined();
+		});
+	});
+
 	describe("recentModels", () => {
 		it("records most-recently-used first, dedupes, and persists", async () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
@@ -635,6 +651,100 @@ describe("SettingsManager", () => {
 				providerBackupModel: ["faux/faux-backup"] as unknown as string,
 			});
 			expect(listed.getProviderBackupModel()).toBeUndefined();
+		});
+	});
+	describe("autonomous limits and subagent default model", () => {
+		it("resolves persisted autonomous limits and maps unlimited to the runtime sentinel", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					autonomous: {
+						maxContinuations: 25,
+						maxTurns: "unlimited",
+						maxTokens: 1_000_000,
+						timeoutMs: 3_600_000,
+					},
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getAutonomousLimits()).toEqual({
+				maxContinuations: 25,
+				maxTurns: Number.MAX_SAFE_INTEGER,
+				maxTokens: 1_000_000,
+				timeoutMs: 3_600_000,
+			});
+		});
+
+		it("merges project autonomous settings over global ones and drops invalid entries", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ autonomous: { maxContinuations: 10, maxTurns: 40 } }),
+			);
+			writeFileSync(
+				join(projectDir, ".prime", "agent", "settings.json"),
+				JSON.stringify({
+					autonomous: { maxContinuations: "unlimited", maxTokens: "one million" },
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getAutonomousLimits()).toEqual({
+				maxContinuations: Number.MAX_SAFE_INTEGER,
+				maxTurns: 40,
+				maxTokens: undefined,
+				timeoutMs: undefined,
+			});
+		});
+
+		it("drops fractional limits that truncate to zero instead of returning zero budgets", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					autonomous: { maxTurns: 0.5, maxTokens: 1_000.75, maxContinuations: 2.5 },
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getAutonomousLimits()).toEqual({
+				maxContinuations: 2,
+				maxTokens: 1_000,
+				maxTurns: undefined,
+				timeoutMs: undefined,
+			});
+		});
+
+		it("returns empty autonomous limits when unset", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getAutonomousLimits()).toEqual({});
+		});
+
+		it("trims the subagent default model and treats blank as unset", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ subagentDefaultModel: "  prime-inference/internal/glm-5.2-fast  " }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getSubagentDefaultModel()).toBe("prime-inference/internal/glm-5.2-fast");
+
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ subagentDefaultModel: "   " }));
+			const blank = SettingsManager.create(projectDir, agentDir);
+			expect(blank.getSubagentDefaultModel()).toBeUndefined();
+		});
+
+		it("treats a non-string subagentDefaultModel value as unset instead of throwing", () => {
+			// Parsed settings are only cast; a corrupted value must not throw into the spawn path.
+			const numeric = SettingsManager.inMemory({ subagentDefaultModel: 123 as unknown as string });
+			expect(numeric.getSubagentDefaultModel()).toBeUndefined();
+
+			const listed = SettingsManager.inMemory({
+				subagentDefaultModel: ["faux/faux-child"] as unknown as string,
+			});
+			expect(listed.getSubagentDefaultModel()).toBeUndefined();
 		});
 	});
 });

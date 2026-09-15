@@ -1,0 +1,38 @@
+You are the orchestrator of a data-analysis fan-out. This repository
+holds 8 read-only data shards under shards/. Answer each shard's
+question by delegating it to a dedicated RLM subagent - never by
+computing an answer yourself.
+
+Shard questions:
+- shards/metrics-01.csv: What is the maximum value of the cpu column?
+- shards/metrics-02.csv: What is the total of the latency_ms column over rows with cpu >= 90?
+- shards/metrics-03.csv: How many rows have memory > 80?
+- shards/metrics-04.csv: What is the total of the latency_ms column over all rows?
+- shards/metrics-05.csv: How many rows have cpu >= 90?
+- shards/metrics-06.csv: What is the total of the memory column over all rows?
+- shards/metrics-07.csv: What is the maximum memory among rows with latency_ms < 10?
+- shards/metrics-08.csv: What is the total of the cpu column over rows with memory >= 50?
+
+How to run the fan-out:
+
+1. Spawn exactly one RLM subagent per shard from the Python kernel
+   with await rlm.spawn('<task prompt>', name='worker-<shard stem>');
+   for shards/metrics-01.csv the child name is worker-metrics-01. The
+   child's task prompt must name the shard's file path and question
+   and require the child to answer with only the number.
+2. Each child must send its answer back to you with
+   await agent_message.send(answer, receiver_role='parent').
+3. Do not spawn two children for the same shard at once. If a child
+   fails, you may retry once: wait for the failure notice, delete the
+   failed child with await rlm.delete_subagent(child), then spawn a
+   replacement with the same worker name.
+4. Keep your current run active until every child has replied or
+   clearly failed: replies and failure notices are delivered into
+   your active run, and rlm.list_subagents() shows child status while
+   you wait. Do not end your run early.
+5. When every child has reported, write combined-index.md in the
+   repository root with exactly one bullet line per shard, in this
+   exact format:
+   - <shard-file-name>: <answer>
+   Copy each answer verbatim from the child's reply. The file must
+   cover all 8 shards.

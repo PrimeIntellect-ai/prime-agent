@@ -7,10 +7,11 @@
   "trials": 10,
   "install_trials": 3,
   "debounce_seconds": 2,
-  "timeout_seconds": 1200,
+  "timeout_seconds": 1500,
   "ttl_minutes": 30,
   "budget_usd": 1,
   "cpu_usd_per_hour": 0.05,
   "memory_usd_per_gb_hour": 0.01,
-  "disk_usd_per_gb_hour": 0.001
+  "disk_usd_per_gb_hour": 0.001,
+  "ui_trials": 3
 }

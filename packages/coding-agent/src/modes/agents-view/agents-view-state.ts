@@ -1262,5 +1262,8 @@ export function getSessionStatusLabel(summary: SessionSummary, heartbeat?: Unifi
 	if (summary.activity === "working") {
 		return "classifying";
 	}
+	if (summary.taskState === "error") {
+		return "error";
+	}
 	return summary.taskState === "completed" ? "completed" : "needs input";
 }
