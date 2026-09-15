@@ -184,6 +184,9 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 		parts.push(
 			"Read this session's messaging counters with `await rlm.messaging_stats()` (arrivals, agent-triggered steps vs. all steps, estimated message share of context, send attempts) when you need to reason about coordination overhead.",
 		);
+		parts.push(
+			"When a digest notice says agent messages wait in your inbox, list them with `await rlm.inbox.list()` and pull their contents with `await rlm.inbox.read()`.",
+		);
 	}
 
 	if (hasIpython) {

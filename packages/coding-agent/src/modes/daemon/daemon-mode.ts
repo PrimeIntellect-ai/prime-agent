@@ -6363,6 +6363,7 @@ export class AgentDaemon {
 		const message = createAgentSessionMessage(payload);
 		let preflightFailed = false;
 		let preflightQueued = false;
+		let preflightDigest = false;
 		await targetState.runtime.session.acceptAgentMessagePrompt(message.content, {
 			expandPromptTemplates: false,
 			streamingBehavior: "steer",
@@ -6382,15 +6383,16 @@ export class AgentDaemon {
 					throw new Error("Target session changed before agent message delivery");
 				}
 			},
-			preflightResult: (didSucceed, didQueue) => {
+			preflightResult: (didSucceed, didQueue, didDigest) => {
 				preflightFailed = !didSucceed;
-				preflightQueued = didSucceed && didQueue === true;
+				preflightQueued = didSucceed && didQueue === true && didDigest !== true;
+				preflightDigest = didSucceed && didDigest === true;
 			},
 		});
 		if (preflightFailed) {
 			throw new Error("Agent message was not accepted");
 		}
-		return { status: preflightQueued ? "queued" : "delivered" };
+		return { status: preflightDigest ? "digest" : preflightQueued ? "queued" : "delivered" };
 	}
 
 	private detachClientFromSession(client: DaemonSocketClient, state: ActiveSessionState): void {

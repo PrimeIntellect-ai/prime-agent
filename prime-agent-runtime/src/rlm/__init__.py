@@ -374,6 +374,35 @@ async def delete_subagent(target: str | RLMSubagent | RLMSpawnHandle) -> RLMSuba
     return _subagent_from_payload(payload.get("subagent"), "rlm.delete_subagent")
 
 
+async def inbox_list() -> dict[str, Any]:
+    """List this session's digest inbox entries (ids, senders, read state, previews).
+
+    Entries appear only when the digest lane is enabled for this session; the
+    default is push delivery, where agent messages arrive directly.
+    """
+    return await host_request("rlm.inbox.list")
+
+
+async def inbox_read(ids: list[str] | None = None) -> dict[str, Any]:
+    """Read digest inbox entries and mark them read.
+
+    Reads every unread entry when ``ids`` is None; otherwise only the entries
+    with the given ids (unknown ids are ignored). Returns the entries and the
+    remaining unread count.
+    """
+    return await host_request("rlm.inbox.read", {} if ids is None else {"ids": ids})
+
+
+class _RLMInbox:
+    """Digest inbox for agent messages (digest lane, default off)."""
+
+    async def list(self) -> dict[str, Any]:
+        return await inbox_list()
+
+    async def read(self, ids: list[str] | None = None) -> dict[str, Any]:
+        return await inbox_read(ids)
+
+
 async def messaging_stats() -> dict[str, Any]:
     """Read this session's swarm messaging counters.
 
@@ -472,6 +501,10 @@ class _RLMNamespace:
     async def messaging_stats(self) -> dict[str, Any]:
         return await messaging_stats()
 
+    @property
+    def inbox(self) -> _RLMInbox:
+        return _RLMInbox()
+
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         raise TypeError(_NOT_CALLABLE_MESSAGE)
 
@@ -515,6 +548,8 @@ __all__ = [
     "get_harness_state",
     "harness",
     "host_request",
+    "inbox_list",
+    "inbox_read",
     "list_subagents",
     "messaging_stats",
     "rlm",

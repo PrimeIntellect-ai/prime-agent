@@ -22,7 +22,7 @@ export const DEFAULT_AGENT_MESSAGE_RATE_LIMIT_REFILL_MS = 1000;
 
 /** Legacy daemon wire input accepted and ignored for compatibility. */
 export type AgentSessionMessageDeliveryMode = "auto" | "steer" | "follow_up";
-export type AgentSessionMessageDeliveryStatus = "delivered" | "queued";
+export type AgentSessionMessageDeliveryStatus = "delivered" | "queued" | "digest";
 export type AgentSessionMessageRuntimeKind = "top-level" | "subagent";
 export type AgentFamilyStatus = "running" | "idle" | "inactive";
 export type AgentFamilyRelationship = "parent" | "sibling" | "child";
@@ -149,6 +149,8 @@ export interface AgentSessionMessageReceipt {
 	deliveredAt?: string;
 	/** Present only for queued messages: when it was placed behind current work. */
 	queuedAt?: string;
+	/** Present only for digest-lane messages: when it was placed in the target inbox. */
+	digestAt?: string;
 	deliveryMode?: "steer";
 }
 
@@ -454,7 +456,7 @@ export function createAgentSessionMessageReceipt(
 		from: payload.from,
 		message: payload.message,
 		deliveryStatus: status,
-		...(status === "delivered" ? { deliveredAt: at } : { queuedAt: at }),
+		...(status === "delivered" ? { deliveredAt: at } : status === "digest" ? { digestAt: at } : { queuedAt: at }),
 		deliveryMode: "steer",
 	};
 }
