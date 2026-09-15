@@ -374,6 +374,16 @@ async def delete_subagent(target: str | RLMSubagent | RLMSpawnHandle) -> RLMSuba
     return _subagent_from_payload(payload.get("subagent"), "rlm.delete_subagent")
 
 
+async def messaging_stats() -> dict[str, Any]:
+    """Read this session's swarm messaging counters.
+
+    Instrumentation only: arrivals, agent-triggered model steps vs. all
+    model steps, estimated agent-message context share, and send attempts.
+    Never changes delivery behavior.
+    """
+    return await host_request("rlm.messaging_stats")
+
+
 class _HarnessProxy:
     """Resolve the harness state against the current environment on every access.
 
@@ -459,6 +469,9 @@ class _RLMNamespace:
     async def collect(self, targets: Any = None, *, timeout_ms: int = 0) -> list[RLMChildResult]:
         return await collect(targets, timeout_ms=timeout_ms)
 
+    async def messaging_stats(self) -> dict[str, Any]:
+        return await messaging_stats()
+
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         raise TypeError(_NOT_CALLABLE_MESSAGE)
 
@@ -503,6 +516,7 @@ __all__ = [
     "harness",
     "host_request",
     "list_subagents",
+    "messaging_stats",
     "rlm",
     "spawn",
 ]

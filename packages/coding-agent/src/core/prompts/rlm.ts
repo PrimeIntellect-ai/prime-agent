@@ -181,6 +181,9 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 		parts.push(
 			"Spawn independent children in separate calls and end your turn instead of awaiting completion. Multiple replies may arrive over multiple turns. Delete a direct child explicitly with `await rlm.delete_subagent(child)` when it is no longer needed.",
 		);
+		parts.push(
+			"Read this session's messaging counters with `await rlm.messaging_stats()` (arrivals, agent-triggered steps vs. all steps, estimated message share of context, send attempts) when you need to reason about coordination overhead.",
+		);
 	}
 
 	if (hasIpython) {
