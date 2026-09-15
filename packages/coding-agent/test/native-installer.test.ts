@@ -21,6 +21,12 @@ import { Agent, getGlobalDispatcher, setGlobalDispatcher } from "undici";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getNativeUpdatePlan } from "../src/cli/native-update.js";
 import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
+import { terminateSupervisor } from "./supervisor-teardown.js";
+
+// Each wait in the teardown hook is bounded so the whole chain stays strictly below the hook budget
+// in vitest.config.ts; an unbounded wait would be killed mid-cleanup and hide the real failure.
+const CONNECT_TIMEOUT = 5000;
+const SHUTDOWN_TIMEOUT = 15000;
 
 const installer = resolve(__dirname, "../../../install.sh");
 const assets = [
@@ -239,27 +245,21 @@ describe.skipIf(process.platform === "win32")("managed compiled installer", () =
 		vi.unstubAllEnvs();
 		if (!existsSync(daemonSocket())) return;
 		const client = new DaemonClient(daemonSocket());
+		let supervisorPid: number | undefined;
+		let shutdownError: unknown;
 		try {
-			await client.connect();
-			const hello = await client.waitForHello();
-			await client.request({ type: "shutdown", force: true });
-			if (hello.supervisorPid)
-				await expect
-					.poll(
-						() => {
-							try {
-								process.kill(hello.supervisorPid!, 0);
-								return false;
-							} catch {
-								return true;
-							}
-						},
-						{ timeout: 10000 },
-					)
-					.toBe(true);
+			await client.connect(CONNECT_TIMEOUT);
+			supervisorPid = (await client.waitForHello()).supervisorPid;
+			await client.request({ type: "shutdown", force: true }, SHUTDOWN_TIMEOUT);
+		} catch (error) {
+			shutdownError = error;
 		} finally {
 			client.close();
 		}
+		// The supervisor is terminated even when the shutdown request failed, so an unresponsive
+		// daemon reports its own error instead of leaking a process into the next test.
+		if (supervisorPid !== undefined) await terminateSupervisor(supervisorPid);
+		if (shutdownError) throw shutdownError;
 	});
 	afterAll(async () => {
 		setGlobalDispatcher(originalDispatcher);

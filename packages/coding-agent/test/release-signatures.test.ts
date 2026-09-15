@@ -42,6 +42,9 @@ function entitlements(binary: string): string {
 	});
 }
 
+// Compiling and codesigning the fixture is the slowest step in this file and it happens inside a
+// hook, so it depends on the shared hook budget in vitest.config.ts rather than vitest's 10s default;
+// the hook itself waits on no deadline of its own.
 beforeAll(() => {
 	root = mkdtempSync(join(tmpdir(), "prime-release-signatures-"));
 	if (process.platform === "darwin") {

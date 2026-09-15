@@ -1,0 +1,1 @@
+- Changed the standalone archive and native installer test teardowns to terminate leftover daemon supervisors through shared budgets strictly below the raised vitest hook timeout, so a slow runner reports its own failure instead of a hook timeout.

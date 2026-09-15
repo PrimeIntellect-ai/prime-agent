@@ -12,6 +12,12 @@ export default defineConfig({
 		globals: true,
 		environment: "node",
 		testTimeout: 30000,
+		// Hooks build and tear down real processes, sockets and extracted archives, so they need at
+		// least as much room as the tests they wrap. Vitest's 10s default was below the deadlines the
+		// standalone suites already wait on inside their own hooks, which turned a slow runner into a
+		// "Hook timed out" report that hid the real failure. Any deadline awaited inside a hook must
+		// stay strictly below this budget.
+		hookTimeout: 60000,
 		env: { DO_NOT_TRACK: "1" },
 		tags: [
 			{

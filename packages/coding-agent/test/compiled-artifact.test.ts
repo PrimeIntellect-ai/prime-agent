@@ -20,8 +20,18 @@ import { createServer } from "node:http2";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { deflateSync } from "node:zlib";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
+import { terminateSupervisor } from "./supervisor-teardown.js";
+
+// Extracting and exercising a standalone archive is slower than an ordinary unit test, so this file
+// raises the test budget above the shared default; the hook budget comes from vitest.config.ts.
+// Every deadline inside a test or hook stays strictly below the surrounding budget, otherwise the
+// slower standalone runners kill the test before its own diagnostic can report.
+const RUN_TIMEOUT = 60000;
+const CONNECT_TIMEOUT = 5000;
+const SHUTDOWN_TIMEOUT = 15000;
+vi.setConfig({ testTimeout: 120000 });
 
 const archive = process.env.PRIME_AGENT_TEST_ARCHIVE;
 const uv = process.env.PRIME_AGENT_TEST_UV;
@@ -34,7 +44,7 @@ let cwd = "";
 let socket = "";
 let environment: NodeJS.ProcessEnv;
 
-async function run(args: string[], extraEnv: NodeJS.ProcessEnv = {}, timeout = 30000, input?: string) {
+async function run(args: string[], extraEnv: NodeJS.ProcessEnv = {}, timeout = RUN_TIMEOUT, input?: string) {
 	const child = spawn(binary, args, { cwd, env: { ...environment, ...extraEnv }, stdio: ["pipe", "pipe", "pipe"] });
 	children.add(child);
 	let stdout = "";
@@ -166,34 +176,27 @@ describe.skipIf(!archive)("extracted standalone archive", () => {
 	afterEach(async () => {
 		for (const child of children) child.kill("SIGTERM");
 		const client = new DaemonClient(socket);
+		let supervisorPid: number | undefined;
+		let shutdownError: unknown;
 		try {
-			await client.connect(1000);
-			const hello = await client.waitForHello();
-			await client.request({ type: "shutdown", force: true });
-			if (hello.supervisorPid) {
-				await expect
-					.poll(
-						() => {
-							try {
-								process.kill(hello.supervisorPid!, 0);
-								return false;
-							} catch {
-								return true;
-							}
-						},
-						{ timeout: 10000 },
-					)
-					.toBe(true);
-			}
+			await client.connect(CONNECT_TIMEOUT);
+			supervisorPid = (await client.waitForHello()).supervisorPid;
+			await client.request({ type: "shutdown", force: true }, SHUTDOWN_TIMEOUT);
 		} catch (error) {
-			if (existsSync(socket)) throw error;
+			if (existsSync(socket)) shutdownError = error;
 		} finally {
 			client.close();
 		}
+		// The supervisor is terminated even when the shutdown request failed, so an unresponsive
+		// daemon reports its own error instead of leaking a process into the next test.
+		if (supervisorPid !== undefined) await terminateSupervisor(supervisorPid);
 		for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
 		children.clear();
+		if (shutdownError) throw shutdownError;
 	});
 	afterAll(() => {
+		// The retry budget removes an extracted tree whose files a just-killed child may still hold;
+		// ten attempts spaced 100ms apart stay far below the hook budget even when every one is used.
 		if (root) rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	});
 
@@ -314,7 +317,7 @@ writeFileSync(join(process.cwd(), "hot-runtime.json"), JSON.stringify({ value, e
 		]
 			.map((command) => `${JSON.stringify(command)}\n`)
 			.join("");
-		const result = await run([...sessionArgs(), "--no-tools", "--mode", "rpc"], {}, 30000, input);
+		const result = await run([...sessionArgs(), "--no-tools", "--mode", "rpc"], {}, RUN_TIMEOUT, input);
 		expect(result.code, result.stderr).toBe(0);
 		const frames = result.stdout
 			.trim()

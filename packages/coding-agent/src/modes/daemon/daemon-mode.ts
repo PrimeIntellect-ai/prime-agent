@@ -574,6 +574,16 @@ export class AgentDaemon {
 	private readonly pendingSessionNames = new Set<string>();
 	private restoreActiveSessionId: string | undefined;
 	private supervisorMonitorTimer?: ReturnType<typeof setTimeout>;
+	/**
+	 * Settles when the armed supervisor availability check has run to completion
+	 * (including the reschedule it performs) or has been cancelled. The check is
+	 * a real async chain started from a timer callback, so this is the only way
+	 * to tell the monitor reached a steady state. It stays public because the
+	 * daemon supervisor monitor tests await it through structural access; no
+	 * production code reads it.
+	 */
+	supervisorAvailabilityCheckSettled?: Promise<void>;
+	private settleArmedSupervisorAvailabilityCheck?: () => void;
 	private supervisorFenceTimer?: ReturnType<typeof setTimeout>;
 	private supervisorLaunchInProgress = false;
 	private supervisorAbsentSince?: number;
@@ -756,17 +766,36 @@ export class AgentDaemon {
 		if (this.shuttingDown || this.hasAuthenticatedSupervisorConnection()) {
 			return;
 		}
-		if (this.supervisorMonitorTimer) {
-			clearTimeout(this.supervisorMonitorTimer);
-		}
+		this.cancelArmedSupervisorAvailabilityCheck();
+		let settle: () => void = () => undefined;
+		this.supervisorAvailabilityCheckSettled = new Promise<void>((resolveSettled) => {
+			settle = resolveSettled;
+		});
+		this.settleArmedSupervisorAvailabilityCheck = settle;
 		this.supervisorMonitorTimer = setTimeout(() => {
 			this.supervisorMonitorTimer = undefined;
-			void this.checkSupervisorAvailability(supervisorSocketPath).catch(() => {
-				if (!this.shuttingDown && !this.hasAuthenticatedSupervisorConnection()) {
-					this.scheduleSupervisorAvailabilityCheck(supervisorSocketPath, 5000);
-				}
-			});
+			// The check owns its settle from here on, so a reschedule started
+			// inside it installs a fresh one instead of resolving this one early.
+			this.settleArmedSupervisorAvailabilityCheck = undefined;
+			void this.checkSupervisorAvailability(supervisorSocketPath)
+				.catch(() => {
+					if (!this.shuttingDown && !this.hasAuthenticatedSupervisorConnection()) {
+						this.scheduleSupervisorAvailabilityCheck(supervisorSocketPath, 5000);
+					}
+				})
+				.finally(settle);
 		}, delayMs);
+	}
+
+	/** Disarms a pending check and settles it, since it will never run. */
+	private cancelArmedSupervisorAvailabilityCheck(): void {
+		if (this.supervisorMonitorTimer) {
+			clearTimeout(this.supervisorMonitorTimer);
+			this.supervisorMonitorTimer = undefined;
+		}
+		const settle = this.settleArmedSupervisorAvailabilityCheck;
+		this.settleArmedSupervisorAvailabilityCheck = undefined;
+		settle?.();
 	}
 
 	private async checkSupervisorAvailability(supervisorSocketPath: string): Promise<void> {
@@ -867,10 +896,7 @@ export class AgentDaemon {
 	}
 
 	private clearSupervisorAvailabilityCheck(): void {
-		if (this.supervisorMonitorTimer) {
-			clearTimeout(this.supervisorMonitorTimer);
-			this.supervisorMonitorTimer = undefined;
-		}
+		this.cancelArmedSupervisorAvailabilityCheck();
 		if (this.supervisorFenceTimer) {
 			clearTimeout(this.supervisorFenceTimer);
 			this.supervisorFenceTimer = undefined;
@@ -7799,10 +7825,7 @@ export class AgentDaemon {
 		this.peerAdmissionsFenced = true;
 		this.peerGrants.clear();
 		this.supervisorLinkInstance?.close();
-		if (this.supervisorMonitorTimer) {
-			clearTimeout(this.supervisorMonitorTimer);
-			this.supervisorMonitorTimer = undefined;
-		}
+		this.cancelArmedSupervisorAvailabilityCheck();
 		if (this.supervisorFenceTimer) {
 			clearTimeout(this.supervisorFenceTimer);
 			this.supervisorFenceTimer = undefined;
