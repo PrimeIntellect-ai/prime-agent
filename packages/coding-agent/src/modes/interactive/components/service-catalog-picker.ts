@@ -199,6 +199,15 @@ class ServiceAccountsBodyComponent implements Component {
 		private readonly header: string,
 		private readonly description: string,
 		private readonly getRowsState: () => readonly ServiceAccountsRow[],
+		/**
+		 * Rows available for this body inside the panel. The fixed frame
+		 * (blank, header, blank, description cap, blank under the options,
+		 * trailing blank) is painted first; when the viewport cannot fit it,
+		 * the description drops (and with it its blank) instead of the frame
+		 * overflowing the terminal — the same rule the catalog mode applies to
+		 * its detail line. Options are never dropped: they are the content.
+		 */
+		private readonly getAvailableRows: () => number,
 	) {}
 
 	invalidate(): void {
@@ -213,7 +222,13 @@ class ServiceAccountsBodyComponent implements Component {
 			lines.push(this.line(safeWidth, theme.fg("text", this.header)));
 			lines.push(this.line(safeWidth, ""));
 		}
-		if (this.description) {
+		// Fixed-frame budget: what must fit besides the option rows.
+		const FIXED_ROWS = 2 /* leading blank, header */ + 1 /* blank under header */ + 1 /* trailing blank */;
+		const budgeted = this.getAvailableRows();
+		const optionRowCount = this.getRowsState().length;
+		const neededWithDescription = FIXED_ROWS + ACCOUNTS_DESCRIPTION_BUDGET_ROWS + optionRowCount + 1 /* trailing */;
+		const showDescription = !!this.description && budgeted >= neededWithDescription;
+		if (showDescription) {
 			const wrapWidth = Math.max(1, Math.min(ACCOUNTS_DESCRIPTION_WIDTH, safeWidth - 2));
 			const wrapped = wrapTextWithAnsi(this.description, wrapWidth);
 			// Hard cap: at most three lines, and when the description ran
@@ -345,6 +360,11 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 				flattenToSingleLine(options.title ?? ""),
 				description,
 				() => this.accountsRows(),
+				// The picker paints the shortcuts line itself, so the body gets
+				// the rest of the terminal; the separator rule is budgeted by
+				// contextRows, not by the body.
+				// No rows provider means no bound: only a real viewport limits the frame.
+				() => (this.viewport.getRows ? Math.max(0, (this.viewport.getRows() ?? 0) - 1) : Number.POSITIVE_INFINITY),
 			);
 			panel.addChild(this.accountsBody);
 			// The accounts body owns every fixed row (blank, header,

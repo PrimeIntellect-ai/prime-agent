@@ -307,31 +307,51 @@ describe("ServiceCatalogPickerComponent", () => {
 	});
 
 	it("budgets the accounts frame to its rendered height, including the blank under the last option", () => {
-		// Bugbot: the new blank row under "Add another account" was not in
-		// ACCOUNTS_FRAME_ROWS, so at the 3-line description cap the frame was one
-		// row taller than the layout allowed and a tight viewport pushed the
-		// shortcuts line off-screen.
-		const longDescription = "A".repeat(400);
+		// Bugbot: the blank row under the last option was not in
+		// ACCOUNTS_FRAME_ROWS, so a viewport sized exactly to the budget was one
+		// row too short and the shortcuts line was pushed off-screen. Pin the
+		// invariant at the exact failure point: a viewport of exactly the
+		// budgeted rows must show the last frame row (the shortcuts line).
+		const longDescription = "A".repeat(400); // forces the 3-line cap
+		const accounts = [
+			viewFixture({
+				serviceId: "acme",
+				label: "Acme",
+				description: longDescription,
+				connectionStatus: "connected",
+				connectionIds: ["acme-1"],
+			}),
+		];
+		const budgetAtDescriptionCap =
+			1 /* rule */ +
+			1 /* blank */ +
+			1 /* header */ +
+			1 /* blank */ +
+			3 /* description cap */ +
+			1 /* blank */ +
+			1 /* the one option */ +
+			1 /* trailing blank */ +
+			1 /* shortcuts */;
 		const picker = new ServiceCatalogPickerComponent(
-			[
-				viewFixture({
-					serviceId: "acme",
-					label: "Acme",
-					description: longDescription,
-					connectionStatus: "connected",
-					connectionIds: ["acme-1"],
-				}),
-			],
+			accounts,
 			() => {},
 			() => {},
-			{ mode: "accounts", getRows: () => 30 },
+			{ mode: "accounts", getRows: () => budgetAtDescriptionCap, title: "Acme MCP" },
 		);
-		picker.handleInput("test"); // ensure selection state settled
-		const renderedHeight = picker.render(120).length;
-		// The frame: rule(1) + blank(1) + header(1) + blank(1) + description cap
-		// 3 + blank(1) + options + trailing blank(1) + shortcuts(1). The budget
-		// must never be SHORTER than what is actually painted.
-		expect(renderedHeight).toBeLessThanOrEqual(30);
+		const lines = picker.render(120);
+		expect(lines).toHaveLength(budgetAtDescriptionCap);
+		// The last painted row IS the shortcuts line, not a truncated frame.
+		expect(stripAnsi(lines[lines.length - 1] ?? "")).toContain("Enter");
+		// And one row SHORTER: the frame must still fit by the windowing rules
+		// (options compress, the shortcuts stay visible) — the frame never
+		// paints past the viewport.
+		const tight = new ServiceCatalogPickerComponent(
+			accounts,
+			() => {},
+			() => {},
+			{ mode: "accounts", getRows: () => budgetAtDescriptionCap - 1, title: "Acme MCP" },
+		);
+		expect(tight.render(120).length).toBeLessThanOrEqual(budgetAtDescriptionCap - 1);
 	});
 
 	it("renders the accounts frame in the onboarding-choice shape (PR #2340)", () => {
