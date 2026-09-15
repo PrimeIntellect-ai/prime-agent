@@ -42,6 +42,12 @@ export interface CreateAgentSessionServicesOptions {
 	 */
 	noBuiltinHerdrReporter?: boolean;
 	telemetryDisabled?: true;
+	/**
+	 * Hold the telemetry disclosure back on a first interactive launch, where it
+	 * would land on the onboarding screen. Onboarding marks itself shown, so the
+	 * notice appears on the next launch; sessions that never onboard disclose now.
+	 */
+	deferTelemetryNoticeForOnboarding?: boolean;
 }
 
 export interface AgentSessionCreationOptions {
@@ -186,6 +192,10 @@ export async function createAgentSessionServices(
 	if (
 		!options.telemetryDisabled &&
 		isTelemetryEnabled(settingsManager) &&
+		// A first interactive launch belongs to onboarding, where the notice would
+		// land on the welcome screen; it surfaces on the next launch once
+		// onboarding marks itself shown. Sessions that never onboard disclose now.
+		(settingsManager.getOnboardingShown() || !options.deferTelemetryNoticeForOnboarding) &&
 		!settingsManager.getTelemetryNoticeShown()
 	) {
 		diagnostics.push({
