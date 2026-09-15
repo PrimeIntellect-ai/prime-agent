@@ -13,7 +13,15 @@ import pytest
 ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT))
 
-from scripts.evals.short_swe import builder, candidate_contract, ci, evaluate, prepare, report  # noqa: E402
+from scripts.evals.short_swe import (  # noqa: E402
+    builder,
+    candidate_contract,
+    ci,
+    cleanup,
+    evaluate,
+    prepare,
+    report,
+)
 
 EVAL_ROOT = ROOT / "scripts/evals/short_swe"
 
@@ -338,6 +346,40 @@ def test_report_fails_drastic_quality_or_efficiency_regression() -> None:
 def open_directories(source: Path, destination: Path) -> tuple[int, int]:
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     return os.open(source, flags), os.open(destination, flags)
+
+
+def test_cleanup_rechecks_labels_paginates_and_attempts_every_delete() -> None:
+    labels = ["owner", "repository:repo/name", "run:1", "attempt:1"]
+    pages = [
+        SimpleNamespace(
+            sandboxes=[
+                SimpleNamespace(id="owned-1", labels=[*labels, "role:task"]),
+                SimpleNamespace(id="foreign", labels=["owner"]),
+            ],
+            has_next=True,
+        ),
+        SimpleNamespace(
+            sandboxes=[SimpleNamespace(id="owned-2", labels=labels)],
+            has_next=False,
+        ),
+    ]
+
+    class Client:
+        def __init__(self):
+            self.deleted = []
+
+        def list(self, **kwargs):
+            return pages[kwargs["page"] - 1]
+
+        def delete(self, sandbox_id):
+            self.deleted.append(sandbox_id)
+            if sandbox_id == "owned-1":
+                raise RuntimeError("failed")
+
+    client = Client()
+    with pytest.raises(RuntimeError, match="1 sandbox"):
+        cleanup.cleanup_owned(client, labels)
+    assert client.deleted == ["owned-1", "owned-2"]
 
 
 def test_artifact_snapshot_hashes_one_open_regular_file(tmp_path: Path) -> None:

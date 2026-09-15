@@ -12,6 +12,32 @@ from prime_sandboxes import APIClient, SandboxClient
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
+def cleanup_owned(client, labels: list[str], team_id: str | None = None) -> int:
+    sandbox_ids = []
+    page = 1
+    while True:
+        response = client.list(
+            team_id=team_id,
+            labels=labels,
+            page=page,
+            per_page=100,
+            exclude_terminated=True,
+        )
+        sandbox_ids.extend(sandbox.id for sandbox in response.sandboxes if set(labels) <= set(sandbox.labels))
+        if not response.has_next:
+            break
+        page += 1
+    failures = []
+    for sandbox_id in sandbox_ids:
+        try:
+            client.delete(sandbox_id)
+        except Exception:
+            failures.append(sandbox_id)
+    if failures:
+        raise RuntimeError(f"cleanup failed for {len(failures)} sandbox(es); TTL remains active")
+    return len(sandbox_ids)
+
+
 def cleanup(repository: str, run_id: int, attempt: int) -> int:
     if not REPO_RE.fullmatch(repository):
         raise ValueError("invalid repository")
@@ -22,22 +48,7 @@ def cleanup(repository: str, run_id: int, attempt: int) -> int:
         f"attempt:{attempt}",
     ]
     client = SandboxClient(APIClient(api_key=os.environ["PRIME_SANDBOX_API_KEY"]))
-    team_id = os.environ.get("PRIME_TEAM_ID") or None
-    sandbox_ids = []
-    for page in range(1, 21):
-        response = client.list(
-            team_id=team_id,
-            labels=labels,
-            page=page,
-            per_page=50,
-            exclude_terminated=True,
-        )
-        sandbox_ids.extend(sandbox.id for sandbox in response.sandboxes)
-        if len(response.sandboxes) < 50:
-            break
-    for sandbox_id in sandbox_ids:
-        client.delete(sandbox_id)
-    return len(sandbox_ids)
+    return cleanup_owned(client, labels, os.environ.get("PRIME_TEAM_ID") or None)
 
 
 def main() -> None:
