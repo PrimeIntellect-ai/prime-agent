@@ -13,22 +13,22 @@
 		}
 	],
 	"counts": {
-		"total": 75,
-		"http": 72,
-		"httpTemplate": 2,
-		"sse": 1,
+		"total": 70,
+		"http": 70,
+		"httpTemplate": 0,
+		"sse": 0,
 		"stdio": 0,
 		"ready": 57,
-		"requiresSetup": 18,
+		"requiresSetup": 13,
 		"metadataReviewed": 2,
-		"oauthStrategy": 6,
-		"apiKeyStrategy": 16,
+		"oauthStrategy": 5,
+		"apiKeyStrategy": 12,
 		"mergedFromBothSources": 11,
 		"readinessOauthReady": 57,
-		"readinessUserSetup": 18,
+		"readinessUserSetup": 13,
 		"readinessPrimeRestricted": 0,
 		"readinessUnknown": 0,
-		"metadataAvailable": 70,
+		"metadataAvailable": 67,
 		"metadataUnavailable": 3
 	},
 	"entries": [
@@ -689,7 +689,7 @@
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "requires an auth token supplied via environment variable",
+				"reason": "paste your AWS DevSecOps agent token (DEVOPS_AGENT_TOKEN)",
 				"fields": [
 					{
 						"id": "DEVOPS_AGENT_TOKEN",
@@ -1423,7 +1423,7 @@
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "requires provider credentials supplied as headers",
+				"reason": "paste your Cloudinary API key and API secret (cld-api-key, cld-secret)",
 				"fields": [
 					{
 						"id": "cld-api-key",
@@ -1536,82 +1536,6 @@
 			]
 		},
 		{
-			"server": "cockroachdb",
-			"service": "cockroach-labs",
-			"label": "CockroachDB Cloud",
-			"url": "https://cockroachlabs.cloud/mcp",
-			"aliases": [
-				"cockroach-labs",
-				"cockroachdb-cloud"
-			],
-			"publisher": "Cockroach Labs",
-			"transport": {
-				"type": "http",
-				"url": "https://cockroachlabs.cloud/mcp"
-			},
-			"auth": {
-				"strategy": "api_key",
-				"clientRegistration": "unknown",
-				"metadata": {
-					"status": "available",
-					"authorizationServer": "https://cockroachlabs.cloud/mcp",
-					"resource": "https://cockroachlabs.cloud/mcp",
-					"pkceS256": true,
-					"dynamicClientRegistration": true,
-					"protectedResourceScopes": [
-						"mcp:read",
-						"mcp:write"
-					],
-					"authorizationServerScopes": [
-						"mcp:read",
-						"mcp:write"
-					],
-					"tokenAuthMethods": [
-						"none"
-					],
-					"sourceUrls": [
-						"https://cockroachlabs.cloud/mcp",
-						"https://cockroachlabs.cloud/.well-known/oauth-protected-resource/mcp",
-						"https://cockroachlabs.cloud/.well-known/oauth-protected-resource",
-						"https://cockroachlabs.cloud/.well-known/oauth-authorization-server/mcp",
-						"https://cockroachlabs.cloud/mcp/.well-known/openid-configuration"
-					],
-					"fetchedAt": "2026-09-12"
-				}
-			},
-			"setup": {
-				"status": "requires-setup",
-				"reason": "requires provider credentials supplied as headers",
-				"fields": [
-					{
-						"id": "COCKROACHDB_CLUSTER_ID",
-						"label": "COCKROACHDB_CLUSTER_ID",
-						"description": "Environment variable COCKROACHDB_CLUSTER_ID",
-						"required": true,
-						"kind": "env-var"
-					}
-				],
-				"requirement": "tenant",
-				"readiness": "user-setup"
-			},
-			"verification": {
-				"status": "unverified"
-			},
-			"legacyBuiltin": false,
-			"provenance": [
-				{
-					"source": "claude-plugins-official",
-					"repository": "https://github.com/cockroachdb/claude-plugin.git",
-					"commit": "6c96c6394a61f366e8ec1b7cec2281e97507cbff",
-					"url": "https://raw.githubusercontent.com/cockroachdb/claude-plugin/6c96c6394a61f366e8ec1b7cec2281e97507cbff/.mcp.json"
-				},
-				{
-					"source": "prime",
-					"note": "curated override applied; see mcp-catalog/overrides.json"
-				}
-			]
-		},
-		{
 			"server": "codspeed",
 			"service": "codspeed",
 			"label": "CodSpeed",
@@ -1700,7 +1624,7 @@
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "requires provider credentials supplied as headers",
+				"reason": "paste your Datadog API key and application key (DD_API_KEY, DD_APPLICATION_KEY)",
 				"fields": [
 					{
 						"id": "DD_API_KEY",
@@ -1853,61 +1777,6 @@
 			"homepage": "https://www.dropbox.com",
 			"privacyUrl": "https://www.dropbox.com/privacy",
 			"supportUrl": "https://www.dropbox.com/get_help"
-		},
-		{
-			"server": "dynatrace",
-			"service": "dynatrace",
-			"label": "Dynatrace",
-			"url": "",
-			"transport": {
-				"type": "http-template",
-				"template": "${DT_ENVIRONMENT}/platform-reserved/mcp-gateway/v0.1/servers/dynatrace-mcp/mcp",
-				"variables": [
-					{
-						"name": "DT_ENVIRONMENT",
-						"description": "Upstream template variable DT_ENVIRONMENT"
-					}
-				]
-			},
-			"auth": {
-				"strategy": "api_key",
-				"clientRegistration": "unknown"
-			},
-			"setup": {
-				"status": "requires-setup",
-				"reason": "endpoint is tenant-specific; provide your instance URL and credentials",
-				"fields": [
-					{
-						"id": "DT_ENVIRONMENT",
-						"label": "DT_ENVIRONMENT",
-						"description": "Upstream template variable DT_ENVIRONMENT",
-						"required": true,
-						"kind": "url"
-					},
-					{
-						"id": "DT_PLATFORM_TOKEN",
-						"label": "DT_PLATFORM_TOKEN",
-						"description": "Environment variable DT_PLATFORM_TOKEN",
-						"required": true,
-						"kind": "bearer-token"
-					}
-				],
-				"requirement": "tenant",
-				"readiness": "user-setup"
-			},
-			"verification": {
-				"status": "unverified"
-			},
-			"legacyBuiltin": false,
-			"aliases": [],
-			"provenance": [
-				{
-					"source": "claude-plugins-official",
-					"repository": "https://github.com/Dynatrace/dynatrace-for-ai.git",
-					"commit": "9ebe70d408ea59d2df4b371b745c6c2aa6229e5b",
-					"url": "https://raw.githubusercontent.com/Dynatrace/dynatrace-for-ai/9ebe70d408ea59d2df4b371b745c6c2aa6229e5b/.mcp.json"
-				}
-			]
 		},
 		{
 			"server": "expo",
@@ -2143,7 +2012,7 @@
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "requires a bearer token supplied via environment variable; requires an auth token supplied via environment variable",
+				"reason": "paste a GitHub personal access token (GITHUB_PAT_TOKEN or GITHUB_PERSONAL_ACCESS_TOKEN)",
 				"fields": [
 					{
 						"id": "GITHUB_PAT_TOKEN",
@@ -3536,7 +3405,7 @@
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "requires an auth token supplied via environment variable",
+				"reason": "paste your PagerDuty API key (PAGERDUTY_API_KEY)",
 				"fields": [
 					{
 						"id": "PAGERDUTY_API_KEY",
@@ -3559,75 +3428,6 @@
 					"repository": "https://github.com/PagerDuty/claude-code-plugins.git",
 					"commit": "761cba75bd50fd561405c3b173ecf36084432089",
 					"url": "https://raw.githubusercontent.com/PagerDuty/claude-code-plugins/761cba75bd50fd561405c3b173ecf36084432089/.mcp.json"
-				}
-			]
-		},
-		{
-			"server": "paypal-sandbox",
-			"service": "paypal",
-			"label": "PayPal (Sandbox)",
-			"url": "https://mcp.sandbox.paypal.com/sse",
-			"transport": {
-				"type": "sse",
-				"url": "https://mcp.sandbox.paypal.com/sse"
-			},
-			"auth": {
-				"strategy": "api_key",
-				"clientRegistration": "unknown",
-				"metadata": {
-					"status": "available",
-					"authorizationServer": "https://mcp.sandbox.paypal.com",
-					"resource": "https://mcp.sandbox.paypal.com/sse",
-					"pkceS256": true,
-					"dynamicClientRegistration": true,
-					"protectedResourceScopes": [
-						"openid",
-						"email",
-						"profile"
-					],
-					"tokenAuthMethods": [
-						"client_secret_basic",
-						"client_secret_post",
-						"none"
-					],
-					"sourceUrls": [
-						"https://mcp.sandbox.paypal.com/sse",
-						"https://mcp.sandbox.paypal.com/.well-known/oauth-protected-resource/sse",
-						"https://mcp.sandbox.paypal.com/.well-known/oauth-protected-resource",
-						"https://mcp.sandbox.paypal.com/.well-known/oauth-authorization-server",
-						"https://mcp.sandbox.paypal.com/.well-known/openid-configuration"
-					],
-					"fetchedAt": "2026-09-12"
-				}
-			},
-			"setup": {
-				"status": "requires-setup",
-				"reason": "legacy SSE transport; the generic runtime currently supports streamable HTTP and stdio only",
-				"fields": [
-					{
-						"id": "PAYPAL_SANDBOX_ACCESS_TOKEN",
-						"label": "PAYPAL_SANDBOX_ACCESS_TOKEN",
-						"description": "Environment variable PAYPAL_SANDBOX_ACCESS_TOKEN",
-						"required": true,
-						"kind": "bearer-token"
-					}
-				],
-				"requirement": "unsupported-transport",
-				"readiness": "user-setup"
-			},
-			"verification": {
-				"status": "unverified"
-			},
-			"legacyBuiltin": false,
-			"aliases": [
-				"paypal"
-			],
-			"provenance": [
-				{
-					"source": "claude-plugins-official",
-					"repository": "https://github.com/paypal/AI-Toolkit.git",
-					"commit": "310b4962f0e5b3d09ff1c909d96ad5e226703ecb",
-					"url": "https://raw.githubusercontent.com/paypal/AI-Toolkit/310b4962f0e5b3d09ff1c909d96ad5e226703ecb/.mcp.json"
 				},
 				{
 					"source": "prime",
@@ -3945,73 +3745,6 @@
 					"url": "https://raw.githubusercontent.com/railwayapp/railway-skills/950acebcef3445f3915ea0709876c3ba9c237a7f/plugins/railway/.mcp.json"
 				}
 			]
-		},
-		{
-			"server": "render",
-			"service": "render",
-			"label": "Render",
-			"url": "https://mcp.render.com/mcp",
-			"aliases": [],
-			"publisher": "Render",
-			"transport": {
-				"type": "http",
-				"url": "https://mcp.render.com/mcp"
-			},
-			"auth": {
-				"strategy": "oauth",
-				"clientRegistration": "unknown",
-				"alternatives": [
-					{
-						"kind": "oauth",
-						"readiness": "unknown",
-						"note": "Render also announced OAuth onboarding for specific partner clients (Claude Code, Codex, Cursor); Prime's client registration path is unknown",
-						"sourceUrl": "https://render.com/changelog/render-mcp-now-supports-oauth-for-claude-code-codex-and-cursor"
-					}
-				],
-				"metadata": {
-					"status": "available",
-					"authorizationServer": "https://api.render.com",
-					"resource": "https://mcp.render.com/mcp",
-					"pkceS256": true,
-					"tokenAuthMethods": [
-						"none"
-					],
-					"sourceUrls": [
-						"https://mcp.render.com/mcp",
-						"https://mcp.render.com/.well-known/oauth-protected-resource/mcp",
-						"https://mcp.render.com/.well-known/oauth-protected-resource",
-						"https://api.render.com/.well-known/oauth-authorization-server",
-						"https://api.render.com/.well-known/openid-configuration"
-					],
-					"fetchedAt": "2026-09-12",
-					"note": "no dynamic client registration advertised; only public-client token auth ('none') is advertised"
-				}
-			},
-			"setup": {
-				"status": "requires-setup",
-				"reason": "Render's documented MCP authentication route is a user-supplied API key; the upstream config relies on a Claude-specific OAuth client identity that Prime must not reuse",
-				"readiness": "user-setup",
-				"requirement": "api-key"
-			},
-			"verification": {
-				"status": "unverified"
-			},
-			"legacyBuiltin": false,
-			"provenance": [
-				{
-					"source": "claude-plugins-official",
-					"repository": "https://github.com/render-oss/render-plugin-claude-code.git",
-					"commit": "e8f889396634dbc8c368448a7f3de993ed4a5ac1",
-					"url": "https://raw.githubusercontent.com/render-oss/render-plugin-claude-code/e8f889396634dbc8c368448a7f3de993ed4a5ac1/.mcp.json"
-				},
-				{
-					"source": "prime",
-					"note": "curated override applied; see mcp-catalog/overrides.json"
-				}
-			],
-			"oauth": {
-				"kind": "oauth"
-			}
 		},
 		{
 			"server": "resend",
@@ -4448,7 +4181,7 @@
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "requires an auth token supplied via environment variable",
+				"reason": "paste your Sonatype Guide token (SONATYPE_GUIDE_TOKEN)",
 				"fields": [
 					{
 						"id": "SONATYPE_GUIDE_TOKEN",
@@ -4471,61 +4204,10 @@
 					"repository": "https://github.com/sonatype/sonatype-guide-claude-plugin.git",
 					"commit": "1dae73980f591d3196f5532ac72186513563d028",
 					"url": "https://raw.githubusercontent.com/sonatype/sonatype-guide-claude-plugin/1dae73980f591d3196f5532ac72186513563d028/.mcp.json"
-				}
-			]
-		},
-		{
-			"server": "sourcegraph",
-			"service": "sourcegraph",
-			"label": "Sourcegraph",
-			"url": "",
-			"transport": {
-				"type": "http-template",
-				"template": "${SOURCEGRAPH_ENDPOINT}/.api/mcp",
-				"variables": [
-					{
-						"name": "SOURCEGRAPH_ENDPOINT",
-						"description": "Upstream template variable SOURCEGRAPH_ENDPOINT"
-					}
-				]
-			},
-			"auth": {
-				"strategy": "api_key",
-				"clientRegistration": "unknown"
-			},
-			"setup": {
-				"status": "requires-setup",
-				"reason": "endpoint is tenant-specific; provide your instance URL and credentials",
-				"fields": [
-					{
-						"id": "SOURCEGRAPH_ACCESS_TOKEN",
-						"label": "SOURCEGRAPH_ACCESS_TOKEN",
-						"description": "Environment variable SOURCEGRAPH_ACCESS_TOKEN",
-						"required": true,
-						"kind": "bearer-token"
-					},
-					{
-						"id": "SOURCEGRAPH_ENDPOINT",
-						"label": "SOURCEGRAPH_ENDPOINT",
-						"description": "Upstream template variable SOURCEGRAPH_ENDPOINT",
-						"required": true,
-						"kind": "url"
-					}
-				],
-				"requirement": "tenant",
-				"readiness": "user-setup"
-			},
-			"verification": {
-				"status": "unverified"
-			},
-			"legacyBuiltin": false,
-			"aliases": [],
-			"provenance": [
+				},
 				{
-					"source": "claude-plugins-official",
-					"repository": "https://github.com/sourcegraph-community/sourcegraph-claudecode-plugin.git",
-					"commit": "332ee0ca9a409ccd791abee43c7abf2606469017",
-					"url": "https://raw.githubusercontent.com/sourcegraph-community/sourcegraph-claudecode-plugin/332ee0ca9a409ccd791abee43c7abf2606469017/.mcp.json"
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
 				}
 			]
 		},
@@ -5063,7 +4745,7 @@
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "requires an auth token supplied via environment variable",
+				"reason": "paste your Zoom access token (ZOOM_MCP_ACCESS_TOKEN)",
 				"fields": [
 					{
 						"id": "ZOOM_MCP_ACCESS_TOKEN",
@@ -5156,7 +4838,7 @@
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "requires an auth token supplied via environment variable",
+				"reason": "paste your Zoom Canvas access token (ZOOM_CANVAS_MCP_ACCESS_TOKEN)",
 				"fields": [
 					{
 						"id": "ZOOM_CANVAS_MCP_ACCESS_TOKEN",
@@ -5242,7 +4924,7 @@
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "requires an auth token supplied via environment variable",
+				"reason": "paste your Zoom Chat access token (ZOOM_CHAT_MCP_ACCESS_TOKEN)",
 				"fields": [
 					{
 						"id": "ZOOM_CHAT_MCP_ACCESS_TOKEN",
@@ -5323,7 +5005,7 @@
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "requires an auth token supplied via environment variable; upstream OAuth client values are placeholders; upstream OAuth config contains client-id placeholders",
+				"reason": "paste your Zoom Meetings access token (ZOOM_MEETINGS_MCP_ACCESS_TOKEN)",
 				"fields": [
 					{
 						"id": "ZOOM_MEETINGS_MCP_ACCESS_TOKEN",
@@ -5415,7 +5097,7 @@
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "requires an auth token supplied via environment variable",
+				"reason": "paste your Zoom Revenue Accelerator access token (ZOOM_REVENUE_ACCELERATOR_MCP_ACCESS_TOKEN)",
 				"fields": [
 					{
 						"id": "ZOOM_REVENUE_ACCELERATOR_MCP_ACCESS_TOKEN",
@@ -5499,7 +5181,7 @@
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "requires an auth token supplied via environment variable",
+				"reason": "paste your Zoom Tasks access token (ZOOM_TASKS_MCP_ACCESS_TOKEN)",
 				"fields": [
 					{
 						"id": "ZOOM_TASKS_MCP_ACCESS_TOKEN",
@@ -5581,7 +5263,7 @@
 			},
 			"setup": {
 				"status": "requires-setup",
-				"reason": "requires an auth token supplied via environment variable",
+				"reason": "paste your Zoom Whiteboard access token (ZOOM_WHITEBOARD_MCP_ACCESS_TOKEN)",
 				"fields": [
 					{
 						"id": "ZOOM_WHITEBOARD_MCP_ACCESS_TOKEN",

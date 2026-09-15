@@ -966,9 +966,9 @@ describe("defaultServiceCatalogProvider", () => {
 		const services = defaultServiceCatalogProvider()();
 		const ids = new Set(services.map((service) => service.serviceId));
 		// The merged catalog supersedes the legacy-only slice; the full entry set
-		// (75 today, after the 2026-09-14 zero-app cut and the 2026-09-15
-		// final cut to one-click DCR or user token/key only) still contains
-		// the reserved legacy built-ins.
+		// (70 today, after the 2026-09-14 zero-app cut, the 2026-09-15 final cut
+		// to one-click DCR or user token/key only, and the 2026-09-16 token-only
+		// cut) still contains the reserved legacy built-ins.
 		expect(ids.has("linear")).toBe(true);
 		expect(ids.has("notion")).toBe(true);
 		expect(services.length).toBeGreaterThan(50);
@@ -1472,18 +1472,20 @@ describe("resolveMcpServiceCatalog", () => {
 });
 
 describe("/mcp and /plugins picker row counts", () => {
-	it("ships exactly 75 catalog services after the ENG-6108 one-click/token-key cut", () => {
-		// The live /mcp picker counter read /77 against this shipped 75: the two
-		// extra rows are installed connections pinned from records (below), never
-		// catalog growth or duplicated rows. Pin the shipped length so silent
+	it("ships exactly 70 catalog services after the ENG-6108 token-only cut", () => {
+		// The live /mcp picker counter read /77 against the earlier shipped 75:
+		// the extra rows are installed connections pinned from records (below),
+		// never catalog growth or duplicated rows. The 2026-09-16 token-only cut
+		// dropped 5 more non-pasteable survivors (CockroachDB Cloud, Dynatrace,
+		// Sourcegraph, PayPal Sandbox, Render). Pin the shipped length so silent
 		// re-growth changes the counter loudly.
-		expect(SERVICE_CATALOG.length).toBe(75);
+		expect(SERVICE_CATALOG.length).toBe(70);
 	});
 
 	it("counts rows as the shipped catalog plus pinned installed connections — unique, no off-by-N", () => {
 		// Kevin's live state: figma and huggingface-skills were cut from the
 		// shipped catalog but their connections are installed, so their records
-		// pin durable descriptors and the picker legitimately lists 75 + 2 = 77
+		// pin durable descriptors and the picker legitimately lists 70 + 2 = 72
 		// rows. Every row is unique — the counter matches the rendered list.
 		const catalogIds = new Set(SERVICE_CATALOG.map((entry) => entry.server));
 		expect(catalogIds.has("figma")).toBe(false);

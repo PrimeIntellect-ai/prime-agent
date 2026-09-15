@@ -8,9 +8,9 @@
 		},
 		"claude-plugins-official": {
 			"plugins": 118,
-			"remoteServers": 71,
+			"remoteServers": 68,
 			"stdioServers": 0,
-			"excluded": 78
+			"excluded": 83
 		}
 	},
 	"merged": [
@@ -239,6 +239,10 @@
 			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Cloud SQL for SQL Server is a local stdio adapter (`npx -y @toolbox-sdk/server@1.9.0 --prebuilt cloud-sql-mssql --stdio`)—it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
 		},
 		{
+			"key": "claude-plugins-official/cockroachdb/cockroachdb-cloud",
+			"reason": "token-only catalog cut (2026-09-16 product decision: the catalog ships one-click DCR connectors and simple paste-an-API-key/token services only — Kevin, live testing: \"things like cockroachdb cloud still need mcp/ 'requires provider credentials supplied as headers'? i told you to remove all that stuff?\"): CockroachDB Cloud is a tenant config, not a key paste—its only setup input is the per-cluster header `mcp-cluster-id: ${COCKROACHDB_CLUSTER_ID}` (requirement `tenant`, one `env-var` field, no api-key/token field at all), and it shipped the scary derived reason `requires provider credentials supplied as headers` that Kevin named in the callout above"
+		},
+		{
 			"key": "claude-plugins-official/cockroachdb/cockroachdb-toolbox",
 			"reason": "local stdio utility inside a remote-service plugin; outside the remote service lane"
 		},
@@ -327,6 +331,10 @@
 			"reason": "Claude-app-specific endpoint variant; the official Dropbox endpoint is imported from the openai catalog"
 		},
 		{
+			"key": "claude-plugins-official/dynatrace/dynatrace",
+			"reason": "token-only catalog cut (2026-09-16 product decision: the catalog ships one-click DCR connectors and simple paste-an-API-key/token services only — Kevin, live testing: \"things like cockroachdb cloud still need mcp/ 'requires provider credentials supplied as headers'? i told you to remove all that stuff?\"): Dynatrace is a tenant-instance endpoint (requirement `tenant`, template `${DT_ENVIRONMENT}/platform-reserved/mcp-gateway/v0.1/servers/dynatrace-mcp/mcp` with `Authorization: Bearer ${DT_PLATFORM_TOKEN}`)—the user must first look up the tenant environment URL and paste it next to the token, so it is not a paste-an-API-key service"
+		},
+		{
 			"key": "claude-plugins-official/figma/figma",
 			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): the Claude-side record of the same Figma endpoint excluded via openai-plugins/figma/figma — Figma requires a provider-authorized pre-registered app client (its advertised dynamic client registration is 403-gated for anonymous registrations, live-verified 2026-09-13; evidence kept in the committed audit store)"
 		},
@@ -403,6 +411,10 @@
 			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): MongoDB's hosted MCP requires a pre-registered OAuth client for the default interactive path — no dynamic client registration is advertised and a client-id metadata document alone is not oauth-readiness (the documented service-account model is an alternative, not the audited default path)"
 		},
 		{
+			"key": "claude-plugins-official/paypal/paypal-sandbox",
+			"reason": "token-only catalog cut (2026-09-16 product decision: the catalog ships one-click DCR connectors and simple paste-an-API-key/token services only — Kevin, live testing: \"things like cockroachdb cloud still need mcp/ 'requires provider credentials supplied as headers'? i told you to remove all that stuff?\"): PayPal Sandbox is a legacy SSE endpoint (`\"type\": \"sse\", \"url\": \"https://mcp.sandbox.paypal.com/sse\"`) and the generic runtime supports streamable HTTP and stdio only, which the entry itself admitted (`legacy SSE transport; the generic runtime currently supports streamable HTTP and stdio only`)—it cannot connect at all, so shipping it as a token/key connector is dishonest"
+		},
+		{
 			"key": "claude-plugins-official/pigment/pigment",
 			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Pigment is a tenant-URL endpoint (template `https://pigment.app/api/mcp/public/${your-mcp-id}`)—its only setup input is the instance URL, with no one-click DCR and no provider token/api key"
 		},
@@ -419,6 +431,10 @@
 			"reason": "local stdio utility inside a remote-service plugin; outside the remote service lane"
 		},
 		{
+			"key": "claude-plugins-official/render/render",
+			"reason": "token-only catalog cut (2026-09-16 product decision: the catalog ships one-click DCR connectors and simple paste-an-API-key/token services only — Kevin, live testing: \"things like cockroachdb cloud still need mcp/ 'requires provider credentials supplied as headers'? i told you to remove all that stuff?\"): Render advertised requirement `api-key` but shipped ZERO setup fields—the upstream config carries only a Claude-specific OAuth client identity (`\"oauth\": {\"clientId\": \"claude\"}`) that Prime must not reuse, so the derived entry gives the user nothing to paste and cannot be connected as shipped; an api-key promise with no credential field is unusable, not a simple key paste"
+		},
+		{
 			"key": "claude-plugins-official/sagemaker-ai/aws-mcp",
 			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Amazon SageMaker AI is a local stdio adapter (`uvx mcp-proxy-for-aws@latest https://aws-mcp.us-east-1.api.aws/mcp`)—it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
 		},
@@ -429,6 +445,10 @@
 		{
 			"key": "claude-plugins-official/slack/slack",
 			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): the Claude-side record of the same Slack endpoint excluded via openai-plugins/slack/slack — Slack requires a Slack-registered app client (no dynamic client registration advertised; confidential-only client auth observed)"
+		},
+		{
+			"key": "claude-plugins-official/sourcegraph/sourcegraph",
+			"reason": "token-only catalog cut (2026-09-16 product decision: the catalog ships one-click DCR connectors and simple paste-an-API-key/token services only — Kevin, live testing: \"things like cockroachdb cloud still need mcp/ 'requires provider credentials supplied as headers'? i told you to remove all that stuff?\"): Sourcegraph is a tenant-instance endpoint (requirement `tenant`, template `${SOURCEGRAPH_ENDPOINT}/.api/mcp` with `Authorization: token ${SOURCEGRAPH_ACCESS_TOKEN}`)—the user must first look up the instance URL and paste it next to the token, so it is not a paste-an-API-key service"
 		},
 		{
 			"key": "claude-plugins-official/spanner/spanner",
@@ -512,22 +532,22 @@
 		}
 	],
 	"counts": {
-		"total": 75,
-		"http": 72,
-		"httpTemplate": 2,
-		"sse": 1,
+		"total": 70,
+		"http": 70,
+		"httpTemplate": 0,
+		"sse": 0,
 		"stdio": 0,
 		"ready": 57,
-		"requiresSetup": 18,
+		"requiresSetup": 13,
 		"metadataReviewed": 2,
-		"oauthStrategy": 6,
-		"apiKeyStrategy": 16,
+		"oauthStrategy": 5,
+		"apiKeyStrategy": 12,
 		"mergedFromBothSources": 11,
 		"readinessOauthReady": 57,
-		"readinessUserSetup": 18,
+		"readinessUserSetup": 13,
 		"readinessPrimeRestricted": 0,
 		"readinessUnknown": 0,
-		"metadataAvailable": 70,
+		"metadataAvailable": 67,
 		"metadataUnavailable": 3
 	}
 }

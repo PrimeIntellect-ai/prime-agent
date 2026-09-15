@@ -37,14 +37,16 @@ rebuilds the catalog offline and deterministically:
 - Tenant-URL configs (`${JFROG_URL}/mcp`, `{your-mcp-id}`, …) become
   `http-template` entries with setup fields instead of fabricated endpoints.
   Templates whose variables all have upstream defaults resolve to those
-  defaults (logfire/postman/AWS DevOps).
+  defaults (logfire/postman/AWS DevOps). Since the 2026-09-16 token-only cut
+  no unresolved template ships — a tenant URL is not a key paste.
 - No upstream scope lists are imported (`reviewedScopes` stays unset); the
   host requests provider-advertised scopes at discovery and owns minimum-scope
   policy.
 - stdio SaaS adapters (the Claude catalog's 32) are recorded in the pinned
   fixtures with their commands; since the 2026-09-15 final cut none of them
   ships (see below). A legacy SSE transport is recorded and flagged the same
-  way — it ships only when it collects a user token/key.
+  way; since the 2026-09-16 token-only cut it does not ship either, because
+  the generic runtime cannot connect to it at all.
 - Zero-app shipping policy (2026-09-14 product decision): Prime maintains ZERO
   provider OAuth apps, so the catalog ships only self-serve connectors —
   dynamic client registration (readiness `oauth-ready`) or user-supplied
@@ -77,6 +79,22 @@ rebuilds the catalog offline and deterministically:
   into the catalog. The demotion/auth-methods honesty machinery that derives
   these requirements stays active for the survivors; the pinned source
   snapshots and audit evidence stay committed as history.
+- Token-only catalog cut (2026-09-16 product decision, Kevin live-testing the
+  picker: "things like cockroachdb cloud still need mcp/ 'requires provider
+  credentials supplied as headers'? i told you to remove all that stuff?"): a
+  `user-setup` entry now ships only when its requirement is literally
+  `bearer-token` or `api-key` AND it collects at least one bearer-token/api-key
+  field — a service the user connects by pasting a key or token. The 5
+  remaining survivors that were not are excluded with per-entry reasons: the 3
+  tenant configs (CockroachDB Cloud's per-cluster `mcp-cluster-id` header,
+  Dynatrace's and Sourcegraph's instance URLs), the 1 legacy-SSE endpoint the
+  runtime cannot connect to at all (PayPal Sandbox) and the 1 api-key promise
+  with zero setup fields (Render, whose upstream config carries only a
+  Claude-specific OAuth client id Prime must not reuse). The importer refuses
+  any other user-setup shape, refuses a key/token entry with nothing to paste,
+  and refuses an entry the readiness pass never classified — so none of these
+  can silently re-derive. The result is 70 entries: 57 `oauth-ready` + 13
+  `user-setup`, all plain streamable-http endpoints.
 - Everything except the pre-existing `linear`/`notion` integrations ships
   `verification: "unverified"`. Import success is never a readiness claim.
 
@@ -177,18 +195,25 @@ deterministically:
   `registered-client`, then cut; its live evidence stays in the audit store).
 - Placeholder/branded-client-only blockers were cleared with evidence where
   the provider supports self-serve OAuth (Airtable stays Connect-attemptable);
-  genuine documented requirements stay hard for kept providers — API
-  keys/bearer tokens (GitHub PAT, Zoom, Render, datadog…), token-bearing
-  tenant config (Dynatrace, Sourcegraph) and per-instance values (CockroachDB
-  cluster id), and the legacy-transport sandbox entry that still collects a
-  token (PayPal Sandbox). Provider-client requirements (Google, Slack,
-  MongoDB), honest unknowns (Shopify, HubSpot, LogRocket, …), the
-  user-own-app OAuth path (GitLab, Miro, Supabase, …), local-runtime stdio
-  adapters and url-only tenant templates no longer ship: the 2026-09-14
-  zero-app cut and the 2026-09-15 final cut excluded those providers with
+  genuine documented requirements stay hard for kept providers — API keys and
+  bearer tokens only (GitHub PAT, Zoom, PagerDuty, Sonatype, AWS DevOps,
+  Datadog, Cloudinary MediaFlows). Every shipped `setup.reason` is picker
+  copy for a human: one line, starting with "paste", naming the entry's real
+  setup field ("paste your Datadog API key and application key (DD_API_KEY,
+  DD_APPLICATION_KEY)") — never importer diagnostics ("requires an auth token
+  supplied via environment variable"), never a repeated clause, and never an
+  upstream-config note that does not change what the user must do (the
+  placeholder client ids stay in the pinned fixtures as evidence). Provider-client requirements
+  (Google, Slack, MongoDB), honest unknowns (Shopify, HubSpot, LogRocket, …),
+  the user-own-app OAuth path (GitLab, Miro, Supabase, …), local-runtime stdio
+  adapters, url-only tenant templates, token-bearing tenant config (Dynatrace,
+  Sourcegraph), per-instance values (CockroachDB cluster id), the
+  legacy-transport sandbox entry (PayPal Sandbox) and the field-less api-key
+  entry (Render) no longer ship: the 2026-09-14 zero-app cut, the 2026-09-15
+  final cut and the 2026-09-16 token-only cut excluded those providers with
   per-entry reasons.
 - `auth.alternatives` records documented per-path alternatives with their own
-  readiness (Airtable PAT, GitHub standard OAuth, Render partner OAuth).
+  readiness (Airtable PAT, GitHub standard OAuth).
 - Ready entries are never downgraded by unavailable audit evidence, and
   unknown is never treated as proof of a restriction.
 

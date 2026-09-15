@@ -22,25 +22,32 @@
 		"openai-plugins/zoom/zoom": {
 			"id": "zoom-meetings",
 			"label": "Zoom Meetings",
+			"setupReason": "paste your Zoom Meetings access token (ZOOM_MEETINGS_MCP_ACCESS_TOKEN)",
 			"note": "the upstream OpenAI zoom plugin targets the Zoom meetings MCP endpoint; renamed to keep the general zoom endpoint distinct"
 		},
 		"claude-plugins-official/zoom-plugin/zoom-mcp": {
-			"label": "Zoom"
+			"label": "Zoom",
+			"setupReason": "paste your Zoom access token (ZOOM_MCP_ACCESS_TOKEN)"
 		},
 		"claude-plugins-official/zoom-plugin/zoom-chat-mcp": {
-			"label": "Zoom Chat"
+			"label": "Zoom Chat",
+			"setupReason": "paste your Zoom Chat access token (ZOOM_CHAT_MCP_ACCESS_TOKEN)"
 		},
 		"claude-plugins-official/zoom-plugin/zoom-canvas-mcp": {
-			"label": "Zoom Canvas"
+			"label": "Zoom Canvas",
+			"setupReason": "paste your Zoom Canvas access token (ZOOM_CANVAS_MCP_ACCESS_TOKEN)"
 		},
 		"claude-plugins-official/zoom-plugin/zoom-tasks-mcp": {
-			"label": "Zoom Tasks"
+			"label": "Zoom Tasks",
+			"setupReason": "paste your Zoom Tasks access token (ZOOM_TASKS_MCP_ACCESS_TOKEN)"
 		},
 		"claude-plugins-official/zoom-plugin/zoom-whiteboard-mcp": {
-			"label": "Zoom Whiteboard"
+			"label": "Zoom Whiteboard",
+			"setupReason": "paste your Zoom Whiteboard access token (ZOOM_WHITEBOARD_MCP_ACCESS_TOKEN)"
 		},
 		"claude-plugins-official/zoom-plugin/zoom-revenue-accelerator-mcp": {
-			"label": "Zoom Revenue Accelerator"
+			"label": "Zoom Revenue Accelerator",
+			"setupReason": "paste your Zoom Revenue Accelerator access token (ZOOM_REVENUE_ACCELERATOR_MCP_ACCESS_TOKEN)"
 		},
 		"claude-plugins-official/vanta/vanta-us": {
 			"id": "vanta",
@@ -65,7 +72,8 @@
 			"label": "Cloudinary Analysis"
 		},
 		"claude-plugins-official/cloudinary/cloudinary-mediaflows": {
-			"label": "Cloudinary MediaFlows"
+			"label": "Cloudinary MediaFlows",
+			"setupReason": "paste your Cloudinary API key and API secret (cld-api-key, cld-secret)"
 		},
 		"claude-plugins-official/mapbox/mapbox": {
 			"label": "Mapbox"
@@ -76,23 +84,23 @@
 		"claude-plugins-official/atlassian/atlassian": {
 			"label": "Atlassian"
 		},
-		"claude-plugins-official/paypal/paypal-sandbox": {
-			"id": "paypal-sandbox",
-			"label": "PayPal (Sandbox)"
-		},
-		"claude-plugins-official/cockroachdb/cockroachdb-cloud": {
-			"id": "cockroachdb",
-			"label": "CockroachDB Cloud"
-		},
 		"claude-plugins-official/prisma/Prisma-Remote": {
 			"id": "prisma",
 			"label": "Prisma"
 		},
 		"openai-plugins/datadog/datadog": {
-			"label": "Datadog"
+			"label": "Datadog",
+			"setupReason": "paste your Datadog API key and application key (DD_API_KEY, DD_APPLICATION_KEY)"
 		},
 		"claude-plugins-official/aws-agents-for-devsecops/aws-devops-agent": {
-			"label": "AWS Agents for DevSecOps"
+			"label": "AWS Agents for DevSecOps",
+			"setupReason": "paste your AWS DevSecOps agent token (DEVOPS_AGENT_TOKEN)"
+		},
+		"claude-plugins-official/pagerduty/pagerduty": {
+			"setupReason": "paste your PagerDuty API key (PAGERDUTY_API_KEY)"
+		},
+		"claude-plugins-official/sonatype-guide/sonatype-guide": {
+			"setupReason": "paste your Sonatype Guide token (SONATYPE_GUIDE_TOKEN)"
 		},
 		"openai-plugins/airtable/airtable": {
 			"setup": "ready",
@@ -106,21 +114,8 @@
 				}
 			]
 		},
-		"claude-plugins-official/render/render": {
-			"requirement": "api-key",
-			"readiness": "user-setup",
-			"setupReason": "Render's documented MCP authentication route is a user-supplied API key; the upstream config relies on a Claude-specific OAuth client identity that Prime must not reuse",
-			"alternatives": [
-				{
-					"kind": "oauth",
-					"readiness": "unknown",
-					"note": "Render also announced OAuth onboarding for specific partner clients (Claude Code, Codex, Cursor); Prime's client registration path is unknown",
-					"sourceUrl": "https://render.com/changelog/render-mcp-now-supports-oauth-for-claude-code-codex-and-cursor"
-				}
-			],
-			"metadataNote": "no dynamic client registration advertised; only public-client token auth ('none') is advertised"
-		},
 		"openai-plugins/github/github": {
+			"setupReason": "paste a GitHub personal access token (GITHUB_PAT_TOKEN or GITHUB_PERSONAL_ACCESS_TOKEN)",
 			"alternatives": [
 				{
 					"kind": "oauth",
@@ -468,6 +463,26 @@
 		{
 			"key": "claude-plugins-official/pigment/pigment",
 			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Pigment is a tenant-URL endpoint (template `https://pigment.app/api/mcp/public/${your-mcp-id}`)\u2014its only setup input is the instance URL, with no one-click DCR and no provider token/api key"
+		},
+		{
+			"key": "claude-plugins-official/paypal/paypal-sandbox",
+			"reason": "token-only catalog cut (2026-09-16 product decision: the catalog ships one-click DCR connectors and simple paste-an-API-key/token services only \u2014 Kevin, live testing: \"things like cockroachdb cloud still need mcp/ 'requires provider credentials supplied as headers'? i told you to remove all that stuff?\"): PayPal Sandbox is a legacy SSE endpoint (`\"type\": \"sse\", \"url\": \"https://mcp.sandbox.paypal.com/sse\"`) and the generic runtime supports streamable HTTP and stdio only, which the entry itself admitted (`legacy SSE transport; the generic runtime currently supports streamable HTTP and stdio only`)\u2014it cannot connect at all, so shipping it as a token/key connector is dishonest"
+		},
+		{
+			"key": "claude-plugins-official/cockroachdb/cockroachdb-cloud",
+			"reason": "token-only catalog cut (2026-09-16 product decision: the catalog ships one-click DCR connectors and simple paste-an-API-key/token services only \u2014 Kevin, live testing: \"things like cockroachdb cloud still need mcp/ 'requires provider credentials supplied as headers'? i told you to remove all that stuff?\"): CockroachDB Cloud is a tenant config, not a key paste\u2014its only setup input is the per-cluster header `mcp-cluster-id: ${COCKROACHDB_CLUSTER_ID}` (requirement `tenant`, one `env-var` field, no api-key/token field at all), and it shipped the scary derived reason `requires provider credentials supplied as headers` that Kevin named in the callout above"
+		},
+		{
+			"key": "claude-plugins-official/dynatrace/dynatrace",
+			"reason": "token-only catalog cut (2026-09-16 product decision: the catalog ships one-click DCR connectors and simple paste-an-API-key/token services only \u2014 Kevin, live testing: \"things like cockroachdb cloud still need mcp/ 'requires provider credentials supplied as headers'? i told you to remove all that stuff?\"): Dynatrace is a tenant-instance endpoint (requirement `tenant`, template `${DT_ENVIRONMENT}/platform-reserved/mcp-gateway/v0.1/servers/dynatrace-mcp/mcp` with `Authorization: Bearer ${DT_PLATFORM_TOKEN}`)\u2014the user must first look up the tenant environment URL and paste it next to the token, so it is not a paste-an-API-key service"
+		},
+		{
+			"key": "claude-plugins-official/sourcegraph/sourcegraph",
+			"reason": "token-only catalog cut (2026-09-16 product decision: the catalog ships one-click DCR connectors and simple paste-an-API-key/token services only \u2014 Kevin, live testing: \"things like cockroachdb cloud still need mcp/ 'requires provider credentials supplied as headers'? i told you to remove all that stuff?\"): Sourcegraph is a tenant-instance endpoint (requirement `tenant`, template `${SOURCEGRAPH_ENDPOINT}/.api/mcp` with `Authorization: token ${SOURCEGRAPH_ACCESS_TOKEN}`)\u2014the user must first look up the instance URL and paste it next to the token, so it is not a paste-an-API-key service"
+		},
+		{
+			"key": "claude-plugins-official/render/render",
+			"reason": "token-only catalog cut (2026-09-16 product decision: the catalog ships one-click DCR connectors and simple paste-an-API-key/token services only \u2014 Kevin, live testing: \"things like cockroachdb cloud still need mcp/ 'requires provider credentials supplied as headers'? i told you to remove all that stuff?\"): Render advertised requirement `api-key` but shipped ZERO setup fields\u2014the upstream config carries only a Claude-specific OAuth client identity (`\"oauth\": {\"clientId\": \"claude\"}`) that Prime must not reuse, so the derived entry gives the user nothing to paste and cannot be connected as shipped; an api-key promise with no credential field is unusable, not a simple key paste"
 		}
 	]
 }

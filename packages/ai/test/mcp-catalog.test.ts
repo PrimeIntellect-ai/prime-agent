@@ -235,11 +235,6 @@ describe("MCP service catalog", () => {
 		// the zero-app cut (2026-09-14) excludes those providers (see the cut
 		// test), and the importer now refuses to emit either class.
 		// Documented user-supplied credentials stay primary; OAuth alternatives stay unknown.
-		const render = getServiceCatalogEntry("render");
-		expect(render?.setup.status).toBe("requires-setup");
-		expect(render?.setup.readiness).toBe("user-setup");
-		expect(render?.setup.requirement).toBe("api-key");
-		expect(render?.auth.alternatives).toEqual([expect.objectContaining({ kind: "oauth", readiness: "unknown" })]);
 		const github = getServiceCatalogEntry("github");
 		expect(github?.setup.readiness).toBe("user-setup");
 		expect(github?.setup.requirement).toBe("bearer-token");
@@ -247,18 +242,34 @@ describe("MCP service catalog", () => {
 		for (const field of github?.setup.fields ?? []) {
 			expect(field.kind).toBe("bearer-token");
 		}
-		// The surviving requirement shapes are exactly the token/key ones
-		// (2026-09-15 final cut): bearer tokens, api keys, token-bearing
-		// tenant config and the token-collecting legacy-transport entry.
-		expect(getServiceCatalogEntry("cockroachdb")?.setup.requirement).toBe("tenant");
-		expect(getServiceCatalogEntry("paypal-sandbox")?.setup.requirement).toBe("unsupported-transport");
+		// The surviving requirement shapes are exactly the two pasteable ones
+		// (2026-09-16 token-only cut): bearer tokens and api keys, each with a
+		// credential field the user can actually fill in. Tenant configs,
+		// legacy-transport entries and field-less api-key promises are gone.
 		expect(getServiceCatalogEntry("zoom")?.setup.requirement).toBe("bearer-token");
 		expect(getServiceCatalogEntry("datadog")?.setup.requirement).toBe("api-key");
-		expect(
-			getServiceCatalogEntry("dynatrace")
-				?.setup.fields?.map((field) => field.kind)
-				.sort(),
-		).toEqual(["bearer-token", "url"]);
+		for (const server of ["cockroachdb", "dynatrace", "sourcegraph", "paypal-sandbox", "render"]) {
+			expect(getServiceCatalogEntry(server), `${server} must be cut from the catalog`).toBeUndefined();
+		}
+		for (const entry of SERVICE_CATALOG) {
+			if (entry.setup.readiness !== "user-setup") continue;
+			expect(["bearer-token", "api-key"], `${entry.server} requirement`).toContain(entry.setup.requirement);
+			expect(
+				entry.setup.fields?.some((field) => field.kind === "bearer-token" || field.kind === "api-key"),
+				`${entry.server} must collect a credential the user can paste`,
+			).toBe(true);
+		}
+		// The multi-key survivors say what to paste instead of "requires
+		// provider credentials supplied as headers" (2026-09-16 wording fix).
+		expect(getServiceCatalogEntry("datadog")?.setup.reason).toBe(
+			"paste your Datadog API key and application key (DD_API_KEY, DD_APPLICATION_KEY)",
+		);
+		expect(getServiceCatalogEntry("cloudinary-mediaflows")?.setup.reason).toBe(
+			"paste your Cloudinary API key and API secret (cld-api-key, cld-secret)",
+		);
+		for (const entry of SERVICE_CATALOG) {
+			expect(entry.setup.reason ?? "").not.toContain("requires provider credentials supplied as headers");
+		}
 		expect(
 			SERVICE_CATALOG.filter((entry) => entry.setup.readiness === "user-setup")
 				.map((entry) => entry.server)
@@ -266,15 +277,10 @@ describe("MCP service catalog", () => {
 		).toEqual([
 			"aws-devops-agent",
 			"cloudinary-mediaflows",
-			"cockroachdb",
 			"datadog",
-			"dynatrace",
 			"github",
 			"pagerduty",
-			"paypal-sandbox",
-			"render",
 			"sonatype-guide",
-			"sourcegraph",
 			"zoom",
 			"zoom-canvas",
 			"zoom-chat",
@@ -286,13 +292,14 @@ describe("MCP service catalog", () => {
 		// Readiness is informational-only data; the raw counts are in the file.
 		// Zero-app cut state (2026-09-14) + engine auth-method compatibility
 		// (2026-09-14, live Hugging Face gap) + final catalog cut (2026-09-15,
-		// one-click DCR or user token/key only): the catalog ships exactly the
-		// two self-serve classes, with the user-setup class fully token/key —
+		// one-click DCR or user token/key only) + token-only cut (2026-09-16,
+		// paste-an-api-key/token survivors only): the catalog ships exactly the
+		// two self-serve classes, with the user-setup class fully pasteable —
 		// the sums must stay exact so any drift forces a conscious update here.
 		const committed = JSON.parse(rawCatalogJson);
-		expect(committed.counts.total).toBe(75);
+		expect(committed.counts.total).toBe(70);
 		expect(committed.counts.readinessOauthReady).toBe(57);
-		expect(committed.counts.readinessUserSetup).toBe(18);
+		expect(committed.counts.readinessUserSetup).toBe(13);
 		expect(committed.counts.readinessPrimeRestricted).toBe(0);
 		expect(committed.counts.readinessUnknown).toBe(0);
 		expect(
@@ -330,27 +337,60 @@ describe("MCP service catalog", () => {
 		}
 	});
 
-	it("ships no stdio or url-only tenant adapter; token-collecting non-http shapes stay flagged not one-click", () => {
+	it("ships only streamable-http endpoints: no stdio, no tenant template, no legacy SSE", () => {
 		// 2026-09-15 final cut: local stdio adapters and url-only tenant
-		// templates are excluded entirely — only token/key-bearing shapes ship.
-		const stdio = SERVICE_CATALOG.filter((entry) => entry.transport.type === "stdio");
-		expect(stdio).toEqual([]);
-		for (const server of ["activecampaign", "jfrog", "pigment"]) {
+		// templates were excluded. 2026-09-16 token-only cut: the remaining
+		// non-http shapes go too — every shipped entry is a plain http endpoint
+		// the runtime can actually connect to.
+		expect(SERVICE_CATALOG.filter((entry) => entry.transport.type !== "http")).toEqual([]);
+		for (const entry of SERVICE_CATALOG) {
+			expect(entry.url, `${entry.server} must ship a concrete endpoint`).not.toBe("");
+		}
+		for (const server of ["activecampaign", "jfrog", "pigment", "sourcegraph", "dynatrace", "paypal-sandbox"]) {
 			expect(getServiceCatalogEntry(server), `${server} must be cut from the catalog`).toBeUndefined();
 		}
-		// The legacy SSE entry ships only because it collects a user token.
-		const paypal = getServiceCatalogEntry("paypal-sandbox");
-		expect(paypal?.transport.type).toBe("sse");
-		expect(paypal?.setup.status).toBe("requires-setup");
-		expect(paypal?.setup.fields?.map((field) => field.kind)).toEqual(["bearer-token"]);
-		// The surviving tenant templates carry a token field next to the URL.
-		for (const server of ["sourcegraph", "dynatrace"]) {
-			const entry = getServiceCatalogEntry(server);
-			expect(entry?.transport.type).toBe("http-template");
-			expect(entry?.setup.status).toBe("requires-setup");
-			expect(entry?.url).toBe("");
-			expect(entry?.setup.fields?.some((field) => field.kind === "bearer-token")).toBe(true);
+	});
+
+	it("says what to paste: every requires-setup reason is plain single-line picker copy", () => {
+		// The shipped reason is the line a human reads in the /mcp picker, so it
+		// must be an instruction, not an importer diagnostic (2026-09-16). The
+		// old copy leaked machine vocabulary ("requires an auth token supplied
+		// via environment variable"), stuttered the same clause twice (github)
+		// and appended upstream-config notes that changed nothing for the user
+		// (zoom-meetings).
+		const setupEntries = SERVICE_CATALOG.filter((entry) => entry.setup.status === "requires-setup");
+		expect(setupEntries).toHaveLength(13);
+		for (const entry of setupEntries) {
+			const reason = entry.setup.reason ?? "";
+			expect(reason, `${entry.server} must carry setup copy`).not.toBe("");
+			expect(reason, `${entry.server} reason must be one line`).not.toMatch(/[\n\r]/);
+			expect(reason.length, `${entry.server} reason must fit a picker row`).toBeLessThanOrEqual(100);
+			expect(reason, `${entry.server} reason must tell the user what to do`).toMatch(/^paste /);
+			expect(reason.toLowerCase(), `${entry.server} reason must not leak importer vocabulary`).not.toContain(
+				"upstream",
+			);
+			const clauses = reason.split(";").map((clause) => clause.trim().toLowerCase());
+			expect(new Set(clauses).size, `${entry.server} reason repeats a clause`).toBe(clauses.length);
+			const fieldIds = entry.setup.fields?.map((field) => field.id) ?? [];
+			expect(fieldIds.length, `${entry.server} must collect a field`).toBeGreaterThan(0);
+			expect(
+				fieldIds.some((id) => reason.includes(id)),
+				`${entry.server} reason must name one of its real setup fields`,
+			).toBe(true);
 		}
+		expect(getServiceCatalogEntry("github")?.setup.reason).toBe(
+			"paste a GitHub personal access token (GITHUB_PAT_TOKEN or GITHUB_PERSONAL_ACCESS_TOKEN)",
+		);
+		expect(getServiceCatalogEntry("zoom-meetings")?.setup.reason).toBe(
+			"paste your Zoom Meetings access token (ZOOM_MEETINGS_MCP_ACCESS_TOKEN)",
+		);
+		// Dropping the placeholder note from the shipped copy deletes no
+		// evidence: the pinned fixture still carries the upstream placeholder
+		// client id, and Prime never uses it either way.
+		const inputs = loadInputs();
+		const zoomPlugin = inputs.openAi.plugins.find((plugin) => plugin.name === "zoom");
+		expect(zoomPlugin?.oauthPlaceholders).toBe(true);
+		expect(zoomPlugin?.mcpServers.zoom?.oauth?.client_id).toBe("<ZOOM_PUBLIC_CLIENT_ID>");
 	});
 
 	it("marks only the legacy built-ins as metadata-reviewed; every import stays unverified", () => {
@@ -689,6 +729,103 @@ describe("MCP service catalog", () => {
 		}
 	});
 
+	it("cuts the catalog to one-click DCR or a paste-an-api-key/token service, structurally", () => {
+		// 2026-09-16 product decision (Kevin, live testing: "things like
+		// cockroachdb cloud still need mcp/ 'requires provider credentials
+		// supplied as headers'? i told you to remove all that stuff?"): the
+		// user-setup class is narrowed to services a user can connect by
+		// pasting a key or token. The 5 remaining survivors that were not —
+		// 3 tenant configs (CockroachDB Cloud's per-cluster header, Dynatrace
+		// and Sourcegraph's instance URLs), 1 legacy-SSE endpoint the runtime
+		// cannot connect to at all (PayPal Sandbox) and 1 api-key promise with
+		// zero setup fields (Render) — are EXCLUDED with a documented
+		// per-entry reason, not shipped mislabeled.
+		for (const server of ["cockroachdb", "dynatrace", "sourcegraph", "paypal-sandbox", "render"]) {
+			expect(getServiceCatalogEntry(server), `${server} must be cut from the catalog`).toBeUndefined();
+		}
+		for (const term of ["cockroach", "dynatrace", "sourcegraph", "paypal", "render"]) {
+			expect(searchServiceCatalog(term), `${term} must not surface a cut entry`).toEqual([]);
+		}
+		const inputs = loadInputs();
+		const { report } = buildCatalog(inputs.openAi, inputs.claude, inputs.overrides, inputs.audit);
+		const excluded = new Map(report.excluded.map((entry) => [entry.key, entry.reason]));
+		for (const key of [
+			"claude-plugins-official/paypal/paypal-sandbox",
+			"claude-plugins-official/cockroachdb/cockroachdb-cloud",
+			"claude-plugins-official/dynatrace/dynatrace",
+			"claude-plugins-official/sourcegraph/sourcegraph",
+			"claude-plugins-official/render/render",
+		]) {
+			expect(excluded.has(key), `${key} must be a documented exclusion`).toBe(true);
+			expect(excluded.get(key), `${key} must cite the token-only cut decision`).toMatch(
+				/token-only catalog cut \(2026-09-16 product decision/,
+			);
+		}
+		// The importer enforces the cut structurally: lift any one exclusion and
+		// the import fails with a curation prompt instead of shipping, so none
+		// of these shapes can silently re-derive.
+		const withoutExclusion = (key: string, servers?: Overrides["servers"]): Overrides => ({
+			...inputs.overrides,
+			servers: { ...inputs.overrides.servers, ...servers },
+			excludedServers: inputs.overrides.excludedServers.filter((entry) => entry.key !== key),
+		});
+		const build = (overrides: Overrides): void => {
+			buildCatalog(inputs.openAi, inputs.claude, overrides, inputs.audit);
+		};
+		// Tenant shapes (instance URL or per-tenant id) are no longer shippable.
+		expect(() =>
+			build(
+				withoutExclusion("claude-plugins-official/cockroachdb/cockroachdb-cloud", {
+					"claude-plugins-official/cockroachdb/cockroachdb-cloud": { id: "cockroachdb" },
+				}),
+			),
+		).toThrow(
+			/entry cockroachdb has requirement "tenant"; the catalog ships one-click DCR or a paste-an-api-key\/token service only/,
+		);
+		for (const server of ["dynatrace", "sourcegraph"]) {
+			expect(() => build(withoutExclusion(`claude-plugins-official/${server}/${server}`))).toThrow(
+				new RegExp(`entry ${server} has requirement "tenant"`),
+			);
+		}
+		// A transport the runtime cannot speak is not shippable either.
+		expect(() => build(withoutExclusion("claude-plugins-official/paypal/paypal-sandbox"))).toThrow(
+			/entry paypal-sandbox has requirement "unsupported-transport"/,
+		);
+		// Render has nothing to paste: without curation its requirement cannot
+		// even be derived, and curating the api-key requirement back (its old
+		// shipped shape) hits the "collects no credential field" guard.
+		expect(() => build(withoutExclusion("claude-plugins-official/render/render"))).toThrow(
+			/requires-setup entry render has no genuine requirement signal/,
+		);
+		expect(() =>
+			build(
+				withoutExclusion("claude-plugins-official/render/render", {
+					"claude-plugins-official/render/render": { requirement: "api-key", readiness: "user-setup" },
+				}),
+			),
+		).toThrow(/entry render has requirement "api-key" but collects no bearer-token\/api-key field/);
+		// An entry the readiness pass never classified fails closed too, so a
+		// missing audit result can never become a silent free pass.
+		expect(() => build(withoutExclusion("claude-plugins-official/cockroachdb/cockroachdb-cloud"))).toThrow(
+			/entry cockroachdb-cloud carries no readiness classification/,
+		);
+		// The cut is a shipping decision, not an evidence deletion: the pinned
+		// source snapshots still carry every cut upstream config, including
+		// PayPal's SSE transport and Render's Claude-branded OAuth client id.
+		const paypalPlugin = inputs.claude.plugins.find((plugin) => plugin.name === "paypal");
+		expect(paypalPlugin?.mcpServers["paypal-sandbox"]?.type).toBe("sse");
+		const renderPlugin = inputs.claude.plugins.find((plugin) => plugin.name === "render");
+		expect(renderPlugin?.mcpServers.render?.oauth?.clientId).toBe("claude");
+		const cockroachPlugin = inputs.claude.plugins.find((plugin) => plugin.name === "cockroachdb");
+		expect(cockroachPlugin?.mcpServers["cockroachdb-cloud"]?.headers?.["mcp-cluster-id"]).toMatch(
+			/^\$\{COCKROACHDB_CLUSTER_ID\}$/,
+		);
+		const auditedCut = new Set(inputs.audit.results.map((result) => result.server));
+		for (const server of ["cockroachdb", "render", "paypal-sandbox"]) {
+			expect(auditedCut.has(server), `${server} audit evidence must stay committed`).toBe(true);
+		}
+	});
+
 	it("keeps the gated-DCR machinery: live-rejected advertised registration is explicit-false and never oauth-ready", () => {
 		// The figma entry that exercised this predicate live is now excluded by
 		// the zero-app cut (its evidence stays in the audit store), so the
@@ -829,7 +966,7 @@ describe("MCP service catalog", () => {
 			),
 		};
 		expect(() => buildCatalog(inputs.openAi, inputs.claude, withoutGitlab, inputs.audit)).toThrow(
-			/entry gitlab has requirement "registered-client"; the catalog ships one-click DCR or user token\/key only/,
+			/entry gitlab has requirement "registered-client"; the catalog ships one-click DCR or a paste-an-api-key\/token service only/,
 		);
 		// The shared engine decision drives the synthetic classification matrix:
 		// coherent DCR evidence with confidential-only methods demotes (never

@@ -112,8 +112,10 @@ describe("MCP catalog eligibility (authoritative real-data regressions)", () => 
 		// The sweep must actually cover the strategies Bugbot found divergent:
 		// real api_key rows and real unknown rows. none+ready is asserted to be
 		// exactly zero TODAY so catalog drift forces a conscious update here.
-		// Post-2026-09-15 final cut: 75 rows (57 one-click DCR, 18 token/key
-		// user-setup), of which 16 are api_key strategy and 53 unknown.
+		// Post-2026-09-16 token-only cut: 70 rows (57 one-click DCR, 13
+		// paste-an-api-key/token user-setup), of which 12 are api_key strategy
+		// and 53 unknown. The thresholds below stay where they were — the cut
+		// removed 4 api_key rows and 1 oauth row, no unknown rows.
 		expect(descriptors.length).toBeGreaterThan(50);
 		expect(descriptors.filter((d) => d.authStrategy === "api_key").length).toBeGreaterThanOrEqual(10);
 		expect(descriptors.filter((d) => d.authStrategy === "unknown").length).toBeGreaterThanOrEqual(50);
