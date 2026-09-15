@@ -18,6 +18,7 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { transformSync } from "esbuild";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { ambientFreeEnv } from "./ambient-env.js";
 
 let root: string;
 let home: string;
@@ -60,13 +61,15 @@ function native(version = "1.0.0", suffix = "", platform = `${process.platform}-
 
 function start(args: string[] = [], extra: NodeJS.ProcessEnv = {}) {
 	const child = spawn(process.execPath, [entry, ...args], {
-		env: {
-			...process.env,
+		// The bridge branches on update and daemon-worker variables, so the child gets a
+		// sanitised environment instead of whatever the host shell exports. Cases that
+		// cover those branches pass the variable through `extra`.
+		env: ambientFreeEnv({
 			HOME: home,
 			XDG_DATA_HOME: join(home, "data"),
 			PRIME_AGENT_ALLOW_INSECURE_HTTP_FOR_TESTS: "1",
 			...extra,
-		},
+		}),
 		cwd: home,
 		stdio: ["ignore", "pipe", "pipe"],
 	});

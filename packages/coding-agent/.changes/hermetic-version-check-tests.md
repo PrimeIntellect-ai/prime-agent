@@ -1,0 +1,1 @@
+- Made the version check and npm bridge test suites hermetic. They now clear the update and daemon-worker environment variables they depend on, and the bridge sanitises the environment it hands to spawned children, so both suites pass from inside a running Prime Agent session instead of only in CI.

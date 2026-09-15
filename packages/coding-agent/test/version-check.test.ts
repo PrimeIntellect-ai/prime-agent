@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	checkForNewPiVersion,
 	comparePackageVersions,
@@ -9,25 +9,21 @@ import {
 	isReleaseUpdateCandidate,
 	resolveUpdateChannel,
 } from "../src/utils/version-check.js";
+import { clearAmbientRuntimeEnv } from "./ambient-env.js";
 
 const defaultPrimeAgentDownloadBaseUrl = "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev";
-const originalSkipVersionCheck = process.env.PI_SKIP_VERSION_CHECK;
-const originalOffline = process.env.PI_OFFLINE;
-const originalPrimeAgentDownloadBaseUrl = process.env.PRIME_AGENT_DOWNLOAD_BASE_URL;
 
-function restoreEnv(name: string, value: string | undefined): void {
-	if (value === undefined) {
-		delete process.env[name];
-		return;
-	}
-	process.env[name] = value;
-}
+// These checks read the environment, so each test starts from a cleared one and the
+// host shell cannot decide the outcome. Tests that need a variable set it themselves.
+let restoreAmbientRuntimeEnv: () => void;
+
+beforeEach(() => {
+	restoreAmbientRuntimeEnv = clearAmbientRuntimeEnv();
+});
 
 afterEach(() => {
 	vi.unstubAllGlobals();
-	restoreEnv("PI_SKIP_VERSION_CHECK", originalSkipVersionCheck);
-	restoreEnv("PI_OFFLINE", originalOffline);
-	restoreEnv("PRIME_AGENT_DOWNLOAD_BASE_URL", originalPrimeAgentDownloadBaseUrl);
+	restoreAmbientRuntimeEnv();
 });
 
 describe("version checks", () => {
@@ -108,8 +104,6 @@ describe("update channel preference", () => {
 	});
 
 	it("follows a preferred nightly channel from a stable installation", async () => {
-		delete process.env.PI_SKIP_VERSION_CHECK;
-		delete process.env.PI_OFFLINE;
 		const fetchMock = vi.fn(async () => Response.json({ version: "v1.2.5-beta.130.1.abcdef0" }));
 		vi.stubGlobal("fetch", fetchMock);
 		await expect(getLatestPiVersion("1.2.4", { channel: "nightly" })).resolves.toBe("1.2.5-beta.130.1.abcdef0");
@@ -117,8 +111,6 @@ describe("update channel preference", () => {
 	});
 
 	it("follows a preferred stable channel from a beta installation", async () => {
-		delete process.env.PI_SKIP_VERSION_CHECK;
-		delete process.env.PI_OFFLINE;
 		const fetchMock = vi.fn(async () => Response.json({ version: "v1.2.4" }));
 		vi.stubGlobal("fetch", fetchMock);
 		await expect(getLatestPiVersion("1.2.4-beta.123.1.1234567", { channel: "stable" })).resolves.toBe("1.2.4");
@@ -153,8 +145,6 @@ describe("update channel preference", () => {
 	});
 
 	it("reports the current beta build from a stable installation once nightly is preferred", async () => {
-		delete process.env.PI_SKIP_VERSION_CHECK;
-		delete process.env.PI_OFFLINE;
 		vi.stubGlobal(
 			"fetch",
 			vi.fn(async () => Response.json({ version: "v1.2.3-beta.5.1.abcdef0" })),
@@ -164,8 +154,6 @@ describe("update channel preference", () => {
 	});
 
 	it("reports a newer beta build when nightly is preferred", async () => {
-		delete process.env.PI_SKIP_VERSION_CHECK;
-		delete process.env.PI_OFFLINE;
 		vi.stubGlobal(
 			"fetch",
 			vi.fn(async () => Response.json({ version: "v1.2.5-beta.1.1.abcdef0" })),
