@@ -111,3 +111,61 @@ export class MessagingStats {
 export function estimateMessagingTokens(chars: number): number {
 	return Math.ceil(chars / 4);
 }
+
+/**
+ * Pre-registered defense lines for the swarm starvation eval. A config is
+ * defensible only if all three lines hold; any line failing is a starvation
+ * finding, any line unknown keeps the verdict inconclusive rather than pass.
+ */
+export const MESSAGING_DEFENSE_LINE_LIMITS = {
+	/** Agent-message share of working context. */
+	contextShare: 0.25,
+	/** Agent-triggered model steps over all model steps. */
+	turnShare: 1 / 3,
+	/** Ingestion-step usage tokens over all step usage tokens. */
+	costShare: 0.2,
+} as const;
+
+export interface MessagingDefenseLine {
+	value: number | null;
+	limit: number;
+	passed: boolean | null;
+}
+
+export interface MessagingDefenseLines {
+	contextShare: MessagingDefenseLine;
+	turnShare: MessagingDefenseLine;
+	costShare: MessagingDefenseLine;
+	/** "fail" if any line failed; "inconclusive" if any line is unknown and none failed; else "pass". */
+	verdict: "pass" | "fail" | "inconclusive";
+}
+
+export function evaluateMessagingDefenseLines(
+	snapshot: MessagingStatsSnapshot,
+	limits: Partial<Record<keyof typeof MESSAGING_DEFENSE_LINE_LIMITS, number>> = {},
+): MessagingDefenseLines {
+	const contextLimit = limits.contextShare ?? MESSAGING_DEFENSE_LINE_LIMITS.contextShare;
+	const turnLimit = limits.turnShare ?? MESSAGING_DEFENSE_LINE_LIMITS.turnShare;
+	const costLimit = limits.costShare ?? MESSAGING_DEFENSE_LINE_LIMITS.costShare;
+	const line = (value: number | null, limit: number): MessagingDefenseLine => ({
+		value,
+		limit,
+		passed: value === null ? null : value <= limit,
+	});
+	const contextLine = line(snapshot.context.share, contextLimit);
+	const turnLine = line(
+		snapshot.model_steps.total > 0 ? snapshot.ingestion_steps.total / snapshot.model_steps.total : null,
+		turnLimit,
+	);
+	const costLine = line(
+		snapshot.model_steps.tokens > 0 ? snapshot.ingestion_steps.tokens / snapshot.model_steps.tokens : null,
+		costLimit,
+	);
+	const lines = [contextLine, turnLine, costLine];
+	const verdict = lines.some((l) => l.passed === false)
+		? "fail"
+		: lines.some((l) => l.passed === null)
+			? "inconclusive"
+			: "pass";
+	return { contextShare: contextLine, turnShare: turnLine, costShare: costLine, verdict };
+}
