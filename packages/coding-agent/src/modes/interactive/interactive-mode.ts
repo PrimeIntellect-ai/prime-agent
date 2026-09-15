@@ -1927,6 +1927,28 @@ export class InteractiveMode {
 	/** Runs the first-launch sequence. Resolves true only when every step ran. */
 	private async runOnboardingFlow(): Promise<boolean> {
 		this.modelRegistry.refresh();
+
+		// Existing users (working model with configured auth) skip login and
+		// the provider picker entirely. They see only the trace question, or
+		// nothing at all when traces are already enabled.
+		if (isOnboardingModelReady(this.getOnboardingState())) {
+			if (this.settingsManager.getAgentTracesEnabled()) {
+				return true;
+			}
+			const abort = new AbortController();
+			this.onboardingFlowAbort = abort;
+			const splash = await this.showOnboardingSplash({ immediate: true });
+			if (!splash) {
+				return false;
+			}
+			await this.askOnboardingTraceOptIn();
+			if (abort.signal.aborted) {
+				return false;
+			}
+			splash.dismiss();
+			return true;
+		}
+
 		const abort = new AbortController();
 		this.onboardingFlowAbort = abort;
 		const splash = await this.showOnboardingSplash();
@@ -8989,7 +9011,7 @@ export class InteractiveMode {
 		}
 	}
 
-	private showOnboardingSplash(): Promise<OnboardingSplashHandle | undefined> {
+	private showOnboardingSplash(options?: { immediate?: boolean }): Promise<OnboardingSplashHandle | undefined> {
 		return new Promise((resolve) => {
 			let settled = false;
 			let dismissed = false;
@@ -9027,6 +9049,7 @@ export class InteractiveMode {
 					// Nothing else owns Ctrl+C yet, so the block exits the app itself.
 					onExit: () => void this.shutdown(),
 					requestRender: () => this.ui.requestRender(),
+					immediate: options?.immediate,
 				},
 			);
 			// The block owns the pane while onboarding runs: the brand header hides
@@ -9048,6 +9071,12 @@ export class InteractiveMode {
 				row: 0,
 				col: 0,
 			});
+			// Immediate mode: settle without waiting for the user to press Enter
+			// on the login action. The flow panels mount directly under the brand
+			// mark with no welcome text or action row flash.
+			if (options?.immediate) {
+				settle({ dismiss });
+			}
 		});
 	}
 
