@@ -13,9 +13,9 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { assembleBinaryArchives } from "./assemble-release-archives.mjs";
-import { manifestPlatforms } from "./release-platforms.mjs";
+import { manifestV1Platforms } from "./release-platforms.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultOutputDir = join(root, "packages", "coding-agent", "release");
@@ -244,6 +244,37 @@ function sha256File(path) {
 	return hash.digest("hex");
 }
 
+export function writeReleaseMetadata({
+	artifactsDir,
+	channel,
+	releaseVersion,
+	codingAgentTarball,
+	tarballs,
+	binaries,
+}) {
+	writeFileSync(
+		join(artifactsDir, "SHA256SUMS"),
+		[...tarballs, ...binaries].map((artifact) => `${artifact.sha256}  ${artifact.file}`).join("\n") + "\n",
+	);
+	writeFileSync(join(artifactsDir, channel), `v${releaseVersion}\n`);
+
+	const manifestName = channel === "stable" ? "latest.json" : "beta.json";
+	const manifestV1PlatformSet = new Set(manifestV1Platforms);
+	const binariesV1 = binaries.filter((entry) => manifestV1PlatformSet.has(entry.platform));
+	writeJson(join(artifactsDir, manifestName), {
+		version: `v${releaseVersion}`,
+		package: publicPackageName,
+		tarball: `releases/v${releaseVersion}/${codingAgentTarball}`,
+		...(binariesV1.length > 0 ? { binaries: binariesV1 } : {}),
+		...(binaries.length > 0 ? { binariesV2: binaries } : {}),
+		tarballs: tarballs.map((tarball) => ({
+			package: tarball.name,
+			file: tarball.file,
+			sha256: tarball.sha256,
+		})),
+	});
+}
+
 function main() {
 	const args = parseArgs(process.argv.slice(2));
 	const sourcePackages = new Map(
@@ -341,27 +372,13 @@ function main() {
 	const binaries = args.binaryDir
 		? assembleBinaryArchives({ binaryDir: args.binaryDir, artifactsDir, version: releaseVersion })
 		: [];
-	writeFileSync(
-		join(artifactsDir, "SHA256SUMS"),
-		[...tarballs, ...binaries].map((artifact) => `${artifact.sha256}  ${artifact.file}`).join("\n") + "\n",
-	);
-	writeFileSync(join(artifactsDir, args.channel), `v${releaseVersion}\n`);
-	const manifestName = args.channel === "stable" ? "latest.json" : "beta.json";
-	// Advertise only the legacy four platforms in the client-facing manifest so
-	// pre-0.9.5 clients (which reject the whole list on an unknown entry) still
-	// find their platform. All archives remain in SHA256SUMS for the installer.
-	const manifestSafe = new Set(manifestPlatforms);
-	const manifestBinaries = binaries.filter((entry) => manifestSafe.has(entry.platform));
-	writeJson(join(artifactsDir, manifestName), {
-		version: `v${releaseVersion}`,
-		package: publicPackageName,
-		tarball: `releases/v${releaseVersion}/${artifactFiles.get("coding-agent")}`,
-		...(manifestBinaries.length > 0 ? { binaries: manifestBinaries } : {}),
-		tarballs: tarballs.map((tarball) => ({
-			package: tarball.name,
-			file: tarball.file,
-			sha256: tarball.sha256,
-		})),
+	writeReleaseMetadata({
+		artifactsDir,
+		channel: args.channel,
+		releaseVersion,
+		codingAgentTarball: artifactFiles.get("coding-agent"),
+		tarballs,
+		binaries,
 	});
 
 	for (const artifact of [...tarballs, ...binaries]) {
@@ -369,9 +386,11 @@ function main() {
 	}
 }
 
-try {
-	main();
-} catch (error) {
-	console.error(error instanceof Error ? error.message : String(error));
-	process.exit(1);
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+	try {
+		main();
+	} catch (error) {
+		console.error(error instanceof Error ? error.message : String(error));
+		process.exit(1);
+	}
 }

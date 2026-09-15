@@ -22,11 +22,10 @@ export const releasePlatforms = [
 	"linux-x64-musl-baseline",
 ];
 
-// Platforms advertised in client-facing manifests (beta.json / latest.json).
-// Pre-0.9.5 clients reject the entire binaries list when they encounter an
-// unknown platform entry, so the manifest must stay limited to the four
-// platforms every shipped client accepts.
-export const manifestPlatforms = [
+// The v1 manifest field stays limited to the original platform schema.
+// The v2 field uses releasePlatforms so current clients can select every
+// supported archive without changing the v1 compatibility contract.
+export const manifestV1Platforms = [
 	"darwin-arm64",
 	"darwin-x64",
 	"linux-arm64",

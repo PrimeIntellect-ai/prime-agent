@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { NATIVE_PLATFORMS } from "../src/utils/native-installation.js";
 import {
 	checkForNewPiVersion,
 	comparePackageVersions,
@@ -162,128 +163,96 @@ describe("update channel preference", () => {
 	});
 });
 
-describe("manifest binary forward compatibility", () => {
-	it("skips unknown future platform entries and keeps valid known binaries", async () => {
-		const fetchMock = vi.fn(async () =>
-			Response.json({
-				version: "v1.2.4",
-				package: "prime-agent",
-				tarball: "releases/v1.2.4/prime-agent-1.2.4.tgz",
-				binaries: [
-					{ platform: "darwin-arm64", file: "prime-agent-1.2.4-darwin-arm64.tar.gz", sha256: "a".repeat(64) },
-					{
-						platform: "future-riscv128",
-						file: "prime-agent-1.2.4-future-riscv128.tar.gz",
-						sha256: "b".repeat(64),
-					},
-				],
-			}),
-		);
-		vi.stubGlobal("fetch", fetchMock);
-
-		const release = await getLatestPiRelease("1.2.3");
-		expect(release).toBeDefined();
-		expect(release!.binaries).toEqual([
-			{ platform: "darwin-arm64", file: "prime-agent-1.2.4-darwin-arm64.tar.gz", sha256: "a".repeat(64) },
-		]);
+describe("manifest binary schema compatibility", () => {
+	const artifact = (platform: string, sha256 = "a".repeat(64)) => ({
+		platform,
+		file: `prime-agent-1.2.4-${platform}.tar.gz`,
+		sha256,
 	});
 
-	it("skips non-object and missing-platform entries without discarding valid ones", async () => {
-		const fetchMock = vi.fn(async () =>
-			Response.json({
-				version: "v1.2.4",
-				package: "prime-agent",
-				tarball: "releases/v1.2.4/prime-agent-1.2.4.tgz",
-				binaries: [
-					null,
-					42,
-					{ file: "no-platform.tar.gz", sha256: "c".repeat(64) },
-					{ platform: "darwin-arm64", file: "prime-agent-1.2.4-darwin-arm64.tar.gz", sha256: "a".repeat(64) },
-				],
-			}),
+	function stubManifest(fields: Record<string, unknown>): void {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () =>
+				Response.json({
+					version: "v1.2.4",
+					package: "prime-agent",
+					tarball: "releases/v1.2.4/prime-agent-1.2.4.tgz",
+					...fields,
+				}),
+			),
 		);
-		vi.stubGlobal("fetch", fetchMock);
+	}
+
+	it("prefers binariesV2, keeps every supported platform, and skips future platforms", async () => {
+		stubManifest({
+			binaries: [artifact("darwin-arm64", "b".repeat(64))],
+			binariesV2: [
+				...NATIVE_PLATFORMS.map((platform, index) => artifact(platform, index.toString(16).padStart(64, "0"))),
+				artifact("future-riscv128", "f".repeat(64)),
+			],
+		});
 
 		const release = await getLatestPiRelease("1.2.3");
-		expect(release).toBeDefined();
-		expect(release!.binaries).toEqual([
-			{ platform: "darwin-arm64", file: "prime-agent-1.2.4-darwin-arm64.tar.gz", sha256: "a".repeat(64) },
-		]);
+		expect(release?.binaries?.map(({ platform }) => platform)).toEqual(NATIVE_PLATFORMS);
+		expect(release?.binaries?.map(({ platform }) => platform)).toEqual(
+			expect.arrayContaining([
+				"linux-arm64-musl",
+				"linux-x64-baseline",
+				"linux-x64-musl",
+				"linux-x64-musl-baseline",
+			]),
+		);
 	});
 
-	it("still rejects all binaries when a known platform has a bad sha256", async () => {
-		const fetchMock = vi.fn(async () =>
-			Response.json({
-				version: "v1.2.4",
-				package: "prime-agent",
-				tarball: "releases/v1.2.4/prime-agent-1.2.4.tgz",
-				binaries: [{ platform: "darwin-arm64", file: "prime-agent-1.2.4-darwin-arm64.tar.gz", sha256: "not-hex" }],
-			}),
-		);
-		vi.stubGlobal("fetch", fetchMock);
+	it("falls back to binaries when binariesV2 is absent", async () => {
+		stubManifest({ binaries: [artifact("darwin-arm64")] });
 
-		const release = await getLatestPiRelease("1.2.3");
-		expect(release).toBeDefined();
-		expect(release!.version).toBe("1.2.4");
-		expect(release!.binaries).toBeUndefined();
+		await expect(getLatestPiRelease("1.2.3")).resolves.toMatchObject({
+			binaries: [artifact("darwin-arm64")],
+		});
 	});
 
-	it("still rejects all binaries when a known platform has a wrong filename", async () => {
-		const fetchMock = vi.fn(async () =>
-			Response.json({
-				version: "v1.2.4",
-				package: "prime-agent",
-				tarball: "releases/v1.2.4/prime-agent-1.2.4.tgz",
-				binaries: [{ platform: "darwin-arm64", file: "wrong-name.tar.gz", sha256: "a".repeat(64) }],
-			}),
-		);
-		vi.stubGlobal("fetch", fetchMock);
+	it("rejects the selected list when an entry is structurally malformed", async () => {
+		stubManifest({
+			binaries: [artifact("darwin-arm64")],
+			binariesV2: [artifact("linux-x64"), null],
+		});
 
 		const release = await getLatestPiRelease("1.2.3");
-		expect(release).toBeDefined();
-		expect(release!.binaries).toBeUndefined();
+		expect(release?.version).toBe("1.2.4");
+		expect(release?.binaries).toBeUndefined();
 	});
 
-	it("still rejects all binaries when a known platform is duplicated", async () => {
-		const fetchMock = vi.fn(async () =>
-			Response.json({
-				version: "v1.2.4",
-				package: "prime-agent",
-				tarball: "releases/v1.2.4/prime-agent-1.2.4.tgz",
-				binaries: [
-					{ platform: "darwin-arm64", file: "prime-agent-1.2.4-darwin-arm64.tar.gz", sha256: "a".repeat(64) },
-					{ platform: "darwin-arm64", file: "prime-agent-1.2.4-darwin-arm64.tar.gz", sha256: "b".repeat(64) },
-				],
-			}),
-		);
-		vi.stubGlobal("fetch", fetchMock);
+	it("rejects the selected list when a supported platform entry is malformed", async () => {
+		stubManifest({
+			binaries: [artifact("darwin-arm64")],
+			binariesV2: [artifact("linux-x64"), artifact("linux-x64-musl", "not-hex")],
+		});
 
 		const release = await getLatestPiRelease("1.2.3");
-		expect(release).toBeDefined();
-		expect(release!.binaries).toBeUndefined();
+		expect(release?.version).toBe("1.2.4");
+		expect(release?.binaries).toBeUndefined();
 	});
 
-	it("preserves npm release info even when all binary entries are unknown platforms", async () => {
-		const fetchMock = vi.fn(async () =>
-			Response.json({
-				version: "v1.2.4",
-				package: "prime-agent",
-				tarball: "releases/v1.2.4/prime-agent-1.2.4.tgz",
-				binaries: [
-					{
-						platform: "future-riscv128",
-						file: "prime-agent-1.2.4-future-riscv128.tar.gz",
-						sha256: "b".repeat(64),
-					},
-				],
-			}),
-		);
-		vi.stubGlobal("fetch", fetchMock);
+	it("rejects the selected list when a supported platform is duplicated", async () => {
+		stubManifest({
+			binaries: [artifact("darwin-arm64")],
+			binariesV2: [artifact("linux-x64"), artifact("linux-x64", "b".repeat(64))],
+		});
 
 		const release = await getLatestPiRelease("1.2.3");
-		expect(release).toBeDefined();
-		expect(release!.version).toBe("1.2.4");
-		expect(release!.packageName).toBe("prime-agent");
-		expect(release!.binaries).toBeUndefined();
+		expect(release?.version).toBe("1.2.4");
+		expect(release?.binaries).toBeUndefined();
+	});
+
+	it("preserves npm release info when the selected list contains only future platforms", async () => {
+		stubManifest({ binariesV2: [artifact("future-riscv128", "b".repeat(64))] });
+
+		await expect(getLatestPiRelease("1.2.3")).resolves.toEqual({
+			version: "1.2.4",
+			packageName: "prime-agent",
+			installSpec: `${defaultPrimeAgentDownloadBaseUrl}/releases/v1.2.4/prime-agent-1.2.4.tgz`,
+		});
 	});
 });
