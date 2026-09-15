@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -135,6 +135,7 @@ function installFakeUv(): string {
 			'if [ "$1" = "pip" ]; then',
 			'  for arg in "$@"; do',
 			'    if [ "$UV_FAIL_ARG" != "" ] && [ "$arg" = "$UV_FAIL_ARG" ]; then',
+			'      echo "fake uv: refusing to install $arg" >&2',
 			"      exit 1",
 			"    fi",
 			"  done",
@@ -156,6 +157,7 @@ describe("kernel bootstrap", () => {
 		process.env.PATH = originalEnv.PATH ?? "";
 		delete process.env.PRIME_AGENT_KERNEL_PYTHON;
 		delete process.env.PRIME_AGENT_KERNEL_VENV;
+		delete process.env.PRIME_AGENT_RUNTIME_SOURCE;
 		delete process.env.XDG_DATA_HOME;
 	});
 
@@ -200,6 +202,73 @@ describe("kernel bootstrap", () => {
 			pythonSkills: [],
 		});
 		expect(version.runtime).toMatch(/^sha256:/);
+	});
+
+	it("installs the runtime from PRIME_AGENT_RUNTIME_SOURCE when set", async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const runtimeSource = join(tempDir, "runtime-src");
+		mkdirSync(join(runtimeSource, "src", "rlm"), { recursive: true });
+		writeFileSync(
+			join(runtimeSource, "pyproject.toml"),
+			'[project]\nname = "prime-agent-runtime"\nversion = "0.0.0"\n',
+		);
+		writeFileSync(join(runtimeSource, "src", "rlm", "__init__.py"), "spawn = None\n");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		process.env.PRIME_AGENT_RUNTIME_SOURCE = runtimeSource;
+
+		await expect(ensureKernelPython()).resolves.toBe(join(venv, "bin", "python"));
+
+		expect(readFileSync(logPath, "utf8")).toContain(
+			`pip install --python ${join(venv, "bin", "python")} ${runtimeSource} dill`,
+		);
+		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
+		expect(version.runtime).toBe(await resolveRuntimeIdentity());
+		expect(version.runtime).toMatch(/^sha256:/);
+		expect(version.runtime).not.toBe(runtimeIdentity);
+	});
+
+	it("fails without tearing down a stale venv when the runtime source is missing", async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "bin", "python");
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		// A stale identity would normally trigger rm -rf + rebuild of the shared venv.
+		const staleVersion = `${JSON.stringify({
+			schema: 9,
+			runtime: "sha256:stale",
+			snapshot: "dill",
+			extraUvArgs: DEFAULT_RLM_EXTRA_UV_ARGS,
+			pythonSkills: [],
+		})}\n`;
+		writeFileSync(join(venv, ".bootstrap-version"), staleVersion);
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		const missingSource = join(tempDir, "missing-runtime");
+		process.env.PRIME_AGENT_RUNTIME_SOURCE = missingSource;
+
+		const error = await ensureKernelPython().catch((caught: unknown) => caught);
+
+		expect(error).toBeInstanceOf(Error);
+		const message = (error as Error).message;
+		expect(message).toMatch(/prime-agent-runtime source .* is missing/);
+		expect(message).toContain(missingSource);
+		expect(message).toContain("left untouched");
+		expect(message).not.toContain("First-time setup needs internet");
+		expect(readFileSync(join(venv, ".bootstrap-version"), "utf8")).toBe(staleVersion);
+		expect(existsSync(python)).toBe(true);
+		expect(existsSync(logPath)).toBe(false);
+	});
+
+	it("includes the failing command's stderr in the bootstrap error", async () => {
+		installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		process.env.UV_FAIL_ARG = "dill";
+
+		await expect(ensureKernelPython()).rejects.toThrow(
+			/failed with exit code 1\nfake uv: refusing to install dill\nFirst-time setup needs internet/,
+		);
 	});
 
 	it("routes bootstrap progress through the provided callback", async () => {
