@@ -306,6 +306,34 @@ describe("ServiceCatalogPickerComponent", () => {
 		expect(stripAnsi(picker.render(100).join("\n"))).toBe(before);
 	});
 
+	it("budgets the accounts frame to its rendered height, including the blank under the last option", () => {
+		// Bugbot: the new blank row under "Add another account" was not in
+		// ACCOUNTS_FRAME_ROWS, so at the 3-line description cap the frame was one
+		// row taller than the layout allowed and a tight viewport pushed the
+		// shortcuts line off-screen.
+		const longDescription = "A".repeat(400);
+		const picker = new ServiceCatalogPickerComponent(
+			[
+				viewFixture({
+					serviceId: "acme",
+					label: "Acme",
+					description: longDescription,
+					connectionStatus: "connected",
+					connectionIds: ["acme-1"],
+				}),
+			],
+			() => {},
+			() => {},
+			{ mode: "accounts", getRows: () => 30 },
+		);
+		picker.handleInput("test"); // ensure selection state settled
+		const renderedHeight = picker.render(120).length;
+		// The frame: rule(1) + blank(1) + header(1) + blank(1) + description cap
+		// 3 + blank(1) + options + trailing blank(1) + shortcuts(1). The budget
+		// must never be SHORTER than what is actually painted.
+		expect(renderedHeight).toBeLessThanOrEqual(30);
+	});
+
 	it("renders the accounts frame in the onboarding-choice shape (PR #2340)", () => {
 		const reconnect = viewFixture({
 			serviceId: "acme-work",

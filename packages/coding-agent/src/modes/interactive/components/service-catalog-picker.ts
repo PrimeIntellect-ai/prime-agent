@@ -77,9 +77,11 @@ const ACCOUNTS_DESCRIPTION_MAX_LINES = 3;
 const ACCOUNTS_DESCRIPTION_BUDGET_ROWS = ACCOUNTS_DESCRIPTION_MAX_LINES + 1;
 /**
  * Accounts mode rows that are not option rows: the separator rule, the blank
- * under it, the header, the blank under the header, and the shortcuts line.
+ * under it, the header, the blank under the header, the blank under the last
+ * option (it keeps the shortcuts line from touching it), and the shortcuts
+ * line itself.
  */
-const ACCOUNTS_FRAME_ROWS = 5;
+const ACCOUNTS_FRAME_ROWS = 6;
 
 // Search bands: lower scores rank first. Identity fields (label, service id,
 // aliases) always outrank description/setup-hint text.
