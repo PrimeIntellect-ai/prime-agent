@@ -187,6 +187,15 @@ describe("public command routing", () => {
 		expect(mocks.psCalls).toEqual([]);
 	});
 
+	it("keeps a version request ahead of command routing instead of rotating it", async () => {
+		const args = ["--version", "status"];
+		await expect(handlePublicCommand(args)).resolves.toEqual({
+			handled: false,
+			args,
+			explicitAgentsView: false,
+		});
+	});
+
 	it("keeps an unknown long option's value out of command routing", async () => {
 		await expect(handlePublicCommand(["--extension-option", "status"])).resolves.toEqual({
 			handled: false,
