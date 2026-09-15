@@ -29,9 +29,10 @@ Reapply the label to approve the new exact comparison.
   It never extracts or executes candidate packages.
 - Verifiers uploads those packages into isolated task sandboxes. Candidate code
   receives no GitHub, provider, or sandbox credentials.
-- The three tasksets and both comparison sides launch concurrently. Each evaluator uses its native
-  concurrency of five, so at most 30 tasks run against provider capacity 32. There is no shared
-  client-side queue or semaphore.
+- The three tasksets and both comparison sides launch concurrently. Each evaluator starts at most
+  five root episodes, so the six-way launch has at most 30 root agents against provider capacity 32.
+  Recursive subagents remain unrestricted; there is no shared client-side queue or semaphore.
+  A terminal rollout timeout with any provider call error fails closed.
 - Typed Verifiers `WireTrace` episodes provide rewards, usage, timing, and task
   identity. Missing or malformed episodes fail. Exact rollout deadlines and deterministic
   provider rejections remain unresolved model outcomes; transient provider failures fail.

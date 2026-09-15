@@ -61,8 +61,9 @@ def test_manifest_is_the_fixed_pinned_suite() -> None:
     }
     assert manifest["model"] == "internal/glm-5.3-fast"
     assert manifest["autonomous"] is False
+    root_concurrency = manifest["max_concurrent"] * 6
     assert manifest["max_concurrent"] == 5
-    assert manifest["max_concurrent"] * 6 <= 32
+    assert root_concurrency <= 32
     tasksets = {item["id"]: item["tasks"] for item in manifest["tasksets"]}
     verified_repositories = {task.rsplit("-", 1)[0] for task in tasksets["swebench-verified"]}
     pro_repositories = {task.removeprefix("instance_").split("-", 1)[0] for task in tasksets["swebench-pro"]}
