@@ -43,6 +43,13 @@ export function currentDaemonStateRoot(): DaemonStateRoot {
  * The registry read is deferred and memoised so the common case (every socket in
  * our own socket dir) costs nothing, and a fresh matcher per sweep keeps results
  * current for callers that poll.
+ *
+ * The socket dir is deliberately part of the root: it is per-uid, per-TMPDIR
+ * state, so two invocations that share TMPDIR also share that one daemon
+ * namespace no matter which HOME or agent dir they run under — they could not
+ * run concurrent default daemons on one socket path anyway. Scoping the dir away
+ * would orphan every unregistered listener there (workers, abandoned and
+ * pre-registry daemons), which `shutdown --force` must still reap.
  */
 export function createDaemonStateRootMatcher(
 	root: DaemonStateRoot = currentDaemonStateRoot(),

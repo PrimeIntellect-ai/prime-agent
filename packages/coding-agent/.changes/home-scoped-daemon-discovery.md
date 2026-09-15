@@ -1,1 +1,2 @@
 - Scoped background service discovery to the state root the command runs in, so a run with an isolated HOME or agent dir only lists and stops its own daemons and `shutdown --force` no longer reaches daemons that belong to another root.
+- Scoped discovery now also reads the pre-move supervisor registry (so daemons from before the registry relocation stay reachable under the same agent dir) and skips records whose agent dir can no longer be resolved, so one stale record cannot abort the sweep.
