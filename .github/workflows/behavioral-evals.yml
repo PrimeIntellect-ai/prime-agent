@@ -1,0 +1,360 @@
+name: Behavioral Eval
+run-name: >-
+  Behavioral Eval · ${{ github.event_name == 'push' && 'base update' ||
+  format('PR #{0}', github.event.pull_request.number) }}
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [labeled, unlabeled, synchronize, edited, reopened]
+  push:
+    branches: [main]
+
+concurrency:
+  group: >-
+    ${{
+      github.event_name == 'pull_request_target' &&
+      ((github.event.action == 'labeled' && github.event.label.name == 'pre-release') ||
+       (github.event.action == 'unlabeled' && github.event.label.name == 'pre-release') ||
+       ((github.event.action == 'synchronize' || github.event.action == 'reopened' ||
+         (github.event.action == 'edited' && github.event.changes.base)) &&
+        contains(github.event.pull_request.labels.*.name, 'pre-release'))) &&
+      format('prime-agent-behavioral-{0}', github.event.pull_request.number) ||
+      format('prime-agent-behavioral-skip-{0}', github.run_id)
+    }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  invalidate-on-pr-change:
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      ((github.event.action == 'unlabeled' && github.event.label.name == 'pre-release') ||
+       ((github.event.action == 'synchronize' || github.event.action == 'reopened' ||
+         (github.event.action == 'edited' && github.event.changes.base)) &&
+        contains(github.event.pull_request.labels.*.name, 'pre-release')))
+    runs-on: ubuntu-24.04
+    permissions:
+      statuses: write
+    steps:
+      - name: Revoke the durable release status
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v8.0.0
+        with:
+          script: |
+            const action = context.payload.action;
+            const description = action === 'unlabeled'
+              ? 'pre-release approval removed'
+              : action === 'synchronize'
+                ? 'Head changed; reapply pre-release'
+                : 'PR identity changed; reapply pre-release';
+            for (const statusContext of [
+              'Behavioral Eval / pre-release approval',
+              'Behavioral Eval / pre-release',
+            ]) {
+              await github.rest.repos.createCommitStatus({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                sha: context.payload.pull_request.head.sha,
+                state: 'failure',
+                context: statusContext,
+                description,
+                target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              });
+            }
+
+  invalidate-on-base-change:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: read
+      statuses: write
+    steps:
+      - name: Revoke results bound to the previous base
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v8.0.0
+        with:
+          script: |
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              base: context.ref.replace('refs/heads/', ''),
+              per_page: 100,
+            });
+            for (const pull of pulls) {
+              const statuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: pull.head.sha,
+                per_page: 100,
+              });
+              const contexts = [
+                'Behavioral Eval / pre-release approval',
+                'Behavioral Eval / pre-release',
+              ];
+              if (!statuses.some(status => contexts.includes(status.context))) continue;
+              for (const statusContext of contexts) {
+                await github.rest.repos.createCommitStatus({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  sha: pull.head.sha,
+                  state: 'failure',
+                  context: statusContext,
+                  description: 'Base advanced; reapply pre-release',
+                  target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+                });
+              }
+            }
+
+  pre-release:
+    if: >-
+      github.event_name == 'pull_request_target' && github.event.action == 'labeled' &&
+      github.event.label.name == 'pre-release'
+    name: runner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: write
+    steps:
+      - name: Mark the requested head pending
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v8.0.0
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.payload.pull_request.head.sha,
+              state: 'pending',
+              context: 'Behavioral Eval / pre-release',
+              description: 'Starting exact base and head validation',
+              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.payload.pull_request.head.sha,
+              state: 'success',
+              context: 'Behavioral Eval / pre-release approval',
+              description: 'pre-release label approves this exact head',
+              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
+
+      - name: Check out trusted evaluator
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Resolve exact base and head
+        id: resolve
+        run: >-
+          python3 scripts/evals/short_swe/ci.py
+          --output request --harness-sha "$(git rev-parse HEAD)"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          version: 0.12.9
+          enable-cache: false
+
+      - name: Install controller tooling
+        run: uv sync --locked --project scripts/benchmarks
+
+      - name: Check out pinned Verifiers
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: PrimeIntellect-ai/verifiers
+          ref: 9df6a3c01bb640c34380f4f6dff63a1b168dee22
+          path: vendor/verifiers
+          persist-credentials: false
+
+      - name: Check out pinned environments
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: PrimeIntellect-ai/prime-envs
+          ref: a41660014674ba43d56ed054199dde25ddf69946
+          path: vendor/environments
+          persist-credentials: false
+
+      - name: Install pinned evaluator
+        id: evaluator
+        continue-on-error: true
+        run: |
+          uv sync --locked --project vendor/verifiers --extra harbor
+          uv pip install --python vendor/verifiers/.venv/bin/python --no-deps \
+            -e vendor/environments/environments/swe/swebench_verified \
+            -e vendor/environments/environments/swe/swebench_pro \
+            -e vendor/environments/environments/swe/scaleswe
+
+      - name: Build exact base and head in isolated sandboxes
+        id: build
+        continue-on-error: true
+        if: steps.evaluator.outcome == 'success'
+        run: |
+          runner=(uv run --locked --project scripts/benchmarks python scripts/evals/short_swe/build_controller.py)
+          "${runner[@]}" --repository "$GITHUB_REPOSITORY" --source-repository "$GITHUB_REPOSITORY" \
+            --sha "${{ steps.resolve.outputs.base_sha }}" --side base \
+            --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --output artifacts/base &
+          base_pid=$!
+          "${runner[@]}" --repository "$GITHUB_REPOSITORY" \
+            --source-repository "${{ steps.resolve.outputs.head_repository }}" \
+            --sha "${{ steps.resolve.outputs.head_sha }}" --side head \
+            --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --output artifacts/head &
+          head_pid=$!
+          status=0
+          wait "$base_pid" || status=1
+          wait "$head_pid" || status=1
+          exit "$status"
+        env:
+          PRIME_SANDBOX_API_KEY: ${{ secrets.PRIME_SANDBOX_API_KEY }}
+          PRIME_TEAM_ID: ${{ vars.PRIME_BENCHMARK_TEAM_ID }}
+
+      - name: Generate the fixed 15/8/5 configs
+        id: prepare
+        continue-on-error: true
+        if: steps.build.outcome == 'success'
+        run: |
+          python3 scripts/evals/short_swe/prepare.py \
+            --verifiers vendor/verifiers --environments vendor/environments \
+            --base-artifacts artifacts/base --base-sha "${{ steps.resolve.outputs.base_sha }}" \
+            --head-artifacts artifacts/head --head-sha "${{ steps.resolve.outputs.head_sha }}" \
+            --output generated-configs
+
+      - name: Evaluate exact base and head concurrently
+        id: evaluate
+        continue-on-error: true
+        if: steps.prepare.outcome == 'success'
+        run: |
+          vendor/verifiers/.venv/bin/python scripts/evals/short_swe/evaluate.py \
+            --eval vendor/verifiers/.venv/bin/eval --configs generated-configs \
+            --output raw-eval --request request/request.json --result results/paired.json
+        env:
+          PRIME_API_KEY: ${{ secrets.PRIME_BEHAVIORAL_API_KEY }}
+          PRIME_SANDBOX_API_KEY: ${{ secrets.PRIME_SANDBOX_API_KEY }}
+          PRIME_TEAM_ID: ${{ vars.PRIME_BENCHMARK_TEAM_ID }}
+
+      - name: Clean up evaluation sandboxes
+        if: always() && steps.evaluator.outcome == 'success'
+        continue-on-error: true
+        run: |
+          uv run --locked --project scripts/benchmarks python scripts/evals/short_swe/cleanup.py \
+            --repository "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" \
+            --attempt "$GITHUB_RUN_ATTEMPT"
+        env:
+          PRIME_SANDBOX_API_KEY: ${{ secrets.PRIME_SANDBOX_API_KEY }}
+          PRIME_TEAM_ID: ${{ vars.PRIME_BENCHMARK_TEAM_ID }}
+
+      - name: Render trusted report
+        if: always()
+        run: |
+          python3 scripts/evals/short_swe/report.py \
+            --request request/request.json --result results/paired.json \
+            --markdown results/report.md --verdict results/verdict
+          cat results/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save packages, traces, and paired results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: behavioral-results-${{ github.run_attempt }}
+          path: |
+            artifacts
+            generated-configs
+            raw-eval
+            request
+            results
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Set exact-head status
+        if: always()
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v8.0.0
+        with:
+          script: |
+            const fs = require('node:fs');
+            let request;
+            try {
+              request = JSON.parse(fs.readFileSync('request/request.json', 'utf8'));
+            } catch {
+              request = null;
+            }
+            const {data: pull} = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+            });
+            const rules = await github.paginate(
+              'GET /repos/{owner}/{repo}/rules/branches/{branch}',
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                branch: pull.base.ref,
+                per_page: 100,
+              },
+            );
+            const requiredContexts = new Set([
+              'Behavioral Eval / pre-release approval',
+              'Behavioral Eval / pre-release',
+            ]);
+            const strictContexts = new Set(
+              rules
+                .filter(rule => rule.type === 'required_status_checks' &&
+                  rule.parameters?.strict_required_status_checks_policy === true)
+                .flatMap(rule => rule.parameters.required_status_checks.map(check => check.context)),
+            );
+            const strictRequired = [...requiredContexts].every(
+              contextName => strictContexts.has(contextName),
+            );
+            const labelPresent = pull.labels.some(label => label.name === 'pre-release');
+            const identityCurrent = request &&
+              request.head_sha === pull.head.sha && request.base_sha === pull.base.sha;
+            const passed = strictRequired && identityCurrent && labelPresent &&
+              fs.existsSync('results/verdict') &&
+              fs.readFileSync('results/verdict', 'utf8').trim() === 'pass';
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.payload.pull_request.head.sha,
+              state: passed ? 'success' : 'failure',
+              context: 'Behavioral Eval / pre-release',
+              description: passed ? 'Paired Short SWE gate passed' : 'Paired Short SWE gate failed or stale',
+              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
+
+      - name: Publish PR report
+        if: always() && hashFiles('results/report.md') != ''
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v8.0.0
+        with:
+          script: |
+            const fs = require('node:fs');
+            const marker = '<!-- prime-agent-behavioral-eval:v1 -->';
+            const body = fs.readFileSync('results/report.md', 'utf8');
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              per_page: 100,
+            });
+            const prior = comments.find(comment =>
+              comment.user.type === 'Bot' && comment.body?.includes(marker));
+            if (prior) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: prior.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Enforce complete paired result and regression thresholds
+        if: always()
+        run: test -f results/verdict && test "$(cat results/verdict)" = pass

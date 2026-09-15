@@ -2,10 +2,17 @@
 
 These harnesses measure end-to-end agent capability with a real model.
 They complement the repo's unit tests (which never call a model) and the
-PR performance benchmarks (which measure startup, not capability). They
-never run in CI and never need credentials to validate: every harness is
-exercised by model-free self-tests, and a real-model run is a manual
-step.
+PR performance benchmarks (which measure startup, not capability). Every
+harness has model-free self-tests. Real-model runs are manual unless a harness
+documents a narrow release gate, such as the label-gated Short SWE check.
+
+
+## short_swe
+
+The Short SWE release check compares the exact base and head of a pull request on
+fixed 15/8/5 slices of SWE-bench Verified, SWE-bench Pro, and ScaleSWE. It runs
+only when a maintainer applies the exact `pre-release` label. See
+[`short_swe/README.md`](short_swe/README.md) for its trust boundary and commands.
 
 ## swarm-fanout
 
