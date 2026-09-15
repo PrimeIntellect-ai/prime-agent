@@ -181,6 +181,9 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 		parts.push(
 			"Spawn independent children in separate calls and end your turn instead of awaiting completion. Multiple replies may arrive over multiple turns. Delete a direct child explicitly with `await rlm.delete_subagent(child)` when it is no longer needed.",
 		);
+		parts.push(
+			"Coordinate through shared files with `await rlm.watch.path(path, recursive=False)`: the current session owns the subscription, debounced changes arrive as `[watch-path ...]` notices, and removal or backend failure arrives as `[watch-path-failed ...]`. List, re-read, and stop watches with `rlm.watch.list()`, `rlm.watch.get(id)`, and `rlm.watch.cancel(id)`; recreating a removed path needs a new registration.",
+		);
 	}
 
 	if (hasIpython) {

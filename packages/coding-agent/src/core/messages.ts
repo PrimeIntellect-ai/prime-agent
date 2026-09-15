@@ -47,6 +47,10 @@ export const HARNESS_DIGEST_CUSTOM_TYPE = "harness_digest";
 export const RLM_CHILD_FAILURE_CUSTOM_TYPE = "rlm_child_failure";
 export const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE = "rlm_child_terminal_notice";
 export const ASYNC_BASH_COMPLETION_CUSTOM_TYPE = "async_bash_completion";
+export const WATCH_PATH_CHANGED_CUSTOM_TYPE = "watch_path_changed";
+export const WATCH_PATH_CHANGED_PREVIEW_LABEL = "Watched path changed";
+export const WATCH_PATH_FAILED_CUSTOM_TYPE = "watch_path_failed";
+export const WATCH_PATH_FAILED_PREVIEW_LABEL = "Watched path failed";
 export const ASYNC_BASH_COMPLETION_PREVIEW_LABEL = "Background command finished";
 
 /**
@@ -172,6 +176,23 @@ export type RlmChildTerminalNoticeDetails =
 			lastAssistantTextPreview?: string;
 	  };
 
+/** Session-owned path-watch notice: one debounced batch of changed paths. */
+export interface WatchPathChangedDetails {
+	watchId: string;
+	path: string;
+	recursive: boolean;
+	paths: string[];
+	truncated: boolean;
+}
+
+/** Session-owned path-watch notice: the watch stopped and needs re-registration. */
+export interface WatchPathFailedDetails {
+	watchId: string;
+	path: string;
+	recursive: boolean;
+	error: string;
+}
+
 export interface AsyncBashCompletionDetails {
 	pid: number;
 	command: string;
@@ -193,6 +214,54 @@ export function createAsyncBashCompletionMessage(
 		content: `[bash-done pid:${details.pid} exit:${details.exitCode}]
 
 Command: ${JSON.stringify(details.command)}`,
+		display: true,
+		details,
+		timestamp,
+	};
+}
+
+interface WatchPathChangedMessage extends CustomMessage<WatchPathChangedDetails> {
+	customType: typeof WATCH_PATH_CHANGED_CUSTOM_TYPE;
+	content: string;
+}
+
+export function createWatchPathChangedMessage(
+	details: WatchPathChangedDetails,
+	timestamp = Date.now(),
+): WatchPathChangedMessage {
+	const root = sanitizeMessageHeaderValue(details.path);
+	const changed = details.paths.map((path) => sanitizeMessageHeaderValue(path)).join("\n- ");
+	const content = `[watch-path id:${sanitizeMessageHeaderValue(details.watchId)} path:${root}]
+
+Changed paths:
+- ${changed}`;
+	return {
+		role: "custom",
+		customType: WATCH_PATH_CHANGED_CUSTOM_TYPE,
+		content,
+		display: true,
+		details,
+		timestamp,
+	};
+}
+
+interface WatchPathFailedMessage extends CustomMessage<WatchPathFailedDetails> {
+	customType: typeof WATCH_PATH_FAILED_CUSTOM_TYPE;
+	content: string;
+}
+
+export function createWatchPathFailedMessage(
+	details: WatchPathFailedDetails,
+	timestamp = Date.now(),
+): WatchPathFailedMessage {
+	const root = sanitizeMessageHeaderValue(details.path);
+	const content = `[watch-path-failed id:${sanitizeMessageHeaderValue(details.watchId)} path:${root}]
+
+Error: ${details.error}`;
+	return {
+		role: "custom",
+		customType: WATCH_PATH_FAILED_CUSTOM_TYPE,
+		content,
 		display: true,
 		details,
 		timestamp,

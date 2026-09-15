@@ -51,6 +51,18 @@ class RLMSubagent:
 
 
 @dataclass(frozen=True)
+class RLMPathWatch:
+    """One filesystem subscription owned by the current session."""
+
+    watch_id: str
+    path: str
+    recursive: bool
+    status: str
+    created_at: str | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
 class RLMChildResult:
     """Terminal or in-progress state of one direct child, from `collect()`."""
 
@@ -374,6 +386,79 @@ async def delete_subagent(target: str | RLMSubagent | RLMSpawnHandle) -> RLMSuba
     return _subagent_from_payload(payload.get("subagent"), "rlm.delete_subagent")
 
 
+def _path_watch_from_payload(payload: Any, operation: str = "rlm.watch") -> RLMPathWatch:
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{operation} returned an invalid watch payload")
+    watch_id = payload.get("watch_id")
+    path = payload.get("path")
+    recursive = payload.get("recursive")
+    status = payload.get("status")
+    if not isinstance(watch_id, str) or not watch_id:
+        raise RuntimeError(f"{operation} payload is missing watch_id")
+    if not isinstance(path, str) or not path:
+        raise RuntimeError(f"{operation} payload is missing path")
+    if not isinstance(recursive, bool):
+        raise RuntimeError(f"{operation} payload has invalid recursive flag")
+    if status not in {"active", "completed", "failed"}:
+        raise RuntimeError(f"{operation} payload has invalid status")
+    created_at = payload.get("created_at")
+    if created_at is not None and not isinstance(created_at, str):
+        raise RuntimeError(f"{operation} payload has invalid created_at")
+    error = payload.get("error")
+    if error is not None and not isinstance(error, str):
+        raise RuntimeError(f"{operation} payload has invalid error")
+    return RLMPathWatch(
+        watch_id=watch_id,
+        path=path,
+        recursive=recursive,
+        status=status,
+        created_at=created_at,
+        error=error,
+    )
+
+
+async def watch_path(path: str, *, recursive: bool = False) -> RLMPathWatch:
+    """Subscribe to changes on an existing file or directory.
+
+    The current session owns the subscription: it survives kernel restarts and
+    is released when the session terminates. Change batches are debounced by
+    the host and delivered as runtime notices into this session's conversation.
+    ``path`` is resolved against the session working directory when relative;
+    ``recursive`` directory watching depends on platform support.
+    """
+    if not isinstance(path, str):
+        raise TypeError(f"path must be str, got {type(path).__name__}")
+    if not isinstance(recursive, bool):
+        raise TypeError(f"recursive must be bool, got {type(recursive).__name__}")
+    payload = await host_request("rlm.watch_path", {"path": path, "recursive": recursive})
+    return _path_watch_from_payload(payload.get("watch"), "rlm.watch_path")
+
+
+async def list_watches() -> list[RLMPathWatch]:
+    """List this session's path watches, including finished ones."""
+    payload = await host_request("rlm.watch_list")
+    watches = payload.get("watches")
+    if not isinstance(watches, list):
+        raise RuntimeError("rlm.watch_list returned an invalid watches list")
+    return [_path_watch_from_payload(entry, "rlm.watch_list") for entry in watches]
+
+
+async def get_watch(watch_id: str) -> RLMPathWatch:
+    """Read one of this session's path watches by id."""
+    if not isinstance(watch_id, str):
+        raise TypeError(f"watch_id must be str, got {type(watch_id).__name__}")
+    payload = await host_request("rlm.watch_get", {"watch_id": watch_id})
+    return _path_watch_from_payload(payload.get("watch"), "rlm.watch_get")
+
+
+async def cancel_watch(watch_id: str) -> RLMPathWatch:
+    """Stop one of this session's path watches; published notices stay readable."""
+    if not isinstance(watch_id, str):
+        raise TypeError(f"watch_id must be str, got {type(watch_id).__name__}")
+    payload = await host_request("rlm.watch_cancel", {"watch_id": watch_id})
+    return _path_watch_from_payload(payload.get("watch"), "rlm.watch_cancel")
+
+
 class _HarnessProxy:
     """Resolve the harness state against the current environment on every access.
 
@@ -459,6 +544,8 @@ class _RLMNamespace:
     async def collect(self, targets: Any = None, *, timeout_ms: int = 0) -> list[RLMChildResult]:
         return await collect(targets, timeout_ms=timeout_ms)
 
+    watch: "_RLMWatchNamespace"
+
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         raise TypeError(_NOT_CALLABLE_MESSAGE)
 
@@ -469,7 +556,24 @@ class _RLMNamespace:
         raise AttributeError(f"'rlm' object has no attribute {name!r}")
 
 
+class _RLMWatchNamespace:
+    """Session-owned filesystem subscriptions (``rlm.watch.*``)."""
+
+    async def path(self, path: str, *, recursive: bool = False) -> RLMPathWatch:
+        return await watch_path(path, recursive=recursive)
+
+    async def list(self) -> list[RLMPathWatch]:
+        return await list_watches()
+
+    async def get(self, watch_id: str) -> RLMPathWatch:
+        return await get_watch(watch_id)
+
+    async def cancel(self, watch_id: str) -> RLMPathWatch:
+        return await cancel_watch(watch_id)
+
+
 rlm = _RLMNamespace()
+rlm.watch = _RLMWatchNamespace()
 harness = _harness_state
 
 
@@ -491,6 +595,7 @@ __all__ = [
     "NotEnabled",
     "RLMCreateSessionHandle",
     "RLMModel",
+    "RLMPathWatch",
     "RLMSpawnHandle",
     "RLMSubagent",
     "create_session",
@@ -500,11 +605,15 @@ __all__ = [
     "emit",
     "find_models",
     "get_harness_state",
+    "get_watch",
     "harness",
     "host_request",
     "list_subagents",
+    "list_watches",
     "rlm",
     "spawn",
+    "watch_path",
+    "cancel_watch",
 ]
 
 # Lazily re-export the MCP base class. Kept lazy so `import rlm` never requires

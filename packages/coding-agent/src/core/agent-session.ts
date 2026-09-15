@@ -194,6 +194,8 @@ import {
 	createRlmChildTerminalNoticeMessage,
 	createSessionSlashCommandMessage,
 	createSessionSlashCommandResultMessage,
+	createWatchPathChangedMessage,
+	createWatchPathFailedMessage,
 	HARNESS_DIGEST_CUSTOM_TYPE,
 	type HarnessDigestDetails,
 	HEARTBEAT_PROMPT_CUSTOM_TYPE,
@@ -203,9 +205,14 @@ import {
 	type RefinementSource,
 	RLM_CHILD_FAILURE_CUSTOM_TYPE,
 	RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+	WATCH_PATH_CHANGED_CUSTOM_TYPE,
+	WATCH_PATH_CHANGED_PREVIEW_LABEL,
+	WATCH_PATH_FAILED_CUSTOM_TYPE,
+	WATCH_PATH_FAILED_PREVIEW_LABEL,
 } from "./messages.js";
 import type { ModelRegistry } from "./model-registry.js";
 import { findExactModelReferenceMatch } from "./model-resolver.js";
+import { RlmPathWatchRegistry, resolveWatchPath, rlmPathWatchHostResponse } from "./path-watches.js";
 import { throwIfPromptAdmissionCancelled } from "./prompt-admission.js";
 import { expandPromptTemplate, type PromptTemplate, parseCommandArgs } from "./prompt-templates.js";
 import {
@@ -917,6 +924,10 @@ function injectedMessagePreviewLabel(message: CustomMessage): string | undefined
 			return HEARTBEAT_PROMPT_PREVIEW_LABEL;
 		case ASYNC_BASH_COMPLETION_CUSTOM_TYPE:
 			return ASYNC_BASH_COMPLETION_PREVIEW_LABEL;
+		case WATCH_PATH_CHANGED_CUSTOM_TYPE:
+			return WATCH_PATH_CHANGED_PREVIEW_LABEL;
+		case WATCH_PATH_FAILED_CUSTOM_TYPE:
+			return WATCH_PATH_FAILED_PREVIEW_LABEL;
 		case GOAL_CONTEXT_CUSTOM_TYPE:
 			return GOAL_CONTEXT_PREVIEW_LABEL;
 		default:
@@ -1485,6 +1496,7 @@ export class AgentSession {
 	// Kept alive for retained children so nested updates (e.g. a grandchild cancel)
 	// still forward to root; torn down when the retained child is disposed.
 	private _rlmChildUnsubscribes = new Map<string, () => void>();
+	private _pathWatchRegistry: RlmPathWatchRegistry | undefined;
 	/** Latest recap for this session, written by the daemon summarizer; read by a parent to label its child snapshots. */
 	private _currentRecap?: string;
 
@@ -4776,6 +4788,8 @@ export class AgentSession {
 			this._rlmChildCleanupFailures.clear();
 			this._deletedRlmChildIds.clear();
 			this._pendingNextTurnMessages = [];
+			this._pathWatchRegistry?.dispose();
+			this._pathWatchRegistry = undefined;
 			const deliveryError = new Error("Session disposed before prompt delivery.");
 			const completionError = new Error("Session disposed before prompt completion.");
 			this._rejectQueuedAgentMessageDeliveries(deliveryError, completionError);
@@ -5325,6 +5339,62 @@ export class AgentSession {
 			followUpQueueKey: options?.followUpQueueKey ?? `heartbeat:${job.id}`,
 			resumeIfIdle: true,
 		});
+	}
+
+	/** Registry of this session's filesystem subscriptions, created on first use. */
+	private _pathWatches(): RlmPathWatchRegistry {
+		this._pathWatchRegistry ??= new RlmPathWatchRegistry({
+			onChange: (change) => {
+				void this._promptRuntimeNotice(createWatchPathChangedMessage(change)).catch(() => undefined);
+			},
+			onFailure: (failure) => {
+				void this._promptRuntimeNotice(createWatchPathFailedMessage(failure)).catch(() => undefined);
+			},
+		});
+		return this._pathWatchRegistry;
+	}
+
+	/** Kernel-facing `rlm.watch_path`: validate and register one subscription. */
+	private _watchPathFromHost(payload: Record<string, unknown>): Record<string, unknown> {
+		if (typeof payload.path !== "string" || !payload.path.trim()) {
+			throw new Error("rlm.watch_path path must be a non-empty string");
+		}
+		const rawRecursive = payload.recursive;
+		const recursive = rawRecursive === undefined || rawRecursive === null ? false : rawRecursive;
+		if (typeof recursive !== "boolean") {
+			throw new Error("rlm.watch_path recursive must be a boolean");
+		}
+		const resolved = resolveWatchPath(payload.path.trim(), this._cwd);
+		return { watch: rlmPathWatchHostResponse(this._pathWatches().register(resolved, recursive)) };
+	}
+
+	/**
+	 * Inject one runtime notice (bash completion, watch event): steers into a
+	 * busy session, wakes an idle one, and never starts a turn on its own.
+	 */
+	private async _promptRuntimeNotice(message: CustomMessage & { content: string }): Promise<void> {
+		const disposeSignal = this._sessionActionCommitDisposeAbortController.signal;
+		while (true) {
+			let admissionCommitted = false;
+			try {
+				await this._promptInjectedMessage(message.content, message, {
+					streamingBehavior: "steer",
+					queueIfBusy: true,
+					resumeIfIdle: true,
+					returnAfterAccepted: true,
+					suppressAutonomousContinuation: true,
+					admissionCommitted: () => {
+						admissionCommitted = true;
+					},
+				});
+				return;
+			} catch (error) {
+				if (admissionCommitted || !(error instanceof SessionInputAdmissionPausedError)) throw error;
+				while (this._sessionInputAdmissionPauses.size > 0 && !disposeSignal.aborted) {
+					await this._waitForSessionActivityChange(disposeSignal);
+				}
+			}
+		}
 	}
 
 	private _isRlmTerminalNotice(message: CustomMessage): boolean {
@@ -10300,30 +10370,28 @@ export class AgentSession {
 				...(await this.createRlmSession(prompt, kwargs)),
 			})),
 			"bash.completed": createAsyncBashCompletionHostHandler(async (details) => {
-				const message = createAsyncBashCompletionMessage(details);
-				const disposeSignal = this._sessionActionCommitDisposeAbortController.signal;
-				while (true) {
-					let admissionCommitted = false;
-					try {
-						await this._promptInjectedMessage(message.content, message, {
-							streamingBehavior: "steer",
-							queueIfBusy: true,
-							resumeIfIdle: true,
-							returnAfterAccepted: true,
-							suppressAutonomousContinuation: true,
-							admissionCommitted: () => {
-								admissionCommitted = true;
-							},
-						});
-						return;
-					} catch (error) {
-						if (admissionCommitted || !(error instanceof SessionInputAdmissionPausedError)) throw error;
-						while (this._sessionInputAdmissionPauses.size > 0 && !disposeSignal.aborted) {
-							await this._waitForSessionActivityChange(disposeSignal);
-						}
-					}
-				}
+				await this._promptRuntimeNotice(createAsyncBashCompletionMessage(details));
 			}),
+			"rlm.watch_path": async (payload: Record<string, unknown> = {}) => this._watchPathFromHost(payload),
+			"rlm.watch_list": async () => ({
+				watches: this._pathWatches().list().map(rlmPathWatchHostResponse),
+			}),
+			"rlm.watch_get": async (payload: Record<string, unknown> = {}) => {
+				if (typeof payload.watch_id !== "string" || !payload.watch_id.trim()) {
+					throw new Error("rlm.watch_get watch_id must be a non-empty string");
+				}
+				const watch = this._pathWatches().get(payload.watch_id.trim());
+				if (!watch) {
+					throw new Error(`Unknown path watch: ${payload.watch_id.trim()}`);
+				}
+				return { watch: rlmPathWatchHostResponse(watch) };
+			},
+			"rlm.watch_cancel": async (payload: Record<string, unknown> = {}) => {
+				if (typeof payload.watch_id !== "string" || !payload.watch_id.trim()) {
+					throw new Error("rlm.watch_cancel watch_id must be a non-empty string");
+				}
+				return { watch: rlmPathWatchHostResponse(this._pathWatches().cancel(payload.watch_id.trim())) };
+			},
 			"bash.consumed": createAsyncBashConsumedHostHandler((details) => {
 				this._withdrawAsyncBashCompletionNotice(details);
 			}),
