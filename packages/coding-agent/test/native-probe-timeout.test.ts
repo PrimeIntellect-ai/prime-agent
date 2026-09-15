@@ -77,6 +77,7 @@ printf '%s\\n' '${version}'
 						PRIME_AGENT_INSTALL_DIR: managed,
 						BLOCK_ARGUMENT: argument,
 						PROBE_PIDS: probePids,
+						PRIME_AGENT_PROBE_TIMEOUT_SECONDS: "10",
 					},
 					stdio: ["ignore", "pipe", "pipe"],
 					timeout: operation === "recovery" ? 27000 : 17000,

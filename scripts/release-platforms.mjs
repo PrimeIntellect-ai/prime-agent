@@ -22,6 +22,16 @@ export const releasePlatforms = [
 	"linux-x64-musl-baseline",
 ];
 
+// The v1 manifest field stays limited to the original platform schema.
+// The v2 field uses releasePlatforms so current clients can select every
+// supported archive without changing the v1 compatibility contract.
+export const manifestV1Platforms = [
+	"darwin-arm64",
+	"darwin-x64",
+	"linux-arm64",
+	"linux-x64",
+];
+
 export const darwinReleasePlatforms = releasePlatforms.filter((platform) => platform.startsWith("darwin-"));
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

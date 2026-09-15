@@ -60,7 +60,14 @@ let fixtureDispatcher: Agent;
 
 function publish(
 	version: string,
-	options: { broken?: boolean; missing?: boolean; link?: boolean; installer?: string; libstdcxx?: boolean } = {},
+	options: {
+		broken?: boolean;
+		missing?: boolean;
+		link?: boolean;
+		installer?: string;
+		libstdcxx?: boolean;
+		slow?: number;
+	} = {},
 ) {
 	const source = mkdtempSync(join(root, "archive-"));
 	for (const asset of assets) {
@@ -70,6 +77,7 @@ function publish(
 	}
 	writeFileSync(join(source, "package.json"), JSON.stringify({ version }));
 	writeFileSync(join(source, "install.sh"), options.installer ?? readFileSync(installer));
+	const startup = options.slow ? `sleep ${options.slow}\n` : "";
 	// A musl host without libstdc++ fails in the loader, exactly as reproduced on Alpine.
 	const missingLibstdcxx = `#!/bin/sh
 printf 'Error loading shared library libstdc++.so.6: No such file or directory (needed by %s)\\n' "$0" >&2
@@ -83,7 +91,8 @@ exit 1
 			? missingLibstdcxx
 			: options.broken
 				? "#!/bin/sh\nexit 1\n"
-				: `#!/bin/sh\nprintf '%s\\n' '${version}'\n`,
+				: `#!/bin/sh\n${startup}printf '%s\\n' '${version}'\n`,
+
 		{ mode: 0o755 },
 	);
 	if (options.link) symlinkSync("/tmp", join(source, "outside"));
@@ -1098,6 +1107,49 @@ exec /bin/${operation} "$@"
 		expect(result.code, result.output).toBe(129);
 		expect(existsSync(join(home, "data/prime-agent/.install-lock"))).toBe(false);
 	});
+
+	it("reports a slow first run as a timeout and installs it within a larger budget", async () => {
+		publish("1.0.0", { slow: 5 });
+		const impatient = await install("1.0.0", { PRIME_AGENT_PROBE_TIMEOUT_SECONDS: "2" });
+		expect(impatient.code, impatient.output).not.toBe(0);
+		expect(impatient.output).toContain("probe timed out after 2 seconds");
+		expect(impatient.output).toContain("did not answer within 2 seconds");
+		expect(impatient.output).not.toContain("cannot run on this machine");
+		expect(existsSync(command())).toBe(false);
+		const patient = await install("1.0.0", { PRIME_AGENT_PROBE_TIMEOUT_SECONDS: "60" });
+		expect(patient.code, patient.output).toBe(0);
+		expect(existsSync(command())).toBe(true);
+	}, 90000);
+
+	it("reads a leading-zero probe timeout override as decimal, not octal", async () => {
+		const harness = join(root, "probe-timeout.sh");
+		writeFileSync(
+			harness,
+			readFileSync(installer, "utf8").replace(
+				/\nmain "\$@"\s*$/,
+				() =>
+					'\nfor value in 010 08 09 000 600 601 ""; do\n' +
+					'\tPRIME_AGENT_PROBE_TIMEOUT_SECONDS="$value"\n' +
+					"\tnative_probe_timeout=$(prime_agent_native_probe_timeout)\n" +
+					"\tnative_probe_deadline=$(($(date +%s) + native_probe_timeout))\n" +
+					"\tprintf '%s\\n' \"$native_probe_timeout\"\n" +
+					"done\n",
+			),
+		);
+		const result = await install("", {}, harness);
+		expect(result.code, result.output).toBe(0);
+		expect(result.output.trim().split("\n")).toEqual(["10", "8", "9", "60", "600", "60", "60"]);
+	});
+
+	it("installs a slow first run within a leading-zero timeout budget read as decimal", async () => {
+		publish("1.0.0", { slow: 5 });
+		// "09" previously aborted the deadline arithmetic under set -eu; as a
+		// decimal 9-second budget it must cover a 5-second first run.
+		const result = await install("1.0.0", { PRIME_AGENT_PROBE_TIMEOUT_SECONDS: "09" });
+		expect(result.code, result.output).toBe(0);
+		expect(result.output).not.toContain("probe timed out");
+		expect(existsSync(command())).toBe(true);
+	}, 90000);
 
 	it("reports the supported native platform without installation or release discovery", async () => {
 		const result = await install("--native-platform", { PRIME_AGENT_DOWNLOAD_BASE_URL: "http://127.0.0.1:1" });

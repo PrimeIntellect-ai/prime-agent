@@ -3501,6 +3501,7 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 				getOnboardingShown: () => boolean;
 				setOnboardingShown: (shown: boolean) => void;
 				setDefaultModelAndProvider: (provider: string, modelId: string) => void;
+				getAgentTracesEnabled: () => boolean;
 				flush: () => Promise<void>;
 			};
 		};
@@ -4179,6 +4180,7 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 				getOnboardingShown: vi.fn(() => shown),
 				setOnboardingShown: vi.fn(),
 				setDefaultModelAndProvider: vi.fn(),
+				getAgentTracesEnabled: vi.fn(() => false),
 				flush: vi.fn(async () => {}),
 			},
 		};
@@ -4240,26 +4242,21 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 		expect(fakeThis.showConfigurationMenu).not.toHaveBeenCalled();
 	});
 
-	test("runs the sign-in flow even when Prime CLI credentials are on disk", async () => {
+	test("skips the sign-in flow when the model already works, even with Prime CLI credentials on disk", async () => {
 		const fakeThis = createPrimeCliHarness(false);
 		const dismiss = vi.fn();
 		fakeThis.showOnboardingSplash = vi.fn(async () => ({ dismiss }));
-		fakeThis.createAuthFlows = vi.fn(() => ({
-			runPrimeInferenceLogin: vi.fn(async () => ({
-				status: "success" as const,
-				providerId: PRIME_INFERENCE_PROVIDER_ID,
-				providerName: "Prime Inference",
-				authType: "api_key" as const,
-				kind: "provider" as const,
-			})),
-		}));
+		fakeThis.askOnboardingTraceOptIn = vi.fn(async () => {});
+		fakeThis.createAuthFlows = vi.fn();
 		fakeThis.prepareForModelSelectionAfterLogin = vi.fn(async () => true);
 		fakeThis.showConfigurationMenu = vi.fn(async () => {});
 
 		await expect(runOnboardingFlow.call(fakeThis)).resolves.toBe(true);
 
-		expect(fakeThis.showOnboardingSplash).toHaveBeenCalledWith();
-		expect(fakeThis.prepareForModelSelectionAfterLogin).toHaveBeenCalledTimes(1);
+		expect(fakeThis.showOnboardingSplash).toHaveBeenCalledWith({ immediate: true });
+		expect(fakeThis.createAuthFlows).not.toHaveBeenCalled();
+		expect(fakeThis.prepareForModelSelectionAfterLogin).not.toHaveBeenCalled();
+		expect(fakeThis.askOnboardingTraceOptIn).toHaveBeenCalledTimes(1);
 		// The model picker is no longer part of first launch.
 		expect(fakeThis.showConfigurationMenu).not.toHaveBeenCalled();
 		expect(dismiss).toHaveBeenCalledOnce();
@@ -4302,20 +4299,9 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 		expect(fakeThis.uiServices.settingsManager.flush).not.toHaveBeenCalled();
 	});
 
-	test("reports no completion when a reset interrupts the last question", async () => {
+	test("reports no completion when a reset interrupts the trace question", async () => {
 		const fakeThis = createPrimeCliHarness(false);
 		fakeThis.showOnboardingSplash = vi.fn(async () => ({ dismiss: vi.fn() }));
-		fakeThis.createAuthFlows = vi.fn(() => ({
-			runPrimeInferenceLogin: vi.fn(async () => ({
-				status: "success" as const,
-				providerId: PRIME_INFERENCE_PROVIDER_ID,
-				providerName: "Prime Inference",
-				authType: "api_key" as const,
-				kind: "provider" as const,
-			})),
-		}));
-		fakeThis.prepareForModelSelectionAfterLogin = vi.fn(async () => true);
-		fakeThis.askOnboardingProviders = vi.fn(async () => {});
 		// The reset settles the trace question and aborts the flow behind it.
 		fakeThis.askOnboardingTraceOptIn = vi.fn(async () => {
 			(fakeThis as unknown as { onboardingFlowAbort?: AbortController }).onboardingFlowAbort?.abort();
@@ -4377,7 +4363,9 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 	});
 
 	test("ends the flow when the sign-in does not succeed", async () => {
+		// Without a working model the user still needs the full sign-in flow.
 		const fakeThis = createPrimeCliHarness(false);
+		fakeThis.connectionState = createConnectionState({ model: undefined });
 		const dismiss = vi.fn();
 		fakeThis.showOnboardingSplash = vi.fn(async () => ({ dismiss }));
 		fakeThis.createAuthFlows = vi.fn(() => ({

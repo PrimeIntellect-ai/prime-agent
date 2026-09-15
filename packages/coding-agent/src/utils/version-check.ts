@@ -186,6 +186,7 @@ export async function getLatestPiRelease(
 		tarball?: unknown;
 		version?: unknown;
 		binaries?: unknown;
+		binariesV2?: unknown;
 	};
 	if (typeof data.version !== "string" || !data.version.trim()) {
 		return undefined;
@@ -204,17 +205,23 @@ export async function getLatestPiRelease(
 	if (installSpec) {
 		release.installSpec = installSpec;
 	}
-	if (Array.isArray(data.binaries)) {
-		// Invalid optional native metadata must not discard a valid npm release.
-		// Publish the list only after every entry passes validation.
+	// Prefer the complete v2 schema, with the v1 schema as a compatibility
+	// fallback. Structurally valid entries for future platforms are ignored,
+	// while malformed or duplicate supported-platform entries reject the list.
+	const binarySource = Array.isArray(data.binariesV2)
+		? data.binariesV2
+		: Array.isArray(data.binaries)
+			? data.binaries
+			: undefined;
+	if (binarySource) {
 		const binaries: NativeReleaseArtifact[] = [];
 		const platforms = new Set<string>();
-		for (const candidate of data.binaries) {
+		for (const candidate of binarySource) {
 			if (!candidate || typeof candidate !== "object") return release;
 			const artifact = candidate as Partial<NativeReleaseArtifact>;
+			if (typeof artifact.platform !== "string") return release;
+			if (!isNativePlatform(artifact.platform)) continue;
 			if (
-				typeof artifact.platform !== "string" ||
-				!isNativePlatform(artifact.platform) ||
 				platforms.has(artifact.platform) ||
 				artifact.file !== `prime-agent-${release.version}-${artifact.platform}.tar.gz` ||
 				typeof artifact.sha256 !== "string" ||
@@ -224,7 +231,7 @@ export async function getLatestPiRelease(
 			platforms.add(artifact.platform);
 			binaries.push({ platform: artifact.platform, file: artifact.file, sha256: artifact.sha256 });
 		}
-		release.binaries = binaries;
+		if (binaries.length > 0) release.binaries = binaries;
 	}
 	return release;
 }

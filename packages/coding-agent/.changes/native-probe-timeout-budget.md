@@ -1,0 +1,1 @@
+- Fixed installs that failed on a slow first run of the compiled executable, such as Rosetta 2 translation on Apple Silicon; the startup probe now waits up to 60 seconds, accepts a `PRIME_AGENT_PROBE_TIMEOUT_SECONDS` override, and reports a timeout as a timeout instead of claiming the executable cannot run on this machine.

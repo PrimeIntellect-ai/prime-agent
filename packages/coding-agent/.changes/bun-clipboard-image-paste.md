@@ -1,0 +1,1 @@
+- Fixed image paste in standalone macOS and glibc releases by embedding the available platform clipboard addon.

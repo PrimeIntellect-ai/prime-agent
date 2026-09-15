@@ -33,6 +33,12 @@ describe("MCP management commands", () => {
 		});
 	});
 
+	it("rejects a global run flag rotated ahead of the -- separator instead of leaking it into the child command", () => {
+		expect(() => parseMcpAddArgs(["local", "--offline", "--", "node", "server.js"])).toThrow(
+			"Unknown MCP add option: --offline",
+		);
+	});
+
 	it("accepts environment names inherited from Object.prototype", () => {
 		const { config } = parseMcpAddArgs([
 			"local",

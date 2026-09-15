@@ -1,0 +1,2 @@
+- Fixed release manifest parsing rejecting all native binary entries when encountering an unknown future platform; unknown platforms are now skipped while known-platform entries remain strictly validated.
+- Added versioned native binary metadata so the v1 manifest schema stays compatible while the v2 schema advertises every musl and baseline archive.

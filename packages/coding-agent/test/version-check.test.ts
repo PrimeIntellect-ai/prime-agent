@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { NATIVE_PLATFORMS } from "../src/utils/native-installation.js";
 import {
 	checkForNewPiVersion,
 	comparePackageVersions,
@@ -9,25 +10,21 @@ import {
 	isReleaseUpdateCandidate,
 	resolveUpdateChannel,
 } from "../src/utils/version-check.js";
+import { clearAmbientRuntimeEnv } from "./ambient-env.js";
 
 const defaultPrimeAgentDownloadBaseUrl = "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev";
-const originalSkipVersionCheck = process.env.PI_SKIP_VERSION_CHECK;
-const originalOffline = process.env.PI_OFFLINE;
-const originalPrimeAgentDownloadBaseUrl = process.env.PRIME_AGENT_DOWNLOAD_BASE_URL;
 
-function restoreEnv(name: string, value: string | undefined): void {
-	if (value === undefined) {
-		delete process.env[name];
-		return;
-	}
-	process.env[name] = value;
-}
+// These checks read the environment, so each test starts from a cleared one and the
+// host shell cannot decide the outcome. Tests that need a variable set it themselves.
+let restoreAmbientRuntimeEnv: () => void;
+
+beforeEach(() => {
+	restoreAmbientRuntimeEnv = clearAmbientRuntimeEnv();
+});
 
 afterEach(() => {
 	vi.unstubAllGlobals();
-	restoreEnv("PI_SKIP_VERSION_CHECK", originalSkipVersionCheck);
-	restoreEnv("PI_OFFLINE", originalOffline);
-	restoreEnv("PRIME_AGENT_DOWNLOAD_BASE_URL", originalPrimeAgentDownloadBaseUrl);
+	restoreAmbientRuntimeEnv();
 });
 
 describe("version checks", () => {
@@ -108,8 +105,6 @@ describe("update channel preference", () => {
 	});
 
 	it("follows a preferred nightly channel from a stable installation", async () => {
-		delete process.env.PI_SKIP_VERSION_CHECK;
-		delete process.env.PI_OFFLINE;
 		const fetchMock = vi.fn(async () => Response.json({ version: "v1.2.5-beta.130.1.abcdef0" }));
 		vi.stubGlobal("fetch", fetchMock);
 		await expect(getLatestPiVersion("1.2.4", { channel: "nightly" })).resolves.toBe("1.2.5-beta.130.1.abcdef0");
@@ -117,8 +112,6 @@ describe("update channel preference", () => {
 	});
 
 	it("follows a preferred stable channel from a beta installation", async () => {
-		delete process.env.PI_SKIP_VERSION_CHECK;
-		delete process.env.PI_OFFLINE;
 		const fetchMock = vi.fn(async () => Response.json({ version: "v1.2.4" }));
 		vi.stubGlobal("fetch", fetchMock);
 		await expect(getLatestPiVersion("1.2.4-beta.123.1.1234567", { channel: "stable" })).resolves.toBe("1.2.4");
@@ -153,8 +146,6 @@ describe("update channel preference", () => {
 	});
 
 	it("reports the current beta build from a stable installation once nightly is preferred", async () => {
-		delete process.env.PI_SKIP_VERSION_CHECK;
-		delete process.env.PI_OFFLINE;
 		vi.stubGlobal(
 			"fetch",
 			vi.fn(async () => Response.json({ version: "v1.2.3-beta.5.1.abcdef0" })),
@@ -164,12 +155,104 @@ describe("update channel preference", () => {
 	});
 
 	it("reports a newer beta build when nightly is preferred", async () => {
-		delete process.env.PI_SKIP_VERSION_CHECK;
-		delete process.env.PI_OFFLINE;
 		vi.stubGlobal(
 			"fetch",
 			vi.fn(async () => Response.json({ version: "v1.2.5-beta.1.1.abcdef0" })),
 		);
 		await expect(checkForNewPiVersion("1.2.4", "nightly")).resolves.toBe("1.2.5-beta.1.1.abcdef0");
+	});
+});
+
+describe("manifest binary schema compatibility", () => {
+	const artifact = (platform: string, sha256 = "a".repeat(64)) => ({
+		platform,
+		file: `prime-agent-1.2.4-${platform}.tar.gz`,
+		sha256,
+	});
+
+	function stubManifest(fields: Record<string, unknown>): void {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () =>
+				Response.json({
+					version: "v1.2.4",
+					package: "prime-agent",
+					tarball: "releases/v1.2.4/prime-agent-1.2.4.tgz",
+					...fields,
+				}),
+			),
+		);
+	}
+
+	it("prefers binariesV2, keeps every supported platform, and skips future platforms", async () => {
+		stubManifest({
+			binaries: [artifact("darwin-arm64", "b".repeat(64))],
+			binariesV2: [
+				...NATIVE_PLATFORMS.map((platform, index) => artifact(platform, index.toString(16).padStart(64, "0"))),
+				artifact("future-riscv128", "f".repeat(64)),
+			],
+		});
+
+		const release = await getLatestPiRelease("1.2.3");
+		expect(release?.binaries?.map(({ platform }) => platform)).toEqual(NATIVE_PLATFORMS);
+		expect(release?.binaries?.map(({ platform }) => platform)).toEqual(
+			expect.arrayContaining([
+				"linux-arm64-musl",
+				"linux-x64-baseline",
+				"linux-x64-musl",
+				"linux-x64-musl-baseline",
+			]),
+		);
+	});
+
+	it("falls back to binaries when binariesV2 is absent", async () => {
+		stubManifest({ binaries: [artifact("darwin-arm64")] });
+
+		await expect(getLatestPiRelease("1.2.3")).resolves.toMatchObject({
+			binaries: [artifact("darwin-arm64")],
+		});
+	});
+
+	it("rejects the selected list when an entry is structurally malformed", async () => {
+		stubManifest({
+			binaries: [artifact("darwin-arm64")],
+			binariesV2: [artifact("linux-x64"), null],
+		});
+
+		const release = await getLatestPiRelease("1.2.3");
+		expect(release?.version).toBe("1.2.4");
+		expect(release?.binaries).toBeUndefined();
+	});
+
+	it("rejects the selected list when a supported platform entry is malformed", async () => {
+		stubManifest({
+			binaries: [artifact("darwin-arm64")],
+			binariesV2: [artifact("linux-x64"), artifact("linux-x64-musl", "not-hex")],
+		});
+
+		const release = await getLatestPiRelease("1.2.3");
+		expect(release?.version).toBe("1.2.4");
+		expect(release?.binaries).toBeUndefined();
+	});
+
+	it("rejects the selected list when a supported platform is duplicated", async () => {
+		stubManifest({
+			binaries: [artifact("darwin-arm64")],
+			binariesV2: [artifact("linux-x64"), artifact("linux-x64", "b".repeat(64))],
+		});
+
+		const release = await getLatestPiRelease("1.2.3");
+		expect(release?.version).toBe("1.2.4");
+		expect(release?.binaries).toBeUndefined();
+	});
+
+	it("preserves npm release info when the selected list contains only future platforms", async () => {
+		stubManifest({ binariesV2: [artifact("future-riscv128", "b".repeat(64))] });
+
+		await expect(getLatestPiRelease("1.2.3")).resolves.toEqual({
+			version: "1.2.4",
+			packageName: "prime-agent",
+			installSpec: `${defaultPrimeAgentDownloadBaseUrl}/releases/v1.2.4/prime-agent-1.2.4.tgz`,
+		});
 	});
 });
