@@ -81,7 +81,7 @@ describe("Windows kernel subprocesses", () => {
 				env: { PYTHONUTF8: "1", PRIME_AGENT_KERNEL_OWNER_PID: String(process.pid) },
 			});
 			expect(call?.[0]).toBe(python);
-			expect(call?.[1]).toEqual(["-m", "rlm.repl"]);
+			expect(call?.[1]).toEqual(["-P", "-m", "rlm.repl"]);
 			expect(call?.[2]?.windowsVerbatimArguments).toBeUndefined();
 		} finally {
 			await manager.shutdown();

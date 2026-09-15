@@ -15,6 +15,12 @@ import type { PythonSkillRuntimeInfo } from "../skills.js";
 const BOOTSTRAP_SCHEMA = 9;
 const PYTHON_VERSION = "3.11";
 const RUNTIME_REQUIREMENT = "prime-agent-runtime";
+// `-P` (safe path, Python >= 3.11) keeps the current directory / script directory
+// off sys.path, so a checkout carrying `rlm/`, `dill.py`, or a stdlib name cannot
+// shadow the kernel's own imports. Every kernel-python invocation must carry it;
+// the process-local flag is preferred over PYTHONSAFEPATH, which the kernel's
+// bash() children would inherit.
+export const KERNEL_PYTHON_SAFE_PATH_ARGS: readonly string[] = ["-P"];
 // Serializes the kernel's user namespace so it can be revived across session
 // resume. Internal-only; intentionally not surfaced to the model as an import.
 const STATE_SNAPSHOT_REQUIREMENT = "dill";
@@ -430,7 +436,7 @@ function run(command: string, args: string[], options: { stdio?: "ignore" | "inh
 
 async function pythonImports(python: string, moduleName: string): Promise<boolean> {
 	try {
-		await run(python, ["-c", `import ${moduleName}`], { stdio: "ignore" });
+		await run(python, [...KERNEL_PYTHON_SAFE_PATH_ARGS, "-c", `import ${moduleName}`], { stdio: "ignore" });
 		return true;
 	} catch {
 		return false;
@@ -439,7 +445,7 @@ async function pythonImports(python: string, moduleName: string): Promise<boolea
 
 async function hasPrimeAgentRuntime(python: string): Promise<boolean> {
 	try {
-		await run(python, ["-c", RUNTIME_READY_CHECK], { stdio: "ignore" });
+		await run(python, [...KERNEL_PYTHON_SAFE_PATH_ARGS, "-c", RUNTIME_READY_CHECK], { stdio: "ignore" });
 		return true;
 	} catch {
 		return false;

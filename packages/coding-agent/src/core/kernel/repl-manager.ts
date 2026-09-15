@@ -8,7 +8,7 @@ import { StringDecoder } from "node:string_decoder";
 import { v4 as uuid } from "uuid";
 import { spawnHidden } from "../../utils/child-process.js";
 import { reapKernelOrphanProcesses, recordOrphanProcessState } from "../orphan-process-journal.js";
-import { ensureKernelPython } from "./bootstrap.js";
+import { ensureKernelPython, KERNEL_PYTHON_SAFE_PATH_ARGS } from "./bootstrap.js";
 import {
 	AGENT_MESSAGE_DISPLAY_MIME,
 	ATTACHMENT_DISPLAY_MIME,
@@ -312,7 +312,9 @@ export class ReplKernelManager {
 			throw new Error("Kernel was disposed during startup");
 		}
 
-		const child = spawnHidden(python, ["-m", "rlm.repl"], {
+		// Safe path: the project cwd must never sit at sys.path[0], or a checkout
+		// could substitute its own rlm/, dill.py, or stdlib-named module.
+		const child = spawnHidden(python, [...KERNEL_PYTHON_SAFE_PATH_ARGS, "-m", "rlm.repl"], {
 			cwd: this.options.cwd,
 			// bash.py journals its process groups under this pid so the host can
 			// reap them if the runtime dies without running its shutdown hook.
