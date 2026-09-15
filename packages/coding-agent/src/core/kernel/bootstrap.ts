@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants, existsSync, readdirSync, readFileSync } from "node:fs";
-import { access, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { stderr, stdin } from "node:process";
@@ -965,7 +965,20 @@ async function ensureKernelPythonUncached(
 		reportProgress(options, "› setting up python kernel (one-time, ~30s)…");
 		if (hadVenv) {
 			reportProgress(options, "rebuilding kernel venv");
-			await rm(venv, { recursive: true, force: true });
+			try {
+				await rm(venv, { recursive: true, force: true });
+			} catch (error) {
+				// Windows can refuse to unlink a venv while a stale Python process
+				// still owns a DLL. Quarantine by rename, then rebuild at the stable
+				// path; cleanup is best-effort and must not block bootstrap.
+				const quarantined = `${venv}.stale-${process.pid}-${randomUUID()}`;
+				try {
+					await rename(venv, quarantined);
+					void rm(quarantined, { recursive: true, force: true }).catch(() => undefined);
+				} catch {
+					throw error;
+				}
+			}
 		}
 
 		await bootstrapVenv(venv, pythonSkills, options);
