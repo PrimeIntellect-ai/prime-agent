@@ -4324,6 +4324,23 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 		await expect(runOnboardingFlow.call(fakeThis)).resolves.toBe(false);
 	});
 
+	test("stops asking for providers once the flow is aborted", async () => {
+		const askOnboardingProviders = (InteractiveMode.prototype as unknown as OnboardingHarness).askOnboardingProviders;
+		const abort = new AbortController();
+		abort.abort();
+		const showInlineAuthPanel = vi.fn();
+		const fakeThis = {
+			onboardingSplash: { setPanel: vi.fn(), getActivePanel: () => undefined },
+			onboardingFlowAbort: abort,
+			createAuthFlows: vi.fn(() => ({ getLoginProviderOptions: vi.fn(() => []) })),
+			showInlineAuthPanel,
+		};
+
+		await expect(askOnboardingProviders.call(fakeThis)).resolves.toBeUndefined();
+
+		expect(showInlineAuthPanel).not.toHaveBeenCalled();
+	});
+
 	test("settles the pending step when a reset unmounts its panel", () => {
 		const showInlineAuthPanel = (
 			InteractiveMode.prototype as unknown as {

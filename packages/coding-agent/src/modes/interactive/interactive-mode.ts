@@ -1930,6 +1930,11 @@ export class InteractiveMode {
 		}
 		const authFlows = this.createAuthFlows();
 		for (;;) {
+			// A reset that cancels a provider login must end the question too,
+			// otherwise the next picker opens in the editor and waits for input.
+			if (this.onboardingFlowAbort?.signal.aborted) {
+				return;
+			}
 			// One row per provider: a provider offering both a subscription and an
 			// API key would otherwise appear twice under the same name.
 			const options = [
