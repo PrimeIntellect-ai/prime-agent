@@ -13,8 +13,44 @@ interface MenuPanelOptions {
 	title: string;
 	subtitle?: string;
 	inline?: boolean;
-	/** Inline only: prefix the panel with a full-width separator rule. */
+	/**
+	 * Inline only: force or suppress the full-width separator rule above the
+	 * panel. By default an inline panel opens with exactly ONE rule — its own,
+	 * or the bordered search input's when that input already leads the panel
+	 * (never both).
+	 */
 	topRule?: boolean;
+}
+
+/**
+ * A component whose first rendered line is already a full-width rule: the
+ * inline MenuSearchInput. MenuPanel uses this to open every inline picker with
+ * exactly one separator rule instead of doubling the search input's border.
+ */
+interface InlineTopRuleComponent {
+	readonly rendersInlineTopRule: boolean;
+}
+
+function rendersInlineTopRule(component: Component | undefined): boolean {
+	return (component as InlineTopRuleComponent | undefined)?.rendersInlineTopRule === true;
+}
+
+/**
+ * Rows an inline MenuPanel draws above its children: one separator rule,
+ * except when the bordered search input already leads the panel and its own
+ * top border IS that rule. Components that budget viewport rows for an inline
+ * panel must add this to their reserved rows — it is the same decision
+ * MenuPanel.render applies, so the budget and the frame can never disagree.
+ */
+export function inlineMenuPanelTopRuleRows(options: {
+	title?: string;
+	subtitle?: string;
+	firstChild?: Component;
+	topRule?: boolean;
+}): number {
+	const hasHeader = Boolean(options.title) || Boolean(options.subtitle?.trim());
+	const firstChildLeadsWithRule = rendersInlineTopRule(options.firstChild);
+	return (options.topRule ?? (!firstChildLeadsWithRule || hasHeader)) ? 1 : 0;
 }
 
 export interface MenuViewportProvider {
@@ -261,7 +297,18 @@ export class MenuPanel extends Container {
 	override render(width: number): string[] {
 		if (this.options.inline) {
 			const lines: string[] = [];
-			if (this.options.topRule) {
+			// Every inline picker opens with one full-width rule that separates
+			// it from the transcript above. A headerless panel led by the
+			// bordered search input keeps that input's own top border as the
+			// rule; a panel with a title or subtitle draws the rule above it.
+			if (
+				inlineMenuPanelTopRuleRows({
+					title: this.title,
+					subtitle: this.options.subtitle,
+					firstChild: this.children[0],
+					topRule: this.options.topRule,
+				}) > 0
+			) {
 				lines.push(theme.fg("borderMuted", "─".repeat(Math.max(0, width))));
 			}
 			if (this.title) lines.push(theme.fg("muted", ` ${this.title}`));
@@ -323,6 +370,11 @@ export class MenuSearchInput implements Component, Focusable, FullWidthMenuCompo
 		private readonly placeholder: string,
 		private readonly inline = false,
 	) {}
+
+	/** The inline variant renders a full-width rule as its first line. */
+	get rendersInlineTopRule(): boolean {
+		return this.inline;
+	}
 
 	get focused(): boolean {
 		return this.input.focused;

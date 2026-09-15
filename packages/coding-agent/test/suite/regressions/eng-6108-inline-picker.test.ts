@@ -281,6 +281,74 @@ it.each(["remove", "add"] as const)("keeps the %s action and identifiers unchang
 	}
 });
 
+async function connectedAccountFixture() {
+	const f = await settingsFixture();
+	const now = Date.now();
+	f.harness.authStorage.set("mcp:acme-work", {
+		type: "oauth",
+		access: "synthetic-access",
+		refresh: "r",
+		expires: now + 3600_000,
+		endpoint: ENDPOINT,
+	});
+	f.store.upsert({
+		connectionId: "acme-work",
+		serviceId: "acme",
+		endpoint: ENDPOINT,
+		label: "Work",
+		status: "connected",
+		verifiedAt: now,
+		toolCount: 2,
+		createdAt: now,
+		updatedAt: now,
+	});
+	await f.store.flush();
+	const removeAccount = vi.spyOn(f.store, "removeAccount");
+	const done = f.mode.showAccountPickerForService(
+		view({ connectionIds: ["acme-work"], connectionStatus: "connected" }),
+		{ url: ENDPOINT, usesOAuth: true, managedBySettings: false },
+		{ knownIds: new Set(["acme"]) },
+	);
+	return { f, removeAccount, done, accounts: f.picker() };
+}
+
+it("Enter on the accounts name row re-verifies a connected account instead of removing it", async () => {
+	// Kevin (live testing): Enter on the first row (the account name) must not
+	// disconnect the account — that is the Remove row's job. The name row
+	// re-verifies; the record and the credential both survive.
+	const { f, removeAccount, done, accounts } = await connectedAccountFixture();
+	expect(stripAnsi(accounts.render(100).join("\n"))).toContain("Enter re-verify");
+	expect(stripAnsi(accounts.render(100).join("\n"))).not.toContain("Enter disconnect");
+	accounts.handleInput("\r");
+	await done;
+	expect(removeAccount).not.toHaveBeenCalled();
+	expect(f.store.get("acme-work")).toBeDefined();
+	expect(f.harness.authStorage.getVerified("mcp:acme-work")).toBeDefined();
+	expect(f.reserve).not.toHaveBeenCalled();
+	expect(f.claim).not.toHaveBeenCalled();
+	expect(f.authFlow).not.toHaveBeenCalled();
+	// The network-denied environment makes the verification fail, which keeps
+	// this test offline; the honest outcome is a retry that leaves the account
+	// saved — never a removal.
+	expect(f.appendOutcome).toHaveBeenCalledOnce();
+	expect(f.appendOutcome.mock.calls[0]?.[0]).toMatchObject({
+		customType: "mcp_connection_outcome",
+		details: { source: "retry", verification: "unverified" },
+	});
+});
+
+it("Enter on the accounts Remove row still removes that account", async () => {
+	const { f, removeAccount, done, accounts } = await connectedAccountFixture();
+	accounts.handleInput("\x1b[B");
+	expect(stripAnsi(accounts.render(100).join("\n"))).toContain("Enter remove account");
+	accounts.handleInput("\r");
+	await done;
+	expect(removeAccount).toHaveBeenCalledOnce();
+	expect(f.store.get("acme-work")).toBeUndefined();
+	expect(f.harness.authStorage.getVerified("mcp:acme-work")).toBeUndefined();
+	expect(f.reload).toHaveBeenCalledOnce();
+});
+
 async function settingsFixture() {
 	const f = await fixture();
 	// Restore the real view builder and mutation callback on the production prototype.

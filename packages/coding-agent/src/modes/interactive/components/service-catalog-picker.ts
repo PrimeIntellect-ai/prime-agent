@@ -1,16 +1,10 @@
-import {
-	Container,
-	type Focusable,
-	fuzzyFilter,
-	getKeybindings,
-	TruncatedText,
-	truncateToWidth,
-} from "@earendil-works/pi-tui";
+import { Container, type Focusable, getKeybindings, TruncatedText, truncateToWidth } from "@earendil-works/pi-tui";
 import type { McpPluginView } from "../../../core/mcp/service-catalog.js";
 import { theme } from "../theme/theme.js";
 import { keyText } from "./keybinding-hints.js";
 import {
 	getMenuListLayout,
+	inlineMenuPanelTopRuleRows,
 	MenuList,
 	MenuPanel,
 	MenuRow,
@@ -47,12 +41,107 @@ const SEARCH_AND_FOOTER_ROWS = 4;
 const SCROLL_INDICATOR_ROWS = 1;
 /** The one fixed line under the list describing the selected connector. */
 const DETAIL_ROWS = 1;
+/** The one blank line between the last row and the description line. */
+const DETAIL_SPACER_ROWS = 1;
 /**
  * Viewports below this height cannot fit the search box, one result row, the
- * counter, the description, and the hint; the description line drops instead
- * of overflowing the terminal. Real terminals never reach this boundary.
+ * counter, the spacer, the description, and the hint; the description line
+ * drops instead of overflowing the terminal. Real terminals never reach this
+ * boundary.
  */
-const MIN_ROWS_FOR_DETAIL = SEARCH_AND_FOOTER_ROWS + DETAIL_ROWS + 2;
+const MIN_ROWS_FOR_DETAIL = SEARCH_AND_FOOTER_ROWS + DETAIL_ROWS + DETAIL_SPACER_ROWS + 2;
+
+// Search bands: lower scores rank first. Identity fields (label, service id,
+// aliases) always outrank description/setup-hint text.
+const EXACT_SCORE = 0;
+const PREFIX_SCORE = 100;
+const WORD_START_SCORE = 200;
+const SUBSTRING_SCORE = 300;
+const SUBSEQUENCE_SCORE = 400;
+const DESCRIPTION_WORD_START_SCORE = 500;
+const DESCRIPTION_SUBSTRING_SCORE = 600;
+
+function words(text: string): string[] {
+	return text
+		.toLowerCase()
+		.split(/[^\p{L}\p{N}]+/u)
+		.filter(Boolean);
+}
+
+/** Identity match: exact, prefix, word start, substring, then the subsequence fallback. */
+function identityMatchScore(text: string, token: string): number | undefined {
+	const haystack = text.toLowerCase();
+	if (haystack === token) return EXACT_SCORE;
+	if (haystack.startsWith(token)) return PREFIX_SCORE + (haystack.length - token.length) * 0.01;
+	if (words(haystack).some((word) => word.startsWith(token))) return WORD_START_SCORE;
+	const at = haystack.indexOf(token);
+	if (at >= 0) return SUBSTRING_SCORE + at * 0.01;
+	return subsequenceMatchScore(haystack, token);
+}
+
+/**
+ * Identity-only subsequence fallback. The consecutive-run floor — half the
+ * query, minimum two characters — keeps the fallback for tight abbreviations
+ * ("crdb" finds cockroachdb) while rejecting the scattered matches that made
+ * the old joined-haystack search return noise for almost any query.
+ */
+function subsequenceMatchScore(haystack: string, token: string): number | undefined {
+	if (token.length < 2 || token.length > haystack.length) return undefined;
+	let tokenIndex = 0;
+	let runLength = 0;
+	let longestRun = 0;
+	let firstMatch = -1;
+	let lastMatch = -1;
+	for (let index = 0; index < haystack.length && tokenIndex < token.length; index++) {
+		if (haystack[index] !== token[tokenIndex]) continue;
+		runLength = lastMatch === index - 1 ? runLength + 1 : 1;
+		longestRun = Math.max(longestRun, runLength);
+		if (firstMatch === -1) firstMatch = index;
+		lastMatch = index;
+		tokenIndex++;
+	}
+	if (tokenIndex < token.length || longestRun < Math.max(2, Math.ceil(token.length / 2))) return undefined;
+	return SUBSEQUENCE_SCORE + (lastMatch - firstMatch + 1 - token.length) * 2;
+}
+
+/** Description text matches only as a word start or substring — never a subsequence. */
+function descriptionMatchScore(text: string, token: string): number | undefined {
+	const haystack = text.toLowerCase();
+	if (words(haystack).some((word) => word.startsWith(token))) return DESCRIPTION_WORD_START_SCORE;
+	const at = haystack.indexOf(token);
+	if (at >= 0) return DESCRIPTION_SUBSTRING_SCORE + at * 0.01;
+	return undefined;
+}
+
+/**
+ * Score one row against the query; undefined means "not a match". Every query
+ * token must match somewhere. Account rows all carry the SAME description and
+ * setup hint (inherited from the service), so matching that text could never
+ * filter anything — accounts mode matches identity only: the account label
+ * and the connection id are the fields that distinguish rows.
+ */
+function serviceMatchScore(service: McpPluginView, query: string, mode: "catalog" | "accounts"): number | undefined {
+	const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+	if (tokens.length === 0) return 0;
+	let total = 0;
+	for (const token of tokens) {
+		let best: number | undefined;
+		for (const field of [service.label, service.serviceId, ...(service.aliases ?? [])]) {
+			const score = identityMatchScore(field, token);
+			if (score !== undefined && (best === undefined || score < best)) best = score;
+		}
+		if (best === undefined && mode === "catalog") {
+			for (const field of [service.description, service.setupHint]) {
+				if (!field) continue;
+				const score = descriptionMatchScore(field, token);
+				if (score !== undefined && (best === undefined || score < best)) best = score;
+			}
+		}
+		if (best === undefined) return undefined;
+		total += best;
+	}
+	return total;
+}
 
 /**
  * Inline catalog/account picker on the same menu primitives as models/providers.
@@ -102,7 +191,6 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 		this.viewport = options;
 		this.mode = options.mode ?? "catalog";
 		this.getRowPresentation = options.getRowPresentation;
-		this.contextRows = options.title ? 1 : 0;
 		this.onSelectCallback = onSelect;
 		this.onCancelCallback = onCancel;
 
@@ -121,6 +209,12 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 			if (service) this.onSelectCallback(service);
 		};
 		panel.addChild(this.searchInput);
+		// A titled panel (accounts mode) renders the separator rule plus the
+		// title before its children; a headerless panel's rule IS the search
+		// input's top border, already budgeted in SEARCH_AND_FOOTER_ROWS. The
+		// helper is the same decision MenuPanel.render applies.
+		this.contextRows =
+			(options.title ? 1 : 0) + inlineMenuPanelTopRuleRows({ title: options.title, firstChild: this.searchInput });
 
 		this.listContainer = new MenuList({ inline: true });
 		panel.addChild(this.listContainer);
@@ -136,16 +230,19 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 	private filterServices(query: string): void {
 		const queryChanged = query !== this.searchQuery;
 		this.searchQuery = query;
-		this.filteredServices = query
-			? fuzzyFilter(this.allServices, query, (service) =>
-					[
-						service.label,
-						service.serviceId,
-						service.description ?? "",
-						...(service.setupHint ? [service.setupHint] : []),
-					].join(" "),
-				)
-			: this.allServices;
+		const trimmed = query.trim();
+		if (!trimmed) {
+			this.filteredServices = this.allServices;
+		} else {
+			const scored: { service: McpPluginView; score: number }[] = [];
+			for (const service of this.allServices) {
+				const score = serviceMatchScore(service, trimmed, this.mode);
+				if (score !== undefined) scored.push({ service, score });
+			}
+			// Stable sort: rows that score the same keep their catalog order.
+			scored.sort((left, right) => left.score - right.score);
+			this.filteredServices = scored.map((entry) => entry.service);
+		}
 		this.selectedIndex = queryChanged
 			? 0
 			: Math.max(0, Math.min(this.selectedIndex, Math.max(0, this.filteredServices.length - 1)));
@@ -201,14 +298,24 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 		}
 
 		if (startIndex > 0 || endIndex < this.filteredServices.length) {
-			const scrollInfo = theme.fg("muted", `  (${this.selectedIndex + 1}/${this.filteredServices.length})`);
+			// One leading space plus TruncatedText's one-column padding puts the
+			// counter's first glyph in the same column as the rows' labels
+			// (the rows render "› "/" before their primary text).
+			const scrollInfo = theme.fg("muted", ` (${this.selectedIndex + 1}/${this.filteredServices.length})`);
 			this.listContainer.addChild(new TruncatedText(scrollInfo, 1, 0));
 		}
 
 		if (this.filteredServices.length === 0) {
 			const message = this.allServices.length === 0 ? "No external services available" : "No matching services";
-			this.listContainer.addChild(new TruncatedText(theme.fg("muted", message), 1, 0));
+			this.listContainer.addChild(new TruncatedText(theme.fg("muted", ` ${message}`), 1, 0));
 		} else if (this.detailRows > 0) {
+			// One blank line between the last row and the description, so the
+			// settings block reads as its own group. updateLayout() budgets the
+			// spacer, so the panel height never changes to fit it.
+			this.listContainer.addChild({
+				render: () => [""],
+				invalidate: () => {},
+			});
 			// ONE fixed line about the selected connector — never a growing
 			// description block — with the shortcuts row underneath from render().
 			// updateLayout() budgets the line, so the panel never resizes to fit it.
@@ -241,7 +348,9 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 		if (this.mode === "accounts" && service.connectionIds.length === 0)
 			return service.usesOAuth ? "add account" : "setup guidance";
 		if (service.source === "user" && !service.usesOAuth) return "manage";
-		if (service.connectionStatus === "connected") return "disconnect";
+		// Enter on the account NAME row re-verifies a connected account; removal
+		// is the explicit Remove row's job, so the name row never disconnects.
+		if (service.connectionStatus === "connected") return "re-verify";
 		if (service.connectionStatus === "pending") return "verify";
 		if (!service.connectable) return "setup guidance";
 		return service.connectionStatus === "error" ? "reconnect" : "connect";
@@ -327,7 +436,11 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 			getRows: this.viewport.getRows,
 			preferredVisibleItems: PREFERRED_VISIBLE_SERVICES,
 			totalItems: this.filteredServices.length,
-			reservedRows: SEARCH_AND_FOOTER_ROWS + this.contextRows + this.detailRows,
+			reservedRows:
+				SEARCH_AND_FOOTER_ROWS +
+				this.contextRows +
+				this.detailRows +
+				(this.detailRows > 0 ? DETAIL_SPACER_ROWS : 0),
 			comfortableItemRows: 1,
 			comfortableListPaddingRows: 0,
 			scrollIndicatorRows: SCROLL_INDICATOR_ROWS,

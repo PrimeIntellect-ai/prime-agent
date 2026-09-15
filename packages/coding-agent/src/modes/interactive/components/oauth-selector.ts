@@ -13,6 +13,7 @@ import { PRIME_INFERENCE_PROVIDER_ID } from "../../../core/prime-inference-auth.
 import { theme } from "../theme/theme.js";
 import {
 	getMenuListLayout,
+	inlineMenuPanelTopRuleRows,
 	MenuList,
 	MenuPanel,
 	MenuRow,
@@ -88,6 +89,8 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		compactItemRows: 2,
 	});
 	private readonly viewport: MenuViewportProvider;
+	/** Rows the inline MenuPanel draws above its children (separator rule). */
+	private topRuleRows = 0;
 	private readonly getHeaderRows: () => number;
 	private readonly inline: boolean;
 	private readonly emptyMessage?: string;
@@ -122,14 +125,14 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 				? options.initialCategory
 				: (this.categories[0] ?? "provider");
 
+		const panelTitle =
+			this.inline && options.header ? "" : (options.title ?? (mode === "login" ? "Providers" : "Saved Credentials"));
+		const panelSubtitle =
+			options.subtitle ??
+			(mode === "login" ? "Connect with a subscription or API key." : "Choose a credential to remove.");
 		const panel = new MenuPanel({
-			title:
-				this.inline && options.header
-					? ""
-					: (options.title ?? (mode === "login" ? "Providers" : "Saved Credentials")),
-			subtitle:
-				options.subtitle ??
-				(mode === "login" ? "Connect with a subscription or API key." : "Choose a credential to remove."),
+			title: panelTitle,
+			subtitle: panelSubtitle,
 			inline: this.inline,
 		});
 		this.addChild(panel);
@@ -156,6 +159,15 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 
 		this.listContainer = new MenuList({ compact: () => this.listLayout.compact, inline: this.inline });
 		panel.addChild(this.listContainer);
+		// The inline panel opens with its separator rule unless the bordered
+		// search already leads it; budget whichever the panel decides.
+		this.topRuleRows = this.inline
+			? inlineMenuPanelTopRuleRows({
+					title: panelTitle,
+					subtitle: panelSubtitle,
+					firstChild: panel.children[0],
+				})
+			: 0;
 
 		this.filterProviders("");
 	}
@@ -431,7 +443,8 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		return (
 			(this.inline ? 3 + this.getInlineDetailRows() : PROVIDER_LIST_RESERVED_ROWS) +
 			this.getHeaderRows() +
-			(this.tabBar ? TAB_BAR_RESERVED_ROWS : 0)
+			(this.tabBar ? TAB_BAR_RESERVED_ROWS : 0) +
+			this.topRuleRows
 		);
 	}
 

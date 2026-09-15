@@ -31,7 +31,9 @@ describe("ExtensionSelectorComponent", () => {
 		const lines = output.split("\n");
 		const titleIndex = lines.findIndex((line) => line.includes("Choose an account"));
 
-		expect(titleIndex).toBe(0);
+		// The default inline separator rule leads the panel, above the title.
+		expect(lines[0]).toBe("─".repeat(88));
+		expect(titleIndex).toBe(1);
 		expect(lines[titleIndex + 1]).toContain("Sign in with the account you want to use with Prime Agent.");
 		expect(output).toContain("Personal");
 		expect(output).toContain("Business");

@@ -9647,48 +9647,19 @@ export class InteractiveMode {
 			this.showStatus(ownership.setupHint ?? service.setupHint ?? "Disabled in settings.");
 			return false;
 		}
-		if (service.connectionStatus === "connected") {
-			if (target?.managedBySettings && !service.usesOAuth) {
-				this.showStatus(
-					`${service.label} is configured through settings; manage it with /mcp remove ${service.serviceId}.`,
-				);
-				return false;
-			}
-			const disconnected = await this.getMcpConnectionStore().removeAccount({
-				connectionId: service.serviceId,
-				authCleanup: (connectionId) => {
-					// Disk-authoritative logout: remove() swallows persistence
-					// errors, so a failed auth-file write could report the logout
-					// done while the credential survives. removeVerified throws
-					// instead (the honest "failed" path) and returns whether a
-					// credential was actually removed from disk.
-					return this.modelRegistry.authStorage.removeVerified(mcpCredentialKey(connectionId));
-				},
-			});
-			// Honest outcomes: removed/credential-only disconnected the account,
-			// missing is a no-op, logged-out keeps the durable logout but says the
-			// record save failed, and failed is state-neutral (the cleanup may or
-			// may not have run — it never claims a specific state).
-			if (disconnected === "failed") {
-				this.showWarning(`The change could not be saved; try disconnecting ${service.label} again.`);
-				return false;
-			}
-			if (disconnected === "logged-out") {
-				this.showWarning(
-					`Logged out ${service.label}, but the change could not be saved. It may still appear in the list; try again to finish cleanup.`,
-				);
-				return false;
-			}
-			if (disconnected === "missing") {
-				this.showStatus(`${service.label} is no longer connected.`);
-				return false;
-			}
-			await this.reloadAfterMcpChange(`Disconnected ${service.label}.`);
+		if (service.connectionStatus === "connected" && target?.managedBySettings && !service.usesOAuth) {
+			this.showStatus(
+				`${service.label} is configured through settings; manage it with /mcp remove ${service.serviceId}.`,
+			);
 			return false;
 		}
-		// Pending accounts retry verification explicitly — no login needed, the
-		// grant already exists; "retry from /plugins" must actually work.
-		if (service.connectionStatus === "pending" && target?.url) {
+		// Connected and pending accounts retry verification explicitly — no
+		// login needed, the grant already exists; "retry from /plugins" must
+		// actually work. Enter on the account NAME row therefore never
+		// disconnects a working account (Kevin, live testing): removal is the
+		// explicit Remove row's job, and this is the only reachable branch for a
+		// connected account coming out of either picker.
+		if ((service.connectionStatus === "pending" || service.connectionStatus === "connected") && target?.url) {
 			let retried: McpConnectionRecord | undefined;
 			try {
 				retried = await verifyMcpConnection({
@@ -9736,7 +9707,7 @@ export class InteractiveMode {
 	 * add account, /mcp login, the generic /login service options, the config
 	 * menu): claim/reserve under the store's file lock, staged OAuth, guarded
 	 * finalize, verification. Never dispatches on the record's status — the
-	 * picker's disconnect/verify actions live in connectServiceFromPicker.
+	 * picker's remove/verify actions live in connectServiceFromPicker.
 	 * Reports success only after the finalize committed.
 	 */
 	private async guardedMcpLogin(

@@ -7,7 +7,14 @@ import { Container, getKeybindings, Spacer, Text, type TUI } from "@earendil-wor
 import { theme } from "../theme/theme.js";
 import { CountdownTimer } from "./countdown-timer.js";
 import { keyHint, rawKeyHint } from "./keybinding-hints.js";
-import { getMenuListLayout, MenuList, MenuPanel, MenuRow, type MenuViewportProvider } from "./menu-panel.js";
+import {
+	getMenuListLayout,
+	inlineMenuPanelTopRuleRows,
+	MenuList,
+	MenuPanel,
+	MenuRow,
+	type MenuViewportProvider,
+} from "./menu-panel.js";
 
 export interface ExtensionSelectorOptions {
 	tui?: TUI;
@@ -67,7 +74,6 @@ export class ExtensionSelectorComponent extends Container {
 		this.inline = opts?.inline === true;
 		const header = splitTitleAndDescription(title);
 		this.baseTitle = header.title;
-		this.reservedRows = OPTION_LIST_RESERVED_BASE_ROWS + header.descriptionRows;
 		const tui = opts?.tui;
 		this.viewport = { getRows: opts?.getRows ?? (tui ? () => tui.terminal.rows : undefined) };
 
@@ -89,6 +95,17 @@ export class ExtensionSelectorComponent extends Container {
 
 		this.listContainer = new MenuList({ compact: true, inline: this.inline });
 		this.panel.addChild(this.listContainer);
+		// The inline panel opens with its separator rule; budget it.
+		this.reservedRows =
+			OPTION_LIST_RESERVED_BASE_ROWS +
+			header.descriptionRows +
+			(this.inline
+				? inlineMenuPanelTopRuleRows({
+						title: header.title,
+						subtitle: header.description,
+						firstChild: this.listContainer,
+					})
+				: 0);
 		if (!this.inline) this.panel.addChild(new Spacer(1));
 		this.panel.addChild(
 			new Text(

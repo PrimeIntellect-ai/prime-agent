@@ -173,16 +173,21 @@ describe("ServiceCatalogPickerComponent", () => {
 			() => {},
 		);
 		const lines = picker.render(80).map(stripAnsi);
+		// Exactly one full-width rule opens this headerless panel: the bordered
+		// search input leads, so its top border IS the separator rule and the
+		// panel never doubles it.
 		expect(lines[0]).toBe("─".repeat(80));
+		expect(lines[1]).not.toBe("─".repeat(80));
 		expect(lines[1]).toContain("Search MCP connections");
 		expect(lines[2]).toBe("─".repeat(80));
 		expect(lines[3]).toMatch(/^› Acme\s+Connect$/);
-		// One fixed description line about the selected connector with the
-		// shortcuts underneath — no blank separator, no viewport-driven resize.
-		expect(lines).toHaveLength(6);
-		expect(lines[4]).toContain("Selected detail");
-		expect(lines[5]).toContain("↑/↓ navigate");
-		expect(lines[5]).toContain("Enter connect");
+		// One fixed description line about the selected connector, one blank
+		// line above it, and the shortcuts underneath — no viewport-driven resize.
+		expect(lines).toHaveLength(7);
+		expect(lines[4].trim()).toBe("");
+		expect(lines[5]).toContain("Selected detail");
+		expect(lines[6]).toContain("↑/↓ navigate");
+		expect(lines[6]).toContain("Enter connect");
 	});
 
 	it.each([24, 40, 80, 120])(
@@ -231,14 +236,14 @@ describe("ServiceCatalogPickerComponent", () => {
 			{ getRows: () => 14 },
 		);
 		picker.render(80);
-		// The fixed one-line description frees a row for the list, so a page
-		// step at 14 rows now moves by the full 8 visible items.
+		// The fixed one-line description plus its blank spacer stay budgeted,
+		// so a page step at 14 rows moves by the full 7 visible items.
 		picker.handleInput("\x04");
 		picker.handleInput("\x19");
-		expect(selected).toEqual(["svc-8"]);
+		expect(selected).toEqual(["svc-7"]);
 		picker.handleInput("\x15");
 		picker.handleInput("\x19");
-		expect(selected).toEqual(["svc-8", "svc-0"]);
+		expect(selected).toEqual(["svc-7", "svc-0"]);
 		const output = stripAnsi(picker.render(80).join("\n"));
 		expect(output).toContain("Ctrl+Y connect");
 		expect(output).toContain("Ctrl+X close");
@@ -275,7 +280,9 @@ describe("ServiceCatalogPickerComponent", () => {
 		expect(output).toContain("Search accounts");
 		expect(output.indexOf("Acme work")).toBeLessThan(output.indexOf("Remove acme-work"));
 		expect(output.indexOf("Remove acme-work")).toBeLessThan(output.indexOf("Add another account"));
-		expect(output).toContain("Enter disconnect");
+		// Enter on the account NAME row re-verifies; only the Remove row removes.
+		expect(output).toContain("Enter re-verify");
+		expect(output).not.toContain("Enter disconnect");
 		picker.handleInput("\x1b[B");
 		output = stripAnsi(picker.render(100).join("\n"));
 		expect(output).toContain("Enter remove account");
@@ -314,6 +321,11 @@ describe("ServiceCatalogPickerComponent", () => {
 			}),
 			mode: "accounts" as const,
 			action: "manage",
+		},
+		{
+			view: viewFixture({ connectionIds: ["acme"], connectionStatus: "connected" }),
+			mode: "accounts" as const,
+			action: "re-verify",
 		},
 		{
 			view: viewFixture({ connectionStatus: "disabled", connectable: false }),
@@ -436,10 +448,11 @@ describe("ServiceCatalogPickerComponent", () => {
 		let lines = frame();
 		const detailIndex = lines.findIndex((line) => line.includes("Design and publish social content."));
 		expect(detailIndex).toBeGreaterThan(0);
-		// Exactly ONE description line, the counter directly above it, the
-		// shortcuts directly underneath, no blank separator rows, and the hint
-		// is the panel's last line.
-		expect(lines[detailIndex - 1].trim()).toMatch(/\(\d+\/\d+\)/);
+		// Exactly ONE description line with ONE blank line above it: the
+		// counter sits directly above the blank, the shortcuts directly
+		// underneath the description, and the hint is the panel's last line.
+		expect(lines[detailIndex - 1].trim()).toBe("");
+		expect(lines[detailIndex - 2].trim()).toMatch(/\(\d+\/\d+\)/);
 		expect(lines[detailIndex + 1]).toContain("↑/↓ navigate");
 		expect(lines[detailIndex + 1]).toContain("Enter manage accounts");
 		expect(lines[lines.length - 1]).toContain("Esc close");
@@ -485,5 +498,230 @@ describe("ServiceCatalogPickerComponent", () => {
 		picker.handleInput("hugg");
 		expect(counterLine()).toBeUndefined();
 		expect(stripAnsi(picker.render(100).join("\n"))).toContain("Hugging Face");
+	});
+	it("aligns the scroll counter and the empty state with the row indent", () => {
+		// Kevin (live testing): the (1/77) counter sat one column off the rows.
+		// Rows render "› "/" before their label, so label text starts at column
+		// 2 — the counter and the empty-state message must align to that.
+		const services = Array.from({ length: 77 }, (_, i) =>
+			viewFixture({ serviceId: `svc-${i}`, label: `Service ${i}` }),
+		);
+		const picker = new ServiceCatalogPickerComponent(
+			services,
+			() => {},
+			() => {},
+			{ getRows: () => 24 },
+		);
+		const lines = picker.render(100).map(stripAnsi);
+		const counter = lines.find((line) => /\(\d+\/\d+\)/.test(line));
+		const row = lines.find((line) => /^ {2}Service \d/.test(line));
+		expect(counter).toBeDefined();
+		expect(row).toBeDefined();
+		expect(counter?.indexOf("(1/77)")).toBe(2);
+		expect(row?.indexOf("Service")).toBe(2);
+		picker.handleInput("zzzzzzzz");
+		const empty = picker
+			.render(100)
+			.map(stripAnsi)
+			.find((line) => line.includes("No matching services"));
+		expect(empty?.indexOf("No matching services")).toBe(2);
+	});
+
+	it("returns zero rows for a query nothing matches, never scattered-subsequence noise", () => {
+		// Kevin's live report: searching "vercel" surfaced eight unrelated rows
+		// through the shared setup-hint boilerplate ("...not been VERified.
+		// ConneCt ... capabilitiEs ... Login"). Vercel is not in the catalog, so
+		// the honest answer is the empty state.
+		const boilerplate =
+			"OAuth support has not been verified. Connect checks capabilities and asks for approval before login.";
+		const services = [
+			viewFixture({ serviceId: "cockroachdb", label: "CockroachDB Cloud", setupHint: boilerplate }),
+			viewFixture({ serviceId: "cloudinary-mediaflows", label: "Cloudinary MediaFlows", setupHint: boilerplate }),
+			viewFixture({ serviceId: "wix", label: "Wix", setupHint: boilerplate }),
+			viewFixture({ serviceId: "expo", label: "Expo", setupHint: boilerplate }),
+			viewFixture({ serviceId: "neon", label: "Neon", setupHint: boilerplate }),
+			viewFixture({ serviceId: "gc-ai", label: "GC AI", setupHint: boilerplate }),
+			viewFixture({ serviceId: "mapbox", label: "Mapbox", setupHint: boilerplate }),
+			viewFixture({ serviceId: "prisma", label: "Prisma", setupHint: boilerplate }),
+		];
+		let calls = 0;
+		const picker = new ServiceCatalogPickerComponent(
+			services,
+			() => {
+				calls++;
+			},
+			() => {},
+			{ getRows: () => 24 },
+		);
+		picker.handleInput("vercel");
+		const lines = picker.render(100).map(stripAnsi);
+		for (const service of services) {
+			expect(lines.some((line) => line.includes(service.label))).toBe(false);
+		}
+		expect(lines.some((line) => line.includes("No matching services"))).toBe(true);
+		// The empty state is inert: navigation and Enter dispatch nothing.
+		picker.handleInput("\x1b[B");
+		picker.handleInput("\r");
+		expect(calls).toBe(0);
+	});
+
+	it("ranks identity matches above description text and keeps description search useful", () => {
+		const services = [
+			viewFixture({
+				serviceId: "stripe",
+				label: "Stripe",
+				description: "Develop your payments integration faster.",
+			}),
+			viewFixture({ serviceId: "ledger", label: "Ledger", description: "Import Stripe-like payment ledgers." }),
+			viewFixture({
+				serviceId: "notion",
+				label: "Notion",
+				aliases: ["notion-workspace"],
+				description: "Notion workflows for implementation planning.",
+			}),
+		];
+		const picker = new ServiceCatalogPickerComponent(
+			services,
+			() => {},
+			() => {},
+			{ getRows: () => 24 },
+		);
+		const firstRow = () =>
+			stripAnsi(picker.render(100).join("\n"))
+				.split("\n")
+				.find((line) => line.trim().startsWith("›"));
+		const backspace = (count: number) => {
+			for (let i = 0; i < count; i++) picker.handleInput("\x7f");
+		};
+		picker.handleInput("notion");
+		expect(firstRow()).toContain("Notion");
+		// A distinctive description word still finds its service.
+		backspace(6);
+		picker.handleInput("payments");
+		expect(firstRow()).toContain("Stripe");
+		// An identity hit for the same word outranks a description-only hit.
+		backspace(8);
+		picker.handleInput("stripe");
+		expect(firstRow()).toContain("Stripe");
+		expect(stripAnsi(picker.render(100).join("\n"))).toContain("Ledger");
+	});
+
+	it("separates the description line from the list with one blank line in both modes", () => {
+		// Kevin (live testing): one blank line above the description / below the
+		// last row ("Add another account"), without changing the panel height.
+		const catalog = new ServiceCatalogPickerComponent(
+			[viewFixture({ label: "Acme", description: "Selected detail" })],
+			() => {},
+			() => {},
+		);
+		let lines = catalog.render(80).map(stripAnsi);
+		let detailIndex = lines.findIndex((line) => line.includes("Selected detail"));
+		expect(detailIndex).toBeGreaterThan(0);
+		expect(lines[detailIndex - 1].trim()).toBe("");
+		expect(lines[detailIndex - 2]).toMatch(/Acme/);
+
+		const account = viewFixture({
+			serviceId: "acme-work",
+			label: "Acme work",
+			connectionIds: ["acme-work"],
+			connectionStatus: "connected",
+			description: "Bring operational data into your conversations.",
+		});
+		const accounts = new ServiceCatalogPickerComponent(
+			[
+				account,
+				{ ...account, label: "Remove acme-work", removeAction: true },
+				viewFixture({
+					label: "Add another account",
+					description: "Bring operational data into your conversations.",
+				}),
+			],
+			() => {},
+			() => {},
+			{ mode: "accounts", title: "Accounts — Acme" },
+		);
+		lines = accounts.render(80).map(stripAnsi);
+		detailIndex = lines.findIndex((line) => line.includes("Bring operational data"));
+		expect(detailIndex).toBeGreaterThan(0);
+		expect(lines[detailIndex - 1].trim()).toBe("");
+		expect(lines[detailIndex - 2]).toMatch(/Add another account/);
+	});
+
+	it("opens every inline panel with exactly one leading separator rule", () => {
+		// Kevin (live testing): inline pickers need a line between the chat view
+		// and the picker. A headerless panel borrows the bordered search's top
+		// border as that rule; a titled panel draws the rule above its title.
+		const catalog = new ServiceCatalogPickerComponent(
+			[viewFixture()],
+			() => {},
+			() => {},
+		);
+		const lines = catalog.render(80).map(stripAnsi);
+		expect(lines[0]).toBe("─".repeat(80));
+		expect(lines[1]).not.toBe("─".repeat(80));
+
+		const account = viewFixture({
+			serviceId: "acme-work",
+			label: "Acme work",
+			connectionIds: ["acme-work"],
+			connectionStatus: "connected",
+		});
+		const accounts = new ServiceCatalogPickerComponent(
+			[account, { ...account, label: "Remove acme-work", removeAction: true }],
+			() => {},
+			() => {},
+			{ mode: "accounts", title: "Accounts — Acme" },
+		);
+		const titled = accounts.render(80).map(stripAnsi);
+		expect(titled[0]).toBe("─".repeat(80));
+		expect(titled[1]).toContain("Accounts — Acme");
+		expect(titled[2]).toBe("─".repeat(80));
+	});
+
+	it("filters account rows by their distinguishing fields only", () => {
+		// Every account row inherits the service's description and setup hint,
+		// so matching that text filters nothing ("search accounts doesn't
+		// really do anything"). Accounts search matches the account label and
+		// the connection id — the fields that actually distinguish rows.
+		const account = viewFixture({
+			serviceId: "acme-work",
+			label: "Acme · acme-work",
+			connectionIds: ["acme-work"],
+			connectionStatus: "connected",
+			description: "Bring operational data into your conversations.",
+		});
+		const picker = new ServiceCatalogPickerComponent(
+			[
+				account,
+				{ ...account, label: "Remove acme-work", removeAction: true },
+				viewFixture({
+					label: "Add another account",
+					description: "Bring operational data into your conversations.",
+				}),
+			],
+			() => {},
+			() => {},
+			{ mode: "accounts", title: "Accounts — Acme", getRows: () => 24 },
+		);
+		const visible = () => {
+			const output = stripAnsi(picker.render(100).join("\n"));
+			return {
+				accountRow: output.includes("Acme · acme-work"),
+				removeRow: output.includes("Remove acme-work"),
+				addRow: output.includes("Add another account"),
+				empty: output.includes("No matching services"),
+			};
+		};
+		const backspace = (count: number) => {
+			for (let i = 0; i < count; i++) picker.handleInput("\x7f");
+		};
+		picker.handleInput("work");
+		expect(visible()).toEqual({ accountRow: true, removeRow: true, addRow: false, empty: false });
+		backspace(4);
+		picker.handleInput("remove");
+		expect(visible()).toEqual({ accountRow: false, removeRow: true, addRow: false, empty: false });
+		backspace(6);
+		picker.handleInput("operational");
+		expect(visible().empty).toBe(true);
 	});
 });

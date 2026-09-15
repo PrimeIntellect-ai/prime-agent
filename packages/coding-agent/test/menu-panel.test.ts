@@ -67,6 +67,24 @@ describe("MenuPanel", () => {
 		expect(withoutRule.join("")).not.toContain("─");
 	});
 
+	it("opens inline panels with exactly one rule by default", () => {
+		// A titled inline panel draws its separator rule above the title...
+		const titled = new MenuPanel({ title: "Accounts", inline: true });
+		titled.addChild(new StaticComponent());
+		const titledLines = titled.render(24).map(stripAnsi);
+		expect(titledLines[0]).toBe("─".repeat(24));
+		expect(titledLines[1]?.trim()).toBe("Accounts");
+
+		// ...and a headerless panel led by the bordered search input keeps the
+		// input's own top border as its one rule — never two adjacent rules.
+		const search = new MenuPanel({ title: "", inline: true });
+		search.addChild(new MenuSearchInput("Search", true));
+		const searchLines = search.render(24).map(stripAnsi);
+		expect(searchLines[0]).toBe("─".repeat(24));
+		expect(searchLines[1]).not.toBe("─".repeat(24));
+		expect(searchLines[1]).toContain("Search");
+	});
+
 	it("renders the subtitle under the title in inline panels", () => {
 		const panel = new MenuPanel({
 			title: "Choose an account",
@@ -78,9 +96,11 @@ describe("MenuPanel", () => {
 		const lines = panel.render(60);
 		const output = lines.map((line) => stripAnsi(line));
 
-		expect(output[0]?.trim()).toBe("Choose an account");
-		expect(output[1]?.trim()).toBe("Sign in with the account you want to use.");
-		expect(output[2]?.trim()).toBe("first");
+		// The default inline separator rule leads the panel, above the title.
+		expect(output[0]).toBe("─".repeat(60));
+		expect(output[1]?.trim()).toBe("Choose an account");
+		expect(output[2]?.trim()).toBe("Sign in with the account you want to use.");
+		expect(output[3]?.trim()).toBe("first");
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBe(60);
 		}
