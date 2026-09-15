@@ -72,7 +72,11 @@ jobs:
         working-directory: source
         run: |
           if [[ "${{ matrix.platform }}" == *musl* ]]; then
-            npm ci --libc=musl
+            cpu=x64
+            if [[ "${{ matrix.platform }}" == *arm64* ]]; then
+              cpu=arm64
+            fi
+            npm ci --os=linux --cpu="$cpu" --libc=musl
           else
             npm ci
           fi

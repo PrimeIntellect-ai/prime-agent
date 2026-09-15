@@ -172,7 +172,8 @@ ${step(validation, "Verify and exercise exact final Mac archives").run}`,
 		const build = standalone.jobs.build!;
 		const install = step(build, "Install locked npm dependencies");
 		expect(install.run).toContain(`[[ "\${{ matrix.platform }}" == *musl* ]]`);
-		expect(install.run).toContain("npm ci --libc=musl");
+		expect(install.run).toContain(`[[ "\${{ matrix.platform }}" == *arm64* ]]`);
+		expect(install.run).toContain('npm ci --os=linux --cpu="$cpu" --libc=musl');
 		const glibc = step(build, "Test extracted application without JavaScript runtimes on PATH");
 		const musl = step(build, "Test extracted application on Alpine without JavaScript runtimes");
 		// A cross-compiled musl archive cannot run on the glibc runner that built it.
