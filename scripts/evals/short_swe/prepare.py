@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -12,10 +11,13 @@ import subprocess
 import tomllib
 from pathlib import Path
 
-from evaluator_contract import evaluator_contract_fingerprint
-
 ROOT = Path(__file__).resolve().parent
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+CANDIDATE_TARBALLS = {
+    f"{name}-0.0.0-benchmark.tgz"
+    for name in ("prime-agent", "prime-agent-ai", "prime-agent-core", "prime-agent-tui")
+}
 
 
 def revision(path: Path) -> str:
@@ -33,6 +35,21 @@ def replace_once(path: Path, old: str, new: str) -> None:
     if text.count(old) != 1:
         raise ValueError(f"trusted compatibility patch did not match {path}")
     path.write_text(text.replace(old, new))
+
+
+def strip_task_runtime_credentials(verifiers: Path) -> None:
+    """Patch the pinned Harbor task boundary before it populates a sandbox environment."""
+    harbor = verifiers / "verifiers/v1/tasksets/harbor/taskset.py"
+    old = "    def runtime_env(self) -> dict[str, str]:\n        return resolve_env(self.data.env)"
+    new = (
+        "    def runtime_env(self) -> dict[str, str]:\n"
+        "        env = resolve_env(self.data.env)\n"
+        '        for name in ("PRIME_API_KEY", "PRIME_SANDBOX_API_KEY", '
+        '"GITHUB_TOKEN", "GH_TOKEN", "HF_TOKEN"):\n'
+        "            env.pop(name, None)\n"
+        "        return env"
+    )
+    replace_once(harbor, old, new)
 
 
 def pin_taskset_sources(manifest: dict, verifiers: Path, environments: Path) -> None:
@@ -61,6 +78,8 @@ def pin_taskset_sources(manifest: dict, verifiers: Path, environments: Path) -> 
         "        )"
     )
     replace_once(scale, old, new)
+
+    strip_task_runtime_credentials(verifiers)
 
     # This Verifiers revision eagerly imports the optional NeMo Gym plugin from
     # tasksets.__init__. Harbor does not need it, and MCP 2.0 no longer exposes
@@ -119,7 +138,31 @@ def toml_array(values: list[str]) -> str:
     return "[" + ", ".join(json.dumps(value) for value in values) + "]"
 
 
-def config_text(item: dict, manifest: dict, artifacts: Path, commit: str) -> str:
+def artifact_checksums(artifacts: Path, commit: str) -> dict[str, str]:
+    manifest = json.loads((artifacts / "artifact-manifest.json").read_text())
+    records = manifest.get("artifacts") if manifest.get("sha") == commit else None
+    if not isinstance(records, list) or len(records) != 4:
+        raise ValueError("artifact manifest does not match the evaluated revision")
+    checksums = {record.get("name"): record.get("sha256") for record in records}
+    if set(checksums) != CANDIDATE_TARBALLS or any(
+        not isinstance(value, str) or not DIGEST_RE.fullmatch(value) for value in checksums.values()
+    ):
+        raise ValueError("artifact manifest has invalid checksums")
+    return checksums
+
+
+def toml_table(values: dict[str, str]) -> str:
+    entries = ", ".join(f"{json.dumps(key)} = {json.dumps(value)}" for key, value in values.items())
+    return "{ " + entries + " }"
+
+
+def config_text(
+    item: dict,
+    manifest: dict,
+    artifacts: Path,
+    commit: str,
+    checksums: dict[str, str] | None = None,
+) -> str:
     lines = [
         f"model = {json.dumps(manifest['model'])}",
         f"num_rollouts = {manifest['num_rollouts']}",
@@ -154,6 +197,7 @@ def config_text(item: dict, manifest: dict, artifacts: Path, commit: str) -> str
             'id = "prime-agent-candidate"',
             f"artifact_dir = {json.dumps(str(artifacts.resolve()))}",
             f"commit = {json.dumps(commit)}",
+            *([f"checksums = {toml_table(checksums)}"] if checksums is not None else []),
             "autonomous = false",
             "",
             "[env.agent.runtime]",
@@ -178,29 +222,33 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--verifiers", required=True, type=Path)
     parser.add_argument("--environments", required=True, type=Path)
-    parser.add_argument("--artifacts", required=True, type=Path)
-    parser.add_argument("--commit", required=True)
+    parser.add_argument("--base-artifacts", required=True, type=Path)
+    parser.add_argument("--base-sha", required=True)
+    parser.add_argument("--head-artifacts", required=True, type=Path)
+    parser.add_argument("--head-sha", required=True)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
-    manifest_path = ROOT / "short-swe.json"
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads((ROOT / "short-swe.json").read_text())
     validate_manifest(manifest)
     if revision(args.verifiers) != manifest["verifiers_commit"]:
         raise ValueError("Verifiers checkout does not match the manifest")
     if revision(args.environments) != manifest["environments_commit"]:
         raise ValueError("environments checkout does not match the manifest")
     validate_verifiers_lock(manifest, args.verifiers)
-    if not SHA_RE.fullmatch(args.commit):
-        raise ValueError("invalid candidate revision")
+    if not SHA_RE.fullmatch(args.base_sha) or not SHA_RE.fullmatch(args.head_sha):
+        raise ValueError("invalid evaluated revision")
     pin_taskset_sources(manifest, args.verifiers, args.environments)
-    args.output.mkdir(parents=True, exist_ok=True)
-    for item in manifest["tasksets"]:
-        (args.output / f"{item['id']}.toml").write_text(
-            config_text(item, manifest, args.artifacts, args.commit)
-        )
-    fingerprint = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
-    (args.output / "manifest-fingerprint").write_text(fingerprint + "\n")
-    (args.output / "evaluator-contract-fingerprint").write_text(evaluator_contract_fingerprint() + "\n")
+    for side, artifacts, commit in (
+        ("base", args.base_artifacts, args.base_sha),
+        ("head", args.head_artifacts, args.head_sha),
+    ):
+        target = args.output / side
+        target.mkdir(parents=True, exist_ok=True)
+        checksums = artifact_checksums(artifacts, commit)
+        for item in manifest["tasksets"]:
+            (target / f"{item['id']}.toml").write_text(
+                config_text(item, manifest, artifacts, commit, checksums)
+            )
 
 
 if __name__ == "__main__":

@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-import hashlib
-import re
 from pathlib import Path
 from uuid import uuid4
 
+from candidate_contract import (
+    TARBALLS,
+    VERSION,
+    load_artifacts,
+    process_env,
+    require_non_autonomous,
+    validate_checksums,
+)
 from pydantic import Field, field_validator
 from verifiers.v1.acp import ACPHarness
 from verifiers.v1.configs.harness import HarnessConfig
@@ -20,14 +26,7 @@ from verifiers.v1.trace import Trace
 
 __all__ = ["PrimeAgentCandidateHarness"]
 
-VERSION = "0.0.0-benchmark"
-TARBALLS = tuple(
-    f"{name}-{VERSION}.tgz"
-    for name in ("prime-agent", "prime-agent-ai", "prime-agent-core", "prime-agent-tui")
-)
-SHA256_RE = re.compile(r"[0-9a-f]{64}")
 MAX_MODEL_REQUEST_BYTES = 16_000_000
-
 interception_server.MAX_REQUEST_BODY = MAX_MODEL_REQUEST_BYTES
 
 
@@ -99,20 +98,12 @@ class PrimeAgentCandidateHarnessConfig(HarnessConfig):
     @field_validator("autonomous")
     @classmethod
     def reject_autonomous(cls, value: bool) -> bool:
-        if value:
-            raise ValueError("candidate harness requires autonomous=false")
-        return value
+        return require_non_autonomous(value)
 
     @field_validator("checksums")
     @classmethod
-    def validate_checksums(cls, value: dict[str, str] | None) -> dict[str, str] | None:
-        if value is None:
-            return None
-        if set(value) != set(TARBALLS):
-            raise ValueError("checksums must name exactly the four candidate tarballs")
-        if any(SHA256_RE.fullmatch(digest) is None for digest in value.values()):
-            raise ValueError("checksums must be lowercase SHA256 strings")
-        return value
+    def check_checksums(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        return validate_checksums(value)
 
 
 class PrimeAgentCandidateHarness(PrimeAgentHarness, ACPHarness[PrimeAgentCandidateHarnessConfig]):
@@ -121,17 +112,7 @@ class PrimeAgentCandidateHarness(PrimeAgentHarness, ACPHarness[PrimeAgentCandida
     config: PrimeAgentCandidateHarnessConfig
 
     def _load_artifacts(self) -> tuple[dict[str, bytes], dict[str, str]]:
-        root = self.config.artifact_dir
-        if not root.is_dir():
-            raise ValueError(f"artifact_dir is not a directory: {root}")
-        names = {path.name for path in root.glob("*.tgz")}
-        if names != set(TARBALLS) or any(not (root / name).is_file() for name in TARBALLS):
-            raise ValueError("artifact_dir must contain exactly the four candidate tarballs")
-        blobs = {name: (root / name).read_bytes() for name in TARBALLS}
-        computed = {name: hashlib.sha256(data).hexdigest() for name, data in blobs.items()}
-        if self.config.checksums is not None and computed != self.config.checksums:
-            raise ValueError("candidate tarball checksum mismatch")
-        return blobs, self.config.checksums or computed
+        return load_artifacts(self.config.artifact_dir, self.config.checksums)
 
     async def setup(self, runtime: Runtime) -> None:
         blobs, checksums = self._load_artifacts()
@@ -141,8 +122,7 @@ class PrimeAgentCandidateHarness(PrimeAgentHarness, ACPHarness[PrimeAgentCandida
         for name, data in blobs.items():
             await runtime.write(f"{upload_dir}/{name}", data)
         sums = "\n".join(f"{checksums[name]}  {name}" for name in TARBALLS)
-        install_env = dict(self.config.resolved_env)
-        install_env.pop("PRIME_API_KEY", None)
+        install_env = process_env(self.config.resolved_env)
         await ensure_installed(
             runtime,
             directory=PRIME_AGENT_DIR,
@@ -160,6 +140,4 @@ class PrimeAgentCandidateHarness(PrimeAgentHarness, ACPHarness[PrimeAgentCandida
         await ACPHarness.setup(self, runtime)
 
     def _env(self, trace: Trace, secret: str) -> dict[str, str]:
-        env = super()._env(trace, secret)
-        env.pop("PRIME_API_KEY", None)
-        return env
+        return process_env(super()._env(trace, secret))

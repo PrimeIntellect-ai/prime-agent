@@ -36,13 +36,13 @@ COMMAND_TIMEOUT_LIMIT_SECONDS = 900
 BUILD_POLL_SECONDS = 10
 
 
-def labels(repository: str, run_id: int, attempt: int) -> list[str]:
+def labels(repository: str, run_id: int, attempt: int, side: str) -> list[str]:
     return [
         OWNER_LABEL,
         f"repository:{repository}",
         f"run:{run_id}",
         f"attempt:{attempt}",
-        "role:builder",
+        f"role:builder-{side}",
     ]
 
 
@@ -106,16 +106,19 @@ def build(
     run_id: int,
     attempt: int,
     output: Path,
+    side: str,
 ) -> None:
+    if side not in {"base", "head"}:
+        raise ValueError("side must be base or head")
     if not REPO_RE.fullmatch(repository) or not REPO_RE.fullmatch(source_repository):
         raise ValueError("invalid repository")
     if not SHA_RE.fullmatch(sha):
         raise ValueError("invalid candidate revision")
-    config = json.loads((ROOT.parent / "benchmarks/config.json").read_text())
+    config = json.loads((ROOT.parents[1] / "benchmarks/config.json").read_text())
     client = SandboxClient(APIClient(api_key=os.environ["PRIME_SANDBOX_API_KEY"]))
     sandbox = client.create(
         CreateSandboxRequest(
-            name=f"behavioral-build-{run_id}-{attempt}",
+            name=f"behavioral-{side}-{run_id}-{attempt}",
             docker_image=config["image"],
             cpu_cores=config["cpu_cores"],
             memory_gb=config["memory_gb"],
@@ -124,8 +127,8 @@ def build(
             region=config["region"],
             timeout_minutes=BUILD_SANDBOX_TIMEOUT_MINUTES,
             team_id=os.environ.get("PRIME_TEAM_ID") or None,
-            labels=labels(repository, run_id, attempt),
-            idempotency_key=f"behavioral-build-{repository}-{run_id}-{attempt}",
+            labels=labels(repository, run_id, attempt, side),
+            idempotency_key=f"behavioral-{side}-{repository}-{run_id}-{attempt}",
         )
     )
     try:
@@ -187,7 +190,7 @@ def build(
             or {record.get("name") for record in records} != EXPECTED
         ):
             raise ValueError("candidate artifact manifest is incomplete")
-        source = f"{REMOTE}/source/packages/coding-agent/release/behavioral/artifacts"
+        source = f"{REMOTE}/results/artifacts"
         for record in records:
             name = record["name"]
             size = record.get("size")
@@ -214,6 +217,7 @@ def main() -> None:
     parser.add_argument("--run-id", required=True, type=int)
     parser.add_argument("--attempt", required=True, type=int)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--side", required=True, choices=("base", "head"))
     args = parser.parse_args()
     build(
         args.repository,
@@ -222,6 +226,7 @@ def main() -> None:
         args.run_id,
         args.attempt,
         args.output,
+        args.side,
     )
 
 

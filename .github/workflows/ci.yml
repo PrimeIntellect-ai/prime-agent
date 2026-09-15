@@ -160,23 +160,9 @@ jobs:
       - name: Test behavioral evaluation harness
         if: matrix.name == 'runtime python'
         run: |
-          uv run --locked --project scripts/benchmarks ruff check --config scripts/benchmarks/pyproject.toml scripts/behavioral-evals
-          uv run --locked --project scripts/benchmarks ruff format --config scripts/benchmarks/pyproject.toml --check scripts/behavioral-evals
-          cd scripts/behavioral-evals
-          uv run --locked --project ../benchmarks python -m unittest -v \
-            tests.test_assemble \
-            tests.test_build_controller \
-            tests.test_ci \
-            tests.test_cleanup \
-            tests.test_confirm \
-            tests.test_evaluate \
-            tests.test_evaluation \
-            tests.test_evaluator_contract \
-            tests.test_prepare \
-            tests.test_promote \
-            tests.test_release \
-            tests.test_stage_evidence \
-            tests.test_trace_analyzer
+          uv run --locked --project scripts/benchmarks ruff check --config scripts/benchmarks/pyproject.toml scripts/evals/short_swe
+          uv run --locked --project scripts/benchmarks ruff format --config scripts/benchmarks/pyproject.toml --check scripts/evals/short_swe
+          uv run --locked --project scripts/benchmarks pytest -q scripts/evals/short_swe/tests
 
   standalone:
     needs: trust

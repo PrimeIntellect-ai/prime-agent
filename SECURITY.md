@@ -16,15 +16,14 @@ Include the following when possible:
 
 Do not include real API keys, tokens, personal data, or credentials in the report. Use redacted or disposable test values.
 
-## Behavioral Release Evaluation
+## Behavioral release evaluation
 
-The `pre-release` label enables a trusted behavioral evaluation before release. Pull
-request source is built only inside an isolated Prime sandbox. GitHub runners treat
-candidate packages as opaque bytes and never execute or extract them. A dedicated spend-capped model credential stays behind the trusted ACP interception
-boundary and is removed from candidate process environments. Per-rollout request,
-turn, token, and time budgets limit the short-lived interception capability. Baseline generations are immutable and integrity-checked before
-use. See [`scripts/behavioral-evals/README.md`](scripts/behavioral-evals/README.md) for
-the full boundary and maintainer requirements.
+The `pre-release` label enables a trusted behavioral evaluation before release. Exact base
+and head revisions build only inside isolated Prime sandboxes. GitHub runners treat their
+packages as opaque bytes and never execute or extract them. Model and sandbox credentials
+stay behind trusted Verifiers interception and are removed from candidate process
+environments. See [`scripts/evals/short_swe/README.md`](scripts/evals/short_swe/README.md)
+for the full boundary.
 
 ## What to Expect
 
