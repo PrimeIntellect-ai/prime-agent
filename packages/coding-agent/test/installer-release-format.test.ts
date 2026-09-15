@@ -13,10 +13,12 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { hostNativePlatform } from "./installer-platform.js";
 
 const version = "1.2.3";
 const nodeFile = `prime-agent-${version}.tgz`;
-const nativeFile = `prime-agent-${version}-${process.platform}-${process.arch}.tar.gz`;
+// The inventory must advertise the archive the installer actually selects here.
+const nativeFile = `prime-agent-${version}-${hostNativePlatform()}.tar.gz`;
 const digest = "a".repeat(64);
 let root: string;
 let harness: string;

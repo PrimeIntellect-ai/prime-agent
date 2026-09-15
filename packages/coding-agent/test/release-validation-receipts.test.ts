@@ -169,7 +169,11 @@ describe("macOS validation receipt publication gate", () => {
 			symlinkSync(value.artifacts, join(working, "release-artifacts", channel));
 			symlinkSync(value.receipts, join(working, "macos-validation"));
 			mkdirSync(join(working, "scripts"));
-			for (const name of ["verify-macos-validation-receipts.mjs", "release-artifact-integrity.mjs"]) {
+			for (const name of [
+				"verify-macos-validation-receipts.mjs",
+				"release-artifact-integrity.mjs",
+				"release-platforms.mjs",
+			]) {
 				copyFileSync(resolve(__dirname, "../../../scripts", name), join(working, "scripts", name));
 			}
 			const workflow = parse(

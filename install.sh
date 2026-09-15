@@ -61,6 +61,8 @@ prime_agent_animation_frame=0
 prime_agent_native_stage=
 prime_agent_native_lock=
 prime_agent_allow_insecure_http=0
+# Tests point platform detection at a fake /proc and /lib without needing a container.
+prime_agent_native_sysroot="${PRIME_AGENT_NATIVE_SYSROOT_FOR_TESTS:-}"
 
 main() {
 	if [ "${1:-}" = --rollback ]; then
@@ -1711,7 +1713,31 @@ Finalizing npm install."
 	fi
 }
 
+# Supported glibc releases carry no libc suffix; musl builds are published separately.
+prime_agent_native_glibc() {
+	native_glibc_version=$(getconf GNU_LIBC_VERSION 2>/dev/null) || return 1
+	printf '%s\n' "$native_glibc_version" |
+		awk '$1 == "glibc" { split($2, v, "."); if (v[1] > 2 || (v[1] == 2 && v[2] >= 17)) ok=1 } END { exit !ok }'
+}
+
+# Alpine and other musl distributions ship the loader under a fixed name; `ldd`
+# without arguments prints its musl banner and is the fallback for stripped images.
+prime_agent_native_musl() {
+	for native_musl_loader in "$prime_agent_native_sysroot"/lib/ld-musl-*.so.1; do
+		[ -e "$native_musl_loader" ] && return 0
+	done
+	ldd 2>&1 | grep -q musl
+}
+
+# Bun's default x64 build needs AVX2; hosts without it need the baseline build.
+# An unreadable CPU inventory selects baseline, which runs on every x86-64 CPU.
+prime_agent_native_avx2() {
+	awk '/^flags[[:space:]]*:/ { for (i = 3; i <= NF; i++) if ($i == "avx2") found = 1 } END { exit !found }' \
+		"$prime_agent_native_sysroot/proc/cpuinfo" 2>/dev/null
+}
+
 prime_agent_native_platform() {
+	native_libc_suffix=
 	case "$(uname -s)" in
 		Darwin)
 			native_os_version=$(sw_vers -productVersion) || return 1
@@ -1720,15 +1746,26 @@ prime_agent_native_platform() {
 			native_os=darwin
 			;;
 		Linux)
-			native_libc=$(getconf GNU_LIBC_VERSION 2>/dev/null) || return 1
-			printf '%s\n' "$native_libc" | awk '$1 == "glibc" { split($2, v, "."); if (v[1] > 2 || (v[1] == 2 && v[2] >= 17)) ok=1 } END { exit !ok }' || return 1
 			native_os=linux
+			if prime_agent_native_glibc; then
+				native_libc_suffix=
+			elif prime_agent_native_musl; then
+				native_libc_suffix=-musl
+			else
+				return 1
+			fi
 			;;
 		*) return 1 ;;
 	esac
 	case "$(uname -m)" in
-		arm64|aarch64) printf '%s-arm64' "$native_os" ;;
-		x86_64|amd64) printf '%s-x64' "$native_os" ;;
+		arm64|aarch64) printf '%s-arm64%s' "$native_os" "$native_libc_suffix" ;;
+		x86_64|amd64)
+			if [ "$native_os" = linux ] && ! prime_agent_native_avx2; then
+				printf '%s-x64%s-baseline' "$native_os" "$native_libc_suffix"
+			else
+				printf '%s-x64%s' "$native_os" "$native_libc_suffix"
+			fi
+			;;
 		*) return 1 ;;
 	esac
 }
@@ -1849,13 +1886,20 @@ prime_agent_native_parse_target() {
 		case "$native_parsed_unique" in *[!0-9A-Za-z]*) return 1 ;; esac
 	fi
 	native_parsed_prefix=${native_parsed_name%-"$native_parsed_digest_suffix"}
+	# Longest platform suffix first: a shorter arm matches the prefix of a longer
+	# platform name, so `<version>-linux-x64-musl` must not be read as `linux-x64`.
 	case "$native_parsed_prefix" in
-		*-darwin-arm64) native_parsed_version=${native_parsed_prefix%-darwin-arm64}; native_parsed_platform=darwin-arm64 ;;
-		*-darwin-x64) native_parsed_version=${native_parsed_prefix%-darwin-x64}; native_parsed_platform=darwin-x64 ;;
-		*-linux-arm64) native_parsed_version=${native_parsed_prefix%-linux-arm64}; native_parsed_platform=linux-arm64 ;;
-		*-linux-x64) native_parsed_version=${native_parsed_prefix%-linux-x64}; native_parsed_platform=linux-x64 ;;
+		*-linux-x64-musl-baseline) native_parsed_platform=linux-x64-musl-baseline ;;
+		*-linux-x64-musl) native_parsed_platform=linux-x64-musl ;;
+		*-linux-x64-baseline) native_parsed_platform=linux-x64-baseline ;;
+		*-linux-arm64-musl) native_parsed_platform=linux-arm64-musl ;;
+		*-darwin-arm64) native_parsed_platform=darwin-arm64 ;;
+		*-darwin-x64) native_parsed_platform=darwin-x64 ;;
+		*-linux-arm64) native_parsed_platform=linux-arm64 ;;
+		*-linux-x64) native_parsed_platform=linux-x64 ;;
 		*) return 1 ;;
 	esac
+	native_parsed_version=${native_parsed_prefix%-"$native_parsed_platform"}
 	printf '%s\n' "$native_parsed_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || return 1
 	native_parsed_dir="$native_root/releases/$native_parsed_name"
 }

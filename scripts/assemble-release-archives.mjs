@@ -20,15 +20,16 @@ import {
 	setBinaryVersion,
 	validateBinaryAssets,
 } from "../packages/coding-agent/scripts/copy-binary-assets.mjs";
+import { releasePlatforms } from "./release-platforms.mjs";
 
-const platforms = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"];
+const platforms = releasePlatforms;
 
 export function assembleBinaryArchives({ binaryDir, artifactsDir, version, requireAll = true }) {
 	if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) throw new Error(`Invalid binary version: ${version}`);
 	const available = readdirSync(binaryDir);
 	const targets = platforms.filter((platform) => available.includes(platform));
 	if (targets.length === 0 || (requireAll && targets.length !== platforms.length)) {
-		throw new Error("Missing compiled binaries; build all four platforms before packing a release");
+		throw new Error(`Missing compiled binaries; build all ${platforms.length} platforms before packing a release`);
 	}
 	mkdirSync(artifactsDir, { recursive: true });
 	const archives = [];

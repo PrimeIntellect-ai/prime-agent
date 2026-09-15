@@ -20,13 +20,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Darwin builds must be compiled and signed on their own architecture.
           - platform: darwin-arm64
             runner: macos-15
           - platform: darwin-x64
             runner: macos-15-intel
+          # Bun cross-compiles musl and baseline targets, so each Linux variant is
+          # built on the runner whose architecture it targets and then executed on
+          # that architecture: glibc archives on the runner, musl archives in Alpine.
           - platform: linux-arm64
             runner: ubuntu-24.04-arm
+          - platform: linux-arm64-musl
+            runner: ubuntu-24.04-arm
           - platform: linux-x64
+            runner: ubuntu-24.04
+          - platform: linux-x64-baseline
+            runner: ubuntu-24.04
+          - platform: linux-x64-musl
+            runner: ubuntu-24.04
+          - platform: linux-x64-musl-baseline
             runner: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -62,7 +74,7 @@ jobs:
 
       - name: Compile standalone application
         working-directory: source/packages/coding-agent
-        run: npm run build:binary
+        run: npm run build:binary -- --platform ${{ matrix.platform }}
 
       - name: Assemble native archive
         working-directory: source
@@ -75,9 +87,42 @@ jobs:
       - name: Remove the build paths from the test machine
         run: mv "$GITHUB_WORKSPACE/source" "$RUNNER_TEMP/standalone-source"
 
+      # A musl archive cannot execute on the glibc runner that cross-compiled it, and
+      # the checkout's node_modules are glibc builds, so Vitest cannot move into Alpine
+      # either. musl archives are executed by the Alpine step below instead.
       - name: Test extracted application without JavaScript runtimes on PATH
+        if: ${{ !contains(matrix.platform, 'musl') }}
         working-directory: ${{ runner.temp }}/standalone-source/packages/coding-agent
         run: npx tsx ../../node_modules/vitest/dist/cli.js --run test/release-signatures.test.ts test/compiled-artifact.test.ts test/native-installer.test.ts test/native-probe-timeout.test.ts
+
+      # Real musl execution evidence: Alpine has no glibc and no JavaScript runtime.
+      # Bun's musl executables link against libstdc++, which Alpine does not preinstall.
+      - name: Test extracted application on Alpine without JavaScript runtimes
+        if: ${{ contains(matrix.platform, 'musl') }}
+        env:
+          TARGET_PLATFORM: ${{ matrix.platform }}
+        run: |
+          version=$(node -p "require('$RUNNER_TEMP/standalone-source/package.json').version")
+          docker run --rm --init \
+            --volume "$RUNNER_TEMP/standalone:/archives:ro" \
+            --env "ARCHIVE=prime-agent-$version-$TARGET_PLATFORM.tar.gz" \
+            --env "VERSION=$version" \
+            --env DO_NOT_TRACK=1 \
+            --env PI_OFFLINE=1 \
+            --env PRIME_AGENT_INSTALL_UV=0 \
+            alpine:3.21 sh -eu -c '
+              apk add --no-cache libstdc++ > /dev/null
+              for runtime in node npm bun deno; do
+                if command -v "$runtime" >/dev/null 2>&1; then
+                  echo "A JavaScript runtime must not be present: $runtime" >&2
+                  exit 1
+                fi
+              done
+              mkdir /application
+              tar -xzf "/archives/$ARCHIVE" -C /application
+              test "$(timeout 60 /application/prime-agent --version)" = "$VERSION"
+              timeout 60 /application/prime-agent --help > /dev/null
+            '
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

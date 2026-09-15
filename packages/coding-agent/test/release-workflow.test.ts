@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
+import { NATIVE_PLATFORMS } from "../src/utils/native-installation.js";
 
 interface Step {
 	name?: string;
@@ -28,6 +29,12 @@ interface Workflow {
 }
 
 const repository = resolve(__dirname, "../../..");
+// The same command the release workflow uses to enumerate publishable platforms.
+const releasePlatforms = spawnSync(process.execPath, [join(repository, "scripts/release-platforms.mjs")], {
+	encoding: "utf8",
+})
+	.stdout.trim()
+	.split("\n");
 const release: Workflow = parse(readFileSync(join(repository, ".github/workflows/build-binaries.yml"), "utf8"));
 const standalone: Workflow = parse(readFileSync(join(repository, ".github/workflows/standalone-binaries.yml"), "utf8"));
 
@@ -146,14 +153,11 @@ ${step(validation, "Verify and exercise exact final Mac archives").run}`,
 		},
 	);
 
-	it("retains all four standalone targets and only uploads tested executable identities", () => {
+	it("retains every standalone target and only uploads tested executable identities", () => {
 		const build = standalone.jobs.build!;
-		expect(build.strategy?.matrix.include.map((entry) => entry.platform)).toEqual([
-			"darwin-arm64",
-			"darwin-x64",
-			"linux-arm64",
-			"linux-x64",
-		]);
+		expect(build.strategy?.matrix.include.map((entry) => entry.platform)).toEqual(releasePlatforms);
+		// Each target must be compiled explicitly; the host default cannot produce a cross-build.
+		expect(step(build, "Compile standalone application").run).toContain(`--platform \${{ matrix.platform }}`);
 		const test = step(build, "Test extracted application without JavaScript runtimes on PATH");
 		expect(test.run).toContain("test/compiled-artifact.test.ts");
 		expect(test.run).toContain("test/release-signatures.test.ts");
@@ -162,6 +166,34 @@ ${step(validation, "Verify and exercise exact final Mac archives").run}`,
 		expect(build.steps.indexOf(test)).toBeLessThan(build.steps.indexOf(upload));
 		requiresSuccess(build);
 		expect(release.jobs.standalone!.with?.build_ref).toBe(`\${{ needs.release-context.outputs.build_ref }}`);
+	});
+
+	it("executes every archive on its own libc, musl archives inside Alpine", () => {
+		const build = standalone.jobs.build!;
+		const glibc = step(build, "Test extracted application without JavaScript runtimes on PATH");
+		const musl = step(build, "Test extracted application on Alpine without JavaScript runtimes");
+		// A cross-compiled musl archive cannot run on the glibc runner that built it.
+		expect(glibc.if).toBe(`\${{ !contains(matrix.platform, 'musl') }}`);
+		expect(musl.if).toBe(`\${{ contains(matrix.platform, 'musl') }}`);
+		expect(musl.run).toContain("docker run");
+		expect(musl.run).toContain("alpine:");
+		expect(musl.run).toContain("prime-agent --version");
+		expect(musl.run).toContain("prime-agent --help");
+		const upload = build.steps.find((entry) => entry.uses?.startsWith("actions/upload-artifact@"))!;
+		expect(build.steps.indexOf(musl)).toBeLessThan(build.steps.indexOf(upload));
+		// A container smoke test only proves execution when the runner matches the target architecture.
+		for (const entry of build.strategy!.matrix.include) {
+			if (!entry.platform.startsWith("linux-")) continue;
+			expect(entry.runner.endsWith("-arm"), entry.platform).toBe(entry.platform.includes("arm64"));
+		}
+	});
+
+	it("keeps one platform set across the installer, the release scripts, and the workflows", () => {
+		expect([...NATIVE_PLATFORMS]).toEqual(releasePlatforms);
+		const stage = step(release.jobs.build!, "Verify and stage standalone binaries");
+		// A hardcoded list here silently drops newly published platforms from a release.
+		expect(stage.run).toContain("node scripts/release-platforms.mjs");
+		for (const platform of releasePlatforms) expect(stage.run).not.toContain(` ${platform} `);
 	});
 
 	it.skipIf(process.platform === "win32")(
