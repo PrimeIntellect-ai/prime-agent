@@ -1,1 +1,0 @@
-- Fullscreen frames can pin a component above the scrolling transcript: the viewport composes header, window, and dock rows and maps mouse selection, dock click targets, and the follow hint through the header offset.

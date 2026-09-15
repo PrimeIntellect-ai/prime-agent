@@ -1,6 +1,0 @@
-- Changed provider logins, including the in-flow team and account selectors, to render inline under the chat in the compact picker style instead of a centered full-pane modal.
-- Changed finishing a provider login to stay on the providers tab instead of forcing the models picker open; the models tab refreshes in the background so it is ready when opened.
-- Added a separator rule above the inline provider login panel so the login section stands out from the conversation above it.
-- Tightened the inline provider login panel: the sign-in link and provider guidance lead the panel, the repeated browser-open copy and section labels are gone, and the paste field keeps a single key-hint line.
-- Fixed inline menu panels dropping their subtitle, so multi-line provider prompts keep every instruction line.
-- Renamed the Prime team selection heading to "Select a Prime Team:".

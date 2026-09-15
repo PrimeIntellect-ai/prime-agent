@@ -1,1 +1,0 @@
-- Fixed CLI value flags (--model, --provider, and 15 others) being silently swallowed when their value was missing, and invalid --mode values being ignored; both now fail with a clear error.

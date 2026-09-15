@@ -1,1 +1,0 @@
-- Sped up session appends and forking large sessions: the per-append assistant-message scan is now a cached flag, and session forks write through a single open descriptor instead of one append syscall per source entry.

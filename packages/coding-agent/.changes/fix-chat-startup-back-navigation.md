@@ -1,3 +1,0 @@
-- Fixed a crash when returning to the agents view while a chat is still loading.
-- Fixed shutdown being ignored after returning to the agents view during stalled chat startup.
-- Removed heartbeat catalog loading from the wait when opening or leaving a chat.

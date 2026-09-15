@@ -1,1 +1,0 @@
-- Added subcommand autocomplete to /traces, suggesting status, on, off, preview, upload, upload-current, upload-all, and login after the command.

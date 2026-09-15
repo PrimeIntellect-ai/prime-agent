@@ -1,1 +1,0 @@
-- Added the `⚠` icon prefix to `showError` messages in the interactive TUI, matching the existing `showWarning` treatment ([ENG-6159](https://linear.app/primeintellect/issue/ENG-6159)).

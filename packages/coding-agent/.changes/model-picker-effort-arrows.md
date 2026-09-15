@@ -1,1 +1,0 @@
-- Fixed left and right arrows moving the search cursor after a search in the models picker: once up or down moves into the list, they adjust the highlighted model's effort until the query is edited again.

@@ -1,2 +1,0 @@
-- Fixed cold chat openings waiting behind saved-session catalog scans ([#2259](https://github.com/PrimeIntellect-ai/prime-agent/pull/2259)).
-- Fixed background scheduled-job scans slowing down agents with large saved chats ([#2259](https://github.com/PrimeIntellect-ai/prime-agent/pull/2259)).
