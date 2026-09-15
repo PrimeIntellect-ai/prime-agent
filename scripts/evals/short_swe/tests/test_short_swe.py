@@ -39,9 +39,12 @@ def test_workflow_gates_and_revokes_durable_release_status() -> None:
     assert "invalidate-on-base-change:" in workflow
     assert "Base advanced; reapply pre-release" in workflow
     assert "request.head_sha === pull.head.sha && request.base_sha === pull.base.sha" in workflow
-    assert "strict_required_status_checks_policy !== true" in workflow
+    assert "strict_required_status_checks_policy === true" in workflow
     assert "Behavioral Eval / pre-release approval" in workflow
     assert "[...requiredContexts].every" in workflow
+    assert "const strictContexts = new Set(" in workflow
+    assert ".filter(rule => rule.type === 'required_status_checks'" in workflow
+    assert ".flatMap(rule => rule.parameters.required_status_checks.map" in workflow
     assert "contains(github.event.pull_request.labels.*.name, 'pre-release')" in workflow
     assert "const rules = await github.paginate(" in workflow
     assert "GET /repos/{owner}/{repo}/rules/branches/{branch}" in workflow

@@ -298,14 +298,15 @@ jobs:
               'Behavioral Eval / pre-release approval',
               'Behavioral Eval / pre-release',
             ]);
-            const strictRequired = rules.some(rule => {
-              if (rule.type !== 'required_status_checks' ||
-                  rule.parameters?.strict_required_status_checks_policy !== true) return false;
-              const configured = new Set(
-                rule.parameters.required_status_checks.map(check => check.context),
-              );
-              return [...requiredContexts].every(contextName => configured.has(contextName));
-            });
+            const strictContexts = new Set(
+              rules
+                .filter(rule => rule.type === 'required_status_checks' &&
+                  rule.parameters?.strict_required_status_checks_policy === true)
+                .flatMap(rule => rule.parameters.required_status_checks.map(check => check.context)),
+            );
+            const strictRequired = [...requiredContexts].every(
+              contextName => strictContexts.has(contextName),
+            );
             const labelPresent = pull.labels.some(label => label.name === 'pre-release');
             const identityCurrent = request &&
               request.head_sha === pull.head.sha && request.base_sha === pull.base.sha;
