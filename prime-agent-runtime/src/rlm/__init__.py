@@ -383,6 +383,17 @@ async def inbox_list() -> dict[str, Any]:
     return await host_request("rlm.inbox.list")
 
 
+async def inbox_configure(mode: str) -> dict[str, Any]:
+    """Pin this session's agent-message delivery lane.
+
+    mode:
+      - "auto": the daemon's dynamic controller decides (default).
+      - "push": always deliver agent messages directly (never digest).
+      - "digest": always store non-parent messages in the inbox.
+    """
+    return await host_request("rlm.inbox.configure", {"mode": mode})
+
+
 async def inbox_read(ids: list[str] | None = None) -> dict[str, Any]:
     """Read digest inbox entries and mark them read.
 
@@ -401,6 +412,9 @@ class _RLMInbox:
 
     async def read(self, ids: list[str] | None = None) -> dict[str, Any]:
         return await inbox_read(ids)
+
+    async def configure(self, mode: str) -> dict[str, Any]:
+        return await inbox_configure(mode)
 
 
 async def messaging_stats() -> dict[str, Any]:
@@ -548,6 +562,7 @@ __all__ = [
     "get_harness_state",
     "harness",
     "host_request",
+    "inbox_configure",
     "inbox_list",
     "inbox_read",
     "list_subagents",

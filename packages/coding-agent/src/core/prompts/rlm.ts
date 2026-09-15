@@ -187,6 +187,9 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 		parts.push(
 			"When a digest notice says agent messages wait in your inbox, list them with `await rlm.inbox.list()` and pull their contents with `await rlm.inbox.read()`.",
 		);
+		parts.push(
+			'The daemon decides the delivery lane per recipient; a user may pin it per session with `await rlm.inbox.configure("auto"|"push"|"digest")`.',
+		);
 	}
 
 	if (hasIpython) {

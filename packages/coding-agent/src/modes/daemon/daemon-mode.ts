@@ -21,6 +21,7 @@ import {
 	getSessionsDir,
 	VERSION,
 } from "../../config.js";
+import { AgentMessageDigestController } from "../../core/agent-message-digest-controller.js";
 import {
 	AGENT_FAMILY_REACH_ERROR,
 	AGENT_MESSAGE_SOURCE,
@@ -568,6 +569,8 @@ export class AgentDaemon {
 	private readonly agentDir: string;
 	private readonly cronScheduler: AgentCronScheduler;
 	private readonly agentMessageRateLimiter = new AgentSessionMessageRateLimiter();
+	/** Per-recipient digest-lane controllers; the daemon owns the lane decision. */
+	private readonly agentMessageDigestControllers = new Map<string, AgentMessageDigestController>();
 	// Sessions inserted into `sessions` but still awaiting extension binding;
 	// visible to host controllers during bind, excluded from targeting.
 	private readonly bindingSessions = new Set<string>();
@@ -6356,10 +6359,39 @@ export class AgentDaemon {
 		return response.data as AgentSessionMessageReceipt;
 	}
 
+	/**
+	 * Daemon-owned digest-lane decision before each delivery. The daemon
+	 * decides the lane; a user pin ("push"/"digest") suspends switching.
+	 */
+	private evaluateAgentMessageDigestLane(targetState: ActiveSessionState): void {
+		const session = targetState.runtime.session;
+		const pin = session.agentMessageDigestPin;
+		if (pin === "push" || pin === "digest") return;
+		if (typeof session.messagingStats !== "function" || typeof session.setAgentMessageDigestMode !== "function") {
+			return;
+		}
+		if (typeof session.agentMessageDigestMode !== "boolean") return;
+		const snapshot = session.messagingStats();
+		let controller = this.agentMessageDigestControllers.get(targetState.activeSessionId);
+		if (!controller) {
+			controller = new AgentMessageDigestController();
+			this.agentMessageDigestControllers.set(targetState.activeSessionId, controller);
+		}
+		const decision = controller.evaluate({
+			pending: snapshot.arrivals.last5m,
+			ingestionShare: snapshot.context.share,
+			ingestionTurnShare:
+				snapshot.model_steps.total > 0 ? snapshot.ingestion_steps.total / snapshot.model_steps.total : null,
+			currentMode: session.agentMessageDigestMode ? "digest" : "push",
+		});
+		if (decision.changed) session.setAgentMessageDigestMode(decision.mode === "digest");
+	}
+
 	private async acceptAgentSessionMessage(
 		targetState: ActiveSessionState,
 		payload: AgentSessionMessagePayload,
 	): Promise<{ status: AgentSessionMessageDeliveryStatus }> {
+		this.evaluateAgentMessageDigestLane(targetState);
 		const message = createAgentSessionMessage(payload);
 		let preflightFailed = false;
 		let preflightQueued = false;
@@ -6956,6 +6988,7 @@ export class AgentDaemon {
 		}
 		state.clients.clear();
 		this.acpMcpOwners.delete(state.activeSessionId);
+		this.agentMessageDigestControllers.delete(state.activeSessionId);
 		this.sessions.delete(state.activeSessionId);
 		// Archived top-level sessions leave the worker's list; subagent rows mirror the registry and stay.
 		if (!keepsResumeEntry && state.runtime.metadata.kind !== "subagent" && this.options.worker) {
