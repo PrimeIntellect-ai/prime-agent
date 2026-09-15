@@ -1,1 +1,0 @@
-- Fixed OpenCode Zen and Go requests to identify Prime Agent and send the conversation ID across all supported adapters, including when prompt caching is disabled.

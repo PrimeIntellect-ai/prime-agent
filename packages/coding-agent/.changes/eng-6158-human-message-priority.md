@@ -1,1 +1,0 @@
-- Changed the prompt queue so messages you send are delivered before queued agent-to-agent messages, background notices, and scheduled prompts, while keeping your own messages in the order you sent them.

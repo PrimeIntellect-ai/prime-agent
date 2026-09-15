@@ -1,5 +1,217 @@
 # Changelog
 
+## [0.9.5] - 2026-09-15
+
+- Removed the inactive-session collapse (Alt+I): inactive sessions always render in the agents view, and search remains the filter.
+- Changed the default Prime Inference model from GLM 5.2 to GLM 5.3.
+- Changed Agents View session statistics to use muted secondary text while preserving the available details ([ENG-6000](https://linear.app/primeintellect/issue/ENG-6000)).
+- Changed Agents View session search to inline editable text without an input background or border ([ENG-6001](https://linear.app/primeintellect/issue/ENG-6001)).
+- Changed refinement delivery to preserve the provider prefix cache: applying a refinement no longer rebuilds or swaps the system prompt. Applied edits now reach the model as a durable in-context `[auto-refinement]`/`[user-refinement]`/`[self-refinement]` notice at the apply boundary (zero-applied-edit refinements emit nothing, and the notice never starts a turn), and the harness digest moved from the system prompt to cold context boundaries: fresh sessions start with a digest message, post-compaction head messages render the digest before the summary on both compaction paths, and resumes append a fresh digest only when it no longer matches disk state.
+- Fixed prompt templates altering literal dollar sequences and expanding placeholders inside user arguments.
+- Fixed automatic compaction and recovery for LiteLLM maximum-context rejections.
+- Fixed active goals stalling after manual compaction.
+- Added the recorded model to inactive session rows in the agents view instead of showing '-'.
+- Fixed Amazon Bedrock requests failing to load the provider in packaged CLI installations.
+- Fixed Bedrock provider failures losing structured error severity and worker context in the shared CLI log.
+- Fixed refinement and side questions disabling reasoning when the session uses it, while respecting the selected model's supported thinking levels.
+- Removed fixed output caps from refinement with reasoning enabled, while respecting the model's output limit and reserving context space for the prompt.
+- Fixed long refinements exceeding the context window or being rejected prematurely, keeping recent conversation text and space for the response.
+- Changed recursive subagent spawning to the explicit `await rlm.spawn(...)` call; the `rlm` object is no longer callable and calling it raises an error naming `rlm.spawn`.
+- Changed `rlm.spawn` to require an explicit `name` keyword argument for every spawned child.
+- Unified all machine-injected user-channel messages under one bracket grammar: agent messages now open with `[agent-message from <relationship>:<name>]`, heartbeats with `[heartbeat: <schedule> run#<n>]` (previously the raw prompt with no marker), background shell completions with `[bash-done pid:<pid> exit:<code>]` (dropping the standing BashHandle hint), RLM child notices with `[child-exited: ...]`/`[child-failed ...]`, goal context with `[goal: <kind>]`, kernel state notices with `[python-state]`/`[python-state-restored]`, autonomous status and continuations with `[autonomous-status: on|off]`/`[autonomous-continuation(: gate-failed)]`, post-update restore notices with `[update-complete]`, and compaction/branch/harness-digest blocks with `[compaction-summary]`/`[branch-summary]`/`[harness-digest]`. Machine data (message ids, endpoints, pids, schedules) lives in message details, detection keys on customType instead of text regexes, and old-format persisted transcripts still parse.
+- Removed `agent_message.list_agents()`; `agent_observe.list_agents()` is now the single family roster and lists inactive parents, siblings, and children with a `relationship` field.
+- `/autonomous on` now accepts the same budget flags as the `--autonomous-*` CLI options (`--max-continuations`, `--max-turns`, `--max-tokens`, `--timeout-ms`, `--gate`, `--gate-retries`, `--gate-timeout-ms`), so interactive runs use a user-defined budget instead of always stopping after the default three continuations. The CLI spellings work as aliases and quoted gate commands are supported. Numeric values accept `,`/`_` digit separators, and the four budget limits accept `unlimited` to remove that cap. Named budget flags define the whole budget: unnamed limits become unlimited, so `/autonomous on --max-tokens 100,000` is bounded only by that token budget (plus gates); with no budget flags, the configured or default limits still apply. The status text now reports the time budget, configured gates, unlimited limits, and comma-grouped numbers.
+- Added subcommand autocomplete to /traces, suggesting status, on, off, preview, upload, upload-current, upload-all, and login after the command.
+- Changed the agents view model column to show the bare model name, stripping provider paths embedded in the model id.
+- Changed the subagents bar to count running, idle, and inactive agents across the whole subagent subtree instead of only direct children.
+- Background command completion notices are now withdrawn when the agent already read the result: reading a finished `bash()` handle from a live cell (awaiting it, or calling `poll()`, `output()`, or `tail()`) drops a notice that is still queued and stops one that was not sent yet. Reads that no cell receives, such as a detached watcher polling between turns, still leave the notice in place, so an unread completion wakes an idle session exactly as before, and a delivered notice is never retracted. The queue and transcript label for these messages is now "Background command finished" instead of "Shell message received".
+- Changed `/btw` side questions to declare the session's tools without allowing their use: the request now matches the main conversation's cached prefix byte for byte (tools included), any tool call gets an error result instead of executing, and the side thread's first turn explains that it is a `/btw` side conversation with tools deactivated.
+- Fixed `/btw` side questions discarding the main conversation's prompt cache by lowering the reasoning level: side questions now keep the session's thinking level, so providers whose cache keys include thinking parameters reuse the cached conversation.
+- Changed refinement notices to show a spaced purple status line and softer semantic summary in overview and details, with full change counts and diffs in all output.
+- Added expandable Title and Description diffs with the same red and green backgrounds as file edits, preserving other fields and failure details.
+- Changed successful compaction notices to show a purple Context compacted header and softer summary preview, with the full summary and token/focus metadata in all output.
+- Fixed refinement notices to stay purple across themes and avoid extra blank lines before following prose.
+- Changed model, provider, and MCP pickers to compact inline lists with responsive search and keyboard navigation.
+- Added selected-model catalog prices for input, cached input, and output per million tokens.
+- Split the configuration menu into separate single-purpose pickers and dropped the tab bar and tab navigation; each command opens only its own picker.
+- Changed model rows to right-align the provider label with a require sign in hint beside it, and to list signed-in providers first with Prime Inference pinned on top when signed in.
+- Added per-model effort squares to the models picker; left/right adjusts the highlighted model's reasoning level and Enter applies the model and effort together.
+- Fixed the models picker search to keep signed-in providers above unsigned matches, with Prime Inference pinned on top of the signed-in group.
+- Softened the selected row highlight in menu pickers: the selection background blends toward the editor surface and the selected label renders bold instead of accent-colored.
+- Refined the effort squares: clusters align across rows with arrow hints on the highlighted row, spaced squares in a stronger purple, and the selected level labeled beside them.
+- Folded the USD per million tokens unit into the model detail header line and left clear whitespace at the end of the detail block.
+- Rounded model picker token prices to at most three decimals, showing sub-$0.001 rates as <0.001 instead of a misleading $0.
+- Centered the models picker effort cluster near the row midpoint with square glyphs; fills render light gray and reserve the saturated purple for the highlighted row.
+- Removed the explanatory title and subtitle lines from the model, provider, and MCP pickers; the search row now leads each picker.
+- Moved the model detail pricing unit onto the price row as "dollars per 1 million tokens" and left the provider/model line bare.
+- Fixed the effort cluster so changing the level never shifts the row; the level label renders in a fixed-width cell sized to the longest supported level name.
+- Refined the model picker effort marks to the larger medium-square glyphs, softened the effort purple, and shortened the pricing unit to "$ / 1M tokens".
+- Dropped the provider/model-id line from the inline model detail block; the prices now follow the list row directly.
+- Settled the effort marks on the filled ■ and empty □ squares, the largest square pair the terminal fonts cover.
+- Tightened the effort square spacing; the squares now render edge to edge and the cluster stays centered.
+- Fixed model selection retaining focus until the model and explicitly selected effort finish applying, preserving the default effort when it is untouched.
+- Fixed arrow keys editing model searches and removed the unused configuration-tab binding.
+- Moved muted conversation detail status directly above the prompt beside an ellipsized recap, with one blank line separating the row from the chat.
+- Showed model IDs with colon-separated lowercase effort and context usage in the bottom-right tray.
+- Kept fast mode beside model and effort, renamed session navigation to manage, and removed the repeated shortcut guide hint below the prompt.
+- Hid the tray and subagents summary while pickers are open and showed depth only for subagent sessions.
+- Kept slash command autocomplete completion-only: Tab or Enter completes the command, and pressing Enter again runs it.
+- Removed unsolicited feature-discovery tips during agent runs and example prompts from the startup splash and editor.
+- Removed the extra blank line above recap and detail status when no extension widget is shown.
+- Kept the tray and subagent summary visible during slash-command autocomplete while hiding them for actual pickers.
+- Renamed conversation detail states to Collapsed mode, Details mode, and Expanded mode.
+- Prevented hidden subagent summaries from taking focus while a picker is open.
+- Changed the agents view to hide abandoned empty saved sessions consistently during search, simplify model labels, and keep secondary metadata quiet.
+- Changed the agents list to separate the splash from search, bold the shared column headings, mute populated status groups, and omit the global scope label.
+- Changed idle and inactive rows to share one bold status circle distinguished by color, keeping the animated mark for running rows and sub-agent expansion available through its keybinding.
+- Replaced chat and agents splash logos with a compact solid butterfly beside centered runtime metadata, with a text heading in narrow terminals.
+- Changed the agents header to show three metadata lines: title and version, agent counts, and the working directory globally or numeric depth in nested views; retained the nested back breadcrumb and chat model line.
+- Removed duplicate prompt suggestions from chat and agents headers.
+- Fixed empty-state search feedback while replying to or renaming an agent.
+- Changed assistant message body text to a new dimmed `mdBody` theme color, easing the wall of bright default-foreground text while headings, links, and code keep their styling.
+- Changed prime-theme inline code to a darker neutral (#c8c8cd) so it stays distinct from the dimmed body text.
+- Added a three-stage Ctrl+O cycle for overview, thinking and file diffs, and all output, replacing the separate Ctrl+J and Ctrl+T conversation shortcuts without changing saved traces.
+- Changed thinking rows to stay hidden in overview and appear as dim text without a repeated heading in the other detail modes, including newly streamed thinking.
+- Changed collapsed tool-call previews to render plain and dim instead of green or syntax-highlighted code, with dim line counts and durations, while expanded blocks keep full highlighting.
+- Changed decorative bold text in the conversation surface to normal weight, keeping bold only where it marks state or a single critical item (selected rows, active tabs, the login verification code).
+- Changed the conversation row hierarchy: event-row trailing detail (agent-message participants, tool command previews, line counts, durations) renders dim while leading labels keep their colors.
+- Changed background shell completions to update identifiable command rows, with compact fallback notices and full notifications shown once at their original conversation position in all output.
+- Replaced repeated conversation detail shortcut hints with a status label showing the current detail mode and configurable expand or collapse shortcut.
+- Changed expanded file diffs to start at the normal chat inset while preserving code indentation and diff gutters.
+- Changed sent and received agent messages to keep compact notices in overview and details, show full bodies only in all output, and use the shared detail cycle instead of a separate Ctrl+P toggle.
+- Fixed spacing after background shell completions and matched unique literal assignment-only shell launches to their completion notices.
+- Fixed multiline Python string colors across source lines and narrow wrapping, kept embedded string content out of collapsed code previews, and preserved statements after closing quotes.
+- Changed expanded Python cells to nest input directly under the summary, align marked output beneath it, and separate full tool and message blocks.
+- Fixed unwanted gaps between compact tool and agent-message rows when empty assistant messages or hidden thinking appear between them.
+- Fixed missing separation between refinement notices and subsequent collapsed background shell completions.
+- Fixed custom themes without `mdBody`, large expanded agent messages, and slow or unmatched shell completions caused by malformed launch arguments or blank lines.
+- Removed obsolete thinking-visibility settings and unused transcript heading and hint state.
+- Fixed indefinitely animated shell rows after ambiguous completion notifications while keeping unmatched results at their original timeline position.
+- Added xAI Grok subscription authentication through the existing `/login` menu for all bundled tool models, with auth changes applied to the current session.
+- Changed the agents view subagent expand/collapse control: the arrow now sits on the always-visible subagent summary line instead of hiding on the session row.
+- Changed the agents view hint tray to describe the arrow keys in context — `→ open`, `→ expand`/`→ collapse` on a subagent summary line, and `← parent` only inside an agent scope — in place of the `?` actions hint.
+- Added standalone macOS and Linux release archives that run without Node, npm, or Bun, including the Python runtime sources and application assets.
+- Changed new installations to prefer verified compiled releases on supported machines, with Node installation available for other systems.
+- Fixed reinstalling the same compiled release to restore its assets without modifying files used by existing processes.
+- Fixed installation to preserve a public command replaced by another installer during download.
+- Fixed terminal hangups leaving an installation lock behind.
+- Fixed installing older releases that only provide npm packages through the default installer, including when an npm command already exists.
+- Fixed interrupted compiled updates discarding the existing rollback target.
+- Fixed reinstalling or upgrading through the installer after an incompatible compiled executable falls back to Node.
+- Fixed interrupted fresh installations leaving a broken command.
+- Fixed installer downloads to require HTTPS and reject redirects to insecure protocols.
+- Changed macOS installation guidance to use the published installer until browser downloads are signed and notarized.
+- Added migration from global npm installations to compiled releases during the next launch after an update, preserving settings and a Node fallback when migration cannot run.
+- Fixed migration to preserve a newer compiled installation activated by a competing update.
+- Fixed automatic migration delaying daemon startup, reusing incompatible compiled releases, and replacing a concurrent npm command.
+- Fixed automatic migration blocking informational and automated launches, hiding installer progress, suppressing retries after cancellation, and silently deferring invalid compiled releases.
+- Fixed migration from scoped global npm packages to compiled installations.
+- Fixed background and informational launches starting migration downloads after the public command had already switched to a compiled installation.
+- Fixed unsupported hosts attempting compiled migration downloads instead of quietly continuing with Node.js.
+- Fixed Prime Agent production credentials and team selection to stay independent of Prime CLI configuration, with validated CLI credential reuse only during explicit login.
+- Fixed explicit Prime CLI credential import for the default SDK services factory.
+- Added verified updates and offline rollback for compiled Prime Agent installations, preserving sessions and restarting with the activated release.
+- Fixed normal interruptions during rollback losing the release needed to undo that rollback.
+- Fixed malformed compiled-release metadata causing unnecessary npm reinstalls and daemon restarts.
+- Fixed interrupted compiled activation recovering the exact rollback target before another lifecycle change.
+- Added conservative cleanup for abandoned installer staging and inactive managed releases while retaining live or uncertain releases.
+- Fixed direct and planned rollback rejecting inconsistent release metadata, assets, paths, and executable versions before activation.
+- Fixed failed activation recovery discarding the state needed to retry restoring the previous release.
+- Fixed damaged compiled installations blocking repair and rollback to a healthy retained release.
+- Fixed rollback planning after interrupted activation and provided repair guidance for older retained installers without recovery support.
+- Fixed stalled executable checks holding the installer lock indefinitely during installation, rollback, or activation recovery.
+- Fixed update guidance directing repairable compiled installations to a manual download instead of the update command.
+- Fixed OpenCode compaction, refinement, and branch summaries failing because requests omitted the conversation identity.
+- Sped up roster and family resolution by caching the RLM spawn ledger's replayed edges behind a file-stat guard: unchanged files reuse the cached edges instead of re-reading and re-parsing the whole ledger, while any writer's append (this process or another daemon) still forces a fresh replay.
+- Fixed slow agents-view updates and searches in large session catalogs, while keeping streamed sessions and status ages current.
+- Sped up opening long live sessions: events arriving during the snapshot load now replay incrementally instead of each one triggering a full transcript re-transfer.
+- Capped resync and settings-rebuild transcript renders to the recent tail, matching the initial open.
+- Stopped the chat from re-fetching the whole transcript when a live event lands between attach and the first render.
+- Fixed event ordering and snapshot recovery when opening busy sessions, switching sessions, or reconnecting, while preserving live updates in headless modes.
+- Fixed snapshot transfers continuing after a session closes.
+- Limited memory retained by live updates while a slow snapshot loads.
+- Fixed `heartbeats_list` failing with "Cannot list heartbeats while session worker is starting" by awaiting in-flight worker launches before enumerating heartbeats.
+- Bounded the global `heartbeats_list` startup wait and stopped waiting on client-owned launches, so private session startups no longer stall the catalog past the caller's request timeout.
+- Bounded the session-scoped `heartbeats_list` forward so a stuck worker fails inside the caller's request budget instead of hanging until the client transport timeout.
+- Fixed re-opened sessions rendering an empty transcript until the next message when a transient control-plane failure interrupted the initial render.
+- Fixed one unrenderable message aborting the whole transcript rebuild during a session resync.
+- Fixed orphaned session workers retrying supervisor resurrection forever when no replacement can come up: they now exit gracefully after a bounded supervisor-lost window, closing active sessions first.
+- Fixed a crash when returning to the agents view while a chat is still loading.
+- Fixed shutdown being ignored after returning to the agents view during stalled chat startup.
+- Removed heartbeat catalog loading from the wait when opening or leaving a chat.
+- Fixed a kernel pipe write error (write EPIPE) crashing the whole session worker: pipe errors are now recorded as kernel diagnostics while the pending write rejects cleanly.
+- Added `rlm.collect`, a typed non-steering fan-in for subagent results: it awaits direct children's runs with a bounded timeout and returns per-child result envelopes (status, settled, answer preview, error, duration, tool count) without growing the parent's message queue.
+- Fixed agent-spawned shells hanging on interactive prompts: git commit/rebase without -m, credential asks, and pagers now fail fast or no-op because GIT_EDITOR, EDITOR, VISUAL, PAGER, and related variables default to non-interactive values.
+- No-argument slash commands now show a `Usage: /<command>` error when given arguments instead of silently sending the text to the model; the input is preserved for editing.
+- Formatting-only: applied biome's line-wrapping to `daemon-mode.ts` so the pre-commit hook no longer leaves working-tree drift after every commit.
+- Fixed non-worker draft discards to be best-effort: teardown failures are logged instead of exiting the daemon, an in-flight attach keeps its draft alive, and get_rlm_children returns the merged roster (resident plus passivated children) that the attach snapshot advertises.
+- Autonomous mode now holds timer-driven continuations while subagents run, mirroring the goal continuation gate: child replies and exit notices wake the parent, so idle status-check turns no longer consume continuation budget. The held continuation is delivered when descendants settle, and a configurable keep-alive valve (default one continuation per 25 minutes of continuous subagent activity, `/autonomous on --subagent-keep-alive-ms <n>`, `0` disables) lets the parent check for hung children.
+- Escaping the onboarding splash or failing its login no longer permanently skips onboarding; the guide reruns on the next launch until a model is configured.
+- Added a bounded wait-for-usage mode: quota/subscription failures (429s, usage limits) now wait for recovery with exponential-backoff pings (1s doubling to a 5m ceiling, jittered), resume exactly at provider-reported reset times, and stop at configurable attempt/duration bounds instead of killing the session mid-turn.
+- Added transient-unavailability waits: after quick retries are exhausted on 5xx/overload/network (and 404 routing blips) failures, the session pings with the same bounded backoff instead of giving up.
+- Added an opt-in `providerBackupModel` setting that routes failed turns to a user-defined backup model while the primary is quota-blocked or unavailable, with an explicit status-line indicator, session-logged primary->backup->primary transitions, and automatic return to the primary on recovery.
+- Non-interactive CLI boots no longer hang on stdin: the boot-time piped-stdin read gives up after a short idle window (PI_STDIN_TIMEOUT_MS, default 250ms) instead of waiting forever on a pipe a daemon worker, agent harness, or CI runner holds open without ever writing or closing it, `--resume` of a session from another project fails fast without a TTY instead of blocking on a fork confirmation, `daemon attach` without a TTY reports an error instead of waiting for terminal input, and the deprecation-warning keypress wait is skipped without a TTY.
+- Fixed model cycling being unreachable from the interactive UI: Alt+M / Shift+Alt+M now cycle scoped models (previously documented as Ctrl+P, which actually toggles message expansion), and all docs and the startup banner now name the real keys.
+- Typo'd slash commands now fail fast with a suggested correction instead of being sent to the model as a prompt; genuine messages that merely start with a slash still pass through.
+- Fixed goal token accounting regressing across compaction context rebuilds: the same goal's usage counter can no longer move backwards when a summary navigation reloads a stale persisted state, and a stale active snapshot can no longer revive a goal whose budget gate already fired.
+- Fixed compaction summaries dropping the tail of tool results: truncated tool output now keeps the last 500 characters so errors and log tails survive compaction.
+- Fixed compaction summaries never recording kernel-performed file edits: ipython tool results now contribute their structured edit diffs to the tracked file operations, so `<modified-files>` reflects the default toolset's edits.
+- Added an `auxiliaryModel` setting (`"provider/id"`) that routes refinement LLM passes (auto-refine review and refinement planning) to a different model. These passes use their own prompt prefixes, so running them on the session model evicts the provider's prompt-cache entry for the session and forces a full context re-read on the next session request; the setting isolates those passes while falling back to the session model when unset or unusable.
+- Prime Inference `anthropic/*` models now send anthropic-style `cache_control` markers (system prompt, last tool, last conversation message) so prompt caching engages on gateways that pass them through to the upstream Anthropic API, matching the Anthropic cache pricing the catalog already applies to those entries.
+- Fixed an invalid `--thinking` level being only a warning while the launch continued with the default level; it is now a hard error listing the valid values, matching `--mode` strictness.
+- Fixed the agents-view hint telling users to start "without --no-daemon" - a flag the CLI does not recognize; the hint now names the real condition (a daemon-hosted session; start normally without `--no-session`).
+- Changed the continual harness digest from alphabetical truncation to relevance ranking: entries are selected by weighted term overlap with the active goal and recent messages (recency tiebreak), and a `harness.search(query, kind=None, limit=10)` kernel API returns ranked entries on demand.
+- Sped up session appends and forking large sessions: the per-append assistant-message scan is now a cached flag, and session forks write through a single open descriptor instead of one append syscall per source entry.
+- Added `autonomous` settings (`maxContinuations`, `maxTurns`, `maxTokens`, `timeoutMs`, each a positive number or `"unlimited"`) that persist the default budget for autonomous runs, so long-horizon runs keep a user-defined budget without re-passing `--autonomous-*` CLI or `/autonomous on` flags; explicit per-run flags still win.
+- Added the `subagentDefaultModel` setting: `rlm.spawn` calls that do not pin a model resolve against this persisted default (shown in the spawn receipt's `model` field) instead of always inheriting the parent model; unset keeps inherit-parent, and an unavailable default fails the spawn instead of silently falling back.
+- Fixed the bundled goal skill's canonical example, which still taught `token_budget=200000` against its own "set `token_budget` only when an explicit token budget is requested" guidance.
+- Fixed `rlm.delete_subagent` rejecting the `RLMSpawnHandle` returned by `rlm.spawn`; it now accepts a spawn handle, a subagent row, or a child id/session name string, matching `rlm.collect`.
+- Fixed vague subagent and top-level session model validation errors: unambiguous bare model ids (like "z-ai/glm-5.3") now resolve to their full selector ("prime-inference/z-ai/glm-5.3"), and unresolved references state the expected "provider/model-id" form with close matches instead of only "unavailable, unauthenticated, or expired".
+- A bare reference that matches no authenticated catalog model still resolves to the parent model when it matches the parent's full selector, covering offline discovery or expired provider credentials; ambiguous references remain unresolved.
+- Removed the dead `./hooks` subpath export from `@earendil-works/pi-coding-agent`; the `core/hooks` module was deleted in #454 and the advertised export already resolved to a nonexistent file.
+- Fixed `rlm.create_session` sessions on private Prime Inference models failing every request with a provider 400: an unknown private route id (e.g. `internal/glm-5.3-fast`) no longer inherits the public provider default's zai thinking format, so created sessions stop sending the `enable_thinking` parameter the private endpoint rejects, and thinking `off` is no longer coerced to `low`. Public models keep their existing fallback behavior.
+- Fixed errored sessions persisting fabricated completed verdicts: a session whose last turn ended in a model error (e.g. provider 400s before any work ran) no longer lets the status classifier invent a recap and a COMPLETED verdict from the task text. Such sessions now settle to an `error` task state whose summary carries the transcript's real error message, persisted with the same journal-dedupe discipline as model verdicts, and terminal turns with `stopReason === "error"` no longer persist `completed` without a final answer. A verdict fabricated by earlier builds and persisted before a daemon restart no longer survives: the restart-seeded status is exempt from the unchanged-content fast path, so the first sweep repairs it to the error verdict.
+- Fixed invalid macOS signatures in standalone downloads and blocked releases whose final Mac archives fail signature or runtime checks.
+- Added host-owned `ctx.setTimeout`/`ctx.setInterval` (plus matching clears) for extensions: throwing callbacks are reported through the extension error boundary instead of crashing the process, and pending timers are cancelled on unload. Raw global timers remain unsupported for scheduling extension work.
+- Fixed a session worker wedging at 100% CPU: waiting for a session to go idle while queued input was blocked by a running bash command, compaction, or retry spun in microtasks without ever yielding to IO, freezing every session in the worker and starving daemon IPC.
+- Fixed session model restore silently substituting another provider's same-named model right after a daemon restart: restore now waits (bounded, default 5s) for in-flight Prime Inference catalog and private-authorization refreshes to settle and retries the lookup once before falling back, so saved models like prime-inference/openai/gpt-6-astra are restored once auth and the catalog are ready instead of swapping to openai-codex/gpt-6-astra, which displays identically in the UI.
+- Fixed goal continuation prompts delivering a stale accounting snapshot taken when the continuation was queued; usage numbers now refresh at delivery time so long-queued continuations report the current budget state.
+- Added a persistent supervisor connection for daemon workers: cross-worker requests (agent messages, roster reads, root-session creation, renames) now multiplex over one `SupervisorLink` instead of opening a fresh supervisor connection per call. Requests are never retried in-flight because daemon commands are not idempotent.
+- Added a dirty-tree guard to the bash tool: destructive git discard commands (`git checkout -- .`, `git checkout .`, `git clean -f...`, `git reset --hard`, `git restore .`) are refused while uncommitted changes exist, listing the dirty paths and the explicit bypasses (`allowDestructiveGit: true` or `PI_BASH_ALLOW_DESTRUCTIVE_GIT=1`). The guard probes the repository the command targets (following `cd` chains and `git -C`), refuses relocations it cannot replay safely, and fails open when dirtiness cannot be determined.
+- Fixed cold chat openings waiting behind saved-session catalog scans ([#2259](https://github.com/PrimeIntellect-ai/prime-agent/pull/2259)).
+- Fixed background scheduled-job scans slowing down agents with large saved chats ([#2259](https://github.com/PrimeIntellect-ai/prime-agent/pull/2259)).
+- Fixed large chats downloading their transcript again after refreshing the model catalog during startup.
+- Fixed beta-only and stable-only releases failing macOS validation because their artifacts were downloaded to the wrong directory ([#2265](https://github.com/PrimeIntellect-ai/prime-agent/issues/2265)).
+- Fixed repeated full transcript scans when refreshing large saved-session catalogs.
+- Fixed repeated filesystem path checks when refreshing RLM session catalogs.
+- Fixed saved-session deletion records when a path alias changes during deletion.
+- Fixed RLM child renames and deletions being ignored after a cached session path becomes a symlink or changes targets.
+- Fixed left and right arrows moving the search cursor after a search in the models picker: once up or down moves into the list, they adjust the highlighted model's effort until the query is edited again.
+- Added the `⚠` icon prefix to `showError` messages in the interactive TUI, matching the existing `showWarning` treatment ([ENG-6159](https://linear.app/primeintellect/issue/ENG-6159)).
+- Removed the mcp service catalog picker, connection store, and oauth login flows (revert of #2256; the work will be relanded separately).
+- Fixed CLI value flags (--model, --provider, and 15 others) being silently swallowed when their value was missing, and invalid --mode values being ignored; both now fail with a clear error.
+- Fullscreen chats show a pinned top bar with the chat name centered in plain text and the session's total spend beside it; the bar stays visible in every scroll position and refreshes the spend after each turn.
+- Changed the prompt queue so messages you send are delivered before queued agent-to-agent messages, background notices, and scheduled prompts, while keeping your own messages in the order you sent them.
+- Added a persistent update channel. `/nightly` (or `prime-agent update --nightly`) warns that nightly builds may be broken, asks for confirmation, then switches self-updates to the nightly (`beta.json`) release manifest and runs the normal update flow with its busy-session confirmation. `/nightly off` or `--stable` returns to stable. Startup version notices follow the chosen channel.
+- Changed provider logins, including the in-flow team and account selectors, to render inline under the chat in the compact picker style instead of a centered full-pane modal.
+- Changed finishing a provider login to stay on the providers tab instead of forcing the models picker open; the models tab refreshes in the background so it is ready when opened.
+- Added a separator rule above the inline provider login panel so the login section stands out from the conversation above it.
+- Tightened the inline provider login panel: the sign-in link and provider guidance lead the panel, the repeated browser-open copy and section labels are gone, and the paste field keeps a single key-hint line.
+- Fixed inline menu panels dropping their subtitle, so multi-line provider prompts keep every instruction line.
+- Renamed the Prime team selection heading to "Select a Prime Team:".
+- Fixed the TUI heartbeat view freezing on busy sessions: catalog fetches now keep the last snapshot after a 10-second deadline and retry on the next heartbeats_changed event, instead of waiting behind an active turn indefinitely. A timed-out fetch still applies its late answer and re-arms a short retry so the open view always converges, and a failed fetch now shows an error in the view instead of silently showing a stale catalog.
+- Changed the first-run onboarding to a compact block anchored top-left: the brand mark over its animated field, a short description of what Prime Agent does, and a single action to log in with Prime Intellect.
+- Changed onboarding to run every step inside that block: the Prime Intellect login, team selection, and the new questions all mount under the mark instead of opening full-pane modals or dropping to the prompt dock.
+- Added a provider step after login where several providers can be connected in one pass, with a search field, a scrolling list, and check marks on providers already signed in.
+- Added a trace-sharing question at the end of onboarding, which writes the agent traces setting and notes it can be changed later with /traces.
+- Changed first launch to run one sequence for everyone: credentials already on disk (a Prime CLI token, an API key in the environment) no longer skip onboarding or divert it to the model picker; they only make the sign-in step instant.
+- Changed team selection to be skipped when the account has no team or exactly one, and to list accounts by name with their handle.
+- Changed onboarding to stay quiet: provider progress chatter, the credentials-saved status line, and the telemetry notice no longer appear during first launch; the telemetry notice surfaces on the next launch instead.
+- Added `rlm.progress.note`, a throttled child-to-parent progress channel: children report short in-flight notes that surface as `progressNote`, `lastActivityAt`, and `activityStaleMs` on child snapshots and in `rlm.list_subagents()` roster entries, so the parent kernel sees child state without polling or interrupting. `activityStaleMs` measures active (monotonic) time since the last tracked activity and stays unset while a child's activity is `executing`, so a long tool call reads as busy rather than stale and a host sleep does not mark every running child stale on wake.
+- Extended the kernel runtime readiness check to require `rlm.progress_note`, so a `PRIME_AGENT_KERNEL_PYTHON` override older than the progress-note API fails fast with an actionable message instead of an `AttributeError` mid-run.
+
+- Added musl and baseline compiled releases so Linux hosts stop falling back to the Node installation. Releases now publish `linux-arm64-musl`, `linux-x64-baseline`, `linux-x64-musl`, and `linux-x64-musl-baseline` alongside the existing four archives. The installer detects musl (Alpine) and x86-64 CPUs without AVX2 and downloads the matching archive. musl archives need `libstdc++` (`apk add --no-cache libstdc++` on Alpine); when it is missing, the installer now names that package and stops instead of falling back to the Node installation, and a failed first install no longer leaves an empty installation directory behind.
+
 ## [0.9.4] - 2026-09-08
 
 - A Python kernel that dies after a successful startup is restarted on the next use instead of every call being handed the dead kernel forever, and skill-MCP tools advertise their real input schemas again under mcp>=2 (the SDK renamed the field to input_schema).

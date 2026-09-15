@@ -1,1 +1,0 @@
-- Fixed model cycling being unreachable from the interactive UI: Alt+M / Shift+Alt+M now cycle scoped models (previously documented as Ctrl+P, which actually toggles message expansion), and all docs and the startup banner now name the real keys.

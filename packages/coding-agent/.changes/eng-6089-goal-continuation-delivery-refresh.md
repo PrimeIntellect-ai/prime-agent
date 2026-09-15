@@ -1,1 +1,0 @@
-- Fixed goal continuation prompts delivering a stale accounting snapshot taken when the continuation was queued; usage numbers now refresh at delivery time so long-queued continuations report the current budget state.

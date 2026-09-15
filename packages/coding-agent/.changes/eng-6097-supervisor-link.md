@@ -1,1 +1,0 @@
-- Added a persistent supervisor connection for daemon workers: cross-worker requests (agent messages, roster reads, root-session creation, renames) now multiplex over one `SupervisorLink` instead of opening a fresh supervisor connection per call. Requests are never retried in-flight because daemon commands are not idempotent.

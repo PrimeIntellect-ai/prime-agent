@@ -1,1 +1,0 @@
-- Added log sink configuration to the Bedrock provider entry so bundled consumers can preserve structured diagnostics.

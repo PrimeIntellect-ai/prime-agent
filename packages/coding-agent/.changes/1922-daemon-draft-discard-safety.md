@@ -1,1 +1,0 @@
-- Fixed non-worker draft discards to be best-effort: teardown failures are logged instead of exiting the daemon, an in-flight attach keeps its draft alive, and get_rlm_children returns the merged roster (resident plus passivated children) that the attach snapshot advertises.

@@ -1,1 +1,0 @@
-- Fixed `rlm.delete_subagent` rejecting the `RLMSpawnHandle` returned by `rlm.spawn`; it now accepts a spawn handle, a subagent row, or a child id/session name string, matching `rlm.collect`.
