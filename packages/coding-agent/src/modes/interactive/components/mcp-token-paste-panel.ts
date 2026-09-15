@@ -86,7 +86,7 @@ export class McpTokenPastePanelComponent extends Container implements Focusable 
 		// the masked input over the editor background.
 		const panel = new MenuPanel({ title: `Connect ${options.serviceLabel}`, inline: true, topRule: true });
 		this.addChild(panel);
-		this.input = new MenuSearchInput("Paste token", true, { masked: true });
+		this.input = new MenuSearchInput("Paste token", true, false, false, { masked: true });
 		this.input.onSubmit = () => this.submit();
 		panel.addChild(new TokenPasteBody(() => this.renderState()));
 	}

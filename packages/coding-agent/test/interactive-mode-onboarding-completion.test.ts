@@ -28,8 +28,8 @@ function makeContext(options: { modelReady: boolean }): Context {
 			flush: vi.fn(async () => {}),
 		},
 		shouldRunOnboarding: () => true,
-		shouldRunPrimeCliOnboardingSplash: () => false,
-		runOnboardingFlow: vi.fn(async () => {}),
+		// The flow reports completion; readiness alone no longer persists the flag.
+		runOnboardingFlow: vi.fn(async () => true),
 		markOnboardingShown: InteractiveMode.prototype[
 			"markOnboardingShown" as keyof typeof InteractiveMode.prototype
 		] as (this: Context) => void,

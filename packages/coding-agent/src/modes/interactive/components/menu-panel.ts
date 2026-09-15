@@ -383,14 +383,18 @@ export class MenuSearchInput implements Component, Focusable, FullWidthMenuCompo
 	constructor(
 		private readonly placeholder: string,
 		private readonly inline = false,
+		/** Inline only: drop the enclosing rules and render just the field. */
+		private readonly plain = false,
+		/** Drop the "> " prompt for surfaces that mark selection with their own caret. */
+		private readonly hidePrompt = false,
 		options: { masked?: boolean } = {},
 	) {
 		this.input = new Input(options.masked === true ? { masked: true } : {});
 	}
 
-	/** The inline variant renders a full-width rule as its first line. */
+	/** The inline variant renders a full-width rule as its first line — unless it renders plain. */
 	get rendersInlineTopRule(): boolean {
-		return this.inline;
+		return this.inline && !this.plain;
 	}
 
 	get focused(): boolean {
@@ -427,14 +431,28 @@ export class MenuSearchInput implements Component, Focusable, FullWidthMenuCompo
 
 	render(width: number): string[] {
 		if (this.inline) {
-			const border = theme.fg("borderMuted", "─".repeat(Math.max(0, width)));
 			let content = this.input.render(Math.max(1, width - 2))[0] ?? "";
-			if (this.getValue() === "") {
-				content = this.focused
-					? `${content.trimEnd()}${theme.fg("dim", this.placeholder)}`
-					: `> ${theme.fg("dim", this.placeholder)}`;
+			if (this.hidePrompt) {
+				content = this.stripInputPrompt(content);
 			}
-			return [border, truncateToWidth(` ${content}`, width, "", true), border];
+			if (this.getValue() === "") {
+				const placeholder = theme.fg("dim", this.placeholder);
+				if (this.hidePrompt) {
+					// Sit the caret on the first placeholder character so the field keeps
+					// the same left edge as the text above it.
+					content = this.focused
+						? `\x1b[7m${this.placeholder.slice(0, 1)}\x1b[27m${theme.fg("dim", this.placeholder.slice(1))}`
+						: placeholder;
+				} else {
+					content = this.focused ? `${content.trimEnd()}${placeholder}` : `> ${placeholder}`;
+				}
+			}
+			const field = truncateToWidth(` ${content}`, width, "", true);
+			if (this.plain) {
+				return [field];
+			}
+			const border = theme.fg("borderMuted", "─".repeat(Math.max(0, width)));
+			return [border, field, border];
 		}
 		const safeWidth = Math.max(FIELD_PADDING_X * 2 + 1, width);
 		const innerWidth = Math.max(1, safeWidth - FIELD_PADDING_X * 2);

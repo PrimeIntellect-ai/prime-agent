@@ -154,7 +154,7 @@ import {
 } from "../../core/messages.js";
 import { findExactModelReferenceMatch, resolveModelScopeFromModels } from "../../core/model-resolver.js";
 import { parseNewSessionCommand } from "../../core/new-session-command.js";
-import { resolvePrimeAgentTracesBaseUrl } from "../../core/prime-inference-auth.js";
+import { PRIME_INFERENCE_PROVIDER_ID, resolvePrimeAgentTracesBaseUrl } from "../../core/prime-inference-auth.js";
 import { resolvePrimeInferencePostLoginModelAction } from "../../core/prime-inference-model-selection.js";
 import { parseCommandArgs } from "../../core/prompt-templates.js";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.js";
@@ -261,6 +261,8 @@ import {
 import { McpTokenPastePanelComponent } from "./components/mcp-token-paste-panel.js";
 import { createMermaidMarkdownTransform } from "./components/mermaid.js";
 import type { AuthSelectorProvider } from "./components/oauth-selector.js";
+import { OnboardingChoiceComponent } from "./components/onboarding-choice.js";
+import { OnboardingPickerComponent } from "./components/onboarding-picker.js";
 import { PrimeOnboardingSplashComponent } from "./components/prime-onboarding-splash.js";
 import { PromptContextLine } from "./components/prompt-context-line.js";
 import { styleArgumentTokens } from "./components/prompt-highlight.js";
@@ -310,12 +312,7 @@ import type {
 	InteractiveModeLocalToolRendererDefinition,
 	InteractiveModeUiServices,
 } from "./interactive-mode-services.js";
-import {
-	isOnboardingModelReady,
-	type OnboardingStartupState,
-	shouldRunOnboarding,
-	shouldRunPrimeCliOnboardingSplash,
-} from "./onboarding.js";
+import { isOnboardingModelReady, type OnboardingStartupState, shouldRunOnboarding } from "./onboarding.js";
 import type { ClientPromptStashStore, PromptStash, PromptStashState } from "./prompt-stash-state.js";
 import { QueueSelection, type QueueSelectionItem } from "./queue-selection.js";
 import { formatResumeHint } from "./resume-hint.js";
@@ -476,6 +473,13 @@ export interface BrandSplashHeaderOptions {
 	topPadding?: boolean;
 	getModelId?: () => string | undefined;
 	getExtraMetadata?: () => readonly BrandSplashMetadataLine[];
+	/** Suppress the header entirely, e.g. while inline onboarding owns the top rows. */
+	getHidden?: () => boolean;
+}
+
+/** Flow panels that can settle their pending step when unmounted early. */
+function isAbortablePanel(component: Component): component is Component & { abort(): void } {
+	return typeof (component as { abort?: unknown }).abort === "function";
 }
 
 export class BrandSplashHeader implements Component {
@@ -498,6 +502,9 @@ export class BrandSplashHeader implements Component {
 	}
 
 	render(width: number): string[] {
+		if (this.options.getHidden?.()) {
+			return [];
+		}
 		const safeWidth = Math.max(1, width);
 		const paddingX = safeWidth > 1 ? 1 : 0;
 		const contentWidth = Math.max(1, safeWidth - paddingX * 2);
@@ -649,7 +656,6 @@ function buildMcpPickerTargets(
 }
 
 interface OnboardingSplashHandle {
-	showProgress(message: string): void;
 	dismiss(): void;
 }
 
@@ -702,6 +708,36 @@ const INITIAL_TRANSCRIPT_RENDER_MESSAGE_LIMIT = 400;
 // Coalesce at most this many heartbeats_changed refreshes into one refresh
 // promise; sustained churn must not hold rebindCurrentSession in a drain loop.
 const HEARTBEAT_REFRESH_DRAIN_LIMIT = 25;
+// A busy daemon can serialize a catalog fetch behind session work or worker
+// recovery for minutes; the TUI waits at most this long before keeping the
+// last catalog and letting the next heartbeats_changed event retry.
+export const HEARTBEAT_REFRESH_FETCH_TIMEOUT_MS = 10_000;
+// After a deadline expiry, retry the open manager's refresh on this short
+// cadence so the view always has a next scheduled retrieval even when no
+// heartbeats_changed event arrives and the catalog has no nextRunAt to
+// schedule from.
+export const HEARTBEAT_REFRESH_RETRY_DELAY_MS = 5_000;
+
+/** Race a catalog fetch against the refresh deadline; resolves undefined on expiry. */
+async function fetchHeartbeatsWithinDeadline(
+	fetch: Promise<AgentConnectionHeartbeat[]>,
+): Promise<AgentConnectionHeartbeat[] | undefined> {
+	// The deadline can settle first; a late failure must not surface as an
+	// unhandled rejection after this refresh has moved on.
+	void fetch.catch(() => undefined);
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			fetch,
+			new Promise<undefined>((resolve) => {
+				timeout = setTimeout(() => resolve(undefined), HEARTBEAT_REFRESH_FETCH_TIMEOUT_MS);
+				timeout.unref?.();
+			}),
+		]);
+	} finally {
+		clearTimeout(timeout);
+	}
+}
 
 function initialRenderMessages(messages: AgentMessage[]): AgentMessage[] {
 	if (messages.length <= INITIAL_TRANSCRIPT_RENDER_MESSAGE_LIMIT) {
@@ -1208,7 +1244,7 @@ export class InteractiveMode {
 	private connectionModelsRefreshVersion = 0;
 	private connectionModelsRefreshInFlight: { version: number; promise: Promise<AgentConnectionModel[]> } | undefined;
 	private closeConfigurationMenu: (() => void) | undefined;
-	private inlineAuthPanelClosers: (() => void)[] = [];
+	private inlineAuthPanelClosers: ((reason?: "reset") => void)[] = [];
 	private closeServiceCatalogPicker: (() => void) | undefined;
 	private configurationModelSelection: Promise<void> | undefined;
 	private connectionState: AgentConnectionState | undefined;
@@ -1220,6 +1256,15 @@ export class InteractiveMode {
 	private heartbeatManagerHandle: OverlayHandle | undefined;
 	private heartbeatManagerRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 	private heartbeatManagerRefreshAt: number | undefined;
+	private heartbeatManagerFetchRetryTimer: ReturnType<typeof setTimeout> | undefined;
+	// Last catalog fetch failure surfaced in the open manager view; cleared by
+	// the next successful apply and on manager open.
+	private heartbeatCatalogFetchError: string | undefined;
+	// Monotonic issue-order sequence for catalog writes (fetches and heartbeat
+	// management actions). A fetch write sequenced behind an already-applied
+	// newer one is dropped, so a late/older snapshot cannot revert newer state.
+	private heartbeatCatalogSeq = 0;
+	private heartbeatCatalogAppliedSeq = 0;
 
 	// Registry of images pasted this session, keyed by the `[image #N]` marker
 	// shown to the user. Insertion-ordered; the bytes persist (bounded by
@@ -1288,6 +1333,18 @@ export class InteractiveMode {
 	private topBarCostRefresh = { generation: 0, lastSuccessGeneration: 0 };
 
 	private builtInHeader: Component | undefined = undefined;
+
+	/** True while the inline onboarding block owns the top rows (header stays hidden). */
+	private onboardingUiActive = false;
+
+	/** The mounted onboarding block, so flow panels can render inside it. */
+	private onboardingSplash: PrimeOnboardingSplashComponent | undefined = undefined;
+
+	/** Tears the block down and settles the pending flow, e.g. on a session reset. */
+	private onboardingAbort: (() => void) | undefined = undefined;
+
+	/** Aborted when onboarding is torn down so in-flight steps stop waiting. */
+	private onboardingFlowAbort: AbortController | undefined = undefined;
 
 	private customHeader: (Component & { dispose?(): void }) | undefined = undefined;
 
@@ -1649,6 +1706,7 @@ export class InteractiveMode {
 			this.builtInHeader = new BrandSplashHeader(this.version, () => this.getCurrentCwd(), verboseInstructions, {
 				topPadding: true,
 				getModelId: () => this.getCurrentModelId(),
+				getHidden: () => this.onboardingUiActive,
 			});
 			this.headerContainer.addChild(this.builtInHeader);
 			this.headerContainer.addChild(new Spacer(1));
@@ -1994,10 +2052,6 @@ export class InteractiveMode {
 		return shouldRunOnboarding(this.getOnboardingState());
 	}
 
-	private shouldRunPrimeCliOnboardingSplash(): boolean {
-		return shouldRunPrimeCliOnboardingSplash(this.getOnboardingState());
-	}
-
 	private markOnboardingShown(): void {
 		if (!this.settingsManager.getOnboardingShown()) {
 			this.settingsManager.setOnboardingShown(true);
@@ -2010,15 +2064,16 @@ export class InteractiveMode {
 		}
 
 		const startedAt = Date.now();
-		const showPrimeCliSplash = this.shouldRunPrimeCliOnboardingSplash();
 		let outcome: TelemetryOnboardingOutcome = "aborted";
 		try {
-			await this.runOnboardingFlow(showPrimeCliSplash);
-			outcome = isOnboardingModelReady(this.getOnboardingState()) ? "success" : "aborted";
+			// The flow reports completion itself: a user who already had a working
+			// model would otherwise look "ready" straight after cancelling it, and
+			// the questions they never saw would be skipped for good.
+			const completed = await this.runOnboardingFlow();
+			outcome = completed && isOnboardingModelReady(this.getOnboardingState()) ? "success" : "aborted";
 			if (outcome === "success") {
-				// Only a completed onboarding counts as seen: an escaped splash or a
-				// failed login leaves the flag unset so the next launch retries, and
-				// shouldRunOnboarding already skips users who configured a model.
+				// Only a completed onboarding counts as seen: a cancelled sign-in
+				// leaves the flag unset so the next launch retries the flow.
 				this.markOnboardingShown();
 				await this.settingsManager.flush();
 			}
@@ -2042,46 +2097,149 @@ export class InteractiveMode {
 		}
 	}
 
-	private async showOnboardingModelSelection(splash: OnboardingSplashHandle): Promise<void> {
-		splash.dismiss();
-		await this.showConfigurationMenu("models");
-	}
-
-	private async runOnboardingFlow(showPrimeCliSplash = this.shouldRunPrimeCliOnboardingSplash()): Promise<void> {
+	/** Runs the first-launch sequence. Resolves true only when every step ran. */
+	private async runOnboardingFlow(): Promise<boolean> {
 		this.modelRegistry.refresh();
-		if (showPrimeCliSplash) {
-			const splash = await this.showOnboardingSplash("choose a model");
-			if (!splash) {
-				return;
-			}
-
-			await this.showOnboardingModelSelection(splash);
-			return;
-		}
-
-		const availableModels = await this.getModelCandidates();
-		if (availableModels.length > 0) {
-			await this.showConfigurationMenu("models");
-			return;
-		}
-
+		const abort = new AbortController();
+		this.onboardingFlowAbort = abort;
 		const splash = await this.showOnboardingSplash();
 		if (!splash) {
-			return;
+			return false;
 		}
 
-		splash.showProgress("Signing in to Prime Intellect...");
-		// The splash covers the whole screen, so the login panel must render as an
-		// overlay above it instead of inline behind it.
-		const authResult = await this.createAuthFlows({ overlay: true }).runPrimeInferenceLogin();
-		if (authResult.status !== "success") {
+		// One sequence for every first launch. Signing in is instant when a Prime
+		// CLI token is already on disk, so users who arrive with credentials still
+		// reach the same account, provider and trace questions.
+		const authResult = await this.createAuthFlows().runPrimeInferenceLogin();
+		if (abort.signal.aborted || authResult.status !== "success") {
 			splash.dismiss();
-			return;
+			return false;
 		}
 
-		splash.showProgress("Preparing models...");
-		await this.prepareForModelSelectionAfterLogin(authResult);
-		await this.showOnboardingModelSelection(splash);
+		await this.prepareForModelSelectionAfterLogin(authResult, abort.signal);
+		if (abort.signal.aborted) {
+			return false;
+		}
+		await this.askOnboardingProviders(abort.signal);
+		if (abort.signal.aborted) {
+			return false;
+		}
+		await this.askOnboardingTraceOptIn();
+		if (abort.signal.aborted) {
+			return false;
+		}
+		splash.dismiss();
+		return true;
+	}
+
+	/**
+	 * Optional step: connect more providers before the first chat. The picker
+	 * stays mounted between logins so several can be connected in one pass.
+	 */
+	private async askOnboardingProviders(signal: AbortSignal): Promise<void> {
+		if (!this.onboardingSplash) {
+			return;
+		}
+		const authFlows = this.createAuthFlows();
+		for (;;) {
+			// A reset that cancels a provider login must end the question too,
+			// otherwise the next picker opens in the editor and waits for input.
+			// The signal is passed in: tearing the block down clears the field.
+			if (signal.aborted) {
+				return;
+			}
+			// One row per provider: a provider offering both a subscription and an
+			// API key would otherwise appear twice under the same name.
+			const options = [
+				...new Map(
+					authFlows
+						.getLoginProviderOptions()
+						.filter((option) => option.id !== PRIME_INFERENCE_PROVIDER_ID && option.category !== "service")
+						.map((option) => [option.id, option]),
+				).values(),
+			];
+			if (options.length === 0) {
+				return;
+			}
+			const items = options.map((option) => ({
+				id: option.id,
+				label: option.name,
+				...(this.modelRegistry.getProviderAuthStatus(option.id).configured ? { connected: true } : {}),
+			}));
+			const picked = await new Promise<string | undefined>((resolve) => {
+				let settled = false;
+				let close: (() => void) | undefined;
+				const settle = (id: string | undefined) => {
+					if (settled) {
+						return;
+					}
+					settled = true;
+					close?.();
+					resolve(id);
+				};
+				const picker = new OnboardingPickerComponent(
+					items,
+					(id) => settle(id),
+					() => settle(undefined),
+					() => settle(undefined),
+					{
+						prompt: "Connect other providers, or continue.",
+						searchPlaceholder: "Search providers",
+						note: "You can add providers anytime with /login.",
+						onExit: () => void this.shutdown(),
+						requestRender: () => this.ui.requestRender(),
+					},
+				);
+				close = this.showInlineAuthPanel(picker, { onReset: () => settle(undefined) });
+				this.ui.requestRender();
+			});
+			if (!picked) {
+				return;
+			}
+			const option = options.find((candidate) => candidate.id === picked);
+			if (option) {
+				await authFlows.loginProvider(option);
+			}
+		}
+	}
+
+	/** Final onboarding question: trace collection, with a reminder it is reversible. */
+	private askOnboardingTraceOptIn(): Promise<void> {
+		const splash = this.onboardingSplash;
+		if (!splash) {
+			return Promise.resolve();
+		}
+		return new Promise<void>((resolve) => {
+			let closed = false;
+			let close: (() => void) | undefined;
+			const finish = (enabled?: boolean) => {
+				if (closed) {
+					return;
+				}
+				closed = true;
+				if (enabled !== undefined) {
+					this.settingsManager.setAgentTracesEnabled(enabled);
+					void this.settingsManager.flush();
+				}
+				close?.();
+				resolve();
+			};
+			const choice = new OnboardingChoiceComponent(
+				[{ label: "Share" }, { label: "Not now" }],
+				(index) => finish(index === 0),
+				() => finish(undefined),
+				{
+					onExit: () => void this.shutdown(),
+					prompt: "Share agent traces with Prime Intellect?",
+					description:
+						"Trace sharing helps us train better open-source models and improve the open agent ecosystem for everyone.",
+					note: "You can change this anytime with /traces.",
+					requestRender: () => this.ui.requestRender(),
+				},
+			);
+			close = this.showInlineAuthPanel(choice, { onReset: () => finish(undefined) });
+			this.ui.requestRender();
+		});
 	}
 
 	private getMarkdownThemeWithSettings(): MarkdownTheme {
@@ -2830,9 +2988,22 @@ export class InteractiveMode {
 			// starve an awaiting rebind (and its transcript render) indefinitely.
 			for (let drain = 0; drain <= HEARTBEAT_REFRESH_DRAIN_LIMIT; drain++) {
 				this.heartbeatRefreshRequested = false;
-				const heartbeats = await connection.listHeartbeats();
+				const fetchSeq = ++this.heartbeatCatalogSeq;
+				const fetch = connection.listHeartbeats();
+				const heartbeats = await fetchHeartbeatsWithinDeadline(fetch);
 				if (this.isShuttingDown || this.isReturningToAgentsView || this.agentConnection !== connection) return;
-				this.applyHeartbeatCatalog(heartbeats);
+				if (heartbeats === undefined) {
+					// The fetch deadline expired: keep the last catalog, retain the
+					// in-flight result so the open view still converges when the
+					// late answer lands, and arm a bounded retry so the open view
+					// always has a next scheduled retrieval even if it never does.
+					// A change event that arrived mid-fetch still re-triggers a
+					// refresh through the follow-up scheduling below.
+					this.retainHeartbeatCatalogFetch(fetch, connection, fetchSeq);
+					this.armHeartbeatManagerFetchRetry();
+					return;
+				}
+				this.applyHeartbeatCatalog(heartbeats, fetchSeq);
 				if (!this.heartbeatRefreshRequested) return;
 			}
 		})().finally(() => {
@@ -2850,8 +3021,15 @@ export class InteractiveMode {
 		return refresh;
 	}
 
-	private applyHeartbeatCatalog(heartbeats: AgentConnectionHeartbeat[]): void {
+	private applyHeartbeatCatalog(heartbeats: AgentConnectionHeartbeat[], seq?: number): void {
+		// A sequenced fetch write that lost the race to a newer catalog write
+		// (a later fetch or a management action) must not revert it.
+		if (seq !== undefined) {
+			if (seq < this.heartbeatCatalogAppliedSeq) return;
+			this.heartbeatCatalogAppliedSeq = seq;
+		}
 		this.heartbeatCatalog = heartbeats;
+		this.heartbeatCatalogFetchError = undefined;
 		this.scheduleHeartbeatManagerRefresh();
 		this.updateSubagentSummaryLine();
 		this.ui.requestRender();
@@ -3761,8 +3939,11 @@ export class InteractiveMode {
 		// menu is still torn down by the closeConfigurationMenu call below.
 		// Innermost panels close first, ending at the pre-login content.
 		for (const close of this.inlineAuthPanelClosers.splice(0).reverse()) {
-			close();
+			close("reset");
 		}
+		// A reset mid-onboarding leaves the block with no flow to host: tear it
+		// down too, so the overlay, its animation and the pending step all end.
+		this.onboardingAbort?.();
 		this.closeConfigurationMenu?.();
 		this.closeServiceCatalogPicker?.();
 		this.cancelActiveConnectionExtensionUiRequests();
@@ -4359,7 +4540,7 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
 		this.defaultEditor.onAction("app.subagents.focus", () => this.focusSubagentSummary());
 		this.defaultEditor.onAction("app.heartbeats.open", () => {
-			void this.showHeartbeatManager();
+			this.showHeartbeatManager();
 		});
 		this.defaultEditor.onAction("app.editor.external", () => this.openExternalEditor());
 		this.defaultEditor.onAction("app.prompt.stash", () => this.handlePromptStash());
@@ -6423,6 +6604,8 @@ export class InteractiveMode {
 
 	private getPromptContextLabel(maxWidth: number): string | undefined {
 		if (maxWidth < 1) return undefined;
+		// Onboarding owns the screen; chat chrome under it reads as clutter.
+		if (this.onboardingUiActive) return undefined;
 		return theme.fg(
 			"dim",
 			truncateToWidth(formatConversationDetailStatus(this.toolOutputExpanded, this.editDiffsExpanded), maxWidth, ""),
@@ -8988,7 +9171,7 @@ export class InteractiveMode {
 		}
 	}
 
-	private showOnboardingSplash(continueActionLabel?: string): Promise<OnboardingSplashHandle | undefined> {
+	private showOnboardingSplash(): Promise<OnboardingSplashHandle | undefined> {
 		return new Promise((resolve) => {
 			let settled = false;
 			let dismissed = false;
@@ -9008,26 +9191,39 @@ export class InteractiveMode {
 				dismissed = true;
 				selector?.dispose();
 				handle?.hide();
+				this.onboardingSplash = undefined;
+				this.onboardingAbort = undefined;
+				this.onboardingFlowAbort = undefined;
+				this.onboardingUiActive = false;
+				this.builtInHeader?.invalidate();
 				this.ui.requestRender();
 			};
 			selector = new PrimeOnboardingSplashComponent(
 				() => {
-					selector?.dispose();
-					settle({
-						showProgress: (message) => selector?.showProgress(message),
-						dismiss,
-					});
-				},
-				() => {
-					dismiss();
-					settle(undefined);
+					// The field keeps animating behind the flow panels; only dismissal
+					// stops it.
+					settle({ dismiss });
 				},
 				{
 					getRows: () => this.ui.terminal.rows,
+					// Nothing else owns Ctrl+C yet, so the block exits the app itself.
+					onExit: () => void this.shutdown(),
 					requestRender: () => this.ui.requestRender(),
-					...(continueActionLabel ? { continueActionLabel } : {}),
 				},
 			);
+			// The block owns the pane while onboarding runs: the brand header hides
+			// so the two marks never stack, and flow panels mount inside the block.
+			this.onboardingAbort = () => {
+				// Cancel the running step first: after Enter the splash promise is
+				// already settled, so dismissing alone would leave the login waiting
+				// on an unmounted dialog and remount later panels in the prompt dock.
+				this.onboardingFlowAbort?.abort();
+				dismiss();
+				settle(undefined);
+			};
+			this.onboardingUiActive = true;
+			this.onboardingSplash = selector;
+			this.builtInHeader?.invalidate();
 			handle = this.ui.showOverlay(selector, {
 				width: "100%",
 				maxHeight: "100%",
@@ -9037,26 +9233,20 @@ export class InteractiveMode {
 		});
 	}
 
-	private createAuthFlows(options: { overlay?: boolean } = {}): ProviderAuthFlows {
-		const showAuthPanel = options.overlay
-			? (component: Component) => {
-					const handle = this.showFullPaneOverlay(component, {
-						maxContentWidth: 88,
-						suspendFullscreenMouse: true,
-					});
-					return () => {
-						handle.hide();
-						this.ui.requestRender();
-					};
-				}
-			: (component: Component) => this.showInlineAuthPanel(component);
+	private createAuthFlows(): ProviderAuthFlows {
+		const showAuthPanel = (component: Component, options?: { heading?: string; onReset?: () => void }) =>
+			this.showInlineAuthPanel(component, options);
 		return new ProviderAuthFlows({
 			ui: this.ui,
 			modelRegistry: this.modelRegistry,
 			showStatus: (message) => this.showStatus(message),
 			showError: (message) => this.showError(message),
 			showAuthPanel,
+			exitApp: () => void this.shutdown(),
 			getAuthPanelRows: () => Math.max(1, Math.min(20, this.ui.terminal.rows - 3)),
+			// Onboarding renders its own heading above the panel and asks its
+			// questions in the onboarding selection language.
+			isOnboardingSurface: () => this.onboardingUiActive,
 			getAvailableModels: () => this.getConnectionAvailableModels(),
 			onAuthChanged: async () => {
 				await this.refreshConnectionModelsAfterAuthChange();
@@ -9087,7 +9277,42 @@ export class InteractiveMode {
 	 * resetExtensionUI tears the whole stack down on session resets. Each
 	 * closer runs once, so a reset cannot stomp a picker opened afterwards.
 	 */
-	private showInlineAuthPanel(component: Component): () => void {
+	private showInlineAuthPanel(
+		component: Component,
+		options?: { heading?: string; onReset?: () => void },
+	): (reason?: "reset") => void {
+		// Onboarding owns the top of the screen: mount the panel inside its block
+		// rather than down in the prompt dock.
+		const splash = this.onboardingSplash;
+		if (splash) {
+			splash.setPanel(component, options?.heading);
+			this.ui.setFocus(component);
+			this.ui.requestRender();
+			let splashPanelClosed = false;
+			const closeSplashPanel = (reason?: "reset") => {
+				if (splashPanelClosed) return;
+				splashPanelClosed = true;
+				const index = this.inlineAuthPanelClosers.indexOf(closeSplashPanel);
+				if (index !== -1) {
+					this.inlineAuthPanelClosers.splice(index, 1);
+				}
+				// A reset unmounts the panel without its flow finishing: settle the
+				// step the caller is awaiting, or it waits on a dead panel forever.
+				if (reason === "reset") {
+					options?.onReset?.();
+					if (isAbortablePanel(component)) {
+						component.abort();
+					}
+				}
+				splash.setPanel(undefined);
+				// The splash ignores keys while a panel is mounted, so focus has to
+				// land on whichever panel the pop restored, not on the block itself.
+				this.ui.setFocus(splash.getActivePanel() ?? splash);
+				this.ui.requestRender();
+			};
+			this.inlineAuthPanelClosers.push(closeSplashPanel);
+			return closeSplashPanel;
+		}
 		const previousChildren = [...this.editorContainer.children];
 		const previousFocus = previousChildren.find((child) => isFocusable(child) && child.focused) ?? this.editor;
 		this.editorContainer.clear();
@@ -9095,9 +9320,15 @@ export class InteractiveMode {
 		this.ui.setFocus(component);
 		this.ui.requestRender();
 		let closed = false;
-		const close = () => {
+		const close = (reason?: "reset") => {
 			if (closed) return;
 			closed = true;
+			if (reason === "reset") {
+				options?.onReset?.();
+				if (isAbortablePanel(component)) {
+					component.abort();
+				}
+			}
 			const index = this.inlineAuthPanelClosers.indexOf(close);
 			if (index !== -1) {
 				this.inlineAuthPanelClosers.splice(index, 1);
@@ -9141,7 +9372,15 @@ export class InteractiveMode {
 		return result;
 	}
 
-	private async prepareForModelSelectionAfterLogin(authResult: AuthenticationResult): Promise<boolean> {
+	private async prepareForModelSelectionAfterLogin(
+		authResult: AuthenticationResult,
+		abortSignal?: AbortSignal,
+	): Promise<boolean> {
+		// A reset rebinds the session; selection prepared for the old one must
+		// not be applied to the new one.
+		if (abortSignal?.aborted) {
+			return false;
+		}
 		const currentModel = this.getCurrentModel();
 		// The agent core uses unknown/unknown as its no-model sentinel.
 		const selectedModel =
@@ -9165,6 +9404,9 @@ export class InteractiveMode {
 		}
 
 		if (action.fallbackModel) {
+			if (abortSignal?.aborted) {
+				return false;
+			}
 			try {
 				await this.applySelectedModel(action.fallbackModel);
 				await this.settingsManager.flush();
@@ -11528,19 +11770,22 @@ export class InteractiveMode {
 		}
 	}
 
-	private async showHeartbeatManager(): Promise<void> {
+	private showHeartbeatManager(): void {
 		if (this.heartbeatManagerHandle) {
 			this.heartbeatManagerHandle.focus();
 			return;
 		}
-		try {
-			await this.refreshHeartbeatCatalog();
-		} catch (error) {
-			this.showError(error instanceof Error ? error.message : String(error));
-			return;
-		}
+		// Stale-while-revalidate: open immediately with the cached catalog. A
+		// busy session can take minutes to answer the fetch, and the overlay
+		// must not wait for it; the background refresh updates the open view
+		// when fresh data lands (the component reads the catalog per render).
+		// A failed fetch surfaces inside the view instead of silently showing a
+		// possibly-stale catalog; each open starts with a clean notice state.
+		this.heartbeatCatalogFetchError = undefined;
+		void this.refreshHeartbeatCatalog().catch((error) => this.onHeartbeatCatalogFetchError(error));
 		const manager = new HeartbeatManagerComponent({
 			getHeartbeats: () => this.getScopedHeartbeats(),
+			getFetchError: () => this.heartbeatCatalogFetchError,
 			getRows: () => this.ui.terminal.rows,
 			onAction: (heartbeat, action) => this.manageHeartbeat(heartbeat, action),
 			onClose: () => this.closeHeartbeatManager(),
@@ -11556,6 +11801,7 @@ export class InteractiveMode {
 
 	private closeHeartbeatManager(): void {
 		this.clearHeartbeatManagerRefreshTimer();
+		this.clearHeartbeatManagerFetchRetryTimer();
 		this.heartbeatManagerHandle?.hide();
 		this.heartbeatManagerHandle = undefined;
 		this.heartbeatManager = undefined;
@@ -11610,10 +11856,64 @@ export class InteractiveMode {
 		this.heartbeatManagerRefreshAt = undefined;
 	}
 
+	private retainHeartbeatCatalogFetch(
+		fetch: Promise<AgentConnectionHeartbeat[]>,
+		connection: AgentConnection,
+		seq: number,
+	): void {
+		// The deadline expired while this fetch was still in flight: apply the
+		// late result when it lands so the open view converges even without a
+		// further heartbeats_changed event. Bounded by the same context guards
+		// as the drain loop and by the write sequence, so a superseded result
+		// cannot revert newer catalog state; a late failure is swallowed (the
+		// retry chain owns recovery from it).
+		void fetch
+			.then((heartbeats) => {
+				if (this.isShuttingDown || this.isReturningToAgentsView || this.agentConnection !== connection) {
+					return;
+				}
+				this.applyHeartbeatCatalog(heartbeats, seq);
+			})
+			.catch(() => undefined);
+	}
+
+	private armHeartbeatManagerFetchRetry(): void {
+		// Guarantee the open manager always has a next scheduled retrieval
+		// after a deadline expiry; a still-armed retry keeps the earliest slot.
+		if (!this.heartbeatManager || this.heartbeatManagerFetchRetryTimer) return;
+		this.heartbeatManagerFetchRetryTimer = setTimeout(() => {
+			this.heartbeatManagerFetchRetryTimer = undefined;
+			if (!this.heartbeatManager) return;
+			void this.refreshHeartbeatCatalog().catch((error) => this.onHeartbeatCatalogFetchError(error));
+		}, HEARTBEAT_REFRESH_RETRY_DELAY_MS);
+		this.heartbeatManagerFetchRetryTimer.unref?.();
+	}
+
+	private clearHeartbeatManagerFetchRetryTimer(): void {
+		if (this.heartbeatManagerFetchRetryTimer) {
+			clearTimeout(this.heartbeatManagerFetchRetryTimer);
+			this.heartbeatManagerFetchRetryTimer = undefined;
+		}
+	}
+
+	private onHeartbeatCatalogFetchError(error: unknown): void {
+		// Stale-while-revalidate opens the manager even when the fetch fails;
+		// surface the failure in the view instead of silently showing a stale
+		// catalog, and keep a next retrieval scheduled.
+		this.heartbeatCatalogFetchError = error instanceof Error ? error.message : String(error);
+		this.armHeartbeatManagerFetchRetry();
+		this.scheduleHeartbeatManagerRefresh();
+		this.ui.requestRender();
+	}
+
 	private async manageHeartbeat(
 		heartbeat: AgentConnectionHeartbeat,
 		action: AgentHeartbeatManagementAction,
 	): Promise<void> {
+		// Sequence the action by issue order so an older in-flight fetch
+		// cannot later revert its result; the action itself is authoritative
+		// and always applies.
+		const actionSeq = ++this.heartbeatCatalogSeq;
 		const updated = await this.agentConnection.manageHeartbeat(
 			heartbeat.job.activeSessionId,
 			heartbeat.job.id,
@@ -11622,6 +11922,7 @@ export class InteractiveMode {
 		if (updated.source === "heartbeat" && updated.activeSessionId === this.connectionState?.activeSessionId) {
 			this.patchConnectionState({ heartbeat: action === "stop" ? null : updated });
 		}
+		this.heartbeatCatalogAppliedSeq = Math.max(this.heartbeatCatalogAppliedSeq, actionSeq);
 		const remaining = this.heartbeatCatalog.filter((entry) => entry.job.id !== updated.id);
 		this.applyHeartbeatCatalog(
 			updated.status === "active" || updated.status === "paused"

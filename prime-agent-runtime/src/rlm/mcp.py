@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from . import host_request
+from .mcp_base import McpToolError
 
 __all__ = [
     "McpCredentialsUnavailable",
@@ -78,9 +79,6 @@ _SECRET_KEY_PATTERN = re.compile(r"token|secret|password|credential|authorizatio
 class McpStartupError(RuntimeError):
     """A stdio server failed while completing the MCP startup handshake."""
 
-
-class McpToolError(RuntimeError):
-    """Raised when an MCP tool call returns a result flagged as an error."""
 
 
 class McpDiscoveryError(RuntimeError):

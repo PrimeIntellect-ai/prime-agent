@@ -570,6 +570,11 @@ export interface AgentConnectionRlmChildAgentSnapshot {
 	recap?: string;
 	sessionDir: string;
 	activity?: AgentConnectionRlmChildAgentActivity;
+	/** Latest child progress note (`rlm.progress.note`), newest wins. */
+	progressNote?: string;
+	lastActivityAt?: number;
+	/** Set when a running child has had no tracked activity for the staleness threshold. */
+	activityStaleMs?: number;
 	error?: string;
 }
 
@@ -616,6 +621,7 @@ export type AgentConnectionSessionEvent =
 	  }
 	| { type: "auth_stale"; provider: string; sourceTokens?: readonly AuthSourceToken[] }
 	| { type: "rlm_child_update"; child: AgentConnectionRlmChildAgentSnapshot }
+	| { type: "rlm_progress_note"; message: string; timestamp: number }
 	| { type: "recap_update"; recap: string | undefined }
 	| { type: "goal_update"; goal: GoalState }
 	| { type: "bash_start"; command: string; excludeFromContext: boolean; transient?: boolean; runId?: string }
