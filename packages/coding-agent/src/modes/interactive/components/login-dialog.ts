@@ -45,6 +45,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 	private continueRejecter?: (error: Error) => void;
 	private authUrl?: string;
 	private authActions?: Text;
+	private inputSpacer?: Spacer;
 
 	// Focusable implementation - propagate to input for IME cursor positioning
 	private _focused = false;
@@ -181,6 +182,13 @@ export class LoginDialogComponent extends Container implements Focusable {
 	/** Append the paste field plus the single key-hint line at the panel bottom. */
 	private addInputField(): void {
 		this.contentContainer.removeChild(this.input);
+		if (this.inputSpacer) {
+			this.contentContainer.removeChild(this.inputSpacer);
+		} else {
+			// A blank row keeps the key hints off the field. It is retained so a
+			// second prompt moves it instead of stacking another blank row.
+			this.inputSpacer = new Spacer(1);
+		}
 		if (this.authActions) {
 			this.contentContainer.removeChild(this.authActions);
 		} else {
@@ -188,8 +196,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 		}
 		this.contentContainer.addChild(this.input);
 		this.inputVisible = true;
-		// A blank row keeps the key hints off the field.
-		this.contentContainer.addChild(new Spacer(1));
+		this.contentContainer.addChild(this.inputSpacer);
 		this.contentContainer.addChild(this.authActions);
 		this.authActions.setText(this.getAuthActionsText());
 	}
@@ -288,6 +295,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 		this.contentContainer.clear();
 		this.authUrl = undefined;
 		this.authActions = undefined;
+		this.inputSpacer = undefined;
 		// The cleared panel no longer shows the paste field.
 		this.inputVisible = false;
 		this.contentContainer.addChild(new Spacer(1));

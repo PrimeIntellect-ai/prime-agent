@@ -192,6 +192,17 @@ describe("LoginDialogComponent", () => {
 		}
 	});
 
+	it("keeps one blank row above the key hints across repeated prompts", () => {
+		const dialog = new LoginDialogComponent(createFakeTui(), "prime-inference", () => {}, "Prime Inference");
+		dialog.showPrompt("Enter API key:");
+		const first = dialog.render(80).length;
+		dialog.showPrompt("Enter API key:");
+
+		// The second prompt adds its own separator and title, and moves the blank
+		// row above the key hints instead of stacking another one.
+		expect(dialog.render(80).length - first).toBe(2);
+	});
+
 	it("cancels the prompt with esc and ctrl+c", async () => {
 		for (const key of ["\x1b", "\x03"]) {
 			const dialog = new LoginDialogComponent(createFakeTui(), "prime-inference", () => {}, "Prime Inference");
