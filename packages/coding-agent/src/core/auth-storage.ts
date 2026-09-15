@@ -41,7 +41,29 @@ export type OAuthCredential = {
 	type: "oauth";
 } & OAuthCredentials;
 
-export type AuthCredential = ApiKeyCredential | OAuthCredential;
+/**
+ * A static token pasted for one MCP connection through the inline paste flow.
+ * Deliberately NOT the OAuth shape: there is no refresh token, no expiry, and
+ * no client identity to fake — the handshake sends `bearer` as
+ * `Authorization: Bearer` and the remaining collected values (e.g. an
+ * application key) stay in `values`. Bound to the exact endpoint it was pasted
+ * for, stored only in the credential store under the owning connection's
+ * `mcp:<connectionId>` key — never in settings.json.
+ */
+export type McpStaticTokenCredential = {
+	type: "mcp_static_token";
+	/** The endpoint the pasted values are bound to; a retargeted entry fails closed. */
+	endpoint: string;
+	/** The value the MCP handshake sends as the bearer. */
+	bearer: string;
+	/** The catalog setup field id the bearer value was pasted for. */
+	bearerFieldId: string;
+	/** Every collected value keyed by catalog setup field id. */
+	values: Record<string, string>;
+	createdAt: number;
+};
+
+export type AuthCredential = ApiKeyCredential | OAuthCredential | McpStaticTokenCredential;
 
 export type AuthStorageData = Record<string, AuthCredential>;
 
@@ -372,6 +394,9 @@ export class AuthStorage {
 			}
 			return `api_key:${credential.key}\0${resolveConfigValue(credential.key) ?? ""}`;
 		}
+		// Static MCP tokens are not model-provider key material: they never
+		// resolve to a provider API key value fingerprint.
+		if (credential.type !== "oauth") return undefined;
 		const provider = getOAuthProvider(providerId);
 		const apiKey = provider?.getApiKey(credential) ?? credential.access;
 		return `oauth:${apiKey}\0${credential.refresh}\0${credential.expires}`;

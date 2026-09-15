@@ -19,10 +19,12 @@ import {
 	decodePluginCursor,
 	defaultServiceCatalogProvider,
 	filterPluginViewsByStatus,
+	isPasteableTokenService,
 	type McpPluginView,
 	type McpServiceCatalogProvider,
 	type McpServiceDescriptor,
 	mcpLoginEligibility,
+	mcpStaticTokenUsable,
 	oauthGrantUsable,
 	pagePluginViews,
 	reservedMcpOwnership,
@@ -60,18 +62,25 @@ const GENERIC_SERVER_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 interface ResolvedIntegration {
 	server: string;
 	label: string;
-	config: McpServerConfig;
+	/** Served config; catalog token services carry a `credentialSource` marker. */
+	config: McpServerConfig & { credentialSource?: "static-token" };
 	usesOAuth: boolean;
 	/** True when this came from Settings.mcpServers (may override a catalog name). */
 	userDeclared?: boolean;
 	blockedReason?: string;
 	/**
 	 * Catalog entries only: the descriptor is explicitly public no-auth AND
-	 * setup-ready, so credential-free dispatch is honest. api_key and
-	 * requires-setup entries fail closed until the user adds the server
-	 * manually (the picker already shows them as setup_required).
+	 * setup-ready, so credential-free dispatch is honest. Everything else
+	 * without a stored credential stays closed.
 	 */
 	credentialFreeEligible?: boolean;
+	/**
+	 * Catalog token services only: the entry collects pasteable credential
+	 * fields, so a stored `mcp_static_token` credential under this exact id is
+	 * a valid credential source — bound to this endpoint, never inferred from
+	 * the setup field ids (those env vars are NOT read).
+	 */
+	staticTokenEligible?: boolean;
 	/** Parent catalog service id for per-account connections (records keep it). */
 	catalogServiceId?: string;
 }
@@ -190,6 +199,10 @@ export class McpManager {
 				record: this.connectionStore.get(service.serviceId),
 				credential: this.authStorage.get(this.providerId(service.serviceId)),
 			});
+			// Token services authenticate with a pasted static token credential:
+			// the marker tells the kernel where the bearer comes from, and the
+			// config is only served once credentials exist (isAuthed).
+			const staticToken = isPasteableTokenService(service);
 			integrations.set(service.serviceId, {
 				server: service.serviceId,
 				label: service.label,
@@ -200,9 +213,11 @@ export class McpManager {
 							? eligibility.endpoint!
 							: service.transport.url,
 					...(usesOAuth ? { oauth: true } : {}),
+					...(staticToken ? { credentialSource: "static-token" as const } : {}),
 				},
 				usesOAuth,
 				credentialFreeEligible: service.authStrategy === "none" && service.setup.status === "ready",
+				staticTokenEligible: staticToken,
 			});
 		}
 		// Per-account connections ("acme-2"): each record of a catalog service is
@@ -220,15 +235,20 @@ export class McpManager {
 				record,
 				credential: this.authStorage.get(this.providerId(record.connectionId)),
 			});
+			// Per-account connections mirror their parent's credential source:
+			// OAuth accounts stay OAuth; a token-service account would paste.
+			const staticToken = isPasteableTokenService(service);
 			integrations.set(record.connectionId, {
 				server: record.connectionId,
 				label: `${service.label} (${record.connectionId})`,
 				config: {
 					type: "http",
 					url: eligibility.repair ? eligibility.endpoint! : service.transport.url,
-					oauth: true,
+					...(staticToken ? {} : { oauth: true }),
+					...(staticToken ? { credentialSource: "static-token" as const } : {}),
 				},
-				usesOAuth: true,
+				usesOAuth: !staticToken,
+				staticTokenEligible: staticToken,
 				catalogServiceId: service.serviceId,
 			});
 		}
@@ -349,11 +369,21 @@ export class McpManager {
 		const { bearerTokenEnvVar } = integration.config;
 		if (!integration.userDeclared && !integration.usesOAuth) {
 			// Catalog entry without OAuth: credential-free dispatch ONLY for an
-			// explicitly public no-auth, setup-ready descriptor. api_key and
-			// requires-setup entries fail closed until the user adds the server
-			// manually — matching the picker setup_required view. Credential
-			// binding is never inferred from setup field ids.
-			return integration.credentialFreeEligible === true;
+			// explicitly public no-auth, setup-ready descriptor. A token service
+			// additionally accepts its STORED pasted static token — bound to
+			// this exact id and endpoint. Everything else (no stored token,
+			// unbound token, or a non-token service with a stray credential)
+			// fails closed — matching the picker setup_required view. Credential
+			// binding is never inferred from setup field ids: the env vars the
+			// fields NAME are never read as credential sources.
+			if (integration.credentialFreeEligible === true) return true;
+			if (integration.staticTokenEligible === true) {
+				return mcpStaticTokenUsable(
+					this.authStorage.get(this.providerId(integration.server)),
+					integration.config.url,
+				).usable;
+			}
+			return false;
 		}
 		if (!integration.usesOAuth && !bearerTokenEnvVar) return true;
 		if (bearerTokenEnvVar) {
@@ -411,6 +441,8 @@ export class McpManager {
 			endpoint: integration.config.url,
 			usesOAuth: integration.usesOAuth,
 			bearerTokenEnvVar: integration.config.type === "http" ? integration.config.bearerTokenEnvVar : undefined,
+			// Token services verify with the stored pasted token as the bearer.
+			...(integration.staticTokenEligible === true ? { staticToken: true } : {}),
 			...(this.probeConnection ? { probe: this.probeConnection } : {}),
 		});
 	}
@@ -461,7 +493,14 @@ export class McpManager {
 				}
 				continue;
 			}
-			if (!integration.usesOAuth && !integration.config.bearerTokenEnvVar) continue;
+			// Demand-driven verification covers credential-bearing connections:
+			// OAuth grants, env-var bearers, and stored pasted static tokens.
+			if (
+				!integration.usesOAuth &&
+				!integration.config.bearerTokenEnvVar &&
+				integration.staticTokenEligible !== true
+			)
+				continue;
 			if (integration.config.enabled === false) continue;
 			const record = this.connectionStore.get(integration.server);
 			if (record?.attemptId !== undefined || record?.status === "connected") continue;

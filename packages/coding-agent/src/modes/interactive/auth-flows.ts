@@ -344,7 +344,9 @@ export class ProviderAuthFlows {
 			options.push({
 				id: providerId,
 				name,
-				authType: credential.type,
+				// A pasted MCP static token is key-shaped for the selector: it
+				// is removed exactly like a stored API key.
+				authType: credential.type === "mcp_static_token" ? "api_key" : credential.type,
 				category: isSerper || isMcp ? "service" : "provider",
 			});
 		}

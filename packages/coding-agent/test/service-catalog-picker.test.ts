@@ -3,6 +3,7 @@ import stripAnsi from "strip-ansi";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import type { McpPluginView } from "../src/core/mcp/service-catalog.js";
+import { McpTokenPastePanelComponent } from "../src/modes/interactive/components/mcp-token-paste-panel.js";
 import { ServiceCatalogPickerComponent } from "../src/modes/interactive/components/service-catalog-picker.js";
 import { initTheme, preloadCodeHighlighter, theme } from "../src/modes/interactive/theme/theme.js";
 
@@ -888,5 +889,174 @@ describe("ServiceCatalogPickerComponent", () => {
 		expect(output).toContain("Disconnect acme-work");
 		expect(output).toContain("Add another account");
 		expect(output).not.toContain("No matching services");
+	});
+});
+
+describe("McpTokenPastePanelComponent (inline masked paste panel)", () => {
+	beforeAll(async () => {
+		initTheme("dark");
+		await preloadCodeHighlighter();
+	});
+
+	beforeEach(() => {
+		setKeybindings(new KeybindingsManager());
+	});
+
+	const SECRET = "ghp_live-secret-token-value";
+
+	function type(panel: McpTokenPastePanelComponent, text: string): void {
+		for (const character of text) panel.handleInput(character);
+	}
+
+	function rendered(panel: McpTokenPastePanelComponent): string {
+		return panel
+			.render(120)
+			.map((line) => stripAnsi(line))
+			.join("\n");
+	}
+
+	it("renders the prompt label and never the raw secret in any rendered line", () => {
+		let submitted: Record<string, string> | undefined;
+		let cancelled = false;
+		const panel = new McpTokenPastePanelComponent({
+			serviceLabel: "GitHub",
+			reason: "paste a GitHub personal access token (GITHUB_PAT_TOKEN or GITHUB_PERSONAL_ACCESS_TOKEN)",
+			fields: [{ id: "GITHUB_PAT_TOKEN", label: "GitHub personal access token" }],
+			onSubmit: (values) => {
+				submitted = values;
+			},
+			onCancel: () => {
+				cancelled = true;
+			},
+		});
+		panel.focused = true;
+		type(panel, SECRET);
+
+		const flat = rendered(panel);
+		expect(flat).toContain("Connect GitHub");
+		expect(flat).toContain("GitHub personal access token");
+		expect(flat).toContain("credential store");
+		// THE leak test: the raw secret appears in NO rendered line — only bullets.
+		expect(flat.includes(SECRET)).toBe(false);
+		expect(flat.includes("ghp_live")).toBe(false);
+		expect(flat).toContain("•".repeat(SECRET.length));
+		// The masked line still fits the width.
+		for (const line of panel.render(120)) {
+			expect(visibleWidth(line)).toBeLessThanOrEqual(120);
+		}
+
+		panel.handleInput("\r");
+		expect(submitted).toEqual({ GITHUB_PAT_TOKEN: SECRET });
+		expect(cancelled).toBe(false);
+		// After submit the panel renders no raw value either.
+		expect(rendered(panel).includes(SECRET)).toBe(false);
+	});
+
+	it("prompts every required field in order and submits both stored values (datadog shape)", () => {
+		const submitted: Record<string, string>[] = [];
+		const panel = new McpTokenPastePanelComponent({
+			serviceLabel: "Datadog",
+			fields: [
+				{ id: "DD_API_KEY", label: "Datadog API key (DD_API_KEY)" },
+				{ id: "DD_APPLICATION_KEY", label: "Datadog application key (DD_APPLICATION_KEY)" },
+			],
+			onSubmit: (values) => {
+				submitted.push(values);
+			},
+			onCancel: () => {},
+		});
+		panel.focused = true;
+		// First prompt shows the API key label only.
+		let flat = rendered(panel);
+		expect(flat).toContain("Datadog API key (DD_API_KEY)");
+		expect(flat).not.toContain("Datadog application key");
+
+		type(panel, "dd-api-key-value");
+		panel.handleInput("\r");
+		// The second field prompts in order; the completed first field is
+		// visible as context and its value is nowhere in the frame.
+		flat = rendered(panel);
+		expect(flat).toContain("Datadog application key (DD_APPLICATION_KEY)");
+		expect(flat).toContain("✓ Datadog API key (DD_API_KEY)");
+		expect(flat.includes("dd-api-key-value")).toBe(false);
+
+		type(panel, "dd-application-key-value");
+		panel.handleInput("\r");
+		expect(submitted).toEqual([{ DD_API_KEY: "dd-api-key-value", DD_APPLICATION_KEY: "dd-application-key-value" }]);
+	});
+
+	it("Esc cancels: nothing submitted, nothing echoed", () => {
+		let cancelled = false;
+		let submitted: Record<string, string> | undefined;
+		const panel = new McpTokenPastePanelComponent({
+			serviceLabel: "PagerDuty",
+			fields: [{ id: "PAGERDUTY_API_KEY", label: "PagerDuty API key" }],
+			onSubmit: (values) => {
+				submitted = values;
+			},
+			onCancel: () => {
+				cancelled = true;
+			},
+		});
+		panel.focused = true;
+		type(panel, SECRET);
+		panel.handleInput("\x1b");
+		expect(cancelled).toBe(true);
+		expect(submitted).toBeUndefined();
+	});
+
+	it("an empty submit stays on the field with an honest notice, never advancing", () => {
+		let submitted: Record<string, string> | undefined;
+		const panel = new McpTokenPastePanelComponent({
+			serviceLabel: "Zoom",
+			fields: [{ id: "ZOOM_MCP_ACCESS_TOKEN", label: "Zoom access token" }],
+			onSubmit: (values) => {
+				submitted = values;
+			},
+			onCancel: () => {},
+		});
+		panel.focused = true;
+		panel.handleInput("\r");
+		expect(rendered(panel)).toContain("The value cannot be empty.");
+		expect(submitted).toBeUndefined();
+		expect(rendered(panel)).toContain("Zoom access token");
+	});
+});
+
+describe("ServiceCatalogPickerComponent paste rows", () => {
+	beforeAll(async () => {
+		initTheme("dark");
+		await preloadCodeHighlighter();
+	});
+
+	beforeEach(() => {
+		setKeybindings(new KeybindingsManager());
+	});
+
+	it("renders a requires-setup token row with the paste action, not a dead-end hint", () => {
+		const picker = new ServiceCatalogPickerComponent(
+			[
+				viewFixture({
+					serviceId: "github",
+					label: "GitHub",
+					connectionStatus: "setup_required",
+					connectable: false,
+					usesOAuth: false,
+					pasteToken: true,
+					setupHint: "paste a GitHub personal access token (GITHUB_PAT_TOKEN or GITHUB_PERSONAL_ACCESS_TOKEN)",
+				}),
+			],
+			() => {},
+			() => {},
+			{ getRows: () => 20 },
+		);
+		const lines = picker.render(120).map((line) => stripAnsi(line));
+		// The trailing status stays the honest state...
+		expect(lines.some((line) => line.includes("Requires setup"))).toBe(true);
+		// ...and the footer hint is the ACTION (⏎ paste token), not "setup guidance".
+		const hint = lines.find((line) => line.includes("paste token"));
+		expect(hint).toBeDefined();
+		expect(lines.some((line) => line.includes("setup guidance"))).toBe(false);
+		expect(lines.some((line) => line.includes("GitHub"))).toBe(true);
 	});
 });

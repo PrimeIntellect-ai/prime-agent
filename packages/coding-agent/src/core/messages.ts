@@ -128,8 +128,8 @@ export interface RefinementNoticeMessage extends CustomMessage<RefinementNoticeD
 /** How an MCP connection attempt finished: verified handshake, saved but unverified, or unrecorded result. */
 export type McpConnectionVerificationState = "connected" | "unverified" | "unsaved";
 
-/** Which flow produced the outcome: a completed login or a pending-account retry verification. */
-export type McpConnectionOutcomeSource = "login" | "retry";
+/** Which flow produced the outcome: a completed login, an inline token paste, or a pending-account retry verification. */
+export type McpConnectionOutcomeSource = "login" | "paste" | "retry";
 
 /** Whether the saved connection change is live in the current session. */
 export type McpConnectionActivationState = "active" | "inactive";
@@ -583,13 +583,23 @@ export function formatMcpConnectionOutcomeNotice(details: McpOutcomeDetails): st
 				details.toolCount !== undefined ? ` (${details.toolCount} tools verified)` : ""
 			}.${suffix}`;
 		case "unverified":
-			return details.source === "retry"
-				? `Verification did not complete: ${details.issue}. The connection is saved; retry from /plugins.${suffix}`
-				: `${prefix}Login succeeded for ${details.label}, but connection verification did not complete: ${details.issue}. The connection is saved; retry from /plugins.${suffix}`;
+			if (details.source === "retry") {
+				return `Verification did not complete: ${details.issue}. The connection is saved; retry from /plugins.${suffix}`;
+			}
+			if (details.source === "paste") {
+				// No login happened: the user pasted a token. "Login succeeded"
+				// would be a false claim here.
+				return `Token saved for ${details.label}, but connection verification did not complete: ${details.issue}. The connection is saved; retry from /plugins.${suffix}`;
+			}
+			return `${prefix}Login succeeded for ${details.label}, but connection verification did not complete: ${details.issue}. The connection is saved; retry from /plugins.${suffix}`;
 		case "unsaved":
-			return details.source === "retry"
-				? `The verification result could not be saved. The connection is saved; retry from /plugins.${suffix}`
-				: `${prefix}Login succeeded for ${details.label}, but the verification result could not be saved. The connection is saved; retry from /plugins.${suffix}`;
+			if (details.source === "retry") {
+				return `The verification result could not be saved. The connection is saved; retry from /plugins.${suffix}`;
+			}
+			if (details.source === "paste") {
+				return `Token saved for ${details.label}, but the verification result could not be saved. The connection is saved; retry from /plugins.${suffix}`;
+			}
+			return `${prefix}Login succeeded for ${details.label}, but the verification result could not be saved. The connection is saved; retry from /plugins.${suffix}`;
 	}
 }
 

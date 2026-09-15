@@ -140,6 +140,50 @@ describe("McpConnectionOutcomeMessageComponent", () => {
 		);
 	});
 
+	test("a paste outcome keeps the diamond entry honest: token saved, never 'login succeeded'", () => {
+		const connectedPaste = {
+			label: "GitHub",
+			source: "paste",
+			verification: "connected",
+			toolCount: 9,
+			activation: "active",
+		} as const;
+		expect(flat(outcomeComponent(connectedPaste))).toBe("◆ Connected GitHub · 9 tools verified");
+		expect(createMcpConnectionOutcomeMessage(connectedPaste).content).toBe("Connected GitHub (9 tools verified).");
+
+		const unverifiedPaste = {
+			label: "GitHub",
+			source: "paste",
+			verification: "unverified",
+			issue: "the endpoint rejected the stored credentials (reconnect)",
+			activation: "active",
+		} as const;
+		expect(rendered(outcomeComponent(unverifiedPaste))).toContain("◆ Verification did not complete · GitHub saved");
+		expect(flat(outcomeComponent(unverifiedPaste))).toBe(
+			"◆ Verification did not complete · GitHub saved The endpoint rejected the stored credentials (reconnect). Retry from /plugins.",
+		);
+		expect(createMcpConnectionOutcomeMessage(unverifiedPaste).content).toBe(
+			"Token saved for GitHub, but connection verification did not complete: the endpoint rejected the stored credentials (reconnect). The connection is saved; retry from /plugins.",
+		);
+
+		const unsavedPaste = {
+			label: "GitHub",
+			source: "paste",
+			verification: "unsaved",
+			activation: "active",
+		} as const;
+		expect(flat(outcomeComponent(unsavedPaste))).toBe(
+			"◆ Verification result not recorded · GitHub saved Retry verification from /plugins.",
+		);
+		expect(createMcpConnectionOutcomeMessage(unsavedPaste).content).toBe(
+			"Token saved for GitHub, but the verification result could not be saved. The connection is saved; retry from /plugins.",
+		);
+		// The expanded metadata origin names the paste flow.
+		const expanded = new McpConnectionOutcomeMessageComponent(createMcpConnectionOutcomeMessage(unverifiedPaste));
+		expanded.setExpanded(true);
+		expect(rendered(expanded)).toContain("paste flow");
+	});
+
 	test("reports a saved-but-inactive change in the body, not the header", () => {
 		const output = rendered(outcomeComponent({ ...connected, activation: "inactive" }));
 		expect(output).toContain("◆ Connected Linear · 12 tools verified");

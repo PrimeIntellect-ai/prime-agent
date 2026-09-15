@@ -1183,3 +1183,113 @@ describe("McpManager service catalog handlers", () => {
 		await expect(handlers["mcp.connect"]({})).rejects.toThrow("requires a serviceId");
 	});
 });
+
+describe("McpManager token services (paste flow)", () => {
+	let tempDir: string;
+	let authStorage: AuthStorage;
+	let store: McpConnectionStore;
+	const TOKEN_URL = "https://mcp.token-service.test/mcp";
+
+	function tokenServiceFixture(overrides: Partial<McpServiceDescriptor> = {}): McpServiceDescriptor {
+		return {
+			serviceId: "token-service",
+			label: "Token Service",
+			aliases: [],
+			transport: { type: "http", url: TOKEN_URL },
+			authStrategy: "api_key",
+			setup: {
+				status: "requires-setup",
+				reason: "paste your token",
+				fields: [{ id: "TOKEN_SERVICE_TOKEN", label: "TOKEN_SERVICE_TOKEN", required: true, kind: "bearer-token" }],
+			},
+			metadataReviewed: false,
+			legacyBuiltin: false,
+			...overrides,
+		};
+	}
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "mcp-token-mgr-"));
+		authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+		resetOAuthProviders();
+	});
+
+	afterEach(() => {
+		resetOAuthProviders();
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
+	it("verifies a token service with the STORED pasted token as the probe bearer", async () => {
+		authStorage.set("mcp:token-service", {
+			type: "mcp_static_token",
+			endpoint: TOKEN_URL,
+			bearer: "ghp_stored-token",
+			bearerFieldId: "TOKEN_SERVICE_TOKEN",
+			values: { TOKEN_SERVICE_TOKEN: "ghp_stored-token" },
+			createdAt: Date.now(),
+		});
+		const probed: string[] = [];
+		const manager = new McpManager({
+			authStorage,
+			connectionStore: store,
+			noBackgroundVerification: true,
+			getServiceCatalog: () => [tokenServiceFixture()],
+			probeConnection: async (options) => {
+				probed.push(await options.getToken());
+				return { ok: true, toolCount: 3 };
+			},
+		});
+		const record = await manager.verifyConnection("token-service");
+		expect(record.status).toBe("connected");
+		expect(record.toolCount).toBe(3);
+		expect(probed).toEqual(["ghp_stored-token"]);
+	});
+
+	it("demand-driven verification probes a token service only once its token is stored", async () => {
+		authStorage.set("mcp:token-service", {
+			type: "mcp_static_token",
+			endpoint: TOKEN_URL,
+			bearer: "ghp_stored-token",
+			bearerFieldId: "TOKEN_SERVICE_TOKEN",
+			values: { TOKEN_SERVICE_TOKEN: "ghp_stored-token" },
+			createdAt: Date.now(),
+		});
+		const probes: string[] = [];
+		const manager = new McpManager({
+			authStorage,
+			connectionStore: store,
+			getServiceCatalog: () => [tokenServiceFixture()],
+			probeConnection: async (options) => {
+				probes.push(await options.getToken());
+				return { ok: true, toolCount: 7 };
+			},
+		});
+		const listPlugins = manager.hostHandlers()["mcp.list_plugins"];
+		expect(listPlugins).toBeDefined();
+		await listPlugins({ limit: 10 });
+		// The background handshake runs and lands in the record, not the console.
+		await new Promise((resolve) => setTimeout(resolve, 60));
+		expect(probes).toEqual(["ghp_stored-token"]);
+		expect(store.get("token-service")).toMatchObject({ status: "connected", toolCount: 7 });
+	});
+
+	it("never probes a token service without a stored credential (no anonymous handshakes)", async () => {
+		const probes: string[] = [];
+		const manager = new McpManager({
+			authStorage,
+			connectionStore: store,
+			getServiceCatalog: () => [tokenServiceFixture()],
+			probeConnection: async (options) => {
+				probes.push(await options.getToken());
+				return { ok: true, toolCount: 7 };
+			},
+		});
+		const listPlugins = manager.hostHandlers()["mcp.list_plugins"];
+		expect(listPlugins).toBeDefined();
+		await listPlugins({ limit: 10 });
+		await new Promise((resolve) => setTimeout(resolve, 60));
+		expect(probes).toEqual([]);
+		expect(store.get("token-service")).toBeUndefined();
+	});
+});

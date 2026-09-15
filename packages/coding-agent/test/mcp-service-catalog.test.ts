@@ -4,8 +4,8 @@ import { join } from "node:path";
 import type { McpServiceEntry } from "@earendil-works/pi-ai/mcp";
 import { createMcpOAuthProvider, SERVICE_CATALOG } from "@earendil-works/pi-ai/mcp";
 import { registerOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AuthStorage } from "../src/core/auth-storage.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AuthStorage, type McpStaticTokenCredential } from "../src/core/auth-storage.js";
 import { MCP_PROBE_ERRORS } from "../src/core/mcp/connection-probe.js";
 import { type McpConnectionRecord, McpConnectionStore } from "../src/core/mcp/connection-store.js";
 import {
@@ -14,10 +14,14 @@ import {
 	decodePluginCursor,
 	defaultServiceCatalogProvider,
 	filterPluginViewsByStatus,
+	isPasteableTokenService,
 	type McpPluginView,
 	type McpServiceDescriptor,
+	mcpCredentialFieldPromptLabel,
+	mcpCredentialFields,
 	mcpCredentialKey,
 	mcpLoginEligibility,
+	mcpStaticTokenUsable,
 	nextMcpConnectionId,
 	pagePluginViews,
 	resolveMcpOAuthIdentity,
@@ -1520,5 +1524,284 @@ describe("/mcp and /plugins picker row counts", () => {
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("catalog token services: the paste flow (storage, views, verification)", () => {
+	let tempDir: string;
+	let authStorage: AuthStorage;
+	let store: McpConnectionStore;
+
+	const GITHUB_URL = "https://api.githubcopilot.com/mcp/";
+
+	function staticToken(overrides: Partial<McpStaticTokenCredential> = {}): McpStaticTokenCredential {
+		return {
+			type: "mcp_static_token",
+			endpoint: GITHUB_URL,
+			bearer: "ghp_pasted-token",
+			bearerFieldId: "GITHUB_PAT_TOKEN",
+			values: { GITHUB_PAT_TOKEN: "ghp_pasted-token" },
+			createdAt: Date.now(),
+			...overrides,
+		};
+	}
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "svc-catalog-token-"));
+		authStorage = AuthStorage.inMemory();
+		store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
+	it("identifies exactly the catalog's paste-an-api-key/token services and their credential fields", () => {
+		const descriptors = defaultServiceCatalogProvider()();
+		const pasteable = descriptors.filter((descriptor) => isPasteableTokenService(descriptor));
+		// The 2026-09-16 token-only cut: 13 requires-setup token services.
+		expect(pasteable.map((descriptor) => descriptor.serviceId).sort()).toEqual(
+			[
+				"aws-devops-agent",
+				"cloudinary-mediaflows",
+				"datadog",
+				"github",
+				"pagerduty",
+				"sonatype-guide",
+				"zoom",
+				"zoom-canvas",
+				"zoom-chat",
+				"zoom-meetings",
+				"zoom-revenue-accelerator",
+				"zoom-tasks",
+				"zoom-whiteboard",
+			].sort(),
+		);
+		// GitHub prompts BOTH declared credential fields, in catalog order.
+		const github = pasteable.find((descriptor) => descriptor.serviceId === "github");
+		expect(github ? mcpCredentialFields(github).map((field) => field.id) : []).toEqual([
+			"GITHUB_PAT_TOKEN",
+			"GITHUB_PERSONAL_ACCESS_TOKEN",
+		]);
+		// Datadog prompts its two API keys; the non-credential env-var field
+		// (DD_MCP_TOOLSETS) is NEVER prompted and never stored by the flow.
+		const datadog = pasteable.find((descriptor) => descriptor.serviceId === "datadog");
+		expect(datadog ? mcpCredentialFields(datadog).map((field) => field.id) : []).toEqual([
+			"DD_API_KEY",
+			"DD_APPLICATION_KEY",
+		]);
+		// Non-token services are not pasteable.
+		expect(isPasteableTokenService(serviceFixture())).toBe(false);
+	});
+
+	it("derives human prompt labels from the field, never the raw env var alone", () => {
+		const descriptors = defaultServiceCatalogProvider()();
+		const byId = (id: string) => descriptors.find((descriptor) => descriptor.serviceId === id);
+		const github = byId("github");
+		expect(github).toBeDefined();
+		const githubFields = github ? mcpCredentialFields(github) : [];
+		expect(mcpCredentialFieldPromptLabel(github!, githubFields[0]!, true)).toBe(
+			"GitHub personal access token (GITHUB_PAT_TOKEN)",
+		);
+		expect(mcpCredentialFieldPromptLabel(github!, githubFields[1]!, true)).toBe(
+			"GitHub personal access token (GITHUB_PERSONAL_ACCESS_TOKEN)",
+		);
+		// Single-field services keep the plain noun (Kevin's live-testing example).
+		expect(mcpCredentialFieldPromptLabel(byId("pagerduty")!, mcpCredentialFields(byId("pagerduty")!)[0]!)).toBe(
+			"PagerDuty API key",
+		);
+		expect(mcpCredentialFieldPromptLabel(byId("zoom-chat")!, mcpCredentialFields(byId("zoom-chat")!)[0]!)).toBe(
+			"Zoom Chat access token",
+		);
+		expect(
+			mcpCredentialFieldPromptLabel(byId("sonatype-guide")!, mcpCredentialFields(byId("sonatype-guide")!)[0]!),
+		).toBe("Sonatype Guide token");
+	});
+
+	it("shares ONE static-token usability rule: type, endpoint binding, non-empty bearer", () => {
+		expect(mcpStaticTokenUsable(undefined, GITHUB_URL)).toMatchObject({ usable: false, reason: "missing" });
+		expect(mcpStaticTokenUsable(oauthCredential(), GITHUB_URL)).toMatchObject({
+			usable: false,
+			reason: "wrong-type",
+		});
+		expect(mcpStaticTokenUsable(staticToken({ endpoint: undefined as never }), GITHUB_URL)).toMatchObject({
+			usable: false,
+			reason: "unbound",
+		});
+		expect(mcpStaticTokenUsable(staticToken({ endpoint: "https://other.example/mcp" }), GITHUB_URL)).toMatchObject({
+			usable: false,
+			reason: "cross-endpoint",
+		});
+		expect(mcpStaticTokenUsable(staticToken({ bearer: "" }), GITHUB_URL)).toMatchObject({
+			usable: false,
+			reason: "empty-bearer",
+		});
+		expect(mcpStaticTokenUsable(staticToken(), GITHUB_URL)).toEqual({ usable: true });
+	});
+
+	it("renders the token service as setup_required with a paste action, and env presence never connects it", () => {
+		const github = defaultServiceCatalogProvider()().find((descriptor) => descriptor.serviceId === "github");
+		expect(github).toBeDefined();
+		const views = buildPluginViews({
+			services: [github!],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views[0]).toMatchObject({
+			connectionStatus: "setup_required",
+			connectable: false,
+			pasteToken: true,
+			connectionIds: [],
+		});
+		expect(views[0]?.setupHint).toBe(
+			"paste a GitHub personal access token (GITHUB_PAT_TOKEN or GITHUB_PERSONAL_ACCESS_TOKEN)",
+		);
+	});
+
+	it("never reports connected from a stored pasted token alone: pending until the handshake verifies", () => {
+		const github = defaultServiceCatalogProvider()().find((descriptor) => descriptor.serviceId === "github");
+		authStorage.set(mcpCredentialKey("github"), staticToken());
+		const views = buildPluginViews({
+			services: [github!],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views[0]).toMatchObject({ connectionStatus: "pending", connectionIds: ["github"] });
+	});
+
+	it("surfaces an unbound pasted token as reconnect-required, never pending or connected", () => {
+		const github = defaultServiceCatalogProvider()().find((descriptor) => descriptor.serviceId === "github");
+		authStorage.set(mcpCredentialKey("github"), staticToken({ endpoint: "https://moved.example/mcp" }));
+		const views = buildPluginViews({
+			services: [github!],
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		});
+		expect(views[0]?.connectionStatus).toBe("error");
+		expect(views[0]?.setupHint).toContain("not bound to this endpoint");
+	});
+
+	it("verifies with the stored pasted token and records connected only after a real handshake", async () => {
+		authStorage.set(mcpCredentialKey("github"), staticToken());
+		const probedTokens: string[] = [];
+		const record = await verifyMcpConnection({
+			authStorage,
+			connectionStore: store,
+			connectionId: "github",
+			serviceId: "github",
+			label: "GitHub",
+			endpoint: GITHUB_URL,
+			usesOAuth: false,
+			staticToken: true,
+			probe: async (options) => {
+				probedTokens.push(await options.getToken());
+				return { ok: true, toolCount: 4 };
+			},
+		});
+		expect(probedTokens).toEqual(["ghp_pasted-token"]);
+		expect(record.status).toBe("connected");
+		expect(record.toolCount).toBe(4);
+		expect(store.get("github")).toMatchObject({ status: "connected", toolCount: 4 });
+	});
+
+	it("records error with a fixed safe category when the pasted token is rejected", async () => {
+		authStorage.set(mcpCredentialKey("github"), staticToken());
+		const record = await verifyMcpConnection({
+			authStorage,
+			connectionStore: store,
+			connectionId: "github",
+			serviceId: "github",
+			label: "GitHub",
+			endpoint: GITHUB_URL,
+			usesOAuth: false,
+			staticToken: true,
+			probe: async () => ({ ok: false, error: MCP_PROBE_ERRORS.UNAUTHORIZED }),
+		});
+		expect(record.status).toBe("error");
+		expect(record.lastError).toBe(MCP_PROBE_ERRORS.UNAUTHORIZED);
+		expect(store.get("github")?.status).toBe("error");
+	});
+
+	it("refuses to verify an unbound pasted token before any network operation", async () => {
+		authStorage.set(mcpCredentialKey("github"), staticToken({ endpoint: "https://moved.example/mcp" }));
+		const probe = vi.fn(async () => ({ ok: true as const, toolCount: 1 }));
+		const record = await verifyMcpConnection({
+			authStorage,
+			connectionStore: store,
+			connectionId: "github",
+			serviceId: "github",
+			label: "GitHub",
+			endpoint: GITHUB_URL,
+			usesOAuth: false,
+			staticToken: true,
+			probe,
+		});
+		expect(probe).not.toHaveBeenCalled();
+		expect(record.status).toBe("error");
+		expect(record.lastError).toBe(MCP_PROBE_ERRORS.UNBOUND_CREDENTIAL);
+	});
+
+	it("discards a verify result when the pasted token rotates or is removed mid-probe", async () => {
+		authStorage.set(mcpCredentialKey("github"), staticToken());
+		let releaseProbe: (() => void) | undefined;
+		const probeGate = new Promise<void>((resolve) => {
+			releaseProbe = resolve;
+		});
+		const verifyPromise = verifyMcpConnection({
+			authStorage,
+			connectionStore: store,
+			connectionId: "github",
+			serviceId: "github",
+			label: "GitHub",
+			endpoint: GITHUB_URL,
+			usesOAuth: false,
+			staticToken: true,
+			probe: async () => {
+				await probeGate;
+				return { ok: true, toolCount: 2 };
+			},
+		});
+		// A concurrent re-paste rotates the credential while the probe runs.
+		authStorage.set(mcpCredentialKey("github"), staticToken({ bearer: "ghp_rotated" }));
+		releaseProbe?.();
+		const record = await verifyPromise;
+		expect(record.status).toBe("pending");
+		expect(record.lastError).toBe(MCP_PROBE_ERRORS.CREDENTIAL_CHANGED);
+		expect(store.get("github")).toBeUndefined();
+	});
+
+	it("keeps verification honest when no usable credential exists: never connected, never a probe", async () => {
+		const probe = vi.fn(async () => ({ ok: true as const, toolCount: 1 }));
+		const cases: Array<McpStaticTokenCredential | ReturnType<typeof oauthCredential> | undefined> = [
+			undefined,
+			oauthCredential(3600_000, GITHUB_URL),
+			staticToken({ bearer: "" }),
+		];
+		for (const [index, credential] of cases.entries()) {
+			if (credential) authStorage.set(mcpCredentialKey("github"), credential);
+			else authStorage.remove(mcpCredentialKey("github"));
+			// Each case gets a fresh record state: the verdict is per-case, and
+			// a missing/wrong-typed/empty credential never inherits one.
+			const caseStore = McpConnectionStore.open(join(tempDir, `conns-${index}`, "mcp-connections.json"));
+			const record = await verifyMcpConnection({
+				authStorage,
+				connectionStore: caseStore,
+				connectionId: "github",
+				serviceId: "github",
+				label: "GitHub",
+				endpoint: GITHUB_URL,
+				usesOAuth: false,
+				staticToken: true,
+				probe,
+			});
+			expect(record.status).toBe("pending");
+			expect(record.lastError).toBe(MCP_PROBE_ERRORS.UNKNOWN);
+			expect(record.verifiedAt).toBeUndefined();
+			expect(record.toolCount).toBeUndefined();
+		}
+		expect(probe).not.toHaveBeenCalled();
 	});
 });

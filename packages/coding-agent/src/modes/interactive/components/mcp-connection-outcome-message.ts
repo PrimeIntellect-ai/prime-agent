@@ -63,7 +63,9 @@ function outcomeMetadata(details: McpOutcomeDetails): string {
 		? disconnectionOrigin(details)
 		: details.source === "retry"
 			? "retry verification"
-			: "login flow";
+			: details.source === "paste"
+				? "paste flow"
+				: "login flow";
 	return [origin, ...(details.connectionId ? [`account ${details.connectionId}`] : []), activation].join(" · ");
 }
 

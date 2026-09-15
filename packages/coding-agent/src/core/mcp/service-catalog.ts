@@ -6,7 +6,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { LocalCatalogLoadResult, McpServiceEntry } from "@earendil-works/pi-ai/mcp";
+import type { LocalCatalogLoadResult, McpServiceEntry, McpServiceSetupField } from "@earendil-works/pi-ai/mcp";
 import { createMcpOAuthProvider, loadLocalServiceCatalog, SERVICE_CATALOG } from "@earendil-works/pi-ai/mcp";
 import type { AuthCredential, AuthStorage } from "../auth-storage.js";
 import type { McpServerConfig } from "../settings-manager.js";
@@ -37,6 +37,11 @@ export interface McpPluginView {
 	connectionIds: string[];
 	/** View-only marker: this row removes the account instead of connecting. */
 	removeAction?: boolean;
+	/**
+	 * View-only marker: this row opens the inline paste panel (a requires-setup
+	 * token service with credential fields). Never a connected/verified claim.
+	 */
+	pasteToken?: boolean;
 	/** Catalog metadata aliases (searchable; never runtime claims). */
 	aliases?: string[];
 	description?: string;
@@ -79,7 +84,12 @@ export interface McpServiceDescriptor {
 	homepage?: string;
 	transport: { type: "http"; url: string } | { type: "http-template" | "stdio" | "other" };
 	authStrategy: "oauth" | "api_key" | "none" | "unknown";
-	setup: { status: "ready" | "requires-setup"; reason?: string };
+	setup: {
+		status: "ready" | "requires-setup";
+		reason?: string;
+		/** Setup fields the entry collects; credential kinds drive the paste flow. */
+		fields?: readonly McpServiceSetupField[];
+	};
 	/** True only for legacy built-ins whose provider OAuth metadata was reviewed. Never a runtime/interop claim. */
 	metadataReviewed: boolean;
 	/** Advisory client-registration capability mirrored from the catalog (shapes engine error guidance only). */
@@ -133,6 +143,7 @@ function mapCatalogEntry(entry: McpServiceEntry, localSource: boolean): McpServi
 		setup: {
 			status: entry.setup.status,
 			...(entry.setup.reason ? { reason: entry.setup.reason } : {}),
+			...(entry.setup.fields ? { fields: [...entry.setup.fields] } : {}),
 		},
 		metadataReviewed: entry.verification?.status === "metadata-reviewed",
 		...(entry.auth.clientRegistration ? { clientRegistration: entry.auth.clientRegistration } : {}),
@@ -331,6 +342,129 @@ export function freshMcpLoginAllowed(service: McpServiceDescriptor): boolean {
 		service.setup.status === "ready" &&
 		service.pinnedFromRecord !== true
 	);
+}
+
+/** Credential kinds the inline paste flow collects and stores. */
+const PASTE_CREDENTIAL_FIELD_KINDS: ReadonlySet<string> = new Set(["bearer-token", "api-key"]);
+
+/**
+ * The required credential fields a service collects, in catalog order — the
+ * paste flow's prompt order. Non-credential fields (env-var kind, url, tenant)
+ * are NOT returned: the flow never prompts for them and never stores values for
+ * them; setup field ids are metadata, never environment variables to read.
+ */
+export function mcpCredentialFields(service: McpServiceDescriptor): readonly McpServiceSetupField[] {
+	const fields = service.setup.fields ?? [];
+	return fields.filter(
+		(field) => field.required === true && field.kind !== undefined && PASTE_CREDENTIAL_FIELD_KINDS.has(field.kind),
+	);
+}
+
+/**
+ * True when selecting this catalog entry opens the inline paste panel: an HTTP
+ * endpoint that requires setup and collects at least one required credential
+ * field. These are the "paste a key" services — Connect-by-OAuth stays the
+ * freshMcpLoginAllowed path; entries without a concrete endpoint are not
+ * pasteable (no URL, no handshake to verify against).
+ */
+export function isPasteableTokenService(service: McpServiceDescriptor | undefined): boolean {
+	if (!service) return false;
+	if (service.transport.type !== "http" || !service.transport.url) return false;
+	if (service.setup.status !== "requires-setup") return false;
+	return mcpCredentialFields(service).length > 0;
+}
+
+/**
+ * Human prompt label for one credential field, derived from the field id and the
+ * service identity ("GitHub personal access token"). The derivation is display
+ * copy only — it never influences what is stored or sent.
+ */
+export function mcpCredentialFieldPromptLabel(
+	service: McpServiceDescriptor,
+	field: McpServiceSetupField,
+	multiField = false,
+): string {
+	const stripWords = new Set(
+		[
+			...service.serviceId.split(/[^a-z0-9]+/i),
+			...service.label.split(/[^a-zA-Z0-9]+/),
+			// The protocol word is never part of a credential's name.
+			"mcp",
+		]
+			.map((word) => word.trim().toLowerCase())
+			.filter(Boolean),
+	);
+	const tokens = field.id.split(/[_-]+/).filter(Boolean);
+	const serviceIdLower = service.serviceId.toLowerCase();
+	const kept: string[] = [];
+	for (const token of tokens) {
+		const lower = token.toLowerCase();
+		if (stripWords.has(lower)) continue;
+		// Branding prefixes never name the credential: a direct prefix of the
+		// service id ("cld" for "cloudinary") or a short uppercase
+		// abbreviation sharing the id's first letter ("DD" for "datadog").
+		if (kept.length === 0) {
+			if (serviceIdLower.startsWith(lower)) continue;
+			if (
+				token.length <= 3 &&
+				token === token.toUpperCase() &&
+				!FIELD_LABEL_ACRONYMS.has(lower) &&
+				serviceIdLower.startsWith(token[0]?.toLowerCase() ?? "")
+			) {
+				continue;
+			}
+		}
+		kept.push(token);
+	}
+	let noun: string;
+	if (kept.length === 0) {
+		noun = field.label;
+	} else {
+		noun = kept
+			.map((token) => {
+				if (token === "PAT") return "personal access token";
+				// Real acronyms stay uppercase (API, DD, AWS); every other
+				// token reads as a word (KEY -> "key", TOKEN -> "token").
+				return FIELD_LABEL_ACRONYMS.has(token.toLowerCase()) ? token.toUpperCase() : token.toLowerCase();
+			})
+			.join(" ")
+			.replace(/\btoken\s+token\b/gi, "token")
+			.trim();
+	}
+	const suffix = multiField ? ` (${field.id})` : "";
+	return `${service.label} ${noun}${suffix}`;
+}
+
+/**
+ * Tokens that stay uppercase in the derived label: real acronyms, not shouty ids.
+ * "DD" is deliberately absent — it is a branding abbreviation the strip rule
+ * removes ("Datadog DD_API_KEY" reads as "Datadog API key").
+ */
+const FIELD_LABEL_ACRONYMS: ReadonlySet<string> = new Set(["api", "aws", "ci", "sdk", "cli", "id"]);
+
+/** Why a stored static token credential is not usable at an endpoint. */
+export type McpStaticTokenUsabilityReason = "missing" | "wrong-type" | "unbound" | "cross-endpoint" | "empty-bearer";
+
+/**
+ * ONE shared rule for whether a stored credential is a usable pasted static
+ * token at an endpoint: typed mcp_static_token, bound to exactly this endpoint,
+ * with a non-empty bearer. The manager's dispatch eligibility, the account-state
+ * resolver, and verification all consume this predicate so their answers can
+ * never drift. There is no expiry: a static token is usable until the user
+ * removes or replaces it.
+ */
+export function mcpStaticTokenUsable(
+	credential: AuthCredential | undefined,
+	endpoint: string,
+): { usable: boolean; reason?: McpStaticTokenUsabilityReason } {
+	if (credential === undefined) return { usable: false, reason: "missing" };
+	if (credential.type !== "mcp_static_token") return { usable: false, reason: "wrong-type" };
+	if (typeof credential.bearer !== "string" || credential.bearer.length === 0) {
+		return { usable: false, reason: "empty-bearer" };
+	}
+	if (credential.endpoint === undefined) return { usable: false, reason: "unbound" };
+	if (credential.endpoint !== endpoint) return { usable: false, reason: "cross-endpoint" };
+	return { usable: true };
 }
 
 /** Resolve one operation, never infer approval from an aggregate account status. */
@@ -561,6 +695,8 @@ function httpConnectionStatus(options: {
 	connectionStore: McpConnectionStore;
 	usesOAuth: boolean;
 	bearerTokenEnvVar?: string;
+	/** The connection authenticates with a pasted static token credential. */
+	staticToken?: boolean;
 	/** Declared no-auth endpoint: dispatchable without credentials (kernel handshakes). */
 	declaredNoAuth?: boolean;
 }): HttpStatusResult {
@@ -641,6 +777,36 @@ function httpConnectionStatus(options: {
 		if (record?.status === "error") return { status: "error", setupHint: record.lastError, record };
 		return { status: "pending", setupHint: "Bearer token present; connection verification pending." };
 	}
+	if (options.staticToken) {
+		// A pasted static token: the ONE shared usability rule (type, endpoint
+		// binding, non-empty bearer), then the SAME record-driven states as the
+		// env-var path. There is no expiry: the token is usable until removed
+		// or replaced, and setup field ids are never read as env vars.
+		const token = mcpStaticTokenUsable(authStorage.get(mcpCredentialKey(connectionId)), endpoint);
+		if (!token.usable) {
+			if (token.reason === "unbound" || token.reason === "cross-endpoint") {
+				// Endpoint binding: a pasted token must prove where it belongs
+				// before it counts — same rule as an OAuth grant.
+				return {
+					status: "error",
+					setupHint: "Stored credentials are not bound to this endpoint. Reconnect required.",
+					record,
+				};
+			}
+			if (record) {
+				return {
+					status: "error",
+					setupHint: "Stored credentials are missing. Reconnect required.",
+					record,
+				};
+			}
+			return { status: "not_connected" };
+		}
+		if (record?.status === "connected") return { status: "connected", record };
+		if (record?.status === "pending") return { status: "pending", setupHint: record.lastError, record };
+		if (record?.status === "error") return { status: "error", setupHint: record.lastError, record };
+		return { status: "pending", setupHint: "Token stored; connection verification pending." };
+	}
 	if (options.declaredNoAuth) return { status: "connected", record };
 	return { status: "not_connected" };
 }
@@ -672,6 +838,8 @@ function catalogServiceNotConnectedView(service: McpServiceDescriptor): McpPlugi
 		usesOAuth: service.authStrategy === "oauth" || service.authStrategy === "unknown",
 		source: "catalog",
 		connectionIds: [],
+		// A pasteable token service opens the inline paste panel from this row.
+		...(isPasteableTokenService(service) ? { pasteToken: true } : {}),
 		...(service.description ? { description: service.description } : {}),
 		...(service.category ? { category: service.category } : {}),
 		...(service.publisher ? { publisher: service.publisher } : {}),
@@ -706,6 +874,8 @@ export function accountStateFor(options: {
 	authStorage: AuthStorage;
 	connectionStore: McpConnectionStore;
 	usesOAuth?: boolean;
+	/** The connection authenticates with a pasted static token credential. */
+	staticToken?: boolean;
 }): McpAccountState {
 	const state = httpConnectionStatus({
 		connectionId: options.connectionId,
@@ -713,6 +883,7 @@ export function accountStateFor(options: {
 		authStorage: options.authStorage,
 		connectionStore: options.connectionStore,
 		usesOAuth: options.usesOAuth ?? true,
+		...(options.staticToken ? { staticToken: true } : {}),
 	});
 	return {
 		connectionId: options.connectionId,
@@ -755,6 +926,8 @@ export function accountStatesFor(options: {
 				authStorage,
 				connectionStore,
 				usesOAuth: service.authStrategy === "oauth" || service.authStrategy === "unknown",
+				// Token services authenticate with the pasted static token.
+				...(isPasteableTokenService(service) ? { staticToken: true } : {}),
 			});
 		})
 		.filter(
@@ -778,6 +951,7 @@ function baseCatalogServiceView(
 			authStorage,
 			connectionStore,
 			usesOAuth: service.authStrategy === "oauth" || service.authStrategy === "unknown",
+			...(isPasteableTokenService(service) ? { staticToken: true } : {}),
 		});
 		if (primary.status === "not_connected" && service.authStrategy === "none") {
 			return catalogServiceNotConnectedView(service);
@@ -1107,6 +1281,8 @@ export interface VerifyMcpConnectionOptions {
 	endpoint: string;
 	usesOAuth: boolean;
 	bearerTokenEnvVar?: string;
+	/** The connection authenticates with a pasted static token credential. */
+	staticToken?: boolean;
 	/** Injectable probe for tests; defaults to the real streamable-HTTP probe. */
 	probe?: typeof probeMcpEndpoint;
 	timeoutMs?: number;
@@ -1138,9 +1314,13 @@ export async function verifyMcpConnection(options: VerifyMcpConnectionOptions): 
 	// refreshes credentials or probes on behalf of an active attempt.
 	if (expectedRecord?.attemptId !== undefined) return { ...expectedRecord, status: "pending" };
 	const oauthSource = usesOAuth && !bearerTokenEnvVar;
+	// A pasted static token connection: the stored credential is the token
+	// source, exactly like the OAuth grant branch but with no refresh concept.
+	const staticTokenSource = options.staticToken === true;
 	const currentSource = (): string => {
 		if (bearerTokenEnvVar) return process.env[bearerTokenEnvVar]?.trim() ?? "";
-		if (oauthSource) return JSON.stringify(authStorage.getVerified(mcpCredentialKey(connectionId))) ?? "";
+		if (oauthSource || staticTokenSource)
+			return JSON.stringify(authStorage.getVerified(mcpCredentialKey(connectionId))) ?? "";
 		return "";
 	};
 	let sourceSnapshot: string;
@@ -1176,7 +1356,21 @@ export async function verifyMcpConnection(options: VerifyMcpConnectionOptions): 
 				return await persist();
 			}
 		}
-		const token = await resolveConnectionToken(authStorage, connectionId, oauthSource, bearerTokenEnvVar);
+		if (staticTokenSource) {
+			const credential = authStorage.getVerified(mcpCredentialKey(connectionId));
+			if (credential?.type === "mcp_static_token" && credential.endpoint !== endpoint) {
+				record.status = "error";
+				record.lastError = MCP_PROBE_ERRORS.UNBOUND_CREDENTIAL;
+				return await persist();
+			}
+		}
+		const token = await resolveConnectionToken(
+			authStorage,
+			connectionId,
+			oauthSource,
+			bearerTokenEnvVar,
+			staticTokenSource,
+		);
 		// getApiKey may refresh. Bind both the probe token and the complete fresh
 		// credential identity (including endpoint) before any network operation.
 		if (oauthSource) {
@@ -1190,10 +1384,23 @@ export async function verifyMcpConnection(options: VerifyMcpConnectionOptions): 
 				return { ...record, lastError: MCP_PROBE_ERRORS.CREDENTIAL_CHANGED };
 			}
 			sourceSnapshot = JSON.stringify(credential) ?? "";
+		} else if (staticTokenSource) {
+			// The probe token must be exactly the currently stored bearer: a
+			// rotation or logout between reads discards the whole result.
+			const credential = authStorage.getVerified(mcpCredentialKey(connectionId));
+			if (
+				token &&
+				(credential?.type !== "mcp_static_token" ||
+					credential.endpoint !== endpoint ||
+					!sameGrantToken(token, credential.bearer))
+			) {
+				return { ...record, lastError: MCP_PROBE_ERRORS.CREDENTIAL_CHANGED };
+			}
+			sourceSnapshot = JSON.stringify(credential) ?? "";
 		} else if (bearerTokenEnvVar) {
 			sourceSnapshot = token;
 		}
-		if ((oauthSource || bearerTokenEnvVar) && !token) {
+		if ((oauthSource || bearerTokenEnvVar || staticTokenSource) && !token) {
 			record.lastError = MCP_PROBE_ERRORS.UNKNOWN;
 			return await persist();
 		}
@@ -1225,12 +1432,19 @@ async function resolveConnectionToken(
 	connectionId: string,
 	usesOAuth: boolean,
 	bearerTokenEnvVar: string | undefined,
+	staticTokenSource = false,
 ): Promise<string> {
 	if (usesOAuth) {
 		const token = await authStorage.getApiKey(mcpCredentialKey(connectionId));
 		return token ?? "";
 	}
 	if (bearerTokenEnvVar) return process.env[bearerTokenEnvVar]?.trim() ?? "";
+	if (staticTokenSource) {
+		// A pasted static token: the stored credential's bearer value. Setup
+		// field ids are never read as environment variables.
+		const credential = authStorage.getVerified(mcpCredentialKey(connectionId));
+		return credential?.type === "mcp_static_token" ? credential.bearer : "";
+	}
 	return "";
 }
 

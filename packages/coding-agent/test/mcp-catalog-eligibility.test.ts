@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type McpServiceEntry, SERVICE_CATALOG } from "@earendil-works/pi-ai/mcp";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type AuthCredential, AuthStorage } from "../src/core/auth-storage.js";
+import { type AuthCredential, AuthStorage, type McpStaticTokenCredential } from "../src/core/auth-storage.js";
 
 import { type McpConnectionRecord, McpConnectionStore } from "../src/core/mcp/connection-store.js";
 import { McpManager } from "../src/core/mcp/mcp-manager.js";
@@ -517,5 +517,179 @@ describe("MCP catalog cap protection (installed rows always survive)", () => {
 		const diagnostics = resolution.diagnostics.join("\n");
 		expect(diagnostics, "the diagnostic must state the cap was exceeded by installed inventory").toContain("capped");
 		expect(diagnostics).toContain("505");
+	});
+});
+
+describe("MCP catalog token services (paste flow) eligibility and dispatch", () => {
+	let tempDir: string;
+	let authStorage: AuthStorage;
+	let store: McpConnectionStore;
+	const savedEnv: Record<string, string | undefined> = {};
+	const GITHUB_URL = "https://api.githubcopilot.com/mcp/";
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "mcp-token-eligibility-"));
+		authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+	});
+
+	afterEach(() => {
+		for (const [key, value] of Object.entries(savedEnv)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		for (const key of Object.keys(savedEnv)) delete savedEnv[key];
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
+	function managerFor(options: {
+		services?: readonly McpServiceDescriptor[];
+		userServers?: Record<string, unknown>;
+	}): McpManager {
+		return new McpManager({
+			authStorage,
+			connectionStore: store,
+			noBackgroundVerification: true,
+			getServiceCatalog: () => options.services ?? [],
+			getUserServers: () => (options.userServers ?? undefined) as never,
+		});
+	}
+
+	async function configFor(manager: McpManager, server: string): Promise<Record<string, unknown>> {
+		const handler = manager.hostHandlers()["mcp.config"];
+		if (!handler) throw new Error("mcp.config handler missing");
+		return handler({ server });
+	}
+
+	function storedGithubToken(overrides: Partial<McpStaticTokenCredential> = {}): McpStaticTokenCredential {
+		return {
+			type: "mcp_static_token",
+			endpoint: GITHUB_URL,
+			bearer: "ghp_pasted-token",
+			bearerFieldId: "GITHUB_PAT_TOKEN",
+			values: { GITHUB_PAT_TOKEN: "ghp_pasted-token" },
+			createdAt: Date.now(),
+			...overrides,
+		};
+	}
+
+	it("a stored pasted token enables the real github row with the setup env var UNSET", async () => {
+		const descriptors = defaultServiceCatalogProvider()();
+		// The setup fields NAME env vars; they stay UNSET and unread.
+		savedEnv.GITHUB_PAT_TOKEN = process.env.GITHUB_PAT_TOKEN;
+		delete process.env.GITHUB_PAT_TOKEN;
+		savedEnv.GITHUB_PERSONAL_ACCESS_TOKEN = process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+		delete process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+
+		authStorage.set("mcp:github", storedGithubToken());
+		const manager = managerFor({ services: descriptors });
+		expect(manager.getEnabledPersistentGenericServers()).toContain("github");
+		expect(manager.listStatus().find((row) => row.server === "github")?.enabled).toBe(true);
+		const config = await configFor(manager, "github");
+		expect(config).toMatchObject({
+			type: "http",
+			url: GITHUB_URL,
+			credentialSource: "static-token",
+		});
+	});
+
+	it("a stored pasted token enables nothing else: eligibility binds to the exact id and endpoint", async () => {
+		const descriptors = defaultServiceCatalogProvider()();
+		authStorage.set("mcp:github", storedGithubToken());
+		const manager = managerFor({ services: descriptors });
+		const enabled = manager.getEnabledPersistentGenericServers();
+		expect(enabled).toContain("github");
+		// Every other token service stays closed (its id has no credential).
+		for (const serviceId of ["pagerduty", "datadog", "zoom"]) {
+			expect(enabled, serviceId).not.toContain(serviceId);
+		}
+		// A token bound to another endpoint never serves this row.
+		authStorage.set("mcp:pagerduty", storedGithubToken());
+		const other = managerFor({ services: descriptors });
+		expect(other.getEnabledPersistentGenericServers()).not.toContain("pagerduty");
+		expect(await configFor(other, "pagerduty")).toEqual({});
+	});
+
+	it("github still fails closed with no stored token even when its setup env vars are set", async () => {
+		const descriptors = defaultServiceCatalogProvider()();
+		savedEnv.GITHUB_PAT_TOKEN = process.env.GITHUB_PAT_TOKEN;
+		process.env.GITHUB_PAT_TOKEN = "ambient-guess";
+		const manager = managerFor({ services: descriptors });
+		// No inference from field ids: the env var the field NAMES is not a source.
+		expect(manager.getEnabledPersistentGenericServers()).not.toContain("github");
+		expect(await configFor(manager, "github")).toEqual({});
+		const view = buildPluginViews({
+			services: descriptors,
+			userServers: undefined,
+			authStorage,
+			connectionStore: store,
+		}).find((plugin) => plugin.serviceId === "github");
+		expect(view?.connectionStatus).toBe("setup_required");
+		expect(view?.connectable).toBe(false);
+	});
+
+	it("a wrong-typed or unbound stored credential never enables a token service", async () => {
+		const descriptors = defaultServiceCatalogProvider()();
+		// An OAuth grant stored under the token service id is the wrong type.
+		authStorage.set("mcp:github", {
+			type: "oauth",
+			access: "oauth-grant",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: GITHUB_URL,
+		});
+		let manager = managerFor({ services: descriptors });
+		expect(manager.getEnabledPersistentGenericServers()).not.toContain("github");
+		expect(await configFor(manager, "github")).toEqual({});
+
+		// An unbound pasted token (no endpoint) fails closed too.
+		authStorage.set("mcp:github", storedGithubToken({ endpoint: undefined as never }));
+		manager = managerFor({ services: descriptors });
+		expect(manager.getEnabledPersistentGenericServers()).not.toContain("github");
+		expect(await configFor(manager, "github")).toEqual({});
+	});
+
+	it("a reserved builtin name with a stored pasted token still fails closed under a user shadow", async () => {
+		const reservedTokenService = descriptor({
+			serviceId: "linear",
+			label: "Linear",
+			legacyBuiltin: true,
+			authStrategy: "api_key",
+			setup: {
+				status: "requires-setup",
+				reason: "paste a token",
+				fields: [{ id: "LINEAR_TOKEN", label: "LINEAR_TOKEN", required: true, kind: "bearer-token" }],
+			},
+		});
+		authStorage.set("mcp:linear", {
+			type: "mcp_static_token",
+			endpoint: "https://shadow.example.test/mcp",
+			bearer: "shadow-token",
+			bearerFieldId: "LINEAR_TOKEN",
+			values: { LINEAR_TOKEN: "shadow-token" },
+			createdAt: Date.now(),
+		});
+		const manager = managerFor({
+			services: [reservedTokenService],
+			userServers: { linear: { type: "http", url: "https://shadow.example.test/mcp", oauth: true } },
+		});
+		expect(
+			manager.getEnabledPersistentGenericServers(),
+			"a shadowed reserved name never dispatches, even with a stored token",
+		).not.toContain("linear");
+		expect(await configFor(manager, "linear")).toEqual({});
+	});
+
+	it("a user-declared bearer env server stays enabled by its env var alone (no stored credential)", async () => {
+		savedEnv.MATRIX_BEARER = process.env.MATRIX_BEARER;
+		process.env.MATRIX_BEARER = "configured-bearer";
+		const manager = managerFor({
+			services: [],
+			userServers: {
+				bearer: { type: "http", url: "https://bearer.example.test/mcp", bearerTokenEnvVar: "MATRIX_BEARER" },
+			},
+		});
+		expect(manager.getEnabledPersistentGenericServers()).toContain("bearer");
+		expect((await configFor(manager, "bearer")).bearerTokenEnvVar).toBe("MATRIX_BEARER");
 	});
 });

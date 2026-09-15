@@ -13,7 +13,7 @@ import {
 	supportsFastMode,
 	type ToolCall,
 } from "@earendil-works/pi-ai";
-import { BUILTIN_MCP_CATALOG } from "@earendil-works/pi-ai/mcp";
+import { BUILTIN_MCP_CATALOG, type McpServiceSetupField } from "@earendil-works/pi-ai/mcp";
 import { registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import type {
 	AutocompleteItem,
@@ -82,7 +82,7 @@ import {
 	uploadAllAgentTraces,
 } from "../../core/agent-traces.js";
 import { isNoModelsAvailableMessage } from "../../core/auth-guidance.js";
-import type { AuthCredential } from "../../core/auth-storage.js";
+import type { AuthCredential, McpStaticTokenCredential } from "../../core/auth-storage.js";
 import {
 	type AgentCronJob,
 	type AgentHeartbeatManagementAction,
@@ -116,8 +116,11 @@ import {
 	accountStateFor,
 	buildPluginViews,
 	createConfiguredMcpProvider,
+	isPasteableTokenService,
 	type McpPluginView,
 	type McpServiceDescriptor,
+	mcpCredentialFieldPromptLabel,
+	mcpCredentialFields,
 	mcpCredentialKey,
 	mcpLoginEligibility,
 	nextMcpConnectionId,
@@ -254,6 +257,7 @@ import {
 	MalformedMcpConnectionOutcomeMessageComponent,
 	McpConnectionOutcomeMessageComponent,
 } from "./components/mcp-connection-outcome-message.js";
+import { McpTokenPastePanelComponent } from "./components/mcp-token-paste-panel.js";
 import { createMermaidMarkdownTransform } from "./components/mermaid.js";
 import type { AuthSelectorProvider } from "./components/oauth-selector.js";
 import { PrimeOnboardingSplashComponent } from "./components/prime-onboarding-splash.js";
@@ -9535,6 +9539,19 @@ export class InteractiveMode {
 				setupHint: undefined,
 			});
 		}
+		// Token services keep a paste entry point: a stored token the handshake
+		// rejected needs a NEW paste, not a re-verify of the same value.
+		if (definition && isPasteableTokenService(definition) && !service.loginPending) {
+			accountCards.push({
+				...service,
+				label: "Paste a new token",
+				connectionIds: [],
+				connectionStatus: "not_connected",
+				connectable: false,
+				pasteToken: true,
+				setupHint: undefined,
+			});
+		}
 		const card = await this.selectServiceCatalogRow(accountCards, {
 			// Kevin (live testing): "Accounts — Cloudflare" reads as a caption;
 			// the menu is just the service, with the description above the
@@ -9722,6 +9739,15 @@ export class InteractiveMode {
 		if (service.loginPending || this.getMcpConnectionStore().get(service.serviceId)?.attemptId !== undefined) {
 			this.showStatus("Login in progress. Finish it or remove the account to cancel.");
 			return false;
+		}
+		// A requires-setup token service connects through the inline paste
+		// panel: nothing is stored until the panel completes, and the stored
+		// token is verified with a real handshake before anything claims
+		// Connected.
+		if (service.pasteToken === true) {
+			return this.pasteTokenForService(service, target, {
+				...(options.catalogServiceId ? { catalogServiceId: options.catalogServiceId } : {}),
+			});
 		}
 		const currentServices = this.resolveCurrentServiceCatalog();
 		const catalog = currentServices.find(
@@ -10149,6 +10175,156 @@ export class InteractiveMode {
 			authType: "oauth",
 			kind: "service",
 		};
+	}
+
+	/**
+	 * The inline paste flow for requires-setup token services: prompt every
+	 * required credential field in order (masked), store ONE static-token
+	 * credential under the SAME credential key OAuth uses, then verify with a
+	 * real MCP handshake. Esc cancels with nothing stored; a verification
+	 * failure keeps the decision honest (unverified, never Connected). No
+	 * fail-closed rule is relaxed: setup field ids are never read as env vars,
+	 * the credential is bound to this exact id and endpoint, and
+	 * reserved/shadowed names still fail closed.
+	 */
+	private async pasteTokenForService(
+		service: McpPluginView,
+		target:
+			| {
+					url?: string;
+					usesOAuth: boolean;
+					bearerTokenEnvVar?: string;
+					managedBySettings: boolean;
+					transport?: "stdio";
+					name?: string;
+			  }
+			| undefined,
+		options: { catalogServiceId?: string } = {},
+	): Promise<boolean> {
+		const serviceId = options.catalogServiceId ?? service.serviceId;
+		const definition = this.resolveCurrentServiceCatalog().find((entry) => entry.serviceId === serviceId);
+		if (!definition || !isPasteableTokenService(definition)) {
+			this.showStatus(service.setupHint ?? `${service.label} cannot be connected by pasting a token.`);
+			return false;
+		}
+		const ownership = reservedMcpOwnership(
+			definition,
+			this.settingsManager.getGlobalMcpServers()?.[definition.serviceId],
+		);
+		if (ownership.status !== "canonical" || service.connectionStatus === "disabled") {
+			this.showStatus(ownership.setupHint ?? "Disabled in settings.");
+			return false;
+		}
+		// The paste flow serves CATALOG definitions; a settings-managed server
+		// owns its id and keeps its settings-managed authentication.
+		if (target?.managedBySettings) {
+			this.showStatus(`${service.label} is configured through settings; manage it with /mcp or your settings file.`);
+			return false;
+		}
+		if (
+			definition.transport.type !== "http" ||
+			!definition.transport.url ||
+			target?.url !== definition.transport.url
+		) {
+			this.showStatus("The connection target changed. Open the catalog again to review it.");
+			return false;
+		}
+		const connectionId = definition.serviceId;
+		if (this.getMcpConnectionStore().get(connectionId)?.attemptId !== undefined) {
+			this.showStatus("Login in progress. Finish it or remove the account to cancel.");
+			return false;
+		}
+		const fields = mcpCredentialFields(definition);
+		const values = await this.promptForMcpTokenValues(definition, fields);
+		// Esc: nothing stored, no record, no status line.
+		if (!values) return false;
+		if (fields.some((field) => !values[field.id])) {
+			this.showStatus("The pasted values were incomplete. Nothing was stored; retry from /plugins.");
+			return false;
+		}
+		const credential: McpStaticTokenCredential = {
+			type: "mcp_static_token",
+			endpoint: definition.transport.url,
+			bearer: values[fields[0]?.id ?? ""] ?? "",
+			bearerFieldId: fields[0]?.id ?? "",
+			values,
+			createdAt: Date.now(),
+		};
+		// Stored ONLY in the agent credential store (auth.json), under the SAME
+		// key OAuth uses — never settings.json, never a status line or log.
+		this.modelRegistry.authStorage.set(mcpCredentialKey(connectionId), credential);
+		// A stored token is not "Connected": verify with a real MCP handshake
+		// that uses the stored token as the bearer.
+		let verification: McpConnectionRecord | undefined;
+		try {
+			verification = await verifyMcpConnection({
+				authStorage: this.modelRegistry.authStorage,
+				connectionStore: this.getMcpConnectionStore(),
+				connectionId,
+				serviceId: definition.serviceId,
+				label: service.label,
+				endpoint: definition.transport.url,
+				usesOAuth: false,
+				staticToken: true,
+			});
+		} catch {
+			verification = undefined;
+		}
+		// The SAME durable outcome entry the OAuth path records: success only
+		// from a verified handshake, unverified/unsaved otherwise — the token
+		// value itself never appears in the entry.
+		await this.completeMcpConnectionOutcome(
+			verification?.status === "connected"
+				? {
+						label: service.label,
+						source: "paste",
+						verification: "connected",
+						...(verification.toolCount !== undefined ? { toolCount: verification.toolCount } : {}),
+					}
+				: verification
+					? {
+							label: service.label,
+							source: "paste",
+							verification: "unverified",
+							issue: formatMcpVerificationIssue(verification.lastError),
+						}
+					: { label: service.label, source: "paste", verification: "unsaved" },
+		);
+		return verification?.status === "connected";
+	}
+
+	/**
+	 * The masked inline prompt for one service's credential fields, in catalog
+	 * order — the same inline surface as the OAuth login panel
+	 * (showInlineAuthPanel), in the #2331/#2340 panel language. Resolves with
+	 * every pasted value keyed by field id, or undefined when the user
+	 * cancelled. The raw values never leave this seam: no status line, no log,
+	 * no transcript entry, and no rendered line contains them.
+	 */
+	private promptForMcpTokenValues(
+		definition: McpServiceDescriptor,
+		fields: readonly McpServiceSetupField[],
+	): Promise<Record<string, string> | undefined> {
+		return new Promise((resolve) => {
+			let close: (() => void) | undefined;
+			const panel = new McpTokenPastePanelComponent({
+				serviceLabel: definition.label,
+				...(definition.setup.reason ? { reason: definition.setup.reason } : {}),
+				fields: fields.map((field) => ({
+					id: field.id,
+					label: mcpCredentialFieldPromptLabel(definition, field, fields.length > 1),
+				})),
+				onSubmit: (values) => {
+					close?.();
+					resolve(values);
+				},
+				onCancel: () => {
+					close?.();
+					resolve(undefined);
+				},
+			});
+			close = this.showInlineAuthPanel(panel);
+		});
 	}
 
 	private async reloadAfterMcpChange(message: string, successMessage = message): Promise<void> {

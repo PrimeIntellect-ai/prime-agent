@@ -883,6 +883,13 @@ def _credentials_unavailable(server: str) -> McpCredentialsUnavailable:
 
 
 async def _auth_identity(server: str, config: dict[str, Any]) -> str:
+    if config.get("credentialSource") == "static-token":
+        # A pasted static token has no refresh concept: it either resolves from
+        # the bound stored credential or the connection fails closed.
+        token = _static_token(server, config)
+        if not token:
+            raise _credentials_unavailable(server)
+        return hashlib.sha256(token.encode()).hexdigest()
     env_name = config.get("bearerTokenEnvVar")
     token = os.environ.get(env_name, "").strip() if isinstance(env_name, str) else ""
     if config.get("oauth") is True and not token:
@@ -903,12 +910,32 @@ async def _auth_identity(server: str, config: dict[str, Any]) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def _static_token(server: str, config: dict[str, Any]) -> str:
+    """The pasted static token for a ``static-token`` connection.
+
+    Only the endpoint-BOUND stored credential counts (``_bound_auth``): a token
+    pasted for another endpoint never attaches here. The bearer is a literal
+    pasted value — never resolved as an env-var name or a ``!command``.
+    """
+    cred = _bound_auth(f"mcp:{server}", config)
+    bearer = (cred or {}).get("bearer")
+    if not isinstance(bearer, str):
+        return ""
+    return bearer.strip()
+
+
 async def _headers(server: str, config: dict[str, Any]) -> dict[str, str]:
     raw = config.get("headers", {})
     if not isinstance(raw, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in raw.items()):
         raise ValueError("MCP HTTP headers must contain strings")
     headers = dict(raw)
     if config.get("credentialSource") == "acp":
+        return headers
+    if config.get("credentialSource") == "static-token":
+        token = _static_token(server, config)
+        if not token:
+            raise _credentials_unavailable(server)
+        headers["Authorization"] = f"Bearer {token}"
         return headers
     env_name = config.get("bearerTokenEnvVar")
     token = os.environ.get(env_name, "").strip() if isinstance(env_name, str) else ""

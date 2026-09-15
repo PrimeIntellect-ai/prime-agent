@@ -378,12 +378,15 @@ export class MenuPanel extends Container {
 
 export class MenuSearchInput implements Component, Focusable, FullWidthMenuComponent {
 	readonly fillsMenuPanel = true;
-	private readonly input = new Input();
+	private readonly input: Input;
 
 	constructor(
 		private readonly placeholder: string,
 		private readonly inline = false,
-	) {}
+		options: { masked?: boolean } = {},
+	) {
+		this.input = new Input(options.masked === true ? { masked: true } : {});
+	}
 
 	/** The inline variant renders a full-width rule as its first line. */
 	get rendersInlineTopRule(): boolean {

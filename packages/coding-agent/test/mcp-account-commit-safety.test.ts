@@ -11,6 +11,7 @@ import { mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
+import stripAnsi from "strip-ansi";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type AuthCredential, AuthStorage } from "../src/core/auth-storage.js";
 import {
@@ -19,13 +20,22 @@ import {
 	McpConnectionStore,
 	resolveMcpAccountLogoutTarget,
 } from "../src/core/mcp/connection-store.js";
+import type { McpTokenPastePanelComponent } from "../src/modes/interactive/components/mcp-token-paste-panel.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
+import { initTheme, preloadCodeHighlighter } from "../src/modes/interactive/theme/theme.js";
 
 // The store's atomic write is the coordinated seam for write-failure
 // regressions: a hoisted counter injects a failure on the Nth durable write so
 // any flush stage (reserve, finalize, later flush) can fail deterministically;
 // every other write keeps the real disk path.
 const writeControl = vi.hoisted(() => ({ writeCount: 0, failOnNthWrite: 0 }));
+// The paste-flow tests drive the real interactive flow but control the
+// verification verdict: the probe never runs (offline, no network).
+const verifyMock = vi.hoisted(() => vi.fn());
+vi.mock("../src/core/mcp/service-catalog.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../src/core/mcp/service-catalog.js")>();
+	return { ...actual, verifyMcpConnection: verifyMock };
+});
 vi.mock("../src/utils/atomic-file.js", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../src/utils/atomic-file.js")>();
 	return {
@@ -1912,5 +1922,298 @@ describe("MCP account guarded OAuth commit (interactive add-account seam)", () =
 		store.upsert(reservation("unrelated", randomUUID()));
 		await store.flush();
 		expect(McpConnectionStore.open(join(tempDir, "mcp-connections.json")).get("acme")).toEqual(retained);
+	});
+});
+
+describe("MCP token paste flow (inline panel, credential store, honest verification)", () => {
+	let tempDir: string;
+	let store: McpConnectionStore;
+	let authStorage: AuthStorage;
+	let realFetch: typeof globalThis.fetch;
+
+	const GITHUB_URL = "https://api.githubcopilot.com/mcp/";
+	const DATADOG_URL = "https://mcp.datadoghq.com/v1/mcp";
+	const SECRET = "ghp_live-secret-token-value";
+
+	type FakeThis = Record<string, unknown>;
+
+	function buildFake(prompt?: unknown): FakeThis {
+		// An own property would SHADOW the real prototype method: only install
+		// the prompt stub when a test provides one.
+		const promptStub = prompt === undefined ? {} : { promptForMcpTokenValues: prompt };
+		const fake = {
+			mcpConnectionStore: store,
+			modelRegistry: { authStorage },
+			...promptStub,
+			showStatus: vi.fn(),
+			showWarning: vi.fn(),
+			showError: vi.fn(),
+			isAgentStreaming: () => false,
+			isAgentCompacting: () => false,
+			handleReloadCommand: vi.fn(async () => true),
+			settingsManager: {
+				getGlobalMcpServers: () => undefined,
+				getMcpCatalogSources: () => [],
+			},
+			uiServices: { settingsManager: { getGlobalMcpServers: () => undefined } },
+		} as unknown as FakeThis;
+		Object.setPrototypeOf(fake, InteractiveMode.prototype);
+		return fake;
+	}
+
+	function callPaste(fake: FakeThis, serviceId: string, url: string, label: string): Promise<boolean> {
+		return (
+			fake as unknown as {
+				connectServiceFromPicker: (
+					this: unknown,
+					service: unknown,
+					target: unknown,
+					options?: unknown,
+				) => Promise<boolean>;
+			}
+		).connectServiceFromPicker.call(
+			fake,
+			{
+				serviceId,
+				label,
+				connectionStatus: "setup_required",
+				connectionIds: [],
+				connectable: false,
+				usesOAuth: false,
+				pasteToken: true,
+			},
+			{ url, usesOAuth: false, managedBySettings: false },
+			{},
+		);
+	}
+
+	/** Every user-facing surface the flow can touch; used for the leak asserts. */
+	function emitted(fake: FakeThis): string {
+		return JSON.stringify([
+			...(fake.showStatus as ReturnType<typeof vi.fn>).mock.calls,
+			...(fake.showWarning as ReturnType<typeof vi.fn>).mock.calls,
+			...(fake.showError as ReturnType<typeof vi.fn>).mock.calls,
+		]);
+	}
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "mcp-paste-flow-"));
+		store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+		authStorage = AuthStorage.inMemory();
+		verifyMock.mockReset();
+		writeControl.writeCount = 0;
+		writeControl.failOnNthWrite = 0;
+		resetOAuthProviders();
+		realFetch = globalThis.fetch;
+		globalThis.fetch = (() => {
+			throw new Error("unexpected network fetch in offline mcp-account-commit-safety test");
+		}) as typeof fetch;
+	});
+
+	afterEach(() => {
+		globalThis.fetch = realFetch;
+		resetOAuthProviders();
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
+	});
+
+	it("stores the pasted token under the owning connection's credential key and connects after verification", async () => {
+		const fieldsSeen: unknown[] = [];
+		const fake = buildFake(
+			vi.fn(async (_definition: unknown, fields: unknown[]) => {
+				fieldsSeen.push(fields);
+				return { GITHUB_PAT_TOKEN: SECRET, GITHUB_PERSONAL_ACCESS_TOKEN: SECRET };
+			}),
+		);
+		verifyMock.mockResolvedValue({
+			connectionId: "github",
+			serviceId: "github",
+			endpoint: GITHUB_URL,
+			label: "GitHub",
+			status: "connected",
+			toolCount: 2,
+			verifiedAt: Date.now(),
+			createdAt: Date.now(),
+			updatedAt: Date.now(),
+		});
+
+		await expect(callPaste(fake, "github", GITHUB_URL, "GitHub")).resolves.toBe(true);
+
+		// The credential lands under the SAME key OAuth uses, with the honest
+		// static-token shape: bound to the endpoint, no oauth fields faked.
+		expect(authStorage.get("mcp:github")).toMatchObject({
+			type: "mcp_static_token",
+			endpoint: GITHUB_URL,
+			bearer: SECRET,
+			bearerFieldId: "GITHUB_PAT_TOKEN",
+			values: { GITHUB_PAT_TOKEN: SECRET, GITHUB_PERSONAL_ACCESS_TOKEN: SECRET },
+		});
+		// Verification ran with the stored token as the source, never the env.
+		expect(verifyMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				connectionId: "github",
+				endpoint: GITHUB_URL,
+				usesOAuth: false,
+				staticToken: true,
+			}),
+		);
+		// The durable outcome entry claims Connected only from the handshake.
+		const emittedText = emitted(fake);
+		expect(emittedText).toContain("Connected GitHub (2 tools verified).");
+		// THE leak test: the raw secret appears in NO status, warning, or
+		// error call, and never in the outcome entry's persisted content.
+		expect(emittedText.includes(SECRET)).toBe(false);
+		expect(fieldsSeen).toHaveLength(1);
+	});
+
+	it("the real panel seam prompts the derived labels in order and collects masked values (datadog)", async () => {
+		initTheme("dark");
+		await preloadCodeHighlighter();
+		const captured: McpTokenPastePanelComponent[] = [];
+		const closePanel = vi.fn();
+		const fake = buildFake(undefined); // the REAL promptForMcpTokenValues runs
+		fake.showInlineAuthPanel = vi.fn((component: McpTokenPastePanelComponent) => {
+			captured.push(component);
+			component.focused = true;
+			return closePanel;
+		});
+		verifyMock.mockResolvedValue({
+			connectionId: "datadog",
+			serviceId: "datadog",
+			endpoint: DATADOG_URL,
+			label: "Datadog",
+			status: "connected",
+			toolCount: 6,
+			verifiedAt: Date.now(),
+			createdAt: Date.now(),
+			updatedAt: Date.now(),
+		});
+
+		const flow = callPaste(fake, "datadog", DATADOG_URL, "Datadog");
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(captured).toHaveLength(1);
+		const panel = captured[0]!;
+		const frame = () =>
+			panel
+				.render(120)
+				.map((line) => stripAnsi(line))
+				.join("\n");
+
+		// First field: the derived label, not the raw env-var id alone.
+		expect(frame()).toContain("Datadog API key (DD_API_KEY)");
+		for (const character of "dd-api-key-value") panel.handleInput(character);
+		panel.handleInput("\r");
+		// Second field in order; the first value appears nowhere in the frame.
+		expect(frame()).toContain("Datadog application key (DD_APPLICATION_KEY)");
+		expect(frame().includes("dd-api-key-value")).toBe(false);
+		for (const character of "dd-application-key-value") panel.handleInput(character);
+		panel.handleInput("\r");
+
+		await expect(flow).resolves.toBe(true);
+		expect(authStorage.get("mcp:datadog")).toMatchObject({
+			type: "mcp_static_token",
+			endpoint: DATADOG_URL,
+			bearer: "dd-api-key-value",
+			bearerFieldId: "DD_API_KEY",
+			values: { DD_API_KEY: "dd-api-key-value", DD_APPLICATION_KEY: "dd-application-key-value" },
+		});
+		// The panel closed exactly once, and no raw value was ever emitted.
+		expect(closePanel).toHaveBeenCalledTimes(1);
+		expect(emitted(fake).includes("dd-api-key-value")).toBe(false);
+	});
+
+	it("Esc cancels: nothing stored, no record, no verification, no claims", async () => {
+		const fake = buildFake(vi.fn(async () => undefined));
+		await expect(callPaste(fake, "github", GITHUB_URL, "GitHub")).resolves.toBe(false);
+		expect(authStorage.get("mcp:github")).toBeUndefined();
+		expect(store.get("github")).toBeUndefined();
+		expect(verifyMock).not.toHaveBeenCalled();
+		const emittedText = emitted(fake);
+		expect(emittedText).not.toContain("Connected");
+		expect(emittedText).not.toContain("saved");
+	});
+
+	it("multi-field services prompt in catalog order and store every collected value (datadog)", async () => {
+		const prompts: Array<{ id: string }[]> = [];
+		const fake = buildFake(
+			vi.fn(async (_definition: unknown, fields: Array<{ id: string }>) => {
+				prompts.push(fields);
+				return { DD_API_KEY: "dd-api-key-value", DD_APPLICATION_KEY: "dd-application-key-value" };
+			}),
+		);
+		verifyMock.mockResolvedValue({
+			connectionId: "datadog",
+			serviceId: "datadog",
+			endpoint: DATADOG_URL,
+			label: "Datadog",
+			status: "error",
+			lastError: "http-unauthorized",
+			createdAt: Date.now(),
+			updatedAt: Date.now(),
+		});
+
+		await expect(callPaste(fake, "datadog", DATADOG_URL, "Datadog")).resolves.toBe(false);
+
+		// The prompt order is the catalog order (credential fields only —
+		// DD_MCP_TOOLSETS is never prompted); the derived labels are pinned
+		// by the real-panel test above.
+		expect(prompts).toHaveLength(1);
+		expect(prompts[0]).toEqual([
+			expect.objectContaining({ id: "DD_API_KEY", kind: "api-key" }),
+			expect.objectContaining({ id: "DD_APPLICATION_KEY", kind: "api-key" }),
+		]);
+		expect(prompts[0]?.map((field) => field.id)).not.toContain("DD_MCP_TOOLSETS");
+		// Both values are stored; the FIRST credential field is the bearer.
+		expect(authStorage.get("mcp:datadog")).toMatchObject({
+			type: "mcp_static_token",
+			endpoint: DATADOG_URL,
+			bearer: "dd-api-key-value",
+			bearerFieldId: "DD_API_KEY",
+			values: { DD_API_KEY: "dd-api-key-value", DD_APPLICATION_KEY: "dd-application-key-value" },
+		});
+		// Verification failure reports unverified honestly — never Connected.
+		const emittedText = emitted(fake);
+		expect(emittedText).toContain(
+			"Token saved for Datadog, but connection verification did not complete: the endpoint rejected the stored credentials (reconnect)",
+		);
+		expect(emittedText).not.toContain("Connected Datadog");
+		// The rejected credential is reported, but its value never surfaces.
+		expect(emittedText.includes("dd-api-key-value")).toBe(false);
+	});
+
+	it("an incomplete set of pasted values stores nothing and says so", async () => {
+		const fake = buildFake(vi.fn(async () => ({ DD_API_KEY: "only-one-key" })));
+		await expect(callPaste(fake, "datadog", DATADOG_URL, "Datadog")).resolves.toBe(false);
+		expect(authStorage.get("mcp:datadog")).toBeUndefined();
+		expect(verifyMock).not.toHaveBeenCalled();
+		expect(emitted(fake)).toContain("incomplete");
+	});
+
+	it("refuses to paste when a login attempt owns the account", async () => {
+		const now = Date.now();
+		store.upsert({
+			connectionId: "github",
+			serviceId: "github",
+			endpoint: GITHUB_URL,
+			label: "GitHub",
+			status: "pending",
+			createdAt: now,
+			updatedAt: now,
+			attemptId: "attempt-in-progress",
+		});
+		const prompt = vi.fn(async () => ({ GITHUB_PAT_TOKEN: SECRET }));
+		const fake = buildFake(prompt);
+		await expect(callPaste(fake, "github", GITHUB_URL, "GitHub")).resolves.toBe(false);
+		expect(prompt).not.toHaveBeenCalled();
+		expect(authStorage.get("mcp:github")).toBeUndefined();
+		expect(emitted(fake)).toContain("Login in progress");
+	});
+
+	it("refuses to paste when the picker's target no longer matches the catalog definition", async () => {
+		const prompt = vi.fn(async () => ({ GITHUB_PAT_TOKEN: SECRET }));
+		const fake = buildFake(prompt);
+		await expect(callPaste(fake, "github", "https://moved.example.test/mcp", "GitHub")).resolves.toBe(false);
+		expect(prompt).not.toHaveBeenCalled();
+		expect(authStorage.get("mcp:github")).toBeUndefined();
+		expect(emitted(fake)).toContain("target changed");
 	});
 });

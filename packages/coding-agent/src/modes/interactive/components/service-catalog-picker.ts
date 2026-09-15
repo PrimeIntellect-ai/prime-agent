@@ -493,6 +493,9 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 		// names the row (Kevin, live testing).
 		if (service.removeAction) return "disconnect";
 		if (service.loginPending && this.mode === "accounts") return "login in progress";
+		// A requires-setup token service connects by pasting: the hint is the
+		// action, not a dead-end "see setup" pointer.
+		if (service.pasteToken && service.connectionIds.length === 0) return "paste token";
 		if (this.mode === "catalog" && service.connectionIds.length > 0) return "manage accounts";
 		if (this.mode === "accounts" && service.connectionIds.length === 0)
 			return service.usesOAuth ? "add account" : "setup guidance";
@@ -508,6 +511,9 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 
 	private statusText(service: McpPluginView): string {
 		if (service.removeAction) return theme.fg("muted", "Remove account");
+		// The accounts-mode paste row carries its action; the catalog row keeps
+		// the honest "Requires setup" state with the paste-token hint.
+		if (service.pasteToken && this.mode === "accounts") return theme.fg("accent", "Paste token");
 		if (service.loginPending) return theme.fg("warning", "Login in progress");
 		if (this.mode === "accounts" && service.connectionIds.length === 0)
 			return service.usesOAuth ? theme.fg("accent", "Add account") : theme.fg("warning", "Requires setup");
