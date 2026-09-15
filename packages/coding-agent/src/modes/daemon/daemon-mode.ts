@@ -64,7 +64,7 @@ import {
 	normalizeObserveLimit,
 	normalizeObserveMaxChars,
 } from "../../core/agent-observe.js";
-import { type PromptOptions, rlmChildLabel } from "../../core/agent-session.js";
+import { type PromptOptions, type QueuedAgentMessageDeliverySummary, rlmChildLabel } from "../../core/agent-session.js";
 import { type AgentSessionRuntimeConfig, mergeAgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
 import {
 	type AgentSessionRuntime,
@@ -4705,6 +4705,9 @@ export class AgentDaemon {
 			case "agent_messages_pause": {
 				this.agentMessagesPaused = true;
 				this.agentMessageRateLimiter.clear();
+				for (const state of this.sessions.values()) {
+					this.notifyQueuedAgentMessageSenders(state, "Agent messaging was paused before delivery.");
+				}
 				await this.clearQueuedAgentSessionMessagesForAllStates();
 				return success(command.id, "agent_messages_pause", this.getAgentMessageSafetyStatus());
 			}
@@ -4717,6 +4720,7 @@ export class AgentDaemon {
 			case "agent_messages_clear": {
 				const state = this.getSessionState(command.activeSessionId);
 				this.agentMessageRateLimiter.clearMatching((key) => key.endsWith(`->${state.activeSessionId}`));
+				this.notifyQueuedAgentMessageSenders(state, "Queued agent messages were cleared before delivery.");
 				const cleared = state.runtime.session.clearQueuedAgentMessages();
 				return success(command.id, "agent_messages_clear", cleared);
 			}
@@ -5065,11 +5069,13 @@ export class AgentDaemon {
 
 			case "clear_queue": {
 				const state = this.getSessionState(command.activeSessionId);
+				this.notifyQueuedAgentMessageSenders(state, "Queued agent messages were cleared before delivery.");
 				return success(command.id, "clear_queue", state.runtime.session.clearQueue());
 			}
 
 			case "abort_and_clear_queue": {
 				const state = this.getSessionState(command.activeSessionId);
+				this.notifyQueuedAgentMessageSenders(state, "Queued agent messages were cleared before delivery.");
 				const queue = state.runtime.session.clearQueue();
 				state.runtime.session.requestAbort();
 				return success(command.id, "abort_and_clear_queue", queue);
@@ -6102,6 +6108,48 @@ export class AgentDaemon {
 		return `cli:${this.socketPath}`;
 	}
 
+	/**
+	 * Notify locally-resident senders that their queued agent messages were
+	 * dropped before delivery. CLI senders and remote peers have no local
+	 * session to wake; a sender already closing is skipped.
+	 */
+	private notifyQueuedAgentMessageSenders(targetState: ActiveSessionState, reason: string): void {
+		let queued: QueuedAgentMessageDeliverySummary[];
+		try {
+			queued = targetState.runtime.session.queuedAgentMessages();
+		} catch (error) {
+			this.log(
+				`failed to list queued agent messages for ${targetState.activeSessionId}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return;
+		}
+		if (queued.length === 0) return;
+		const targetSessionName = targetState.runtime.session.sessionName ?? targetState.activeSessionId;
+		const bySender = new Map<string, QueuedAgentMessageDeliverySummary[]>();
+		for (const message of queued) {
+			if (!message.senderActiveSessionId) continue;
+			const group = bySender.get(message.senderActiveSessionId) ?? [];
+			group.push(message);
+			bySender.set(message.senderActiveSessionId, group);
+		}
+		for (const [senderActiveSessionId, group] of bySender) {
+			const senderState = this.sessions.get(senderActiveSessionId);
+			if (!senderState || this.closingSessions.has(senderActiveSessionId)) continue;
+			void senderState.runtime.session
+				.promptAgentMessageDeliveryFailureNotice({
+					messageIds: group.map((message) => message.id),
+					targetSessionName,
+					targetSessionId: targetState.activeSessionId,
+					reason,
+				})
+				.catch((error) => {
+					this.log(
+						`failed to notify ${senderActiveSessionId} about dropped agent messages: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				});
+		}
+	}
+
 	private async clearQueuedAgentSessionMessagesForState(state: ActiveSessionState) {
 		return state.runtime.session.clearQueuedAgentMessages();
 	}
@@ -6938,6 +6986,7 @@ export class AgentDaemon {
 		}
 		this.recordWorkerRecoveryState(state, `closed:${reason}`, false);
 		state.unsubscribe?.();
+		this.notifyQueuedAgentMessageSenders(state, `Target session closed (${reason}) before delivery.`);
 		let disposeError: unknown;
 		try {
 			await state.runtime.dispose(disposal);

@@ -47,6 +47,8 @@ export const HARNESS_DIGEST_CUSTOM_TYPE = "harness_digest";
 export const RLM_CHILD_FAILURE_CUSTOM_TYPE = "rlm_child_failure";
 export const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE = "rlm_child_terminal_notice";
 export const ASYNC_BASH_COMPLETION_CUSTOM_TYPE = "async_bash_completion";
+export const AGENT_MESSAGE_DELIVERY_FAILED_CUSTOM_TYPE = "agent_message_delivery_failed";
+export const AGENT_MESSAGE_DELIVERY_FAILED_PREVIEW_LABEL = "Agent message delivery failed";
 export const ASYNC_BASH_COMPLETION_PREVIEW_LABEL = "Background command finished";
 
 /**
@@ -172,6 +174,18 @@ export type RlmChildTerminalNoticeDetails =
 			lastAssistantTextPreview?: string;
 	  };
 
+/** Daemon-originated notice: queued agent messages were dropped before delivery. */
+export interface AgentMessageDeliveryFailedDetails {
+	/** Agent-session message ids that never reached the target conversation. */
+	messageIds: string[];
+	/** Target session display name at drop time. */
+	targetSessionName: string;
+	/** Target active session id at drop time. */
+	targetSessionId?: string;
+	/** Short human-readable cause, e.g. "target session closed (killed)". */
+	reason: string;
+}
+
 export interface AsyncBashCompletionDetails {
 	pid: number;
 	command: string;
@@ -227,6 +241,31 @@ export function createRlmChildTerminalNoticeMessage(
 	return {
 		role: "custom",
 		customType: RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+		content,
+		display: true,
+		details,
+		timestamp,
+	};
+}
+
+interface AgentMessageDeliveryFailedMessage extends CustomMessage<AgentMessageDeliveryFailedDetails> {
+	customType: typeof AGENT_MESSAGE_DELIVERY_FAILED_CUSTOM_TYPE;
+	content: string;
+}
+
+export function createAgentMessageDeliveryFailedMessage(
+	details: AgentMessageDeliveryFailedDetails,
+	timestamp = Date.now(),
+): AgentMessageDeliveryFailedMessage {
+	const target = sanitizeMessageHeaderValue(details.targetSessionName);
+	const ids = details.messageIds.map((id) => sanitizeMessageHeaderValue(id)).join(", ");
+	const content = `[agent-message-failed to:${target}]
+
+Reason: ${details.reason}
+Message ids: ${ids}`;
+	return {
+		role: "custom",
+		customType: AGENT_MESSAGE_DELIVERY_FAILED_CUSTOM_TYPE,
 		content,
 		display: true,
 		details,

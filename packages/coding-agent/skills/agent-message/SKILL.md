@@ -46,6 +46,7 @@ if child is not None:
   context; `"queued"` means a steering message was accepted and will deliver when
   the target's current work allows (`send` does not block waiting for that).
   Delivered receipts carry `deliveredAt`, queued receipts carry `queuedAt`.
+- A queued receipt is not a delivery guarantee. If the target session closes or is deleted, or its queue is paused or cleared before a queued message runs, the daemon steers a compact `[agent-message-failed to:<name>]` notice into your conversation listing the dropped message ids and the reason. Treat it as a hard delivery failure and decide whether to resend; never assume the target saw the text.
 
 ## Safety
 
