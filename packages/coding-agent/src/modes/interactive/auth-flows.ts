@@ -27,6 +27,7 @@ import {
 	compareAuthSelectorProviders,
 	OAuthSelectorComponent,
 } from "./components/oauth-selector.js";
+import { OnboardingChoiceComponent } from "./components/onboarding-choice.js";
 import { PrimeTeamSelectorComponent } from "./components/prime-team-selector.js";
 import { theme } from "./theme/theme.js";
 
@@ -101,9 +102,11 @@ export interface ProviderAuthFlowsHost {
 	 * the prompt area. Returns a callback that unmounts the panel and restores
 	 * the previous content and focus.
 	 */
-	showAuthPanel(component: Component): () => void;
+	showAuthPanel(component: Component, options?: { heading?: string }): () => void;
 	/** Terminal rows available to auth panels; selectors size their lists to it. */
 	getAuthPanelRows(): number;
+	/** True while onboarding owns the screen and supplies its own heading. */
+	isOnboardingSurface?(): boolean;
 	/** Models currently visible to the host; used to detect providers configured via external credentials. */
 	getAvailableModels(): Promise<ReadonlyArray<{ provider: string }>>;
 	/** Invoked after stored credentials change so the host can refresh dependent UI. */
@@ -136,6 +139,20 @@ export class ProviderAuthFlows {
 			return Promise.resolve({ status: "failed" });
 		}
 		return this.showLoginDialog(providerId, label ?? provider.name, "service");
+	}
+
+	/**
+	 * Panel chrome for login dialogs. Onboarding renders its own heading above
+	 * the panel, so it drops both the transcript rule and the panel title.
+	 */
+	private loginDialogOptions(): { topRule: boolean; hideTitle: boolean } {
+		const onboarding = this.isOnboarding();
+		return { topRule: !onboarding, hideTitle: onboarding };
+	}
+
+	/** Onboarding narrates itself; step chatter belongs to the chat surfaces. */
+	private isOnboarding(): boolean {
+		return this.host.isOnboardingSurface?.() ?? false;
 	}
 
 	runLogin(options: ProviderLoginOptions = {}): Promise<AuthenticationResult> {
@@ -307,9 +324,11 @@ export class ProviderAuthFlows {
 
 		const actionLabel = authType === "oauth" ? `Logged in to ${providerName}` : `Saved API key for ${providerName}`;
 		await this.host.onAuthChanged?.();
-		this.host.showStatus(
-			`${actionLabel}. Credentials saved to ${credentialPath}${statusSuffix ? `. ${statusSuffix}` : ""}`,
-		);
+		if (!this.isOnboarding()) {
+			this.host.showStatus(
+				`${actionLabel}. Credentials saved to ${credentialPath}${statusSuffix ? `. ${statusSuffix}` : ""}`,
+			);
+		}
 		this.host.onLoginCompleted?.();
 		return {
 			status: "success",
@@ -341,7 +360,14 @@ export class ProviderAuthFlows {
 	}
 
 	private async showBedrockSetupDialog(providerId: string, providerName: string): Promise<AuthenticationResult> {
-		const dialog = new LoginDialogComponent(this.host.ui, providerId, () => {}, providerName, "Amazon Bedrock setup");
+		const dialog = new LoginDialogComponent(
+			this.host.ui,
+			providerId,
+			() => {},
+			providerName,
+			"Amazon Bedrock setup",
+			this.loginDialogOptions(),
+		);
 		const closeDialog = this.host.showAuthPanel(dialog);
 
 		try {
@@ -372,6 +398,33 @@ export class ProviderAuthFlows {
 		teams: PrimeTeam[],
 		currentTeamId: string | undefined,
 	): Promise<PrimeTeam | null | undefined> {
+		if (this.host.isOnboardingSurface?.()) {
+			return new Promise((resolve) => {
+				let close: (() => void) | undefined;
+				const options = [
+					{ label: "Personal account" },
+					...teams.map((team) => ({ label: team.name, ...(team.slug ? { detail: team.slug } : {}) })),
+				];
+				const current = teams.findIndex((team) => team.teamId === currentTeamId);
+				const choice = new OnboardingChoiceComponent(
+					options,
+					(index) => {
+						close?.();
+						resolve(index === 0 ? null : (teams[index - 1] ?? null));
+					},
+					() => {
+						close?.();
+						resolve(undefined);
+					},
+					{
+						prompt: "Which account should Prime Agent use?",
+						selectedIndex: current >= 0 ? current + 1 : 0,
+						requestRender: () => this.host.ui.requestRender(),
+					},
+				);
+				close = this.host.showAuthPanel(choice);
+			});
+		}
 		return new Promise((resolve) => {
 			let close: (() => void) | undefined;
 			const selector = new PrimeTeamSelectorComponent(
@@ -410,7 +463,9 @@ export class ProviderAuthFlows {
 				return "Using team from PRIME_TEAM_ID.";
 			}
 
-			dialog.showProgress("Loading Prime teams...");
+			if (!this.isOnboarding()) {
+				dialog.showProgress("Loading Prime teams...");
+			}
 			const teams = await fetchPrimeTeams(apiKey, resolvePrimeInferenceAuthConfig().baseUrl, {
 				signal: dialog.signal,
 			});
@@ -420,6 +475,12 @@ export class ProviderAuthFlows {
 			if (teams.length === 0) {
 				this.host.modelRegistry.authStorage.setPrimeInferenceTeamSelection(null, apiKey);
 				return "Using personal account.";
+			}
+			// A single team is not a choice: adopt it instead of asking.
+			if (teams.length === 1 && teams[0]) {
+				const onlyTeam = teams[0];
+				this.host.modelRegistry.authStorage.setPrimeInferenceTeamSelection(onlyTeam, apiKey);
+				return `Using team "${onlyTeam.name}".`;
 			}
 
 			const storedTeam = this.host.modelRegistry.authStorage.getPrimeInferenceTeamSelection();
@@ -478,9 +539,11 @@ export class ProviderAuthFlows {
 			PRIME_INFERENCE_PROVIDER_ID,
 			(_success, _message) => {},
 			PRIME_INFERENCE_PROVIDER_NAME,
+			undefined,
+			this.loginDialogOptions(),
 		);
 
-		const closeDialog = this.host.showAuthPanel(dialog);
+		const closeDialog = this.host.showAuthPanel(dialog, { heading: "Login with Prime Intellect" });
 
 		// The browser challenge gets its own controller so a manually pasted key
 		// can stop the polling without tearing down the dialog.
@@ -514,7 +577,10 @@ export class ProviderAuthFlows {
 						armManualInput("Complete the sign-in in your browser, or paste an API key below:");
 					},
 					onProgress: (message) => {
-						dialog.showProgress(message);
+						// Onboarding narrates itself; step chatter stays in the chat flows.
+						if (!this.isOnboarding()) {
+							dialog.showProgress(message);
+						}
 					},
 					signal: browserAbort.signal,
 				},
@@ -555,7 +621,9 @@ export class ProviderAuthFlows {
 
 			if (result.source === "manual") {
 				browserAbort.abort();
-				dialog.showProgress("Checking Prime Inference access...");
+				if (!this.isOnboarding()) {
+					dialog.showProgress("Checking Prime Inference access...");
+				}
 				const access = await checkPrimeInferenceAccess(result.apiKey, resolvePrimeInferenceAuthConfig().baseUrl, {
 					signal: dialog.signal,
 				});
@@ -594,6 +662,8 @@ export class ProviderAuthFlows {
 			PRIME_AGENT_TRACES_PROVIDER_ID,
 			(_success, _message) => {},
 			PRIME_AGENT_TRACES_PROVIDER_NAME,
+			undefined,
+			this.loginDialogOptions(),
 		);
 
 		const closeDialog = this.host.showAuthPanel(dialog);
@@ -628,7 +698,10 @@ export class ProviderAuthFlows {
 						armManualInput("Complete the sign-in in your browser, or paste a Prime API key below:");
 					},
 					onProgress: (message) => {
-						dialog.showProgress(message);
+						// Onboarding narrates itself; step chatter stays in the chat flows.
+						if (!this.isOnboarding()) {
+							dialog.showProgress(message);
+						}
 					},
 					signal: browserAbort.signal,
 				},
@@ -695,7 +768,14 @@ export class ProviderAuthFlows {
 		providerName: string,
 		kind: "provider" | "service" = "provider",
 	): Promise<AuthenticationResult> {
-		const dialog = new LoginDialogComponent(this.host.ui, providerId, (_success, _message) => {}, providerName);
+		const dialog = new LoginDialogComponent(
+			this.host.ui,
+			providerId,
+			(_success, _message) => {},
+			providerName,
+			undefined,
+			this.loginDialogOptions(),
+		);
 
 		const closeDialog = this.host.showAuthPanel(dialog);
 
@@ -752,7 +832,14 @@ export class ProviderAuthFlows {
 
 		const usesCallbackServer = providerInfo?.usesCallbackServer ?? false;
 
-		const dialog = new LoginDialogComponent(this.host.ui, providerId, (_success, _message) => {}, providerName);
+		const dialog = new LoginDialogComponent(
+			this.host.ui,
+			providerId,
+			(_success, _message) => {},
+			providerName,
+			undefined,
+			this.loginDialogOptions(),
+		);
 
 		const closeDialog = this.host.showAuthPanel(dialog);
 

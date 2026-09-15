@@ -34,8 +34,17 @@ describe("PrimeOnboardingSplashComponent", () => {
 
 		expect(output).toContain(firstLogoLine);
 		expect(output).toContain("Welcome to PRIME Agent");
-		expect(output).toContain("Log in with Prime Intellect");
-		expect(output).toContain("Continue later");
+		expect(output).toContain("> Log in with Prime Intellect");
+		// Signing in is the only route forward.
+		expect(output).not.toContain("Continue later");
+		// A short description of the agent, wrapped under the welcome line.
+		expect(output).toContain("Prime Agent programmatically manages your");
+		expect(output).toContain("Recursive Language Model paradigm,");
+		expect(output).toContain("\u2022 track a regression across hundreds of commits");
+		// It wraps rather than running off the block.
+		for (const line of rendered) {
+			expect(stripAnsi(line).trimEnd().length).toBeLessThanOrEqual(100);
+		}
 
 		const lastLogoRow = rendered.findIndex((line) => line.includes(logoLines[logoLines.length - 1]?.trim() ?? ""));
 		const brandRow = rendered.findIndex((line) => line.includes("Welcome to PRIME Agent"));
@@ -50,7 +59,7 @@ describe("PrimeOnboardingSplashComponent", () => {
 			() => {},
 			{},
 		);
-		expect(compact.render(100).length).toBeLessThanOrEqual(logoLines.length + 6);
+		expect(compact.render(100).length).toBeLessThanOrEqual(logoLines.length + 18);
 
 		const covering = new PrimeOnboardingSplashComponent(
 			() => {},
@@ -78,10 +87,8 @@ describe("PrimeOnboardingSplashComponent", () => {
 
 		const brandLine = rendered.find((line) => line.includes("Welcome to PRIME Agent"));
 		const actionLine = rendered.find((line) => line.includes("Log in with Prime Intellect"));
-		const laterLine = rendered.find((line) => line.includes("Continue later"));
-		// One shared left edge for the welcome line and both action labels.
+		// One shared left edge for the welcome line and the action.
 		expect(brandLine?.indexOf("Welcome")).toBe(actionLine?.indexOf(">"));
-		expect(laterLine?.indexOf("Continue")).toBe(actionLine?.indexOf("Log") ?? 0);
 		// Everything hugs the left edge; only the animated field spans the pane.
 		expect(brandLine?.search(/\S/)).toBeLessThanOrEqual(2);
 		// The mark is indented a little further right than the text column, but is
@@ -103,27 +110,9 @@ describe("PrimeOnboardingSplashComponent", () => {
 		);
 		const lines = component.render(100);
 		const selected = lines.find((line) => stripAnsi(line).includes("Log in with Prime Intellect"));
-		const unselected = lines.find((line) => stripAnsi(line).includes("Continue later"));
 
 		expect(stripAnsi(selected ?? "")).toContain("> Log in with Prime Intellect");
-		expect(stripAnsi(unselected ?? "")).not.toContain(">");
 		expect(selected ?? "").toMatch(/\x1b\[(4[0-9]|10[0-7]|48[;:])/);
-		expect(unselected ?? "").not.toMatch(/\x1b\[(4[0-9]|10[0-7]|48[;:])/);
-	});
-
-	it("moves the selection background with the arrow keys", () => {
-		const component = new PrimeOnboardingSplashComponent(
-			() => {},
-			() => {},
-			{ getRows: () => 36 },
-		);
-
-		component.handleInput("\x1b[B");
-		const lines = component.render(100);
-		const later = lines.find((line) => stripAnsi(line).includes("Continue later"));
-
-		expect(stripAnsi(later ?? "")).toContain("> Continue later");
-		expect(later ?? "").toMatch(/\x1b\[(4[0-9]|10[0-7]|48[;:])/);
 	});
 
 	it("starts Prime login on confirm", () => {
@@ -138,18 +127,6 @@ describe("PrimeOnboardingSplashComponent", () => {
 		component.handleInput("\r");
 
 		expect(selected).toBe(true);
-	});
-
-	it("continues later when the second action is confirmed", () => {
-		const onSelect = vi.fn();
-		const onCancel = vi.fn();
-		const component = new PrimeOnboardingSplashComponent(onSelect, onCancel);
-
-		component.handleInput("\x1b[B");
-		component.handleInput("\r");
-
-		expect(onSelect).not.toHaveBeenCalled();
-		expect(onCancel).toHaveBeenCalledTimes(1);
 	});
 
 	it("continues later on cancel", () => {
@@ -171,7 +148,39 @@ describe("PrimeOnboardingSplashComponent", () => {
 
 		expect(output).toContain("Choose a model");
 		expect(output).not.toContain("Log in with Prime Intellect");
-		expect(output).toContain("Continue later");
+	});
+
+	it("drops the description once a flow panel takes over the block", () => {
+		const component = new PrimeOnboardingSplashComponent(
+			() => {},
+			() => {},
+			{ getRows: () => 36 },
+		);
+		component.setPanel({ render: () => ["panel row"], invalidate: () => {} }, "Login with Prime Intellect");
+		const output = stripAnsi(component.render(100).join("\n"));
+
+		expect(output).toContain("panel row");
+		// The panel names the screen while it owns the block.
+		expect(output).toContain("Login with Prime Intellect");
+		expect(output).not.toContain("Welcome to PRIME Agent");
+		expect(output).not.toContain("Prime Agent programmatically manages your");
+		expect(output).not.toContain("Log in with Prime Intellect");
+	});
+
+	it("never falls back to the intro once a flow has started", () => {
+		const component = new PrimeOnboardingSplashComponent(
+			() => {},
+			() => {},
+			{ getRows: () => 36 },
+		);
+		component.setPanel({ render: () => ["panel row"], invalidate: () => {} }, "Login with Prime Intellect");
+		// Between two flow panels the block must not flash the first screen back.
+		component.setPanel(undefined);
+		const output = stripAnsi(component.render(100).join("\n"));
+
+		expect(output).toContain("Welcome to PRIME Agent");
+		expect(output).not.toContain("Log in with Prime Intellect");
+		expect(output).not.toContain("monitor dozens of experiments");
 	});
 
 	it("shows progress and ignores input while onboarding advances", () => {

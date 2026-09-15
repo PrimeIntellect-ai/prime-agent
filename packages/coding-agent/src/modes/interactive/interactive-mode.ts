@@ -121,7 +121,7 @@ import {
 } from "../../core/messages.js";
 import { findExactModelReferenceMatch, resolveModelScopeFromModels } from "../../core/model-resolver.js";
 import { parseNewSessionCommand } from "../../core/new-session-command.js";
-import { resolvePrimeAgentTracesBaseUrl } from "../../core/prime-inference-auth.js";
+import { PRIME_INFERENCE_PROVIDER_ID, resolvePrimeAgentTracesBaseUrl } from "../../core/prime-inference-auth.js";
 import { resolvePrimeInferencePostLoginModelAction } from "../../core/prime-inference-model-selection.js";
 import { parseCommandArgs } from "../../core/prompt-templates.js";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.js";
@@ -222,6 +222,8 @@ import {
 } from "./components/keybinding-hints.js";
 import { createMermaidMarkdownTransform } from "./components/mermaid.js";
 import type { AuthSelectorProvider } from "./components/oauth-selector.js";
+import { OnboardingChoiceComponent } from "./components/onboarding-choice.js";
+import { OnboardingPickerComponent } from "./components/onboarding-picker.js";
 import { PrimeOnboardingSplashComponent } from "./components/prime-onboarding-splash.js";
 import { PromptContextLine } from "./components/prompt-context-line.js";
 import { styleArgumentTokens } from "./components/prompt-highlight.js";
@@ -1124,6 +1126,9 @@ export class InteractiveMode {
 	/** True while the inline onboarding block owns the top rows (header stays hidden). */
 	private onboardingUiActive = false;
 
+	/** The mounted onboarding block, so flow panels can render inside it. */
+	private onboardingSplash: PrimeOnboardingSplashComponent | undefined = undefined;
+
 	private customHeader: (Component & { dispose?(): void }) | undefined = undefined;
 
 	private getLocalSessionHost(): InteractiveModeLocalSessionHost {
@@ -1906,18 +1911,120 @@ export class InteractiveMode {
 			return;
 		}
 
-		splash.showProgress("Signing in to Prime Intellect...");
-		// The splash covers the whole screen, so the login panel must render as an
-		// overlay above it instead of inline behind it.
-		const authResult = await this.createAuthFlows({ overlay: true }).runPrimeInferenceLogin();
+		// The login panel mounts inside the block, directly under the welcome line,
+		// and team selection follows in the same place when there is a choice.
+		const authResult = await this.createAuthFlows().runPrimeInferenceLogin();
 		if (authResult.status !== "success") {
 			splash.dismiss();
 			return;
 		}
 
-		splash.showProgress("Preparing models...");
 		await this.prepareForModelSelectionAfterLogin(authResult);
-		await this.showOnboardingModelSelection(splash);
+		await this.askOnboardingProviders();
+		await this.askOnboardingTraceOptIn();
+		splash.dismiss();
+	}
+
+	/**
+	 * Optional step: connect more providers before the first chat. The picker
+	 * stays mounted between logins so several can be connected in one pass.
+	 */
+	private async askOnboardingProviders(): Promise<void> {
+		if (!this.onboardingSplash) {
+			return;
+		}
+		const authFlows = this.createAuthFlows();
+		for (;;) {
+			// One row per provider: a provider offering both a subscription and an
+			// API key would otherwise appear twice under the same name.
+			const options = [
+				...new Map(
+					authFlows
+						.getLoginProviderOptions()
+						.filter((option) => option.id !== PRIME_INFERENCE_PROVIDER_ID && option.category !== "service")
+						.map((option) => [option.id, option]),
+				).values(),
+			];
+			if (options.length === 0) {
+				return;
+			}
+			const items = options.map((option) => ({
+				id: option.id,
+				label: option.name,
+				...(this.modelRegistry.getProviderAuthStatus(option.id).configured ? { connected: true } : {}),
+			}));
+			const picked = await new Promise<string | undefined>((resolve) => {
+				let settled = false;
+				let close: (() => void) | undefined;
+				const settle = (id: string | undefined) => {
+					if (settled) {
+						return;
+					}
+					settled = true;
+					close?.();
+					resolve(id);
+				};
+				const picker = new OnboardingPickerComponent(
+					items,
+					(id) => settle(id),
+					() => settle(undefined),
+					() => settle(undefined),
+					{
+						prompt: "Connect other providers, or continue.",
+						searchPlaceholder: "Search providers",
+						note: "You can add providers anytime with /login.",
+						requestRender: () => this.ui.requestRender(),
+					},
+				);
+				close = this.showInlineAuthPanel(picker);
+				this.ui.requestRender();
+			});
+			if (!picked) {
+				return;
+			}
+			const option = options.find((candidate) => candidate.id === picked);
+			if (option) {
+				await authFlows.loginProvider(option);
+			}
+		}
+	}
+
+	/** Final onboarding question: trace collection, with a reminder it is reversible. */
+	private askOnboardingTraceOptIn(): Promise<void> {
+		const splash = this.onboardingSplash;
+		if (!splash) {
+			return Promise.resolve();
+		}
+		return new Promise<void>((resolve) => {
+			let closed = false;
+			let close: (() => void) | undefined;
+			const finish = (enabled?: boolean) => {
+				if (closed) {
+					return;
+				}
+				closed = true;
+				if (enabled !== undefined) {
+					this.settingsManager.setAgentTracesEnabled(enabled);
+					void this.settingsManager.flush();
+				}
+				close?.();
+				resolve();
+			};
+			const choice = new OnboardingChoiceComponent(
+				[{ label: "Share" }, { label: "Not now" }],
+				(index) => finish(index === 0),
+				() => finish(undefined),
+				{
+					prompt: "Share agent traces with Prime Intellect?",
+					description:
+						"Trace sharing helps us train better open-source models and improve the open agent ecosystem for everyone.",
+					note: "You can change this anytime with /traces.",
+					requestRender: () => this.ui.requestRender(),
+				},
+			);
+			close = this.showInlineAuthPanel(choice);
+			this.ui.requestRender();
+		});
 	}
 
 	private getMarkdownThemeWithSettings(): MarkdownTheme {
@@ -6251,6 +6358,8 @@ export class InteractiveMode {
 
 	private getPromptContextLabel(maxWidth: number): string | undefined {
 		if (maxWidth < 1) return undefined;
+		// Onboarding owns the screen; chat chrome under it reads as clutter.
+		if (this.onboardingUiActive) return undefined;
 		return theme.fg(
 			"dim",
 			truncateToWidth(formatConversationDetailStatus(this.toolOutputExpanded, this.editDiffsExpanded), maxWidth, ""),
@@ -8835,13 +8944,15 @@ export class InteractiveMode {
 				dismissed = true;
 				selector?.dispose();
 				handle?.hide();
+				this.onboardingSplash = undefined;
 				this.onboardingUiActive = false;
 				this.builtInHeader?.invalidate();
 				this.ui.requestRender();
 			};
 			selector = new PrimeOnboardingSplashComponent(
 				() => {
-					selector?.dispose();
+					// The field keeps animating behind the flow panels; only dismissal
+					// stops it.
 					settle({
 						showProgress: (message) => selector?.showProgress(message),
 						dismiss,
@@ -8861,6 +8972,7 @@ export class InteractiveMode {
 			// the editor and footer stay visible. The brand header hides while it is
 			// mounted so the two marks never stack.
 			this.onboardingUiActive = true;
+			this.onboardingSplash = selector;
 			this.builtInHeader?.invalidate();
 			handle = this.ui.showOverlay(selector, {
 				width: "100%",
@@ -8871,19 +8983,9 @@ export class InteractiveMode {
 		});
 	}
 
-	private createAuthFlows(options: { overlay?: boolean } = {}): ProviderAuthFlows {
-		const showAuthPanel = options.overlay
-			? (component: Component) => {
-					const handle = this.showFullPaneOverlay(component, {
-						maxContentWidth: 88,
-						suspendFullscreenMouse: true,
-					});
-					return () => {
-						handle.hide();
-						this.ui.requestRender();
-					};
-				}
-			: (component: Component) => this.showInlineAuthPanel(component);
+	private createAuthFlows(): ProviderAuthFlows {
+		const showAuthPanel = (component: Component, options?: { heading?: string }) =>
+			this.showInlineAuthPanel(component, options);
 		return new ProviderAuthFlows({
 			ui: this.ui,
 			modelRegistry: this.modelRegistry,
@@ -8891,6 +8993,9 @@ export class InteractiveMode {
 			showError: (message) => this.showError(message),
 			showAuthPanel,
 			getAuthPanelRows: () => Math.max(1, Math.min(20, this.ui.terminal.rows - 3)),
+			// Onboarding renders its own heading above the panel and asks its
+			// questions in the onboarding selection language.
+			isOnboardingSurface: () => this.onboardingUiActive,
 			getAvailableModels: () => this.getConnectionAvailableModels(),
 			onAuthChanged: async () => {
 				await this.refreshConnectionModelsAfterAuthChange();
@@ -8912,7 +9017,29 @@ export class InteractiveMode {
 	 * resetExtensionUI tears the whole stack down on session resets. Each
 	 * closer runs once, so a reset cannot stomp a picker opened afterwards.
 	 */
-	private showInlineAuthPanel(component: Component): () => void {
+	private showInlineAuthPanel(component: Component, options?: { heading?: string }): () => void {
+		// Onboarding owns the top of the screen: mount the panel inside its block
+		// rather than down in the prompt dock.
+		const splash = this.onboardingSplash;
+		if (splash) {
+			splash.setPanel(component, options?.heading);
+			this.ui.setFocus(component);
+			this.ui.requestRender();
+			let splashPanelClosed = false;
+			const closeSplashPanel = () => {
+				if (splashPanelClosed) return;
+				splashPanelClosed = true;
+				const index = this.inlineAuthPanelClosers.indexOf(closeSplashPanel);
+				if (index !== -1) {
+					this.inlineAuthPanelClosers.splice(index, 1);
+				}
+				splash.setPanel(undefined);
+				this.ui.setFocus(splash);
+				this.ui.requestRender();
+			};
+			this.inlineAuthPanelClosers.push(closeSplashPanel);
+			return closeSplashPanel;
+		}
 		const previousChildren = [...this.editorContainer.children];
 		const previousFocus = previousChildren.find((child) => isFocusable(child) && child.focused) ?? this.editor;
 		this.editorContainer.clear();

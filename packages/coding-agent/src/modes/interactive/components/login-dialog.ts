@@ -62,6 +62,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 		private onComplete: (success: boolean, message?: string) => void,
 		providerNameOverride?: string,
 		titleOverride?: string,
+		options: { topRule?: boolean; hideTitle?: boolean } = {},
 	) {
 		super();
 		this.tui = tui;
@@ -71,7 +72,13 @@ export class LoginDialogComponent extends Container implements Focusable {
 		const title = titleOverride ?? `Login to ${providerName}`;
 
 		// The top rule keeps the inline login section separate from the transcript.
-		const panel = new MenuPanel({ title, inline: true, topRule: true });
+		// Surfaces that own the screen above the panel (onboarding) turn both the
+		// rule and the title off: they already say where the user is.
+		const panel = new MenuPanel({
+			title: options.hideTitle ? "" : title,
+			inline: true,
+			topRule: options.topRule ?? true,
+		});
 		this.addChild(panel);
 
 		// Dynamic content area
@@ -79,7 +86,8 @@ export class LoginDialogComponent extends Container implements Focusable {
 		panel.addChild(this.contentContainer);
 
 		// Input (always present, used when needed)
-		this.input = new MenuSearchInput("Paste value", true);
+		// Plain field: the enclosing rules read as clutter in the login panel.
+		this.input = new MenuSearchInput("Paste value", true, true);
 		this.input.onSubmit = () => {
 			if (this.inputResolver) {
 				this.inputResolver(this.input.getValue());
@@ -175,6 +183,8 @@ export class LoginDialogComponent extends Container implements Focusable {
 		}
 		this.contentContainer.addChild(this.input);
 		this.inputVisible = true;
+		// A blank row keeps the key hints off the field.
+		this.contentContainer.addChild(new Spacer(1));
 		this.contentContainer.addChild(this.authActions);
 		this.authActions.setText(this.getAuthActionsText());
 	}
@@ -289,6 +299,8 @@ export class LoginDialogComponent extends Container implements Focusable {
 	private addInstructions(instructions: string): void {
 		const codeMatch = /^(?:Code|Enter code):\s*(.+)$/i.exec(instructions.trim());
 		if (codeMatch?.[1]) {
+			// A blank row separates the sign-in link from the code below it.
+			this.contentContainer.addChild(new Spacer(1));
 			this.addLabel("Verification code");
 			this.contentContainer.addChild(new Text(theme.bold(theme.fg("text", codeMatch[1])), 0, 0));
 			return;

@@ -1,0 +1,6 @@
+- Changed the first-run onboarding to a compact block anchored top-left: the brand mark over its animated field, a short description of what Prime Agent does, and a single action to log in with Prime Intellect.
+- Changed onboarding to run every step inside that block: the Prime Intellect login, team selection, and the new questions all mount under the mark instead of opening full-pane modals or dropping to the prompt dock.
+- Added a provider step after login where several providers can be connected in one pass, with a search field, a scrolling list, and check marks on providers already signed in.
+- Added a trace-sharing question at the end of onboarding, which writes the agent traces setting and notes it can be changed later with /traces.
+- Changed team selection to be skipped when the account has no team or exactly one, and to list accounts by name with their handle.
+- Changed onboarding to stay quiet: provider progress chatter, the credentials-saved status line, and the telemetry notice no longer appear during first launch; the telemetry notice surfaces on the next launch instead.

@@ -1,15 +1,13 @@
 import {
-	blendColor,
 	type Component,
 	getKeybindings,
-	isLightColor,
-	type Rgb,
-	rgbTo256,
 	truncateToWidth,
 	visibleWidth,
+	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { PRIME_COMPACT_BUTTERFLY_LOGO } from "../../../themes/prime-logo.js";
 import { getResolvedThemeColors, type ThemeColor, theme } from "../theme/theme.js";
+import { onboardingHighlightBackground } from "./onboarding-highlight.js";
 
 interface PrimeOnboardingSplashOptions {
 	/** Kept for call-site compatibility; the block sizes itself to its content. */
@@ -28,13 +26,20 @@ const PADDING_X = 1;
 /** The mark sits a little further right than the text column. */
 const LOGO_INDENT = 5;
 const MARKER_WIDTH = 2;
-const MIN_HIGHLIGHT_WIDTH = 44;
-const HIGHLIGHT_TRAILING = 16;
-/** How far the selected row lifts off the canvas; lower reads more transparent. */
-const HIGHLIGHT_LIFT = 0.08;
-/** Canvas assumed when the theme leaves the background to the terminal. */
-const DARK_CANVAS: Rgb = { r: 16, g: 16, b: 16 };
-const LIGHT_CANVAS: Rgb = { r: 255, g: 255, b: 255 };
+/** What sets the agent apart, wrapped under the welcome line. */
+const DESCRIPTION_PARAGRAPHS = [
+	"Prime Agent programmatically manages your context and learns from your workflows.",
+	"Leveraging the Recursive Language Model paradigm, it parallelizes your long-running tasks with subagents, allowing you to:",
+];
+const DESCRIPTION_BULLETS = [
+	"monitor dozens of experiments concurrently",
+	"track a regression across hundreds of commits",
+	"audit thousands of documents in a single run",
+	"and much more",
+];
+const DESCRIPTION_WIDTH = 50;
+const MIN_HIGHLIGHT_WIDTH = 30;
+const HIGHLIGHT_TRAILING = 6;
 
 type SplashTone = Extract<ThemeColor, "accent" | "borderMuted" | "dim" | "mdLink" | "muted" | "text" | "warning">;
 
@@ -61,7 +66,10 @@ export class PrimeOnboardingSplashComponent implements Component {
 	private frame = 0;
 	private animationInterval?: ReturnType<typeof setInterval>;
 	private progressMessage?: string;
-	private selectedIndex = 0;
+	private panel?: Component;
+	private panelHeading?: string;
+	/** Once a flow owns the block, the intro never comes back. */
+	private flowStarted = false;
 
 	constructor(
 		private readonly onSelect: () => void,
@@ -90,29 +98,30 @@ export class PrimeOnboardingSplashComponent implements Component {
 
 	showProgress(message: string): void {
 		this.progressMessage = message;
-		this.dispose();
+		this.options.requestRender?.();
+	}
+
+	/**
+	 * Mount a flow panel (provider login) inside the block, directly under the
+	 * welcome line, so onboarding keeps the top of the screen instead of handing
+	 * it to the prompt dock.
+	 */
+	setPanel(panel: Component | undefined, heading?: string): void {
+		this.panel = panel;
+		this.panelHeading = panel ? heading : undefined;
+		if (panel) {
+			this.flowStarted = true;
+		}
 		this.options.requestRender?.();
 	}
 
 	handleInput(keyData: string): void {
-		if (this.progressMessage) {
+		if (this.panel || this.progressMessage) {
 			return;
 		}
 		const kb = getKeybindings();
-		if (kb.matches(keyData, "tui.select.up")) {
-			this.moveSelection(-1);
-			return;
-		}
-		if (kb.matches(keyData, "tui.select.down")) {
-			this.moveSelection(1);
-			return;
-		}
 		if (kb.matches(keyData, "tui.select.confirm")) {
-			if (this.selectedIndex === 0) {
-				this.onSelect();
-			} else {
-				this.onCancel();
-			}
+			this.onSelect();
 			return;
 		}
 		if (kb.matches(keyData, "tui.select.cancel")) {
@@ -126,16 +135,47 @@ export class PrimeOnboardingSplashComponent implements Component {
 		const lines = [this.line(safeWidth, 0, "")];
 		lines.push(...this.renderMarkRows(layout.fieldWidth).map((row) => this.line(safeWidth, layout.fieldLeft, row)));
 		lines.push(this.line(safeWidth, 0, ""));
-		lines.push(this.line(safeWidth, layout.contentLeft, this.renderBrandLine()));
-		lines.push(this.line(safeWidth, 0, ""));
-		if (this.progressMessage) {
+		lines.push(this.line(safeWidth, layout.contentLeft, this.renderHeadingLine()));
+		if (!this.panel && !this.progressMessage && !this.flowStarted) {
+			lines.push(this.line(safeWidth, 0, ""));
+			const descriptionWidth = Math.max(1, Math.min(DESCRIPTION_WIDTH, safeWidth - layout.contentLeft));
+			DESCRIPTION_PARAGRAPHS.forEach((paragraph, index) => {
+				if (index > 0) {
+					lines.push(this.line(safeWidth, 0, ""));
+				}
+				for (const row of wrapTextWithAnsi(paragraph, descriptionWidth)) {
+					lines.push(this.line(safeWidth, layout.contentLeft, theme.fg("muted", row)));
+				}
+			});
+			for (const bullet of DESCRIPTION_BULLETS) {
+				lines.push(
+					this.line(safeWidth, layout.contentLeft, theme.fg("dim", "\u2022 ") + theme.fg("muted", bullet)),
+				);
+			}
+		}
+		// The panel brings its own leading padding; a second blank row reads as a gap.
+		if (!this.panel) {
+			lines.push(this.line(safeWidth, 0, ""));
+		}
+		if (this.panel) {
+			// The inline panel indents its own content by one column, so drop one
+			// here to keep it flush with the welcome line.
+			const panelLeft = Math.max(0, layout.contentLeft - 1);
+			const panelWidth = Math.max(1, safeWidth - panelLeft);
+			for (const row of this.panel.render(panelWidth)) {
+				lines.push(this.line(safeWidth, panelLeft, row));
+			}
+		} else if (this.progressMessage) {
 			lines.push(this.line(safeWidth, layout.contentLeft + MARKER_WIDTH, theme.fg("muted", this.progressMessage)));
-		} else {
+		} else if (!this.flowStarted) {
 			lines.push(...this.renderActions(safeWidth, layout));
 		}
-		// The block owns the pane while it is mounted: pad out the remaining rows
-		// so the prompt dock underneath stays covered.
-		const rows = this.options.getRows?.();
+		// The block owns the pane while the user is choosing: pad out the remaining
+		// rows so the prompt dock underneath stays covered. Once a flow is running
+		// (login, model preparation) the block collapses to its content so the
+		// inline auth panel can mount underneath it.
+		const rows =
+			this.progressMessage === undefined || this.panel !== undefined ? this.options.getRows?.() : undefined;
 		if (rows !== undefined && Number.isFinite(rows)) {
 			while (lines.length < Math.floor(rows)) {
 				lines.push(this.line(safeWidth, 0, ""));
@@ -160,23 +200,16 @@ export class PrimeOnboardingSplashComponent implements Component {
 			Math.max(1, width - PADDING_X * 2),
 			Math.max(MIN_HIGHLIGHT_WIDTH, MARKER_WIDTH + labelWidth + HIGHLIGHT_TRAILING),
 		);
-		// The field starts at the mark and runs to the right edge: nothing drifts
-		// through the empty column to the left of the butterfly.
-		return {
-			contentLeft: PADDING_X,
-			contentWidth,
-			fieldLeft: LOGO_INDENT,
-			fieldWidth: Math.max(1, width - LOGO_INDENT),
-		};
+		// The field spans the pane; the mark sits a little in from the left edge.
+		return { contentLeft: PADDING_X, contentWidth, fieldLeft: 0, fieldWidth: width };
 	}
 
-	private moveSelection(delta: number): void {
-		const next = this.selectedIndex + delta;
-		if (next < 0 || next > 1) {
-			return;
+	/** The panel that owns the block names itself; otherwise the brand line. */
+	private renderHeadingLine(): string {
+		if (this.panelHeading) {
+			return theme.bold(theme.fg("text", this.panelHeading));
 		}
-		this.selectedIndex = next;
-		this.options.requestRender?.();
+		return this.renderBrandLine();
 	}
 
 	private renderBrandLine(): string {
@@ -195,30 +228,23 @@ export class PrimeOnboardingSplashComponent implements Component {
 		return label.charAt(0).toUpperCase() + label.slice(1);
 	}
 
+	/** Signing in is the only way forward, so the block offers a single action. */
 	private renderActions(width: number, layout: { contentLeft: number; contentWidth: number }): string[] {
-		const labels = [this.getPrimaryActionLabel(), "Continue later"];
 		const highlightWidth = layout.contentWidth;
-		const background = this.getHighlightBackground();
-		return labels.map((label, index) => {
-			const selected = index === this.selectedIndex;
-			const marker = selected ? "> " : "  ";
-			const content = truncateToWidth(marker + label, highlightWidth, "");
-			const padded = content + " ".repeat(Math.max(0, highlightWidth - visibleWidth(content)));
-			const styled = selected ? background(theme.bold(theme.fg("text", padded))) : theme.fg("muted", padded);
-			return this.line(width, layout.contentLeft, styled);
-		});
+		const content = truncateToWidth(`> ${this.getPrimaryActionLabel()}`, highlightWidth, "");
+		const padded = content + " ".repeat(Math.max(0, highlightWidth - visibleWidth(content)));
+		const styled = this.getHighlightBackground()(theme.bold(theme.fg("text", padded)));
+		return [this.line(width, layout.contentLeft, styled)];
 	}
 
 	private renderMarkRows(fieldWidth: number): string[] {
 		const rows = LOGO_LINES.length;
-		const markLeft = 0;
+		const markLeft = LOGO_INDENT;
 		const canvas: SplashCell[][] = Array.from({ length: rows }, () =>
 			Array.from({ length: fieldWidth }, (): SplashCell => ({ char: " ", tone: "dim", priority: 0 })),
 		);
 		const quietZone: QuietZone = { left: markLeft, right: markLeft + LOGO_WIDTH - 1, top: 0, bottom: rows - 1 };
-		if (!this.progressMessage) {
-			this.drawField(canvas, fieldWidth, rows, quietZone);
-		}
+		this.drawField(canvas, fieldWidth, rows, quietZone);
 		LOGO_LINES.forEach((line, y) => {
 			[...line].forEach((char, x) => {
 				if (char !== " ") {
@@ -251,9 +277,9 @@ export class PrimeOnboardingSplashComponent implements Component {
 					this.put(canvas, x, y, "\u2500", this.mod(x + frame, 3) === 0 ? "accent" : "dim", 3, width);
 				}
 
-				// Scan columns run the whole width; the original splash started them at
-				// mid-screen, which left the left half without any.
-				if (!this.isInsideQuietZone(x, y, quietZone)) {
+				// Scan columns trail the mark to the right; ambient dots, contours and
+				// traces still drift across the full width, including left of it.
+				if (x >= quietZone.left && !this.isInsideQuietZone(x, y, quietZone)) {
 					if (x % 4 === 0) {
 						const scanIndex = Math.floor(x / 4);
 						const segment = this.mod(y + scanIndex * 2 + Math.floor(frame / 2), 6);
@@ -289,24 +315,8 @@ export class PrimeOnboardingSplashComponent implements Component {
 		}
 	}
 
-	/**
-	 * The soft wash used behind user messages, not the picker's solid selection
-	 * fill: the selected row should lift off the canvas, not sit in a block.
-	 */
 	private getHighlightBackground(): (text: string) => string {
-		const colors = getResolvedThemeColors();
-		const text = parseHexColor(colors.text);
-		const onDark = !text || isLightColor(text);
-		// Lift the row a few percent off the canvas toward the text colour. Fading a
-		// surface colour downward instead lands near black, which reads harsh.
-		const canvas = parseHexColor(colors.background) ?? (onDark ? DARK_CANVAS : LIGHT_CANVAS);
-		const lift: Rgb = onDark ? { r: 255, g: 255, b: 255 } : { r: 0, g: 0, b: 0 };
-		const washed = blendColor(lift, canvas, HIGHLIGHT_LIFT);
-		const ansi =
-			theme.colorMode === "truecolor"
-				? `\x1b[48;2;${washed.r};${washed.g};${washed.b}m`
-				: `\x1b[48;5;${rgbTo256(washed)}m`;
-		return (value: string) => `${ansi}${value}\x1b[49m`;
+		return onboardingHighlightBackground(getResolvedThemeColors());
 	}
 
 	private isInsideQuietZone(x: number, y: number, zone: QuietZone): boolean {
@@ -357,13 +367,4 @@ export class PrimeOnboardingSplashComponent implements Component {
 	private mod(value: number, divisor: number): number {
 		return ((value % divisor) + divisor) % divisor;
 	}
-}
-
-function parseHexColor(value: string | undefined): Rgb | undefined {
-	const match = /^#?([0-9a-f]{6})$/i.exec(value?.trim() ?? "");
-	if (!match?.[1]) {
-		return undefined;
-	}
-	const int = Number.parseInt(match[1], 16);
-	return { r: (int >> 16) & 255, g: (int >> 8) & 255, b: int & 255 };
 }

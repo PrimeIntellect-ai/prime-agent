@@ -72,11 +72,10 @@ describe("ENG-4658 onboarding transitions", () => {
 		}
 	});
 
-	test("dismisses the splash before opening first-launch model selection inline", async () => {
+	test("finishes first-launch onboarding after login without the model picker", async () => {
 		const harness = await createHarness({ provider: "prime-inference", withConfiguredAuth: false });
 		harnesses.push(harness);
 		const order: string[] = [];
-		const configuration = deferred<void>();
 		const splash: OnboardingSplashHandle = {
 			showProgress: (message) => order.push(`progress:${message}`),
 			dismiss: () => order.push("dismiss"),
@@ -103,29 +102,19 @@ describe("ENG-4658 onboarding transitions", () => {
 		});
 		fakeThis.showConfigurationMenu = vi.fn((tab) => {
 			order.push(`configuration:${tab}`);
-			return configuration.promise;
+			return Promise.resolve();
 		});
 
-		const onboarding = fakeThis.runOnboardingFlow(false);
-		await vi.waitFor(() => expect(fakeThis.showConfigurationMenu).toHaveBeenCalledWith("models"));
+		await fakeThis.runOnboardingFlow(false);
 
-		// The splash covers the screen, so onboarding logins must mount above it
-		// as overlays instead of inline behind it.
-		expect(fakeThis.createAuthFlows).toHaveBeenCalledWith({ overlay: true });
-
-		expect(order.slice(-2)).toEqual(["dismiss", "configuration:models"]);
-		configuration.resolve();
-		await onboarding;
-
+		// The login and the questions after it mount inside the onboarding block,
+		// so the flows are the inline ones rather than overlays.
+		expect(fakeThis.createAuthFlows).toHaveBeenCalledWith();
 		expect(fakeThis.showOnboardingSplash).toHaveBeenCalledWith();
-		expect(order).toEqual([
-			"progress:Signing in to Prime Intellect...",
-			"login",
-			"progress:Preparing models...",
-			"prepare",
-			"dismiss",
-			"configuration:models",
-		]);
+		// Onboarding now ends at the trace question; the model picker is no longer
+		// part of the first-launch sequence.
+		expect(fakeThis.showConfigurationMenu).not.toHaveBeenCalled();
+		expect(order).toEqual(["login", "prepare", "dismiss"]);
 	});
 
 	test("swaps the inline picker for the login panel and restores the draft after closing", async () => {
