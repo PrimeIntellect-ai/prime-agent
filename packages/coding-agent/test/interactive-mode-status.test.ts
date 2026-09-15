@@ -3477,7 +3477,7 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 		shouldRunOnboarding(): boolean;
 		markOnboardingShown(): void;
 		runStartupOnboarding(): Promise<boolean>;
-		runOnboardingFlow(showPrimeCliSplash?: boolean): Promise<void>;
+		runOnboardingFlow(): Promise<boolean>;
 		applySelectedModel(model: AgentConnectionModel): Promise<void>;
 		prepareForModelSelectionAfterLogin(authResult: AuthenticationResult): Promise<boolean>;
 		setupAutocompleteProvider(): void;
@@ -4219,6 +4219,7 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 		fakeThis.runOnboardingFlow = vi.fn(async () => {
 			expect(shown).toBe(false);
 			expect(flushed).toBe(false);
+			return true;
 		});
 
 		await expect(runStartupOnboarding.call(fakeThis)).resolves.toBe(true);
@@ -4227,12 +4228,12 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 		expect(fakeThis.uiServices.settingsManager.flush).toHaveBeenCalledTimes(1);
 	});
 
-	test("cancelled Prime CLI splash exits onboarding before opening configuration", async () => {
+	test("reports no completion when the block never mounts", async () => {
 		const fakeThis = createPrimeCliHarness(false);
 		fakeThis.showOnboardingSplash = vi.fn(async () => undefined);
 		fakeThis.showConfigurationMenu = vi.fn(async () => {});
 
-		await expect(runOnboardingFlow.call(fakeThis)).resolves.toBeUndefined();
+		await expect(runOnboardingFlow.call(fakeThis)).resolves.toBe(false);
 
 		expect(fakeThis.showConfigurationMenu).not.toHaveBeenCalled();
 	});
@@ -4253,7 +4254,7 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 		fakeThis.prepareForModelSelectionAfterLogin = vi.fn(async () => true);
 		fakeThis.showConfigurationMenu = vi.fn(async () => {});
 
-		await expect(runOnboardingFlow.call(fakeThis)).resolves.toBeUndefined();
+		await expect(runOnboardingFlow.call(fakeThis)).resolves.toBe(true);
 
 		expect(fakeThis.showOnboardingSplash).toHaveBeenCalledWith();
 		expect(fakeThis.prepareForModelSelectionAfterLogin).toHaveBeenCalledTimes(1);
@@ -4279,9 +4280,24 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 		fakeThis.prepareForModelSelectionAfterLogin = vi.fn(async () => true);
 		fakeThis.showConfigurationMenu = vi.fn(async () => {});
 
-		await expect(runOnboardingFlow.call(fakeThis)).resolves.toBeUndefined();
+		await expect(runOnboardingFlow.call(fakeThis)).resolves.toBe(true);
 
 		expect(fakeThis.showConfigurationMenu).not.toHaveBeenCalled();
+	});
+
+	test("keeps onboarding pending when a configured user cancels the sign-in", async () => {
+		// The harness already carries a working model and stored credentials.
+		const fakeThis = createPrimeCliHarness(false);
+		fakeThis.uiServices.settingsManager.setOnboardingShown = vi.fn();
+		fakeThis.uiServices.settingsManager.flush = vi.fn(async () => {});
+		// The user already has a working model, so readiness alone would look like
+		// a completed flow; only the flow's own result may persist the flag.
+		fakeThis.runOnboardingFlow = vi.fn(async () => false);
+
+		await expect(runStartupOnboarding.call(fakeThis)).resolves.toBe(true);
+
+		expect(fakeThis.uiServices.settingsManager.setOnboardingShown).not.toHaveBeenCalled();
+		expect(fakeThis.uiServices.settingsManager.flush).not.toHaveBeenCalled();
 	});
 
 	test("settles the pending step when a reset unmounts its panel", () => {
@@ -4321,7 +4337,7 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 		}));
 		fakeThis.prepareForModelSelectionAfterLogin = vi.fn(async () => true);
 
-		await expect(runOnboardingFlow.call(fakeThis)).resolves.toBeUndefined();
+		await expect(runOnboardingFlow.call(fakeThis)).resolves.toBe(false);
 
 		expect(fakeThis.prepareForModelSelectionAfterLogin).not.toHaveBeenCalled();
 		expect(dismiss).toHaveBeenCalledOnce();

@@ -1854,8 +1854,11 @@ export class InteractiveMode {
 		const startedAt = Date.now();
 		let outcome: TelemetryOnboardingOutcome = "aborted";
 		try {
-			await this.runOnboardingFlow();
-			outcome = isOnboardingModelReady(this.getOnboardingState()) ? "success" : "aborted";
+			// The flow reports completion itself: a user who already had a working
+			// model would otherwise look "ready" straight after cancelling it, and
+			// the questions they never saw would be skipped for good.
+			const completed = await this.runOnboardingFlow();
+			outcome = completed && isOnboardingModelReady(this.getOnboardingState()) ? "success" : "aborted";
 			if (outcome === "success") {
 				// Only a completed onboarding counts as seen: a cancelled sign-in
 				// leaves the flag unset so the next launch retries the flow.
@@ -1882,13 +1885,14 @@ export class InteractiveMode {
 		}
 	}
 
-	private async runOnboardingFlow(): Promise<void> {
+	/** Runs the first-launch sequence. Resolves true only when every step ran. */
+	private async runOnboardingFlow(): Promise<boolean> {
 		this.modelRegistry.refresh();
 		const abort = new AbortController();
 		this.onboardingFlowAbort = abort;
 		const splash = await this.showOnboardingSplash();
 		if (!splash) {
-			return;
+			return false;
 		}
 
 		// One sequence for every first launch. Signing in is instant when a Prime
@@ -1897,19 +1901,20 @@ export class InteractiveMode {
 		const authResult = await this.createAuthFlows().runPrimeInferenceLogin();
 		if (abort.signal.aborted || authResult.status !== "success") {
 			splash.dismiss();
-			return;
+			return false;
 		}
 
 		await this.prepareForModelSelectionAfterLogin(authResult);
 		if (abort.signal.aborted) {
-			return;
+			return false;
 		}
 		await this.askOnboardingProviders();
 		if (abort.signal.aborted) {
-			return;
+			return false;
 		}
 		await this.askOnboardingTraceOptIn();
 		splash.dismiss();
+		return true;
 	}
 
 	/**
