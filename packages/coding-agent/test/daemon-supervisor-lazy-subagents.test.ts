@@ -541,7 +541,7 @@ describe("daemon supervisor passive subagent topology", () => {
 		});
 		const ownedWorker = worker("owned", [ownedSummary]);
 		ownedWorker.descriptor.ownerClientId = "interactive-client";
-		ownedWorker.client.request.mockResolvedValue(success(undefined, "set_session_name"));
+		ownedWorker.client.request.mockResolvedValue(success(undefined, "rename", ownedSummary));
 		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
 			defaultSessionConfig: { agentDir: directory, cwd: directory },
 			descriptorDir: join(directory, "workers"),
@@ -560,7 +560,7 @@ describe("daemon supervisor passive subagent topology", () => {
 			}),
 		).resolves.toMatchObject({ success: true });
 		expect(ownedWorker.client.request).toHaveBeenCalledWith(
-			expect.objectContaining({ type: "set_session_name", activeSessionId: "owned-active" }),
+			{ type: "rename", activeSessionId: "owned-active", name: "renamed-by-worker" },
 			expect.any(Number),
 		);
 
