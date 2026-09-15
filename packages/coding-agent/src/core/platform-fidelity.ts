@@ -85,6 +85,17 @@ export function detectLibc(probe: PlatformProbe): { libc: TelemetryLibc; version
 		return { libc: "none", version: UNKNOWN };
 	}
 
+	// The runtime report header observes how THIS process was actually linked,
+	// so it outranks filesystem heuristics: a Debian/Ubuntu host with the musl
+	// package installed ships a musl loader file but is not a musl host. The
+	// header is absent inside compiled musl binaries (glibcVersionRuntime is
+	// null there), which only means the decision falls through to the loader
+	// checks below — it must not terminate them early in musl's favour.
+	const glibcVersion = probe.glibcVersionRuntime();
+	if (glibcVersion) {
+		return { libc: "glibc", version: sanitizeVersion(glibcVersion) };
+	}
+
 	const loaderNames = MUSL_LOADER_NAMES[probe.arch] ?? [];
 	for (const loaderName of loaderNames) {
 		for (const prefix of ["/lib", "/usr/lib"]) {
@@ -95,17 +106,13 @@ export function detectLibc(probe: PlatformProbe): { libc: TelemetryLibc; version
 		}
 	}
 
-	const glibcVersion = probe.glibcVersionRuntime();
-	if (glibcVersion) {
-		return { libc: "glibc", version: sanitizeVersion(glibcVersion) };
-	}
-
 	// No runtime version (some builds omit it): fall back to the presence of a
 	// glibc dynamic loader before giving up.
 	const glibcLoaders = [
 		`/lib/ld-linux-${probe.arch === "arm64" ? "aarch64" : "x86-64"}.so.1`,
 		"/lib64/ld-linux-x86-64.so.1",
 		"/lib/ld-linux-aarch64.so.1",
+		"/lib/ld-linux.so.2",
 	];
 	if (glibcLoaders.some((path) => probe.fileExists(path))) {
 		return { libc: "glibc", version: UNKNOWN };

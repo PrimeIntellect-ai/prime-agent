@@ -1,1 +1,3 @@
 - Fixed global flags written before a command routing the command to the model as a chat message; `prime-agent --offline model list` now runs the command, `--` still sends the word as a message, and a global flag a command does not accept fails with a clear error.
+- Fixed moved global flags leaking past a `--` separator into an `mcp add` child command or a scheduled message; they now stay ahead of any `--`.
+- Fixed `prime-agent --offline help` and `--offline help status` printing help instead of chatting; global run flags no longer count as help arguments.

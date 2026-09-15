@@ -1054,6 +1054,36 @@ exec /bin/${operation} "$@"
 		expect(existsSync(command())).toBe(true);
 	}, 90000);
 
+	it("reads a leading-zero probe timeout override as decimal, not octal", async () => {
+		const harness = join(root, "probe-timeout.sh");
+		writeFileSync(
+			harness,
+			readFileSync(installer, "utf8").replace(
+				/\nmain "\$@"\s*$/,
+				() =>
+					'\nfor value in 010 08 09 000 600 601 ""; do\n' +
+					'\tPRIME_AGENT_PROBE_TIMEOUT_SECONDS="$value"\n' +
+					"\tnative_probe_timeout=$(prime_agent_native_probe_timeout)\n" +
+					"\tnative_probe_deadline=$(($(date +%s) + native_probe_timeout))\n" +
+					"\tprintf '%s\\n' \"$native_probe_timeout\"\n" +
+					"done\n",
+			),
+		);
+		const result = await install("", {}, harness);
+		expect(result.code, result.output).toBe(0);
+		expect(result.output.trim().split("\n")).toEqual(["10", "8", "9", "60", "600", "60", "60"]);
+	});
+
+	it("installs a slow first run within a leading-zero timeout budget read as decimal", async () => {
+		publish("1.0.0", { slow: 5 });
+		// "09" previously aborted the deadline arithmetic under set -eu; as a
+		// decimal 9-second budget it must cover a 5-second first run.
+		const result = await install("1.0.0", { PRIME_AGENT_PROBE_TIMEOUT_SECONDS: "09" });
+		expect(result.code, result.output).toBe(0);
+		expect(result.output).not.toContain("probe timed out");
+		expect(existsSync(command())).toBe(true);
+	}, 90000);
+
 	it("reports the supported native platform without installation or release discovery", async () => {
 		const result = await install("--native-platform", { PRIME_AGENT_DOWNLOAD_BASE_URL: "http://127.0.0.1:1" });
 		expect(result).toEqual({ code: 0, output: platform });

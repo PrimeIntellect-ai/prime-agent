@@ -90,7 +90,9 @@ export function isCommandPositional(positional: FirstPositionalArgument | undefi
  * so `prime-agent --offline model list` runs the command instead of chatting.
  * Arguments are returned unchanged when no known command is present, when `--`
  * already escaped the token, and for one-shot prompt runs, whose positional is
- * the message.
+ * the message. Moved flags stay ahead of any `--` separator: arguments behind
+ * it are operand text (a child command or a scheduled message), so a flag
+ * landing there would be forwarded to the child verbatim.
  */
 export function rotateGlobalFlagsBeforeCommand(args: readonly string[]): string[] {
 	const positional = findFirstPositionalArgument(args);
@@ -100,5 +102,44 @@ export function rotateGlobalFlagsBeforeCommand(args: readonly string[]): string[
 	if (args.slice(0, positional.index).some((arg) => PROMPT_RUN_FLAGS.has(arg))) {
 		return [...args];
 	}
-	return [positional.value, ...args.slice(positional.index + 1), ...args.slice(0, positional.index)];
+	const moved = args.slice(0, positional.index);
+	const rest = args.slice(positional.index + 1);
+	const separatorIndex = rest.indexOf("--");
+	if (separatorIndex === -1) {
+		return [positional.value, ...rest, ...moved];
+	}
+	return [positional.value, ...rest.slice(0, separatorIndex), ...moved, ...rest.slice(separatorIndex)];
+}
+
+/**
+ * The command path a `help` request names, with global run flags (and their
+ * values) excluded: they are run options, not help arguments, so
+ * `prime-agent --offline help status` asks about `status`. Returns undefined
+ * when the tail contains `--` (everything behind it stays literal message
+ * text) or an explicit --help/-h flag with no topic yet (the generic
+ * per-command help path handles those).
+ */
+export function extractHelpCommandPath(args: readonly string[], from: number): string[] | undefined {
+	const path: string[] = [];
+	for (let index = from; index < args.length; index++) {
+		const arg = args[index]!;
+		if (arg === "--") {
+			return undefined;
+		}
+		if (arg === "--help" || arg === "-h") {
+			// An explicit help flag after a topic still asks about that topic;
+			// with no topic it defers to the generic per-command help block so
+			// `help --help` keeps asking about help itself.
+			return path.length > 0 ? path : undefined;
+		}
+		if (GLOBAL_VALUE_FLAGS.has(arg)) {
+			index++;
+			continue;
+		}
+		if (arg.startsWith("-")) {
+			continue;
+		}
+		path.push(arg);
+	}
+	return path;
 }
