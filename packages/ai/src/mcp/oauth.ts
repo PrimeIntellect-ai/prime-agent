@@ -156,11 +156,17 @@ function randomState(): string {
 		.replace(/=/g, "");
 }
 
-function resourceMetadata(value: unknown, resource: string): ProtectedResourceMetadata {
+function resourceMetadata(value: unknown, resource: URL): ProtectedResourceMetadata {
 	if (!value || typeof value !== "object") throw new Error("Protected-resource metadata is invalid");
 	const metadata = value as Partial<ProtectedResourceMetadata>;
-	if (metadata.resource !== resource)
-		throw new Error(`Protected-resource metadata resource does not exactly match ${resource}`);
+	const configuredResource = canonicalResource(resource);
+	// RFC 9728 §2: the metadata `resource` identifies the protected resource and
+	// need not equal the MCP endpoint URL itself. Slack serves https://mcp.slack.com/mcp
+	// but advertises `resource: "https://mcp.slack.com"`. Accept the canonical endpoint
+	// or its origin so credentials stay bound to the same origin.
+	if (metadata.resource !== configuredResource && metadata.resource !== resource.origin) {
+		throw new Error(`Protected-resource metadata resource does not exactly match ${configuredResource}`);
+	}
 	if (!Array.isArray(metadata.authorization_servers) || metadata.authorization_servers.length === 0) {
 		throw new Error("Protected-resource metadata has no authorization_servers");
 	}
@@ -200,7 +206,7 @@ async function tryProtectedResourceMetadata(url: string): Promise<ProtectedResou
 		: resourceMetadataUrl(resource);
 	const response = await fetchResponse(candidate);
 	if (response.status === 404 && !headerUrl) return undefined;
-	return resourceMetadata(await jsonMetadata(response, candidate), canonicalResource(resource));
+	return resourceMetadata(await jsonMetadata(response, candidate), resource);
 }
 
 /** Discover RFC 9728 protected-resource metadata before the origin-level authorization server fallback. */
@@ -521,8 +527,11 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 		if (creds.endpoint !== config.url) {
 			throw new Error(`Stored OAuth credentials are not bound to ${config.url}; re-run /mcp login ${config.server}`);
 		}
-		const configuredResource = canonicalResource(validatedHttpsUrl(config.url, "MCP endpoint"));
-		if (creds.resource !== undefined && creds.resource !== configuredResource) {
+		const endpoint = validatedHttpsUrl(config.url, "MCP endpoint");
+		const configuredResource = canonicalResource(endpoint);
+		// Origin-advertised resource indicators (see resourceMetadata) must survive
+		// the stored-credential binding check so PRM-based logins keep refreshing.
+		if (creds.resource !== undefined && creds.resource !== configuredResource && creds.resource !== endpoint.origin) {
 			throw new Error(
 				`Stored OAuth credentials are not bound to ${configuredResource}; re-run /mcp login ${config.server}`,
 			);

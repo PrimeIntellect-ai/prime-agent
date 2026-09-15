@@ -24,6 +24,18 @@ const PLANE_META = {
 	registration_endpoint: "https://mcp.plane.so/http/register",
 	scopes_supported: ["read", "write"],
 };
+// Slack-style server: the endpoint lives at /mcp while RFC 9728 metadata advertises
+// the bare origin as its resource indicator, with no dynamic client registration.
+const SLACK_URL = "https://mcp.slack.test/mcp";
+const SLACK_ORIGIN = "https://mcp.slack.test";
+const SLACK_PRM_URL = "https://mcp.slack.test/.well-known/oauth-protected-resource/mcp";
+const SLACK_META_URL = "https://mcp.slack.test/.well-known/oauth-authorization-server";
+const SLACK_META = {
+	issuer: SLACK_ORIGIN,
+	authorization_endpoint: "https://mcp.slack.test/oauth/authorize",
+	token_endpoint: "https://mcp.slack.test/api/oauth.token",
+	scopes_supported: ["chat:write", "search:read"],
+};
 const ORIGIN_URL = "https://srv.test/mcp";
 const ORIGIN_META = {
 	issuer: "https://srv.test/tenant",
@@ -395,6 +407,82 @@ describe.sequential("MCP OAuth provider", () => {
 				onPrompt: async () => "",
 			}),
 		).rejects.toThrow("resource does not exactly match");
+	});
+
+	it("accepts an origin-advertised resource indicator like Slack's and stores it", async () => {
+		const fetchMock = vi.fn(async (input: unknown, init?: RequestInit): Promise<Response> => {
+			const url = urlOf(input);
+			if (url === SLACK_URL) return new Response("", { status: 401 });
+			if (url === SLACK_PRM_URL)
+				return jsonResponse({ resource: SLACK_ORIGIN, authorization_servers: [SLACK_ORIGIN] });
+			if (url === SLACK_META_URL) return jsonResponse(SLACK_META);
+			if (url === SLACK_META.token_endpoint) {
+				const params = new URLSearchParams(String(init?.body));
+				expect(params.get("resource")).toBe(SLACK_ORIGIN);
+				return jsonResponse({ access_token: "slack-access", refresh_token: "slack-refresh", expires_in: 3600 });
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const { creds, authUrl } = await loginWithManualCode(
+			createMcpOAuthProvider({ server: "slack", url: SLACK_URL, clientId: "slack-client" }),
+		);
+		expect(creds).toMatchObject({
+			access: "slack-access",
+			endpoint: SLACK_URL,
+			resource: SLACK_ORIGIN,
+			issuer: SLACK_ORIGIN,
+		});
+		expect(new URL(authUrl).searchParams.get("resource")).toBe(SLACK_ORIGIN);
+		expect(new URL(authUrl).searchParams.get("scope")).toBe("chat:write search:read");
+	});
+
+	it("refreshes credentials bound to an origin-advertised resource indicator", async () => {
+		const fetchMock = vi.fn(async (input: unknown, init?: RequestInit): Promise<Response> => {
+			const url = urlOf(input);
+			if (url === SLACK_URL) return new Response("", { status: 401 });
+			if (url === SLACK_PRM_URL)
+				return jsonResponse({ resource: SLACK_ORIGIN, authorization_servers: [SLACK_ORIGIN] });
+			if (url === SLACK_META_URL) return jsonResponse(SLACK_META);
+			if (url === SLACK_META.token_endpoint) {
+				const params = new URLSearchParams(String(init?.body));
+				expect(params.get("grant_type")).toBe("refresh_token");
+				expect(params.get("resource")).toBe(SLACK_ORIGIN);
+				return jsonResponse({ access_token: "slack-access-2", expires_in: 1800 });
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		const provider = createMcpOAuthProvider({ server: "slack", url: SLACK_URL, clientId: "slack-client" });
+		const refreshed = await provider.refreshToken({
+			access: "slack-access",
+			refresh: "slack-refresh",
+			expires: 0,
+			endpoint: SLACK_URL,
+			resource: SLACK_ORIGIN,
+			issuer: SLACK_ORIGIN,
+			tokenEndpoint: SLACK_META.token_endpoint,
+			clientId: "slack-client",
+		} as never);
+		expect(refreshed).toMatchObject({
+			access: "slack-access-2",
+			refresh: "slack-refresh",
+			endpoint: SLACK_URL,
+			resource: SLACK_ORIGIN,
+			issuer: SLACK_ORIGIN,
+		});
+		await expect(
+			provider.refreshToken({
+				access: "a",
+				refresh: "r",
+				expires: 0,
+				endpoint: SLACK_URL,
+				resource: "https://attacker.example",
+				issuer: SLACK_ORIGIN,
+				tokenEndpoint: SLACK_META.token_endpoint,
+			} as never),
+		).rejects.toThrow("not bound");
 	});
 
 	it("falls back to the next callback port when the base port is occupied", async () => {

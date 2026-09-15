@@ -1,0 +1,1 @@
+- Fixed MCP OAuth login and token refresh failing against servers like Slack whose protected-resource metadata advertises the bare origin as the resource identifier instead of the MCP endpoint URL.
