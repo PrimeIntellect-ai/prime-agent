@@ -526,6 +526,37 @@ function isOwnerProcessAlive(pid: number): boolean {
 	return true;
 }
 
+/**
+ * Socket paths of the supervisors registered under `agentDir`, read straight
+ * from the registry record each daemon writes for itself. Callers use this to
+ * tell their own state root's daemons apart from daemons that belong to another
+ * HOME, agent dir, or socket dir on the same machine.
+ *
+ * Read-only and lock-free on purpose: records are written rename-atomically so a
+ * torn read is impossible, and a momentarily stale answer only affects discovery,
+ * never ownership.
+ */
+export function listDaemonSupervisorSocketPathsForAgentDir(
+	agentDir: string,
+	registryDir: string = defaultDaemonSupervisorRegistryDir(),
+): string[] {
+	const canonicalAgentDir = canonicalizeFilesystemPath(agentDir);
+	let directories: string[];
+	try {
+		directories = listOwnerDirectories(registryDir);
+	} catch {
+		return [];
+	}
+	const socketPaths: string[] = [];
+	for (const directory of directories) {
+		const owner = readOwnerRecord(directory);
+		if (owner && canonicalizeFilesystemPath(owner.agentDir) === canonicalAgentDir) {
+			socketPaths.push(normalizeSocketPath(owner.socketPath));
+		}
+	}
+	return socketPaths;
+}
+
 export async function assertDaemonSupervisorOwnerCurrent(
 	owner: {
 		generation: string;

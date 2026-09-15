@@ -1,0 +1,1 @@
+- Scoped background service discovery to the state root the command runs in, so a run with an isolated HOME or agent dir only lists and stops its own daemons and `shutdown --force` no longer reaches daemons that belong to another root.
