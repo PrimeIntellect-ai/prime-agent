@@ -1,6 +1,7 @@
 import { type Component, type Focusable, getKeybindings, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { getResolvedThemeColors, theme } from "../theme/theme.js";
 import { MenuSearchInput } from "./menu-panel.js";
+import { isOnboardingExitKey } from "./onboarding-exit.js";
 import { onboardingHighlightBackground } from "./onboarding-highlight.js";
 
 export interface OnboardingPickerItem {
@@ -18,6 +19,8 @@ interface OnboardingPickerOptions {
 	visibleRows?: number;
 	rowWidth?: number;
 	requestRender?: () => void;
+	/** Quits the app while onboarding owns the screen. */
+	onExit?: () => void;
 }
 
 const MARKER_WIDTH = 2;
@@ -61,6 +64,10 @@ export class OnboardingPickerComponent implements Component, Focusable {
 	}
 
 	handleInput(keyData: string): void {
+		if (isOnboardingExitKey(keyData)) {
+			this.config.onExit?.();
+			return;
+		}
 		const kb = getKeybindings();
 		if (kb.matches(keyData, "tui.select.up")) {
 			this.move(-1);

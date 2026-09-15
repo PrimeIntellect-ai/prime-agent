@@ -7,6 +7,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { PRIME_COMPACT_BUTTERFLY_LOGO } from "../../../themes/prime-logo.js";
 import { getResolvedThemeColors, type ThemeColor, theme } from "../theme/theme.js";
+import { isOnboardingExitKey } from "./onboarding-exit.js";
 import { onboardingHighlightBackground } from "./onboarding-highlight.js";
 
 interface PrimeOnboardingSplashOptions {
@@ -14,6 +15,8 @@ interface PrimeOnboardingSplashOptions {
 	getRows?: () => number;
 	requestRender?: () => void;
 	animationIntervalMs?: number;
+	/** Quits the app: the editor that normally owns Ctrl+C has no focus yet. */
+	onExit?: () => void;
 }
 
 const LOGO_LINES = PRIME_COMPACT_BUTTERFLY_LOGO.split("\n");
@@ -103,6 +106,10 @@ export class PrimeOnboardingSplashComponent implements Component {
 	}
 
 	handleInput(keyData: string): void {
+		if (isOnboardingExitKey(keyData)) {
+			this.options.onExit?.();
+			return;
+		}
 		if (this.getActivePanel()) {
 			return;
 		}

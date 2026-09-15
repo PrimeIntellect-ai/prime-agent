@@ -6,6 +6,7 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { getResolvedThemeColors, theme } from "../theme/theme.js";
+import { isOnboardingExitKey } from "./onboarding-exit.js";
 import { onboardingHighlightBackground } from "./onboarding-highlight.js";
 
 export interface OnboardingChoiceOption {
@@ -23,6 +24,8 @@ interface OnboardingChoiceOptions {
 	rowWidth?: number;
 	selectedIndex?: number;
 	requestRender?: () => void;
+	/** Quits the app while onboarding owns the screen. */
+	onExit?: () => void;
 }
 
 const MARKER_WIDTH = 2;
@@ -51,6 +54,10 @@ export class OnboardingChoiceComponent implements Component {
 	}
 
 	handleInput(keyData: string): void {
+		if (isOnboardingExitKey(keyData)) {
+			this.config.onExit?.();
+			return;
+		}
 		const kb = getKeybindings();
 		if (kb.matches(keyData, "tui.select.up")) {
 			this.move(-1);

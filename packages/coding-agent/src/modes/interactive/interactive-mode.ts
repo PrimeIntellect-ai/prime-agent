@@ -1974,6 +1974,7 @@ export class InteractiveMode {
 						prompt: "Connect other providers, or continue.",
 						searchPlaceholder: "Search providers",
 						note: "You can add providers anytime with /login.",
+						onExit: () => void this.shutdown(),
 						requestRender: () => this.ui.requestRender(),
 					},
 				);
@@ -2016,6 +2017,7 @@ export class InteractiveMode {
 				(index) => finish(index === 0),
 				() => finish(undefined),
 				{
+					onExit: () => void this.shutdown(),
 					prompt: "Share agent traces with Prime Intellect?",
 					description:
 						"Trace sharing helps us train better open-source models and improve the open agent ecosystem for everyone.",
@@ -8963,6 +8965,8 @@ export class InteractiveMode {
 				},
 				{
 					getRows: () => this.ui.terminal.rows,
+					// Nothing else owns Ctrl+C yet, so the block exits the app itself.
+					onExit: () => void this.shutdown(),
 					requestRender: () => this.ui.requestRender(),
 				},
 			);
@@ -8997,6 +9001,7 @@ export class InteractiveMode {
 			showStatus: (message) => this.showStatus(message),
 			showError: (message) => this.showError(message),
 			showAuthPanel,
+			exitApp: () => void this.shutdown(),
 			getAuthPanelRows: () => Math.max(1, Math.min(20, this.ui.terminal.rows - 3)),
 			// Onboarding renders its own heading above the panel and asks its
 			// questions in the onboarding selection language.

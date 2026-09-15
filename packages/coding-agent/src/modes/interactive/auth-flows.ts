@@ -108,6 +108,8 @@ export interface ProviderAuthFlowsHost {
 	getAuthPanelRows(): number;
 	/** True while onboarding owns the screen and supplies its own heading. */
 	isOnboardingSurface?(): boolean;
+	/** Quits the app from an onboarding panel, where the editor has no focus. */
+	exitApp?(): void;
 	/** Models currently visible to the host; used to detect providers configured via external credentials. */
 	getAvailableModels(): Promise<ReadonlyArray<{ provider: string }>>;
 	/** Invoked after stored credentials change so the host can refresh dependent UI. */
@@ -421,6 +423,7 @@ export class ProviderAuthFlows {
 						prompt: "Which account should Prime Agent use?",
 						selectedIndex: current >= 0 ? current + 1 : 0,
 						requestRender: () => this.host.ui.requestRender(),
+						onExit: () => this.host.exitApp?.(),
 					},
 				);
 				close = this.host.showAuthPanel(choice, { onReset: () => resolve(undefined) });

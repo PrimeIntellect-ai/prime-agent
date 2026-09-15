@@ -22,6 +22,17 @@ describe("PrimeOnboardingSplashComponent", () => {
 		vi.useRealTimers();
 	});
 
+	it("exits the app on ctrl+c and ctrl+d instead of trapping the user", () => {
+		for (const key of ["\x03", "\x04"]) {
+			const onExit = vi.fn();
+			const splash = new PrimeOnboardingSplashComponent(() => {}, { onExit });
+
+			splash.handleInput(key);
+
+			expect(onExit).toHaveBeenCalledOnce();
+		}
+	});
+
 	it("renders the brand mark with the welcome line beneath it", () => {
 		const component = new PrimeOnboardingSplashComponent(() => {}, { getRows: () => 36 });
 		const lines = component.render(100);
