@@ -1,0 +1,1 @@
+- Changed helper provisioning to download pinned fd, ripgrep, and uv releases, verify their SHA-256 and archive contents before installing into `~/.prime/agent/bin`, and clean up partial downloads; uv is no longer installed by piping a remote script into `sh`.
