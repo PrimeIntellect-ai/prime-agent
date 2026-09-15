@@ -93,7 +93,15 @@ def validate_timing(trace) -> float:
         ):
             raise ValueError("trace has invalid timing")
         total += span.duration
-    return total
+    verifier = getattr(trace, "info", {}).get("isolated_verifier_seconds", 0.0)
+    if (
+        not isinstance(verifier, (int, float))
+        or isinstance(verifier, bool)
+        or not math.isfinite(verifier)
+        or verifier < 0
+    ):
+        raise ValueError("trace has invalid isolated verifier timing")
+    return total + verifier
 
 
 def provider_usage(trace, identity: str):
@@ -161,6 +169,47 @@ def validate_tasks(records: list[dict], manifest: dict) -> None:
         raise ValueError("trace task identities differ from the fixed 15/8/5 manifest")
 
 
+def validate_oracle_episode(episode) -> None:
+    if len(episode.traces) != 1:
+        raise RuntimeError("SWE-bench oracle did not produce one trace")
+    trace = episode.traces[0]
+    if (
+        episode.errors
+        or task_name(trace) != "astropy__astropy-14096"
+        or not trace.ok
+        or not trace.is_completed
+        or not scored(trace)
+        or trace.reward <= 0
+    ):
+        raise RuntimeError("SWE-bench gold-patch oracle did not resolve")
+
+
+def run_oracle(executable: Path, config: Path, output: Path) -> None:
+    from verifiers.v1.cli.output import read_episodes
+    from verifiers.v1.trace import WireTrace
+
+    target = output / "oracle"
+    target.mkdir(parents=True, exist_ok=True)
+    environment = {**os.environ, "PYTHONPATH": str(ROOT)}
+    with (target / "eval.log").open("w") as log:
+        completed = subprocess.run(
+            [str(executable), "@", str(config), "--output-dir", str(target), "--no-push"],
+            env=environment,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    if completed.returncode:
+        raise RuntimeError(f"SWE-bench oracle exited with status {completed.returncode}")
+    files = list(target.rglob("traces.jsonl"))
+    if len(files) != 1 or files[0].stat().st_size > TRACE_FILE_LIMIT:
+        raise RuntimeError("SWE-bench oracle trace output is invalid")
+    episodes = list(read_episodes(files[0].parent, WireTrace))
+    if len(episodes) != 1:
+        raise RuntimeError("SWE-bench oracle did not produce one episode")
+    validate_oracle_episode(episodes[0])
+
+
 def run_all(executable: Path, configs: Path, output: Path) -> dict[str, list[dict]]:
     environment = {**os.environ, "PYTHONPATH": str(ROOT)}
     processes = {}
@@ -203,8 +252,9 @@ def main() -> None:
     args = parser.parse_args()
     manifest = json.loads((ROOT / "short-swe.json").read_text())
     request = json.loads(args.request.read_text())
-    started = time.time()
     try:
+        run_oracle(args.eval, args.configs / "oracle.toml", args.output)
+        started = time.time()
         sides = run_all(args.eval, args.configs, args.output)
         for records in sides.values():
             validate_tasks(records, manifest)

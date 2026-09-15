@@ -78,7 +78,7 @@ def compare(base: dict, head: dict) -> list[str]:
     additional_failures = head["model_failures"] - base["model_failures"]
     if additional_failures >= MODEL_FAILURE_LIMIT:
         findings.append(f"Model failures increased by {additional_failures}.")
-    for field, label in (("output_tokens", "Output tokens"), ("e2e_seconds", "End-to-end time")):
+    for field, label in (("output_tokens", "Output tokens"), ("e2e_seconds", "Cumulative task time")):
         if base[field] > 0 and head[field] / base[field] >= RATIO_LIMIT and resolved_delta <= 0:
             findings.append(
                 f"{label} reached {head[field] / base[field]:.2f}x base without more resolutions."
@@ -139,6 +139,7 @@ def render(result: dict, request: dict) -> tuple[str, str]:
         "",
         f"PR head `{request['head_sha'][:8]}` compared with exact base `{request['base_sha'][:8]}`.",
         "Model `internal/glm-5.3-fast`. Inference cost: **$0**.",
+        "Time is summed across task traces; concurrent tasks overlap in wall-clock time.",
         "",
         "| Metric | Exact base | PR head | Change |",
         "| --- | ---: | ---: | ---: |",
@@ -150,7 +151,7 @@ def render(result: dict, request: dict) -> tuple[str, str]:
         f"| Cached input tokens | {base['cached_input_tokens']:,} | "
         f"{head['cached_input_tokens']:,} | {cached_change} |",
         f"| Output tokens | {base['output_tokens']:,} | {head['output_tokens']:,} | {output_change} |",
-        f"| End-to-end time | {base['e2e_seconds']:,.1f} s | {head['e2e_seconds']:,.1f} s | "
+        f"| Cumulative task time | {base['e2e_seconds']:,.1f} s | {head['e2e_seconds']:,.1f} s | "
         f"{elapsed_change} |",
         "",
         "#### Results by taskset",

@@ -52,6 +52,59 @@ def strip_task_runtime_credentials(verifiers: Path) -> None:
     replace_once(harbor, old, new)
 
 
+def install_verified_verifier(manifest: dict, environments: Path) -> None:
+    # Tests run in a fresh, network-free verifier. Their bounded log is parsed here,
+    # outside candidate control, against the trusted task package's config.
+    by_id = {item["id"]: item for item in manifest["tasksets"]}
+    package = environments / by_id["swebench-verified"]["package"] / "swebench_verified"
+    taskset = package / "taskset.py"
+    replace_once(
+        taskset,
+        "`SWEBenchVerifiedTask` (a `HarborTask` whose `finalize` ensures uv before harbor's verifier runs).",
+        "`SWEBenchVerifiedTask` (a `HarborTask` graded in a fresh offline verifier sandbox).",
+    )
+    replace_once(taskset, "from verifiers.v1.runtimes import Runtime\n", "")
+    replace_once(taskset, "from verifiers.v1.runtimes.base import _ENSURE_UV\n", "")
+    replace_once(
+        taskset,
+        "from verifiers.v1.tasksets.harbor import HarborConfig, HarborTask, HarborTaskset\n",
+        "from verifiers.v1.tasksets.harbor import HarborConfig, HarborTask, HarborTaskset\n"
+        "from verifiers.v1.tasksets.harbor.taskset import CollectHook, VerifierConfig\n"
+        "from verifiers.v1.utils.artifacts import Artifact\n"
+        "from secure_harbor import SecureVerifiedMixin\n"
+        "from verified_verifier import patch_collect_command\n",
+    )
+    old = """class SWEBenchVerifiedTask(HarborTask):
+    async def finalize(self, trace: vf.Trace, runtime: Runtime) -> None:
+        # The SWE-bench verifier runs `uv run parser.py` but never installs uv, relying on the
+        # harness to leave one on PATH. rlm pins uv off PATH, so the grader hits `uv: command not
+        # found` and scores 0 even for correct fixes. Ensure uv before scoring, under any harness.
+        await runtime.run(["sh", "-c", _ENSURE_UV], {})
+        await super().finalize(trace, runtime)
+"""
+    new = """class SWEBenchVerifiedTask(SecureVerifiedMixin, HarborTask):
+    pass
+"""
+    replace_once(taskset, old, new)
+    old_data = 'data = task.data.model_copy(update={"image": image, "workdir": "/testbed"})'
+    new_data = """if task.data.artifacts or task.data.collect or task.data.verifier is not None:
+                raise ValueError(f"{task.data.name}: unexpected verifier transfer configuration")
+            data = task.data.model_copy(
+                update={
+                    "image": image,
+                    "workdir": "/testbed",
+                    "artifacts": [Artifact(source="/tmp/prime-agent.patch")],
+                    "collect": [
+                        CollectHook(
+                            command=patch_collect_command(Path(task.data.task_dir))
+                        )
+                    ],
+                    "verifier": VerifierConfig(fresh_copy=True, network_allow=[]),
+                }
+            )"""
+    replace_once(taskset, old_data, new_data)
+
+
 def pin_taskset_sources(manifest: dict, verifiers: Path, environments: Path) -> None:
     by_id = {item["id"]: item for item in manifest["tasksets"]}
     for taskset_id, module in (
@@ -79,6 +132,7 @@ def pin_taskset_sources(manifest: dict, verifiers: Path, environments: Path) -> 
     )
     replace_once(scale, old, new)
 
+    install_verified_verifier(manifest, environments)
     strip_task_runtime_credentials(verifiers)
 
     # This Verifiers revision eagerly imports the optional NeMo Gym plugin from
@@ -168,17 +222,55 @@ def config_text(
         f"num_rollouts = {manifest['num_rollouts']}",
         f"max_concurrent = {manifest['max_concurrent']}",
         "",
-        "[env.agent]",
-        f"max_turns = {manifest['limits']['max_turns']}",
-        f"max_output_tokens = {manifest['limits']['max_output_tokens']}",
-        f"max_total_tokens = {manifest['limits']['max_total_tokens']}",
-        "",
-        "[env.agent.timeout]",
-        f"rollout = {manifest['limits']['rollout_timeout_seconds']}",
-        "",
-        "[env.taskset]",
-        f"id = {json.dumps(item['id'])}",
     ]
+    if item["id"] == "swebench-verified":
+        lines.extend(
+            [
+                "[env]",
+                'id = "secure_harbor"',
+                "",
+                "[env.timeout]",
+                f"finalize = {manifest['limits']['rollout_timeout_seconds']}",
+                "",
+                "[env.verifier]",
+                "retries = 0",
+                "",
+                "[env.verifier.runtime]",
+                'type = "prime"',
+                "allow = []",
+                "vm = true",
+                "labels = "
+                + toml_array(
+                    [
+                        "prime-agent-behavioral-v1",
+                        f"repository:{os.environ.get('GITHUB_REPOSITORY', 'local/local')}",
+                        f"run:{os.environ.get('GITHUB_RUN_ID', 'local')}",
+                        f"attempt:{os.environ.get('GITHUB_RUN_ATTEMPT', 'local')}",
+                        "role:verifier",
+                    ]
+                ),
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "[env.agent]",
+            f"max_turns = {manifest['limits']['max_turns']}",
+            f"max_output_tokens = {manifest['limits']['max_output_tokens']}",
+            f"max_total_tokens = {manifest['limits']['max_total_tokens']}",
+            "",
+            "[env.agent.timeout]",
+            f"rollout = {manifest['limits']['rollout_timeout_seconds']}",
+            *(
+                [f"scoring = {manifest['limits']['rollout_timeout_seconds']}"]
+                if item["id"] == "swebench-verified"
+                else []
+            ),
+            "",
+            "[env.taskset]",
+            f"id = {json.dumps(item['id'])}",
+        ]
+    )
     if item["id"] in {"swebench-verified", "swebench-pro"}:
         lines.append(f"tasks = {toml_array(item['tasks'])}")
     else:
@@ -218,6 +310,71 @@ def config_text(
     return "\n".join(lines) + "\n"
 
 
+def oracle_config_text(manifest: dict) -> str:
+    return "\n".join(
+        [
+            f"model = {json.dumps(manifest['model'])}",
+            "num_rollouts = 1",
+            "max_concurrent = 1",
+            "",
+            "[env]",
+            'id = "secure_harbor"',
+            "",
+            "[env.timeout]",
+            "finalize = 600",
+            "",
+            "[env.verifier]",
+            "retries = 0",
+            "",
+            "[env.verifier.runtime]",
+            'type = "prime"',
+            "allow = []",
+            "vm = true",
+            "labels = "
+            + toml_array(
+                [
+                    "prime-agent-behavioral-v1",
+                    f"repository:{os.environ.get('GITHUB_REPOSITORY', 'local/local')}",
+                    f"run:{os.environ.get('GITHUB_RUN_ID', 'local')}",
+                    f"attempt:{os.environ.get('GITHUB_RUN_ATTEMPT', 'local')}",
+                    "role:oracle-verifier",
+                ]
+            ),
+            "",
+            "[env.agent]",
+            "max_turns = 4",
+            "max_output_tokens = 20000",
+            "max_total_tokens = 100000",
+            "",
+            "[env.agent.timeout]",
+            "rollout = 600",
+            "scoring = 600",
+            "",
+            "[env.taskset]",
+            'id = "swebench-verified"',
+            'tasks = ["astropy__astropy-14096"]',
+            "",
+            "[env.agent.harness]",
+            'id = "oracle_harness"',
+            "",
+            "[env.agent.runtime]",
+            'type = "prime"',
+            "allow = []",
+            "labels = "
+            + toml_array(
+                [
+                    "prime-agent-behavioral-v1",
+                    f"repository:{os.environ.get('GITHUB_REPOSITORY', 'local/local')}",
+                    f"run:{os.environ.get('GITHUB_RUN_ID', 'local')}",
+                    f"attempt:{os.environ.get('GITHUB_RUN_ATTEMPT', 'local')}",
+                    "role:oracle",
+                ]
+            ),
+            "",
+        ]
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--verifiers", required=True, type=Path)
@@ -238,6 +395,8 @@ def main() -> None:
     if not SHA_RE.fullmatch(args.base_sha) or not SHA_RE.fullmatch(args.head_sha):
         raise ValueError("invalid evaluated revision")
     pin_taskset_sources(manifest, args.verifiers, args.environments)
+    args.output.mkdir(parents=True, exist_ok=True)
+    (args.output / "oracle.toml").write_text(oracle_config_text(manifest))
     for side, artifacts, commit in (
         ("base", args.base_artifacts, args.base_sha),
         ("head", args.head_artifacts, args.head_sha),

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -19,8 +20,10 @@ from scripts.evals.short_swe import (  # noqa: E402
     ci,
     cleanup,
     evaluate,
+    offline_swebench_grader,
     prepare,
     report,
+    verified_verifier,
 )
 
 EVAL_ROOT = ROOT / "scripts/evals/short_swe"
@@ -47,6 +50,131 @@ def test_manifest_is_the_fixed_pinned_suite() -> None:
     }
     assert manifest["model"] == "internal/glm-5.3-fast"
     assert manifest["autonomous"] is False
+    tasksets = {item["id"]: item["tasks"] for item in manifest["tasksets"]}
+    verified_repositories = {task.rsplit("-", 1)[0] for task in tasksets["swebench-verified"]}
+    pro_repositories = {task.removeprefix("instance_").split("-", 1)[0] for task in tasksets["swebench-pro"]}
+    assert len(verified_repositories) == 12
+    assert len(pro_repositories) == 8
+
+
+def test_offline_verified_grader_requires_all_expected_tests() -> None:
+    config = {
+        "instance_id": "astropy__astropy-test",
+        "repo": "astropy/astropy",
+        "FAIL_TO_PASS": json.dumps(["tests/test_fix.py::test_fixed"]),
+        "PASS_TO_PASS": json.dumps(["tests/test_old.py::test_still_works"]),
+    }
+    passed = "tests/test_fix.py::test_fixed PASSED\ntests/test_old.py::test_still_works PASSED\n"
+    report = offline_swebench_grader.grade(config, passed)[config["instance_id"]]
+    assert report["resolved"] is True
+    with pytest.raises(ValueError, match="missing 1 expected"):
+        offline_swebench_grader.grade(config, "tests/test_fix.py::test_fixed PASSED\n")
+    forged_append = offline_swebench_grader.grade(
+        config,
+        "FAILED tests/test_fix.py::test_fixed - assertion\n"
+        "PASSED tests/test_fix.py::test_fixed\n"
+        "PASSED tests/test_old.py::test_still_works\n",
+    )
+    assert forged_append[config["instance_id"]]["resolved"] is False
+    skipped = offline_swebench_grader.grade(
+        config,
+        "tests/test_fix.py::test_fixed PASSED\ntests/test_old.py::test_still_works SKIPPED\n",
+    )
+    assert skipped[config["instance_id"]]["resolved"] is False
+    with pytest.raises(ValueError, match="missing 2 expected"):
+        offline_swebench_grader.grade(config, "pytest failed before collecting tests")
+
+
+def test_patch_collection_uses_trusted_base_and_keeps_all_git_states(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True)
+    for name in ("committed.txt", "staged.txt", "deleted.txt"):
+        (repo / name).write_text("base\n")
+    (repo / "binary.bin").write_bytes(b"base\x00")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+    (repo / "committed.txt").write_text("committed\n")
+    subprocess.run(["git", "add", "committed.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "candidate commit"], cwd=repo, check=True)
+    (repo / "staged.txt").write_text("staged\n")
+    subprocess.run(["git", "add", "staged.txt"], cwd=repo, check=True)
+    (repo / "deleted.txt").unlink()
+    (repo / "binary.bin").write_bytes(b"changed\x00binary")
+    (repo / "untracked.txt").write_text("untracked\n")
+
+    task = tmp_path / "task/tests"
+    task.mkdir(parents=True)
+    (task / "config.json").write_text(json.dumps({"base_commit": base}))
+    command = verified_verifier.patch_collect_command(task.parent)
+    assert command.startswith("rm -rf /logs/artifacts && ")
+    subprocess.run(command.split(" && ", 1)[1], cwd=repo, check=True, shell=True)
+    patch = Path("/tmp/prime-agent.patch")
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(repo), str(clone)], check=True)
+    subprocess.run(["git", "checkout", "-q", base], cwd=clone, check=True)
+    subprocess.run(["git", "apply", "--binary", str(patch)], cwd=clone, check=True)
+    assert (clone / "committed.txt").read_text() == "committed\n"
+    assert (clone / "staged.txt").read_text() == "staged\n"
+    assert not (clone / "deleted.txt").exists()
+    assert (clone / "binary.bin").read_bytes() == b"changed\x00binary"
+    assert (clone / "untracked.txt").read_text() == "untracked\n"
+
+
+def test_verified_test_rewrite_handles_pinned_install_variants() -> None:
+    for install in [*sorted(verified_verifier.INSTALLS), None]:
+        script = "\n".join(
+            filter(
+                None,
+                [
+                    install,
+                    verified_verifier.LOG_ASSIGNMENT,
+                    verified_verifier.TEE_REDIRECT,
+                    "pytest tests || true",
+                    verified_verifier.PARSER,
+                ],
+            )
+        )
+        rewritten = verified_verifier.rewrite_test_script(script)
+        assert "uv run parser.py" not in rewritten
+        assert "TEST_STATUS=$?" in rewritten
+        assert 'exit "${TEST_STATUS:-0}"' in rewritten
+        assert "/logs/verifier/test.log" not in rewritten
+        assert "output captured by the runtime controller" in rewritten
+        if install:
+            assert "dependencies are pinned in the task image" in rewritten
+            assert "pip install" not in rewritten
+    source = (EVAL_ROOT / "secure_harbor.py").read_text()
+    assert "head -c 16000001" in source
+    assert 'runtime.read("/logs/verifier/test.log"' not in source
+    assert '["rm", "-f", "/tests/config.json", "/tmp/tests.tgz"]' in source
+    with pytest.raises(RuntimeError, match="template"):
+        verified_verifier.rewrite_test_script("python -m pip install malicious")
+
+
+def test_oracle_is_network_blocked_and_required_to_resolve() -> None:
+    manifest = json.loads((EVAL_ROOT / "short-swe.json").read_text())
+    config = tomllib.loads(prepare.oracle_config_text(manifest))
+    assert config["env"]["id"] == "secure_harbor"
+    assert config["env"]["agent"]["runtime"]["allow"] == []
+    assert config["env"]["verifier"]["runtime"]["allow"] == []
+    assert config["env"]["timeout"]["finalize"] == 600
+    assert config["env"]["agent"]["timeout"]["scoring"] == 600
+    assert config["env"]["taskset"]["tasks"] == ["astropy__astropy-14096"]
+    assert config["env"]["agent"]["harness"]["id"] == "oracle_harness"
+    trace = fake_trace()
+    trace.task.data.name = "swe-bench/astropy__astropy-14096"
+    episode = SimpleNamespace(traces=[trace], errors=[])
+    evaluate.validate_oracle_episode(episode)
+    trace.rewards = {"solved": SimpleNamespace(score=0.0, weight=1.0)}
+    trace.reward = 0.0
+    with pytest.raises(RuntimeError, match="oracle"):
+        evaluate.validate_oracle_episode(episode)
 
 
 def test_config_pins_candidate_and_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -64,6 +192,11 @@ def test_config_pins_candidate_and_limits(tmp_path: Path, monkeypatch: pytest.Mo
     assert "max_output_tokens = 100000" in text
     assert "max_total_tokens = 5000000" in text
     assert "rollout = 3600" in text
+    parsed = tomllib.loads(text)
+    assert parsed["env"]["id"] == "secure_harbor"
+    assert parsed["env"]["verifier"]["runtime"]["allow"] == []
+    assert parsed["env"]["timeout"]["finalize"] == 3600
+    assert parsed["env"]["agent"]["timeout"]["scoring"] == 3600
 
 
 def labeled_event() -> dict:
@@ -180,6 +313,10 @@ def test_trace_record_uses_native_usage_buckets() -> None:
     assert record["cached_input_tokens"] == 7
     assert record["output_tokens"] == 5
     assert record["e2e_seconds"] == 5
+    trace = fake_trace()
+    trace.info = {"isolated_verifier_seconds": 3.5}
+    record = evaluate.trace_record(SimpleNamespace(traces=[trace], errors=[], ok=True), "suite")
+    assert record["e2e_seconds"] == 8.5
 
 
 def test_scored_model_timeout_is_an_outcome_but_incomplete_trace_fails() -> None:
@@ -323,6 +460,9 @@ def test_report_passes_noise_and_colors_meaningful_token_change() -> None:
     assert "\\textcolor" in markdown
     assert "#e5484d" in markdown
     assert "SWE-bench Verified" in markdown
+    assert "Cumulative task time | 280.0 s | 560.0 s" in markdown
+    assert "concurrent tasks overlap in wall-clock time" in markdown
+    assert "End-to-end time" not in markdown
     assert "task-0" not in markdown
 
 
@@ -340,7 +480,7 @@ def test_report_fails_drastic_quality_or_efficiency_regression() -> None:
     efficiency = paired(base_resolved=10, head_resolved=10, head_multiplier=2)
     markdown, verdict = report.render(efficiency, request())
     assert verdict == "fail"
-    assert "without more resolutions" in markdown
+    assert "Cumulative task time reached 2.00x base without more resolutions." in markdown
 
 
 def open_directories(source: Path, destination: Path) -> tuple[int, int]:
