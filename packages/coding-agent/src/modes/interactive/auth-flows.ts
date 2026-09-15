@@ -521,6 +521,11 @@ export class ProviderAuthFlows {
 		const teamStatus = await this.selectPrimeInferenceTeam(apiKey, dialog);
 
 		closeDialog();
+		// A reset unmounts the dialog and aborts its signal: completing now would
+		// refresh the registry and notify a session that was already torn down.
+		if (dialog.signal.aborted) {
+			return { status: "cancelled" };
+		}
 		return await this.completeProviderAuthentication(
 			PRIME_INFERENCE_PROVIDER_ID,
 			PRIME_INFERENCE_PROVIDER_NAME,

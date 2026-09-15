@@ -203,7 +203,7 @@ describe("LoginDialogComponent", () => {
 		expect(dialog.render(80).length - first).toBe(2);
 	});
 
-	it("quits the app from ctrl+c only while onboarding passes onExit", () => {
+	it("quits the app from ctrl+c only while onboarding passes onExit", async () => {
 		const dialog = new LoginDialogComponent(
 			createFakeTui(),
 			"prime-inference",
@@ -222,7 +222,7 @@ describe("LoginDialogComponent", () => {
 		const prompt = plain.showPrompt("Enter API key:");
 		plain.handleInput("\x03");
 		// Outside onboarding, ctrl+c keeps cancelling the prompt.
-		expect(() => prompt).rejects.toThrow("Login cancelled");
+		await expect(prompt).rejects.toThrow("Login cancelled");
 	});
 
 	it("cancels the prompt with esc and ctrl+c", async () => {
