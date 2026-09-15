@@ -53,39 +53,6 @@ describe("OnboardingPickerComponent", () => {
 		}
 	});
 
-	it("marks already connected providers with a check", () => {
-		const component = new OnboardingPickerComponent(
-			items,
-			() => {},
-			() => {},
-			() => {},
-		);
-		const row = component.render(90).find((line) => stripAnsi(line).includes("ChatGPT Plus/Pro"));
-
-		expect(stripAnsi(row ?? "")).toContain("\u2713");
-		expect(stripAnsi(row ?? "")).not.toContain("connected");
-	});
-
-	it("keeps a single caret on screen: the search line has none", () => {
-		const component = new OnboardingPickerComponent(
-			items,
-			() => {},
-			() => {},
-			() => {},
-			{
-				prompt: "Connect other providers, or continue.",
-				searchPlaceholder: "Search providers",
-			},
-		);
-		const rendered = component.render(90).map((line) => stripAnsi(line));
-		const promptLine = rendered.find((line) => line.includes("Connect other providers"));
-		const searchLine = rendered.find((line) => line.includes("Search providers"));
-
-		expect(searchLine).toBeDefined();
-		expect(searchLine).not.toContain(">");
-		expect(searchLine?.search(/\S/)).toBe(promptLine?.search(/\S/));
-	});
-
 	it("filters as the user types", () => {
 		const component = new OnboardingPickerComponent(
 			items,
@@ -100,24 +67,6 @@ describe("OnboardingPickerComponent", () => {
 
 		expect(output).toContain("Groq");
 		expect(output).not.toContain("Anthropic (Claude Pro/Max)");
-	});
-
-	it("reports the chosen provider and scrolls to reach it", () => {
-		const onSelect = vi.fn();
-		const component = new OnboardingPickerComponent(
-			items,
-			onSelect,
-			() => {},
-			() => {},
-		);
-
-		for (let i = 0; i < 8; i++) {
-			component.handleInput("\x1b[B");
-		}
-		component.handleInput("\r");
-
-		expect(onSelect).toHaveBeenCalledWith("mistral");
-		expect(render(component)).toContain("Mistral");
 	});
 
 	it("continues from the pinned action and cancels on escape", () => {

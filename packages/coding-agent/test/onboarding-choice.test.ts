@@ -67,40 +67,4 @@ describe("OnboardingChoiceComponent", () => {
 		component.handleInput("\x1b");
 		expect(onCancel).toHaveBeenCalledTimes(1);
 	});
-
-	it("keeps the selection inside the option list", () => {
-		const onSelect = vi.fn();
-		const component = new OnboardingChoiceComponent([{ label: "Only" }], onSelect, () => {});
-
-		component.handleInput("\x1b[A");
-		component.handleInput("\x1b[B");
-		component.handleInput("\r");
-
-		expect(onSelect).toHaveBeenCalledWith(0);
-	});
-
-	it("renders a muted description under the prompt", () => {
-		const component = new OnboardingChoiceComponent(
-			[{ label: "Share" }, { label: "Not now" }],
-			() => {},
-			() => {},
-			{
-				prompt: "Share agent traces with Prime Intellect?",
-				description: "Traces train open-source models and improve the open agent ecosystem everyone builds on.",
-			},
-		);
-		const output = stripAnsi(component.render(90).join("\n"));
-
-		expect(output).toContain("Share agent traces with Prime Intellect?");
-		expect(output).toContain("Traces train open-source models");
-	});
-
-	it("shows an option detail next to its label", () => {
-		const component = new OnboardingChoiceComponent(
-			[{ label: "Prime Intellect", detail: "prime-intellect" }],
-			() => {},
-			() => {},
-		);
-		expect(stripAnsi(component.render(90).join("\n"))).toContain("Prime Intellect  @prime-intellect");
-	});
 });

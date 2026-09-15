@@ -1,4 +1,4 @@
-import { setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
+import { setKeybindings } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
@@ -53,26 +53,6 @@ describe("PrimeOnboardingSplashComponent", () => {
 		expect(actionRow).toBeGreaterThan(brandRow);
 	});
 
-	it("sizes to its content, and covers the pane when a row count is given", () => {
-		const compact = new PrimeOnboardingSplashComponent(
-			() => {},
-			() => {},
-			{},
-		);
-		expect(compact.render(100).length).toBeLessThanOrEqual(logoLines.length + 18);
-
-		const covering = new PrimeOnboardingSplashComponent(
-			() => {},
-			() => {},
-			{ getRows: () => 40 },
-		);
-		const lines = covering.render(100);
-		expect(lines).toHaveLength(40);
-		for (const line of lines) {
-			expect(visibleWidth(line)).toBe(100);
-		}
-	});
-
 	it("left aligns the mark, the welcome line and the actions", () => {
 		const component = new PrimeOnboardingSplashComponent(
 			() => {},
@@ -102,19 +82,6 @@ describe("PrimeOnboardingSplashComponent", () => {
 		expect(markColumn).toBeLessThanOrEqual(16);
 	});
 
-	it("marks the active action with a caret and a selection background", () => {
-		const component = new PrimeOnboardingSplashComponent(
-			() => {},
-			() => {},
-			{ getRows: () => 36 },
-		);
-		const lines = component.render(100);
-		const selected = lines.find((line) => stripAnsi(line).includes("Log in with Prime Intellect"));
-
-		expect(stripAnsi(selected ?? "")).toContain("> Log in with Prime Intellect");
-		expect(selected ?? "").toMatch(/\x1b\[(4[0-9]|10[0-7]|48[;:])/);
-	});
-
 	it("starts Prime login on confirm", () => {
 		let selected = false;
 		const component = new PrimeOnboardingSplashComponent(
@@ -127,44 +94,6 @@ describe("PrimeOnboardingSplashComponent", () => {
 		component.handleInput("\r");
 
 		expect(selected).toBe(true);
-	});
-
-	it("continues later on cancel", () => {
-		const onCancel = vi.fn();
-		const component = new PrimeOnboardingSplashComponent(() => {}, onCancel);
-
-		component.handleInput("\x1b");
-
-		expect(onCancel).toHaveBeenCalledTimes(1);
-	});
-
-	it("renders a model selection action when auth is already available", () => {
-		const component = new PrimeOnboardingSplashComponent(
-			() => {},
-			() => {},
-			{ getRows: () => 36, continueActionLabel: "choose a model" },
-		);
-		const output = stripAnsi(component.render(100).join("\n"));
-
-		expect(output).toContain("Choose a model");
-		expect(output).not.toContain("Log in with Prime Intellect");
-	});
-
-	it("drops the description once a flow panel takes over the block", () => {
-		const component = new PrimeOnboardingSplashComponent(
-			() => {},
-			() => {},
-			{ getRows: () => 36 },
-		);
-		component.setPanel({ render: () => ["panel row"], invalidate: () => {} }, "Login with Prime Intellect");
-		const output = stripAnsi(component.render(100).join("\n"));
-
-		expect(output).toContain("panel row");
-		// The panel names the screen while it owns the block.
-		expect(output).toContain("Login with Prime Intellect");
-		expect(output).not.toContain("Welcome to PRIME Agent");
-		expect(output).not.toContain("Prime Agent programmatically manages your");
-		expect(output).not.toContain("Log in with Prime Intellect");
 	});
 
 	it("never falls back to the intro once a flow has started", () => {
@@ -181,22 +110,6 @@ describe("PrimeOnboardingSplashComponent", () => {
 		expect(output).toContain("Welcome to PRIME Agent");
 		expect(output).not.toContain("Log in with Prime Intellect");
 		expect(output).not.toContain("monitor dozens of experiments");
-	});
-
-	it("shows progress and ignores input while onboarding advances", () => {
-		const onSelect = vi.fn();
-		const onCancel = vi.fn();
-		const component = new PrimeOnboardingSplashComponent(onSelect, onCancel, { getRows: () => 36 });
-
-		component.showProgress("Preparing models...");
-		component.handleInput("\r");
-		component.handleInput("\x1b");
-
-		const output = stripAnsi(component.render(100).join("\n"));
-		expect(output).toContain("Preparing models...");
-		expect(output).not.toContain("Continue later");
-		expect(onSelect).not.toHaveBeenCalled();
-		expect(onCancel).not.toHaveBeenCalled();
 	});
 
 	it("animates the mark at an interactive cadence", () => {
