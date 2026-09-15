@@ -1,2 +1,0 @@
-- Changed onboarding for existing users (working model with configured auth) to show only the trace-sharing question, skipping Prime login and the provider picker entirely.
-- Changed onboarding for existing users who already have traces enabled to complete silently without showing any questions.

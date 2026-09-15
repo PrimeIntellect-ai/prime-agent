@@ -211,6 +211,19 @@
 - Extended the kernel runtime readiness check to require `rlm.progress_note`, so a `PRIME_AGENT_KERNEL_PYTHON` override older than the progress-note API fails fast with an actionable message instead of an `AttributeError` mid-run.
 
 - Added musl and baseline compiled releases so Linux hosts stop falling back to the Node installation. Releases now publish `linux-arm64-musl`, `linux-x64-baseline`, `linux-x64-musl`, and `linux-x64-musl-baseline` alongside the existing four archives. The installer detects musl (Alpine) and x86-64 CPUs without AVX2 and downloads the matching archive. musl archives need `libstdc++` (`apk add --no-cache libstdc++` on Alpine); when it is missing, the installer now names that package and stops instead of falling back to the Node installation, and a failed first install no longer leaves an empty installation directory behind.
+- Fixed global flags written before a command routing the command to the model as a chat message; `prime-agent --offline model list` now runs the command, `--` still sends the word as a message, and a global flag a command does not accept fails with a clear error.
+- Fixed moved global flags leaking past a `--` separator into an `mcp add` child command or a scheduled message; they now stay ahead of any `--`.
+- Fixed `prime-agent --offline help` and `--offline help status` printing help instead of chatting; global run flags no longer count as help arguments.
+- Made the version check and npm bridge test suites hermetic. They now clear the update and daemon-worker environment variables they depend on, and the bridge sanitises the environment it hands to spawned children, so both suites pass from inside a running Prime Agent session instead of only in CI.
+- Scoped background service discovery to the state root the command runs in, so a run with an isolated HOME or agent dir only lists and stops its own daemons and `shutdown --force` no longer reaches daemons that belong to another root.
+- Scoped discovery now also reads the pre-move supervisor registry (so daemons from before the registry relocation stay reachable under the same agent dir) and skips records whose agent dir can no longer be resolved, so one stale record cannot abort the sweep.
+- Fixed installs that failed on a slow first run of the compiled executable, such as Rosetta 2 translation on Apple Silicon; the startup probe now waits up to 60 seconds, accepts a `PRIME_AGENT_PROBE_TIMEOUT_SECONDS` override, and reports a timeout as a timeout instead of claiming the executable cannot run on this machine.
+- Usage analytics now report `libc`, `libc_version`, `cpu_baseline`, `os_release`, and `os_product_version` so musl and non-AVX2 coverage is measurable before the standalone-Node install path is retired; every probe is memoized, the linked glibc runtime outranks a merely installed musl loader, and `os_release` is the raw kernel release string, which custom kernels can make identifying.
+- Changed onboarding for existing users (working model with configured auth) to show only the trace-sharing question, skipping Prime login and the provider picker entirely.
+- Changed onboarding for existing users who already have traces enabled to complete silently without showing any questions.
+- Fixed image paste in standalone macOS and glibc releases by embedding the available platform clipboard addon.
+- Fixed release manifest parsing rejecting all native binary entries when encountering an unknown future platform; unknown platforms are now skipped while known-platform entries remain strictly validated.
+- Added versioned native binary metadata so the v1 manifest schema stays compatible while the v2 schema advertises every musl and baseline archive.
 
 ## [0.9.4] - 2026-09-08
 
