@@ -142,7 +142,9 @@ import {
 	isSessionSlashCommandMessage,
 	isSessionSlashCommandResultMessage,
 	MCP_CONNECTION_OUTCOME_CUSTOM_TYPE,
-	type McpConnectionOutcomeDetails,
+	type McpDisconnectionOutcomeDetails,
+	type McpDisconnectionState,
+	type McpOutcomeDetails,
 	REFINEMENT_OUTCOME_CUSTOM_TYPE,
 	SESSION_SLASH_COMMAND_CUSTOM_TYPE,
 	SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE,
@@ -964,6 +966,25 @@ function formatMcpVerificationIssue(category: string | undefined): string {
 	return MCP_VERIFICATION_ISSUES[category ?? ""] ?? "the endpoint did not complete an MCP handshake";
 }
 
+/**
+ * Which removal outcomes earn a durable "Disconnected" entry: only the three
+ * that actually removed the stored credential. "logged-out" (partial save
+ * failure), "failed", "missing", and the state-neutral "refused" keep their
+ * honest transient lines — an entry would claim the disconnect is done.
+ */
+function mcpDisconnectionState(result: McpRemoveAccountResult): McpDisconnectionState | undefined {
+	switch (result) {
+		case "removed":
+			return "removed";
+		case "credential-only":
+			return "credential-only";
+		case "preserved":
+			return "preserved";
+		default:
+			return undefined;
+	}
+}
+
 export class InteractiveMode {
 	private static readonly EXIT_HINT_DURATION_MS = 2000;
 	private static readonly ESCAPE_REPEAT_WINDOW_MS = 500;
@@ -1135,8 +1156,14 @@ export class InteractiveMode {
 	 * durable outcome message instead of a transient status line.
 	 */
 	private pendingPostRunActivation:
-		| { message: string; successMessage: string; connectionOutcome?: McpConnectionOutcomeDetails }
+		| { message: string; successMessage: string; connectionOutcome?: McpOutcomeDetails }
 		| undefined;
+	/**
+	 * Durable outcome for an MCP logout the generic /logout route just made:
+	 * the host owns the store op, the route reports, and the selector records
+	 * the entry after the single reload.
+	 */
+	private pendingMcpDisconnectionOutcome: McpDisconnectionOutcomeDetails | undefined;
 	private signalCleanupHandlers: Array<() => void> = [];
 
 	private autoCompactionLoader: Loader | undefined = undefined;
@@ -9020,7 +9047,17 @@ export class InteractiveMode {
 	private async logoutMcpAccount(providerId: string): Promise<McpRemoveAccountResult> {
 		// The shared exported one-op handler: same code the reviewer's route
 		// tests drive, no copied literals.
-		return logoutMcpAccount(providerId, this.getMcpConnectionStore(), this.modelRegistry.authStorage);
+		const store = this.getMcpConnectionStore();
+		const connectionId = providerId.startsWith("mcp:") ? providerId.slice("mcp:".length) : providerId;
+		// Read the display label BEFORE the op: a "removed" outcome deletes the
+		// record, so afterwards only the id survives.
+		const label = store.get(connectionId)?.label ?? connectionId;
+		const result = await logoutMcpAccount(providerId, store, this.modelRegistry.authStorage);
+		// The route reports next; the durable entry waits for the reload the
+		// selector already runs, so the logout stays ONE store op and ONE reload.
+		const removal = mcpDisconnectionState(result);
+		this.pendingMcpDisconnectionOutcome = removal ? { kind: "disconnect", label, removal, connectionId } : undefined;
+		return result;
 	}
 
 	private async prepareForModelSelectionAfterLogin(authResult: AuthenticationResult): Promise<boolean> {
@@ -9096,6 +9133,9 @@ export class InteractiveMode {
 				this.showStatus(`${server} is not connected.`);
 				return;
 			}
+			// Read the display label BEFORE the op: a removed record leaves only
+			// the id the user typed.
+			const logoutLabel = this.getMcpConnectionStore().get(server)?.label ?? server;
 			// Credential AND record removal in one store-locked step (the same
 			// lock ordering finalize uses): no orphan credential can survive.
 			const loggedOut = await this.getMcpConnectionStore().removeAccount({
@@ -9125,6 +9165,16 @@ export class InteractiveMode {
 			}
 			if (loggedOut === "missing") {
 				this.showStatus(`${server} is no longer connected.`);
+				return;
+			}
+			const removal = mcpDisconnectionState(loggedOut);
+			if (removal) {
+				await this.completeMcpConnectionOutcome({
+					kind: "disconnect",
+					label: logoutLabel,
+					removal,
+					connectionId: server,
+				});
 				return;
 			}
 			await this.reloadAfterMcpChange(`Disconnected ${server}.`);
@@ -9598,6 +9648,8 @@ export class InteractiveMode {
 		// Explicit per-account remove: credential AND record removal in ONE
 		// store-locked step (the same lock ordering finalize uses), then reload.
 		if (service.removeAction === true) {
+			// Read the label before the op: a "removed" outcome deletes the record.
+			const removeLabel = this.getMcpConnectionStore().get(service.serviceId)?.label ?? service.label;
 			const removed = await this.getMcpConnectionStore().removeAccount({
 				connectionId: service.serviceId,
 				authCleanup: (connectionId) => {
@@ -9626,6 +9678,19 @@ export class InteractiveMode {
 			}
 			if (removed === "missing") {
 				this.showStatus(`Account ${service.serviceId} is no longer present.`);
+				return false;
+			}
+			// The explicit Remove row is the picker's primary disconnect gesture,
+			// so it records the same durable entry the /logout routes do instead
+			// of a status line that scrolls away (Kevin, live testing).
+			const removal = mcpDisconnectionState(removed);
+			if (removal) {
+				await this.completeMcpConnectionOutcome({
+					kind: "disconnect",
+					label: removeLabel,
+					removal,
+					connectionId: service.serviceId,
+				});
 				return false;
 			}
 			await this.reloadAfterMcpChange(`Removed account ${service.serviceId}.`);
@@ -10077,10 +10142,11 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Connect outcomes are durable chat entries, not transient status lines:
-	 * reload the session, then record the outcome where it stays visible.
+	 * Connect AND disconnect outcomes are durable chat entries, not transient
+	 * status lines: reload the session, then record the outcome where it stays
+	 * visible.
 	 */
-	private async completeMcpConnectionOutcome(details: McpConnectionOutcomeDetails): Promise<void> {
+	private async completeMcpConnectionOutcome(details: McpOutcomeDetails): Promise<void> {
 		const notice = formatMcpConnectionOutcomeNotice(details);
 		if (this.isAgentStreaming() || this.isAgentCompacting()) {
 			this.queueMcpActivationForNextBoundary(notice, notice, details);
@@ -10090,7 +10156,7 @@ export class InteractiveMode {
 		await this.appendMcpConnectionOutcome({ ...details, activation: reloaded ? "active" : "inactive" });
 	}
 
-	private async appendMcpConnectionOutcome(details: McpConnectionOutcomeDetails): Promise<void> {
+	private async appendMcpConnectionOutcome(details: McpOutcomeDetails): Promise<void> {
 		const message = createMcpConnectionOutcomeMessage(details);
 		try {
 			await this.agentConnection.appendCustomMessage({
@@ -10113,7 +10179,7 @@ export class InteractiveMode {
 	private queueMcpActivationForNextBoundary(
 		message: string,
 		successMessage = message,
-		connectionOutcome?: McpConnectionOutcomeDetails,
+		connectionOutcome?: McpOutcomeDetails,
 	): void {
 		this.pendingPostRunActivation = { message, successMessage, ...(connectionOutcome ? { connectionOutcome } : {}) };
 		this.showStatus(`${message} It will activate automatically when the current turn finishes.`);
@@ -10142,10 +10208,18 @@ export class InteractiveMode {
 	private async showLogoutSelector(): Promise<void> {
 		// Only reload when an MCP integration was actually removed (its skill must
 		// be disabled); a cancelled or non-MCP logout needs no reload.
+		this.pendingMcpDisconnectionOutcome = undefined;
 		const loggedOut = await this.createAuthFlows().runLogout();
-		if (loggedOut?.startsWith("mcp:")) {
-			await this.handleReloadCommand();
+		const outcome = this.pendingMcpDisconnectionOutcome;
+		this.pendingMcpDisconnectionOutcome = undefined;
+		if (!loggedOut?.startsWith("mcp:")) return;
+		if (outcome) {
+			// The outcome path reloads itself, then leaves the durable entry; a
+			// refused/partial logout falls back to the reload-only behaviour.
+			await this.completeMcpConnectionOutcome(outcome);
+			return;
 		}
+		await this.handleReloadCommand();
 	}
 
 	private async handleUpdateCommand(args: string): Promise<void> {

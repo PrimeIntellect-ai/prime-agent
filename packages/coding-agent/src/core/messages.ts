@@ -135,6 +135,8 @@ export type McpConnectionOutcomeSource = "login" | "retry";
 export type McpConnectionActivationState = "active" | "inactive";
 
 export interface McpConnectionOutcomeDetails {
+	/** Absent on entries written before disconnect outcomes existed; both mean "connect". */
+	kind?: "connect";
 	/** Display label the outcome line names, e.g. "Linear" or "Acme (acme-2)". */
 	label: string;
 	source: McpConnectionOutcomeSource;
@@ -151,10 +153,36 @@ export interface McpConnectionOutcomeDetails {
 	activation?: McpConnectionActivationState;
 }
 
-export interface McpConnectionOutcomeMessage extends CustomMessage<McpConnectionOutcomeDetails> {
+/**
+ * How a disconnect finished. Only outcomes that actually removed the stored
+ * credential are representable: a failed or partial removal never gets a
+ * durable "Disconnected" entry.
+ */
+export type McpDisconnectionState = "removed" | "credential-only" | "preserved";
+
+export interface McpDisconnectionOutcomeDetails {
+	kind: "disconnect";
+	/** Display label the outcome line names, e.g. "Granola" or "account acme-2". */
+	label: string;
+	removal: McpDisconnectionState;
+	/** Account connection id when the outcome is account-scoped. */
+	connectionId?: string;
+	/** Whether the saved change is live in this session; absent until activation resolves. */
+	activation?: McpConnectionActivationState;
+}
+
+/** Either side of the MCP connection lifecycle, carried by one durable entry type. */
+export type McpOutcomeDetails = McpConnectionOutcomeDetails | McpDisconnectionOutcomeDetails;
+
+/** Connect details predate the disconnect entry, so a missing `kind` means "connect". */
+export function isMcpDisconnectionOutcome(details: McpOutcomeDetails): details is McpDisconnectionOutcomeDetails {
+	return (details as Partial<McpDisconnectionOutcomeDetails>).kind === "disconnect";
+}
+
+export interface McpConnectionOutcomeMessage extends CustomMessage<McpOutcomeDetails> {
 	customType: typeof MCP_CONNECTION_OUTCOME_CUSTOM_TYPE;
 	content: string;
-	details: McpConnectionOutcomeDetails;
+	details: McpOutcomeDetails;
 }
 
 export interface HarnessDigestDetails {
@@ -518,18 +546,37 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
 
+/** The saved-but-not-live tail every outcome line shares. */
+function activationSuffix(details: McpOutcomeDetails): string {
+	return details.activation === "inactive" ? " The change remains saved, but it is not active in this session." : "";
+}
+
+/** Plain-text outcome line for a completed MCP disconnect. */
+function formatMcpDisconnectionNotice(details: McpDisconnectionOutcomeDetails): string {
+	const suffix = activationSuffix(details);
+	switch (details.removal) {
+		case "removed":
+			return `Disconnected ${details.label}.${suffix}`;
+		case "credential-only":
+			return `Disconnected ${details.label}. No saved connection entry existed; the stored credential was removed.${suffix}`;
+		case "preserved":
+			return `Disconnected ${details.label}. The saved connection entry was kept and now shows as not connected.${suffix}`;
+	}
+}
+
 /**
- * Plain-text outcome line for an MCP connection attempt. This is the durable
- * wording the connect flows already reported; the persistent chat message
- * renders it as the body under a compact header.
+ * Plain-text outcome line for an MCP connect or disconnect. This is the
+ * durable wording the flows already reported: it is what the entry persists as
+ * `content` and what the transient fallback shows, so it stays a full sentence
+ * even where the rendered entry splits it into a header and a detail line.
  */
-export function formatMcpConnectionOutcomeNotice(details: McpConnectionOutcomeDetails): string {
+export function formatMcpConnectionOutcomeNotice(details: McpOutcomeDetails): string {
+	if (isMcpDisconnectionOutcome(details)) return formatMcpDisconnectionNotice(details);
 	const prefix =
 		details.source === "login" && details.addedAccount === true && details.connectionId
 			? `Added account ${details.connectionId}. `
 			: "";
-	const suffix =
-		details.activation === "inactive" ? " The change remains saved, but it is not active in this session." : "";
+	const suffix = activationSuffix(details);
 	switch (details.verification) {
 		case "connected":
 			return `${prefix}Connected ${details.label}${
@@ -547,7 +594,7 @@ export function formatMcpConnectionOutcomeNotice(details: McpConnectionOutcomeDe
 }
 
 export function createMcpConnectionOutcomeMessage(
-	details: McpConnectionOutcomeDetails,
+	details: McpOutcomeDetails,
 	display = true,
 	timestamp = Date.now(),
 ): McpConnectionOutcomeMessage {
@@ -651,10 +698,25 @@ export function isRefinementOutcomeMessage(message: unknown): message is Refinem
 	);
 }
 
+function isValidMcpActivation(activation: unknown): boolean {
+	return activation === undefined || activation === "active" || activation === "inactive";
+}
+
+function isValidMcpDisconnectionDetails(details: Record<string, unknown>): boolean {
+	return (
+		typeof details.label === "string" &&
+		(details.removal === "removed" || details.removal === "credential-only" || details.removal === "preserved") &&
+		(details.connectionId === undefined || typeof details.connectionId === "string") &&
+		isValidMcpActivation(details.activation)
+	);
+}
+
 export function isMcpConnectionOutcomeMessage(message: unknown): message is McpConnectionOutcomeMessage {
 	if (!isRecord(message) || !hasValidCustomMessageEnvelope(message, MCP_CONNECTION_OUTCOME_CUSTOM_TYPE)) return false;
 	if (!isRecord(message.details)) return false;
+	if (message.details.kind === "disconnect") return isValidMcpDisconnectionDetails(message.details);
 	return (
+		(message.details.kind === undefined || message.details.kind === "connect") &&
 		typeof message.details.label === "string" &&
 		(message.details.source === "login" || message.details.source === "retry") &&
 		(message.details.verification === "connected" ||
@@ -665,9 +727,7 @@ export function isMcpConnectionOutcomeMessage(message: unknown): message is McpC
 		(message.details.issue === undefined || typeof message.details.issue === "string") &&
 		(message.details.connectionId === undefined || typeof message.details.connectionId === "string") &&
 		(message.details.addedAccount === undefined || typeof message.details.addedAccount === "boolean") &&
-		(message.details.activation === undefined ||
-			message.details.activation === "active" ||
-			message.details.activation === "inactive")
+		isValidMcpActivation(message.details.activation)
 	);
 }
 

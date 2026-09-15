@@ -65,18 +65,34 @@ describe("McpConnectionOutcomeMessageComponent", () => {
 		initTheme("dark");
 	});
 
-	test("renders the connected outcome like a harness refinement: purple diamond header, soft body", () => {
+	test("renders a plain connected outcome as the purple diamond header ALONE, never a restated body", () => {
 		const component = outcomeComponent(connected);
 		const output = rendered(component);
 		const lines = output.split("\n");
+		// One line only: the body restated the header ("Connected Linear · 12
+		// tools verified / Connected Linear (12 tools verified).").
 		expect(lines.filter((line) => line.trim()).map((line) => line.trimEnd())).toEqual([
 			" ◆ Connected Linear · 12 tools verified",
-			" Connected Linear (12 tools verified).",
 		]);
+		expect(flat(component)).not.toContain("(12 tools verified)");
 		const raw = component.render(120).join("\n");
 		expect(raw).toContain(theme.fg("refinementHeader", "◆ Connected Linear · 12 tools verified"));
-		expect(raw).toContain(theme.fg("refinementSummary", " Connected Linear (12 tools verified)."));
 		expect(raw).not.toContain("Ctrl+O");
+		// The persisted content keeps the full sentence for status-line fallbacks.
+		expect(createMcpConnectionOutcomeMessage(connected).content).toBe("Connected Linear (12 tools verified).");
+	});
+
+	test("the body carries only the detail the header omits, for every variant", () => {
+		expect(flat(outcomeComponent({ ...connected, toolCount: undefined }))).toBe("◆ Connected Linear");
+		expect(
+			flat(
+				outcomeComponent({
+					...connected,
+					connectionId: "acme-2",
+					addedAccount: true,
+				}),
+			),
+		).toBe("◆ Connected Linear · 12 tools verified Added account acme-2.");
 	});
 
 	test("keeps the diamond header for unverified, unsaved, and tool-count-less outcomes", () => {
@@ -89,8 +105,9 @@ describe("McpConnectionOutcomeMessageComponent", () => {
 			activation: "active",
 		});
 		expect(rendered(unverified)).toContain("◆ Verification did not complete · Linear saved");
-		expect(flat(unverified)).toContain(
-			"Verification did not complete: the endpoint rejected the stored credentials (reconnect). The connection is saved; retry from /plugins.",
+		// The body adds the reason and the next step; it never restates the header.
+		expect(flat(unverified)).toBe(
+			"◆ Verification did not complete · Linear saved The endpoint rejected the stored credentials (reconnect). Retry from /plugins.",
 		);
 		const unsaved = outcomeComponent({
 			label: "Linear",
@@ -99,13 +116,11 @@ describe("McpConnectionOutcomeMessageComponent", () => {
 			activation: "active",
 		});
 		expect(rendered(unsaved)).toContain("◆ Verification result not recorded · Linear saved");
-		expect(flat(unsaved)).toContain(
-			"The verification result could not be saved. The connection is saved; retry from /plugins.",
-		);
+		expect(flat(unsaved)).toBe("◆ Verification result not recorded · Linear saved Retry verification from /plugins.");
 	});
 
 	test("carries the existing saved-but-unverified login wording and the account prefix", () => {
-		const component = outcomeComponent({
+		const details = {
 			label: "Acme (acme-2)",
 			source: "login",
 			verification: "unverified",
@@ -113,19 +128,82 @@ describe("McpConnectionOutcomeMessageComponent", () => {
 			connectionId: "acme-2",
 			addedAccount: true,
 			activation: "active",
-		});
+		} as const;
+		const component = outcomeComponent(details);
 		expect(rendered(component)).toContain("◆ Verification did not complete · Acme (acme-2) saved");
-		expect(flat(component)).toContain(
-			"Added account acme-2. Login succeeded for Acme (acme-2), but connection verification did not complete: the endpoint did not respond in time. The connection is saved; retry from /plugins.",
+		expect(flat(component)).toBe(
+			"◆ Verification did not complete · Acme (acme-2) saved Added account acme-2. The endpoint did not respond in time. Retry from /plugins.",
+		);
+		// The durable content still carries the full legacy sentence.
+		expect(createMcpConnectionOutcomeMessage(details).content).toContain(
+			"Login succeeded for Acme (acme-2), but connection verification did not complete",
 		);
 	});
 
 	test("reports a saved-but-inactive change in the body, not the header", () => {
 		const output = rendered(outcomeComponent({ ...connected, activation: "inactive" }));
 		expect(output).toContain("◆ Connected Linear · 12 tools verified");
-		expect(output).toContain(
-			"Connected Linear (12 tools verified). The change remains saved, but it is not active in this session.",
+		// The deferred-activation sentence is the ONLY body: no restated header.
+		expect(flat(outcomeComponent({ ...connected, activation: "inactive" }))).toBe(
+			"◆ Connected Linear · 12 tools verified The change remains saved, but it is not active in this session.",
 		);
+	});
+
+	test("renders a disconnect as a muted diamond header, in neither the connect purple nor the error red", () => {
+		const component = outcomeComponent({ kind: "disconnect", label: "Granola", removal: "removed" });
+		expect(flat(component)).toBe("◆ Disconnected Granola");
+		const raw = component.render(120).join("\n");
+		expect(raw).toContain(theme.fg("muted", "◆ Disconnected Granola"));
+		expect(raw).not.toContain(theme.fg("refinementHeader", "◆ Disconnected Granola"));
+		expect(raw).not.toContain(theme.fg("error", "◆ Disconnected Granola"));
+	});
+
+	test("a disconnect body adds only the honest extra state", () => {
+		expect(flat(outcomeComponent({ kind: "disconnect", label: "Granola", removal: "credential-only" }))).toBe(
+			"◆ Disconnected Granola No saved connection entry existed; the stored credential was removed.",
+		);
+		expect(flat(outcomeComponent({ kind: "disconnect", label: "Granola", removal: "preserved" }))).toBe(
+			"◆ Disconnected Granola The saved connection entry was kept and now shows as not connected.",
+		);
+		expect(
+			flat(outcomeComponent({ kind: "disconnect", label: "Granola", removal: "removed", activation: "inactive" })),
+		).toBe("◆ Disconnected Granola The change remains saved, but it is not active in this session.");
+	});
+
+	test("a disconnect expands to its own metadata line and survives transcript replay", () => {
+		const details = { kind: "disconnect", label: "Granola", removal: "removed", connectionId: "granola" } as const;
+		const component = outcomeComponent(details);
+		component.setExpanded(true);
+		expect(rendered(component)).toContain("account removed · account granola · active in this session");
+		const message = createMcpConnectionOutcomeMessage(details);
+		expect(message.content).toBe("Disconnected Granola.");
+		expect(isMcpConnectionOutcomeMessage(message)).toBe(true);
+		expect(isMcpConnectionOutcomeMessage({ ...message, details: { ...details, removal: "nope" } })).toBe(false);
+		expect(convertToLlm([message])).toEqual([]);
+		const [replay] = buildConversationComponents([message], {
+			ui: {} as TUI,
+			cwd: "/tmp",
+			toolOptions: {},
+			getToolDefinition: () => undefined,
+		});
+		expect(replay).toBeInstanceOf(McpConnectionOutcomeMessageComponent);
+		expect(replay!.render(120)).toEqual(outcomeComponent(details).render(120));
+	});
+
+	test("no rendered outcome line ever contains a newline", () => {
+		const variants = [
+			connected,
+			{ ...connected, activation: "inactive" },
+			{ label: "Linear", source: "retry", verification: "unverified", issue: "the endpoint timed out" },
+			{ kind: "disconnect", label: "Granola", removal: "credential-only" },
+		] as const;
+		for (const details of variants) {
+			for (const expanded of [false, true]) {
+				const component = outcomeComponent(details);
+				component.setExpanded(expanded);
+				for (const line of component.render(60)) expect(line).not.toContain("\n");
+			}
+		}
 	});
 
 	test("expands to the metadata line and collapses back without it", () => {
@@ -514,5 +592,188 @@ describe("MCP connect outcome emit sites", () => {
 		});
 
 		expect(showWarning).toHaveBeenCalledWith("Connected Linear (3 tools verified).");
+	});
+});
+
+/** Seed a connected account plus its credential, the state a disconnect acts on. */
+function seedConnectedAccount(store: McpConnectionStore, authStorage: AuthStorage, connectionId: string): void {
+	const at = Date.now();
+	store.upsert({
+		connectionId,
+		serviceId: "granola",
+		endpoint: "https://mcp.granola.test/mcp",
+		label: "Granola",
+		status: "connected",
+		createdAt: at,
+		updatedAt: at,
+	});
+	authStorage.set(`mcp:${connectionId}`, {
+		type: "oauth",
+		access: "synthetic",
+		refresh: "r",
+		expires: at + 3600_000,
+		endpoint: "https://mcp.granola.test/mcp",
+	});
+}
+
+describe("MCP disconnect outcome emit sites", () => {
+	beforeAll(() => {
+		initTheme("dark");
+	});
+
+	test("disconnecting from the /plugins picker records the durable entry", async () => {
+		const { fake, appendCustomMessage, store, authStorage, showStatus } = createOutcomeFake();
+		seedConnectedAccount(store, authStorage, "granola");
+
+		await callPrivate(
+			"connectServiceFromPicker",
+			fake,
+			{
+				serviceId: "granola",
+				label: "Granola",
+				connectionStatus: "connected",
+				connectionIds: ["granola"],
+				connectable: false,
+				usesOAuth: true,
+			},
+			{ url: "https://mcp.granola.test/mcp", usesOAuth: true, managedBySettings: false },
+			{},
+		);
+
+		expect(appendCustomMessage).toHaveBeenCalledTimes(1);
+		const [appended] = appendCustomMessage.mock.calls[0]!;
+		expect(appended.content).toBe("Disconnected Granola.");
+		expect(appended.details).toEqual({
+			kind: "disconnect",
+			label: "Granola",
+			removal: "removed",
+			connectionId: "granola",
+			activation: "active",
+		});
+		expect(JSON.stringify(showStatus.mock.calls)).not.toContain("Disconnected");
+	});
+
+	test("/mcp logout records a durable Disconnected entry, not just a status line", async () => {
+		const { fake, appendCustomMessage, store, authStorage, showStatus } = createOutcomeFake();
+		seedConnectedAccount(store, authStorage, "granola");
+
+		await callPrivate("handleMcpCommand", fake, "logout granola");
+
+		expect(appendCustomMessage).toHaveBeenCalledTimes(1);
+		const [appended] = appendCustomMessage.mock.calls[0]!;
+		expect(appended).toMatchObject({
+			customType: MCP_CONNECTION_OUTCOME_CUSTOM_TYPE,
+			display: true,
+			content: "Disconnected Granola.",
+		});
+		// The record's display label, read before the removal deleted it.
+		expect(appended.details).toEqual({
+			kind: "disconnect",
+			label: "Granola",
+			removal: "removed",
+			connectionId: "granola",
+			activation: "active",
+		});
+		expect(JSON.stringify(showStatus.mock.calls)).not.toContain("Disconnected");
+	});
+
+	test("a failed /mcp logout warns and records nothing: no entry may claim it is done", async () => {
+		const { fake, appendCustomMessage, store, authStorage, showWarning } = createOutcomeFake();
+		seedConnectedAccount(store, authStorage, "granola");
+		vi.spyOn(authStorage, "removeVerified").mockImplementation(() => {
+			throw new Error("auth file is read-only");
+		});
+
+		await callPrivate("handleMcpCommand", fake, "logout granola");
+
+		expect(appendCustomMessage).not.toHaveBeenCalled();
+		expect(showWarning).toHaveBeenCalledWith("The change could not be saved; try logging out granola again.");
+		vi.restoreAllMocks();
+	});
+
+	test("the generic /logout route records the disconnect after its single reload", async () => {
+		const { fake, appendCustomMessage, store, authStorage } = createOutcomeFake();
+		seedConnectedAccount(store, authStorage, "granola");
+		const reload = vi.fn(async () => true);
+		(fake as Record<string, unknown>).handleReloadCommand = reload;
+		(fake as Record<string, unknown>).createAuthFlows = () => ({
+			// The real route delegates the whole MCP logout to the host first.
+			runLogout: async () => {
+				await callPrivate("logoutMcpAccount", fake, "mcp:granola");
+				return "mcp:granola";
+			},
+		});
+
+		await callPrivate("showLogoutSelector", fake);
+
+		expect(reload).toHaveBeenCalledTimes(1);
+		const [appended] = appendCustomMessage.mock.calls[0]!;
+		// The completed record is PRESERVED by this route; the entry says so.
+		expect(appended.details).toEqual({
+			kind: "disconnect",
+			label: "Granola",
+			removal: "preserved",
+			connectionId: "granola",
+			activation: "active",
+		});
+		expect(appended.content).toBe(
+			"Disconnected Granola. The saved connection entry was kept and now shows as not connected.",
+		);
+	});
+
+	test("a refused generic logout reloads without claiming a disconnect", async () => {
+		const { fake, appendCustomMessage, store, authStorage } = createOutcomeFake();
+		const at = Date.now();
+		store.upsert({
+			connectionId: "granola",
+			serviceId: "granola",
+			endpoint: "https://mcp.granola.test/mcp",
+			label: "Granola",
+			status: "pending",
+			attemptId: "nonce-1",
+			createdAt: at,
+			updatedAt: at,
+		});
+		authStorage.set("mcp:granola--nonce-1", {
+			type: "oauth",
+			access: "staged",
+			refresh: "r",
+			expires: at + 3600_000,
+			endpoint: "https://mcp.granola.test/mcp",
+		});
+		const reload = vi.fn(async () => true);
+		(fake as Record<string, unknown>).handleReloadCommand = reload;
+		(fake as Record<string, unknown>).createAuthFlows = () => ({
+			runLogout: async () => {
+				await callPrivate("logoutMcpAccount", fake, "mcp:granola--nonce-1");
+				return "mcp:granola--nonce-1";
+			},
+		});
+
+		await callPrivate("showLogoutSelector", fake);
+
+		expect(reload).toHaveBeenCalledTimes(1);
+		expect(appendCustomMessage).not.toHaveBeenCalled();
+	});
+
+	test("a disconnect made mid-stream lands at the next safe boundary, marked inactive on a failed reload", async () => {
+		const { fake, appendCustomMessage } = createOutcomeFake();
+		(fake as Record<string, unknown>).connectionState = { isStreaming: true, isCompacting: false, messageCount: 0 };
+		(fake as Record<string, unknown>).handleReloadCommand = vi.fn(async () => false);
+
+		await callPrivate("completeMcpConnectionOutcome", fake, {
+			kind: "disconnect",
+			label: "Granola",
+			removal: "removed",
+		});
+		expect(appendCustomMessage).not.toHaveBeenCalled();
+
+		callPrivate("updateConnectionStateFromEvent", fake, { type: "agent_end" } as AgentConnectionSessionEvent);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const [appended] = appendCustomMessage.mock.calls[0]!;
+		expect(appended.details).toMatchObject({ kind: "disconnect", removal: "removed", activation: "inactive" });
+		expect(appended.content).toBe(
+			"Disconnected Granola. The change remains saved, but it is not active in this session.",
+		);
 	});
 });
