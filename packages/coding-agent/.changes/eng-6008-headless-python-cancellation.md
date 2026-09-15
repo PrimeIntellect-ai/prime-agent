@@ -1,0 +1,3 @@
+- Fixed headless Python cancellation leaving unresponsive kernels consuming CPU and blocking subsequent calls.
+- Fixed Python cancellation diagnostics exceeding the configured output limit or omitting the truncation notice.
+- Kept Windows kernel cancellation responsive while orphan-process identity checks and tree cleanup finish.

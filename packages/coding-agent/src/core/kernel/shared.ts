@@ -68,6 +68,8 @@ export interface KernelStartOptions {
 export interface ExecuteOptions {
 	/** Aborting interrupts the kernel out-of-band. */
 	signal?: AbortSignal;
+	/** Kill an unresponsive kernel after the interrupt grace period instead of preserving it for a UI choice. */
+	killOnAbortTimeout?: boolean;
 	onStream?: (chunk: string, name: "stdout" | "stderr") => void;
 	onLateSentAgentMessage?: (message: KernelSentAgentMessage) => void;
 	/** Cap stdout / stderr / result at this many characters. Default 65536. */

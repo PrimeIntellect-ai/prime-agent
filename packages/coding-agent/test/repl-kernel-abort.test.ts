@@ -191,6 +191,45 @@ describe("ReplKernelManager abort handling", () => {
 		expect(interruptWrites.length).toBeGreaterThan(0);
 	});
 
+	it.each([
+		{ maxOutputChars: 0, priorStderr: "", prefix: "", truncated: true },
+		{ maxOutputChars: 8, priorStderr: "", prefix: "Python k", truncated: true },
+		{ maxOutputChars: 16, priorStderr: "warning", prefix: "warning\nPython k", truncated: true },
+		{ maxOutputChars: 16, priorStderr: "x".repeat(16), prefix: "x".repeat(16), truncated: true },
+		{ maxOutputChars: 16, priorStderr: "x".repeat(32), prefix: "x".repeat(16), truncated: true },
+		{ maxOutputChars: 512, priorStderr: "warning", prefix: "warning\nPython kernel was killed", truncated: false },
+	])(
+		"bounds the kill diagnostic with $maxOutputChars chars and prior stderr '$priorStderr'",
+		async ({ maxOutputChars, priorStderr, prefix, truncated }) => {
+			vi.useFakeTimers();
+			const writeLine = vi.fn(async (_request: Record<string, unknown>) => {});
+			const { manager, internals, kernelKill } = runningManagerWith(writeLine);
+			const controller = new AbortController();
+			const execution = manager.execute("while True: pass", {
+				signal: controller.signal,
+				killOnAbortTimeout: true,
+				maxOutputChars,
+			});
+			await waitForCalls(writeLine, 1);
+			internals.handleEvent({ event: "stderr", id: internals.activeExecution?.requestId, text: priorStderr });
+			controller.abort();
+			await vi.advanceTimersByTimeAsync(1000);
+
+			const result = await execution;
+			expect(result.status).toBe("aborted");
+			expect(kernelKill).toHaveBeenCalledWith("SIGKILL");
+			expect(manager.isDefunct).toBe(true);
+			if (truncated) {
+				expect(result.stderr).toBe(`${prefix}\n[... output truncated at ${maxOutputChars} chars ...]`);
+			} else {
+				expect(result.stderr.startsWith(prefix)).toBe(true);
+				expect(result.stderr).toContain("Live Python state was lost.");
+				expect(result.stderr).not.toContain("output truncated");
+				expect(result.stderr.length).toBeLessThanOrEqual(maxOutputChars);
+			}
+		},
+	);
+
 	it("fails a later execution fast when the interrupted cell never settles", async () => {
 		vi.useFakeTimers();
 		const writeLine = vi.fn(async (_request: Record<string, unknown>) => {});
