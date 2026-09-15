@@ -4284,6 +4284,34 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 		expect(fakeThis.showConfigurationMenu).not.toHaveBeenCalled();
 	});
 
+	test("settles the pending step when a reset unmounts its panel", () => {
+		const showInlineAuthPanel = (
+			InteractiveMode.prototype as unknown as {
+				showInlineAuthPanel(component: unknown, options?: { onReset?: () => void }): (reason?: "reset") => void;
+			}
+		).showInlineAuthPanel;
+		const closers: ((reason?: "reset") => void)[] = [];
+		const fakeThis = {
+			onboardingSplash: { setPanel: vi.fn(), getActivePanel: () => undefined },
+			ui: { setFocus: vi.fn(), requestRender: vi.fn() },
+			inlineAuthPanelClosers: closers,
+		};
+		let settled = false;
+		showInlineAuthPanel.call(
+			fakeThis,
+			{},
+			{
+				onReset: () => {
+					settled = true;
+				},
+			},
+		);
+
+		closers[0]?.("reset");
+
+		expect(settled).toBe(true);
+	});
+
 	test("ends the flow when the sign-in does not succeed", async () => {
 		const fakeThis = createPrimeCliHarness(false);
 		const dismiss = vi.fn();

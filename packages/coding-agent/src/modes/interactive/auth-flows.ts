@@ -102,7 +102,8 @@ export interface ProviderAuthFlowsHost {
 	 * the prompt area. Returns a callback that unmounts the panel and restores
 	 * the previous content and focus.
 	 */
-	showAuthPanel(component: Component, options?: { heading?: string }): () => void;
+	/** `onReset` settles the caller's step when a session reset unmounts the panel. */
+	showAuthPanel(component: Component, options?: { heading?: string; onReset?: () => void }): () => void;
 	/** Terminal rows available to auth panels; selectors size their lists to it. */
 	getAuthPanelRows(): number;
 	/** True while onboarding owns the screen and supplies its own heading. */
@@ -422,7 +423,7 @@ export class ProviderAuthFlows {
 						requestRender: () => this.host.ui.requestRender(),
 					},
 				);
-				close = this.host.showAuthPanel(choice);
+				close = this.host.showAuthPanel(choice, { onReset: () => resolve(undefined) });
 			});
 		}
 		return new Promise((resolve) => {

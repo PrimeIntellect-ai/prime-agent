@@ -1963,7 +1963,7 @@ export class InteractiveMode {
 						requestRender: () => this.ui.requestRender(),
 					},
 				);
-				close = this.showInlineAuthPanel(picker);
+				close = this.showInlineAuthPanel(picker, { onReset: () => settle(undefined) });
 				this.ui.requestRender();
 			});
 			if (!picked) {
@@ -2009,7 +2009,7 @@ export class InteractiveMode {
 					requestRender: () => this.ui.requestRender(),
 				},
 			);
-			close = this.showInlineAuthPanel(choice);
+			close = this.showInlineAuthPanel(choice, { onReset: () => finish(undefined) });
 			this.ui.requestRender();
 		});
 	}
@@ -8975,7 +8975,7 @@ export class InteractiveMode {
 	}
 
 	private createAuthFlows(): ProviderAuthFlows {
-		const showAuthPanel = (component: Component, options?: { heading?: string }) =>
+		const showAuthPanel = (component: Component, options?: { heading?: string; onReset?: () => void }) =>
 			this.showInlineAuthPanel(component, options);
 		return new ProviderAuthFlows({
 			ui: this.ui,
@@ -9008,7 +9008,10 @@ export class InteractiveMode {
 	 * resetExtensionUI tears the whole stack down on session resets. Each
 	 * closer runs once, so a reset cannot stomp a picker opened afterwards.
 	 */
-	private showInlineAuthPanel(component: Component, options?: { heading?: string }): (reason?: "reset") => void {
+	private showInlineAuthPanel(
+		component: Component,
+		options?: { heading?: string; onReset?: () => void },
+	): (reason?: "reset") => void {
 		// Onboarding owns the top of the screen: mount the panel inside its block
 		// rather than down in the prompt dock.
 		const splash = this.onboardingSplash;
@@ -9024,10 +9027,13 @@ export class InteractiveMode {
 				if (index !== -1) {
 					this.inlineAuthPanelClosers.splice(index, 1);
 				}
-				// A reset unmounts the panel without its flow finishing; tell the
-				// component so the step it is awaiting settles instead of hanging.
-				if (reason === "reset" && isAbortablePanel(component)) {
-					component.abort();
+				// A reset unmounts the panel without its flow finishing: settle the
+				// step the caller is awaiting, or it waits on a dead panel forever.
+				if (reason === "reset") {
+					options?.onReset?.();
+					if (isAbortablePanel(component)) {
+						component.abort();
+					}
 				}
 				splash.setPanel(undefined);
 				// The splash ignores keys while a panel is mounted, so focus has to
@@ -9048,8 +9054,11 @@ export class InteractiveMode {
 		const close = (reason?: "reset") => {
 			if (closed) return;
 			closed = true;
-			if (reason === "reset" && isAbortablePanel(component)) {
-				component.abort();
+			if (reason === "reset") {
+				options?.onReset?.();
+				if (isAbortablePanel(component)) {
+					component.abort();
+				}
 			}
 			const index = this.inlineAuthPanelClosers.indexOf(close);
 			if (index !== -1) {
