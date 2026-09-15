@@ -236,8 +236,12 @@ export class McpManager {
 				record,
 				credential: this.authStorage.get(this.providerId(record.connectionId)),
 			});
-			// Per-account connections mirror their parent's credential source:
-			// OAuth accounts stay OAuth; a token-service account would paste.
+			// Per-account connections mirror their PARENT's catalog
+			// classification exactly (the same rule the parent entry above
+			// uses): OAuth accounts stay OAuth, a token-service account pastes,
+			// and a public no-auth account stays credential-free — never a
+			// blanket OAuth shape a token or no-auth service never had.
+			const usesOAuth = service.authStrategy === "oauth" || service.authStrategy === "unknown";
 			const staticToken = isPasteableTokenService(service);
 			integrations.set(record.connectionId, {
 				server: record.connectionId,
@@ -245,10 +249,11 @@ export class McpManager {
 				config: {
 					type: "http",
 					url: eligibility.repair ? eligibility.endpoint! : service.transport.url,
-					...(staticToken ? {} : { oauth: true }),
+					...(usesOAuth ? { oauth: true } : {}),
 					...(staticToken ? { credentialSource: "static-token" as const } : {}),
 				},
-				usesOAuth: !staticToken,
+				usesOAuth,
+				credentialFreeEligible: service.authStrategy === "none" && service.setup.status === "ready",
 				staticTokenEligible: staticToken,
 				catalogServiceId: service.serviceId,
 			});
@@ -329,11 +334,18 @@ export class McpManager {
 			this.services.filter((service) => service.legacyBuiltin).map((service) => this.providerId(service.serviceId)),
 		);
 		// Alias connections register their own provider so an "Add account"
-		// login targets mcp:<connectionId> and its bound credential.
+		// login targets mcp:<connectionId> and its bound credential — but ONLY
+		// under the SAME catalog classification as the parent service above:
+		// an alias of a token or requires-setup (or otherwise non-OAuth)
+		// service never gains an OAuth provider, so a second account keeps its
+		// parent's token-based treatment instead of being offered a browser
+		// login whose stored grant isAuthed would reject.
 		for (const record of this.connectionStore.records()) {
 			if (record.connectionId === record.serviceId) continue;
 			const service = this.services.find((entry) => entry.serviceId === record.serviceId);
 			if (!service || service.transport.type !== "http" || !service.transport.url) continue;
+			if (service.setup.status !== "ready") continue;
+			if (service.authStrategy !== "oauth" && service.authStrategy !== "unknown") continue;
 			if (this.isUserOwnedName(record.connectionId)) continue;
 			const parentConfig = this.getUserServers()?.[record.serviceId];
 			desired.set(

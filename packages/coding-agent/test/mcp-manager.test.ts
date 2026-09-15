@@ -1013,6 +1013,60 @@ describe("McpManager service catalog handlers", () => {
 		expect(getOAuthProvider("mcp:acme-2")).toBeUndefined();
 	});
 
+	it("alias accounts mirror the parent's classification: public no-auth stays credential-free, requires-setup gains no OAuth provider", async () => {
+		const at = Date.now();
+		const descriptors: McpServiceDescriptor[] = [
+			{
+				serviceId: "public-docs",
+				label: "Public Docs",
+				aliases: [],
+				transport: { type: "http", url: "https://public.example/mcp" },
+				authStrategy: "none",
+				setup: { status: "ready" },
+				metadataReviewed: true,
+				legacyBuiltin: false,
+			},
+			{
+				serviceId: "gated-oauth",
+				label: "Gated OAuth",
+				aliases: [],
+				transport: { type: "http", url: "https://gated.example/mcp" },
+				authStrategy: "oauth",
+				setup: { status: "requires-setup", reason: "manual setup" },
+				metadataReviewed: true,
+				legacyBuiltin: false,
+			},
+		];
+		for (const [connectionId, serviceId, endpoint] of [
+			["public-docs-2", "public-docs", "https://public.example/mcp"],
+			["gated-oauth-2", "gated-oauth", "https://gated.example/mcp"],
+		] as const) {
+			store.upsert({
+				connectionId,
+				serviceId,
+				endpoint,
+				label: connectionId,
+				status: "pending",
+				createdAt: at,
+				updatedAt: at,
+			});
+		}
+		await store.flush();
+		const manager = createManager({ noBackgroundVerification: true, getServiceCatalog: () => descriptors });
+		// Neither parent qualifies for an OAuth provider, so neither alias does:
+		// a requires-setup or otherwise non-OAuth service never offers a browser
+		// login to an extra account.
+		expect(getOAuthProvider("mcp:public-docs-2")).toBeUndefined();
+		expect(getOAuthProvider("mcp:gated-oauth-2")).toBeUndefined();
+		// A public no-auth service's account is credential-free exactly like its
+		// parent, so the alias record stays dispatchable with no credential.
+		expect(manager.getEnabledPersistentGenericServers()).toContain("public-docs-2");
+		// A requires-setup service's account stays closed like its parent until
+		// setup completes — no OAuth provider, no phantom browser-login path.
+		expect(manager.getEnabledPersistentGenericServers()).not.toContain("gated-oauth-2");
+		expect(manager.listStatus().find((s) => s.server === "gated-oauth-2")?.enabled).toBe(false);
+	});
+
 	it("reconciles owned providers atomically: override removal restores the catalog provider in one refresh", () => {
 		const getServices = () => [CATALOG_SERVICE];
 		let userServers: Record<string, { type: "http"; url: string; oauth: boolean }> = {
@@ -1289,5 +1343,57 @@ describe("McpManager token services (paste flow)", () => {
 		await new Promise((resolve) => setTimeout(resolve, 60));
 		expect(probes).toEqual([]);
 		expect(store.get("token-service")).toBeUndefined();
+	});
+
+	it("a second account of a token service gets no OAuth provider and stays token-based and dispatchable", async () => {
+		const at = Date.now();
+		store.upsert({
+			connectionId: "token-service-2",
+			serviceId: "token-service",
+			endpoint: TOKEN_URL,
+			label: "Token Service (token-service-2)",
+			status: "pending",
+			createdAt: at,
+			updatedAt: at,
+		});
+		await store.flush();
+		const probed: string[] = [];
+		const manager = new McpManager({
+			authStorage,
+			connectionStore: store,
+			noBackgroundVerification: true,
+			getServiceCatalog: () => [tokenServiceFixture()],
+			probeConnection: async (options) => {
+				probed.push(await options.getToken());
+				return { ok: true, toolCount: 4 };
+			},
+		});
+		// The alias mirrors the parent's token classification: NO OAuth provider
+		// is registered for the account id (or the parent), so the extra account
+		// can never be offered a browser login whose grant isAuthed would reject.
+		expect(getOAuthProvider("mcp:token-service")).toBeUndefined();
+		expect(getOAuthProvider("mcp:token-service-2")).toBeUndefined();
+		// A pasted static token stored under the ACCOUNT's own id — the same
+		// credential source the parent accepts — makes it dispatchable.
+		authStorage.set("mcp:token-service-2", {
+			type: "mcp_static_token",
+			endpoint: TOKEN_URL,
+			bearer: "second-account-token",
+			bearerFieldId: "TOKEN_SERVICE_TOKEN",
+			createdAt: at,
+		});
+		expect(manager.getEnabledPersistentGenericServers()).toEqual(["token-service-2"]);
+		// mcp.config serves the SAME token-based config shape the parent serves.
+		const handlers = manager.hostHandlers();
+		await expect(handlers["mcp.config"]({ server: "token-service-2" })).resolves.toEqual({
+			type: "http",
+			url: TOKEN_URL,
+			credentialSource: "static-token",
+		});
+		// Verification probes with the stored pasted token, exactly like the parent.
+		const record = await manager.verifyConnection("token-service-2");
+		expect(record.status).toBe("connected");
+		expect(record.serviceId).toBe("token-service");
+		expect(probed).toEqual(["second-account-token"]);
 	});
 });
