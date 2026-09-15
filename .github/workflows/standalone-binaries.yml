@@ -70,16 +70,7 @@ jobs:
 
       - name: Install locked npm dependencies
         working-directory: source
-        run: |
-          if [[ "${{ matrix.platform }}" == *musl* ]]; then
-            cpu=x64
-            if [[ "${{ matrix.platform }}" == *arm64* ]]; then
-              cpu=arm64
-            fi
-            npm ci --os=linux --cpu="$cpu" --libc=musl
-          else
-            npm ci
-          fi
+        run: npm ci
 
       - name: Compile standalone application
         working-directory: source/packages/coding-agent
