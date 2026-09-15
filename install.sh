@@ -1902,8 +1902,16 @@ prime_agent_native_probe_timeout() {
 	# 51 MB x64 executable measured 11.3s cold and 0.2s warm on Apple Silicon.
 	native_probe_timeout=60
 	case "${PRIME_AGENT_PROBE_TIMEOUT_SECONDS:-}" in
-		''|*[!0-9]*|0) ;;
-		*) [ "$PRIME_AGENT_PROBE_TIMEOUT_SECONDS" -le 600 ] && native_probe_timeout="$PRIME_AGENT_PROBE_TIMEOUT_SECONDS" ;;
+		''|*[!0-9]*) ;;
+		*)
+			# $((...)) reads leading-zero constants as octal: "010" would become an
+			# 8-second deadline while being reported as 10, and "08"/"09" are invalid
+			# octal and abort the arithmetic under set -eu. Strip the leading zeroes
+			# so the accepted value stays decimal; an all-zero value strips to the
+			# empty string and falls back to the default like any invalid value.
+			native_probe_timeout="${PRIME_AGENT_PROBE_TIMEOUT_SECONDS#"${PRIME_AGENT_PROBE_TIMEOUT_SECONDS%%[!0]*}"}"
+			[ -n "$native_probe_timeout" ] && [ "$native_probe_timeout" -le 600 ] || native_probe_timeout=60
+			;;
 	esac
 	printf '%s\n' "$native_probe_timeout"
 }
