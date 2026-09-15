@@ -148,9 +148,15 @@ export class ProviderAuthFlows {
 	 * Panel chrome for login dialogs. Onboarding renders its own heading above
 	 * the panel, so it drops both the transcript rule and the panel title.
 	 */
-	private loginDialogOptions(): { topRule: boolean; hideTitle: boolean } {
+	private loginDialogOptions(): { topRule: boolean; hideTitle: boolean; onExit?: () => void } {
 		const onboarding = this.isOnboarding();
-		return { topRule: !onboarding, hideTitle: onboarding };
+		// While onboarding owns the screen the dialog answers the exit keys
+		// itself; the editor that normally owns them has no focus yet.
+		return {
+			topRule: !onboarding,
+			hideTitle: onboarding,
+			...(onboarding ? { onExit: () => this.host.exitApp?.() } : {}),
+		};
 	}
 
 	/** Onboarding narrates itself; step chatter belongs to the chat surfaces. */

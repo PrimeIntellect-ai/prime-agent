@@ -16,6 +16,7 @@ import { theme } from "../theme/theme.js";
 import { formatKeyText, keyHint } from "./keybinding-hints.js";
 import { MenuPanel, MenuSearchInput } from "./menu-panel.js";
 import { shouldTreatAsBack } from "./modal-back.js";
+import { isOnboardingExitKey } from "./onboarding-exit.js";
 
 function isTextEntryKeybinding(key: string): boolean {
 	const parts = key.toLowerCase().split("+");
@@ -63,7 +64,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 		private onComplete: (success: boolean, message?: string) => void,
 		providerNameOverride?: string,
 		titleOverride?: string,
-		options: { topRule?: boolean; hideTitle?: boolean } = {},
+		private dialogOptions: { topRule?: boolean; hideTitle?: boolean; onExit?: () => void } = {},
 	) {
 		super();
 		this.tui = tui;
@@ -76,9 +77,9 @@ export class LoginDialogComponent extends Container implements Focusable {
 		// Surfaces that own the screen above the panel (onboarding) turn both the
 		// rule and the title off: they already say where the user is.
 		const panel = new MenuPanel({
-			title: options.hideTitle ? "" : title,
+			title: this.dialogOptions.hideTitle ? "" : title,
 			inline: true,
-			topRule: options.topRule ?? true,
+			topRule: this.dialogOptions.topRule ?? true,
 		});
 		this.addChild(panel);
 
@@ -376,6 +377,13 @@ export class LoginDialogComponent extends Container implements Focusable {
 
 	handleInput(data: string): void {
 		const kb = getKeybindings();
+
+		// On the onboarding surface the exit keys must quit the app; cancel
+		// would drop the user into an unconfigured chat instead.
+		if (this.dialogOptions.onExit && isOnboardingExitKey(data)) {
+			this.dialogOptions.onExit();
+			return;
+		}
 
 		if (
 			this.authUrl &&

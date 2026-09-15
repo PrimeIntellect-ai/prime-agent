@@ -1904,7 +1904,7 @@ export class InteractiveMode {
 			return false;
 		}
 
-		await this.prepareForModelSelectionAfterLogin(authResult);
+		await this.prepareForModelSelectionAfterLogin(authResult, abort.signal);
 		if (abort.signal.aborted) {
 			return false;
 		}
@@ -9094,7 +9094,15 @@ export class InteractiveMode {
 		return close;
 	}
 
-	private async prepareForModelSelectionAfterLogin(authResult: AuthenticationResult): Promise<boolean> {
+	private async prepareForModelSelectionAfterLogin(
+		authResult: AuthenticationResult,
+		abortSignal?: AbortSignal,
+	): Promise<boolean> {
+		// A reset rebinds the session; selection prepared for the old one must
+		// not be applied to the new one.
+		if (abortSignal?.aborted) {
+			return false;
+		}
 		const currentModel = this.getCurrentModel();
 		// The agent core uses unknown/unknown as its no-model sentinel.
 		const selectedModel =
@@ -9118,6 +9126,9 @@ export class InteractiveMode {
 		}
 
 		if (action.fallbackModel) {
+			if (abortSignal?.aborted) {
+				return false;
+			}
 			try {
 				await this.applySelectedModel(action.fallbackModel);
 				await this.settingsManager.flush();
