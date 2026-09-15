@@ -409,6 +409,18 @@ describe("public command routing", () => {
 		});
 	});
 
+	it("keeps the help topic when an explicit help flag follows it", async () => {
+		await expect(handlePublicCommand(["help", "status", "--help"])).resolves.toMatchObject({ handled: true });
+		expect(console.log).toHaveBeenCalledWith(expect.stringContaining("prime-agent status [--json]"));
+		await expect(handlePublicCommand(["--offline", "help", "mcp", "add", "-h"])).resolves.toMatchObject({
+			handled: true,
+		});
+		expect(console.log).toHaveBeenCalledWith(expect.stringContaining("prime-agent mcp add <name>"));
+		await expect(handlePublicCommand(["help", "--help"])).resolves.toMatchObject({ handled: true });
+		expect(console.log).toHaveBeenLastCalledWith(expect.not.stringContaining("prime-agent status [--json]"));
+		expect(mocks.daemonCommands).toEqual([]);
+	});
+
 	it("treats help written after global flags as a help request", async () => {
 		await expect(handlePublicCommand(["--offline", "help"])).resolves.toMatchObject({ handled: true });
 		expect(console.log).toHaveBeenCalledWith(expect.stringContaining("prime-agent - AI coding assistant"));

@@ -116,15 +116,21 @@ export function rotateGlobalFlagsBeforeCommand(args: readonly string[]): string[
  * values) excluded: they are run options, not help arguments, so
  * `prime-agent --offline help status` asks about `status`. Returns undefined
  * when the tail contains `--` (everything behind it stays literal message
- * text) or an explicit --help/-h flag (the generic per-command help path
- * handles those).
+ * text) or an explicit --help/-h flag with no topic yet (the generic
+ * per-command help path handles those).
  */
 export function extractHelpCommandPath(args: readonly string[], from: number): string[] | undefined {
 	const path: string[] = [];
 	for (let index = from; index < args.length; index++) {
 		const arg = args[index]!;
-		if (arg === "--" || arg === "--help" || arg === "-h") {
+		if (arg === "--") {
 			return undefined;
+		}
+		if (arg === "--help" || arg === "-h") {
+			// An explicit help flag after a topic still asks about that topic;
+			// with no topic it defers to the generic per-command help block so
+			// `help --help` keeps asking about help itself.
+			return path.length > 0 ? path : undefined;
 		}
 		if (GLOBAL_VALUE_FLAGS.has(arg)) {
 			index++;
