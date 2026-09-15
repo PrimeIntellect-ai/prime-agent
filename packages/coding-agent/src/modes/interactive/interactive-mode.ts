@@ -583,6 +583,36 @@ const INITIAL_TRANSCRIPT_RENDER_MESSAGE_LIMIT = 400;
 // Coalesce at most this many heartbeats_changed refreshes into one refresh
 // promise; sustained churn must not hold rebindCurrentSession in a drain loop.
 const HEARTBEAT_REFRESH_DRAIN_LIMIT = 25;
+// A busy daemon can serialize a catalog fetch behind session work or worker
+// recovery for minutes; the TUI waits at most this long before keeping the
+// last catalog and letting the next heartbeats_changed event retry.
+export const HEARTBEAT_REFRESH_FETCH_TIMEOUT_MS = 10_000;
+// After a deadline expiry, retry the open manager's refresh on this short
+// cadence so the view always has a next scheduled retrieval even when no
+// heartbeats_changed event arrives and the catalog has no nextRunAt to
+// schedule from.
+export const HEARTBEAT_REFRESH_RETRY_DELAY_MS = 5_000;
+
+/** Race a catalog fetch against the refresh deadline; resolves undefined on expiry. */
+async function fetchHeartbeatsWithinDeadline(
+	fetch: Promise<AgentConnectionHeartbeat[]>,
+): Promise<AgentConnectionHeartbeat[] | undefined> {
+	// The deadline can settle first; a late failure must not surface as an
+	// unhandled rejection after this refresh has moved on.
+	void fetch.catch(() => undefined);
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			fetch,
+			new Promise<undefined>((resolve) => {
+				timeout = setTimeout(() => resolve(undefined), HEARTBEAT_REFRESH_FETCH_TIMEOUT_MS);
+				timeout.unref?.();
+			}),
+		]);
+	} finally {
+		clearTimeout(timeout);
+	}
+}
 
 function initialRenderMessages(messages: AgentMessage[]): AgentMessage[] {
 	if (messages.length <= INITIAL_TRANSCRIPT_RENDER_MESSAGE_LIMIT) {
@@ -1062,6 +1092,15 @@ export class InteractiveMode {
 	private heartbeatManagerHandle: OverlayHandle | undefined;
 	private heartbeatManagerRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 	private heartbeatManagerRefreshAt: number | undefined;
+	private heartbeatManagerFetchRetryTimer: ReturnType<typeof setTimeout> | undefined;
+	// Last catalog fetch failure surfaced in the open manager view; cleared by
+	// the next successful apply and on manager open.
+	private heartbeatCatalogFetchError: string | undefined;
+	// Monotonic issue-order sequence for catalog writes (fetches and heartbeat
+	// management actions). A fetch write sequenced behind an already-applied
+	// newer one is dropped, so a late/older snapshot cannot revert newer state.
+	private heartbeatCatalogSeq = 0;
+	private heartbeatCatalogAppliedSeq = 0;
 
 	// Registry of images pasted this session, keyed by the `[image #N]` marker
 	// shown to the user. Insertion-ordered; the bytes persist (bounded by
@@ -2657,9 +2696,22 @@ export class InteractiveMode {
 			// starve an awaiting rebind (and its transcript render) indefinitely.
 			for (let drain = 0; drain <= HEARTBEAT_REFRESH_DRAIN_LIMIT; drain++) {
 				this.heartbeatRefreshRequested = false;
-				const heartbeats = await connection.listHeartbeats();
+				const fetchSeq = ++this.heartbeatCatalogSeq;
+				const fetch = connection.listHeartbeats();
+				const heartbeats = await fetchHeartbeatsWithinDeadline(fetch);
 				if (this.isShuttingDown || this.isReturningToAgentsView || this.agentConnection !== connection) return;
-				this.applyHeartbeatCatalog(heartbeats);
+				if (heartbeats === undefined) {
+					// The fetch deadline expired: keep the last catalog, retain the
+					// in-flight result so the open view still converges when the
+					// late answer lands, and arm a bounded retry so the open view
+					// always has a next scheduled retrieval even if it never does.
+					// A change event that arrived mid-fetch still re-triggers a
+					// refresh through the follow-up scheduling below.
+					this.retainHeartbeatCatalogFetch(fetch, connection, fetchSeq);
+					this.armHeartbeatManagerFetchRetry();
+					return;
+				}
+				this.applyHeartbeatCatalog(heartbeats, fetchSeq);
 				if (!this.heartbeatRefreshRequested) return;
 			}
 		})().finally(() => {
@@ -2677,8 +2729,15 @@ export class InteractiveMode {
 		return refresh;
 	}
 
-	private applyHeartbeatCatalog(heartbeats: AgentConnectionHeartbeat[]): void {
+	private applyHeartbeatCatalog(heartbeats: AgentConnectionHeartbeat[], seq?: number): void {
+		// A sequenced fetch write that lost the race to a newer catalog write
+		// (a later fetch or a management action) must not revert it.
+		if (seq !== undefined) {
+			if (seq < this.heartbeatCatalogAppliedSeq) return;
+			this.heartbeatCatalogAppliedSeq = seq;
+		}
 		this.heartbeatCatalog = heartbeats;
+		this.heartbeatCatalogFetchError = undefined;
 		this.scheduleHeartbeatManagerRefresh();
 		this.updateSubagentSummaryLine();
 		this.ui.requestRender();
@@ -4183,7 +4242,7 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
 		this.defaultEditor.onAction("app.subagents.focus", () => this.focusSubagentSummary());
 		this.defaultEditor.onAction("app.heartbeats.open", () => {
-			void this.showHeartbeatManager();
+			this.showHeartbeatManager();
 		});
 		this.defaultEditor.onAction("app.editor.external", () => this.openExternalEditor());
 		this.defaultEditor.onAction("app.prompt.stash", () => this.handlePromptStash());
@@ -9930,19 +9989,22 @@ export class InteractiveMode {
 		}
 	}
 
-	private async showHeartbeatManager(): Promise<void> {
+	private showHeartbeatManager(): void {
 		if (this.heartbeatManagerHandle) {
 			this.heartbeatManagerHandle.focus();
 			return;
 		}
-		try {
-			await this.refreshHeartbeatCatalog();
-		} catch (error) {
-			this.showError(error instanceof Error ? error.message : String(error));
-			return;
-		}
+		// Stale-while-revalidate: open immediately with the cached catalog. A
+		// busy session can take minutes to answer the fetch, and the overlay
+		// must not wait for it; the background refresh updates the open view
+		// when fresh data lands (the component reads the catalog per render).
+		// A failed fetch surfaces inside the view instead of silently showing a
+		// possibly-stale catalog; each open starts with a clean notice state.
+		this.heartbeatCatalogFetchError = undefined;
+		void this.refreshHeartbeatCatalog().catch((error) => this.onHeartbeatCatalogFetchError(error));
 		const manager = new HeartbeatManagerComponent({
 			getHeartbeats: () => this.getScopedHeartbeats(),
+			getFetchError: () => this.heartbeatCatalogFetchError,
 			getRows: () => this.ui.terminal.rows,
 			onAction: (heartbeat, action) => this.manageHeartbeat(heartbeat, action),
 			onClose: () => this.closeHeartbeatManager(),
@@ -9958,6 +10020,7 @@ export class InteractiveMode {
 
 	private closeHeartbeatManager(): void {
 		this.clearHeartbeatManagerRefreshTimer();
+		this.clearHeartbeatManagerFetchRetryTimer();
 		this.heartbeatManagerHandle?.hide();
 		this.heartbeatManagerHandle = undefined;
 		this.heartbeatManager = undefined;
@@ -10012,10 +10075,64 @@ export class InteractiveMode {
 		this.heartbeatManagerRefreshAt = undefined;
 	}
 
+	private retainHeartbeatCatalogFetch(
+		fetch: Promise<AgentConnectionHeartbeat[]>,
+		connection: AgentConnection,
+		seq: number,
+	): void {
+		// The deadline expired while this fetch was still in flight: apply the
+		// late result when it lands so the open view converges even without a
+		// further heartbeats_changed event. Bounded by the same context guards
+		// as the drain loop and by the write sequence, so a superseded result
+		// cannot revert newer catalog state; a late failure is swallowed (the
+		// retry chain owns recovery from it).
+		void fetch
+			.then((heartbeats) => {
+				if (this.isShuttingDown || this.isReturningToAgentsView || this.agentConnection !== connection) {
+					return;
+				}
+				this.applyHeartbeatCatalog(heartbeats, seq);
+			})
+			.catch(() => undefined);
+	}
+
+	private armHeartbeatManagerFetchRetry(): void {
+		// Guarantee the open manager always has a next scheduled retrieval
+		// after a deadline expiry; a still-armed retry keeps the earliest slot.
+		if (!this.heartbeatManager || this.heartbeatManagerFetchRetryTimer) return;
+		this.heartbeatManagerFetchRetryTimer = setTimeout(() => {
+			this.heartbeatManagerFetchRetryTimer = undefined;
+			if (!this.heartbeatManager) return;
+			void this.refreshHeartbeatCatalog().catch((error) => this.onHeartbeatCatalogFetchError(error));
+		}, HEARTBEAT_REFRESH_RETRY_DELAY_MS);
+		this.heartbeatManagerFetchRetryTimer.unref?.();
+	}
+
+	private clearHeartbeatManagerFetchRetryTimer(): void {
+		if (this.heartbeatManagerFetchRetryTimer) {
+			clearTimeout(this.heartbeatManagerFetchRetryTimer);
+			this.heartbeatManagerFetchRetryTimer = undefined;
+		}
+	}
+
+	private onHeartbeatCatalogFetchError(error: unknown): void {
+		// Stale-while-revalidate opens the manager even when the fetch fails;
+		// surface the failure in the view instead of silently showing a stale
+		// catalog, and keep a next retrieval scheduled.
+		this.heartbeatCatalogFetchError = error instanceof Error ? error.message : String(error);
+		this.armHeartbeatManagerFetchRetry();
+		this.scheduleHeartbeatManagerRefresh();
+		this.ui.requestRender();
+	}
+
 	private async manageHeartbeat(
 		heartbeat: AgentConnectionHeartbeat,
 		action: AgentHeartbeatManagementAction,
 	): Promise<void> {
+		// Sequence the action by issue order so an older in-flight fetch
+		// cannot later revert its result; the action itself is authoritative
+		// and always applies.
+		const actionSeq = ++this.heartbeatCatalogSeq;
 		const updated = await this.agentConnection.manageHeartbeat(
 			heartbeat.job.activeSessionId,
 			heartbeat.job.id,
@@ -10024,6 +10141,7 @@ export class InteractiveMode {
 		if (updated.source === "heartbeat" && updated.activeSessionId === this.connectionState?.activeSessionId) {
 			this.patchConnectionState({ heartbeat: action === "stop" ? null : updated });
 		}
+		this.heartbeatCatalogAppliedSeq = Math.max(this.heartbeatCatalogAppliedSeq, actionSeq);
 		const remaining = this.heartbeatCatalog.filter((entry) => entry.job.id !== updated.id);
 		this.applyHeartbeatCatalog(
 			updated.status === "active" || updated.status === "paused"
