@@ -52,7 +52,9 @@ def recognized_model_failure(trace) -> bool:
 def accepted_model_outcome(trace) -> bool:
     if not trace.is_completed:
         return False
-    return scored(trace) if trace.ok else recognized_model_failure(trace)
+    if trace.ok:
+        return scored(trace)
+    return recognized_model_failure(trace) and not trace.rewards
 
 
 def validate_graph(trace) -> None:
@@ -140,7 +142,7 @@ def trace_record(episode, taskset: str) -> dict:
     return {
         "taskset": taskset,
         "task": task_name(trace),
-        "resolved": scored(trace) and trace.reward > 0,
+        "resolved": trace.ok and scored(trace) and trace.reward > 0,
         "model_failure": not trace.ok,
         "uncached_input_tokens": usage.prompt_tokens,
         "cached_input_tokens": usage.cached_input_tokens,

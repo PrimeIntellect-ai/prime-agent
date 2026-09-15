@@ -12,9 +12,13 @@ repository/difficulty bucket were ranked with the fixed seed `prime-agent-short-
 Eligibility requires the pinned verifier tests to complete without external network access;
 prompts and model outcomes were not inspected when choosing between eligible tasks.
 
-The workflow runs only for a `pull_request_target` `labeled` event whose label is
-exactly `pre-release`. Applying the label approves that head only. A later commit
-has no passing check and requires the label to be removed and applied again.
+The paid evaluation runs only for a `pull_request_target` `labeled` event whose label is
+exactly `pre-release`. The workflow marks the requested head pending before checkout and records
+label approval in a separate status that the evaluation finisher never writes. Removing the label
+revokes approval even if an in-flight evaluation later finishes. Head or default-branch changes
+revoke both statuses. Evaluation success also requires repository rules to require both statuses
+with strict up-to-date-branch enforcement, which closes races with a concurrent base update.
+Reapply the label to approve the new exact comparison.
 
 ## Trust boundary
 
@@ -31,9 +35,10 @@ has no passing check and requires the label to be removed and applied again.
   identity. Missing or malformed episodes fail. Exact rollout deadlines and deterministic
   provider rejections remain unresolved model outcomes; transient provider failures fail.
 - SWE-bench Verified transfers only a bounded binary source diff into a fresh, credential-free,
-  network-free verifier sandbox. The trusted evaluator parses its bounded test log against pinned
-  task metadata. Gold source patches and expected-status metadata are removed from the sandbox
-  before candidate code runs. The fixed pure-Python slice uses dependencies already pinned in
+  network-free verifier sandbox. The trusted evaluator parses bounded controller-captured test
+  output against pinned task metadata. The solver never receives the task package metadata; gold
+  source patches and expected statuses are removed from the verifier before repository tests run.
+  The fixed pure-Python slice uses dependencies already pinned in
   each task image, so scoring does not resolve packages from the network. A fixed gold-patch oracle must resolve
   before any paired task starts. Missing or inconsistent verifier output fails as infrastructure
   rather than becoming a zero reward.

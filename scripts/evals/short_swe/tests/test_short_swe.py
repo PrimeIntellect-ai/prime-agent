@@ -29,12 +29,21 @@ from scripts.evals.short_swe import (  # noqa: E402
 EVAL_ROOT = ROOT / "scripts/evals/short_swe"
 
 
-def test_workflow_is_only_label_gated() -> None:
+def test_workflow_gates_and_revokes_durable_release_status() -> None:
     workflow = (ROOT / ".github/workflows/behavioral-evals.yml").read_text()
-    assert "types: [labeled]" in workflow
-    assert "if: github.event.label.name == 'pre-release'" in workflow
+    assert "types: [labeled, unlabeled, synchronize, edited, reopened]" in workflow
+    assert "push:" in workflow
+    assert "github.event.label.name == 'pre-release'" in workflow
     assert "workflow_dispatch" not in workflow
-    assert "synchronize" not in workflow
+    assert "invalidate-on-pr-change:" in workflow
+    assert "invalidate-on-base-change:" in workflow
+    assert "Base advanced; reapply pre-release" in workflow
+    assert "request.head_sha === pull.head.sha && request.base_sha === pull.base.sha" in workflow
+    assert "strict_required_status_checks_policy !== true" in workflow
+    assert "Behavioral Eval / pre-release approval" in workflow
+    assert "[...requiredContexts].every" in workflow
+    assert "GET /repos/{owner}/{repo}/rules/branches/{branch}" in workflow
+    assert workflow.index("Mark the requested head pending") < workflow.index("Check out trusted evaluator")
     assert "Behavioral Eval / pre-release" in workflow
     assert "statuses: write" in workflow
     assert "prime-agent-behavioral-skip-{0}" in workflow
@@ -326,6 +335,13 @@ def test_scored_model_timeout_is_an_outcome_but_incomplete_trace_fails() -> None
     timeout.calls[0].error = None
     record = evaluate.trace_record(SimpleNamespace(traces=[timeout], errors=[], ok=False), "suite")
     assert record["resolved"] is False
+    scored_failure = fake_trace(ok=False, timeout=True)
+    scored_failure.calls[0].error = None
+    with pytest.raises(ValueError, match="complete trace or model outcome"):
+        evaluate.trace_record(SimpleNamespace(traces=[scored_failure], errors=[], ok=False), "suite")
+    scored_failure.rewards["partial"] = None
+    with pytest.raises(ValueError, match="complete trace or model outcome"):
+        evaluate.trace_record(SimpleNamespace(traces=[scored_failure], errors=[], ok=False), "suite")
     provider_failure = fake_trace(ok=False, timeout=True)
     provider_failure.rewards = {}
     provider_failure.reward = 0.0
@@ -463,6 +479,14 @@ def test_report_passes_noise_and_colors_meaningful_token_change() -> None:
     assert "Cumulative task time | 280.0 s | 560.0 s" in markdown
     assert "concurrent tasks overlap in wall-clock time" in markdown
     assert "End-to-end time" not in markdown
+    invalid = paired()
+    invalid["sides"]["head"][0]["e2e_seconds"] = -1.0
+    with pytest.raises(ValueError, match="e2e_seconds"):
+        report.render(invalid, request())
+    contradictory = paired(head_resolved=1)
+    contradictory["sides"]["head"][0]["model_failure"] = True
+    with pytest.raises(ValueError, match="outcome"):
+        report.render(contradictory, request())
     assert "task-0" not in markdown
 
 
@@ -472,6 +496,7 @@ def test_report_fails_drastic_quality_or_efficiency_regression() -> None:
     assert verdict == "fail"
     failures = paired()
     for task in failures["sides"]["head"][:3]:
+        task["resolved"] = False
         task["model_failure"] = True
     markdown, verdict = report.render(failures, request())
     assert verdict == "fail"

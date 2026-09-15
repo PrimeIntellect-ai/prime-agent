@@ -27,14 +27,24 @@ def aggregate(tasks: list[dict]) -> dict:
     if len(tasks) != TASK_COUNT:
         raise ValueError("a result side must contain 28 tasks")
     for task in tasks:
-        if not isinstance(task.get("resolved"), bool) or not isinstance(task.get("model_failure"), bool):
+        if (
+            not isinstance(task.get("resolved"), bool)
+            or not isinstance(task.get("model_failure"), bool)
+            or task["resolved"]
+            and task["model_failure"]
+        ):
             raise ValueError("invalid outcome value")
         for field in fields:
             value = task.get(field)
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise ValueError(f"invalid {field}")
         elapsed = task.get("e2e_seconds")
-        if not isinstance(elapsed, (int, float)) or isinstance(elapsed, bool) or not math.isfinite(elapsed):
+        if (
+            not isinstance(elapsed, (int, float))
+            or isinstance(elapsed, bool)
+            or not math.isfinite(elapsed)
+            or elapsed < 0
+        ):
             raise ValueError("invalid e2e_seconds")
     return {
         "tasks": len(tasks),

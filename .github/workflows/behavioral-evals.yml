@@ -1,15 +1,24 @@
 name: Behavioral Eval
-run-name: 'Behavioral Eval · PR #${{ github.event.pull_request.number }}'
+run-name: >-
+  Behavioral Eval · ${{ github.event_name == 'push' && 'base update' ||
+  format('PR #{0}', github.event.pull_request.number) }}
 
 on:
   pull_request_target:
     branches: [main]
-    types: [labeled]
+    types: [labeled, unlabeled, synchronize, edited, reopened]
+  push:
+    branches: [main]
 
 concurrency:
   group: >-
     ${{
-      github.event.label.name == 'pre-release' &&
+      github.event_name == 'pull_request_target' &&
+      ((github.event.action == 'labeled' && github.event.label.name == 'pre-release') ||
+       (github.event.action == 'unlabeled' && github.event.label.name == 'pre-release') ||
+       github.event.action == 'synchronize' ||
+       github.event.action == 'reopened' ||
+       (github.event.action == 'edited' && github.event.changes.base)) &&
       format('prime-agent-behavioral-{0}', github.event.pull_request.number) ||
       format('prime-agent-behavioral-skip-{0}', github.run_id)
     }}
@@ -18,8 +27,89 @@ concurrency:
 permissions: {}
 
 jobs:
+  invalidate-on-pr-change:
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      ((github.event.action == 'unlabeled' && github.event.label.name == 'pre-release') ||
+       github.event.action == 'synchronize' ||
+       github.event.action == 'reopened' ||
+       (github.event.action == 'edited' && github.event.changes.base))
+    runs-on: ubuntu-24.04
+    permissions:
+      statuses: write
+    steps:
+      - name: Revoke the durable release status
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v8.0.0
+        with:
+          script: |
+            const action = context.payload.action;
+            const description = action === 'unlabeled'
+              ? 'pre-release approval removed'
+              : action === 'synchronize'
+                ? 'Head changed; reapply pre-release'
+                : 'PR identity changed; reapply pre-release';
+            for (const statusContext of [
+              'Behavioral Eval / pre-release approval',
+              'Behavioral Eval / pre-release',
+            ]) {
+              await github.rest.repos.createCommitStatus({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                sha: context.payload.pull_request.head.sha,
+                state: 'failure',
+                context: statusContext,
+                description,
+                target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              });
+            }
+
+  invalidate-on-base-change:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: read
+      statuses: write
+    steps:
+      - name: Revoke results bound to the previous base
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v8.0.0
+        with:
+          script: |
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              base: context.ref.replace('refs/heads/', ''),
+              per_page: 100,
+            });
+            for (const pull of pulls) {
+              const statuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: pull.head.sha,
+                per_page: 100,
+              });
+              const contexts = [
+                'Behavioral Eval / pre-release approval',
+                'Behavioral Eval / pre-release',
+              ];
+              if (!statuses.some(status => contexts.includes(status.context))) continue;
+              for (const statusContext of contexts) {
+                await github.rest.repos.createCommitStatus({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  sha: pull.head.sha,
+                  state: 'failure',
+                  context: statusContext,
+                  description: 'Base advanced; reapply pre-release',
+                  target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+                });
+              }
+            }
+
   pre-release:
-    if: github.event.label.name == 'pre-release'
+    if: >-
+      github.event_name == 'pull_request_target' && github.event.action == 'labeled' &&
+      github.event.label.name == 'pre-release'
     name: runner
     runs-on: ubuntu-24.04
     timeout-minutes: 360
@@ -28,6 +118,29 @@ jobs:
       pull-requests: write
       statuses: write
     steps:
+      - name: Mark the requested head pending
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v8.0.0
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.payload.pull_request.head.sha,
+              state: 'pending',
+              context: 'Behavioral Eval / pre-release',
+              description: 'Starting exact base and head validation',
+              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.payload.pull_request.head.sha,
+              state: 'success',
+              context: 'Behavioral Eval / pre-release approval',
+              description: 'pre-release label approves this exact head',
+              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
+
       - name: Check out trusted evaluator
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -39,20 +152,6 @@ jobs:
         run: >-
           python3 scripts/evals/short_swe/ci.py
           --output request --harness-sha "$(git rev-parse HEAD)"
-
-      - name: Mark the exact head pending
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v8.0.0
-        with:
-          script: |
-            await github.rest.repos.createCommitStatus({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              sha: '${{ steps.resolve.outputs.head_sha }}',
-              state: 'pending',
-              context: 'Behavioral Eval / pre-release',
-              description: 'Comparing the label-approved head with its exact base',
-              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
-            });
 
       - name: Set up uv
         uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
@@ -170,20 +269,51 @@ jobs:
           retention-days: 30
 
       - name: Set exact-head status
-        if: always() && steps.resolve.outcome == 'success'
+        if: always()
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v8.0.0
         with:
           script: |
             const fs = require('node:fs');
-            const passed = fs.existsSync('results/verdict') &&
+            let request;
+            try {
+              request = JSON.parse(fs.readFileSync('request/request.json', 'utf8'));
+            } catch {
+              request = null;
+            }
+            const {data: pull} = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+            });
+            const {data: rules} = await github.request(
+              'GET /repos/{owner}/{repo}/rules/branches/{branch}',
+              {owner: context.repo.owner, repo: context.repo.repo, branch: pull.base.ref},
+            );
+            const requiredContexts = new Set([
+              'Behavioral Eval / pre-release approval',
+              'Behavioral Eval / pre-release',
+            ]);
+            const strictRequired = rules.some(rule => {
+              if (rule.type !== 'required_status_checks' ||
+                  rule.parameters?.strict_required_status_checks_policy !== true) return false;
+              const configured = new Set(
+                rule.parameters.required_status_checks.map(check => check.context),
+              );
+              return [...requiredContexts].every(contextName => configured.has(contextName));
+            });
+            const labelPresent = pull.labels.some(label => label.name === 'pre-release');
+            const identityCurrent = request &&
+              request.head_sha === pull.head.sha && request.base_sha === pull.base.sha;
+            const passed = strictRequired && identityCurrent && labelPresent &&
+              fs.existsSync('results/verdict') &&
               fs.readFileSync('results/verdict', 'utf8').trim() === 'pass';
             await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              sha: '${{ steps.resolve.outputs.head_sha }}',
+              sha: context.payload.pull_request.head.sha,
               state: passed ? 'success' : 'failure',
               context: 'Behavioral Eval / pre-release',
-              description: passed ? 'Paired Short SWE gate passed' : 'Paired Short SWE gate failed',
+              description: passed ? 'Paired Short SWE gate passed' : 'Paired Short SWE gate failed or stale',
               target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
             });
 

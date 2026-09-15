@@ -22,7 +22,10 @@ The `pre-release` label enables a trusted behavioral evaluation before release. 
 and head revisions build only inside isolated Prime sandboxes. GitHub runners treat their
 packages as opaque bytes and never execute or extract them. Model and sandbox credentials
 stay behind trusted Verifiers interception and are removed from candidate process
-environments. See [`scripts/evals/short_swe/README.md`](scripts/evals/short_swe/README.md)
+environments. Separate durable approval and evaluation statuses prevent an in-flight evaluation
+from restoring approval after the label is removed. Both statuses are revoked when either candidate
+revision changes, and repository rules must require both with strict up-to-date enforcement. See
+[`scripts/evals/short_swe/README.md`](scripts/evals/short_swe/README.md)
 for the full boundary.
 
 ## What to Expect
