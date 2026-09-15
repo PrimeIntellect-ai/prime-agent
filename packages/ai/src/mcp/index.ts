@@ -22,7 +22,6 @@ export {
 	loadLocalServiceCatalog,
 	MAX_LOCAL_CATALOG_BYTES,
 	MAX_LOCAL_CATALOG_ENTRIES,
-	userProvenance,
 } from "./local-catalog.js";
 export type { McpOAuthConfig } from "./oauth.js";
 export { createMcpOAuthProvider } from "./oauth.js";

@@ -19,12 +19,7 @@
  */
 
 import * as fs from "node:fs";
-import {
-	type McpServiceEntry,
-	type McpServiceProvenance,
-	SERVICE_CATALOG,
-	validateMcpServiceEntry,
-} from "./catalog.js";
+import { type McpServiceEntry, SERVICE_CATALOG, validateMcpServiceEntry } from "./catalog.js";
 
 /** Maximum accepted local source file size. */
 export const MAX_LOCAL_CATALOG_BYTES = 256 * 1024;
@@ -181,9 +176,4 @@ export function loadLocalServiceCatalog(filePath: string): LocalCatalogLoadResul
 		entries.push(entry);
 	}
 	return { entries, path: filePath };
-}
-
-/** Convenience helper for authoring: a provenance record local entries may use. */
-export function userProvenance(note: string): McpServiceProvenance {
-	return { source: "user", note };
 }

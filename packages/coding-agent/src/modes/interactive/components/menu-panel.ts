@@ -36,6 +36,17 @@ function rendersInlineTopRule(component: Component | undefined): boolean {
 }
 
 /**
+ * The child whose first line opens the panel body. Children that render nothing
+ * (an empty placeholder Container, e.g. the model picker's header-help slot
+ * before it is populated) must be skipped: treating one as the opener answered
+ * "the search input does not lead" and drew a panel rule directly on top of the
+ * search box's own border — two stacked rules and one wasted list row.
+ */
+function firstRenderingChild(children: readonly Component[]): Component | undefined {
+	return children.find((child) => !(child instanceof Container) || child.children.length > 0);
+}
+
+/**
  * Rows an inline MenuPanel draws above its children: one separator rule,
  * except when the bordered search input already leads the panel and its own
  * top border IS that rule. Components that budget viewport rows for an inline
@@ -45,11 +56,14 @@ function rendersInlineTopRule(component: Component | undefined): boolean {
 export function inlineMenuPanelTopRuleRows(options: {
 	title?: string;
 	subtitle?: string;
+	/** Prefer `children`: an empty placeholder child must not count as the opener. */
 	firstChild?: Component;
+	children?: readonly Component[];
 	topRule?: boolean;
 }): number {
 	const hasHeader = Boolean(options.title) || Boolean(options.subtitle?.trim());
-	const firstChildLeadsWithRule = rendersInlineTopRule(options.firstChild);
+	const opener = options.children ? firstRenderingChild(options.children) : options.firstChild;
+	const firstChildLeadsWithRule = rendersInlineTopRule(opener);
 	return (options.topRule ?? (!firstChildLeadsWithRule || hasHeader)) ? 1 : 0;
 }
 
@@ -305,7 +319,7 @@ export class MenuPanel extends Container {
 				inlineMenuPanelTopRuleRows({
 					title: this.title,
 					subtitle: this.options.subtitle,
-					firstChild: this.children[0],
+					children: this.children,
 					topRule: this.options.topRule,
 				}) > 0
 			) {

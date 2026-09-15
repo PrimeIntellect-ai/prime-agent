@@ -1,9 +1,10 @@
-import { type Component, TruncatedText, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, Container, Text, TruncatedText, visibleWidth } from "@earendil-works/pi-tui";
 import chalk from "chalk";
 import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
 	getMenuListLayout,
+	inlineMenuPanelTopRuleRows,
 	MenuList,
 	MenuPanel,
 	MenuRow,
@@ -271,5 +272,33 @@ describe("MenuPanel", () => {
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBe(40);
 		}
+	});
+	it("an empty leading child never doubles the inline separator (bugbot #2330)", () => {
+		// The model picker adds an empty header-help Container before its search
+		// input; counting that placeholder as the panel opener drew the panel rule
+		// directly on top of the search box's own border (two stacked rules and a
+		// wasted list row).
+		const withPlaceholder = new MenuPanel({ title: "", inline: true });
+		withPlaceholder.addChild(new Container());
+		withPlaceholder.addChild(new MenuSearchInput("Search models", true));
+
+		const direct = new MenuPanel({ title: "", inline: true });
+		direct.addChild(new MenuSearchInput("Search models", true));
+
+		const rules = (panel: MenuPanel) =>
+			panel
+				.render(80)
+				.map((line) => stripAnsi(line))
+				.filter((line) => line.trim().startsWith("─")).length;
+
+		expect(rules(withPlaceholder)).toBe(rules(direct));
+		expect(inlineMenuPanelTopRuleRows({ children: withPlaceholder.children })).toBe(0);
+		// A populated header still owns the rule.
+		const populated = new MenuPanel({ title: "", inline: true });
+		const header = new Container();
+		header.addChild(new Text("Signed-in providers first.", 0, 0));
+		populated.addChild(header);
+		populated.addChild(new MenuSearchInput("Search models", true));
+		expect(inlineMenuPanelTopRuleRows({ children: populated.children })).toBe(1);
 	});
 });

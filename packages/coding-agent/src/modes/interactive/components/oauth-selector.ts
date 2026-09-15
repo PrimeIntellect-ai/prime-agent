@@ -165,7 +165,7 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 			? inlineMenuPanelTopRuleRows({
 					title: panelTitle,
 					subtitle: panelSubtitle,
-					firstChild: panel.children[0],
+					children: panel.children,
 				})
 			: 0;
 

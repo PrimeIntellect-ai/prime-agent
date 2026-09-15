@@ -278,7 +278,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		// The inline panel opens with its separator rule; budget it.
 		this.inlineTopRuleRows = inlineMenuPanelTopRuleRows({
 			subtitle: options.subtitle,
-			firstChild: this.panel.children[0],
+			children: this.panel.children,
 		});
 		this.updateResponsiveLayout();
 

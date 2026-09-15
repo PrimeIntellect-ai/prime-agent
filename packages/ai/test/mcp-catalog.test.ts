@@ -29,7 +29,6 @@ import {
 	loadLocalServiceCatalog,
 	MAX_LOCAL_CATALOG_BYTES,
 	MAX_LOCAL_CATALOG_ENTRIES,
-	userProvenance,
 } from "../src/mcp/local-catalog.js";
 import { getOAuthProvider, resetOAuthProviders } from "../src/utils/oauth/index.js";
 
@@ -1060,7 +1059,7 @@ describe("Local MCP service sources", () => {
 			setup: { status: "ready" },
 			verification: { status: "unverified" },
 			legacyBuiltin: false,
-			provenance: [userProvenance("added locally by the user")],
+			provenance: [{ source: "user" as const, note: "added locally by the user" }],
 			...overrides,
 		};
 	}
