@@ -15,7 +15,11 @@ function outcomeHeader(details: McpOutcomeDetails): string {
 		case "connected":
 			return `Connected ${label}${toolCount !== undefined ? ` · ${toolCount} tools verified` : ""}`;
 		case "unverified":
-			return `Verification did not complete · ${label} saved`;
+			// A pasted token the service rejected is not a verification hiccup:
+			// name the real outcome so the next step is obvious.
+			return details.source === "paste" && details.issueCategory === "http-unauthorized"
+				? `Token not accepted · ${label} not connected`
+				: `Verification did not complete · ${label} saved`;
 		case "unsaved":
 			return `Verification result not recorded · ${label} saved`;
 	}
@@ -48,9 +52,13 @@ function outcomeBody(details: McpOutcomeDetails): string | undefined {
 		if (detail) parts.push(detail);
 	} else {
 		if (details.addedAccount === true && details.connectionId) parts.push(`Added account ${details.connectionId}.`);
+		// The next step differs by how the credential arrived: a pasted token is
+		// replaced by pasting another one, an OAuth grant by reconnecting.
+		const nextStep = details.source === "paste" ? "Paste a new token from /mcp." : "Retry from /plugins.";
 		if (details.verification === "unverified")
-			parts.push(details.issue ? `${capitalize(details.issue)}. Retry from /plugins.` : "Retry from /plugins.");
-		if (details.verification === "unsaved") parts.push("Retry verification from /plugins.");
+			parts.push(details.issue ? `${capitalize(details.issue)}. ${nextStep}` : nextStep);
+		if (details.verification === "unsaved")
+			parts.push(details.source === "paste" ? "Retry verification from /mcp." : "Retry verification from /plugins.");
 	}
 	if (details.activation === "inactive") parts.push("The change remains saved, but it is not active in this session.");
 	return parts.length > 0 ? parts.join(" ") : undefined;

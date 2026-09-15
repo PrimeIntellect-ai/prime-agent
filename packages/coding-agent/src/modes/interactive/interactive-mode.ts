@@ -9804,6 +9804,7 @@ export class InteractiveMode {
 								source: "retry",
 								verification: "unverified",
 								issue: formatMcpVerificationIssue(retried.lastError),
+								...(retried.lastError ? { issueCategory: retried.lastError } : {}),
 							}
 						: { label: service.label, source: "retry", verification: "unsaved" },
 			);
@@ -9988,7 +9989,12 @@ export class InteractiveMode {
 			}
 			return released && discarded;
 		};
-		const loginLabel = connectionId === service.serviceId ? service.label : `${service.label} (${connectionId})`;
+		// The SERVICE's display name, never the picked row's label: the accounts
+		// picker's "Add another account" row would otherwise name the outcome
+		// "Connected Add another account (linear-2)" (Kevin, live testing).
+		const serviceLabel = definition?.label ?? service.label;
+		const parentServiceId = options.catalogServiceId ?? service.serviceId;
+		const loginLabel = connectionId === parentServiceId ? serviceLabel : `${serviceLabel} (${connectionId})`;
 		// ONE login-time client identity, shared by the staged login and the
 		// post-finalize real-id registration: the engine pins the client
 		// identity on the stored credential and refuses drift at refresh, so
@@ -10160,6 +10166,7 @@ export class InteractiveMode {
 							source: "login",
 							verification: "unverified",
 							issue: formatMcpVerificationIssue(verification.lastError),
+							...(verification.lastError ? { issueCategory: verification.lastError } : {}),
 							...(accountScoped ? { connectionId, addedAccount: true } : {}),
 						}
 					: {
@@ -10285,6 +10292,7 @@ export class InteractiveMode {
 							source: "paste",
 							verification: "unverified",
 							issue: formatMcpVerificationIssue(verification.lastError),
+							...(verification.lastError ? { issueCategory: verification.lastError } : {}),
 						}
 					: { label: service.label, source: "paste", verification: "unsaved" },
 		);

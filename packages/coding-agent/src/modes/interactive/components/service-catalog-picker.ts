@@ -66,6 +66,10 @@ const DETAIL_SPACER_ROWS = 1;
 const MIN_ROWS_FOR_DETAIL = SEARCH_AND_FOOTER_ROWS + DETAIL_ROWS + DETAIL_SPACER_ROWS + 2;
 
 /** Accounts mode: description wrap width, the onboarding choice panel's (PR #2340). */
+/** #2340 row sizing: marker + label + trailing padding, floored so short labels still read as a bar. */
+const ROW_MARKER_WIDTH = 2;
+const ROW_TRAILING_WIDTH = 6;
+const ACCOUNTS_MIN_ROW_WIDTH = 30;
 const ACCOUNTS_DESCRIPTION_WIDTH = 50;
 /** Accounts mode: the description block is hard-capped at three rendered lines. */
 const ACCOUNTS_DESCRIPTION_MAX_LINES = 3;
@@ -221,11 +225,23 @@ class ServiceAccountsBodyComponent implements Component {
 			for (const row of shown) lines.push(this.line(safeWidth, theme.fg("muted", row)));
 			lines.push(this.line(safeWidth, ""));
 		}
-		for (const row of this.getRowsState()) {
+		const rows = this.getRowsState();
+		// #2340 sizing: the selection bar hugs the widest label instead of
+		// spanning the terminal, so a wide window does not paint a full-width
+		// block behind one short option.
+		const labelWidth = rows.reduce((max, row) => Math.max(max, visibleWidth(row.label)), 0);
+		const rowWidth = Math.min(
+			safeWidth,
+			Math.max(ACCOUNTS_MIN_ROW_WIDTH, ROW_MARKER_WIDTH + labelWidth + ROW_TRAILING_WIDTH),
+		);
+		for (const row of rows) {
 			const name = `${row.selected ? "> " : "  "}${row.label}`;
 			const content = row.selected ? theme.bold(theme.fg("text", name)) : theme.fg("muted", name);
-			lines.push(this.rowLine(safeWidth, content, row.selected));
+			lines.push(this.rowLine(safeWidth, rowWidth, content, row.selected));
 		}
+		// A blank row under the last option keeps the shortcuts line from
+		// touching it (Kevin, live testing).
+		lines.push(this.line(safeWidth, ""));
 		return lines;
 	}
 
@@ -235,11 +251,16 @@ class ServiceAccountsBodyComponent implements Component {
 		return truncated + " ".repeat(Math.max(0, width - visibleWidth(truncated)));
 	}
 
-	/** A full-width option row; the selection is a bold label over the soft-selection background. */
-	private rowLine(width: number, content: string, selected: boolean): string {
-		const body = truncateToWidth(` ${content}`, width, "");
-		const padded = body + " ".repeat(Math.max(0, width - visibleWidth(body)));
-		return selected ? theme.getSoftSelectionBackgroundColor()(padded) : padded;
+	/**
+	 * One option row. The selection background is painted only across rowWidth
+	 * (the widest label plus padding), never the whole terminal width; the rest
+	 * of the line stays unpainted.
+	 */
+	private rowLine(width: number, rowWidth: number, content: string, selected: boolean): string {
+		const body = truncateToWidth(` ${content}`, rowWidth, "");
+		const bar = body + " ".repeat(Math.max(0, rowWidth - visibleWidth(body)));
+		const painted = selected ? theme.getSoftSelectionBackgroundColor()(bar) : bar;
+		return painted + " ".repeat(Math.max(0, width - rowWidth));
 	}
 }
 

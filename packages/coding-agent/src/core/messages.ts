@@ -145,6 +145,8 @@ export interface McpConnectionOutcomeDetails {
 	toolCount?: number;
 	/** Human-readable reason the handshake did not complete; present only when verification is "unverified". */
 	issue?: string;
+	/** Probe error category behind `issue` (e.g. "http-unauthorized"), so the renderer can name the fix. */
+	issueCategory?: string;
 	/** Account connection id when the outcome is account-scoped. */
 	connectionId?: string;
 	/** True when the login added a new account to a multi-account service. */
@@ -728,13 +730,16 @@ export function isMcpConnectionOutcomeMessage(message: unknown): message is McpC
 	return (
 		(message.details.kind === undefined || message.details.kind === "connect") &&
 		typeof message.details.label === "string" &&
-		(message.details.source === "login" || message.details.source === "retry") &&
+		(message.details.source === "login" ||
+			message.details.source === "retry" ||
+			message.details.source === "paste") &&
 		(message.details.verification === "connected" ||
 			message.details.verification === "unverified" ||
 			message.details.verification === "unsaved") &&
 		(message.details.toolCount === undefined ||
 			(typeof message.details.toolCount === "number" && Number.isInteger(message.details.toolCount))) &&
 		(message.details.issue === undefined || typeof message.details.issue === "string") &&
+		(message.details.issueCategory === undefined || typeof message.details.issueCategory === "string") &&
 		(message.details.connectionId === undefined || typeof message.details.connectionId === "string") &&
 		(message.details.addedAccount === undefined || typeof message.details.addedAccount === "boolean") &&
 		isValidMcpActivation(message.details.activation)

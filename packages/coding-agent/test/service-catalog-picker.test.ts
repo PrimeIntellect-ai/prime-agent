@@ -338,8 +338,10 @@ describe("ServiceCatalogPickerComponent", () => {
 		expect(lines[descriptionIndex + 2].trim()).toBe("> Reconnect");
 		expect(lines[descriptionIndex + 3].trim()).toBe("Disconnect acme-work");
 		expect(lines[descriptionIndex + 4].trim()).toBe("Add another account");
-		expect(lines[descriptionIndex + 5]).toContain("Enter reconnect");
-		expect(lines).toHaveLength(descriptionIndex + 6);
+		// A blank row separates the last option from the shortcuts line.
+		expect(lines[descriptionIndex + 5]?.trim()).toBe("");
+		expect(lines[descriptionIndex + 6]).toContain("Enter reconnect");
+		expect(lines).toHaveLength(descriptionIndex + 7);
 		// Moving the selection swaps the marker and the hint, never the height.
 		picker.handleInput("\x1b[B");
 		const moved = picker.render(100).map(stripAnsi);

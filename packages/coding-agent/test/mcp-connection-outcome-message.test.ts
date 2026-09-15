@@ -140,6 +140,24 @@ describe("McpConnectionOutcomeMessageComponent", () => {
 		);
 	});
 
+	test("names the service, never the picked row, and tells a rejected token what to do", () => {
+		// Kevin, live testing: a fake PAT rendered "[Malformed MCP connection
+		// outcome message]" (the guard did not know source "paste"), and adding an
+		// account read "Connected Add another account (linear-2)".
+		const rejected = {
+			label: "GitHub",
+			source: "paste",
+			verification: "unverified",
+			issue: "the endpoint rejected the stored credentials (reconnect)",
+			issueCategory: "http-unauthorized",
+			activation: "active",
+		} as const;
+		expect(flat(outcomeComponent(rejected))).toBe(
+			"◆ Token not accepted · GitHub not connected The endpoint rejected the stored credentials (reconnect). Paste a new token from /mcp.",
+		);
+		expect(isMcpConnectionOutcomeMessage(createMcpConnectionOutcomeMessage(rejected))).toBe(true);
+	});
+
 	test("a paste outcome keeps the diamond entry honest: token saved, never 'login succeeded'", () => {
 		const connectedPaste = {
 			label: "GitHub",
@@ -160,7 +178,7 @@ describe("McpConnectionOutcomeMessageComponent", () => {
 		} as const;
 		expect(rendered(outcomeComponent(unverifiedPaste))).toContain("◆ Verification did not complete · GitHub saved");
 		expect(flat(outcomeComponent(unverifiedPaste))).toBe(
-			"◆ Verification did not complete · GitHub saved The endpoint rejected the stored credentials (reconnect). Retry from /plugins.",
+			"◆ Verification did not complete · GitHub saved The endpoint rejected the stored credentials (reconnect). Paste a new token from /mcp.",
 		);
 		expect(createMcpConnectionOutcomeMessage(unverifiedPaste).content).toBe(
 			"Token saved for GitHub, but connection verification did not complete: the endpoint rejected the stored credentials (reconnect). The connection is saved; retry from /plugins.",
@@ -173,7 +191,7 @@ describe("McpConnectionOutcomeMessageComponent", () => {
 			activation: "active",
 		} as const;
 		expect(flat(outcomeComponent(unsavedPaste))).toBe(
-			"◆ Verification result not recorded · GitHub saved Retry verification from /plugins.",
+			"◆ Verification result not recorded · GitHub saved Retry verification from /mcp.",
 		);
 		expect(createMcpConnectionOutcomeMessage(unsavedPaste).content).toBe(
 			"Token saved for GitHub, but the verification result could not be saved. The connection is saved; retry from /plugins.",
