@@ -1,5 +1,7 @@
-import { type Component, Container, Text, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { type Component, Container, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { type ThemeColor, theme } from "../theme/theme.js";
+
+const METADATA_MAX_LINES = 3;
 
 class EventSummary implements Component {
 	constructor(
@@ -24,6 +26,23 @@ class EventSummary implements Component {
 	invalidate(): void {}
 }
 
+class EventMetadata implements Component {
+	constructor(private readonly text: string) {}
+
+	render(width: number): string[] {
+		if (width < 1) return [];
+		const contentWidth = Math.max(1, width - 1);
+		const lines = wrapTextWithAnsi(this.text, contentWidth);
+		if (lines.length > METADATA_MAX_LINES) {
+			lines.splice(METADATA_MAX_LINES);
+			lines[METADATA_MAX_LINES - 1] = truncateToWidth(`${lines[METADATA_MAX_LINES - 1]} …`, contentWidth, "…");
+		}
+		return lines.map((line) => theme.fg("dim", ` ${line}`));
+	}
+
+	invalidate(): void {}
+}
+
 /** Compact outcome first, with quiet metadata and the existing details toggle. */
 export abstract class ExpandableEventMessage extends Container {
 	protected expanded = false;
@@ -41,7 +60,12 @@ export abstract class ExpandableEventMessage extends Container {
 
 	protected addSummary(summary: string, metadata?: string, color: ThemeColor = "customMessageText"): void {
 		this.addChild(new EventSummary(summary, this.expanded, color));
-		if (metadata) this.addChild(new Text(theme.fg("dim", metadata), 1, 0));
+		if (metadata) this.addMetadata(metadata);
+	}
+
+	/** Quiet trailing metadata, clamped: it can carry unbounded author-supplied text. */
+	protected addMetadata(text: string): void {
+		this.addChild(new EventMetadata(text));
 	}
 
 	protected abstract updateDisplay(): void;

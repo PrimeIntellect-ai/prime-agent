@@ -1,0 +1,1 @@
+- Changed compaction and branch summary cards to render their summary as notice text: markdown element colors and code syntax highlighting no longer make a summary read like source, and long single-line focus instructions are clamped instead of filling the screen ([ENG-6127](https://linear.app/primeintellect/issue/ENG-6127)).

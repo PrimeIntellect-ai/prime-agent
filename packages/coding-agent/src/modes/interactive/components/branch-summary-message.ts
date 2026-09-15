@@ -1,6 +1,6 @@
 import { Box, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
 import type { BranchSummaryMessage } from "../../../core/messages.js";
-import { getMarkdownTheme, theme } from "../theme/theme.js";
+import { getFlatMarkdownTheme, theme } from "../theme/theme.js";
 import { expandCollapseHint } from "./keybinding-hints.js";
 
 /**
@@ -12,7 +12,10 @@ export class BranchSummaryMessageComponent extends Box {
 	private message: BranchSummaryMessage;
 	private markdownTheme: MarkdownTheme;
 
-	constructor(message: BranchSummaryMessage, markdownTheme: MarkdownTheme = getMarkdownTheme()) {
+	constructor(
+		message: BranchSummaryMessage,
+		markdownTheme: MarkdownTheme = getFlatMarkdownTheme("customMessageText"),
+	) {
 		super(1, 1, (t) => theme.bg("customMessageBg", t));
 		this.message = message;
 		this.markdownTheme = markdownTheme;

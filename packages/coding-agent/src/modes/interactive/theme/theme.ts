@@ -1403,6 +1403,34 @@ export function getMarkdownTheme(): MarkdownTheme {
 	};
 }
 
+/**
+ * Markdown theme that paints every element with one color. Notice cards render
+ * summary prose, not source, so element colors and syntax highlighting only add
+ * noise; emphasis survives as text attributes.
+ */
+export function getFlatMarkdownTheme(color: ThemeColor): MarkdownTheme {
+	const paint = (text: string): string => theme.fg(color, text);
+	return {
+		heading: paint,
+		link: paint,
+		linkUrl: paint,
+		code: paint,
+		codeBlock: paint,
+		codeBlockBorder: paint,
+		quote: paint,
+		quoteBorder: paint,
+		hr: paint,
+		listBullet: paint,
+		bold: (text: string) => theme.bold(text),
+		italic: (text: string) => theme.italic(text),
+		underline: (text: string) => theme.underline(text),
+		strikethrough: (text: string) => chalk.strikethrough(text),
+		math: paint,
+		mathBlock: paint,
+		highlightCode: (code: string): string[] => code.split("\n").map(paint),
+	};
+}
+
 export function getSelectListTheme(): SelectListTheme {
 	return {
 		selectedPrefix: (text: string) => theme.fg("accent", text),

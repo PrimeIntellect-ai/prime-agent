@@ -390,6 +390,7 @@ export {
 } from "./modes/interactive/components/index.js";
 // Theme utilities for custom tools and extensions
 export {
+	getFlatMarkdownTheme,
 	getLanguageFromPath,
 	getMarkdownTheme,
 	getSelectListTheme,

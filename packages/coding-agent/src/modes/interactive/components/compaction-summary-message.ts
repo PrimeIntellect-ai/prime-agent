@@ -1,13 +1,13 @@
 import { Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
 import type { CompactionSummaryMessage } from "../../../core/messages.js";
-import { getMarkdownTheme, theme } from "../theme/theme.js";
+import { getFlatMarkdownTheme, theme } from "../theme/theme.js";
 import { ExpandableEventMessage } from "./expandable-event-message.js";
 
 /** Compact context outcome with the full markdown summary available on demand. */
 export class CompactionSummaryMessageComponent extends ExpandableEventMessage {
 	constructor(
 		private readonly message: CompactionSummaryMessage,
-		private readonly markdownTheme: MarkdownTheme = getMarkdownTheme(),
+		private readonly markdownTheme: MarkdownTheme = getFlatMarkdownTheme("refinementSummary"),
 	) {
 		super();
 		this.updateDisplay();
@@ -34,6 +34,6 @@ export class CompactionSummaryMessageComponent extends ExpandableEventMessage {
 		const instructions = this.message.customInstructions;
 		const focus = instructions ? ` · focus: ${instructions}` : "";
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", `Compacted from ${tokenStr} tokens${focus}`), 1, 0));
+		this.addMetadata(`Compacted from ${tokenStr} tokens${focus}`);
 	}
 }
