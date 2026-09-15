@@ -3480,6 +3480,8 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 		runOnboardingFlow(): Promise<boolean>;
 		applySelectedModel(model: AgentConnectionModel): Promise<void>;
 		prepareForModelSelectionAfterLogin(authResult: AuthenticationResult): Promise<boolean>;
+		askOnboardingProviders(): Promise<void>;
+		askOnboardingTraceOptIn(): Promise<void>;
 		setupAutocompleteProvider(): void;
 	};
 	type OnboardingFake = OnboardingHarness & {
@@ -4298,6 +4300,28 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 
 		expect(fakeThis.uiServices.settingsManager.setOnboardingShown).not.toHaveBeenCalled();
 		expect(fakeThis.uiServices.settingsManager.flush).not.toHaveBeenCalled();
+	});
+
+	test("reports no completion when a reset interrupts the last question", async () => {
+		const fakeThis = createPrimeCliHarness(false);
+		fakeThis.showOnboardingSplash = vi.fn(async () => ({ dismiss: vi.fn() }));
+		fakeThis.createAuthFlows = vi.fn(() => ({
+			runPrimeInferenceLogin: vi.fn(async () => ({
+				status: "success" as const,
+				providerId: PRIME_INFERENCE_PROVIDER_ID,
+				providerName: "Prime Inference",
+				authType: "api_key" as const,
+				kind: "provider" as const,
+			})),
+		}));
+		fakeThis.prepareForModelSelectionAfterLogin = vi.fn(async () => true);
+		fakeThis.askOnboardingProviders = vi.fn(async () => {});
+		// The reset settles the trace question and aborts the flow behind it.
+		fakeThis.askOnboardingTraceOptIn = vi.fn(async () => {
+			(fakeThis as unknown as { onboardingFlowAbort?: AbortController }).onboardingFlowAbort?.abort();
+		});
+
+		await expect(runOnboardingFlow.call(fakeThis)).resolves.toBe(false);
 	});
 
 	test("settles the pending step when a reset unmounts its panel", () => {

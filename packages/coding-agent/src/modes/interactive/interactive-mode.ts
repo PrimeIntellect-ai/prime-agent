@@ -1913,6 +1913,9 @@ export class InteractiveMode {
 			return false;
 		}
 		await this.askOnboardingTraceOptIn();
+		if (abort.signal.aborted) {
+			return false;
+		}
 		splash.dismiss();
 		return true;
 	}
