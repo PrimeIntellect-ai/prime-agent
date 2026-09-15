@@ -114,7 +114,7 @@ it("mounts catalog inline, preserves prefill and cancels without auth or draft l
 	const f = await fixture([view(), view({ serviceId: "other", label: "Other" })]);
 	const done = f.mode.showServiceCatalogPicker("acme");
 	const picker = f.picker();
-	expect(picker.getSearchInput().getValue()).toBe("acme");
+	expect(picker.getSearchInput()?.getValue()).toBe("acme");
 	expect(stripAnsi(picker.render(80).join("\n"))).not.toContain("Other");
 	expect(f.setFocus).toHaveBeenLastCalledWith(picker);
 	picker.handleInput("\x1b");
@@ -244,10 +244,12 @@ it("catalog to accounts preserves ownership, grouping and real per-account pendi
 	catalog.handleInput("\x1b");
 	expect(f.editorContainer.children).toEqual([accounts]);
 	const output = stripAnsi(accounts.render(100).join("\n"));
-	expect(output).toContain("Accounts — Acme");
-	expect(output).toContain("Needs verification");
+	expect(output).toContain("Acme MCP");
+	expect(output).toContain("Reconnect");
 	expect(output).toContain("Enter verify");
-	expect(output).not.toContain("Connected");
+	// The redesign drops the right-hand status column; the hint carries the
+	// per-row action.
+	expect(output).not.toContain("Needs verification");
 	accounts.handleInput("\r");
 	await done;
 	expect(f.connect).toHaveBeenCalledOnce();
@@ -312,12 +314,12 @@ async function connectedAccountFixture() {
 	return { f, removeAccount, done, accounts: f.picker() };
 }
 
-it("Enter on the accounts name row re-verifies a connected account instead of removing it", async () => {
-	// Kevin (live testing): Enter on the first row (the account name) must not
-	// disconnect the account — that is the Remove row's job. The name row
+it("Enter on the accounts Reconnect row re-verifies a connected account instead of removing it", async () => {
+	// Kevin (live testing): Enter on the first row must not disconnect the
+	// account — that is the Disconnect row's job. The relabelled Reconnect row
 	// re-verifies; the record and the credential both survive.
 	const { f, removeAccount, done, accounts } = await connectedAccountFixture();
-	expect(stripAnsi(accounts.render(100).join("\n"))).toContain("Enter re-verify");
+	expect(stripAnsi(accounts.render(100).join("\n"))).toContain("Enter reconnect");
 	expect(stripAnsi(accounts.render(100).join("\n"))).not.toContain("Enter disconnect");
 	accounts.handleInput("\r");
 	await done;
@@ -337,16 +339,69 @@ it("Enter on the accounts name row re-verifies a connected account instead of re
 	});
 });
 
-it("Enter on the accounts Remove row still removes that account", async () => {
+it("Enter on the accounts Disconnect row still removes that account and records the durable entry", async () => {
 	const { f, removeAccount, done, accounts } = await connectedAccountFixture();
 	accounts.handleInput("\x1b[B");
-	expect(stripAnsi(accounts.render(100).join("\n"))).toContain("Enter remove account");
+	expect(stripAnsi(accounts.render(100).join("\n"))).toContain("Enter disconnect");
 	accounts.handleInput("\r");
 	await done;
 	expect(removeAccount).toHaveBeenCalledOnce();
 	expect(f.store.get("acme-work")).toBeUndefined();
 	expect(f.harness.authStorage.getVerified("mcp:acme-work")).toBeUndefined();
 	expect(f.reload).toHaveBeenCalledOnce();
+	// The durable "◆ Disconnected" entry rides the remove path: the change
+	// survives in the chat instead of a status line that scrolls away.
+	expect(f.appendOutcome).toHaveBeenCalledOnce();
+	expect(f.appendOutcome.mock.calls[0]?.[0]).toMatchObject({
+		customType: "mcp_connection_outcome",
+		details: { kind: "disconnect", label: "Work", connectionId: "acme-work" },
+	});
+});
+
+it("labels multi-account rows as id-suffixed reconnect/disconnect pairs, then one add row", async () => {
+	// Kevin (live testing): with several accounts every Reconnect/Disconnect
+	// pair carries the connection id, and a single "Add another account" row
+	// closes the list.
+	const f = await fixture();
+	const now = Date.now();
+	for (const id of ["acme-work", "acme-personal"]) {
+		f.harness.authStorage.set(`mcp:${id}`, {
+			type: "oauth",
+			access: "synthetic",
+			refresh: "r",
+			expires: now + 3600_000,
+			endpoint: ENDPOINT,
+		});
+		f.store.upsert({
+			connectionId: id,
+			serviceId: "acme",
+			endpoint: ENDPOINT,
+			label: id,
+			status: "connected",
+			verifiedAt: now,
+			toolCount: 2,
+			createdAt: now,
+			updatedAt: now,
+		});
+	}
+	await f.store.flush();
+	const done = f.mode.showAccountPickerForService(
+		view({ connectionIds: ["acme-work", "acme-personal"], connectionStatus: "connected" }),
+		{ url: ENDPOINT, usesOAuth: true, managedBySettings: false },
+		{ knownIds: new Set(["acme"]) },
+	);
+	const accounts = f.picker();
+	const output = stripAnsi(accounts.render(100).join("\n"));
+	expect(output).toContain("Acme MCP");
+	expect(output.indexOf("Reconnect acme-work")).toBeLessThan(output.indexOf("Disconnect acme-work"));
+	expect(output.indexOf("Disconnect acme-work")).toBeLessThan(output.indexOf("Reconnect acme-personal"));
+	expect(output.indexOf("Reconnect acme-personal")).toBeLessThan(output.indexOf("Disconnect acme-personal"));
+	expect(output.indexOf("Disconnect acme-personal")).toBeLessThan(output.indexOf("Add another account"));
+	// No account-name rows survive: every label is the action itself.
+	expect(output).not.toContain("Acme ·");
+	accounts.handleInput("\x1b");
+	await done;
+	expect(f.connect).not.toHaveBeenCalled();
 });
 
 async function settingsFixture() {
@@ -483,8 +538,15 @@ it.each([false, true])("nonOAuth pending HTTP follows real Verify without OAuth 
 	const picker = f.picker();
 	const output = stripAnsi(picker.render(100).join("\n"));
 	expect(output).toContain("Enter verify");
-	expect(output).toContain("Needs verification");
 	expect(output).not.toContain("Add another account");
+	if (saved) {
+		// Accounts menu: the relabelled Reconnect row replaces the account-name
+		// row and its trailing status; the hint carries the verify action.
+		expect(output).toContain("Reconnect");
+		expect(output).not.toContain("Needs verification");
+	} else {
+		expect(output).toContain("Needs verification");
+	}
 	if (!saved) expect(output).not.toContain("Remove saved data");
 	picker.handleInput("\r");
 	await done;
@@ -546,7 +608,10 @@ it.each(["record", "credential-only"] as const)(
 		accounts.handleInput("\x1b[B");
 		const output = stripAnsi(accounts.render(100).join("\n"));
 		expect(output).toContain("Enter remove saved data");
-		expect(output).toContain("Keeps server settings and environment token.");
+		// The panel description now carries the settings-managed explainer
+		// (asserted per wrapped line, ~50 columns like the onboarding copy).
+		expect(output).toContain("Saved account data for a settings-managed server.");
+		expect(output).toContain("environment token.");
 		// Changing the environment does not change the meaning of saved-data cleanup.
 		vi.stubEnv("ENG_6108_SAVED_BEARER", "synthetic-current-token");
 		accounts.handleInput("\r");

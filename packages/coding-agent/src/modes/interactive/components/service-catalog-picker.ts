@@ -1,4 +1,13 @@
-import { Container, type Focusable, getKeybindings, TruncatedText, truncateToWidth } from "@earendil-works/pi-tui";
+import {
+	type Component,
+	Container,
+	type Focusable,
+	getKeybindings,
+	TruncatedText,
+	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
 import type { McpPluginView } from "../../../core/mcp/service-catalog.js";
 import { theme } from "../theme/theme.js";
 import { keyText } from "./keybinding-hints.js";
@@ -17,7 +26,12 @@ export interface ServiceCatalogPickerOptions extends MenuViewportProvider {
 	initialSearch?: string;
 	/** Panel title override (e.g. the account picker reuses this component). */
 	title?: string;
-	/** Account rows preserve their account/remove grouping and expose explicit actions. */
+	/**
+	 * Accounts mode: the static description shown above the options. Defaults
+	 * to the shared card description (every account row inherits the service's).
+	 */
+	description?: string;
+	/** Account rows preserve their account/disconnect grouping and expose explicit actions. */
 	mode?: "catalog" | "accounts";
 	/** Host-resolved intent and copy for settings-managed transports. */
 	getRowPresentation?: (service: McpPluginView) => { action?: string; status?: string; detail?: string } | undefined;
@@ -50,6 +64,18 @@ const DETAIL_SPACER_ROWS = 1;
  * boundary.
  */
 const MIN_ROWS_FOR_DETAIL = SEARCH_AND_FOOTER_ROWS + DETAIL_ROWS + DETAIL_SPACER_ROWS + 2;
+
+/** Accounts mode: description wrap width, the onboarding choice panel's (PR #2340). */
+const ACCOUNTS_DESCRIPTION_WIDTH = 50;
+/** Accounts mode: the description block is hard-capped at three rendered lines. */
+const ACCOUNTS_DESCRIPTION_MAX_LINES = 3;
+/** Accounts mode: description lines plus the blank line under them, budgeted at the cap. */
+const ACCOUNTS_DESCRIPTION_BUDGET_ROWS = ACCOUNTS_DESCRIPTION_MAX_LINES + 1;
+/**
+ * Accounts mode rows that are not option rows: the separator rule, the blank
+ * under it, the header, the blank under the header, and the shortcuts line.
+ */
+const ACCOUNTS_FRAME_ROWS = 5;
 
 // Search bands: lower scores rank first. Identity fields (label, service id,
 // aliases) always outrank description/setup-hint text.
@@ -115,12 +141,11 @@ function descriptionMatchScore(text: string, token: string): number | undefined 
 
 /**
  * Score one row against the query; undefined means "not a match". Every query
- * token must match somewhere. Account rows all carry the SAME description and
- * setup hint (inherited from the service), so matching that text could never
- * filter anything — accounts mode matches identity only: the account label
- * and the connection id are the fields that distinguish rows.
+ * token must match somewhere. Only the catalog picker searches (accounts mode
+ * has no search box), so description and setup-hint text only ever matches
+ * catalog rows.
  */
-function serviceMatchScore(service: McpPluginView, query: string, mode: "catalog" | "accounts"): number | undefined {
+function serviceMatchScore(service: McpPluginView, query: string): number | undefined {
 	const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
 	if (tokens.length === 0) return 0;
 	let total = 0;
@@ -130,7 +155,7 @@ function serviceMatchScore(service: McpPluginView, query: string, mode: "catalog
 			const score = identityMatchScore(field, token);
 			if (score !== undefined && (best === undefined || score < best)) best = score;
 		}
-		if (best === undefined && mode === "catalog") {
+		if (best === undefined) {
 			for (const field of [service.description, service.setupHint]) {
 				if (!field) continue;
 				const score = descriptionMatchScore(field, token);
@@ -143,12 +168,92 @@ function serviceMatchScore(service: McpPluginView, query: string, mode: "catalog
 	return total;
 }
 
+/** One option row of the accounts menu (the label carries the action). */
+interface ServiceAccountsRow {
+	label: string;
+	selected: boolean;
+}
+
+/**
+ * The accounts-mode body: a static choice list in the same selection language
+ * as the onboarding choice panel (PR #2340) — one leading blank row, a single
+ * column of indent, a prompt-style header, a muted wrapped description capped
+ * at three lines, then `> label` for the selection (bold text over the
+ * soft-selection background) and `  label` muted otherwise. No search box, no
+ * counter, no right-hand column: the labels carry the actions.
+ *
+ * #2340 is not merged yet, so this mirrors OnboardingChoiceComponent's visual
+ * language locally instead of importing it — dedupe the two once it lands.
+ */
+class ServiceAccountsBodyComponent implements Component {
+	/** Full-width body: MenuPanel renders it without adding its own indent. */
+	readonly fillsMenuPanel = true;
+
+	constructor(
+		private readonly header: string,
+		private readonly description: string,
+		private readonly getRowsState: () => readonly ServiceAccountsRow[],
+	) {}
+
+	invalidate(): void {
+		// Render output derives from the picker's live state.
+	}
+
+	render(width: number): string[] {
+		const safeWidth = Math.max(1, width);
+		// The #2340 shape: a leading blank row, then the one-column indent.
+		const lines: string[] = [this.line(safeWidth, "")];
+		if (this.header) {
+			lines.push(this.line(safeWidth, theme.fg("text", this.header)));
+			lines.push(this.line(safeWidth, ""));
+		}
+		if (this.description) {
+			const wrapWidth = Math.max(1, Math.min(ACCOUNTS_DESCRIPTION_WIDTH, safeWidth - 2));
+			const wrapped = wrapTextWithAnsi(this.description, wrapWidth);
+			// Hard cap: at most three lines, and when the description ran
+			// longer the third line ALWAYS carries an ellipsis — even when the
+			// wrapped line happens to fill the wrap width exactly.
+			const shown = wrapped.slice(0, ACCOUNTS_DESCRIPTION_MAX_LINES);
+			if (wrapped.length > shown.length && shown.length > 0) {
+				const last = shown.length - 1;
+				shown[last] = `${truncateToWidth(shown[last] ?? "", Math.max(0, wrapWidth - 1), "")}…`;
+			}
+			for (const row of shown) lines.push(this.line(safeWidth, theme.fg("muted", row)));
+			lines.push(this.line(safeWidth, ""));
+		}
+		for (const row of this.getRowsState()) {
+			const name = `${row.selected ? "> " : "  "}${row.label}`;
+			const content = row.selected ? theme.bold(theme.fg("text", name)) : theme.fg("muted", name);
+			lines.push(this.rowLine(safeWidth, content, row.selected));
+		}
+		return lines;
+	}
+
+	/** One indented line (the #2340 shape: a single column of indent). */
+	private line(width: number, content: string): string {
+		const truncated = truncateToWidth(content ? ` ${content}` : "", width, "");
+		return truncated + " ".repeat(Math.max(0, width - visibleWidth(truncated)));
+	}
+
+	/** A full-width option row; the selection is a bold label over the soft-selection background. */
+	private rowLine(width: number, content: string, selected: boolean): string {
+		const body = truncateToWidth(` ${content}`, width, "");
+		const padded = body + " ".repeat(Math.max(0, width - visibleWidth(body)));
+		return selected ? theme.getSoftSelectionBackgroundColor()(padded) : padded;
+	}
+}
+
 /**
  * Inline catalog/account picker on the same menu primitives as models/providers.
  * Selection only reports intent; the host owns every guarded account operation.
  */
 export class ServiceCatalogPickerComponent extends Container implements Focusable {
-	private searchInput: MenuSearchInput;
+	/** Catalog mode only: accounts mode has no search box (Kevin, live testing). */
+	private searchInput: MenuSearchInput | undefined;
+	/** Accounts mode only: the static choice-list body. */
+	private accountsBody: ServiceAccountsBodyComponent | undefined;
+	/** Accounts mode: description rows budgeted for the viewport layout. */
+	private accountsDescriptionRows = 0;
 
 	// Delegate focus to the search input so its IME cursor remains positioned correctly.
 	private _focused = false;
@@ -157,7 +262,7 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 	}
 	set focused(value: boolean) {
 		this._focused = value;
-		this.searchInput.focused = value;
+		if (this.searchInput) this.searchInput.focused = value;
 	}
 
 	private listContainer: Container;
@@ -195,39 +300,68 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 		this.onCancelCallback = onCancel;
 
 		const panel = new MenuPanel({
-			title: options.title ?? "",
+			title: this.mode === "accounts" ? "" : (options.title ?? ""),
 			inline: true,
 		});
 		this.addChild(panel);
+		// The catalog list container; accounts mode never attaches it — the
+		// accounts body renders its rows from live state instead.
+		this.listContainer = new MenuList({ inline: true });
 
-		this.searchInput = new MenuSearchInput(
-			this.mode === "accounts" ? "Search accounts" : "Search MCP connections",
-			true,
-		);
-		this.searchInput.onSubmit = () => {
+		if (this.mode === "accounts") {
+			// Kevin (live testing): the accounts menu had a search box that
+			// filtered nothing useful, a first row that only re-verified, and
+			// right-hand "remove account"/"add account" echoes of what the row
+			// labels already say. The redesign is a static choice list —
+			// header, description, then Reconnect/Disconnect/Add rows.
+			const description = flattenToSingleLine(
+				options.description ?? this.allServices[0]?.description ?? this.allServices[0]?.setupHint ?? "",
+			);
+			this.accountsDescriptionRows = description ? ACCOUNTS_DESCRIPTION_BUDGET_ROWS : 0;
+			this.accountsBody = new ServiceAccountsBodyComponent(
+				flattenToSingleLine(options.title ?? ""),
+				description,
+				() => this.accountsRows(),
+			);
+			panel.addChild(this.accountsBody);
+			// The accounts body owns every fixed row (blank, header,
+			// description); only the separator rule leads the panel, and the
+			// viewport budget lives in updateLayout's accounts branch.
+			this.contextRows = inlineMenuPanelTopRuleRows({ firstChild: this.accountsBody });
+			return;
+		}
+
+		const searchInput = new MenuSearchInput("Search MCP connections", true);
+		this.searchInput = searchInput;
+		searchInput.onSubmit = () => {
 			const service = this.filteredServices[this.selectedIndex];
 			if (service) this.onSelectCallback(service);
 		};
-		panel.addChild(this.searchInput);
-		// A titled panel (accounts mode) renders the separator rule plus the
-		// title before its children; a headerless panel's rule IS the search
-		// input's top border, already budgeted in SEARCH_AND_FOOTER_ROWS. The
-		// helper is the same decision MenuPanel.render applies.
+		panel.addChild(searchInput);
+		// A titled panel renders the separator rule plus the title before its
+		// children; a headerless panel's rule IS the search input's top border,
+		// already budgeted in SEARCH_AND_FOOTER_ROWS. The helper is the same
+		// decision MenuPanel.render applies.
 		this.contextRows =
-			(options.title ? 1 : 0) + inlineMenuPanelTopRuleRows({ title: options.title, firstChild: this.searchInput });
+			(options.title ? 1 : 0) + inlineMenuPanelTopRuleRows({ title: options.title, firstChild: searchInput });
 
-		this.listContainer = new MenuList({ inline: true });
 		panel.addChild(this.listContainer);
 
-		if (options.initialSearch) this.searchInput.setValue(options.initialSearch);
+		if (options.initialSearch) searchInput.setValue(options.initialSearch);
 		this.filterServices(options.initialSearch ?? "");
 	}
 
-	getSearchInput(): MenuSearchInput {
+	getSearchInput(): MenuSearchInput | undefined {
 		return this.searchInput;
 	}
 
 	private filterServices(query: string): void {
+		if (this.mode === "accounts") {
+			// No search box in accounts mode: the row set IS the menu and
+			// typing is inert, so the filter never runs.
+			this.filteredServices = this.allServices;
+			return;
+		}
 		const queryChanged = query !== this.searchQuery;
 		this.searchQuery = query;
 		const trimmed = query.trim();
@@ -236,7 +370,7 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 		} else {
 			const scored: { service: McpPluginView; score: number }[] = [];
 			for (const service of this.allServices) {
-				const score = serviceMatchScore(service, trimmed, this.mode);
+				const score = serviceMatchScore(service, trimmed);
 				if (score !== undefined) scored.push({ service, score });
 			}
 			// Stable sort: rows that score the same keep their catalog order.
@@ -270,6 +404,11 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 
 	private updateList(): void {
 		this.updateLayout();
+		if (this.mode === "accounts") {
+			// The accounts body renders from the picker's live state every
+			// frame; there is no child list to rebuild.
+			return;
+		}
 		this.listContainer.clear();
 
 		// Centered window over the selection, clamped to the list bounds: at the
@@ -308,6 +447,14 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 		if (this.filteredServices.length === 0) {
 			const message = this.allServices.length === 0 ? "No external services available" : "No matching services";
 			this.listContainer.addChild(new TruncatedText(theme.fg("muted", ` ${message}`), 1, 0));
+			// One blank row between the empty state and the shortcuts line
+			// (Kevin, live testing): the message never touches the keybinds.
+			// The pair is fixed, so the empty frame stays deterministic — the
+			// panel height never jumps between renders of the same state.
+			this.listContainer.addChild({
+				render: () => [""],
+				invalidate: () => {},
+			});
 		} else if (this.detailRows > 0) {
 			// One blank line between the last row and the description, so the
 			// settings block reads as its own group. updateLayout() budgets the
@@ -342,15 +489,18 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 	}
 
 	private actionText(service: McpPluginView): string {
-		if (service.removeAction) return "remove account";
+		// The relabelled Disconnect row keeps the remove semantics; the hint
+		// names the row (Kevin, live testing).
+		if (service.removeAction) return "disconnect";
 		if (service.loginPending && this.mode === "accounts") return "login in progress";
 		if (this.mode === "catalog" && service.connectionIds.length > 0) return "manage accounts";
 		if (this.mode === "accounts" && service.connectionIds.length === 0)
 			return service.usesOAuth ? "add account" : "setup guidance";
 		if (service.source === "user" && !service.usesOAuth) return "manage";
-		// Enter on the account NAME row re-verifies a connected account; removal
-		// is the explicit Remove row's job, so the name row never disconnects.
-		if (service.connectionStatus === "connected") return "re-verify";
+		// Enter on the accounts Reconnect row re-verifies a connected account;
+		// disconnect is the explicit Disconnect row's job, so Reconnect never
+		// disconnects. The hint names the row.
+		if (service.connectionStatus === "connected") return this.mode === "accounts" ? "reconnect" : "re-verify";
 		if (service.connectionStatus === "pending") return "verify";
 		if (!service.connectable) return "setup guidance";
 		return service.connectionStatus === "error" ? "reconnect" : "connect";
@@ -376,7 +526,11 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 			case "disabled":
 				return theme.fg("muted", "Disabled");
 			default:
-				return service.connectable ? theme.fg("accent", "Connect") : theme.fg("muted", "Not connected");
+				// "Connect" is the plain next step, not a semantic state like
+				// the success/warning/error trailing texts around it, so it
+				// reads in the white text colour instead of the accent purple
+				// (Kevin, live testing).
+				return service.connectable ? theme.fg("text", "Connect") : theme.fg("muted", "Not connected");
 		}
 	}
 
@@ -418,14 +572,60 @@ export class ServiceCatalogPickerComponent extends Container implements Focusabl
 			if (service) this.onSelectCallback(service);
 		} else if (keybindings.matches(keyData, "tui.select.cancel")) {
 			this.onCancelCallback();
+		} else if (this.mode === "accounts") {
+			// No search box in accounts mode: plain typing is inert.
+			return;
 		} else {
-			const previousQuery = this.searchInput.getValue();
-			this.searchInput.handleInput(keyData);
-			if (previousQuery !== this.searchInput.getValue()) this.filterServices(this.searchInput.getValue());
+			const searchInput = this.searchInput;
+			if (!searchInput) return;
+			const previousQuery = searchInput.getValue();
+			searchInput.handleInput(keyData);
+			if (previousQuery !== searchInput.getValue()) this.filterServices(searchInput.getValue());
 		}
 	}
 
+	/**
+	 * Visible accounts rows: the same centered window the catalog list uses,
+	 * projected onto the choice-list shape. There is no scroll counter — the
+	 * account menu is a short static list, and the window only exists so a
+	 * pathological account count can never overflow the terminal.
+	 */
+	private accountsRows(): ServiceAccountsRow[] {
+		const maxVisible = this.listLayout.visibleItems;
+		const startIndex = Math.max(
+			0,
+			Math.min(this.selectedIndex - Math.floor(maxVisible / 2), this.filteredServices.length - maxVisible),
+		);
+		const endIndex = Math.min(startIndex + maxVisible, this.filteredServices.length);
+		const rows: ServiceAccountsRow[] = [];
+		for (let index = startIndex; index < endIndex; index++) {
+			const service = this.filteredServices[index];
+			if (!service) continue;
+			// Row labels carry the action (Reconnect / Disconnect <id> / Add
+			// another account); flatten so a stray newline can never split one.
+			rows.push({ label: flattenToSingleLine(service.label), selected: index === this.selectedIndex });
+		}
+		return rows;
+	}
+
 	private updateLayout(): void {
+		if (this.mode === "accounts") {
+			// Accounts frame: rule + blank + header + blank + (description +
+			// blank, budgeted at the cap) + hint. Budgeting the description at
+			// its MAX keeps the frame deterministic; a shorter description only
+			// undershoots the viewport, it never overflows it.
+			this.detailRows = 0;
+			this.listLayout = getMenuListLayout({
+				getRows: this.viewport.getRows,
+				preferredVisibleItems: PREFERRED_VISIBLE_SERVICES,
+				totalItems: this.filteredServices.length,
+				reservedRows: ACCOUNTS_FRAME_ROWS + this.accountsDescriptionRows,
+				comfortableItemRows: 1,
+				comfortableListPaddingRows: 0,
+				scrollIndicatorRows: 0,
+			});
+			return;
+		}
 		// The description is ONE fixed line (no appearance-driven resize); it
 		// only drops in terminals too short to fit the panel skeleton at all.
 		this.detailRows =

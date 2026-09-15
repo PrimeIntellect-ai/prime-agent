@@ -9452,6 +9452,9 @@ export class InteractiveMode {
 		);
 		const accountCards: McpPluginView[] = [];
 		const accountTargets = new Map<string, typeof target>();
+		// Multiple accounts need the connection id on every row to tell the
+		// pairs apart; a single account reads cleaner without it (Kevin).
+		const multiAccount = service.connectionIds.length > 1;
 		for (const connectionId of service.connectionIds) {
 			// Centralized per-account state: credential binding, expiry, and the
 			// record combine through the SAME computation as the plugin aggregate
@@ -9475,10 +9478,23 @@ export class InteractiveMode {
 				admission.repair && admission.endpoint
 					? `Saved endpoint: ${new URL(admission.endpoint).origin}${new URL(admission.endpoint).pathname}`
 					: undefined;
+			// The old account-name row, relabelled as the explicit Reconnect
+			// option at the top of the list (Kevin, live testing): Enter keeps
+			// running the SAME re-verify path — verifyMcpConnection plus the
+			// existing retry outcome — and never disconnects. Settings-managed
+			// servers keep an honest label: pending re-verifies, anything else
+			// only shows management guidance.
+			const reconnectLabel = settingsOnly
+				? status === "pending"
+					? "Reconnect"
+					: `Manage ${connectionId}`
+				: multiAccount
+					? `Reconnect ${connectionId}`
+					: "Reconnect";
 			accountCards.push({
 				...service,
 				serviceId: connectionId,
-				label: `${service.label} · ${connectionId}`,
+				label: reconnectLabel,
 				connectionIds: [connectionId],
 				connectionStatus: status,
 				connectable:
@@ -9491,11 +9507,13 @@ export class InteractiveMode {
 						: [repairHint, state.setupHint].filter(Boolean).join(" · ") || undefined,
 				...(state.toolCount !== undefined ? { toolCount: state.toolCount } : {}),
 			});
-			// Explicit per-account remove action, state-independent.
+			// Explicit per-account disconnect action, state-independent. For
+			// settings-managed servers the honest action stays "remove saved
+			// data": the server config and its environment token survive.
 			accountCards.push({
 				...service,
 				serviceId: connectionId,
-				label: settingsOnly ? `Remove saved data for ${connectionId}` : `Remove ${connectionId}`,
+				label: settingsOnly ? `Remove saved data for ${connectionId}` : `Disconnect ${connectionId}`,
 				connectionIds: [connectionId],
 				connectionStatus: status,
 				connectable: false,
@@ -9518,16 +9536,21 @@ export class InteractiveMode {
 			});
 		}
 		const card = await this.selectServiceCatalogRow(accountCards, {
-			title: `Accounts — ${service.label}`,
+			// Kevin (live testing): "Accounts — Cloudflare" reads as a caption;
+			// the menu is just the service, with the description above the
+			// options instead of under the list.
+			title: `${service.label} MCP`,
 			mode: "accounts",
+			description: settingsOnly
+				? "Saved account data for a settings-managed server. Removing it keeps the server settings and environment token."
+				: service.description,
+			// The accounts redesign renders no trailing status or per-row detail;
+			// the hint names the action and the description block carries the
+			// panel-level explanation.
 			getRowPresentation: (row) =>
 				settingsOnly
 					? row.removeAction
-						? {
-								action: "remove saved data",
-								status: "Remove saved data",
-								detail: "Remove saved account data. Keeps server settings and environment token.",
-							}
+						? { action: "remove saved data" }
 						: { action: row.connectionStatus === "pending" ? "verify" : "settings guidance" }
 					: undefined,
 		});
