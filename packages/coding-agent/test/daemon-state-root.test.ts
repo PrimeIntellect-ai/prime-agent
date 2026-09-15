@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -71,6 +71,32 @@ describe.runIf(process.platform !== "win32")("daemon state root scoping", () => 
 		expect(belongsToStateRoot(join(root.socketDir, "worker-abc.sock"))).toBe(true);
 	});
 
+	// The OS sweep reports the spelling each daemon bound, which can be a
+	// symlink alias of our own TMPDIR spelling while naming the same directory
+	// (macOS /var against /private/var). Such a listener must stay in scope or
+	// `shutdown --force` drops it from the residual and hidden-supervisor
+	// cleanup and its daemon keeps running.
+	it("claims a listener reported through a symlink alias of our socket dir", () => {
+		const { root, base } = createRoot();
+		const aliasDir = join(base, "socket-alias");
+		symlinkSync(root.socketDir, aliasDir);
+		const belongsToStateRoot = createDaemonStateRootMatcher(root);
+		expect(belongsToStateRoot(join(aliasDir, "daemon.sock"))).toBe(true);
+		expect(belongsToStateRoot(join(aliasDir, "worker-abc.sock"))).toBe(true);
+	});
+
+	it("claims a canonical listener when our socket dir is spelled through a symlink alias", () => {
+		const { root, base } = createRoot();
+		const aliasDir = join(base, "socket-alias");
+		symlinkSync(root.socketDir, aliasDir);
+		const belongsToStateRoot = createDaemonStateRootMatcher({
+			agentDir: root.agentDir,
+			socketDir: aliasDir,
+			defaultSocketPath: join(aliasDir, "daemon.sock"),
+		});
+		expect(belongsToStateRoot(join(root.socketDir, "daemon.sock"))).toBe(true);
+	});
+
 	it("claims a custom socket path registered under our agent dir", async () => {
 		const { root, base, registryDir } = createRoot();
 		const customSocket = join(base, "custom.sock");
@@ -102,9 +128,45 @@ describe.runIf(process.platform !== "win32")("daemon state root scoping", () => 
 		expect(belongsToStateRoot(join(root.agentDir, "nested", "worker-command.sock"))).toBe(true);
 	});
 
+	it("claims a hidden supervisor reported through a symlink alias of our agent dir", () => {
+		const { root, base } = createRoot();
+		const aliasDir = join(base, "agent-alias");
+		symlinkSync(root.agentDir, aliasDir);
+		const belongsToStateRoot = createDaemonStateRootMatcher(root);
+		expect(belongsToStateRoot(join(aliasDir, "daemon.sock"))).toBe(true);
+		expect(belongsToStateRoot(join(aliasDir, "nested", "worker-command.sock"))).toBe(true);
+	});
+
+	it("claims a supervisor in a directory literally named '..runtime'", () => {
+		const { root, base } = createRoot();
+		const aliasDir = join(base, "agent-alias");
+		symlinkSync(root.agentDir, aliasDir);
+		const belongsToStateRoot = createDaemonStateRootMatcher(root);
+		expect(belongsToStateRoot(join(root.agentDir, "..runtime", "daemon.sock"))).toBe(true);
+		expect(belongsToStateRoot(join(aliasDir, "..runtime", "daemon.sock"))).toBe(true);
+	});
+
 	it("does not mistake an agent dir with a shared name prefix for our own", () => {
 		const { root, base } = createRoot();
 		expect(createDaemonStateRootMatcher(root)(join(`${base}/agent-other`, "daemon.sock"))).toBe(false);
+	});
+
+	it("still disowns a listener that traverses out of our agent dir", () => {
+		const { root, base } = createRoot();
+		const belongsToStateRoot = createDaemonStateRootMatcher(root);
+		expect(belongsToStateRoot(join(base, "outside.sock"))).toBe(false);
+		expect(belongsToStateRoot(join(base, "..", "outside.sock"))).toBe(false);
+	});
+
+	it("still disowns a listener whose symlink alias points outside our root", () => {
+		const { root, base } = createRoot();
+		const elsewhere = join(base, "elsewhere");
+		mkdirSync(elsewhere, { recursive: true });
+		const aliasDir = join(base, "stranger-alias");
+		symlinkSync(elsewhere, aliasDir);
+		const belongsToStateRoot = createDaemonStateRootMatcher(root);
+		expect(belongsToStateRoot(join(aliasDir, "daemon.sock"))).toBe(false);
+		expect(belongsToStateRoot(join(aliasDir, "nested", "worker-abc.sock"))).toBe(false);
 	});
 
 	it("still answers when the registry does not exist yet", () => {

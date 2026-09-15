@@ -1,0 +1,1 @@
+- Fixed `daemon ps` and `shutdown --force` missing daemons whose listening socket path is reported through a symlink alias of the state root's socket dir (macOS `/var` against `/private/var`), so forced shutdowns no longer leave those daemons running.

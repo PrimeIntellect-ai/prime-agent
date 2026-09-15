@@ -11,7 +11,7 @@
 import { PUBLIC_COMMAND_NAMES, REMOVED_COMMAND_NAMES } from "./command-registry.js";
 
 /** Global flags that consume the next argument as their value. */
-export const GLOBAL_VALUE_FLAGS: ReadonlySet<string> = new Set([
+const GLOBAL_VALUE_FLAGS: ReadonlySet<string> = new Set([
 	"--mode",
 	"--daemon-socket",
 	"--provider",

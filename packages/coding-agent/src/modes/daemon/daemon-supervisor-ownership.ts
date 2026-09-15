@@ -772,7 +772,13 @@ function matchesExactProcessIdentity(identity: ProcessIdentity): boolean {
 	return identity.processStartId === undefined || getProcessStartId(identity.pid) === identity.processStartId;
 }
 
-function canonicalizeFilesystemPath(path: string): string {
+/**
+ * Realpath-resolved form of `path`, canonicalizing only as far as its nearest
+ * existing ancestor so missing tail components survive verbatim. Symlink
+ * aliases of one directory (macOS /var against /private/var) then compare equal
+ * to the spelling the OS reports for it.
+ */
+export function canonicalizeFilesystemPath(path: string): string {
 	let existingAncestor = resolve(path);
 	const missingSuffix: string[] = [];
 	while (true) {

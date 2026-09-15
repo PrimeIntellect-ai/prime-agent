@@ -1,7 +1,10 @@
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { getAgentDir } from "../../config.js";
 import { defaultDaemonSocketDir, defaultDaemonSocketPath, normalizeSocketPath } from "./daemon-socket.js";
-import { listDaemonSupervisorSocketPathsForAgentDir } from "./daemon-supervisor-ownership.js";
+import {
+	canonicalizeFilesystemPath,
+	listDaemonSupervisorSocketPathsForAgentDir,
+} from "./daemon-supervisor-ownership.js";
 
 /**
  * The state root an invocation reads and writes: the agent dir (config, logs,
@@ -30,6 +33,11 @@ export function currentDaemonStateRoot(): DaemonStateRoot {
  * or when the supervisor ownership registry (itself scoped to our HOME) records
  * it under our agent dir — the last two rules keep daemons on custom
  * `--daemon-socket` paths in scope for the root that started them.
+ *
+ * The directory rules also compare canonical, realpath-resolved forms: the
+ * listening sweep reports the spelling each daemon bound, which can be a
+ * symlink alias of our own spelling while naming the very same directory
+ * (macOS /var against /private/var), and such a listener is still ours to reap.
  *
  * The agent-dir rule is what keeps *hidden* supervisors reachable. A supervisor
  * that has handed its runtime to a successor is no longer the registered owner,
@@ -60,11 +68,22 @@ export function createDaemonStateRootMatcher(
 	}
 	const socketDir = resolve(root.socketDir);
 	const agentDir = resolve(root.agentDir);
+	const canonicalSocketDir = canonicalizeDirectorySafely(socketDir);
+	const canonicalAgentDir = canonicalizeDirectorySafely(agentDir);
+	const canonicalDirectories = new Map<string, string>();
 	let registeredSocketPaths: Set<string> | undefined;
 	return (socketPath: string): boolean => {
 		const normalized = normalizeSocketPath(socketPath);
 		const directory = resolve(dirname(normalized));
 		if (normalized === root.defaultSocketPath || directory === socketDir || isInside(directory, agentDir)) {
+			return true;
+		}
+		let canonicalDirectory = canonicalDirectories.get(directory);
+		if (canonicalDirectory === undefined) {
+			canonicalDirectory = canonicalizeDirectorySafely(directory);
+			canonicalDirectories.set(directory, canonicalDirectory);
+		}
+		if (canonicalDirectory === canonicalSocketDir || isInside(canonicalDirectory, canonicalAgentDir)) {
 			return true;
 		}
 		registeredSocketPaths ??= new Set(listDaemonSupervisorSocketPathsForAgentDir(root.agentDir));
@@ -77,9 +96,24 @@ export function createDaemonStateRootMatcher(
  * rather than a prefix comparison so a sibling whose name merely starts with the
  * parent's name (`/tmp/agent-other` against `/tmp/agent`) is not mistaken for a
  * child, and so an absolute result on a different volume is rejected outright.
+ * Traversal is recognized only as a complete `..` path segment, so a directory
+ * literally named `..runtime` still counts as a child.
  */
 function isInside(directory: string, parent: string): boolean {
 	if (directory === parent) return true;
 	const offset = relative(parent, directory);
-	return offset.length > 0 && !offset.startsWith("..") && !isAbsolute(offset);
+	return offset.length > 0 && offset !== ".." && !offset.startsWith(`..${sep}`) && !isAbsolute(offset);
+}
+
+/**
+ * Canonical form of a directory for the alias comparison, degrading to the
+ * lexical form when canonicalization itself fails (an unreadable ancestor, a
+ * symlink loop): a listener must never crash the sweep scoping it.
+ */
+function canonicalizeDirectorySafely(directory: string): string {
+	try {
+		return canonicalizeFilesystemPath(directory);
+	} catch {
+		return directory;
+	}
 }
