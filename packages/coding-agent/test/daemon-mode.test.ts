@@ -3203,6 +3203,7 @@ describe("daemon mode helpers", () => {
 				messageCount: 3,
 				queuedCount: 0,
 				isSessionActive: false,
+				sessionPath: "/tmp/archivist.jsonl",
 				firstMessage: "x".repeat(AGENT_OBSERVE_PREVIEW_MAX_CHARS),
 			},
 			{
@@ -3219,7 +3220,83 @@ describe("daemon mode helpers", () => {
 				attachedClients: 0,
 				queuedCount: 0,
 				isSessionActive: true,
+				sessionPath: "/tmp/peer.jsonl",
 			},
+		]);
+	});
+
+	it("lists descendants as read-only rows when the observe roster is recursive", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		});
+		const currentState = makeState("current");
+		currentState.runtime = {
+			...currentState.runtime,
+			cwd: "/tmp",
+			diagnostics: [],
+			modelFallbackMessage: undefined,
+			session: {
+				sessionId: "session-current",
+				sessionName: "Current",
+				sessionFile: "/tmp/current.jsonl",
+				sessionManager: { getCwd: () => "/tmp" },
+				isStreaming: false,
+				isCompacting: false,
+				isSessionActive: false,
+				unfinishedActionCount: 0,
+				getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
+				messages: [],
+				state: { pendingToolCalls: new Set(), streamingMessage: undefined },
+				hasRunningRlmChildren: () => false,
+			},
+		} as never;
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			createAgentFamilyCatalog: ReturnType<typeof vi.fn>;
+			createAgentObserveListResult(
+				current: ActiveSessionState,
+				input?: { recursive?: boolean },
+			): Promise<AgentObserveListResult>;
+		};
+		internals.sessions.set(currentState.activeSessionId, currentState);
+		internals.createAgentFamilyCatalog = vi.fn(async () => [
+			{
+				id: "session-current",
+				name: "Current",
+				depth: 0,
+				status: "running",
+				sessionPath: "/tmp/current.jsonl",
+			},
+			{
+				id: "session-child",
+				name: "researcher",
+				depth: 1,
+				parentSessionId: "session-current",
+				status: "running",
+				sessionPath: "/tmp/researcher.jsonl",
+				cwd: "/tmp",
+			},
+			{
+				id: "session-grandchild",
+				name: "analyst",
+				depth: 2,
+				parentSessionId: "session-child",
+				status: "running",
+				sessionPath: "/tmp/analyst.jsonl",
+				cwd: "/tmp",
+			},
+		]);
+
+		const nuclear = await internals.createAgentObserveListResult(currentState);
+		expect(nuclear.agents.map((agent) => [agent.relationship, agent.sessionName])).toEqual([["child", "researcher"]]);
+
+		const recursive = await internals.createAgentObserveListResult(currentState, { recursive: true });
+		expect(recursive.agents.map((agent) => [agent.relationship, agent.sessionName, agent.sessionPath])).toEqual([
+			["child", "researcher", "/tmp/researcher.jsonl"],
+			["descendant", "analyst", "/tmp/analyst.jsonl"],
 		]);
 	});
 

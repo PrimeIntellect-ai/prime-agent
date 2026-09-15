@@ -57,12 +57,15 @@ import {
 	type AgentObserveAgentSnapshot,
 	type AgentObserveAgentSummary,
 	type AgentObserveController,
+	type AgentObserveListInput,
 	type AgentObserveListResult,
 	type AgentObserveRecentMessagesInput,
 	type AgentObserveRecentMessagesResult,
+	type AgentObserveRosterMember,
 	createAgentObserveMessagePreview,
 	normalizeObserveLimit,
 	normalizeObserveMaxChars,
+	selectAgentObserveRoster,
 } from "../../core/agent-observe.js";
 import { type PromptOptions, rlmChildLabel } from "../../core/agent-session.js";
 import { type AgentSessionRuntimeConfig, mergeAgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
@@ -3435,14 +3438,22 @@ export class AgentDaemon {
 			return current;
 		};
 		return {
-			listAgents: () => this.createAgentObserveListResult(requireCurrentState()),
+			listAgents: (input) => this.createAgentObserveListResult(requireCurrentState(), input),
 			getAgent: (target) => this.createAgentObserveAgentSnapshot(requireCurrentState(), target),
 			recentMessages: (input) => this.createAgentObserveRecentMessages(requireCurrentState(), input),
 		};
 	}
 
-	private async createAgentObserveListResult(currentState: ActiveSessionState): Promise<AgentObserveListResult> {
-		const family = await this.createAgentFamily(currentState);
+	private async createAgentObserveListResult(
+		currentState: ActiveSessionState,
+		input?: AgentObserveListInput,
+	): Promise<AgentObserveListResult> {
+		const catalog = await this.createAgentFamilyCatalog(currentState);
+		const currentEntry = catalog.find((entry) => entry.id === currentState.runtime.session.sessionId);
+		if (!currentEntry) {
+			throw new Error("Current agent is missing from the family catalog");
+		}
+		const family = selectAgentObserveRoster(currentEntry, catalog, input?.recursive === true);
 		const residentBySessionId = new Map(
 			this.listTargetableSessionStates(currentState).map((state) => [state.runtime.session.sessionId, state]),
 		);
@@ -3469,7 +3480,7 @@ export class AgentDaemon {
 	 * so the runtime flags stay false. A peer working in another worker keeps its
 	 * `activeSessionId` and its live status; everything else is absent or inactive.
 	 */
-	private createPersistedAgentObserveSummary(member: AgentFamilyMember): AgentObserveAgentSummary {
+	private createPersistedAgentObserveSummary(member: AgentObserveRosterMember): AgentObserveAgentSummary {
 		const entry = member.entry;
 		return {
 			...(entry.activeSessionId ? { activeSessionId: entry.activeSessionId } : {}),
@@ -3490,6 +3501,7 @@ export class AgentDaemon {
 			...(entry.parentSessionId ? { parentSessionId: entry.parentSessionId } : {}),
 			...(entry.rlmChildId ? { rlmChildId: entry.rlmChildId } : {}),
 			...(entry.firstMessage ? { firstMessage: entry.firstMessage.slice(0, AGENT_OBSERVE_PREVIEW_MAX_CHARS) } : {}),
+			...(entry.sessionPath ? { sessionPath: entry.sessionPath } : {}),
 		};
 	}
 
@@ -3562,6 +3574,7 @@ export class AgentDaemon {
 			...(summary.parentSessionId ? { parentSessionId: summary.parentSessionId } : {}),
 			...(summary.rlmChildId ? { rlmChildId: summary.rlmChildId } : {}),
 			...(summary.rlmParentNodeId ? { rlmParentNodeId: summary.rlmParentNodeId } : {}),
+			...(session.sessionFile ? { sessionPath: canonicalSessionPath(session.sessionFile) } : {}),
 			...(summary.firstMessage ? { firstMessage: summary.firstMessage } : {}),
 			...(latest
 				? {

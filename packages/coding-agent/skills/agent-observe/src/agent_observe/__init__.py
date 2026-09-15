@@ -12,9 +12,17 @@ from typing import Any
 from rlm import host_request
 
 
-async def list_agents() -> dict[str, Any]:
-    """List the full nuclear family: parent, siblings, children, active or not."""
-    return await host_request("agent_observe.list")
+async def list_agents(recursive: bool = False) -> dict[str, Any]:
+    """List the family roster: parent, siblings, children, active or not.
+
+    With ``recursive=True`` the roster also includes every descendant below
+    direct children as read-only ``descendant`` rows, breadth-first by name.
+    Discovery only: a descendant grants no extra reach, and messaging still
+    relays through its parent.
+    """
+    if not isinstance(recursive, bool):
+        raise TypeError(f"recursive must be bool, got {type(recursive).__name__}")
+    return await host_request("agent_observe.list", {"recursive": recursive})
 
 
 async def get_agent(target: str) -> dict[str, Any]:

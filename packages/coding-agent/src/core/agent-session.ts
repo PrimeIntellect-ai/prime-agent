@@ -70,6 +70,7 @@ import {
 	createAgentObserveHostHandlers,
 	normalizeObserveLimit,
 	normalizeObserveMaxChars,
+	normalizeObserveRecursive,
 	ORCHESTRATION_HEARTBEAT_SKILL_NAME,
 } from "./agent-observe.js";
 import {
@@ -3942,7 +3943,9 @@ export class AgentSession {
 		}
 		switch (type) {
 			case "agent_observe.list":
-				return controller.listAgents();
+				return controller.listAgents({
+					recursive: normalizeObserveRecursive(payload.recursive),
+				});
 			case "agent_observe.get": {
 				if (typeof payload.target !== "string") {
 					throw new Error("agent_observe.get target must be a string");
@@ -10493,7 +10496,10 @@ export class AgentSession {
 			Object.assign(
 				handlers,
 				createAgentObserveHostHandlers({
-					listAgents: () => this.handleAgentObserveHostRequest("agent_observe.list") as AgentObserveListResult,
+					listAgents: (input) =>
+						this.handleAgentObserveHostRequest("agent_observe.list", {
+							recursive: input?.recursive,
+						}) as AgentObserveListResult,
 					getAgent: (target) =>
 						this.handleAgentObserveHostRequest("agent_observe.get", {
 							target,

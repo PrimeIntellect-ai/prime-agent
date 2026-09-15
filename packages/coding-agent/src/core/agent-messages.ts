@@ -290,7 +290,7 @@ function sameAgentFamilyParent(
 	return false;
 }
 
-function isAgentFamilyParent(parent: AgentFamilyCatalogEntry, child: AgentFamilyCatalogEntry): boolean {
+export function isAgentFamilyParent(parent: AgentFamilyCatalogEntry, child: AgentFamilyCatalogEntry): boolean {
 	return (
 		(child.parentSessionPath !== undefined && child.parentSessionPath === parent.sessionPath) ||
 		(child.parentSessionId !== undefined && child.parentSessionId === parent.id)

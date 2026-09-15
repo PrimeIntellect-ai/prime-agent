@@ -28,16 +28,22 @@ if child is not None:
 
 ## API
 
-- `await agent_observe.list_agents()` returns `current` and `agents`, the full
-  nuclear family: parent, siblings, and direct children, active or not. Each
-  agent carries `sessionId`, optional `sessionName`, `relationship`
-  (`parent`/`sibling`/`child`), `status`, `isSessionActive`, and the counts and
-  message previews known for it: `latestMessage` for a live session,
-  `firstMessage` for an inactive child. A member with no live session has
-  no `activeSessionId` and no live detail; address it with `agent_message.send`
-  using its `relationship` plus its `sessionName`, or its `sessionId` when the
-  member has no name. For direct children,
+- `await agent_observe.list_agents(recursive=False)` returns `current` and
+  `agents`, the full nuclear family: parent, siblings, and direct children,
+  active or not. Each agent carries `sessionId`, optional `sessionName`,
+  `relationship` (`parent`/`sibling`/`child`), `status`, `isSessionActive`, and
+  the counts and message previews known for it: `latestMessage` for a live
+  session, `firstMessage` for an inactive child. A member with no live session
+  has no `activeSessionId` and no live detail; address it with
+  `agent_message.send` using its `relationship` plus its `sessionName`, or its
+  `sessionId` when the member has no name. For direct children,
   `await rlm.list_subagents()` also exposes parent-owned lifecycle handles.
+- `await agent_observe.list_agents(recursive=True)` additionally lists every
+  descendant below direct children as read-only rows with
+  `relationship: "descendant"`, breadth-first by name. This is discovery only:
+  a descendant row grants no extra reach or control. Message a descendant by
+  relaying through its parent, and inspect deeper trees by asking the
+  intermediate child to observe its own family.
 - `await agent_observe.get_agent(target)` returns `agent`, where `agent`
   contains one live agent summary. `target` is resolved like other live-session
   selectors: active id, session id/name, or unambiguous suffix.

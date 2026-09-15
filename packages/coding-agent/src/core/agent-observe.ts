@@ -1,5 +1,10 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AgentFamilyRelationship } from "./agent-messages.js";
+import {
+	type AgentFamilyCatalogEntry,
+	type AgentFamilyRelationship,
+	isAgentFamilyParent,
+	selectAgentFamily,
+} from "./agent-messages.js";
 
 export const AGENT_OBSERVE_SKILL_NAME = "agent-observe";
 /** Shared cap for the message previews carried by roster rows. */
@@ -7,13 +12,72 @@ export const AGENT_OBSERVE_PREVIEW_MAX_CHARS = 240;
 export const AGENT_OBSERVE_IMPORT_NAME = "agent_observe";
 export const ORCHESTRATION_HEARTBEAT_SKILL_NAME = "orchestration-heartbeat";
 
+/** Roster relationship: nuclear family roles plus read-only `descendant` rows. */
+export type AgentObserveRelationship = AgentFamilyRelationship | "descendant";
+
+export interface AgentObserveRosterMember {
+	relationship: AgentObserveRelationship;
+	entry: AgentFamilyCatalogEntry;
+}
+
+export interface AgentObserveListInput {
+	/** Include descendants of the current agent beyond direct children. */
+	recursive?: boolean;
+}
+
+/**
+ * Roster for the current agent: the nuclear family, and when `recursive` is
+ * set, every descendant below direct children as read-only `descendant` rows
+ * in breadth-first name order. Discovery only: a descendant grants no extra
+ * reach, and communication still relays through its parent.
+ */
+export function selectAgentObserveRoster(
+	current: AgentFamilyCatalogEntry,
+	catalog: readonly AgentFamilyCatalogEntry[],
+	recursive = false,
+): AgentObserveRosterMember[] {
+	const family = selectAgentFamily(current, catalog);
+	if (!recursive) return family;
+	const included = new Set(family.map((member) => member.entry.id).concat(current.id));
+	const descendants: AgentObserveRosterMember[] = [];
+	// Walked ids bound the frontier even if malformed parent edges form a cycle.
+	const walked = new Set([current.id]);
+	let frontier: AgentFamilyCatalogEntry[] = [current];
+	while (frontier.length > 0) {
+		const next: AgentFamilyCatalogEntry[] = [];
+		const level: AgentObserveRosterMember[] = [];
+		for (const parent of frontier) {
+			for (const entry of catalog) {
+				if (!isAgentFamilyParent(parent, entry) || walked.has(entry.id)) continue;
+				// Direct children already appear as nuclear rows, but their own
+				// descendants still need the walk to continue through them.
+				walked.add(entry.id);
+				next.push(entry);
+				if (included.has(entry.id)) continue;
+				included.add(entry.id);
+				level.push({ relationship: "descendant", entry });
+			}
+		}
+		level.sort(
+			(a, b) =>
+				(a.entry.name ?? a.entry.id).localeCompare(b.entry.name ?? b.entry.id) ||
+				a.entry.id.localeCompare(b.entry.id),
+		);
+		descendants.push(...level);
+		frontier = next;
+	}
+	return [...family, ...descendants];
+}
+
 export interface AgentObserveAgentSummary {
 	/** Absent for family members that have no live session in this daemon. */
 	activeSessionId?: string;
 	sessionId: string;
 	sessionName?: string;
 	/** Absent only for the current agent. */
-	relationship?: AgentFamilyRelationship;
+	relationship?: AgentObserveRelationship;
+	/** Canonical session file path, when known; supports read-only transcript inspection. */
+	sessionPath?: string;
 	runtimeKind?: "top-level" | "subagent";
 	cwd?: string;
 	status: string;
@@ -67,7 +131,7 @@ export interface AgentObserveMessagePreview {
 }
 
 export interface AgentObserveController {
-	listAgents(): AgentObserveListResult | Promise<AgentObserveListResult>;
+	listAgents(input?: AgentObserveListInput): AgentObserveListResult | Promise<AgentObserveListResult>;
 	getAgent(target: string): AgentObserveAgentSnapshot | Promise<AgentObserveAgentSnapshot>;
 	recentMessages(
 		input: AgentObserveRecentMessagesInput,
@@ -76,7 +140,10 @@ export interface AgentObserveController {
 
 export function createAgentObserveHostHandlers(controller: AgentObserveController) {
 	return {
-		"agent_observe.list": async () => controller.listAgents() as unknown as Record<string, unknown>,
+		"agent_observe.list": async (payload: Record<string, unknown> = {}) =>
+			(await controller.listAgents({
+				recursive: normalizeObserveRecursive(payload.recursive),
+			})) as unknown as Record<string, unknown>,
 		"agent_observe.get": async (payload: Record<string, unknown> = {}) => {
 			if (typeof payload.target !== "string") {
 				throw new Error("agent_observe.get target must be a string");
@@ -121,6 +188,14 @@ export function createAgentObserveMessagePreview(
 		...(toolCalls && toolCalls.length > 0 ? { toolCalls } : {}),
 		...(message.role === "custom" ? { customType: message.customType } : {}),
 	};
+}
+
+export function normalizeObserveRecursive(value: unknown): boolean {
+	if (value === undefined || value === null) return false;
+	if (typeof value !== "boolean") {
+		throw new Error("agent_observe.list recursive must be a boolean");
+	}
+	return value;
 }
 
 function normalizeOptionalInteger(value: unknown, label: string): number | undefined {
