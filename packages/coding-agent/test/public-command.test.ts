@@ -187,6 +187,85 @@ describe("public command routing", () => {
 		expect(mocks.psCalls).toEqual([]);
 	});
 
+	it("keeps a positional after a prompt-value flag on the message path", async () => {
+		for (const flag of ["--system-prompt", "--append-system-prompt"]) {
+			const args = [flag, "--offline", "status"];
+			await expect(handlePublicCommand(args)).resolves.toEqual({
+				handled: false,
+				args,
+				explicitAgentsView: false,
+			});
+		}
+	});
+
+	it("keeps a version request ahead of command routing instead of rotating it", async () => {
+		const args = ["--version", "status"];
+		await expect(handlePublicCommand(args)).resolves.toEqual({
+			handled: false,
+			args,
+			explicitAgentsView: false,
+		});
+		await expect(handlePublicCommand(["-v", "status"])).resolves.toEqual({
+			handled: false,
+			args: ["-v", "status"],
+			explicitAgentsView: false,
+		});
+		await expect(handlePublicCommand(args)).resolves.toEqual({
+			handled: false,
+			args,
+			explicitAgentsView: false,
+		});
+	});
+
+	it("keeps an unknown long option's value out of command routing", async () => {
+		await expect(handlePublicCommand(["--extension-option", "status"])).resolves.toEqual({
+			handled: false,
+			args: ["--extension-option", "status"],
+			explicitAgentsView: false,
+		});
+		await expect(handlePublicCommand(["--extension-option", "statuses", "of", "my", "agents"])).resolves.toEqual({
+			handled: false,
+			args: ["--extension-option", "statuses", "of", "my", "agents"],
+			explicitAgentsView: false,
+		});
+		expect(mocks.psCalls).toEqual([]);
+		expect(mocks.daemonCommands).toEqual([]);
+	});
+
+	it("still rotates a command written after flags that take no value", async () => {
+		await expect(handlePublicCommand(["--verbose", "model", "list"])).resolves.toMatchObject({
+			handled: false,
+			args: [INTERNAL_RUNTIME_COMMAND_MARKER, "--list-models", "--verbose"],
+		});
+		await expect(handlePublicCommand(["-x", "model", "list"])).resolves.toMatchObject({
+			handled: false,
+			args: [INTERNAL_RUNTIME_COMMAND_MARKER, "--list-models", "-x"],
+		});
+		await expect(handlePublicCommand(["--extension-option=status", "model", "list"])).resolves.toMatchObject({
+			handled: false,
+			args: [INTERNAL_RUNTIME_COMMAND_MARKER, "--list-models", "--extension-option=status"],
+		});
+	});
+
+	it("keeps text after -- following a value flag on the message path", async () => {
+		await expect(handlePublicCommand(["--cwd", "--", "status"])).resolves.toEqual({
+			handled: false,
+			args: ["--cwd", "--", "status"],
+			explicitAgentsView: false,
+		});
+		expect(mocks.psCalls).toEqual([]);
+	});
+
+	it("keeps a resume @file reference free instead of consuming it as a selector", async () => {
+		await expect(handlePublicCommand(["--resume", "@prompt.md", "status"])).resolves.toEqual({
+			handled: false,
+			args: ["--resume", "@prompt.md", "status"],
+			explicitAgentsView: false,
+		});
+		expect(mocks.psCalls).toEqual([]);
+		expect(mocks.daemonCommands).toEqual([]);
+	});
+
 	it("keeps the positional of a print run as the message", async () => {
 		await expect(handlePublicCommand(["--print", "status"])).resolves.toEqual({
 			handled: false,
@@ -438,6 +517,26 @@ describe("public command routing", () => {
 
 		await expect(handlePublicCommand(["help", "--verbose"])).resolves.toMatchObject({ handled: true });
 		expect(console.log).toHaveBeenLastCalledWith(expect.stringContaining("prime-agent - AI coding assistant"));
+	});
+
+	it("excludes parseArgs-consumed flag values from the help command path", async () => {
+		await expect(handlePublicCommand(["help", "--resume", "status"])).resolves.toMatchObject({
+			handled: true,
+		});
+		expect(console.log).toHaveBeenLastCalledWith(expect.stringContaining("prime-agent - AI coding assistant"));
+		await expect(handlePublicCommand(["help", "-r", "status"])).resolves.toMatchObject({ handled: true });
+		expect(console.log).toHaveBeenLastCalledWith(expect.stringContaining("prime-agent - AI coding assistant"));
+		await expect(handlePublicCommand(["help", "--print", "status"])).resolves.toMatchObject({
+			handled: true,
+		});
+		expect(console.log).toHaveBeenLastCalledWith(expect.stringContaining("prime-agent - AI coding assistant"));
+
+		// The print flag must not swallow the help flag itself: an explicit
+		// --help still defers to the per-command help block.
+		await expect(handlePublicCommand(["help", "--print", "--help"])).resolves.toMatchObject({
+			handled: true,
+		});
+		expect(console.log).toHaveBeenLastCalledWith(expect.not.stringContaining("prime-agent status [--json]"));
 	});
 
 	it("keeps a -- after the help command on the message path", async () => {

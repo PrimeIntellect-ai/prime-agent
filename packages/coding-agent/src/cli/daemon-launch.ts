@@ -24,7 +24,12 @@ import {
 } from "../modes/daemon/daemon-worker-protocol.js";
 import { spawnHidden } from "../utils/child-process.js";
 import { isHelpCommandRequest, REMOVED_COMMAND_NAMES } from "./command-registry.js";
-import { extractHelpCommandPath, findFirstPositionalArgument, isCommandPositional } from "./global-flags.js";
+import {
+	extractHelpCommandPath,
+	findFirstPositionalArgument,
+	isCommandPositional,
+	PROMPT_RUN_FLAGS,
+} from "./global-flags.js";
 import { createCliSubprocessEnv, formatCurrentCliCommand } from "./subprocess-launch.js";
 
 const DAEMON_STARTUP_TIMEOUT_MS = 30_000;
@@ -523,6 +528,11 @@ export function shouldStartDaemonEarly(args: readonly string[], startupBenchmark
 	}
 	const firstPositional = findFirstPositionalArgument(args);
 	if (!firstPositional || !isCommandPositional(firstPositional)) {
+		return true;
+	}
+	// Prompt-run flags keep a following command word on the chat path (the
+	// rotation skips them), so these runs need the early daemon boot too.
+	if (args.slice(0, firstPositional.index).some((arg) => PROMPT_RUN_FLAGS.has(arg))) {
 		return true;
 	}
 	const helpPath =
