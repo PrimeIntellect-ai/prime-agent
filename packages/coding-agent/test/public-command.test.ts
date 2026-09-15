@@ -194,6 +194,16 @@ describe("public command routing", () => {
 			args,
 			explicitAgentsView: false,
 		});
+		await expect(handlePublicCommand(["-v", "status"])).resolves.toEqual({
+			handled: false,
+			args: ["-v", "status"],
+			explicitAgentsView: false,
+		});
+		await expect(handlePublicCommand(args)).resolves.toEqual({
+			handled: false,
+			args,
+			explicitAgentsView: false,
+		});
 	});
 
 	it("keeps an unknown long option's value out of command routing", async () => {

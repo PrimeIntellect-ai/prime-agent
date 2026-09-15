@@ -163,10 +163,13 @@ export function rotateGlobalFlagsBeforeCommand(args: readonly string[]): string[
 	if (!positional || positional.index === 0 || !isCommandPositional(positional)) {
 		return [...args];
 	}
-	if (args.slice(0, positional.index).some((arg) => PROMPT_RUN_FLAGS.has(arg) || arg === "--version")) {
-		// `--version` stays ahead of routing: parseArgs answers it wherever it
-		// appears, while a rotated `status --version` would die as an unknown
-		// option before the runtime ever sees it.
+	if (
+		args.slice(0, positional.index).some((arg) => PROMPT_RUN_FLAGS.has(arg) || arg === "--version" || arg === "-v")
+	) {
+		// `--version` and its short form stay ahead of routing: parseArgs
+		// answers them wherever they appear, while a rotated
+		// `status --version` would die as an unknown option before the runtime
+		// ever sees it.
 		return [...args];
 	}
 	const moved = args.slice(0, positional.index);
