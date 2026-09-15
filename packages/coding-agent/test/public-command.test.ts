@@ -409,6 +409,33 @@ describe("public command routing", () => {
 		});
 	});
 
+	it("treats help written after global flags as a help request", async () => {
+		await expect(handlePublicCommand(["--offline", "help"])).resolves.toMatchObject({ handled: true });
+		expect(console.log).toHaveBeenCalledWith(expect.stringContaining("prime-agent - AI coding assistant"));
+		await expect(handlePublicCommand(["--offline", "help", "status"])).resolves.toMatchObject({ handled: true });
+		expect(console.log).toHaveBeenLastCalledWith(expect.stringContaining("prime-agent status [--json]"));
+		expect(mocks.daemonCommands).toEqual([]);
+		expect(process.exitCode).toBeUndefined();
+	});
+
+	it("excludes global flags from the help command path instead of forwarding them", async () => {
+		await expect(handlePublicCommand(["--offline", "help", "mcp", "add"])).resolves.toMatchObject({
+			handled: true,
+		});
+		expect(console.log).toHaveBeenCalledWith(expect.stringContaining("prime-agent mcp add <name>"));
+
+		await expect(handlePublicCommand(["help", "--verbose"])).resolves.toMatchObject({ handled: true });
+		expect(console.log).toHaveBeenLastCalledWith(expect.stringContaining("prime-agent - AI coding assistant"));
+	});
+
+	it("keeps a -- after the help command on the message path", async () => {
+		await expect(handlePublicCommand(["--offline", "help", "--", "status"])).resolves.toEqual({
+			handled: false,
+			args: ["help", "--offline", "--", "status"],
+			explicitAgentsView: false,
+		});
+	});
+
 	it("rejects invalid paths below a known help command", async () => {
 		await handlePublicCommand(["help", "schedule", "nonsense"]);
 

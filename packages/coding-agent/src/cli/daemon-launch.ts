@@ -24,7 +24,7 @@ import {
 } from "../modes/daemon/daemon-worker-protocol.js";
 import { spawnHidden } from "../utils/child-process.js";
 import { isHelpCommandRequest, REMOVED_COMMAND_NAMES } from "./command-registry.js";
-import { findFirstPositionalArgument, isCommandPositional } from "./global-flags.js";
+import { extractHelpCommandPath, findFirstPositionalArgument, isCommandPositional } from "./global-flags.js";
 import { createCliSubprocessEnv, formatCurrentCliCommand } from "./subprocess-launch.js";
 
 const DAEMON_STARTUP_TIMEOUT_MS = 30_000;
@@ -525,8 +525,9 @@ export function shouldStartDaemonEarly(args: readonly string[], startupBenchmark
 	if (!firstPositional || !isCommandPositional(firstPositional)) {
 		return true;
 	}
-	const isHelpCommand =
-		firstPositional.value === "help" && isHelpCommandRequest(args.slice(firstPositional.index + 1));
+	const helpPath =
+		firstPositional.value === "help" ? extractHelpCommandPath(args, firstPositional.index + 1) : undefined;
+	const isHelpCommand = helpPath !== undefined && isHelpCommandRequest(helpPath);
 	if (
 		REMOVED_COMMAND_NAMES.has(firstPositional.value) ||
 		(firstPositional.value !== "agents" && (firstPositional.value !== "help" || isHelpCommand))

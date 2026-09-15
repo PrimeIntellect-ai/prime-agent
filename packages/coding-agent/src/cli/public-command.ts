@@ -18,7 +18,7 @@ import {
 import { handleDaemonCommand } from "./daemon-command.js";
 import { runPs, runReap, runShutdownAll } from "./daemon-ps.js";
 import { DAEMON_UPDATE_RESTART_COORDINATOR_FLAG } from "./daemon-update-restart.js";
-import { rotateGlobalFlagsBeforeCommand } from "./global-flags.js";
+import { extractHelpCommandPath, rotateGlobalFlagsBeforeCommand } from "./global-flags.js";
 
 export interface PublicCommandResult {
 	handled: boolean;
@@ -39,8 +39,12 @@ export async function handlePublicCommand(args: string[]): Promise<PublicCommand
 
 async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 	args = rotateGlobalFlagsBeforeCommand(args);
-	if (args[0] === "help" && isHelpCommandRequest(args.slice(1))) {
-		return printRequestedHelp(args.slice(1));
+	// Global run flags are excluded from the help request, not forwarded as help
+	// arguments: `prime-agent --offline help` must print help, not chat the
+	// rotated argv to the model.
+	const helpPath = args[0] === "help" ? extractHelpCommandPath(args, 1) : undefined;
+	if (helpPath !== undefined && isHelpCommandRequest(helpPath)) {
+		return printRequestedHelp(helpPath);
 	}
 
 	const command = args[0];

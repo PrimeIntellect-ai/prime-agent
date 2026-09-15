@@ -231,6 +231,9 @@ describe("shouldStartDaemonEarly", () => {
 		["model listing", ["--list-models"]],
 		["management command after global flags", ["--daemon-socket", "/tmp/prime.sock", "status"]],
 		["nested command after global flags", ["--offline", "model", "list"]],
+		["help after global flags", ["--offline", "help"]],
+		["nested help after global flags", ["--offline", "help", "status"]],
+		["help before global flags", ["help", "--verbose"]],
 		["startup benchmark", []],
 	])("does not start early for %s", (label, args) => {
 		expect(shouldStartDaemonEarly(args, label === "startup benchmark")).toBe(false);

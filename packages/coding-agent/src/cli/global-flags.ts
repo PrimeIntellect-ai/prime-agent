@@ -110,3 +110,30 @@ export function rotateGlobalFlagsBeforeCommand(args: readonly string[]): string[
 	}
 	return [positional.value, ...rest.slice(0, separatorIndex), ...moved, ...rest.slice(separatorIndex)];
 }
+
+/**
+ * The command path a `help` request names, with global run flags (and their
+ * values) excluded: they are run options, not help arguments, so
+ * `prime-agent --offline help status` asks about `status`. Returns undefined
+ * when the tail contains `--` (everything behind it stays literal message
+ * text) or an explicit --help/-h flag (the generic per-command help path
+ * handles those).
+ */
+export function extractHelpCommandPath(args: readonly string[], from: number): string[] | undefined {
+	const path: string[] = [];
+	for (let index = from; index < args.length; index++) {
+		const arg = args[index]!;
+		if (arg === "--" || arg === "--help" || arg === "-h") {
+			return undefined;
+		}
+		if (GLOBAL_VALUE_FLAGS.has(arg)) {
+			index++;
+			continue;
+		}
+		if (arg.startsWith("-")) {
+			continue;
+		}
+		path.push(arg);
+	}
+	return path;
+}
