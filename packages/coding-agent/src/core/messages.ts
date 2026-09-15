@@ -41,6 +41,7 @@ export const IPYTHON_STATE_RESTORED_CUSTOM_TYPE = "ipython_state_restored";
 export const SESSION_SLASH_COMMAND_CUSTOM_TYPE = "session_slash_command";
 export const SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE = "session_slash_command_result";
 export const COMPACTION_OUTCOME_CUSTOM_TYPE = "compaction_outcome";
+export const MCP_CONNECTION_OUTCOME_CUSTOM_TYPE = "mcp_connection_outcome";
 export const REFINEMENT_OUTCOME_CUSTOM_TYPE = "refinement_outcome";
 export const REFINEMENT_NOTICE_CUSTOM_TYPE = "refinement_notice";
 export const HARNESS_DIGEST_CUSTOM_TYPE = "harness_digest";
@@ -122,6 +123,38 @@ export interface RefinementNoticeMessage extends CustomMessage<RefinementNoticeD
 	customType: typeof REFINEMENT_NOTICE_CUSTOM_TYPE;
 	content: string;
 	details: RefinementNoticeDetails;
+}
+
+/** How an MCP connection attempt finished: verified handshake, saved but unverified, or unrecorded result. */
+export type McpConnectionVerificationState = "connected" | "unverified" | "unsaved";
+
+/** Which flow produced the outcome: a completed login or a pending-account retry verification. */
+export type McpConnectionOutcomeSource = "login" | "retry";
+
+/** Whether the saved connection change is live in the current session. */
+export type McpConnectionActivationState = "active" | "inactive";
+
+export interface McpConnectionOutcomeDetails {
+	/** Display label the outcome line names, e.g. "Linear" or "Acme (acme-2)". */
+	label: string;
+	source: McpConnectionOutcomeSource;
+	verification: McpConnectionVerificationState;
+	/** Tools verified by the MCP handshake; present only when verification is "connected". */
+	toolCount?: number;
+	/** Human-readable reason the handshake did not complete; present only when verification is "unverified". */
+	issue?: string;
+	/** Account connection id when the outcome is account-scoped. */
+	connectionId?: string;
+	/** True when the login added a new account to a multi-account service. */
+	addedAccount?: boolean;
+	/** Whether the saved change is live in this session; absent until activation resolves. */
+	activation?: McpConnectionActivationState;
+}
+
+export interface McpConnectionOutcomeMessage extends CustomMessage<McpConnectionOutcomeDetails> {
+	customType: typeof MCP_CONNECTION_OUTCOME_CUSTOM_TYPE;
+	content: string;
+	details: McpConnectionOutcomeDetails;
 }
 
 export interface HarnessDigestDetails {
@@ -485,6 +518,49 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
 
+/**
+ * Plain-text outcome line for an MCP connection attempt. This is the durable
+ * wording the connect flows already reported; the persistent chat message
+ * renders it as the body under a compact header.
+ */
+export function formatMcpConnectionOutcomeNotice(details: McpConnectionOutcomeDetails): string {
+	const prefix =
+		details.source === "login" && details.addedAccount === true && details.connectionId
+			? `Added account ${details.connectionId}. `
+			: "";
+	const suffix =
+		details.activation === "inactive" ? " The change remains saved, but it is not active in this session." : "";
+	switch (details.verification) {
+		case "connected":
+			return `${prefix}Connected ${details.label}${
+				details.toolCount !== undefined ? ` (${details.toolCount} tools verified)` : ""
+			}.${suffix}`;
+		case "unverified":
+			return details.source === "retry"
+				? `Verification did not complete: ${details.issue}. The connection is saved; retry from /plugins.${suffix}`
+				: `${prefix}Login succeeded for ${details.label}, but connection verification did not complete: ${details.issue}. The connection is saved; retry from /plugins.${suffix}`;
+		case "unsaved":
+			return details.source === "retry"
+				? `The verification result could not be saved. The connection is saved; retry from /plugins.${suffix}`
+				: `${prefix}Login succeeded for ${details.label}, but the verification result could not be saved. The connection is saved; retry from /plugins.${suffix}`;
+	}
+}
+
+export function createMcpConnectionOutcomeMessage(
+	details: McpConnectionOutcomeDetails,
+	display = true,
+	timestamp = Date.now(),
+): McpConnectionOutcomeMessage {
+	return {
+		role: "custom",
+		customType: MCP_CONNECTION_OUTCOME_CUSTOM_TYPE,
+		content: formatMcpConnectionOutcomeNotice(details),
+		display,
+		details: { ...details },
+		timestamp,
+	};
+}
+
 function hasValidCustomMessageEnvelope(message: Record<string, unknown>, customType: string): boolean {
 	return (
 		message.role === "custom" &&
@@ -575,6 +651,26 @@ export function isRefinementOutcomeMessage(message: unknown): message is Refinem
 	);
 }
 
+export function isMcpConnectionOutcomeMessage(message: unknown): message is McpConnectionOutcomeMessage {
+	if (!isRecord(message) || !hasValidCustomMessageEnvelope(message, MCP_CONNECTION_OUTCOME_CUSTOM_TYPE)) return false;
+	if (!isRecord(message.details)) return false;
+	return (
+		typeof message.details.label === "string" &&
+		(message.details.source === "login" || message.details.source === "retry") &&
+		(message.details.verification === "connected" ||
+			message.details.verification === "unverified" ||
+			message.details.verification === "unsaved") &&
+		(message.details.toolCount === undefined ||
+			(typeof message.details.toolCount === "number" && Number.isInteger(message.details.toolCount))) &&
+		(message.details.issue === undefined || typeof message.details.issue === "string") &&
+		(message.details.connectionId === undefined || typeof message.details.connectionId === "string") &&
+		(message.details.addedAccount === undefined || typeof message.details.addedAccount === "boolean") &&
+		(message.details.activation === undefined ||
+			message.details.activation === "active" ||
+			message.details.activation === "inactive")
+	);
+}
+
 export interface HeartbeatPromptMessage extends CustomMessage<HeartbeatPromptDetails> {
 	customType: typeof HEARTBEAT_PROMPT_CUSTOM_TYPE;
 	content: string;
@@ -624,6 +720,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						m.customType === SESSION_SLASH_COMMAND_CUSTOM_TYPE ||
 						m.customType === SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE ||
 						m.customType === COMPACTION_OUTCOME_CUSTOM_TYPE ||
+						m.customType === MCP_CONNECTION_OUTCOME_CUSTOM_TYPE ||
 						m.customType === REFINEMENT_OUTCOME_CUSTOM_TYPE
 					) {
 						return undefined;

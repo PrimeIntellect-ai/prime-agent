@@ -35,7 +35,8 @@ afterEach(() => vi.unstubAllGlobals());
 type ActivationQueueThis = {
 	chatContainer: Container;
 	connectionState: { isStreaming: boolean; isCompacting: boolean; messageCount: number };
-	pendingPostRunActivation: { message: string; successMessage: string } | undefined;
+	pendingPostRunActivation: { message: string; successMessage: string; connectionOutcome?: unknown } | undefined;
+	agentConnection: { appendCustomMessage: ReturnType<typeof vi.fn> };
 	pulseTimer: ReturnType<typeof setInterval> | undefined;
 	ui: { requestRender: ReturnType<typeof vi.fn> };
 	showStatus: ReturnType<typeof vi.fn>;
@@ -50,6 +51,7 @@ function createFakeMode(): ActivationQueueThis {
 		chatContainer: new Container(),
 		connectionState: { isStreaming: false, isCompacting: false, messageCount: 0 },
 		pendingPostRunActivation: undefined,
+		agentConnection: { appendCustomMessage: vi.fn(async () => {}) },
 		pulseTimer: undefined,
 		ui: { requestRender: vi.fn() },
 		showStatus: vi.fn(),
@@ -241,7 +243,9 @@ describe("ENG-6108 guarded credential commit", () => {
 		const authStorage = authStorageOverride ?? AuthStorage.inMemory();
 		const showStatus = vi.fn();
 		const showWarning = vi.fn();
+		const appendCustomMessage = vi.fn(async (_message: Record<string, unknown>) => {});
 		const fake = {
+			agentConnection: { appendCustomMessage },
 			mcpConnectionStore: store,
 			modelRegistry: { authStorage },
 			ui: { requestRender: vi.fn() },
@@ -256,7 +260,7 @@ describe("ENG-6108 guarded credential commit", () => {
 			},
 		} as unknown as Record<string, unknown>;
 		Object.setPrototypeOf(fake, InteractiveMode.prototype);
-		return { fake, store, authStorage, showStatus, showWarning };
+		return { fake, store, authStorage, showStatus, showWarning, appendCustomMessage };
 	}
 
 	const callAddAccount = (fake: Record<string, unknown>) =>
@@ -664,7 +668,7 @@ describe("ENG-6108 guarded credential commit", () => {
 	});
 
 	test("an error-state reconnect routes through the guarded claim: full-identity CAS, pending-verification, nonce consumed", async () => {
-		const { fake, store, authStorage, showStatus } = fakeWithStore();
+		const { fake, store, authStorage, appendCustomMessage } = fakeWithStore();
 		const at = Date.now();
 		// An EXISTING account: an error record with a real (old) credential and
 		// stale verification fields that must NOT carry onto the new grant.
@@ -741,7 +745,13 @@ describe("ENG-6108 guarded credential commit", () => {
 		expect(record?.lastError).not.toBe("http_unauthorized");
 		// No staged leftovers.
 		expect(authStorage.list().filter((id) => id.startsWith("mcp:acme--"))).toEqual([]);
-		expect(JSON.stringify(showStatus.mock.calls)).toContain("Login succeeded for Acme");
+		// The offline verification outcome is the durable entry: the login
+		// succeeded and the wording never claims Connected.
+		expect(appendCustomMessage).toHaveBeenCalledTimes(1);
+		const [appended] = appendCustomMessage.mock.calls[0]!;
+		expect(appended.content).toContain("Login succeeded for Acme");
+		expect(appended.content).not.toContain("Connected Acme");
+		expect(appended.details).toMatchObject({ label: "Acme", source: "login", verification: "unverified" });
 	});
 
 	test("a cancelled reconnect preserves the existing credential and account unchanged", async () => {
@@ -1251,7 +1261,9 @@ describe("ENG-6108 /plugins account state actions", () => {
 		const authStorage = options.authStorage ?? AuthStorage.inMemory();
 		const runMcpLogin = options.runMcpLogin ?? vi.fn(async () => ({ status: "success" }) as const);
 		const showStatus = vi.fn();
+		const appendCustomMessage = vi.fn(async (_message: Record<string, unknown>) => {});
 		const fake = {
+			agentConnection: { appendCustomMessage },
 			mcpConnectionStore: store,
 			modelRegistry: { authStorage },
 			createAuthFlows: () => ({ runMcpLogin }),
@@ -1267,7 +1279,7 @@ describe("ENG-6108 /plugins account state actions", () => {
 			},
 		} as unknown as Record<string, unknown>;
 		Object.setPrototypeOf(fake, InteractiveMode.prototype);
-		return { fake, store, authStorage, showStatus, runMcpLogin };
+		return { fake, store, authStorage, showStatus, runMcpLogin, appendCustomMessage };
 	}
 
 	const callConnect = (fake: Record<string, unknown>, service: unknown, target: unknown, options: unknown = {}) =>
@@ -1278,7 +1290,7 @@ describe("ENG-6108 /plugins account state actions", () => {
 		).connectServiceFromPicker.call(fake, service, target, options);
 
 	test("pending account retries verification without a new login", async () => {
-		const { fake, store, authStorage, runMcpLogin } = fakeFor({});
+		const { fake, store, authStorage, runMcpLogin, appendCustomMessage } = fakeFor({});
 		authStorage.set("mcp:acme-2", {
 			type: "oauth",
 			access: "second",
@@ -1305,9 +1317,21 @@ describe("ENG-6108 /plugins account state actions", () => {
 			{ catalogServiceId: "acme" },
 		);
 		expect(runMcpLogin).not.toHaveBeenCalled();
-		// The retry runs the verify path: offline the probe fails honestly and
-		// the record keeps its pending/category state — no login, no /reload ask.
+		// The retry runs the verify path and records the outcome as a DURABLE
+		// chat entry: offline the probe fails honestly and the wording keeps
+		// its pending/category state — no login, no /reload ask.
+		expect(appendCustomMessage).toHaveBeenCalledTimes(1);
+		const [appended] = appendCustomMessage.mock.calls[0]!;
+		expect(appended.details).toMatchObject({
+			label: "Acme · acme-2",
+			source: "retry",
+			verification: "unverified",
+			activation: "active",
+		});
+		expect(appended.content).toContain("Verification did not complete");
+		expect(appended.content).toContain("The connection is saved; retry from /plugins.");
 		expect(JSON.stringify(retryStatus.mock.calls)).not.toContain("/reload");
+		expect(JSON.stringify(retryStatus.mock.calls)).not.toContain("Verification did not complete");
 	});
 
 	test("remove action logs out and removes that account's record only", async () => {
@@ -1346,7 +1370,7 @@ describe("ENG-6108 /plugins account state actions", () => {
 	});
 
 	test("a login whose verification result cannot be saved reports pending, never Connected", async () => {
-		const { fake, showStatus } = fakeFor({});
+		const { fake, appendCustomMessage } = fakeFor({});
 		const brokenStore = {
 			load: vi.fn(),
 			get: vi.fn(() => undefined),
@@ -1375,10 +1399,19 @@ describe("ENG-6108 /plugins account state actions", () => {
 			},
 			{ url: "https://mcp.acme.test/mcp", usesOAuth: true, managedBySettings: false },
 		);
-		const calls = JSON.stringify(showStatus.mock.calls);
-		expect(calls).toContain("Login succeeded for Acme");
-		expect(calls).toContain("could not be saved");
-		expect(calls).not.toContain("Connected Acme");
+		// The honest pending state lands in the durable outcome message, never
+		// as a transient line and never claiming Connected.
+		expect(appendCustomMessage).toHaveBeenCalledTimes(1);
+		const [appended] = appendCustomMessage.mock.calls[0]!;
+		expect(appended.details).toMatchObject({
+			label: "Acme",
+			source: "login",
+			verification: "unsaved",
+			activation: "active",
+		});
+		expect(appended.content).toContain("Login succeeded for Acme");
+		expect(appended.content).toContain("could not be saved");
+		expect(appended.content).not.toContain("Connected Acme");
 	});
 
 	test("add-account never allocates an id configured as a user server", async () => {
@@ -1413,7 +1446,9 @@ describe("ENG-6108 /plugins account state actions", () => {
 			{ url: "https://mcp.acme.test/mcp", usesOAuth: true, managedBySettings: false },
 			{ catalogServiceId: "acme", addAccount: true, knownIds: new Set(["acme"]) },
 		);
-		// Skipped the configured acme-2; the allocation landed on acme-3.
+		// Skipped the configured acme-2; the allocation landed on acme-3. The
+		// synthetic login stages no credential, so the honest finalize failure
+		// wording names the allocated id.
 		expect(JSON.stringify(showStatus.mock.calls)).toContain("acme-3");
 		expect(store.get("acme-2")).toBeUndefined();
 		expect(store.get("acme-3")).toBeDefined();
@@ -1452,7 +1487,9 @@ describe("ENG-6108 /plugins add-account flow", () => {
 			return { status: "success" } as const;
 		});
 		const showStatus = vi.fn();
+		const appendCustomMessage = vi.fn(async (_message: Record<string, unknown>) => {});
 		const fake = {
+			agentConnection: { appendCustomMessage },
 			mcpConnectionStore: store,
 			modelRegistry: { authStorage },
 			createAuthFlows: () => ({ runMcpLogin }),
@@ -1492,7 +1529,15 @@ describe("ENG-6108 /plugins add-account flow", () => {
 		expect(record?.serviceId).toBe("acme");
 		// The first account is untouched.
 		expect(store.get("acme")?.status).toBe("connected");
-		expect(JSON.stringify(showStatus.mock.calls)).toContain("acme-2");
+		// The connect outcome is a durable chat entry naming the new account.
+		expect(appendCustomMessage).toHaveBeenCalledTimes(1);
+		const [appended] = appendCustomMessage.mock.calls[0]!;
+		expect(appended.content).toContain("Added account acme-2.");
+		expect(appended.details).toMatchObject({
+			connectionId: "acme-2",
+			addedAccount: true,
+			source: "login",
+		});
 		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 		resetOAuthProviders();
 	});

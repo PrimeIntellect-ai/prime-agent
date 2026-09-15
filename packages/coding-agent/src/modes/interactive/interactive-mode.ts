@@ -133,11 +133,16 @@ import {
 	COMPACTION_OUTCOME_CUSTOM_TYPE,
 	type CustomMessage,
 	createHeartbeatPromptMessage,
+	createMcpConnectionOutcomeMessage,
+	formatMcpConnectionOutcomeNotice,
 	HEARTBEAT_PROMPT_PREVIEW_LABEL,
 	isCompactionOutcomeMessage,
+	isMcpConnectionOutcomeMessage,
 	isRefinementOutcomeMessage,
 	isSessionSlashCommandMessage,
 	isSessionSlashCommandResultMessage,
+	MCP_CONNECTION_OUTCOME_CUSTOM_TYPE,
+	type McpConnectionOutcomeDetails,
 	REFINEMENT_OUTCOME_CUSTOM_TYPE,
 	SESSION_SLASH_COMMAND_CUSTOM_TYPE,
 	SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE,
@@ -243,6 +248,10 @@ import {
 	keyText,
 	rawKeyHint,
 } from "./components/keybinding-hints.js";
+import {
+	MalformedMcpConnectionOutcomeMessageComponent,
+	McpConnectionOutcomeMessageComponent,
+} from "./components/mcp-connection-outcome-message.js";
 import { createMermaidMarkdownTransform } from "./components/mermaid.js";
 import type { AuthSelectorProvider } from "./components/oauth-selector.js";
 import { PrimeOnboardingSplashComponent } from "./components/prime-onboarding-splash.js";
@@ -1120,8 +1129,14 @@ export class InteractiveMode {
 
 	private unsubscribe?: () => void;
 	private mcpConnectionStore?: McpConnectionStore;
-	/** MCP changes made while streaming/compacting; activated at the next safe boundary. */
-	private pendingPostRunActivation: { message: string; successMessage: string } | undefined;
+	/**
+	 * MCP changes made while streaming/compacting; activated at the next safe boundary.
+	 * Connection outcomes carry structured details so the boundary renders the
+	 * durable outcome message instead of a transient status line.
+	 */
+	private pendingPostRunActivation:
+		| { message: string; successMessage: string; connectionOutcome?: McpConnectionOutcomeDetails }
+		| undefined;
 	private signalCleanupHandlers: Array<() => void> = [];
 
 	private autoCompactionLoader: Loader | undefined = undefined;
@@ -6523,6 +6538,10 @@ export class InteractiveMode {
 		if (message.customType === COMPACTION_OUTCOME_CUSTOM_TYPE) {
 			return new MalformedCompactionOutcomeMessageComponent();
 		}
+		if (isMcpConnectionOutcomeMessage(message)) return new McpConnectionOutcomeMessageComponent(message);
+		if (message.customType === MCP_CONNECTION_OUTCOME_CUSTOM_TYPE) {
+			return new MalformedMcpConnectionOutcomeMessageComponent();
+		}
 		if (isRefinementOutcomeMessage(message)) return new RefinementOutcomeMessageComponent(message);
 		if (message.customType === REFINEMENT_OUTCOME_CUSTOM_TYPE) {
 			return new MalformedRefinementOutcomeMessageComponent();
@@ -9685,15 +9704,23 @@ export class InteractiveMode {
 			} catch {
 				retried = undefined;
 			}
-			const retriedMessage =
+			await this.completeMcpConnectionOutcome(
 				retried?.status === "connected"
-					? `Connected ${service.label}${
-							retried.toolCount !== undefined ? ` (${retried.toolCount} tools verified)` : ""
-						}.`
+					? {
+							label: service.label,
+							source: "retry",
+							verification: "connected",
+							...(retried.toolCount !== undefined ? { toolCount: retried.toolCount } : {}),
+						}
 					: retried
-						? `Verification did not complete: ${formatMcpVerificationIssue(retried.lastError)}. The connection is saved; retry from /plugins.`
-						: "The verification result could not be saved. The connection is saved; retry from /plugins.";
-			await this.reloadAfterMcpChange(retriedMessage);
+						? {
+								label: service.label,
+								source: "retry",
+								verification: "unverified",
+								issue: formatMcpVerificationIssue(retried.lastError),
+							}
+						: { label: service.label, source: "retry", verification: "unsaved" },
+			);
 			return false;
 		}
 
@@ -10031,18 +10058,31 @@ export class InteractiveMode {
 		} catch {
 			verification = undefined;
 		}
-		const accountPrefix = options.addAccount === true ? `Added account ${connectionId}. ` : "";
-		const message =
+		const accountScoped = options.addAccount === true;
+		await this.completeMcpConnectionOutcome(
 			verification?.status === "connected"
-				? `${accountPrefix}Connected ${loginLabel}${
-						verification.toolCount !== undefined ? ` (${verification.toolCount} tools verified)` : ""
-					}.`
+				? {
+						label: loginLabel,
+						source: "login",
+						verification: "connected",
+						...(accountScoped ? { connectionId, addedAccount: true } : {}),
+						...(verification.toolCount !== undefined ? { toolCount: verification.toolCount } : {}),
+					}
 				: verification
-					? `${accountPrefix}Login succeeded for ${loginLabel}, but connection verification did not complete: ${formatMcpVerificationIssue(
-							verification.lastError,
-						)}. The connection is saved; retry from /plugins.`
-					: `${accountPrefix}Login succeeded for ${loginLabel}, but the verification result could not be saved. The connection is saved; retry from /plugins.`;
-		await this.reloadAfterMcpChange(message);
+					? {
+							label: loginLabel,
+							source: "login",
+							verification: "unverified",
+							issue: formatMcpVerificationIssue(verification.lastError),
+							...(accountScoped ? { connectionId, addedAccount: true } : {}),
+						}
+					: {
+							label: loginLabel,
+							source: "login",
+							verification: "unsaved",
+							...(accountScoped ? { connectionId, addedAccount: true } : {}),
+						},
+		);
 		return {
 			status: "success",
 			providerId: mcpCredentialKey(connectionId),
@@ -10066,11 +10106,45 @@ export class InteractiveMode {
 	}
 
 	/**
+	 * Connect outcomes are durable chat entries, not transient status lines:
+	 * reload the session, then record the outcome where it stays visible.
+	 */
+	private async completeMcpConnectionOutcome(details: McpConnectionOutcomeDetails): Promise<void> {
+		const notice = formatMcpConnectionOutcomeNotice(details);
+		if (this.isAgentStreaming() || this.isAgentCompacting()) {
+			this.queueMcpActivationForNextBoundary(notice, notice, details);
+			return;
+		}
+		const reloaded = await this.handleReloadCommand();
+		await this.appendMcpConnectionOutcome({ ...details, activation: reloaded ? "active" : "inactive" });
+	}
+
+	private async appendMcpConnectionOutcome(details: McpConnectionOutcomeDetails): Promise<void> {
+		const message = createMcpConnectionOutcomeMessage(details);
+		try {
+			await this.agentConnection.appendCustomMessage({
+				customType: message.customType,
+				content: message.content,
+				display: message.display,
+				details: message.details,
+			});
+		} catch {
+			// The connection change itself is already saved; never fail the flow
+			// over a transcript entry — fall back to the transient line.
+			this.showWarning(message.content);
+		}
+	}
+
+	/**
 	 * Defer an MCP change's activation to the next safe boundary (agent run end and
 	 * compaction end both check); the user never has to run /reload manually.
 	 */
-	private queueMcpActivationForNextBoundary(message: string, successMessage = message): void {
-		this.pendingPostRunActivation = { message, successMessage };
+	private queueMcpActivationForNextBoundary(
+		message: string,
+		successMessage = message,
+		connectionOutcome?: McpConnectionOutcomeDetails,
+	): void {
+		this.pendingPostRunActivation = { message, successMessage, ...(connectionOutcome ? { connectionOutcome } : {}) };
 		this.showStatus(`${message} It will activate automatically when the current turn finishes.`);
 	}
 
@@ -10080,6 +10154,13 @@ export class InteractiveMode {
 		const pending = this.pendingPostRunActivation;
 		this.pendingPostRunActivation = undefined;
 		const reloaded = await this.handleReloadCommand();
+		if (pending.connectionOutcome) {
+			await this.appendMcpConnectionOutcome({
+				...pending.connectionOutcome,
+				activation: reloaded ? "active" : "inactive",
+			});
+			return;
+		}
 		if (reloaded) {
 			this.showStatus(pending.successMessage);
 		} else {

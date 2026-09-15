@@ -288,13 +288,19 @@ async function settingsFixture() {
 	Reflect.deleteProperty(f.mode, "connectServiceFromPicker");
 	const showStatus = vi.fn();
 	const reload = vi.fn(async () => {});
+	const appendOutcome = vi.fn(async (_message: Record<string, unknown>) => {});
 	const authFlow = vi.fn(() => {
 		throw new Error("OAuth must not run for settings-only actions");
 	});
-	Object.assign(f.mode, { showStatus, reloadAfterMcpChange: reload, createAuthFlows: authFlow });
+	Object.assign(f.mode, {
+		showStatus,
+		handleReloadCommand: reload,
+		createAuthFlows: authFlow,
+		agentConnection: { appendCustomMessage: appendOutcome },
+	});
 	const reserve = vi.spyOn(f.store, "reserveConnectionId");
 	const claim = vi.spyOn(f.store, "claimConnectionId");
-	return { ...f, showStatus, reload, authFlow, reserve, claim };
+	return { ...f, showStatus, reload, appendOutcome, authFlow, reserve, claim };
 }
 
 it("real stdio view routes explicit Disable directly to the existing settings mutator, not account cards", async () => {
@@ -421,6 +427,12 @@ it.each([false, true])("nonOAuth pending HTTP follows real Verify without OAuth 
 	expect(f.store.get("http-proof")?.lastError).toBeDefined();
 	expect(f.store.get("http-proof")?.verifiedAt).toBeUndefined();
 	expect(f.reload).toHaveBeenCalledOnce();
+	// The failed verification outcome is a durable chat entry, never a login.
+	expect(f.appendOutcome).toHaveBeenCalledOnce();
+	expect(f.appendOutcome.mock.calls[0]?.[0]).toMatchObject({
+		customType: "mcp_connection_outcome",
+		details: { source: "retry", verification: "unverified" },
+	});
 	expect(f.authFlow).not.toHaveBeenCalled();
 	expect(f.reserve).not.toHaveBeenCalled();
 	expect(f.claim).not.toHaveBeenCalled();
