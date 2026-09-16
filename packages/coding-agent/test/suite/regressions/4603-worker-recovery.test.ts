@@ -94,6 +94,12 @@ const fixturePath = resolve(__dirname, "../../fixtures/eng-4600-supervisor-fixtu
 const fauxExtensionPath = resolve(__dirname, "../../fixtures/eng-4600-faux-extension.ts");
 const cliPath = resolve(__dirname, "../../../src/cli.ts");
 const tsxPath = resolve(__dirname, "../../../../../node_modules/tsx/dist/cli.mjs");
+// The fixture must run in the spawned process itself: the tsx CLI wrapper forks,
+// which would leave the spawned pid owning only tsx IPC pipes while the real
+// supervisor (and its daemon socket) hides in an untracked child pid — invisible
+// to the OS socket sweep this regression exercises. `--import` with tsx's ESM
+// loader runs the TypeScript fixture in-process.
+const tsxLoaderPath = resolve(__dirname, "../../../../../node_modules/tsx/dist/esm/index.mjs");
 const tsconfigPath = resolve(__dirname, "../../../../../tsconfig.json");
 const supervisorRegistryDirEnv = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
 const handles = new Set<ProcessHandle>();
@@ -147,7 +153,7 @@ async function createPaths(): Promise<TestPaths> {
 
 function spawnSupervisor(paths: TestPaths): ProcessHandle {
 	return trackProcess(
-		spawn(paths.executablePath, [tsxPath, fixturePath], {
+		spawn(paths.executablePath, ["--import", tsxLoaderPath, fixturePath], {
 			cwd: paths.agentDir,
 			env: {
 				...process.env,

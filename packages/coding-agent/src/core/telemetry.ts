@@ -8,6 +8,7 @@ import { writeFileAtomicSync } from "../utils/atomic-file.js";
 import type { AgentSession, AgentSessionEvent } from "./agent-session.js";
 import type { AgentExecutionMode } from "./agent-session-config.js";
 import type { AuthCredential, AuthStatus } from "./auth-storage.js";
+import { platformFidelity } from "./platform-fidelity.js";
 import type { SettingsManager } from "./settings-manager.js";
 import { isBuiltinSlashCommandName, resolveBuiltinSlashCommandName } from "./slash-commands.js";
 
@@ -478,12 +479,18 @@ export function telemetryAuthCategory(
 }
 
 function baseProperties(executionMode: TelemetryExecutionMode): TelemetryProperties {
+	const fidelity = platformFidelity();
 	return {
 		version: VERSION,
 		os_family: platform(),
 		architecture: arch(),
 		install_method: detectInstallMethod(),
 		execution_mode: executionMode,
+		libc: fidelity.libc,
+		libc_version: fidelity.libc_version,
+		cpu_baseline: fidelity.cpu_baseline,
+		os_release: fidelity.os_release,
+		os_product_version: fidelity.os_product_version,
 	};
 }
 

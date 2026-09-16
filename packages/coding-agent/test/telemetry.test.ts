@@ -328,6 +328,39 @@ describe("agent telemetry aggregation", () => {
 		expect(telemetryAuthCategory("models_json_command")).toBe("models_json");
 	});
 
+	it("includes platform fidelity properties on every event", async () => {
+		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
+		const sink = new FakeTelemetrySink();
+
+		await captureAgentCommandUsed({
+			agentDir: "/not-used",
+			settingsManager: SettingsManager.inMemory(),
+			commandName: "model",
+			sink,
+		});
+
+		const properties = sink.events[0]?.properties ?? {};
+		expect(properties.libc).toMatch(/^(glibc|musl|none|unknown)$/);
+		expect(properties.cpu_baseline).toMatch(/^(avx2|no_avx2|avx2_assumed|not_applicable|unknown)$/);
+		expect(typeof properties.libc_version).toBe("string");
+		expect(typeof properties.os_release).toBe("string");
+		expect(typeof properties.os_product_version).toBe("string");
+		// Non-identifying: no hostname, username, path, or hardware id fields.
+		expect(Object.keys(properties).sort()).toEqual([
+			"architecture",
+			"command_name",
+			"cpu_baseline",
+			"execution_mode",
+			"install_method",
+			"libc",
+			"libc_version",
+			"os_family",
+			"os_product_version",
+			"os_release",
+			"version",
+		]);
+	});
+
 	it("emits aggregate metrics without message or tool content", () => {
 		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
 		let timestamp = 1_000;

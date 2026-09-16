@@ -1,3 +1,4 @@
+import { isNativePlatform } from "./native-installation.js";
 import { getPiUserAgent } from "./pi-user-agent.js";
 
 const DEFAULT_PRIME_AGENT_DOWNLOAD_BASE_URL = "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev";
@@ -185,6 +186,7 @@ export async function getLatestPiRelease(
 		tarball?: unknown;
 		version?: unknown;
 		binaries?: unknown;
+		binariesV2?: unknown;
 	};
 	if (typeof data.version !== "string" || !data.version.trim()) {
 		return undefined;
@@ -203,17 +205,23 @@ export async function getLatestPiRelease(
 	if (installSpec) {
 		release.installSpec = installSpec;
 	}
-	if (Array.isArray(data.binaries)) {
-		// Invalid optional native metadata must not discard a valid npm release.
-		// Publish the list only after every entry passes validation.
+	// Prefer the complete v2 schema, with the v1 schema as a compatibility
+	// fallback. Structurally valid entries for future platforms are ignored,
+	// while malformed or duplicate supported-platform entries reject the list.
+	const binarySource = Array.isArray(data.binariesV2)
+		? data.binariesV2
+		: Array.isArray(data.binaries)
+			? data.binaries
+			: undefined;
+	if (binarySource) {
 		const binaries: NativeReleaseArtifact[] = [];
 		const platforms = new Set<string>();
-		for (const candidate of data.binaries) {
+		for (const candidate of binarySource) {
 			if (!candidate || typeof candidate !== "object") return release;
 			const artifact = candidate as Partial<NativeReleaseArtifact>;
+			if (typeof artifact.platform !== "string") return release;
+			if (!isNativePlatform(artifact.platform)) continue;
 			if (
-				typeof artifact.platform !== "string" ||
-				!/^(darwin|linux)-(arm64|x64)$/.test(artifact.platform) ||
 				platforms.has(artifact.platform) ||
 				artifact.file !== `prime-agent-${release.version}-${artifact.platform}.tar.gz` ||
 				typeof artifact.sha256 !== "string" ||
@@ -223,7 +231,7 @@ export async function getLatestPiRelease(
 			platforms.add(artifact.platform);
 			binaries.push({ platform: artifact.platform, file: artifact.file, sha256: artifact.sha256 });
 		}
-		release.binaries = binaries;
+		if (binaries.length > 0) release.binaries = binaries;
 	}
 	return release;
 }

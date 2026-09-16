@@ -1,1 +1,0 @@
-- Fixed deep markdown headings to render as formatted headings at all six levels instead of dumping raw `#` prefixes for H3-H6: h1 stays bold+underlined, h2/h3 are bold, h4 is bold+italic, and h5/h6 are italic, all in the heading color ([ENG-6159](https://linear.app/primeintellect/issue/ENG-6159)).

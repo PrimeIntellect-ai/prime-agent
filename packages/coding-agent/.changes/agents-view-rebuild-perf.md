@@ -1,1 +1,0 @@
-- Fixed slow agents-view updates and searches in large session catalogs, while keeping streamed sessions and status ages current.

@@ -2,10 +2,11 @@
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { darwinReleasePlatforms, releasePlatforms } from "../../../scripts/release-platforms.mjs";
 
 function requiresMacosSigning(platform) {
-	if (platform === "linux-arm64" || platform === "linux-x64") return false;
-	if (platform !== "darwin-arm64" && platform !== "darwin-x64") throw new Error(`Unsupported binary platform: ${platform}`);
+	if (!releasePlatforms.includes(platform)) throw new Error(`Unsupported binary platform: ${platform}`);
+	if (!darwinReleasePlatforms.includes(platform)) return false;
 	if (process.platform !== "darwin") throw new Error("Darwin binaries must be signed and verified on macOS");
 	return true;
 }

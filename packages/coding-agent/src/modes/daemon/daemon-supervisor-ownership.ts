@@ -526,6 +526,65 @@ function isOwnerProcessAlive(pid: number): boolean {
 	return true;
 }
 
+/**
+ * Socket paths of the supervisors registered under `agentDir`, read straight
+ * from the registry record each daemon writes for itself. Callers use this to
+ * tell their own state root's daemons apart from daemons that belong to another
+ * HOME, agent dir, or socket dir on the same machine.
+ *
+ * Read-only and lock-free on purpose: records are written rename-atomically so a
+ * torn read is impossible, and a momentarily stale answer only affects discovery,
+ * never ownership.
+ *
+ * Daemons started before the registry moved out of the socket dir only have
+ * records in the legacy location, so that registry is read too (unless the
+ * caller overrides the registry). A record whose agent dir cannot be
+ * canonicalized (permissions, replaced paths, corrupt records) is skipped
+ * instead of aborting discovery for every other record.
+ */
+export function listDaemonSupervisorSocketPathsForAgentDir(
+	agentDir: string,
+	registryDir?: string,
+	legacyRegistryDir: string | undefined = registryDir === undefined ? legacyDaemonSupervisorRegistryDir() : undefined,
+): string[] {
+	let canonicalAgentDir: string;
+	try {
+		canonicalAgentDir = canonicalizeFilesystemPath(agentDir);
+	} catch {
+		return [];
+	}
+	const directories = ownerDirectoriesForDiscovery(registryDir ?? defaultDaemonSupervisorRegistryDir());
+	if (legacyRegistryDir) {
+		directories.push(...ownerDirectoriesForDiscovery(legacyRegistryDir));
+	}
+	const socketPaths: string[] = [];
+	for (const directory of directories) {
+		const owner = readOwnerRecord(directory);
+		if (!owner) {
+			continue;
+		}
+		let canonicalOwnerAgentDir: string;
+		try {
+			canonicalOwnerAgentDir = canonicalizeFilesystemPath(owner.agentDir);
+		} catch {
+			continue;
+		}
+		if (canonicalOwnerAgentDir === canonicalAgentDir) {
+			socketPaths.push(normalizeSocketPath(owner.socketPath));
+		}
+	}
+	return socketPaths;
+}
+
+/** Non-mutating registry listing: discovery must never reclaim abandoned directories. */
+function ownerDirectoriesForDiscovery(registryDir: string): string[] {
+	try {
+		return listOwnerDirectories(registryDir);
+	} catch {
+		return [];
+	}
+}
+
 export async function assertDaemonSupervisorOwnerCurrent(
 	owner: {
 		generation: string;

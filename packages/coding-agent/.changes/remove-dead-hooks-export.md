@@ -1,1 +1,0 @@
-- Removed the dead `./hooks` subpath export from `@earendil-works/pi-coding-agent`; the `core/hooks` module was deleted in #454 and the advertised export already resolved to a nonexistent file.

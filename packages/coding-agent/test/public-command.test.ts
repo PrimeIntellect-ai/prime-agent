@@ -120,6 +120,182 @@ describe("public command routing", () => {
 		expect(mocks.mcpCommands).toEqual([["add", "local", "--", "node", "server file.js", "--stdio"]]);
 	});
 
+	it("runs a management command written after global flags", async () => {
+		await expect(handlePublicCommand(["--offline", "model", "list", "sonnet"])).resolves.toMatchObject({
+			handled: false,
+			args: [INTERNAL_RUNTIME_COMMAND_MARKER, "--list-models", "sonnet", "--offline"],
+		});
+		await expect(handlePublicCommand(["--offline", "list", "--json"])).resolves.toMatchObject({ handled: true });
+		expect(mocks.daemonCommands).toEqual([["daemon", "list", "--json", "--offline"]]);
+	});
+
+	it("keeps rotated global flags ahead of a -- separator", async () => {
+		await expect(
+			handlePublicCommand(["--offline", "mcp", "add", "local", "--", "node", "server file.js", "--stdio"]),
+		).resolves.toMatchObject({ handled: true });
+		expect(mocks.mcpCommands).toEqual([["add", "local", "--offline", "--", "node", "server file.js", "--stdio"]]);
+
+		await expect(
+			handlePublicCommand([
+				"--daemon-socket",
+				"/tmp/prime.sock",
+				"schedule",
+				"add",
+				"worker",
+				"0 9 * * 1-5",
+				"--",
+				"Check open work",
+			]),
+		).resolves.toMatchObject({ handled: true });
+		expect(mocks.daemonCommands.at(-1)).toEqual([
+			"daemon",
+			"cron",
+			"add",
+			"worker",
+			"0 9 * * 1-5",
+			"--daemon-socket",
+			"/tmp/prime.sock",
+			"--",
+			"Check open work",
+		]);
+	});
+
+	it("rejects a rotated global flag the command does not accept instead of chatting", async () => {
+		await expect(
+			handlePublicCommand(["--daemon-socket", "/tmp/prime.sock", "status", "--json"]),
+		).resolves.toMatchObject({ handled: true });
+		expect(mocks.psCalls).toEqual([]);
+		expect(process.exitCode).toBe(1);
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("Unknown option for status: --daemon-socket"));
+	});
+
+	it("forwards a custom daemon socket written before stop", async () => {
+		await expect(
+			handlePublicCommand(["--daemon-socket", "/tmp/custom-daemon.sock", "stop", "worker"]),
+		).resolves.toMatchObject({ handled: true });
+		expect(mocks.daemonCommands).toEqual([
+			["daemon", "kill", "worker", "--daemon-socket", "/tmp/custom-daemon.sock"],
+		]);
+	});
+
+	it("keeps a command word after -- as message text", async () => {
+		await expect(handlePublicCommand(["--", "status"])).resolves.toEqual({
+			handled: false,
+			args: ["--", "status"],
+			explicitAgentsView: false,
+		});
+		expect(mocks.psCalls).toEqual([]);
+	});
+
+	it("keeps a positional after a prompt-value flag on the message path", async () => {
+		for (const flag of ["--system-prompt", "--append-system-prompt"]) {
+			const args = [flag, "--offline", "status"];
+			await expect(handlePublicCommand(args)).resolves.toEqual({
+				handled: false,
+				args,
+				explicitAgentsView: false,
+			});
+		}
+	});
+
+	it("keeps a version request ahead of command routing instead of rotating it", async () => {
+		const args = ["--version", "status"];
+		await expect(handlePublicCommand(args)).resolves.toEqual({
+			handled: false,
+			args,
+			explicitAgentsView: false,
+		});
+		await expect(handlePublicCommand(["-v", "status"])).resolves.toEqual({
+			handled: false,
+			args: ["-v", "status"],
+			explicitAgentsView: false,
+		});
+		await expect(handlePublicCommand(args)).resolves.toEqual({
+			handled: false,
+			args,
+			explicitAgentsView: false,
+		});
+	});
+
+	it("keeps an unknown long option's value out of command routing", async () => {
+		await expect(handlePublicCommand(["--extension-option", "status"])).resolves.toEqual({
+			handled: false,
+			args: ["--extension-option", "status"],
+			explicitAgentsView: false,
+		});
+		await expect(handlePublicCommand(["--extension-option", "statuses", "of", "my", "agents"])).resolves.toEqual({
+			handled: false,
+			args: ["--extension-option", "statuses", "of", "my", "agents"],
+			explicitAgentsView: false,
+		});
+		expect(mocks.psCalls).toEqual([]);
+		expect(mocks.daemonCommands).toEqual([]);
+	});
+
+	it("still rotates a command written after flags that take no value", async () => {
+		await expect(handlePublicCommand(["--verbose", "model", "list"])).resolves.toMatchObject({
+			handled: false,
+			args: [INTERNAL_RUNTIME_COMMAND_MARKER, "--list-models", "--verbose"],
+		});
+		await expect(handlePublicCommand(["-x", "model", "list"])).resolves.toMatchObject({
+			handled: false,
+			args: [INTERNAL_RUNTIME_COMMAND_MARKER, "--list-models", "-x"],
+		});
+		await expect(handlePublicCommand(["--extension-option=status", "model", "list"])).resolves.toMatchObject({
+			handled: false,
+			args: [INTERNAL_RUNTIME_COMMAND_MARKER, "--list-models", "--extension-option=status"],
+		});
+	});
+
+	it("keeps text after -- following a value flag on the message path", async () => {
+		await expect(handlePublicCommand(["--cwd", "--", "status"])).resolves.toEqual({
+			handled: false,
+			args: ["--cwd", "--", "status"],
+			explicitAgentsView: false,
+		});
+		expect(mocks.psCalls).toEqual([]);
+	});
+
+	it("keeps a resume @file reference free instead of consuming it as a selector", async () => {
+		await expect(handlePublicCommand(["--resume", "@prompt.md", "status"])).resolves.toEqual({
+			handled: false,
+			args: ["--resume", "@prompt.md", "status"],
+			explicitAgentsView: false,
+		});
+		expect(mocks.psCalls).toEqual([]);
+		expect(mocks.daemonCommands).toEqual([]);
+	});
+
+	it("keeps the positional of a print run as the message", async () => {
+		await expect(handlePublicCommand(["--print", "status"])).resolves.toEqual({
+			handled: false,
+			args: ["--print", "status"],
+			explicitAgentsView: false,
+		});
+		await expect(handlePublicCommand(["-p", "--offline", "list"])).resolves.toEqual({
+			handled: false,
+			args: ["-p", "--offline", "list"],
+			explicitAgentsView: false,
+		});
+		expect(mocks.psCalls).toEqual([]);
+		expect(mocks.daemonCommands).toEqual([]);
+	});
+
+	it("leaves a prompt that only starts like a command alone", async () => {
+		await expect(handlePublicCommand(["--offline", "statuses", "of", "my", "agents"])).resolves.toEqual({
+			handled: false,
+			args: ["--offline", "statuses", "of", "my", "agents"],
+			explicitAgentsView: false,
+		});
+		expect(mocks.psCalls).toEqual([]);
+	});
+
+	it("rejects a removed command written after global flags", async () => {
+		await expect(handlePublicCommand(["--offline", "install", "pkg"])).resolves.toMatchObject({ handled: true });
+		expect(process.exitCode).toBe(1);
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("Unknown command: install"));
+	});
+
 	it("routes agent operations through the internal protocol adapter", async () => {
 		await expect(handlePublicCommand(["list", "--all", "--json"])).resolves.toMatchObject({ handled: true });
 		expect(mocks.daemonCommands).toEqual([["daemon", "list", "--all", "--json"]]);
@@ -308,6 +484,65 @@ describe("public command routing", () => {
 		await expect(handlePublicCommand(args)).resolves.toEqual({
 			handled: false,
 			args,
+			explicitAgentsView: false,
+		});
+	});
+
+	it("keeps the help topic when an explicit help flag follows it", async () => {
+		await expect(handlePublicCommand(["help", "status", "--help"])).resolves.toMatchObject({ handled: true });
+		expect(console.log).toHaveBeenCalledWith(expect.stringContaining("prime-agent status [--json]"));
+		await expect(handlePublicCommand(["--offline", "help", "mcp", "add", "-h"])).resolves.toMatchObject({
+			handled: true,
+		});
+		expect(console.log).toHaveBeenCalledWith(expect.stringContaining("prime-agent mcp add <name>"));
+		await expect(handlePublicCommand(["help", "--help"])).resolves.toMatchObject({ handled: true });
+		expect(console.log).toHaveBeenLastCalledWith(expect.not.stringContaining("prime-agent status [--json]"));
+		expect(mocks.daemonCommands).toEqual([]);
+	});
+
+	it("treats help written after global flags as a help request", async () => {
+		await expect(handlePublicCommand(["--offline", "help"])).resolves.toMatchObject({ handled: true });
+		expect(console.log).toHaveBeenCalledWith(expect.stringContaining("prime-agent - AI coding assistant"));
+		await expect(handlePublicCommand(["--offline", "help", "status"])).resolves.toMatchObject({ handled: true });
+		expect(console.log).toHaveBeenLastCalledWith(expect.stringContaining("prime-agent status [--json]"));
+		expect(mocks.daemonCommands).toEqual([]);
+		expect(process.exitCode).toBeUndefined();
+	});
+
+	it("excludes global flags from the help command path instead of forwarding them", async () => {
+		await expect(handlePublicCommand(["--offline", "help", "mcp", "add"])).resolves.toMatchObject({
+			handled: true,
+		});
+		expect(console.log).toHaveBeenCalledWith(expect.stringContaining("prime-agent mcp add <name>"));
+
+		await expect(handlePublicCommand(["help", "--verbose"])).resolves.toMatchObject({ handled: true });
+		expect(console.log).toHaveBeenLastCalledWith(expect.stringContaining("prime-agent - AI coding assistant"));
+	});
+
+	it("excludes parseArgs-consumed flag values from the help command path", async () => {
+		await expect(handlePublicCommand(["help", "--resume", "status"])).resolves.toMatchObject({
+			handled: true,
+		});
+		expect(console.log).toHaveBeenLastCalledWith(expect.stringContaining("prime-agent - AI coding assistant"));
+		await expect(handlePublicCommand(["help", "-r", "status"])).resolves.toMatchObject({ handled: true });
+		expect(console.log).toHaveBeenLastCalledWith(expect.stringContaining("prime-agent - AI coding assistant"));
+		await expect(handlePublicCommand(["help", "--print", "status"])).resolves.toMatchObject({
+			handled: true,
+		});
+		expect(console.log).toHaveBeenLastCalledWith(expect.stringContaining("prime-agent - AI coding assistant"));
+
+		// The print flag must not swallow the help flag itself: an explicit
+		// --help still defers to the per-command help block.
+		await expect(handlePublicCommand(["help", "--print", "--help"])).resolves.toMatchObject({
+			handled: true,
+		});
+		expect(console.log).toHaveBeenLastCalledWith(expect.not.stringContaining("prime-agent status [--json]"));
+	});
+
+	it("keeps a -- after the help command on the message path", async () => {
+		await expect(handlePublicCommand(["--offline", "help", "--", "status"])).resolves.toEqual({
+			handled: false,
+			args: ["help", "--offline", "--", "status"],
 			explicitAgentsView: false,
 		});
 	});

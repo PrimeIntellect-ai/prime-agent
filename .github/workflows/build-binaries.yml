@@ -189,7 +189,7 @@ jobs:
 
       - name: Verify and stage standalone binaries
         run: |
-          for platform in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
+          for platform in $(node scripts/release-platforms.mjs); do
             source_dir="standalone-artifacts/standalone-$platform"
             (cd "$source_dir" && sha256sum --check SHA256SUMS)
             destination="packages/coding-agent/binaries/$platform"

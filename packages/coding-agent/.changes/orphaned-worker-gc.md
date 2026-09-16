@@ -1,1 +1,0 @@
-- Fixed orphaned session workers retrying supervisor resurrection forever when no replacement can come up: they now exit gracefully after a bounded supervisor-lost window, closing active sessions first.

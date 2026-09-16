@@ -17,6 +17,8 @@ interface PrimeOnboardingSplashOptions {
 	animationIntervalMs?: number;
 	/** Quits the app: the editor that normally owns Ctrl+C has no focus yet. */
 	onExit?: () => void;
+	/** Skip the welcome text and login action; the flow starts immediately. */
+	immediate?: boolean;
 }
 
 const LOGO_LINES = PRIME_COMPACT_BUTTERFLY_LOGO.split("\n");
@@ -70,6 +72,9 @@ export class PrimeOnboardingSplashComponent implements Component {
 		private readonly onSelect: () => void,
 		private readonly options: PrimeOnboardingSplashOptions = {},
 	) {
+		if (options.immediate) {
+			this.flowStarted = true;
+		}
 		if (options.requestRender) {
 			this.animationInterval = setInterval(() => {
 				this.frame++;

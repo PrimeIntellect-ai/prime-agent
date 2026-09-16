@@ -92,6 +92,21 @@ The stable `latest.json` and beta `beta.json` manifests use the same JSON shape:
 
 Prime Agent sends pseudonymous, aggregate usage and performance events to Prime Intellect. These events include version and operating-system category, onboarding outcome and duration, execution mode (`interactive`, `print`, `json`, `rpc`, or `acp`), run outcomes, TTFT and latency, prompt and turn counts, token usage, tool success counts, retries, and compactions.
 
+Every event also carries a small platform descriptor, used to decide which prebuilt binaries Prime Agent has to ship:
+
+| Property | Values |
+|----------|--------|
+| `os_family` | `linux`, `darwin`, `win32`, ... |
+| `architecture` | `arm64`, `x64`, ... |
+| `install_method` | `bun-binary`, `homebrew`, `npm`, `pnpm`, `yarn`, `bun`, `unknown` |
+| `libc` | `glibc`, `musl`, `none` (not Linux), `unknown` |
+| `libc_version` | glibc runtime version such as `2.39`, else `unknown` |
+| `cpu_baseline` | `avx2`, `no_avx2` (both measured on x86_64), `avx2_assumed` (Intel Macs, inferred), `not_applicable` (not x86_64), `unknown` |
+| `os_release` | kernel version such as `6.8.0-45-generic` or `24.6.0` |
+| `os_product_version` | macOS product version such as `15.6`; `unknown` elsewhere |
+
+Most of these are coarse platform categories shared by millions of machines. `os_release` is the one exception: it is the raw kernel release string, capped at 64 characters. Stock kernel names such as `6.8.0-45-generic` are shared widely, but custom or self-built kernels can embed organization-, user-, or machine-specific labels in that string, so `os_release` is not guaranteed to be non-identifying. The remaining fields contain no hostname, username, path, serial number, or other hardware identifier.
+
 Prime Agent does not send prompts, responses, thinking, tool arguments or results, command text, filenames, paths, repository information, environment variables, credentials, raw error messages, hostnames, usernames, emails, or hardware identifiers. A random installation ID is stored as `telemetry.json` in the configured agent directory (normally `~/.prime/agent/`).
 
 Telemetry can be disabled globally or for an individual project. Project settings can only further restrict telemetry: they cannot re-enable a global opt-out or suppress the global one-time disclosure.

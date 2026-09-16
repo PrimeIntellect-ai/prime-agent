@@ -61,6 +61,8 @@ prime_agent_animation_frame=0
 prime_agent_native_stage=
 prime_agent_native_lock=
 prime_agent_allow_insecure_http=0
+# Tests point platform detection at a fake /proc and /lib without needing a container.
+prime_agent_native_sysroot="${PRIME_AGENT_NATIVE_SYSROOT_FOR_TESTS:-}"
 
 main() {
 	if [ "${1:-}" = --rollback ]; then
@@ -1711,7 +1713,31 @@ Finalizing npm install."
 	fi
 }
 
+# Supported glibc releases carry no libc suffix; musl builds are published separately.
+prime_agent_native_glibc() {
+	native_glibc_version=$(getconf GNU_LIBC_VERSION 2>/dev/null) || return 1
+	printf '%s\n' "$native_glibc_version" |
+		awk '$1 == "glibc" { split($2, v, "."); if (v[1] > 2 || (v[1] == 2 && v[2] >= 17)) ok=1 } END { exit !ok }'
+}
+
+# Alpine and other musl distributions ship the loader under a fixed name; `ldd`
+# without arguments prints its musl banner and is the fallback for stripped images.
+prime_agent_native_musl() {
+	for native_musl_loader in "$prime_agent_native_sysroot"/lib/ld-musl-*.so.1; do
+		[ -e "$native_musl_loader" ] && return 0
+	done
+	ldd 2>&1 | grep -q musl
+}
+
+# Bun's default x64 build needs AVX2; hosts without it need the baseline build.
+# An unreadable CPU inventory selects baseline, which runs on every x86-64 CPU.
+prime_agent_native_avx2() {
+	awk '/^flags[[:space:]]*:/ { for (i = 3; i <= NF; i++) if ($i == "avx2") found = 1 } END { exit !found }' \
+		"$prime_agent_native_sysroot/proc/cpuinfo" 2>/dev/null
+}
+
 prime_agent_native_platform() {
+	native_libc_suffix=
 	case "$(uname -s)" in
 		Darwin)
 			native_os_version=$(sw_vers -productVersion) || return 1
@@ -1720,15 +1746,26 @@ prime_agent_native_platform() {
 			native_os=darwin
 			;;
 		Linux)
-			native_libc=$(getconf GNU_LIBC_VERSION 2>/dev/null) || return 1
-			printf '%s\n' "$native_libc" | awk '$1 == "glibc" { split($2, v, "."); if (v[1] > 2 || (v[1] == 2 && v[2] >= 17)) ok=1 } END { exit !ok }' || return 1
 			native_os=linux
+			if prime_agent_native_glibc; then
+				native_libc_suffix=
+			elif prime_agent_native_musl; then
+				native_libc_suffix=-musl
+			else
+				return 1
+			fi
 			;;
 		*) return 1 ;;
 	esac
 	case "$(uname -m)" in
-		arm64|aarch64) printf '%s-arm64' "$native_os" ;;
-		x86_64|amd64) printf '%s-x64' "$native_os" ;;
+		arm64|aarch64) printf '%s-arm64%s' "$native_os" "$native_libc_suffix" ;;
+		x86_64|amd64)
+			if [ "$native_os" = linux ] && ! prime_agent_native_avx2; then
+				printf '%s-x64%s-baseline' "$native_os" "$native_libc_suffix"
+			else
+				printf '%s-x64%s' "$native_os" "$native_libc_suffix"
+			fi
+			;;
 		*) return 1 ;;
 	esac
 }
@@ -1759,6 +1796,22 @@ prime_agent_native_cleanup() {
 		rmdir "$prime_agent_native_lock"
 	fi
 	prime_agent_native_lock=
+	prime_agent_native_discard_adopted_root
+}
+
+# A first install that never activated a release must not keep the ownership
+# marker: the next run would find a managed tree holding no executable. Only a
+# root this run created, still empty apart from what this run created, is given up.
+prime_agent_native_discard_adopted_root() {
+	[ "${prime_agent_native_root_adopted:-0}" = 1 ] || return 0
+	prime_agent_native_root_adopted=0
+	[ -n "${native_root:-}" ] || return 0
+	if [ -e "$native_root/bin/prime-agent" ] || [ -L "$native_root/bin/prime-agent" ]; then return 0; fi
+	[ -z "$(ls -A "$native_root" 2>/dev/null | grep -vxE '\.managed|bin|releases' || :)" ] || return 0
+	rmdir "$native_root/bin" "$native_root/releases" 2>/dev/null || :
+	if [ -e "$native_root/bin" ] || [ -e "$native_root/releases" ]; then return 0; fi
+	rm -f "$native_root/.managed"
+	rmdir "$native_root" 2>/dev/null || :
 }
 
 prime_agent_native_prepare_root() {
@@ -1769,6 +1822,7 @@ prime_agent_native_prepare_root() {
 	if [ -L "$native_root/.managed" ] || [ -L "$native_root/releases" ] || [ -L "$native_root/bin" ]; then
 		printf 'error: managed installation directories must not be symlinks.\n' >&2; exit 1
 	fi
+	prime_agent_native_root_adopted=0
 	if [ -e "$native_root/.managed" ]; then
 		[ "$(cat "$native_root/.managed")" = prime-agent-native-v1 ] || {
 			printf 'error: unrecognized installation owner in %s.\n' "$native_root" >&2; exit 1;
@@ -1776,6 +1830,9 @@ prime_agent_native_prepare_root() {
 	elif [ -n "$(ls -A "$native_root")" ]; then
 		printf 'error: refusing to take ownership of nonempty directory %s.\n' "$native_root" >&2
 		exit 1
+	else
+		# Ownership taken now is given back if this run never activates a release.
+		prime_agent_native_root_adopted=1
 	fi
 	# Never steal a lock: even stale-lock recovery can race with another installer.
 	if ! mkdir "$native_root/.install-lock" 2>/dev/null; then
@@ -1849,13 +1906,20 @@ prime_agent_native_parse_target() {
 		case "$native_parsed_unique" in *[!0-9A-Za-z]*) return 1 ;; esac
 	fi
 	native_parsed_prefix=${native_parsed_name%-"$native_parsed_digest_suffix"}
+	# Longest platform suffix first: a shorter arm matches the prefix of a longer
+	# platform name, so `<version>-linux-x64-musl` must not be read as `linux-x64`.
 	case "$native_parsed_prefix" in
-		*-darwin-arm64) native_parsed_version=${native_parsed_prefix%-darwin-arm64}; native_parsed_platform=darwin-arm64 ;;
-		*-darwin-x64) native_parsed_version=${native_parsed_prefix%-darwin-x64}; native_parsed_platform=darwin-x64 ;;
-		*-linux-arm64) native_parsed_version=${native_parsed_prefix%-linux-arm64}; native_parsed_platform=linux-arm64 ;;
-		*-linux-x64) native_parsed_version=${native_parsed_prefix%-linux-x64}; native_parsed_platform=linux-x64 ;;
+		*-linux-x64-musl-baseline) native_parsed_platform=linux-x64-musl-baseline ;;
+		*-linux-x64-musl) native_parsed_platform=linux-x64-musl ;;
+		*-linux-x64-baseline) native_parsed_platform=linux-x64-baseline ;;
+		*-linux-arm64-musl) native_parsed_platform=linux-arm64-musl ;;
+		*-darwin-arm64) native_parsed_platform=darwin-arm64 ;;
+		*-darwin-x64) native_parsed_platform=darwin-x64 ;;
+		*-linux-arm64) native_parsed_platform=linux-arm64 ;;
+		*-linux-x64) native_parsed_platform=linux-x64 ;;
 		*) return 1 ;;
 	esac
+	native_parsed_version=${native_parsed_prefix%-"$native_parsed_platform"}
 	printf '%s\n' "$native_parsed_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || return 1
 	native_parsed_dir="$native_root/releases/$native_parsed_name"
 }
@@ -1896,6 +1960,26 @@ prime_agent_native_validate_release_metadata() {
 	case "$native_metadata_source" in http://*|https://*) ;; *) return 1 ;; esac
 }
 
+prime_agent_native_probe_timeout() {
+	# The first run of a freshly extracted executable can be slow: Rosetta 2 translates
+	# the whole binary before it prints anything, and a cold page cache adds more. A
+	# 51 MB x64 executable measured 11.3s cold and 0.2s warm on Apple Silicon.
+	native_probe_timeout=60
+	case "${PRIME_AGENT_PROBE_TIMEOUT_SECONDS:-}" in
+		''|*[!0-9]*) ;;
+		*)
+			# $((...)) reads leading-zero constants as octal: "010" would become an
+			# 8-second deadline while being reported as 10, and "08"/"09" are invalid
+			# octal and abort the arithmetic under set -eu. Strip the leading zeroes
+			# so the accepted value stays decimal; an all-zero value strips to the
+			# empty string and falls back to the default like any invalid value.
+			native_probe_timeout="${PRIME_AGENT_PROBE_TIMEOUT_SECONDS#"${PRIME_AGENT_PROBE_TIMEOUT_SECONDS%%[!0]*}"}"
+			[ -n "$native_probe_timeout" ] && [ "$native_probe_timeout" -le 600 ] || native_probe_timeout=60
+			;;
+	esac
+	printf '%s\n' "$native_probe_timeout"
+}
+
 prime_agent_native_probe() (
 	# macOS does not ship timeout; keep the deadline independent of Node and Python.
 	native_probe_pid=
@@ -1910,10 +1994,11 @@ prime_agent_native_probe() (
 	trap 'exit 129' HUP
 	"$@" &
 	native_probe_pid=$!
-	native_probe_deadline=$(($(date +%s) + 10))
+	native_probe_timeout=$(prime_agent_native_probe_timeout)
+	native_probe_deadline=$(($(date +%s) + native_probe_timeout))
 	while kill -0 "$native_probe_pid" 2>/dev/null; do
 		if [ "$(date +%s)" -ge "$native_probe_deadline" ]; then
-			printf 'error: executable probe timed out after 10 seconds.\n' >&2
+			printf 'error: executable probe timed out after %s seconds.\n' "$native_probe_timeout" >&2
 			kill -KILL "$native_probe_pid" 2>/dev/null || :
 			wait "$native_probe_pid" 2>/dev/null || :
 			native_probe_pid=
@@ -1925,6 +2010,24 @@ prime_agent_native_probe() (
 	native_probe_pid=
 	exit "$native_probe_status"
 )
+
+# Bun's musl executables link against libstdc++, which Alpine does not preinstall.
+# The loader either names the library or reports a wall of C++ relocation failures.
+prime_agent_native_probe_missing_libstdcxx() {
+	native_probe_log="$1"
+	[ -f "$native_probe_log" ] || return 1
+	grep -q 'libstdc++\.so\.6' "$native_probe_log" && return 0
+	# musl names no library when every C++ runtime symbol is unresolved, so match
+	# the mangled and Itanium ABI names it does report.
+	grep -Eq 'Error relocating .*: (_Z|__cxa_|__dynamic_cast|__once_proxy)[A-Za-z0-9_]*: symbol not found' "$native_probe_log"
+}
+
+# One actionable line beats sixty relocation errors the user cannot act on.
+prime_agent_native_report_missing_libstdcxx() {
+	printf 'error: the compiled executable needs the libstdc++ runtime library, which is missing here.\n' >&2
+	printf 'Install it and run this installer again (Alpine: apk add --no-cache libstdc++).\n' >&2
+	printf 'To install the Node.js build instead, set PRIME_AGENT_INSTALL_METHOD=node.\n' >&2
+}
 
 prime_agent_native_verify_release_target() {
 	native_verify_target="$1"
@@ -2153,9 +2256,30 @@ prime_agent_install_native() {
 	for native_asset in prime-agent package.json install.sh prime-agent-runtime/pyproject.toml prime-agent-runtime/src/rlm/repl.py theme/prime.json export-html/template.html photon_rs_bg.wasm; do
 		[ -f "$native_extracted/$native_asset" ] || { printf 'error: missing archive asset: %s\n' "$native_asset" >&2; exit 1; }
 	done
-	if ! prime_agent_native_probe "$native_extracted/prime-agent" --version >"$prime_agent_native_stage/version" 2>"$prime_agent_native_stage/probe.log"; then
+	native_probe_status=0
+	prime_agent_native_probe "$native_extracted/prime-agent" --version >"$prime_agent_native_stage/version" 2>"$prime_agent_native_stage/probe.log" ||
+		native_probe_status=$?
+	if [ "$native_probe_status" -ne 0 ]; then
+		# A missing libstdc++ is one package away, so name it instead of downloading Node.
+		if prime_agent_native_probe_missing_libstdcxx "$prime_agent_native_stage/probe.log"; then
+			prime_agent_native_cleanup
+			prime_agent_native_report_missing_libstdcxx
+			exit 1
+		fi
 		cat "$prime_agent_native_stage/probe.log" >&2
 		prime_agent_native_cleanup
+		# A timeout means the executable never answered, not that it cannot run here.
+		if [ "$native_probe_status" -eq 124 ]; then
+			native_probe_hint="Set PRIME_AGENT_PROBE_TIMEOUT_SECONDS to a larger value and run the installer again."
+			if [ "${PRIME_AGENT_INSTALL_METHOD:-auto}" = auto ]; then
+				printf 'The compiled executable did not answer in time; using the Node installation. %s\n' "$native_probe_hint" >&2
+				prime_agent_install_node "$native_version"
+				return
+			fi
+			printf 'error: the compiled executable did not answer within %s seconds. %s\n' \
+				"$(prime_agent_native_probe_timeout)" "$native_probe_hint" >&2
+			exit 1
+		fi
 		if [ "${PRIME_AGENT_INSTALL_METHOD:-auto}" = auto ]; then
 			printf 'The compiled executable cannot run here; using the Node installation.\n' >&2
 			prime_agent_install_node "$native_version"

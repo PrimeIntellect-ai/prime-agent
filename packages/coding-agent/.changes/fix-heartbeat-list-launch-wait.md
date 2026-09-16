@@ -1,2 +1,0 @@
-- Bounded the global `heartbeats_list` startup wait and stopped waiting on client-owned launches, so private session startups no longer stall the catalog past the caller's request timeout.
-- Bounded the session-scoped `heartbeats_list` forward so a stuck worker fails inside the caller's request budget instead of hanging until the client transport timeout.
