@@ -786,6 +786,37 @@ class ReplTest(unittest.TestCase):
                     again = self.repl.execute("withdraw-again", "handle.output()\nhandle.tail(1)")
                     self.assertIsNone(one(again, "host_request"))
 
+    def test_withdrawal_ships_before_the_reading_cell_done(self):
+        # Live-confirmed race: reading the handle as the last action of a cell
+        # delivered the stale notice at that cell's turn boundary, because the
+        # withdrawal frame left the kernel only after the cell's done event.
+        # The withdrawal must ride the reading cell's own protocol flow, ahead
+        # of its done, or the host frees the notice before the withdrawal.
+        reads = (
+            ("poll", "handle.poll().output"),
+            ("await", "(await handle).output"),
+        )
+        for label, read_code in reads:
+            with self.subTest(label=label):
+                command = f"sleep 0.05; printf last-read-{label}"
+                started = self.repl.execute(
+                    f"last-read-{label}",
+                    f"from rlm import bash\nhandle = bash({command!r})\nhandle.pid",
+                )
+                pid = int(one(started, "result")["text"])
+                notice = wait_for_host_request(self.repl, started)
+                self.assertEqual(notice["data"]["type"], "bash.completed")
+                reply_ok(self.repl, notice)
+                read = self.repl.execute(f"last-read-{label}-read", read_code)
+                self.assertIn(f"last-read-{label}", one(read, "result")["text"])
+                kinds = [event.get("event") for event in read]
+                self.assertIn("host_request", kinds)
+                self.assertLess(kinds.index("host_request"), kinds.index("done"))
+                self.assertEqual(
+                    one(read, "host_request")["data"],
+                    {"type": "bash.consumed", "pid": pid, "command": command},
+                )
+
     def test_detached_read_between_turns_keeps_bash_completion(self):
         # A watcher reading the handle with no cell running reaches nobody: the
         # notice is the only wake-up an idle session gets, so it must survive.

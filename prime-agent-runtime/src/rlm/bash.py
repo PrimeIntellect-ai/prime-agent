@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections import deque
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
@@ -735,17 +736,7 @@ class BashHandle:
 
     def _arm_consumed_notice(self, command: str) -> None:
         # Armed only post-acceptance: the withdrawal can never overtake its notice.
-        loop = asyncio.get_running_loop()
-
-        def dispatch() -> None:
-            def start() -> None:
-                task = loop.create_task(self._notify_result_consumed(command))
-                task.add_done_callback(_consume_notice_task)
-
-            try:
-                loop.call_soon_threadsafe(start)
-            except RuntimeError:
-                pass  # notifying loop already closed
+        dispatch = functools.partial(self._notify_result_consumed, command)
 
         with self._callback_lock:
             if not self._result_consumed:
@@ -753,17 +744,29 @@ class BashHandle:
                 return
         dispatch()
 
-    async def _notify_result_consumed(self, command: str) -> None:
+    def _notify_result_consumed(self, command: str) -> None:
+        """Ship the withdrawal inside the read, ahead of the cell's done event.
+
+        The host delivers a queued notice at the reading cell's turn boundary,
+        which begins when that cell's done event is processed: a withdrawal
+        frame that leaves the kernel after done arrives too late, and the stale
+        notice wakes the model anyway. Reads happen inside a live cell, so
+        writing the frame right here puts it ahead of done on the wire, where
+        the host must withdraw before it can dispatch. The reply never matters
+        (unknown reply ids are dropped), so the request is fire-and-forget:
+        no future to await, no event-loop hop that could run after the cell.
+        """
         from . import repl
 
         if not repl.is_active():
             return
-        try:
-            await repl.host_request(
-                {"type": "bash.consumed", "pid": self._pid, "command": command}
-            )
-        except (OSError, RuntimeError):
-            return  # bridge closed at teardown; old hosts error-reply — both fine
+        repl._send(
+            {
+                "event": "host_request",
+                "id": uuid.uuid4().hex,
+                "data": {"type": "bash.consumed", "pid": self._pid, "command": command},
+            }
+        )
 
     async def _wait_reaped(self) -> None:
         loop = asyncio.get_running_loop()
