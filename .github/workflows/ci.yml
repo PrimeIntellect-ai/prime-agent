@@ -79,38 +79,56 @@ jobs:
           - name: agent-core
             package: packages/agent
             command: npm test
+            install_node: true
+            build: false
             install_uv: false
           - name: ai
             package: packages/ai
             command: npm test
+            install_node: true
+            build: false
             install_uv: false
           - name: tui
             package: packages/tui
             command: npm test
+            install_node: true
+            build: false
             install_uv: false
           - name: coding-agent 1/3
             package: packages/coding-agent
             command: npm run test:ci -- --shard=1/3
+            install_node: true
+            build: true
             install_uv: true
           - name: coding-agent 2/3
             package: packages/coding-agent
             command: npm run test:ci -- --shard=2/3
+            install_node: true
+            build: true
             install_uv: true
           - name: coding-agent 3/3
             package: packages/coding-agent
             command: npm run test:ci -- --shard=3/3
+            install_node: true
+            build: true
             install_uv: true
           - name: coding-agent process smoke
             package: packages/coding-agent
             command: npm run test:process
-            install_uv: true
+            install_node: true
+            build: false
+            install_uv: false
           - name: coding-agent kernel
             package: packages/coding-agent
             command: npm run test:kernel
+            install_node: true
+            build: false
             install_uv: true
           - name: runtime python
             package: prime-agent-runtime
             command: uv run python -m unittest discover -s test
+            install_node: false
+            build: false
             install_uv: true
     steps:
       - name: Checkout
@@ -119,12 +137,14 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
+        if: matrix.install_node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
 
       - name: Install system dependencies
+        if: matrix.install_node
         run: |
           # These dependencies come from Ubuntu, not the runner's third-party repositories.
           test -f /etc/apt/sources.list.d/ubuntu.sources
@@ -134,9 +154,11 @@ jobs:
           sudo ln -s $(which fdfind) /usr/local/bin/fd
 
       - name: Install dependencies
+        if: matrix.install_node
         run: npm ci
 
       - name: Build
+        if: matrix.build
         run: npm run build
 
       - name: Install uv
@@ -157,23 +179,16 @@ jobs:
           uv run --locked ruff format --check .
           uv run --locked python -m unittest discover -s tests -v
 
-  standalone:
-    needs: trust
-    if: needs.trust.outputs.allowed == 'true'
-    uses: ./.github/workflows/standalone-binaries.yml
-
   build-check-test:
     name: build-check-test
     if: always() && needs.trust.outputs.allowed == 'true'
-    needs: [trust, build-check, test, standalone]
+    needs: [trust, build-check, test]
     runs-on: ubuntu-latest
     steps:
       - name: Verify CI results
         env:
           BUILD_CHECK_RESULT: ${{ needs.build-check.result }}
           TEST_RESULT: ${{ needs.test.result }}
-          STANDALONE_RESULT: ${{ needs.standalone.result }}
         run: |
           test "$BUILD_CHECK_RESULT" = success
           test "$TEST_RESULT" = success
-          test "$STANDALONE_RESULT" = success

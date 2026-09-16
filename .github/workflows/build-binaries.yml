@@ -52,6 +52,7 @@ jobs:
       production_version: ${{ steps.context.outputs.production_version }}
       publish_beta: ${{ steps.context.outputs.publish_beta }}
       publish_production: ${{ steps.context.outputs.publish_production }}
+      macos_validation_matrix: ${{ steps.context.outputs.macos_validation_matrix }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -133,11 +134,14 @@ jobs:
             exit 1
           fi
 
+          macos_validation_matrix=$(node scripts/release-macos-validation-matrix.mjs "$publish_production" "$publish_beta")
+
           echo "beta_version=$beta_version" >> "$GITHUB_OUTPUT"
           echo "build_ref=$build_ref" >> "$GITHUB_OUTPUT"
           echo "production_version=$production_version" >> "$GITHUB_OUTPUT"
           echo "publish_beta=$publish_beta" >> "$GITHUB_OUTPUT"
           echo "publish_production=$publish_production" >> "$GITHUB_OUTPUT"
+          echo "macos_validation_matrix=$macos_validation_matrix" >> "$GITHUB_OUTPUT"
           echo "Build ref: $build_ref"
           echo "Production: $publish_production ${production_version:+v${production_version}}"
           echo "Beta: $publish_beta ${beta_version:+v${beta_version}}"
@@ -197,31 +201,49 @@ jobs:
             tar -xzf "$source_dir"/*.tar.gz -C "$destination"
           done
 
-      - name: Pack production release
-        if: env.PUBLISH_PRODUCTION == 'true'
+      - name: Pack enabled release channels
         env:
           PRIME_AGENT_DOWNLOAD_BASE_URL: ${{ github.event_name == 'pull_request' && 'https://example.invalid/prime-agent-validation' || vars.R2_PUBLIC_BASE_URL }}
         run: |
           test -n "$PRIME_AGENT_DOWNLOAD_BASE_URL"
-          npm run release:pack -- \
-            --channel stable \
-            --version "$PRODUCTION_VERSION" \
-            --base-url "$PRIME_AGENT_DOWNLOAD_BASE_URL" \
-            --binary-dir packages/coding-agent/binaries \
-            --out-dir packages/coding-agent/release/production
+          pack_pids=()
+          pack_channels=()
 
-      - name: Pack beta release
-        if: env.PUBLISH_BETA == 'true'
-        env:
-          PRIME_AGENT_DOWNLOAD_BASE_URL: ${{ github.event_name == 'pull_request' && 'https://example.invalid/prime-agent-validation' || vars.R2_PUBLIC_BASE_URL }}
-        run: |
-          test -n "$PRIME_AGENT_DOWNLOAD_BASE_URL"
-          npm run release:pack -- \
-            --channel beta \
-            --version "$BETA_VERSION" \
-            --base-url "$PRIME_AGENT_DOWNLOAD_BASE_URL" \
-            --binary-dir packages/coding-agent/binaries \
-            --out-dir packages/coding-agent/release/beta
+          if [ "$PUBLISH_PRODUCTION" = true ]; then
+            npm run release:pack -- \
+              --channel stable \
+              --version "$PRODUCTION_VERSION" \
+              --base-url "$PRIME_AGENT_DOWNLOAD_BASE_URL" \
+              --binary-dir packages/coding-agent/binaries \
+              --out-dir packages/coding-agent/release/production &
+            pack_pids+=("$!")
+            pack_channels+=(production)
+          fi
+
+          if [ "$PUBLISH_BETA" = true ]; then
+            npm run release:pack -- \
+              --channel beta \
+              --version "$BETA_VERSION" \
+              --base-url "$PRIME_AGENT_DOWNLOAD_BASE_URL" \
+              --binary-dir packages/coding-agent/binaries \
+              --out-dir packages/coding-agent/release/beta &
+            pack_pids+=("$!")
+            pack_channels+=(beta)
+          fi
+
+          if [ "${#pack_pids[@]}" -eq 0 ]; then
+            echo "At least one release channel must be enabled." >&2
+            exit 1
+          fi
+
+          pack_status=0
+          for index in "${!pack_pids[@]}"; do
+            if ! wait "${pack_pids[$index]}"; then
+              echo "Failed to pack ${pack_channels[$index]} release." >&2
+              pack_status=1
+            fi
+          done
+          exit "$pack_status"
 
       - name: Smoke test installer with npm 12
         run: |
@@ -259,6 +281,7 @@ jobs:
             PRIME_AGENT_INSTALLER_PLAIN=1 \
             sh /tmp/prime-agent-npm12-install.sh "$SMOKE_VERSION"
           test -x "$NPM_CONFIG_PREFIX/bin/prime-agent"
+          test "$("$NPM_CONFIG_PREFIX/bin/prime-agent" --version)" = "$SMOKE_VERSION"
 
       - name: Upload production artifacts
         if: env.PUBLISH_PRODUCTION == 'true'
@@ -277,22 +300,16 @@ jobs:
           if-no-files-found: error
 
   validate-macos:
-    name: Final release (${{ matrix.platform }})
+    name: Final release (${{ matrix.channel }} ${{ matrix.platform }})
     needs: [release-context, build]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - platform: darwin-arm64
-            runner: macos-15
-          - platform: darwin-x64
-            runner: macos-15-intel
+      matrix: ${{ fromJSON(needs.release-context.outputs.macos_validation_matrix) }}
     env:
       BUILD_REF: ${{ needs.release-context.outputs.build_ref }}
-      PUBLISH_PRODUCTION: ${{ needs.release-context.outputs.publish_production }}
-      PUBLISH_BETA: ${{ needs.release-context.outputs.publish_beta }}
+      CHANNEL: ${{ matrix.channel }}
     steps:
       - name: Checkout validation source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -315,19 +332,11 @@ jobs:
         working-directory: source
         run: npm ci
 
-      - name: Download exact final production artifacts
-        if: env.PUBLISH_PRODUCTION == 'true'
+      - name: Download exact final channel artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: prime-agent-production
-          path: ${{ runner.temp }}/final-artifacts/prime-agent-production
-
-      - name: Download exact final beta artifacts
-        if: env.PUBLISH_BETA == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: prime-agent-beta
-          path: ${{ runner.temp }}/final-artifacts/prime-agent-beta
+          name: prime-agent-${{ matrix.channel }}
+          path: ${{ runner.temp }}/final-artifacts/prime-agent-${{ matrix.channel }}
 
       - name: Download tested executable identity
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -338,29 +347,25 @@ jobs:
       - name: Remove the build paths from the test machine
         run: mv "$GITHUB_WORKSPACE/source" "$RUNNER_TEMP/validation-source"
 
-      - name: Verify and exercise exact final Mac archives
+      - name: Verify and exercise exact final Mac archive
         working-directory: ${{ runner.temp }}/validation-source
         env:
           TARGET_PLATFORM: ${{ matrix.platform }}
         run: |
           export PRIME_AGENT_TEST_UV=$(command -v uv)
-          for channel in production beta; do
-            if [ "$channel" = production ] && [ "$PUBLISH_PRODUCTION" != true ]; then continue; fi
-            if [ "$channel" = beta ] && [ "$PUBLISH_BETA" != true ]; then continue; fi
-            artifacts="$RUNNER_TEMP/final-artifacts/prime-agent-$channel"
-            node scripts/validate-macos-release.mjs "$artifacts" "$TARGET_PLATFORM" \
-              "$RUNNER_TEMP/standalone-reference/binaries.json" \
-              "$RUNNER_TEMP/macos-validation/$channel-$TARGET_PLATFORM.json"
-            export PRIME_AGENT_TEST_ARCHIVE=$(find "$artifacts" -maxdepth 1 -name "*-$TARGET_PLATFORM.tar.gz")
-            test -n "$PRIME_AGENT_TEST_ARCHIVE"
-            (cd packages/coding-agent && npx tsx ../../node_modules/vitest/dist/cli.js --run test/compiled-artifact.test.ts test/native-installer.test.ts)
-          done
+          artifacts="$RUNNER_TEMP/final-artifacts/prime-agent-$CHANNEL"
+          node scripts/validate-macos-release.mjs "$artifacts" "$TARGET_PLATFORM" \
+            "$RUNNER_TEMP/standalone-reference/binaries.json" \
+            "$RUNNER_TEMP/macos-validation/$CHANNEL-$TARGET_PLATFORM.json"
+          export PRIME_AGENT_TEST_ARCHIVE=$(find "$artifacts" -maxdepth 1 -name "*-$TARGET_PLATFORM.tar.gz")
+          test -n "$PRIME_AGENT_TEST_ARCHIVE"
+          (cd packages/coding-agent && npx tsx ../../node_modules/vitest/dist/cli.js --run test/compiled-artifact.test.ts test/native-installer.test.ts)
 
-      - name: Upload native validation receipts
+      - name: Upload native validation receipt
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: macos-validation-${{ matrix.platform }}
-          path: ${{ runner.temp }}/macos-validation/*.json
+          name: macos-validation-${{ matrix.channel }}-${{ matrix.platform }}
+          path: ${{ runner.temp }}/macos-validation/${{ matrix.channel }}-${{ matrix.platform }}.json
           if-no-files-found: error
 
   publish:
