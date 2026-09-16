@@ -310,7 +310,11 @@ function resourceMetadataUrl(resource: URL): string {
 }
 
 function rootResourceMetadataUrl(resource: URL): string {
-	return `${resource.origin}/.well-known/oauth-protected-resource${resource.search}`;
+	// The origin-level RFC 9728 document is addressed by its BARE origin: the
+	// template is the well-known path with the resource path appended, never
+	// the endpoint's query string. The catalog audit probes the same bare
+	// URL, so classification and connect-time discovery cannot disagree.
+	return `${resource.origin}/.well-known/oauth-protected-resource`;
 }
 
 async function tryProtectedResourceMetadata(
