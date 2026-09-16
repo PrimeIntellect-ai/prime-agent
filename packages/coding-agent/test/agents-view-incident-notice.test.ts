@@ -636,6 +636,39 @@ describe("agents view incident notices", () => {
 		).toHaveLength(1);
 	});
 
+	it("defers the .old bridge until the main log recovers from missing", () => {
+		useTempAgentDir();
+		const base = Date.now();
+		// A rotation left the earlier supervisor start in agent.jsonl.old while
+		// agent.jsonl has not been recreated yet. The missing-log poll must not
+		// read .old early nor poison the fresh state; the bridge waits for the
+		// first successful read of the main log.
+		writeFileSync(`${getAgentLogPath()}.old`, `${supervisorStartLine(base, 120)}\n`);
+		const state = createIncidentNoticeState();
+		const logPath = getAgentLogPath();
+		expect(refreshIncidentNoticeState(state, logPath, base)).toBe(false);
+		expect(state.logOffset).toBeUndefined();
+		expect(state.logFileId).toBeUndefined();
+		expect(state.entries).toHaveLength(0);
+		expect(state.notice).toBeUndefined();
+
+		// The main log appears: the bridge happens exactly on this first
+		// successful read, pairing the .old start with the newer one.
+		writeAgentLog([supervisorStartLine(base, 30)]);
+		expect(refreshIncidentNoticeState(state, logPath, base)).toBe(true);
+		expect(state.notice?.kind).toBe("update-restart");
+		expect(state.entries).toHaveLength(2);
+		expect(state.logOffset).toBeGreaterThan(0);
+
+		// A further poll does not re-read .old: the pair stays stable and no
+		// phantom restart appears.
+		expect(refreshIncidentNoticeState(state, logPath, base)).toBe(false);
+		expect(state.entries).toHaveLength(2);
+		expect(
+			deriveIncidentNotices(state.entries, base).filter((notice) => notice.kind === "update-restart"),
+		).toHaveLength(1);
+	});
+
 	it("follows a rotated log (new inode) to the newest incident", () => {
 		useTempAgentDir();
 		const base = Date.now();
