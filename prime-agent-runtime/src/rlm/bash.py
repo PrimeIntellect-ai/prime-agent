@@ -3620,13 +3620,14 @@ def _wrapped_payloads_hide_recursive_force_rm(
     recursive-force rm.
 
     Mirrors the git guard's eval scan: only unquoted wrapper tokens are
-    scanned, each payload is unquoted one shell quoting layer at a time, and
-    a recursive-force rm in any layer is refused outright because the payload
-    can relocate or chain freely. Shell `-c` payloads are scanned when the
-    wrapper word names a shell interpreter or carries unresolvable expansion
-    (`$BASH -c ...`): literal non-shell wrappers (`python -c`) stay unscanned
-    because their payload is not shell syntax. `trap` action strings are
-    live commands the shell runs later (at signal/exit), so the first
+    scanned, each payload uses the scanner's folded word values (so adjacent
+    quoted fragments like 'r''m stay one word, exactly as the shell passes
+    them), and a recursive-force rm in any layer is refused outright because
+    the payload can relocate or chain freely. Shell `-c` payloads are scanned
+    when the wrapper word names a shell interpreter or carries unresolvable
+    expansion (`$BASH -c ...`): literal non-shell wrappers (`python -c`) stay
+    unscanned because their payload is not shell syntax. `trap` action
+    strings are live commands the shell runs later (at signal/exit), so the
     argument is scanned as a payload too."""
     if depth > _MAX_EVAL_SCAN_DEPTH:
         return True  # absurdly nested wrappers: refuse rather than risk a miss
@@ -3638,7 +3639,7 @@ def _wrapped_payloads_hide_recursive_force_rm(
             for follower in words[index + 1 :]:
                 if follower.starts_command:
                     break
-                payload_parts.append(command[follower.start : follower.end])
+                payload_parts.append(follower.value)
         elif word.value == "trap":
             # The action string is the first argument after any -l/-p flags
             # or a `--` end-of-options marker; the rest are signals.
@@ -3652,37 +3653,34 @@ def _wrapped_payloads_hide_recursive_force_rm(
                 break
             if action is None:
                 continue
-            payload_parts.append(command[action.start : action.end])
+            payload_parts.append(action.value)
         else:
             is_shell = os.path.basename(word.value) in _SHELL_DASH_C_INTERPRETERS
             if not is_shell and _expansion_is_resolvable(word.value):
                 continue  # python/node -c payloads are not shell syntax
-            # `-c` may follow other options (`bash -e -c ...`) or be bundled
-            # (`bash -uc ...`); locate it among the options and take the word
-            # that follows it as the command string.
+            # `-c` may sit anywhere in the option list (`bash -e -c ...`,
+            # bundled `-ce`/`-uc`, behind argument-taking options like
+            # `-o pipefail`); locate any short cluster containing `c` and
+            # take the word that follows it as the command string. Long
+            # options and non-option words are skipped so positional
+            # arguments do not end the search early (over-scanning a
+            # positional is only a conservative refusal).
             payload_word = None
             for offset, follower in enumerate(words[index + 1 :]):
                 if follower.starts_command:
                     break
                 token = follower.value
-                if token == "--":
-                    break  # end of options: a later -c is a positional
-                if token == "-c" or (
-                    token.startswith("-")
-                    and token != "-"
-                    and not token.startswith("--")
-                    and token.endswith("c")
-                ):
+                if token == "-" or token.startswith("--"):
+                    continue
+                if token.startswith("-") and "c" in token[1:]:
                     candidate = words[index + 2 + offset : index + 3 + offset]
                     if candidate and not candidate[0].starts_command:
                         payload_word = candidate[0]
                     break
-                if not token.startswith("-"):
-                    break  # first non-option argument: no -c present
             if payload_word is None:
-                continue  # bare `sh -c` with no payload string: nothing to scan
-            payload_parts.append(command[payload_word.start : payload_word.end])
-        payload = _unquote_one_level(" ".join(payload_parts))
+                continue  # no `-c` payload: nothing to scan
+            payload_parts.append(payload_word.value)
+        payload = " ".join(payload_parts)
         if _find_recursive_force_rm_invocations(payload):
             return True
         if _wrapped_payloads_hide_recursive_force_rm(payload, depth + 1):
@@ -3694,16 +3692,34 @@ def _wrapped_payloads_hide_recursive_force_rm(
 # operands must resolve against the tracked directory, not the kernel cwd.
 _CD_BUILTINS = ("cd", "pushd")
 
+# cd/pushd options that are not directory operands.
+_CD_OPTIONS = frozenset({"-L", "-P", "-LP", "-PL", "--"})
+
+
+def _strip_cd_options(targets: list[str]) -> list[str]:
+    """Drop leading cd/pushd options (-L/-P/--) from the target list."""
+    index = 0
+    while index < len(targets) and targets[index] in _CD_OPTIONS:
+        index += 1
+    return targets[index:]
+
 
 def _resolve_cd_target(
-    targets: list[str], tracked: str | None, builtin: str, *, home_untrackable: bool = False
+    targets: list[str],
+    tracked: str | None,
+    builtin: str,
+    *,
+    home_untrackable: bool = False,
+    pwd_untrackable: bool = False,
+    cdpath_untrackable: bool = False,
 ) -> str | None:
     """The shell's directory after `cd`/`pushd` with the follower values
     `targets`, or None when the destination cannot be established statically
-    (variable, glob, brace, substitution, or stack-relative targets). Fail
-    closed: never guess."""
+    (variable, glob, brace, substitution, stack-relative, CDPATH-redirected,
+    or reassigned-HOME/PWD targets). Fail closed: never guess."""
     if tracked is None:
         return None
+    targets = _strip_cd_options(targets)
     if not targets:
         if builtin == "pushd":
             return None  # swaps with the directory stack: unknowable statically
@@ -3746,11 +3762,18 @@ def _resolve_cd_target(
         else:
             for prefix in ("${PWD}", "$PWD"):
                 if expanded.startswith(prefix):
+                    if pwd_untrackable:
+                        return None  # PWD is reassigned in this command
                     expanded = tracked + expanded[len(prefix) :]
                     break
     if not _expansion_is_resolvable(expanded) or any(
         ch in expanded for ch in "*?\\"
     ):
+        return None
+    if cdpath_untrackable and not (
+        os.path.isabs(expanded) or expanded.startswith(".")
+    ):
+        # CDPATH can redirect a plain relative cd to any of its entries.
         return None
     try:
         return os.path.realpath(
@@ -3760,42 +3783,103 @@ def _resolve_cd_target(
         return None
 
 
+def _boundary_positions(command: str) -> list[tuple[int, str]]:
+    """Positions and kinds of unquoted control boundaries: `&&`, `||`, `;`,
+    `&`, `|`, newlines, and subshell parens; quoted spans and escapes are
+    skipped. Used to model which commands may be skipped at run time."""
+    positions: list[tuple[int, str]] = []
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if ch == "\\":
+            i += 2
+        elif ch in "'\"":
+            i = _quote_span_end(command, i, n)
+        elif ch in "();\n":
+            positions.append((i, ch))
+            i += 1
+        elif ch in "&|":
+            kind = ch
+            if command[i + 1 : i + 2] == ch:
+                kind = ch * 2
+                i += 1
+            positions.append((i, kind))
+            i += 1
+        else:
+            i += 1
+    return positions
+
+
 def _tracked_cwd_at_words(
     command: str,
     words: list[_ShellWord],
     start_cwd: str | None,
     *,
     home_untrackable: bool = False,
-) -> list[str | None]:
-    """For each word, the shell's working directory when that word runs.
+    pwd_untrackable: bool = False,
+    cdpath_untrackable: bool = False,
+) -> list[list[str | None]]:
+    """For each word, the set of directories the shell may be in when that
+    word runs (an over-approximation of the control flow).
 
-    `cd`/`pushd` relocations are resolved statically against the directory
-    tracked so far, and unquoted parens scope those changes the way `(...)`
-    isolates them in the shell (command substitutions included). None means
-    the runtime directory could not be established, so relative rm operands
-    after it must be refused."""
-    tracked: str | None = start_cwd
-    paren_stack: list[str | None] = []
-    parens = _paren_positions(command)
-    paren_index = 0
-    result: list[str | None] = []
+    `cd`/`pushd` relocations are resolved statically against every tracked
+    directory; unquoted parens scope those changes the way `(...)` isolates
+    them in the shell (command substitutions included), and a command that
+    may be skipped (after `||` or `&`) leaves the pre-command directories in
+    play alongside the relocated ones — `cd A && true || cd B && rm` can run
+    the rm in A even though B never executed. A None entry means the runtime
+    directory could not be established, so relative rm operands after it
+    must be refused."""
+    def dedupe(values: list[str | None]) -> list[str | None]:
+        return list(dict.fromkeys(values))
+
+    states: list[str | None] = [start_cwd]
+    chain_states: list[str | None] = list(states)
+    stack: list[tuple[list[str | None], list[str | None]]] = []
+    boundaries = _boundary_positions(command)
+    boundary_index = 0
+    result: list[list[str | None]] = []
+    may_skip = False
     for index, word in enumerate(words):
-        while paren_index < len(parens) and parens[paren_index][0] < word.start:
-            if parens[paren_index][1] == "(":
-                paren_stack.append(tracked)
-            else:
-                tracked = paren_stack.pop() if paren_stack else tracked
-            paren_index += 1
+        while boundary_index < len(boundaries) and boundaries[boundary_index][0] < word.start:
+            position, kind = boundaries[boundary_index]
+            if kind == "(":
+                stack.append((states, chain_states))
+            elif kind == ")":
+                if stack:
+                    states, chain_states = stack.pop()
+            elif kind == "||" or kind == "&":
+                # The next command may be skipped: its failure/success
+                # predecessors also stay in play.
+                may_skip = True
+                states = dedupe(states + chain_states)
+            elif kind == "&&":
+                may_skip = False
+            else:  # ; | newline: a fresh statement
+                may_skip = False
+                chain_states = list(states)
+            boundary_index += 1
         if word.value in _CD_BUILTINS:
             targets: list[str] = []
             for follower in words[index + 1 :]:
                 if follower.starts_command:
                     break
                 targets.append(follower.value)
-            tracked = _resolve_cd_target(
-                targets, tracked, word.value, home_untrackable=home_untrackable
-            )
-        result.append(tracked)
+            relocated = [
+                _resolve_cd_target(
+                    targets,
+                    state,
+                    word.value,
+                    home_untrackable=home_untrackable,
+                    pwd_untrackable=pwd_untrackable,
+                    cdpath_untrackable=cdpath_untrackable,
+                )
+                for state in states
+            ]
+            states = dedupe(relocated if not may_skip else states + relocated)
+            chain_states = dedupe(chain_states + states)
+        result.append(list(states))
     return result
 
 
@@ -3981,7 +4065,9 @@ def _script_runner_word_indices(words: list[_ShellWord]) -> list[int]:
     stdin (`sh <<EOF`), a pipeline consumer after the terminator
     (`{ cat <<EOF ... } | sh`), a script invocation (`sh s.sh`, `./s.sh`,
     `. s.sh`, `source s.sh`, `exec ./s.sh`), or an unresolvable-expansion
-    word that could be any of them. cd/pushd targets are not runners."""
+    word that could be any of them. Exec-style prefixes reach through their
+    options and arguments (`sudo -E ./s.sh`, `env -i ./s.sh`), so the
+    prefix may sit several words back; cd/pushd targets are not runners."""
     indices: list[int] = []
     for index, word in enumerate(words):
         value = word.value
@@ -3991,12 +4077,12 @@ def _script_runner_word_indices(words: list[_ShellWord]) -> list[int]:
             indices.append(index)
         elif word.starts_command and ("/" in value or value == "."):
             indices.append(index)
-        elif (
-            "/" in value
-            and words[index - 1].starts_command
-            and words[index - 1].value in _EXEC_STYLE_PREFIXES
-        ):
-            indices.append(index)
+        elif "/" in value:
+            for back in range(index - 1, -1, -1):
+                if words[back].starts_command:
+                    if words[back].value in _EXEC_STYLE_PREFIXES:
+                        indices.append(index)
+                    break
         elif not _expansion_is_resolvable(value):
             indices.append(index)
     return indices
@@ -4099,22 +4185,23 @@ def _rm_invocation_reasons(
     words: list[_ShellWord],
     invocations: list[tuple[int, list[str]]],
     workspace_root: str,
-    tracked_at: list[str | None],
+    tracked_at: list[list[str | None]],
     reassigns_home: bool,
     reassigns_pwd: bool,
 ) -> list[str]:
     """Refusal reasons for one scan text's recursive-force rm invocations,
-    resolving operands against the precomputed per-word tracked directories."""
+    resolving operands against every precomputed candidate directory (any
+    escape refuses)."""
     reasons: list[str] = []
     for word_index, operands in invocations:
-        tracked = tracked_at[word_index]
+        candidates = tracked_at[word_index]
         if not operands:
             reasons.append(
                 "receives no explicit operand, so names could arrive from"
                 " xargs or stdin and cannot be checked"
             )
             continue
-        if tracked is None:
+        if any(candidate is None for candidate in candidates):
             reasons.append(
                 "runs after a cd/pushd the guard cannot resolve, so its"
                 " relative targets cannot be checked"
@@ -4135,7 +4222,11 @@ def _rm_invocation_reasons(
                     " expansion the shell performs cannot be tracked"
                 )
                 continue
-            reason = _resolve_rm_operand(operand, workspace_root, tracked)
+            reason = None
+            for candidate in candidates:
+                reason = _resolve_rm_operand(operand, workspace_root, candidate)
+                if reason:
+                    break
             if reason:
                 reasons.append(f"{operand!r}: {reason}")
     return reasons
@@ -4181,8 +4272,16 @@ def _guard_destructive_rm(command: str, allow_destructive_rm: bool) -> None:
             return  # the spawn itself will fail; the guard must not mask that error
         reasons.extend(_unresolvable_expansion_rm_reasons(words))
     else:
+        cdpath_untrackable = bool(os.environ.get("CDPATH")) or _command_reassigns_env(
+            words, "CDPATH"
+        )
         tracked_at = _tracked_cwd_at_words(
-            prepared, words, workspace_root, home_untrackable=reassigns_home
+            prepared,
+            words,
+            workspace_root,
+            home_untrackable=reassigns_home,
+            pwd_untrackable=reassigns_pwd,
+            cdpath_untrackable=cdpath_untrackable,
         )
         reasons.extend(
             _rm_invocation_reasons(
@@ -4193,9 +4292,13 @@ def _guard_destructive_rm(command: str, allow_destructive_rm: bool) -> None:
         # The bodies run wherever the outer command has relocated to: resolve
         # them against every script runner's tracked directory (any escape
         # refuses), and inherit the outer HOME/PWD reassignments.
-        runner_starts = [
-            tracked_at[word_index] for word_index in _script_runner_word_indices(words)
-        ]
+        runner_starts = list(
+            dict.fromkeys(
+                candidate
+                for word_index in _script_runner_word_indices(words)
+                for candidate in tracked_at[word_index]
+            )
+        )
     # ---- body passes ----
     for body_text in body_texts:
         body_prepared = _mask_shell_redirections(body_text)
@@ -4208,9 +4311,17 @@ def _guard_destructive_rm(command: str, allow_destructive_rm: bool) -> None:
             continue
         body_reassigns_home = reassigns_home or _command_reassigns_env(body_words, "HOME")
         body_reassigns_pwd = reassigns_pwd or _command_reassigns_env(body_words, "PWD")
+        body_cdpath = cdpath_untrackable or bool(os.environ.get("CDPATH")) or _command_reassigns_env(
+            body_words, "CDPATH"
+        )
         for start in runner_starts or [workspace_root]:
             body_tracked_at = _tracked_cwd_at_words(
-                body_prepared, body_words, start, home_untrackable=body_reassigns_home
+                body_prepared,
+                body_words,
+                start,
+                home_untrackable=body_reassigns_home,
+                pwd_untrackable=body_reassigns_pwd,
+                cdpath_untrackable=body_cdpath,
             )
             reasons.extend(
                 _rm_invocation_reasons(

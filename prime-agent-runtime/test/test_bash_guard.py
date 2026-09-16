@@ -979,15 +979,22 @@ class TrackedCwdDetectionTest(unittest.TestCase):
         words = bash_module._scan_shell_words(command)
         tracked = bash_module._tracked_cwd_at_words(command, words, "/ws")
         rm_indices = [i for i, w in enumerate(words) if w.value == "rm"]
-        self.assertEqual(tracked[rm_indices[0]], os.path.realpath("/tmp"))
-        self.assertEqual(tracked[rm_indices[1]], os.path.realpath("/ws"))
+        self.assertEqual(tracked[rm_indices[0]], [os.path.realpath("/tmp")])
+        self.assertEqual(tracked[rm_indices[1]], [os.path.realpath("/ws")])
 
     def test_unresolvable_cd_targets_fail_closed(self):
         command = "cd $UNSET; rm -rf sub"
         words = bash_module._scan_shell_words(command)
         tracked = bash_module._tracked_cwd_at_words(command, words, "/ws")
         rm_index = next(i for i, w in enumerate(words) if w.value == "rm")
-        self.assertIsNone(tracked[rm_index])
+        self.assertEqual(tracked[rm_index], [None])
+
+    def test_conditional_cd_keeps_preceding_candidates(self):
+        command = "cd /outside && true || cd /workspace && rm -rf victim"
+        words = bash_module._scan_shell_words(command)
+        tracked = bash_module._tracked_cwd_at_words(command, words, "/ws")
+        rm_index = next(i for i, w in enumerate(words) if w.value == "rm")
+        self.assertIn(os.path.realpath("/outside"), tracked[rm_index])
 
     def test_bare_cd_goes_home(self):
         command = "cd; rm -rf sub"
@@ -995,7 +1002,7 @@ class TrackedCwdDetectionTest(unittest.TestCase):
         tracked = bash_module._tracked_cwd_at_words(command, words, "/ws")
         rm_index = next(i for i, w in enumerate(words) if w.value == "rm")
         home = os.environ.get("HOME")
-        self.assertEqual(tracked[rm_index], os.path.realpath(home) if home else None)
+        self.assertEqual(tracked[rm_index], [os.path.realpath(home) if home else None])
 
 
 class RmExpansionDetectionTest(unittest.TestCase):
@@ -1775,6 +1782,98 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
         # stay masked and allowed.
         result = await bash("cd sub && cat <<EOF\nrm -rf /printed-not-run\nEOF")
         self.assertEqual(result.exit_code, 0)
+
+    async def test_refuses_more_interpreter_dash_c_forms(self):
+        # `-c` hides behind option clusters (`bash -ce`) and behind
+        # options that take arguments (`bash -o pipefail -c`).
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            f"bash -ce 'rm -rf {outside}'",
+            f"bash -o pipefail -c 'rm -rf {outside}'",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+
+    async def test_refuses_adjacent_quoted_fragments_in_payloads(self):
+        # Bash concatenates adjacent quoted fragments: 'r''m -rf x' is one
+        # `rm -rf x` argument, so payload scanning must use folded word
+        # values, not raw quote-bearing slices.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "sh -c 'r''m -rf " + outside + "'",
+            "eval 'r''m -rf " + outside + "'",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+
+    async def test_refuses_cdpath_redirected_relocations(self):
+        # With CDPATH set, `cd sub` can land in an outside directory the
+        # guard never validated; relative cd targets become untrackable.
+        self._make_tree()
+        outside = self._outside_target()
+        Path(outside, "sub").mkdir()
+        Path(outside, "sub", "nested").mkdir()
+        Path(outside, "sub", "nested", "file.txt").write_text("keep\n")
+        with mock.patch.dict(os.environ, {"CDPATH": outside}):
+            with self.assertRaises(DestructiveRmRefusalError):
+                bash("cd sub && rm -rf nested")
+            self.assertTrue(Path(outside, "sub", "nested", "file.txt").exists())
+        with self.assertRaises(DestructiveRmRefusalError):
+            bash(f"CDPATH={outside}; cd sub && rm -rf nested")
+        self.assertTrue(Path(outside, "sub", "nested", "file.txt").exists())
+        # Without CDPATH the relocation still resolves normally.
+        self._make_tree()
+        result = await bash("cd sub && rm -rf nested")
+        self.assertEqual(result.exit_code, 0)
+
+    async def test_refuses_pwd_reassigned_relocations(self):
+        # `PWD=/outside; cd "$PWD"` relocates using the reassigned value.
+        outside = self._outside_target()
+        Path(outside, "victim").mkdir()
+        Path(outside, "victim", "file.txt").write_text("keep\n")
+        self._make_tree()
+        Path(self.test_dir, "victim").mkdir()
+        Path(self.test_dir, "victim", "file.txt").write_text("keep\n")
+        command = f"PWD={outside}; cd \"$PWD\"; rm -rf victim"
+        with self.assertRaises(DestructiveRmRefusalError):
+            bash(command)
+        self.assertTrue(Path(outside, "victim", "file.txt").exists())
+        self.assertTrue(Path(self.test_dir, "victim", "file.txt").exists())
+
+    async def test_cd_options_are_not_directory_operands(self):
+        # cd -P/-L are options, not extra operands.
+        self._make_tree()
+        result = await bash("cd -P sub && rm -rf nested")
+        self.assertEqual(result.exit_code, 0)
+        self.assertFalse(self._tracked("sub", "nested").exists())
+        self._make_tree()
+        result = await bash("cd -L sub && rm -rf nested")
+        self.assertEqual(result.exit_code, 0)
+
+    async def test_refuses_conditionally_relocated_rm(self):
+        # `cd A && true || cd B && rm` can run the rm in A (the second cd is
+        # skipped): candidate directories must over-approximate control flow.
+        outside = self._outside_target()
+        Path(outside, "victim").mkdir()
+        Path(outside, "victim", "file.txt").write_text("keep\n")
+        self._make_tree()
+        Path(self.test_dir, "victim").mkdir()
+        Path(self.test_dir, "victim", "file.txt").write_text("keep\n")
+        command = f"cd {outside} && true || cd {self.test_dir} && rm -rf victim"
+        with self.assertRaises(DestructiveRmRefusalError):
+            bash(command)
+        self.assertTrue(Path(outside, "victim", "file.txt").exists())
+        # Plain && chains stay precise: the rm runs only when the cd ran.
+        self._make_tree()
+        result = await bash("true && cd sub && rm -rf nested")
+        self.assertEqual(result.exit_code, 0)
+        self.assertFalse(self._tracked("sub", "nested").exists())
 
     async def test_operands_after_end_of_options_are_checked(self):
         self._make_tree()
