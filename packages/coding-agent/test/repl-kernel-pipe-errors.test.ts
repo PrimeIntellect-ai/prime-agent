@@ -47,11 +47,16 @@ describeIf("ReplKernelManager pipe errors (real runtime)", () => {
 		const child = (manager as unknown as { child?: ChildProcess }).child;
 		expect(child?.stdin).toBeDefined();
 		expect(child?.stdout).toBeDefined();
+		expect(child?.stderr).toBeDefined();
 		// A write racing the kernel's death lands as an 'error' event on the pipe;
 		// without a listener Node would crash the worker (observed in production as
-		// "uncaught exception: Error: write EPIPE").
+		// "uncaught exception: Error: write EPIPE"). Read-side pipes need the same
+		// guard: an unhandled stderr stream error also reaches the daemon's
+		// uncaughtException handler, which exits the worker and every hosted
+		// session with it.
 		expect(() => child?.stdin?.emit("error", new Error("write EPIPE"))).not.toThrow();
 		expect(() => child?.stdout?.emit("error", new Error("read ECONNRESET"))).not.toThrow();
+		expect(() => child?.stderr?.emit("error", new Error("read ECONNRESET"))).not.toThrow();
 
 		// The kernel is still healthy: further cells keep executing and shutdown
 		// (afterEach) still completes.

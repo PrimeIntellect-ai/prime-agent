@@ -436,7 +436,8 @@ export class ReplKernelManager {
 		// stream (write EPIPE); without a listener Node rethrows it and takes
 		// down the whole worker. The pending writeLine rejection and the child
 		// 'exit' handler below own the fallout, so this only records the
-		// diagnosis.
+		// diagnosis. Read-side pipe errors on stdout/stderr land the same way
+		// and need the same guard.
 		child.stdin?.on("error", (error) => {
 			if (this.child !== child) return;
 			this.appendKernelDiagnostic(`kernel stdin error: ${errorMessage(error)}`);
@@ -444,6 +445,10 @@ export class ReplKernelManager {
 		child.stdout?.on("error", (error) => {
 			if (this.child !== child) return;
 			this.appendKernelDiagnostic(`kernel stdout error: ${errorMessage(error)}`);
+		});
+		child.stderr?.on("error", (error) => {
+			if (this.child !== child) return;
+			this.appendKernelDiagnostic(`kernel stderr error: ${errorMessage(error)}`);
 		});
 		child.once("exit", () => {
 			// One turn for the poll phase to deliver the bytes the kernel wrote
