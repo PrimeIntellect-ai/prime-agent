@@ -1,0 +1,1 @@
+- Reduced Python kernel startup time by deferring the event-loop import stack (asyncio plus the shell tool's heavy stdlib imports) until after the ready event, with no protocol or behavior changes.

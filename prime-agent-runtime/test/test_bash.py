@@ -4,6 +4,8 @@ import asyncio
 import json
 import os
 import resource
+import secrets
+import shutil
 import signal
 import socket
 import subprocess
@@ -55,6 +57,27 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         handle = bash("echo again")
         awaited = await handle
         self.assertEqual(handle.poll(), awaited)
+
+    def test_handle_construction_binds_asyncio_without_event_loop(self):
+        # rlm.bash defers its asyncio import and binds it on first handle
+        # construction: a fresh interpreter (no event loop, no bash() call yet)
+        # must construct a handle and reap it without NameError.
+        code = (
+            "import rlm, sys, time\n"
+            "assert 'asyncio' not in sys.modules\n"
+            "handle = rlm.BashHandle('exit 7')\n"
+            "for _ in range(250):\n"
+            "    result = handle.poll()\n"
+            "    if result is not None:\n"
+            "        break\n"
+            "    time.sleep(0.02)\n"
+            "assert result is not None, 'handle never completed'\n"
+            "assert result.exit_code == 7\n"
+            "sys.exit(0)"
+        )
+        # The runtime test venv has the rlm package installed, so the child
+        # interpreter resolves it the same way this process does.
+        subprocess.run([sys.executable, "-c", code], check=True, timeout=30)
 
     def test_construction_cleanup_uses_windows_signal_without_sigkill(self):
         failure = RuntimeError("task construction failed")
@@ -599,8 +622,9 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         # Windows must raise without consulting PATH: a which() hit would be
         # the same repo-controlled-PATH hole the host-side resolution closed.
         with mock.patch.object(bash_module, "_IS_POSIX", False):
+            # rlm.bash imports shutil lazily, so patch the stdlib module itself.
             with mock.patch.object(
-                bash_module.shutil, "which", return_value=r"C:\evil\bash.exe"
+                shutil, "which", return_value=r"C:\evil\bash.exe"
             ) as which:
                 with self.assertRaisesRegex(RuntimeError, "PRIME_AGENT_BASH_SHELL"):
                     bash_module._shell()
@@ -649,7 +673,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             "if [ -r /proc/$$/cmdline ]; then cat /proc/$$/cmdline; fi\n"
             "printf '\\nafter-sentinel-lookalike\\n'"
         )
-        with mock.patch.object(bash_module.secrets, "token_hex", return_value=token):
+        # rlm.bash imports secrets lazily, so patch the stdlib module itself.
+        with mock.patch.object(secrets, "token_hex", return_value=token):
             result = await asyncio.wait_for(bash(command), timeout=5)
         actual_marker = (
             bash_module._COMPLETION_PREFIX + token.encode() + bash_module._COMPLETION_SUFFIX

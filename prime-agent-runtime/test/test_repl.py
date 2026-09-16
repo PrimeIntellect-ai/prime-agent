@@ -137,6 +137,26 @@ class ReplTest(unittest.TestCase):
         print(f"\n[startup] spawn -> ready: {self.ready_ms:.0f} ms")
         self.assertLess(self.ready_ms, 500)
 
+    def test_import_rlm_defers_event_loop_stack(self):
+        # `import rlm` (the pre-ready boot path of a kernel) must stay lean:
+        # the asyncio stack loads after the ready event, not during package
+        # import. A regression here reintroduces the boot-time import cost.
+        code = (
+            "import rlm, sys; "
+            "assert 'asyncio' not in sys.modules, 'rlm import must defer asyncio'; "
+            "assert 'secrets' not in sys.modules, 'rlm import must defer secrets'; "
+            "sys.exit(0)"
+        )
+        env = {**os.environ, "PYTHONPATH": SRC + os.pathsep + os.environ.get("PYTHONPATH", "")}
+        subprocess.run([sys.executable, "-c", code], env=env, check=True, timeout=30)
+
+    def test_serving_kernel_loads_asyncio_after_ready(self):
+        # The deferral must not break serving: by the first executed cell the
+        # event loop stack is resident and drives cell execution as usual.
+        events = self.repl.execute("serving", "import sys\n'asyncio' in sys.modules")
+        self.assertEqual(one(events, "result")["text"], "True")
+        self.assertEqual(one(events, "done")["status"], "ok")
+
     def test_result_echo(self):
         events = self.repl.execute("a", "1+1")
         self.assertEqual(one(events, "result")["text"], "2")

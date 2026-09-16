@@ -8,7 +8,6 @@ next to this file. Cells execute with top-level await in one persistent
 from __future__ import annotations
 
 import ast
-import asyncio
 import codecs
 import contextvars
 import ctypes
@@ -20,7 +19,6 @@ import os
 import platform
 import signal
 import sys
-import tempfile
 import threading
 import time
 import traceback
@@ -49,6 +47,8 @@ _serve_task: asyncio.Task[Any] | None = None
 
 class _CellExecution:
     def __init__(self) -> None:
+        import asyncio
+
         self.finished = asyncio.Event()
         self.owner: asyncio.Task[Any] | None = None
 
@@ -119,6 +119,8 @@ def current_cell_completion_context() -> tuple[asyncio.Event, asyncio.Task[Any] 
 def active_cell_task() -> asyncio.Task[Any] | None:
     """The cell body task executing right now, or None between cells (global
     state, not the cell contextvar — detached tasks keep stale context copies)."""
+    import asyncio
+
     with _interrupt_lock:
         task = _active["task"]
     return task if isinstance(task, asyncio.Task) and not task.done() else None
@@ -331,6 +333,10 @@ def _consume_task_exception(task: asyncio.Task[Any]) -> None:
 
 
 def _sigint_handler(signum: int, frame: types.FrameType | None) -> None:
+    # asyncio loads by the time any task can be active (main() imports it), so
+    # this is a cached sys.modules hit even inside the signal handler.
+    import asyncio
+
     global _handoff_interrupted
     task = _active["task"]
     # No lock (the main thread may hold it): the rid equality revalidates the
@@ -529,6 +535,8 @@ async def _run_codes(codes: list[types.CodeType], ns: dict[str, Any]) -> Any:
 
 async def _run_guarded(task: asyncio.Task[Any], rid: str) -> tuple[str, Any, dict[str, Any] | None]:
     """Await a request task; returns (status, value, error event or None)."""
+    import asyncio
+
     with _interrupt_lock:
         _active["interrupted"] = False
         _active["rid"] = rid
@@ -644,6 +652,7 @@ def _snapshot_state(
     committed: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     import datetime
+    import tempfile
 
     try:
         import dill
@@ -851,6 +860,8 @@ def _restore_state(
 
 async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
     """Run snapshot/restore as an interruptible task and reply in the done event."""
+    import asyncio
+
     rid = req["id"]
     committed: list[dict[str, Any]] = []
 
@@ -1173,13 +1184,20 @@ def main() -> None:
     user_module.__dict__["__builtins__"] = __builtins__
     sys.modules["__main__"] = user_module
 
+    signal.signal(signal.SIGINT, _sigint_handler)
+    _send({"event": "ready", "protocol": PROTOCOL_VERSION, "python": platform.python_version()})
+
+    # The event-loop stack (asyncio plus its ssl, concurrent.futures, and
+    # logging imports) is the heaviest part of this module's boot chain; load
+    # it after the ready event so kernel startup stays lean. The loop, reader
+    # thread, and serve task all come up here before the host's first request
+    # can be served, and every function that references asyncio runs only
+    # after this point.
+    import asyncio
     _loop = asyncio.new_event_loop()
     asyncio.set_event_loop(_loop)
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-    signal.signal(signal.SIGINT, _sigint_handler)
     threading.Thread(target=_read_requests, args=(stdin_fd, queue), daemon=True).start()
-
-    _send({"event": "ready", "protocol": PROTOCOL_VERSION, "python": platform.python_version()})
 
     _serve_task = _loop.create_task(_serve(queue, user_module.__dict__))
     # A KeyboardInterrupt escaping a cell or background task stops
