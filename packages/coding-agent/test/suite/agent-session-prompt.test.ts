@@ -975,6 +975,36 @@ describe("Harness digest at cold boundaries", () => {
 		expect(harness.session.messages[0]).toMatchObject({ role: "custom", customType: HARNESS_DIGEST_CUSTOM_TYPE });
 	});
 
+	it("keeps the digest deduped when only the shell tool drops out", async () => {
+		const makeTool = (name: string): AgentTool => ({
+			name,
+			label: name,
+			description: `${name} tool`,
+			parameters: Type.Object({ value: Type.String() }),
+			execute: async () => ({ content: [{ type: "text", text: name }], details: {} }),
+		});
+		// The digest only reads tool names, so named stand-ins are enough to
+		// make the session fingerprint shell examples on.
+		const harness = await createHarness({ persistSession: true, tools: [makeTool("ipython"), makeTool("bash")] });
+		harnesses.push(harness);
+
+		harness.setResponses([fauxAssistantMessage("one reply"), fauxAssistantMessage("two reply")]);
+		await harness.session.prompt("one");
+		await harness.session.prompt("two");
+		expect(digestMessages(harness)).toHaveLength(1);
+		const firstText = getMessageText(digestMessages(harness)[0]!);
+
+		// The bash tool drops out while ipython stays active: the rendered
+		// digest is unchanged because IPython examples take precedence, so the
+		// cold-boundary fingerprint must stay fresh and keep the prompt-cache hit.
+		harness.session.setActiveToolsByName(["ipython"]);
+		await harness.session.navigateTree(harness.session.getUserMessagesForForking()[1]!.entryId);
+
+		const digests = digestMessages(harness);
+		expect(digests).toHaveLength(1);
+		expect(getMessageText(digests[0]!)).toBe(firstText);
+	});
+
 	it("exposes the newest digest details, including the state fingerprint", async () => {
 		const harness = await createHarness({ persistSession: true });
 		harnesses.push(harness);

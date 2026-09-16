@@ -1112,8 +1112,11 @@ describe("harness digest cache stability", () => {
 		expect(visibleIds(ranked)[0]).toBe("bravo");
 		expect(harnessDigestFingerprint(state, renderFlags)).toBe(fingerprint);
 
-		// Render flags are fingerprinted.
-		expect(harnessDigestFingerprint(state, { ...renderFlags, includeShellExamples: true })).not.toBe(fingerprint);
+		// Render flags are fingerprinted, except the shell flag while IPython
+		// examples take precedence: the formatter never reads it then, so it
+		// must not change the fingerprint for an otherwise unchanged digest.
+		expect(harnessDigestFingerprint(state, { ...renderFlags, includeShellExamples: true })).toBe(fingerprint);
+		expect(harnessDigestFingerprint(state, { ...renderFlags, includeRefineExamples: false })).not.toBe(fingerprint);
 
 		// Refinement material is fingerprinted by its printed fields only.
 		const withRefinement = seedState("fingerprint-refine");
@@ -1137,6 +1140,37 @@ describe("harness digest cache stability", () => {
 		});
 		expect(harnessDigestFingerprint(sameRefinementOtherTime, renderFlags)).toBe(
 			harnessDigestFingerprint(withRefinement, renderFlags),
+		);
+	});
+
+	it("fingerprints the shell-example flag only while IPython examples are absent", () => {
+		const state = seedState("fingerprint-shell");
+
+		// With IPython examples the formatter never reads the shell flag, so it
+		// must not reach the fingerprint: a session whose bash tool drops out
+		// keeps its byte-identical digest and its prompt-cache hit.
+		const withIpython = {
+			includeIpythonExamples: true,
+			includeShellExamples: true,
+			includeRefineExamples: false,
+		};
+		expect(harnessDigestFingerprint(state, withIpython)).toBe(
+			harnessDigestFingerprint(state, { ...withIpython, includeShellExamples: false }),
+		);
+		// The flag sets are render-equivalent, which is why the fingerprints are.
+		expect(formatHarnessStateForPrompt(state, withIpython)).toBe(
+			formatHarnessStateForPrompt(state, { ...withIpython, includeShellExamples: false }),
+		);
+
+		// Without IPython examples the shell flag drives the call-contract line,
+		// so it must still change the fingerprint.
+		const withoutIpython = {
+			includeIpythonExamples: false,
+			includeShellExamples: true,
+			includeRefineExamples: false,
+		};
+		expect(harnessDigestFingerprint(state, withoutIpython)).not.toBe(
+			harnessDigestFingerprint(state, { ...withoutIpython, includeShellExamples: false }),
 		);
 	});
 });

@@ -24,6 +24,12 @@ const DEFAULT_OVERVIEW_CONTENT_LIMIT = 180;
 /**
  * Bump when the fingerprinted material or its canonical serialization changes,
  * so fingerprints minted under older schemes never compare equal to new ones.
+ * Normalizing a render-ignored flag out of the material is not a scheme
+ * change under this rule: an old-scheme material can equal a new-scheme one
+ * only when both would render the same digest (with IPython examples off
+ * the normalization is a no-op; with them on, equality means the shell flag
+ * was already false, i.e. identical renders), so stale cross-scheme
+ * fingerprints are render-safe and no bump is needed.
  */
 const HARNESS_DIGEST_FINGERPRINT_VERSION = 1;
 
@@ -663,10 +669,13 @@ export function formatHarnessStateForPrompt(
  * cold boundaries can skip digest re-delivery with a state comparison instead
  * of a rendered-text comparison that query-term relevance keeps invalidating.
  *
- * Covered: entry identity and content plus the three render flags and each
- * refinement's printed fields. Excluded: `metadata`, `source`, and the
- * invisible `created_at`/`updated_at` bookkeeping, and relevance query terms
- * (the digest stays frozen per delivery; see `compareRankedHarnessEntries`).
+ * Covered: entry identity and content plus the render flags and each
+ * refinement's printed fields. The shell-examples flag participates only
+ * when IPython examples are not rendered: the formatter never reads it then,
+ * so it is normalized out of the fingerprint to keep an unchanged digest
+ * fresh. Excluded: `metadata`, `source`, and the invisible
+ * `created_at`/`updated_at` bookkeeping, and relevance query terms (the
+ * digest stays frozen per delivery; see `compareRankedHarnessEntries`).
  */
 export function harnessDigestFingerprint(
 	state: HarnessState,
@@ -698,9 +707,15 @@ export function harnessDigestFingerprint(
 			changes: event.changes,
 			outcome: event.outcome,
 		}));
+	// The formatter renders the shell call-contract only when IPython examples
+	// are absent, so the shell flag cannot change the digest while IPython
+	// examples take precedence; fingerprint only the flags the render reads.
+	const effectiveRenderFlags = renderFlags.includeIpythonExamples
+		? { ...renderFlags, includeShellExamples: false }
+		: renderFlags;
 	const material = JSON.stringify({
 		version: HARNESS_DIGEST_FINGERPRINT_VERSION,
-		renderFlags,
+		renderFlags: effectiveRenderFlags,
 		entries,
 		refinements,
 	});
