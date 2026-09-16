@@ -160,20 +160,28 @@ export function deriveIncidentNotices(entries: readonly IncidentLogEntry[], nowM
 			);
 		}
 	}
+	// Latest timeout per subject, built in one pass: the classifier anchors each
+	// timeout-burst anomaly at the burst's FIRST timeout, but the notice must
+	// anchor at the LATEST one so dismissal advances with a growing burst (a
+	// later timeout re-surfaces the notice past the horizon instead of it
+	// staying hidden until the first timeout ages out). One pass keeps the
+	// derivation linear in the windowed entries — a per-anomaly rescan would go
+	// quadratic against the bounded 20,000-entry window on every poll.
+	const latestTimeoutBySubject = new Map<string, number>();
+	for (const event of events) {
+		if (event.eventClass !== "timeout") {
+			continue;
+		}
+		const previous = latestTimeoutBySubject.get(event.subject);
+		latestTimeoutBySubject.set(
+			event.subject,
+			previous === undefined ? event.timeMs : Math.max(previous, event.timeMs),
+		);
+	}
 	for (const anomaly of computeIncidentAnomalies(events)) {
 		if (anomaly.summary.includes("command timeouts")) {
-			// The anomaly summary already reads "<subject>: N command timeouts over X";
-			// the classifier anchors the anomaly at the burst's FIRST timeout. Anchor
-			// the notice at the LATEST timeout of the subject instead: dismissal
-			// records notice.timeMs as the horizon for the key, so a later timeout
-			// that extends the burst past the horizon re-surfaces it rather than the
-			// notice staying hidden until the first timeout ages out of the window.
-			let latestTimeoutMs = anomaly.timeMs;
-			for (const event of events) {
-				if (event.eventClass === "timeout" && event.subject === anomaly.subject) {
-					latestTimeoutMs = Math.max(latestTimeoutMs, event.timeMs);
-				}
-			}
+			// The anomaly summary already reads "<subject>: N command timeouts over X".
+			const latestTimeoutMs = latestTimeoutBySubject.get(anomaly.subject) ?? anomaly.timeMs;
 			notices.push(
 				createNotice("timeout-burst", anomaly.severity, anomaly.subject, latestTimeoutMs, anomaly.summary),
 			);

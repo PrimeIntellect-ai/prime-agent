@@ -64,11 +64,11 @@ function workerCrashLine(base: number, workerId: string, secondsAgoValue: number
 	});
 }
 
-function commandTimeoutLine(base: number, minutesAgoValue: number): string {
+function commandTimeoutLine(base: number, minutesAgoValue: number, socketPath: string = DAEMON_SOCKET): string {
 	return logLine({
 		ts: tsAgo(base, minutesAgoValue * 60_000),
 		component: "coding-agent.daemon-supervisor",
-		socketPath: DAEMON_SOCKET,
+		socketPath,
 		msg: "Supervisor command attach failed: Error: Timed out waiting for daemon worker response to attach\n    at Timeout._onTimeout (node:internal/timers:618:7)",
 	});
 }
@@ -202,6 +202,25 @@ describe("incident notice derivation", () => {
 		const extended = deriveIncidentNotices(three, base)[0]!;
 		expect(extended.timeMs).toBe(three[2]!.timeMs);
 		expect(extended.text).toBe(`${DAEMON_SOCKET}: 3 command timeouts over 25m`);
+	});
+
+	it("anchors each subject's timeout burst at that subject's own latest timeout", () => {
+		const base = Date.now();
+		const otherSocket = "/tmp/prime-agent-501/daemon-other.sock";
+		// Two daemon sockets, each with its own timeout burst: A spans T-30..T-20,
+		// B spans T-25..T-5. The per-subject latest-timeout lookup must never leak
+		// one subject's timeout into the other subject's notice.
+		const entries = fixtureEntries([
+			commandTimeoutLine(base, 30, DAEMON_SOCKET),
+			commandTimeoutLine(base, 25, otherSocket),
+			commandTimeoutLine(base, 20, DAEMON_SOCKET),
+			commandTimeoutLine(base, 5, otherSocket),
+		]);
+		const bursts = deriveIncidentNotices(entries, base).filter((notice) => notice.kind === "timeout-burst");
+		expect(bursts).toHaveLength(2);
+		const bySubject = new Map(bursts.map((notice) => [notice.subject, notice]));
+		expect(bySubject.get(DAEMON_SOCKET)?.timeMs).toBe(base - 20 * 60_000);
+		expect(bySubject.get(otherSocket)?.timeMs).toBe(base - 5 * 60_000);
 	});
 
 	it("derives an update-restart notice only for a repeated supervisor start", () => {
