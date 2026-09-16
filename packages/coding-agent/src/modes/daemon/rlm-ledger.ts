@@ -430,45 +430,58 @@ export class RlmSpawnLedger {
 
 	/** Same-parent rows for a child session path, including the child itself. */
 	siblings(sessionPath: string): Promise<SessionInfo[]> {
-		return this.enqueue(async () => {
-			const target = cachedCanonicalSessionPath(sessionPath);
-			const family = await this.familyUnlocked(await this.liveEdgesUnlocked());
-			const edges = [...this.replaySyncCached().values()].filter((edge) => !edge.deleted);
-			const parentByChild = new Map(
-				edges.map((edge) => [cachedCanonicalSessionPath(edge.child), cachedCanonicalSessionPath(edge.parent)]),
-			);
-			const parent = parentByChild.get(target);
-			if (parent !== undefined) {
-				const rows = family.filter((row) => parentByChild.get(cachedCanonicalSessionPath(row.path)) === parent);
-				// The target's edge can be reconciliation-dropped (parent file
-				// gone) while its own file still exists: fall back to presenting
-				// the survivor alone rather than an empty set the callers would
-				// read as "session not found".
-				if (!rows.some((row) => cachedCanonicalSessionPath(row.path) === target)) {
-					try {
-						if ((await stat(target)).isFile()) {
-							return [await this.sessionRow(target, 0, undefined, undefined)];
-						}
-					} catch {
-						// fall through to the (possibly empty) sibling rows
+		// Capture ordered topology first; transcript metadata must not block
+		// spawn appends or scheduled-catalog topology reads behind a full
+		// saved-session scan (same split as family()).
+		return this.enqueue(async () => ({
+			alive: await this.liveEdgesUnlocked(),
+			edges: [...this.replaySyncCached().values()].filter((edge) => !edge.deleted),
+		})).then((topology) => this.siblingsUnlocked(sessionPath, topology));
+	}
+
+	private async siblingsUnlocked(
+		sessionPath: string,
+		topology: { alive: RlmLedgerEdge[]; edges: RlmLedgerEdge[] },
+	): Promise<SessionInfo[]> {
+		const target = cachedCanonicalSessionPath(sessionPath);
+		const family = await this.familyUnlocked(topology.alive);
+		const parentByChild = new Map(
+			topology.edges.map((edge) => [
+				cachedCanonicalSessionPath(edge.child),
+				cachedCanonicalSessionPath(edge.parent),
+			]),
+		);
+		const parent = parentByChild.get(target);
+		if (parent !== undefined) {
+			const rows = family.filter((row) => parentByChild.get(cachedCanonicalSessionPath(row.path)) === parent);
+			// The target's edge can be reconciliation-dropped (parent file
+			// gone) while its own file still exists: fall back to presenting
+			// the survivor alone rather than an empty set the callers would
+			// read as "session not found".
+			if (!rows.some((row) => cachedCanonicalSessionPath(row.path) === target)) {
+				try {
+					if ((await stat(target)).isFile()) {
+						return [await this.sessionRow(target, 0, undefined, undefined)];
 					}
+				} catch {
+					// fall through to the (possibly empty) sibling rows
 				}
-				return rows;
 			}
-			// Roots are siblings of the other roots. A session outside both the
-			// ledger and the sessions dir is presented alone (matching the
-			// registry-walking reader's behavior for parentless sessions).
-			const roots = family.filter((row) => row.rlmDepth === 0);
-			if (roots.some((row) => cachedCanonicalSessionPath(row.path) === target)) {
-				return roots;
-			}
-			try {
-				if (!(await stat(target)).isFile()) return [];
-			} catch {
-				return [];
-			}
-			return [await this.sessionRow(target, 0, undefined, undefined)];
-		});
+			return rows;
+		}
+		// Roots are siblings of the other roots. A session outside both the
+		// ledger and the sessions dir is presented alone (matching the
+		// registry-walking reader's behavior for parentless sessions).
+		const roots = family.filter((row) => row.rlmDepth === 0);
+		if (roots.some((row) => cachedCanonicalSessionPath(row.path) === target)) {
+			return roots;
+		}
+		try {
+			if (!(await stat(target)).isFile()) return [];
+		} catch {
+			return [];
+		}
+		return [await this.sessionRow(target, 0, undefined, undefined)];
 	}
 
 	private enqueue<T>(fn: () => Promise<T> | T): Promise<T> {
