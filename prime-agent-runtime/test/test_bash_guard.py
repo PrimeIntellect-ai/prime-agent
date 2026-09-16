@@ -987,7 +987,7 @@ class TrackedCwdDetectionTest(unittest.TestCase):
         words = bash_module._scan_shell_words(command)
         tracked = bash_module._tracked_cwd_at_words(command, words, "/ws")
         rm_index = next(i for i, w in enumerate(words) if w.value == "rm")
-        self.assertEqual(tracked[rm_index], [None])
+        self.assertIn(None, tracked[rm_index])
 
     def test_conditional_cd_keeps_preceding_candidates(self):
         command = "cd /outside && true || cd /workspace && rm -rf victim"
@@ -1874,6 +1874,42 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
         result = await bash("true && cd sub && rm -rf nested")
         self.assertEqual(result.exit_code, 0)
         self.assertFalse(self._tracked("sub", "nested").exists())
+
+    async def test_refuses_piped_command_text_into_stdin_shells(self):
+        # A pipeline feeding a bare shell interpreter runs the producer's
+        # output as commands; that text must be scanned.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            f"printf 'rm -rf {outside}\\n' | sh",
+            f"echo 'rm -rf {outside}' | sh",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # Benign pipelines still run.
+        result = await bash("printf 'echo hi\\n' | sh")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("hi", result.output)
+
+    async def test_refuses_rm_after_a_skipped_and_then_cd(self):
+        # A failed `&&` predecessor skips the cd back; execution continues
+        # at the next statement with the shell still outside.
+        outside = self._outside_target()
+        Path(outside, "victim").mkdir()
+        Path(outside, "victim", "file.txt").write_text("keep\n")
+        self._make_tree()
+        Path(self.test_dir, "victim").mkdir()
+        Path(self.test_dir, "victim", "file.txt").write_text("keep\n")
+        command = f"cd {outside}; false && cd {self.test_dir}; rm -rf victim"
+        with self.assertRaises(DestructiveRmRefusalError):
+            bash(command)
+        self.assertTrue(Path(outside, "victim", "file.txt").exists())
+        # A successful && cd back still allows the in-workspace deletion.
+        self._make_tree()
+        result = await bash("cd sub && rm -rf nested")
+        self.assertEqual(result.exit_code, 0)
 
     async def test_operands_after_end_of_options_are_checked(self):
         self._make_tree()

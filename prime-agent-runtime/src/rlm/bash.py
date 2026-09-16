@@ -3835,7 +3835,10 @@ def _tracked_cwd_at_words(
         return list(dict.fromkeys(values))
 
     states: list[str | None] = [start_cwd]
-    chain_states: list[str | None] = list(states)
+    # Directories from which the current chain can exit early: a failed
+    # command leaves the `&&` chain (and a `;` statement then runs in that
+    # directory), so every failing command's pre-state stays in play.
+    chain_states: list[str | None] = []
     stack: list[tuple[list[str | None], list[str | None]]] = []
     boundaries = _boundary_positions(command)
     boundary_index = 0
@@ -3858,7 +3861,7 @@ def _tracked_cwd_at_words(
                 may_skip = False
             else:  # ; | newline: a fresh statement
                 may_skip = False
-                chain_states = list(states)
+                states = dedupe(states + chain_states)
             boundary_index += 1
         if word.value in _CD_BUILTINS:
             targets: list[str] = []
@@ -3877,7 +3880,21 @@ def _tracked_cwd_at_words(
                 )
                 for state in states
             ]
-            states = dedupe(relocated if not may_skip else states + relocated)
+            definite = all(
+                target is not None and os.path.isdir(target) for target in relocated
+            )
+            if may_skip or not definite:
+                # The relocation may be skipped (|| continuation) or may
+                # fail (missing target): the earlier directories stay in
+                # play alongside the relocated ones.
+                chain_states = dedupe(chain_states + states)
+                states = dedupe(states + relocated)
+            else:
+                # The relocation provably runs and succeeds, so no earlier
+                # directory can survive it inside this chain.
+                states = dedupe(relocated)
+            chain_states = dedupe(chain_states + states)
+        elif word.starts_command:
             chain_states = dedupe(chain_states + states)
         result.append(list(states))
     return result
@@ -4094,6 +4111,60 @@ def _heredoc_bodies_reach_script_runners(command_without_bodies: str) -> bool:
     return bool(_script_runner_word_indices(_scan_shell_words(command_without_bodies)))
 
 
+def _interpret_shell_escapes(text: str) -> str:
+    """Interpret the printf-style escapes a producer may emit (`\\n`, `\\t`,
+    `\\r`) so piped command text scans the way the consuming shell reads it."""
+    return re.sub(
+        r"\\([ntr])",
+        lambda match: {"n": "\n", "t": "\t", "r": "\r"}[match.group(1)],
+        text,
+    )
+
+
+def _stdin_shell_feed_texts(prepared: str, words: list[_ShellWord]) -> list[tuple[str, int]]:
+    """(producer text, interpreter word index) pairs for pipelines feeding a
+    bare shell interpreter: `printf 'rm -rf x\\n' | sh` runs the producer's
+    output as commands, so that text must be scanned. Only interpreters that
+    read stdin qualify — no file/script argument and no `-c` payload — and
+    only when a pipe feeds them."""
+    boundaries = _boundary_positions(prepared)
+    feeds: list[tuple[str, int]] = []
+    for index, word in enumerate(words):
+        if os.path.basename(word.value) not in _SHELL_DASH_C_INTERPRETERS:
+            continue
+        reads_stdin = True
+        for follower in words[index + 1 :]:
+            if follower.starts_command:
+                break
+            token = follower.value
+            if token.startswith("-") and token != "-":
+                if "c" in token[1:] and not token.startswith("--"):
+                    reads_stdin = False  # a -c payload: not a stdin shell
+                continue
+            reads_stdin = False  # a file/script argument
+            break
+        if not reads_stdin:
+            continue
+        pipe_position = None
+        segment_start = 0
+        for position, kind in boundaries:
+            if position >= word.start:
+                break
+            if kind == "|":
+                pipe_position = position
+            elif kind in (";", "&", "&&", "||", "\n", "(", ")"):
+                segment_start = position
+        if pipe_position is None:
+            continue
+        producer_words = [
+            other for other in words if segment_start < other.start < pipe_position
+        ]
+        if not producer_words:
+            continue
+        feeds.append((" ".join(other.value for other in producer_words), index))
+    return feeds
+
+
 def _rm_guard_scan_texts(normalized: str) -> tuple[str, list[str]]:
     """Scan texts for the rm guard: the command with here-document bodies
     blanked, plus each body that can reach a script runner as its own
@@ -4299,6 +4370,38 @@ def _guard_destructive_rm(command: str, allow_destructive_rm: bool) -> None:
                 for candidate in tracked_at[word_index]
             )
         )
+        # Pipelines feeding a bare stdin shell run the producer's output as
+        # commands: scan that text against the interpreter's tracked state.
+        for feed_text, interp_index in _stdin_shell_feed_texts(prepared, words):
+            for variant in (feed_text, _interpret_shell_escapes(feed_text)):
+                feed_prepared = _mask_shell_redirections(variant)
+                feed_words = _scan_shell_words(feed_prepared)
+                if _wrapped_payloads_hide_recursive_force_rm(
+                    feed_prepared, words=feed_words
+                ):
+                    raise DestructiveRmRefusalError(_format_rm_wrapper_refusal())
+                feed_invocations = _find_rf_rm_invocations_in_words(feed_words)
+                if feed_invocations:
+                    for start in tracked_at[interp_index]:
+                        feed_tracked_at = _tracked_cwd_at_words(
+                            feed_prepared,
+                            feed_words,
+                            start,
+                            home_untrackable=reassigns_home,
+                            pwd_untrackable=reassigns_pwd,
+                            cdpath_untrackable=cdpath_untrackable,
+                        )
+                        reasons.extend(
+                            _rm_invocation_reasons(
+                                feed_words,
+                                feed_invocations,
+                                workspace_root,
+                                feed_tracked_at,
+                                reassigns_home,
+                                reassigns_pwd,
+                            )
+                        )
+                reasons.extend(_unresolvable_expansion_rm_reasons(feed_words))
     # ---- body passes ----
     for body_text in body_texts:
         body_prepared = _mask_shell_redirections(body_text)
