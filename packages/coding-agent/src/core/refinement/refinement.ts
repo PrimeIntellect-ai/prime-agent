@@ -549,10 +549,9 @@ export function scoreHarnessEntryForQuery(entry: HarnessEntry, terms: HarnessQue
 function compareRankedHarnessEntries(a: HarnessEntry, b: HarnessEntry, terms: HarnessQueryTerms): number {
 	const scoreDifference = scoreHarnessEntryForQuery(b, terms) - scoreHarnessEntryForQuery(a, terms);
 	if (scoreDifference !== 0) return scoreDifference;
-	// Equal scores tie on stable identifier order only. An `updated_at` recency
-	// tiebreak would reshuffle equal-score siblings whenever any unrelated entry
-	// is touched, flipping which entries reach the visible window and busting
-	// the provider prefix cache for the digest delivered at the next boundary.
+	// Equal scores tie on stable identifier order (path, title, id), so
+	// touching unrelated entries never reshuffles equal-score siblings and the
+	// rendered digest keeps a stable prefix for provider prompt-cache reuse.
 	return [a.path, a.title, a.id].join("\0").localeCompare([b.path, b.title, b.id].join("\0"));
 }
 

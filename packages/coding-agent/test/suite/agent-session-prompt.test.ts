@@ -1125,7 +1125,11 @@ describe("Harness digest at cold boundaries", () => {
 
 		// Prove the skip was fingerprint-based, not string-based: the fresh
 		// render really did drift with the new last-4 messages.
-		const freshDigest = (resumed.session as unknown as { _harnessDigest(): string })._harnessDigest();
+		const freshDigest = (
+			resumed.session as unknown as {
+				_harnessDigestWithFingerprint(): { digest: string; stateFingerprint: string };
+			}
+		)._harnessDigestWithFingerprint().digest;
 		expect(HARNESS_DIGEST_PREFIX + freshDigest + HARNESS_DIGEST_SUFFIX).not.toBe(getMessageText(after[0]));
 	});
 

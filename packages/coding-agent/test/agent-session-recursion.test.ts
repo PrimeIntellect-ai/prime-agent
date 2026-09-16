@@ -2830,7 +2830,11 @@ describe("AgentSession RLM session dir", () => {
 		);
 		const root = createSession(SessionManager.inMemory(tempDir), undefined, undefined, false, ephemeralDir);
 
-		const digest = (root as unknown as { _harnessDigest(): string })._harnessDigest();
+		const digest = (
+			root as unknown as {
+				_harnessDigestWithFingerprint(): { digest: string; stateFingerprint: string };
+			}
+		)._harnessDigestWithFingerprint().digest;
 
 		expect(root.systemPrompt).not.toContain("Ephemeral note");
 		expect(digest).toContain("Ephemeral note");

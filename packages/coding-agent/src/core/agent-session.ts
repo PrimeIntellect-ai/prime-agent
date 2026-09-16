@@ -9128,17 +9128,6 @@ export class AgentSession {
 	}
 
 	/**
-	 * The compact harness digest delivered at cold context boundaries (session
-	 * start, resume, compaction head). Kept as the single-material wrapper for
-	 * tests that characterize the digest via internals.
-	 */
-	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: exercised by tests through internals casts
-	private _harnessDigest(): string {
-		const { state, options } = this._harnessDigestMaterial();
-		return formatHarnessStateForPrompt(state, options);
-	}
-
-	/**
 	 * Digest plus the fingerprint of the state that produced it. Cold boundaries
 	 * compare fingerprints instead of rendered text: relevance query terms
 	 * change per turn, so a rendered-text comparison re-delivers an unchanged
@@ -9222,8 +9211,9 @@ export class AgentSession {
 
 	/**
 	 * Whether the newest in-context digest already reflects the current harness
-	 * state. The fingerprint decides; legacy digests persisted before
-	 * fingerprints existed fall back to a rendered-text comparison.
+	 * state. A digest is fresh when its state fingerprint matches the current
+	 * one; a digest without a fingerprint is compared by rendered
+	 * text instead.
 	 */
 	private _harnessDigestIsFresh(
 		latest: { digest: string; stateFingerprint?: string },
@@ -9261,15 +9251,6 @@ export class AgentSession {
 			}
 		}
 		return latest;
-	}
-
-	/**
-	 * Newest in-context digest text. Kept for tests that characterize the
-	 * newest-digest preference via internals casts.
-	 */
-	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: exercised by tests through internals casts
-	private _latestContextHarnessDigest(): string | undefined {
-		return this._latestContextHarnessDigestDetails()?.digest;
 	}
 
 	/** Global harness state overlaid with this session's local state, when persisted. */
