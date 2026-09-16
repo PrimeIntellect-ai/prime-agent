@@ -281,6 +281,19 @@ describe("incident notice derivation", () => {
 		expect(deriveIncidentNotices(stale, Date.now())).toEqual([]);
 	});
 
+	it("rejects future-dated entries outside the CLI window", () => {
+		const base = Date.now();
+		// The CLI bounds events by >= since && <= until (buildIncidentReport); a
+		// bogus future timestamp (clock skew, a manual edit) must not pin a
+		// notice beyond the window.
+		const futureCrash = logLine({
+			ts: new Date(base + 60 * 60_000).toISOString(),
+			component: "coding-agent.daemon-supervisor",
+			msg: "Session worker 5b1d3aeb91ee stderr: uncaught exception: Error: write EPIPE",
+		});
+		expect(deriveIncidentNotices(fixtureEntries([futureCrash]), base)).toEqual([]);
+	});
+
 	it("collapses repeated identical crashes to a single notice line", () => {
 		const base = Date.now();
 		// The daemon logs the crash twice (worker log + stderr forward, deduped by
@@ -500,6 +513,24 @@ describe("agents view incident notices", () => {
 		} finally {
 			stopThemeWatcher();
 		}
+	});
+
+	it("drops future-dated log lines instead of surfacing them", () => {
+		useTempAgentDir();
+		const base = Date.now();
+		writeAgentLog([
+			logLine({
+				ts: new Date(base + 60 * 60_000).toISOString(),
+				component: "coding-agent.daemon-supervisor",
+				msg: "Session worker 5b1d3aeb91ee stderr: uncaught exception: Error: write EPIPE",
+			}),
+		]);
+		const state = createIncidentNoticeState();
+		// CLI window parity: entries are bounded by >= since && <= until, so a
+		// future-dated crash never enters the window nor pins a notice.
+		expect(refreshIncidentNoticeState(state, getAgentLogPath(), base)).toBe(false);
+		expect(state.entries).toHaveLength(0);
+		expect(state.notice).toBeUndefined();
 	});
 
 	it("holds back a partially-written final line until it completes", () => {

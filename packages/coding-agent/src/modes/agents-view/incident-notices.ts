@@ -130,7 +130,9 @@ function createNotice(
  */
 export function deriveIncidentNotices(entries: readonly IncidentLogEntry[], nowMs: number): IncidentNotice[] {
 	const sinceMs = nowMs - INCIDENT_NOTICE_WINDOW_MS;
-	const windowed = entries.filter((entry) => entry.timeMs >= sinceMs);
+	// CLI window parity: buildIncidentReport windows events by [sinceMs, untilMs],
+	// so a future-dated entry (clock skew, a bogus timestamp) is outside it too.
+	const windowed = entries.filter((entry) => entry.timeMs >= sinceMs && entry.timeMs <= nowMs);
 	const workerPids = collectWorkerPidMap(windowed);
 	const events = collectIncidentEvents(windowed, workerPids);
 	events.sort((a, b) => a.timeMs - b.timeMs);
@@ -372,10 +374,15 @@ export function refreshIncidentNoticeState(state: IncidentNoticeState, logPath: 
 		return false;
 	}
 	const sinceMs = nowMs - INCIDENT_NOTICE_WINDOW_MS;
+	// CLI window parity (buildIncidentReport bounds events by >= since && <=
+	// until): future-dated entries fall outside the window and never surface.
 	const parseWindowedLines = (lines: readonly string[]): IncidentLogEntry[] =>
 		lines
 			.map((line) => parseIncidentLogLine(line))
-			.filter((entry): entry is IncidentLogEntry => entry !== undefined && entry.timeMs >= sinceMs);
+			.filter(
+				(entry): entry is IncidentLogEntry =>
+					entry !== undefined && entry.timeMs >= sinceMs && entry.timeMs <= nowMs,
+			);
 	// Mirror the CLI's [agent.jsonl.old, agent.jsonl] source order (merge sorts
 	// by time anyway), tailing .old with the same bounded tail as the main log.
 	let parsed: IncidentLogEntry[] = [];
