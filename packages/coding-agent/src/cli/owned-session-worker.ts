@@ -351,6 +351,13 @@ export async function runOwnedSessionWorkerFrontend(
 			stdio,
 		});
 		currentChild = child;
+		// A bridge write into a worker that closed its stdin lands as an
+		// unhandled 'error' event on that pipe (write EPIPE) and takes down the
+		// whole frontend, defeating the crash-recovery loop below. The child
+		// 'close' handler already owns the fallout (failing pending RPC
+		// commands, relaunching with the recovery descriptor), so this listener
+		// only stops the pipe error from becoming a fatal one.
+		child.stdin?.on("error", () => {});
 		if (!interactive) {
 			const childInput = child.stdin ?? undefined;
 			const childOutput = child.stdout ?? undefined;

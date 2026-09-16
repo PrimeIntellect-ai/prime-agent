@@ -323,4 +323,58 @@ describe("owned session worker processes", () => {
 		expect(existsSync(`${pidPath}.terminated`)).toBe(true);
 		await waitForProcessGone(workerPid);
 	});
+
+	it("absorbs a bridge write EPIPE when the worker closes its stdin mid-session", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-owned-worker-test-"));
+		tempDirs.push(root);
+		const pidPath = join(root, "worker.pid");
+		const frontend = spawnFrontend(["--mode", "rpc"], pidPath, true, {
+			PRIME_AGENT_TEST_CLOSE_STDIN_ON_COMMAND: "close_stdin",
+		});
+		let stdout = "";
+		frontend.stdout?.on("data", (chunk: Buffer) => {
+			stdout += chunk.toString("utf8");
+		});
+		const workerPid = await waitForWorkerPid(pidPath);
+		frontend.stdin?.write(`${JSON.stringify({ id: "close-1", type: "close_stdin" })}\n`);
+		const ackDeadline = Date.now() + 10_000;
+		while (!stdout.includes("close_stdin")) {
+			if (Date.now() > ackDeadline) {
+				throw new Error("Owned worker did not acknowledge close_stdin");
+			}
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+		}
+		// The worker is alive but deaf: its stdin read end is closed, so this
+		// bridge write EPIPEs on the frontend side. Before the fix that pipe
+		// error crashed the whole frontend instead of letting the close-based
+		// recovery below own the fallout.
+		let frontendExit: { code: number | null; signal: string | null } | undefined;
+		const onEarlyExit = (code: number | null, signal: NodeJS.Signals | null) => {
+			frontendExit = { code, signal };
+		};
+		frontend.once("exit", onEarlyExit);
+		frontend.stdin?.write(`${JSON.stringify({ id: "after-1", type: "get_state" })}\n`);
+		await new Promise((resolveGrace) => setTimeout(resolveGrace, 500));
+		expect(frontendExit).toBeUndefined();
+		frontend.off("exit", onEarlyExit);
+		frontend.stdin?.end();
+
+		// The worker dying now drives the normal recovery: the pending command
+		// is failed explicitly and the frontend exits instead of hanging.
+		process.kill(workerPid, "SIGKILL");
+		const exit = await waitForExit(frontend);
+		children.delete(frontend);
+		expect(exit).toEqual({ code: 1, signal: null });
+		expect(stdout).toBe(
+			`${JSON.stringify({ id: "close-1", type: "response", command: "close_stdin", success: true })}\n` +
+				`${JSON.stringify({
+					id: "after-1",
+					type: "response",
+					command: "get_state",
+					success: false,
+					error: "The isolated session worker stopped during this command; its result is uncertain and was not replayed",
+				})}\n`,
+		);
+		await waitForProcessGone(workerPid);
+	});
 });

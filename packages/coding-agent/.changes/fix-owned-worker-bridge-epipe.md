@@ -1,0 +1,1 @@
+- Fixed a bridge write into a dead or stopped owned session worker (write EPIPE) crashing the whole CLI frontend: pipe errors are now absorbed so the existing worker close-based recovery (failing pending RPC commands and relaunching) runs instead.

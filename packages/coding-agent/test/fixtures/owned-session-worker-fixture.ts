@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, writeFileSync } from "node:fs";
 import {
 	closeOwnedSessionWorkerOwnerWatch,
 	installOwnedSessionWorkerOwnerWatch,
@@ -46,6 +46,16 @@ if (process.env.PRIME_AGENT_INTERNAL_OWNED_WORKER === "1") {
 			}
 			if (process.env.PRIME_AGENT_TEST_CRASH_ON_COMMAND === command.type) {
 				process.exit(1);
+			}
+			if (process.env.PRIME_AGENT_TEST_CLOSE_STDIN_ON_COMMAND === command.type) {
+				outputResponse(command);
+				// Close the read end of the bridge pipe (fd 0) while the worker
+				// stays alive: the next frontend bridge write EPIPEs, the same
+				// kernel-level condition a dying worker leaves behind before
+				// Node tears its pipe down. An EPIPE race here used to be
+				// nondeterministic; closing the fd makes it reproducible.
+				closeSync(0);
+				return;
 			}
 			if (command.type === "ack_result") {
 				if (process.env.PRIME_AGENT_TEST_CRASH_ON_ACK === "1" && pidPath && !existsSync(`${pidPath}.crashed`)) {
