@@ -121,8 +121,13 @@ import {
 	loadContextTreeChildFromDisk,
 	loadContextTreeChildrenFromDisk,
 } from "./context-tree.js";
-import type { AgentCronJob, AgentRlmHeartbeatController, AgentRlmHeartbeatStatusUpdate } from "./cron-jobs.js";
-import { normalizeHeartbeatDeliveryMode } from "./cron-jobs.js";
+import {
+	type AgentCronJob,
+	AgentCronJobStore,
+	type AgentRlmHeartbeatController,
+	type AgentRlmHeartbeatStatusUpdate,
+	normalizeHeartbeatDeliveryMode,
+} from "./cron-jobs.js";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.js";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.js";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.js";
@@ -214,6 +219,7 @@ import {
 	isPermanentProviderFailureKind,
 	type ProviderWaitPolicy,
 	parseProviderResetMs,
+	providerParkDecision,
 	providerRetryDelay,
 	providerRetryPolicy,
 	providerStreamFailureKind,
@@ -1085,6 +1091,24 @@ const RLM_REGISTRY_ANSWER_PREVIEW_MAX_LENGTH = 200;
 /** Hard cap for labels carried into kernel roster entries (snapshots keep the full prompt). */
 const RLM_REGISTRY_LABEL_MAX_LENGTH = 200;
 
+/** Session-log entry recorded when a quota-blocked session parks until the provider reset. */
+const QUOTA_PARK_CUSTOM_ENTRY_TYPE = "provider_quota_park";
+/** Session-log entry recorded when a parked session resumes (scheduled wake or early recovery). */
+const QUOTA_RESUME_CUSTOM_ENTRY_TYPE = "provider_quota_resume";
+/** Label for the durable one-shot wake that resumes a parked session. */
+const QUOTA_RESUME_CRON_LABEL = "quota-resume";
+/**
+ * In-context marker delivered on resume: tells the model the pause happened and
+ * that it should continue the interrupted task. The same text is the prompt of
+ * the durable wake job, so daemon-delivered resumes read identically.
+ */
+const QUOTA_RESUME_MARKER_TEXT =
+	"<provider_quota_resumed>\n" +
+	"The provider usage limit that paused this session has been reported as reset; this resume is automatic (retry.provider.waitForUsage.pauseUntilReset). Continue the interrupted task from where it stopped.\n" +
+	"</provider_quota_resumed>";
+/** Node caps timers at 2^31-1 ms; longer delays overflow setTimeout and fire after ~1ms. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 function noopRlmChildAbort(): void {}
 function noopRlmChildEventUnsubscribe(): void {}
 
@@ -1461,6 +1485,28 @@ export class AgentSession {
 	private _retryAuthFailureSources: AuthSourceToken[] = [];
 	/** Ongoing wait-for-recovery state: pings issued and when the wait started. */
 	private _providerWait: { attempts: number; startedAtMs: number } | undefined = undefined;
+	/**
+	 * Quota park state: the session ended its turn because the provider-reported
+	 * usage reset was beyond the bounded wait, and a wake (in-process timer plus
+	 * a durable one-shot scheduled job) will resume the task automatically. While
+	 * parked the session itself makes no model calls.
+	 */
+	private _quotaPark:
+		| {
+				/** Parks consumed in this quota episode; bounded by waitForUsage.maxParks. */
+				parkCount: number;
+				/** Wall-clock wake time for the current park. */
+				resumeAtMs: number;
+				/** Id of the durable one-shot wake job, when the session persists artifacts. */
+				jobId?: string;
+				/** Pending in-process wake timer for the current park. */
+				timer?: ReturnType<typeof setTimeout>;
+				/** True from the wake until the park state clears (the resume probe is running). */
+				waking?: boolean;
+		  }
+		| undefined = undefined;
+	/** Lazily built session-artifact store for durable quota-resume wake jobs. */
+	private _quotaResumeJobStore: AgentCronJobStore | undefined = undefined;
 	/** Set while turns are routed to the user-configured backup model. */
 	private _backupModel:
 		| {
@@ -4381,6 +4427,11 @@ export class AgentSession {
 					this._providerWait = undefined;
 					this._retryAuthFailureSources = [];
 				}
+				// A parked session that completes a model call has its quota back:
+				// clear the park (cancelling the pending wake) and resume the task.
+				if (assistantMsg.stopReason !== "error" && this._quotaPark) {
+					this._completeQuotaParkResume();
+				}
 				if (this._accountGoalUsageForAssistantMessage(assistantMsg)) {
 					const message = createGoalContextMessage(this._goalState, "budget_limit");
 					const normalized = normalizeMessageContent(message.content);
@@ -4838,6 +4889,12 @@ export class AgentSession {
 			}
 			this._scheduledAutoRefineTimers.clear();
 			this._disarmAutonomousSubagentKeepAlive();
+			// The in-process wake dies with the session; the durable one-shot job
+			// stays so a restart can still restore the session and resume the task.
+			if (this._quotaPark) {
+				if (this._quotaPark.timer) clearTimeout(this._quotaPark.timer);
+				this._quotaPark = undefined;
+			}
 			this._serializedPlanInFlight = undefined;
 			this._serializedExplicitRefineOptions = undefined;
 			this._pendingRequestedRefine = undefined;
@@ -12763,6 +12820,22 @@ export class AgentSession {
 		const resetMs = providerStreamFailureRetryAfterMs(message) ?? parseProviderResetMs(message.errorMessage);
 		const decision = providerWaitDecision(pingAttempt, Date.now() - startedAtMs, resetMs, policy);
 		if (decision.kind === "abort") {
+			// A quota reset beyond the bounded wait parks the session instead of
+			// dying mid-task: end the turn cleanly and resume at the reset time.
+			if (reason === "usage" && decision.reason === "reset-too-far") {
+				const park = providerParkDecision(this._quotaPark?.parkCount ?? 0, resetMs, policy);
+				if (park.kind === "park") {
+					return this._parkForQuotaReset(message, options, park.delayMs, decision.message, pingAttempt - 1);
+				}
+			}
+			// A quota wait that gives up ends the episode's park: its wake has
+			// already fired (or was never armed), so nothing else would resume it.
+			// Future-scheduled parks survive; only stale post-wake parks clear.
+			const stalePark = this._quotaPark;
+			if (reason === "usage" && stalePark !== undefined && stalePark.resumeAtMs <= Date.now()) {
+				this._cancelQuotaParkWake(stalePark);
+				this._quotaPark = undefined;
+			}
 			this._markProviderAuthStaleForRetryFailure(message, options);
 			const restoredModel = this._restorePrimaryModelAfterBackup();
 			this._emit({
@@ -12792,6 +12865,232 @@ export class AgentSession {
 			},
 			decision.delayMs,
 		);
+	}
+
+	/**
+	 * Park a quota-blocked session: end the failed turn cleanly, record the
+	 * parked transition in the session log, and schedule one wake (a durable
+	 * one-shot scheduled job plus an in-process timer) at the provider-reported
+	 * reset time. While parked the session makes no model calls; the wake
+	 * delivers the resume marker, whose first model call probes the quota.
+	 */
+	private _parkForQuotaReset(
+		message: AssistantMessage,
+		options:
+			| {
+					markAuthStaleOnFailure?: boolean;
+					authSourceTokens?: readonly AuthSourceToken[];
+			  }
+			| undefined,
+		pauseMs: number,
+		abortMessage: string,
+		parkedAttempt: number,
+	): boolean {
+		const existing = this._quotaPark;
+		if (existing !== undefined && existing.resumeAtMs > Date.now()) {
+			// Already parked for this window (e.g. a heartbeat turn failed while
+			// parked): keep the scheduled wake, consume no park, end the turn.
+			this._finishQuotaParkedTurn(
+				message,
+				options,
+				parkedAttempt,
+				`Session is parked until ${new Date(existing.resumeAtMs).toISOString()} waiting for the provider usage reset; this turn ended without a retry: ${message.errorMessage || "unknown error"}`,
+			);
+			return false;
+		}
+		this._cancelQuotaParkWake(existing);
+		const parkCount = (existing?.parkCount ?? 0) + 1;
+		const resumeAtMs = Date.now() + pauseMs;
+		const jobId = this._createQuotaResumeJob(resumeAtMs);
+		const timer = this._scheduleQuotaResumeTimer(resumeAtMs);
+		this._quotaPark = {
+			parkCount,
+			resumeAtMs,
+			...(jobId !== undefined ? { jobId } : {}),
+			...(timer !== undefined ? { timer } : {}),
+		};
+		this.sessionManager.appendCustomEntry(QUOTA_PARK_CUSTOM_ENTRY_TYPE, {
+			resumeAt: new Date(resumeAtMs).toISOString(),
+			parkCount,
+			...(jobId !== undefined ? { jobId } : {}),
+			provider: message.provider,
+		});
+		this._finishQuotaParkedTurn(
+			message,
+			options,
+			parkedAttempt,
+			`${abortMessage}. Session parked until ${new Date(resumeAtMs).toISOString()} and will resume automatically (retry.provider.waitForUsage.pauseUntilReset): ${message.errorMessage || "unknown error"}`,
+		);
+		return false;
+	}
+
+	/** Shared park tail: mark auth stale, surface the parked status, end the retry and the turn. */
+	private _finishQuotaParkedTurn(
+		message: AssistantMessage,
+		options:
+			| {
+					markAuthStaleOnFailure?: boolean;
+					authSourceTokens?: readonly AuthSourceToken[];
+			  }
+			| undefined,
+		parkedAttempt: number,
+		finalError: string,
+	): void {
+		this._markProviderAuthStaleForRetryFailure(message, options);
+		this._emit({ type: "auto_retry_end", success: false, attempt: parkedAttempt, finalError });
+		this._retryAttempt = 0;
+		this._providerWait = undefined;
+		this._retryAuthFailureSources = [];
+		this._resolveRetry();
+	}
+
+	/**
+	 * Durable wake: a one-shot scheduled job in this session's artifacts, so a
+	 * restart or closed worker still restores the session and delivers the
+	 * resume marker at the reset time. Best-effort: the in-process timer covers
+	 * live sessions when this cannot be persisted (e.g. in-memory sessions).
+	 */
+	private _createQuotaResumeJob(resumeAtMs: number): string | undefined {
+		const sessionFile = this.sessionFile;
+		const artifactDir = this.sessionManager.getSessionArtifactDir();
+		if (!sessionFile || !artifactDir) {
+			return undefined;
+		}
+		try {
+			const store = this._quotaResumeJobStore ?? AgentCronJobStore.forSessionArtifacts();
+			store.registerSessionArtifact(this.sessionId, artifactDir);
+			this._quotaResumeJobStore = store;
+			const job = store.create({
+				activeSessionId: this.sessionId,
+				sessionId: this.sessionId,
+				sessionFile,
+				cwd: this.sessionManager.getCwd(),
+				label: QUOTA_RESUME_CRON_LABEL,
+				prompt: QUOTA_RESUME_MARKER_TEXT,
+				scheduleText: `at ${new Date(resumeAtMs).toISOString()}`,
+				runtimeKind: this._rlmDepth > 0 ? "subagent" : "top-level",
+			});
+			return job.id;
+		} catch {
+			return undefined;
+		}
+	}
+
+	/** In-process wake for live sessions; unref'd so a parked session never holds the process open. */
+	private _scheduleQuotaResumeTimer(resumeAtMs: number): ReturnType<typeof setTimeout> | undefined {
+		const delayMs = Math.min(Math.max(resumeAtMs - Date.now(), 0), MAX_TIMER_DELAY_MS);
+		const timer = setTimeout(() => {
+			void this._resumeFromQuotaPark();
+		}, delayMs);
+		timer.unref();
+		return timer;
+	}
+
+	/** Cancel a park's pending wake: the in-process timer and the durable job. */
+	private _cancelQuotaParkWake(
+		park: { resumeAtMs: number; jobId?: string; timer?: ReturnType<typeof setTimeout> } | undefined,
+	): void {
+		if (!park) return;
+		if (park.timer) {
+			clearTimeout(park.timer);
+			park.timer = undefined;
+		}
+		if (park.jobId !== undefined && this._quotaResumeJobStore) {
+			try {
+				this._quotaResumeJobStore.cancel(park.jobId);
+			} catch {
+				// Best effort: a completed or already-cancelled job is fine to leave.
+			}
+		}
+		park.jobId = undefined;
+	}
+
+	/**
+	 * Wake a parked session and deliver the resume marker: its first model call
+	 * probes the quota, resumes the interrupted task on success, and re-parks
+	 * with the newly reported reset on failure. The durable wake job and this
+	 * timer race for live sessions; whoever lands first owns the resume — the
+	 * job's prompt is the same marker text, so both paths read identically.
+	 */
+	private async _resumeFromQuotaPark(): Promise<void> {
+		const park = this._quotaPark;
+		if (!park || park.waking || park.resumeAtMs > Date.now()) {
+			return;
+		}
+		if (park.jobId !== undefined && this._quotaResumeJobStore) {
+			let cancelled: AgentCronJob | undefined;
+			try {
+				cancelled = this._quotaResumeJobStore.cancel(park.jobId);
+			} catch {
+				cancelled = undefined;
+			}
+			if (cancelled === undefined) {
+				const job = this._findQuotaResumeJob(park.jobId);
+				if (job?.status === "completed") {
+					// The daemon dispatched the durable wake; its prompt drives the resume.
+					park.waking = true;
+					return;
+				}
+				if (job?.status === "cancelled") {
+					// The user cancelled the wake: honor it and drop the park.
+					this._quotaPark = undefined;
+					return;
+				}
+				// Unreadable or gone: fall through, the timer owns the resume.
+			}
+		}
+		park.waking = true;
+		try {
+			await this._queuePreparedPrompt("followUp", QUOTA_RESUME_MARKER_TEXT, undefined, {
+				source: "internal",
+				priority: "background",
+				resumeIfIdle: true,
+			});
+		} catch {
+			// A failed admission must not claim a wake: un-mark so a later quota
+			// failure can re-park with a fresh schedule.
+			park.waking = false;
+		}
+	}
+
+	private _findQuotaResumeJob(jobId: string): AgentCronJob | undefined {
+		if (!this._quotaResumeJobStore) {
+			return undefined;
+		}
+		try {
+			return this._quotaResumeJobStore.list().find((job) => job.id === jobId);
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
+	 * A parked session completed a model call successfully: the quota is back.
+	 * Clear the park (cancelling any pending wake), record the resumed
+	 * transition, and — unless this success WAS the wake probe — deliver the
+	 * resume marker so the interrupted task continues right away.
+	 */
+	private _completeQuotaParkResume(): void {
+		const park = this._quotaPark;
+		if (!park) return;
+		this._cancelQuotaParkWake(park);
+		const wasWaking = park.waking === true;
+		const restoredModel = this._restorePrimaryModelAfterBackup();
+		this._quotaPark = undefined;
+		this.sessionManager.appendCustomEntry(QUOTA_RESUME_CUSTOM_ENTRY_TYPE, {
+			outcome: wasWaking ? "wake" : "early",
+			...(restoredModel ? { restoredModel } : {}),
+		});
+		if (!wasWaking) {
+			void this._queuePreparedPrompt("followUp", QUOTA_RESUME_MARKER_TEXT, undefined, {
+				source: "internal",
+				priority: "background",
+				resumeIfIdle: true,
+			}).catch(() => {
+				// The early-resume marker could not be queued; the park is cleared,
+				// so a later quota failure parks again with a fresh schedule.
+			});
+		}
 	}
 
 	/**
@@ -12846,6 +13145,11 @@ export class AgentSession {
 
 	get isRetrying(): boolean {
 		return this._retryPromise !== undefined;
+	}
+
+	/** True while the session is parked waiting out a provider-reported usage reset. */
+	get isQuotaParked(): boolean {
+		return this._quotaPark !== undefined;
 	}
 
 	get hasAcceptedPromptInFlight(): boolean {

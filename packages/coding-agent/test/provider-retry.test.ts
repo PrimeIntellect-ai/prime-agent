@@ -5,6 +5,7 @@ import {
 	DEFAULT_PROVIDER_WAIT_POLICY,
 	type ProviderWaitPolicy,
 	parseProviderResetMs,
+	providerParkDecision,
 	providerRetryDelay,
 	providerWaitClass,
 	providerWaitDecision,
@@ -75,6 +76,9 @@ const TEST_WAIT_POLICY: ProviderWaitPolicy = {
 	maxDelayMs: 300_000,
 	maxAttempts: 30,
 	maxWaitMs: 900_000,
+	pauseUntilReset: true,
+	maxPauseMs: 86_400_000,
+	maxParks: 8,
 };
 
 describe("providerWaitClass", () => {
@@ -193,6 +197,48 @@ describe("providerWaitDecision", () => {
 			maxDelayMs: 300_000,
 			maxAttempts: 30,
 			maxWaitMs: 900_000,
+			pauseUntilReset: true,
+			maxPauseMs: 86_400_000,
+			maxParks: 8,
+		});
+	});
+});
+
+describe("providerParkDecision", () => {
+	it("parks until the reported reset plus a grace when the bounded wait cannot cover it", () => {
+		// Subscription windows reported in hours ("Try again in 2 hours").
+		const decision = providerParkDecision(0, 2 * 3_600_000, TEST_WAIT_POLICY);
+		expect(decision).toEqual({
+			kind: "park",
+			delayMs: 2 * 3_600_000 + 30_000,
+		});
+	});
+
+	it("caps the park at maxPauseMs so long-horizon resets still get probed", () => {
+		const decision = providerParkDecision(0, 10 * 86_400_000, TEST_WAIT_POLICY);
+		expect(decision).toEqual({ kind: "park", delayMs: 86_400_000 });
+	});
+
+	it("never parks when the pause setting is disabled", () => {
+		const decision = providerParkDecision(0, 3_600_000, { ...TEST_WAIT_POLICY, pauseUntilReset: false });
+		expect(decision).toEqual({ kind: "none", reason: "disabled" });
+	});
+
+	it("refuses to park once the park budget is spent", () => {
+		const decision = providerParkDecision(8, 3_600_000, TEST_WAIT_POLICY);
+		expect(decision).toEqual({ kind: "none", reason: "park-budget" });
+		// maxParks 0 disables parking outright, including the first park.
+		expect(providerParkDecision(0, 3_600_000, { ...TEST_WAIT_POLICY, maxParks: 0 })).toEqual({
+			kind: "none",
+			reason: "park-budget",
+		});
+	});
+
+	it("never parks without a provider-reported reset time", () => {
+		// Blind parks would guess a wake time; the bounded wait keeps its abort.
+		expect(providerParkDecision(0, undefined, TEST_WAIT_POLICY)).toEqual({
+			kind: "none",
+			reason: "no-reset",
 		});
 	});
 });

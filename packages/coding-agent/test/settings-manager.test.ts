@@ -595,6 +595,9 @@ describe("SettingsManager", () => {
 				maxDelayMs: 300_000,
 				maxAttempts: 30,
 				maxWaitMs: 900_000,
+				pauseUntilReset: true,
+				maxPauseMs: 86_400_000,
+				maxParks: 8,
 			});
 			expect(manager.getProviderBackupModel()).toBeUndefined();
 		});
@@ -609,6 +612,9 @@ describe("SettingsManager", () => {
 							maxDelayMs: 60_000,
 							maxAttempts: 10,
 							maxWaitMs: 120_000,
+							pauseUntilReset: false,
+							maxPauseMs: 3_600_000,
+							maxParks: 3,
 						},
 					},
 				},
@@ -620,7 +626,26 @@ describe("SettingsManager", () => {
 				maxDelayMs: 60_000,
 				maxAttempts: 10,
 				maxWaitMs: 120_000,
+				pauseUntilReset: false,
+				maxPauseMs: 3_600_000,
+				maxParks: 3,
 			});
+		});
+
+		it("clamps very large pause bounds to the maximum park duration", () => {
+			const manager = SettingsManager.inMemory({
+				retry: { provider: { waitForUsage: { maxPauseMs: 365 * 86_400_000, maxParks: 99 } } },
+			});
+
+			const wait = manager.getProviderWaitSettings();
+			expect(wait.maxPauseMs).toBe(7 * 86_400_000);
+			expect(wait.maxParks).toBe(99);
+			// Non-finite park settings fall back to the defaults, like the wait bounds.
+			const invalid = SettingsManager.inMemory({
+				retry: { provider: { waitForUsage: { maxPauseMs: Number.NaN, maxParks: -1 } } },
+			}).getProviderWaitSettings();
+			expect(invalid.maxPauseMs).toBe(86_400_000);
+			expect(invalid.maxParks).toBe(0);
 		});
 
 		it("clamps non-finite wait bounds to the defaults", () => {
