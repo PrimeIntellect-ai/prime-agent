@@ -1947,6 +1947,35 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
         result = await bash("echo 'rm -rf /printed'; git status | sh")
         self.assertEqual(result.exit_code, 0)
 
+    async def test_refuses_wrapper_payloads_named_by_expansion(self):
+        # `sh -c "$SCRIPT"` runs whatever the variable holds; the payload
+        # cannot be scanned literally.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            f"SCRIPT='rm -rf {outside}'; sh -c \"$SCRIPT\"",
+            f'bash -c "$SCRIPT"',
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # Expansion in argument position keeps running.
+        result = await bash("sh -c 'echo $UNSET_ARG'")
+        self.assertEqual(result.exit_code, 0)
+
+    async def test_arithmetic_shifts_never_blank_live_commands(self):
+        # A `$((x<<y))` "delimiter" must never swallow later lines: the live
+        # rm after it stays in the outer scan.
+        self._make_tree()
+        outside = self._outside_target()
+        command = "echo $((1<<2))\nrm -rf " + outside + "\n2))"
+        with self.assertRaises(DestructiveRmRefusalError):
+            bash(command)
+        self.assertTrue(Path(outside, "file.txt").exists())
+        result = await bash("echo $((1<<2))")
+        self.assertEqual(result.exit_code, 0)
+
     async def test_operands_after_end_of_options_are_checked(self):
         self._make_tree()
         with self.assertRaises(DestructiveRmRefusalError):

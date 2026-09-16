@@ -3681,6 +3681,15 @@ def _wrapped_payloads_hide_recursive_force_rm(
                 continue  # no `-c` payload: nothing to scan
             payload_parts.append(payload_word.value)
         payload = " ".join(payload_parts)
+        # A payload word in command position that expands at run time
+        # (`sh -c "$SCRIPT"`) could be any command, including rm: refuse
+        # rather than scan the expansion text literally.
+        if any(
+            payload_word.starts_command
+            and not _expansion_is_resolvable(payload_word.value)
+            for payload_word in _scan_shell_words(payload)
+        ):
+            return True
         if _find_recursive_force_rm_invocations(payload):
             return True
         if _wrapped_payloads_hide_recursive_force_rm(payload, depth + 1):
@@ -4018,6 +4027,20 @@ def _heredoc_body_spans(command: str) -> list[tuple[int, int]]:
         if ch in "'\"":
             i = _quote_span_end(command, i, n)
             continue
+        if ch == "$" and command[i + 1 : i + 3] == "((":
+            # Arithmetic substitution: its `<<` is a shift, not a heredoc.
+            # Skip to the matching `))` (parens stay balanced in valid
+            # arithmetic); unterminated input skips to the end.
+            depth = 2
+            j = i + 3
+            while j < n and depth > 0:
+                if command[j] == "(":
+                    depth += 1
+                elif command[j] == ")":
+                    depth -= 1
+                j += 1
+            i = j
+            continue
         if ch == "#" and (i == 0 or command[i - 1] in " \t\n;&|(){}"):
             while i < n and command[i] != "\n":
                 i += 1
@@ -4027,9 +4050,8 @@ def _heredoc_body_spans(command: str) -> list[tuple[int, int]]:
             continue
         if ch == "<" and command[i + 1 : i + 2] == "<":
             # The operator is valid attached to the command word too
-            # (`sh<<EOF`); arithmetic `<<` inside $((...)) parses as a
-            # heredoc with a delimiter that never terminates, so it reports
-            # no span and leaves the scan unchanged.
+            # (`sh<<EOF`); arithmetic shifts never reach here because
+            # $((...)) spans are skipped above.
             j = i + 2
             strip_tabs = False
             if command[j : j + 1] == "-":
