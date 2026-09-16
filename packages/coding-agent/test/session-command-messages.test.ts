@@ -327,6 +327,9 @@ describe("session command messages", () => {
 
 		expect(compactionText).toMatch(/^\[compaction-summary\]\n\n/);
 		expect(compactionText).toContain("<summary>\nwhat happened\n</summary>");
+		// The retained tail is newer than the summary; the prefix line keeps the
+		// model from trusting a stale summary over the messages below it.
+		expect(compactionText).toContain("retained messages below are authoritative");
 		expect(branchText).toMatch(/^\[branch-summary\]\n\n/);
 		expect(branchText).toContain("<summary>\nside quest</summary>");
 	});

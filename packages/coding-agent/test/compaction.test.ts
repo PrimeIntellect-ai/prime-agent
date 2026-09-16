@@ -540,6 +540,106 @@ describe("prepareCompaction with previous compaction", () => {
 	});
 });
 
+describe("prepareCompaction recency anchor", () => {
+	// A long user message crosses the small keep-recent budget, so the cut
+	// lands on it: a deterministic user-message cut with no split turn.
+	const longUserText = `user tail ${"x".repeat(400)}`;
+
+	it("anchors to the newest kept-tail assistant text and strips file blocks from the previous summary", () => {
+		const u1 = createMessageEntry(createUserMessage("user msg 1"));
+		const a1 = createMessageEntry(createAssistantMessage("assistant msg 1", createMockUsage(5000, 1000)));
+		const u2 = createMessageEntry(createUserMessage("user msg 2"));
+		const a2 = createMessageEntry(createAssistantMessage("assistant msg 2", createMockUsage(6000, 2000)));
+		const compaction1 = createCompactionEntry(
+			"First summary\n\n<read-files>\nold/a.ts\n</read-files>\n\n<modified-files>\nold/b.ts\n</modified-files>",
+			u2.id,
+		);
+		const u3 = createMessageEntry(createUserMessage(longUserText));
+		const a3 = createMessageEntry(createAssistantMessage("newest kept assistant text", createMockUsage(7000, 3000)));
+
+		const settings: CompactionSettings = { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 10 };
+		const preparation = prepareCompaction([u1, a1, u2, a2, compaction1, u3, a3], settings);
+
+		expect(preparation).toBeDefined();
+		// The cut keeps [u3, a3]; the anchor is the newest kept-tail assistant text.
+		expect(preparation!.firstKeptEntryId).toBe(u3.id);
+		expect(preparation!.recentStateAnchor).toBe("newest kept assistant text");
+		// The stale file blocks never reach the update prompt.
+		expect(preparation!.previousSummary).toBe("First summary");
+	});
+
+	it("skips empty-text assistants in the kept tail", () => {
+		const u1 = createMessageEntry(createUserMessage("user msg 1"));
+		const a1 = createMessageEntry(createAssistantMessage("assistant msg 1", createMockUsage(5000, 1000)));
+		const u2 = createMessageEntry(createUserMessage("user msg 2"));
+		const a2 = createMessageEntry(createAssistantMessage("assistant msg 2", createMockUsage(6000, 2000)));
+		const compaction1 = createCompactionEntry("First summary", u2.id);
+		const u3 = createMessageEntry(createUserMessage(longUserText));
+		const emptyAssistant = createMessageEntry(createAssistantMessage("", createMockUsage(6500, 500)));
+		const a4 = createMessageEntry(createAssistantMessage("fallback anchor text", createMockUsage(7000, 3000)));
+
+		const settings: CompactionSettings = { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 10 };
+		const preparation = prepareCompaction([u1, a1, u2, a2, compaction1, u3, emptyAssistant, a4], settings);
+
+		expect(preparation).toBeDefined();
+		expect(preparation!.firstKeptEntryId).toBe(u3.id);
+		expect(preparation!.recentStateAnchor).toBe("fallback anchor text");
+	});
+
+	it("returns no anchor when the kept tail has no assistant text", () => {
+		const u1 = createMessageEntry(createUserMessage("user msg 1"));
+		const a1 = createMessageEntry(createAssistantMessage("assistant msg 1", createMockUsage(5000, 1000)));
+		const u2 = createMessageEntry(createUserMessage("user msg 2"));
+		const a2 = createMessageEntry(createAssistantMessage("assistant msg 2", createMockUsage(6000, 2000)));
+		const compaction1 = createCompactionEntry("First summary", u2.id);
+		const u3 = createMessageEntry(createUserMessage(longUserText));
+
+		const settings: CompactionSettings = { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 10 };
+		const preparation = prepareCompaction([u1, a1, u2, a2, compaction1, u3], settings);
+
+		expect(preparation).toBeDefined();
+		expect(preparation!.firstKeptEntryId).toBe(u3.id);
+		expect(preparation!.recentStateAnchor).toBeUndefined();
+	});
+
+	it("drops the previous summary entirely when it contained only file blocks", () => {
+		const u1 = createMessageEntry(createUserMessage("user msg 1"));
+		const a1 = createMessageEntry(createAssistantMessage("assistant msg 1", createMockUsage(5000, 1000)));
+		const u2 = createMessageEntry(createUserMessage("user msg 2"));
+		const a2 = createMessageEntry(createAssistantMessage("assistant msg 2", createMockUsage(6000, 2000)));
+		const compaction1 = createCompactionEntry(
+			"<read-files>\nold/a.ts\n</read-files>\n\n<modified-files>\nold/b.ts\n</modified-files>",
+			u2.id,
+		);
+		const u3 = createMessageEntry(createUserMessage(longUserText));
+
+		const settings: CompactionSettings = { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 10 };
+		const preparation = prepareCompaction([u1, a1, u2, a2, compaction1, u3], settings);
+
+		expect(preparation).toBeDefined();
+		expect(preparation!.previousSummary).toBeUndefined();
+	});
+
+	it("tail-truncates the anchor to its character budget", () => {
+		const longText = `${"a".repeat(2500)}final kept state`;
+		const u1 = createMessageEntry(createUserMessage("user msg 1"));
+		const a1 = createMessageEntry(createAssistantMessage("assistant msg 1", createMockUsage(5000, 1000)));
+		const u2 = createMessageEntry(createUserMessage("user msg 2"));
+		const a2 = createMessageEntry(createAssistantMessage("assistant msg 2", createMockUsage(6000, 2000)));
+		const compaction1 = createCompactionEntry("First summary", u2.id);
+		const u3 = createMessageEntry(createUserMessage(longUserText));
+		const a3 = createMessageEntry(createAssistantMessage(longText, createMockUsage(7000, 3000)));
+
+		const settings: CompactionSettings = { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 10 };
+		const preparation = prepareCompaction([u1, a1, u2, a2, compaction1, u3, a3], settings);
+
+		expect(preparation).toBeDefined();
+		expect(preparation!.recentStateAnchor).toBe(longText.slice(-2000));
+		expect(preparation!.recentStateAnchor).toHaveLength(2000);
+		expect(preparation!.recentStateAnchor!.endsWith("final kept state")).toBe(true);
+	});
+});
+
 // ============================================================================
 // Integration tests with real session data
 // ============================================================================

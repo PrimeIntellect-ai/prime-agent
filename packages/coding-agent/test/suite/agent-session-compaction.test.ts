@@ -3,10 +3,12 @@ import { AgentContinueError, type AgentMessage, type ShouldStopAfterTurnContext 
 import {
 	type AssistantMessage,
 	fauxAssistantMessage,
+	fauxToolCall,
 	type Model,
 	type ToolResultMessage,
 	type Usage,
 } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { convertToLlm } from "../../src/core/messages.js";
 import { getLocalHarnessStateDir, loadHarnessState, saveHarnessState } from "../../src/core/refinement/index.js";
@@ -275,6 +277,114 @@ describe("AgentSession compaction characterization", () => {
 		expect((mergedHead as { harnessDigest?: string }).harnessDigest).toContain(
 			"[local:compaction_test_memory] Compaction test memory",
 		);
+	});
+
+	it("anchors summaries to kept-tail state and stops re-summarizing file lists across compactions", async () => {
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			persistSession: true,
+			tools: [
+				{
+					name: "ipython",
+					label: "ipython",
+					description: "Execute Python code in the agent kernel.",
+					parameters: Type.Object({ code: Type.String() }),
+					execute: async () => ({
+						content: [{ type: "text" as const, text: "edited src/kernel-edit.ts" }],
+						details: {
+							status: "ok",
+							diffs: [{ path: "src/kernel-edit.ts", oldStr: "a", newStr: "b" }],
+						},
+					}),
+				},
+			],
+		});
+		harnesses.push(harness);
+		const summarizerInputs: string[] = [];
+		const capture = (label: string) => (context: { messages: { content: unknown }[] }) => {
+			summarizerInputs.push(context.messages.map(getMessageText).join("\n"));
+			return fauxAssistantMessage(label);
+		};
+		harness.setResponses([
+			fauxAssistantMessage(
+				[{ type: "text" as const, text: "editing a file" }, fauxToolCall("ipython", { code: "await edit(...)" })],
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("one response"),
+			fauxAssistantMessage("two response"),
+			capture("first summary"),
+			capture("first turn summary"),
+			fauxAssistantMessage("three response"),
+			capture("second summary"),
+			capture("second turn summary"),
+			fauxAssistantMessage("four response"),
+		]);
+
+		// Turn 1 edits a file through the kernel; the tool result carries the
+		// structured diff that feeds compaction file tracking.
+		await harness.session.prompt("one");
+		await harness.session.prompt("two");
+		await harness.session.compact();
+
+		const compactionEntries = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction");
+		expect(compactionEntries).toHaveLength(1);
+		const first = compactionEntries[0] as {
+			summary: string;
+			details?: { readFiles: string[]; modifiedFiles: string[] };
+		};
+		// The stored summary carries the mechanical file-list append (and old
+		// sessions keep loading these), but the update prompt never sees them.
+		expect(first.summary).toContain("<modified-files>\nsrc/kernel-edit.ts\n</modified-files>");
+		expect(first.details).toEqual({ readFiles: [], modifiedFiles: ["src/kernel-edit.ts"] });
+
+		await harness.session.prompt("three");
+		await harness.session.compact();
+
+		const allCompactions = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction");
+		expect(allCompactions).toHaveLength(2);
+		const second = allCompactions[1] as {
+			summary: string;
+			firstKeptEntryId: string;
+			details?: { readFiles: string[]; modifiedFiles: string[] };
+		};
+		// The merged summary keeps exactly one fresh file-list append and the
+		// previous details merge into the new entry.
+		expect(second.summary).toContain("second summary");
+		expect(second.summary).toContain("**Turn Context (split turn):**");
+		expect(second.summary.match(/<modified-files>/g)).toHaveLength(1);
+		expect(second.summary).toContain("<modified-files>\nsrc/kernel-edit.ts\n</modified-files>");
+		expect(second.details).toEqual({ readFiles: [], modifiedFiles: ["src/kernel-edit.ts"] });
+
+		// Every history slice is anchored to the newest kept-tail assistant
+		// text; keepRecentTokens: 1 keeps only the final turn of each window.
+		const historyInputs = summarizerInputs.filter((input) => !input.includes("PREFIX of a turn"));
+		expect(historyInputs).toHaveLength(2);
+		for (const input of historyInputs) {
+			expect(input).toContain("<recent-state-anchor>");
+		}
+		expect(historyInputs[0]).toContain("two response");
+		expect(historyInputs[0]).not.toContain("<previous-summary>");
+		// The second compaction's previous summary carries no stale file blocks.
+		const secondHistory = historyInputs[1];
+		expect(secondHistory).toContain("<previous-summary>");
+		expect(secondHistory).toContain("first summary");
+		expect(secondHistory).not.toContain("<read-files>");
+		expect(secondHistory).not.toContain("<modified-files>");
+		expect(secondHistory).toContain("<recent-state-anchor>");
+		expect(secondHistory).toContain("three response");
+
+		// The in-context compaction head tells the model the retained tail wins.
+		const head = harness.session.messages[0];
+		expect(head?.role).toBe("compactionSummary");
+		const headText = getMessageText(convertToLlm([head!])[0]);
+		expect(headText).toContain("retained messages below are authoritative");
+
+		// The session stays usable after both compactions.
+		await harness.session.prompt("four");
+		expect(harness.session.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			content: [{ type: "text", text: "four response" }],
+		});
 	});
 
 	it("renders an executing /compact as activity instead of queued work", async () => {
