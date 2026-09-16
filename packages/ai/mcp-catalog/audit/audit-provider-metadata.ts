@@ -203,12 +203,25 @@ export function canonicalResource(url: string): string {
  */
 export function audienceMatchesEngineRule(resource: string | undefined, endpoint: string): boolean {
 	if (!resource) return false;
-	const parsedResource = new URL(resource);
-	const parsedEndpoint = new URL(endpoint);
+	// Mirror the engine's component comparison exactly (oauth.ts
+	// resourceAudienceMode): the declared resource is either the exact endpoint
+	// (same origin, path, and search — never a string compare) or the
+	// endpoint's bare origin. A malformed resource the ENGINE would reject is
+	// not an audience match here either — it must not abort the audit run.
+	let parsedResource: URL;
+	let parsedEndpoint: URL;
+	try {
+		parsedResource = new URL(resource);
+		parsedEndpoint = new URL(endpoint);
+	} catch {
+		return false;
+	}
+	if (parsedResource.protocol !== "https:" || parsedEndpoint.protocol !== "https:") return false;
 	const sameOrigin = parsedResource.origin === parsedEndpoint.origin;
+	const exact = sameOrigin && parsedResource.pathname === parsedEndpoint.pathname && parsedResource.search === parsedEndpoint.search;
 	const originLevel =
 		sameOrigin && (parsedResource.pathname === "/" || parsedResource.pathname === "") && !parsedResource.search;
-	return originLevel || resource === canonicalResource(endpoint);
+	return exact || originLevel;
 }
 
 /** Authorization-server metadata candidates (mirrors oauth.ts authorizationServerMetadataUrls). */
@@ -589,9 +602,12 @@ async function auditEndpoint(server: string, endpoint: string): Promise<AuditRes
 				})()),
 	};
 
-	const issuer =
-		selected?.evidence?.authorizationServers?.find((candidate) => typeof candidate === "string" && isFetchableUrl(candidate)) ??
-		new URL(endpoint).origin;
+	// The engine uses authorization_servers[0] of the SELECTED PRM document,
+	// exactly as advertised, and never origin-falls-back once a valid PRM was
+	// selected (discover() in oauth.ts). An unfetchable first issuer is
+	// therefore an honest AS-unavailable outcome — auditing a later server the
+	// engine would never use would classify against the wrong authorization server.
+	const issuer = selected?.evidence?.authorizationServers?.[0] ?? new URL(endpoint).origin;
 	const asCandidates = authorizationServerUrls(issuer);
 	const authorizationServer: AuditResult["authorizationServer"] = {
 		sourceUrls: asCandidates,
