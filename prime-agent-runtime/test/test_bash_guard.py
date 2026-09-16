@@ -1218,6 +1218,33 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(BASH_DESTRUCTIVE_RM_BYPASS_ENV, message)
         self.assertIn("ignored by design", message)
 
+    def test_frozen_rm_bypass_not_leaked_into_child_environments(self):
+        # The rm bypass is frozen at kernel start like the git one, so a
+        # mid-session write must stay out of child environments: a child
+        # kernel would freeze the inherited value as its own launch-time
+        # bypass.
+        with (
+            mock.patch.dict(os.environ, {BASH_DESTRUCTIVE_RM_BYPASS_ENV: "1"}),
+            mock.patch.object(bash_module, "_BASH_RM_BYPASS_AT_KERNEL_START", None),
+        ):
+            child_env = bash_module._child_env()
+        self.assertNotIn(BASH_DESTRUCTIVE_RM_BYPASS_ENV, child_env)
+        # Authorized at launch: children inherit it.
+        with (
+            mock.patch.dict(os.environ, {BASH_DESTRUCTIVE_RM_BYPASS_ENV: "1"}),
+            mock.patch.object(bash_module, "_BASH_RM_BYPASS_AT_KERNEL_START", "1"),
+        ):
+            child_env = bash_module._child_env()
+        self.assertEqual(child_env.get(BASH_DESTRUCTIVE_RM_BYPASS_ENV), "1")
+        # A falsy launch value is airtight too: the launched-with-"0" edge
+        # cannot leak a later mid-session write.
+        with (
+            mock.patch.dict(os.environ, {BASH_DESTRUCTIVE_RM_BYPASS_ENV: "1"}),
+            mock.patch.object(bash_module, "_BASH_RM_BYPASS_AT_KERNEL_START", "0"),
+        ):
+            child_env = bash_module._child_env()
+        self.assertNotIn(BASH_DESTRUCTIVE_RM_BYPASS_ENV, child_env)
+
     async def test_refuses_eval_wrapped_rm(self):
         self._make_tree()
         for command in [

@@ -4714,6 +4714,11 @@ def _child_env() -> dict[str, str]:
         # freeze their own launch-time copy, and an inherited forged value
         # would arm as if the user had authorized it at launch.
         env.pop(BASH_DESTRUCTIVE_GIT_BYPASS_ENV, None)
+    if not _is_truthy_env_value(_BASH_RM_BYPASS_AT_KERNEL_START):
+        # Same rationale for the rm bypass: strip it unless the launch-time
+        # snapshot authorizes it, so a mid-session write cannot arm a child
+        # kernel's frozen copy (a falsy launch value like "0" stays stripped).
+        env.pop(BASH_DESTRUCTIVE_RM_BYPASS_ENV, None)
     # Non-interactive bash sources $BASH_ENV (and some shells $ENV) before
     # the command; the env is model-writable mid-session, so never let it
     # smuggle an unscanned startup file past the guards.
