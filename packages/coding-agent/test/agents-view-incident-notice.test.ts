@@ -544,6 +544,45 @@ describe("agents view incident notices", () => {
 		}
 	});
 
+	it("bridges the rotated .old generation on the first read", () => {
+		useTempAgentDir();
+		const base = Date.now();
+		// A rotation moved the earlier supervisor start into agent.jsonl.old. The
+		// CLI reads [agent.jsonl.old, agent.jsonl], so a fresh view must still
+		// pair the two starts into an update-restart notice.
+		writeFileSync(`${getAgentLogPath()}.old`, `${supervisorStartLine(base, 120)}\n`);
+		writeAgentLog([supervisorStartLine(base, 30)]);
+		const view = newView();
+		try {
+			invoke("refreshIncidentNotices", view);
+			const lines = renderedIncidentLines(view);
+			expect(lines).toHaveLength(1);
+			expect(lines[0]).toContain("daemon restarted for update at");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("reads the rotated .old tail only on the first successful read", () => {
+		useTempAgentDir();
+		const base = Date.now();
+		writeFileSync(`${getAgentLogPath()}.old`, `${supervisorStartLine(base, 120)}\n`);
+		writeAgentLog([supervisorStartLine(base, 30)]);
+		const state = createIncidentNoticeState();
+		const logPath = getAgentLogPath();
+		expect(refreshIncidentNoticeState(state, logPath, base)).toBe(true);
+		expect(state.notice?.kind).toBe("update-restart");
+		const entryCount = state.entries.length;
+
+		// Later polls must not re-read .old: duplicate supervisor-start entries
+		// would pair with the current file into a phantom restart.
+		expect(refreshIncidentNoticeState(state, logPath, base)).toBe(false);
+		expect(state.entries).toHaveLength(entryCount);
+		expect(
+			deriveIncidentNotices(state.entries, base).filter((notice) => notice.kind === "update-restart"),
+		).toHaveLength(1);
+	});
+
 	it("follows a rotated log (new inode) to the newest incident", () => {
 		useTempAgentDir();
 		const base = Date.now();

@@ -20,7 +20,9 @@ import { theme } from "../interactive/theme/theme.js";
  * notice line in the agents-view header. A notice appears when the recent
  * window of the log contains a worker crash, a command-timeout burst, or an
  * update restart (a supervisor replacement), so the operator sees the
- * incident without running the CLI by hand.
+ * incident without running the CLI by hand. On the initial read the view
+ * matches the CLI's [agent.jsonl.old, agent.jsonl] source with the same
+ * bounded tail, so incidents spanning a log rotation surface too.
  */
 
 /** Recent-log window, matching the `prime-agent incident` default. */
@@ -341,11 +343,24 @@ function mergeIncidentWindowedEntries(
 /**
  * One best-effort poll: read new agent.jsonl bytes, keep the 24h window,
  * re-derive the qualifying notices, apply the dismissal horizons, and keep the
- * single collapsed line worth showing. Returns true when that line changed so
- * the caller can re-render. Never throws for a missing or unreadable log —
- * that simply retries a bounded tail on the next poll.
+ * single collapsed line worth showing. The first successful read also tails
+ * the rotated agent.jsonl.old — matching the CLI's [agent.jsonl.old,
+ * agent.jsonl] source with the same bounded tail — so incidents spanning a
+ * rotation still surface in a fresh view; later polls read only appended
+ * agent.jsonl bytes (re-reading .old would duplicate supervisor starts into
+ * phantom update restarts). Returns true when that line changed so the caller
+ * can re-render. Never throws for a missing or unreadable log — that simply
+ * retries a bounded tail on the next poll.
  */
 export function refreshIncidentNoticeState(state: IncidentNoticeState, logPath: string, nowMs: number): boolean {
+	// The first successful read bridges the rotated generation: the CLI reads
+	// [agent.jsonl.old, agent.jsonl] (readIncidentLogEntries), so a view opened
+	// after a rotation must see pairs that span it — an update restart whose
+	// earlier supervisor start sits in .old, or a burst straddling the files.
+	// Only this first read: a later re-read would duplicate supervisor-start
+	// lines into a phantom update restart (the classifier does not dedupe
+	// supervisor-start), which is also why the consumed offset never resets.
+	const firstRead = state.logOffset === undefined && state.logFileId === undefined;
 	const chunk = readIncidentLogLines(logPath, state.logOffset, state.logFileId);
 	if (chunk === undefined) {
 		// Missing or unreadable: keep the consumed offset and file id. Resetting
@@ -356,12 +371,23 @@ export function refreshIncidentNoticeState(state: IncidentNoticeState, logPath: 
 		// passing the size) on the next successful read.
 		return false;
 	}
+	const sinceMs = nowMs - INCIDENT_NOTICE_WINDOW_MS;
+	const parseWindowedLines = (lines: readonly string[]): IncidentLogEntry[] =>
+		lines
+			.map((line) => parseIncidentLogLine(line))
+			.filter((entry): entry is IncidentLogEntry => entry !== undefined && entry.timeMs >= sinceMs);
+	// Mirror the CLI's [agent.jsonl.old, agent.jsonl] source order (merge sorts
+	// by time anyway), tailing .old with the same bounded tail as the main log.
+	let parsed: IncidentLogEntry[] = [];
+	if (firstRead) {
+		const rotated = readIncidentLogLines(`${logPath}.old`, undefined, undefined);
+		if (rotated !== undefined) {
+			parsed = parseWindowedLines(rotated.lines);
+		}
+	}
+	parsed = parsed.concat(parseWindowedLines(chunk.lines));
 	state.logOffset = chunk.nextOffset;
 	state.logFileId = chunk.fileId;
-	const sinceMs = nowMs - INCIDENT_NOTICE_WINDOW_MS;
-	const parsed = chunk.lines
-		.map((line) => parseIncidentLogLine(line))
-		.filter((entry): entry is IncidentLogEntry => entry !== undefined && entry.timeMs >= sinceMs);
 	const previous = state.notice;
 	state.entries = mergeIncidentWindowedEntries(state.entries, parsed, sinceMs);
 	const notices = deriveIncidentNotices(state.entries, nowMs);
