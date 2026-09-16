@@ -183,8 +183,24 @@ describe("incident notice derivation", () => {
 		expect(notice.kind).toBe("timeout-burst");
 		expect(notice.severity).toBe("error");
 		expect(notice.subject).toBe(DAEMON_SOCKET);
-		expect(notice.timeMs).toBe(entries[0]!.timeMs);
+		// The classifier anchors the anomaly at the burst's first timeout, but the
+		// notice carries the latest one so dismissal advances with a growing burst.
+		expect(notice.timeMs).toBe(entries[1]!.timeMs);
 		expect(notice.text).toBe(`${DAEMON_SOCKET}: 2 command timeouts over 1m`);
+	});
+
+	it("advances the timeout-burst notice timeMs with the latest timeout", () => {
+		const base = Date.now();
+		const two = fixtureEntries([commandTimeoutLine(base, 30), commandTimeoutLine(base, 20)]);
+		const burst = deriveIncidentNotices(two, base)[0]!;
+		expect(burst.timeMs).toBe(two[1]!.timeMs);
+		expect(burst.text).toBe(`${DAEMON_SOCKET}: 2 command timeouts over 10m`);
+
+		// A later timeout extends the burst: the notice timeMs advances with it.
+		const three = [...two, ...fixtureEntries([commandTimeoutLine(base, 5)])];
+		const extended = deriveIncidentNotices(three, base)[0]!;
+		expect(extended.timeMs).toBe(three[2]!.timeMs);
+		expect(extended.text).toBe(`${DAEMON_SOCKET}: 3 command timeouts over 25m`);
 	});
 
 	it("derives an update-restart notice only for a repeated supervisor start", () => {
@@ -428,6 +444,26 @@ describe("agents view incident notices", () => {
 		} finally {
 			stopThemeWatcher();
 		}
+	});
+
+	it("re-shows a dismissed timeout-burst when a later timeout extends the burst", () => {
+		useTempAgentDir();
+		const base = Date.now();
+		writeAgentLog([commandTimeoutLine(base, 30), commandTimeoutLine(base, 29)]);
+		const state = createIncidentNoticeState();
+		const logPath = getAgentLogPath();
+		expect(refreshIncidentNoticeState(state, logPath, base)).toBe(true);
+		expect(state.notice?.kind).toBe("timeout-burst");
+		// Dismissal records the notice's timeMs — the burst's latest timeout so
+		// far — as the horizon for the key.
+		expect(dismissIncidentNoticeState(state)).toBe(true);
+
+		// A later timeout extends the burst past the horizon: the notice
+		// reappears instead of staying hidden until the first timeout ages out.
+		appendAgentLog([commandTimeoutLine(base, 5)]);
+		expect(refreshIncidentNoticeState(state, logPath, base)).toBe(true);
+		expect(state.notice?.kind).toBe("timeout-burst");
+		expect(state.notice?.timeMs).toBe(base - 5 * 60_000);
 	});
 
 	it("surfaces an update restart only when the supervisor was replaced", () => {

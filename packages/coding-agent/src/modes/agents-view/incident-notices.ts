@@ -119,7 +119,12 @@ function createNotice(
  * classifier's per-subject "N command timeouts over X" anomaly), and update
  * restarts (a supervisor-start whose subject already started within the
  * window, i.e. the supervisor was replaced). A first-ever supervisor start is
- * routine and never produces a notice.
+ * routine and never produces a notice. A timeout-burst notice carries the
+ * LATEST timeout of its subject — the classifier anchors the anomaly at the
+ * first timeout — so dismissing it records a horizon that only covers the
+ * burst as dismissed: a later timeout extends the burst past the horizon and
+ * re-surfaces the notice, instead of it staying hidden until the first
+ * timeout ages out of the window.
  */
 export function deriveIncidentNotices(entries: readonly IncidentLogEntry[], nowMs: number): IncidentNotice[] {
 	const sinceMs = nowMs - INCIDENT_NOTICE_WINDOW_MS;
@@ -144,9 +149,20 @@ export function deriveIncidentNotices(entries: readonly IncidentLogEntry[], nowM
 	}
 	for (const anomaly of computeIncidentAnomalies(events)) {
 		if (anomaly.summary.includes("command timeouts")) {
-			// The anomaly summary already reads "<subject>: N command timeouts over X".
+			// The anomaly summary already reads "<subject>: N command timeouts over X";
+			// the classifier anchors the anomaly at the burst's FIRST timeout. Anchor
+			// the notice at the LATEST timeout of the subject instead: dismissal
+			// records notice.timeMs as the horizon for the key, so a later timeout
+			// that extends the burst past the horizon re-surfaces it rather than the
+			// notice staying hidden until the first timeout ages out of the window.
+			let latestTimeoutMs = anomaly.timeMs;
+			for (const event of events) {
+				if (event.eventClass === "timeout" && event.subject === anomaly.subject) {
+					latestTimeoutMs = Math.max(latestTimeoutMs, event.timeMs);
+				}
+			}
 			notices.push(
-				createNotice("timeout-burst", anomaly.severity, anomaly.subject, anomaly.timeMs, anomaly.summary),
+				createNotice("timeout-burst", anomaly.severity, anomaly.subject, latestTimeoutMs, anomaly.summary),
 			);
 		}
 	}
