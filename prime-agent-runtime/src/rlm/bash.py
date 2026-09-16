@@ -3728,9 +3728,11 @@ def _wrapped_payloads_hide_recursive_force_rm(
         # A payload word in command position that expands at run time
         # (`sh -c "$SCRIPT"`, `sh -c "$HOME ..."`) could be any command,
         # including rm — even $HOME/$PWD resolve to a path the environment
-        # controls: refuse rather than scan the expansion text literally.
+        # controls, and brace expansion / backticks assemble commands the
+        # same way: refuse rather than scan the expansion text literally.
         if any(
-            payload_word.starts_command and "$" in payload_word.value
+            payload_word.starts_command
+            and any(ch in payload_word.value for ch in "$`{}")
             for payload_word in _scan_shell_words(payload)
         ):
             return True

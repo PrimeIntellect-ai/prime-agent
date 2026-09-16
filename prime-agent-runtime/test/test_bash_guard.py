@@ -2037,6 +2037,21 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
                     bash(command)
                 self.assertTrue(Path(outside, "file.txt").exists())
 
+    async def test_refuses_brace_and_backtick_expansion_command_words_in_payloads(self):
+        # Round-10 regression guard: brace expansion and backticks in a
+        # payload command position must fail closed like $-expansion does.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "eval '{rm,-rf} " + outside + "'",
+            "sh -c '{rm,-rf} " + outside + "'",
+            "bash -c '`{printf,printf} \"rm -rf " + outside + "\"`'",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+
     async def test_operands_after_end_of_options_are_checked(self):
         self._make_tree()
         with self.assertRaises(DestructiveRmRefusalError):
