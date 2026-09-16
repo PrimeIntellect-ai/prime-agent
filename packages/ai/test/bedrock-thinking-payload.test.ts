@@ -1,7 +1,51 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getModel } from "../src/models.js";
 import { type BedrockOptions, streamBedrock } from "../src/providers/amazon-bedrock.js";
 import type { Context, Model } from "../src/types.js";
+
+const bedrockMock = vi.hoisted(() => ({
+	constructorCalls: [] as Array<Record<string, unknown>>,
+}));
+
+vi.mock("@aws-sdk/client-bedrock-runtime", () => {
+	class BedrockRuntimeServiceException extends Error {}
+
+	class BedrockRuntimeClient {
+		constructor(config: Record<string, unknown>) {
+			bedrockMock.constructorCalls.push(config);
+		}
+
+		send(): Promise<never> {
+			return Promise.reject(new Error("mock send"));
+		}
+	}
+
+	class ConverseStreamCommand {
+		readonly input: unknown;
+
+		constructor(input: unknown) {
+			this.input = input;
+		}
+	}
+
+	return {
+		BedrockRuntimeClient,
+		BedrockRuntimeServiceException,
+		ConverseStreamCommand,
+		StopReason: {
+			END_TURN: "end_turn",
+			STOP_SEQUENCE: "stop_sequence",
+			MAX_TOKENS: "max_tokens",
+			MODEL_CONTEXT_WINDOW_EXCEEDED: "model_context_window_exceeded",
+			TOOL_USE: "tool_use",
+		},
+		CachePointType: { DEFAULT: "default" },
+		CacheTTL: { ONE_HOUR: "ONE_HOUR" },
+		ConversationRole: { ASSISTANT: "assistant", USER: "user" },
+		ImageFormat: { JPEG: "jpeg", PNG: "png", GIF: "gif", WEBP: "webp" },
+		ToolResultStatus: { ERROR: "error", SUCCESS: "success" },
+	};
+});
 
 interface BedrockThinkingPayload {
 	inferenceConfig?: { maxTokens?: number; temperature?: number };
@@ -203,5 +247,66 @@ describe("Application inference profile support", () => {
 			budget_tokens: expect.any(Number),
 		});
 		expect(payload.additionalModelRequestFields?.anthropic_beta).toEqual(["interleaved-thinking-2025-05-14"]);
+	});
+});
+
+describe("Bedrock endpoint resolution", () => {
+	const awsEnvVars = ["AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE"] as const;
+	const originalEnv = Object.fromEntries(awsEnvVars.map((name) => [name, process.env[name]]));
+
+	beforeEach(() => {
+		bedrockMock.constructorCalls.length = 0;
+		for (const name of awsEnvVars) delete process.env[name];
+	});
+
+	afterEach(() => {
+		for (const name of awsEnvVars) {
+			const value = originalEnv[name];
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+	});
+
+	it("assigns eu-central-1 runtime URLs to built-in EU inference profiles", () => {
+		expect(getModel("amazon-bedrock", "eu.anthropic.claude-sonnet-4-5-20250929-v1:0").baseUrl).toBe(
+			"https://bedrock-runtime.eu-central-1.amazonaws.com",
+		);
+	});
+
+	it.each([
+		{
+			name: "does not pin standard AWS endpoints when AWS_REGION is configured",
+			env: "us-east-2",
+			modelId: "us.anthropic.claude-opus-4-7" as const,
+			baseUrl: undefined,
+			endpoint: undefined,
+			region: "us-east-2",
+		},
+		{
+			name: "derives the region from a built-in EU endpoint when nothing is configured",
+			env: undefined,
+			modelId: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0" as const,
+			baseUrl: undefined,
+			endpoint: "https://bedrock-runtime.eu-central-1.amazonaws.com",
+			region: "eu-central-1",
+		},
+		{
+			name: "passes custom Bedrock endpoints through to the SDK client",
+			env: "us-west-2",
+			modelId: "us.anthropic.claude-opus-4-7" as const,
+			baseUrl: "https://bedrock-vpc.example.com",
+			endpoint: "https://bedrock-vpc.example.com",
+			region: "us-west-2",
+		},
+	])("$name", async ({ env, modelId, baseUrl, endpoint, region }) => {
+		if (env) process.env.AWS_REGION = env;
+		const baseModel = getModel("amazon-bedrock", modelId);
+		const model: Model<"bedrock-converse-stream"> = baseUrl ? { ...baseModel, baseUrl } : baseModel;
+
+		await streamBedrock(model, makeContext(), { cacheRetention: "none" }).result();
+
+		expect(bedrockMock.constructorCalls).toHaveLength(1);
+		expect(bedrockMock.constructorCalls[0].endpoint).toBe(endpoint);
+		expect(bedrockMock.constructorCalls[0].region).toBe(region);
 	});
 });

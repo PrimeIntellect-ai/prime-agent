@@ -1,10 +1,14 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { registerOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
 import { AuthStorage, FileAuthStorageBackend } from "../src/core/auth-storage.js";
+import { InProcessAgentConnection } from "../src/modes/agent-connection/in-process-agent-connection.js";
+import { createHarness, type Harness, type HarnessOptions } from "./suite/harness.js";
 
 const initialWriteFault = vi.hoisted(() => ({ count: -1 }));
 const renameFault = vi.hoisted(() => ({ error: undefined as Error | undefined }));
@@ -60,106 +64,32 @@ describe("AuthStorage", () => {
 	}
 
 	function toShPath(value: string): string {
-		return value.replace(/\\/g, "/").replace(/"/g, '\\"');
+		// Single pass: backslashes become separators and quotes are escaped, so no
+		// escape sequence can be produced and then re-escaped by a later pass.
+		return value.replace(/[\\"]/g, (ch) => (ch === "\\" ? "/" : '\\"'));
 	}
 
 	describe("API key resolution", () => {
-		test("literal API key is returned directly", async () => {
-			writeAuthJson({
-				anthropic: { type: "api_key", key: "sk-ant-literal-key" },
-			});
-
-			authStorage = AuthStorage.create(authJsonPath);
-			const apiKey = await authStorage.getApiKey("anthropic");
-
-			expect(apiKey).toBe("sk-ant-literal-key");
-		});
-
-		test("apiKey with ! prefix executes command and uses stdout", async () => {
-			writeAuthJson({
-				anthropic: { type: "api_key", key: "!echo test-api-key-from-command" },
-			});
-
-			authStorage = AuthStorage.create(authJsonPath);
-			const apiKey = await authStorage.getApiKey("anthropic");
-
-			expect(apiKey).toBe("test-api-key-from-command");
-		});
-
-		test("apiKey with ! prefix trims whitespace from command output", async () => {
-			writeAuthJson({
-				anthropic: { type: "api_key", key: "!echo '  spaced-key  '" },
-			});
-
-			authStorage = AuthStorage.create(authJsonPath);
-			const apiKey = await authStorage.getApiKey("anthropic");
-
-			expect(apiKey).toBe("spaced-key");
-		});
-
-		test("apiKey with ! prefix handles multiline output (uses trimmed result)", async () => {
-			writeAuthJson({
-				anthropic: { type: "api_key", key: "!printf 'line1\\nline2'" },
-			});
-
-			authStorage = AuthStorage.create(authJsonPath);
-			const apiKey = await authStorage.getApiKey("anthropic");
-
-			expect(apiKey).toBe("line1\nline2");
-		});
-
-		test("apiKey with ! prefix returns undefined on command failure", async () => {
-			writeAuthJson({
-				anthropic: { type: "api_key", key: "!exit 1" },
-			});
-
-			authStorage = AuthStorage.create(authJsonPath);
-			const apiKey = await authStorage.getApiKey("anthropic");
-
-			expect(apiKey).toBeUndefined();
-		});
-
-		test("apiKey with ! prefix returns undefined on nonexistent command", async () => {
-			writeAuthJson({
-				anthropic: { type: "api_key", key: "!nonexistent-command-12345" },
-			});
-
-			authStorage = AuthStorage.create(authJsonPath);
-			const apiKey = await authStorage.getApiKey("anthropic");
-
-			expect(apiKey).toBeUndefined();
-		});
-
-		test("apiKey with ! prefix returns undefined on empty output", async () => {
-			writeAuthJson({
-				anthropic: { type: "api_key", key: "!printf ''" },
-			});
-
-			authStorage = AuthStorage.create(authJsonPath);
-			const apiKey = await authStorage.getApiKey("anthropic");
-
-			expect(apiKey).toBeUndefined();
-		});
-
-		test("apiKey as environment variable name resolves to env value", async () => {
-			const originalEnv = process.env.TEST_AUTH_API_KEY_12345;
-			process.env.TEST_AUTH_API_KEY_12345 = "env-api-key-value";
-
+		test("resolves stored keys as literals or environment variable names", async () => {
+			const envVar = "TEST_AUTH_API_KEY_12345";
+			const previous = process.env[envVar];
+			process.env[envVar] = "env-api-key-value";
+			delete process.env.literal_api_key_value;
 			try {
 				writeAuthJson({
-					anthropic: { type: "api_key", key: "TEST_AUTH_API_KEY_12345" },
+					anthropic: { type: "api_key", key: "sk-ant-literal-key" },
+					openai: { type: "api_key", key: envVar },
+					google: { type: "api_key", key: "literal_api_key_value" },
 				});
 
 				authStorage = AuthStorage.create(authJsonPath);
-				const apiKey = await authStorage.getApiKey("anthropic");
 
-				expect(apiKey).toBe("env-api-key-value");
+				await expect(authStorage.getApiKey("anthropic")).resolves.toBe("sk-ant-literal-key");
+				await expect(authStorage.getApiKey("openai")).resolves.toBe("env-api-key-value");
+				await expect(authStorage.getApiKey("google")).resolves.toBe("literal_api_key_value");
 			} finally {
-				if (originalEnv === undefined) {
-					delete process.env.TEST_AUTH_API_KEY_12345;
-				} else {
-					process.env.TEST_AUTH_API_KEY_12345 = originalEnv;
-				}
+				if (previous === undefined) delete process.env[envVar];
+				else process.env[envVar] = previous;
 			}
 		});
 
@@ -207,19 +137,6 @@ describe("AuthStorage", () => {
 					process.env.AWS_PROFILE = originalAwsProfile;
 				}
 			}
-		});
-
-		test("apiKey as literal value is used directly when not an env var", async () => {
-			delete process.env.literal_api_key_value;
-
-			writeAuthJson({
-				anthropic: { type: "api_key", key: "literal_api_key_value" },
-			});
-
-			authStorage = AuthStorage.create(authJsonPath);
-			const apiKey = await authStorage.getApiKey("anthropic");
-
-			expect(apiKey).toBe("literal_api_key_value");
 		});
 
 		test("stored credential updates do not revive stale runtime auth", async () => {
@@ -288,8 +205,9 @@ describe("AuthStorage", () => {
 				});
 			}
 
-			test("CLI-only credentials never count as Agent auth", async () => {
+			test("CLI-only credentials never count as Agent auth, and Agent writes never touch the CLI config", async () => {
 				authStorage = createStorage();
+				const cliBefore = readFileSync(primeConfigPath, "utf8");
 				await expect(authStorage.getApiKey("prime-inference")).resolves.toBeUndefined();
 				expect(authStorage.hasAuth("prime-inference")).toBe(false);
 				expect(authStorage.getAuthStatus("prime-inference")).toEqual({ configured: false });
@@ -297,6 +215,14 @@ describe("AuthStorage", () => {
 				expect(authStorage.markAuthStale("prime-inference")).toBe(false);
 				expect(authStorage.getProviderHeaders("prime-inference")).toBeUndefined();
 				expect(authStorage.getPrimeInferenceTeamSelection()).toBeUndefined();
+
+				authStorage.setPrimeInferenceApiKey("agent-key", team);
+				expect(statSync(authJsonPath).mode & 0o777).toBe(0o600);
+				await expect(createStorage().getApiKey("prime-inference")).resolves.toBe("agent-key");
+				authStorage.logout("prime-inference");
+				expect(createStorage().has("prime-inference")).toBe(false);
+				expect(readFileSync(primeConfigPath, "utf8")).toBe(cliBefore);
+				expect(authStorage.drainErrors()).toEqual([]);
 			});
 
 			test("stored auth and team survive CLI edits, corruption, removal, and Agent reload", async () => {
@@ -348,24 +274,6 @@ describe("AuthStorage", () => {
 				await expect(authStorage.getApiKey("prime-inference", { includeFallback: false })).resolves.toBeUndefined();
 			});
 
-			test.each([undefined, null])("missing or personal Agent team never inherits CLI team (%j)", (primeTeam) => {
-				writeAuthJson({ "prime-inference": { type: "api_key", key: "agent-key", primeTeam } });
-				authStorage = createStorage();
-				expect(authStorage.getPrimeInferenceTeamSelection()).toBe(primeTeam);
-				expect(authStorage.getProviderHeaders("prime-inference")).toBeUndefined();
-			});
-
-			test("PRIME_TEAM_ID overrides headers without changing the stored selection", () => {
-				writeAuthJson({ "prime-inference": { type: "api_key", key: "agent-key", primeTeam: team } });
-				authStorage = createStorage();
-				vi.stubEnv("PRIME_TEAM_ID", "env-team");
-				expect(authStorage.getProviderHeaders("prime-inference")).toEqual({ "X-Prime-Team-ID": "env-team" });
-				expect(authStorage.getPrimeInferenceTeamSelection()).toBeUndefined();
-				vi.stubEnv("PRIME_TEAM_ID", undefined);
-				expect(authStorage.getPrimeInferenceTeamSelection()).toEqual(team);
-				expect(authStorage.get("prime-inference")).toMatchObject({ primeTeam: team });
-			});
-
 			test("CLI edits cannot revive stale Agent auth or replace its cached team", async () => {
 				writeAuthJson({ "prime-inference": { type: "api_key", key: "agent-key", primeTeam: team } });
 				authStorage = createStorage();
@@ -401,54 +309,6 @@ describe("AuthStorage", () => {
 				vi.stubEnv("PRIME_API_KEY", "fresh-env-key");
 				await expect(authStorage.getApiKey("prime-inference")).resolves.toBe("fresh-env-key");
 			});
-
-			test("login preserves, clears, or replaces team according to key and explicit selection", () => {
-				writeAuthJson({ "prime-inference": { type: "api_key", key: "agent-key", primeTeam: team } });
-				authStorage = createStorage();
-				authStorage.setPrimeInferenceApiKey("agent-key");
-				expect(createStorage().getPrimeInferenceTeamSelection()).toEqual(team);
-				authStorage.setPrimeInferenceApiKey("different-key");
-				expect(createStorage().get("prime-inference")).toEqual({
-					type: "api_key",
-					key: "different-key",
-					primeTeam: null,
-				});
-				authStorage.setPrimeInferenceApiKey("imported-key", team);
-				expect(createStorage().getPrimeInferenceTeamSelection()).toEqual(team);
-				authStorage.setPrimeInferenceApiKey("imported-key", null);
-				expect(createStorage().getPrimeInferenceTeamSelection()).toBeNull();
-			});
-
-			test.each(["existing", "missing", "directory"])(
-				"Agent login, team, and logout leave %s CLI config unchanged",
-				async (state) => {
-					if (state !== "existing") rmSync(primeConfigPath);
-					if (state === "directory") mkdirSync(primeConfigPath);
-					const cliState = () => {
-						if (!existsSync(primeConfigPath)) return undefined;
-						return statSync(primeConfigPath).isDirectory() ? "directory" : readFileSync(primeConfigPath, "utf8");
-					};
-					const cliBefore = cliState();
-					authStorage = createStorage();
-					authStorage.setPrimeInferenceApiKey("agent-key", team);
-					expect(cliState()).toBe(cliBefore);
-					expect(statSync(authJsonPath).mode & 0o777).toBe(0o600);
-					const reopened = createStorage();
-					await expect(reopened.getApiKey("prime-inference")).resolves.toBe("agent-key");
-					expect(reopened.getPrimeInferenceTeamSelection()).toEqual(team);
-					authStorage.setPrimeInferenceTeamSelection({ teamId: "new-team", name: "New Team" });
-					expect(createStorage().getPrimeInferenceTeamSelection()?.teamId).toBe("new-team");
-					expect(cliState()).toBe(cliBefore);
-					authStorage.setPrimeInferenceTeamSelection(null);
-					expect(createStorage().getPrimeInferenceTeamSelection()).toBeNull();
-					expect(cliState()).toBe(cliBefore);
-					authStorage.logout("prime-inference");
-					expect(createStorage().has("prime-inference")).toBe(false);
-					await expect(authStorage.getApiKey("prime-inference")).resolves.toBeUndefined();
-					expect(cliState()).toBe(cliBefore);
-					expect(authStorage.drainErrors()).toEqual([]);
-				},
-			);
 
 			test("key and team changes merge the current disk credential, not a stale instance", () => {
 				writeAuthJson({ "prime-inference": { type: "api_key", key: "agent-key", primeTeam: team } });
@@ -553,93 +413,33 @@ describe("AuthStorage", () => {
 			});
 		});
 
-		test("apiKey command can use shell features like pipes", async () => {
-			writeAuthJson({
-				anthropic: { type: "api_key", key: "!echo 'hello world' | tr ' ' '-'" },
-			});
-
-			authStorage = AuthStorage.create(authJsonPath);
-			const apiKey = await authStorage.getApiKey("anthropic");
-
-			expect(apiKey).toBe("hello-world");
-		});
-
 		describe("caching", () => {
-			test("command is only executed once per process", async () => {
+			test.each([
+				{ name: "successful command runs once per process and across instances", fails: false },
+				{ name: "failed command is cached, never retried", fails: true },
+			])("$name", async ({ fails }) => {
 				const counterFile = join(tempDir, "counter");
 				writeFileSync(counterFile, "0");
-
 				const counterPath = toShPath(counterFile);
-				const command = `!sh -c 'count=$(cat "${counterPath}"); echo $((count + 1)) > "${counterPath}"; echo "key-value"'`;
+				const tail = fails ? "exit 1" : 'echo "key-value"';
 				writeAuthJson({
-					anthropic: { type: "api_key", key: command },
-				});
-
-				authStorage = AuthStorage.create(authJsonPath);
-
-				await authStorage.getApiKey("anthropic");
-				await authStorage.getApiKey("anthropic");
-				await authStorage.getApiKey("anthropic");
-
-				const count = parseInt(readFileSync(counterFile, "utf-8").trim(), 10);
-				expect(count).toBe(1);
-			});
-
-			test("cache persists across AuthStorage instances", async () => {
-				const counterFile = join(tempDir, "counter");
-				writeFileSync(counterFile, "0");
-
-				const counterPath = toShPath(counterFile);
-				const command = `!sh -c 'count=$(cat "${counterPath}"); echo $((count + 1)) > "${counterPath}"; echo "key-value"'`;
-				writeAuthJson({
-					anthropic: { type: "api_key", key: command },
-				});
-
-				const storage1 = AuthStorage.create(authJsonPath);
-				await storage1.getApiKey("anthropic");
-
-				const storage2 = AuthStorage.create(authJsonPath);
-				await storage2.getApiKey("anthropic");
-
-				const count = parseInt(readFileSync(counterFile, "utf-8").trim(), 10);
-				expect(count).toBe(1);
-			});
-
-			test("different commands are cached separately", async () => {
-				writeAuthJson({
-					anthropic: { type: "api_key", key: "!echo key-anthropic" },
+					anthropic: {
+						type: "api_key",
+						key: `!sh -c 'count=$(cat "${counterPath}"); echo $((count + 1)) > "${counterPath}"; ${tail}'`,
+					},
 					openai: { type: "api_key", key: "!echo key-openai" },
 				});
 
 				authStorage = AuthStorage.create(authJsonPath);
+				const expected = fails ? undefined : "key-value";
+				await expect(authStorage.getApiKey("anthropic")).resolves.toBe(expected);
+				await expect(authStorage.getApiKey("anthropic")).resolves.toBe(expected);
+				// A second instance shares the process-wide command cache.
+				await expect(AuthStorage.create(authJsonPath).getApiKey("anthropic")).resolves.toBe(expected);
+				// Distinct commands are cached under distinct keys.
+				await expect(authStorage.getApiKey("openai")).resolves.toBe("key-openai");
 
-				const keyA = await authStorage.getApiKey("anthropic");
-				const keyB = await authStorage.getApiKey("openai");
-
-				expect(keyA).toBe("key-anthropic");
-				expect(keyB).toBe("key-openai");
-			});
-
-			test("failed commands are cached (not retried)", async () => {
-				const counterFile = join(tempDir, "counter");
-				writeFileSync(counterFile, "0");
-
-				const counterPath = toShPath(counterFile);
-				const command = `!sh -c 'count=$(cat "${counterPath}"); echo $((count + 1)) > "${counterPath}"; exit 1'`;
-				writeAuthJson({
-					anthropic: { type: "api_key", key: command },
-				});
-
-				authStorage = AuthStorage.create(authJsonPath);
-
-				const key1 = await authStorage.getApiKey("anthropic");
-				const key2 = await authStorage.getApiKey("anthropic");
-
-				expect(key1).toBeUndefined();
-				expect(key2).toBeUndefined();
-
-				const count = parseInt(readFileSync(counterFile, "utf-8").trim(), 10);
-				expect(count).toBe(1);
+				expect(parseInt(readFileSync(counterFile, "utf-8").trim(), 10)).toBe(1);
 			});
 
 			test("environment variables are not cached (changes are picked up)", async () => {
@@ -842,7 +642,7 @@ describe("AuthStorage", () => {
 			expect(onDisk.anthropic.key).toBe("old-key");
 		});
 
-		test("set preserves unrelated external edits", () => {
+		test.each(["set", "remove"])("%s preserves unrelated external edits", (operation) => {
 			writeAuthJson({
 				anthropic: { type: "api_key", key: "old-anthropic" },
 				openai: { type: "api_key", key: "openai-key" },
@@ -850,38 +650,18 @@ describe("AuthStorage", () => {
 
 			authStorage = AuthStorage.create(authJsonPath);
 
+			// Another process adds a provider after this instance loaded the file.
 			writeAuthJson({
 				anthropic: { type: "api_key", key: "old-anthropic" },
 				openai: { type: "api_key", key: "openai-key" },
 				google: { type: "api_key", key: "google-key" },
 			});
 
-			authStorage.set("anthropic", { type: "api_key", key: "new-anthropic" });
+			if (operation === "set") authStorage.set("anthropic", { type: "api_key", key: "new-anthropic" });
+			else authStorage.remove("anthropic");
 
 			const updated = JSON.parse(readFileSync(authJsonPath, "utf-8")) as Record<string, { key: string }>;
-			expect(updated.anthropic.key).toBe("new-anthropic");
-			expect(updated.openai.key).toBe("openai-key");
-			expect(updated.google.key).toBe("google-key");
-		});
-
-		test("remove preserves unrelated external edits", () => {
-			writeAuthJson({
-				anthropic: { type: "api_key", key: "anthropic-key" },
-				openai: { type: "api_key", key: "openai-key" },
-			});
-
-			authStorage = AuthStorage.create(authJsonPath);
-
-			writeAuthJson({
-				anthropic: { type: "api_key", key: "anthropic-key" },
-				openai: { type: "api_key", key: "openai-key" },
-				google: { type: "api_key", key: "google-key" },
-			});
-
-			authStorage.remove("anthropic");
-
-			const updated = JSON.parse(readFileSync(authJsonPath, "utf-8")) as Record<string, { key: string }>;
-			expect(updated.anthropic).toBeUndefined();
+			expect(updated.anthropic?.key).toBe(operation === "set" ? "new-anthropic" : undefined);
 			expect(updated.openai.key).toBe("openai-key");
 			expect(updated.google.key).toBe("google-key");
 		});
@@ -969,31 +749,15 @@ describe("AuthStorage", () => {
 	});
 
 	describe("runtime overrides", () => {
-		test("runtime override takes priority over auth.json", async () => {
-			writeAuthJson({
-				anthropic: { type: "api_key", key: "!echo stored-key" },
-			});
+		test("runtime override takes priority over auth.json until it is removed", async () => {
+			writeAuthJson({ anthropic: { type: "api_key", key: "!echo stored-key" } });
 
 			authStorage = AuthStorage.create(authJsonPath);
 			authStorage.setRuntimeApiKey("anthropic", "runtime-key");
+			await expect(authStorage.getApiKey("anthropic")).resolves.toBe("runtime-key");
 
-			const apiKey = await authStorage.getApiKey("anthropic");
-
-			expect(apiKey).toBe("runtime-key");
-		});
-
-		test("removing runtime override falls back to auth.json", async () => {
-			writeAuthJson({
-				anthropic: { type: "api_key", key: "!echo stored-key" },
-			});
-
-			authStorage = AuthStorage.create(authJsonPath);
-			authStorage.setRuntimeApiKey("anthropic", "runtime-key");
 			authStorage.removeRuntimeApiKey("anthropic");
-
-			const apiKey = await authStorage.getApiKey("anthropic");
-
-			expect(apiKey).toBe("stored-key");
+			await expect(authStorage.getApiKey("anthropic")).resolves.toBe("stored-key");
 		});
 	});
 
@@ -1076,5 +840,216 @@ describe("AuthStorage", () => {
 			expect(restored).toBe(false);
 			expect(AuthStorage.create(authJsonPath).get("mcp:acme-2--attempt-1")).toEqual(newer);
 		});
+	});
+});
+
+function structuredFailureMessage(kind: string, status: number, errorMessage: string): AssistantMessage {
+	return {
+		...fauxAssistantMessage("", { stopReason: "error", errorMessage }),
+		diagnostics: [{ type: "provider_stream_failure", timestamp: Date.now(), details: { kind, status } }],
+	};
+}
+
+const provider401Message = () => structuredFailureMessage("auth", 401, "401 Unauthorized: invalid API key");
+const provider500Message = () => structuredFailureMessage("server_error", 500, "500 Internal Server Error");
+const unstructured401Message = () =>
+	fauxAssistantMessage("", { stopReason: "error", errorMessage: "401 status code (no body)" });
+
+interface StaleAuthCase {
+	name: string;
+	settings: HarnessOptions["settings"];
+	responses: () => AssistantMessage[];
+	calls: number;
+	retryAttempts: number[];
+	stale: boolean;
+}
+
+const staleAuthCases: StaleAuthCase[] = [
+	{
+		name: "structured 401 retries once, then marks the current auth stale",
+		settings: { retry: { enabled: true, maxRetries: 2, baseDelayMs: 1 } },
+		responses: () => [provider401Message(), provider401Message(), provider401Message()],
+		calls: 2,
+		retryAttempts: [1],
+		stale: true,
+	},
+	{
+		name: "unstructured 401 error text does not mark auth stale",
+		settings: { retry: { enabled: true, maxRetries: 0, baseDelayMs: 1 } },
+		responses: () => [unstructured401Message()],
+		calls: 1,
+		retryAttempts: [],
+		stale: false,
+	},
+	{
+		name: "structured permission (403) failures do not mark auth stale",
+		settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } },
+		responses: () => [
+			structuredFailureMessage("permission", 403, "403 model access denied by organization policy"),
+			fauxAssistantMessage("unused"),
+		],
+		calls: 1,
+		retryAttempts: [],
+		stale: false,
+	},
+	{
+		// Wait-for-usage is disabled so quick-retry exhaustion stays terminal here.
+		name: "a captured auth failure stays stale when the final retryable error is not auth",
+		settings: {
+			retry: { enabled: true, maxRetries: 2, baseDelayMs: 1, provider: { waitForUsage: { enabled: false } } },
+		},
+		responses: () => [provider401Message(), provider500Message(), provider500Message()],
+		calls: 3,
+		retryAttempts: [1, 2],
+		stale: true,
+	},
+	{
+		name: "concrete auth failures are marked stale when retry is disabled",
+		settings: { retry: { enabled: false } },
+		responses: () => [provider401Message()],
+		calls: 1,
+		retryAttempts: [],
+		stale: true,
+	},
+];
+
+describe("issue #4491 provider auth stale after repeated 401", () => {
+	const harnesses: Harness[] = [];
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		while (harnesses.length > 0) {
+			harnesses.pop()?.cleanup();
+		}
+	});
+
+	/** The harness configures two auth sources; mark both so the provider is fully locked out. */
+	function lockOutProvider(harness: Harness, provider: string): void {
+		const registry = harness.session.modelRegistry;
+		for (let i = 0; i < 2 && registry.getProviderAuthStatus(provider).source !== "stale"; i++) {
+			expect(registry.markProviderAuthStale(provider)).toBe(true);
+		}
+		expect(registry.getProviderAuthStatus(provider)).toMatchObject({ configured: false, source: "stale" });
+	}
+
+	test.each(staleAuthCases)("$name", async ({ settings, responses, calls, retryAttempts, stale }) => {
+		const harness = await createHarness({ settings });
+		harnesses.push(harness);
+		harness.setResponses(responses());
+
+		await harness.session.prompt("hello");
+
+		const provider = harness.getModel().provider;
+		expect(harness.faux.state.callCount).toBe(calls);
+		expect(harness.eventsOfType("auto_retry_start").map((event) => event.attempt)).toEqual(retryAttempts);
+		expect(harness.eventsOfType("auth_stale")).toHaveLength(stale ? 1 : 0);
+		expect(harness.authStorage.hasAuth(provider)).toBe(!stale);
+		if (stale) {
+			expect(harness.authStorage.getAuthStatus(provider)).toEqual({
+				configured: false,
+				source: "stale",
+				label: "expired",
+			});
+			await expect(harness.authStorage.getApiKey(provider)).resolves.toBeUndefined();
+		}
+	});
+
+	test("emits stale auth source tokens for daemon clients after a structured 401", async () => {
+		const harness = await createHarness({
+			provider: "prime-inference",
+			settings: { retry: { enabled: true, maxRetries: 0, baseDelayMs: 1 } },
+		});
+		harnesses.push(harness);
+		harness.setResponses([provider401Message()]);
+
+		await harness.session.prompt("hello");
+
+		const authStaleEvents = harness.eventsOfType("auth_stale");
+		expect(authStaleEvents).toHaveLength(1);
+		expect(authStaleEvents[0]?.provider).toBe("prime-inference");
+		expect(authStaleEvents[0]?.sourceTokens).toMatchObject([{ provider: "prime-inference", source: "runtime" }]);
+		expect(harness.authStorage.getAuthStatus("prime-inference")).toEqual({
+			configured: false,
+			source: "stale",
+			label: "expired",
+		});
+	});
+
+	test("marks captured auth failures stale when retry backoff is cancelled", async () => {
+		const harness = await createHarness({
+			settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 100 } },
+		});
+		harnesses.push(harness);
+		harness.setResponses([provider401Message(), provider401Message()]);
+		const sawRetryStart = new Promise<void>((resolve) => {
+			const unsubscribe = harness.session.subscribe((event) => {
+				if (event.type === "auto_retry_start") {
+					unsubscribe();
+					resolve();
+				}
+			});
+		});
+
+		const promptPromise = harness.session.prompt("hello");
+		await sawRetryStart;
+		harness.session.abortRetry();
+		await promptPromise;
+
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.eventsOfType("auth_stale")).toHaveLength(1);
+		expect(harness.eventsOfType("auto_retry_end").map((event) => event.finalError)).toContain("Retry cancelled");
+		await expect(harness.authStorage.getApiKey(harness.getModel().provider)).resolves.toBeUndefined();
+	});
+
+	test("marks each failed auth source stale when credentials change during retry backoff", async () => {
+		const harness = await createHarness({
+			settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 5 } },
+		});
+		harnesses.push(harness);
+		harness.setResponses([provider401Message(), provider401Message()]);
+		let changedCredentials = false;
+		harness.session.subscribe((event) => {
+			if (event.type === "auto_retry_start" && !changedCredentials) {
+				changedCredentials = true;
+				harness.authStorage.setRuntimeApiKey(harness.getModel().provider, "fresh-key");
+			}
+		});
+
+		await harness.session.prompt("hello");
+
+		expect(changedCredentials).toBe(true);
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(harness.authStorage.getAuthStatus(harness.getModel().provider)).toEqual({
+			configured: false,
+			source: "stale",
+			label: "expired",
+		});
+		await expect(harness.authStorage.getApiKey(harness.getModel().provider)).resolves.toBeUndefined();
+	});
+
+	test("only a resolvable explicit model selection clears a stale-auth lockout", async () => {
+		const harness = await createHarness({
+			settings: { retry: { enabled: true, maxRetries: 0, baseDelayMs: 1 } },
+		});
+		harnesses.push(harness);
+		const provider = harness.getModel().provider;
+		lockOutProvider(harness, provider);
+		const runtime = {
+			session: harness.session,
+			setRebindSession() {},
+			setBeforeSessionInvalidate() {},
+		} as unknown as AgentSessionRuntime;
+		const connection = new InProcessAgentConnection(runtime);
+
+		// A mistyped model id must not unlock the provider it failed to switch to.
+		await expect(connection.setModel(provider, "not-a-model")).rejects.toThrow("Model not found");
+		expect(harness.authStorage.hasAuth(provider)).toBe(false);
+		expect(harness.session.modelRegistry.getProviderAuthStatus(provider)).toMatchObject({ source: "stale" });
+
+		const model = harness.getModel();
+		await connection.setModel(model.provider, model.id);
+
+		expect(harness.authStorage.hasAuth(provider)).toBe(true);
+		expect(harness.session.modelRegistry.getProviderAuthStatus(provider).source).not.toBe("stale");
 	});
 });

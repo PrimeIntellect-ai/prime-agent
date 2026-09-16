@@ -78,48 +78,61 @@ interface InstallerResult {
 
 function runInstaller(command: string, version: string, environment: NodeJS.ProcessEnv): Promise<InstallerResult> {
 	return new Promise((resolveResult) => {
-		const child = spawn("sh", [command, version], {
-			env: environment,
-			stdio: ["ignore", "pipe", "pipe"],
-			detached: true,
-		});
-		child.stdout.pipe(process.stderr, { end: false });
-		child.stderr.pipe(process.stderr, { end: false });
+		let child: ReturnType<typeof spawn> | undefined;
 		let parentSignal: (typeof signals)[number] | undefined;
 		let forceTimer: NodeJS.Timeout | undefined;
+		let timeout: NodeJS.Timeout | undefined;
 		let settled = false;
 		const terminate = (signal: NodeJS.Signals) => {
+			if (!child?.pid) return;
 			try {
-				process.kill(-child.pid!, signal);
+				process.kill(-child.pid, signal);
 			} catch {
 				child.kill(signal);
 			}
+		};
+		// Install handlers before spawning so an immediately ready installer cannot expose
+		// a window where the bridge receives the default signal action before cleanup.
+		const scheduleForceKill = () => {
+			forceTimer ??= setTimeout(() => terminate("SIGKILL"), 1000);
+			forceTimer.unref();
 		};
 		const handlers = signals.map((signal) => {
 			const handler = () => {
 				parentSignal ??= signal;
 				terminate(signal);
-				forceTimer ??= setTimeout(() => terminate("SIGKILL"), 1000);
-				forceTimer.unref();
+				scheduleForceKill();
 			};
 			process.on(signal, handler);
 			return handler;
 		});
-		const timeout = setTimeout(() => {
-			terminate("SIGTERM");
-			forceTimer = setTimeout(() => terminate("SIGKILL"), 1000);
-			forceTimer.unref();
-		}, 450000);
 		const finish = (result: InstallerResult) => {
 			if (settled) return;
 			settled = true;
-			clearTimeout(timeout);
+			if (timeout) clearTimeout(timeout);
 			if (forceTimer) clearTimeout(forceTimer);
 			for (const [index, signal] of signals.entries()) process.removeListener(signal, handlers[index]);
 			resolveResult({ ...result, parentSignal });
 		};
+		try {
+			child = spawn("sh", [command, version], {
+				env: environment,
+				stdio: ["ignore", "pipe", "pipe"],
+				detached: true,
+			});
+		} catch (error) {
+			finish({ status: null, signal: null, error: error as Error });
+			return;
+		}
+		child.stdout!.pipe(process.stderr, { end: false });
+		child.stderr!.pipe(process.stderr, { end: false });
 		child.once("error", (error) => finish({ status: null, signal: null, error }));
 		child.once("close", (status, signal) => finish({ status, signal }));
+		timeout = setTimeout(() => {
+			terminate("SIGTERM");
+			scheduleForceKill();
+		}, 450000);
+		if (parentSignal) terminate(parentSignal);
 	});
 }
 

@@ -135,26 +135,153 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-describe("runPrintMode", () => {
-	it("emits session_shutdown in text mode", async () => {
-		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
-		const { session } = runtimeHost;
-		const images: ImageContent[] = [{ type: "image", mimeType: "image/png", data: "abc" }];
+type RunOptions = Parameters<typeof runPrintMode>[1];
 
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-			initialMessage: "Say done",
-			initialImages: images,
-		});
+const run = (host: FakeRuntimeHost, options: RunOptions = { mode: "text" }) =>
+	runPrintMode(host as unknown as Parameters<typeof runPrintMode>[0], options);
 
-		expect(exitCode).toBe(0);
-		expect(session.promptAndWait).toHaveBeenCalledWith("Say done", { images });
-		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
-		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
+const AUTONOMOUS_LIMITS = { maxContinuations: 10, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 };
+
+const gateFailure = (attempt: number, exitText = "exited 1", output = "0/9") => ({
+	command: "verify-public",
+	attempt,
+	exitText,
+	output,
+});
+
+const gateStatus = (over: Partial<AgentAutonomousStatus> = {}): AgentAutonomousStatus => ({
+	enabled: true,
+	continuationsUsed: 1,
+	turnsUsed: 2,
+	tokensUsed: 100,
+	startedAt: Date.now(),
+	limits: AUTONOMOUS_LIMITS,
+	gates: { commands: ["verify-public"], maxRetries: 3, timeoutMs: 300_000 },
+	gateAttempts: { "verify-public": 1 },
+	lastGateFailure: gateFailure(1),
+	...over,
+});
+
+const STALLED_GATE = gateFailure(
+	1,
+	"not rerun: workspace unchanged since previous failed gate",
+	"edit source files before attempting to finish again",
+);
+
+const sessionCommandResult = (text: string, success: boolean) =>
+	createSessionSlashCommandResultMessage(text, {
+		command: { name: "goal", args: "status", text: "/goal status" },
+		success,
+		severity: success ? "info" : "error",
+		...(success ? {} : { error: "bad arguments" }),
+	});
+
+const compactionOutcome = (text: string, outcome: "skipped" | "failed") =>
+	createCompactionOutcomeMessage(text, { reason: "requested", outcome });
+
+const refinementOutcome = () =>
+	createRefinementOutcomeMessage({
+		id: "refine-1",
+		summary: "Added a local memory.",
+		rationale: "",
+		expectedOutcome: "",
+		appliedEdits: [],
+		harnessStatePath: "/tmp/harness/state.json",
+		scope: "local",
+	});
+
+describe("selectHeadlessTerminalResult", () => {
+	const assistant = createAssistantMessage({ text: "final answer" });
+	const failed = compactionOutcome("Compaction failed", "failed");
+	const skipped = compactionOutcome("Requested compaction skipped", "skipped");
+
+	it.each([
+		[
+			"skips a malformed terminal outcome without hiding an earlier valid failure",
+			[assistant, failed, { ...failed, details: { reason: "unknown", outcome: "failed" } } as AgentMessage],
+			{ primary: assistant, compactionOutcomes: [failed] },
+		],
+		[
+			"selects the saved assistant output past a resume-injected harness digest",
+			[assistant, createHarnessDigestMessage("# Continual Harness State\n\nmemory: 0")],
+			{ primary: assistant, compactionOutcomes: [] },
+		],
+		[
+			"does not select a result across a user-message barrier",
+			[assistant, { role: "user", content: "next request", timestamp: Date.now() } as AgentMessage, skipped],
+			{ primary: undefined, compactionOutcomes: [skipped] },
+		],
+		[
+			"does not select a result across a custom-message barrier",
+			[
+				assistant,
+				createCustomMessage("extension.notice", "unrelated", true, undefined, new Date().toISOString()),
+				skipped,
+			],
+			{ primary: undefined, compactionOutcomes: [skipped] },
+		],
+	])("%s", (_label, messages, expected) => {
+		expect(selectHeadlessTerminalResult(messages)).toEqual(expected);
+	});
+});
+
+describe("runPrintMode exit codes", () => {
+	it.each([
+		["assistant output", () => [createAssistantMessage({ text: "done" })], 0],
+		["a successful session command result", () => [sessionCommandResult("No active goal.", true)], 0],
+		["a failed session command result", () => [sessionCommandResult("Command failed: bad arguments", false)], 1],
+		[
+			"an assistant error",
+			() => [createAssistantMessage({ stopReason: "error", errorMessage: "provider failure" })],
+			1,
+		],
+		[
+			"assistant output followed by a skipped compaction outcome",
+			() => [createAssistantMessage({ text: "done" }), compactionOutcome("Requested compaction skipped", "skipped")],
+			0,
+		],
+		[
+			"assistant output followed by a refinement outcome",
+			() => [createAssistantMessage({ text: "done" }), refinementOutcome()],
+			0,
+		],
+		["an outcome-only failure", () => [compactionOutcome("Context overflow recovery failed", "failed")], 1],
+		[
+			"a session command result followed by a compaction outcome",
+			() => [
+				sessionCommandResult("No active goal.", true),
+				compactionOutcome("Requested compaction skipped", "skipped"),
+			],
+			0,
+		],
+	])("exits %s => %s", async (_label, makeMessages, expected) => {
+		const runtimeHost = createRuntimeHost(makeMessages());
+		vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(run(runtimeHost)).resolves.toBe(expected);
+	});
+
+	it.each([
+		[
+			"text",
+			{
+				mode: "text" as const,
+				initialMessage: "Say done",
+				initialImages: [{ type: "image", mimeType: "image/png", data: "abc" }] as ImageContent[],
+			},
+			"Say done",
+			{ images: [{ type: "image", mimeType: "image/png", data: "abc" }] },
+		],
+		["json", { mode: "json" as const, messages: ["hello"] }, "hello", {}],
+	])("forwards the initial prompt in %s mode", async (_mode, options, expectedMessage, expectedOptions) => {
+		const runtimeHost = createRuntimeHost([createAssistantMessage({ text: "done" })]);
+
+		await expect(run(runtimeHost, options)).resolves.toBe(0);
+		expect(runtimeHost.session.promptAndWait).toHaveBeenCalledWith(expectedMessage, expectedOptions);
 	});
 
 	it("disposes the connection before exiting on SIGINT", async () => {
-		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
+		const runtimeHost = createRuntimeHost([createAssistantMessage({ text: "done" })]);
 		const { session } = runtimeHost;
 		let resolvePrompt: (() => void) | undefined;
 		session.promptAndWait.mockImplementation(
@@ -166,10 +293,7 @@ describe("runPrintMode", () => {
 		const onSpy = vi.spyOn(process, "on");
 		const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => undefined) as typeof process.exit);
 
-		const runPromise = runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-			initialMessage: "Wait",
-		});
+		const runPromise = run(runtimeHost, { mode: "text", initialMessage: "Wait" });
 		await vi.waitFor(() => expect(session.promptAndWait).toHaveBeenCalled());
 		const handler = onSpy.mock.calls.find(([event]) => event === "SIGINT")?.[1];
 		if (typeof handler !== "function") throw new Error("SIGINT handler was not registered");
@@ -178,335 +302,170 @@ describe("runPrintMode", () => {
 
 		await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(130));
 		expect(runtimeHost.dispose).toHaveBeenCalledTimes(1);
-		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
 		resolvePrompt?.();
 		await expect(runPromise).resolves.toBe(0);
 	});
+});
 
-	it("prints successful session command results in text mode", async () => {
-		const result = createSessionSlashCommandResultMessage("No active goal.", {
-			command: { name: "goal", args: "status", text: "/goal status" },
-			success: true,
-			severity: "info",
-		});
-		const runtimeHost = createRuntimeHost(result);
-		output.write.mockClear();
+describe("runPrintMode autonomous gate loop", () => {
+	const PROMPT_OPTIONS = {
+		streamingBehavior: "followUp",
+		internalPrompt: true,
+		suppressAutonomousContinuation: true,
+	};
 
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-		});
+	type GateExpectation = { exitCode: number; prompts: number; errorContains?: string };
 
-		expect(exitCode).toBe(0);
-		expect(output.write).toHaveBeenCalledWith("No active goal.\n");
-	});
-
-	it("prints a session command result before a trailing compaction outcome", async () => {
-		const result = createSessionSlashCommandResultMessage("No active goal.", {
-			command: { name: "goal", args: "status", text: "/goal status" },
-			success: true,
-			severity: "info",
-		});
-		const outcome = createCompactionOutcomeMessage("Requested compaction skipped", {
-			reason: "requested",
-			outcome: "skipped",
-		});
-		const runtimeHost = createRuntimeHost([result, outcome]);
+	it.each<[string, AgentAutonomousStatus[], GateExpectation]>([
+		[
+			"stops once the gate retry budget is exhausted",
+			[gateStatus({ gateAttempts: { "verify-public": 4 }, lastGateFailure: { ...STALLED_GATE, attempt: 4 } })],
+			{ exitCode: 1, prompts: 0, errorContains: "still failing after attempt 4/3" },
+		],
+		[
+			"stops once maxContinuations is reached",
+			[
+				gateStatus({
+					continuationsUsed: 3,
+					limits: { ...AUTONOMOUS_LIMITS, maxContinuations: 3 },
+				}),
+			],
+			{ exitCode: 1, prompts: 0, errorContains: "maxContinuations reached (3/3)" },
+		],
+		[
+			"names the limit that stopped a still-failing gate",
+			[
+				gateStatus({
+					continuationsUsed: 34,
+					tokensUsed: 2_000_000,
+					limits: { maxContinuations: 999, maxTurns: 1000, maxTokens: 2_000_000, timeoutMs: 1_800_000 },
+					gates: { commands: ["verify-public"], maxRetries: 999, timeoutMs: 300_000 },
+					gateAttempts: { "verify-public": 34 },
+					lastGateFailure: gateFailure(34),
+				}),
+			],
+			{ exitCode: 1, prompts: 0, errorContains: "maxTokens reached (2000000/2000000)" },
+		],
+		[
+			"stops an ungated autonomous run at its limit",
+			[
+				gateStatus({
+					continuationsUsed: 3,
+					limits: { ...AUTONOMOUS_LIMITS, maxContinuations: 3 },
+					gates: { commands: [], maxRetries: 3, timeoutMs: 300_000 },
+					gateAttempts: {},
+					lastGateFailure: undefined,
+				}),
+			],
+			{ exitCode: 1, prompts: 0, errorContains: "Autonomous run stopped before terminal evidence" },
+		],
+		[
+			"keeps prompting while the gate fails below its retry limit, then finishes",
+			[
+				gateStatus(),
+				gateStatus({
+					continuationsUsed: 2,
+					turnsUsed: 3,
+					gateAttempts: { "verify-public": 2 },
+					lastGateFailure: gateFailure(2, "exited 1", "0/9 summary"),
+				}),
+				gateStatus({
+					continuationsUsed: 2,
+					turnsUsed: 4,
+					gateAttempts: { "verify-public": 2 },
+					lastGateFailure: undefined,
+				}),
+			],
+			{ exitCode: 0, prompts: 2 },
+		],
+		[
+			"continues prompting when gate attempts stall but autonomous usage advances",
+			[
+				gateStatus(),
+				gateStatus({ continuationsUsed: 2, turnsUsed: 3, lastGateFailure: STALLED_GATE }),
+				gateStatus({ continuationsUsed: 3, turnsUsed: 4, lastGateFailure: STALLED_GATE }),
+				gateStatus({ continuationsUsed: 10, turnsUsed: 5, lastGateFailure: STALLED_GATE }),
+			],
+			{ exitCode: 1, prompts: 3 },
+		],
+		[
+			"keeps prompting on repeated gate progress until a limit stops the run",
+			[7, 8, 9, 10].map((continuationsUsed) =>
+				gateStatus({
+					continuationsUsed,
+					turnsUsed: continuationsUsed + 1,
+					gates: { commands: ["verify-public"], maxRetries: 20, timeoutMs: 300_000 },
+					gateAttempts: { "verify-public": 7 },
+					lastGateFailure: { ...STALLED_GATE, attempt: 7 },
+				}),
+			),
+			{ exitCode: 1, prompts: 3 },
+		],
+	])("%s", async (_label, statuses, expected) => {
+		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "still failing" }), statuses[0]);
+		const { session } = runtimeHost;
+		let statusIndex = 0;
+		session.getAutonomousStatus.mockImplementation(
+			() => statuses[Math.min(statusIndex++, statuses.length - 1)] as AgentAutonomousStatus,
+		);
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-		output.write.mockClear();
 
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-		});
-
-		expect(exitCode).toBe(0);
-		expect(output.write).toHaveBeenCalledWith("No active goal.\n");
-		expect(errorSpy).toHaveBeenCalledWith("Requested compaction skipped");
-	});
-
-	it("skips malformed terminal outcomes without hiding earlier valid failures", () => {
-		const failed = createCompactionOutcomeMessage("Compaction failed", {
-			reason: "requested",
-			outcome: "failed",
-		});
-		const malformed = { ...failed, details: { reason: "unknown", outcome: "failed" } } as AgentMessage;
-		const assistant = createAssistantMessage({ text: "done" });
-
-		expect(selectHeadlessTerminalResult([assistant, failed, malformed])).toEqual({
-			primary: assistant,
-			compactionOutcomes: [failed],
-		});
-	});
-
-	it("selects the saved assistant output past a resume-injected harness digest", () => {
-		const assistant = createAssistantMessage({ text: "final answer" });
-		const digest = createHarnessDigestMessage("# Continual Harness State\n\nmemory: 0");
-
-		expect(selectHeadlessTerminalResult([assistant, digest])).toEqual({
-			primary: assistant,
-			compactionOutcomes: [],
-		});
-	});
-
-	it("does not select a result across a message barrier", () => {
-		const outcome = createCompactionOutcomeMessage("Requested compaction skipped", {
-			reason: "requested",
-			outcome: "skipped",
-		});
-		const barriers: AgentMessage[] = [
-			{ role: "user", content: "next request", timestamp: Date.now() },
-			createCustomMessage("extension.notice", "unrelated", true, undefined, new Date().toISOString()),
-		];
-
-		for (const barrier of barriers) {
-			expect(selectHeadlessTerminalResult([createAssistantMessage({ text: "stale" }), barrier, outcome])).toEqual({
-				primary: undefined,
-				compactionOutcomes: [outcome],
-			});
+		await expect(run(runtimeHost)).resolves.toBe(expected.exitCode);
+		expect(session.prompt).toHaveBeenCalledTimes(expected.prompts);
+		expect(session.recordHostAutonomousContinuation).toHaveBeenCalledTimes(expected.prompts);
+		if (expected.prompts > 0) {
+			expect(session.waitForIdle).toHaveBeenCalledBefore(session.prompt);
+			expect(session.prompt.mock.calls[0][1]).toEqual(PROMPT_OPTIONS);
+		}
+		if (expected.errorContains) {
+			expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining(expected.errorContains));
 		}
 	});
 
-	it("returns non-zero for failed session command results in text mode", async () => {
-		const result = createSessionSlashCommandResultMessage("Command failed: bad arguments", {
-			command: { name: "refine", args: "rollback", text: "/refine rollback" },
-			success: false,
-			severity: "error",
-			error: "bad arguments",
-		});
-		const runtimeHost = createRuntimeHost(result);
-		output.write.mockClear();
-
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-		});
-
-		expect(exitCode).toBe(1);
-		expect(output.write).toHaveBeenCalledWith("Command failed: bad arguments\n");
-	});
-
-	it("emits session_shutdown in json mode", async () => {
-		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
-		const { session } = runtimeHost;
-
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "json",
-			messages: ["hello"],
-		});
-
-		expect(exitCode).toBe(0);
-		expect(session.promptAndWait).toHaveBeenCalledWith("hello", {});
-		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
-		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
-	});
-
-	it("emits session_shutdown and returns non-zero on assistant error", async () => {
-		const runtimeHost = createRuntimeHost(
-			createAssistantMessage({ stopReason: "error", errorMessage: "provider failure" }),
-		);
-		const { session } = runtimeHost;
-		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-		});
-
-		expect(exitCode).toBe(1);
-		expect(errorSpy).toHaveBeenCalledWith("provider failure");
-		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
-		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
-	});
-
-	it("prints assistant output and reports a trailing compaction outcome", async () => {
-		const outcome = createCompactionOutcomeMessage("Auto-compaction skipped: nothing to compact", {
-			reason: "threshold",
-			outcome: "skipped",
-		});
-		const runtimeHost = createRuntimeHost([createAssistantMessage({ text: "done" }), outcome]);
-		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-		output.write.mockClear();
-
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-		});
-
-		expect(exitCode).toBe(0);
-		expect(output.write).toHaveBeenCalledWith("done\n");
-		expect(errorSpy).toHaveBeenCalledWith("Auto-compaction skipped: nothing to compact");
-	});
-
-	it("prints assistant output past a trailing refinement outcome", async () => {
-		const outcome = createRefinementOutcomeMessage({
-			id: "refine-1",
-			summary: "Added a local memory.",
-			rationale: "",
-			expectedOutcome: "",
-			appliedEdits: [],
-			harnessStatePath: "/tmp/harness/state.json",
-			scope: "local",
-		});
-		const runtimeHost = createRuntimeHost([createAssistantMessage({ text: "done" }), outcome]);
-		output.write.mockClear();
-
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-		});
-
-		expect(exitCode).toBe(0);
-		expect(output.write).toHaveBeenCalledWith("done\n");
-	});
-
-	it("reports an outcome-only failure and exits non-zero", async () => {
-		const outcome = createCompactionOutcomeMessage("Context overflow recovery failed", {
-			reason: "overflow",
-			outcome: "failed",
-		});
-		const runtimeHost = createRuntimeHost(outcome);
-		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-		output.write.mockClear();
-
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-		});
-
-		expect(exitCode).toBe(1);
-		expect(output.write).not.toHaveBeenCalled();
-		expect(errorSpy).toHaveBeenCalledWith("Context overflow recovery failed");
-	});
-
-	it("stops host-driven gate retries once gate maxRetries is exhausted", async () => {
-		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "still failing" }), {
-			enabled: true,
-			continuationsUsed: 1,
-			turnsUsed: 2,
-			tokensUsed: 100,
-			startedAt: Date.now(),
-			limits: { maxContinuations: 10, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
-			gates: { commands: ["verify-public"], maxRetries: 3, timeoutMs: 300_000 },
-			gateAttempts: { "verify-public": 4 },
-			lastGateFailure: {
-				command: "verify-public",
-				attempt: 4,
-				exitText: "not rerun: workspace unchanged since previous failed gate",
-				output: "edit source files before attempting to finish again",
-			},
-		});
-		const { session } = runtimeHost;
-		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-		});
-
-		expect(exitCode).toBe(1);
-		expect(session.prompt).not.toHaveBeenCalled();
-		expect(session.recordHostAutonomousContinuation).not.toHaveBeenCalled();
-		expect(errorSpy).toHaveBeenCalledWith(
-			"Autonomous quality gate still failing after attempt 4/3: not rerun: workspace unchanged since previous failed gate",
-		);
-	});
-
-	it("refreshes autonomous gates after host-driven gate retries", async () => {
-		const failingStatus: AgentAutonomousStatus = {
-			enabled: true,
-			continuationsUsed: 0,
-			turnsUsed: 1,
-			tokensUsed: 100,
-			startedAt: Date.now(),
-			limits: { maxContinuations: 3, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
-			gates: { commands: ["verify-public"], maxRetries: 3, timeoutMs: 300_000 },
-			gateAttempts: { "verify-public": 1 },
-			lastGateFailure: {
-				command: "verify-public",
-				attempt: 1,
-				exitText: "exited 1",
-				output: "0/9",
-			},
-		};
-		const passingStatus: AgentAutonomousStatus = {
-			...failingStatus,
+	it("re-runs the gates after a host-driven retry and exits clean when they pass", async () => {
+		const failing = gateStatus({ continuationsUsed: 0, turnsUsed: 1 });
+		const passing = gateStatus({
 			continuationsUsed: 1,
 			turnsUsed: 2,
 			tokensUsed: 200,
 			gateAttempts: { "verify-public": 0 },
 			lastGateFailure: undefined,
-		};
-		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "fixed the gate" }), failingStatus);
+		});
+		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "fixed the gate" }), failing);
 		const { session } = runtimeHost;
-		let currentStatus = failingStatus;
+		let currentStatus = failing;
 		session.getAutonomousStatus.mockImplementation(() => currentStatus);
 		session.refreshAutonomousGates.mockImplementation(() => {
-			currentStatus = passingStatus;
+			currentStatus = passing;
 		});
 
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-		});
-
-		expect(exitCode).toBe(0);
+		await expect(run(runtimeHost)).resolves.toBe(0);
 		expect(session.prompt).toHaveBeenCalledTimes(1);
 		expect(session.recordHostAutonomousContinuation).toHaveBeenCalledTimes(1);
 		expect(session.refreshAutonomousGates).toHaveBeenCalledTimes(1);
 	});
 
-	it("keeps autonomous gate prompting after a transient assistant error while limits remain", async () => {
-		const statuses: AgentAutonomousStatus[] = [
-			{
-				enabled: true,
-				continuationsUsed: 1,
-				turnsUsed: 2,
-				tokensUsed: 100,
-				startedAt: Date.now(),
-				limits: { maxContinuations: 10, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
-				gates: { commands: ["verify-public"], maxRetries: 3, timeoutMs: 300_000 },
-				gateAttempts: { "verify-public": 1 },
-				lastGateFailure: {
-					command: "verify-public",
-					attempt: 1,
-					exitText: "exited 1",
-					output: "0/9",
-				},
-			},
-			{
-				enabled: true,
-				continuationsUsed: 1,
+	it("keeps gate prompting after a transient assistant error while limits remain", async () => {
+		const statuses = [
+			gateStatus(),
+			gateStatus({
 				turnsUsed: 3,
 				tokensUsed: 200,
-				startedAt: Date.now(),
-				limits: { maxContinuations: 10, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
-				gates: { commands: ["verify-public"], maxRetries: 3, timeoutMs: 300_000 },
 				gateAttempts: { "verify-public": 2 },
-				lastGateFailure: {
-					command: "verify-public",
-					attempt: 2,
-					exitText: "exited 1",
-					output: "0/9",
-				},
-			},
-			{
-				enabled: true,
-				continuationsUsed: 1,
+				lastGateFailure: gateFailure(2),
+			}),
+			gateStatus({
 				turnsUsed: 4,
 				tokensUsed: 300,
-				startedAt: Date.now(),
-				limits: { maxContinuations: 10, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
-				gates: { commands: ["verify-public"], maxRetries: 3, timeoutMs: 300_000 },
 				gateAttempts: { "verify-public": 2 },
-				lastGateFailure: {
-					command: "verify-public",
-					attempt: 2,
-					exitText: "exited 1",
-					output: "0/9",
-				},
-			},
-			{
-				enabled: true,
-				continuationsUsed: 1,
+				lastGateFailure: gateFailure(2),
+			}),
+			gateStatus({
 				turnsUsed: 5,
 				tokensUsed: 400,
-				startedAt: Date.now(),
-				limits: { maxContinuations: 10, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
-				gates: { commands: ["verify-public"], maxRetries: 3, timeoutMs: 300_000 },
 				gateAttempts: { "verify-public": 2 },
-			},
+				lastGateFailure: undefined,
+			}),
 		];
 		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "still failing" }), statuses[0]);
 		const { session } = runtimeHost;
@@ -517,7 +476,7 @@ describe("runPrintMode", () => {
 		session.prompt.mockImplementationOnce(async () => {
 			session.state.messages = [
 				createAssistantMessage({ stopReason: "error", errorMessage: "provider down" }),
-				createCompactionOutcomeMessage("Auto-compaction failed", { reason: "threshold", outcome: "failed" }),
+				compactionOutcome("Auto-compaction failed", "failed"),
 			];
 		});
 		session.prompt.mockImplementationOnce(async () => {
@@ -525,46 +484,22 @@ describe("runPrintMode", () => {
 		});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-		});
-
-		expect(exitCode).toBe(0);
+		// The transient error is not terminal: the loop keeps its gate budget.
+		await expect(run(runtimeHost)).resolves.toBe(0);
 		expect(session.prompt).toHaveBeenCalledTimes(2);
 		expect(session.recordHostAutonomousContinuation).toHaveBeenCalledTimes(2);
 		expect(errorSpy).not.toHaveBeenCalledWith("provider down");
-		expect(session.prompt.mock.calls[0][0]).toContain("Autonomous quality gate failed");
-		expect(session.prompt.mock.calls[1][0]).toContain("Autonomous quality gate failed");
 	});
 
 	it("waits for a queued follow-up turn before evaluating transient assistant errors", async () => {
-		const statuses: AgentAutonomousStatus[] = [
-			{
-				enabled: true,
-				continuationsUsed: 0,
-				turnsUsed: 1,
-				tokensUsed: 100,
-				startedAt: Date.now(),
-				limits: { maxContinuations: 1, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
-				gates: { commands: ["verify-public"], maxRetries: 3, timeoutMs: 300_000 },
-				gateAttempts: { "verify-public": 1 },
-				lastGateFailure: {
-					command: "verify-public",
-					attempt: 1,
-					exitText: "exited 1",
-					output: "0/9",
-				},
-			},
-			{
-				enabled: true,
+		const statuses = [
+			gateStatus({ continuationsUsed: 0, turnsUsed: 1, limits: { ...AUTONOMOUS_LIMITS, maxContinuations: 1 } }),
+			gateStatus({
 				continuationsUsed: 1,
-				turnsUsed: 2,
 				tokensUsed: 200,
-				startedAt: Date.now(),
-				limits: { maxContinuations: 1, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
-				gates: { commands: ["verify-public"], maxRetries: 3, timeoutMs: 300_000 },
-				gateAttempts: { "verify-public": 1 },
-			},
+				limits: { ...AUTONOMOUS_LIMITS, maxContinuations: 1 },
+				lastGateFailure: undefined,
+			}),
 		];
 		const runtimeHost = createRuntimeHost(
 			createAssistantMessage({ stopReason: "error", errorMessage: "provider down" }),
@@ -584,383 +519,9 @@ describe("runPrintMode", () => {
 		});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-		});
-
-		expect(exitCode).toBe(0);
+		await expect(run(runtimeHost)).resolves.toBe(0);
 		expect(session.prompt).toHaveBeenCalledTimes(1);
-		expect(session.recordHostAutonomousContinuation).toHaveBeenCalledTimes(1);
 		expect(session.waitForIdle).toHaveBeenCalledTimes(3);
 		expect(errorSpy).not.toHaveBeenCalledWith("provider down");
-	});
-
-	it("does not issue host-driven gate prompts once maxContinuations is reached", async () => {
-		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "still failing" }), {
-			enabled: true,
-			continuationsUsed: 3,
-			turnsUsed: 2,
-			tokensUsed: 100,
-			startedAt: Date.now(),
-			limits: { maxContinuations: 3, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
-			gates: { commands: ["verify-public"], maxRetries: 3, timeoutMs: 300_000 },
-			gateAttempts: { "verify-public": 1 },
-			lastGateFailure: {
-				command: "verify-public",
-				attempt: 1,
-				exitText: "exited 1",
-				output: "0/9",
-			},
-		});
-		const { session } = runtimeHost;
-		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-		});
-
-		expect(exitCode).toBe(1);
-		expect(session.prompt).not.toHaveBeenCalled();
-		expect(session.recordHostAutonomousContinuation).not.toHaveBeenCalled();
-		expect(errorSpy).toHaveBeenCalledWith(
-			"Autonomous quality gate still failing after attempt 1/3: exited 1; autonomous limit reached: maxContinuations reached (3/3)",
-		);
-	});
-
-	it("returns non-zero when autonomous gates are still failing", async () => {
-		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "still failing" }), {
-			enabled: true,
-			continuationsUsed: 999,
-			turnsUsed: 92,
-			tokensUsed: 215_535,
-			limits: { maxContinuations: 999, maxTurns: 1000, maxTokens: 2_000_000, timeoutMs: 1_800_000 },
-			gates: { commands: ["verify-public"], maxRetries: 999, timeoutMs: 3_600_000 },
-			gateAttempts: { "verify-public": 34 },
-			lastGateFailure: {
-				command: "verify-public",
-				attempt: 34,
-				exitText: "exited 1",
-				output: "0/43",
-			},
-		});
-		const { session } = runtimeHost;
-		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-		});
-
-		expect(exitCode).toBe(1);
-		expect(errorSpy).toHaveBeenCalledWith(
-			"Autonomous quality gate still failing after attempt 34/999: exited 1; autonomous limit reached: maxContinuations reached (999/999)",
-		);
-		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
-	});
-
-	it("reports the exact autonomous limit that stopped a still-failing gate", async () => {
-		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "still failing" }), {
-			enabled: true,
-			continuationsUsed: 34,
-			turnsUsed: 92,
-			tokensUsed: 2_000_000,
-			limits: { maxContinuations: 999, maxTurns: 1000, maxTokens: 2_000_000, timeoutMs: 1_800_000 },
-			gates: { commands: ["verify-public"], maxRetries: 999, timeoutMs: 3_600_000 },
-			gateAttempts: { "verify-public": 34 },
-			lastGateFailure: {
-				command: "verify-public",
-				attempt: 34,
-				exitText: "exited 1",
-				output: "0/43",
-			},
-		});
-		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-		});
-
-		expect(exitCode).toBe(1);
-		expect(errorSpy).toHaveBeenCalledWith(
-			"Autonomous quality gate still failing after attempt 34/999: exited 1; autonomous limit reached: maxTokens reached (2000000/2000000)",
-		);
-	});
-
-	it("returns non-zero when ungated autonomous runs stop at a limit", async () => {
-		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "I still need more work." }), {
-			enabled: true,
-			continuationsUsed: 3,
-			turnsUsed: 4,
-			tokensUsed: 100,
-			startedAt: Date.now(),
-			limits: { maxContinuations: 3, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
-			gates: { commands: [], maxRetries: 3, timeoutMs: 300_000 },
-			gateAttempts: {},
-		});
-		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-		});
-
-		expect(exitCode).toBe(1);
-		expect(errorSpy).toHaveBeenCalledWith(
-			"Autonomous run stopped before terminal evidence; maxContinuations reached (3/3)",
-		);
-	});
-
-	it("keeps prompting while autonomous gates fail below retry limits", async () => {
-		const statuses: AgentAutonomousStatus[] = [
-			{
-				enabled: true,
-				continuationsUsed: 1,
-				turnsUsed: 2,
-				tokensUsed: 100,
-				startedAt: Date.now(),
-				limits: { maxContinuations: 10, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
-				gates: { commands: ["verify-public"], maxRetries: 3, timeoutMs: 300_000 },
-				gateAttempts: { "verify-public": 1 },
-				lastGateFailure: {
-					command: "verify-public",
-					attempt: 1,
-					exitText: "exited 1",
-					output: "0/9",
-				},
-			},
-			{
-				enabled: true,
-				continuationsUsed: 2,
-				turnsUsed: 3,
-				tokensUsed: 200,
-				startedAt: Date.now(),
-				limits: { maxContinuations: 10, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
-				gates: { commands: ["verify-public"], maxRetries: 3, timeoutMs: 300_000 },
-				gateAttempts: { "verify-public": 2 },
-				lastGateFailure: {
-					command: "verify-public",
-					attempt: 2,
-					exitText: "exited 1",
-					output: "0/9 summary",
-				},
-			},
-			{
-				enabled: true,
-				continuationsUsed: 2,
-				turnsUsed: 4,
-				tokensUsed: 250,
-				startedAt: Date.now(),
-				limits: { maxContinuations: 10, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
-				gates: { commands: ["verify-public"], maxRetries: 3, timeoutMs: 300_000 },
-				gateAttempts: { "verify-public": 2 },
-			},
-		];
-		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "still working" }), statuses[0]);
-		const { session } = runtimeHost;
-		let statusIndex = 0;
-		session.getAutonomousStatus.mockImplementation(
-			() => statuses[Math.min(statusIndex++, statuses.length - 1)] as AgentAutonomousStatus,
-		);
-
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-		});
-
-		expect(exitCode).toBe(0);
-		expect(session.waitForIdle).toHaveBeenCalledBefore(session.prompt);
-		expect(session.prompt).toHaveBeenCalledTimes(2);
-		expect(session.prompt.mock.calls[0][0]).toContain("Autonomous quality gate failed (attempt 1/3)");
-		expect(session.prompt.mock.calls[0][0]).toContain("0/9");
-		expect(session.prompt.mock.calls[0][1]).toEqual({
-			streamingBehavior: "followUp",
-			internalPrompt: true,
-			suppressAutonomousContinuation: true,
-		});
-		expect(session.prompt.mock.calls[1][0]).toContain("Autonomous quality gate failed (attempt 2/3)");
-		expect(session.prompt.mock.calls[1][0]).toContain("0/9 summary");
-		expect(session.prompt.mock.calls[1][1]).toEqual({
-			streamingBehavior: "followUp",
-			internalPrompt: true,
-			suppressAutonomousContinuation: true,
-		});
-	});
-
-	it("continues prompting when gate attempts do not advance but autonomous usage does", async () => {
-		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "still failing" }), {
-			enabled: true,
-			continuationsUsed: 1,
-			turnsUsed: 2,
-			tokensUsed: 100,
-			startedAt: Date.now(),
-			limits: { maxContinuations: 10, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
-			gates: { commands: ["verify-public"], maxRetries: 3, timeoutMs: 300_000 },
-			gateAttempts: { "verify-public": 1 },
-			lastGateFailure: {
-				command: "verify-public",
-				attempt: 1,
-				exitText: "exited 1",
-				output: "0/9",
-			},
-		});
-		const { session } = runtimeHost;
-		const statuses: AgentAutonomousStatus[] = [
-			{
-				enabled: true,
-				continuationsUsed: 1,
-				turnsUsed: 2,
-				tokensUsed: 100,
-				startedAt: Date.now(),
-				limits: { maxContinuations: 10, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
-				gates: { commands: ["verify-public"], maxRetries: 3, timeoutMs: 300_000 },
-				gateAttempts: { "verify-public": 1 },
-				lastGateFailure: { command: "verify-public", attempt: 1, exitText: "exited 1", output: "0/9" },
-			},
-			{
-				enabled: true,
-				continuationsUsed: 2,
-				turnsUsed: 3,
-				tokensUsed: 150,
-				startedAt: Date.now(),
-				limits: { maxContinuations: 10, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
-				gates: { commands: ["verify-public"], maxRetries: 3, timeoutMs: 300_000 },
-				gateAttempts: { "verify-public": 1 },
-				lastGateFailure: {
-					command: "verify-public",
-					attempt: 1,
-					exitText: "not rerun: workspace unchanged since previous failed gate",
-					output: "edit source files before attempting to finish again",
-				},
-			},
-			{
-				enabled: true,
-				continuationsUsed: 3,
-				turnsUsed: 4,
-				tokensUsed: 150,
-				startedAt: Date.now(),
-				limits: { maxContinuations: 10, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
-				gates: { commands: ["verify-public"], maxRetries: 3, timeoutMs: 300_000 },
-				gateAttempts: { "verify-public": 1 },
-				lastGateFailure: {
-					command: "verify-public",
-					attempt: 1,
-					exitText: "not rerun: workspace unchanged since previous failed gate",
-					output: "edit source files before attempting to finish again",
-				},
-			},
-			{
-				enabled: true,
-				continuationsUsed: 10,
-				turnsUsed: 5,
-				tokensUsed: 150,
-				startedAt: Date.now(),
-				limits: { maxContinuations: 10, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
-				gates: { commands: ["verify-public"], maxRetries: 3, timeoutMs: 300_000 },
-				gateAttempts: { "verify-public": 1 },
-				lastGateFailure: {
-					command: "verify-public",
-					attempt: 1,
-					exitText: "not rerun: workspace unchanged since previous failed gate",
-					output: "edit source files before attempting to finish again",
-				},
-			},
-		];
-		let statusIndex = 0;
-		session.getAutonomousStatus.mockImplementation(
-			() => statuses[Math.min(statusIndex++, statuses.length - 1)] as AgentAutonomousStatus,
-		);
-
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-		});
-
-		expect(exitCode).toBe(1);
-		expect(session.waitForIdle).toHaveBeenCalledTimes(7);
-		expect(session.prompt).toHaveBeenCalledTimes(3);
-		expect(session.recordHostAutonomousContinuation).toHaveBeenCalledTimes(3);
-		expect(session.prompt.mock.calls[1][0]).toContain("workspace unchanged");
-		expect(session.prompt.mock.calls[2][0]).toContain("workspace unchanged");
-	});
-
-	it("keeps prompting on repeated gate progress until autonomous limits stop the run", async () => {
-		const startedAt = Date.now();
-		const statuses: AgentAutonomousStatus[] = [
-			{
-				enabled: true,
-				continuationsUsed: 7,
-				turnsUsed: 8,
-				tokensUsed: 100,
-				startedAt,
-				limits: { maxContinuations: 10, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
-				gates: { commands: ["verify-public"], maxRetries: 20, timeoutMs: 300_000 },
-				gateAttempts: { "verify-public": 7 },
-				lastGateFailure: {
-					command: "verify-public",
-					attempt: 7,
-					exitText: "not rerun: workspace unchanged since previous failed gate",
-					output: "edit source files before attempting to finish again",
-				},
-			},
-			{
-				enabled: true,
-				continuationsUsed: 8,
-				turnsUsed: 9,
-				tokensUsed: 100,
-				startedAt,
-				limits: { maxContinuations: 10, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
-				gates: { commands: ["verify-public"], maxRetries: 20, timeoutMs: 300_000 },
-				gateAttempts: { "verify-public": 7 },
-				lastGateFailure: {
-					command: "verify-public",
-					attempt: 7,
-					exitText: "not rerun: workspace unchanged since previous failed gate",
-					output: "edit source files before attempting to finish again",
-				},
-			},
-			{
-				enabled: true,
-				continuationsUsed: 9,
-				turnsUsed: 10,
-				tokensUsed: 100,
-				startedAt,
-				limits: { maxContinuations: 10, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
-				gates: { commands: ["verify-public"], maxRetries: 20, timeoutMs: 300_000 },
-				gateAttempts: { "verify-public": 7 },
-				lastGateFailure: {
-					command: "verify-public",
-					attempt: 7,
-					exitText: "not rerun: workspace unchanged since previous failed gate",
-					output: "edit source files before attempting to finish again",
-				},
-			},
-			{
-				enabled: true,
-				continuationsUsed: 10,
-				turnsUsed: 11,
-				tokensUsed: 100,
-				startedAt,
-				limits: { maxContinuations: 10, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
-				gates: { commands: ["verify-public"], maxRetries: 20, timeoutMs: 300_000 },
-				gateAttempts: { "verify-public": 7 },
-				lastGateFailure: {
-					command: "verify-public",
-					attempt: 7,
-					exitText: "not rerun: workspace unchanged since previous failed gate",
-					output: "edit source files before attempting to finish again",
-				},
-			},
-		];
-		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "still failing" }), statuses[0]);
-		const { session } = runtimeHost;
-		let statusIndex = 0;
-		session.getAutonomousStatus.mockImplementation(
-			() => statuses[Math.min(statusIndex++, statuses.length - 1)] as AgentAutonomousStatus,
-		);
-
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-		});
-
-		expect(exitCode).toBe(1);
-		expect(session.prompt).toHaveBeenCalledTimes(3);
-		expect(session.prompt.mock.calls[0][0]).toContain("workspace unchanged");
-		expect(session.prompt.mock.calls[2][0]).toContain("workspace unchanged");
 	});
 });

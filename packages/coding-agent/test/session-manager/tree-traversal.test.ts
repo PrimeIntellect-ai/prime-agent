@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, rmSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
-import { type CustomEntry, SessionManager } from "../../src/core/session-manager.js";
+import { type CustomEntry, loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.js";
 import { assistantMsg, userMsg } from "../utilities.js";
 
 describe("SessionManager append and tree traversal", () => {
@@ -526,6 +526,92 @@ describe("createBranchedSession", () => {
 			const lines = content.trim().split("\n").filter(Boolean);
 			const records = lines.map((line) => JSON.parse(line));
 			expect(records.filter((r) => r.type === "session")).toHaveLength(1);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+});
+
+// Merged from custom-session-id.test.ts
+const UUID_V7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+describe("SessionManager session ids", () => {
+	it.each<[string, () => SessionManager]>([
+		["a freshly constructed session", () => SessionManager.inMemory()],
+		[
+			"newSession() without options",
+			() => {
+				const session = SessionManager.inMemory();
+				session.newSession();
+				return session;
+			},
+		],
+		[
+			"newSession() with options but no id",
+			() => {
+				const session = SessionManager.inMemory();
+				session.newSession({ parentSession: "parent.jsonl" });
+				return session;
+			},
+		],
+		[
+			"a branched session",
+			() => {
+				const session = SessionManager.inMemory();
+				session.createBranchedSession(session.appendMessage(userMsg("hello")));
+				return session;
+			},
+		],
+	])("generates a UUIDv7 id for %s", (_name, create) => {
+		const session = create();
+
+		expect(session.getSessionId()).toMatch(UUID_V7_RE);
+		expect(session.getHeader()!.id).toBe(session.getSessionId());
+	});
+
+	it("uses a caller-provided id for the session and its header", () => {
+		const session = SessionManager.inMemory();
+
+		session.newSession({ id: "my-custom-id" });
+
+		expect(session.getSessionId()).toBe("my-custom-id");
+		expect(session.getHeader()!.id).toBe("my-custom-id");
+	});
+
+	it("forks a legacy session file with a fresh UUIDv7 id and migrated entries", () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-session-manager-legacy-fork-"));
+		try {
+			const sourcePath = join(tempDir, "source.jsonl");
+			writeFileSync(
+				sourcePath,
+				`${[
+					JSON.stringify({
+						type: "session",
+						id: "legacy-session-id",
+						timestamp: new Date().toISOString(),
+						cwd: tempDir,
+					}),
+					JSON.stringify({
+						type: "message",
+						timestamp: new Date().toISOString(),
+						message: { role: "user", content: "hello", timestamp: Date.now() },
+					}),
+				].join("\n")}\n`,
+			);
+
+			const forked = SessionManager.forkFrom(sourcePath, tempDir, tempDir);
+
+			const header = forked.getHeader();
+			expect(header!.id).toMatch(UUID_V7_RE);
+			expect(header!.parentSession).toBe(sourcePath);
+
+			const messageEntries = loadEntriesFromFile(forked.getSessionFile()!).filter(
+				(entry) => entry.type === "message",
+			);
+			expect(messageEntries).toHaveLength(1);
+			expect(messageEntries[0]).toMatchObject({ type: "message", parentId: null });
+			expect(messageEntries[0]!.id).toEqual(expect.any(String));
+			expect(forked.buildSessionContext().messages).toHaveLength(1);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}

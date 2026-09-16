@@ -4,6 +4,7 @@ import {
 	existsSync,
 	linkSync,
 	mkdirSync,
+	mkdtempSync,
 	readdirSync,
 	readFileSync,
 	renameSync,
@@ -11,6 +12,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { createConnection, type Socket } from "node:net";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { APP_NAME, ENV_AGENT_DIR } from "../../../src/config.js";
@@ -133,8 +135,10 @@ async function createPaths(): Promise<TestPaths> {
 	harnesses.push(harness);
 	const executablePath = join(harness.tempDir, APP_NAME);
 	linkSync(process.execPath, executablePath);
-	const socketTmpDir = `/tmp/eng-4603-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-	mkdirSync(socketTmpDir, { recursive: true, mode: 0o700 });
+	// Unix socket paths are length limited, so the child TMPDIR stays under a short root.
+	const socketTmpRoot = process.platform === "win32" ? tmpdir() : "/tmp";
+	mkdirSync(socketTmpRoot, { recursive: true, mode: 0o700 });
+	const socketTmpDir = mkdtempSync(join(socketTmpRoot, "eng-4603-"));
 	socketTempDirs.add(socketTmpDir);
 	fixtureDescriptorDirs.add(join(harness.tempDir, "workers"));
 	fixtureRegistryDirs.add(join(harness.tempDir, "registry"));
@@ -1109,10 +1113,13 @@ printf '%s\\n' "$listeners" | awk -v pids="$ENG_4603_LSOF_PIDS" '
 		await waitForExactProcessExit(predecessor.child.pid!, predecessorStartId);
 		await waitForExactProcessExit(successor.child.pid!, successorStartId);
 		await waitForExactProcessExit(workerPid, workerStartId);
-		await delay(11_000);
-		expect(exactProcessIsAlive(predecessor.child.pid!, predecessorStartId)).toBe(false);
-		expect(exactProcessIsAlive(successor.child.pid!, successorStartId)).toBe(false);
-		expect(exactProcessIsAlive(workerPid, workerStartId)).toBe(false);
+		const listenersAfterShutdown = spawnSync(lsofPath, [], {
+			encoding: "utf8",
+			env: { ...process.env, ...lsofEnvironment },
+		}).stdout;
+		expect(listenersAfterShutdown).not.toContain(`p${predecessor.child.pid}`);
+		expect(listenersAfterShutdown).not.toContain(`p${successor.child.pid}`);
+		expect(listenersAfterShutdown).not.toContain(`p${workerPid}`);
 
 		const contracts = [
 			{ args: ["status", "--json"], json: [] },

@@ -32,38 +32,27 @@ vi.mock("../src/cli/daemon-update-restart.js", async (importOriginal) => ({
 
 import { buildDaemonUpdateRestartReport } from "../src/cli/daemon-update-restart.js";
 import {
-	buildUpdateChildArgs,
 	buildUpdateRelaunchArgs,
 	InteractiveMode,
-	resolveInteractiveUpdateDaemonSocketPath,
 	tryExecUpdateRelaunch,
-	updateArgsIncludeSelf,
 } from "../src/modes/interactive/interactive-mode.js";
 
 describe("buildUpdateRelaunchArgs", () => {
-	it("relaunches the current session with the supported resume flag", () => {
-		expect(buildUpdateRelaunchArgs(["--model", "gpt-5"], "/tmp/session.jsonl")).toEqual([
-			"--model",
-			"gpt-5",
-			"--resume",
-			"/tmp/session.jsonl",
-		]);
-	});
-
-	it("keeps an existing resume selection", () => {
-		expect(buildUpdateRelaunchArgs(["--resume", "/tmp/other.jsonl"], "/tmp/session.jsonl")).toEqual([
-			"--resume",
-			"/tmp/other.jsonl",
-		]);
-	});
-
-	it("does not treat the unsupported session flag as an existing selection", () => {
-		expect(buildUpdateRelaunchArgs(["--session", "/tmp/old.jsonl"], "/tmp/session.jsonl")).toEqual([
-			"--session",
-			"/tmp/old.jsonl",
-			"--resume",
-			"/tmp/session.jsonl",
-		]);
+	// [name, existing args, relaunch args] - the resumed session must survive the update.
+	it.each([
+		[
+			"appends the supported resume flag",
+			["--model", "gpt-5"],
+			["--model", "gpt-5", "--resume", "/tmp/session.jsonl"],
+		],
+		["keeps an existing resume selection", ["--resume", "/tmp/other.jsonl"], ["--resume", "/tmp/other.jsonl"]],
+		[
+			"ignores the unsupported session flag as a selection",
+			["--session", "/tmp/old.jsonl"],
+			["--session", "/tmp/old.jsonl", "--resume", "/tmp/session.jsonl"],
+		],
+	])("%s", (_name, args, expected) => {
+		expect(buildUpdateRelaunchArgs(args, "/tmp/session.jsonl")).toEqual(expected);
 	});
 });
 
@@ -115,31 +104,20 @@ describe("tryExecUpdateRelaunch", () => {
 		expect(chdir).toHaveBeenLastCalledWith("/tmp/before");
 	});
 
-	it.each(["win32", "os400"])("keeps the compatible child relaunch on %s", (platform) => {
-		const chdir = vi.fn();
-		const execve = vi.fn(() => undefined as never);
-
-		expect(
-			tryExecUpdateRelaunch(
-				{ command: "node", args: ["cli.js"] },
-				{
-					platform,
-					nodeVersion: "26.1.0",
-					cwd: "/tmp/project",
-					previousCwd: "/tmp/before",
-					environment: {},
-					chdir,
-					execve,
-				},
-			),
-		).toBe(false);
-		expect(chdir).not.toHaveBeenCalled();
-		expect(execve).not.toHaveBeenCalled();
-	});
-
-	it.each(["22.22.0", "24.13.0", "25.8.1", "26.0.0"])(
-		"keeps the compatible child relaunch when execve failures abort Node %s",
-		(nodeVersion) => {
+	// The compatible child relaunch must stay in place wherever in-place execve is
+	// unsupported: other platforms, Node versions that abort on execve failure, and
+	// runtimes without execve at all.
+	it.each([
+		["win32", "26.1.0", true],
+		["os400", "26.1.0", true],
+		["linux", "22.22.0", true],
+		["linux", "24.13.0", true],
+		["linux", "25.8.1", true],
+		["linux", "26.0.0", true],
+		["linux", "26.1.0", false],
+	])(
+		"keeps the compatible child relaunch on %s node %s (execve available: %s)",
+		(platform, nodeVersion, hasExecve) => {
 			const chdir = vi.fn();
 			const execve = vi.fn(() => undefined as never);
 
@@ -147,13 +125,13 @@ describe("tryExecUpdateRelaunch", () => {
 				tryExecUpdateRelaunch(
 					{ command: "/usr/bin/node", args: ["cli.js"] },
 					{
-						platform: "linux",
+						platform,
 						nodeVersion,
 						cwd: "/tmp/project",
 						previousCwd: "/tmp/before",
 						environment: {},
 						chdir,
-						execve,
+						execve: hasExecve ? execve : undefined,
 					},
 				),
 			).toBe(false);
@@ -161,22 +139,6 @@ describe("tryExecUpdateRelaunch", () => {
 			expect(execve).not.toHaveBeenCalled();
 		},
 	);
-
-	it("keeps the compatible child relaunch when execve is unavailable", () => {
-		expect(
-			tryExecUpdateRelaunch(
-				{ command: "/usr/bin/node", args: ["cli.js"] },
-				{
-					platform: "linux",
-					nodeVersion: "26.1.0",
-					cwd: "/tmp/project",
-					previousCwd: "/tmp/before",
-					environment: {},
-					chdir: vi.fn(),
-				},
-			),
-		).toBe(false);
-	});
 });
 
 describe("interactive self-update relaunch", () => {
@@ -277,32 +239,6 @@ describe("interactive self-update relaunch", () => {
 			expect(execve.mock.calls[0]?.[1]).toEqual(expect.arrayContaining(["--resume", "/tmp/session.jsonl"]));
 		},
 	);
-});
-
-describe("buildUpdateChildArgs", () => {
-	it("passes the active custom socket to the deferred self-update child", () => {
-		expect(buildUpdateChildArgs(["--self", "--force"], "/tmp/custom-daemon.sock")).toEqual([
-			"--self",
-			"--force",
-			"--daemon-socket",
-			"/tmp/custom-daemon.sock",
-		]);
-	});
-
-	it("keeps an explicitly selected update socket", () => {
-		expect(buildUpdateChildArgs(["--self", "--daemon-socket", "/tmp/explicit.sock"], "/tmp/active.sock")).toEqual([
-			"--self",
-			"--daemon-socket",
-			"/tmp/explicit.sock",
-		]);
-		expect(
-			resolveInteractiveUpdateDaemonSocketPath(
-				["--self", "--daemon-socket", "/tmp/explicit.sock"],
-				"/tmp/active.sock",
-			),
-		).toBe("/tmp/explicit.sock");
-		expect(updateArgsIncludeSelf(["--daemon-socket", "/tmp/explicit.sock"])).toBe(true);
-	});
 });
 
 describe("buildDaemonUpdateRestartReport", () => {

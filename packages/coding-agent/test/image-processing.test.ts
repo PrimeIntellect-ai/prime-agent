@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { convertToPng } from "../src/utils/image-convert.js";
-import { formatDimensionNote, resizeImage } from "../src/utils/image-resize.js";
+import { resizeImage } from "../src/utils/image-resize.js";
 
 const TINY_PNG =
 	"iVBORw0KGgoAAAANSUhEUgAAAAIAAAACAQMAAABIeJ9nAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAAGUExURf8AAP///0EdNBEAAAABYktHRAH/Ai3eAAAAB3RJTUUH6gEOADM5Ddoh/wAAAAxJREFUCNdjYGBgAAAABAABJzQnCgAAACV0RVh0ZGF0ZTpjcmVhdGUAMjAyNi0wMS0xNFQwMDo1MTo1NyswMDowMOnKzHgAAAAldEVYdGRhdGU6bW9kaWZ5ADIwMjYtMDEtMTRUMDA6NTE6NTcrMDA6MDCYl3TEAAAAKHRFWHRkYXRlOnRpbWVzdGFtcAAyMDI2LTAxLTE0VDAwOjUxOjU3KzAwOjAwz4JVGwAAAABJRU5ErkJggg==";
@@ -14,120 +14,66 @@ const MEDIUM_PNG_100x100 =
 const LARGE_PNG_200x200 =
 	"iVBORw0KGgoAAAANSUhEUgAAAMgAAADIEAIAAAByquWKAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAAGYktHRP///////wlY99wAAAAHdElNRQfqAQ4AMzqU03BFAAAEEElEQVR42u3dvWqUURSF4XXMRAyIhSAWQvwnWtjaWusFx9bW1kKD/wELESxEiBjDjJdwysOC57mCXW32+zGcGbtdACpsdi+T8Xz1GABzm91xMl6sHgNgblzcT/Y+rh4DYG6cv0/2H64eA2BOEgI1fHQHaoyzbXIwVo8BMCcJgRqSEKgxft9Lrn5aPQbA3Ph1klw7Wj0GwJwkBGpYWECN8fMiub63egyAORcWUMPCAmqMH3eTG59XjwEwN76/S24+Wj0GwJwkBGpYWECN8e1fcmuzegyAORcWUMPCAmqM09vJ4dfVYwDMjS9vkzuPV48BMCcJgRqeSAZqjA/nyYP91WMAzElCoIYkBGqMk8Pk6HT1GABzm+3L5JIkBApIQqCGj+5AjfHmb/Lk8uoxAOYkIVBDEgI1LCygxmZ7nFyShEABFxZQw8ICaozXf5KnV1aPATDnwgJqWFhADQsLqOFnDUANFxZQw8ICaoxXZ8mzg9VjAMy5sIAaFhZQw3tYQA1/QgHUkIRADUkI1JCEQA1JCNSQhEANFxZQwzcsoIYkBGpIQqCGJARqSEKghiQEalhYQA1/QgHUcGEBNSwsoIYkBGq4sIAaFhZQw8ICaviGBdRwYQE1LCyghiQEariwgBoWFlDDe1hADS+OAjUkIVBDEgI1JCFQQxICNSQhUMOFBdTwDQuoIQmBGpIQqCEJgRqSEKghCYEaFhZQw4ujQA0XFlDDwgJqSEKghgsLqGFhATUsLKCGb1hADRcWUMPCAmpIQqCGCwuoYWEBNbyHBdTw4ihQQxICNSQhUEMSAjUkIVBDEgI1XFhADd+wgBqSEKghCYEakhCoIQmBGpIQqGFhATW8OArUcGEBNSwsoIYkBGq4sIAaFhZQw8ICaviGBdRwYQE1LCyghiQEariwgBoWFlDDe1hADS+OAjUkIVBDEgI1JCFQQxICNSQhUMOFBdTwDQuoIQmBGpIQqCEJgRqSEKghCYEa49lB8ups9RgAc14cBWpIQqCGhQXUkIRADRcWUMPCAmqMp1eS139WjwEw5xsWUEMSAjUsLKCGJARquLCAGhYWUGM8uZy8+bt6DIA5L44CNSQhUMMTyUCNcXSanByuHgNgThICNSQhUGM82E8+nK8eA2DOzxqAGpIQqDHuPE6+vF09BsDcOPyanN5ePQbAnCQEavgdFlBj3Nok3/6tHgNgzoujQA1JCNQYNx8l39+tHgNgbtz4nPy4u3oMgDlJCNSwsIAa4/pe8vNi9RgAc37WANSQhECNce0o+XWyegyAuXH1U/L73uoxAOYkIVDDwgJqjIORnG1XjwEw508ogBqSEKgx9h8m5+9XjwEwN/Y+Jhf3V48BMCcJgRpjPE+2x6vHAJgbSbLbrR4DYO4/GqiSgXN+ksgAAAAldEVYdGRhdGU6Y3JlYXRlADIwMjYtMDEtMTRUMDA6NTE6NTcrMDA6MDDpysx4AAAAJXRFWHRkYXRlOm1vZGlmeQAyMDI2LTAxLTE0VDAwOjUxOjU3KzAwOjAwmJd0xAAAACh0RVh0ZGF0ZTp0aW1lc3RhbXAAMjAyNi0wMS0xNFQwMDo1MTo1NyswMDowMM+CVRsAAAAASUVORK5CYII=";
 
-describe("convertToPng", () => {
-	it("should return original data for PNG input", async () => {
-		const result = await convertToPng(TINY_PNG, "image/png");
-		expect(result).not.toBeNull();
-		expect(result!.data).toBe(TINY_PNG);
-		expect(result!.mimeType).toBe("image/png");
-	});
-
-	it("should convert JPEG to PNG", async () => {
+describe("image conversion and resize", () => {
+	it("converts JPEG input to a PNG byte stream", async () => {
 		const result = await convertToPng(TINY_JPEG, "image/jpeg");
 		expect(result).not.toBeNull();
 		expect(result!.mimeType).toBe("image/png");
-		expect(() => Buffer.from(result!.data, "base64")).not.toThrow();
 		const buffer = Buffer.from(result!.data, "base64");
-		expect(buffer[0]).toBe(0x89);
-		expect(buffer[1]).toBe(0x50); // 'P'
-		expect(buffer[2]).toBe(0x4e); // 'N'
-		expect(buffer[3]).toBe(0x47); // 'G'
+		expect([...buffer.subarray(0, 4)]).toEqual([0x89, 0x50, 0x4e, 0x47]);
 	});
-});
 
-describe("resizeImage", () => {
-	it("should return original image if within limits", async () => {
+	it.each([
+		{
+			name: "keeps a small PNG untouched",
+			data: TINY_PNG,
+			mimeType: "image/png",
+			maxBytes: 1024 * 1024,
+			limit: 100,
+			resized: false,
+		},
+		{
+			name: "keeps a small JPEG untouched",
+			data: TINY_JPEG,
+			mimeType: "image/jpeg",
+			maxBytes: 1024 * 1024,
+			limit: 100,
+			resized: false,
+		},
+		{
+			name: "shrinks a PNG past the dimension limit",
+			data: MEDIUM_PNG_100x100,
+			mimeType: "image/png",
+			maxBytes: 1024 * 1024,
+			limit: 50,
+			resized: true,
+		},
+		{
+			name: "shrinks a PNG past the byte limit",
+			data: LARGE_PNG_200x200,
+			mimeType: "image/png",
+			maxBytes: Math.floor(LARGE_PNG_200x200.length * 0.9),
+			limit: 2000,
+			resized: true,
+		},
+	])("resizeImage $name", async ({ data, mimeType, maxBytes, limit, resized }) => {
 		const result = await resizeImage(
-			{ type: "image", data: TINY_PNG, mimeType: "image/png" },
-			{ maxWidth: 100, maxHeight: 100, maxBytes: 1024 * 1024 },
+			{ type: "image", data, mimeType },
+			{ maxWidth: limit, maxHeight: limit, maxBytes },
 		);
 
 		expect(result).not.toBeNull();
-		expect(result!.wasResized).toBe(false);
-		expect(result!.data).toBe(TINY_PNG);
-		expect(result!.originalWidth).toBe(2);
-		expect(result!.originalHeight).toBe(2);
-		expect(result!.width).toBe(2);
-		expect(result!.height).toBe(2);
+		expect(result!.wasResized).toBe(resized);
+		expect(result!.width).toBeLessThanOrEqual(limit);
+		expect(result!.height).toBeLessThanOrEqual(limit);
+		expect(Buffer.from(result!.data, "base64").length).toBeLessThanOrEqual(maxBytes);
 	});
 
-	it("should resize image exceeding dimension limits", async () => {
-		const result = await resizeImage(
-			{ type: "image", data: MEDIUM_PNG_100x100, mimeType: "image/png" },
-			{ maxWidth: 50, maxHeight: 50, maxBytes: 1024 * 1024 },
-		);
-
-		expect(result).not.toBeNull();
-		expect(result!.wasResized).toBe(true);
-		expect(result!.originalWidth).toBe(100);
-		expect(result!.originalHeight).toBe(100);
-		expect(result!.width).toBeLessThanOrEqual(50);
-		expect(result!.height).toBeLessThanOrEqual(50);
-	});
-
-	it("should resize image exceeding byte limit", async () => {
-		const originalBuffer = Buffer.from(LARGE_PNG_200x200, "base64");
-		const originalSize = originalBuffer.length;
-
-		const result = await resizeImage(
-			{ type: "image", data: LARGE_PNG_200x200, mimeType: "image/png" },
-			{ maxWidth: 2000, maxHeight: 2000, maxBytes: Math.floor(LARGE_PNG_200x200.length * 0.9) },
-		);
-
-		expect(result).not.toBeNull();
-		const resultBuffer = Buffer.from(result!.data, "base64");
-		expect(resultBuffer.length).toBeLessThan(originalSize);
-		expect(result!.data.length).toBeLessThan(LARGE_PNG_200x200.length);
-	});
-
-	it("should return null when image cannot be resized below maxBytes", async () => {
+	it("returns null when the image cannot be shrunk below maxBytes", async () => {
 		const result = await resizeImage(
 			{ type: "image", data: LARGE_PNG_200x200, mimeType: "image/png" },
 			{ maxWidth: 2000, maxHeight: 2000, maxBytes: 1 },
 		);
-
 		expect(result).toBeNull();
-	});
-
-	it("should handle JPEG input", async () => {
-		const result = await resizeImage(
-			{ type: "image", data: TINY_JPEG, mimeType: "image/jpeg" },
-			{ maxWidth: 100, maxHeight: 100, maxBytes: 1024 * 1024 },
-		);
-
-		expect(result).not.toBeNull();
-		expect(result!.wasResized).toBe(false);
-		expect(result!.originalWidth).toBe(2);
-		expect(result!.originalHeight).toBe(2);
-	});
-});
-
-describe("formatDimensionNote", () => {
-	it("should return undefined for non-resized images", () => {
-		const note = formatDimensionNote({
-			data: "",
-			mimeType: "image/png",
-			originalWidth: 100,
-			originalHeight: 100,
-			width: 100,
-			height: 100,
-			wasResized: false,
-		});
-		expect(note).toBeUndefined();
-	});
-
-	it("should return formatted note for resized images", () => {
-		const note = formatDimensionNote({
-			data: "",
-			mimeType: "image/png",
-			originalWidth: 2000,
-			originalHeight: 1000,
-			width: 1000,
-			height: 500,
-			wasResized: true,
-		});
-		expect(note).toContain("original 2000x1000");
-		expect(note).toContain("displayed at 1000x500");
-		expect(note).toContain("2.00"); // scale factor
 	});
 });

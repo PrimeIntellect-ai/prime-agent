@@ -1,0 +1,1 @@
+- Changed the daemon worker supervisor monitor to report when each availability check settles, so its recovery behavior is observable instead of timing-dependent.

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { parseNewSessionCommand } from "../src/core/new-session-command.js";
+import { expandPromptTemplate, type PromptTemplate, substituteArgs } from "../src/core/prompt-templates.js";
 import {
 	BUILTIN_SLASH_COMMANDS,
 	builtinSlashCommandTakesArgument,
@@ -12,144 +13,37 @@ import {
 	resolveSlashCommand,
 	SESSION_SLASH_COMMAND_NAMES,
 } from "../src/core/slash-commands.js";
-
-describe("built-in slash commands", () => {
-	test("exposes heartbeat without exposing a cron slash command", () => {
-		const commandNames = BUILTIN_SLASH_COMMANDS.map((command) => command.name);
-
-		expect(commandNames).toContain("heartbeat");
-		expect(commandNames).not.toContain("cron");
-	});
-
-	test("describes the fine-grained /rlm-max-depth semantics", () => {
-		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "rlm-max-depth")).toMatchObject({
-			description:
-				"Set/view the per-chat persistent RLM max depth immediately; never interrupts or queues the running turn",
-			argumentHint: "[<int> [--global]]",
-			takesArgument: true,
-		});
-	});
-
-	test("exposes heartbeat syntax guidance", () => {
-		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "heartbeat")).toMatchObject({
-			description:
-				"Set or view a persistent heartbeat; delivery defaults to steer, use --follow-up to queue; supports pause, resume, stop, and clear",
-			argumentHint: "[status|pause|resume|stop|[every <duration>] [--steer|--follow-up] <instruction>]",
-			takesArgument: true,
-		});
-	});
-
-	test("exposes /effort for selecting the thinking level", () => {
-		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "effort")).toMatchObject({
-			description: "Select reasoning/thinking level (opens selector UI)",
-			argumentHint: "[level]",
-			aliases: ["thinking"],
-		});
-	});
-
-	test("exposes /btw as an argument command with /side as an alias", () => {
-		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "btw")).toMatchObject({
-			argumentHint: "<question>",
-			aliases: ["side"],
-			takesArgument: true,
-		});
-		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "side")).toBeUndefined();
-		expect(builtinSlashCommandTakesArgument("side")).toBe(true);
-	});
-
-	test("describes /mcp and /plugins as the external-services entry points", () => {
-		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "mcp")).toMatchObject({
-			description: "Browse external services or manage MCP integrations",
-			argumentHint: "[add|list|get|remove|login|logout]",
-			takesArgument: true,
-		});
-		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "plugins")).toMatchObject({
-			description: "Browse and connect external services",
-			argumentHint: "[search]",
-			takesArgument: true,
-		});
-	});
-
-	test("exposes trace preview and backfill syntax", () => {
-		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "traces")).toMatchObject({
-			description: "Preview, upload, or configure Prime Agent traces",
-			argumentHint: "[status|on|off|preview|upload|upload-current|upload-all|login]",
-		});
-	});
-
-	test("marks argument commands as taking a free-form argument", () => {
-		for (const [name, argumentHint] of [
-			["export", "[path]"],
-			["import", "<path.jsonl>"],
-			["name", "[name]"],
-		] as const) {
-			expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === name)).toMatchObject({
-				argumentHint,
-				takesArgument: true,
-			});
-		}
-		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "goal")).toMatchObject({
-			takesArgument: true,
-		});
-		expect(builtinSlashCommandTakesArgument("goal")).toBe(true);
-		expect(builtinSlashCommandTakesArgument("effort")).toBe(false);
-		expect(builtinSlashCommandTakesArgument("model")).toBe(false);
-		expect(builtinSlashCommandTakesArgument("thinking")).toBe(false);
-		expect(builtinSlashCommandTakesArgument("heartbeat")).toBe(true);
-		expect(builtinSlashCommandTakesArgument("mcp")).toBe(true);
-		expect(builtinSlashCommandTakesArgument("new")).toBe(true);
-		expect(builtinSlashCommandTakesArgument("clear")).toBe(false);
-	});
-});
+import { createSyntheticSourceInfo } from "../src/core/source-info.js";
 
 describe("slash command aliases", () => {
-	test("keeps aliases hidden on canonical command entries", () => {
-		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "clear")).toBeUndefined();
-		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "usage")).toBeUndefined();
-		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "rename")).toBeUndefined();
-		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "new")).toMatchObject({
-			description: "Start a new session, optionally named and/or with an initial prompt",
-			argumentHint: '[--name "session name" --] [prompt]',
-			aliases: ["clear"],
-		});
-		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "context")).toMatchObject({
-			description: "Show token, cost, and context usage for agent and sub-agents",
-			aliases: ["usage"],
-		});
-		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "name")).toMatchObject({
-			description: "Set or show the session display name",
-			argumentHint: "[name]",
-			takesArgument: true,
-			aliases: ["rename"],
-		});
+	// [input, canonical name, args, alias used]
+	test.each([
+		["/rename my session", "name", "my session", "rename"],
+		["/clear", "new", "", "clear"],
+		["/thinking", "effort", "", "thinking"],
+		["/usage latest turn", "context", "latest turn", "usage"],
+		["/side Is this cached?", "btw", "Is this cached?", "side"],
+	])("resolves %s to its canonical command while preserving arguments", (input, name, args, originalName) => {
+		const parsed = parseSlashCommand(input);
+
+		expect(parsed).toEqual({ name: originalName, args });
+		expect(isBuiltinSlashCommandName(originalName)).toBe(true);
+		expect(resolveBuiltinSlashCommandName(originalName)).toBe(name);
+		expect(resolveSlashCommand(parsed!)).toEqual({ name, args, originalName, isAlias: true });
+		// Aliases are reachable but never listed as their own command entry.
+		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === originalName)).toBeUndefined();
+		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === name)?.aliases).toContain(originalName);
 	});
 
-	test("resolves /rename to /name through the alias path", () => {
-		const parsed = parseSlashCommand("/rename my session");
-
-		expect(isBuiltinSlashCommandName("rename")).toBe(true);
-		expect(resolveBuiltinSlashCommandName("rename")).toBe("name");
-		expect(resolveSlashCommand(parsed!)).toEqual({
-			name: "name",
-			args: "my session",
-			originalName: "rename",
-			isAlias: true,
-		});
+	test("carries the alias argument requirement over to the canonical command", () => {
+		expect(builtinSlashCommandTakesArgument("side")).toBe(builtinSlashCommandTakesArgument("btw"));
+		expect(builtinSlashCommandTakesArgument("thinking")).toBe(builtinSlashCommandTakesArgument("effort"));
+		expect(builtinSlashCommandTakesArgument("clear")).toBe(false);
+		expect(builtinSlashCommandTakesArgument("new")).toBe(true);
 	});
 
-	test("resolves /clear to /new through the alias path", () => {
-		const parsed = parseSlashCommand("/clear");
-
-		expect(parsed).toEqual({ name: "clear", args: "" });
+	test("parses /new names, prompts, and option errors", () => {
 		expect(parseSlashCommand("/new\n  multiline prompt")).toEqual({ name: "new", args: "multiline prompt" });
-		expect(isBuiltinSlashCommandName("clear")).toBe(true);
-		expect(resolveBuiltinSlashCommandName("clear")).toBe("new");
-		expect(resolveSlashCommand(parsed!)).toEqual({
-			name: "new",
-			args: "",
-			originalName: "clear",
-			isAlias: true,
-		});
 		expect(parseNewSessionCommand(" write a\n  multiline prompt  ")).toEqual({
 			prompt: "write a\n  multiline prompt  ",
 		});
@@ -162,41 +56,6 @@ describe("slash command aliases", () => {
 		expect(() => parseNewSessionCommand(' --name "one" --name "two"')).toThrow("Duplicate");
 		expect(() => parseNewSessionCommand(" --other value")).toThrow("Unknown /new option");
 		expect(() => parseNewSessionCommand(' --name "broken')).toThrow("Unterminated quote");
-	});
-
-	test("resolves /thinking to /effort through the alias path", () => {
-		const parsed = parseSlashCommand("/thinking");
-
-		expect(isBuiltinSlashCommandName("thinking")).toBe(true);
-		expect(resolveBuiltinSlashCommandName("thinking")).toBe("effort");
-		expect(resolveSlashCommand(parsed!)).toEqual({
-			name: "effort",
-			args: "",
-			originalName: "thinking",
-			isAlias: true,
-		});
-	});
-
-	test("preserves arguments when resolving aliases", () => {
-		const parsed = parseSlashCommand("/usage latest turn");
-
-		expect(resolveSlashCommand(parsed!)).toEqual({
-			name: "context",
-			args: "latest turn",
-			originalName: "usage",
-			isAlias: true,
-		});
-	});
-
-	test("resolves /side to /btw", () => {
-		const parsed = parseSlashCommand("/side Is this cached?");
-
-		expect(resolveSlashCommand(parsed!)).toEqual({
-			name: "btw",
-			args: "Is this cached?",
-			originalName: "side",
-			isAlias: true,
-		});
 	});
 });
 
@@ -267,5 +126,48 @@ describe("session slash commands", () => {
 		expect(parseSessionSlashCommand(" /compact")).toBeUndefined();
 		expect(parseSessionSlashCommand("/compaction")).toBeUndefined();
 		expect(parseSessionSlashCommand("/settings")).toBeUndefined();
+	});
+});
+
+describe("ENG-6014 literal prompt arguments", () => {
+	const explainTemplate: PromptTemplate = {
+		name: "explain",
+		description: "Explain the argument",
+		content: "Explain: $ARGUMENTS",
+		sourceInfo: createSyntheticSourceInfo("/tmp/explain.md", { source: "test" }),
+		filePath: "/tmp/explain.md",
+	};
+
+	test.each(["$$", "$&", "$`", "$'", "$1", "$10", "$ARGUMENTS", "$@", `\${@:2}`, `\${@:1:2}`])(
+		"preserves %s in every placeholder form",
+		(literal) => {
+			const args = [literal, "tail"];
+			expect(substituteArgs("Before $1 after", args)).toBe(`Before ${literal} after`);
+			expect(substituteArgs("Before $ARGUMENTS after", args)).toBe(`Before ${literal} tail after`);
+			expect(substituteArgs("Before $@ after", args)).toBe(`Before ${literal} tail after`);
+			expect(substituteArgs(`Before \${@:1} after`, args)).toBe(`Before ${literal} tail after`);
+			expect(substituteArgs(`Before \${@:2:1} after`, ["head", literal, "tail"])).toBe(`Before ${literal} after`);
+		},
+	);
+
+	test("does not expand placeholders formed across insertion boundaries", () => {
+		expect(substituteArgs("$1ARGUMENTS|$1@|$1{@:2}", ["$", "tail"])).toBe(`$ARGUMENTS|$@|\${@:2}`);
+	});
+
+	test("expands mixed and repeated template placeholders without expanding inserted arguments", () => {
+		expect(substituteArgs(`$1|$2|\${@:2:1}|$@|$ARGUMENTS|$1`, ["$@", `\${@:1}`, "$ARGUMENTS"])).toBe(
+			`$@|\${@:1}|\${@:1}|$@ \${@:1} $ARGUMENTS|$@ \${@:1} $ARGUMENTS|$@`,
+		);
+	});
+
+	test.each([
+		{ input: "$$", expected: "Explain: $$" },
+		{ input: "$&", expected: "Explain: $&" },
+		{ input: "$@ tail", expected: "Explain: $@ tail" },
+		{ input: '"$`"', expected: "Explain: $`" },
+		{ input: '"$\'"', expected: "Explain: $'" },
+		{ input: "ordinary text", expected: "Explain: ordinary text" },
+	])("preserves $input through an expanded prompt template", ({ input, expected }) => {
+		expect(expandPromptTemplate(`/explain ${input}`, [explainTemplate])).toBe(expected);
 	});
 });

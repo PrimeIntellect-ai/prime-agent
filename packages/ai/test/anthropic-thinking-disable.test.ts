@@ -1,7 +1,11 @@
+import { createServer, type IncomingMessage } from "node:http";
+import type { AddressInfo } from "node:net";
+import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.js";
+import { type AnthropicOptions, streamAnthropic } from "../src/providers/anthropic.js";
 import { streamSimple } from "../src/stream.js";
-import type { Context, Model, SimpleStreamOptions } from "../src/types.js";
+import type { Context, Model, SimpleStreamOptions, Tool } from "../src/types.js";
 
 interface AnthropicThinkingPayload {
 	thinking?: { type: string; budget_tokens?: number; display?: string };
@@ -41,67 +45,6 @@ async function capturePayload(
 	}
 
 	return capturedPayload;
-}
-
-interface RunResult {
-	thinkingEventCount: number;
-	thinkingCharCount: number;
-	text: string;
-	contentTypes: string[];
-}
-
-function makeE2EContext(): Context {
-	return {
-		systemPrompt: "You are a precise assistant. Follow the requested output format exactly.",
-		messages: [
-			{
-				role: "user",
-				content:
-					"Before replying, carefully solve 36863 * 5279 internally. Then reply with the word pong repeated exactly 40 times, separated by single spaces. Do not add any other text.",
-				timestamp: Date.now(),
-			},
-		],
-	};
-}
-
-function countPongs(text: string): number {
-	return text.match(/\bpong\b/gi)?.length ?? 0;
-}
-
-async function runWithoutReasoning(model: Model<"anthropic-messages">): Promise<RunResult> {
-	const s = streamSimple(model, makeE2EContext(), {
-		temperature: 0,
-		maxTokens: 160,
-	});
-
-	let thinkingEventCount = 0;
-	let thinkingCharCount = 0;
-
-	for await (const event of s) {
-		if (event.type === "thinking_start" || event.type === "thinking_end") {
-			thinkingEventCount += 1;
-		}
-		if (event.type === "thinking_delta") {
-			thinkingEventCount += 1;
-			thinkingCharCount += event.delta.length;
-		}
-	}
-
-	const response = await s.result();
-	expect(response.stopReason, response.errorMessage).toBe("stop");
-
-	const text = response.content
-		.filter((block) => block.type === "text")
-		.map((block) => block.text)
-		.join("")
-		.trim();
-
-	return {
-		thinkingEventCount,
-		thinkingCharCount,
-		text,
-		contentTypes: response.content.map((block) => block.type),
-	};
 }
 
 describe("Anthropic thinking disable payload", () => {
@@ -196,13 +139,145 @@ describe("Anthropic thinking disable payload", () => {
 	});
 });
 
-describe.skipIf(!process.env.ANTHROPIC_API_KEY)("Anthropic thinking disable E2E", () => {
-	it("disables thinking for Claude reasoning models", { retry: 2, timeout: 30000 }, async () => {
-		const result = await runWithoutReasoning(getModel("anthropic", "claude-sonnet-4-5"));
+interface CapturedRequest {
+	headers: IncomingMessage["headers"];
+	body: Record<string, unknown>;
+}
 
-		expect(result.thinkingEventCount).toBe(0);
-		expect(result.thinkingCharCount).toBe(0);
-		expect(result.contentTypes).not.toContain("thinking");
-		expect(countPongs(result.text)).toBeGreaterThanOrEqual(35);
+async function captureAnthropicRequest(
+	model: Model<"anthropic-messages">,
+	context: Context,
+	options: AnthropicOptions,
+): Promise<CapturedRequest> {
+	let capturedRequest: CapturedRequest | undefined;
+	const server = createServer(async (request, response) => {
+		const chunks: Buffer[] = [];
+		for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+		capturedRequest = {
+			headers: request.headers,
+			body: JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>,
+		};
+		response.writeHead(200, { "content-type": "text/event-stream" });
+		response.end();
+	});
+
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const { port } = server.address() as AddressInfo;
+
+	try {
+		const s = streamAnthropic({ ...model, baseUrl: `http://127.0.0.1:${port}` }, context, options);
+		for await (const event of s) {
+			if (event.type === "done" || event.type === "error") break;
+		}
+	} finally {
+		await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+	}
+
+	if (!capturedRequest) throw new Error("Anthropic request was not captured");
+	return capturedRequest;
+}
+
+function toolsOf(body: Record<string, unknown>): Array<Record<string, unknown>> {
+	return (body.tools ?? []) as Array<Record<string, unknown>>;
+}
+
+function tool(name: string): Tool {
+	return { name, description: `Tool ${name}`, parameters: Type.Object({ value: Type.String() }) };
+}
+
+const toolContext: Context = {
+	messages: [{ role: "user", content: "Use the tool", timestamp: 1 }],
+	tools: [tool("lookup")],
+};
+
+describe("Anthropic request wire contract", () => {
+	const testModel: Model<"anthropic-messages"> = {
+		...getModel("anthropic", "claude-opus-4-7"),
+		provider: "test-anthropic",
+	};
+
+	it.each([
+		{
+			name: "sends per-tool eager_input_streaming by default",
+			compat: undefined,
+			context: toolContext,
+			eager: true,
+			beta: undefined,
+		},
+		{
+			name: "uses the legacy fine-grained beta when eager tool input streaming is disabled",
+			compat: { supportsEagerToolInputStreaming: false },
+			context: toolContext,
+			eager: undefined,
+			beta: "fine-grained-tool-streaming-2025-05-14",
+		},
+		{
+			name: "omits the legacy fine-grained beta when there are no tools",
+			compat: { supportsEagerToolInputStreaming: false },
+			context: { messages: toolContext.messages } as Context,
+			eager: undefined,
+			beta: undefined,
+		},
+	])("$name", async ({ compat, context, eager, beta }) => {
+		const request = await captureAnthropicRequest({ ...testModel, compat }, context, {
+			apiKey: "test-key",
+			cacheRetention: "none",
+		});
+
+		expect(toolsOf(request.body)[0]?.eager_input_streaming).toBe(eager);
+		expect(request.headers["anthropic-beta"]).toBe(beta);
+	});
+
+	it("renames user tools to their Claude Code casing only for OAuth tokens", async () => {
+		const context: Context = {
+			messages: [{ role: "user", content: "Use the tools", timestamp: 1 }],
+			tools: [tool("todowrite"), tool("find"), tool("my_custom_tool")],
+		};
+
+		const oauth = await captureAnthropicRequest(getModel("anthropic", "claude-sonnet-4-6"), context, {
+			apiKey: "sk-ant-oat-fake-token",
+			cacheRetention: "none",
+		});
+		expect(toolsOf(oauth.body).map((entry) => entry.name)).toEqual(["TodoWrite", "find", "my_custom_tool"]);
+
+		const apiKey = await captureAnthropicRequest(getModel("anthropic", "claude-sonnet-4-6"), context, {
+			apiKey: "sk-ant-api-fake-token",
+			cacheRetention: "none",
+		});
+		expect(toolsOf(apiKey.body).map((entry) => entry.name)).toEqual(["todowrite", "find", "my_custom_tool"]);
+	});
+
+	it("sends Copilot bearer auth, Copilot headers, and a valid Anthropic Messages payload", async () => {
+		const model = getModel("github-copilot", "claude-sonnet-4.6");
+		expect(model.api).toBe("anthropic-messages");
+
+		const request = await captureAnthropicRequest(
+			model as Model<"anthropic-messages">,
+			{ systemPrompt: "You are a helpful assistant.", messages: [{ role: "user", content: "Hello", timestamp: 1 }] },
+			{ apiKey: "tid_copilot_session_test_token" },
+		);
+
+		expect(request.headers.authorization).toBe("Bearer tid_copilot_session_test_token");
+		expect(request.headers["x-api-key"]).toBeUndefined();
+		expect(request.headers["user-agent"]).toContain("GitHubCopilotChat");
+		expect(request.headers["copilot-integration-id"]).toBe("vscode-chat");
+		expect(request.headers["x-initiator"]).toBe("user");
+		expect(request.headers["openai-intent"]).toBe("conversation-edits");
+		expect(request.headers["anthropic-beta"] ?? "").not.toContain("fine-grained-tool-streaming");
+
+		expect(request.body.model).toBe("claude-sonnet-4.6");
+		expect(request.body.stream).toBe(true);
+		expect(request.body.max_tokens as number).toBeGreaterThan(0);
+		expect(Array.isArray(request.body.messages)).toBe(true);
+	});
+
+	it("includes the interleaved-thinking beta for non-adaptive Copilot Claude models", async () => {
+		const request = await captureAnthropicRequest(
+			getModel("github-copilot", "claude-haiku-4.5") as Model<"anthropic-messages">,
+			{ messages: [{ role: "user", content: "Hello", timestamp: 1 }] },
+			{ apiKey: "tid_copilot_session_test_token", interleavedThinking: true },
+		);
+
+		expect(request.headers["anthropic-beta"]).toContain("interleaved-thinking-2025-05-14");
 	});
 });

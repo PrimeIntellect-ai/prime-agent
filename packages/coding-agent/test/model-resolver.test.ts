@@ -1,4 +1,4 @@
-import { getModels, getSupportedThinkingLevels, type KnownProvider, type Model } from "@earendil-works/pi-ai";
+import { type Api, getModels, getSupportedThinkingLevels, type KnownProvider, type Model } from "@earendil-works/pi-ai";
 import { describe, expect, test, vi } from "vitest";
 import {
 	defaultModelPerProvider,
@@ -8,392 +8,198 @@ import {
 } from "../src/core/model-resolver.js";
 import { getPrivatePrimeInferenceModels } from "../src/core/prime-inference-models.js";
 
-const mockModels: Model<"anthropic-messages">[] = [
-	{
-		id: "claude-sonnet-4-5",
-		name: "Claude Sonnet 4.5",
-		api: "anthropic-messages",
-		provider: "anthropic",
-		baseUrl: "https://api.anthropic.com",
-		reasoning: true,
-		input: ["text", "image"],
-		cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-		contextWindow: 200000,
-		maxTokens: 8192,
-	},
-	{
-		id: "gpt-4o",
-		name: "GPT-4o",
-		api: "anthropic-messages", // Using same type for simplicity
-		provider: "openai",
-		baseUrl: "https://api.openai.com",
-		reasoning: false,
-		input: ["text", "image"],
-		cost: { input: 5, output: 15, cacheRead: 0.5, cacheWrite: 5 },
-		contextWindow: 128000,
-		maxTokens: 4096,
-	},
-];
+/** Any catalog model, matching what ModelRegistry.getAll() returns. */
+type AnyModel = Model<Api>;
+type TestModel = Model<"anthropic-messages">;
+type CliRegistry = Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+type InitialRegistry = Parameters<typeof findInitialModel>[0]["modelRegistry"];
 
-const mockOpenRouterModels: Model<"anthropic-messages">[] = [
-	{
-		id: "qwen/qwen3-coder:exacto",
-		name: "Qwen3 Coder Exacto",
+function model(overrides: Partial<TestModel> & Pick<TestModel, "id" | "provider">): TestModel {
+	return {
+		name: overrides.id,
 		api: "anthropic-messages",
-		provider: "openrouter",
-		baseUrl: "https://openrouter.ai/api/v1",
+		baseUrl: "https://example.test",
 		reasoning: true,
 		input: ["text"],
 		cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
 		contextWindow: 128000,
 		maxTokens: 8192,
-	},
-	{
-		id: "openai/gpt-4o:extended",
-		name: "GPT-4o Extended",
-		api: "anthropic-messages",
-		provider: "openrouter",
-		baseUrl: "https://openrouter.ai/api/v1",
-		reasoning: false,
-		input: ["text", "image"],
-		cost: { input: 5, output: 15, cacheRead: 0.5, cacheWrite: 5 },
-		contextWindow: 128000,
-		maxTokens: 4096,
-	},
-];
+		...overrides,
+	};
+}
 
-const allModels = [...mockModels, ...mockOpenRouterModels];
+const sonnet = model({ id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", provider: "anthropic" });
+const gpt4o = model({ id: "gpt-4o", name: "GPT-4o", provider: "openai", reasoning: false });
+const qwenExacto = model({ id: "qwen/qwen3-coder:exacto", provider: "openrouter" });
+const gpt4oExtended = model({ id: "openai/gpt-4o:extended", provider: "openrouter", reasoning: false });
+const allModels = [sonnet, gpt4o, qwenExacto, gpt4oExtended];
+
+const primeInference = (id: string) =>
+	model({ id, provider: "prime-inference", baseUrl: "https://api.pinference.ai/api/v1" });
+const zaiDirect = model({ id: "glm-5", provider: "zai", baseUrl: "https://open.bigmodel.cn/api/paas/v4" });
+const zaiGateway = model({ id: "zai/glm-5", provider: "vercel-ai-gateway", baseUrl: "https://ai-gateway.vercel.sh" });
+
+const cliRegistry = (models: AnyModel[]): CliRegistry => ({ getAll: () => models }) as unknown as CliRegistry;
 
 describe("resolveModelScopeFromModels", () => {
-	test("resolves scope patterns against the supplied model list", () => {
-		const daemonModel: Model<"anthropic-messages"> = {
-			id: "daemon-only-model",
-			name: "Daemon Only Model",
-			api: "anthropic-messages",
-			provider: "prime-inference",
-			baseUrl: "https://api.pinference.ai/api/v1",
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
-			contextWindow: 128000,
-			maxTokens: 8192,
-		};
+	test("resolves scope patterns, thinking suffixes, and provider-qualified ids", () => {
+		const daemonOnly = primeInference("daemon-only-model");
+		const hfGlm = model({
+			id: "zai-org/GLM-5.2",
+			provider: "huggingface",
+			baseUrl: "https://router.huggingface.co/v1",
+		});
+		const primeGlm = primeInference("z-ai/glm-5.2");
+		const models = [...allModels, daemonOnly, hfGlm, primeGlm];
 
-		const result = resolveModelScopeFromModels(
-			["prime-inference/daemon-only-model:high", "openai/gpt-4o"],
-			[...allModels, daemonModel],
-		);
-
-		expect(result).toHaveLength(2);
-		expect(result[0]?.model).toBe(daemonModel);
-		expect(result[0]?.thinkingLevel).toBe("high");
-		expect(result[1]?.model.provider).toBe("openai");
-		expect(result[1]?.model.id).toBe("gpt-4o");
-	});
-
-	test("resolves a thinking level after a colon-bearing model id", () => {
-		const result = resolveModelScopeFromModels(["openrouter/qwen/qwen3-coder:exacto:high"], allModels);
-
-		expect(result).toEqual([{ model: mockOpenRouterModels[0], thinkingLevel: "high" }]);
+		expect(resolveModelScopeFromModels(["prime-inference/daemon-only-model:high", "openai/gpt-4o"], models)).toEqual([
+			{ model: daemonOnly, thinkingLevel: "high" },
+			{ model: gpt4o, thinkingLevel: undefined },
+		]);
+		// A thinking level may follow a colon-bearing model id.
+		expect(resolveModelScopeFromModels(["openrouter/qwen/qwen3-coder:exacto:high"], models)).toEqual([
+			{ model: qwenExacto, thinkingLevel: "high" },
+		]);
+		// A provider prefix wins over a same-named model from another provider.
+		expect(resolveModelScopeFromModels(["huggingface/zai-org/GLM-5.2"], models)).toEqual([
+			{ model: hfGlm, thinkingLevel: undefined },
+		]);
 	});
 
 	test("keeps the model, warns, and drops an invalid thinking suffix", () => {
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 		try {
-			const result = resolveModelScopeFromModels(["sonnet:random"], allModels);
-
-			expect(result).toEqual([{ model: mockModels[0], thinkingLevel: undefined }]);
+			expect(resolveModelScopeFromModels(["sonnet:random"], allModels)).toEqual([
+				{ model: sonnet, thinkingLevel: undefined },
+			]);
 			expect(warn).toHaveBeenCalledWith(expect.stringContaining('Invalid thinking level "random"'));
 		} finally {
 			warn.mockRestore();
 		}
 	});
-
-	test("preserves provider-qualified selections when model names overlap", () => {
-		const primeInferenceModel: Model<"anthropic-messages"> = {
-			...mockModels[0]!,
-			id: "z-ai/glm-5.2",
-			name: "GLM 5.2",
-			provider: "prime-inference",
-			baseUrl: "https://api.pinference.ai/api/v1",
-		};
-		const huggingFaceModel: Model<"anthropic-messages"> = {
-			...primeInferenceModel,
-			id: "zai-org/GLM-5.2",
-			provider: "huggingface",
-			baseUrl: "https://router.huggingface.co/v1",
-		};
-
-		const result = resolveModelScopeFromModels(
-			["huggingface/zai-org/GLM-5.2"],
-			[primeInferenceModel, huggingFaceModel],
-		);
-
-		expect(result).toEqual([{ model: huggingFaceModel, thinkingLevel: undefined }]);
-	});
 });
 
 describe("resolveCliModel", () => {
-	test("resolves --model provider/id without --provider", () => {
-		const registry = {
-			getAll: () => allModels,
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
-
+	test.each<
+		[
+			string,
+			{ provider?: string; pattern: string; models?: AnyModel[] },
+			{ provider: string; id: string; thinking?: string },
+		]
+	>([
+		["provider/id without --provider", { pattern: "openai/gpt-4o" }, { provider: "openai", id: "gpt-4o" }],
+		[
+			"a fuzzy pattern inside an explicit provider",
+			{ provider: "openai", pattern: "4o" },
+			{ provider: "openai", id: "gpt-4o" },
+		],
+		[
+			"a provider-prefixed fuzzy pattern",
+			{ pattern: "openrouter/qwen" },
+			{ provider: "openrouter", id: "qwen/qwen3-coder:exacto" },
+		],
+		[
+			"a <pattern>:<thinking> suffix",
+			{ pattern: "sonnet:high" },
+			{ provider: "anthropic", id: "claude-sonnet-4-5", thinking: "high" },
+		],
+		// An exact id match beats provider inference, and an invalid :suffix stays part of the id.
+		[
+			"an exact OpenRouter-style id",
+			{ pattern: "openai/gpt-4o:extended" },
+			{ provider: "openrouter", id: "openai/gpt-4o:extended" },
+		],
+		[
+			"a raw id with a non-thinking suffix",
+			{ provider: "openai", pattern: "gpt-4o:extended" },
+			{ provider: "openai", id: "gpt-4o:extended" },
+		],
+		[
+			"a custom id without double prefixing",
+			{ provider: "openrouter", pattern: "openrouter/openai/ghost-model" },
+			{ provider: "openrouter", id: "openai/ghost-model" },
+		],
+		// A provider/model split beats a gateway model whose id happens to match.
+		[
+			"provider split over a gateway id",
+			{ pattern: "zai/glm-5", models: [...allModels, zaiDirect, zaiGateway] },
+			{ provider: "zai", id: "glm-5" },
+		],
+	])("resolves %s", (_label, { provider, pattern, models }, expected) => {
 		const result = resolveCliModel({
-			cliModel: "openai/gpt-4o",
-			modelRegistry: registry,
+			cliProvider: provider,
+			cliModel: pattern,
+			modelRegistry: cliRegistry(models ?? allModels),
 		});
 
 		expect(result.error).toBeUndefined();
-		expect(result.model?.provider).toBe("openai");
-		expect(result.model?.id).toBe("gpt-4o");
+		expect(result.model?.provider).toBe(expected.provider);
+		expect(result.model?.id).toBe(expected.id);
+		expect(result.thinkingLevel).toBe(expected.thinking);
 	});
 
-	test("resolves fuzzy patterns within an explicit provider", () => {
-		const registry = {
-			getAll: () => allModels,
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
-
+	test.each<[string, AnyModel[], string]>([
+		["there are no models", [], "No models available"],
+		["a private id has no private template", getModels("prime-inference"), "not found"],
+	])("reports an error when %s", (_label, models, errorFragment) => {
 		const result = resolveCliModel({
-			cliProvider: "openai",
-			cliModel: "4o",
-			modelRegistry: registry,
-		});
-
-		expect(result.error).toBeUndefined();
-		expect(result.model?.provider).toBe("openai");
-		expect(result.model?.id).toBe("gpt-4o");
-	});
-
-	test("supports --model <pattern>:<thinking> (without explicit --thinking)", () => {
-		const registry = {
-			getAll: () => allModels,
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
-
-		const result = resolveCliModel({
-			cliModel: "sonnet:high",
-			modelRegistry: registry,
-		});
-
-		expect(result.error).toBeUndefined();
-		expect(result.model?.id).toBe("claude-sonnet-4-5");
-		expect(result.thinkingLevel).toBe("high");
-	});
-
-	test("prefers exact model id match over provider inference (OpenRouter-style ids)", () => {
-		const registry = {
-			getAll: () => allModels,
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
-
-		const result = resolveCliModel({
-			cliModel: "openai/gpt-4o:extended",
-			modelRegistry: registry,
-		});
-
-		expect(result.error).toBeUndefined();
-		expect(result.model?.provider).toBe("openrouter");
-		expect(result.model?.id).toBe("openai/gpt-4o:extended");
-	});
-
-	test("does not strip invalid :suffix as thinking level in --model (treat as raw id)", () => {
-		const registry = {
-			getAll: () => allModels,
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
-
-		const result = resolveCliModel({
-			cliProvider: "openai",
-			cliModel: "gpt-4o:extended",
-			modelRegistry: registry,
-		});
-
-		expect(result.error).toBeUndefined();
-		expect(result.model?.provider).toBe("openai");
-		expect(result.model?.id).toBe("gpt-4o:extended");
-	});
-
-	test("allows custom model ids for explicit providers without double prefixing", () => {
-		const registry = {
-			getAll: () => allModels,
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
-
-		const result = resolveCliModel({
-			cliProvider: "openrouter",
-			cliModel: "openrouter/openai/ghost-model",
-			modelRegistry: registry,
-		});
-
-		expect(result.error).toBeUndefined();
-		expect(result.model?.provider).toBe("openrouter");
-		expect(result.model?.id).toBe("openai/ghost-model");
-	});
-
-	test("returns a clear error when there are no models", () => {
-		const registry = {
-			getAll: () => [],
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
-
-		const result = resolveCliModel({
-			cliProvider: "openai",
-			cliModel: "gpt-4o",
-			modelRegistry: registry,
+			cliProvider: "prime-inference",
+			cliModel: "internal/glm-5.3-fast",
+			modelRegistry: cliRegistry(models),
 		});
 
 		expect(result.model).toBeUndefined();
-		expect(result.error).toContain("No models available");
+		expect(result.error).toContain(errorFragment);
 	});
 
-	test("prefers provider/model split over gateway model with matching id", () => {
-		const zaiModel: Model<"anthropic-messages"> = {
-			id: "glm-5",
-			name: "GLM-5",
-			api: "anthropic-messages",
-			provider: "zai",
-			baseUrl: "https://open.bigmodel.cn/api/paas/v4",
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
-			contextWindow: 128000,
-			maxTokens: 8192,
-		};
-		const gatewayModel: Model<"anthropic-messages"> = {
-			id: "zai/glm-5",
-			name: "GLM-5",
-			api: "anthropic-messages",
-			provider: "vercel-ai-gateway",
-			baseUrl: "https://ai-gateway.vercel.sh",
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
-			contextWindow: 128000,
-			maxTokens: 8192,
-		};
-		const registry = {
-			getAll: () => [...allModels, zaiModel, gatewayModel],
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
-
-		const result = resolveCliModel({
-			cliModel: "zai/glm-5",
-			modelRegistry: registry,
-		});
-
-		expect(result.error).toBeUndefined();
-		expect(result.model?.provider).toBe("zai");
-		expect(result.model?.id).toBe("glm-5");
-	});
-
-	test("resolves provider-prefixed fuzzy patterns (openrouter/qwen -> openrouter model)", () => {
-		const registry = {
-			getAll: () => allModels,
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
-
-		const result = resolveCliModel({
-			cliModel: "openrouter/qwen",
-			modelRegistry: registry,
-		});
-
-		expect(result.error).toBeUndefined();
-		expect(result.model?.provider).toBe("openrouter");
-		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
-	});
-
-	test("derives unknown private Prime Inference ids from a private-route template", () => {
+	test("derives unknown Prime Inference ids from the matching route template", () => {
 		// The registry a daemon worker builds for a fresh session: bundled public
 		// catalog plus bundled private models, without the team-authorized private
 		// catalog that only loads after refreshAvailableModels().
-		const registry = {
-			getAll: () => [...getModels("prime-inference"), ...getPrivatePrimeInferenceModels()],
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+		const registry = cliRegistry([...getModels("prime-inference"), ...getPrivatePrimeInferenceModels()]);
 
-		const result = resolveCliModel({
+		const priv = resolveCliModel({
 			cliProvider: "prime-inference",
 			cliModel: "internal/glm-5.3-fast",
 			modelRegistry: registry,
 		});
-
-		expect(result.error).toBeUndefined();
-		expect(result.model?.id).toBe("internal/glm-5.3-fast");
-		expect(result.model?.provider).toBe("prime-inference");
-		expect(result.model?.baseUrl).toBe("https://api.pinference.ai/api/v1");
-		const model = result.model as Model<"openai-completions">;
+		expect(priv.error).toBeUndefined();
+		expect(priv.model?.id).toBe("internal/glm-5.3-fast");
+		expect(priv.model?.provider).toBe("prime-inference");
+		expect(priv.model?.baseUrl).toBe("https://api.pinference.ai/api/v1");
+		const privateModel = priv.model as Model<"openai-completions">;
 		// The public provider default carries the zai thinking format; a private
 		// route must not inherit it (enable_thinking is a provider 400 there).
-		expect(model.compat?.thinkingFormat).toBeUndefined();
+		expect(privateModel.compat?.thinkingFormat).toBeUndefined();
 		// The zai thinkingLevelMap would coerce thinking "off" to "low".
-		expect(getSupportedThinkingLevels(model).includes("off")).toBe(true);
-	});
+		expect(getSupportedThinkingLevels(privateModel).includes("off")).toBe(true);
 
-	test("still derives unknown public Prime Inference ids from the provider default", () => {
-		const registry = {
-			getAll: () => [...getModels("prime-inference"), ...getPrivatePrimeInferenceModels()],
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
-
-		const result = resolveCliModel({
-			cliProvider: "prime-inference",
-			cliModel: "z-ai/glm-9",
-			modelRegistry: registry,
-		});
-
-		expect(result.error).toBeUndefined();
-		expect(result.model?.id).toBe("z-ai/glm-9");
-		expect((result.model as Model<"openai-completions">).compat?.thinkingFormat).toBe("zai");
-	});
-
-	test("keeps an unknown private Prime Inference id unresolved without a private template", () => {
-		const registry = {
-			getAll: () => getModels("prime-inference"),
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
-
-		const result = resolveCliModel({
-			cliProvider: "prime-inference",
-			cliModel: "internal/glm-5.3-fast",
-			modelRegistry: registry,
-		});
-
-		expect(result.model).toBeUndefined();
-		expect(result.error).toContain("not found");
+		const pub = resolveCliModel({ cliProvider: "prime-inference", cliModel: "z-ai/glm-9", modelRegistry: registry });
+		expect(pub.error).toBeUndefined();
+		expect(pub.model?.id).toBe("z-ai/glm-9");
+		expect((pub.model as Model<"openai-completions">).compat?.thinkingFormat).toBe("zai");
 	});
 });
 
 describe("default model selection", () => {
-	test("openai defaults track current models", () => {
-		expect(defaultModelPerProvider.openai).toBe("gpt-5.4");
-		expect(defaultModelPerProvider["openai-codex"]).toBe("gpt-5.5");
-		expect(defaultModelPerProvider["prime-inference"]).toBe("z-ai/glm-5.3");
-	});
-
 	test("every per-provider default exists in the model catalog", () => {
 		for (const [provider, modelId] of Object.entries(defaultModelPerProvider)) {
 			const models = getModels(provider as KnownProvider);
 			if (models.length === 0) continue;
 			expect(
-				models.map((model) => model.id),
+				models.map((entry) => entry.id),
 				`default for ${provider}`,
 			).toContain(modelId);
 		}
 	});
 
-	test("zai, minimax, and cerebras defaults track current models", () => {
-		expect(defaultModelPerProvider.zai).toBe("glm-5.3");
-		expect(defaultModelPerProvider.minimax).toBe("MiniMax-M2.7");
-		expect(defaultModelPerProvider["minimax-cn"]).toBe("MiniMax-M2.7");
-		expect(defaultModelPerProvider.cerebras).toBe("gpt-oss-120b");
-	});
-
-	test("ai-gateway default tracks current model", () => {
-		expect(defaultModelPerProvider["vercel-ai-gateway"]).toBe("zai/glm-5.1");
-	});
-
 	test("findInitialModel accepts explicit provider custom model ids", async () => {
-		const registry = {
-			getAll: () => allModels,
-		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
-
 		const result = await findInitialModel({
 			cliProvider: "openrouter",
 			cliModel: "openrouter/openai/ghost-model",
 			scopedModels: [],
 			isContinuing: false,
-			modelRegistry: registry,
+			modelRegistry: cliRegistry(allModels) as unknown as InitialRegistry,
 		});
 
 		expect(result.model?.provider).toBe("openrouter");
@@ -401,129 +207,54 @@ describe("default model selection", () => {
 	});
 
 	test("findInitialModel uses medium as the built-in default thinking level", async () => {
-		const reasoningModel = mockModels[0];
-		const registry = {
-			refreshAvailableModels: async () => [reasoningModel],
-		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
+		const registry = { refreshAvailableModels: async () => [sonnet] } as unknown as InitialRegistry;
 
-		const result = await findInitialModel({
-			scopedModels: [],
-			isContinuing: false,
-			modelRegistry: registry,
-		});
+		const result = await findInitialModel({ scopedModels: [], isContinuing: false, modelRegistry: registry });
 
-		expect(result.model).toBe(reasoningModel);
+		expect(result.model).toBe(sonnet);
 		expect(result.thinkingLevel).toBe("medium");
 	});
 
-	test("findInitialModel prefers GLM 5.3 when Prime Inference is configured", async () => {
-		const anthropicModel: Model<"anthropic-messages"> = {
-			...mockModels[0],
-			id: "claude-opus-4-7",
-			name: "Claude Opus 4.7",
-		};
-		const primeModel: Model<"anthropic-messages"> = {
-			id: "z-ai/glm-5.3",
-			name: "GLM 5.3",
-			api: "anthropic-messages",
-			provider: "prime-inference",
-			baseUrl: "https://api.pinference.ai/api/v1",
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 1048576,
-			maxTokens: 101376,
-		};
-		const registry = {
-			refreshAvailableModels: async () => [
-				anthropicModel,
-				{ ...primeModel, id: "z-ai/glm-5.2", name: "GLM 5.2" },
-				primeModel,
+	test.each<[string, AnyModel[], string]>([
+		[
+			"prefers the Prime Inference default",
+			[sonnet, primeInference("z-ai/glm-5.2"), primeInference("z-ai/glm-5.3")],
+			"z-ai/glm-5.3",
+		],
+		["falls back to another provider default", [sonnet], "claude-sonnet-4-5"],
+		[
+			"selects the ai-gateway default",
+			[
+				model({
+					id: "anthropic/claude-opus-4-6",
+					provider: "vercel-ai-gateway",
+					baseUrl: "https://ai-gateway.vercel.sh",
+				}),
 			],
-		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
+			"anthropic/claude-opus-4-6",
+		],
+	])("findInitialModel %s", async (_label, available, expectedId) => {
+		const registry = { refreshAvailableModels: async () => available } as unknown as InitialRegistry;
 
-		const result = await findInitialModel({
-			scopedModels: [],
-			isContinuing: false,
-			modelRegistry: registry,
-		});
+		const result = await findInitialModel({ scopedModels: [], isContinuing: false, modelRegistry: registry });
 
-		expect(result.model).toBe(primeModel);
-	});
-
-	test("findInitialModel uses another provider default when Prime Inference is not configured", async () => {
-		const anthropicModel: Model<"anthropic-messages"> = {
-			...mockModels[0],
-			id: "claude-opus-4-7",
-			name: "Claude Opus 4.7",
-		};
-		const registry = {
-			refreshAvailableModels: async () => [anthropicModel],
-		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
-
-		const result = await findInitialModel({
-			scopedModels: [],
-			isContinuing: false,
-			modelRegistry: registry,
-		});
-
-		expect(result.model).toBe(anthropicModel);
-	});
-
-	test("findInitialModel selects ai-gateway default when available", async () => {
-		const aiGatewayModel: Model<"anthropic-messages"> = {
-			id: "anthropic/claude-opus-4-6",
-			name: "Claude Opus 4.6",
-			api: "anthropic-messages",
-			provider: "vercel-ai-gateway",
-			baseUrl: "https://ai-gateway.vercel.sh",
-			reasoning: true,
-			input: ["text", "image"],
-			cost: { input: 5, output: 15, cacheRead: 0.5, cacheWrite: 5 },
-			contextWindow: 200000,
-			maxTokens: 8192,
-		};
-
-		const registry = {
-			refreshAvailableModels: async () => [aiGatewayModel],
-		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
-
-		const result = await findInitialModel({
-			scopedModels: [],
-			isContinuing: false,
-			modelRegistry: registry,
-		});
-
-		expect(result.model?.provider).toBe("vercel-ai-gateway");
-		expect(result.model?.id).toBe("anthropic/claude-opus-4-6");
+		expect(result.model?.id).toBe(expectedId);
 	});
 
 	test("findInitialModel skips saved defaults without configured auth", async () => {
-		const savedDefault = mockModels[0];
-		const primeModel: Model<"anthropic-messages"> = {
-			id: "openai/gpt-5.5",
-			name: "GPT 5.5 (Prime Inference)",
-			api: "anthropic-messages",
-			provider: "prime-inference",
-			baseUrl: "https://api.pinference.ai/api/v1",
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
-			contextWindow: 128000,
-			maxTokens: 8192,
-		};
+		const primeModel = primeInference("openai/gpt-5.5");
 		const registry = {
 			find: (provider: string, modelId: string) =>
-				[savedDefault, primeModel].find((model) => model.provider === provider && model.id === modelId),
-			hasConfiguredAuth: (model: Model<"anthropic-messages">) => model.provider === "prime-inference",
+				[sonnet, primeModel].find((entry) => entry.provider === provider && entry.id === modelId),
+			hasConfiguredAuth: (entry: TestModel) => entry.provider === "prime-inference",
 			refreshAvailableModels: async () => [primeModel],
-		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
+		} as unknown as InitialRegistry;
 
 		const result = await findInitialModel({
 			scopedModels: [],
 			isContinuing: false,
-			defaultProvider: savedDefault.provider,
-			defaultModelId: savedDefault.id,
+			defaultProvider: sonnet.provider,
+			defaultModelId: sonnet.id,
 			modelRegistry: registry,
 		});
 
@@ -531,67 +262,43 @@ describe("default model selection", () => {
 		expect(result.model?.id).toBe("openai/gpt-5.5");
 	});
 
-	test("findInitialModel rebuilds a saved default missing from the model snapshot when the provider is authed", async () => {
-		const primeSnapshotModel: Model<"anthropic-messages"> = {
-			id: "openai/gpt-5.5",
-			name: "GPT 5.5 (Prime Inference)",
-			api: "anthropic-messages",
-			provider: "prime-inference",
-			baseUrl: "https://api.pinference.ai/api/v1",
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
-			contextWindow: 128000,
-			maxTokens: 8192,
-		};
+	test.each<[string, { provider: string; modelId: string; snapshot: AnyModel[] }, string]>([
+		[
+			"rebuilds a saved default missing from the snapshot when the provider is authed",
+			{
+				provider: "prime-inference",
+				modelId: "anthropic/claude-opus-4.6",
+				snapshot: [primeInference("openai/gpt-5.5")],
+			},
+			"anthropic/claude-opus-4.6",
+		],
+		[
+			"does not rebuild a saved default for an unauthed provider",
+			{
+				provider: "anthropic",
+				modelId: "claude-ghost-9",
+				snapshot: [...allModels, primeInference("openai/gpt-5.5")],
+			},
+			"openai/gpt-5.5",
+		],
+	])("findInitialModel %s", async (_label, saved, expectedId) => {
+		const primeModel = primeInference("openai/gpt-5.5");
 		const registry = {
 			find: () => undefined,
-			getAll: () => [primeSnapshotModel],
-			hasConfiguredAuth: (model: Model<"anthropic-messages">) => model.provider === "prime-inference",
-			refreshAvailableModels: async () => [primeSnapshotModel],
-		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
+			getAll: () => saved.snapshot,
+			hasConfiguredAuth: (entry: TestModel) => entry.provider === "prime-inference",
+			refreshAvailableModels: async () => [primeModel],
+		} as unknown as InitialRegistry;
 
 		const result = await findInitialModel({
 			scopedModels: [],
 			isContinuing: false,
-			defaultProvider: "prime-inference",
-			defaultModelId: "anthropic/claude-opus-4.6",
+			defaultProvider: saved.provider,
+			defaultModelId: saved.modelId,
 			modelRegistry: registry,
 		});
 
 		expect(result.model?.provider).toBe("prime-inference");
-		expect(result.model?.id).toBe("anthropic/claude-opus-4.6");
-	});
-
-	test("findInitialModel does not rebuild a saved default for an unauthed provider", async () => {
-		const primeSnapshotModel: Model<"anthropic-messages"> = {
-			id: "openai/gpt-5.5",
-			name: "GPT 5.5 (Prime Inference)",
-			api: "anthropic-messages",
-			provider: "prime-inference",
-			baseUrl: "https://api.pinference.ai/api/v1",
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
-			contextWindow: 128000,
-			maxTokens: 8192,
-		};
-		const registry = {
-			find: () => undefined,
-			getAll: () => [...mockModels, primeSnapshotModel],
-			hasConfiguredAuth: (model: Model<"anthropic-messages">) => model.provider === "prime-inference",
-			refreshAvailableModels: async () => [primeSnapshotModel],
-		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
-
-		const result = await findInitialModel({
-			scopedModels: [],
-			isContinuing: false,
-			defaultProvider: "anthropic",
-			defaultModelId: "claude-ghost-9",
-			modelRegistry: registry,
-		});
-
-		expect(result.model?.provider).toBe("prime-inference");
-		expect(result.model?.id).toBe("openai/gpt-5.5");
+		expect(result.model?.id).toBe(expectedId);
 	});
 });

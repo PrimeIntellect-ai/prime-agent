@@ -1,839 +1,349 @@
 import { describe, expect, test } from "vitest";
-import { INTERNAL_RUNTIME_COMMAND_MARKER, parseArgs } from "../src/cli/args.js";
+import { type Args, INTERNAL_RUNTIME_COMMAND_MARKER, parseArgs } from "../src/cli/args.js";
+
+type Expected = Partial<Omit<Args, "unknownFlags" | "diagnostics">>;
+
+const FRONTMATTER = "---\ntitle: hello\n---\nSay hi.";
+
+/** argv -> parsed fields, for inputs that must produce no diagnostics. */
+const parseCases: Array<[string, string[], Expected]> = [
+	["--version", ["--version"], { version: true }],
+	["-v", ["-v"], { version: true }],
+	[
+		"--version does not suppress later args",
+		["--version", "--help", "x"],
+		{ version: true, help: true, messages: ["x"] },
+	],
+	["--help", ["--help"], { help: true }],
+	["-h", ["-h"], { help: true }],
+	["--print", ["--print"], { print: true }],
+	["-p", ["-p"], { print: true }],
+	["-p keeps a frontmatter prompt positional", ["-p", FRONTMATTER], { print: true, messages: [FRONTMATTER] }],
+	[
+		"-p does not swallow later options",
+		["-p", "--provider", "openai", "hi"],
+		{ print: true, provider: "openai", messages: ["hi"] },
+	],
+	["--continue", ["--continue"], { continue: true }],
+	["-c", ["-c"], { continue: true }],
+	["bare --resume", ["--resume"], { resume: true }],
+	["bare -r", ["-r"], { resume: true }],
+	[
+		"--resume with a session path",
+		["--resume", "/path/to/session.jsonl"],
+		{ resume: "/path/to/session.jsonl", messages: [] },
+	],
+	[
+		"--resume with a windows session path",
+		["--resume", "C:\\Users\\me\\session.jsonl"],
+		{ resume: "C:\\Users\\me\\session.jsonl", messages: [] },
+	],
+	[
+		"--resume with a relative session path",
+		["--resume", "sessions/current"],
+		{ resume: "sessions/current", messages: [] },
+	],
+	["-r with a session id", ["-r", "1234abcd"], { resume: "1234abcd", messages: [] }],
+	["--resume=value", ["--resume=1234abcd"], { resume: "1234abcd", messages: [] }],
+	[
+		"--resume value is an authoritative selector",
+		["--resume", "fix", "the", "bug"],
+		{ resume: "fix", messages: ["the", "bug"] },
+	],
+	[
+		"--resume -- keeps the picker and a prompt",
+		["--resume", "--", "continue", "it"],
+		{ resume: true, messages: ["continue", "it"] },
+	],
+	["empty --resume value is the picker", ["--resume", ""], { resume: true, messages: [] }],
+	["empty --resume= value is the picker", ["--resume="], { resume: true, messages: [] }],
+	["--cwd", ["--cwd", "/tmp/project"], { cwd: "/tmp/project" }],
+	["--provider", ["--provider", "openai"], { provider: "openai" }],
+	["--model", ["--model", "gpt-4o"], { model: "gpt-4o" }],
+	["--api-key", ["--api-key", "sk-test-key"], { apiKey: "sk-test-key" }],
+	["--system-prompt", ["--system-prompt", "be helpful"], { systemPrompt: "be helpful" }],
+	[
+		"--system-prompt accepts a dash-leading value",
+		["--system-prompt", "- only JSON"],
+		{ systemPrompt: "- only JSON" },
+	],
+	["--system-prompt accepts frontmatter", ["--system-prompt", FRONTMATTER], { systemPrompt: FRONTMATTER }],
+	// Prompt text is arbitrary: a short-option-looking value is still the value.
+	["--system-prompt accepts a short-option-looking value", ["--system-prompt", "-x"], { systemPrompt: "-x" }],
+	["--append-system-prompt", ["--append-system-prompt", "A"], { appendSystemPrompt: ["A"] }],
+	[
+		"repeated --append-system-prompt",
+		["--append-system-prompt", "A", "--append-system-prompt", "B"],
+		{ appendSystemPrompt: ["A", "B"] },
+	],
+	[
+		"--append-system-prompt accepts frontmatter",
+		["--append-system-prompt", FRONTMATTER],
+		{ appendSystemPrompt: [FRONTMATTER] },
+	],
+	["--mode json", ["--mode", "json"], { mode: "json" }],
+	["--mode rpc", ["--mode", "rpc"], { mode: "rpc" }],
+	["--fork", ["--fork", "1234abcd"], { fork: "1234abcd", messages: [] }],
+	["--thinking", ["--thinking", "high"], { thinking: "high" }],
+	["--models is comma separated", ["--models", "gpt-4o,claude-sonnet"], { models: ["gpt-4o", "claude-sonnet"] }],
+	["--no-session", ["--no-session"], { noSession: true }],
+	["--extension", ["--extension", "./a.ts"], { extensions: ["./a.ts"] }],
+	["-e", ["-e", "./a.ts"], { extensions: ["./a.ts"] }],
+	["repeated extension flags", ["--extension", "./a.ts", "-e", "./b.ts"], { extensions: ["./a.ts", "./b.ts"] }],
+	[
+		"--no-extensions keeps explicit -e",
+		["--no-extensions", "-e", "a.ts"],
+		{ noExtensions: true, extensions: ["a.ts"] },
+	],
+	["--skill", ["--skill", "./s"], { skills: ["./s"] }],
+	["repeated --skill", ["--skill", "./a", "--skill", "./b"], { skills: ["./a", "./b"] }],
+	[
+		"--prompt-template",
+		["--prompt-template", "./one", "--prompt-template", "./two"],
+		{ promptTemplates: ["./one", "./two"] },
+	],
+	["--theme", ["--theme", "./dark.json", "--theme", "./light.json"], { themes: ["./dark.json", "./light.json"] }],
+	["--no-skills", ["--no-skills"], { noSkills: true }],
+	["--no-prompt-templates", ["--no-prompt-templates"], { noPromptTemplates: true }],
+	["--no-themes", ["--no-themes"], { noThemes: true }],
+	["--no-context-files", ["--no-context-files"], { noContextFiles: true }],
+	["-nc", ["-nc"], { noContextFiles: true }],
+	["--verbose", ["--verbose"], { verbose: true }],
+	["--offline", ["--offline"], { offline: true }],
+	["--no-tools", ["--no-tools"], { noTools: true }],
+	["-nt", ["-nt"], { noTools: true }],
+	["--no-builtin-tools", ["--no-builtin-tools"], { noBuiltinTools: true }],
+	["-nbt", ["-nbt"], { noBuiltinTools: true }],
+	["--tools", ["--tools", "ipython,dynamic_tool"], { tools: ["ipython", "dynamic_tool"] }],
+	["-t", ["-t", "ipython,dynamic_tool"], { tools: ["ipython", "dynamic_tool"] }],
+	["--no-tools keeps explicit --tools", ["--no-tools", "--tools", "ipython"], { noTools: true, tools: ["ipython"] }],
+	["--autonomous", ["--autonomous"], { autonomous: true }],
+	[
+		"autonomous gate flags",
+		[
+			"--autonomous",
+			"--autonomous-gate",
+			"npm test",
+			"--autonomous-gate",
+			"npm run lint",
+			"--autonomous-gate-retries",
+			"2",
+			"--autonomous-gate-timeout-ms",
+			"1000",
+		],
+		{
+			autonomous: true,
+			autonomousGates: ["npm test", "npm run lint"],
+			autonomousGateRetries: 2,
+			autonomousGateTimeoutMs: 1000,
+		},
+	],
+	[
+		"autonomous limit flags",
+		[
+			"--autonomous",
+			"--autonomous-max-continuations",
+			"20",
+			"--autonomous-max-turns",
+			"80",
+			"--autonomous-max-tokens",
+			"500000",
+			"--autonomous-timeout-ms",
+			"1800000",
+		],
+		{
+			autonomous: true,
+			autonomousMaxContinuations: 20,
+			autonomousMaxTurns: 80,
+			autonomousMaxTokens: 500000,
+			autonomousTimeoutMs: 1800000,
+		},
+	],
+	[
+		"autonomous sub-options auto-enable autonomous mode",
+		["--autonomous-max-turns", "1", "--autonomous-gate", "npm test"],
+		{ autonomous: true, autonomousMaxTurns: 1, autonomousGates: ["npm test"] },
+	],
+	[
+		"a gate command may start with an unknown short flag",
+		["--autonomous-gate", "-x npm test"],
+		{ autonomousGates: ["-x npm test"] },
+	],
+	["--goal", ["--goal", "Write a paper"], { goal: "Write a paper" }],
+	["--goal accepts a dash-prefixed objective", ["--goal", "-p"], { goal: "-p", print: undefined }],
+	[
+		"--goal with --goal-token-budget",
+		["--goal", "g", "--goal-token-budget", "50000"],
+		{ goal: "g", goalTokenBudget: 50000 },
+	],
+	[
+		"session export needs the internal marker",
+		[INTERNAL_RUNTIME_COMMAND_MARKER, "--export", "s.jsonl"],
+		{ export: "s.jsonl" },
+	],
+	[
+		"model list needs the internal marker",
+		[INTERNAL_RUNTIME_COMMAND_MARKER, "--list-models", "sonnet"],
+		{ listModels: "sonnet" },
+	],
+	["plain messages", ["hello", "world"], { messages: ["hello", "world"] }],
+	["@file arguments", ["@README.md", "@src/main.ts"], { fileArgs: ["README.md", "src/main.ts"] }],
+	[
+		"mixed messages and file args",
+		["@f.txt", "explain", "@i.png"],
+		{ fileArgs: ["f.txt", "i.png"], messages: ["explain"] },
+	],
+	[
+		"many flags together",
+		["--provider", "anthropic", "--model", "claude-sonnet", "--print", "--thinking", "high", "@prompt.md", "Do it"],
+		{
+			provider: "anthropic",
+			model: "claude-sonnet",
+			print: true,
+			thinking: "high",
+			fileArgs: ["prompt.md"],
+			messages: ["Do it"],
+		},
+	],
+	["-- keeps a dash-leading prompt positional", ["--", "- weights.pt ..."], { messages: ["- weights.pt ..."] }],
+	[
+		"-- stops option parsing",
+		["--", "--provider", "openai"],
+		{ provider: undefined, messages: ["--provider", "openai"] },
+	],
+	[
+		"flags before -- still parse",
+		["--provider", "openai", "--", "-p", "@file"],
+		{ provider: "openai", print: undefined, fileArgs: [], messages: ["-p", "@file"] },
+	],
+	["a lone --", ["--"], { messages: [] }],
+	[
+		"--values are consumed when present",
+		["--model", "claude-sonnet-4-5", "--fork", "abc"],
+		{ model: "claude-sonnet-4-5", fork: "abc" },
+	],
+];
+
+/** argv -> one diagnostic the parser must report as a hard error. */
+const errorCases: Array<[string, string[], string]> = [
+	[
+		"--export was removed",
+		["--export", "session.jsonl"],
+		'--export was removed. Use "prime-agent session export <file> [output]".',
+	],
+	[
+		"--list-models was removed",
+		["--list-models", "sonnet"],
+		'--list-models was removed. Use "prime-agent model list [search]".',
+	],
+	[
+		"invalid thinking level",
+		["--thinking", "hig"],
+		'Invalid thinking level "hig". Valid values: off, minimal, low, medium, high, xhigh, max',
+	],
+	[
+		"invalid --mode",
+		["--mode", "interactive"],
+		'Invalid --mode "interactive". Valid values: text, json, rpc, acp, daemon',
+	],
+	[
+		"removed built-in tools",
+		["--tools", "read,bash,edit"],
+		"Unknown built-in tool(s): read. Available built-in tools: ipython",
+	],
+	["a dash-leading prompt without --", ["- do the thing"], "Unknown option: - do the thing"],
+	["--model without a value", ["--model"], "--model requires a value"],
+	["--model followed by a long flag", ["--model", "--provider", "anthropic"], "--model requires a value"],
+	["--model followed by a short flag", ["--model", "-t", "ipython"], "--model requires a value"],
+	["--thinking followed by a short flag", ["--thinking", "-x"], "--thinking requires a value"],
+	["--theme without a value", ["--theme"], "--theme requires a value"],
+	["--system-prompt does not eat --", ["--system-prompt", "--", "--model", "foo"], "--system-prompt requires a value"],
+	[
+		"--append-system-prompt does not eat --",
+		["--append-system-prompt", "--", "run"],
+		"--append-system-prompt requires a value",
+	],
+	["--goal followed by a long flag", ["--goal", "--verbose"], "--goal requires a value"],
+	["--goal without a value", ["--goal"], "--goal requires a value"],
+	["empty --goal objective", ["--goal", "  "], "--goal requires a non-empty objective"],
+	[
+		"--autonomous-gate rejects a long-option value",
+		["--autonomous-gate", "---run"],
+		"--autonomous-gate requires a value",
+	],
+	[
+		"--autonomous-gate does not eat another autonomous flag",
+		["--autonomous-gate", "--autonomous-max-turns", "3"],
+		"--autonomous-gate requires a value",
+	],
+	["--goal-token-budget without --goal", ["--goal-token-budget", "50000"], "--goal-token-budget requires --goal"],
+	["non-positive --goal-token-budget", ["--goal-token-budget", "0"], "--goal-token-budget must be a positive integer"],
+	["--goal-token-budget without a value", ["--goal-token-budget"], "--goal-token-budget requires a value"],
+];
+
+const VALUE_FLAGS = ["--provider", "--api-key", "--cwd", "--fork", "--session-dir", "--models", "--daemon-socket"];
+const AUTONOMOUS_VALUE_FLAGS = [
+	"--autonomous-gate",
+	"--autonomous-gate-retries",
+	"--autonomous-gate-timeout-ms",
+	"--autonomous-max-continuations",
+	"--autonomous-max-turns",
+	"--autonomous-max-tokens",
+	"--autonomous-timeout-ms",
+];
 
 describe("parseArgs", () => {
-	describe("--version flag", () => {
-		test("parses --version flag", () => {
-			const result = parseArgs(["--version"]);
-			expect(result.version).toBe(true);
-		});
-
-		test("parses -v shorthand", () => {
-			const result = parseArgs(["-v"]);
-			expect(result.version).toBe(true);
-		});
-
-		test("--version takes precedence over other args", () => {
-			const result = parseArgs(["--version", "--help", "some message"]);
-			expect(result.version).toBe(true);
-			expect(result.help).toBe(true);
-			expect(result.messages).toContain("some message");
-		});
+	test.each(parseCases)("parses %s", (_label, argv, expected) => {
+		const result = parseArgs(argv);
+		// An expected `undefined` means the flag must stay unset.
+		for (const [field, value] of Object.entries(expected) as Array<[keyof Args, unknown]>) {
+			expect(result[field], field).toEqual(value);
+		}
+		expect(result.diagnostics).toEqual([]);
+		expect(result.unknownFlags.size).toBe(0);
 	});
 
-	describe("--help flag", () => {
-		test("parses --help flag", () => {
-			const result = parseArgs(["--help"]);
-			expect(result.help).toBe(true);
-		});
-
-		test("parses -h shorthand", () => {
-			const result = parseArgs(["-h"]);
-			expect(result.help).toBe(true);
-		});
+	test.each(errorCases)("reports %s", (_label, argv, message) => {
+		const result = parseArgs(argv);
+		expect(result.diagnostics).toContainEqual({ type: "error", message });
 	});
 
-	describe("--print flag", () => {
-		test("parses --print flag", () => {
-			const result = parseArgs(["--print"]);
-			expect(result.print).toBe(true);
+	test("--system-prompt reports a missing value only when its text is absent", () => {
+		expect(parseArgs(["--system-prompt"]).diagnostics).toContainEqual({
+			type: "error",
+			message: "--system-prompt requires a value",
 		});
-
-		test("parses -p shorthand", () => {
-			const result = parseArgs(["-p"]);
-			expect(result.print).toBe(true);
-		});
-
-		test("parses prompt after -p even when it starts with YAML frontmatter", () => {
-			const prompt = "---\ntitle: hello\n---\nSay hi.";
-			const result = parseArgs(["-p", prompt]);
-			expect(result.print).toBe(true);
-			expect(result.messages).toEqual([prompt]);
-			expect(result.unknownFlags.size).toBe(0);
-		});
-
-		test("does not consume options after -p as prompts", () => {
-			const result = parseArgs(["-p", "--provider", "openai", "Say hi."]);
-			expect(result.print).toBe(true);
-			expect(result.provider).toBe("openai");
-			expect(result.messages).toEqual(["Say hi."]);
-		});
+		expect(parseArgs(["--system-prompt"]).unknownFlags.has("system-prompt")).toBe(false);
 	});
 
-	describe("--continue flag", () => {
-		test("parses --continue flag", () => {
-			const result = parseArgs(["--continue"]);
-			expect(result.continue).toBe(true);
-		});
-
-		test("parses -c shorthand", () => {
-			const result = parseArgs(["-c"]);
-			expect(result.continue).toBe(true);
-		});
-	});
-
-	describe("--resume flag", () => {
-		test("parses --resume flag", () => {
-			const result = parseArgs(["--resume"]);
-			expect(result.resume).toBe(true);
-		});
-
-		test("parses -r shorthand", () => {
-			const result = parseArgs(["-r"]);
-			expect(result.resume).toBe(true);
-		});
-
-		test("parses --resume with a session selector", () => {
-			const result = parseArgs(["--resume", "/path/to/session.jsonl"]);
-			expect(result.resume).toBe("/path/to/session.jsonl");
-			expect(result.messages).toEqual([]);
-		});
-
-		test("parses -r with a session selector", () => {
-			const result = parseArgs(["-r", "1234abcd"]);
-			expect(result.resume).toBe("1234abcd");
-			expect(result.messages).toEqual([]);
-		});
-
-		test("parses --resume=value", () => {
-			const result = parseArgs(["--resume=1234abcd"]);
-			expect(result.resume).toBe("1234abcd");
-		});
-
-		test("parses --resume with a windows session path", () => {
-			const sessionPath = "C:\\Users\\me\\session.jsonl";
-			const result = parseArgs(["--resume", sessionPath]);
-			expect(result.resume).toBe(sessionPath);
-			expect(result.messages).toEqual([]);
-		});
-
-		test("parses --resume with a slash-containing relative session path", () => {
-			const result = parseArgs(["--resume", "sessions/current"]);
-			expect(result.resume).toBe("sessions/current");
-			expect(result.messages).toEqual([]);
-		});
-
-		test("treats the value after --resume as an authoritative selector", () => {
-			const result = parseArgs(["--resume", "fix", "the", "bug"]);
-			expect(result.resume).toBe("fix");
-			expect(result.messages).toEqual(["the", "bug"]);
-		});
-
-		test("treats the value after --resume= as an authoritative selector", () => {
-			const result = parseArgs(["--resume=fix"]);
-			expect(result.resume).toBe("fix");
-			expect(result.messages).toEqual([]);
-		});
-
-		test("supports an initial prompt after the bare resume picker", () => {
-			const result = parseArgs(["--resume", "--", "continue", "the", "session"]);
-			expect(result.resume).toBe(true);
-			expect(result.messages).toEqual(["continue", "the", "session"]);
-		});
-
-		test("treats empty --resume values as the bare resume picker flag", () => {
-			const separated = parseArgs(["--resume", ""]);
-			expect(separated.resume).toBe(true);
-			expect(separated.messages).toEqual([]);
-
-			const equals = parseArgs(["--resume="]);
-			expect(equals.resume).toBe(true);
-			expect(equals.messages).toEqual([]);
-		});
-	});
-
-	describe("--cwd flag", () => {
-		test("parses --cwd flag", () => {
-			const result = parseArgs(["--cwd", "/tmp/project"]);
-			expect(result.cwd).toBe("/tmp/project");
-		});
-	});
-
-	describe("flags with values", () => {
-		test("parses --provider", () => {
-			const result = parseArgs(["--provider", "openai"]);
-			expect(result.provider).toBe("openai");
-		});
-
-		test("parses --model", () => {
-			const result = parseArgs(["--model", "gpt-4o"]);
-			expect(result.model).toBe("gpt-4o");
-		});
-
-		test("parses --api-key", () => {
-			const result = parseArgs(["--api-key", "sk-test-key"]);
-			expect(result.apiKey).toBe("sk-test-key");
-		});
-
-		test("parses --system-prompt", () => {
-			const result = parseArgs(["--system-prompt", "You are a helpful assistant"]);
-			expect(result.systemPrompt).toBe("You are a helpful assistant");
-		});
-
-		test("parses --append-system-prompt", () => {
-			const result = parseArgs(["--append-system-prompt", "Additional context"]);
-			expect(result.appendSystemPrompt).toEqual(["Additional context"]);
-		});
-
-		test("parses multiple --append-system-prompt flags", () => {
-			const result = parseArgs(["--append-system-prompt", "Context A", "--append-system-prompt", "Context B"]);
-			expect(result.appendSystemPrompt).toEqual(["Context A", "Context B"]);
-		});
-
-		test("parses --mode", () => {
-			const result = parseArgs(["--mode", "json"]);
-			expect(result.mode).toBe("json");
-		});
-
-		test("parses --mode rpc", () => {
-			const result = parseArgs(["--mode", "rpc"]);
-			expect(result.mode).toBe("rpc");
-		});
-
-		test("parses --fork", () => {
-			const result = parseArgs(["--fork", "1234abcd"]);
-			expect(result.fork).toBe("1234abcd");
-			expect(result.messages).toEqual([]);
-		});
-
-		test("rejects removed --export syntax", () => {
-			const result = parseArgs(["--export", "session.jsonl"]);
-			expect(result.export).toBeUndefined();
-			expect(result.messages).toEqual([]);
-			expect(result.diagnostics).toContainEqual({
-				type: "error",
-				message: '--export was removed. Use "prime-agent session export <file> [output]".',
-			});
-		});
-
-		test("parses session export only through the internal command marker", () => {
-			const result = parseArgs([INTERNAL_RUNTIME_COMMAND_MARKER, "--export", "session.jsonl"]);
-			expect(result.export).toBe("session.jsonl");
-		});
-
-		test("rejects removed --list-models syntax", () => {
-			const result = parseArgs(["--list-models", "sonnet"]);
-			expect(result.listModels).toBeUndefined();
-			expect(result.messages).toEqual([]);
-			expect(result.diagnostics).toContainEqual({
-				type: "error",
-				message: '--list-models was removed. Use "prime-agent model list [search]".',
-			});
-		});
-
-		test("parses model list only through the internal command marker", () => {
-			const result = parseArgs([INTERNAL_RUNTIME_COMMAND_MARKER, "--list-models", "sonnet"]);
-			expect(result.listModels).toBe("sonnet");
-		});
-
-		test("parses --thinking", () => {
-			const result = parseArgs(["--thinking", "high"]);
-			expect(result.thinking).toBe("high");
-		});
-
-		test("rejects an invalid --thinking level as a hard error", () => {
-			const result = parseArgs(["--thinking", "hig"]);
-			expect(result.thinking).toBeUndefined();
-			expect(result.diagnostics).toContainEqual({
-				type: "error",
-				message: 'Invalid thinking level "hig". Valid values: off, minimal, low, medium, high, xhigh, max',
-			});
-		});
-
-		test("parses --models as comma-separated list", () => {
-			const result = parseArgs(["--models", "gpt-4o,claude-sonnet,gemini-pro"]);
-			expect(result.models).toEqual(["gpt-4o", "claude-sonnet", "gemini-pro"]);
-		});
-	});
-
-	describe("--no-session flag", () => {
-		test("parses --no-session flag", () => {
-			const result = parseArgs(["--no-session"]);
-			expect(result.noSession).toBe(true);
-		});
-	});
-
-	describe("--extension flag", () => {
-		test("parses single --extension", () => {
-			const result = parseArgs(["--extension", "./my-extension.ts"]);
-			expect(result.extensions).toEqual(["./my-extension.ts"]);
-		});
-
-		test("parses -e shorthand", () => {
-			const result = parseArgs(["-e", "./my-extension.ts"]);
-			expect(result.extensions).toEqual(["./my-extension.ts"]);
-		});
-
-		test("parses multiple --extension flags", () => {
-			const result = parseArgs(["--extension", "./ext1.ts", "-e", "./ext2.ts"]);
-			expect(result.extensions).toEqual(["./ext1.ts", "./ext2.ts"]);
-		});
-	});
-
-	describe("--no-extensions flag", () => {
-		test("parses --no-extensions flag", () => {
-			const result = parseArgs(["--no-extensions"]);
-			expect(result.noExtensions).toBe(true);
-		});
-
-		test("parses --no-extensions with explicit -e flags", () => {
-			const result = parseArgs(["--no-extensions", "-e", "foo.ts", "-e", "bar.ts"]);
-			expect(result.noExtensions).toBe(true);
-			expect(result.extensions).toEqual(["foo.ts", "bar.ts"]);
-		});
-	});
-
-	describe("--skill flag", () => {
-		test("parses single --skill", () => {
-			const result = parseArgs(["--skill", "./skill-dir"]);
-			expect(result.skills).toEqual(["./skill-dir"]);
-		});
-
-		test("parses multiple --skill flags", () => {
-			const result = parseArgs(["--skill", "./skill-a", "--skill", "./skill-b"]);
-			expect(result.skills).toEqual(["./skill-a", "./skill-b"]);
-		});
-	});
-
-	describe("--prompt-template flag", () => {
-		test("parses single --prompt-template", () => {
-			const result = parseArgs(["--prompt-template", "./prompts"]);
-			expect(result.promptTemplates).toEqual(["./prompts"]);
-		});
-
-		test("parses multiple --prompt-template flags", () => {
-			const result = parseArgs(["--prompt-template", "./one", "--prompt-template", "./two"]);
-			expect(result.promptTemplates).toEqual(["./one", "./two"]);
-		});
-	});
-
-	describe("--theme flag", () => {
-		test("parses single --theme", () => {
-			const result = parseArgs(["--theme", "./theme.json"]);
-			expect(result.themes).toEqual(["./theme.json"]);
-		});
-
-		test("parses multiple --theme flags", () => {
-			const result = parseArgs(["--theme", "./dark.json", "--theme", "./light.json"]);
-			expect(result.themes).toEqual(["./dark.json", "./light.json"]);
-		});
-	});
-
-	describe("--no-skills flag", () => {
-		test("parses --no-skills flag", () => {
-			const result = parseArgs(["--no-skills"]);
-			expect(result.noSkills).toBe(true);
-		});
-	});
-
-	describe("--no-prompt-templates flag", () => {
-		test("parses --no-prompt-templates flag", () => {
-			const result = parseArgs(["--no-prompt-templates"]);
-			expect(result.noPromptTemplates).toBe(true);
-		});
-	});
-
-	describe("--no-themes flag", () => {
-		test("parses --no-themes flag", () => {
-			const result = parseArgs(["--no-themes"]);
-			expect(result.noThemes).toBe(true);
-		});
-	});
-
-	describe("--no-context-files flag", () => {
-		test("parses --no-context-files flag", () => {
-			const result = parseArgs(["--no-context-files"]);
-			expect(result.noContextFiles).toBe(true);
-		});
-
-		test("parses -nc shorthand", () => {
-			const result = parseArgs(["-nc"]);
-			expect(result.noContextFiles).toBe(true);
-		});
-	});
-
-	describe("--verbose flag", () => {
-		test("parses --verbose flag", () => {
-			const result = parseArgs(["--verbose"]);
-			expect(result.verbose).toBe(true);
-		});
-	});
-
-	describe("--offline flag", () => {
-		test("parses --offline flag", () => {
-			const result = parseArgs(["--offline"]);
-			expect(result.offline).toBe(true);
-		});
-	});
-
-	describe("--autonomous flag", () => {
-		test("parses --autonomous flag", () => {
-			const result = parseArgs(["--autonomous"]);
-			expect(result.autonomous).toBe(true);
-		});
-
-		test("parses autonomous gate flags", () => {
-			const result = parseArgs([
-				"--autonomous",
-				"--autonomous-gate",
-				"npm test",
-				"--autonomous-gate",
-				"npm run lint",
-				"--autonomous-gate-retries",
-				"2",
-				"--autonomous-gate-timeout-ms",
-				"1000",
-			]);
-			expect(result.autonomous).toBe(true);
-			expect(result.autonomousGates).toEqual(["npm test", "npm run lint"]);
-			expect(result.autonomousGateRetries).toBe(2);
-			expect(result.autonomousGateTimeoutMs).toBe(1000);
-		});
-
-		test("parses autonomous limit flags", () => {
-			const result = parseArgs([
-				"--autonomous",
-				"--autonomous-max-continuations",
-				"20",
-				"--autonomous-max-turns",
-				"80",
-				"--autonomous-max-tokens",
-				"500000",
-				"--autonomous-timeout-ms",
-				"1800000",
-			]);
-			expect(result.autonomous).toBe(true);
-			expect(result.autonomousMaxContinuations).toBe(20);
-			expect(result.autonomousMaxTurns).toBe(80);
-			expect(result.autonomousMaxTokens).toBe(500000);
-			expect(result.autonomousTimeoutMs).toBe(1800000);
-		});
-
-		test("auto-enables autonomous mode when autonomous sub-options are supplied", () => {
-			const result = parseArgs(["--autonomous-max-turns", "1", "--autonomous-gate", "npm test"]);
-			expect(result.autonomous).toBe(true);
-			expect(result.autonomousMaxTurns).toBe(1);
-			expect(result.autonomousGates).toEqual(["npm test"]);
-		});
-
-		test("reports missing autonomous option values", () => {
-			const result = parseArgs(["--autonomous-max-turns", "--autonomous-gate", "npm test"]);
-
-			expect(result.autonomous).toBe(true);
-			expect(result.autonomousMaxTurns).toBeUndefined();
-			expect(result.autonomousGates).toEqual(["npm test"]);
-			expect(result.unknownFlags.size).toBe(0);
-			expect(result.diagnostics).toContainEqual({
-				type: "error",
-				message: "--autonomous-max-turns requires a value",
-			});
-		});
-
-		test("does not consume another autonomous flag as a gate value", () => {
-			const result = parseArgs(["--autonomous-gate", "--autonomous-max-turns", "3"]);
-
-			expect(result.autonomous).toBe(true);
-			expect(result.autonomousGates).toBeUndefined();
-			expect(result.autonomousMaxTurns).toBe(3);
-			expect(result.diagnostics).toContainEqual({
-				type: "error",
-				message: "--autonomous-gate requires a value",
-			});
-		});
-
-		test("accepts a gate command that starts with an unknown short flag", () => {
-			const result = parseArgs(["--autonomous-gate", "-x npm test"]);
-
-			expect(result.autonomousGates).toEqual(["-x npm test"]);
-			expect(result.diagnostics).toEqual([]);
-		});
-
-		test.each([
-			"--autonomous-gate",
-			"--autonomous-gate-retries",
-			"--autonomous-gate-timeout-ms",
-			"--autonomous-max-continuations",
-			"--autonomous-max-turns",
-			"--autonomous-max-tokens",
-			"--autonomous-timeout-ms",
-		])("reports when %s has no value", (flag) => {
-			const result = parseArgs([flag]);
-
-			expect(result.autonomous).toBe(true);
-			expect(result.unknownFlags.size).toBe(0);
+	test.each(VALUE_FLAGS)("%s reports a missing value instead of becoming an extension flag", (flag) => {
+		for (const argv of [[flag], [flag, "-x"]]) {
+			const result = parseArgs(argv);
 			expect(result.diagnostics).toContainEqual({ type: "error", message: `${flag} requires a value` });
-		});
+			expect(result.unknownFlags.has(flag.slice(2))).toBe(false);
+		}
 	});
 
-	describe("tool flags", () => {
-		test("parses --no-tools flag", () => {
-			const result = parseArgs(["--no-tools"]);
-			expect(result.noTools).toBe(true);
-		});
-
-		test("parses -nt shorthand", () => {
-			const result = parseArgs(["-nt"]);
-			expect(result.noTools).toBe(true);
-		});
-
-		test("parses --no-builtin-tools flag", () => {
-			const result = parseArgs(["--no-builtin-tools"]);
-			expect(result.noBuiltinTools).toBe(true);
-		});
-
-		test("parses -nbt shorthand", () => {
-			const result = parseArgs(["-nbt"]);
-			expect(result.noBuiltinTools).toBe(true);
-		});
-
-		test("parses --tools flag", () => {
-			const result = parseArgs(["--tools", "ipython,dynamic_tool"]);
-			expect(result.tools).toEqual(["ipython", "dynamic_tool"]);
-		});
-
-		test("parses -t shorthand", () => {
-			const result = parseArgs(["-t", "ipython,dynamic_tool"]);
-			expect(result.tools).toEqual(["ipython", "dynamic_tool"]);
-		});
-
-		test("parses --no-tools with explicit --tools flags", () => {
-			const result = parseArgs(["--no-tools", "--tools", "ipython,dynamic_tool"]);
-			expect(result.noTools).toBe(true);
-			expect(result.tools).toEqual(["ipython", "dynamic_tool"]);
-		});
-
-		test("parses --no-builtin-tools with explicit --tools flags", () => {
-			const result = parseArgs(["--no-builtin-tools", "--tools", "ipython,dynamic_tool"]);
-			expect(result.noBuiltinTools).toBe(true);
-			expect(result.tools).toEqual(["ipython", "dynamic_tool"]);
-		});
-
-		test("rejects removed built-in tools", () => {
-			const result = parseArgs(["--tools", "read,bash,edit"]);
-			expect(result.tools).toEqual(["read", "bash", "edit"]);
-			expect(result.diagnostics).toContainEqual({
-				type: "error",
-				message: "Unknown built-in tool(s): read. Available built-in tools: ipython",
-			});
-		});
-	});
-
-	describe("messages and file args", () => {
-		test("parses plain text messages", () => {
-			const result = parseArgs(["hello", "world"]);
-			expect(result.messages).toEqual(["hello", "world"]);
-		});
-
-		test("parses @file arguments", () => {
-			const result = parseArgs(["@README.md", "@src/main.ts"]);
-			expect(result.fileArgs).toEqual(["README.md", "src/main.ts"]);
-		});
-
-		test("parses mixed messages and file args", () => {
-			const result = parseArgs(["@file.txt", "explain this", "@image.png"]);
-			expect(result.fileArgs).toEqual(["file.txt", "image.png"]);
-			expect(result.messages).toEqual(["explain this"]);
-		});
-
-		test("captures unknown long flags with string values", () => {
-			const result = parseArgs(["--unknown-flag", "message"]);
-			expect(result.messages).toEqual([]);
-			expect(result.unknownFlags.get("unknown-flag")).toBe("message");
-		});
-
-		test("captures unknown boolean long flags", () => {
-			const result = parseArgs(["--unknown-flag"]);
-			expect(result.unknownFlags.get("unknown-flag")).toBe(true);
-		});
-
-		test("captures unknown long flags with equals syntax", () => {
-			const result = parseArgs(["--unknown-flag=value"]);
-			expect(result.unknownFlags.get("unknown-flag")).toBe("value");
-		});
-	});
-
-	describe("complex combinations", () => {
-		test("parses multiple flags together", () => {
-			const result = parseArgs([
-				"--provider",
-				"anthropic",
-				"--model",
-				"claude-sonnet",
-				"--print",
-				"--thinking",
-				"high",
-				"@prompt.md",
-				"Do the task",
-			]);
-			expect(result.provider).toBe("anthropic");
-			expect(result.model).toBe("claude-sonnet");
-			expect(result.print).toBe(true);
-			expect(result.thinking).toBe("high");
-			expect(result.fileArgs).toEqual(["prompt.md"]);
-			expect(result.messages).toEqual(["Do the task"]);
-		});
-	});
-
-	describe("-- end-of-options separator", () => {
-		test("treats a dash-leading prompt after -- as a positional message", () => {
-			const result = parseArgs(["--", "- You are given a state dictionary (/app/weights.pt)..."]);
-			expect(result.messages).toEqual(["- You are given a state dictionary (/app/weights.pt)..."]);
-			expect(result.diagnostics).toEqual([]);
-			expect(result.unknownFlags.size).toBe(0);
-		});
-
-		test("a dash-leading prompt without -- still errors", () => {
-			const result = parseArgs(["- do the thing"]);
-			expect(result.messages).toEqual([]);
-			expect(result.diagnostics).toEqual([{ type: "error", message: "Unknown option: - do the thing" }]);
-		});
-
-		test("does not parse flags after -- as options", () => {
-			const result = parseArgs(["--", "--provider", "openai"]);
-			expect(result.provider).toBeUndefined();
-			expect(result.messages).toEqual(["--provider", "openai"]);
-			expect(result.unknownFlags.size).toBe(0);
-		});
-
-		test("parses flags before -- and treats the rest as messages", () => {
-			const result = parseArgs(["--provider", "openai", "--", "-p", "@file"]);
-			expect(result.provider).toBe("openai");
-			expect(result.print).toBeUndefined();
-			expect(result.fileArgs).toEqual([]);
-			expect(result.messages).toEqual(["-p", "@file"]);
-		});
-
-		test("a lone -- produces no messages and no diagnostics", () => {
-			const result = parseArgs(["--"]);
-			expect(result.messages).toEqual([]);
-			expect(result.diagnostics).toEqual([]);
-			expect(result.unknownFlags.size).toBe(0);
-		});
-
-		test("value flags do not consume the end-of-options delimiter as a value", () => {
-			const prompt = parseArgs(["--system-prompt", "--", "--model", "foo"]);
-			expect(prompt.systemPrompt).toBeUndefined();
-			expect(prompt.model).toBeUndefined();
-			expect(prompt.messages).toEqual(["--model", "foo"]);
-			expect(prompt.diagnostics).toEqual([{ type: "error", message: "--system-prompt requires a value" }]);
-
-			const appended = parseArgs(["--append-system-prompt", "--", "Run the suite"]);
-			expect(appended.appendSystemPrompt).toBeUndefined();
-			expect(appended.messages).toEqual(["Run the suite"]);
-			expect(appended.diagnostics).toEqual([{ type: "error", message: "--append-system-prompt requires a value" }]);
-		});
-
-		test("parses --goal as a string", () => {
-			const result = parseArgs(["--goal", "Write a paper"]);
-			expect(result.goal).toBe("Write a paper");
-			expect(result.diagnostics).toEqual([]);
-		});
-
-		test("parses --goal-token-budget as a positive integer with --goal", () => {
-			const result = parseArgs(["--goal", "test goal", "--goal-token-budget", "50000"]);
-			expect(result.goalTokenBudget).toBe(50000);
-			expect(result.diagnostics).toEqual([]);
-		});
-
-		test("rejects non-positive --goal-token-budget", () => {
-			const result = parseArgs(["--goal-token-budget", "0"]);
-			expect(result.goalTokenBudget).toBeUndefined();
-			expect(result.diagnostics).toEqual([
-				{ type: "error", message: "--goal-token-budget must be a positive integer" },
-			]);
-		});
-
-		test("parses --goal and --goal-token-budget together", () => {
-			const result = parseArgs(["--goal", "Fix all bugs", "--goal-token-budget", "100000"]);
-			expect(result.goal).toBe("Fix all bugs");
-			expect(result.goalTokenBudget).toBe(100000);
-		});
-
-		test("trailing --goal without value produces an error", () => {
-			const result = parseArgs(["--goal"]);
-			expect(result.goal).toBeUndefined();
-			expect(result.diagnostics).toEqual([{ type: "error", message: "--goal requires a value" }]);
-		});
-
-		test("trailing --goal-token-budget without value produces an error", () => {
-			const result = parseArgs(["--goal-token-budget"]);
-			expect(result.goalTokenBudget).toBeUndefined();
-			expect(result.diagnostics).toEqual([{ type: "error", message: "--goal-token-budget requires a value" }]);
-		});
-
-		test("--goal followed by --other flag produces an error for --goal", () => {
-			const result = parseArgs(["--goal", "--verbose"]);
-			expect(result.goal).toBeUndefined();
-			expect(result.diagnostics).toEqual([{ type: "error", message: "--goal requires a value" }]);
-		});
-
-		test("--goal accepts a dash-prefixed objective", () => {
-			const result = parseArgs(["--goal", "-p"]);
-
-			expect(result.goal).toBe("-p");
-			expect(result.print).toBeUndefined();
-			expect(result.diagnostics).toEqual([]);
-		});
-
-		test("--goal-token-budget without --goal produces an error", () => {
-			const result = parseArgs(["--goal-token-budget", "50000"]);
-			expect(result.diagnostics).toContainEqual({
-				type: "error",
-				message: "--goal-token-budget requires --goal",
-			});
-		});
-
-		test("empty --goal value produces an error", () => {
-			const result = parseArgs(["--goal", "  "]);
-			expect(result.goal).toBeUndefined();
-			expect(result.diagnostics).toContainEqual({
-				type: "error",
-				message: "--goal requires a non-empty objective",
-			});
-		});
-	});
-});
-
-describe("value flags require values", () => {
-	test("--model without a value is an error, not an extension flag", () => {
-		const result = parseArgs(["--model"]);
-		expect(result.model).toBeUndefined();
-		expect(result.unknownFlags.has("model")).toBe(false);
-		expect(result.diagnostics).toContainEqual({
-			type: "error",
-			message: "--model requires a value",
-		});
-	});
-
-	test("value flags followed by another flag report missing values", () => {
-		const result = parseArgs(["--model", "--provider", "anthropic"]);
-		expect(result.provider).toBe("anthropic");
-		expect(result.model).toBeUndefined();
-		expect(result.diagnostics).toContainEqual({
-			type: "error",
-			message: "--model requires a value",
-		});
-	});
-
-	test.each([
-		"--provider",
-		"--api-key",
-		"--cwd",
-		"--fork",
-		"--session-dir",
-		"--models",
-		"--daemon-socket",
-		"--system-prompt",
-	])("%s without a value reports a missing-value error", (flag) => {
+	test.each(AUTONOMOUS_VALUE_FLAGS)("%s without a value still enables autonomous mode", (flag) => {
 		const result = parseArgs([flag]);
-		expect(result.diagnostics).toContainEqual({
-			type: "error",
-			message: `${flag} requires a value`,
-		});
-		expect(result.unknownFlags.has(flag.slice(2))).toBe(false);
+		expect(result.autonomous).toBe(true);
+		expect(result.unknownFlags.size).toBe(0);
+		expect(result.diagnostics).toContainEqual({ type: "error", message: `${flag} requires a value` });
 	});
 
-	test("invalid --mode reports valid values instead of being ignored", () => {
-		const result = parseArgs(["--mode", "interactive"]);
-		expect(result.mode).toBeUndefined();
-		expect(result.diagnostics).toContainEqual({
-			type: "error",
-			message: 'Invalid --mode "interactive". Valid values: text, json, rpc, acp, daemon',
-		});
+	test("captures unknown flags for extensions", () => {
+		expect(parseArgs(["--unknown-flag", "message"]).unknownFlags.get("unknown-flag")).toBe("message");
+		expect(parseArgs(["--unknown-flag", "message"]).messages).toEqual([]);
+		expect(parseArgs(["--unknown-flag"]).unknownFlags.get("unknown-flag")).toBe(true);
+		expect(parseArgs(["--unknown-flag=value"]).unknownFlags.get("unknown-flag")).toBe("value");
 	});
 
-	test("--mode still accepts valid values", () => {
-		const result = parseArgs(["--mode", "json"]);
-		expect(result.mode).toBe("json");
-		expect(result.diagnostics.some((d) => d.type === "error")).toBe(false);
-	});
-
-	test("list-style flags without values report missing values", () => {
-		const result = parseArgs(["--theme"]);
-		expect(result.diagnostics).toContainEqual({
-			type: "error",
-			message: "--theme requires a value",
-		});
-	});
-
-	test("values are still consumed when present", () => {
-		const result = parseArgs(["--model", "claude-sonnet-4-5", "--fork", "abc"]);
-		expect(result.model).toBe("claude-sonnet-4-5");
-		expect(result.fork).toBe("abc");
-		expect(result.diagnostics.some((d) => d.type === "error")).toBe(false);
-	});
-
-	test("--model followed by a short option is not consumed as its value", () => {
-		const result = parseArgs(["--model", "-t", "ipython"]);
-
-		expect(result.model).toBeUndefined();
-		expect(result.tools).toEqual(["ipython"]);
-		expect(result.diagnostics).toContainEqual({
-			type: "error",
-			message: "--model requires a value",
-		});
-	});
-
-	test("value flags followed by a short option report missing values", () => {
-		const result = parseArgs(["--thinking", "-x"]);
-
-		expect(result.thinking).toBeUndefined();
-		expect(result.diagnostics).toContainEqual({
-			type: "error",
-			message: "--thinking requires a value",
-		});
-	});
-
-	test.each(["--provider", "--api-key", "--cwd", "--fork", "--session-dir", "--models", "--daemon-socket"])(
-		"%s followed by a short option reports a missing value",
-		(flag) => {
-			const result = parseArgs([flag, "-x"]);
-
-			expect(result.diagnostics).toContainEqual({
-				type: "error",
-				message: `${flag} requires a value`,
-			});
-		},
-	);
-
-	test("free-form value flags keep accepting dash-prefixed values", () => {
-		const goal = parseArgs(["--goal", "-p"]);
-		expect(goal.goal).toBe("-p");
-		expect(goal.print).toBeUndefined();
-		expect(goal.diagnostics.some((d) => d.type === "error")).toBe(false);
-
-		const gate = parseArgs(["--autonomous-gate", "-x npm test"]);
-		expect(gate.autonomousGates).toEqual(["-x npm test"]);
-		expect(gate.diagnostics.some((d) => d.type === "error")).toBe(false);
-
-		const prompt = parseArgs(["--system-prompt", "- Respond only with JSON"]);
-		expect(prompt.systemPrompt).toBe("- Respond only with JSON");
-		expect(prompt.diagnostics.some((d) => d.type === "error")).toBe(false);
-
-		const appended = parseArgs(["--append-system-prompt", "- Be terse"]);
-		expect(appended.appendSystemPrompt).toEqual(["- Be terse"]);
-		expect(appended.diagnostics.some((d) => d.type === "error")).toBe(false);
-	});
-
-	test("prompt value flags keep accepting YAML frontmatter", () => {
-		const frontmatter = "---\nname: strict\n---\nYou output only JSON.";
-
-		const prompt = parseArgs(["--system-prompt", frontmatter]);
-		expect(prompt.systemPrompt).toBe(frontmatter);
-		expect(prompt.diagnostics.some((d) => d.type === "error")).toBe(false);
-
-		const appended = parseArgs(["--append-system-prompt", frontmatter]);
-		expect(appended.appendSystemPrompt).toEqual([frontmatter]);
-		expect(appended.diagnostics.some((d) => d.type === "error")).toBe(false);
-	});
-
-	test("goal and gate flags still reject long-option-looking values", () => {
-		const goal = parseArgs(["--goal", "--verbose"]);
-		expect(goal.goal).toBeUndefined();
-		expect(goal.diagnostics).toContainEqual({ type: "error", message: "--goal requires a value" });
-
-		const gate = parseArgs(["--autonomous-gate", "---run"]);
-		expect(gate.autonomousGates).toBeUndefined();
-		expect(gate.diagnostics).toContainEqual({ type: "error", message: "--autonomous-gate requires a value" });
+	test("removed session/model commands consume their value without leaving messages", () => {
+		const exported = parseArgs(["--export", "session.jsonl"]);
+		expect(exported.export).toBeUndefined();
+		expect(exported.messages).toEqual([]);
+		const listed = parseArgs(["--list-models", "sonnet"]);
+		expect(listed.listModels).toBeUndefined();
+		expect(listed.messages).toEqual([]);
 	});
 });

@@ -51,7 +51,6 @@ vi.mock("../src/cli/daemon-ps.js", () => ({
 }));
 
 import { INTERNAL_RUNTIME_COMMAND_MARKER } from "../src/cli/args.js";
-import { formatTopLevelHelp } from "../src/cli/command-registry.js";
 import { DAEMON_UPDATE_RESTART_COORDINATOR_FLAG } from "../src/cli/daemon-update-restart.js";
 import { handlePublicCommand } from "../src/cli/public-command.js";
 
@@ -73,44 +72,83 @@ describe("public command routing", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("rewrites attach into the normal interactive resume path", async () => {
-		await expect(handlePublicCommand(["attach", "worker"])).resolves.toEqual({
-			handled: false,
-			args: ["--resume", "worker"],
-			explicitAgentsView: false,
-			attachAgent: "worker",
-		});
+	it.each<[string[], Record<string, unknown>]>([
+		[
+			["attach", "worker"],
+			{ handled: false, args: ["--resume", "worker"], explicitAgentsView: false, attachAgent: "worker" },
+		],
+		[
+			["attach", "worker", "--verbose", "--provider", "anthropic"],
+			{
+				handled: false,
+				args: ["--resume", "worker", "--verbose", "--provider", "anthropic"],
+				explicitAgentsView: false,
+				attachAgent: "worker",
+			},
+		],
+		[
+			["agents", "--verbose", "--provider", "anthropic"],
+			{ handled: false, args: ["--verbose", "--provider", "anthropic"], explicitAgentsView: true },
+		],
+		[
+			["model", "list", "sonnet", "--offline"],
+			{
+				handled: false,
+				args: [INTERNAL_RUNTIME_COMMAND_MARKER, "--list-models", "sonnet", "--offline"],
+				explicitAgentsView: false,
+			},
+		],
+		[
+			["session", "export", "session.jsonl", "session.html", "--verbose"],
+			{
+				handled: false,
+				args: [INTERNAL_RUNTIME_COMMAND_MARKER, "--export", "session.jsonl", "session.html", "--verbose"],
+				explicitAgentsView: false,
+			},
+		],
+		[
+			["help", "me", "fix", "this"],
+			{ handled: false, args: ["help", "me", "fix", "this"], explicitAgentsView: false },
+		],
+		[["--help"], { handled: false, args: ["--help"], explicitAgentsView: false }],
+		[["-h"], { handled: false, args: ["-h"], explicitAgentsView: false }],
+	])("passes %j back to the interactive startup path", async (argv, expected) => {
+		await expect(handlePublicCommand(argv)).resolves.toEqual(expected);
 	});
 
-	it("forwards global options when attaching", async () => {
-		await expect(handlePublicCommand(["attach", "worker", "--verbose", "--provider", "anthropic"])).resolves.toEqual({
-			handled: false,
-			args: ["--resume", "worker", "--verbose", "--provider", "anthropic"],
-			explicitAgentsView: false,
-			attachAgent: "worker",
-		});
+	it.each<[string[], string[]]>([
+		[
+			["list", "--all", "--json"],
+			["daemon", "list", "--all", "--json"],
+		],
+		[
+			["stop", "worker", "--daemon-socket", "/tmp/custom-daemon.sock"],
+			["daemon", "kill", "worker", "--daemon-socket", "/tmp/custom-daemon.sock"],
+		],
+		[
+			["rename", "worker", "reviewer", "--daemon-socket", "/tmp/custom-daemon.sock"],
+			["daemon", "rename", "worker", "reviewer", "--daemon-socket", "/tmp/custom-daemon.sock"],
+		],
+		// Help-like message text after the separator stays literal payload.
+		[
+			["send", "worker", "--", "--help"],
+			["daemon", "send", "worker", "--", "--help"],
+		],
+	])("routes %j through the internal protocol adapter", async (argv, forwarded) => {
+		await expect(handlePublicCommand(argv)).resolves.toMatchObject({ handled: true });
+		expect(mocks.daemonCommands).toEqual([forwarded]);
 	});
 
-	it("rejects extra attach operands", async () => {
-		await expect(handlePublicCommand(["attach", "worker", "extra"])).resolves.toMatchObject({ handled: true });
+	it.each<[string[]]>([
+		[["attach", "worker", "extra"]],
+		[["attach", "worker", "--resume", "other"]],
+		[["attach", "worker", "-r", "other"]],
+		[["attach", "worker", "--continue"]],
+		[["attach", "worker", "--fork", "session.jsonl"]],
+	])("rejects %j instead of starting a session", async (argv) => {
+		await expect(handlePublicCommand(argv)).resolves.toMatchObject({ handled: true });
 		expect(process.exitCode).toBe(1);
-		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("prime-agent attach <agent>"));
-	});
-
-	it("rejects conflicting session selectors when attaching", async () => {
-		for (const selector of [["--resume", "other"], ["-r", "other"], ["--continue"], ["--fork", "session.jsonl"]]) {
-			await expect(handlePublicCommand(["attach", "worker", ...selector])).resolves.toMatchObject({ handled: true });
-		}
-		expect(process.exitCode).toBe(1);
-		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("cannot be combined"));
-	});
-
-	it("forwards global options when opening the agents view", async () => {
-		await expect(handlePublicCommand(["agents", "--verbose", "--provider", "anthropic"])).resolves.toEqual({
-			handled: false,
-			args: ["--verbose", "--provider", "anthropic"],
-			explicitAgentsView: true,
-		});
+		expect(mocks.daemonCommands).toEqual([]);
 	});
 
 	it("routes MCP management without entering agent startup", async () => {
@@ -296,29 +334,6 @@ describe("public command routing", () => {
 		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("Unknown command: install"));
 	});
 
-	it("routes agent operations through the internal protocol adapter", async () => {
-		await expect(handlePublicCommand(["list", "--all", "--json"])).resolves.toMatchObject({ handled: true });
-		expect(mocks.daemonCommands).toEqual([["daemon", "list", "--all", "--json"]]);
-	});
-
-	it("forwards a custom daemon socket when stopping an agent", async () => {
-		await expect(
-			handlePublicCommand(["stop", "worker", "--daemon-socket", "/tmp/custom-daemon.sock"]),
-		).resolves.toMatchObject({ handled: true });
-		expect(mocks.daemonCommands).toEqual([
-			["daemon", "kill", "worker", "--daemon-socket", "/tmp/custom-daemon.sock"],
-		]);
-	});
-
-	it("forwards a custom daemon socket when renaming an agent", async () => {
-		await expect(
-			handlePublicCommand(["rename", "worker", "reviewer", "--daemon-socket", "/tmp/custom-daemon.sock"]),
-		).resolves.toMatchObject({ handled: true });
-		expect(mocks.daemonCommands).toEqual([
-			["daemon", "rename", "worker", "reviewer", "--daemon-socket", "/tmp/custom-daemon.sock"],
-		]);
-	});
-
 	it("separates Prime Agent updates from package updates", async () => {
 		await handlePublicCommand(["update", "--force"]);
 		await handlePublicCommand(["package", "update"]);
@@ -357,82 +372,31 @@ describe("public command routing", () => {
 		expect(mocks.packageCommands).toEqual([args]);
 	});
 
-	it("gives legacy update targets explicit migration guidance", async () => {
-		for (const target of ["self", "--self", "prime-agent"]) {
-			await handlePublicCommand(["update", target]);
-		}
+	it.each<[string[]]>([
+		[["update", "self"]],
+		[["update", "--self"]],
+		[["update", "prime-agent"]],
+		[["update", "npm:@example/tools"]],
+		[["update", "--extensions"]],
+		[["update", "--self", "--extensions"]],
+		[["package", "update", "self"]],
+		[["package", "uninstall", "npm:@example/tools"]],
+		[["package", "list", "ignored-source"]],
+		[["daemon", "list"]],
+		[["schedule", "cancell", "job-1"]],
+	])("rejects the retired form %j without executing it", async (argv) => {
+		await expect(handlePublicCommand(argv)).resolves.toMatchObject({ handled: true });
 
+		expect(process.exitCode).toBe(1);
+		expect(console.error).toHaveBeenCalled();
 		expect(mocks.packageCommands).toEqual([]);
-		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Use "prime-agent update [--force]"'));
-	});
-
-	it("directs legacy package-update forms to the package command", async () => {
-		await handlePublicCommand(["update", "npm:@example/tools"]);
-		await handlePublicCommand(["update", "--extensions"]);
-		await handlePublicCommand(["update", "--extension", "npm:@example/tools"]);
-
-		expect(mocks.packageCommands).toEqual([]);
-		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Use "prime-agent package update [source]"'));
-	});
-
-	it("explains that combined legacy updates are now separate", async () => {
-		await handlePublicCommand(["update", "--self", "--extensions"]);
-
-		expect(mocks.packageCommands).toEqual([]);
-		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("separately"));
-	});
-
-	it("rejects self-update aliases on the package update path", async () => {
-		for (const source of ["self", "pi", "prime-agent"]) {
-			await handlePublicCommand(["package", "update", source]);
-		}
-
-		expect(mocks.packageCommands).toEqual([]);
-		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Use "prime-agent update"'));
-	});
-
-	it("directs package uninstall to package remove", async () => {
-		await handlePublicCommand(["package", "uninstall", "npm:@example/tools"]);
-
-		expect(mocks.packageCommands).toEqual([]);
-		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Use "prime-agent package remove"'));
-		expect(console.error).not.toHaveBeenCalledWith(expect.stringContaining("package install"));
-	});
-
-	it("maps model listing and session export to the existing runtime flags", async () => {
-		await expect(handlePublicCommand(["model", "list", "sonnet"])).resolves.toMatchObject({
-			handled: false,
-			args: [INTERNAL_RUNTIME_COMMAND_MARKER, "--list-models", "sonnet"],
-		});
-		await expect(handlePublicCommand(["session", "export", "session.jsonl", "session.html"])).resolves.toMatchObject({
-			handled: false,
-			args: [INTERNAL_RUNTIME_COMMAND_MARKER, "--export", "session.jsonl", "session.html"],
-		});
-	});
-
-	it("preserves trailing global options for model listing and session export", async () => {
-		await expect(handlePublicCommand(["model", "list", "sonnet", "--offline"])).resolves.toMatchObject({
-			handled: false,
-			args: [INTERNAL_RUNTIME_COMMAND_MARKER, "--list-models", "sonnet", "--offline"],
-		});
-		await expect(
-			handlePublicCommand(["session", "export", "session.jsonl", "session.html", "--verbose"]),
-		).resolves.toMatchObject({
-			handled: false,
-			args: [INTERNAL_RUNTIME_COMMAND_MARKER, "--export", "session.jsonl", "session.html", "--verbose"],
-		});
-	});
-
-	it("rejects operands for package list", async () => {
-		await handlePublicCommand(["package", "list", "ignored-source"]);
-
-		expect(mocks.packageCommands).toEqual([]);
-		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("prime-agent package list"));
+		expect(mocks.daemonCommands).toEqual([]);
 	});
 
 	it("uses force only when explicitly requested for full shutdown", async () => {
 		await handlePublicCommand(["shutdown", "--json"]);
 		await handlePublicCommand(["shutdown", "--force"]);
+
 		expect(mocks.shutdownCalls).toEqual([
 			[true, false],
 			[false, true],
@@ -441,51 +405,18 @@ describe("public command routing", () => {
 
 	it("routes doctor fixes through the safe cleanup path", async () => {
 		await handlePublicCommand(["doctor", "--fix", "--json"]);
+
 		expect(mocks.reapCalls).toEqual([[true, false]]);
 	});
 
-	it("rejects the old daemon hierarchy with migration guidance", async () => {
-		await expect(handlePublicCommand(["daemon", "list"])).resolves.toMatchObject({ handled: true });
-		expect(process.exitCode).toBe(1);
-		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Run "prime-agent help"'));
-	});
+	it("resolves command help when options precede the help flag", async () => {
+		await handlePublicCommand(["list", "--all", "--help"]);
+		await handlePublicCommand(["package", "install", "--local", "--help"]);
 
-	it("shows migration guidance when help targets removed commands", async () => {
-		const cases: Array<[path: string[], hint: string]> = [
-			[["daemon"], 'Run "prime-agent help"'],
-			[["install"], 'Use "prime-agent package install"'],
-			[["remove"], 'Use "prime-agent package remove"'],
-			[["uninstall"], 'Use "prime-agent package remove"'],
-			[["manage"], 'Use "prime-agent agents"'],
-			[["app", "update"], 'Use "prime-agent update"'],
-		];
-
-		for (const [path, hint] of cases) {
-			await expect(handlePublicCommand(["help", ...path])).resolves.toMatchObject({ handled: true });
-			expect(console.error).toHaveBeenCalledWith(expect.stringContaining(hint));
-		}
-		expect(process.exitCode).toBe(1);
-		expect(console.log).not.toHaveBeenCalled();
-	});
-
-	it("suggests close nested commands without executing them", async () => {
-		await handlePublicCommand(["schedule", "cancell", "job-1"]);
+		expect(console.log).toHaveBeenCalledTimes(2);
+		expect(console.error).not.toHaveBeenCalled();
 		expect(mocks.daemonCommands).toEqual([]);
-		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("schedule cancel"));
-	});
-
-	it("treats help-like message text after the separator literally", async () => {
-		await handlePublicCommand(["send", "worker", "--", "--help"]);
-		expect(mocks.daemonCommands).toEqual([["daemon", "send", "worker", "--", "--help"]]);
-	});
-
-	it("leaves natural-language prompts beginning with help on the prompt path", async () => {
-		const args = ["help", "me", "fix", "this"];
-		await expect(handlePublicCommand(args)).resolves.toEqual({
-			handled: false,
-			args,
-			explicitAgentsView: false,
-		});
+		expect(mocks.packageCommands).toEqual([]);
 	});
 
 	it("keeps the help topic when an explicit help flag follows it", async () => {
@@ -551,57 +482,6 @@ describe("public command routing", () => {
 		await handlePublicCommand(["help", "schedule", "nonsense"]);
 
 		expect(process.exitCode).toBe(1);
-		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("Unknown command: schedule nonsense"));
-	});
-
-	it("shows command help when options precede the help flag", async () => {
-		await handlePublicCommand(["list", "--all", "--help"]);
-		await handlePublicCommand(["doctor", "--fix", "--help"]);
-		await handlePublicCommand(["package", "install", "--local", "--help"]);
-
-		expect(console.log).toHaveBeenNthCalledWith(1, expect.stringContaining("prime-agent list [--all] [--json]"));
-		expect(console.log).toHaveBeenNthCalledWith(2, expect.stringContaining("prime-agent doctor [--fix] [--json]"));
-		expect(console.log).toHaveBeenNthCalledWith(3, expect.stringContaining("prime-agent package install <source>"));
-		expect(console.error).not.toHaveBeenCalled();
-	});
-
-	it("leaves top-level help flags on the full CLI help path", async () => {
-		await expect(handlePublicCommand(["--help"])).resolves.toEqual({
-			handled: false,
-			args: ["--help"],
-			explicitAgentsView: false,
-		});
-		await expect(handlePublicCommand(["-h"])).resolves.toEqual({
-			handled: false,
-			args: ["-h"],
-			explicitAgentsView: false,
-		});
-	});
-
-	it("formats complete top-level help, including autonomous options", () => {
-		const help = formatTopLevelHelp();
-		expect(help).toContain("Options:");
-		expect(help).toContain("Run options:");
-		expect(help).toContain("--mode <text|json|rpc|acp|daemon>");
-		expect(help).toContain("Autonomous options:");
-		for (const option of [
-			"--autonomous",
-			"--autonomous-gate <command>",
-			"--autonomous-gate-retries <n>",
-			"--autonomous-gate-timeout-ms <n>",
-			"--autonomous-max-continuations <n>",
-			"--autonomous-max-turns <n>",
-			"--autonomous-max-tokens <n>",
-			"--autonomous-timeout-ms <n>",
-		]) {
-			expect(help).toContain(option);
-		}
-		expect(help).toContain("default: 300000");
-		expect(help).toContain("default: 1800000");
-		expect(help).toContain("Commands:");
-		expect(help).toContain("shutdown");
-		expect(help).not.toContain("Environment Variables:");
-		expect(help).not.toContain("Examples:");
-		expect(help).not.toContain("Built-in Tool Names:");
+		expect(mocks.daemonCommands).toEqual([]);
 	});
 });

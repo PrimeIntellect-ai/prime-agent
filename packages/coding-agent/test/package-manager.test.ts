@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DefaultPackageManager, type ProgressEvent, type ResolvedResource } from "../src/core/package-manager.js";
@@ -41,6 +41,59 @@ const isDisabled = (r: ResolvedResource, pathMatch: string, matchFn: "endsWith" 
 		? normalizedPath.endsWith(normalizedMatch) && !r.enabled
 		: normalizedPath.includes(normalizedMatch) && !r.enabled;
 };
+
+type PatternResourceKind = "extensions" | "skills" | "prompts" | "themes";
+type ResourceExpectation = Record<string, "enabled" | "disabled" | "absent">;
+
+const RESOURCE_FILE_BODY: Record<Exclude<PatternResourceKind, "skills">, string> = {
+	extensions: "export default function() {}",
+	prompts: "Prompt body",
+	themes: "{}",
+};
+
+/** Write one resource fixture: skills are directories with SKILL.md, everything else is a single file. */
+function writeResourceFixture(root: string, kind: PatternResourceKind, relPath: string): void {
+	if (kind === "skills") {
+		mkdirSync(join(root, relPath), { recursive: true });
+		const name = relPath.split("/").pop() ?? relPath;
+		writeFileSync(join(root, relPath, "SKILL.md"), `---\nname: ${name}\ndescription: ${name}\n---\nContent`);
+		return;
+	}
+	const target = join(root, relPath);
+	mkdirSync(dirname(target), { recursive: true });
+	writeFileSync(target, RESOURCE_FILE_BODY[kind]);
+}
+
+function expectResourceStates(
+	resources: ResolvedResource[],
+	kind: PatternResourceKind,
+	expected: ResourceExpectation,
+): void {
+	const matchFn = kind === "skills" ? "includes" : "endsWith";
+	for (const [name, state] of Object.entries(expected)) {
+		if (state === "absent") {
+			expect(resources.some((r) => normalizeForMatch(r.path).includes(normalizeForMatch(name)))).toBe(false);
+			continue;
+		}
+		const matches = state === "enabled" ? isEnabled : isDisabled;
+		expect(resources.some((r) => matches(r, name, matchFn))).toBe(true);
+	}
+}
+
+function setTopLevelPatterns(settings: SettingsManager, kind: PatternResourceKind, patterns: string[]): void {
+	if (kind === "extensions") settings.setExtensionPaths(patterns);
+	else if (kind === "skills") settings.setSkillPaths(patterns);
+	else if (kind === "prompts") settings.setPromptTemplatePaths(patterns);
+	else settings.setThemePaths(patterns);
+}
+
+interface PatternCase {
+	name: string;
+	kind: PatternResourceKind;
+	files: string[];
+	patterns: string[];
+	expected: ResourceExpectation;
+}
 
 describe("DefaultPackageManager", () => {
 	let tempDir: string;
@@ -552,34 +605,22 @@ Content`,
 			);
 		});
 
-		it("should install git package dependencies with --omit=dev", async () => {
-			const source = "git:github.com/user/repo";
-			const targetDir = join(agentDir, "git", "github.com", "user", "repo");
-			const runCommandSpy = vi
-				.spyOn(packageManager as any, "runCommand")
-				.mockImplementation(async (...callArgs: unknown[]) => {
-					const [command, args] = callArgs as [string, string[]];
-					if (command === "git" && args[0] === "clone") {
-						mkdirSync(targetDir, { recursive: true });
-						writeFileSync(join(targetDir, "package.json"), JSON.stringify({ name: "repo", version: "1.0.0" }));
-					}
-				});
-
-			await packageManager.install(source);
-
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev"], { cwd: targetDir });
-		});
-
-		it("should use plain install for git package dependencies when npmCommand is configured", async () => {
-			settingsManager = SettingsManager.inMemory({
+		it.each([
+			{
+				name: "npm with --omit=dev by default",
+				npmCommand: undefined,
+				expected: ["npm", ["install", "--omit=dev"]],
+			},
+			{
+				name: "a plain install through the configured npmCommand",
 				npmCommand: ["pnpm"],
-			});
-			packageManager = new DefaultPackageManager({
-				cwd: tempDir,
-				agentDir,
-				settingsManager,
-			});
-
+				expected: ["pnpm", ["install"]],
+			},
+		])("installs git package dependencies with $name", async ({ npmCommand, expected }) => {
+			if (npmCommand) {
+				settingsManager = SettingsManager.inMemory({ npmCommand });
+				packageManager = new DefaultPackageManager({ cwd: tempDir, agentDir, settingsManager });
+			}
 			const source = "git:github.com/user/repo";
 			const targetDir = join(agentDir, "git", "github.com", "user", "repo");
 			const runCommandSpy = vi
@@ -594,46 +635,25 @@ Content`,
 
 			await packageManager.install(source);
 
-			expect(runCommandSpy).toHaveBeenCalledWith("pnpm", ["install"], { cwd: targetDir });
+			expect(runCommandSpy).toHaveBeenCalledWith(expected[0], expected[1], { cwd: targetDir });
 		});
 
-		it("should update git package dependencies with --omit=dev", async () => {
-			const source = "git:github.com/user/repo";
-			const targetDir = join(tempDir, ".prime", "agent", "git", "github.com", "user", "repo");
-			mkdirSync(targetDir, { recursive: true });
-			writeFileSync(join(targetDir, "package.json"), JSON.stringify({ name: "repo", version: "1.0.0" }));
-			settingsManager.setProjectPackages([source]);
-
-			vi.spyOn(packageManager as any, "runCommandCapture").mockImplementation(async (...callArgs: unknown[]) => {
-				const [_command, args] = callArgs as [string, string[]];
-				if (args[0] === "rev-parse" && args[1] === "--abbrev-ref" && args[2] === "@{upstream}") {
-					return "origin/main";
-				}
-				if (args[0] === "rev-parse" && args[1] === "@{upstream}") {
-					return "remote-head";
-				}
-				if (args[0] === "rev-parse" && args[1] === "HEAD") {
-					return "local-head";
-				}
-				throw new Error(`Unexpected runCommandCapture args: ${args.join(" ")}`);
-			});
-			const runCommandSpy = vi.spyOn(packageManager as any, "runCommand").mockResolvedValue(undefined);
-
-			await packageManager.update(source);
-
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev"], { cwd: targetDir });
-		});
-
-		it("should use plain install through npmCommand argv when updating git package dependencies", async () => {
-			settingsManager = SettingsManager.inMemory({
+		it.each([
+			{
+				name: "npm with --omit=dev by default",
+				npmCommand: undefined,
+				expected: ["npm", ["install", "--omit=dev"]],
+			},
+			{
+				name: "a plain install through the configured npmCommand argv",
 				npmCommand: ["mise", "exec", "node@20", "--", "pnpm"],
-			});
-			packageManager = new DefaultPackageManager({
-				cwd: tempDir,
-				agentDir,
-				settingsManager,
-			});
-
+				expected: ["mise", ["exec", "node@20", "--", "pnpm", "install"]],
+			},
+		])("updates git package dependencies with $name", async ({ npmCommand, expected }) => {
+			if (npmCommand) {
+				settingsManager = SettingsManager.inMemory({ npmCommand });
+				packageManager = new DefaultPackageManager({ cwd: tempDir, agentDir, settingsManager });
+			}
 			const source = "git:github.com/user/repo";
 			const targetDir = join(tempDir, ".prime", "agent", "git", "github.com", "user", "repo");
 			mkdirSync(targetDir, { recursive: true });
@@ -642,24 +662,17 @@ Content`,
 
 			vi.spyOn(packageManager as any, "runCommandCapture").mockImplementation(async (...callArgs: unknown[]) => {
 				const [_command, args] = callArgs as [string, string[]];
-				if (args[0] === "rev-parse" && args[1] === "--abbrev-ref" && args[2] === "@{upstream}") {
+				if (args[0] === "rev-parse" && args[1] === "--abbrev-ref" && args[2] === "@{upstream}")
 					return "origin/main";
-				}
-				if (args[0] === "rev-parse" && args[1] === "@{upstream}") {
-					return "remote-head";
-				}
-				if (args[0] === "rev-parse" && args[1] === "HEAD") {
-					return "local-head";
-				}
+				if (args[0] === "rev-parse" && args[1] === "@{upstream}") return "remote-head";
+				if (args[0] === "rev-parse" && args[1] === "HEAD") return "local-head";
 				throw new Error(`Unexpected runCommandCapture args: ${args.join(" ")}`);
 			});
 			const runCommandSpy = vi.spyOn(packageManager as any, "runCommand").mockResolvedValue(undefined);
 
 			await packageManager.update(source);
 
-			expect(runCommandSpy).toHaveBeenCalledWith("mise", ["exec", "node@20", "--", "pnpm", "install"], {
-				cwd: targetDir,
-			});
+			expect(runCommandSpy).toHaveBeenCalledWith(expected[0], expected[1], { cwd: targetDir });
 		});
 
 		it("should use npmCommand argv for npm root lookup and invalidate cached root when npmCommand changes", () => {
@@ -803,68 +816,40 @@ Content`,
 	});
 
 	describe("HTTPS git URL parsing (old behavior)", () => {
-		it("should parse HTTPS GitHub URLs correctly", async () => {
-			const parsed = (packageManager as any).parseSource("https://github.com/user/repo");
-			expect(parsed.type).toBe("git");
-			expect(parsed.host).toBe("github.com");
-			expect(parsed.path).toBe("user/repo");
-			expect(parsed.pinned).toBe(false);
-		});
-
-		it("should parse HTTPS URLs with git: prefix", async () => {
-			const parsed = (packageManager as any).parseSource("git:https://github.com/user/repo");
-			expect(parsed.type).toBe("git");
-			expect(parsed.host).toBe("github.com");
-			expect(parsed.path).toBe("user/repo");
-		});
-
-		it("should parse HTTPS URLs with ref", async () => {
-			const parsed = (packageManager as any).parseSource("https://github.com/user/repo@v1.2.3");
-			expect(parsed.type).toBe("git");
-			expect(parsed.host).toBe("github.com");
-			expect(parsed.path).toBe("user/repo");
-			expect(parsed.ref).toBe("v1.2.3");
-			expect(parsed.pinned).toBe(true);
-		});
-
-		it("should parse host/path shorthand only with git: prefix", async () => {
-			const parsed = (packageManager as any).parseSource("git:github.com/user/repo");
-			expect(parsed.type).toBe("git");
-			expect(parsed.host).toBe("github.com");
-			expect(parsed.path).toBe("user/repo");
-		});
-
-		it("should treat host/path shorthand as local without git: prefix", async () => {
-			const parsed = (packageManager as any).parseSource("github.com/user/repo");
-			expect(parsed.type).toBe("local");
-		});
-
-		it("should parse HTTPS URLs with .git suffix", async () => {
-			const parsed = (packageManager as any).parseSource("https://github.com/user/repo.git");
-			expect(parsed.type).toBe("git");
-			expect(parsed.host).toBe("github.com");
-			expect(parsed.path).toBe("user/repo");
-		});
-
-		it("should parse GitLab HTTPS URLs", async () => {
-			const parsed = (packageManager as any).parseSource("https://gitlab.com/user/repo");
-			expect(parsed.type).toBe("git");
-			expect(parsed.host).toBe("gitlab.com");
-			expect(parsed.path).toBe("user/repo");
-		});
-
-		it("should parse Bitbucket HTTPS URLs", async () => {
-			const parsed = (packageManager as any).parseSource("https://bitbucket.org/user/repo");
-			expect(parsed.type).toBe("git");
-			expect(parsed.host).toBe("bitbucket.org");
-			expect(parsed.path).toBe("user/repo");
-		});
-
-		it("should parse Codeberg HTTPS URLs", async () => {
-			const parsed = (packageManager as any).parseSource("https://codeberg.org/user/repo");
-			expect(parsed.type).toBe("git");
-			expect(parsed.host).toBe("codeberg.org");
-			expect(parsed.path).toBe("user/repo");
+		it.each([
+			{
+				source: "https://github.com/user/repo",
+				expected: { type: "git", host: "github.com", path: "user/repo", pinned: false },
+			},
+			{
+				source: "git:https://github.com/user/repo",
+				expected: { type: "git", host: "github.com", path: "user/repo" },
+			},
+			{
+				source: "https://github.com/user/repo@v1.2.3",
+				expected: { type: "git", host: "github.com", path: "user/repo", ref: "v1.2.3", pinned: true },
+			},
+			{
+				source: "https://github.com/user/repo@feature/branch",
+				expected: { type: "git", host: "github.com", path: "user/repo", ref: "feature/branch", pinned: true },
+			},
+			{ source: "git:github.com/user/repo", expected: { type: "git", host: "github.com", path: "user/repo" } },
+			{ source: "github.com/user/repo", expected: { type: "local" } },
+			{
+				source: "https://github.com/user/repo.git",
+				expected: { type: "git", host: "github.com", path: "user/repo" },
+			},
+			{ source: "https://gitlab.com/user/repo", expected: { type: "git", host: "gitlab.com", path: "user/repo" } },
+			{
+				source: "https://bitbucket.org/user/repo",
+				expected: { type: "git", host: "bitbucket.org", path: "user/repo" },
+			},
+			{
+				source: "https://codeberg.org/user/repo",
+				expected: { type: "git", host: "codeberg.org", path: "user/repo" },
+			},
+		])("parses $source", ({ source, expected }) => {
+			expect((packageManager as any).parseSource(source)).toMatchObject(expected);
 		});
 
 		it("should generate correct package identity for protocol and git:-prefixed URLs", async () => {
@@ -897,141 +882,131 @@ Content`,
 			expect(id1).toBe(id2);
 			expect(id2).toBe(id3);
 		});
-
-		it("should handle HTTPS URLs with refs in resolve", async () => {
-			const parsed = (packageManager as any).parseSource("https://github.com/user/repo@main");
-			expect(parsed.ref).toBe("main");
-			expect(parsed.pinned).toBe(true);
-
-			const parsed2 = (packageManager as any).parseSource("https://github.com/user/repo@feature/branch");
-			expect(parsed2.ref).toBe("feature/branch");
-		});
 	});
 
 	describe("pattern filtering in top-level arrays", () => {
-		it("should exclude extensions with ! pattern", async () => {
-			const extDir = join(agentDir, "extensions");
-			mkdirSync(extDir, { recursive: true });
-			writeFileSync(join(extDir, "keep.ts"), "export default function() {}");
-			writeFileSync(join(extDir, "remove.ts"), "export default function() {}");
+		const cases: PatternCase[] = [
+			{
+				name: "excludes extensions with a ! pattern",
+				kind: "extensions",
+				files: ["extensions/keep.ts", "extensions/remove.ts"],
+				patterns: ["extensions", "!**/remove.ts"],
+				expected: { "keep.ts": "enabled", "remove.ts": "disabled" },
+			},
+			{
+				name: "filters themes with glob patterns",
+				kind: "themes",
+				files: ["themes/dark.json", "themes/light.json", "themes/funky.json"],
+				patterns: ["themes", "!funky.json"],
+				expected: { "dark.json": "enabled", "light.json": "enabled", "funky.json": "disabled" },
+			},
+			{
+				name: "filters prompts with an exclusion pattern",
+				kind: "prompts",
+				files: ["prompts/review.md", "prompts/explain.md"],
+				patterns: ["prompts", "!explain.md"],
+				expected: { "review.md": "enabled", "explain.md": "disabled" },
+			},
+			{
+				name: "filters skills with an exclusion pattern",
+				kind: "skills",
+				files: ["skills/good-skill", "skills/bad-skill"],
+				patterns: ["skills", "!**/bad-skill"],
+				expected: { "good-skill": "enabled", "bad-skill": "disabled" },
+			},
+			{
+				name: "works without patterns (backward compatible)",
+				kind: "extensions",
+				files: ["extensions/my-ext.ts"],
+				patterns: ["extensions/my-ext.ts"],
+				expected: { "my-ext.ts": "enabled" },
+			},
+			{
+				name: "force-includes extensions with a + pattern after exclusion",
+				kind: "extensions",
+				files: ["extensions/keep.ts", "extensions/excluded.ts", "extensions/force-back.ts"],
+				patterns: ["extensions", "!extensions/*.ts", "+extensions/force-back.ts"],
+				expected: { "keep.ts": "disabled", "excluded.ts": "disabled", "force-back.ts": "enabled" },
+			},
+			{
+				name: "force-includes after a specific exclusion",
+				kind: "extensions",
+				files: ["extensions/a.ts", "extensions/b.ts"],
+				patterns: ["extensions", "!extensions/b.ts", "+extensions/b.ts"],
+				expected: { "a.ts": "enabled", "b.ts": "enabled" },
+			},
+			{
+				name: "force-includes themes",
+				kind: "themes",
+				files: ["themes/dark.json", "themes/light.json", "themes/special.json"],
+				patterns: ["themes", "!themes/*.json", "+themes/special.json"],
+				expected: { "dark.json": "disabled", "light.json": "disabled", "special.json": "enabled" },
+			},
+			{
+				name: "force-includes prompts",
+				kind: "prompts",
+				files: ["prompts/review.md", "prompts/explain.md", "prompts/debug.md"],
+				patterns: ["prompts", "!prompts/*.md", "+prompts/debug.md"],
+				expected: { "review.md": "disabled", "explain.md": "disabled", "debug.md": "enabled" },
+			},
+			{
+				name: "force-excludes a top-level resource that a + pattern re-added",
+				kind: "extensions",
+				files: ["extensions/alpha.ts", "extensions/beta.ts"],
+				patterns: ["extensions", "+extensions/alpha.ts", "-extensions/alpha.ts"],
+				expected: { "alpha.ts": "disabled", "beta.ts": "enabled" },
+			},
+		];
 
-			settingsManager.setExtensionPaths(["extensions", "!**/remove.ts"]);
+		it.each(cases)("$name", async ({ kind, files, patterns, expected }) => {
+			for (const file of files) writeResourceFixture(agentDir, kind, file);
+
+			setTopLevelPatterns(settingsManager, kind, patterns);
 
 			const result = await packageManager.resolve();
-			expect(result.extensions.some((r) => isEnabled(r, "keep.ts"))).toBe(true);
-			expect(result.extensions.some((r) => isDisabled(r, "remove.ts"))).toBe(true);
-		});
-
-		it("should filter themes with glob patterns", async () => {
-			const themesDir = join(agentDir, "themes");
-			mkdirSync(themesDir, { recursive: true });
-			writeFileSync(join(themesDir, "dark.json"), "{}");
-			writeFileSync(join(themesDir, "light.json"), "{}");
-			writeFileSync(join(themesDir, "funky.json"), "{}");
-
-			settingsManager.setThemePaths(["themes", "!funky.json"]);
-
-			const result = await packageManager.resolve();
-			expect(result.themes.some((r) => isEnabled(r, "dark.json"))).toBe(true);
-			expect(result.themes.some((r) => isEnabled(r, "light.json"))).toBe(true);
-			expect(result.themes.some((r) => isDisabled(r, "funky.json"))).toBe(true);
-		});
-
-		it("should filter prompts with exclusion pattern", async () => {
-			const promptsDir = join(agentDir, "prompts");
-			mkdirSync(promptsDir, { recursive: true });
-			writeFileSync(join(promptsDir, "review.md"), "Review code");
-			writeFileSync(join(promptsDir, "explain.md"), "Explain code");
-
-			settingsManager.setPromptTemplatePaths(["prompts", "!explain.md"]);
-
-			const result = await packageManager.resolve();
-			expect(result.prompts.some((r) => isEnabled(r, "review.md"))).toBe(true);
-			expect(result.prompts.some((r) => isDisabled(r, "explain.md"))).toBe(true);
-		});
-
-		it("should filter skills with exclusion pattern", async () => {
-			const skillsDir = join(agentDir, "skills");
-			mkdirSync(join(skillsDir, "good-skill"), { recursive: true });
-			mkdirSync(join(skillsDir, "bad-skill"), { recursive: true });
-			writeFileSync(
-				join(skillsDir, "good-skill", "SKILL.md"),
-				"---\nname: good-skill\ndescription: Good\n---\nContent",
-			);
-			writeFileSync(
-				join(skillsDir, "bad-skill", "SKILL.md"),
-				"---\nname: bad-skill\ndescription: Bad\n---\nContent",
-			);
-
-			settingsManager.setSkillPaths(["skills", "!**/bad-skill"]);
-
-			const result = await packageManager.resolve();
-			expect(result.skills.some((r) => isEnabled(r, "good-skill", "includes"))).toBe(true);
-			expect(result.skills.some((r) => isDisabled(r, "bad-skill", "includes"))).toBe(true);
-		});
-
-		it("should work without patterns (backward compatible)", async () => {
-			const extDir = join(agentDir, "extensions");
-			mkdirSync(extDir, { recursive: true });
-			const extPath = join(extDir, "my-ext.ts");
-			writeFileSync(extPath, "export default function() {}");
-
-			settingsManager.setExtensionPaths(["extensions/my-ext.ts"]);
-
-			const result = await packageManager.resolve();
-			expect(result.extensions.some((r) => r.path === extPath && r.enabled)).toBe(true);
+			expectResourceStates(result[kind], kind, expected);
 		});
 	});
 
 	describe("pattern filtering in pi manifest", () => {
-		it("should support glob patterns in manifest extensions", async () => {
+		const cases: PatternCase[] = [
+			{
+				name: "supports glob patterns in manifest extensions",
+				kind: "extensions",
+				files: [
+					"extensions/local.ts",
+					"node_modules/dep/extensions/remote.ts",
+					"node_modules/dep/extensions/skip.ts",
+				],
+				patterns: ["extensions", "node_modules/dep/extensions", "!**/skip.ts"],
+				expected: { "local.ts": "enabled", "remote.ts": "enabled", "skip.ts": "absent" },
+			},
+			{
+				name: "supports glob patterns in manifest skills",
+				kind: "skills",
+				files: ["skills/good-skill", "skills/bad-skill"],
+				patterns: ["skills", "!**/bad-skill"],
+				expected: { "good-skill": "enabled", "bad-skill": "absent" },
+			},
+			{
+				name: "handles force-include in manifest patterns",
+				kind: "extensions",
+				files: ["extensions/one.ts", "extensions/two.ts", "extensions/three.ts"],
+				patterns: ["extensions", "!**/two.ts", "+extensions/two.ts"],
+				expected: { "one.ts": "enabled", "two.ts": "enabled", "three.ts": "enabled" },
+			},
+		];
+
+		it.each(cases)("$name", async ({ kind, files, patterns, expected }) => {
 			const pkgDir = join(tempDir, "manifest-pkg");
-			mkdirSync(join(pkgDir, "extensions"), { recursive: true });
-			mkdirSync(join(pkgDir, "node_modules/dep/extensions"), { recursive: true });
-			writeFileSync(join(pkgDir, "extensions", "local.ts"), "export default function() {}");
-			writeFileSync(join(pkgDir, "node_modules/dep/extensions", "remote.ts"), "export default function() {}");
-			writeFileSync(join(pkgDir, "node_modules/dep/extensions", "skip.ts"), "export default function() {}");
+			for (const file of files) writeResourceFixture(pkgDir, kind, file);
 			writeFileSync(
 				join(pkgDir, "package.json"),
-				JSON.stringify({
-					name: "manifest-pkg",
-					pi: {
-						extensions: ["extensions", "node_modules/dep/extensions", "!**/skip.ts"],
-					},
-				}),
+				JSON.stringify({ name: "manifest-pkg", pi: { [kind]: patterns } }),
 			);
 
 			const result = await packageManager.resolveExtensionSources([pkgDir]);
-			expect(result.extensions.some((r) => isEnabled(r, "local.ts"))).toBe(true);
-			expect(result.extensions.some((r) => isEnabled(r, "remote.ts"))).toBe(true);
-			expect(result.extensions.some((r) => pathEndsWith(r.path, "skip.ts"))).toBe(false);
-		});
-
-		it("should support glob patterns in manifest skills", async () => {
-			const pkgDir = join(tempDir, "skill-manifest-pkg");
-			mkdirSync(join(pkgDir, "skills/good-skill"), { recursive: true });
-			mkdirSync(join(pkgDir, "skills/bad-skill"), { recursive: true });
-			writeFileSync(
-				join(pkgDir, "skills/good-skill", "SKILL.md"),
-				"---\nname: good-skill\ndescription: Good\n---\nContent",
-			);
-			writeFileSync(
-				join(pkgDir, "skills/bad-skill", "SKILL.md"),
-				"---\nname: bad-skill\ndescription: Bad\n---\nContent",
-			);
-			writeFileSync(
-				join(pkgDir, "package.json"),
-				JSON.stringify({
-					name: "skill-manifest-pkg",
-					pi: {
-						skills: ["skills", "!**/bad-skill"],
-					},
-				}),
-			);
-
-			const result = await packageManager.resolveExtensionSources([pkgDir]);
-			expect(result.skills.some((r) => isEnabled(r, "good-skill", "includes"))).toBe(true);
-			expect(result.skills.some((r) => r.path.includes("bad-skill"))).toBe(false);
+			expectResourceStates(result[kind], kind, expected);
 		});
 
 		it("should expand positive glob manifest entries before collecting skills", async () => {
@@ -1060,9 +1035,7 @@ Content`,
 			expect(result.skills.some((r) => isEnabled(r, "pdf-to-markdown", "includes"))).toBe(true);
 			expect(result.skills.some((r) => isEnabled(r, "document-processor-api", "includes"))).toBe(true);
 		});
-	});
 
-	describe("pattern filtering in package filters", () => {
 		it("should apply user filters on top of manifest filters (not replace)", async () => {
 			const pkgDir = join(tempDir, "layered-pkg");
 			mkdirSync(join(pkgDir, "extensions"), { recursive: true });
@@ -1094,259 +1067,77 @@ Content`,
 			expect(result.extensions.some((r) => isDisabled(r, "bar.ts"))).toBe(true);
 			expect(result.extensions.some((r) => pathEndsWith(r.path, "baz.ts"))).toBe(false);
 		});
+	});
 
-		it("should exclude extensions from package with ! pattern", async () => {
+	describe("pattern filtering in package filters", () => {
+		const cases: PatternCase[] = [
+			{
+				name: "excludes package extensions with a ! pattern",
+				kind: "extensions",
+				files: ["extensions/foo.ts", "extensions/bar.ts", "extensions/baz.ts"],
+				patterns: ["!**/baz.ts"],
+				expected: { "foo.ts": "enabled", "bar.ts": "enabled", "baz.ts": "disabled" },
+			},
+			{
+				name: "filters package themes",
+				kind: "themes",
+				files: ["themes/nice.json", "themes/ugly.json"],
+				patterns: ["!ugly.json"],
+				expected: { "nice.json": "enabled", "ugly.json": "disabled" },
+			},
+			{
+				name: "combines include and exclude patterns",
+				kind: "extensions",
+				files: ["extensions/alpha.ts", "extensions/beta.ts", "extensions/gamma.ts"],
+				patterns: ["**/alpha.ts", "**/beta.ts", "!**/beta.ts"],
+				expected: { "alpha.ts": "enabled", "beta.ts": "disabled", "gamma.ts": "disabled" },
+			},
+			{
+				name: "works with direct paths (no patterns)",
+				kind: "extensions",
+				files: ["extensions/one.ts", "extensions/two.ts"],
+				patterns: ["extensions/one.ts"],
+				expected: { "one.ts": "enabled", "two.ts": "disabled" },
+			},
+			{
+				name: "force-include overrides exclude",
+				kind: "extensions",
+				files: ["extensions/alpha.ts", "extensions/beta.ts", "extensions/gamma.ts"],
+				patterns: ["!**/*.ts", "+extensions/beta.ts"],
+				expected: { "alpha.ts": "disabled", "beta.ts": "enabled", "gamma.ts": "disabled" },
+			},
+			{
+				name: "force-includes multiple resources",
+				kind: "skills",
+				files: ["skills/skill-a", "skills/skill-b", "skills/skill-c"],
+				patterns: ["!**/*", "+skills/skill-a", "+skills/skill-c"],
+				expected: { "skill-a": "enabled", "skill-b": "disabled", "skill-c": "enabled" },
+			},
+			{
+				name: "force-excludes a resource that a + pattern re-added",
+				kind: "extensions",
+				files: ["extensions/alpha.ts", "extensions/beta.ts"],
+				patterns: ["extensions/*.ts", "+extensions/alpha.ts", "-extensions/alpha.ts"],
+				expected: { "alpha.ts": "disabled", "beta.ts": "enabled" },
+			},
+		];
+
+		it.each(cases)("$name", async ({ kind, files, patterns, expected }) => {
 			const pkgDir = join(tempDir, "pattern-pkg");
-			mkdirSync(join(pkgDir, "extensions"), { recursive: true });
-			writeFileSync(join(pkgDir, "extensions", "foo.ts"), "export default function() {}");
-			writeFileSync(join(pkgDir, "extensions", "bar.ts"), "export default function() {}");
-			writeFileSync(join(pkgDir, "extensions", "baz.ts"), "export default function() {}");
+			for (const file of files) writeResourceFixture(pkgDir, kind, file);
 
-			settingsManager.setPackages([
-				{
-					source: pkgDir,
-					extensions: ["!**/baz.ts"],
-					skills: [],
-					prompts: [],
-					themes: [],
-				},
-			]);
+			const filters = {
+				source: pkgDir,
+				extensions: [] as string[],
+				skills: [] as string[],
+				prompts: [] as string[],
+				themes: [] as string[],
+			};
+			filters[kind] = patterns;
+			settingsManager.setPackages([filters]);
 
 			const result = await packageManager.resolve();
-			expect(result.extensions.some((r) => isEnabled(r, "foo.ts"))).toBe(true);
-			expect(result.extensions.some((r) => isEnabled(r, "bar.ts"))).toBe(true);
-			expect(result.extensions.some((r) => isDisabled(r, "baz.ts"))).toBe(true);
-		});
-
-		it("should filter themes from package", async () => {
-			const pkgDir = join(tempDir, "theme-pkg");
-			mkdirSync(join(pkgDir, "themes"), { recursive: true });
-			writeFileSync(join(pkgDir, "themes", "nice.json"), "{}");
-			writeFileSync(join(pkgDir, "themes", "ugly.json"), "{}");
-
-			settingsManager.setPackages([
-				{
-					source: pkgDir,
-					extensions: [],
-					skills: [],
-					prompts: [],
-					themes: ["!ugly.json"],
-				},
-			]);
-
-			const result = await packageManager.resolve();
-			expect(result.themes.some((r) => isEnabled(r, "nice.json"))).toBe(true);
-			expect(result.themes.some((r) => isDisabled(r, "ugly.json"))).toBe(true);
-		});
-
-		it("should combine include and exclude patterns", async () => {
-			const pkgDir = join(tempDir, "combo-pkg");
-			mkdirSync(join(pkgDir, "extensions"), { recursive: true });
-			writeFileSync(join(pkgDir, "extensions", "alpha.ts"), "export default function() {}");
-			writeFileSync(join(pkgDir, "extensions", "beta.ts"), "export default function() {}");
-			writeFileSync(join(pkgDir, "extensions", "gamma.ts"), "export default function() {}");
-
-			settingsManager.setPackages([
-				{
-					source: pkgDir,
-					extensions: ["**/alpha.ts", "**/beta.ts", "!**/beta.ts"],
-					skills: [],
-					prompts: [],
-					themes: [],
-				},
-			]);
-
-			const result = await packageManager.resolve();
-			expect(result.extensions.some((r) => isEnabled(r, "alpha.ts"))).toBe(true);
-			expect(result.extensions.some((r) => isDisabled(r, "beta.ts"))).toBe(true);
-			expect(result.extensions.some((r) => isDisabled(r, "gamma.ts"))).toBe(true);
-		});
-
-		it("should work with direct paths (no patterns)", async () => {
-			const pkgDir = join(tempDir, "direct-pkg");
-			mkdirSync(join(pkgDir, "extensions"), { recursive: true });
-			writeFileSync(join(pkgDir, "extensions", "one.ts"), "export default function() {}");
-			writeFileSync(join(pkgDir, "extensions", "two.ts"), "export default function() {}");
-
-			settingsManager.setPackages([
-				{
-					source: pkgDir,
-					extensions: ["extensions/one.ts"],
-					skills: [],
-					prompts: [],
-					themes: [],
-				},
-			]);
-
-			const result = await packageManager.resolve();
-			expect(result.extensions.some((r) => isEnabled(r, "one.ts"))).toBe(true);
-			expect(result.extensions.some((r) => isDisabled(r, "two.ts"))).toBe(true);
-		});
-	});
-
-	describe("force-include patterns", () => {
-		it("should force-include extensions with + pattern after exclusion", async () => {
-			const extDir = join(agentDir, "extensions");
-			mkdirSync(extDir, { recursive: true });
-			writeFileSync(join(extDir, "keep.ts"), "export default function() {}");
-			writeFileSync(join(extDir, "excluded.ts"), "export default function() {}");
-			writeFileSync(join(extDir, "force-back.ts"), "export default function() {}");
-
-			settingsManager.setExtensionPaths(["extensions", "!extensions/*.ts", "+extensions/force-back.ts"]);
-
-			const result = await packageManager.resolve();
-			expect(result.extensions.some((r) => isDisabled(r, "keep.ts"))).toBe(true);
-			expect(result.extensions.some((r) => isDisabled(r, "excluded.ts"))).toBe(true);
-			expect(result.extensions.some((r) => isEnabled(r, "force-back.ts"))).toBe(true);
-		});
-
-		it("should force-include overrides exclude in package filters", async () => {
-			const pkgDir = join(tempDir, "force-pkg");
-			mkdirSync(join(pkgDir, "extensions"), { recursive: true });
-			writeFileSync(join(pkgDir, "extensions", "alpha.ts"), "export default function() {}");
-			writeFileSync(join(pkgDir, "extensions", "beta.ts"), "export default function() {}");
-			writeFileSync(join(pkgDir, "extensions", "gamma.ts"), "export default function() {}");
-
-			settingsManager.setPackages([
-				{
-					source: pkgDir,
-					extensions: ["!**/*.ts", "+extensions/beta.ts"],
-					skills: [],
-					prompts: [],
-					themes: [],
-				},
-			]);
-
-			const result = await packageManager.resolve();
-			expect(result.extensions.some((r) => isDisabled(r, "alpha.ts"))).toBe(true);
-			expect(result.extensions.some((r) => isEnabled(r, "beta.ts"))).toBe(true);
-			expect(result.extensions.some((r) => isDisabled(r, "gamma.ts"))).toBe(true);
-		});
-
-		it("should force-include multiple resources", async () => {
-			const pkgDir = join(tempDir, "multi-force-pkg");
-			mkdirSync(join(pkgDir, "skills/skill-a"), { recursive: true });
-			mkdirSync(join(pkgDir, "skills/skill-b"), { recursive: true });
-			mkdirSync(join(pkgDir, "skills/skill-c"), { recursive: true });
-			writeFileSync(join(pkgDir, "skills/skill-a", "SKILL.md"), "---\nname: skill-a\ndescription: A\n---\nContent");
-			writeFileSync(join(pkgDir, "skills/skill-b", "SKILL.md"), "---\nname: skill-b\ndescription: B\n---\nContent");
-			writeFileSync(join(pkgDir, "skills/skill-c", "SKILL.md"), "---\nname: skill-c\ndescription: C\n---\nContent");
-
-			settingsManager.setPackages([
-				{
-					source: pkgDir,
-					extensions: [],
-					skills: ["!**/*", "+skills/skill-a", "+skills/skill-c"],
-					prompts: [],
-					themes: [],
-				},
-			]);
-
-			const result = await packageManager.resolve();
-			expect(result.skills.some((r) => isEnabled(r, "skill-a", "includes"))).toBe(true);
-			expect(result.skills.some((r) => isDisabled(r, "skill-b", "includes"))).toBe(true);
-			expect(result.skills.some((r) => isEnabled(r, "skill-c", "includes"))).toBe(true);
-		});
-
-		it("should force-include after specific exclusion", async () => {
-			const extDir = join(agentDir, "extensions");
-			mkdirSync(extDir, { recursive: true });
-			writeFileSync(join(extDir, "a.ts"), "export default function() {}");
-			writeFileSync(join(extDir, "b.ts"), "export default function() {}");
-
-			settingsManager.setExtensionPaths(["extensions", "!extensions/b.ts", "+extensions/b.ts"]);
-
-			const result = await packageManager.resolve();
-			expect(result.extensions.some((r) => isEnabled(r, "a.ts"))).toBe(true);
-			expect(result.extensions.some((r) => isEnabled(r, "b.ts"))).toBe(true);
-		});
-
-		it("should handle force-include in manifest patterns", async () => {
-			const pkgDir = join(tempDir, "manifest-force-pkg");
-			mkdirSync(join(pkgDir, "extensions"), { recursive: true });
-			writeFileSync(join(pkgDir, "extensions", "one.ts"), "export default function() {}");
-			writeFileSync(join(pkgDir, "extensions", "two.ts"), "export default function() {}");
-			writeFileSync(join(pkgDir, "extensions", "three.ts"), "export default function() {}");
-			writeFileSync(
-				join(pkgDir, "package.json"),
-				JSON.stringify({
-					name: "manifest-force-pkg",
-					pi: {
-						extensions: ["extensions", "!**/two.ts", "+extensions/two.ts"],
-					},
-				}),
-			);
-
-			const result = await packageManager.resolveExtensionSources([pkgDir]);
-			expect(result.extensions.some((r) => isEnabled(r, "one.ts"))).toBe(true);
-			expect(result.extensions.some((r) => isEnabled(r, "two.ts"))).toBe(true);
-			expect(result.extensions.some((r) => isEnabled(r, "three.ts"))).toBe(true);
-		});
-
-		it("should force-include themes", async () => {
-			const themesDir = join(agentDir, "themes");
-			mkdirSync(themesDir, { recursive: true });
-			writeFileSync(join(themesDir, "dark.json"), "{}");
-			writeFileSync(join(themesDir, "light.json"), "{}");
-			writeFileSync(join(themesDir, "special.json"), "{}");
-
-			settingsManager.setThemePaths(["themes", "!themes/*.json", "+themes/special.json"]);
-
-			const result = await packageManager.resolve();
-			expect(result.themes.some((r) => isDisabled(r, "dark.json"))).toBe(true);
-			expect(result.themes.some((r) => isDisabled(r, "light.json"))).toBe(true);
-			expect(result.themes.some((r) => isEnabled(r, "special.json"))).toBe(true);
-		});
-
-		it("should force-include prompts", async () => {
-			const promptsDir = join(agentDir, "prompts");
-			mkdirSync(promptsDir, { recursive: true });
-			writeFileSync(join(promptsDir, "review.md"), "Review");
-			writeFileSync(join(promptsDir, "explain.md"), "Explain");
-			writeFileSync(join(promptsDir, "debug.md"), "Debug");
-
-			settingsManager.setPromptTemplatePaths(["prompts", "!prompts/*.md", "+prompts/debug.md"]);
-
-			const result = await packageManager.resolve();
-			expect(result.prompts.some((r) => isDisabled(r, "review.md"))).toBe(true);
-			expect(result.prompts.some((r) => isDisabled(r, "explain.md"))).toBe(true);
-			expect(result.prompts.some((r) => isEnabled(r, "debug.md"))).toBe(true);
-		});
-	});
-
-	describe("force-exclude patterns", () => {
-		it("should force-exclude top-level resources", async () => {
-			const extDir = join(agentDir, "extensions");
-			mkdirSync(extDir, { recursive: true });
-			writeFileSync(join(extDir, "alpha.ts"), "export default function() {}");
-			writeFileSync(join(extDir, "beta.ts"), "export default function() {}");
-
-			settingsManager.setExtensionPaths(["extensions", "+extensions/alpha.ts", "-extensions/alpha.ts"]);
-
-			const result = await packageManager.resolve();
-			expect(result.extensions.some((r) => isDisabled(r, "alpha.ts"))).toBe(true);
-			expect(result.extensions.some((r) => isEnabled(r, "beta.ts"))).toBe(true);
-		});
-
-		it("should force-exclude in package filters", async () => {
-			const pkgDir = join(tempDir, "force-exclude-pkg");
-			mkdirSync(join(pkgDir, "extensions"), { recursive: true });
-			writeFileSync(join(pkgDir, "extensions", "alpha.ts"), "export default function() {}");
-			writeFileSync(join(pkgDir, "extensions", "beta.ts"), "export default function() {}");
-
-			settingsManager.setPackages([
-				{
-					source: pkgDir,
-					extensions: ["extensions/*.ts", "+extensions/alpha.ts", "-extensions/alpha.ts"],
-					skills: [],
-					prompts: [],
-					themes: [],
-				},
-			]);
-
-			const result = await packageManager.resolve();
-			expect(result.extensions.some((r) => isDisabled(r, "alpha.ts"))).toBe(true);
-			expect(result.extensions.some((r) => isEnabled(r, "beta.ts"))).toBe(true);
+			expectResourceStates(result[kind], kind, expected);
 		});
 	});
 

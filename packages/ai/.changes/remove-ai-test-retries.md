@@ -1,0 +1,1 @@
+- Removed vitest retry masking from the AI provider and attach-image tests, and deleted the live-only provider matrices those retries covered.

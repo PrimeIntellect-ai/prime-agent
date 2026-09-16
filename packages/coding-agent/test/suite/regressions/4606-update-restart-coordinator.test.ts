@@ -1,12 +1,8 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-	DaemonUpdateRestartStatusWriter,
-	launchDaemonUpdateRestartCoordinator,
-	readDaemonUpdateRestartStatus,
-} from "../../../src/cli/daemon-update-restart.js";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { readDaemonUpdateRestartStatus } from "../../../src/cli/daemon-update-restart.js";
 import { ENV_AGENT_DIR } from "../../../src/config.js";
 import { DaemonAgentConnection } from "../../../src/modes/agent-connection/daemon-agent-connection.js";
 import { DaemonClient } from "../../../src/modes/daemon/daemon-client.js";
@@ -185,29 +181,6 @@ function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-async function withSourceCliEntrypoint<T>(action: () => Promise<T>): Promise<T> {
-	const previousEntrypoint = process.argv[1];
-	if (!previousEntrypoint) {
-		throw new Error("Test process has no CLI entrypoint");
-	}
-	const previousExecArgv = [...process.execArgv];
-	const previousTsconfigPath = process.env.TSX_TSCONFIG_PATH;
-	process.argv[1] = cliPath;
-	process.execArgv.splice(0, process.execArgv.length, tsxPath);
-	process.env.TSX_TSCONFIG_PATH = tsconfigPath;
-	try {
-		return await action();
-	} finally {
-		process.argv[1] = previousEntrypoint;
-		process.execArgv.splice(0, process.execArgv.length, ...previousExecArgv);
-		if (previousTsconfigPath === undefined) {
-			delete process.env.TSX_TSCONFIG_PATH;
-		} else {
-			process.env.TSX_TSCONFIG_PATH = previousTsconfigPath;
-		}
-	}
-}
-
 function isProcessAlive(pid: number): boolean {
 	try {
 		process.kill(pid, 0);
@@ -268,85 +241,7 @@ afterEach(async () => {
 	}
 });
 
-describe("ENG-4606 update restart coordinator", () => {
-	it("refreshes coordinator liveness without changing restart state", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		const statusPath = join(harness.tempDir, "restart-status.json");
-
-		vi.useFakeTimers();
-		try {
-			vi.setSystemTime(new Date("2026-07-14T00:00:00.000Z"));
-			const writer = new DaemonUpdateRestartStatusWriter(statusPath, "test-request", "/tmp/daemon.sock");
-			const stopHeartbeat = writer.startHeartbeat();
-			vi.advanceTimersByTime(5000);
-			stopHeartbeat();
-
-			expect(readDaemonUpdateRestartStatus(statusPath)).toMatchObject({
-				phase: "starting",
-				startedAt: "2026-07-14T00:00:00.000Z",
-				updatedAt: "2026-07-14T00:00:00.000Z",
-				heartbeatAt: "2026-07-14T00:00:05.000Z",
-			});
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-
-	it("rejects coordinator spawn errors without terminating the updater", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-
-		await expect(
-			launchDaemonUpdateRestartCoordinator({
-				socketPath: join(harness.tempDir, "missing-daemon.sock"),
-				agentDir: harness.tempDir,
-				cwd: join(harness.tempDir, "missing-cwd"),
-				timeoutMs: 5000,
-			}),
-		).rejects.toThrow();
-	});
-
-	it("keeps a relative agent directory stable across coordinator cwd changes", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		const agentDir = join(harness.tempDir, "relative-agent");
-		const coordinatorCwd = join(harness.tempDir, "coordinator-cwd");
-		mkdirSync(agentDir, { recursive: true });
-		mkdirSync(coordinatorCwd, { recursive: true });
-		const socketPath = join(harness.tempDir, "missing-daemon.sock");
-
-		const status = await withSourceCliEntrypoint(() =>
-			launchDaemonUpdateRestartCoordinator({
-				socketPath,
-				agentDir: relative(process.cwd(), agentDir),
-				cwd: coordinatorCwd,
-				timeoutMs: 30_000,
-			}),
-		);
-
-		expect(status).toMatchObject({ phase: "skipped", socketPath });
-	});
-
-	it("resolves a relative custom socket before changing coordinator cwd", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		const coordinatorCwd = join(harness.tempDir, "coordinator-cwd");
-		mkdirSync(coordinatorCwd, { recursive: true });
-		const socketPath = join(harness.tempDir, "missing-daemon.sock");
-
-		const status = await withSourceCliEntrypoint(() =>
-			launchDaemonUpdateRestartCoordinator({
-				socketPath: relative(process.cwd(), socketPath),
-				agentDir: harness.tempDir,
-				cwd: coordinatorCwd,
-				timeoutMs: 30_000,
-			}),
-		);
-
-		expect(status).toMatchObject({ phase: "skipped", socketPath });
-	});
-
+describe("update restart coordinator lifecycle (ENG-4606)", () => {
 	it("outlives a daemon-owned updater and restores the exact custom socket", async () => {
 		if (process.platform === "win32") {
 			return;

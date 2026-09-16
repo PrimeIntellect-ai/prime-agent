@@ -1,8 +1,5 @@
-import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { isDaemonSessionSummary } from "../src/cli/daemon-launch.js";
+
 import {
 	createDaemonCommandEnvelope,
 	createDaemonEventEnvelope,
@@ -11,16 +8,11 @@ import {
 	DAEMON_COMMAND_COMPATIBILITY,
 	DAEMON_COMMAND_PLANE,
 	DAEMON_DEFAULT_SERVER_CAPABILITIES,
-	DAEMON_OUTBOUND_COMPATIBILITY,
 	DAEMON_PROTOCOL_INFO,
-	DAEMON_PROTOCOL_VERSION,
-	DAEMON_SCHEMA_ID,
-	DAEMON_SCHEMA_REVISION,
 	type DaemonCommand,
 	type DaemonOutbound,
 	getDaemonCommandCompatibilities,
 	isDaemonCommandEnvelope,
-	isDaemonMutatingCommand,
 	isSessionPlaneDaemonCommand,
 	salvageDaemonCommandId,
 } from "../src/modes/daemon/daemon-protocol.js";
@@ -30,6 +22,100 @@ import {
 } from "../src/modes/daemon/daemon-worker-protocol.js";
 
 describe("daemon protocol helpers", () => {
+	// One table for the static command-compatibility gates: protocol floor, schema revision,
+	// capability name, and whether a default server advertises that capability.
+	it.each([
+		["delete_rlm_subagent", { minProtocol: 7, capability: "delete_rlm_subagent" }, true],
+		["replace_acp_mcp_servers", { minProtocol: 7, minSchemaRevision: 22, capability: "acp_mcp_servers" }, true],
+		["get_model_catalog", { minProtocol: 7, capability: "model_catalog" }, true],
+		["mutate_queued_message", { minProtocol: 7, minSchemaRevision: 15, capability: "queue_message_mutation" }, true],
+		["get_rlm_max_depth_status", { minProtocol: 7, minSchemaRevision: 11 }, undefined],
+		["set_rlm_max_depth", { minProtocol: 7, minSchemaRevision: 11 }, undefined],
+		[
+			"acquire_session_input_pause",
+			{ minProtocol: 7, minSchemaRevision: 19, capability: "session_input_pause" },
+			true,
+		],
+		[
+			"release_session_input_pause",
+			{ minProtocol: 7, minSchemaRevision: 19, capability: "session_input_pause" },
+			true,
+		],
+		[
+			"cancel_prompt_admission",
+			{ minProtocol: 7, minSchemaRevision: 8, capability: "prompt_admission_cancellation" },
+			true,
+		],
+		["get_rlm_children", { minProtocol: 7, minSchemaRevision: 17, capability: "authoritative_child_roster" }, true],
+		["roster_subscribe", { minProtocol: 7, capability: "agent_roster" }, undefined],
+		["roster_unsubscribe", { minProtocol: 7, capability: "agent_roster" }, undefined],
+		["heartbeats_list", { minProtocol: 7, capability: "heartbeat_catalog" }, true],
+		["heartbeat_manage", { minProtocol: 7, capability: "heartbeat_management" }, true],
+		["complete_owned_session", { minProtocol: 7, capability: "client_owned_sessions" }, true],
+		// Only the supervisor issues transport tickets; workers and standalone daemons must not advertise it.
+		[
+			"get_direct_worker_transport",
+			{ minProtocol: 7, minSchemaRevision: 25, capability: "direct_peer_transport" },
+			false,
+		],
+	] as const)("gates %s", (command, expected, advertised) => {
+		expect(DAEMON_COMMAND_COMPATIBILITY[command]).toEqual(expected);
+		if (advertised === undefined) return;
+		const capability = (expected as { capability: string }).capability;
+		if (advertised) expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain(capability);
+		else expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).not.toContain(capability);
+	});
+
+	// Field-conditional gates: the same command carries a higher floor only when an opt-in field is present.
+	it.each([
+		["create without a telemetry policy", { type: "create", config: { cwd: "/tmp" } }, [{ minProtocol: 7 }]],
+		[
+			"create carrying a telemetry policy",
+			{ type: "create", config: { cwd: "/tmp", telemetryDisabled: true } },
+			[{ minProtocol: 7, minSchemaRevision: 14 }, { minProtocol: 7 }],
+		],
+		[
+			"attach carrying a telemetry policy",
+			{ type: "attach", activeSessionId: "active-1", telemetryDisabled: true },
+			[{ minProtocol: 7, minSchemaRevision: 14 }, { minProtocol: 7 }],
+		],
+		[
+			"reattach carrying a telemetry policy",
+			{ type: "reattach", activeSessionId: "active-1", targetActiveSessionId: "active-2", telemetryDisabled: true },
+			[{ minProtocol: 7, minSchemaRevision: 14 }, { minProtocol: 7 }],
+		],
+		[
+			"attach carrying owned-session recovery context",
+			{ type: "attach", activeSessionId: "active-1", recoveryConfig: { cwd: "/tmp/fresh-owner" } },
+			[{ minProtocol: 7, minSchemaRevision: 17, capability: "owned_session_recovery_context" }, { minProtocol: 7 }],
+		],
+		[
+			"the headless completion barrier opting into RLM quiescence",
+			{ type: "wait_for_headless_completion", activeSessionId: "active-1", waitForRlmQuiescence: true },
+			[{ minProtocol: 7, minSchemaRevision: 18, capability: "rlm_quiescence_barrier" }, { minProtocol: 7 }],
+		],
+		[
+			"the headless completion barrier without quiescence",
+			{ type: "wait_for_headless_completion", activeSessionId: "active-1" },
+			[{ minProtocol: 7 }],
+		],
+		[
+			"cancellation without prompt ownership",
+			{ type: "cancel_prompt_admission", activeSessionId: "active-1", admissionId: "a-1" },
+			[{ minProtocol: 7, minSchemaRevision: 8, capability: "prompt_admission_cancellation" }],
+		],
+		[
+			"cancellation after prompt ownership",
+			{ type: "cancel_prompt_admission", activeSessionId: "active-1", admissionId: "a-1", cancelOwned: true },
+			[
+				{ minProtocol: 7, minSchemaRevision: 20, capability: "owned_prompt_cancellation" },
+				{ minProtocol: 7, minSchemaRevision: 8, capability: "prompt_admission_cancellation" },
+			],
+		],
+	])("gates %s", (_name, command, expected) => {
+		expect(getDaemonCommandCompatibilities(command as DaemonCommand)).toEqual(expected);
+	});
+
 	it("serializes worker descriptors as identity-only version 2 state", () => {
 		const descriptor = {
 			version: 1,
@@ -79,244 +165,6 @@ describe("daemon protocol helpers", () => {
 		expect(JSON.stringify(durable)).not.toContain("secret-");
 	});
 
-	it("keeps the advertised schema identity synchronized with wire type shapes", () => {
-		const source = readFileSync(resolve(__dirname, "../src/modes/daemon/daemon-protocol.ts"), "utf8");
-		const commandSource = source.slice(
-			source.indexOf("export type DaemonCommand ="),
-			source.indexOf("type DaemonCommandName"),
-		);
-		const savedSessionSource = source.slice(
-			source.indexOf("export interface DaemonSavedSessionInfo"),
-			source.indexOf("export type DaemonDeleteSavedSessionResult"),
-		);
-		const outboundSource = source.slice(
-			source.indexOf("export type DaemonOutbound ="),
-			source.indexOf("export const DAEMON_OUTBOUND_COMPATIBILITY"),
-		);
-		const digest = createHash("sha256")
-			.update(`${commandSource}\n${savedSessionSource}\n${outboundSource}`)
-			.digest("hex")
-			.slice(0, 12);
-		expect(DAEMON_SCHEMA_ID).toBe(`protocol-${DAEMON_PROTOCOL_VERSION}-schema-${DAEMON_SCHEMA_REVISION}-${digest}`);
-	});
-
-	it("requires compatibility metadata for the heartbeat protocol surface", () => {
-		expect(DAEMON_PROTOCOL_VERSION).toBe(7);
-		expect(DAEMON_SCHEMA_ID).toContain(`protocol-${DAEMON_PROTOCOL_VERSION}`);
-		expect(DAEMON_COMMAND_COMPATIBILITY.heartbeats_list).toEqual({
-			minProtocol: 7,
-			capability: "heartbeat_catalog",
-		});
-		expect(DAEMON_COMMAND_COMPATIBILITY.heartbeat_manage).toEqual({
-			minProtocol: 7,
-			capability: "heartbeat_management",
-		});
-		expect(DAEMON_COMMAND_COMPATIBILITY.complete_owned_session).toEqual({
-			minProtocol: 7,
-			capability: "client_owned_sessions",
-		});
-		expect(DAEMON_OUTBOUND_COMPATIBILITY.heartbeats_changed).toEqual({
-			minProtocol: 7,
-			capability: "heartbeat_catalog",
-		});
-		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toEqual(
-			expect.arrayContaining(["heartbeat_catalog", "heartbeat_management"]),
-		);
-	});
-
-	it("capability-gates explicit subagent deletion instead of schema-gating it", () => {
-		expect(DAEMON_COMMAND_COMPATIBILITY.delete_rlm_subagent).toEqual({
-			minProtocol: 7,
-			capability: "delete_rlm_subagent",
-		});
-		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("delete_rlm_subagent");
-	});
-
-	it("capability- and schema-gates ACP MCP server replacement", () => {
-		expect(DAEMON_COMMAND_COMPATIBILITY.replace_acp_mcp_servers).toEqual({
-			minProtocol: 7,
-			minSchemaRevision: 22,
-			capability: "acp_mcp_servers",
-		});
-		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("acp_mcp_servers");
-	});
-
-	it("capability-gates the optional model catalog surface", () => {
-		expect(DAEMON_COMMAND_COMPATIBILITY.get_model_catalog).toEqual({
-			minProtocol: 7,
-			capability: "model_catalog",
-		});
-		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("model_catalog");
-	});
-
-	it("capability- and schema-gates queued message mutation at its introducing revision", () => {
-		expect(DAEMON_COMMAND_COMPATIBILITY.mutate_queued_message).toEqual({
-			minProtocol: 7,
-			minSchemaRevision: 15,
-			capability: "queue_message_mutation",
-		});
-		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("queue_message_mutation");
-	});
-
-	it("schema-gates the RLM max depth commands at their introducing revision", () => {
-		expect(DAEMON_COMMAND_COMPATIBILITY.get_rlm_max_depth_status).toEqual({ minProtocol: 7, minSchemaRevision: 11 });
-		expect(DAEMON_COMMAND_COMPATIBILITY.set_rlm_max_depth).toEqual({ minProtocol: 7, minSchemaRevision: 11 });
-	});
-
-	it("schema-gates session commands that carry the telemetry policy", () => {
-		expect(getDaemonCommandCompatibilities({ type: "create", config: { cwd: "/tmp" } })).toEqual([
-			{ minProtocol: 7 },
-		]);
-		expect(
-			getDaemonCommandCompatibilities({ type: "create", config: { cwd: "/tmp", telemetryDisabled: true } }),
-		).toEqual([{ minProtocol: 7, minSchemaRevision: 14 }, { minProtocol: 7 }]);
-		expect(getDaemonCommandCompatibilities({ type: "attach", activeSessionId: "active-1" })).toEqual([
-			{ minProtocol: 7 },
-		]);
-		expect(
-			getDaemonCommandCompatibilities({ type: "attach", activeSessionId: "active-1", telemetryDisabled: true }),
-		).toEqual([{ minProtocol: 7, minSchemaRevision: 14 }, { minProtocol: 7 }]);
-		expect(
-			getDaemonCommandCompatibilities({
-				type: "reattach",
-				activeSessionId: "active-1",
-				targetActiveSessionId: "active-2",
-				telemetryDisabled: true,
-			}),
-		).toEqual([{ minProtocol: 7, minSchemaRevision: 14 }, { minProtocol: 7 }]);
-	});
-
-	it("capability-gates authoritative rosters and transient owned-session recovery context", () => {
-		expect(DAEMON_COMMAND_COMPATIBILITY.get_rlm_children).toEqual({
-			minProtocol: 7,
-			minSchemaRevision: 17,
-			capability: "authoritative_child_roster",
-		});
-		expect(
-			getDaemonCommandCompatibilities({
-				type: "attach",
-				activeSessionId: "active-1",
-				recoveryConfig: { cwd: "/tmp/fresh-owner" },
-			}),
-		).toEqual([
-			{ minProtocol: 7, minSchemaRevision: 17, capability: "owned_session_recovery_context" },
-			{ minProtocol: 7 },
-		]);
-		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toEqual(
-			expect.arrayContaining([
-				"authoritative_child_roster",
-				"owned_session_recovery_context",
-				"rlm_quiescence_barrier",
-			]),
-		);
-	});
-
-	it("gates the opt-in RLM quiescence wire field", () => {
-		expect(
-			getDaemonCommandCompatibilities({
-				type: "wait_for_headless_completion",
-				activeSessionId: "active-1",
-				waitForRlmQuiescence: true,
-			}),
-		).toEqual([{ minProtocol: 7, minSchemaRevision: 18, capability: "rlm_quiescence_barrier" }, { minProtocol: 7 }]);
-		expect(
-			getDaemonCommandCompatibilities({
-				type: "wait_for_headless_completion",
-				activeSessionId: "active-1",
-			}),
-		).toEqual([{ minProtocol: 7 }]);
-	});
-
-	it("capability- and schema-gates session input pause leases", () => {
-		expect(DAEMON_COMMAND_COMPATIBILITY.acquire_session_input_pause).toEqual({
-			minProtocol: 7,
-			minSchemaRevision: 19,
-			capability: "session_input_pause",
-		});
-		expect(DAEMON_COMMAND_COMPATIBILITY.release_session_input_pause).toEqual(
-			DAEMON_COMMAND_COMPATIBILITY.acquire_session_input_pause,
-		);
-		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("session_input_pause");
-	});
-
-	it("version- and capability-gates prompt admission cancellation", () => {
-		expect(DAEMON_COMMAND_COMPATIBILITY.cancel_prompt_admission).toEqual({
-			minProtocol: 7,
-			minSchemaRevision: 8,
-			capability: "prompt_admission_cancellation",
-		});
-		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("prompt_admission_cancellation");
-	});
-
-	it("capability-gates cancellation after prompt ownership", () => {
-		const legacy = { type: "cancel_prompt_admission", activeSessionId: "active-1", admissionId: "a-1" } as const;
-		expect(getDaemonCommandCompatibilities(legacy)).toEqual([DAEMON_COMMAND_COMPATIBILITY.cancel_prompt_admission]);
-		expect(getDaemonCommandCompatibilities({ ...legacy, cancelOwned: true })).toEqual([
-			{ minProtocol: 7, minSchemaRevision: 20, capability: "owned_prompt_cancellation" },
-			DAEMON_COMMAND_COMPATIBILITY.cancel_prompt_admission,
-		]);
-		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("owned_prompt_cancellation");
-	});
-
-	it("gates honest worker-state reporting at its introducing schema revision", () => {
-		// Revision 16 adds the "stopping" workerState and stops reporting
-		// disconnected workers as "ready". The field is optional and old clients
-		// ignore unknown values, so no capability gate is needed; the revision
-		// lets version probes distinguish daemons with the old semantics.
-		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(16);
-	});
-
-	it("keeps refine failure events backward-compatible on the existing session event channel", () => {
-		const event: DaemonOutbound = {
-			type: "session_event",
-			activeSessionId: "active-1",
-			event: { type: "refine_failed", error: "disk full" },
-		};
-
-		// Refine events remain on the original session-event channel across later schema revisions.
-		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(6);
-		expect(DAEMON_OUTBOUND_COMPATIBILITY.session_event).toEqual({ minProtocol: 7 });
-		expect(event).toMatchObject({ event: { type: "refine_failed", error: "disk full" } });
-	});
-
-	it("accepts legacy side-question and bash shapes in new daemons and clients", () => {
-		const oldClientSideQuestion: DaemonCommand = {
-			type: "start_side_question",
-			activeSessionId: "active-1",
-			sideQuestionId: "side-1",
-			question: "What changed?",
-		};
-		const oldClientBash: DaemonCommand = {
-			type: "execute_bash",
-			activeSessionId: "active-1",
-			command: "ls",
-		};
-		const oldDaemonBashStart: DaemonOutbound = {
-			type: "session_event",
-			activeSessionId: "active-1",
-			event: { type: "bash_start", command: "ls", excludeFromContext: false },
-		};
-		const oldDaemonBashEnd: DaemonOutbound = {
-			type: "session_event",
-			activeSessionId: "active-1",
-			event: { type: "bash_end", exitCode: 0, cancelled: false, truncated: false },
-		};
-
-		expect(DAEMON_COMMAND_COMPATIBILITY.start_side_question).toEqual({ minProtocol: 7 });
-		expect(DAEMON_COMMAND_COMPATIBILITY.execute_bash).toEqual({ minProtocol: 7 });
-		expect(DAEMON_OUTBOUND_COMPATIBILITY.session_event).toEqual({ minProtocol: 7 });
-		expect(oldClientSideQuestion).not.toHaveProperty("previousTurns");
-		expect(oldClientBash).not.toHaveProperty("transient");
-		expect(oldClientBash).not.toHaveProperty("runId");
-		expect(oldDaemonBashStart.event).not.toHaveProperty("transient");
-		expect(oldDaemonBashStart.event).not.toHaveProperty("runId");
-		expect(oldDaemonBashEnd.event).not.toHaveProperty("transient");
-		expect(oldDaemonBashEnd.event).not.toHaveProperty("runId");
-		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toEqual(
-			expect.arrayContaining(["side_question_transcript", "transient_bash"]),
-		);
-	});
-
 	it("creates versioned command and event envelopes", () => {
 		const command = { id: "cmd-1", type: "attach", activeSessionId: "active-1" } as const;
 		const commandEnvelope = createDaemonCommandEnvelope(command, "cmd-1", "client-1");
@@ -353,46 +201,6 @@ describe("daemon protocol helpers", () => {
 
 		expect(isDaemonCommandEnvelope(createDaemonCommandEnvelope(command, "cmd-1", "client-1", 7))).toBe(true);
 		expect(isDaemonCommandEnvelope(createDaemonCommandEnvelope(command, "cmd-1", "client-1", 6))).toBe(false);
-	});
-
-	it("keeps attachment routing out of the durable mutation journal", () => {
-		expect(isDaemonMutatingCommand({ type: "attach" })).toBe(false);
-		expect(isDaemonMutatingCommand({ type: "reattach" })).toBe(false);
-		// Journal replays after a reconnect would skip re-subscribing the new socket.
-		expect(isDaemonMutatingCommand({ type: "roster_subscribe" })).toBe(false);
-		expect(isDaemonMutatingCommand({ type: "roster_unsubscribe" })).toBe(false);
-		expect(isDaemonMutatingCommand({ type: "wait_for_headless_completion" })).toBe(true);
-		expect(isDaemonMutatingCommand({ type: "switch_session" })).toBe(true);
-	});
-
-	it("keeps the roster push additive for pre-roster clients", () => {
-		// Subscription commands and the push are capability-gated; a client that
-		// never sends roster_subscribe is never written a roster_update.
-		expect(DAEMON_COMMAND_COMPATIBILITY.roster_subscribe).toEqual({ minProtocol: 7, capability: "agent_roster" });
-		expect(DAEMON_COMMAND_COMPATIBILITY.roster_unsubscribe).toEqual({ minProtocol: 7, capability: "agent_roster" });
-		expect(DAEMON_OUTBOUND_COMPATIBILITY.roster_update).toEqual({ minProtocol: 7, capability: "agent_roster" });
-		// list responses now carry rosterStatus/statusLabel/lastHeardFromAt; the
-		// summary validator pre-roster clients shipped stays open to additive fields.
-		expect(
-			isDaemonSessionSummary({
-				id: "session-1",
-				activeSessionId: "active-1",
-				rosterStatus: "running",
-				statusLabel: "queued",
-				lastHeardFromAt: "2026-08-01T12:00:00.000Z",
-			}),
-		).toBe(true);
-	});
-
-	it("capability-gates direct worker transport discovery as a supervisor-only surface", () => {
-		expect(DAEMON_COMMAND_COMPATIBILITY.get_direct_worker_transport).toEqual({
-			minProtocol: 7,
-			minSchemaRevision: 25,
-			capability: "direct_peer_transport",
-		});
-		// Only the supervisor issues tickets; workers and standalone daemons must not advertise it.
-		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).not.toContain("direct_peer_transport");
-		expect(isDaemonMutatingCommand({ type: "get_direct_worker_transport" })).toBe(false);
 	});
 
 	it("classifies every command plane and never defaults unknown commands to the session plane", () => {

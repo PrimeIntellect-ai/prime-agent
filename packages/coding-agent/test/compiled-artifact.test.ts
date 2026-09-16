@@ -23,6 +23,11 @@ import { deflateSync } from "node:zlib";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
 
+// Keep process-local failure deadlines below Vitest's default budget so failures report their
+// stderr instead of being replaced by a suite-wide timeout.
+const RUN_TIMEOUT = 25000;
+const CONNECT_TIMEOUT = 5000;
+
 const archive = process.env.PRIME_AGENT_TEST_ARCHIVE;
 const uv = process.env.PRIME_AGENT_TEST_UV;
 const children = new Set<ChildProcess>();
@@ -34,7 +39,16 @@ let cwd = "";
 let socket = "";
 let environment: NodeJS.ProcessEnv;
 
-async function run(args: string[], extraEnv: NodeJS.ProcessEnv = {}, timeout = 30000, input?: string) {
+/** SIGKILL is a deterministic teardown signal and cannot be blocked by the supervisor. */
+function terminateSupervisor(pid: number): void {
+	try {
+		process.kill(pid, "SIGKILL");
+	} catch {
+		/* The supervisor already exited after acknowledging shutdown. */
+	}
+}
+
+async function run(args: string[], extraEnv: NodeJS.ProcessEnv = {}, timeout = RUN_TIMEOUT, input?: string) {
 	const child = spawn(binary, args, { cwd, env: { ...environment, ...extraEnv }, stdio: ["pipe", "pipe", "pipe"] });
 	children.add(child);
 	let stdout = "";
@@ -166,32 +180,23 @@ describe.skipIf(!archive)("extracted standalone archive", () => {
 	afterEach(async () => {
 		for (const child of children) child.kill("SIGTERM");
 		const client = new DaemonClient(socket);
+		let supervisorPid: number | undefined;
+		let shutdownError: unknown;
 		try {
-			await client.connect(1000);
-			const hello = await client.waitForHello();
+			await client.connect(CONNECT_TIMEOUT);
+			supervisorPid = (await client.waitForHello()).supervisorPid;
 			await client.request({ type: "shutdown", force: true });
-			if (hello.supervisorPid) {
-				await expect
-					.poll(
-						() => {
-							try {
-								process.kill(hello.supervisorPid!, 0);
-								return false;
-							} catch {
-								return true;
-							}
-						},
-						{ timeout: 10000 },
-					)
-					.toBe(true);
-			}
 		} catch (error) {
-			if (existsSync(socket)) throw error;
+			if (existsSync(socket)) shutdownError = error;
 		} finally {
 			client.close();
 		}
+		// The supervisor is terminated even when the shutdown request failed, so an unresponsive
+		// daemon reports its own error instead of leaking a process into the next test.
+		if (supervisorPid !== undefined) terminateSupervisor(supervisorPid);
 		for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
 		children.clear();
+		if (shutdownError) throw shutdownError;
 	});
 	afterAll(() => {
 		if (root) rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
@@ -314,7 +319,7 @@ writeFileSync(join(process.cwd(), "hot-runtime.json"), JSON.stringify({ value, e
 		]
 			.map((command) => `${JSON.stringify(command)}\n`)
 			.join("");
-		const result = await run([...sessionArgs(), "--no-tools", "--mode", "rpc"], {}, 30000, input);
+		const result = await run([...sessionArgs(), "--no-tools", "--mode", "rpc"], {}, RUN_TIMEOUT, input);
 		expect(result.code, result.stderr).toBe(0);
 		const frames = result.stdout
 			.trim()

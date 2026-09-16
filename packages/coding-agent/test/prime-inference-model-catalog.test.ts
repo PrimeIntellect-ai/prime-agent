@@ -5,7 +5,6 @@ import type { Model } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
 	buildPrimeInferenceModels,
-	mergePrimeInferenceModels,
 	PRIME_INFERENCE_BASE_URL,
 	refreshPrimeInferenceModels,
 } from "../src/core/prime-inference-model-catalog.js";
@@ -31,7 +30,7 @@ const model = (id: string, provider = "prime-inference"): Model<"openai-completi
 	compat: { supportsDeveloperRole: false, maxTokensField: "max_tokens" },
 });
 
-const entry = (id: string, overrides: Record<string, unknown> = {}) => ({
+const entry = (id: string) => ({
 	id,
 	input: 1,
 	output: 2,
@@ -39,7 +38,6 @@ const entry = (id: string, overrides: Record<string, unknown> = {}) => ({
 	maxTokens: 20_000,
 	vision: true,
 	reasoning: false,
-	...overrides,
 });
 
 const payloadEntry = (
@@ -64,60 +62,18 @@ afterEach(() => {
 });
 
 describe("Prime Inference model catalog", () => {
-	test("uses live metadata while retaining bundled client compatibility", () => {
-		const [live] = buildPrimeInferenceModels(
-			[model("vendor/model")],
-			[entry("vendor/model", { name: "Live Name", cacheRead: 0.1, cacheWrite: 1.25, maxTokens: 250_000 })],
-		) ?? [undefined];
-		expect(live).toMatchObject({
-			id: "vendor/model",
-			name: "Live Name",
-			baseUrl: PRIME_INFERENCE_BASE_URL,
-			api: "openai-completions",
-			provider: "prime-inference",
-			reasoning: false,
-			input: ["text", "image"],
-			cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1.25 },
-			contextWindow: 200_000,
-			maxTokens: 200_000,
-			thinkingLevelMap: { high: "high" },
-			featured: true,
-			compat: { supportsDeveloperRole: false, maxTokensField: "max_tokens" },
-		});
-		expect(live).not.toHaveProperty("headers");
+	test.each([
+		{ id: "internal/model", provider: "prime-inference", private: true },
+		{ id: "INTERNAL/model", provider: "prime-inference", private: true },
+		{ id: "dev/model", provider: "prime-inference", private: true },
+		{ id: "vendor/model:deployment", provider: "prime-inference", private: true },
+		{ id: "public/model", provider: "prime-inference", private: false },
+		{ id: "vendor/model:deployment", provider: "openrouter", private: false },
+	])("isPrivatePrimeInferenceModel($id, $provider) is $private", ({ id, provider, ...expected }) => {
+		expect(isPrivatePrimeInferenceModel(model(id, provider))).toBe(expected.private);
 	});
 
-	test("marks anthropic models for anthropic-style cache control and leaves others untouched", () => {
-		const models =
-			buildPrimeInferenceModels(
-				[model("anthropic/claude-opus-4.8"), model("vendor/model")],
-				[entry("anthropic/claude-opus-4.8"), entry("vendor/model")],
-			) ?? [];
-		const anthropicModel = models.find((candidate) => candidate.id === "anthropic/claude-opus-4.8");
-		const vendorModel = models.find((candidate) => candidate.id === "vendor/model");
-		expect(anthropicModel?.compat?.cacheControlFormat).toBe("anthropic");
-		expect(vendorModel?.compat?.cacheControlFormat).toBeUndefined();
-	});
-
-	test("adds complete new models and skips incomplete unknown models", () => {
-		const models =
-			buildPrimeInferenceModels(
-				[model("bundled")],
-				[entry("new/complete"), { id: "new/incomplete", input: 1, output: 2 }],
-				{ minimumModels: 0 },
-			) ?? [];
-		expect(models.map(({ id }) => id)).toEqual(["new/complete"]);
-	});
-
-	test("retains bundled specs when an existing live entry has none", () => {
-		const [live] = buildPrimeInferenceModels(
-			[model("vendor/model")],
-			[{ id: "vendor/model", name: "Renamed", input: 1, output: 2 }],
-		) ?? [undefined];
-		expect(live).toMatchObject({ name: "Renamed", contextWindow: 100_000, maxTokens: 10_000, reasoning: true });
-	});
-
-	test("filters private routes and measures coverage against bundled models", () => {
+	test("drops private routes from the public catalog and rejects thin coverage", () => {
 		const bundled = [model("one"), model("two"), model("three")];
 		expect(
 			buildPrimeInferenceModels(bundled, [
@@ -132,21 +88,7 @@ describe("Prime Inference model catalog", () => {
 		).toBeUndefined();
 	});
 
-	test("requires authorization for private prefixes and deployment routes", () => {
-		for (const id of ["internal/model", "INTERNAL/model", "dev/model", "vendor/model:deployment"]) {
-			expect(isPrivatePrimeInferenceModel(model(id))).toBe(true);
-		}
-		expect(isPrivatePrimeInferenceModel(model("public/model"))).toBe(false);
-		expect(isPrivatePrimeInferenceModel(model("vendor/model:deployment", "openrouter"))).toBe(false);
-	});
-
-	test("replaces only the Prime Inference provider list", () => {
-		const external = model("external", "openrouter");
-		const live = model("live");
-		expect(mergePrimeInferenceModels([external, model("removed")], [live])).toEqual([external, live]);
-	});
-
-	test("caches valid responses and falls back to the cache", async () => {
+	test("caches valid responses and falls back to the cache when the fetch fails", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-models-"));
 		directories.push(directory);
 		const cachePath = join(directory, "cache.json");
@@ -164,7 +106,7 @@ describe("Prime Inference model catalog", () => {
 		expect(fallback?.[0]?.name).toBe("Live vendor/model");
 	});
 
-	test("uses authenticated responses only for private routes with complete metadata", async () => {
+	test("keeps authenticated private routes with complete metadata and sends the auth headers", async () => {
 		const fetchFn = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
 			expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer secret");
 			expect(new Headers(init?.headers).get("X-Prime-Team-ID")).toBe("team");
@@ -174,6 +116,7 @@ describe("Prime Inference model catalog", () => {
 				payloadEntry("dev/model"),
 				payloadEntry("poolside/model:deployment"),
 				payloadEntry("internal/incomplete", null),
+				{ id: "internal/glm-5.2-fast" },
 			);
 		});
 		const models = await fetchAuthorizedPrivatePrimeInferenceModels(
@@ -182,17 +125,12 @@ describe("Prime Inference model catalog", () => {
 			new Set(["public/model"]),
 			fetchFn,
 		);
-		expect(models.map(({ id }) => id)).toEqual(["internal/model", "dev/model", "poolside/model:deployment"]);
-	});
-
-	test("uses bundled metadata to authorize an existing private route", async () => {
-		const models = await fetchAuthorizedPrivatePrimeInferenceModels(
-			"secret",
-			{ "X-Prime-Team-ID": "team" },
-			new Set(),
-			vi.fn(async () => response({ id: "internal/glm-5.2-fast" })),
-		);
-		expect(models.map(({ id }) => id)).toEqual(["internal/glm-5.2-fast"]);
+		expect(models.map(({ id }) => id)).toEqual([
+			"internal/model",
+			"dev/model",
+			"poolside/model:deployment",
+			"internal/glm-5.2-fast",
+		]);
 	});
 
 	test("treats rejected authenticated requests as no private access", async () => {

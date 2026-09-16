@@ -20,7 +20,7 @@ const signatureScript = join(repository, "packages/coding-agent/scripts/macos-si
 const assemblyScript = join(repository, "scripts/assemble-release-archives.mjs");
 const platform = `${process.platform}-${process.arch}`;
 let root: string;
-let fixture: string;
+let fixture: string | undefined;
 
 function signature(command: string, binary: string, target = platform) {
 	return spawnSync(process.execPath, [signatureScript, command, binary, target], { encoding: "utf8" });
@@ -45,12 +45,16 @@ function entitlements(binary: string): string {
 
 beforeAll(() => {
 	root = mkdtempSync(join(tmpdir(), "prime-release-signatures-"));
-	if (process.platform === "darwin") {
-		fixture = join(root, "native-fixture");
-		const source = join(root, "fixture.c");
-		writeFileSync(
-			source,
-			`#include <stdio.h>
+});
+
+function signedFixture(): string {
+	if (fixture) return fixture;
+	if (process.platform !== "darwin") throw new Error("signed fixture is only available on macOS");
+	fixture = join(root, "native-fixture");
+	const source = join(root, "fixture.c");
+	writeFileSync(
+		source,
+		`#include <stdio.h>
 #include <string.h>
 const char payload[32768] = "signature-page-fixture";
 int main(int argc, char **argv) {
@@ -59,11 +63,11 @@ int main(int argc, char **argv) {
   return payload[0] == 0;
 }
 `,
-		);
-		execFileSync("/usr/bin/cc", [source, "-o", fixture]);
-		execFileSync("/usr/bin/codesign", ["--force", "--sign", "-", fixture], { stdio: "pipe" });
-	}
-});
+	);
+	execFileSync("/usr/bin/cc", [source, "-o", fixture]);
+	execFileSync("/usr/bin/codesign", ["--force", "--sign", "-", fixture], { stdio: "pipe" });
+	return fixture;
+}
 
 afterAll(() => {
 	if (root) rmSync(root, { recursive: true, force: true });
@@ -103,7 +107,7 @@ describe("release signature command", () => {
 		"rejects unsigned and damaged signatures, then repairs signed page hashes",
 		() => {
 			const binary = join(root, "damaged-fixture");
-			copyFileSync(fixture, binary);
+			copyFileSync(signedFixture(), binary);
 			expect(signature("verify", binary).status).toBe(0);
 			const bytes = readFileSync(binary);
 			bytes[4096] ^= 1;
@@ -123,7 +127,7 @@ describe("release signature command", () => {
 		"retains JIT entitlements and the hardened runtime flag during replacement",
 		() => {
 			const binary = join(root, "jit-fixture");
-			copyFileSync(fixture, binary);
+			copyFileSync(signedFixture(), binary);
 			const plist = join(root, "entitlements.plist");
 			writeFileSync(
 				plist,
@@ -154,7 +158,7 @@ describe("release signature command", () => {
 		"does not grant entitlements or hardened runtime to a plain ad-hoc binary",
 		() => {
 			const binary = join(root, "plain-fixture");
-			copyFileSync(fixture, binary);
+			copyFileSync(signedFixture(), binary);
 			const originalEntitlements = entitlements(binary);
 			expect(originalEntitlements).not.toContain("com.apple.security");
 			expect(codesignDetails(binary)).not.toMatch(/flags=.*\bruntime\b/);
@@ -260,14 +264,14 @@ describe.skipIf(process.platform !== "darwin")("final native macOS validation", 
 	}
 
 	it("writes a receipt only after exact packaged executable verification and runtime checks", () => {
-		const { result, receipt, artifacts } = validate(readFileSync(fixture), "valid-final");
+		const { result, receipt, artifacts } = validate(readFileSync(signedFixture()), "valid-final");
 		expect(result.status, result.stderr).toBe(0);
 		const evidence = JSON.parse(readFileSync(receipt, "utf8"));
 		expect(evidence).toMatchObject({
 			schemaVersion: 1,
 			platform,
 			version: "v1.2.3",
-			executableSha256: sha256(fixture),
+			executableSha256: sha256(signedFixture()),
 		});
 		expect(evidence.signature).toContain("Signature=adhoc");
 		expect(evidence.manifestSha256).toBe(sha256(join(artifacts, "binaries.json")));
@@ -275,7 +279,7 @@ describe.skipIf(process.platform !== "darwin")("final native macOS validation", 
 	});
 
 	it("rejects invalid signed pages even with matching archive and executable digests", () => {
-		const bytes = readFileSync(fixture);
+		const bytes = readFileSync(signedFixture());
 		bytes[4096] ^= 1;
 		const { result, receipt } = validate(bytes, "tampered-final");
 		expect(result.status).not.toBe(0);
@@ -284,7 +288,7 @@ describe.skipIf(process.platform !== "darwin")("final native macOS validation", 
 	});
 
 	it("does not attest an executable different from the tested standalone build", () => {
-		const { result, receipt } = validate(readFileSync(fixture), "wrong-reference", true);
+		const { result, receipt } = validate(readFileSync(signedFixture()), "wrong-reference", true);
 		expect(result.status).not.toBe(0);
 		expect(result.stderr).toContain("identity differs");
 		expect(existsSync(receipt)).toBe(false);

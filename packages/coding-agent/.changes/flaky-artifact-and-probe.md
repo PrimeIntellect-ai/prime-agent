@@ -1,0 +1,1 @@
+- Added `PRIME_AGENT_PROBE_TIMEOUT_SECONDS` so an install can shorten the executable probe deadline that otherwise defaults to ten seconds.

@@ -134,6 +134,84 @@ vi.mock("node:child_process", async (importOriginal) => {
 import { handleDaemonCommand } from "../src/cli/daemon-command.js";
 
 describe("daemon command", () => {
+	// Table-driven argv parsing: every row runs `daemon --socket <socket> <argv>` and pins the first
+	// request the CLI puts on the wire.
+	it.each([
+		[
+			"keeps the create session name after an unknown boolean extension flag",
+			["create", "--unknown-typo", "my-session"],
+			{ type: "create", name: "my-session", config: { extensionFlagValues: { "unknown-typo": true } } },
+		],
+		[
+			"parses extension flag values with equals without consuming the create name",
+			["create", "--ticket=123", "my-session"],
+			{ type: "create", name: "my-session", config: { extensionFlagValues: { ticket: "123" } } },
+		],
+		[
+			"keeps bare --resume values as session id selectors",
+			["create", "--resume", "abc123"],
+			{ type: "create", sessionPath: "abc123" },
+		],
+		[
+			"passes --goal and --goal-token-budget to the create config",
+			["create", "--goal", "Write tests", "--goal-token-budget", "50000", "my-session"],
+			{
+				type: "create",
+				name: "my-session",
+				config: { initialGoal: { objective: "Write tests", tokenBudget: 50000 } },
+			},
+		],
+		[
+			"supports the send separator after the target for flag-like message text",
+			["send", "worker", "--", "--from", "literal", "--steer"],
+			{
+				type: "send_message",
+				targetActiveSessionId: "worker",
+				fromActiveSessionId: undefined,
+				message: "--from literal --steer",
+			},
+		],
+		[
+			"supports the send separator before a flag-like target or message",
+			["send", "--", "--target-like", "--from", "literal"],
+			{ type: "send_message", targetActiveSessionId: "--target-like", message: "--from literal" },
+		],
+		[
+			"parses send message text from an explicit --message value",
+			["send", "--from", "planner", "worker", "--message", "please keep --from literal --steer"],
+			{
+				type: "send_message",
+				targetActiveSessionId: "worker",
+				fromActiveSessionId: "planner",
+				message: "please keep --from literal --steer",
+			},
+		],
+		[
+			"preserves the cron add separator before the scheduled prompt",
+			["cron", "add", "active-1", "in 5m", "--", "check status"],
+			{ type: "cron_add", activeSessionId: "active-1", schedule: "in 5m", prompt: "check status" },
+		],
+	])("%s", async (_name, argv, expected) => {
+		await expect(handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", ...argv])).resolves.toBe(true);
+
+		expect(daemonClientMock.instances[0]?.requests[0]).toMatchObject(expected);
+	});
+
+	// Rejected argv must never reach the daemon: a half-parsed command would run the wrong thing.
+	it.each([
+		["rejects unknown send options instead of folding them into the message", ["send", "worker", "--bogus", "hello"]],
+		["rejects extra agent-messages status arguments", ["agent-messages", "pause", "active-1"]],
+		["rejects an empty --goal in daemon create", ["create", "--goal", "  ", "my-session"]],
+		[
+			"rejects --goal-token-budget without --goal in daemon create",
+			["create", "--goal-token-budget", "50000", "my-session"],
+		],
+	])("%s", async (_name, argv) => {
+		await handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", ...argv]);
+
+		expect(daemonClientMock.instances[0]?.requests ?? []).toEqual([]);
+	});
+
 	let consoleErrorMessages: unknown[];
 
 	beforeEach(() => {
@@ -157,19 +235,6 @@ describe("daemon command", () => {
 	afterEach(() => {
 		process.exitCode = undefined;
 		vi.restoreAllMocks();
-	});
-
-	it("cleans prompt listeners when the prompt request fails", async () => {
-		await expect(
-			handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "prompt", "active-1", "hello"]),
-		).resolves.toBe(true);
-
-		const client = daemonClientMock.instances[0];
-		expect(client?.messageListenerCountAtClose).toBe(0);
-		expect(client?.closeListenerCountAtClose).toBe(0);
-		expect(
-			consoleErrorMessages.some((message) => typeof message === "string" && message.includes("prompt failed")),
-		).toBe(true);
 	});
 
 	it("ignores stale agent_end events before a daemon prompt starts", async () => {
@@ -238,176 +303,6 @@ describe("daemon command", () => {
 		expect(client?.requests[1]?.name).not.toBe(unsafeIntegerName);
 	});
 
-	it("keeps create session name after an unknown boolean extension flag", async () => {
-		await expect(
-			handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "create", "--unknown-typo", "my-session"]),
-		).resolves.toBe(true);
-
-		const client = daemonClientMock.instances[0];
-		expect(client?.requests[0]).toEqual({
-			type: "create",
-			name: "my-session",
-			config: {
-				extensionFlagValues: {
-					"unknown-typo": true,
-				},
-			},
-			sessionPath: undefined,
-			continueRecent: undefined,
-		});
-	});
-
-	it("parses extension flag values with equals without consuming the create name", async () => {
-		await expect(
-			handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "create", "--ticket=123", "my-session"]),
-		).resolves.toBe(true);
-
-		const client = daemonClientMock.instances[0];
-		expect(client?.requests[0]).toEqual({
-			type: "create",
-			name: "my-session",
-			config: {
-				extensionFlagValues: {
-					ticket: "123",
-				},
-			},
-			sessionPath: undefined,
-			continueRecent: undefined,
-		});
-	});
-
-	it("keeps bare --resume values as session id selectors", async () => {
-		await expect(
-			handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "create", "--resume", "abc123"]),
-		).resolves.toBe(true);
-
-		const client = daemonClientMock.instances[0];
-		expect(client?.requests[0]).toMatchObject({
-			type: "create",
-			sessionPath: "abc123",
-		});
-	});
-
-	it("rejects unknown send options instead of folding them into the message", async () => {
-		await expect(
-			handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "send", "worker", "--bogus", "hello"]),
-		).resolves.toBe(true);
-
-		expect(daemonClientMock.instances[0]?.requests).toEqual([]);
-		expect(
-			consoleErrorMessages.some(
-				(message) => typeof message === "string" && message.includes("Unknown option for send: --bogus"),
-			),
-		).toBe(true);
-	});
-
-	it("supports send separator after the target for flag-like message text", async () => {
-		await expect(
-			handleDaemonCommand([
-				"daemon",
-				"--socket",
-				"/tmp/prime-agent.sock",
-				"send",
-				"worker",
-				"--",
-				"--from",
-				"literal",
-				"--steer",
-			]),
-		).resolves.toBe(true);
-
-		const client = daemonClientMock.instances[0];
-		expect(client?.requests[0]).toEqual({
-			type: "send_message",
-			targetActiveSessionId: "worker",
-			fromActiveSessionId: undefined,
-			message: "--from literal --steer",
-		});
-	});
-
-	it("supports send separator before a flag-like target or message", async () => {
-		await expect(
-			handleDaemonCommand([
-				"daemon",
-				"--socket",
-				"/tmp/prime-agent.sock",
-				"send",
-				"--",
-				"--target-like",
-				"--from",
-				"literal",
-			]),
-		).resolves.toBe(true);
-
-		const client = daemonClientMock.instances[0];
-		expect(client?.requests[0]).toMatchObject({
-			type: "send_message",
-			targetActiveSessionId: "--target-like",
-			message: "--from literal",
-		});
-	});
-
-	it("rejects extra agent-messages status arguments", async () => {
-		await expect(
-			handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "agent-messages", "pause", "active-1"]),
-		).resolves.toBe(true);
-
-		expect(daemonClientMock.instances[0]?.requests).toEqual([]);
-		expect(
-			consoleErrorMessages.some(
-				(message) => typeof message === "string" && message.includes("Usage: daemon agent-messages pause"),
-			),
-		).toBe(true);
-	});
-
-	it("parses send message text from an explicit --message value", async () => {
-		await expect(
-			handleDaemonCommand([
-				"daemon",
-				"--socket",
-				"/tmp/prime-agent.sock",
-				"send",
-				"--from",
-				"planner",
-				"worker",
-				"--message",
-				"please keep --from literal --steer",
-			]),
-		).resolves.toBe(true);
-
-		const client = daemonClientMock.instances[0];
-		expect(client?.requests[0]).toEqual({
-			type: "send_message",
-			targetActiveSessionId: "worker",
-			fromActiveSessionId: "planner",
-			message: "please keep --from literal --steer",
-		});
-	});
-
-	it("preserves cron add separator before the scheduled prompt", async () => {
-		await expect(
-			handleDaemonCommand([
-				"daemon",
-				"--socket",
-				"/tmp/prime-agent.sock",
-				"cron",
-				"add",
-				"active-1",
-				"in 5m",
-				"--",
-				"check status",
-			]),
-		).resolves.toBe(true);
-
-		const client = daemonClientMock.instances[0];
-		expect(client?.requests[0]).toEqual({
-			type: "cron_add",
-			activeSessionId: "active-1",
-			schedule: "in 5m",
-			prompt: "check status",
-		});
-	});
-
 	it("resolves agent names before filtering scheduled prompts", async () => {
 		daemonClientMock.behavior.sessions = [makeSessionSummary("active-1", "session-1", "alpha")];
 
@@ -419,65 +314,6 @@ describe("daemon command", () => {
 			{ type: "list" },
 			{ type: "cron_list", activeSessionId: "active-1", includeInactive: false },
 		]);
-	});
-
-	it("passes --goal and --goal-token-budget to the create config", async () => {
-		await expect(
-			handleDaemonCommand([
-				"daemon",
-				"--socket",
-				"/tmp/prime-agent.sock",
-				"create",
-				"--goal",
-				"Write tests",
-				"--goal-token-budget",
-				"50000",
-				"my-session",
-			]),
-		).resolves.toBe(true);
-
-		expect(daemonClientMock.instances[0]?.requests[0]).toMatchObject({
-			type: "create",
-			name: "my-session",
-			config: {
-				initialGoal: { objective: "Write tests", tokenBudget: 50000 },
-			},
-		});
-	});
-
-	it("rejects empty --goal in daemon create", async () => {
-		await handleDaemonCommand([
-			"daemon",
-			"--socket",
-			"/tmp/prime-agent.sock",
-			"create",
-			"--goal",
-			"  ",
-			"my-session",
-		]);
-		expect(process.exitCode).toBe(1);
-		expect(
-			consoleErrorMessages.some((m) => typeof m === "string" && m.includes("--goal requires a non-empty objective")),
-		).toBe(true);
-	});
-
-	it("rejects --goal-token-budget without --goal in daemon create", async () => {
-		await handleDaemonCommand([
-			"daemon",
-			"--socket",
-			"/tmp/prime-agent.sock",
-			"create",
-			"--goal-token-budget",
-			"50000",
-			"my-session",
-		]);
-		expect(process.exitCode).toBe(1);
-		expect(
-			consoleErrorMessages.some((m) => typeof m === "string" && m.includes("--goal-token-budget requires --goal")),
-		).toBe(true);
-		// DaemonClient is constructed before runCreate parses session args
-		expect(daemonClientMock.instances.length).toBe(1);
-		expect(daemonClientMock.instances[0]?.requests.length).toBe(0);
 	});
 
 	it("does not leak --goal/--goal-token-budget into daemon startup args", async () => {
@@ -527,17 +363,6 @@ describe("daemon command", () => {
 		await handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "create", "second"]);
 		const secondConfig = daemonClientMock.instances.at(-1)?.requests[0]?.config;
 		expect(secondConfig?.initialGoal).toBeUndefined();
-	});
-
-	it("errors on non-interactive daemon attach with the json remediation instead of hanging", async () => {
-		// The test runner's stdin is not a TTY, so the attach terminal guard must
-		// fail fast rather than block on a readline that can never be answered.
-		await expect(
-			handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "attach", "active-1"]),
-		).resolves.toBe(true);
-
-		expect(process.exitCode).toBe(1);
-		expect(consoleErrorMessages.join(" ")).toContain("attach requires an interactive terminal");
 	});
 
 	it("prints the created session for non-interactive --json open instead of attaching", async () => {

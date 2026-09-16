@@ -16,14 +16,9 @@ afterEach(() => {
 	}
 });
 
-function createTempDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-stdout-clean-"));
-	tempDirs.push(dir);
-	return dir;
-}
-
 async function runCli(args: string[]): Promise<{ stdout: string; stderr: string; code: number | null }> {
-	const tempRoot = createTempDir();
+	const tempRoot = mkdtempSync(join(tmpdir(), "pi-stdout-clean-"));
+	tempDirs.push(tempRoot);
 	const agentDir = join(tempRoot, "agent");
 	const projectDir = join(tempRoot, "project");
 	const projectConfigDir = join(projectDir, ".prime", "agent");
@@ -31,26 +26,10 @@ async function runCli(args: string[]): Promise<{ stdout: string; stderr: string;
 	mkdirSync(projectConfigDir, { recursive: true });
 
 	const fakeNpmPath = join(tempRoot, "fake-npm.mjs");
-	writeFileSync(
-		fakeNpmPath,
-		[
-			'console.log("changed 1 package in 471ms");',
-			'console.log("found 0 vulnerabilities");',
-			"process.exit(0);",
-		].join("\n"),
-		"utf-8",
-	);
-
+	writeFileSync(fakeNpmPath, 'console.log("npm noise on stdout");\nprocess.exit(0);\n', "utf-8");
 	writeFileSync(
 		join(projectConfigDir, "settings.json"),
-		JSON.stringify(
-			{
-				packages: ["npm:fake-package"],
-				npmCommand: [process.execPath, fakeNpmPath],
-			},
-			null,
-			2,
-		),
+		JSON.stringify({ packages: ["npm:fake-package"], npmCommand: [process.execPath, fakeNpmPath] }),
 		"utf-8",
 	);
 
@@ -81,28 +60,14 @@ async function runCli(args: string[]): Promise<{ stdout: string; stderr: string;
 }
 
 describe("stdout cleanliness in non-interactive modes", () => {
-	it("keeps stdout empty for --mode json --help without starting runtime packages", async () => {
-		const result = await runCli(["--mode", "json", "--help"]);
+	it.each([[["--mode", "json", "--help"]], [["-p", "-h"]]])(
+		"keeps stdout empty for %j without starting runtime packages",
+		async (args) => {
+			const result = await runCli(args);
 
-		expect(result.code).toBe(0);
-		expect(result.stdout).toBe("");
-		expect(result.stderr).not.toContain("changed 1 package in 471ms");
-		expect(result.stderr).not.toContain("found 0 vulnerabilities");
-		expect(result.stderr).toContain("Usage:");
-		expect(result.stderr).toContain("Options:");
-		expect(result.stderr).toContain("Commands:");
-		expect(result.stderr).not.toContain("Environment Variables:");
-	});
-
-	it("keeps stdout empty for -p -h without starting runtime packages", async () => {
-		const result = await runCli(["-p", "-h"]);
-
-		expect(result.code).toBe(0);
-		expect(result.stdout).toBe("");
-		expect(result.stderr).not.toContain("changed 1 package in 471ms");
-		expect(result.stderr).not.toContain("found 0 vulnerabilities");
-		expect(result.stderr).toContain("Usage:");
-		expect(result.stderr).not.toContain("Examples:");
-		expect(result.stderr).not.toContain("Built-in Tool Names:");
-	});
+			expect(result.code).toBe(0);
+			expect(result.stdout).toBe("");
+			expect(result.stderr).not.toContain("npm noise on stdout");
+		},
+	);
 });

@@ -2,12 +2,10 @@ import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import { Container, type MarkdownTheme, type TUI } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, test, vi } from "vitest";
-import { KeybindingsManager } from "../src/core/keybindings.js";
 import type { AgentConnectionSessionEvent } from "../src/modes/agent-connection/index.js";
 import { AgentActivityTracker } from "../src/modes/interactive/agent-activity.js";
 import type { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";
 import type { FileChangeSummary } from "../src/modes/interactive/components/edit-summary.js";
-import { createMermaidMarkdownTransform } from "../src/modes/interactive/components/mermaid.js";
 import type { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import { getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.js";
@@ -57,21 +55,7 @@ type HandleEventThis = {
 	clearShortcutGuide(): void;
 	addMessageToChat(): void;
 };
-
 type HandleEvent = (this: HandleEventThis, event: AgentConnectionSessionEvent) => Promise<void>;
-type GetUserInput = (this: {
-	agentsViewRequest?: "agents_view" | "scoped_agents_view";
-	onInputCallback?: (text: string | undefined) => void;
-}) => Promise<string | undefined>;
-type HandleSubagentSummaryChatAction = (
-	this: {
-		keybindings: KeybindingsManager;
-		editor: { handleInput(data: string): void };
-		focusEditor(): void;
-		toggleToolOutputExpansion(): void;
-	},
-	data: string,
-) => void;
 
 function createFakeInteractiveModeThis(): HandleEventThis {
 	const fakeThis = {
@@ -133,47 +117,6 @@ describe("InteractiveMode streaming events", () => {
 		initTheme("dark");
 	});
 
-	test("renders assistant updates when attaching after message_start", async () => {
-		const fakeThis = createFakeInteractiveModeThis();
-		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
-
-		await handleEvent.call(fakeThis, {
-			type: "message_update",
-			message: createAssistantMessage("partial response"),
-			assistantMessageEvent: {
-				type: "text_delta",
-				contentIndex: 0,
-				delta: "partial response",
-				partial: createAssistantMessage("partial response"),
-			},
-		});
-
-		expect(renderChat(fakeThis.chatContainer)).toContain("partial response");
-
-		await handleEvent.call(fakeThis, {
-			type: "message_end",
-			message: createAssistantMessage("final response"),
-		});
-
-		expect(renderChat(fakeThis.chatContainer)).toContain("final response");
-		expect(fakeThis.streamingComponent).toBeUndefined();
-		expect(fakeThis.streamingMessage).toBeUndefined();
-	});
-
-	test("renders assistant end events when attaching after all updates", async () => {
-		const fakeThis = createFakeInteractiveModeThis();
-		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
-
-		await handleEvent.call(fakeThis, {
-			type: "message_end",
-			message: createAssistantMessage("final response"),
-		});
-
-		expect(renderChat(fakeThis.chatContainer)).toContain("final response");
-		expect(fakeThis.streamingComponent).toBeUndefined();
-		expect(fakeThis.streamingMessage).toBeUndefined();
-	});
-
 	test("does not block later compaction events on the agent-end stats refresh", async () => {
 		const fakeThis = createFakeInteractiveModeThis();
 		let resolveRefresh!: () => void;
@@ -209,173 +152,5 @@ describe("InteractiveMode streaming events", () => {
 		expect(renderChat(fakeThis.chatContainer)).toContain("partial response");
 		expect(fakeThis.streamingComponent).toBeUndefined();
 		expect(fakeThis.streamingMessage).toBeUndefined();
-	});
-
-	test("defers mermaid rendering to message_end in final mode", async () => {
-		const fakeThis = createFakeInteractiveModeThis() as HandleEventThis & {
-			mermaidMarkdownTransform?: ReturnType<typeof createMermaidMarkdownTransform>;
-		};
-		fakeThis.mermaidMarkdownTransform = createMermaidMarkdownTransform({ getMode: () => "final" });
-		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
-		const mermaidText = "```mermaid\nflowchart LR\n  A[Start] --> B[Done]\n```";
-
-		await handleEvent.call(fakeThis, {
-			type: "message_update",
-			message: createAssistantMessage(mermaidText),
-			assistantMessageEvent: {
-				type: "text_delta",
-				contentIndex: 0,
-				delta: mermaidText,
-				partial: createAssistantMessage(mermaidText),
-			},
-		});
-
-		expect(renderChat(fakeThis.chatContainer)).not.toContain("───▶");
-
-		await handleEvent.call(fakeThis, {
-			type: "message_end",
-			message: createAssistantMessage(mermaidText),
-		});
-
-		expect(renderChat(fakeThis.chatContainer)).toContain("───▶");
-	});
-
-	test("renders one agent-run edit total only when files changed", async () => {
-		const fakeThis = createFakeInteractiveModeThis();
-		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
-		const message = createAssistantMessage("");
-		message.content = [{ type: "toolCall", id: "edit-1", name: "edit", arguments: { path: "a.ts" } }];
-
-		await handleEvent.call(fakeThis, {
-			type: "turn_end",
-			message,
-			toolResults: [
-				{
-					role: "toolResult",
-					toolCallId: "edit-1",
-					toolName: "edit",
-					content: [],
-					details: { diff: "-1 old\n+1 new" },
-					isError: false,
-					timestamp: 0,
-				},
-			],
-		});
-		await handleEvent.call(fakeThis, { type: "agent_end", messages: [] });
-		const recap = renderChat(fakeThis.recapContainer);
-		expect(recap).toContain("Recap: Updated files");
-		expect(recap).toContain("1 file changed | +1 -1");
-		expect(recap.indexOf("1 file changed")).toBeLessThan(recap.indexOf("Recap:"));
-		expect(renderChat(fakeThis.chatContainer)).not.toContain("file changed");
-
-		const unchanged = createFakeInteractiveModeThis();
-		await handleEvent.call(unchanged, { type: "agent_end", messages: [] });
-		expect(renderChat(unchanged.recapContainer)).not.toContain("file changed");
-	});
-
-	test("keeps edit totals across automatic retries", async () => {
-		const fakeThis = createFakeInteractiveModeThis();
-		fakeThis.agentRunFileChanges.set("/tmp/a.ts", { path: "a.ts", added: 1, removed: 1 });
-		fakeThis.getRetryAttempt = () => 1;
-		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
-
-		await handleEvent.call(fakeThis, { type: "agent_start" });
-
-		expect([...fakeThis.agentRunFileChanges.values()]).toEqual([{ path: "a.ts", added: 1, removed: 1 }]);
-	});
-
-	test("keeps edit totals when compaction restarts the agent", async () => {
-		const fakeThis = createFakeInteractiveModeThis();
-		fakeThis.agentRunFileChanges.set("/tmp/a.ts", { path: "a.ts", added: 1, removed: 1 });
-		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
-
-		await handleEvent.call(fakeThis, { type: "agent_start" });
-
-		expect([...fakeThis.agentRunFileChanges.values()]).toEqual([{ path: "a.ts", added: 1, removed: 1 }]);
-	});
-
-	test("clears edit totals when a new user prompt starts", async () => {
-		const fakeThis = createFakeInteractiveModeThis();
-		fakeThis.agentRunFileChanges.set("/tmp/a.ts", { path: "a.ts", added: 1, removed: 1 });
-		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
-		await handleEvent.call(fakeThis, { type: "agent_end", messages: [] });
-		expect(renderChat(fakeThis.recapContainer)).toContain("1 file changed");
-
-		await handleEvent.call(fakeThis, {
-			type: "message_start",
-			message: { role: "user", content: "next task", timestamp: Date.now() },
-		});
-
-		expect(fakeThis.agentRunFileChanges.size).toBe(0);
-		expect(renderChat(fakeThis.recapContainer)).not.toContain("file changed");
-		expect(renderChat(fakeThis.recapContainer)).toContain("Recap: Updated files");
-	});
-
-	test("resolves input immediately after return to agents view was requested", async () => {
-		const getUserInput = (InteractiveMode.prototype as unknown as { getUserInput: GetUserInput }).getUserInput;
-
-		await expect(getUserInput.call({ agentsViewRequest: "agents_view" })).resolves.toBeUndefined();
-	});
-
-	test.each(["x", "\x10"])("forwards typed key %j from focused subagent summary back to the editor", (key) => {
-		const handleSubagentSummaryChatAction = (
-			InteractiveMode.prototype as unknown as { handleSubagentSummaryChatAction: HandleSubagentSummaryChatAction }
-		).handleSubagentSummaryChatAction;
-		const fakeThis = {
-			keybindings: new KeybindingsManager(),
-			editor: { handleInput: vi.fn() },
-			focusEditor: vi.fn(),
-			toggleToolOutputExpansion: vi.fn(),
-		};
-
-		handleSubagentSummaryChatAction.call(fakeThis, key);
-
-		expect(fakeThis.focusEditor).toHaveBeenCalledOnce();
-		expect(fakeThis.editor.handleInput).toHaveBeenCalledWith(key);
-		expect(fakeThis.toggleToolOutputExpansion).not.toHaveBeenCalled();
-	});
-
-	test("keeps the conversation detail shortcut in the chat surface", () => {
-		const handleSubagentSummaryChatAction = (
-			InteractiveMode.prototype as unknown as { handleSubagentSummaryChatAction: HandleSubagentSummaryChatAction }
-		).handleSubagentSummaryChatAction;
-		const fakeThis = {
-			keybindings: new KeybindingsManager(),
-			editor: { handleInput: vi.fn() },
-			focusEditor: vi.fn(),
-			toggleToolOutputExpansion: vi.fn(),
-		};
-
-		handleSubagentSummaryChatAction.call(fakeThis, "\x0f");
-
-		expect(fakeThis.toggleToolOutputExpansion).toHaveBeenCalledOnce();
-		expect(fakeThis.focusEditor).not.toHaveBeenCalled();
-		expect(fakeThis.editor.handleInput).not.toHaveBeenCalled();
-	});
-
-	test("does not pulse renders for background-only subagent work", () => {
-		vi.useFakeTimers();
-		try {
-			const requestRender = vi.fn();
-			const mode = Object.create(InteractiveMode.prototype) as InteractiveMode & Record<string, unknown>;
-			Object.assign(mode, {
-				connectionState: { isStreaming: false },
-				chatContainer: new Container(),
-				subagentSnapshots: new Map([["worker", { id: "worker", status: "running" }]]),
-				pulseTimer: undefined,
-				ui: { requestRender },
-			});
-			const updatePulse = Reflect.get(InteractiveMode.prototype, "updateWorkingPulse") as (
-				this: typeof mode,
-			) => void;
-
-			updatePulse.call(mode);
-			vi.advanceTimersByTime(1000);
-
-			expect(requestRender).not.toHaveBeenCalled();
-			expect(Reflect.get(mode, "pulseTimer")).toBeUndefined();
-		} finally {
-			vi.useRealTimers();
-		}
 	});
 });

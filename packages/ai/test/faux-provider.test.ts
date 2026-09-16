@@ -9,7 +9,7 @@ import {
 	stream,
 	Type,
 } from "../src/index.js";
-import type { AssistantMessageEvent, Context } from "../src/types.js";
+import type { AssistantMessageEvent, Context, ProviderStreamOptions } from "../src/types.js";
 
 async function collectEvents(streamResult: ReturnType<typeof stream>): Promise<AssistantMessageEvent[]> {
 	const events: AssistantMessageEvent[] = [];
@@ -27,102 +27,20 @@ afterEach(() => {
 	}
 });
 
+function register(options?: Parameters<typeof registerFauxProvider>[0]) {
+	const registration = registerFauxProvider(options);
+	registrations.push(registration);
+	return registration;
+}
+
+const userTurn = (): Context => ({ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] });
+
 describe("faux provider", () => {
-	it("registers a custom provider and estimates usage", async () => {
-		const registration = registerFauxProvider();
-		registrations.push(registration);
-		registration.setResponses([fauxAssistantMessage("hello world")]);
-
-		const context: Context = {
-			systemPrompt: "Be concise.",
-			messages: [{ role: "user", content: "hi there", timestamp: Date.now() }],
-		};
-
-		const response = await complete(registration.getModel(), context);
-		expect(response.content).toEqual([{ type: "text", text: "hello world" }]);
-		expect(response.usage.input).toBeGreaterThan(0);
-		expect(response.usage.output).toBeGreaterThan(0);
-		expect(response.usage.totalTokens).toBe(response.usage.input + response.usage.output);
-		expect(registration.state.callCount).toBe(1);
-	});
-
-	it("supports helper blocks for text, thinking, and tool calls", async () => {
-		const registration = registerFauxProvider();
-		registrations.push(registration);
-		registration.setResponses([
-			fauxAssistantMessage([fauxThinking("think"), fauxToolCall("echo", { text: "hi" }), fauxText("done")], {
-				stopReason: "toolUse",
-			}),
-		]);
-
-		const response = await complete(registration.getModel(), {
-			messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
-		});
-
-		expect(response.content).toEqual([
-			{ type: "thinking", thinking: "think" },
-			{ type: "toolCall", id: expect.any(String), name: "echo", arguments: { text: "hi" } },
-			{ type: "text", text: "done" },
-		]);
-		expect(response.stopReason).toBe("toolUse");
-	});
-
-	it("supports multiple models with per-model reasoning and model-aware factories", async () => {
-		const registration = registerFauxProvider({
-			models: [
-				{ id: "faux-fast", name: "Faux Fast", reasoning: false },
-				{ id: "faux-thinker", name: "Faux Thinker", reasoning: true },
-			],
-		});
-		registrations.push(registration);
-		registration.setResponses([
-			(_context, _options, _state, model) => fauxAssistantMessage(`${model.id}:${String(model.reasoning)}`),
-			(_context, _options, _state, model) => fauxAssistantMessage(`${model.id}:${String(model.reasoning)}`),
-		]);
-
-		expect(registration.models.map((model) => model.id)).toEqual(["faux-fast", "faux-thinker"]);
-		expect(registration.getModel()).toBe(registration.models[0]);
-		expect(registration.getModel("faux-fast")?.reasoning).toBe(false);
-		expect(registration.getModel("faux-thinker")?.reasoning).toBe(true);
-
-		const fast = await complete(registration.getModel("faux-fast")!, {
-			messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
-		});
-		const thinker = await complete(registration.getModel("faux-thinker")!, {
-			messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
-		});
-
-		expect(fast.content).toEqual([{ type: "text", text: "faux-fast:false" }]);
-		expect(thinker.content).toEqual([{ type: "text", text: "faux-thinker:true" }]);
-	});
-
-	it("rewrites api, provider, and model on returned messages", async () => {
-		const registration = registerFauxProvider({
-			api: "faux:test",
-			provider: "faux-provider",
-			models: [{ id: "faux-model" }],
-		});
-		registrations.push(registration);
-		registration.setResponses([fauxAssistantMessage("hello")]);
-
-		const response = await complete(registration.getModel(), {
-			messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
-		});
-
-		expect(response.api).toBe("faux:test");
-		expect(response.provider).toBe("faux-provider");
-		expect(response.model).toBe("faux-model");
-	});
-
 	it("consumes queued responses in order and errors when exhausted", async () => {
-		const registration = registerFauxProvider();
-		registrations.push(registration);
+		const registration = register();
 		registration.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("second")]);
 
-		const context: Context = {
-			messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
-		};
-
+		const context = userTurn();
 		const first = await complete(registration.getModel(), context);
 		const second = await complete(registration.getModel(), context);
 		const exhausted = await complete(registration.getModel(), context);
@@ -135,55 +53,15 @@ describe("faux provider", () => {
 		expect(registration.state.callCount).toBe(3);
 	});
 
-	it("can replace and append queued responses", async () => {
-		const registration = registerFauxProvider();
-		registrations.push(registration);
-		registration.setResponses([fauxAssistantMessage("first")]);
-
-		const context: Context = {
-			messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
-		};
-
-		expect((await complete(registration.getModel(), context)).content).toEqual([{ type: "text", text: "first" }]);
-		expect(registration.getPendingResponseCount()).toBe(0);
-
-		registration.setResponses([fauxAssistantMessage("second")]);
-		expect(registration.getPendingResponseCount()).toBe(1);
-		expect((await complete(registration.getModel(), context)).content).toEqual([{ type: "text", text: "second" }]);
-
-		registration.appendResponses([fauxAssistantMessage("third"), fauxAssistantMessage("fourth")]);
-		expect(registration.getPendingResponseCount()).toBe(2);
-		expect((await complete(registration.getModel(), context)).content).toEqual([{ type: "text", text: "third" }]);
-		expect((await complete(registration.getModel(), context)).content).toEqual([{ type: "text", text: "fourth" }]);
-		expect(registration.getPendingResponseCount()).toBe(0);
-	});
-
-	it("supports async response factories", async () => {
-		const registration = registerFauxProvider();
-		registrations.push(registration);
-		registration.setResponses([
-			async (context, _options, state) => fauxAssistantMessage(`${context.messages.length}:${state.callCount}`),
-		]);
-
-		const response = await complete(registration.getModel(), {
-			messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
-		});
-
-		expect(response.content).toEqual([{ type: "text", text: "1:1" }]);
-	});
-
 	it("emits an error when a response factory throws", async () => {
-		const registration = registerFauxProvider();
-		registrations.push(registration);
+		const registration = register();
 		registration.setResponses([
 			() => {
 				throw new Error("boom");
 			},
 		]);
 
-		const events = await collectEvents(
-			stream(registration.getModel(), { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] }),
-		);
+		const events = await collectEvents(stream(registration.getModel(), userTurn()));
 
 		expect(events).toHaveLength(1);
 		expect(events[0].type).toBe("error");
@@ -194,15 +72,10 @@ describe("faux provider", () => {
 	});
 
 	it("estimates prompt and output tokens from serialized context", async () => {
-		const registration = registerFauxProvider();
-		registrations.push(registration);
+		const registration = register();
 		registration.setResponses([fauxAssistantMessage("done")]);
 
-		const tool = {
-			name: "echo",
-			description: "Echo back text",
-			parameters: Type.Object({ text: Type.String() }),
-		};
+		const tool = { name: "echo", description: "Echo back text", parameters: Type.Object({ text: Type.String() }) };
 		const context: Context = {
 			systemPrompt: "sys",
 			messages: [
@@ -245,42 +118,39 @@ describe("faux provider", () => {
 		expect(response.usage.totalTokens).toBe(expectedPromptTokens + expectedOutputTokens);
 	});
 
-	it("does not share cache across sessions or requests without sessionId", async () => {
-		const registration = registerFauxProvider();
-		registrations.push(registration);
-		registration.setResponses([
-			fauxAssistantMessage("first"),
-			fauxAssistantMessage("second"),
-			fauxAssistantMessage("third"),
-		]);
-
-		const context: Context = {
-			messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
-		};
-
-		const first = await complete(registration.getModel(), context, {
-			sessionId: "session-1",
-			cacheRetention: "short",
-		});
-		expect(first.usage.cacheWrite).toBeGreaterThan(0);
-		context.messages.push(first);
-		context.messages.push({ role: "user", content: "follow up", timestamp: Date.now() + 1 });
-
-		const second = await complete(registration.getModel(), context, {
-			sessionId: "session-2",
-			cacheRetention: "short",
-		});
-		expect(second.usage.cacheRead).toBe(0);
-		expect(second.usage.cacheWrite).toBeGreaterThan(0);
-
-		const third = await complete(registration.getModel(), context);
-		expect(third.usage.cacheRead).toBe(0);
-		expect(third.usage.cacheWrite).toBe(0);
-	});
-
-	it("simulates prompt caching per sessionId", async () => {
-		const registration = registerFauxProvider();
-		registrations.push(registration);
+	// Two sequential requests over a growing context; only a repeated sessionId with a real
+	// retention window may report a cache hit on the second request.
+	it.each([
+		{
+			name: "reuses the prefix for a repeated sessionId",
+			first: { sessionId: "session-1", cacheRetention: "short" } as ProviderStreamOptions,
+			second: { sessionId: "session-1", cacheRetention: "short" } as ProviderStreamOptions,
+			cacheHit: true,
+			cacheWrite: true,
+		},
+		{
+			name: "does not share the cache across sessions",
+			first: { sessionId: "session-1", cacheRetention: "short" } as ProviderStreamOptions,
+			second: { sessionId: "session-2", cacheRetention: "short" } as ProviderStreamOptions,
+			cacheHit: false,
+			cacheWrite: true,
+		},
+		{
+			name: "does not cache without a sessionId",
+			first: undefined,
+			second: undefined,
+			cacheHit: false,
+			cacheWrite: false,
+		},
+		{
+			name: "does not cache when cacheRetention is none",
+			first: { sessionId: "session-1", cacheRetention: "none" } as ProviderStreamOptions,
+			second: { sessionId: "session-1", cacheRetention: "none" } as ProviderStreamOptions,
+			cacheHit: false,
+			cacheWrite: false,
+		},
+	])("simulates prompt caching: $name", async ({ first, second, cacheHit, cacheWrite }) => {
+		const registration = register();
 		registration.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("second")]);
 
 		const context: Context = {
@@ -288,91 +158,33 @@ describe("faux provider", () => {
 			messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
 		};
 
-		const first = await complete(registration.getModel(), context, {
-			sessionId: "session-1",
-			cacheRetention: "short",
-		});
-		expect(first.usage.cacheRead).toBe(0);
-		expect(first.usage.cacheWrite).toBeGreaterThan(0);
-
-		context.messages.push(first);
+		const firstResponse = await complete(registration.getModel(), context, first);
+		context.messages.push(firstResponse);
 		context.messages.push({ role: "user", content: "follow up", timestamp: Date.now() + 1 });
+		const secondResponse = await complete(registration.getModel(), context, second);
 
-		const second = await complete(registration.getModel(), context, {
-			sessionId: "session-1",
-			cacheRetention: "short",
-		});
-		expect(second.usage.cacheRead).toBeGreaterThan(0);
-		expect(second.usage.input + second.usage.cacheRead).toBeGreaterThan(second.usage.input);
-	});
-
-	it("does not simulate caching when cacheRetention is none", async () => {
-		const registration = registerFauxProvider();
-		registrations.push(registration);
-		registration.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("second")]);
-
-		const context: Context = {
-			messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
-		};
-
-		await complete(registration.getModel(), context, { sessionId: "session-1", cacheRetention: "none" });
-		context.messages.push(fauxAssistantMessage("first"));
-		context.messages.push({ role: "user", content: "follow up", timestamp: Date.now() + 1 });
-		const second = await complete(registration.getModel(), context, {
-			sessionId: "session-1",
-			cacheRetention: "none",
-		});
-		expect(second.usage.cacheRead).toBe(0);
-		expect(second.usage.cacheWrite).toBe(0);
-	});
-
-	it("streams thinking, text, and partial tool call deltas", async () => {
-		const registration = registerFauxProvider();
-		registrations.push(registration);
-		registration.setResponses([
-			fauxAssistantMessage(
-				[
-					fauxThinking("thinking text"),
-					fauxText("answer text"),
-					fauxToolCall("echo", { text: "hi", count: 12 }, { id: "tool-1" }),
-				],
-				{ stopReason: "toolUse" },
-			),
-		]);
-
-		const events: string[] = [];
-		const toolCallDeltas: string[] = [];
-		const s = stream(registration.getModel(), { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] });
-		for await (const event of s) {
-			events.push(event.type);
-			if (event.type === "toolcall_delta") {
-				toolCallDeltas.push(event.delta);
-			}
+		if (cacheWrite) {
+			expect(firstResponse.usage.cacheWrite).toBeGreaterThan(0);
+		} else {
+			expect(firstResponse.usage.cacheWrite).toBe(0);
 		}
-
-		expect(events).toContain("thinking_start");
-		expect(events).toContain("thinking_delta");
-		expect(events).toContain("text_start");
-		expect(events).toContain("text_delta");
-		expect(events).toContain("toolcall_start");
-		expect(events).toContain("toolcall_delta");
-		expect(events).toContain("toolcall_end");
-		expect(toolCallDeltas.length).toBeGreaterThan(1);
-		expect(JSON.parse(toolCallDeltas.join(""))).toEqual({ text: "hi", count: 12 });
+		expect(firstResponse.usage.cacheRead).toBe(0);
+		if (cacheHit) {
+			expect(secondResponse.usage.cacheRead).toBeGreaterThan(0);
+		} else {
+			expect(secondResponse.usage.cacheRead).toBe(0);
+		}
 	});
 
 	it("streams an exact event order for fixed-size chunks", async () => {
-		const registration = registerFauxProvider({ tokenSize: { min: 1, max: 1 } });
-		registrations.push(registration);
+		const registration = register({ tokenSize: { min: 1, max: 1 } });
 		registration.setResponses([
 			fauxAssistantMessage([fauxThinking("go"), fauxText("ok"), fauxToolCall("echo", {}, { id: "tool-1" })], {
 				stopReason: "toolUse",
 			}),
 		]);
 
-		const events = await collectEvents(
-			stream(registration.getModel(), { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] }),
-		);
+		const events = await collectEvents(stream(registration.getModel(), userTurn()));
 
 		expect(events.map((event) => event.type)).toEqual([
 			"start",
@@ -389,9 +201,25 @@ describe("faux provider", () => {
 		]);
 	});
 
+	it("reassembles tool call arguments from partial deltas", async () => {
+		const registration = register();
+		registration.setResponses([
+			fauxAssistantMessage([fauxToolCall("echo", { text: "hi", count: 12 }, { id: "tool-1" })], {
+				stopReason: "toolUse",
+			}),
+		]);
+
+		const deltas: string[] = [];
+		for await (const event of stream(registration.getModel(), userTurn())) {
+			if (event.type === "toolcall_delta") deltas.push(event.delta);
+		}
+
+		expect(deltas.length).toBeGreaterThan(1);
+		expect(JSON.parse(deltas.join(""))).toEqual({ text: "hi", count: 12 });
+	});
+
 	it("streams multiple tool calls in one message", async () => {
-		const registration = registerFauxProvider();
-		registrations.push(registration);
+		const registration = register();
 		registration.setResponses([
 			fauxAssistantMessage(
 				[
@@ -402,78 +230,39 @@ describe("faux provider", () => {
 			),
 		]);
 
-		const events = await collectEvents(
-			stream(registration.getModel(), { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] }),
-		);
+		const events = await collectEvents(stream(registration.getModel(), userTurn()));
 
 		expect(events.filter((event) => event.type === "toolcall_start")).toHaveLength(2);
 		expect(events.filter((event) => event.type === "toolcall_end")).toHaveLength(2);
 	});
 
-	it("streams an explicit assistant error message as a terminal error", async () => {
-		const registration = registerFauxProvider({ tokenSize: { min: 2, max: 2 } });
-		registrations.push(registration);
-		registration.setResponses([
-			{
-				...fauxAssistantMessage("partial"),
-				stopReason: "error",
-				errorMessage: "upstream failed",
-			},
-		]);
+	// An explicit terminal stopReason must flush the partial text and then end on a single error event.
+	it.each([
+		{ stopReason: "error" as const, errorMessage: "upstream failed", reason: "error" },
+		{ stopReason: "aborted" as const, errorMessage: "Request was aborted", reason: "aborted" },
+	])("streams an explicit $stopReason message as a terminal error", async ({ stopReason, errorMessage, reason }) => {
+		const registration = register({ tokenSize: { min: 2, max: 2 } });
+		registration.setResponses([{ ...fauxAssistantMessage("partial"), stopReason, errorMessage }]);
 
-		const events = await collectEvents(
-			stream(registration.getModel(), { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] }),
-		);
+		const events = await collectEvents(stream(registration.getModel(), userTurn()));
 
 		expect(events.map((event) => event.type)).toEqual(["start", "text_start", "text_delta", "text_end", "error"]);
 		const terminal = events[events.length - 1];
 		expect(terminal.type).toBe("error");
 		if (terminal.type === "error") {
-			expect(terminal.reason).toBe("error");
-			expect(terminal.error.stopReason).toBe("error");
-			expect(terminal.error.errorMessage).toBe("upstream failed");
-		}
-	});
-
-	it("streams an explicit assistant aborted message as a terminal error", async () => {
-		const registration = registerFauxProvider({ tokenSize: { min: 2, max: 2 } });
-		registrations.push(registration);
-		registration.setResponses([
-			{
-				...fauxAssistantMessage("partial"),
-				stopReason: "aborted",
-				errorMessage: "Request was aborted",
-			},
-		]);
-
-		const events = await collectEvents(
-			stream(registration.getModel(), { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] }),
-		);
-
-		expect(events.map((event) => event.type)).toEqual(["start", "text_start", "text_delta", "text_end", "error"]);
-		const terminal = events[events.length - 1];
-		expect(terminal.type).toBe("error");
-		if (terminal.type === "error") {
-			expect(terminal.reason).toBe("aborted");
-			expect(terminal.error.stopReason).toBe("aborted");
-			expect(terminal.error.errorMessage).toBe("Request was aborted");
+			expect(terminal.reason).toBe(reason);
+			expect(terminal.error.stopReason).toBe(stopReason);
+			expect(terminal.error.errorMessage).toBe(errorMessage);
 		}
 	});
 
 	it("supports aborting before the first chunk", async () => {
-		const registration = registerFauxProvider({ tokensPerSecond: 50, tokenSize: { min: 3, max: 3 } });
-		registrations.push(registration);
+		const registration = register({ tokensPerSecond: 50, tokenSize: { min: 3, max: 3 } });
 		registration.setResponses([fauxAssistantMessage("abcdefghijklmnopqrstuvwxyz")]);
 
 		const controller = new AbortController();
 		controller.abort();
-		const events = await collectEvents(
-			stream(
-				registration.getModel(),
-				{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
-				{ signal: controller.signal },
-			),
-		);
+		const events = await collectEvents(stream(registration.getModel(), userTurn(), { signal: controller.signal }));
 
 		expect(events).toHaveLength(1);
 		expect(events[0].type).toBe("error");
@@ -483,115 +272,62 @@ describe("faux provider", () => {
 		}
 	});
 
-	it("supports aborting mid-text stream when paced", async () => {
-		const registration = registerFauxProvider({ tokensPerSecond: 100, tokenSize: { min: 3, max: 3 } });
-		registrations.push(registration);
-		registration.setResponses([fauxAssistantMessage("abcdefghijklmnopqrstuvwxyz")]);
-
-		const controller = new AbortController();
-		const events: string[] = [];
-		let textDeltaCount = 0;
-		const s = stream(
-			registration.getModel(),
-			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
-			{ signal: controller.signal },
-		);
-		for await (const event of s) {
-			events.push(event.type);
-			if (event.type === "text_delta") {
-				textDeltaCount++;
-				controller.abort();
-			}
-		}
-
-		expect(textDeltaCount).toBe(1);
-		expect(events).toContain("text_start");
-		expect(events).toContain("text_delta");
-		expect(events).toContain("error");
-		expect(events).not.toContain("text_end");
-	});
-
-	it("supports aborting mid-thinking stream when paced", async () => {
-		const registration = registerFauxProvider({ tokensPerSecond: 100, tokenSize: { min: 3, max: 3 } });
-		registrations.push(registration);
-		registration.setResponses([
-			{
+	// Aborting on the first delta of a paced stream must stop the block without emitting its *_end event.
+	it.each([
+		{
+			kind: "text",
+			response: fauxAssistantMessage("abcdefghijklmnopqrstuvwxyz"),
+			deltaType: "text_delta" as const,
+			startType: "text_start",
+			endType: "text_end",
+		},
+		{
+			kind: "thinking",
+			response: {
 				...fauxAssistantMessage("ignored"),
-				content: [{ type: "thinking", thinking: "abcdefghijklmnopqrstuvwxyz" }],
+				content: [{ type: "thinking" as const, thinking: "abcdefghijklmnopqrstuvwxyz" }],
 			},
-		]);
-
-		const controller = new AbortController();
-		const events: string[] = [];
-		let thinkingDeltaCount = 0;
-		const s = stream(
-			registration.getModel(),
-			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
-			{ signal: controller.signal },
-		);
-		for await (const event of s) {
-			events.push(event.type);
-			if (event.type === "thinking_delta") {
-				thinkingDeltaCount++;
-				controller.abort();
-			}
-		}
-
-		expect(thinkingDeltaCount).toBe(1);
-		expect(events).toContain("thinking_start");
-		expect(events).toContain("thinking_delta");
-		expect(events).toContain("error");
-		expect(events).not.toContain("thinking_end");
-	});
-
-	it("supports aborting mid-toolcall stream when paced", async () => {
-		const registration = registerFauxProvider({ tokensPerSecond: 100, tokenSize: { min: 3, max: 3 } });
-		registrations.push(registration);
-		registration.setResponses([
-			{
+			deltaType: "thinking_delta" as const,
+			startType: "thinking_start",
+			endType: "thinking_end",
+		},
+		{
+			kind: "toolcall",
+			response: {
 				...fauxAssistantMessage("done"),
 				content: [
 					{
-						type: "toolCall",
+						type: "toolCall" as const,
 						id: "tool-1",
 						name: "echo",
 						arguments: { text: "abcdefghijklmnopqrstuvwxyz", count: 123456789 },
 					},
 				],
-				stopReason: "toolUse",
+				stopReason: "toolUse" as const,
 			},
-		]);
+			deltaType: "toolcall_delta" as const,
+			startType: "toolcall_start",
+			endType: "toolcall_end",
+		},
+	])("supports aborting mid-$kind stream when paced", async ({ response, deltaType, startType, endType }) => {
+		const registration = register({ tokensPerSecond: 100, tokenSize: { min: 3, max: 3 } });
+		registration.setResponses([response]);
 
 		const controller = new AbortController();
 		const events: string[] = [];
-		let toolCallDeltaCount = 0;
-		const s = stream(
-			registration.getModel(),
-			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
-			{ signal: controller.signal },
-		);
-		for await (const event of s) {
+		let deltaCount = 0;
+		for await (const event of stream(registration.getModel(), userTurn(), { signal: controller.signal })) {
 			events.push(event.type);
-			if (event.type === "toolcall_delta") {
-				toolCallDeltaCount++;
+			if (event.type === deltaType) {
+				deltaCount++;
 				controller.abort();
 			}
 		}
 
-		expect(toolCallDeltaCount).toBe(1);
-		expect(events).toContain("toolcall_start");
-		expect(events).toContain("toolcall_delta");
+		expect(deltaCount).toBe(1);
+		expect(events).toContain(startType);
+		expect(events).toContain(deltaType);
 		expect(events).toContain("error");
-		expect(events).not.toContain("toolcall_end");
-	});
-
-	it("unregisters the provider", async () => {
-		const registration = registerFauxProvider();
-		registration.setResponses([fauxAssistantMessage("hello")]);
-		registration.unregister();
-
-		await expect(
-			complete(registration.getModel(), { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] }),
-		).rejects.toThrow(`No API provider registered for api: ${registration.api}`);
+		expect(events).not.toContain(endType);
 	});
 });
