@@ -900,9 +900,19 @@ function recordShutdownFailure(
 	failed.push({ socketPath, reason });
 }
 
+// Windows worker named pipes live in the `\\.\pipe\` namespace instead of the
+// default daemon socket dir, and their names carry no `.sock` suffix
+// (`\\.\pipe\prime-agent-worker-<key>-<workerId12>`; see workerSocketPath in
+// daemon-supervisor.ts), so the default-dir + `.sock` checks below never match
+// them. Match the exact pipe name instead: pure string matching, so the
+// predicate stays testable and correct on every platform.
+const WORKER_NAMED_PIPE_PATTERN = /^\\\\\.\\pipe\\prime-agent-worker-[0-9a-f]+-[0-9a-f]{12}$/;
+
 export function isWorkerSocketPath(socketPath: string): boolean {
+	if (WORKER_NAMED_PIPE_PATTERN.test(socketPath)) {
+		return true;
+	}
 	return (
-		process.platform !== "win32" &&
 		resolve(dirname(socketPath)) === resolve(defaultDaemonSocketDir()) &&
 		basename(socketPath).startsWith("worker-") &&
 		basename(socketPath).endsWith(".sock")

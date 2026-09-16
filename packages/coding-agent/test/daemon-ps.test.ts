@@ -2,12 +2,18 @@ import { describe, expect, it } from "vitest";
 import {
 	type DaemonInfo,
 	evaluateShutdownQuietPeriod,
+	isWorkerSocketPath,
 	planReap,
 	planShutdownAll,
 	planShutdownConfirmation,
 	verifyHelloSupervisorPid,
 } from "../src/cli/daemon-ps.js";
 import { getProcessStartId } from "../src/core/session-lease.js";
+
+it("recognizes Windows worker named pipes on every platform", () => {
+	expect(isWorkerSocketPath("\\\\.\\pipe\\prime-agent-worker-98ed5cb228d2-5b1d3aeb91ee")).toBe(true);
+	expect(isWorkerSocketPath("\\\\.\\pipe\\prime-agent-daemon")).toBe(false);
+});
 
 describe("evaluateShutdownQuietPeriod", () => {
 	it("requires a full quiet period independently of the convergence window", () => {
