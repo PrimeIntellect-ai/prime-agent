@@ -1911,6 +1911,42 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
         result = await bash("cd sub && rm -rf nested")
         self.assertEqual(result.exit_code, 0)
 
+    async def test_refuses_heredocs_attached_to_command_words(self):
+        # `cat<<EOF` is a valid heredoc; missing it lets body quotes hide
+        # later commands.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "cat<<EOF\ndon't\nEOF\nrm -rf " + outside,
+            "sh<<EOF\nrm -rf " + outside + "\nEOF",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # Data heredocs attached to non-runner commands stay allowed.
+        result = await bash("cat<<EOF\nrm -rf /printed-not-run\nEOF")
+        self.assertEqual(result.exit_code, 0)
+
+    async def test_refuses_stdin_shell_feeds_across_grouped_pipelines(self):
+        # Grouped producers, |& pipelines, variable shells, and -s with
+        # positional args all feed stdin shells.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "{ printf 'rm -rf " + outside + "\\n'; } | sh",
+            "printf 'rm -rf " + outside + "\\n' |& sh",
+            "printf 'rm -rf " + outside + "\\n' | $SHELL_BIN",
+            "printf 'rm -rf " + outside + "\\n' | bash -s arg1",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # Statements before an ungrouped pipe are not part of the feed.
+        result = await bash("echo 'rm -rf /printed'; git status | sh")
+        self.assertEqual(result.exit_code, 0)
+
     async def test_operands_after_end_of_options_are_checked(self):
         self._make_tree()
         with self.assertRaises(DestructiveRmRefusalError):

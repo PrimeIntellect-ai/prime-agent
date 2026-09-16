@@ -3785,8 +3785,10 @@ def _resolve_cd_target(
 
 def _boundary_positions(command: str) -> list[tuple[int, str]]:
     """Positions and kinds of unquoted control boundaries: `&&`, `||`, `;`,
-    `&`, `|`, newlines, and subshell parens; quoted spans and escapes are
-    skipped. Used to model which commands may be skipped at run time."""
+    `&`, `|`, `|&`, newlines, subshell parens, and word-position braces
+    (`{ cmd; }` groups); quoted spans and escapes are skipped. Used to model
+    which commands may be skipped at run time and where pipeline producers
+    start."""
     positions: list[tuple[int, str]] = []
     i = 0
     n = len(command)
@@ -3801,10 +3803,19 @@ def _boundary_positions(command: str) -> list[tuple[int, str]]:
             i += 1
         elif ch in "&|":
             kind = ch
-            if command[i + 1 : i + 2] == ch:
+            following = command[i + 1 : i + 2]
+            if following == ch:
                 kind = ch * 2
                 i += 1
+            elif ch == "|" and following == "&":
+                kind = "|&"
+                i += 1
             positions.append((i, kind))
+            i += 1
+        elif ch in "{}" and (i == 0 or command[i - 1] in " \t\n;&|(){}"):
+            # A group brace at word position (not ${...} expansion or brace
+            # expansion attached to a word).
+            positions.append((i, ch))
             i += 1
         else:
             i += 1
@@ -4014,9 +4025,11 @@ def _heredoc_body_spans(command: str) -> list[tuple[int, int]]:
         if ch == "\\":
             i += 2
             continue
-        if ch == "<" and command[i + 1 : i + 2] == "<" and (
-            i == 0 or command[i - 1] in " \t\n;&|()"
-        ):
+        if ch == "<" and command[i + 1 : i + 2] == "<":
+            # The operator is valid attached to the command word too
+            # (`sh<<EOF`); arithmetic `<<` inside $((...)) parses as a
+            # heredoc with a delimiter that never terminates, so it reports
+            # no span and leaves the scan unchanged.
             j = i + 2
             strip_tabs = False
             if command[j : j + 1] == "-":
@@ -4123,36 +4136,53 @@ def _interpret_shell_escapes(text: str) -> str:
 
 def _stdin_shell_feed_texts(prepared: str, words: list[_ShellWord]) -> list[tuple[str, int]]:
     """(producer text, interpreter word index) pairs for pipelines feeding a
-    bare shell interpreter: `printf 'rm -rf x\\n' | sh` runs the producer's
-    output as commands, so that text must be scanned. Only interpreters that
-    read stdin qualify — no file/script argument and no `-c` payload — and
-    only when a pipe feeds them."""
+    bare stdin shell: `printf 'rm -rf x\\n' | sh` runs the producer's
+    output as commands, so that text must be scanned. Literal interpreters
+    read stdin when they carry no file/script argument and no `-c` payload
+    (`-s` keeps stdin live with positional arguments); an interpreter named
+    through unresolved expansion (`| $SHELL_BIN`) cannot be inspected, so it
+    is treated as a stdin shell. The producer window crosses `;`, newlines,
+    and other boundaries inside `{...}`/`(...)` groups, where the group's
+    whole output feeds the pipe; `|` and `|&` both count as the pipe."""
     boundaries = _boundary_positions(prepared)
     feeds: list[tuple[str, int]] = []
     for index, word in enumerate(words):
-        if os.path.basename(word.value) not in _SHELL_DASH_C_INTERPRETERS:
+        is_shell = os.path.basename(word.value) in _SHELL_DASH_C_INTERPRETERS
+        is_expansion_shell = not _expansion_is_resolvable(word.value)
+        if not (is_shell or is_expansion_shell):
             continue
-        reads_stdin = True
-        for follower in words[index + 1 :]:
-            if follower.starts_command:
+        if is_shell:
+            has_c = has_s = False
+            has_argument = False
+            for follower in words[index + 1 :]:
+                if follower.starts_command:
+                    break
+                token = follower.value
+                if token.startswith("-") and token != "-":
+                    if not token.startswith("--"):
+                        has_c = has_c or "c" in token[1:]
+                        has_s = has_s or "s" in token[1:]
+                    continue
+                has_argument = True
                 break
-            token = follower.value
-            if token.startswith("-") and token != "-":
-                if "c" in token[1:] and not token.startswith("--"):
-                    reads_stdin = False  # a -c payload: not a stdin shell
-                continue
-            reads_stdin = False  # a file/script argument
-            break
-        if not reads_stdin:
-            continue
+            if has_c:
+                continue  # a -c payload is handled by the wrapper scan
+            if has_argument and not has_s:
+                continue  # runs a script file, not stdin
+        # Is a pipe feeding this word, and where does its producer start?
         pipe_position = None
         segment_start = 0
+        group_depth = 0
         for position, kind in boundaries:
             if position >= word.start:
                 break
-            if kind == "|":
+            if kind in ("(", "{"):
+                group_depth += 1
+            elif kind in (")", "}"):
+                group_depth = max(0, group_depth - 1)
+            elif kind in ("|", "|&"):
                 pipe_position = position
-            elif kind in (";", "&", "&&", "||", "\n", "(", ")"):
+            elif group_depth == 0:
                 segment_start = position
         if pipe_position is None:
             continue
