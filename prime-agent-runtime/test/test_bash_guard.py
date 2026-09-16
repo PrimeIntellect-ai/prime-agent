@@ -861,6 +861,8 @@ RM_MATCHING_COMMANDS = [
     "rm -rf $HOME",
     "rm -rf ..",
     "rm -rf /",
+    "rm --recurs --forc sub",
+    "rm --recursive --f sub",
     'echo $(echo ")"; rm -rf /)',
     "echo \"$(echo ')'; rm -rf sub)\"",
 ]
@@ -1469,6 +1471,95 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(DestructiveRmRefusalError):
             bash("rm -rf never-created-yet")
         self.assertTrue(self._tracked("sub", "nested", "file.txt").exists())
+
+    async def test_refuses_expansion_hidden_rm_in_more_positions(self):
+        # Assignment prefixes, env, and keyword/grouping positions still put
+        # an expansion word in command position; any of them with rm-flag
+        # followers must be refused as unresolvable.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            f"FOO=1 $R -rf {outside}",
+            f"env $R -rf {outside}",
+            "if true; then $R -rf x; fi",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError) as caught:
+                    bash(command)
+                self.assertIn(
+                    "Refusing to run this recursive-force rm command",
+                    str(caught.exception),
+                )
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # Expansion command words without rm-shaped flags stay allowed.
+        result = await bash('ECHO_BIN=echo; "$ECHO_BIN" -u hi')
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("hi", result.output)
+
+    async def test_refuses_gnu_long_option_abbreviations(self):
+        # GNU rm accepts unambiguous long-option abbreviations: --recurs and
+        # --forc behave exactly like --recursive and --force.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            f"rm --recurs --forc {outside}",
+            f"rm --recursive --forc {outside}",
+            f"rm --recurs --force {outside}",
+            f"rm --r --f {outside}",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError) as caught:
+                    bash(command)
+                self.assertIn(
+                    "Refusing to run this recursive-force rm command",
+                    str(caught.exception),
+                )
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # Non-matching abbreviations of other options stay allowed.
+        self._make_tree()
+        result = await bash("rm -v sub/nested/file.txt")
+        self.assertEqual(result.exit_code, 0)
+
+    async def test_refuses_trap_action_rm(self):
+        # A trap action string is a live command executed at shell exit;
+        # it must be scanned like an eval payload.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            f"trap 'rm -rf {outside}' EXIT",
+            f'trap "rm -rf {outside}" EXIT',
+            f"sh -c 'trap \"rm -rf {outside}\" EXIT'",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError) as caught:
+                    bash(command)
+                self.assertIn("wraps rm in", str(caught.exception))
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # Benign trap actions still run.
+        result = await bash("trap 'echo done' EXIT; echo hi")
+        self.assertEqual(result.exit_code, 0)
+
+    async def test_heredoc_data_bodies_are_not_live_commands(self):
+        # A here-document body fed to a non-interpreter command is data:
+        # it must not be scanned as live rm commands.
+        result = await bash("cat <<'EOF'\nrm -rf /printed-not-run\nEOF")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("rm -rf /printed-not-run", result.output)
+        result = await bash("cat <<EOF\nrm -rf outside-not-run\nEOF")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("rm -rf outside-not-run", result.output)
+        # Bodies fed to interpreters (directly or through a pipeline) stay
+        # live commands and are refused.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            f"sh <<EOF\nrm -rf {outside}\nEOF",
+            f"cat <<EOF | sh\nrm -rf {outside}\nEOF",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
 
     async def test_operands_after_end_of_options_are_checked(self):
         self._make_tree()
