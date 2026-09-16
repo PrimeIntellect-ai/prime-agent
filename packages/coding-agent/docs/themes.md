@@ -18,7 +18,7 @@ Themes are JSON files that define colors for the TUI.
 
 Prime Agent loads themes from:
 
-- Built-in: `dark`, `light`
+- Built-in: `prime`, `dark`, `light`
 - Global: `~/.prime/agent/themes/*.json`
 - Project: `.prime/agent/themes/*.json`
 - Packages: `themes/` directories or `pi.themes` entries in `package.json`
@@ -37,7 +37,7 @@ Select a theme via `/settings` or in `settings.json`:
 }
 ```
 
-On first run, Prime Agent detects your terminal background and defaults to `dark` or `light`.
+On first run, Prime Agent detects your terminal background and defaults to `prime` or `light`.
 
 ## Creating a Custom Theme
 
