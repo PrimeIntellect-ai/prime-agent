@@ -162,10 +162,15 @@ jobs:
     if: needs.trust.outputs.allowed == 'true'
     uses: ./.github/workflows/standalone-binaries.yml
 
+  windows:
+    needs: trust
+    if: needs.trust.outputs.allowed == 'true'
+    uses: ./.github/workflows/windows-source.yml
+
   build-check-test:
     name: build-check-test
     if: always() && needs.trust.outputs.allowed == 'true'
-    needs: [trust, build-check, test, standalone]
+    needs: [trust, build-check, test, standalone, windows]
     runs-on: ubuntu-latest
     steps:
       - name: Verify CI results
@@ -173,7 +178,9 @@ jobs:
           BUILD_CHECK_RESULT: ${{ needs.build-check.result }}
           TEST_RESULT: ${{ needs.test.result }}
           STANDALONE_RESULT: ${{ needs.standalone.result }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
         run: |
           test "$BUILD_CHECK_RESULT" = success
           test "$TEST_RESULT" = success
           test "$STANDALONE_RESULT" = success
+          test "$WINDOWS_RESULT" = success

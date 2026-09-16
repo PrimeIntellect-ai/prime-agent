@@ -61,6 +61,8 @@ export function buildBatchShimInvocation(
 	}
 	const env = { ...baseEnv };
 	const variables = values.map((value, index) => {
+		// cmd /c leaves an empty environment variable's %NAME% reference unexpanded.
+		if (value === "") return '""';
 		const name = `PRIME_AGENT_BATCH_${token}_${index}`;
 		env[name] = value;
 		return `"%${name}%"`;

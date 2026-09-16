@@ -36,6 +36,21 @@ describe("buildBatchShimInvocation", () => {
 		expect(invocation.env.PRIME_AGENT_BATCH_testtoken_2).toBe("%PATH%");
 	});
 
+	it("passes empty arguments as literal quotes without environment expansion", () => {
+		const invocation = buildBatchShimInvocation("uv.cmd", ["", "nonempty", ""], {}, "emptyargs");
+		expect(invocation.args).toEqual([
+			"/d",
+			"/v:off",
+			"/s",
+			"/c",
+			'""%PRIME_AGENT_BATCH_emptyargs_0%" "" "%PRIME_AGENT_BATCH_emptyargs_2%" """',
+		]);
+		expect(invocation.env).toEqual({
+			PRIME_AGENT_BATCH_emptyargs_0: "uv.cmd",
+			PRIME_AGENT_BATCH_emptyargs_2: "nonempty",
+		});
+	});
+
 	it.each(['a"b', "line\nbreak", "line\rbreak", "null\0byte"])("rejects unsafe command or argument %j", (value) => {
 		expect(() => buildBatchShimInvocation("uv.cmd", [value], {}, "testtoken")).toThrow(/cannot contain/);
 		expect(() => buildBatchShimInvocation(value, [], {}, "testtoken")).toThrow(/cannot contain/);

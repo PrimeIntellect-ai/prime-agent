@@ -1,0 +1,116 @@
+name: Windows source build
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-node:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      DO_NOT_TRACK: '1'
+      PI_OFFLINE: '1'
+      PRIME_AGENT_CODING_AGENT_DIR: ${{ runner.temp }}/prime-agent-windows-test
+      PRIME_AGENT_SESSION_DIR: ${{ runner.temp }}/prime-agent-windows-test/sessions
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          version: '0.11.7'
+          enable-cache: false
+
+      - name: Test installer safeguards in Windows PowerShell
+        shell: powershell
+        run: ./scripts/test-windows-installer.ps1
+
+      - name: Test installer safeguards in PowerShell 7
+        run: ./scripts/test-windows-installer.ps1
+
+      - name: Find Git Bash for shell and installer checks
+        run: |
+          $bashDirectory = Join-Path $env:ProgramFiles 'Git\bin'
+          if (-not (Test-Path (Join-Path $bashDirectory 'bash.exe'))) {
+            throw 'Git for Windows with Git Bash is required.'
+          }
+          $bashDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install locked dependencies
+        run: |
+          npm.cmd ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Compile Node.js application
+        run: |
+          npm.cmd run build:windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Check source (Unix installer checks remain in Linux CI)
+        run: |
+          npx.cmd --no-install biome check --error-on-warnings .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npx.cmd --no-install tsgo --noEmit
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm.cmd run check:browser-smoke
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run focused launcher and Windows regressions
+        working-directory: packages/coding-agent
+        run: |
+          npx.cmd tsx ../../node_modules/vitest/dist/cli.js --run --no-file-parallelism test/windows-launcher.test.ts test/kernel-bootstrap-windows.test.ts test/kernel-windows-process.test.ts test/kernel-bash-shell.test.ts test/child-process.test.ts test/daemon-launch.test.ts test/daemon-socket.test.ts test/daemon-worker-windows-timeouts.test.ts test/bash-close-hang-windows.test.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install into an isolated directory and prepare Python
+        run: |
+          $installDirectory = Join-Path $env:RUNNER_TEMP 'prime-agent-windows-installed'
+          & ./install.ps1 -SourcePath $env:GITHUB_WORKSPACE -InstallDirectory $installDirectory -SkipPrerequisites
+          & (Join-Path $installDirectory 'bin/prime-agent-windows.cmd') --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Exercise the real Windows Python runtime
+        working-directory: packages/coding-agent
+        run: |
+          $installDirectory = Join-Path $env:RUNNER_TEMP 'prime-agent-windows-installed'
+          $release = @(Get-ChildItem -LiteralPath (Join-Path $installDirectory 'versions') -Directory)
+          if ($release.Count -ne 1) { throw 'Expected one isolated installed version.' }
+          $env:PRIME_AGENT_KERNEL_PYTHON = Join-Path $release[0].FullName 'kernel-venv/Scripts/python.exe'
+          if (-not (Test-Path -LiteralPath $env:PRIME_AGENT_KERNEL_PYTHON)) { throw 'Python runtime missing; refusing skipped coverage.' }
+          & $env:PRIME_AGENT_KERNEL_PYTHON -c 'import rlm.repl, dill'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $settings = Get-Content -LiteralPath (Join-Path $installDirectory 'state/settings.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+          $env:PRIME_AGENT_BASH_SHELL = $settings.shellPath
+          npx.cmd tsx ../../node_modules/vitest/dist/cli.js --run --no-file-parallelism test/repl-kernel-execute.test.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run source launcher from CMD
+        shell: cmd
+        run: call prime-agent.cmd --version
+
+      - name: Run compiled launcher from CMD
+        shell: cmd
+        run: call prime-agent.cmd --dist --version
+
+      - name: Run source launcher from Windows PowerShell
+        shell: powershell
+        run: .\prime-agent.ps1 --version
+
+      - name: Run compiled launcher from Windows PowerShell
+        shell: powershell
+        run: .\prime-agent.ps1 --dist --version
+
+      - name: Run compiled launcher from PowerShell 7
+        run: .\prime-agent.ps1 --dist --help

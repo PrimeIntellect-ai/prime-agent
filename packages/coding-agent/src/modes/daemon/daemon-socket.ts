@@ -67,8 +67,16 @@ export interface DaemonSocketIdentity {
 	ino: number;
 }
 
-export function defaultDaemonSocketPath(): string {
-	if (process.platform === "win32") {
+export function defaultDaemonSocketPath(platform: NodeJS.Platform = process.platform): string {
+	if (platform === "win32") {
+		const pipe = process.env.PRIME_AGENT_WINDOWS_DAEMON_PIPE;
+		if (pipe !== undefined) {
+			const match = /^\\\\\.\\pipe\\[A-Za-z0-9_-]{1,200}$/.exec(pipe);
+			if (!match || match[0] !== pipe) {
+				throw new Error("PRIME_AGENT_WINDOWS_DAEMON_PIPE must be a Windows named pipe with a safe ASCII name");
+			}
+			return pipe;
+		}
 		return "\\\\.\\pipe\\prime-agent-daemon";
 	}
 	return join(defaultDaemonSocketDir(), "daemon.sock");

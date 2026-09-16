@@ -12,6 +12,8 @@
 	"scripts": {
 		"clean": "npm run clean --workspaces",
 		"build": "cd packages/tui && npm run build && cd ../ai && npm run build && cd ../agent && npm run build && cd ../coding-agent && npm run build",
+		"build:windows": "npm run build",
+		"start:windows": "node scripts/run-prime-agent.mjs --dist",
 		"dev": "concurrently --names \"ai,agent,coding-agent,tui\" --prefix-colors \"cyan,yellow,red,magenta\" \"cd packages/ai && npm run dev\" \"cd packages/agent && npm run dev\" \"cd packages/coding-agent && npm run dev\" \"cd packages/tui && npm run dev\"",
 		"dev:tsc": "cd packages/ai && npm run dev:tsc",
 		"check": "biome check --write --error-on-warnings . && tsgo --noEmit && npm run check:installer && npm run check:browser-smoke",

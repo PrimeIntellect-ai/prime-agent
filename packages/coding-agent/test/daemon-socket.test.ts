@@ -4,7 +4,7 @@ import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	cleanupDaemonSocketPath,
 	DaemonSocketPathLease,
@@ -22,12 +22,47 @@ describe("normalizeSocketPath", () => {
 });
 
 describe("defaultDaemonSocketPath", () => {
-	it("uses a fixed Windows named pipe path", () => {
-		if (process.platform !== "win32") {
-			return;
-		}
+	afterEach(() => {
+		vi.unstubAllGlobals();
+		vi.unstubAllEnvs();
+	});
 
-		expect(defaultDaemonSocketPath()).toBe("\\\\.\\pipe\\prime-agent-daemon");
+	it("keeps the legacy Windows pipe when the override is unset", () => {
+		vi.stubEnv("PRIME_AGENT_WINDOWS_DAEMON_PIPE", undefined);
+		expect(defaultDaemonSocketPath("win32")).toBe("\\\\.\\pipe\\prime-agent-daemon");
+	});
+
+	it("uses the isolated Windows pipe without changing its name", () => {
+		const pipe = "\\\\.\\pipe\\prime-agent-windows-0123456789abcdef";
+		vi.stubEnv("PRIME_AGENT_WINDOWS_DAEMON_PIPE", pipe);
+		expect(defaultDaemonSocketPath("win32")).toBe(pipe);
+	});
+
+	it.each([
+		"",
+		"prime-agent-windows",
+		"/tmp/prime-agent.sock",
+		"\\\\server\\pipe\\prime-agent",
+		"\\\\.\\pipe\\",
+		"\\\\.\\pipe\\name\\child",
+		"\\\\.\\pipe\\name/child",
+		"\\\\.\\pipe\\name with spaces",
+		"\\\\.\\pipe\\name\0suffix",
+		"\\\\.\\pipe\\name\nsuffix",
+		"\\\\.\\pipe\\name\n",
+		"\\\\.\\pipe\\name\r\n",
+		"\\\\.\\pipe\\工具",
+		`\\\\.\\pipe\\${"a".repeat(201)}`,
+	])("rejects malformed Windows overrides instead of falling back: %j", (pipe) => {
+		// process.env truncates at NUL, so use a plain environment object for validation tests.
+		vi.stubGlobal("process", { ...process, env: { ...process.env, PRIME_AGENT_WINDOWS_DAEMON_PIPE: pipe } });
+		expect(() => defaultDaemonSocketPath("win32")).toThrow("PRIME_AGENT_WINDOWS_DAEMON_PIPE");
+	});
+
+	it.each(["linux", "darwin"] as const)("ignores the Windows override on %s", (platform) => {
+		vi.stubEnv("PRIME_AGENT_WINDOWS_DAEMON_PIPE", "invalid");
+		const suffix = typeof process.getuid === "function" ? String(process.getuid()) : "user";
+		expect(defaultDaemonSocketPath(platform)).toBe(join(tmpdir(), `prime-agent-${suffix}`, "daemon.sock"));
 	});
 
 	it("uses a per-user Unix socket directory", () => {

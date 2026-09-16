@@ -1,0 +1,3 @@
+- Added PowerShell and CMD source launchers and a Windows source installer that prepares Node.js, Git Bash, and uv.
+- Fixed empty arguments passed through Windows batch shims and added Windows build, installer, and process regression checks.
+- Isolated Windows source installations with a dedicated daemon pipe, configuration directory, and Python environment.

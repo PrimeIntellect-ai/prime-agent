@@ -49,6 +49,8 @@ Install the latest stable release on macOS or Linux:
 curl --proto '=https' --proto-redir '=https' -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 ```
 
+Windows users can use the [PowerShell source installer](packages/coding-agent/docs/windows.md). It installs a separate Node.js-based command; it is not a standalone Windows executable.
+
 ## Why Prime Agent
 
 Prime Agent combines a persistent Python control environment with durable harness state, so useful working context and reusable operating patterns can outlive a single chat window.

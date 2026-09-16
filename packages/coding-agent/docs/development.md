@@ -20,6 +20,8 @@ Run from source:
 
 The script can be called from any directory and preserves the caller's working directory. Use that behavior to run a source checkout against a separate test project.
 
+On Windows, use `prime-agent.cmd` or `prime-agent.ps1`. `npm.cmd run build:windows` compiles the same Node.js application; add `--dist` to launch the compiled entry point. See [Windows setup](windows.md) for the one-command source installer, prerequisites, configuration isolation, and platform limits.
+
 ## Product and Source Names
 
 Prime Agent is the product, public CLI, release artifact, and repository name. The monorepo still retains inherited `@earendil-works/pi-*` npm workspace names, a source-package `pi` bin entry, the `pi` package manifest key, and some `PI_*` compatibility environment variables. These names are source and compatibility details, not a signal that contributors should install or develop against pi-mono.
