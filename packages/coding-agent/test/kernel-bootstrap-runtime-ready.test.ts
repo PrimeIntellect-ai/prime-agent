@@ -2,23 +2,31 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { RUNTIME_READY_CHECK } from "../src/core/kernel/bootstrap.js";
 
-const runtimePython = resolve("../../prime-agent-runtime/.venv/bin/python");
+const here = fileURLToPath(new URL(".", import.meta.url));
+// Resolve from the FILE, not process.cwd(): the vitest worker cwd is the
+// repo root, which would silently fall through to the stale fallback venv.
+const runtimePython = resolve(here, "..", "..", "..", "prime-agent-runtime", ".venv", "bin", "python");
 const fallbackPython = join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python");
 
-function resolveKernelPython(): string | null {
+/**
+ * The kernel venv is part of the standard checkout/CI environment, so the
+ * suite is unconditional and self-contained: it must fail loudly when no
+ * kernel-ready python is available, never silently skip.
+ */
+function resolveKernelPython(): string {
 	for (const python of [process.env.PRIME_AGENT_KERNEL_PYTHON, runtimePython, fallbackPython]) {
 		if (!python || !existsSync(python)) continue;
 		const check = spawnSync(python, ["-c", "import rlm.repl, mcp, rlm"], { encoding: "utf8" });
 		if (check.status === 0) return python;
 	}
-	return null;
+	throw new Error(`no kernel-ready python found (tried ${runtimePython} and ${fallbackPython})`);
 }
 
 const python = resolveKernelPython();
-const describeIfKernel = python ? describe : describe.skip;
 
 /**
  * The ready check is the gate that decides whether a cached kernel venv can be
@@ -27,7 +35,7 @@ const describeIfKernel = python ? describe : describe.skip;
  * reject a runtime that predates the MCP discovery surface by simulating each
  * missing method in-process.
  */
-describeIfKernel("kernel bootstrap runtime ready check", () => {
+describe("kernel bootstrap runtime ready check", () => {
 	it("accepts the current runtime", () => {
 		const result = spawnSync(python as string, ["-c", RUNTIME_READY_CHECK], {
 			encoding: "utf8",

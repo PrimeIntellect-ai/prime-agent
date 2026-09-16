@@ -816,15 +816,13 @@ class McpDiscoveryInventoryTest(unittest.TestCase):
         self.assertEqual(connections[1]["setupHint"], "configure API key")
 
     def test_list_connections_rejects_malformed_host_data(self):
-        for reply in (
-            {"connections": [{"label": "no-connection-id"}]},
-            {"connections": ["not-a-dict"]},
-            {"connections": "no"},
-            ["not", "a", "dict"],
-        ):
-            with self._patch_host({"mcp.list_connections": reply}):
-                with self.assertRaises(RuntimeError):
-                    run(mcp.list_connections())
+        # One table: each malformed host reply must fail the whole call instead
+        # of passing a broken inventory shape through to the agent.
+        for reply in ({"connections": [{"label": "no-connection-id"}]}, {"connections": ["not-a-dict"]}, {"connections": "no"}, ["not", "a", "dict"]):
+            with self.subTest(reply=reply):
+                with self._patch_host({"mcp.list_connections": reply}):
+                    with self.assertRaises(RuntimeError):
+                        run(mcp.list_connections())
 
     def test_inventory_wraps_host_failures_without_echoing_them(self):
         with self._patch_host({"mcp.list_connections": RuntimeError("bridge is down")}):
@@ -1091,11 +1089,12 @@ class McpDiscoveryInventoryTest(unittest.TestCase):
             self.assertNotIn(leaked, formatted)
 
     def test_host_inventory_timeouts_report_a_fixed_message(self):
-        async def slow_host_request(request_type, payload):
-            await asyncio.sleep(0.05)
-            return {"connections": []}
+        async def hanging_host_request(request_type, payload):
+            # The host never answers: the inventory's own timeout bound (the
+            # behavior under test) is what settles the call.
+            await asyncio.Event().wait()
 
-        with mock.patch.object(mcp, "host_request", slow_host_request), mock.patch.object(
+        with mock.patch.object(mcp, "host_request", hanging_host_request), mock.patch.object(
             mcp, "_INVENTORY_TIMEOUT", 0.01
         ):
             with self.assertRaises(RuntimeError) as caught:
@@ -1104,47 +1103,46 @@ class McpDiscoveryInventoryTest(unittest.TestCase):
 
     # -- tools/list pagination ----------------------------------------------
 
-    def test_discover_follows_cursor_pages(self):
-        tools_page_one = [SimpleNamespace(name="one", description="", inputSchema={})]
-        tools_page_two = [SimpleNamespace(name="two", description="", inputSchema={})]
-        session = PagedSession([(tools_page_one, "cursor-2"), (tools_page_two, None)])
-        generation = mcp._Generation("svc", {"type": "http"})
-        generation.session = session
-        run(generation.discover())
-        self.assertEqual(sorted(generation.tools), ["one", "two"])
-        self.assertEqual(session.cursors, [None, "cursor-2"])
-
-    def test_discover_repeated_cursor_raises_and_publishes_nothing(self):
+    def test_discover_cursor_paging_is_honest(self):
+        # One table covers the cursor contract: pages are followed in order, a
+        # REPEATED cursor refuses instead of looping, the page cap refuses
+        # instead of publishing a partial inventory, and a malformed cursor
+        # is rejected — every failure leaves the tool inventory untouched.
         tools = [SimpleNamespace(name="one", description="", inputSchema={})]
-        session = PagedSession([(tools, "same"), (tools, "same"), (tools, "same"), (tools, "same")])
-        generation = mcp._Generation("svc", {"type": "http"})
-        generation.session = session
-        with self.assertRaisesRegex(mcp.McpDiscoveryError, "repeated"):
-            run(generation.discover())
-        self.assertEqual(session.cursors, [None, "same"])
-        self.assertEqual(generation.tools, {})
-
-    def test_discover_page_cap_raises_instead_of_partial_inventory(self):
-        tools = [SimpleNamespace(name="one", description="", inputSchema={})]
-        pages = [(tools, f"cursor-{index}") for index in range(10)]
-        session = PagedSession(pages)
-        generation = mcp._Generation("svc", {"type": "http"})
-        generation.session = session
-        with mock.patch.object(mcp, "_MAX_TOOL_PAGES", 3):
-            with self.assertRaisesRegex(mcp.McpDiscoveryError, "partial"):
-                run(generation.discover())
-        self.assertEqual(session.cursors, [None, "cursor-0", "cursor-1"])
-        self.assertEqual(generation.tools, {})
-
-    def test_discover_malformed_cursor_raises(self):
-        tools = [SimpleNamespace(name="one", description="", inputSchema={})]
-        for bad_cursor in ("", 42, {}):
-            session = PagedSession([(tools, bad_cursor), (tools, None)])
+        with self.subTest("pages are followed in order"):
+            tools_page_two = [SimpleNamespace(name="two", description="", inputSchema={})]
+            session = PagedSession([(tools, "cursor-2"), (tools_page_two, None)])
             generation = mcp._Generation("svc", {"type": "http"})
             generation.session = session
-            with self.assertRaisesRegex(mcp.McpDiscoveryError, "malformed"):
+            run(generation.discover())
+            self.assertEqual(sorted(generation.tools), ["one", "two"])
+            self.assertEqual(session.cursors, [None, "cursor-2"])
+        with self.subTest("repeated cursor refuses"):
+            session = PagedSession([(tools, "same")] * 4)
+            generation = mcp._Generation("svc", {"type": "http"})
+            generation.session = session
+            with self.assertRaisesRegex(mcp.McpDiscoveryError, "repeated"):
                 run(generation.discover())
+            self.assertEqual(session.cursors, [None, "same"])
             self.assertEqual(generation.tools, {})
+        with self.subTest("page cap refuses instead of a partial inventory"):
+            pages = [(tools, f"cursor-{index}") for index in range(10)]
+            session = PagedSession(pages)
+            generation = mcp._Generation("svc", {"type": "http"})
+            generation.session = session
+            with mock.patch.object(mcp, "_MAX_TOOL_PAGES", 3):
+                with self.assertRaisesRegex(mcp.McpDiscoveryError, "partial"):
+                    run(generation.discover())
+            self.assertEqual(session.cursors, [None, "cursor-0", "cursor-1"])
+            self.assertEqual(generation.tools, {})
+        for bad_cursor in ("", 42, {}):
+            with self.subTest(bad_cursor=bad_cursor):
+                session = PagedSession([(tools, bad_cursor), (tools, None)])
+                generation = mcp._Generation("svc", {"type": "http"})
+                generation.session = session
+                with self.assertRaisesRegex(mcp.McpDiscoveryError, "malformed"):
+                    run(generation.discover())
+                self.assertEqual(generation.tools, {})
 
     # -- moved shared helpers ----------------------------------------------
 

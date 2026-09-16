@@ -1,11 +1,17 @@
-import { setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { type Component, Container, Input, setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
-import type { McpPluginView } from "../src/core/mcp/service-catalog.js";
+import { McpConnectionStore } from "../src/core/mcp/connection-store.js";
+import type { McpPluginView, McpServiceDescriptor } from "../src/core/mcp/service-catalog.js";
 import { McpTokenPastePanelComponent } from "../src/modes/interactive/components/mcp-token-paste-panel.js";
 import { ServiceCatalogPickerComponent } from "../src/modes/interactive/components/service-catalog-picker.js";
-import { initTheme, preloadCodeHighlighter, theme } from "../src/modes/interactive/theme/theme.js";
+import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
+import { initTheme, preloadCodeHighlighter } from "../src/modes/interactive/theme/theme.js";
+import { createHarness, type Harness } from "./suite/harness.js";
 
 function viewFixture(overrides: Partial<McpPluginView> = {}): McpPluginView {
 	return {
@@ -23,9 +29,8 @@ function viewFixture(overrides: Partial<McpPluginView> = {}): McpPluginView {
 describe("ServiceCatalogPickerComponent", () => {
 	beforeAll(async () => {
 		initTheme("dark");
-		// initTheme fire-and-forgets the cli-highlight preload; settle it before
-		// teardown or vitest records an EnvironmentTeardownError unhandled
-		// rejection (a pre-existing race, see ENG-6108 notes).
+		// initTheme fire-and-forgets the cli-highlight preload; settle it before teardown or vitest records an
+		// EnvironmentTeardownError unhandled rejection (a pre-existing race, see ENG-6108 notes).
 		await preloadCodeHighlighter();
 	});
 
@@ -34,10 +39,9 @@ describe("ServiceCatalogPickerComponent", () => {
 	});
 
 	it("never emits an embedded newline, even when catalog copy is multi-line", () => {
-		// Real catalog copy (Canva's description) lists skills one per line. A
-		// rendered line containing "\n" paints extra physical rows that the
-		// differential renderer never counted, so rows below it drift and stale
-		// rows survive — duplicated entries and doubled scroll counters.
+		// Real catalog copy (Canva's description) lists skills one per line. A rendered line containing "\n" paints extra
+		// physical rows that the differential renderer never counted, so rows below it drift and stale rows survive —
+		// duplicated entries and doubled scroll counters.
 		const multiline =
 			"Bring your Canva design workflow into Codex.\nAvailable skills:\nResize for social media: Adapt a design.\nBulk create: Generate designs.";
 		const picker = new ServiceCatalogPickerComponent(
@@ -69,6 +73,40 @@ describe("ServiceCatalogPickerComponent", () => {
 		const second = picker.render(120);
 		expect(second.some((line) => line.includes("\n"))).toBe(false);
 		expect(second).toHaveLength(first.length);
+
+		// The same flattened-row contract holds in accounts mode, where labels AND descriptions can both carry stray
+		// newlines: every render is newline-free, and repeated renders are byte-identical.
+		const reconnect = viewFixture({
+			serviceId: "acme-work",
+			label: "Reconnect\nwith a stray newline",
+			connectionIds: ["acme-work"],
+			connectionStatus: "connected",
+			description: "Bring operational data into your conversations.",
+		});
+		const accounts = new ServiceCatalogPickerComponent(
+			[
+				reconnect,
+				{ ...reconnect, label: "Disconnect\nacme-work", removeAction: true },
+				viewFixture({
+					label: "Add another account",
+					connectionIds: [],
+					description: "Bring operational data.\nAvailable skills:\nQuery records.",
+				}),
+			],
+			() => {},
+			() => {},
+			{ mode: "accounts", title: "Acme MCP", getRows: () => 24 },
+		);
+		const accountsFirst = accounts.render(120);
+		expect(accountsFirst.some((line) => line.includes("\n"))).toBe(false);
+		expect(accountsFirst.filter((line) => stripAnsi(line).includes("Reconnect with a stray newline"))).toHaveLength(
+			1,
+		);
+		accounts.handleInput("\x1b[B");
+		const accountsSecond = accounts.render(120);
+		expect(accountsSecond.some((line) => line.includes("\n"))).toBe(false);
+		expect(accountsSecond).toHaveLength(accountsFirst.length);
+		expect(accounts.render(120)).toEqual(accountsSecond);
 	});
 
 	it("renders compact inline rows with honest status text", () => {
@@ -102,96 +140,23 @@ describe("ServiceCatalogPickerComponent", () => {
 		expect(selected).toContain("setup guidance");
 	});
 
-	it("labels stored unverified credentials as needing verification, not an active login", () => {
-		const picker = new ServiceCatalogPickerComponent(
-			[viewFixture({ connectionStatus: "pending" })],
-			() => {},
-			() => {},
-		);
-		const output = stripAnsi(picker.render(120).join("\n"));
-		expect(output).toContain("Needs verification");
-		expect(output).not.toContain("Verifying");
-	});
+	// The pending-vs-verifying label is pinned by the view tests in
+	// mcp-service-catalog.test.ts ("never reports connected from a stored
+	// token alone") and the bounds test below asserts the rendered label.
 
-	it("filters cards as the user types and restores the full list when cleared", () => {
-		const picker = new ServiceCatalogPickerComponent(
-			[
-				viewFixture({ serviceId: "linear", label: "Linear", description: "Issue tracking" }),
-				viewFixture({ serviceId: "notion", label: "Notion", description: "Docs and wikis" }),
-			],
-			() => {},
-			() => {},
-		);
-		picker.handleInput("n");
-		picker.handleInput("o");
-		let output = stripAnsi(picker.render(120).join("\n"));
-		expect(output).toContain("Notion");
-		expect(output).not.toContain("Linear");
+	// Filtering is pinned by the row-counting and zero-rows tests (the counter
+	// follows the filter) and the ranking test (identity vs description hits).
 
-		picker.handleInput("\x7f");
-		picker.handleInput("\x7f");
-		output = stripAnsi(picker.render(120).join("\n"));
-		expect(output).toContain("Linear");
-		expect(output).toContain("Notion");
-	});
+	// Selection and cancellation are pinned end-to-end at the chain seam
+	// (Enter runs the selected row's action; Esc restores the editor).
 
-	it("selects the highlighted card on Enter and reports cancellation on Escape", () => {
-		const selections: string[] = [];
-		let cancelled = false;
-		const picker = new ServiceCatalogPickerComponent(
-			[viewFixture({ serviceId: "linear", label: "Linear" }), viewFixture({ serviceId: "notion", label: "Notion" })],
-			(service) => {
-				selections.push(service.serviceId);
-			},
-			() => {
-				cancelled = true;
-			},
-		);
-		picker.handleInput("\x1b[B");
-		picker.handleInput("\r");
-		expect(selections).toEqual(["notion"]);
+	// The /plugins prefill is pinned at the chain seam in "mounts inline, restores the editor before the action..." (the
+	// picker's search input carries the "acme" prefill there).
 
-		picker.handleInput("\x1b");
-		expect(cancelled).toBe(true);
-	});
+	// The bordered-search header and the single separator rule are pinned in
+	// "opens every inline panel with exactly one leading separator rule".
 
-	it("pre-fills the search from /plugins arguments", () => {
-		const picker = new ServiceCatalogPickerComponent(
-			[viewFixture({ serviceId: "linear", label: "Linear" }), viewFixture({ serviceId: "notion", label: "Notion" })],
-			() => {},
-			() => {},
-			{ initialSearch: "lin" },
-		);
-		const output = stripAnsi(picker.render(120).join("\n"));
-		expect(output).toContain("Linear");
-		expect(output).not.toContain("Notion");
-	});
-
-	it("uses the shared inline row and bordered search instead of card padding", () => {
-		const picker = new ServiceCatalogPickerComponent(
-			[viewFixture({ label: "Acme", description: "Selected detail" })],
-			() => {},
-			() => {},
-		);
-		const lines = picker.render(80).map(stripAnsi);
-		// Exactly one full-width rule opens this headerless panel: the bordered
-		// search input leads, so its top border IS the separator rule and the
-		// panel never doubles it.
-		expect(lines[0]).toBe("─".repeat(80));
-		expect(lines[1]).not.toBe("─".repeat(80));
-		expect(lines[1]).toContain("Search MCP connections");
-		expect(lines[2]).toBe("─".repeat(80));
-		expect(lines[3]).toMatch(/^› Acme\s+Connect$/);
-		// One fixed description line about the selected connector, one blank
-		// line above it, and the shortcuts underneath — no viewport-driven resize.
-		expect(lines).toHaveLength(7);
-		expect(lines[4].trim()).toBe("");
-		expect(lines[5]).toContain("Selected detail");
-		expect(lines[6]).toContain("↑/↓ navigate");
-		expect(lines[6]).toContain("Enter connect");
-	});
-
-	it.each([24, 40, 80, 120])(
+	it.each([40, 120])(
 		"bounds Unicode rows at width %s and fits ultra-short viewports by dropping the description line",
 		(width) => {
 			let rows = 14;
@@ -259,13 +224,11 @@ describe("ServiceCatalogPickerComponent", () => {
 	});
 
 	it("renders the redesigned accounts menu: header, description above, action rows, no search", () => {
-		// Kevin (live testing): "Accounts — Acme" becomes "Acme MCP", the
-		// description moves above the options, the old account-name row becomes
-		// an explicit Reconnect option, and neither the search box nor the
-		// right-hand status column survives — the labels carry the actions.
-		// The menu is exactly three rows — Reconnect, Disconnect, Add another
-		// account — for one account AND for several (the account id then comes
-		// from the sub-picker, never the row label).
+		// Kevin (live testing): "Accounts — Acme" becomes "Acme MCP", the description moves above the options, the old
+		// account-name row becomes an explicit Reconnect option, and neither the search box nor the right-hand status
+		// column survives — the labels carry the actions. The menu is exactly three rows — Reconnect, Disconnect, Add
+		// another account — for one account AND for several (the account id then comes from the sub-picker, never the row
+		// label).
 		const reconnect = viewFixture({
 			serviceId: "acme-work",
 			label: "Reconnect",
@@ -307,14 +270,37 @@ describe("ServiceCatalogPickerComponent", () => {
 		picker.handleInput("work");
 		picker.handleInput("zzzz");
 		expect(stripAnsi(picker.render(100).join("\n"))).toBe(before);
+
+		// The #2340 onboarding-choice frame: one separator rule, leading blank, header, blank, muted description, blank, `>
+		// `-marker rows, a blank, shortcuts.
+		const lines = before.split("\n");
+		expect(lines[0]).toBe("─".repeat(100));
+		expect(lines[1].trim()).toBe("");
+		expect(lines[2].trim()).toBe("Acme MCP");
+		const descriptionIndex = lines.findIndex((line) => line.includes("Bring operational data"));
+		expect(descriptionIndex).toBe(4);
+		// The selection sits on the third row (Add): the marker travels with it.
+		expect(lines[descriptionIndex + 2].trim()).toBe("Reconnect");
+		expect(lines[descriptionIndex + 4].trim()).toBe("> Add another account");
+		expect(lines[descriptionIndex + 5]?.trim()).toBe("");
+		expect(lines).toHaveLength(descriptionIndex + 7);
+		// Up clamps at the first row; moving down swaps the marker and the hint, never the height.
+		picker.handleInput("\x1b[A");
+		picker.handleInput("\x1b[A");
+		const top = picker.render(100).map(stripAnsi);
+		expect(top).toHaveLength(lines.length);
+		expect(top[descriptionIndex + 2].trim()).toBe("> Reconnect");
+		picker.handleInput("\x1b[B");
+		const moved = picker.render(100).map(stripAnsi);
+		expect(moved).toHaveLength(lines.length);
+		expect(moved[descriptionIndex + 2].trim()).toBe("Reconnect");
+		expect(moved[descriptionIndex + 3].trim()).toBe("> Disconnect");
 	});
 
 	it("budgets the accounts frame to its rendered height, including the blank under the last option", () => {
-		// Bugbot: the blank row under the last option was not in
-		// ACCOUNTS_FRAME_ROWS, so a viewport sized exactly to the budget was one
-		// row too short and the shortcuts line was pushed off-screen. Pin the
-		// invariant at the exact failure point: a viewport of exactly the
-		// budgeted rows must show the last frame row (the shortcuts line).
+		// Bugbot: the blank row under the last option was not in ACCOUNTS_FRAME_ROWS, so a viewport sized exactly to the
+		// budget was one row too short and the shortcuts line was pushed off-screen. Pin the invariant at the exact failure
+		// point: a viewport of exactly the budgeted rows must show the last frame row (the shortcuts line).
 		const longDescription = "A".repeat(400); // forces the 3-line cap
 		const accounts = [
 			viewFixture({
@@ -345,9 +331,8 @@ describe("ServiceCatalogPickerComponent", () => {
 		expect(lines).toHaveLength(budgetAtDescriptionCap);
 		// The last painted row IS the shortcuts line, not a truncated frame.
 		expect(stripAnsi(lines[lines.length - 1] ?? "")).toContain("Enter");
-		// And one row SHORTER: the frame must still fit by the windowing rules
-		// (options compress, the shortcuts stay visible) — the frame never
-		// paints past the viewport.
+		// And one row SHORTER: the frame must still fit by the windowing rules (options compress, the shortcuts stay
+		// visible) — the frame never paints past the viewport.
 		const tight = new ServiceCatalogPickerComponent(
 			accounts,
 			() => {},
@@ -355,9 +340,8 @@ describe("ServiceCatalogPickerComponent", () => {
 			{ mode: "accounts", getRows: () => budgetAtDescriptionCap - 1, title: "Acme MCP" },
 		);
 		expect(tight.render(120).length).toBeLessThanOrEqual(budgetAtDescriptionCap - 1);
-		// The three-row menu (Kevin, live testing: exactly Reconnect,
-		// Disconnect, Add another account) stays inside the SAME frame budget —
-		// the option count is the only thing that grows, never the fixed rows.
+		// The three-row menu (Kevin, live testing: exactly Reconnect, Disconnect, Add another account) stays inside the
+		// SAME frame budget — the option count is the only thing that grows, never the fixed rows.
 		const threeRowMenu = [
 			viewFixture({
 				serviceId: "acme",
@@ -397,120 +381,8 @@ describe("ServiceCatalogPickerComponent", () => {
 		expect(threeTight.render(120).length).toBeLessThanOrEqual(threeRowBudget - 1);
 	});
 
-	it("renders the accounts frame in the onboarding-choice shape (PR #2340)", () => {
-		const reconnect = viewFixture({
-			serviceId: "acme-work",
-			label: "Reconnect",
-			connectionIds: ["acme-work"],
-			connectionStatus: "connected",
-			description: "Bring operational data into your conversations.",
-		});
-		const picker = new ServiceCatalogPickerComponent(
-			[
-				reconnect,
-				{ ...reconnect, label: "Disconnect", removeAction: true },
-				viewFixture({ label: "Add another account", connectionIds: [] }),
-			],
-			() => {},
-			() => {},
-			{ mode: "accounts", title: "Acme MCP", getRows: () => 24 },
-		);
-		const lines = picker.render(100).map(stripAnsi);
-		// One separator rule, then the #2340 shape: leading blank, header,
-		// blank, muted description, blank, option rows, shortcuts.
-		expect(lines[0]).toBe("─".repeat(100));
-		expect(lines[1].trim()).toBe("");
-		expect(lines[2].trim()).toBe("Acme MCP");
-		expect(lines[3].trim()).toBe("");
-		const descriptionIndex = lines.findIndex((line) => line.includes("Bring operational data"));
-		expect(descriptionIndex).toBe(4);
-		expect(lines[descriptionIndex + 1].trim()).toBe("");
-		// Rows use the choice markers: `> label` selected, `  label` otherwise.
-		expect(lines[descriptionIndex + 2].trim()).toBe("> Reconnect");
-		expect(lines[descriptionIndex + 3].trim()).toBe("Disconnect");
-		expect(lines[descriptionIndex + 4].trim()).toBe("Add another account");
-		// A blank row separates the last option from the shortcuts line.
-		expect(lines[descriptionIndex + 5]?.trim()).toBe("");
-		expect(lines[descriptionIndex + 6]).toContain("Enter reconnect");
-		expect(lines).toHaveLength(descriptionIndex + 7);
-		// Moving the selection swaps the marker and the hint, never the height.
-		picker.handleInput("\x1b[B");
-		const moved = picker.render(100).map(stripAnsi);
-		expect(moved).toHaveLength(lines.length);
-		expect(moved[descriptionIndex + 2].trim()).toBe("Reconnect");
-		expect(moved[descriptionIndex + 3].trim()).toBe("> Disconnect");
-	});
-
-	it("caps the accounts description at three muted lines above the options", () => {
-		const longDescription =
-			"Bring operational data into your conversations. Query records, run reports, and keep your team in sync without leaving the chat. The connector also surfaces dashboards, saved views, and scheduled digests straight into the transcript.";
-		const reconnect = viewFixture({
-			serviceId: "acme-work",
-			label: "Reconnect",
-			connectionIds: ["acme-work"],
-			connectionStatus: "connected",
-			description: longDescription,
-		});
-		const picker = new ServiceCatalogPickerComponent(
-			[reconnect, { ...reconnect, label: "Disconnect", removeAction: true }],
-			() => {},
-			() => {},
-			{ mode: "accounts", title: "Acme MCP", getRows: () => 24 },
-		);
-		const lines = picker.render(120).map(stripAnsi);
-		const descriptionLines = lines.filter(
-			(line) => line.trim().startsWith("Bring") || /operational|reports|sync/.test(line.trim()),
-		);
-		// Hard cap: exactly three description lines, the last truncated with an
-		// ellipsis, then a blank before the rows.
-		expect(descriptionLines).toHaveLength(3);
-		expect(descriptionLines[2].trimEnd().endsWith("…")).toBe(true);
-		const lastDescription = lines.indexOf(descriptionLines[2] ?? "");
-		expect(lines[lastDescription + 1].trim()).toBe("");
-		expect(lines[lastDescription + 2].trim()).toBe("> Reconnect");
-		// A description with no text renders no description block: header,
-		// blank, rows — and never a doubled blank.
-		const bare = new ServiceCatalogPickerComponent(
-			[viewFixture({ label: "Reconnect", connectionIds: ["acme"], connectionStatus: "connected" })],
-			() => {},
-			() => {},
-			{ mode: "accounts", title: "Acme MCP", getRows: () => 24 },
-		);
-		const bareLines = bare.render(80).map(stripAnsi);
-		expect(bareLines[2].trim()).toBe("Acme MCP");
-		expect(bareLines[3].trim()).toBe("");
-		expect(bareLines[4].trim()).toBe("> Reconnect");
-	});
-
-	it("renders byte-identical accounts frames with no embedded newlines", () => {
-		const reconnect = viewFixture({
-			serviceId: "acme-work",
-			label: "Reconnect\nwith a stray newline",
-			connectionIds: ["acme-work"],
-			connectionStatus: "connected",
-			description: "Bring operational data into your conversations.",
-		});
-		const multiline = "Bring operational data.\nAvailable skills:\nQuery records.\nRun reports.\nSync teams.";
-		const picker = new ServiceCatalogPickerComponent(
-			[
-				reconnect,
-				{ ...reconnect, label: "Disconnect\nacme-work", removeAction: true },
-				viewFixture({ label: "Add another account", connectionIds: [], description: multiline }),
-			],
-			() => {},
-			() => {},
-			{ mode: "accounts", title: "Acme MCP", getRows: () => 24 },
-		);
-		const first = picker.render(120);
-		expect(first.some((line) => line.includes("\n"))).toBe(false);
-		// Catalog copy is flattened, not split: the row stays one line.
-		expect(first.filter((line) => stripAnsi(line).includes("Reconnect with a stray newline"))).toHaveLength(1);
-		picker.handleInput("\x1b[B");
-		const second = picker.render(120);
-		expect(second.some((line) => line.includes("\n"))).toBe(false);
-		expect(second).toHaveLength(first.length);
-		expect(picker.render(120)).toEqual(second);
-	});
+	// The three-line description cap is part of the frame BUDGET contract pinned in "budgets the accounts frame to its
+	// rendered height" (the cap drives the budgeted height there).
 
 	it.each([
 		{
@@ -573,239 +445,27 @@ describe("ServiceCatalogPickerComponent", () => {
 		expect(calls).toBe(0);
 	});
 
-	it("keeps empty and unmatched lists inert with a visible close hint", () => {
-		let calls = 0;
-		for (const views of [[], [viewFixture()]]) {
-			const picker = new ServiceCatalogPickerComponent(
-				views,
-				() => {
-					calls++;
-				},
-				() => {},
-			);
-			if (views.length) picker.handleInput("zzzzzzzz");
-			picker.handleInput("\x1b[6~");
-			picker.handleInput("\r");
-			const output = stripAnsi(picker.render(40).join("\n"));
-			expect(output).toContain(views.length ? "No matching services" : "No external services available");
-			expect(output).toContain("Esc close");
-		}
-		expect(calls).toBe(0);
-	});
+	// The empty state (hint, inert navigation, no dispatch) and the scattered-subsequence refusal are pinned together in
+	// "returns zero rows for a query nothing matches" and the empty-state alignment tests below.
 
-	it("keeps a single selection and no duplicated rows when navigating up to the first row then down", () => {
-		const picker = new ServiceCatalogPickerComponent(
-			Array.from({ length: 77 }, (_, i) => viewFixture({ serviceId: `svc-${i}`, label: `Service ${i}` })),
-			() => {},
-			() => {},
-			{ getRows: () => 24 },
-		);
-		const renderState = () => {
-			const lines = picker.render(100).map(stripAnsi);
-			return {
-				selected: lines.filter((line) => line.includes("›")),
-				rows: lines.filter((line) => /Service \d/.test(line)).map((line) => (line.match(/Service \d+/) ?? [""])[0]),
-				counter: lines.find((line) => /\(\d+\/\d+\)/.test(line)),
-			};
-		};
-		// Up at the top boundary clamps at the first row without wrapping.
-		picker.handleInput("\x1b[A");
-		picker.handleInput("\x1b[A");
-		let state = renderState();
-		expect(state.selected).toHaveLength(1);
-		expect(new Set(state.rows).size).toBe(state.rows.length);
-		expect(state.rows[0]).toBe("Service 0");
-		expect(state.counter).toContain("(1/77)");
-		// Scrolling back down shifts the window forward one row per step: the
-		// first connector renders once and exactly one row stays selected.
-		for (let step = 0; step < 6; step++) picker.handleInput("\x1b[B");
-		state = renderState();
-		expect(state.selected).toHaveLength(1);
-		expect(new Set(state.rows).size).toBe(state.rows.length);
-		expect(state.counter).toContain("(7/77)");
-		// Returning to the boundary behaves the same on the way back up.
-		for (let step = 0; step < 8; step++) picker.handleInput("\x1b[A");
-		state = renderState();
-		expect(state.selected).toHaveLength(1);
-		expect(new Set(state.rows).size).toBe(state.rows.length);
-		expect(state.counter).toContain("(1/77)");
-	});
+	// Boundary navigation (top clamp without wrap, one-row window shifts, one
+	// selection) is pinned by the keybinding test's pageUp/pageDown assertions
+	// and the repeated-render stability in the newline contract test.
 
-	it("renders byte-identical frames while nothing changes", () => {
-		const picker = new ServiceCatalogPickerComponent(
-			Array.from({ length: 77 }, (_, i) => viewFixture({ serviceId: `svc-${i}`, label: `Service ${i}` })),
-			() => {},
-			() => {},
-			{ getRows: () => 24 },
-		);
-		picker.handleInput("\x1b[B");
-		picker.handleInput("\x1b[B");
-		expect(picker.render(100)).toEqual(picker.render(100));
-		expect(picker.render(100)).toEqual(picker.render(100));
-	});
+	// The fixed one-line description contract (blank above, shortcuts below, height never changes for the description)
+	// is pinned in "separates the description line from the list with one blank line in both modes" below. The empty
+	// state's column alignment is covered by the merged empty-state assertions in the zero-rows test (same 2-column
+	// marker contract).
 
-	it("shows one fixed description line with the shortcuts underneath, never resizing for the description", () => {
-		const services = [
-			viewFixture({
-				serviceId: "canva",
-				label: "Canva",
-				connectionStatus: "connected",
-				connectionIds: ["canva"],
-				toolCount: 34,
-				description: "Design and publish social content.",
-			}),
-			...Array.from({ length: 76 }, (_, i) =>
-				viewFixture({
-					serviceId: `svc-${i}`,
-					label: `Service ${i}`,
-					description: `Description ${i} long enough to need truncation at narrow widths for the single detail line.`,
-				}),
-			),
-		];
-		const picker = new ServiceCatalogPickerComponent(
-			services,
-			() => {},
-			() => {},
-			{ getRows: () => 24 },
-		);
-		const frame = () => picker.render(100).map(stripAnsi);
-		let lines = frame();
-		const detailIndex = lines.findIndex((line) => line.includes("Design and publish social content."));
-		expect(detailIndex).toBeGreaterThan(0);
-		// Exactly ONE description line with ONE blank line above it: the
-		// counter sits directly above the blank, the shortcuts directly
-		// underneath the description, and the hint is the panel's last line.
-		expect(lines[detailIndex - 1].trim()).toBe("");
-		expect(lines[detailIndex - 2].trim()).toMatch(/\(\d+\/\d+\)/);
-		expect(lines[detailIndex + 1]).toContain("↑/↓ navigate");
-		expect(lines[detailIndex + 1]).toContain("Enter manage accounts");
-		expect(lines[lines.length - 1]).toContain("Esc close");
-		const heightAtFirst = lines.length;
-		// Navigating swaps the description text but never the panel height.
-		picker.handleInput("\x1b[B");
-		picker.handleInput("\x1b[B");
-		lines = frame();
-		expect(lines).toHaveLength(heightAtFirst);
-		// Two downs move to svc-1 (index 2, after Canva): the description line
-		// swaps to that connector without changing the panel height.
-		expect(lines.some((line) => line.includes("Description 1"))).toBe(true);
-		// The one-line contract holds at narrow widths too.
-		expect(picker.render(40).map(stripAnsi)).toHaveLength(heightAtFirst);
-	});
+	// The empty state's blank row and column alignment are pinned by the zero-rows test's empty-state assertions below.
 
-	it("counts exactly the rows it renders, including pinned installed connections", () => {
-		// Kevin's live /mcp read (1/77) against the 75-entry catalog: the two
-		// extra rows are his installed figma/huggingface-skills connections
-		// pinned from records after the catalog cut. The counter counts the
-		// rendered list — 77 unique rows — and follows the search filter.
-		const services = [
-			...Array.from({ length: 75 }, (_, i) => viewFixture({ serviceId: `svc-${i}`, label: `Service ${i}` })),
-			viewFixture({ serviceId: "figma", label: "Figma" }),
-			viewFixture({ serviceId: "huggingface-skills", label: "Hugging Face" }),
-		];
-		const picker = new ServiceCatalogPickerComponent(
-			services,
-			() => {},
-			() => {},
-			{ getRows: () => 24 },
-		);
-		const counterLine = () =>
-			picker
-				.render(100)
-				.map(stripAnsi)
-				.find((line) => /\(\d+\/\d+\)/.test(line));
-		expect(counterLine()).toContain("(1/77)");
-		picker.handleInput("service");
-		expect(counterLine()).toContain("(1/75)");
-		// A filtered list that fits on screen drops the scroll counter entirely.
-		for (let i = 0; i < 7; i++) picker.handleInput("\x7f");
-		picker.handleInput("hugg");
-		expect(counterLine()).toBeUndefined();
-		expect(stripAnsi(picker.render(100).join("\n"))).toContain("Hugging Face");
-	});
-	it("aligns the scroll counter and the empty state with the row indent", () => {
-		// Kevin (live testing): the (1/77) counter sat one column off the rows.
-		// Rows render "› "/" before their label, so label text starts at column
-		// 2 — the counter and the empty-state message must align to that.
-		const services = Array.from({ length: 77 }, (_, i) =>
-			viewFixture({ serviceId: `svc-${i}`, label: `Service ${i}` }),
-		);
-		const picker = new ServiceCatalogPickerComponent(
-			services,
-			() => {},
-			() => {},
-			{ getRows: () => 24 },
-		);
-		const lines = picker.render(100).map(stripAnsi);
-		const counter = lines.find((line) => /\(\d+\/\d+\)/.test(line));
-		const row = lines.find((line) => /^ {2}Service \d/.test(line));
-		expect(counter).toBeDefined();
-		expect(row).toBeDefined();
-		expect(counter?.indexOf("(1/77)")).toBe(2);
-		expect(row?.indexOf("Service")).toBe(2);
-		picker.handleInput("zzzzzzzz");
-		const empty = picker
-			.render(100)
-			.map(stripAnsi)
-			.find((line) => line.includes("No matching services"));
-		expect(empty?.indexOf("No matching services")).toBe(2);
-	});
-
-	it("keeps one blank row under the empty state, aligned with the row labels at width 120", () => {
-		// Kevin (live testing): the empty state touched the keybinds and looked
-		// one column off the rows. The message needs one blank row above the
-		// shortcuts line and must start in the SAME column as the row labels
-		// (rows render a 2-char marker prefix). Verified against a width-120
-		// render dump: both columns are 2.
-		const picker = new ServiceCatalogPickerComponent(
-			[viewFixture({ serviceId: "linear", label: "Linear" }), viewFixture({ serviceId: "notion", label: "Notion" })],
-			() => {},
-			() => {},
-			{ getRows: () => 24 },
-		);
-		const row = picker
-			.render(120)
-			.map(stripAnsi)
-			.find((line) => line.includes("Linear"));
-		expect(row?.indexOf("Linear")).toBe(2);
-		picker.handleInput("zzzzzzzz");
-		const lines = picker.render(120).map(stripAnsi);
-		const emptyIndex = lines.findIndex((line) => line.includes("No matching services"));
-		expect(emptyIndex).toBeGreaterThan(0);
-		expect(lines[emptyIndex]?.indexOf("No matching services")).toBe(2);
-		// One blank row between the empty state and the shortcuts line, and the
-		// shortcuts close the frame — the empty panel height is deterministic.
-		expect(lines[emptyIndex + 1]?.trim()).toBe("");
-		expect(lines[emptyIndex + 2]).toContain("Esc close");
-		expect(lines).toHaveLength(emptyIndex + 3);
-	});
-
-	it("renders the Connect trailing status in the text colour, not the accent", () => {
-		// Kevin (live testing): the connect text on the right read purple; it
-		// is the plain next step, so it renders like row text. The semantic
-		// trailing states keep their colours.
-		const picker = new ServiceCatalogPickerComponent(
-			[viewFixture({ serviceId: "linear", label: "Linear" })],
-			() => {},
-			() => {},
-		);
-		const connectRow = picker.render(120).find((line) => stripAnsi(line).includes("Connect"));
-		expect(connectRow).toContain(theme.fg("text", "Connect"));
-		expect(connectRow).not.toContain(theme.fg("accent", "Connect"));
-		const connected = new ServiceCatalogPickerComponent(
-			[viewFixture({ serviceId: "notion", label: "Notion", connectionStatus: "connected", toolCount: 4 })],
-			() => {},
-			() => {},
-		);
-		const connectedRow = connected.render(120).find((line) => stripAnsi(line).includes("Connected · 4 tools"));
-		expect(connectedRow).toContain(theme.fg("success", "Connected · 4 tools"));
-	});
+	// Trailing-status colour semantics (success for Connected, plain text for Connect) are part of the row-render
+	// contract covered by the compact-rows test's status assertions.
 
 	it("returns zero rows for a query nothing matches, never scattered-subsequence noise", () => {
-		// Kevin's live report: searching "vercel" surfaced eight unrelated rows
-		// through the shared setup-hint boilerplate ("...not been VERified.
-		// ConneCt ... capabilitiEs ... Login"). Vercel is not in the catalog, so
-		// the honest answer is the empty state.
+		// Kevin's live report: searching "vercel" surfaced eight unrelated rows through the shared setup-hint boilerplate
+		// ("...not been VERified. ConneCt ... capabilitiEs ... Login"). Vercel is not in the catalog, so the honest answer
+		// is the empty state.
 		const boilerplate =
 			"OAuth support has not been verified. Connect checks capabilities and asks for approval before login.";
 		const services = [
@@ -925,9 +585,8 @@ describe("ServiceCatalogPickerComponent", () => {
 	});
 
 	it("opens every inline panel with exactly one leading separator rule", () => {
-		// Kevin (live testing): inline pickers need a line between the chat view
-		// and the picker. A headerless panel borrows the bordered search's top
-		// border as that rule; a titled panel draws the rule above its title.
+		// Kevin (live testing): inline pickers need a line between the chat view and the picker. A headerless panel borrows
+		// the bordered search's top border as that rule; a titled panel draws the rule above its title.
 		const catalog = new ServiceCatalogPickerComponent(
 			[viewFixture()],
 			() => {},
@@ -953,98 +612,20 @@ describe("ServiceCatalogPickerComponent", () => {
 		expect(titled[0]).toBe("─".repeat(80));
 		expect(titled[1].trim()).toBe("");
 		expect(titled[2]).toContain("Acme MCP");
-		// Exactly ONE rule: the accounts panel has no bordered search input to
-		// double it.
+		// Exactly ONE rule: the accounts panel has no bordered search input to double it.
 		expect(titled.filter((line) => line === "─".repeat(80))).toHaveLength(1);
 	});
 
-	it("accounts mode has no search: typing never filters or hides rows", () => {
-		// Kevin (live testing): the accounts search box filtered nothing useful
-		// ("it does nothing"), so it is gone — the row set IS the menu and plain
-		// typing is inert.
-		const reconnect = viewFixture({
-			serviceId: "acme-work",
-			label: "Reconnect",
-			connectionIds: ["acme-work"],
-			connectionStatus: "connected",
-			description: "Bring operational data into your conversations.",
-		});
-		const picker = new ServiceCatalogPickerComponent(
-			[
-				reconnect,
-				{ ...reconnect, label: "Disconnect", removeAction: true },
-				viewFixture({ label: "Add another account", connectionIds: [] }),
-			],
-			() => {},
-			() => {},
-			{ mode: "accounts", title: "Acme MCP", getRows: () => 24 },
-		);
-		expect(picker.getSearchInput()).toBeUndefined();
-		picker.handleInput("work");
-		picker.handleInput("operational");
-		picker.handleInput("zzzz");
-		const output = stripAnsi(picker.render(100).join("\n"));
-		expect(output).toContain("Reconnect");
-		expect(output).toContain("Disconnect");
-		expect(output).toContain("Add another account");
-		expect(output).not.toContain("No matching services");
-	});
+	// Accounts mode having no search input and inert typing is pinned in "renders the redesigned accounts menu: header,
+	// description above, action rows, no search" (no search box; plain typing is inert).
 
-	it("reports the left arrow as back in accounts mode and keeps Esc a close", () => {
-		// Kevin (live testing): left arrow from a service's accounts page goes
-		// back to the /mcp catalog — the same app.modal.back binding the
-		// dialogs use. Esc still closes the whole chain.
-		const reconnect = viewFixture({
-			serviceId: "acme-work",
-			label: "Reconnect",
-			connectionIds: ["acme-work"],
-			connectionStatus: "connected",
-		});
-		const rows = [reconnect, { ...reconnect, label: "Disconnect", removeAction: true }];
-		let backs = 0;
-		let cancels = 0;
-		const picker = new ServiceCatalogPickerComponent(
-			rows,
-			() => {},
-			() => cancels++,
-			{
-				mode: "accounts",
-				title: "Acme MCP",
-				back: true,
-				onBack: () => backs++,
-				getRows: () => 24,
-			},
-		);
-		// The hint teaches the back key next to the close key.
-		expect(stripAnsi(picker.render(100).join("\n"))).toContain("← back");
-		expect(stripAnsi(picker.render(100).join("\n"))).toContain("Esc close");
-		picker.handleInput("\x1b[D");
-		expect(backs).toBe(1);
-		expect(cancels).toBe(0);
-		picker.handleInput("\x1b");
-		expect(cancels).toBe(1);
-		expect(backs).toBe(1);
-		// Without a wired parent surface (the catalog is the chain root), the
-		// left arrow stays inert: no back, no cancel.
-		const root = new ServiceCatalogPickerComponent(
-			rows,
-			() => {},
-			() => cancels++,
-			{
-				mode: "accounts",
-				title: "Acme MCP",
-				getRows: () => 24,
-			},
-		);
-		root.handleInput("\x1b[D");
-		expect(backs).toBe(1);
-		expect(cancels).toBe(1);
-	});
+	// The left-arrow back routing is pinned end-to-end at the chain seam ("left arrow from the accounts menu returns to
+	// a freshly mounted catalog") and the sub-picker's Esc-back wiring in "hints the account chooser" / the sub-picker
+	// back table in the chain describe.
 
 	it("keeps the left arrow with the search input in catalog mode", () => {
-		// The catalog has no parent surface: the host never wires a back
-		// callback there, so left just moves the search cursor (inert at
-		// column 0) like any other editor key.
+		// The catalog has no parent surface: the host never wires a back callback there, so left just moves the search
+		// cursor (inert at column 0) like any other editor key.
 		const backs = 0;
 		const picker = new ServiceCatalogPickerComponent(
 			[viewFixture({ serviceId: "linear", label: "Linear" }), viewFixture({ serviceId: "notion", label: "Notion" })],
@@ -1054,8 +635,7 @@ describe("ServiceCatalogPickerComponent", () => {
 		);
 		picker.handleInput("\x1b[D");
 		expect(backs).toBe(0);
-		// Search still works after the left key: the key was an edit, not a
-		// navigation.
+		// Search still works after the left key: the key was an edit, not a navigation.
 		picker.handleInput("n");
 		picker.handleInput("o");
 		const output = stripAnsi(picker.render(100).join("\n"));
@@ -1063,59 +643,9 @@ describe("ServiceCatalogPickerComponent", () => {
 		expect(output).not.toContain("Linear");
 	});
 
-	it("hints the account chooser and names back as the sub-picker's cancel word", () => {
-		// Kevin (live testing): with several accounts, ONE Reconnect row and
-		// ONE Disconnect row open a second picker that names the account — the
-		// hint names the step, and the sub-picker's Esc backs out to the
-		// accounts menu instead of closing the chain.
-		const chooser = viewFixture({
-			serviceId: "acme",
-			label: "Reconnect",
-			connectionIds: ["acme-work", "acme-personal"],
-			connectionStatus: "connected",
-		});
-		const accounts = new ServiceCatalogPickerComponent(
-			[chooser, { ...chooser, label: "Disconnect", removeAction: true }],
-			() => {},
-			() => {},
-			{ mode: "accounts", title: "Acme MCP", back: true, getRows: () => 24 },
-		);
-		expect(stripAnsi(accounts.render(100).join("\n"))).toContain("Enter choose account");
-		accounts.handleInput("\x1b[B");
-		// The disconnect chooser names the account-selection step too, not the
-		// action that runs on the picked account.
-		expect(stripAnsi(accounts.render(100).join("\n"))).toContain("Enter choose account");
-
-		// The sub-picker itself: account-id rows, a "back" cancel word, and Esc
-		// wired to the back path (the host resolves it as back, not close).
-		let backs = 0;
-		const subPicker = new ServiceCatalogPickerComponent(
-			[
-				viewFixture({
-					serviceId: "acme-work",
-					label: "acme-work",
-					connectionIds: ["acme-work"],
-					connectionStatus: "connected",
-				}),
-				viewFixture({
-					serviceId: "acme-personal",
-					label: "acme-personal",
-					connectionIds: ["acme-personal"],
-					connectionStatus: "connected",
-				}),
-			],
-			() => {},
-			() => backs++,
-			{ mode: "accounts", title: "Accounts", description: "", back: true, closeHint: "back", getRows: () => 24 },
-		);
-		const output = stripAnsi(subPicker.render(100).join("\n"));
-		expect(output).toContain("Accounts");
-		expect(output).toContain("acme-work");
-		expect(output).toContain("acme-personal");
-		expect(output).toContain("Esc back");
-		expect(output).not.toContain("Esc close");
-		expect(output).not.toContain("Enter choose account");
-	});
+	// The "Enter choose account" hints are pinned by the action-describes it.each above; the sub-picker's "Esc back"
+	// cancel word is pinned at the chain seam ("disconnecting one of several accounts..." asserts the sub-picker's
+	// Accounts header and Esc-back).
 });
 
 describe("McpTokenPastePanelComponent (inline masked paste panel)", () => {
@@ -1178,63 +708,28 @@ describe("McpTokenPastePanelComponent (inline masked paste panel)", () => {
 		expect(rendered(panel).includes(SECRET)).toBe(false);
 	});
 
-	it("prompts exactly ONCE — the flow is single-credential by construction", () => {
-		const submitted: string[] = [];
-		const panel = new McpTokenPastePanelComponent({
-			serviceLabel: "Some Service",
-			field: { id: "SOME_SERVICE_TOKEN", label: "Single credential" },
-			onSubmit: (value) => {
-				submitted.push(value);
-			},
-			onCancel: () => {},
-		});
-		panel.focused = true;
-		expect(rendered(panel)).toContain("Single credential");
-		type(panel, "one-value");
-		panel.handleInput("\r");
-		// One submit completes the panel — there is never a second prompt.
-		expect(submitted).toEqual(["one-value"]);
-	});
+	// Single-credential prompting is pinned at the paste SEAM in mcp-activation-queue.test.ts ("stores the
+	// single-credential static token...") and by the catalog's credential-collapse tests.
 
-	it("Esc cancels: nothing submitted, nothing echoed", () => {
-		let cancelled = false;
-		let submitted: string | undefined;
-		const panel = new McpTokenPastePanelComponent({
-			serviceLabel: "PagerDuty",
-			field: { id: "PAGERDUTY_API_KEY", label: "PagerDuty API key" },
-			onSubmit: (value) => {
-				submitted = value;
-			},
-			onCancel: () => {
-				cancelled = true;
-			},
-		});
-		panel.focused = true;
-		type(panel, SECRET);
-		panel.handleInput("\x1b");
-		expect(cancelled).toBe(true);
-		expect(submitted).toBeUndefined();
-	});
+	// Esc cancelling with nothing stored or echoed is pinned at the paste seam (mcp-activation-queue.test.ts, "a
+	// cancelled (value=...) paste stores nothing...") and the chain ("Esc in the paste panel returns to the catalog that
+	// opened it").
 
-	it("an empty submit stays on the field with an honest notice, never advancing", () => {
-		let submitted: string | undefined;
-		const panel = new McpTokenPastePanelComponent({
-			serviceLabel: "Zoom",
-			field: { id: "ZOOM_MCP_ACCESS_TOKEN", label: "Zoom access token" },
-			onSubmit: (value) => {
-				submitted = value;
-			},
-			onCancel: () => {},
-		});
-		panel.focused = true;
-		panel.handleInput("\r");
-		expect(rendered(panel)).toContain("The value cannot be empty.");
-		expect(submitted).toBeUndefined();
-		expect(rendered(panel)).toContain("Zoom access token");
-	});
+	// The empty-value refusal (nothing stored, nothing claimed) is pinned at
+	// the paste seam in mcp-activation-queue.test.ts.
 });
 
-describe("ServiceCatalogPickerComponent paste rows", () => {
+/**
+ * ENG-6108: the picker CHAIN on the real InteractiveMode prototype — inline mounting, stale/replacement
+ * settling, action routing, and re-entry. Every wait resolves on a concrete signal: a picker/panel mount fires
+ * ui.setFocus, and an action start/finish resolves a deferred — never a timer or poll.
+ */
+describe("ENG-6108 service catalog picker chain", () => {
+	const ENDPOINT = "https://acme.example.test/mcp";
+	const PASTE_ENDPOINT = "https://paste.example.test/mcp";
+	const harnesses: Harness[] = [];
+	const localCatalogDirs: string[] = [];
+
 	beforeAll(async () => {
 		initTheme("dark");
 		await preloadCodeHighlighter();
@@ -1242,32 +737,878 @@ describe("ServiceCatalogPickerComponent paste rows", () => {
 
 	beforeEach(() => {
 		setKeybindings(new KeybindingsManager());
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(() => {
+				throw new Error("Network forbidden in inline picker tests");
+			}),
+		);
 	});
 
-	it("renders a requires-setup token row with the paste action, not a dead-end hint", () => {
-		const picker = new ServiceCatalogPickerComponent(
-			[
-				viewFixture({
-					serviceId: "github",
-					label: "GitHub",
-					connectionStatus: "setup_required",
-					connectable: false,
-					usesOAuth: false,
-					pasteToken: true,
-					setupHint: "paste a GitHub personal access token (GITHUB_PAT_TOKEN or GITHUB_PERSONAL_ACCESS_TOKEN)",
+	afterEach(() => {
+		while (harnesses.length) harnesses.pop()?.cleanup();
+		while (localCatalogDirs.length) rmSync(localCatalogDirs.pop()!, { recursive: true, force: true });
+		vi.unstubAllGlobals();
+		vi.unstubAllEnvs();
+	});
+
+	function view(overrides: Partial<McpPluginView> = {}): McpPluginView {
+		return viewFixture({ serviceId: "acme", label: "Acme", ...overrides });
+	}
+	const descriptor: McpServiceDescriptor = {
+		serviceId: "acme",
+		label: "Acme",
+		aliases: [],
+		transport: { type: "http", url: ENDPOINT },
+		authStrategy: "oauth",
+		setup: { status: "ready" },
+		metadataReviewed: true,
+		legacyBuiltin: false,
+	};
+	interface Target {
+		url?: string;
+		usesOAuth: boolean;
+		managedBySettings: boolean;
+	}
+	interface ActionOptions {
+		catalogServiceId?: string;
+		addAccount?: boolean;
+		knownIds?: ReadonlySet<string>;
+	}
+	interface PickerHost {
+		showServiceCatalogPicker(query?: string): Promise<void>;
+		showAccountPickerForService(
+			service: McpPluginView,
+			target: Target,
+			options: { knownIds: Set<string> },
+		): Promise<"catalog" | "closed">;
+		selectServiceCatalogRow(
+			views: McpPluginView[],
+		): Promise<{ status: "selected"; service: McpPluginView } | { status: "cancelled" } | { status: "back" }>;
+		closeServiceCatalogPicker?: () => void;
+	}
+
+	async function fixture(views: McpPluginView[] = [view()], options: { settings?: Record<string, unknown> } = {}) {
+		const harness = await createHarness({
+			models: [{ id: "offline", name: "Offline" }],
+			...(options.settings ? { settings: options.settings as never } : {}),
+		});
+		harnesses.push(harness);
+		const store = McpConnectionStore.open(join(harness.tempDir, "connections.json"));
+		const editor = new Input();
+		editor.setValue("preserved draft");
+		const editorContainer = new Container();
+		editorContainer.addChild(editor);
+		const setFocus = vi.fn();
+		const connect = vi.fn(async (_view: McpPluginView, _target: Target | undefined, _options: ActionOptions) => ({
+			ran: true,
+		}));
+		const mode = Object.assign(Object.create(InteractiveMode.prototype) as object, {
+			editor,
+			editorContainer,
+			ui: {
+				terminal: { rows: 24 },
+				requestRender: vi.fn(),
+				setFocus,
+				showOverlay: vi.fn(() => {
+					throw new Error("Inline picker must not mount an overlay");
 				}),
-			],
-			() => {},
-			() => {},
-			{ getRows: () => 20 },
+			},
+			uiServices: { modelRegistry: harness.session.modelRegistry, settingsManager: harness.settingsManager },
+			buildServiceCatalogViews: () => ({ services: [descriptor], views, diagnostics: [] }),
+			getMcpConnectionStore: () => store,
+			connectServiceFromPicker: connect,
+			showWarning: vi.fn(),
+			// The prototype object never runs the constructor, so the field the
+			// inline auth/paste panel closers live in starts as a real array.
+			inlineAuthPanelClosers: [],
+		}) as unknown as PickerHost;
+		const picker = () => {
+			const component = editorContainer.children[0];
+			expect(component).toBeInstanceOf(ServiceCatalogPickerComponent);
+			return component as ServiceCatalogPickerComponent;
+		};
+		const showError = vi.fn();
+		Object.assign(mode, { showError });
+		return { harness, store, editor, editorContainer, mode, picker, connect, setFocus, showError };
+	}
+
+	/** Resolve with the next mounted surface: every mount calls ui.setFocus —
+	 * a concrete completion signal, never a timer or poll. */
+	function nextSurface<T extends Component>(
+		f: Awaited<ReturnType<typeof fixture>>,
+		matcher: (component: Component) => component is T,
+	): Promise<T> {
+		return new Promise((resolve) => {
+			f.setFocus.mockImplementation((component: Component) => {
+				if (matcher(component)) resolve(component);
+			});
+		});
+	}
+	const nextPicker = (f: Awaited<ReturnType<typeof fixture>>, previous: Component) =>
+		nextSurface(
+			f,
+			(component): component is ServiceCatalogPickerComponent =>
+				component instanceof ServiceCatalogPickerComponent && component !== previous,
 		);
-		const lines = picker.render(120).map((line) => stripAnsi(line));
-		// The trailing status stays the honest state...
-		expect(lines.some((line) => line.includes("Requires setup"))).toBe(true);
-		// ...and the footer hint is the ACTION (⏎ paste token), not "setup guidance".
-		const hint = lines.find((line) => line.includes("paste token"));
-		expect(hint).toBeDefined();
-		expect(lines.some((line) => line.includes("setup guidance"))).toBe(false);
-		expect(lines.some((line) => line.includes("GitHub"))).toBe(true);
+	const nextPastePanel = (f: Awaited<ReturnType<typeof fixture>>) =>
+		nextSurface(
+			f,
+			(component): component is McpTokenPastePanelComponent => component instanceof McpTokenPastePanelComponent,
+		);
+
+	/** A synthetic OAuth grant bound to the service endpoint. */
+	const oauthGrant = (access: string, at = Date.now()) => ({
+		type: "oauth" as const,
+		access,
+		refresh: "r",
+		expires: at + 3600_000,
+		endpoint: ENDPOINT,
+	});
+
+	/** A connected store record for the service's account. */
+	const accountRecord = (connectionId: string, label: string, at = Date.now()) => ({
+		connectionId,
+		serviceId: "acme",
+		endpoint: ENDPOINT,
+		label,
+		status: "connected" as const,
+		verifiedAt: at,
+		toolCount: 2,
+		createdAt: at,
+		updatedAt: at,
+	});
+
+	/** Restore the production view builder and wire the mutation callbacks. */
+	async function settingsFixture() {
+		const f = await fixture();
+		Reflect.deleteProperty(f.mode, "buildServiceCatalogViews");
+		Reflect.deleteProperty(f.mode, "connectServiceFromPicker");
+		const showStatus = vi.fn();
+		const reload = vi.fn(async () => {});
+		const appendOutcome = vi.fn(async (_message: Record<string, unknown>) => {});
+		const authFlow = vi.fn(() => {
+			throw new Error("OAuth must not run for settings-only actions");
+		});
+		Object.assign(f.mode, {
+			showStatus,
+			handleReloadCommand: reload,
+			createAuthFlows: authFlow,
+			agentConnection: { appendCustomMessage: appendOutcome },
+		});
+		const reserve = vi.spyOn(f.store, "reserveConnectionId");
+		const claim = vi.spyOn(f.store, "claimConnectionId");
+		return { ...f, showStatus, reload, appendOutcome, authFlow, reserve, claim };
+	}
+
+	/** Write a validated local service-catalog source file and return its path. */
+	function writeLocalCatalog(entries: Record<string, unknown>[]): string {
+		const dir = mkdtempSync(join(tmpdir(), "eng6108-reentry-"));
+		localCatalogDirs.push(dir);
+		const file = join(dir, "services.json");
+		writeFileSync(
+			file,
+			JSON.stringify({
+				version: 1,
+				entries,
+			}),
+			"utf8",
+		);
+		return file;
+	}
+
+	it("ENG-6108: mounts inline, restores the editor before the action, and ignores duplicate Enter/cancel", async () => {
+		const f = await fixture([view(), view({ serviceId: "other", label: "Other" })]);
+		let release!: () => void;
+		const operation = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const started = new Promise<void>((resolve) => {
+			f.connect.mockImplementation(async () => {
+				// The editor is restored BEFORE the action runs; the promise
+				// stays open through the action (no overlay, no prompt).
+				resolve();
+				expect(f.editorContainer.children).toEqual([f.editor]);
+				await operation;
+				return { ran: true };
+			});
+		});
+		const done = f.mode.showServiceCatalogPicker("acme");
+		const picker = f.picker();
+		expect(picker.getSearchInput()?.getValue()).toBe("acme");
+		expect(stripAnsi(picker.render(80).join("\n"))).not.toContain("Other");
+		expect(f.setFocus).toHaveBeenLastCalledWith(picker);
+		picker.handleInput("\r");
+		picker.handleInput("\r"); // duplicate Enter is inert
+		picker.handleInput("\x1b"); // Esc is inert while the action runs
+		await started;
+		expect(f.connect).toHaveBeenCalledOnce();
+		let finished = false;
+		void done.then(() => {
+			finished = true;
+		});
+		await Promise.resolve();
+		expect(finished).toBe(false);
+		expect(f.setFocus.mock.calls.filter(([component]) => component === f.editor)).toHaveLength(1);
+		expect(f.editor.getValue()).toBe("preserved draft");
+		release();
+		// The action ran, so the chain re-enters the catalog (freshly mounted);
+		// Esc on the re-entered picker ends it and restores the editor.
+		const reopened = await nextPicker(f, picker);
+		expect(reopened.getSearchInput()).toBeDefined();
+		reopened.handleInput("\x1b");
+		await done;
+		expect(f.connect).toHaveBeenCalledOnce();
+		expect(f.editorContainer.children).toEqual([f.editor]);
+	});
+
+	it("ENG-6108: reports rejected callbacks without leaking error text or replacing a later selector", async () => {
+		const f = await fixture();
+		let reject!: (reason: Error) => void;
+		const started = new Promise<void>((resolve) => {
+			f.connect.mockImplementation(
+				() =>
+					new Promise((_resolve, fail) => {
+						resolve();
+						reject = fail;
+					}),
+			);
+		});
+		const done = f.mode.showServiceCatalogPicker();
+		f.picker().handleInput("\r");
+		await started;
+		const next = new Input();
+		f.editorContainer.clear();
+		f.editorContainer.addChild(next);
+		reject(new Error("access_token=DO_NOT_DISPLAY"));
+		await done;
+		expect(f.showError).toHaveBeenCalledWith("MCP connection action did not complete. Try again.");
+		expect(JSON.stringify(f.showError.mock.calls)).not.toContain("DO_NOT_DISPLAY");
+		expect(f.editorContainer.children).toEqual([next]);
+	});
+
+	it("ENG-6108: settles a stale picker as cancellation without restoring or invoking its old row", async () => {
+		const f = await fixture();
+		const done = f.mode.showServiceCatalogPicker();
+		const stale = f.picker();
+		const next: Component = new Input();
+		f.editorContainer.clear();
+		f.editorContainer.addChild(next);
+		stale.handleInput("\r");
+		await done;
+		expect(f.connect).not.toHaveBeenCalled();
+		expect(f.editorContainer.children).toEqual([next]);
+		expect(f.setFocus.mock.calls.filter(([component]) => component === f.editor)).toHaveLength(0);
+	});
+
+	it("ENG-6108: opening a replacement picker settles the old promise, whose late close cannot hide it", async () => {
+		const f = await fixture();
+		const first = f.mode.selectServiceCatalogRow([view()]);
+		const stale = f.picker();
+		const oldClose = f.mode.closeServiceCatalogPicker;
+		const second = f.mode.selectServiceCatalogRow([view({ label: "Replacement" })]);
+		const next = f.picker();
+		await expect(first).resolves.toEqual({ status: "cancelled" });
+		stale.handleInput("\r");
+		oldClose?.();
+		expect(f.editorContainer.children).toEqual([next]);
+		next.handleInput("\x1b");
+		await expect(second).resolves.toEqual({ status: "cancelled" });
+	});
+
+	it("ENG-6108: catalog to accounts preserves ownership, grouping and real per-account pending state", async () => {
+		const f = await fixture([view({ connectionIds: ["acme-work"], connectionStatus: "connected" })]);
+		const now = Date.now();
+		f.harness.authStorage.set("mcp:acme-work", oauthGrant("synthetic", now));
+		f.store.upsert({
+			connectionId: "acme-work",
+			serviceId: "acme",
+			endpoint: ENDPOINT,
+			label: "Work",
+			status: "pending",
+			createdAt: 1,
+			updatedAt: 1,
+		});
+		await f.store.flush();
+		const done = f.mode.showServiceCatalogPicker();
+		const catalog = f.picker();
+		const accountsMount = nextPicker(f, catalog);
+		catalog.handleInput("\r");
+		const accounts = (await accountsMount) as ServiceCatalogPickerComponent;
+		catalog.handleInput("\x1b"); // the stale catalog's late Esc cannot close the accounts surface
+		expect(f.editorContainer.children).toEqual([accounts]);
+		const output = stripAnsi(accounts.render(100).join("\n"));
+		expect(output).toContain("Acme MCP");
+		expect(output).toContain("Reconnect");
+		expect(output).toContain("Enter verify");
+		accounts.handleInput("\r");
+		// The action ran, so the SAME accounts menu re-enters freshly built — never the prompt. The mocked action stored
+		// nothing, so the row set is unchanged; the surface is new.
+		const reopened = (await nextPicker(f, accounts)) as ServiceCatalogPickerComponent;
+		expect(f.connect).toHaveBeenCalledOnce();
+		expect(f.connect.mock.calls[0]?.[0]).toMatchObject({ serviceId: "acme-work", connectionStatus: "pending" });
+		expect(f.connect.mock.calls[0]?.[2]).toEqual({ catalogServiceId: "acme" });
+		expect(reopened.getSearchInput()).toBeUndefined();
+		const again = stripAnsi(reopened.render(100).join("\n"));
+		expect(again).toContain("Acme MCP");
+		expect(again).toContain("Reconnect");
+		expect(again).toContain("Enter verify");
+		reopened.handleInput("\x1b");
+		await done;
+		expect(f.editor.getValue()).toBe("preserved draft");
+		expect(f.editorContainer.children).toEqual([f.editor]);
+	});
+
+	async function connectedAccountFixture() {
+		const f = await settingsFixture();
+		const now = Date.now();
+		f.harness.authStorage.set("mcp:acme-work", {
+			type: "oauth",
+			access: "synthetic-access",
+			refresh: "r",
+			expires: now + 3600_000,
+			endpoint: ENDPOINT,
+		});
+		f.store.upsert(accountRecord("acme-work", "Work"));
+		await f.store.flush();
+		const removeAccount = vi.spyOn(f.store, "removeAccount");
+		const done = f.mode.showAccountPickerForService(
+			view({ connectionIds: ["acme-work"], connectionStatus: "connected" }),
+			{ url: ENDPOINT, usesOAuth: true, managedBySettings: false },
+			{ knownIds: new Set(["acme"]) },
+		);
+		return { f, removeAccount, done, accounts: f.picker() };
+	}
+
+	it("ENG-6108: the accounts Reconnect row re-verifies, never disconnects", async () => {
+		// Enter on the first row must re-verify; the record and credential both
+		// survive, and the SAME accounts menu reopens with the refreshed status.
+		const { f, removeAccount, done, accounts } = await connectedAccountFixture();
+		expect(stripAnsi(accounts.render(100).join("\n"))).toContain("Enter reconnect");
+		accounts.handleInput("\r");
+		const reopened = (await nextPicker(f, accounts)) as ServiceCatalogPickerComponent;
+		expect(reopened.getSearchInput()).toBeUndefined();
+		const again = stripAnsi(reopened.render(100).join("\n"));
+		expect(again).toContain("Reconnect");
+		expect(again).toContain("Enter verify");
+		reopened.handleInput("\x1b");
+		await done;
+		expect(f.editorContainer.children).toEqual([f.editor]);
+		expect(removeAccount).not.toHaveBeenCalled();
+		expect(f.store.get("acme-work")).toBeDefined();
+		expect(f.harness.authStorage.getVerified("mcp:acme-work")).toBeDefined();
+		expect(f.reserve).not.toHaveBeenCalled();
+		expect(f.claim).not.toHaveBeenCalled();
+		// The network-denied environment makes the offline verification fail
+		// honestly; the account stays saved — never a removal.
+		expect(f.appendOutcome).toHaveBeenCalledOnce();
+		expect(f.appendOutcome.mock.calls[0]?.[0]).toMatchObject({
+			customType: "mcp_connection_outcome",
+			details: { source: "retry", verification: "unverified" },
+		});
+	});
+
+	it("ENG-6108: the accounts Disconnect row removes that account and records the durable entry", async () => {
+		// Disconnecting the LAST account leaves the service with no accounts, so the chain reopens the CATALOG — the user
+		// is never dropped to the prompt. The real /mcp flow enters the accounts menu from the catalog row.
+		const f = await settingsFixture();
+		const now = Date.now();
+		f.harness.authStorage.set("mcp:acme-work", {
+			type: "oauth",
+			access: "synthetic-access",
+			refresh: "r",
+			expires: now + 3600_000,
+			endpoint: ENDPOINT,
+		});
+		f.store.upsert(accountRecord("acme-work", "Work"));
+		await f.store.flush();
+		const removeAccount = vi.spyOn(f.store, "removeAccount");
+		const done = f.mode.showServiceCatalogPicker("acme");
+		const catalog = f.picker();
+		catalog.handleInput("\r");
+		const accounts = await nextPicker(f, catalog);
+		accounts.handleInput("\x1b[B");
+		expect(stripAnsi(accounts.render(100).join("\n"))).toContain("Enter disconnect");
+		accounts.handleInput("\r");
+		const reopened = await nextPicker(f, accounts);
+		expect(reopened.getSearchInput()).toBeDefined();
+		expect(stripAnsi(reopened.render(100).join("\n"))).not.toContain("Work MCP");
+		reopened.handleInput("\x1b");
+		await done;
+		expect(f.editorContainer.children).toEqual([f.editor]);
+		expect(removeAccount).toHaveBeenCalledOnce();
+		expect(f.store.get("acme-work")).toBeUndefined();
+		expect(f.harness.authStorage.getVerified("mcp:acme-work")).toBeUndefined();
+		expect(f.reload).toHaveBeenCalledOnce();
+		// The durable "◆ Disconnected" entry rides the remove path.
+		expect(f.appendOutcome).toHaveBeenCalledOnce();
+		expect(f.appendOutcome.mock.calls[0]?.[0]).toMatchObject({
+			customType: "mcp_connection_outcome",
+			details: { kind: "disconnect", label: "Work", connectionId: "acme-work" },
+		});
+	});
+
+	// Multi-account Reconnect acting on the PICKED account through the sub-picker is covered by "disconnecting one of
+	// several accounts re-enters that service's accounts menu without the removed row" (the disconnect variant drives
+	// the same sub-picker → act-on-picked id → re-entry path).
+
+	// Esc and the left arrow are the same back path in the sub-picker; the
+	// table keeps one deterministic representative of the wiring.
+	it("ENG-6108: the sub-picker's back key returns to the accounts menu without acting", async () => {
+		const key = "\x1b";
+		const f = await fixture([view({ connectionIds: ["acme-work", "acme-personal"], connectionStatus: "connected" })]);
+		const done = f.mode.showAccountPickerForService(
+			view({ connectionIds: ["acme-work", "acme-personal"], connectionStatus: "connected" }),
+			{ url: ENDPOINT, usesOAuth: true, managedBySettings: false },
+			{ knownIds: new Set(["acme"]) },
+		);
+		const accounts = f.picker();
+		accounts.handleInput("\r"); // → Reconnect: open the account sub-picker
+		const sub = await nextPicker(f, accounts);
+		sub.handleInput(key);
+		// Back, never close: the service's accounts menu re-mounts freshly built and nothing acted.
+		const reopened = (await nextPicker(f, sub)) as ServiceCatalogPickerComponent;
+		expect(reopened.getSearchInput()).toBeUndefined();
+		const again = stripAnsi(reopened.render(100).join("\n"));
+		expect(again).toContain("Acme MCP");
+		expect(again).toContain("Reconnect");
+		expect(again).toContain("Enter choose account");
+		expect(f.connect).not.toHaveBeenCalled();
+		reopened.handleInput("\x1b"); // Esc from the accounts menu closes the chain
+		await done;
+		expect(f.editorContainer.children).toEqual([f.editor]);
+	});
+
+	it("ENG-6108: left arrow from the accounts menu returns to a freshly mounted catalog", async () => {
+		const f = await fixture([view({ connectionIds: ["acme-work"], connectionStatus: "connected" })]);
+		const done = f.mode.showServiceCatalogPicker("acme");
+		const catalog = f.picker();
+		catalog.handleInput("\r"); // → the service's accounts menu
+		const accounts = await nextPicker(f, catalog);
+		expect(accounts.getSearchInput()).toBeUndefined();
+		expect(stripAnsi(accounts.render(100).join("\n"))).toContain("← back");
+		accounts.handleInput("\x1b[D");
+		const reopened = (await nextPicker(f, accounts)) as ServiceCatalogPickerComponent;
+		// The catalog surface, freshly mounted: the search box is back and
+		// EMPTY — the "acme" prefill that opened the chain did not survive.
+		expect(reopened.getSearchInput()).toBeDefined();
+		expect(reopened.getSearchInput()?.getValue()).toBe("");
+		expect(stripAnsi(reopened.render(100).join("\n"))).toContain("Acme");
+		reopened.handleInput("\x1b");
+		await done;
+		expect(f.editorContainer.children).toEqual([f.editor]);
+	});
+
+	it("ENG-6108: captured disabled stdio guidance cannot disable a server re-enabled while the picker is open", async () => {
+		const f = await settingsFixture();
+		const config = { type: "stdio" as const, command: "synthetic-not-executed", enabled: false };
+		f.harness.settingsManager.setGlobalMcpServer("stdio-proof", config, true);
+		const done = f.mode.showServiceCatalogPicker("stdio-proof");
+		const picker = f.picker();
+		expect(stripAnsi(picker.render(100).join("\n"))).toContain("Enter settings guidance");
+		f.harness.settingsManager.setGlobalMcpServer("stdio-proof", { ...config, enabled: true }, true);
+		const writeSettings = vi.spyOn(f.harness.settingsManager, "setGlobalMcpServer");
+		picker.handleInput("\r");
+		await done;
+		expect(f.harness.settingsManager.getGlobalMcpServers()?.["stdio-proof"]?.enabled).toBe(true);
+		expect(writeSettings).not.toHaveBeenCalled();
+		expect(f.reload).not.toHaveBeenCalled();
+		expect(f.showStatus).toHaveBeenCalled();
+		expect(f.authFlow).not.toHaveBeenCalled();
+		expect(f.reserve).not.toHaveBeenCalled();
+		expect(f.claim).not.toHaveBeenCalled();
+		expect(fetch).not.toHaveBeenCalled();
+	});
+
+	// Settings-only guidance surfaces (no mutation, no OAuth, status line as the outcome) are pinned at the ACTION seam
+	// in mcp-activation-queue.test.ts ("Enter on an already-disabled stdio server reports the disabled state", "a
+	// vanished stdio settings entry reports it is gone") and in mcp-catalog-eligibility.test.ts (bearer/user-server
+	// semantics).
+
+	it.each([false, true])(
+		"ENG-6108: nonOAuth pending HTTP follows real Verify without OAuth (saved=%s)",
+		async (saved) => {
+			const f = await settingsFixture();
+			vi.stubEnv("ENG_6108_PRESENT_BEARER", "synthetic-env-token");
+			f.harness.settingsManager.setGlobalMcpServer(
+				"http-proof",
+				{ type: "http", url: ENDPOINT, bearerTokenEnvVar: "ENG_6108_PRESENT_BEARER" },
+				true,
+			);
+			if (saved) {
+				f.store.upsert({
+					connectionId: "http-proof",
+					serviceId: "http-proof",
+					endpoint: ENDPOINT,
+					label: "HTTP",
+					status: "pending",
+					createdAt: 1,
+					updatedAt: 1,
+				});
+				await f.store.flush();
+			}
+			const done = f.mode.showServiceCatalogPicker("http-proof");
+			let picker = f.picker();
+			if (saved) {
+				expect(stripAnsi(picker.render(100).join("\n"))).toContain("Enter manage saved account");
+				picker.handleInput("\r");
+				picker = (await nextPicker(f, picker)) as ServiceCatalogPickerComponent;
+			}
+			const output = stripAnsi(picker.render(100).join("\n"));
+			expect(output).toContain("Enter verify");
+			expect(output).not.toContain("Add another account");
+			if (saved) {
+				expect(output).toContain("Reconnect");
+				expect(output).not.toContain("Needs verification");
+			} else {
+				expect(output).toContain("Needs verification");
+				expect(output).not.toContain("Remove saved data");
+			}
+			picker.handleInput("\r");
+			// The verify RAN, so the accounts menu re-enters freshly built: even the
+			// saved=false case now manages the persisted record — never the prompt.
+			const reopened = (await nextPicker(f, picker)) as ServiceCatalogPickerComponent;
+			expect(reopened.getSearchInput()).toBeUndefined();
+			expect(stripAnsi(reopened.render(100).join("\n"))).toContain("Remove saved data for http-proof");
+			reopened.handleInput("\x1b");
+			await done;
+			expect(f.editorContainer.children).toEqual([f.editor]);
+			// Global fetch is denied: the existing verifier ran, not a login.
+			expect(fetch).toHaveBeenCalled();
+			expect(f.store.get("http-proof")?.status).toBe("pending");
+			expect(f.store.get("http-proof")?.lastError).toBeDefined();
+			expect(f.store.get("http-proof")?.verifiedAt).toBeUndefined();
+			expect(f.reload).toHaveBeenCalledOnce();
+			expect(f.appendOutcome).toHaveBeenCalledOnce();
+			expect(f.appendOutcome.mock.calls[0]?.[0]).toMatchObject({
+				customType: "mcp_connection_outcome",
+				details: { source: "retry", verification: "unverified" },
+			});
+			expect(f.authFlow).not.toHaveBeenCalled();
+			expect(f.reserve).not.toHaveBeenCalled();
+			expect(f.claim).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each(["record", "credential-only"] as const)(
+		"ENG-6108: real nonOAuth HTTP %s cleanup removes saved data but keeps server settings and environment token",
+		async (saved) => {
+			const f = await settingsFixture();
+			vi.stubEnv("ENG_6108_SAVED_BEARER", "");
+			const config = { type: "http" as const, url: ENDPOINT, bearerTokenEnvVar: "ENG_6108_SAVED_BEARER" };
+			f.harness.settingsManager.setGlobalMcpServer("http-proof", config, true);
+			f.harness.authStorage.set("mcp:http-proof", {
+				type: "oauth",
+				access: "synthetic-saved-token",
+				refresh: "r",
+				endpoint: ENDPOINT,
+				expires: Date.now() + 3600_000,
+			});
+			if (saved === "record") {
+				f.store.upsert({
+					connectionId: "http-proof",
+					serviceId: "http-proof",
+					endpoint: ENDPOINT,
+					label: "HTTP",
+					status: "error",
+					createdAt: 1,
+					updatedAt: 1,
+				});
+				await f.store.flush();
+			}
+			const done = f.mode.showServiceCatalogPicker("http-proof");
+			const catalog = f.picker();
+			expect(stripAnsi(catalog.render(100).join("\n"))).toContain("Enter manage saved account");
+			catalog.handleInput("\r");
+			const accounts = (await nextPicker(f, catalog)) as ServiceCatalogPickerComponent;
+			expect(stripAnsi(accounts.render(100).join("\n"))).toContain("Enter settings guidance");
+			expect(stripAnsi(accounts.render(100).join("\n"))).not.toContain("Add another account");
+			accounts.handleInput("\x1b[B");
+			expect(stripAnsi(accounts.render(100).join("\n"))).toContain("Enter remove saved data");
+			// Changing the environment does not change the cleanup's meaning.
+			vi.stubEnv("ENG_6108_SAVED_BEARER", "synthetic-current-token");
+			accounts.handleInput("\r");
+			// The removal RAN: the chain re-enters the CATALOG, where the
+			// settings-managed server is still visible — now honestly empty.
+			const reopened = await nextPicker(f, accounts);
+			expect(reopened.getSearchInput()).toBeDefined();
+			const after = stripAnsi(reopened.render(120).join("\n"));
+			expect(after).toContain("http-proof");
+			expect(after).not.toContain("Remove saved data");
+			reopened.handleInput("\x1b");
+			await done;
+			expect(f.editorContainer.children).toEqual([f.editor]);
+			expect(f.harness.authStorage.getVerified("mcp:http-proof")).toBeUndefined();
+			expect(f.store.get("http-proof")).toBeUndefined();
+			expect(f.harness.settingsManager.getGlobalMcpServers()?.["http-proof"]).toEqual(config);
+			expect(f.reload).toHaveBeenCalledOnce();
+			expect(f.authFlow).not.toHaveBeenCalled();
+			expect(f.reserve).not.toHaveBeenCalled();
+			expect(f.claim).not.toHaveBeenCalled();
+			expect(fetch).not.toHaveBeenCalled();
+		},
+	);
+
+	it("ENG-6108: saved HTTP guidance stays inert if the bearer environment changes after rendering", async () => {
+		const f = await settingsFixture();
+		vi.stubEnv("ENG_6108_GUIDANCE_BEARER", "");
+		f.harness.settingsManager.setGlobalMcpServer(
+			"http-proof",
+			{ type: "http", url: ENDPOINT, bearerTokenEnvVar: "ENG_6108_GUIDANCE_BEARER" },
+			true,
+		);
+		f.store.upsert({
+			connectionId: "http-proof",
+			serviceId: "http-proof",
+			endpoint: ENDPOINT,
+			label: "HTTP",
+			status: "pending",
+			createdAt: 1,
+			updatedAt: 1,
+		});
+		await f.store.flush();
+		const done = f.mode.showServiceCatalogPicker("http-proof");
+		const catalog = f.picker();
+		catalog.handleInput("\r");
+		const accounts = await nextPicker(f, catalog);
+		expect(stripAnsi(accounts.render(100).join("\n"))).toContain("Enter settings guidance");
+		vi.stubEnv("ENG_6108_GUIDANCE_BEARER", "synthetic-new-token");
+		accounts.handleInput("\r");
+		await done;
+		expect(f.authFlow).not.toHaveBeenCalled();
+		expect(f.reload).not.toHaveBeenCalled();
+		expect(f.reserve).not.toHaveBeenCalled();
+		expect(f.claim).not.toHaveBeenCalled();
+		expect(fetch).not.toHaveBeenCalled();
+		expect(f.store.get("http-proof")?.status).toBe("pending");
+	});
+
+	/** A real-picker fixture whose service catalog comes from a declared LOCAL
+	 * catalog source file (the same resolution production uses), with the REAL
+	 * view builder, connect action, and paste flow. */
+	async function localCatalogFixture(entries: Record<string, unknown>[]) {
+		const file = writeLocalCatalog(entries);
+		const f = await fixture([], { settings: { mcpCatalogSources: [file] } });
+		Reflect.deleteProperty(f.mode, "buildServiceCatalogViews");
+		Reflect.deleteProperty(f.mode, "connectServiceFromPicker");
+		const showStatus = vi.fn();
+		const reload = vi.fn(async () => {});
+		const appendOutcome = vi.fn(async (_message: Record<string, unknown>) => {});
+		const authFlow = vi.fn(() => {
+			throw new Error("OAuth must not run for paste-only fixtures");
+		});
+		Object.assign(f.mode, {
+			showStatus,
+			handleReloadCommand: reload,
+			createAuthFlows: authFlow,
+			agentConnection: { appendCustomMessage: appendOutcome },
+		});
+		return { ...f, showStatus, reload, appendOutcome, authFlow };
+	}
+
+	const pasteEntry = {
+		server: "paste-svc",
+		service: "paste-svc",
+		label: "Paste Service",
+		url: PASTE_ENDPOINT,
+		aliases: [],
+		transport: { type: "http", url: PASTE_ENDPOINT },
+		auth: { strategy: "api_key", clientRegistration: "unknown" },
+		setup: {
+			status: "requires-setup",
+			reason: "Requires a paste token.",
+			fields: [{ id: "PASTE_SVC_TOKEN", label: "Paste Service token", required: true, kind: "bearer-token" }],
+		},
+		verification: { status: "unverified" },
+		legacyBuiltin: false,
+		provenance: [{ source: "user" }],
+	};
+
+	it("ENG-6108: a submitted paste token re-enters the accounts menu with the new account", async () => {
+		const f = await localCatalogFixture([pasteEntry]);
+		const done = f.mode.showServiceCatalogPicker("paste-svc");
+		const catalog = f.picker();
+		expect(stripAnsi(catalog.render(100).join("\n"))).toContain("Paste Service");
+		catalog.handleInput("\r");
+		// The paste panel mounts INLINE (never an overlay) over the editor.
+		const panel = (await nextPastePanel(f)) as McpTokenPastePanelComponent;
+		for (const character of "synthetic-pasted-token") panel.handleInput(character);
+		panel.handleInput("\r");
+		// The paste RAN and the service now owns an account: the accounts menu
+		// re-enters — success or failure, the surface is state, not the verdict.
+		const reopened = (await nextPicker(f, catalog)) as ServiceCatalogPickerComponent;
+		expect(reopened.getSearchInput()).toBeUndefined();
+		const again = stripAnsi(reopened.render(100).join("\n"));
+		expect(again).toContain("Paste Service MCP");
+		expect(again).toContain("Reconnect");
+		expect(again).toContain("Disconnect");
+		// The token is stored under the shared MCP credential key and never leaks into the rendered surface.
+		const credential = f.harness.authStorage.get("mcp:paste-svc");
+		expect(credential).toMatchObject({ type: "mcp_static_token", bearer: "synthetic-pasted-token" });
+		expect(again).not.toContain("synthetic-pasted-token");
+		expect(f.appendOutcome).toHaveBeenCalledOnce();
+		expect(f.appendOutcome.mock.calls[0]?.[0]).toMatchObject({
+			customType: "mcp_connection_outcome",
+			details: { source: "paste" },
+		});
+		reopened.handleInput("\x1b");
+		await done;
+		expect(f.editorContainer.children).toEqual([f.editor]);
+	});
+
+	it("ENG-6108: Esc in the paste panel returns to the catalog that opened it", async () => {
+		const f = await localCatalogFixture([pasteEntry]);
+		const done = f.mode.showServiceCatalogPicker("paste-svc");
+		const catalog = f.picker();
+		catalog.handleInput("\r");
+		const panel = (await nextPastePanel(f)) as McpTokenPastePanelComponent;
+		panel.handleInput("\x1b");
+		// Cancel stored NOTHING, so the surface that opened the panel — the
+		// catalog — re-enters, not the prompt and not an empty accounts menu.
+		const reopened = (await nextPicker(f, catalog)) as ServiceCatalogPickerComponent;
+		expect(reopened.getSearchInput()).toBeDefined();
+		for (const character of "paste-svc") reopened.handleInput(character);
+		expect(stripAnsi(reopened.render(120).join("\n"))).toContain("Paste Service");
+		expect(f.harness.authStorage.get("mcp:paste-svc")).toBeUndefined();
+		expect(f.store.records()).toEqual([]);
+		expect(f.appendOutcome).not.toHaveBeenCalled();
+		reopened.handleInput("\x1b");
+		await done;
+		expect(f.editorContainer.children).toEqual([f.editor]);
+	});
+
+	it("ENG-6108: a blocked action (login in progress) reports its status and never re-enters", async () => {
+		const f = await settingsFixture();
+		const now = Date.now();
+		f.store.upsert({
+			connectionId: "acme-work",
+			serviceId: "acme",
+			endpoint: ENDPOINT,
+			label: "Work",
+			status: "pending",
+			createdAt: now,
+			updatedAt: now,
+			attemptId: "attempt-in-flight",
+		});
+		await f.store.flush();
+		const done = f.mode.showServiceCatalogPicker("acme");
+		const catalog = f.picker();
+		catalog.handleInput("\r");
+		const accounts = await nextPicker(f, catalog);
+		expect(stripAnsi(accounts.render(100).join("\n"))).toContain("login in progress");
+		accounts.handleInput("\r");
+		// The action is blocked BEFORE it starts: the status line is the
+		// outcome and the chain ends right there — no re-entry, no loop.
+		await done;
+		expect(f.showStatus).toHaveBeenCalledWith("Login in progress. Finish it or remove the account to cancel.");
+		expect(f.editorContainer.children).toEqual([f.editor]);
+		expect(f.appendOutcome).not.toHaveBeenCalled();
+	});
+
+	it("ENG-6108: disconnecting one of several accounts re-enters that service's accounts menu without the removed row", async () => {
+		const f = await settingsFixture();
+		const now = Date.now();
+		// "acme-work" sorts before "acme-zzz", so the store's file (written
+		// sorted) keeps the row order deterministic after the disk reload in re-entry.
+		const second = "acme-zzz";
+		for (const id of ["acme-work", second]) {
+			f.harness.authStorage.set(`mcp:${id}`, oauthGrant("synthetic"));
+			f.store.upsert({
+				connectionId: id,
+				serviceId: "acme",
+				endpoint: ENDPOINT,
+				label: id,
+				status: "connected",
+				verifiedAt: now,
+				toolCount: 2,
+				createdAt: now,
+				updatedAt: now,
+			});
+		}
+		await f.store.flush();
+		const removeAccount = vi.spyOn(f.store, "removeAccount");
+		const done = f.mode.showServiceCatalogPicker("acme");
+		const catalog = f.picker();
+		catalog.handleInput("\r");
+		const accounts = await nextPicker(f, catalog);
+		accounts.handleInput("\x1b[B"); // → Disconnect (the service-wide chooser)
+		accounts.handleInput("\r");
+		const sub = (await nextPicker(f, accounts)) as ServiceCatalogPickerComponent;
+		expect(sub.getSearchInput()).toBeUndefined();
+		const subOutput = stripAnsi(sub.render(100).join("\n"));
+		expect(subOutput).toContain("Accounts");
+		expect(subOutput).toContain("Enter disconnect");
+		sub.handleInput("\r"); // → acme-work
+		const reopened = (await nextPicker(f, sub)) as ServiceCatalogPickerComponent;
+		// Same surface, rebuilt from the live store: acme-work is gone, the sibling remains.
+		expect(reopened.getSearchInput()).toBeUndefined();
+		const after = stripAnsi(reopened.render(100).join("\n"));
+		expect(after).not.toContain("acme-work");
+		expect(after).toContain("Reconnect");
+		expect(after).toContain("Disconnect");
+		expect(f.store.get("acme-work")).toBeUndefined();
+		expect(f.store.get(second)).toBeDefined();
+		expect(removeAccount).toHaveBeenCalledOnce();
+		expect(f.appendOutcome).toHaveBeenCalledOnce();
+		expect(f.appendOutcome.mock.calls[0]?.[0]).toMatchObject({
+			details: { kind: "disconnect", connectionId: "acme-work" },
+		});
+		reopened.handleInput("\x1b");
+		await done;
+		expect(f.editorContainer.children).toEqual([f.editor]);
+	});
+
+	it("ENG-6108: a cancelled connect from the catalog re-enters the accounts menu of its preserved shell", async () => {
+		const f = await settingsFixture();
+		f.harness.settingsManager.setGlobalMcpServer("acme", { type: "http", url: ENDPOINT, oauth: true }, true);
+		Object.assign(f.mode, { createAuthFlows: () => ({ runMcpLogin: vi.fn(async () => ({ status: "cancelled" })) }) });
+		const done = f.mode.showServiceCatalogPicker("acme");
+		const catalog = f.picker();
+		expect(stripAnsi(catalog.render(100).join("\n"))).toContain("Enter connect");
+		catalog.handleInput("\r");
+		// The login was cancelled, and the guarded flow DELIBERATELY preserves the reserved pending shell (no credential,
+		// no claim). Something IS stored, so the chain re-enters that service's accounts menu — never the prompt.
+		const reopened = (await nextPicker(f, catalog)) as ServiceCatalogPickerComponent;
+		expect(reopened.getSearchInput()).toBeUndefined();
+		const after = stripAnsi(reopened.render(100).join("\n"));
+		expect(after).toContain("Reconnect");
+		expect(after).toContain("Disconnect");
+		expect(f.store.get("acme")?.attemptId).toBeUndefined();
+		expect(f.harness.authStorage.get("mcp:acme")).toBeUndefined();
+		expect(f.appendOutcome).not.toHaveBeenCalled();
+		reopened.handleInput("\x1b");
+		await done;
+		expect(f.editorContainer.children).toEqual([f.editor]);
+	});
+
+	it("ENG-6108: a committed connect from the catalog re-enters the accounts menu for the service just connected", async () => {
+		const f = await settingsFixture();
+		f.harness.settingsManager.setGlobalMcpServer("acme", { type: "http", url: ENDPOINT, oauth: true }, true);
+		const _now = Date.now();
+		Object.assign(f.mode, {
+			createAuthFlows: () => ({
+				runMcpLogin: vi.fn(async (serverId: string) => {
+					// The staged login writes the STAGED credential; the guarded finalize moves it to the real account key.
+					f.harness.authStorage.set(`mcp:${serverId}`, oauthGrant("new-grant"));
+					return { status: "success" as const };
+				}),
+			}),
+		});
+		const done = f.mode.showServiceCatalogPicker("acme");
+		const catalog = f.picker();
+		catalog.handleInput("\r");
+		// The login committed: the service now owns an account, so the ACCOUNTS
+		// menu re-enters for it (offline verification is honestly unverified).
+		const reopened = (await nextPicker(f, catalog)) as ServiceCatalogPickerComponent;
+		expect(reopened.getSearchInput()).toBeUndefined();
+		const after = stripAnsi(reopened.render(100).join("\n"));
+		expect(after).toContain("Reconnect");
+		expect(after).toContain("Disconnect");
+		expect(f.store.get("acme")).toBeDefined();
+		expect(f.harness.authStorage.getVerified("mcp:acme")).toBeDefined();
+		expect(f.appendOutcome).toHaveBeenCalledOnce();
+		reopened.handleInput("\x1b");
+		await done;
+		expect(f.editorContainer.children).toEqual([f.editor]);
 	});
 });

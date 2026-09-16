@@ -1,9 +1,18 @@
 import { Container } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
-import { describe, expect, it } from "vitest";
-import { inlineMenuPanelTopRuleRows, MenuPanel, MenuSearchInput } from "../src/modes/interactive/components/menu-panel.js";
+import { beforeAll, describe, expect, it } from "vitest";
+import {
+	inlineMenuPanelTopRuleRows,
+	MenuPanel,
+	MenuSearchInput,
+} from "../src/modes/interactive/components/menu-panel.js";
+import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 describe("MenuPanel inline separator rule", () => {
+	beforeAll(() => {
+		initTheme("dark");
+	});
+
 	it("opens inline panels with exactly one rule by default", () => {
 		// A titled inline panel draws its separator rule above the title, and a
 		// headerless panel led by the bordered search input keeps the input's own

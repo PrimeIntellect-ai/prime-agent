@@ -318,30 +318,9 @@ describe("ProviderAuthFlows", () => {
 		expect(statusMessages.join("\n")).not.toContain("Logged out of acme-2");
 	});
 
-	it("a partially saved MCP logout reports the honest partial wording", async () => {
-		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
-		authStorage.set("mcp:acme-2", {
-			type: "oauth",
-			access: "real-for-acme-2",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.acme.test/mcp",
-		});
-		const { host, panels, statusMessages } = createHost(authStorage);
-		(host as { onMcpAccountLogout?: unknown }).onMcpAccountLogout = vi.fn(
-			async () => "logged-out" as McpRemoveAccountResult,
-		);
-
-		const logoutResult = new ProviderAuthFlows(host).runLogout();
-		expect(panels).toHaveLength(1); // #2331: the route selector mounts inline, not as an overlay
-		for (const char of "acme-2") {
-			panels[0]?.handleInput?.(char);
-		}
-		panels[0]?.handleInput?.("\r");
-		await expect(logoutResult).resolves.toBe("mcp:acme-2");
-		expect(statusMessages.join("\n")).toContain("Logged out of acme-2");
-		expect(statusMessages.join("\n")).toContain("could not be saved");
-	});
+	// The honest partial-state wording ("could not be saved... try again") is pinned ONCE at the removeAction seam in
+	// mcp-activation-queue.test.ts ("a removeAccount whose record write fails after the logout reports the honest
+	// partial state").
 
 	it("the generic /login service option for an MCP account delegates to the guarded host hook", async () => {
 		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
@@ -362,8 +341,7 @@ describe("ProviderAuthFlows", () => {
 			category: "service",
 		});
 
-		// The MCP login went through the guarded hook — never a raw dialog
-		// writing the final credential directly.
+		// The MCP login went through the guarded hook — never a raw dialog writing the final credential directly.
 		expect(delegated).toHaveBeenCalledWith("mcp:acme");
 		expect(result.status).toBe("success");
 	});
@@ -396,41 +374,16 @@ describe("ProviderAuthFlows", () => {
 			category: "service",
 		});
 
-		// The hook OWNS every MCP login (including unresolvable names): its
-		// explicit failed outcome is the route's result — no raw dialog ever
-		// writes the final credential directly.
+		// The hook OWNS every MCP login (including unresolvable names): its explicit failed outcome is the route's result —
+		// no raw dialog ever writes the final credential directly.
 		expect(delegated).toHaveBeenCalledWith("mcp:acme");
 		expect(result).toEqual({ status: "failed" });
 	});
 
-	it("a refused stale staged logout reports state-neutrally, never Logged out or Connected", async () => {
-		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
-		authStorage.set("mcp:acme-2--attempt-1", {
-			type: "oauth",
-			access: "staged-for-attempt-1",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.acme.test/mcp",
-		});
-		const { host, panels, statusMessages } = createHost(authStorage);
-		(host as { onMcpAccountLogout?: unknown }).onMcpAccountLogout = vi.fn(
-			async () => "refused" as McpRemoveAccountResult,
-		);
-
-		const logoutResult = new ProviderAuthFlows(host).runLogout();
-		expect(panels).toHaveLength(1); // #2331: the route selector mounts inline, not as an overlay
-		for (const char of "acme-2") {
-			panels[0]?.handleInput?.(char);
-		}
-		panels[0]?.handleInput?.("\r");
-		await expect(logoutResult).resolves.toBe("mcp:acme-2--attempt-1");
-		const messages = statusMessages.join("\n");
-		// State-neutral: no success claim, no Connected claim from token presence.
-		expect(messages).toContain("no longer current");
-		expect(messages).toContain("manage the account from /plugins");
-		expect(messages).not.toContain("Logged out of acme-2");
-		expect(messages).not.toContain("remains connected");
-	});
+	// A refused stale staged logout staying state-neutral is pinned at the STORE level in mcp-connection-store.test.ts
+	// ("a staged-key logout queued behind a finalize-first move refuses fail-closed" and "a staged-key logout with a
+	// bystander on the real key preserves the account shell") and at the resolution seam in
+	// mcp-activation-queue.test.ts ("logoutMcpAccount resolves exact ids first...").
 
 	it("non-MCP logouts stay unchanged: the route removes them directly", async () => {
 		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });

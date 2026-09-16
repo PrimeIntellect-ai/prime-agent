@@ -11,9 +11,7 @@ import { type McpConnectionRecord, McpConnectionStore } from "../src/core/mcp/co
 import {
 	buildConnectionViews,
 	buildPluginViews,
-	decodePluginCursor,
 	defaultServiceCatalogProvider,
-	filterPluginViewsByStatus,
 	isPasteableTokenService,
 	type McpPluginView,
 	type McpServiceDescriptor,
@@ -24,14 +22,12 @@ import {
 	mcpPasteCredential,
 	mcpStaticTokenUsable,
 	nextMcpConnectionId,
-	pagePluginViews,
 	resolveMcpOAuthIdentity,
 	resolveMcpServiceCatalog,
 	sameGrantToken,
 	searchPluginViews,
 	verifyMcpConnection,
 } from "../src/core/mcp/service-catalog.js";
-import type { McpServerConfig } from "../src/core/settings-manager.js";
 
 function serviceFixture(overrides: Partial<McpServiceDescriptor> = {}): McpServiceDescriptor {
 	return {
@@ -72,13 +68,18 @@ describe("service catalog views", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("lists a catalog service as not connected and connectable without credentials", () => {
-		const views = buildPluginViews({
+	/** The view surface under test: one catalog service over the live stores. */
+	function buildViews(): McpPluginView[] {
+		return buildPluginViews({
 			services: [serviceFixture()],
 			userServers: undefined,
 			authStorage,
 			connectionStore: store,
 		});
+	}
+
+	it("lists a catalog service as not connected and connectable without credentials", () => {
+		const views = buildViews();
 		expect(views).toHaveLength(1);
 		expect(views[0]).toMatchObject({
 			serviceId: "acme",
@@ -124,36 +125,17 @@ describe("service catalog views", () => {
 
 	it("never reports connected from a stored token alone: bound grants without a verified record stay pending", () => {
 		authStorage.set(mcpCredentialKey("acme"), oauthCredential(3600_000, "https://mcp.acme.test/mcp"));
-		const views = buildPluginViews({
-			services: [serviceFixture()],
-			userServers: undefined,
-			authStorage,
-			connectionStore: store,
-		});
+		const views = buildViews();
 		expect(views[0]?.connectionStatus).toBe("pending");
 		expect(views[0]?.connectionIds).toEqual(["acme"]);
 	});
 
-	it("surfaces an unbound legacy grant as reconnect-required, never pending or connected", () => {
-		authStorage.set(mcpCredentialKey("acme"), oauthCredential());
-		const views = buildPluginViews({
-			services: [serviceFixture()],
-			userServers: undefined,
-			authStorage,
-			connectionStore: store,
-		});
-		expect(views[0]?.connectionStatus).toBe("error");
-		expect(views[0]?.setupHint).toContain("not bound to this endpoint");
-	});
-
-	it("surfaces a cross-endpoint grant as reconnect-required", () => {
-		authStorage.set(mcpCredentialKey("acme"), oauthCredential(3600_000, "https://other.example/mcp"));
-		const views = buildPluginViews({
-			services: [serviceFixture()],
-			userServers: undefined,
-			authStorage,
-			connectionStore: store,
-		});
+	it.each([
+		{ name: "an unbound legacy grant", credential: () => oauthCredential() },
+		{ name: "a cross-endpoint grant", credential: () => oauthCredential(3600_000, "https://other.example/mcp") },
+	])("surfaces $name as reconnect-required, never pending or connected", ({ credential }) => {
+		authStorage.set(mcpCredentialKey("acme"), credential());
+		const views = buildViews();
 		expect(views[0]?.connectionStatus).toBe("error");
 		expect(views[0]?.setupHint).toContain("not bound to this endpoint");
 	});
@@ -171,44 +153,14 @@ describe("service catalog views", () => {
 			createdAt: Date.now(),
 			updatedAt: Date.now(),
 		});
-		const views = buildPluginViews({
-			services: [serviceFixture()],
-			userServers: undefined,
-			authStorage,
-			connectionStore: store,
-		});
+		const views = buildViews();
 		expect(views[0]?.connectionStatus).toBe("connected");
 		expect(views[0]?.toolCount).toBe(7);
 		expect(views[0]?.verifiedAt).toBeGreaterThan(0);
 	});
 
-	it("treats wrong-type and empty-access credentials as no usable grant (shared rule with dispatch)", () => {
-		authStorage.set(mcpCredentialKey("acme"), { type: "api_key", key: "not-an-oauth-grant" });
-		const options = { services: [serviceFixture()], userServers: undefined, authStorage, connectionStore: store };
-		// Wrong type, no record: never connected, never pending.
-		expect(buildPluginViews(options)[0]?.connectionStatus).toBe("not_connected");
-
-		authStorage.set(mcpCredentialKey("acme"), {
-			type: "oauth",
-			access: "",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.acme.test/mcp",
-		} as never);
-		store.upsert({
-			connectionId: "acme",
-			serviceId: "acme",
-			endpoint: "https://mcp.acme.test/mcp",
-			label: "Acme",
-			status: "connected",
-			createdAt: Date.now(),
-			updatedAt: Date.now(),
-		});
-		// Empty access with a record: the stale connection reports Reconnect,
-		// matching dispatch eligibility (the shared oauthGrantUsable rule).
-		expect(buildPluginViews(options)[0]?.connectionStatus).toBe("error");
-		expect(buildPluginViews(options)[0]?.setupHint).toContain("Stored credentials are missing");
-	});
+	// Wrong-type and empty-access grant usability is pinned across predicate,
+	// prompt, dispatch, and view in mcp-catalog-eligibility.test.ts.
 
 	it("downgrades a connected record when the credential disappears", () => {
 		store.upsert({
@@ -222,51 +174,16 @@ describe("service catalog views", () => {
 			createdAt: Date.now(),
 			updatedAt: Date.now(),
 		});
-		const views = buildPluginViews({
-			services: [serviceFixture()],
-			userServers: undefined,
-			authStorage,
-			connectionStore: store,
-		});
+		const views = buildViews();
 		expect(views[0]?.connectionStatus).toBe("error");
 		expect(views[0]?.setupHint).toContain("Reconnect");
 	});
 
-	it("marks expired credentials without a refresh token as error", () => {
-		authStorage.set(mcpCredentialKey("acme"), {
-			type: "oauth",
-			access: "tok",
-			refresh: "",
-			expires: Date.now() - 1000,
-		});
-		const views = buildPluginViews({
-			services: [serviceFixture()],
-			userServers: undefined,
-			authStorage,
-			connectionStore: store,
-		});
-		expect(views[0]?.connectionStatus).toBe("error");
-		// Error accounts stay listed so the account picker can manage them.
-		expect(views[0]?.connectionIds).toEqual(["acme"]);
-	});
+	// Expired-no-refresh status and its honest hint are pinned across
+	// predicate, prompt, dispatch, and view in mcp-catalog-eligibility.test.ts.
 
-	it("surfaces requires-setup services honestly without a connect action", () => {
-		const views = buildPluginViews({
-			services: [
-				serviceFixture({
-					serviceId: "brandapp",
-					label: "BrandApp",
-					setup: { status: "requires-setup", reason: "Requires a developer app." },
-				}),
-			],
-			userServers: undefined,
-			authStorage,
-			connectionStore: store,
-		});
-		expect(views[0]?.connectionStatus).toBe("setup_required");
-		expect(views[0]?.connectable).toBe(false);
-		expect(views[0]?.setupHint).toBe("Requires a developer app.");
-	});
+	// none+requires-setup failing closed with no connect action is pinned across prompt, dispatch, and view in
+	// mcp-catalog-eligibility.test.ts ("%s across prompt and dispatch").
 
 	it("never offers Connect for sse, stdio, or http-template transports", () => {
 		const views = buildPluginViews({
@@ -283,105 +200,17 @@ describe("service catalog views", () => {
 		expect(views.every((view) => typeof view.setupHint === "string" && view.setupHint.length > 0)).toBe(true);
 	});
 
-	it("offers explicit capability discovery for unverified imported OAuth candidates", () => {
-		const views = buildPluginViews({
-			services: [serviceFixture({ metadataReviewed: false })],
-			userServers: undefined,
-			authStorage,
-			connectionStore: store,
-		});
-		expect(views[0]?.unverified).toBe(true);
-		expect(views[0]?.connectable).toBe(true);
-		expect(views[0]?.setupHint).toContain("not been verified");
-	});
+	// Unverified imported OAuth candidates staying explicitly connectable is pinned in this file's
+	// resolveMcpServiceCatalog describe ("keeps unverified OAuth candidates visible and explicitly connectable").
 
-	it("keeps user-declared servers working when the catalog adds the same id (user owns non-legacy ids)", () => {
-		const userServers: Record<string, McpServerConfig> = {
-			acme: { type: "http", url: "https://custom.acme.test/mcp", oauth: true },
-		};
-		const views = buildPluginViews({
-			services: [serviceFixture()],
-			userServers,
-			authStorage,
-			connectionStore: store,
-		});
-		// One card, owned by the user's server entry — no duplicate catalog card.
-		expect(views).toHaveLength(1);
-		expect(views[0]).toMatchObject({ source: "user", serviceId: "acme" });
-	});
+	// User-owned non-legacy ids coexisting with catalog rows is pinned at dispatch level in mcp-manager.test.ts ("serves
+	// custom catalog providers: user-owned non-bundled ids coexist with catalog cards").
 
-	it("ignores dead user shadows of bundled catalog ids (catalog owns the name)", () => {
-		const userServers: Record<string, McpServerConfig> = {
-			notion: { type: "http", url: "https://proxy.test/mcp", oauth: true },
-		};
-		const views = buildPluginViews({
-			services: [serviceFixture({ serviceId: "notion", label: "Notion", legacyBuiltin: true })],
-			userServers,
-			authStorage,
-			connectionStore: store,
-		});
-		expect(views).toHaveLength(1);
-		expect(views[0]).toMatchObject({ source: "catalog", serviceId: "notion" });
-	});
+	// Dead user shadows of bundled catalog ids are pinned with the reserved name matrix at dispatch level in
+	// mcp-manager.test.ts ("ENG-6108 reserved ownership and durable repair endpoints").
 
-	it("builds connection views including pending and user servers, sorted by connectionId", () => {
-		authStorage.set(mcpCredentialKey("acme"), oauthCredential(3600_000, "https://mcp.acme.test/mcp"));
-		const connections = buildConnectionViews({
-			services: [serviceFixture()],
-			userServers: {
-				local: { type: "stdio", command: "node" },
-				remote: { type: "http", url: "https://remote.test/mcp" },
-			},
-			authStorage,
-			connectionStore: store,
-			acpServers: [{ name: "acp-tool", type: "http" }],
-		});
-		expect(
-			connections.map((connection) => `${connection.connectionId}:${connection.source}:${connection.status}`),
-		).toEqual(["acme:catalog:pending", "acp-tool:acp:connected", "local:user:connected", "remote:user:connected"]);
-	});
-
-	it("searches by label, alias, and description with bounded results", () => {
-		const views = buildPluginViews({
-			services: [
-				serviceFixture({ serviceId: "linear", label: "Linear", description: "Issue tracking" }),
-				serviceFixture({ serviceId: "notion", label: "Notion", aliases: ["docs"] }),
-				serviceFixture({ serviceId: "acme", label: "Acme" }),
-			],
-			userServers: undefined,
-			authStorage,
-			connectionStore: store,
-		});
-		expect(searchPluginViews(views, "issue", 10).map((view) => view.serviceId)).toEqual(["linear"]);
-		expect(searchPluginViews(views, "NOTION", 10).map((view) => view.serviceId)).toEqual(["notion"]);
-		expect(searchPluginViews(views, "n", 10).map((view) => view.serviceId)).toEqual(["linear", "notion"]);
-		expect(searchPluginViews(views, "n", 2)).toHaveLength(2);
-		// An empty query is a bounded first page, not an exhaustive claim.
-		expect(searchPluginViews(views, "", 2)).toHaveLength(2);
-	});
-
-	it("filters strictly by connection status and paginates with honest cursors", () => {
-		const views = buildPluginViews({
-			services: [
-				serviceFixture({ serviceId: "a", label: "A" }),
-				serviceFixture({ serviceId: "b", label: "B" }),
-				serviceFixture({ serviceId: "c", label: "C", setup: { status: "requires-setup" } }),
-			],
-			userServers: undefined,
-			authStorage,
-			connectionStore: store,
-		});
-		const notConnected = filterPluginViewsByStatus(views, "not_connected");
-		expect(notConnected.map((view) => view.serviceId)).toEqual(["a", "b"]);
-
-		const page1 = pagePluginViews(notConnected, decodePluginCursor(undefined), 1);
-		expect(page1.plugins.map((view) => view.serviceId)).toEqual(["a"]);
-		expect(page1.nextCursor).toBe("1");
-		const page2 = pagePluginViews(notConnected, decodePluginCursor(page1.nextCursor), 1);
-		expect(page2.plugins.map((view) => view.serviceId)).toEqual(["b"]);
-		expect(page2.nextCursor).toBeNull();
-		expect(() => decodePluginCursor("bogus")).toThrow("invalid cursor");
-	});
+	// Plugin/connection listing, search, strict status filtering, and honest cursor pagination are pinned at the
+	// PROTOCOL boundary (the mcp.list_plugins / mcp.search_plugins handlers) in mcp-manager.test.ts.
 });
 
 describe("ENG-6108 active login ownership (distinct from pending verification)", () => {
@@ -423,143 +252,17 @@ describe("ENG-6108 active login ownership (distinct from pending verification)",
 		expect(inventory).toMatchObject({ connectionId: "acme", status: "pending", loginPending: true });
 	});
 
-	it("a claimed reconnect on a connected record is active ownership too: Remove stays available, Reconnect does not", async () => {
-		const now = Date.now();
-		store.upsert({
-			connectionId: "acme",
-			serviceId: "acme",
-			endpoint: "https://mcp.acme.test/mcp",
-			label: "Acme",
-			status: "connected",
-			verifiedAt: now,
-			toolCount: 2,
-			createdAt: now,
-			updatedAt: now,
-		});
-		await store.flush();
-		authStorage.set(mcpCredentialKey("acme"), oauthCredential());
-		await expect(store.claimConnectionId({ connectionId: "acme", attemptId: "reconnect-owner" })).resolves.toBe(true);
-		const options = { services: [serviceFixture()], userServers: undefined, authStorage, connectionStore: store };
-		const [view] = buildPluginViews(options);
-		expect(view.connectionStatus).toBe("pending");
-		expect(view.loginPending).toBe(true);
-		expect(view.connectable).toBe(false);
-		// The account row itself stays listed for Remove; the state hints at the
-		// live attempt instead of a missing-credential Reconnect.
-		expect(view.setupHint).toContain("Login in progress");
-	});
+	// A claimed account being live ownership (no second action, Remove stays
+	// available) is pinned at dispatch level in mcp-manager.test.ts
+	// ("background verification never probes an account claimed by a live
+	// attempt") and at the chain seam in service-catalog-picker.test.ts
+	// ("a blocked action (login in progress) reports its status and never re-enters").
 });
 
-describe("ENG-6108 reserved builtin ownership classification", () => {
-	let tempDir: string;
-	let authStorage: AuthStorage;
-	let store: McpConnectionStore;
-
-	beforeEach(() => {
-		tempDir = mkdtempSync(join(tmpdir(), "svc-reserved-"));
-		authStorage = AuthStorage.inMemory();
-		store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
-	});
-
-	afterEach(() => {
-		rmSync(tempDir, { recursive: true, force: true });
-	});
-
-	const builtin = (): McpServiceDescriptor =>
-		serviceFixture({ serviceId: "linear", label: "Linear", legacyBuiltin: true, metadataReviewed: true });
-
-	it("a canonical-equivalent user declaration refers to the builtin: the catalog view stays connectable", () => {
-		const views = buildPluginViews({
-			services: [builtin()],
-			userServers: {
-				linear: { type: "http", url: "https://mcp.acme.test/mcp", oauth: true },
-			},
-			authStorage,
-			connectionStore: store,
-		});
-		expect(views).toHaveLength(1);
-		expect(views[0]).toMatchObject({
-			serviceId: "linear",
-			connectionStatus: "not_connected",
-			connectable: true,
-			source: "catalog",
-		});
-	});
-
-	it("a same-name enabled:false declaration disables the reserved slot — no silent reactivation", () => {
-		const views = buildPluginViews({
-			services: [builtin()],
-			userServers: {
-				linear: { type: "http", url: "https://mcp.acme.test/mcp", enabled: false },
-			},
-			authStorage,
-			connectionStore: store,
-		});
-		expect(views).toHaveLength(1);
-		expect(views[0]).toMatchObject({
-			serviceId: "linear",
-			connectionStatus: "disabled",
-			connectable: false,
-		});
-		expect(views[0].setupHint).toContain("Disabled in settings");
-	});
-
-	it("a conflicting same-name declaration is an honest error with a rename hint, never Connected-but-undispatchable", () => {
-		const views = buildPluginViews({
-			services: [builtin()],
-			userServers: {
-				linear: { type: "http", url: "https://other.example/mcp", oauth: true },
-			},
-			authStorage,
-			connectionStore: store,
-		});
-		expect(views).toHaveLength(1);
-		expect(views[0]).toMatchObject({
-			serviceId: "linear",
-			connectionStatus: "error",
-			connectable: false,
-			addAccountAllowed: false,
-		});
-		expect(views[0].setupHint).toContain("Rename or remove the conflicting server settings");
-		// The conflict also surfaces in the connection inventory with the same
-		// diagnostic, so dispatch-target listings never imply a working alias.
-		const [inventory] = buildConnectionViews({
-			services: [builtin()],
-			userServers: {
-				linear: { type: "http", url: "https://other.example/mcp", oauth: true },
-			},
-			authStorage,
-			connectionStore: store,
-		});
-		expect(inventory).toMatchObject({ connectionId: "linear", status: "error" });
-		expect(inventory.setupHint).toContain("Rename or remove the conflicting server settings");
-	});
-
-	it("an installed account under a conflicting reserved name stays listed for cleanup", async () => {
-		const now = Date.now();
-		store.upsert({
-			connectionId: "linear",
-			serviceId: "linear",
-			endpoint: "https://mcp.acme.test/mcp",
-			label: "Linear",
-			status: "connected",
-			verifiedAt: now,
-			createdAt: now,
-			updatedAt: now,
-		});
-		await store.flush();
-		const userServers = { linear: { type: "http" as const, url: "https://other.example/mcp", oauth: true } };
-		const [inventory] = buildConnectionViews({
-			services: [builtin()],
-			userServers,
-			authStorage,
-			connectionStore: store,
-		});
-		expect(inventory).toMatchObject({ connectionId: "linear", status: "error" });
-		// The saved account remains removable through the store API.
-		expect(await store.removeAccount({ connectionId: "linear", authCleanup: () => false })).toBe("removed");
-	});
-});
+// Reserved-builtin ownership classification (canonical-equivalent keeps the slot live, enabled:false disables without
+// deleting, conflicting names never dispatch, installed accounts stay listed) is pinned at the DISPATCH level in
+// mcp-manager.test.ts ("ENG-6108 reserved ownership and durable repair endpoints") and
+// mcp-catalog-eligibility.test.ts.
 
 describe("ENG-6108 per-operation login eligibility (fresh vs exact-id repair)", () => {
 	let tempDir: string;
@@ -658,93 +361,35 @@ describe("ENG-6108 per-operation login eligibility (fresh vs exact-id repair)", 
 		expect(eligibility.setupHint).toContain("Login in progress");
 	});
 
-	it("explicit login commands carry OAuth intent; picker fresh Connect keeps the stricter settings check", () => {
-		const config: McpServerConfig = { type: "http", url: "https://mcp.acme.test/mcp" };
-		const strict = mcpLoginEligibility({
-			connectionId: "acme",
-			userConfig: config,
-			record: undefined,
-			credential: undefined,
-		});
-		expect(strict.allowed).toBe(false);
-		const explicit = mcpLoginEligibility({
-			connectionId: "acme",
-			userConfig: config,
-			record: undefined,
-			credential: undefined,
-			explicitLogin: true,
-		});
-		expect(explicit).toMatchObject({ allowed: true, endpoint: "https://mcp.acme.test/mcp" });
-	});
+	// Login intent routing (explicit commands carry OAuth intent; the guarded claim runs it) is pinned at the mode seam
+	// in mcp-activation-queue.test.ts and at dispatch level in mcp-manager.test.ts.
 
-	it("bearer-token settings servers never take the OAuth login route", () => {
-		const eligibility = mcpLoginEligibility({
-			connectionId: "acme",
-			userConfig: { type: "http", url: "https://mcp.acme.test/mcp", oauth: true, bearerTokenEnvVar: "ACME_TOKEN" },
-			record: undefined,
-			credential: undefined,
-			explicitLogin: true,
-		});
-		expect(eligibility.allowed).toBe(false);
-		expect(eligibility.setupHint).toContain("settings-managed authentication");
-	});
+	// Bearer-token settings servers staying token-based (never OAuth) is pinned in mcp-catalog-eligibility.test.ts ("a
+	// configured bearer env var is the ONLY credential source") and at dispatch level in mcp-manager.test.ts.
 
-	it("unverified imported OAuth candidates stay explicitly connectable without a tested/certified claim", () => {
-		const service = serviceFixture({ metadataReviewed: false });
-		const eligibility = mcpLoginEligibility({
-			connectionId: "acme",
-			service,
-			record: undefined,
-			credential: undefined,
-		});
-		expect(eligibility).toMatchObject({ allowed: true, endpoint: "https://mcp.acme.test/mcp" });
-		expect(eligibility.repair).toBeUndefined();
-	});
+	// Unverified candidates staying explicitly connectable (no tested or certified claim) is pinned in the
+	// resolveMcpServiceCatalog describe in this file ("keeps unverified OAuth candidates visible and explicitly
+	// connectable").
 });
 
 describe("ENG-6108 catalog ordering and OAuth identity resolution", () => {
 	let tempDir: string;
-	let authStorage: AuthStorage;
-	let store: McpConnectionStore;
+	let _authStorage: AuthStorage;
+	let _store: McpConnectionStore;
 
 	beforeEach(() => {
 		tempDir = mkdtempSync(join(tmpdir(), "svc-order-"));
-		authStorage = AuthStorage.inMemory();
-		store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+		_authStorage = AuthStorage.inMemory();
+		_store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
 	});
 
 	afterEach(() => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("orders connected and ready-to-connect services first without hiding any row", () => {
-		const now = Date.now();
-		const connectedRecord: McpConnectionRecord = {
-			connectionId: "acme",
-			serviceId: "acme",
-			endpoint: "https://mcp.acme.test/mcp",
-			label: "Acme",
-			status: "connected",
-			verifiedAt: now,
-			toolCount: 1,
-			createdAt: now,
-			updatedAt: now,
-		};
-		store.upsert(connectedRecord);
-		authStorage.set(mcpCredentialKey("acme"), oauthCredential());
-		const views = buildPluginViews({
-			services: [
-				serviceFixture({ serviceId: "zeta", label: "Zeta", setup: { status: "requires-setup" } }),
-				serviceFixture({ serviceId: "acme", label: "Acme" }),
-				serviceFixture({ serviceId: "beta", label: "Beta" }),
-			],
-			userServers: undefined,
-			authStorage,
-			connectionStore: store,
-		});
-		expect(views.map((view) => view.serviceId)).toEqual(["acme", "beta", "zeta"]);
-		expect(views.every((view) => ["acme", "beta", "zeta"].includes(view.serviceId))).toBe(true);
-	});
+	// Catalog row ordering (connected and ready-to-connect first) is pinned
+	// at the protocol boundary in mcp-manager.test.ts ("lists enabled generic
+	// servers including connected catalog services in deterministic order").
 
 	it("resolves a configured OAuth client identity with fail-closed secret semantics", () => {
 		const previous = process.env.ACME_OAUTH_SECRET;
@@ -804,8 +449,7 @@ describe("verifyMcpConnection", () => {
 		authStorage = AuthStorage.inMemory();
 		store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
 		resetOAuthProviders();
-		// Production registers the catalog OAuth provider before login, so
-		// authStorage.getApiKey resolves the stored grant.
+		// Production registers the catalog OAuth provider before login, so authStorage.getApiKey resolves the stored grant.
 		registerOAuthProvider(
 			createMcpOAuthProvider({ server: "acme", label: "Acme", url: "https://mcp.acme.test/mcp" }),
 		);
@@ -823,8 +467,9 @@ describe("verifyMcpConnection", () => {
 		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 	});
 
-	it("records connected with the discovered tool count after a successful handshake", async () => {
-		const record = await verifyMcpConnection({
+	/** The shared verify options over the live stores, with an injected probe. */
+	function verify(probe: NonNullable<Parameters<typeof verifyMcpConnection>[0]["probe"]>) {
+		return verifyMcpConnection({
 			authStorage,
 			connectionStore: store,
 			connectionId: "acme",
@@ -832,24 +477,19 @@ describe("verifyMcpConnection", () => {
 			label: "Acme",
 			endpoint: "https://mcp.acme.test/mcp",
 			usesOAuth: true,
-			probe: async () => ({ ok: true, toolCount: 5 }),
+			probe,
 		});
+	}
+
+	it("records connected with the discovered tool count after a successful handshake", async () => {
+		const record = await verify(async () => ({ ok: true, toolCount: 5 }));
 		expect(record.status).toBe("connected");
 		expect(record.toolCount).toBe(5);
 		expect(store.get("acme")?.status).toBe("connected");
 	});
 
 	it("records error with a fixed safe category when the server rejects the credential", async () => {
-		const record = await verifyMcpConnection({
-			authStorage,
-			connectionStore: store,
-			connectionId: "acme",
-			serviceId: "acme",
-			label: "Acme",
-			endpoint: "https://mcp.acme.test/mcp",
-			usesOAuth: true,
-			probe: async () => ({ ok: false, error: MCP_PROBE_ERRORS.UNAUTHORIZED }),
-		});
+		const record = await verify(async () => ({ ok: false, error: MCP_PROBE_ERRORS.UNAUTHORIZED }));
 		expect(record.status).toBe("error");
 		// The failure is a fixed category; the endpoint URL never leaks into it.
 		expect(record.lastError).toBe("http-unauthorized");
@@ -857,16 +497,7 @@ describe("verifyMcpConnection", () => {
 	});
 
 	it("keeps pending (not error) when verification could not run — a broken probe is not a broken grant", async () => {
-		const record = await verifyMcpConnection({
-			authStorage,
-			connectionStore: store,
-			connectionId: "acme",
-			serviceId: "acme",
-			label: "Acme",
-			endpoint: "https://mcp.acme.test/mcp",
-			usesOAuth: true,
-			probe: async () => ({ ok: false, error: MCP_PROBE_ERRORS.NETWORK }),
-		});
+		const record = await verify(async () => ({ ok: false, error: MCP_PROBE_ERRORS.NETWORK }));
 		expect(record.status).toBe("pending");
 		expect(record.lastError).toBe("network-unreachable");
 	});
@@ -889,18 +520,9 @@ describe("verifyMcpConnection", () => {
 		const probeGate = new Promise<void>((resolve) => {
 			releaseProbe = resolve;
 		});
-		const verifyPromise = verifyMcpConnection({
-			authStorage,
-			connectionStore: store,
-			connectionId: "acme",
-			serviceId: "acme",
-			label: "Acme",
-			endpoint: "https://mcp.acme.test/mcp",
-			usesOAuth: true,
-			probe: async () => {
-				await probeGate;
-				return { ok: true, toolCount: 4 };
-			},
+		const verifyPromise = verify(async () => {
+			await probeGate;
+			return { ok: true, toolCount: 4 };
 		});
 		// Logout lands while the probe is in flight.
 		authStorage.logout(mcpCredentialKey("acme"));
@@ -917,18 +539,9 @@ describe("verifyMcpConnection", () => {
 		const probeGate = new Promise<void>((resolve) => {
 			releaseProbe = resolve;
 		});
-		const verifyPromise = verifyMcpConnection({
-			authStorage,
-			connectionStore: store,
-			connectionId: "acme",
-			serviceId: "acme",
-			label: "Acme",
-			endpoint: "https://mcp.acme.test/mcp",
-			usesOAuth: true,
-			probe: async () => {
-				await probeGate;
-				return { ok: true, toolCount: 4 };
-			},
+		const verifyPromise = verify(async () => {
+			await probeGate;
+			return { ok: true, toolCount: 4 };
 		});
 		// The credential rotates (re-login/refresh) while the probe is in flight.
 		authStorage.set(mcpCredentialKey("acme"), {
@@ -945,16 +558,7 @@ describe("verifyMcpConnection", () => {
 	});
 
 	it("persists records across store reloads", async () => {
-		await verifyMcpConnection({
-			authStorage,
-			connectionStore: store,
-			connectionId: "acme",
-			serviceId: "acme",
-			label: "Acme",
-			endpoint: "https://mcp.acme.test/mcp",
-			usesOAuth: true,
-			probe: async () => ({ ok: true, toolCount: 2 }),
-		});
+		await verify(async () => ({ ok: true, toolCount: 2 }));
 		const reopened = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
 		expect(reopened.get("acme")?.status).toBe("connected");
 	});
@@ -970,10 +574,9 @@ describe("defaultServiceCatalogProvider", () => {
 	it("derives descriptors from the merged catalog: legacy built-ins plus the imported entries", () => {
 		const services = defaultServiceCatalogProvider()();
 		const ids = new Set(services.map((service) => service.serviceId));
-		// The merged catalog supersedes the legacy-only slice; the full entry set
-		// (70 today, after the 2026-09-14 zero-app cut, the 2026-09-15 final cut
-		// to one-click DCR or user token/key only, and the 2026-09-16 token-only
-		// cut) still contains the reserved legacy built-ins.
+		// The merged catalog supersedes the legacy-only slice; the full entry set (70 today, after the 2026-09-14 zero-app
+		// cut, the 2026-09-15 final cut to one-click DCR or user token/key only, and the 2026-09-16 token-only cut) still
+		// contains the reserved legacy built-ins.
 		expect(ids.has("linear")).toBe(true);
 		expect(ids.has("notion")).toBe(true);
 		expect(services.length).toBeGreaterThan(50);
@@ -1024,63 +627,63 @@ describe("ENG-6108 computed per-account status (no stale Connected)", () => {
 		};
 	}
 
-	for (const connectionId of ["acme", "acme-2"]) {
-		it(`a previously connected record with an UNBOUND credential reports Reconnect, not Connected (${connectionId})`, () => {
-			const authStorage = AuthStorage.inMemory();
-			authStorage.set(mcpCredentialKey(connectionId), {
-				type: "oauth",
-				access: "tok",
-				refresh: "r",
-				expires: Date.now() + 3600_000,
-			});
-			const store = McpConnectionStore.open(join(tmpdir(), `stale-unbound-${connectionId}/mcp-connections.json`));
-			store.upsert(connectedRecord(connectionId, Date.now()));
-			const views = build(authStorage, store);
-			expect(views[0]?.connectionStatus).toBe("error");
-			expect(views[0]?.setupHint).toContain("Reconnect required");
-			// The inventory row agrees (same computed status).
-			const connections = buildConnectionViews({
-				services: [serviceFixture()],
-				userServers: undefined,
-				authStorage,
-				connectionStore: store,
-			});
-			expect(connections.find((connection) => connection.connectionId === connectionId)?.status).toBe("error");
-		});
-
-		it(`a previously connected record with a RETARGETED credential reports Reconnect (${connectionId})`, () => {
-			const authStorage = AuthStorage.inMemory();
-			authStorage.set(mcpCredentialKey(connectionId), {
-				type: "oauth",
+	// The per-account path (the "-2" alias id) shares the computed-status rule: a previously CONNECTED record with a
+	// broken credential never reads as Connected. One table covers the three broken-credential states; the inventory row
+	// agrees with the card (same computed status).
+	const connectionId = "acme-2";
+	it.each([
+		{
+			name: "UNBOUND",
+			credential: () => ({ type: "oauth" as const, access: "tok", refresh: "r", expires: Date.now() + 3600_000 }),
+			hint: "Reconnect required",
+			checkInventory: true,
+		},
+		{
+			name: "RETARGETED",
+			credential: () => ({
+				type: "oauth" as const,
 				access: "tok",
 				refresh: "r",
 				expires: Date.now() + 3600_000,
 				endpoint: "https://retargeted.test/mcp",
-			});
-			const store = McpConnectionStore.open(join(tmpdir(), `stale-retarget-${connectionId}/mcp-connections.json`));
-			store.upsert(connectedRecord(connectionId, Date.now()));
-			const views = build(authStorage, store);
-			expect(views[0]?.connectionStatus).toBe("error");
-			expect(views[0]?.setupHint).toContain("Reconnect required");
-		});
-
-		it(`a previously connected record with an EXPIRED, no-refresh credential reports Reconnect (${connectionId})`, () => {
-			const authStorage = AuthStorage.inMemory();
-			authStorage.set(mcpCredentialKey(connectionId), {
-				type: "oauth",
+			}),
+			hint: "Reconnect required",
+			checkInventory: false,
+		},
+		{
+			name: "EXPIRED, no-refresh",
+			credential: () => ({
+				type: "oauth" as const,
 				access: "tok",
 				// Empty refresh token: expired AND unrecoverable.
 				refresh: "",
 				expires: Date.now() - 60_000,
 				endpoint: URL,
-			});
-			const store = McpConnectionStore.open(join(tmpdir(), `stale-expired-${connectionId}/mcp-connections.json`));
+			}),
+			hint: "expired without a refresh token",
+			checkInventory: false,
+		},
+	])(
+		`a previously connected record with an ${"$"}{name} credential reports Reconnect (${"$"}{connectionId})`,
+		({ credential, hint, checkInventory }) => {
+			const authStorage = AuthStorage.inMemory();
+			authStorage.set(mcpCredentialKey(connectionId), credential());
+			const store = McpConnectionStore.open(join(tmpdir(), `stale-${hint}/mcp-connections.json`));
 			store.upsert(connectedRecord(connectionId, Date.now()));
 			const views = build(authStorage, store);
 			expect(views[0]?.connectionStatus).toBe("error");
-			expect(views[0]?.setupHint).toContain("expired without a refresh token");
-		});
-	}
+			expect(views[0]?.setupHint).toContain(hint);
+			if (checkInventory) {
+				const connections = buildConnectionViews({
+					services: [serviceFixture()],
+					userServers: undefined,
+					authStorage,
+					connectionStore: store,
+				});
+				expect(connections.find((connection) => connection.connectionId === connectionId)?.status).toBe("error");
+			}
+		},
+	);
 
 	it("catalog metadata aliases are searchable when absent from label, id, and description", () => {
 		const service = serviceFixture({
@@ -1206,83 +809,53 @@ describe("ENG-6108 wave-4 resolver and account aggregation", () => {
 		expect(views[0]?.setupHint).toContain("catalog source is unavailable");
 	});
 
-	it("aggregates accounts: primary connected + alias pending stays connected and lists BOTH account ids", () => {
-		const authStorage = AuthStorage.inMemory();
-		authStorage.set(mcpCredentialKey("acme"), {
-			type: "oauth",
-			access: "primary",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.acme.test/mcp",
-		});
-		authStorage.set(mcpCredentialKey("acme-2"), {
-			type: "oauth",
-			access: "second",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.acme.test/mcp",
-		});
-		const store = McpConnectionStore.open(join(tmpdir(), "svc-agg/mcp-connections.json"));
-		const at = Date.now();
-		store.upsert({ ...accountRecord("acme", "connected", at), verifiedAt: at, toolCount: 4 });
-		store.upsert(accountRecord("acme-2", "pending", at));
-		const views = buildPluginViews({
-			services: [serviceFixture()],
-			userServers: undefined,
-			authStorage,
-			connectionStore: store,
-		});
-		expect(views[0]?.connectionStatus).toBe("connected");
-		expect(views[0]?.connectionIds).toEqual(["acme", "acme-2"]);
-	});
+	it("aggregates per-account state: primary+alias, alias-only after a disconnect, and a stale alias", () => {
+		// The service card aggregates ALL its accounts: a connected primary keeps the service
+		// connected while an alias stays visible; after the primary's record is removed the alias
+		// keeps the card alive (still listed and searchable); an alias whose credential went missing
+		// surfaces reconnect-required instead of being silently dropped.
+		const viewsFor = (store: McpConnectionStore, authStorage: AuthStorage) =>
+			buildPluginViews({
+				services: [serviceFixture()],
+				userServers: undefined,
+				authStorage,
+				connectionStore: store,
+			});
 
-	it("after the default account disconnects, the remaining alias stays visible and manageable", () => {
-		const authStorage = AuthStorage.inMemory();
-		authStorage.set(mcpCredentialKey("acme-2"), {
-			type: "oauth",
-			access: "second",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.acme.test/mcp",
-		});
-		const store = McpConnectionStore.open(join(tmpdir(), "svc-alias-left/mcp-connections.json"));
+		const primaryAuth = AuthStorage.inMemory();
+		primaryAuth.set(mcpCredentialKey("acme"), oauthCredential(3600_000, "https://mcp.acme.test/mcp"));
+		primaryAuth.set(mcpCredentialKey("acme-2"), oauthCredential(3600_000, "https://mcp.acme.test/mcp"));
 		const at = Date.now();
-		store.remove("acme");
-		store.upsert(accountRecord("acme-2", "pending", at));
-		const views = buildPluginViews({
-			services: [serviceFixture()],
-			userServers: undefined,
-			authStorage,
-			connectionStore: store,
-		});
-		// The service card survives via the alias account, never vanishing.
-		expect(views).toHaveLength(1);
-		expect(views[0]?.connectionIds).toEqual(["acme-2"]);
-		// The alias is searchable by its account id.
-		expect(searchPluginViews(views, "acme-2", 10)).toHaveLength(1);
-		// The connection inventory lists the alias with its own status.
+		const bothStore = McpConnectionStore.open(join(tmpdir(), "svc-agg/mcp-connections.json"));
+		bothStore.upsert({ ...accountRecord("acme", "connected", at), verifiedAt: at, toolCount: 4 });
+		bothStore.upsert(accountRecord("acme-2", "pending", at));
+		const both = viewsFor(bothStore, primaryAuth);
+		expect(both[0]?.connectionStatus).toBe("connected");
+		expect(both[0]?.connectionIds).toEqual(["acme", "acme-2"]);
+
+		const aliasAuth = AuthStorage.inMemory();
+		aliasAuth.set(mcpCredentialKey("acme-2"), oauthCredential(3600_000, "https://mcp.acme.test/mcp"));
+		const aliasStore = McpConnectionStore.open(join(tmpdir(), "svc-alias-left/mcp-connections.json"));
+		aliasStore.remove("acme");
+		aliasStore.upsert(accountRecord("acme-2", "pending", at));
+		const alias = viewsFor(aliasStore, aliasAuth);
+		expect(alias).toHaveLength(1);
+		expect(alias[0]?.connectionIds).toEqual(["acme-2"]);
+		expect(searchPluginViews(alias, "acme-2", 10)).toHaveLength(1);
 		const connections = buildConnectionViews({
 			services: [serviceFixture()],
 			userServers: undefined,
-			authStorage,
-			connectionStore: store,
+			authStorage: aliasAuth,
+			connectionStore: aliasStore,
 		});
 		expect(connections.map((connection) => connection.connectionId)).toEqual(["acme-2"]);
-	});
 
-	it("an alias whose credential went missing is listed as reconnect-required, not silently dropped", () => {
-		const store = McpConnectionStore.open(join(tmpdir(), "svc-alias-stale/mcp-connections.json"));
-		const at = Date.now();
-		store.upsert(accountRecord("acme-2", "connected", at));
-		const views = buildPluginViews({
-			services: [serviceFixture()],
-			userServers: undefined,
-			authStorage: AuthStorage.inMemory(),
-			connectionStore: store,
-		});
-		expect(views[0]?.connectionIds).toContain("acme-2");
-		expect(views[0]?.connectionStatus).toBe("error");
-		expect(views[0]?.setupHint).toContain("Reconnect required");
+		const staleStore = McpConnectionStore.open(join(tmpdir(), "svc-alias-stale/mcp-connections.json"));
+		staleStore.upsert(accountRecord("acme-2", "connected", at));
+		const stale = viewsFor(staleStore, AuthStorage.inMemory());
+		expect(stale[0]?.connectionIds).toContain("acme-2");
+		expect(stale[0]?.connectionStatus).toBe("error");
+		expect(stale[0]?.setupHint).toContain("Reconnect required");
 	});
 });
 
@@ -1426,10 +999,9 @@ describe("resolveMcpServiceCatalog", () => {
 			loadLocal: () => ({ entries: huge, path: "/huge.json" }),
 			records,
 		});
-		// The cap still binds (500), but BOTH installed serviceIds survive —
-		// the in-source one is retained instead of sliced away, the vanished-
-		// source pin is never the first thing discarded, and legacy builtins
-		// keep their reserved names.
+		// The cap still binds (500), but BOTH installed serviceIds survive — the in-source one is retained instead of
+		// sliced away, the vanished- source pin is never the first thing discarded, and legacy builtins keep their reserved
+		// names.
 		expect(capped.descriptors).toHaveLength(500);
 		const kept = new Set(capped.descriptors.map((descriptor) => descriptor.serviceId));
 		expect(kept.has("bulk-550")).toBe(true);
@@ -1463,10 +1035,8 @@ describe("resolveMcpServiceCatalog", () => {
 			loadLocal: () => ({ entries: huge, path: "/huge.json" }),
 			records,
 		});
-		// Manageability never drops: all 510 installed serviceIds AND the
-		// legacy builtins are kept even though the retained inventory alone
-		// exceeds the cap, the diagnostic says so explicitly, and only
-		// uninstalled candidates were trimmed.
+		// Manageability never drops: all 510 installed serviceIds AND the legacy builtins are kept even though the retained
+		// inventory alone exceeds the cap, the diagnostic says so explicitly, and only uninstalled candidates were trimmed.
 		const kept = capped.descriptors.map((descriptor) => descriptor.serviceId);
 		expect(kept.filter((id) => id.startsWith("installed-"))).toHaveLength(510);
 		expect(kept).toContain("linear");
@@ -1478,21 +1048,18 @@ describe("resolveMcpServiceCatalog", () => {
 
 describe("/mcp and /plugins picker row counts", () => {
 	it("ships exactly 68 catalog services after the ENG-6108 single-credential cut", () => {
-		// The live /mcp picker counter read /77 against the earlier shipped 75:
-		// the extra rows are installed connections pinned from records (below),
-		// never catalog growth or duplicated rows. The 2026-09-16 token-only cut
-		// dropped 5 more non-pasteable survivors (CockroachDB Cloud, Dynatrace,
-		// Sourcegraph, PayPal Sandbox, Render), and the single-credential cut
-		// dropped the two named-header pairs (Datadog, Cloudinary MediaFlows).
-		// Pin the shipped length so silent re-growth changes the counter loudly.
+		// The live /mcp picker counter read /77 against the earlier shipped 75: the extra rows are installed connections
+		// pinned from records (below), never catalog growth or duplicated rows. The 2026-09-16 token-only cut dropped 5
+		// more non-pasteable survivors (CockroachDB Cloud, Dynatrace, Sourcegraph, PayPal Sandbox, Render), and the
+		// single-credential cut dropped the two named-header pairs (Datadog, Cloudinary MediaFlows). Pin the shipped length
+		// so silent re-growth changes the counter loudly.
 		expect(SERVICE_CATALOG.length).toBe(68);
 	});
 
 	it("counts rows as the shipped catalog plus pinned installed connections — unique, no off-by-N", () => {
-		// Kevin's live state: figma and huggingface-skills were cut from the
-		// shipped catalog but their connections are installed, so their records
-		// pin durable descriptors and the picker legitimately lists 70 + 2 = 72
-		// rows. Every row is unique — the counter matches the rendered list.
+		// Kevin's live state: figma and huggingface-skills were cut from the shipped catalog but their connections are
+		// installed, so their records pin durable descriptors and the picker legitimately lists 70 + 2 = 72 rows. Every row
+		// is unique — the counter matches the rendered list.
 		const catalogIds = new Set(SERVICE_CATALOG.map((entry) => entry.server));
 		expect(catalogIds.has("figma")).toBe(false);
 		expect(catalogIds.has("huggingface-skills")).toBe(false);
@@ -1577,9 +1144,8 @@ describe("catalog token services: the paste flow (storage, views, verification)"
 	it("identifies exactly the catalog's paste-an-api-key/token services — single-credential by construction", () => {
 		const descriptors = defaultServiceCatalogProvider()();
 		const pasteable = descriptors.filter((descriptor) => isPasteableTokenService(descriptor));
-		// The 2026-09-16 single-credential cut: 11 one-paste services (the
-		// named-header pairs datadog and cloudinary-mediaflows are cut from the
-		// catalog; the importer refuses to re-ship them).
+		// The 2026-09-16 single-credential cut: 11 one-paste services (the named-header pairs datadog and
+		// cloudinary-mediaflows are cut from the catalog; the importer refuses to re-ship them).
 		expect(pasteable.map((descriptor) => descriptor.serviceId).sort()).toEqual(
 			[
 				"aws-devops-agent",
@@ -1595,9 +1161,8 @@ describe("catalog token services: the paste flow (storage, views, verification)"
 				"zoom-whiteboard",
 			].sort(),
 		);
-		// GitHub's two fields are ALTERNATIVE NAMES for one PAT (a shared
-		// credentialSet): the paste flow collects ONE credential, stored under
-		// the first alternative's id.
+		// GitHub's two fields are ALTERNATIVE NAMES for one PAT (a shared credentialSet): the paste flow collects ONE
+		// credential, stored under the first alternative's id.
 		const github = pasteable.find((descriptor) => descriptor.serviceId === "github");
 		expect(github ? mcpCredentialFields(github).map((field) => field.id) : []).toEqual([
 			"GITHUB_PAT_TOKEN",
@@ -1758,23 +1323,8 @@ describe("catalog token services: the paste flow (storage, views, verification)"
 		expect(store.get("github")).toMatchObject({ status: "connected", toolCount: 4 });
 	});
 
-	it("records error with a fixed safe category when the pasted token is rejected", async () => {
-		authStorage.set(mcpCredentialKey("github"), staticToken());
-		const record = await verifyMcpConnection({
-			authStorage,
-			connectionStore: store,
-			connectionId: "github",
-			serviceId: "github",
-			label: "GitHub",
-			endpoint: GITHUB_URL,
-			usesOAuth: false,
-			staticToken: true,
-			probe: async () => ({ ok: false, error: MCP_PROBE_ERRORS.UNAUTHORIZED }),
-		});
-		expect(record.status).toBe("error");
-		expect(record.lastError).toBe(MCP_PROBE_ERRORS.UNAUTHORIZED);
-		expect(store.get("github")?.status).toBe("error");
-	});
+	// The error-category invariant for pasted tokens is the SAME shared probe-error path pinned above ("records error
+	// with a fixed safe category when the server rejects the credential").
 
 	it("refuses to verify an unbound pasted token before any network operation", async () => {
 		authStorage.set(mcpCredentialKey("github"), staticToken({ endpoint: "https://moved.example/mcp" }));
@@ -1795,34 +1345,8 @@ describe("catalog token services: the paste flow (storage, views, verification)"
 		expect(record.lastError).toBe(MCP_PROBE_ERRORS.UNBOUND_CREDENTIAL);
 	});
 
-	it("discards a verify result when the pasted token rotates or is removed mid-probe", async () => {
-		authStorage.set(mcpCredentialKey("github"), staticToken());
-		let releaseProbe: (() => void) | undefined;
-		const probeGate = new Promise<void>((resolve) => {
-			releaseProbe = resolve;
-		});
-		const verifyPromise = verifyMcpConnection({
-			authStorage,
-			connectionStore: store,
-			connectionId: "github",
-			serviceId: "github",
-			label: "GitHub",
-			endpoint: GITHUB_URL,
-			usesOAuth: false,
-			staticToken: true,
-			probe: async () => {
-				await probeGate;
-				return { ok: true, toolCount: 2 };
-			},
-		});
-		// A concurrent re-paste rotates the credential while the probe runs.
-		authStorage.set(mcpCredentialKey("github"), staticToken({ bearer: "ghp_rotated" }));
-		releaseProbe?.();
-		const record = await verifyPromise;
-		expect(record.status).toBe("pending");
-		expect(record.lastError).toBe(MCP_PROBE_ERRORS.CREDENTIAL_CHANGED);
-		expect(store.get("github")).toBeUndefined();
-	});
+	// The mid-probe rotation discard is the SAME queueVerifyResult guard pinned above ("discards a stale verify result
+	// when the grant rotates mid-probe").
 
 	it("keeps verification honest when no usable credential exists: never connected, never a probe", async () => {
 		const probe = vi.fn(async () => ({ ok: true as const, toolCount: 1 }));

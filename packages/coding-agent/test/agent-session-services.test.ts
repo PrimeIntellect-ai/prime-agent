@@ -8,6 +8,9 @@ import { AGENT_MESSAGE_SKILL_NAME, type AgentSessionMessageController } from "..
 import { AGENT_OBSERVE_SKILL_NAME, type AgentObserveController } from "../src/core/agent-observe.js";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
+import { McpConnectionStore } from "../src/core/mcp/connection-store.js";
+import { McpManager } from "../src/core/mcp/mcp-manager.js";
+import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { createSyntheticSourceInfo } from "../src/core/source-info.js";
@@ -243,8 +246,7 @@ describe("createAgentSessionFromServices", () => {
 			expect(initialPrompt).toContain(
 				"Generic MCP connections are accessed through the pre-imported Python `mcp` object in the Python REPL, not as top-level native tool namespaces or installed Python skills.",
 			);
-			// Zero none+ready catalog rows exist today, so the enabled line is
-			// exactly the user-declared servers.
+			// Zero none+ready catalog rows exist today, so the enabled line is exactly the user-declared servers.
 			expect(enabledServersLine(initialPrompt)).toBe("`filesystem`, `zebra`");
 			expect(initialPrompt).toContain('await mcp.list_tools("filesystem")');
 			expect(initialPrompt).toContain('await mcp.call_tool("filesystem", "<tool>", arguments)');
@@ -308,6 +310,102 @@ describe("createAgentSessionFromServices", () => {
 			expect(session.systemPrompt).toContain('await mcp.list_tools("added")');
 			expect(session.systemPrompt).not.toContain('await mcp.list_tools("filesystem")');
 			expect(session.systemPrompt).not.toContain("new-secret");
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("ENG-6108: activates a verified catalog connection in the live conversation after /plugins login", async () => {
+		// A /plugins login must become usable in the current (daemon-backed) conversation without a restart: credentials
+		// land in the shared credential store, the connection is verified with a real MCP handshake (token presence alone
+		// is never Connected), and the session reload the picker triggers rebuilds the system prompt and serves the catalog
+		// service through the generic mcp route.
+		const tempDir = join(
+			tmpdir(),
+			`pi-session-catalog-activation-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+		);
+		mkdirSync(tempDir, { recursive: true });
+		cleanupPaths.push(tempDir);
+		const faux = registerFauxProvider({ provider: "faux-eng6108" });
+		unregisters.push(() => faux.unregister());
+		const authStorage = AuthStorage.inMemory();
+		const store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+		// Pin a minimal catalog: this exercises connect-then-activate, not the merged catalog's breadth.
+		const mcpManager = new McpManager({
+			authStorage,
+			connectionStore: store,
+			getServiceCatalog: () => [
+				{
+					serviceId: "notion",
+					label: "Notion",
+					aliases: [],
+					transport: { type: "http", url: "https://mcp.notion.com/mcp" },
+					authStrategy: "oauth",
+					setup: { status: "ready" },
+					metadataReviewed: true,
+					legacyBuiltin: true,
+				},
+			],
+			noBackgroundVerification: true,
+			probeConnection: async () => ({ ok: true, toolCount: 3 }),
+		});
+		const model = faux.getModel();
+		const modelRegistry = ModelRegistry.inMemory(authStorage);
+		modelRegistry.registerProvider(model.provider, {
+			baseUrl: model.baseUrl,
+			apiKey: "faux-key",
+			api: faux.api,
+			models: faux.models.map((registeredModel) => ({
+				id: registeredModel.id,
+				name: registeredModel.name,
+				api: registeredModel.api,
+				reasoning: registeredModel.reasoning,
+				input: registeredModel.input,
+				cost: registeredModel.cost,
+				contextWindow: registeredModel.contextWindow,
+				maxTokens: registeredModel.maxTokens,
+				baseUrl: registeredModel.baseUrl,
+			})),
+		});
+		const services = await createAgentSessionServices({
+			cwd: tempDir,
+			agentDir: join(tempDir, "agent"),
+			authStorage,
+			settingsManager: SettingsManager.inMemory(),
+			modelRegistry,
+			mcpManager,
+			telemetryDisabled: true,
+			noBuiltinHerdrReporter: true,
+			resourceLoaderOptions: { noExtensions: true },
+		});
+		const { session } = await createAgentSessionFromServices({
+			services,
+			sessionManager: SessionManager.inMemory(),
+			model,
+		});
+		try {
+			expect(session.agent.state.systemPrompt).not.toContain("Enabled generic MCP servers");
+			expect(services.mcpManager.getDisabledBuiltinSkillOverrides()).toContain("-notion/SKILL.md");
+
+			// The /plugins connect flow, minus the UI: browser OAuth writes the
+			// shared credential, then the host verifies with a real handshake.
+			authStorage.set("mcp:notion", {
+				type: "oauth",
+				access: "notion-access",
+				refresh: "notion-refresh",
+				expires: Date.now() + 3600_000,
+				endpoint: "https://mcp.notion.com/mcp",
+			});
+			const record = await services.mcpManager.verifyConnection("notion");
+			expect(record.status).toBe("connected");
+
+			// The picker triggers the same session reload the interactive client performs: the prompt now
+			// advertises the service and the authored skill override clears.
+			await session.reload();
+			const promptAfter = session.agent.state.systemPrompt;
+			expect(promptAfter).toContain("Enabled generic MCP servers");
+			expect(promptAfter).toContain('await mcp.list_tools("notion")');
+			expect(services.mcpManager.getDisabledBuiltinSkillOverrides()).not.toContain("-notion/SKILL.md");
 		} finally {
 			session.dispose();
 		}

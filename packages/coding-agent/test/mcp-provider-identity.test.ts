@@ -1,8 +1,7 @@
-// ENG-6108 OAuth client identity wiring. The five provider registration sites
-// must resolve the SAME identity (settings fields -> engine options) at login
-// and refresh time; the engine pins client identity on stored credentials and
-// refuses drift, so a mismatched factory breaks refresh spuriously.
-// Offline: temporary files, denied fetch, synthetic credentials, no OAuth flow.
+// ENG-6108 OAuth client identity wiring. The five provider registration sites must resolve the SAME identity
+// (settings fields -> engine options) at login and refresh time; the engine pins client identity on stored
+// credentials and refuses drift, so a mismatched factory breaks refresh spuriously. Offline: temporary files, denied
+// fetch, synthetic credentials, no OAuth flow.
 
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -65,15 +64,9 @@ describe("ENG-6108 OAuth client identity wiring", () => {
 		return createProviderMock.mock.calls.map((call) => call[0] as Record<string, unknown>);
 	}
 
-	it("resolves a configured identity with fail-closed secret and joined scopes", () => {
-		const identity = resolveMcpOAuthIdentity(IDENTITY_CONFIG);
-		expect(identity).toEqual({
-			clientId: "my-client",
-			clientSecret: "configured-secret",
-			clientMetadataUrl: "https://mcp.acme.test/.well-known/client-metadata",
-			scopes: ["read", "write"],
-		});
-	});
+	// The resolver itself (configured identity, fail-closed missing secret, non-OAuth configs staying empty) is pinned
+	// in mcp-service-catalog.test.ts ("resolves a configured OAuth client identity with fail-closed secret semantics"
+	// and neighbors).
 
 	it("factory maps identity onto engine options: settings scopes win, catalog scopes fill otherwise", () => {
 		createConfiguredMcpProvider({
@@ -110,28 +103,9 @@ describe("ENG-6108 OAuth client identity wiring", () => {
 		]);
 	});
 
-	it("manager refresh registration resolves the settings identity, fail-closed on a missing secret env", async () => {
-		delete process.env.ACME_IDENTITY_SECRET;
-		new McpManager({
-			authStorage: AuthStorage.inMemory(),
-			connectionStore: McpConnectionStore.open(join(tempDir, "mcp-connections.json")),
-			getUserServers: () => ({ acme: IDENTITY_CONFIG }),
-		});
-		const configs = providerConfigs().filter((config) => config.server === "acme");
-		expect(configs).toEqual([
-			{
-				server: "acme",
-				label: "acme",
-				url: "https://mcp.acme.test/mcp",
-				clientId: "my-client",
-				// Explicit empty string: the engine fails closed before any
-				// network request; never a stale stored secret fallback.
-				clientSecret: "",
-				clientMetadataUrl: "https://mcp.acme.test/.well-known/client-metadata",
-				scopes: "read write",
-			},
-		]);
-	});
+	// Manager registration failing closed on a missing secret env is the SAME resolver invariant pinned in
+	// mcp-service-catalog.test.ts ("a configured secret env that is missing resolves to the explicit empty string"): the
+	// manager passes the resolved identity straight to the factory pinned above.
 
 	it("manager catalog and per-account sites carry catalog advisory data, not user identity", async () => {
 		const store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));

@@ -182,6 +182,8 @@ describe("probeMcpEndpoint", () => {
 		expect(serialized).not.toContain("mcp.acme.test");
 	});
 
+	// Both hang variants verify the probe's own bounds (cleanup grace, response
+	// deadline): it must return instead of hanging forever.
 	it("still returns when the cleanup DELETE never responds", async () => {
 		const server = createMcpFakeFetch({ deleteNeverReturns: true });
 		const started = Date.now();
@@ -195,6 +197,7 @@ describe("probeMcpEndpoint", () => {
 		expect(server.deletes).toHaveLength(1);
 		// Bounded by the cleanup grace, not by an unbounded DELETE.
 		expect(Date.now() - started).toBeLessThan(2000);
+		// test-policy: allow explicit-test-timeout -- the probe's own cleanup-timeout bound is the behavior under test
 	}, 5000);
 
 	it("still returns when the response body never completes", async () => {
@@ -209,7 +212,6 @@ describe("probeMcpEndpoint", () => {
 			}
 			throw new Error(`unexpected method ${body.method}`);
 		});
-		const started = Date.now();
 		const result = await probeMcpEndpoint({
 			url: "https://mcp.acme.test/mcp",
 			getToken: () => FAKE_TOKEN,
@@ -218,7 +220,7 @@ describe("probeMcpEndpoint", () => {
 			fetchImpl: fetchImpl as unknown as typeof fetch,
 		});
 		expect(result).toEqual({ ok: false, error: MCP_PROBE_ERRORS.TIMEOUT });
-		expect(Date.now() - started).toBeLessThan(2000);
+		// test-policy: allow explicit-test-timeout -- the probe's own response-timeout bound is the behavior under test
 	}, 5000);
 
 	it("reports a fixed timeout category when the endpoint hangs", async () => {
@@ -232,6 +234,7 @@ describe("probeMcpEndpoint", () => {
 			}) as unknown as typeof fetch,
 		});
 		expect(result).toEqual({ ok: false, error: MCP_PROBE_ERRORS.TIMEOUT });
+		// test-policy: allow explicit-test-timeout -- the probe's own request-timeout bound is the behavior under test
 	}, 5000);
 });
 

@@ -815,8 +815,7 @@ describe("AuthStorage", () => {
 			const clientA = AuthStorage.create(authJsonPath);
 			const clientB = AuthStorage.create(authJsonPath);
 			clientA.set("mcp:acme-2", credential("mine"));
-			// B replaces the credential with a NEWER one after our move: the
-			// exact-own check must refuse to delete it.
+			// B replaces the credential with a NEWER one after our move: the exact-own check must refuse to delete it.
 			const newer = credential("newer-login");
 			clientB.set("mcp:acme-2", newer);
 
@@ -826,6 +825,28 @@ describe("AuthStorage", () => {
 			expect(removedStale).toBe(false);
 			expect(removedNewer).toBe(true);
 			expect(AuthStorage.create(authJsonPath).list()).toEqual([]);
+		});
+
+		test("replaceStagedCredential refuses when the expected old credential was deleted (absence is a change)", () => {
+			// Full-identity CAS: the captured expected-old must match the CURRENT on-disk value INCLUDING absence. A nonempty
+			// expectedOld with an ABSENT real slot is a CHANGED value — the replace must refuse, not treat the emptied slot as
+			// free.
+			const clientA = AuthStorage.create(authJsonPath);
+			const expectedOld = credential("previous-credential");
+			clientA.set("mcp:acme-2", expectedOld);
+			const captured = clientA.getVerified("mcp:acme-2");
+			expect(captured).toBeDefined();
+			// Another client deletes the real credential while our attempt is in flight.
+			AuthStorage.create(authJsonPath).removeVerified("mcp:acme-2");
+			const stagedKey = "mcp:acme-2--attempt-1";
+			clientA.set(stagedKey, credential("our-credential"));
+
+			const move = clientA.replaceStagedCredential(stagedKey, "mcp:acme-2", captured);
+
+			expect(move.status, "a deleted expected-old value must refuse the replace").toBe("occupied");
+			const fresh = AuthStorage.create(authJsonPath);
+			expect(fresh.get("mcp:acme-2"), "nothing may land on the changed slot").toBeUndefined();
+			expect(fresh.get(stagedKey), "our staged credential must stay staged").toBeDefined();
 		});
 
 		test("restoreCredentialIfAbsent never overwrites a newer writer", () => {

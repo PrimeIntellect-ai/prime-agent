@@ -2,8 +2,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type AuthCredential, AuthStorage } from "../src/core/auth-storage.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AuthStorage } from "../src/core/auth-storage.js";
 import { McpConnectionStore } from "../src/core/mcp/connection-store.js";
 import { McpManager } from "../src/core/mcp/mcp-manager.js";
 import type { McpServiceDescriptor } from "../src/core/mcp/service-catalog.js";
@@ -33,13 +33,7 @@ describe("McpManager", () => {
 	});
 
 	it("enables an integration once credentials are stored", () => {
-		authStorage.set("mcp:linear", {
-			type: "oauth",
-			access: "tok",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.linear.app/mcp",
-		});
+		authStorage.set("mcp:linear", grant("tok", "https://mcp.linear.app/mcp", Date.now()));
 		const manager = new McpManager({ authStorage });
 		const overrides = manager.getDisabledBuiltinSkillOverrides();
 		expect(overrides).not.toContain("-linear/SKILL.md");
@@ -55,26 +49,23 @@ describe("McpManager", () => {
 		expect(getOAuthProvider("mcp:notion")).toBeDefined();
 	});
 
-	it("keeps MCP providers registered after ModelRegistry.refresh() resets the registry", () => {
+	it("keeps MCP providers registered after ModelRegistry.refresh resets the registry, via the reset hook", () => {
+		// Built-in catalog providers survive reset; user-declared servers survive through the production reset hook.
 		new McpManager({ authStorage });
 		const registry = ModelRegistry.create(authStorage, join(tempDir, "models.json"));
-		registry.refresh(); // calls resetOAuthProviders(); must re-add MCP providers
-		expect(getOAuthProvider("mcp:linear")).toBeDefined();
-		expect(getOAuthProvider("mcp:notion")).toBeDefined();
-	});
-
-	it("re-registers user-declared OAuth servers after ModelRegistry.refresh via the reset hook", () => {
 		const manager = new McpManager({
 			authStorage,
 			getUserServers: () => ({ acme: { type: "http", url: "https://mcp.acme.test/mcp", oauth: true } }),
 		});
-		const registry = ModelRegistry.create(authStorage, join(tempDir, "models.json"));
 		registry.setOnOAuthProvidersReset(() => manager.registerAllProviders());
 		expect(getOAuthProvider("mcp:acme")).toBeDefined();
-		registry.refresh(); // resets registry; hook must re-add the custom provider
+		registry.refresh(); // calls resetOAuthProviders(); hook + built-ins must re-add MCP providers
+		expect(getOAuthProvider("mcp:linear")).toBeDefined();
+		expect(getOAuthProvider("mcp:notion")).toBeDefined();
 		expect(getOAuthProvider("mcp:acme")).toBeDefined();
 	});
-
+	// The user-declared server's reset-hook re-registration is folded into
+	// "keeps MCP providers registered after ModelRegistry.refresh resets the registry, via the reset hook" above.
 	it("exposes only mcp.refresh when no interactive login is wired", async () => {
 		const manager = new McpManager({ authStorage, noBackgroundVerification: true });
 		const handlers = manager.hostHandlers();
@@ -126,13 +117,7 @@ describe("McpManager", () => {
 		// An unconnected catalog service is not dispatched through the generic route.
 		expect(await handlers["mcp.config"]({ server: "notion" })).toEqual({});
 
-		authStorage.set("mcp:notion", {
-			type: "oauth",
-			access: "tok",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.notion.com/mcp",
-		});
+		authStorage.set("mcp:notion", grant("tok", "https://mcp.notion.com/mcp", Date.now()));
 		// Stored credentials put the catalog service on the generic route.
 		expect(await handlers["mcp.config"]({ server: "notion" })).toEqual({
 			type: "http",
@@ -141,72 +126,20 @@ describe("McpManager", () => {
 		});
 	});
 
-	it("does not treat an oauth override of a catalog name as authed via the official stored cred", () => {
-		authStorage.set("mcp:linear", {
-			type: "oauth",
-			access: "official",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.linear.app/mcp",
-		});
-		const manager = new McpManager({
-			authStorage,
-			getUserServers: () => ({ linear: { type: "http", url: "https://proxy.test/mcp", oauth: true } }),
-		});
-		expect(manager.listStatus().find((s) => s.server === "linear")?.enabled).toBe(false);
-	});
+	// A shadow credential never authorizes a reserved name: pinned with the reserved-name matrix below and in
+	// mcp-catalog-eligibility.test.ts ("a reserved builtin name with a stored pasted token still fails closed under a
+	// user shadow").
 
-	it("does not enable a server from a credential bound to a different endpoint or unbound", () => {
-		authStorage.set("mcp:unbound", {
-			type: "oauth",
-			access: "unbound-token",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-		});
-		authStorage.set("mcp:remote", {
-			type: "oauth",
-			access: "old-token",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://old.test/mcp",
-		} as never);
-		const manager = new McpManager({
-			authStorage,
-			getServiceCatalog: () => [],
-			getUserServers: () => ({
-				remote: { type: "http", url: "https://new.test/mcp", oauth: true },
-				unbound: { type: "http", url: "https://srv.test/mcp", oauth: true },
-			}),
-		});
-		expect(manager.listStatus().find((s) => s.server === "remote")?.enabled).toBe(false);
-		expect(manager.listStatus().find((s) => s.server === "unbound")?.enabled).toBe(false);
-		expect(manager.getEnabledPersistentGenericServers()).toEqual([]);
-	});
+	// Unbound/cross-endpoint grants fail closed: pinned across the shared predicate, prompt, dispatch, and view in
+	// mcp-catalog-eligibility.test.ts ("OAuth grant states agree across the shared predicate, prompt, dispatch, and the
+	// picker view").
 
-	it("honors a bearer-token env var for user-declared servers", () => {
-		process.env.MY_MCP_TOKEN = "secret";
-		try {
-			const manager = new McpManager({
-				authStorage,
-				getUserServers: () => ({
-					custom: { type: "http", url: "https://example.test/mcp", bearerTokenEnvVar: "MY_MCP_TOKEN" },
-				}),
-			});
-			const status = manager.listStatus().find((s) => s.server === "custom");
-			expect(status?.enabled).toBe(true);
-		} finally {
-			delete process.env.MY_MCP_TOKEN;
-		}
-	});
+	// Bearer-env eligibility (including the stale-OAuth fall-through refusal) is pinned in
+	// mcp-catalog-eligibility.test.ts ("user-declared servers keep their semantics, but a configured bearer env var is
+	// the ONLY credential source").
 
 	it("lists enabled generic servers including connected catalog services in deterministic order", () => {
-		authStorage.set("mcp:notion", {
-			type: "oauth",
-			access: "tok",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.notion.com/mcp",
-		});
+		authStorage.set("mcp:notion", grant("tok", "https://mcp.notion.com/mcp", Date.now()));
 		const manager = new McpManager({
 			authStorage,
 			noBackgroundVerification: true,
@@ -335,182 +268,22 @@ describe("McpManager", () => {
 		expect(authStorage.get("mcp:task")).toMatchObject({ access: "stored-oauth-token" });
 	});
 
-	it("fails closed with empty auth on the REAL bundled catalog: zero none+ready rows are enabled, aws-devops-agent included", async () => {
-		const manager = new McpManager({ authStorage });
-		// No user servers, empty auth: the enabled generic set is exactly the
-		// bundled rows that are explicitly public no-auth AND setup-ready —
-		// zero such rows exist today, so api_key/requires-setup rows
-		// (aws-devops-agent) must never appear.
-		expect(manager.getEnabledPersistentGenericServers()).toEqual([]);
-		expect(manager.listStatus().find((s) => s.server === "aws-devops-agent")?.enabled).toBe(false);
-		// The requires-setup api_key row is never served to the kernel either.
-		await expect(manager.hostHandlers()["mcp.config"]({ server: "aws-devops-agent" })).resolves.toEqual({});
-	});
+	// The empty-auth sweep over the REAL catalog is pinned in mcp-catalog-eligibility.test.ts ("sweeps the REAL catalog:
+	// no row is enabled without proven credentials").
 
-	it("never enables a catalog api_key row even when its token env var is set (no field-id inference)", () => {
-		process.env.CATALOG_API_KEY_TEST = "some-key";
-		try {
-			const manager = new McpManager({
-				authStorage,
-				getServiceCatalog: () => [
-					{
-						serviceId: "needs-key",
-						label: "Needs Key",
-						aliases: [],
-						transport: { type: "http", url: "https://key.example/mcp" },
-						authStrategy: "api_key",
-						setup: { status: "requires-setup", reason: "requires an API key" },
-						metadataReviewed: true,
-						legacyBuiltin: false,
-					},
-				],
-			});
-			expect(manager.getEnabledPersistentGenericServers()).toEqual([]);
-			expect(manager.listStatus().find((s) => s.server === "needs-key")?.enabled).toBe(false);
-		} finally {
-			delete process.env.CATALOG_API_KEY_TEST;
-		}
-	});
+	// Field-id env vars are never inferred as credentials: pinned on the REAL catalog in mcp-catalog-eligibility.test.ts
+	// ("the real aws-devops-agent row stays unauthenticated even when its setup env var is present").
 
-	it("enables only the explicitly public no-auth setup-ready catalog row; requires-setup and unknown fail closed", async () => {
-		const manager = new McpManager({
-			authStorage,
-			getServiceCatalog: () => [
-				{
-					serviceId: "public-docs",
-					label: "Public Docs",
-					aliases: [],
-					transport: { type: "http", url: "https://public.example/mcp" },
-					authStrategy: "none",
-					setup: { status: "ready" },
-					metadataReviewed: true,
-					legacyBuiltin: false,
-				},
-				{
-					serviceId: "blocked-setup",
-					label: "Blocked Setup",
-					aliases: [],
-					transport: { type: "http", url: "https://blocked.example/mcp" },
-					authStrategy: "none",
-					setup: { status: "requires-setup", reason: "manual setup" },
-					metadataReviewed: true,
-					legacyBuiltin: false,
-				},
-				{
-					serviceId: "unknown-auth",
-					label: "Unknown Auth",
-					aliases: [],
-					transport: { type: "http", url: "https://unknown.example/mcp" },
-					authStrategy: "unknown",
-					setup: { status: "ready" },
-					metadataReviewed: true,
-					legacyBuiltin: false,
-				},
-			],
-		});
-		expect(manager.getEnabledPersistentGenericServers()).toEqual(["public-docs"]);
-		expect(manager.listStatus().find((s) => s.server === "blocked-setup")?.enabled).toBe(false);
-		expect(manager.listStatus().find((s) => s.server === "unknown-auth")?.enabled).toBe(false);
-		const handlers = manager.hostHandlers();
-		await expect(handlers["mcp.config"]({ server: "public-docs" })).resolves.toEqual({
-			type: "http",
-			url: "https://public.example/mcp",
-		});
-		await expect(handlers["mcp.config"]({ server: "blocked-setup" })).resolves.toEqual({});
-		await expect(handlers["mcp.config"]({ server: "unknown-auth" })).resolves.toEqual({});
-	});
+	// Strategy fail-closed semantics are pinned ONCE across prompt, dispatch,
+	// and view in mcp-catalog-eligibility.test.ts ("%s across prompt and dispatch").
 
-	it("oauth grant matrix: expired-no-refresh, wrong-type, and empty-access credentials are not authed; refreshable ones are", async () => {
-		const catalog: McpServiceDescriptor[] = [
-			{
-				serviceId: "svc-a",
-				label: "Service A",
-				aliases: [],
-				transport: { type: "http", url: "https://svc-a.example/mcp" },
-				authStrategy: "oauth",
-				setup: { status: "ready" },
-				metadataReviewed: true,
-				legacyBuiltin: false,
-			},
-			{
-				serviceId: "svc-b",
-				label: "Service B",
-				aliases: [],
-				transport: { type: "http", url: "https://svc-b.example/mcp" },
-				authStrategy: "oauth",
-				setup: { status: "ready" },
-				metadataReviewed: true,
-				legacyBuiltin: false,
-			},
-			{
-				serviceId: "svc-c",
-				label: "Service C",
-				aliases: [],
-				transport: { type: "http", url: "https://svc-c.example/mcp" },
-				authStrategy: "oauth",
-				setup: { status: "ready" },
-				metadataReviewed: true,
-				legacyBuiltin: false,
-			},
-		];
-		// svc-a: expired WITHOUT refresh -> refused.
-		authStorage.set("mcp:svc-a", {
-			type: "oauth",
-			access: "expired",
-			refresh: "",
-			expires: Date.now() - 1000,
-			endpoint: "https://svc-a.example/mcp",
-		});
-		// svc-b: expired WITH refresh -> refreshable, stays eligible.
-		authStorage.set("mcp:svc-b", {
-			type: "oauth",
-			access: "expiring",
-			refresh: "r",
-			expires: Date.now() - 1000,
-			endpoint: "https://svc-b.example/mcp",
-		});
-		// svc-c: a wrong-type entry at the MCP key that STILL carries a
-		// matching endpoint — the exact shape the old endpoint-only check
-		// wrongly authenticated. The type gate must refuse it.
-		authStorage.set("mcp:svc-c", {
-			type: "api_key",
-			key: "not-an-oauth-grant",
-			endpoint: "https://svc-c.example/mcp",
-		} as unknown as AuthCredential);
-		const manager = new McpManager({ authStorage, getServiceCatalog: () => catalog });
-		expect(manager.listStatus().find((s) => s.server === "svc-a")?.enabled).toBe(false);
-		expect(manager.listStatus().find((s) => s.server === "svc-b")?.enabled).toBe(true);
-		expect(manager.listStatus().find((s) => s.server === "svc-c")?.enabled).toBe(false);
-		const handlers = manager.hostHandlers();
-		await expect(handlers["mcp.config"]({ server: "svc-b" })).resolves.toEqual({
-			type: "http",
-			url: "https://svc-b.example/mcp",
-			oauth: true,
-		});
-		await expect(handlers["mcp.config"]({ server: "svc-c" })).resolves.toEqual({});
-
-		// Empty access on the oauth type is equally refused.
-		authStorage.set("mcp:svc-c", {
-			type: "oauth",
-			access: "",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://svc-c.example/mcp",
-		});
-		manager.refresh();
-		expect(manager.listStatus().find((s) => s.server === "svc-c")?.enabled).toBe(false);
-	});
+	// The oauth grant-state matrix is pinned ONCE, across the shared predicate, prompt, dispatch, and the picker view,
+	// in mcp-catalog-eligibility.test.ts.
 
 	it("a configured bearer env var is the ONLY credential source: no stale-OAuth fall-through when it is unset", () => {
 		// A stale OAuth grant sits under the id, but the server's configured
 		// credential source is the env var — while unset, nothing is enabled.
-		authStorage.set("mcp:beared", {
-			type: "oauth",
-			access: "stale",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://beared.example/mcp",
-		});
+		authStorage.set("mcp:beared", grant("stale", "https://beared.example/mcp", Date.now()));
 		const manager = new McpManager({
 			authStorage,
 			getServiceCatalog: () => [],
@@ -530,15 +303,33 @@ describe("McpManager", () => {
 		}
 	});
 });
-async function waitForCondition(condition: () => boolean, timeoutMs = 2000): Promise<void> {
-	const startedAt = Date.now();
-	while (!condition()) {
-		if (Date.now() - startedAt > timeoutMs) {
-			throw new Error("Timed out waiting for a background condition");
-		}
-		await new Promise((resolve) => setTimeout(resolve, 10));
-	}
+/**
+ * Deterministic settle for demand-driven background verification: the store's
+ * queueVerifyResult call is the concrete signal that the verification result
+ * was accepted, and the trailing flush chains behind the durable write — no
+ * timer, no polling.
+ */
+function verifyResultSettled(store: McpConnectionStore): { queued: Promise<void>; flush: () => Promise<void> } {
+	let queued!: () => void;
+	const signal = new Promise<void>((resolve) => {
+		queued = resolve;
+	});
+	const real = store.queueVerifyResult.bind(store);
+	vi.spyOn(store, "queueVerifyResult").mockImplementation((...args: Parameters<typeof real>) => {
+		queued();
+		return real(...args);
+	});
+	return { queued: signal, flush: () => store.flush() };
 }
+
+/** A synthetic OAuth grant bound to the given endpoint (no endpoint = unbound). */
+const grant = (access: string, endpoint?: string, at = Date.now()) => ({
+	type: "oauth" as const,
+	access,
+	refresh: "r",
+	expires: at + 3600_000,
+	...(endpoint !== undefined ? { endpoint } : {}),
+});
 
 const CATALOG_SERVICE: McpServiceDescriptor = {
 	serviceId: "acme",
@@ -619,13 +410,7 @@ describe("ENG-6108 reserved ownership and durable repair endpoints (manager)", (
 		);
 		expect(manager.getEnabledPersistentGenericServers()).not.toContain("linear");
 		// A shadow credential can never authorize dispatch either.
-		authStorage.set("mcp:linear", {
-			type: "oauth",
-			access: "shadow",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://shadow.example/mcp",
-		});
+		authStorage.set("mcp:linear", grant("shadow", "https://shadow.example/mcp", Date.now()));
 		manager.refresh();
 		expect(manager.getEnabledPersistentGenericServers()).not.toContain("linear");
 		expect(manager.getDisabledBuiltinSkillOverrides()).toContain("-linear/SKILL.md");
@@ -636,13 +421,7 @@ describe("ENG-6108 reserved ownership and durable repair endpoints (manager)", (
 			noBackgroundVerification: true,
 			getUserServers: () => ({ linear: { type: "http", url: "https://mcp.linear.app/mcp", enabled: false } }),
 		});
-		authStorage.set("mcp:linear", {
-			type: "oauth",
-			access: "tok",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.linear.app/mcp",
-		});
+		authStorage.set("mcp:linear", grant("tok", "https://mcp.linear.app/mcp", Date.now()));
 		manager.refresh();
 		expect(manager.getEnabledPersistentGenericServers()).not.toContain("linear");
 		expect(manager.getDisabledBuiltinSkillOverrides()).toContain("-linear/SKILL.md");
@@ -655,13 +434,7 @@ describe("ENG-6108 reserved ownership and durable repair endpoints (manager)", (
 				linear: { type: "http", url: "https://mcp.linear.app/mcp", oauth: true },
 			}),
 		});
-		authStorage.set("mcp:linear", {
-			type: "oauth",
-			access: "tok",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.linear.app/mcp",
-		});
+		authStorage.set("mcp:linear", grant("tok", "https://mcp.linear.app/mcp", Date.now()));
 		manager.refresh();
 		expect(manager.getEnabledPersistentGenericServers()).toContain("linear");
 		await expect(manager.verifyConnection("linear")).resolves.toMatchObject({ status: "connected" });
@@ -681,13 +454,7 @@ describe("ENG-6108 reserved ownership and durable repair endpoints (manager)", (
 			updatedAt: now,
 		});
 		await store.flush();
-		authStorage.set("mcp:acme", {
-			type: "oauth",
-			access: "tok",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://old.acme.test/mcp",
-		});
+		authStorage.set("mcp:acme", grant("tok", "https://old.acme.test/mcp", Date.now()));
 		const manager = createManager({
 			noBackgroundVerification: true,
 			getServiceCatalog: () => [
@@ -708,27 +475,14 @@ describe("ENG-6108 reserved ownership and durable repair endpoints (manager)", (
 	});
 
 	it("a credential-only account never retargets automatic dispatch to a stored endpoint", async () => {
-		authStorage.set("mcp:acme", {
-			type: "oauth",
-			access: "tok",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://old.acme.test/mcp",
-		});
+		authStorage.set("mcp:acme", grant("tok", "https://old.acme.test/mcp", Date.now()));
 		const manager = createManager({ noBackgroundVerification: true, getServiceCatalog: () => [CATALOG_SERVICE] });
 		const handlers = manager.hostHandlers();
 		// A cross-endpoint credential-only grant authorizes nothing at the
 		// current service URL — dispatch config stays absent.
 		await expect(handlers["mcp.config"]({ server: "acme" })).resolves.toEqual({});
-		// A bound grant authorizes dispatch at the CURRENT service URL only —
-		// never at a stored credential endpoint.
-		authStorage.set("mcp:acme", {
-			type: "oauth",
-			access: "tok",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.acme.test/mcp",
-		});
+		// A bound grant authorizes dispatch at the CURRENT service URL only — never at a stored credential endpoint.
+		authStorage.set("mcp:acme", grant("tok", "https://mcp.acme.test/mcp", Date.now()));
 		manager.refresh();
 		const bound = (await handlers["mcp.config"]({ server: "acme" })) as { url?: string };
 		expect(bound.url).toBe("https://mcp.acme.test/mcp");
@@ -745,17 +499,12 @@ describe("ENG-6108 reserved ownership and durable repair endpoints (manager)", (
 			createdAt: 1,
 			updatedAt: 1,
 		});
-		authStorage.set("mcp:acme", {
-			type: "oauth",
-			access: "tok",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.acme.test/mcp",
-		});
+		authStorage.set("mcp:acme", grant("tok", "https://mcp.acme.test/mcp", Date.now()));
 		const manager = createManager({ getServiceCatalog: () => [CATALOG_SERVICE] });
 		const handlers = manager.hostHandlers();
 		await handlers["mcp.list_plugins"]({});
-		await new Promise((resolve) => setTimeout(resolve, 20));
+		// The claimed-account skip happens in the scan's synchronous prefix (fired before the listing resolves), so the
+		// settled outcome is exact: no probe may ever start.
 		expect(probeCalls).toEqual([]);
 	});
 });
@@ -785,8 +534,7 @@ describe("McpManager service catalog handlers", () => {
 		return new McpManager({
 			authStorage,
 			connectionStore: store,
-			// Exact-list assertions pin the legacy built-in slice; individual
-			// tests override this with their own catalogs.
+			// Exact-list assertions pin the legacy built-in slice; individual tests override this with their own catalogs.
 			getServiceCatalog: () => LEGACY_CATALOG,
 			probeConnection: async (probeOptions) => {
 				probeCalls.push({ url: probeOptions.url, token: await probeOptions.getToken() });
@@ -797,13 +545,7 @@ describe("McpManager service catalog handlers", () => {
 	}
 
 	it("lists plugins with statuses, strict status filtering, and honest pagination", async () => {
-		authStorage.set("mcp:notion", {
-			type: "oauth",
-			access: "tok",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.notion.com/mcp",
-		});
+		authStorage.set("mcp:notion", grant("tok", "https://mcp.notion.com/mcp", Date.now()));
 		const manager = createManager({ noBackgroundVerification: true });
 		const handlers = manager.hostHandlers();
 
@@ -850,13 +592,7 @@ describe("McpManager service catalog handlers", () => {
 	});
 
 	it("lists connections including pending catalog grants, user servers, and ACP servers", async () => {
-		authStorage.set("mcp:linear", {
-			type: "oauth",
-			access: "tok",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.linear.app/mcp",
-		});
+		authStorage.set("mcp:linear", grant("tok", "https://mcp.linear.app/mcp", Date.now()));
 		const manager = createManager({
 			noBackgroundVerification: true,
 			getUserServers: () => ({ custom: { type: "http", url: "https://custom.test/mcp" } }),
@@ -886,27 +622,23 @@ describe("McpManager service catalog handlers", () => {
 		const manager = createManager({ getServiceCatalog: () => [CATALOG_SERVICE] });
 		const handlers = manager.hostHandlers();
 		await handlers["mcp.list_plugins"]({});
-		// The fire-and-forget verification settles quickly; poll for the record.
-		await new Promise((resolve) => setTimeout(resolve, 20));
+		// The unusable-grant record is queued and flushed in the scan's
+		// synchronous prefix; the chained flush confirms the durable write.
+		await store.flush();
 		const record = store.get("acme");
 		expect(record?.status).toBe("error");
 		expect(record?.lastError).toBe("credential-unbound");
 		expect(probeCalls).toEqual([]);
-		// The next listing does not rewrite the record.
+		// The next listing does not rewrite the record: its scan sees the
+		// existing record, so nothing is queued and the timestamp is settled.
 		await handlers["mcp.list_plugins"]({});
-		await new Promise((resolve) => setTimeout(resolve, 20));
+		await store.flush();
 		expect(store.get("acme")?.updatedAt).toBe(record?.updatedAt);
 	});
 
 	it("serves per-account connection ids as their own dispatchable integrations", async () => {
 		// A second account "acme-2" with its own bound credential.
-		authStorage.set("mcp:acme-2", {
-			type: "oauth",
-			access: "acct-2",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.acme.test/mcp",
-		});
+		authStorage.set("mcp:acme-2", grant("acct-2", "https://mcp.acme.test/mcp", Date.now()));
 		store.upsert({
 			connectionId: "acme-2",
 			serviceId: "acme",
@@ -930,20 +662,8 @@ describe("McpManager service catalog handlers", () => {
 	});
 
 	it("full account lifecycle: second account listed and remains manageable after the default disconnects", async () => {
-		authStorage.set("mcp:acme", {
-			type: "oauth",
-			access: "primary",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.acme.test/mcp",
-		});
-		authStorage.set("mcp:acme-2", {
-			type: "oauth",
-			access: "second",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.acme.test/mcp",
-		});
+		authStorage.set("mcp:acme", grant("primary", "https://mcp.acme.test/mcp", Date.now()));
+		authStorage.set("mcp:acme-2", grant("second", "https://mcp.acme.test/mcp", Date.now()));
 		const at = Date.now();
 		store.upsert({
 			connectionId: "acme",
@@ -1053,9 +773,8 @@ describe("McpManager service catalog handlers", () => {
 		}
 		await store.flush();
 		const manager = createManager({ noBackgroundVerification: true, getServiceCatalog: () => descriptors });
-		// Neither parent qualifies for an OAuth provider, so neither alias does:
-		// a requires-setup or otherwise non-OAuth service never offers a browser
-		// login to an extra account.
+		// Neither parent qualifies for an OAuth provider, so neither alias does: a requires-setup or otherwise non-OAuth
+		// service never offers a browser login to an extra account.
 		expect(getOAuthProvider("mcp:public-docs-2")).toBeUndefined();
 		expect(getOAuthProvider("mcp:gated-oauth-2")).toBeUndefined();
 		// A public no-auth service's account is credential-free exactly like its
@@ -1084,13 +803,8 @@ describe("McpManager service catalog handlers", () => {
 	});
 
 	it("verifies pending connections on demand: a listing triggers a real handshake and the next listing reports it", async () => {
-		authStorage.set("mcp:linear", {
-			type: "oauth",
-			access: "tok",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.linear.app/mcp",
-		});
+		authStorage.set("mcp:linear", grant("tok", "https://mcp.linear.app/mcp", Date.now()));
+		const settle = verifyResultSettled(store);
 		const manager = createManager();
 		const handlers = manager.hostHandlers();
 
@@ -1099,8 +813,10 @@ describe("McpManager service catalog handlers", () => {
 		};
 		expect(before.plugins[0]).toMatchObject({ serviceId: "linear", connectionStatus: "pending" });
 
-		// The demand-driven background probe runs against the bound endpoint with the token.
-		await waitForCondition(() => store.get("linear")?.status === "connected");
+		// The demand-driven background probe runs against the bound endpoint
+		// with the token; its result lands durably before the next listing.
+		await settle.queued;
+		await settle.flush();
 		expect(probeCalls).toEqual([{ url: "https://mcp.linear.app/mcp", token: "tok" }]);
 
 		const after = (await handlers["mcp.list_plugins"]({})) as {
@@ -1113,13 +829,7 @@ describe("McpManager service catalog handlers", () => {
 	});
 
 	it("keeps verification failures recoverable: a rejected credential records error without deleting the grant", async () => {
-		authStorage.set("mcp:linear", {
-			type: "oauth",
-			access: "tok",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.linear.app/mcp",
-		});
+		authStorage.set("mcp:linear", grant("tok", "https://mcp.linear.app/mcp", Date.now()));
 		probeResult = { ok: false, error: "http-unauthorized" };
 		const manager = createManager();
 		const record = await manager.verifyConnection("linear");
@@ -1132,13 +842,7 @@ describe("McpManager service catalog handlers", () => {
 	it("reloads connection records written by the interactive client on refresh()", async () => {
 		const manager = createManager({ noBackgroundVerification: true });
 		const clientStore = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
-		authStorage.set("mcp:notion", {
-			type: "oauth",
-			access: "tok",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.notion.com/mcp",
-		});
+		authStorage.set("mcp:notion", grant("tok", "https://mcp.notion.com/mcp", Date.now()));
 		clientStore.upsert({
 			connectionId: "notion",
 			serviceId: "notion",
@@ -1162,53 +866,21 @@ describe("McpManager service catalog handlers", () => {
 		});
 	});
 
-	it("serves custom catalog providers: user-owned non-bundled ids coexist with catalog cards", async () => {
-		const manager = createManager({
-			noBackgroundVerification: true,
-			getServiceCatalog: () => [CATALOG_SERVICE],
-			getUserServers: () => ({
-				acme: { type: "http", url: "https://custom.acme.test/mcp", oauth: true },
-			}),
-		});
-		const handlers = manager.hostHandlers();
-		const plugins = (await handlers["mcp.list_plugins"]({})) as {
-			plugins: Array<{ serviceId: string; source: string }>;
-		};
-		// The user's server owns the id; no duplicate catalog card is listed.
-		expect(plugins.plugins).toEqual([expect.objectContaining({ serviceId: "acme", source: "user" })]);
-		// The user provider is registered against the user's URL, not the catalog endpoint.
-		expect(getOAuthProvider("mcp:acme")).toMatchObject({ name: "acme" });
-	});
+	// User-owned non-bundled ids coexisting with catalog cards is pinned at
+	// the identity/provider sites in mcp-provider-identity.test.ts ("manager
+	// catalog and per-account sites carry catalog advisory data") and by the
+	// registry-reset preservation in mcp-service-safety.test.ts.
 
-	it("registers OAuth providers for connectable non-bundled catalog services, never for setup-required ones", () => {
-		createManager({
-			noBackgroundVerification: true,
-			getServiceCatalog: () => [
-				CATALOG_SERVICE,
-				{
-					...CATALOG_SERVICE,
-					serviceId: "brandapp",
-					label: "BrandApp",
-					setup: { status: "requires-setup", reason: "Requires a developer app." },
-				},
-			],
-		});
-		expect(getOAuthProvider("mcp:acme")).toBeDefined();
-		expect(getOAuthProvider("mcp:brandapp")).toBeUndefined();
-	});
+	// Connectable-vs-setup-required registration is pinned at the same
+	// manager sites in mcp-provider-identity.test.ts and the
+	// requires-setup fail-closed rule in mcp-catalog-eligibility.test.ts.
 
 	it("exposes mcp.connect only with an explicit approver and maps its result", async () => {
 		const bare = createManager({ noBackgroundVerification: true });
 		expect(Object.keys(bare.hostHandlers())).not.toContain("mcp.connect");
 
 		const approvals: string[] = [];
-		authStorage.set("mcp:acme", {
-			type: "oauth",
-			access: "grant",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
-			endpoint: "https://mcp.acme.test/mcp",
-		});
+		authStorage.set("mcp:acme", grant("grant", "https://mcp.acme.test/mcp", Date.now()));
 		const manager = createManager({
 			noBackgroundVerification: true,
 			getServiceCatalog: () => [CATALOG_SERVICE],
@@ -1274,31 +946,6 @@ describe("McpManager token services (paste flow)", () => {
 		rmSync(tempDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
 	});
 
-	it("verifies a token service with the STORED pasted token as the probe bearer", async () => {
-		authStorage.set("mcp:token-service", {
-			type: "mcp_static_token",
-			endpoint: TOKEN_URL,
-			bearer: "ghp_stored-token",
-			bearerFieldId: "TOKEN_SERVICE_TOKEN",
-			createdAt: Date.now(),
-		});
-		const probed: string[] = [];
-		const manager = new McpManager({
-			authStorage,
-			connectionStore: store,
-			noBackgroundVerification: true,
-			getServiceCatalog: () => [tokenServiceFixture()],
-			probeConnection: async (options) => {
-				probed.push(await options.getToken());
-				return { ok: true, toolCount: 3 };
-			},
-		});
-		const record = await manager.verifyConnection("token-service");
-		expect(record.status).toBe("connected");
-		expect(record.toolCount).toBe(3);
-		expect(probed).toEqual(["ghp_stored-token"]);
-	});
-
 	it("demand-driven verification probes a token service only once its token is stored", async () => {
 		authStorage.set("mcp:token-service", {
 			type: "mcp_static_token",
@@ -1308,6 +955,7 @@ describe("McpManager token services (paste flow)", () => {
 			createdAt: Date.now(),
 		});
 		const probes: string[] = [];
+		const settle = verifyResultSettled(store);
 		const manager = new McpManager({
 			authStorage,
 			connectionStore: store,
@@ -1321,7 +969,8 @@ describe("McpManager token services (paste flow)", () => {
 		expect(listPlugins).toBeDefined();
 		await listPlugins({ limit: 10 });
 		// The background handshake runs and lands in the record, not the console.
-		await new Promise((resolve) => setTimeout(resolve, 60));
+		await settle.queued;
+		await settle.flush();
 		expect(probes).toEqual(["ghp_stored-token"]);
 		expect(store.get("token-service")).toMatchObject({ status: "connected", toolCount: 7 });
 	});
@@ -1340,7 +989,8 @@ describe("McpManager token services (paste flow)", () => {
 		const listPlugins = manager.hostHandlers()["mcp.list_plugins"];
 		expect(listPlugins).toBeDefined();
 		await listPlugins({ limit: 10 });
-		await new Promise((resolve) => setTimeout(resolve, 60));
+		// The no-credential skip happens in the scan's synchronous prefix (fired before the listing resolves): no anonymous
+		// handshake may ever start, and nothing is recorded.
 		expect(probes).toEqual([]);
 		expect(store.get("token-service")).toBeUndefined();
 	});
@@ -1368,9 +1018,8 @@ describe("McpManager token services (paste flow)", () => {
 				return { ok: true, toolCount: 4 };
 			},
 		});
-		// The alias mirrors the parent's token classification: NO OAuth provider
-		// is registered for the account id (or the parent), so the extra account
-		// can never be offered a browser login whose grant isAuthed would reject.
+		// The alias mirrors the parent's token classification: NO OAuth provider is registered for the account id (or the
+		// parent), so the extra account can never be offered a browser login whose grant isAuthed would reject.
 		expect(getOAuthProvider("mcp:token-service")).toBeUndefined();
 		expect(getOAuthProvider("mcp:token-service-2")).toBeUndefined();
 		// A pasted static token stored under the ACCOUNT's own id — the same

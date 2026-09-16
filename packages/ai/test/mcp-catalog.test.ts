@@ -50,6 +50,13 @@ function loadInputs(): {
 }
 
 describe("MCP service catalog", () => {
+	// The committed fixtures are deterministic: load them once and share the
+	// rebuild/report surface across the cut-evidence tests.
+	const inputs = loadInputs();
+	const buildReport = () => buildCatalog(inputs.openAi, inputs.claude, inputs.overrides, inputs.audit);
+	const excludedOf = (report: ReturnType<typeof buildCatalog>["report"]) =>
+		new Map(report.excluded.map((entry) => [entry.key, entry.reason]));
+
 	it("loads, validates and orders the merged catalog", () => {
 		expect(SERVICE_CATALOG.length).toBeGreaterThan(50);
 		const ids = SERVICE_CATALOG.map((entry) => entry.server);
@@ -103,9 +110,8 @@ describe("MCP service catalog", () => {
 		for (const server of ["zoom", "zoom-meetings", "zoom-chat", "zoom-whiteboard"]) {
 			expect(zoomServers).toContain(server);
 		}
-		// The distinct ZoomInfo brand was cut by the 2026-09-15 final cut
-		// (user-own-app OAuth is neither one-click DCR nor token/key), so a
-		// zoom search stays zoom-only.
+		// The distinct ZoomInfo brand was cut by the 2026-09-15 final cut (user-own-app OAuth is neither one-click DCR nor
+		// token/key), so a zoom search stays zoom-only.
 		expect(zoomServers).not.toContain("zoominfo");
 		expect(zoomHits.filter((entry) => entry.service === "zoom")).toHaveLength(7);
 		// The monday-crm plugin was cut by the same decision: no entry surfaces.
@@ -126,9 +132,8 @@ describe("MCP service catalog", () => {
 	});
 
 	it("keeps distinct products and reviewed endpoint variants separate", () => {
-		// Distinct Google products (Gmail / Drive / Calendar) were never merged
-		// upstream, so after the zero-app cut they are simply gone — no merged
-		// or recombined ghost of them may remain.
+		// Distinct Google products (Gmail / Drive / Calendar) were never merged upstream, so after the zero-app cut they
+		// are simply gone — no merged or recombined ghost of them may remain.
 		for (const term of ["gmail", "google-drive", "google-calendar"]) {
 			expect(searchServiceCatalog(term)).toEqual([]);
 		}
@@ -172,12 +177,10 @@ describe("MCP service catalog", () => {
 	});
 
 	it("marks known setup blockers honestly and imports no reviewed scope lists", () => {
-		// Provider-client gates (Slack, Figma, Google, MongoDB) and honest
-		// unknowns are no longer in-catalog classifications: the zero-app cut
-		// (2026-09-14) excludes those providers with documented per-entry
-		// reasons (see the cut test below).
-		// Placeholder-only upstream blocks were cleared with evidence where the
-		// provider supports self-serve OAuth: Airtable Connects with OAuth DCR.
+		// Provider-client gates (Slack, Figma, Google, MongoDB) and honest unknowns are no longer in-catalog
+		// classifications: the zero-app cut (2026-09-14) excludes those providers with documented per-entry reasons (see
+		// the cut test below). Placeholder-only upstream blocks were cleared with evidence where the provider supports
+		// self-serve OAuth: Airtable Connects with OAuth DCR.
 		const airtable = getServiceCatalogEntry("airtable");
 		expect(airtable?.setup.status).toBe("ready");
 		expect(airtable?.setup.reason).toBeUndefined();
@@ -195,9 +198,8 @@ describe("MCP service catalog", () => {
 	});
 
 	it("classifies readiness from committed audit evidence without blanket bans", () => {
-		// Ready entries are never downgraded by missing evidence, and a metadata GET
-		// is never proof of live OAuth: oauth-ready requires audience-coherent
-		// DCR evidence; everything else stays honestly unknown.
+		// Ready entries are never downgraded by missing evidence, and a metadata GET is never proof of live OAuth:
+		// oauth-ready requires audience-coherent DCR evidence; everything else stays honestly unknown.
 		const airtable = getServiceCatalogEntry("airtable");
 		expect(airtable?.setup.status).toBe("ready");
 		expect(airtable?.setup.readiness).toBe("oauth-ready");
@@ -215,25 +217,20 @@ describe("MCP service catalog", () => {
 		const notion = getServiceCatalogEntry("notion");
 		expect(notion?.setup.readiness).toBe("oauth-ready");
 		expect(notion?.auth.metadata?.note).toBeUndefined();
-		// The component comparison accepts exact-origin resources (root-slash
-		// normalized): DCR-capable origin-mismatched entries flipped — and stay
-		// one-click only where the advertised token auth methods still serve
-		// the engine's public client (the confidential-only subset — miro,
-		// vercel, windsor-ai, zoominfo, … — demotes to the user-own-app OAuth
-		// path, and the 2026-09-15 final cut excludes those entries with
-		// documented reasons).
+		// The component comparison accepts exact-origin resources (root-slash normalized): DCR-capable origin-mismatched
+		// entries flipped — and stay one-click only where the advertised token auth methods still serve the engine's public
+		// client (the confidential-only subset — miro, vercel, windsor-ai, zoominfo, … — demotes to the user-own-app OAuth
+		// path, and the 2026-09-15 final cut excludes those entries with documented reasons).
 		for (const server of ["amplitude", "appwrite", "lovable", "rootly"]) {
 			expect(getServiceCatalogEntry(server)?.setup.readiness).toBe("oauth-ready");
 		}
-		// The SDK-parity origin-level fallback makes previously unreachable PRM
-		// documents engine-visible: valid documents with DCR flip (Codspeed,
-		// Resend), served-but-invalid ones fail closed (Confidence).
+		// The SDK-parity origin-level fallback makes previously unreachable PRM documents engine-visible: valid documents
+		// with DCR flip (Codspeed, Resend), served-but-invalid ones fail closed (Confidence).
 		expect(getServiceCatalogEntry("codspeed")?.setup.readiness).toBe("oauth-ready");
 		expect(getServiceCatalogEntry("resend")?.setup.readiness).toBe("oauth-ready");
-		// Prime-restricted and unknown classifications no longer ship at all:
-		// the zero-app cut (2026-09-14) excludes those providers (see the cut
-		// test), and the importer now refuses to emit either class.
-		// Documented user-supplied credentials stay primary; OAuth alternatives stay unknown.
+		// Prime-restricted and unknown classifications no longer ship at all: the zero-app cut (2026-09-14) excludes those
+		// providers (see the cut test), and the importer now refuses to emit either class. Documented user-supplied
+		// credentials stay primary; OAuth alternatives stay unknown.
 		const github = getServiceCatalogEntry("github");
 		expect(github?.setup.readiness).toBe("user-setup");
 		expect(github?.setup.requirement).toBe("bearer-token");
@@ -241,14 +238,12 @@ describe("MCP service catalog", () => {
 		for (const field of github?.setup.fields ?? []) {
 			expect(field.kind).toBe("bearer-token");
 		}
-		// The surviving requirement shapes are exactly the two pasteable ones
-		// (2026-09-16 token-only cut): bearer tokens and api keys, each with a
-		// credential field the user can actually fill in. Tenant configs,
-		// legacy-transport entries and field-less api-key promises are gone.
+		// The surviving requirement shapes are exactly the two pasteable ones (2026-09-16 token-only cut): bearer tokens
+		// and api keys, each with a credential field the user can actually fill in. Tenant configs, legacy-transport
+		// entries and field-less api-key promises are gone.
 		expect(getServiceCatalogEntry("zoom")?.setup.requirement).toBe("bearer-token");
-		// Both named-header api-key pairs (Datadog's DD_API_KEY +
-		// DD_APPLICATION_KEY, Cloudinary MediaFlows' cld-api-key + cld-secret)
-		// are cut by the single-credential cut — see the cut test below.
+		// Both named-header api-key pairs (Datadog's DD_API_KEY + DD_APPLICATION_KEY, Cloudinary MediaFlows' cld-api-key +
+		// cld-secret) are cut by the single-credential cut — see the cut test below.
 		for (const server of [
 			"cockroachdb",
 			"dynatrace",
@@ -268,19 +263,17 @@ describe("MCP service catalog", () => {
 				`${entry.server} must collect a credential the user can paste`,
 			).toBe(true);
 		}
-		// Every survivor says what to paste in one honest line — no
-		// "requires provider credentials supplied as headers" restatements
-		// (2026-09-16 wording fix), and no multi-credential reasons (the
-		// single-credential cut removed the named-header pairs).
+		// Every survivor says what to paste in one honest line — no "requires provider credentials supplied as headers"
+		// restatements (2026-09-16 wording fix), and no multi-credential reasons (the single-credential cut removed the
+		// named-header pairs).
 		for (const entry of SERVICE_CATALOG) {
 			expect(entry.setup.reason ?? "").not.toContain("requires provider credentials supplied as headers");
 			if (entry.setup.readiness === "user-setup") {
 				expect(entry.setup.reason ?? "", `${entry.server} reason`).toMatch(/^paste /);
 			}
 		}
-		// GitHub's two setup fields are curated ALTERNATIVE NAMES for one PAT
-		// (a shared credentialSet): the paste flow prompts once and stores the
-		// value under the first alternative's id.
+		// GitHub's two setup fields are curated ALTERNATIVE NAMES for one PAT (a shared credentialSet): the paste flow
+		// prompts once and stores the value under the first alternative's id.
 		const githubAlternatives = getServiceCatalogEntry("github");
 		expect(githubAlternatives?.setup.fields).toEqual([
 			expect.objectContaining({ id: "GITHUB_PAT_TOKEN", credentialSet: "github-pat" }),
@@ -303,15 +296,12 @@ describe("MCP service catalog", () => {
 			"zoom-tasks",
 			"zoom-whiteboard",
 		]);
-		// Readiness is informational-only data; the raw counts are in the file.
-		// Zero-app cut state (2026-09-14) + engine auth-method compatibility
-		// (2026-09-14, live Hugging Face gap) + final catalog cut (2026-09-15,
-		// one-click DCR or user token/key only) + token-only cut (2026-09-16,
-		// paste-an-api-key/token survivors only) + single-credential cut
-		// (2026-09-16, one prompt/one bearer: named-header pairs cut): the
-		// catalog ships exactly the two self-serve classes, with the
-		// user-setup class fully pasteable — the sums must stay exact so any
-		// drift forces a conscious update here.
+		// Readiness is informational-only data; the raw counts are in the file. Zero-app cut state (2026-09-14) + engine
+		// auth-method compatibility (2026-09-14, live Hugging Face gap) + final catalog cut (2026-09-15, one-click DCR or
+		// user token/key only) + token-only cut (2026-09-16, paste-an-api-key/token survivors only) + single-credential cut
+		// (2026-09-16, one prompt/one bearer: named-header pairs cut): the catalog ships exactly the two self-serve
+		// classes, with the user-setup class fully pasteable — the sums must stay exact so any drift forces a conscious
+		// update here.
 		const committed = JSON.parse(rawCatalogJson);
 		expect(committed.counts.total).toBe(68);
 		expect(committed.counts.readinessOauthReady).toBe(57);
@@ -338,10 +328,9 @@ describe("MCP service catalog", () => {
 				expect(entry.auth.metadata).toBeUndefined();
 			}
 		}
-		// The engine-undefined fallback is exact: an all-4xx well-known state is
-		// NOT a failure — the engine falls back to origin-level AS discovery, so
-		// no fail-closed note is recorded, and readiness follows the AS evidence
-		// (Intercom flips via DCR; Adobe stays unknown with unavailable AS).
+		// The engine-undefined fallback is exact: an all-4xx well-known state is NOT a failure — the engine falls back to
+		// origin-level AS discovery, so no fail-closed note is recorded, and readiness follows the AS evidence (Intercom
+		// flips via DCR; Adobe stays unknown with unavailable AS).
 		const intercom = getServiceCatalogEntry("intercom");
 		expect(intercom?.auth.metadata?.note).toBeUndefined();
 		expect(intercom?.auth.metadata?.dynamicClientRegistration).toBe(true);
@@ -354,10 +343,9 @@ describe("MCP service catalog", () => {
 	});
 
 	it("ships only streamable-http endpoints: no stdio, no tenant template, no legacy SSE", () => {
-		// 2026-09-15 final cut: local stdio adapters and url-only tenant
-		// templates were excluded. 2026-09-16 token-only cut: the remaining
-		// non-http shapes go too — every shipped entry is a plain http endpoint
-		// the runtime can actually connect to.
+		// 2026-09-15 final cut: local stdio adapters and url-only tenant templates were excluded. 2026-09-16 token-only
+		// cut: the remaining non-http shapes go too — every shipped entry is a plain http endpoint the runtime can actually
+		// connect to.
 		expect(SERVICE_CATALOG.filter((entry) => entry.transport.type !== "http")).toEqual([]);
 		for (const entry of SERVICE_CATALOG) {
 			expect(entry.url, `${entry.server} must ship a concrete endpoint`).not.toBe("");
@@ -368,12 +356,10 @@ describe("MCP service catalog", () => {
 	});
 
 	it("says what to paste: every requires-setup reason is plain single-line picker copy", () => {
-		// The shipped reason is the line a human reads in the /mcp picker, so it
-		// must be an instruction, not an importer diagnostic (2026-09-16). The
-		// old copy leaked machine vocabulary ("requires an auth token supplied
-		// via environment variable"), stuttered the same clause twice (github)
-		// and appended upstream-config notes that changed nothing for the user
-		// (zoom-meetings).
+		// The shipped reason is the line a human reads in the /mcp picker, so it must be an instruction, not an importer
+		// diagnostic (2026-09-16). The old copy leaked machine vocabulary ("requires an auth token supplied via environment
+		// variable"), stuttered the same clause twice (github) and appended upstream-config notes that changed nothing for
+		// the user (zoom-meetings).
 		const setupEntries = SERVICE_CATALOG.filter((entry) => entry.setup.status === "requires-setup");
 		expect(setupEntries).toHaveLength(11);
 		for (const entry of setupEntries) {
@@ -400,10 +386,8 @@ describe("MCP service catalog", () => {
 		expect(getServiceCatalogEntry("zoom-meetings")?.setup.reason).toBe(
 			"paste your Zoom Meetings access token (ZOOM_MEETINGS_MCP_ACCESS_TOKEN)",
 		);
-		// Dropping the placeholder note from the shipped copy deletes no
-		// evidence: the pinned fixture still carries the upstream placeholder
-		// client id, and Prime never uses it either way.
-		const inputs = loadInputs();
+		// Dropping the placeholder note from the shipped copy deletes no evidence: the pinned fixture still carries the
+		// upstream placeholder client id, and Prime never uses it either way.
 		const zoomPlugin = inputs.openAi.plugins.find((plugin) => plugin.name === "zoom");
 		expect(zoomPlugin?.oauthPlaceholders).toBe(true);
 		expect(zoomPlugin?.mcpServers.zoom?.oauth?.client_id).toBe("<ZOOM_PUBLIC_CLIENT_ID>");
@@ -476,8 +460,7 @@ describe("MCP service catalog", () => {
 	});
 
 	it("rebuilds the committed catalog byte-for-byte from the pinned fixtures", async () => {
-		const inputs = loadInputs();
-		const { catalog } = buildCatalog(inputs.openAi, inputs.claude, inputs.overrides, inputs.audit);
+		const { catalog } = buildReport();
 		const rebuilt = JSON.parse(JSON.stringify(catalog));
 		const committed = JSON.parse(rawCatalogJson);
 		expect(rebuilt).toEqual(committed);
@@ -490,13 +473,10 @@ describe("MCP service catalog", () => {
 	});
 
 	it("cuts the catalog to zero-app self-serve only, with documented exclusions and kept evidence", () => {
-		// 2026-09-14 product decision: Prime maintains ZERO provider OAuth apps.
-		// The shipped catalog advertises only self-serve connectors — dynamic
-		// client registration (readiness "oauth-ready") or user-supplied
-		// tokens/keys ("user-setup"). Providers that require a
-		// provider-registered client and providers whose self-serve path stayed
-		// honestly unknown are EXCLUDED with a documented per-entry reason, not
-		// shipped mislabeled.
+		// 2026-09-14 product decision: Prime maintains ZERO provider OAuth apps. The shipped catalog advertises only
+		// self-serve connectors — dynamic client registration (readiness "oauth-ready") or user-supplied tokens/keys
+		// ("user-setup"). Providers that require a provider-registered client and providers whose self-serve path stayed
+		// honestly unknown are EXCLUDED with a documented per-entry reason, not shipped mislabeled.
 		const providerClient = ["figma", "gmail", "google-calendar", "google-drive", "mongodb-atlas", "slack"];
 		const unverified = [
 			"adobe-for-creativity",
@@ -513,15 +493,13 @@ describe("MCP service catalog", () => {
 		for (const server of [...providerClient, ...unverified]) {
 			expect(getServiceCatalogEntry(server), `${server} must be cut from the catalog`).toBeUndefined();
 		}
-		// Providers merged from both upstreams were cut on BOTH sides, so no
-		// ghost entry can re-enter from the other source — and neither can any
-		// alias or label fragment of the cut brands.
+		// Providers merged from both upstreams were cut on BOTH sides, so no ghost entry can re-enter from the other source
+		// — and neither can any alias or label fragment of the cut brands.
 		for (const term of ["figma", "slack", "shopify", "gmail", "mongodb", "synthflow", "hubspot"]) {
 			expect(searchServiceCatalog(term)).toEqual([]);
 		}
-		const inputs = loadInputs();
-		const { report } = buildCatalog(inputs.openAi, inputs.claude, inputs.overrides, inputs.audit);
-		const excluded = new Map(report.excluded.map((entry) => [entry.key, entry.reason]));
+		const { report } = buildReport();
+		const excluded = excludedOf(report);
 		for (const key of [
 			"openai-plugins/figma/figma",
 			"claude-plugins-official/figma/figma",
@@ -545,10 +523,9 @@ describe("MCP service catalog", () => {
 			expect(excluded.has(key), `${key} must be a documented exclusion`).toBe(true);
 			expect(excluded.get(key), `${key} must cite the zero-app decision`).toMatch(/zero-app/);
 		}
-		// The cut is a shipping decision, not an evidence deletion: the pinned
-		// source snapshots still carry the excluded upstream configs and the
-		// committed audit store still holds every excluded endpoint's metadata —
-		// including Figma's live gated-DCR evidence.
+		// The cut is a shipping decision, not an evidence deletion: the pinned source snapshots still carry the excluded
+		// upstream configs and the committed audit store still holds every excluded endpoint's metadata — including Figma's
+		// live gated-DCR evidence.
 		expect(inputs.openAi.plugins.some((plugin) => plugin.name === "figma")).toBe(true);
 		expect(inputs.openAi.plugins.some((plugin) => plugin.name === "slack")).toBe(true);
 		expect(inputs.claude.plugins.some((plugin) => plugin.name === "mongodb-atlas")).toBe(true);
@@ -561,14 +538,11 @@ describe("MCP service catalog", () => {
 	});
 
 	it("cuts the catalog to one-click DCR or user token/key only, with documented exclusions and kept evidence", () => {
-		// 2026-09-15 product decision ("remove everything that's not
-		// one-click auth or api key"): the shipped catalog advertises ONLY
-		// one-click dynamic client registration (readiness "oauth-ready") and
-		// user token/key entries. The 49 entries that are neither — the 14
-		// registered-client entries (the user's own confidential OAuth app is
-		// not a token/key), the 32 local-runtime stdio adapters and the 3
-		// url-only tenant templates — are EXCLUDED with a documented
-		// per-entry reason, not shipped mislabeled.
+		// 2026-09-15 product decision ("remove everything that's not one-click auth or api key"): the shipped catalog
+		// advertises ONLY one-click dynamic client registration (readiness "oauth-ready") and user token/key entries. The
+		// 49 entries that are neither — the 14 registered-client entries (the user's own confidential OAuth app is not a
+		// token/key), the 32 local-runtime stdio adapters and the 3 url-only tenant templates — are EXCLUDED with a
+		// documented per-entry reason, not shipped mislabeled.
 		const registeredClient = [
 			"airwallex",
 			"airwallex-sandbox",
@@ -623,10 +597,9 @@ describe("MCP service catalog", () => {
 		for (const server of [...registeredClient, ...localRuntime, ...urlOnlyTenant]) {
 			expect(getServiceCatalogEntry(server), `${server} must be cut from the catalog`).toBeUndefined();
 		}
-		// No ghost re-entry from the other upstream side of merged providers
-		// (gitlab stays single-source; monday-com, supabase and vercel were
-		// merged from both upstreams, so both sides are cut), and neither can
-		// any alias or label fragment of the cut brands resurface.
+		// No ghost re-entry from the other upstream side of merged providers (gitlab stays single-source; monday-com,
+		// supabase and vercel were merged from both upstreams, so both sides are cut), and neither can any alias or label
+		// fragment of the cut brands resurface.
 		for (const term of [
 			"gitlab",
 			"supabase",
@@ -653,12 +626,10 @@ describe("MCP service catalog", () => {
 		]) {
 			expect(searchServiceCatalog(term), `${term} must not surface a cut entry`).toEqual([]);
 		}
-		const inputs = loadInputs();
-		const { report } = buildCatalog(inputs.openAi, inputs.claude, inputs.overrides, inputs.audit);
-		const excluded = new Map(report.excluded.map((entry) => [entry.key, entry.reason]));
-		// One exclusion per upstream record: 64 keys cover the 49 entries,
-		// including both upstream sides of the merged providers and every
-		// stdio server of the multi-server adapter plugins.
+		const { report } = buildReport();
+		const excluded = excludedOf(report);
+		// One exclusion per upstream record: 64 keys cover the 49 entries, including both upstream sides of the merged
+		// providers and every stdio server of the multi-server adapter plugins.
 		for (const key of [
 			"claude-plugins-official/airwallex-agentos/airwallex-agentos",
 			"claude-plugins-official/airwallex-agentos/airwallex-dev",
@@ -730,10 +701,9 @@ describe("MCP service catalog", () => {
 				/2026-09-15 product decision: the catalog ships one-click DCR or user token\/key only/,
 			);
 		}
-		// The cut is a shipping decision, not an evidence deletion: the
-		// pinned source snapshots still carry the excluded upstream configs
-		// (remote, templated and stdio) and the committed audit store still
-		// holds every excluded remote endpoint's metadata.
+		// The cut is a shipping decision, not an evidence deletion: the pinned source snapshots still carry the excluded
+		// upstream configs (remote, templated and stdio) and the committed audit store still holds every excluded remote
+		// endpoint's metadata.
 		expect(inputs.claude.plugins.some((plugin) => plugin.name === "gitlab")).toBe(true);
 		expect(inputs.claude.plugins.some((plugin) => plugin.name === "miro")).toBe(true);
 		expect(inputs.claude.plugins.filter((plugin) => plugin.category === "stdio_service_adapter")).toHaveLength(32);
@@ -746,25 +716,20 @@ describe("MCP service catalog", () => {
 	});
 
 	it("cuts the catalog to one-click DCR or a paste-an-api-key/token service, structurally", () => {
-		// 2026-09-16 product decision (Kevin, live testing: "things like
-		// cockroachdb cloud still need mcp/ 'requires provider credentials
-		// supplied as headers'? i told you to remove all that stuff?"): the
-		// user-setup class is narrowed to services a user can connect by
-		// pasting a key or token. The 5 remaining survivors that were not —
-		// 3 tenant configs (CockroachDB Cloud's per-cluster header, Dynatrace
-		// and Sourcegraph's instance URLs), 1 legacy-SSE endpoint the runtime
-		// cannot connect to at all (PayPal Sandbox) and 1 api-key promise with
-		// zero setup fields (Render) — are EXCLUDED with a documented
-		// per-entry reason, not shipped mislabeled.
+		// 2026-09-16 product decision (Kevin, live testing: "things like cockroachdb cloud still need mcp/ 'requires
+		// provider credentials supplied as headers'? i told you to remove all that stuff?"): the user-setup class is
+		// narrowed to services a user can connect by pasting a key or token. The 5 remaining survivors that were not — 3
+		// tenant configs (CockroachDB Cloud's per-cluster header, Dynatrace and Sourcegraph's instance URLs), 1 legacy-SSE
+		// endpoint the runtime cannot connect to at all (PayPal Sandbox) and 1 api-key promise with zero setup fields
+		// (Render) — are EXCLUDED with a documented per-entry reason, not shipped mislabeled.
 		for (const server of ["cockroachdb", "dynatrace", "sourcegraph", "paypal-sandbox", "render"]) {
 			expect(getServiceCatalogEntry(server), `${server} must be cut from the catalog`).toBeUndefined();
 		}
 		for (const term of ["cockroach", "dynatrace", "sourcegraph", "paypal", "render"]) {
 			expect(searchServiceCatalog(term), `${term} must not surface a cut entry`).toEqual([]);
 		}
-		const inputs = loadInputs();
-		const { report } = buildCatalog(inputs.openAi, inputs.claude, inputs.overrides, inputs.audit);
-		const excluded = new Map(report.excluded.map((entry) => [entry.key, entry.reason]));
+		const { report } = buildReport();
+		const excluded = excludedOf(report);
 		for (const key of [
 			"claude-plugins-official/paypal/paypal-sandbox",
 			"claude-plugins-official/cockroachdb/cockroachdb-cloud",
@@ -777,9 +742,8 @@ describe("MCP service catalog", () => {
 				/token-only catalog cut \(2026-09-16 product decision/,
 			);
 		}
-		// The importer enforces the cut structurally: lift any one exclusion and
-		// the import fails with a curation prompt instead of shipping, so none
-		// of these shapes can silently re-derive.
+		// The importer enforces the cut structurally: lift any one exclusion and the import fails with a curation prompt
+		// instead of shipping, so none of these shapes can silently re-derive.
 		const withoutExclusion = (key: string, servers?: Overrides["servers"]): Overrides => ({
 			...inputs.overrides,
 			servers: { ...inputs.overrides.servers, ...servers },
@@ -807,9 +771,8 @@ describe("MCP service catalog", () => {
 		expect(() => build(withoutExclusion("claude-plugins-official/paypal/paypal-sandbox"))).toThrow(
 			/entry paypal-sandbox has requirement "unsupported-transport"/,
 		);
-		// Render has nothing to paste: without curation its requirement cannot
-		// even be derived, and curating the api-key requirement back (its old
-		// shipped shape) hits the "collects no credential field" guard.
+		// Render has nothing to paste: without curation its requirement cannot even be derived, and curating the api-key
+		// requirement back (its old shipped shape) hits the "collects no credential field" guard.
 		expect(() => build(withoutExclusion("claude-plugins-official/render/render"))).toThrow(
 			/requires-setup entry render has no genuine requirement signal/,
 		);
@@ -825,9 +788,8 @@ describe("MCP service catalog", () => {
 		expect(() => build(withoutExclusion("claude-plugins-official/cockroachdb/cockroachdb-cloud"))).toThrow(
 			/entry cockroachdb-cloud carries no readiness classification/,
 		);
-		// The cut is a shipping decision, not an evidence deletion: the pinned
-		// source snapshots still carry every cut upstream config, including
-		// PayPal's SSE transport and Render's Claude-branded OAuth client id.
+		// The cut is a shipping decision, not an evidence deletion: the pinned source snapshots still carry every cut
+		// upstream config, including PayPal's SSE transport and Render's Claude-branded OAuth client id.
 		const paypalPlugin = inputs.claude.plugins.find((plugin) => plugin.name === "paypal");
 		expect(paypalPlugin?.mcpServers["paypal-sandbox"]?.type).toBe("sse");
 		const renderPlugin = inputs.claude.plugins.find((plugin) => plugin.name === "render");
@@ -843,26 +805,21 @@ describe("MCP service catalog", () => {
 	});
 
 	it("cuts genuinely distinct credential pairs, structurally: the shipped paste class collects exactly ONE credential", () => {
-		// 2026-09-16 single-credential cut (Bugbot findings "extra pasted
-		// credentials never sent" / "GitHub alternative tokens both
-		// required"): the generic runtime sends exactly ONE
-		// Authorization: Bearer per connection, so the shipped user-setup
-		// class collects exactly one credential. Named-header pairs —
-		// Datadog's DD_API_KEY + DD_APPLICATION_KEY, Cloudinary MediaFlows'
-		// cld-api-key + cld-secret — cannot authenticate through a single
-		// bearer even with a complete paste, so both entries are EXCLUDED with
-		// documented reasons instead of shipping mislabeled as pasteable.
+		// 2026-09-16 single-credential cut (Bugbot findings "extra pasted credentials never sent" / "GitHub alternative
+		// tokens both required"): the generic runtime sends exactly ONE Authorization: Bearer per connection, so the
+		// shipped user-setup class collects exactly one credential. Named-header pairs — Datadog's DD_API_KEY +
+		// DD_APPLICATION_KEY, Cloudinary MediaFlows' cld-api-key + cld-secret — cannot authenticate through a single bearer
+		// even with a complete paste, so both entries are EXCLUDED with documented reasons instead of shipping mislabeled
+		// as pasteable.
 		for (const server of ["datadog", "cloudinary-mediaflows"]) {
 			expect(getServiceCatalogEntry(server), `${server} must be cut from the catalog`).toBeUndefined();
 		}
-		// (The other Cloudinary endpoints legitimately ship; only the
-		// named-header mediaflows entry is cut.)
+		// (The other Cloudinary endpoints legitimately ship; only the named-header mediaflows entry is cut.)
 		for (const term of ["datadog", "cloudinary-mediaflows"]) {
 			expect(searchServiceCatalog(term), `${term} must not surface a cut entry`).toEqual([]);
 		}
-		const inputs = loadInputs();
-		const { report } = buildCatalog(inputs.openAi, inputs.claude, inputs.overrides, inputs.audit);
-		const excluded = new Map(report.excluded.map((entry) => [entry.key, entry.reason]));
+		const { report } = buildReport();
+		const excluded = excludedOf(report);
 		for (const key of [
 			"openai-plugins/datadog/datadog",
 			"claude-plugins-official/datadog/mcp",
@@ -873,9 +830,8 @@ describe("MCP service catalog", () => {
 				/single-credential catalog cut \(2026-09-16 product decision/,
 			);
 		}
-		// The importer enforces the cut structurally: lift any exclusion and
-		// the import fails with a curation prompt instead of shipping, so no
-		// unmarked multi-credential entry can ever silently re-derive.
+		// The importer enforces the cut structurally: lift any exclusion and the import fails with a curation prompt
+		// instead of shipping, so no unmarked multi-credential entry can ever silently re-derive.
 		const withoutExclusions = (keys: string[]): Overrides => ({
 			...inputs.overrides,
 			excludedServers: inputs.overrides.excludedServers.filter((entry) => !keys.includes(entry.key)),
@@ -883,10 +839,9 @@ describe("MCP service catalog", () => {
 		const build = (overrides: Overrides): void => {
 			buildCatalog(inputs.openAi, inputs.claude, overrides, inputs.audit);
 		};
-		// Datadog's user-setup shape exists only when BOTH upstream sides ship
-		// (the openai side supplies the endpoint, the claude side the named
-		// header evidence): lifting both exclusions re-derives the two-key
-		// entry and the import fails instead of shipping it.
+		// Datadog's user-setup shape exists only when BOTH upstream sides ship (the openai side supplies the endpoint, the
+		// claude side the named header evidence): lifting both exclusions re-derives the two-key entry and the import fails
+		// instead of shipping it.
 		expect(() =>
 			build(withoutExclusions(["openai-plugins/datadog/datadog", "claude-plugins-official/datadog/mcp"])),
 		).toThrow(
@@ -895,9 +850,8 @@ describe("MCP service catalog", () => {
 		expect(() => build(withoutExclusions(["claude-plugins-official/cloudinary/cloudinary-mediaflows"]))).toThrow(
 			/entry cloudinary-mediaflows collects 2 distinct required credentials \(cld-api-key, cld-secret\); the generic runtime sends a single bearer per connection/,
 		);
-		// Marked alternatives are the ONE multi-field shape that ships: GitHub
-		// fields share the curated credentialSet "github-pat", and the shipped
-		// entries resolve to at most one distinct credential each.
+		// Marked alternatives are the ONE multi-field shape that ships: GitHub fields share the curated credentialSet
+		// "github-pat", and the shipped entries resolve to at most one distinct credential each.
 		for (const entry of SERVICE_CATALOG) {
 			if (entry.setup.readiness !== "user-setup") continue;
 			const credentials = new Set(
@@ -910,11 +864,9 @@ describe("MCP service catalog", () => {
 	});
 
 	it("keeps the gated-DCR machinery: live-rejected advertised registration is explicit-false and never oauth-ready", () => {
-		// The figma entry that exercised this predicate live is now excluded by
-		// the zero-app cut (its evidence stays in the audit store), so the
-		// machinery is pinned directly with synthetic evidence mirroring the
-		// preserved figma attempt: an advertisement alone is NOT usable-DCR
-		// evidence once the real no-credentials flow is known to be rejected.
+		// The figma entry that exercised this predicate live is now excluded by the zero-app cut (its evidence stays in the
+		// audit store), so the machinery is pinned directly with synthetic evidence mirroring the preserved figma attempt:
+		// an advertisement alone is NOT usable-DCR evidence once the real no-credentials flow is known to be rejected.
 		const registrationEndpoint = "https://as.example.test/register";
 		const gatedAttempt = {
 			provenance: "live dogfooding login",
@@ -983,8 +935,7 @@ describe("MCP service catalog", () => {
 				registrationAttempt: { ...gatedAttempt, method: "GET" },
 			}),
 		).toBe(false);
-		// Without a live attempt the advertisement is evidence: not gated, and
-		// the same coherent metadata is oauth-ready.
+		// Without a live attempt the advertisement is evidence: not gated, and the same coherent metadata is oauth-ready.
 		const ungated = { ...gatedResult, authorizationServer: { ...gatedResult.authorizationServer } };
 		delete ungated.authorizationServer.registrationAttempt;
 		expect(advertisedRegistrationGated(ungated.authorizationServer)).toBe(false);
@@ -992,20 +943,15 @@ describe("MCP service catalog", () => {
 	});
 
 	it("keeps the confidential-only demotion machinery and cuts its output from the shipped catalog (engine auth-method parity)", () => {
-		// Live-verified gap (2026-09-14 dogfooding): Hugging Face /mcp login
-		// failed at connect with "no compatible client authentication method
-		// (advertised: client_secret_basic, client_secret_post)" — the engine's
-		// standard no-credentials flow is a PUBLIC client, and the catalog had
-		// classified the entry one-click without ever checking the advertised
-		// token auth methods. Readiness runs the SAME engine decision
-		// (decideClientAuthMethod, shared from oauth.ts), so such entries
-		// demote honestly to the user-setup OAuth path: the user registers
-		// their OWN app (client-id/client-secret setup fields, requirement
-		// "registered-client") — zero-app compliant self-serve, never
-		// prime-restricted. Since the 2026-09-15 final cut ("one-click DCR or
-		// user token/key only") none of those demoted entries ships: the 14
-		// are excluded per upstream record with documented reasons (see the
-		// final-cut test), and no registered-client requirement survives.
+		// Live-verified gap (2026-09-14 dogfooding): Hugging Face /mcp login failed at connect with "no compatible client
+		// authentication method (advertised: client_secret_basic, client_secret_post)" — the engine's standard
+		// no-credentials flow is a PUBLIC client, and the catalog had classified the entry one-click without ever checking
+		// the advertised token auth methods. Readiness runs the SAME engine decision (decideClientAuthMethod, shared from
+		// oauth.ts), so such entries demote honestly to the user-setup OAuth path: the user registers their OWN app
+		// (client-id/client-secret setup fields, requirement "registered-client") — zero-app compliant self-serve, never
+		// prime-restricted. Since the 2026-09-15 final cut ("one-click DCR or user token/key only") none of those demoted
+		// entries ships: the 14 are excluded per upstream record with documented reasons (see the final-cut test), and no
+		// registered-client requirement survives.
 		const confidentialOnly = [
 			"airwallex",
 			"airwallex-sandbox",
@@ -1026,10 +972,9 @@ describe("MCP service catalog", () => {
 			expect(getServiceCatalogEntry(server), `${server} must be cut from the catalog`).toBeUndefined();
 		}
 		expect(SERVICE_CATALOG.filter((entry) => entry.setup.requirement === "registered-client")).toEqual([]);
-		// The demotion itself still derives from the committed evidence: the
-		// huggingface-skills audit result still fails the engine's public-
-		// client gate and still supports the user-own-app path — the cut is a
-		// shipping decision, not an evidence change.
+		// The demotion itself still derives from the committed evidence: the huggingface-skills audit result still fails
+		// the engine's public- client gate and still supports the user-own-app path — the cut is a shipping decision, not
+		// an evidence change.
 		const huggingfaceAudit = loadInputs().audit.results.find((result) => result.server === "huggingface-skills");
 		if (!huggingfaceAudit) throw new Error("huggingface-skills audit evidence must stay committed");
 		expect(huggingfaceAudit.authorizationServer.evidence?.tokenAuthMethods).toEqual([
@@ -1038,9 +983,8 @@ describe("MCP service catalog", () => {
 		]);
 		expect(evidenceSupportsStandardOauth(huggingfaceAudit)).toBe(false);
 		expect(evidenceSupportsUserRegisteredOauth(huggingfaceAudit)).toBe(true);
-		// The importer enforces the cut structurally: lift one exclusion and
-		// the demoted entry fails the import with a curation prompt instead of
-		// shipping — a registered-client shape can never silently re-derive.
+		// The importer enforces the cut structurally: lift one exclusion and the demoted entry fails the import with a
+		// curation prompt instead of shipping — a registered-client shape can never silently re-derive.
 		const inputs = loadInputs();
 		const withoutGitlab: Overrides = {
 			...inputs.overrides,
@@ -1051,12 +995,10 @@ describe("MCP service catalog", () => {
 		expect(() => buildCatalog(inputs.openAi, inputs.claude, withoutGitlab, inputs.audit)).toThrow(
 			/entry gitlab has requirement "registered-client"; the catalog ships one-click DCR or a paste-an-api-key\/token service only/,
 		);
-		// The shared engine decision drives the synthetic classification matrix:
-		// coherent DCR evidence with confidential-only methods demotes (never
-		// one-click); adding "none" restores one-click; omitted methods stay
-		// one-click (the engine applies the public-client spec default); a list
-		// that serves not even a configured secret-bearing client (mTLS-only)
-		// stays honestly unknown — fail closed as before.
+		// The shared engine decision drives the synthetic classification matrix: coherent DCR evidence with
+		// confidential-only methods demotes (never one-click); adding "none" restores one-click; omitted methods stay
+		// one-click (the engine applies the public-client spec default); a list that serves not even a configured
+		// secret-bearing client (mTLS-only) stays honestly unknown — fail closed as before.
 		const coherentEvidence = (tokenAuthMethods?: string[]): AuditResult => ({
 			server: "synthetic",
 			endpoint: "https://mcp.example.test/mcp",
@@ -1105,8 +1047,8 @@ describe("MCP service catalog", () => {
 	});
 
 	it("counts the sources before dedupe and records every exclusion", () => {
-		const inputs = loadInputs();
-		const { report } = buildCatalog(inputs.openAi, inputs.claude, inputs.overrides, inputs.audit);
+		const { report } = buildReport();
+		const _excluded = excludedOf(report);
 		expect(inputs.openAi.plugins).toHaveLength(25);
 		expect(inputs.claude.plugins).toHaveLength(118);
 		// The single-credential cut excluded datadog from the openai side.
@@ -1276,9 +1218,8 @@ describe("Local MCP service sources", () => {
 			entries: [validLocalEntry({ verification: { status: "metadata-reviewed" } })],
 		});
 		expect(() => loadLocalServiceCatalog(reviewed)).toThrow(/local sources are always unverified/);
-		// Audit-derived readiness and evidence are Prime assessments; a local file
-		// cannot self-assert them. setup.requirement stays allowed as honest
-		// self-description of the user's own service.
+		// Audit-derived readiness and evidence are Prime assessments; a local file cannot self-assert them.
+		// setup.requirement stays allowed as honest self-description of the user's own service.
 		const readiness = writeLocal(dir, "readiness.json", {
 			version: 1,
 			entries: [validLocalEntry({ setup: { status: "ready", readiness: "oauth-ready" } })],
