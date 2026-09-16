@@ -41,6 +41,18 @@ Prime Agent is an open-source coding and research agent for general and long-run
 - The **[Recursive Language Model (RLM)](https://www.primeintellect.ai/blog/rlm)** treats context as variables (*prompt-as-a-variable*) and tools like recursive subagents as function calls (*programmatic tool /sub-agent calling*) inside a persistent REPL.
 - The **[Continual Harness](https://arxiv.org/abs/2605.09998)** stores supplemental prompts, memories, skill descriptions, and reusable subagent specifications as durable state that Prime Agent can refine through small, evidence-backed updates, local to the session by default.
 
+## Install
+
+Install the latest stable release on macOS or Linux:
+
+```bash
+curl --proto '=https' --proto-redir '=https' -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
+```
+
+The installer requires HTTPS for release downloads, checks the selected archive against the release origin's SHA-256 inventory, installs the `prime-agent` command, and can prepare the Python runtime used by the agent. The checksum detects corruption or an inconsistent transfer; because the inventory and archive come from the same origin, HTTPS is the authenticity boundary.
+
+## Why Prime Agent
+
 Prime Agent combines a persistent Python control environment with durable harness state, so useful working context and reusable operating patterns can outlive a single chat window.
 
 - **Everything is programmatic:** a persistent Python REPL is the built-in model tool; file operations, shell commands, tool use, subagents, and context management happen through code.
@@ -52,14 +64,6 @@ Prime Agent combines a persistent Python control environment with durable harnes
 - **Long tasks keep moving:** automatic compaction, persistent goals, heartbeats, schedules, autonomous mode, and retained subagents preserve progress across turns and terminal sessions.
 
 ## Getting Started
-
-Install the latest stable release on macOS or Linux:
-
-```bash
-curl --proto '=https' --proto-redir '=https' -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
-```
-
-The installer requires HTTPS for release downloads, checks the selected archive against the release origin's SHA-256 inventory, installs the `prime-agent` command, and can prepare the Python runtime used by the agent. The checksum detects corruption or an inconsistent transfer; because the inventory and archive come from the same origin, HTTPS is the authenticity boundary.
 
 Start Prime Agent from the repository or directory you want it to work in:
 
