@@ -29,6 +29,15 @@ import { theme } from "../interactive/theme/theme.js";
 export const INCIDENT_NOTICE_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** Initial tail bound: incidents older than the tail bytes are simply not seen. */
 export const INCIDENT_NOTICE_TAIL_BYTES = 512 * 1024;
+/**
+ * Retention cap for windowed entries: every entry keeps the full parsed log
+ * record (fields), and agent.jsonl is the sink for ALL structured logging with
+ * 20MB rotating generations, so a busy day would otherwise retain unbounded
+ * memory and make every poll re-sort and re-classify it all synchronously.
+ * Newest entries win; incidents older than the cap are simply not seen — the
+ * same best-effort spirit as INCIDENT_NOTICE_TAIL_BYTES.
+ */
+export const INCIDENT_NOTICE_MAX_WINDOW_ENTRIES = 20_000;
 /** How often the agents view re-reads appended agent.jsonl bytes. */
 export const INCIDENT_NOTICE_POLL_INTERVAL_MS = 30_000;
 
@@ -325,9 +334,11 @@ function readIncidentLogLines(
 
 /**
  * Keep windowed entries in stable time order across polls: new entries append,
- * everything older than the window drops. Lines re-read after a rotation or a
- * re-tail collapse harmlessly — identical lifecycle events dedupe in the
- * classifier, and the collapsed line never stacks copies.
+ * everything older than the window drops, and only the newest
+ * INCIDENT_NOTICE_MAX_WINDOW_ENTRIES survive, so memory and per-poll work stay
+ * bounded. Lines re-read after a rotation or a re-tail collapse harmlessly —
+ * identical lifecycle events dedupe in the classifier, and the collapsed line
+ * never stacks copies.
  */
 function mergeIncidentWindowedEntries(
 	entries: readonly IncidentLogEntry[],
@@ -339,7 +350,12 @@ function mergeIncidentWindowedEntries(
 	}
 	const merged = [...entries, ...parsed];
 	merged.sort((a, b) => a.timeMs - b.timeMs);
-	return merged.filter((entry) => entry.timeMs >= sinceMs);
+	const windowed = merged.filter((entry) => entry.timeMs >= sinceMs);
+	// Newest entries win: slice the tail of the time-sorted array (entries stay
+	// oldest-first) so retention cannot grow without bound on a busy log day.
+	return windowed.length > INCIDENT_NOTICE_MAX_WINDOW_ENTRIES
+		? windowed.slice(windowed.length - INCIDENT_NOTICE_MAX_WINDOW_ENTRIES)
+		: windowed;
 }
 
 /**

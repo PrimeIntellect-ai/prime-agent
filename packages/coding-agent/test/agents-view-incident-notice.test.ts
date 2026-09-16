@@ -15,6 +15,7 @@ import {
 	deriveIncidentNotices,
 	dismissIncidentNoticeState,
 	formatIncidentNoticeTime,
+	INCIDENT_NOTICE_MAX_WINDOW_ENTRIES,
 	INCIDENT_NOTICE_TAIL_BYTES,
 	INCIDENT_NOTICE_WINDOW_MS,
 	isIncidentNoticeDismissed,
@@ -736,5 +737,32 @@ describe("agents view incident notices", () => {
 		expect(state.notice).toBeUndefined();
 		expect(state.entries).toHaveLength(0);
 		expect(state.logOffset).toBeGreaterThan(0);
+	});
+
+	it("caps retained windowed entries at the newest bounded set", () => {
+		useTempAgentDir();
+		const base = Date.now();
+		// A busy day of structured logging: a full cap of windowed entries is
+		// already held in state, spread over the past few hours. Retention must
+		// stay bounded in memory (each entry keeps the full parsed record), and
+		// so must the per-poll sort/classify work.
+		const oldestTimeMs = base - 3 * 60 * 60_000;
+		const stepMs = Math.ceil((60 * 60_000) / INCIDENT_NOTICE_MAX_WINDOW_ENTRIES);
+		const state = createIncidentNoticeState();
+		state.entries = Array.from({ length: INCIDENT_NOTICE_MAX_WINDOW_ENTRIES }, (_, index) => ({
+			timeMs: oldestTimeMs + index * stepMs,
+			level: "warn",
+			component: "coding-agent.daemon-supervisor",
+			msg: `filler entry ${index}`,
+			fields: { ts: new Date(oldestTimeMs + index * stepMs).toISOString(), msg: `filler entry ${index}` },
+		}));
+		writeAgentLog([workerCrashLine(base, "5b1d3aeb91ee", 60)]);
+		// The crash is the newest entry of all: the cap keeps it and drops the
+		// oldest fixture instead of growing past the bound.
+		expect(refreshIncidentNoticeState(state, getAgentLogPath(), base)).toBe(true);
+		expect(state.entries).toHaveLength(INCIDENT_NOTICE_MAX_WINDOW_ENTRIES);
+		expect(state.entries[0]!.timeMs).toBe(oldestTimeMs + stepMs);
+		expect(state.entries.some((entry) => entry.msg.includes("5b1d3aeb91ee"))).toBe(true);
+		expect(state.notice?.kind).toBe("worker-crash");
 	});
 });
