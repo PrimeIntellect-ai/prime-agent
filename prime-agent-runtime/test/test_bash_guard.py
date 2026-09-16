@@ -861,6 +861,8 @@ RM_MATCHING_COMMANDS = [
     "rm -rf $HOME",
     "rm -rf ..",
     "rm -rf /",
+    'echo $(echo ")"; rm -rf /)',
+    "echo \"$(echo ')'; rm -rf sub)\"",
 ]
 
 RM_NON_MATCHING_COMMANDS = [
@@ -885,6 +887,9 @@ RM_NON_MATCHING_COMMANDS = [
     "perm -rf sub",
     "git status",
     "echo hello world",
+    "sh -c 'rm -r sub'",
+    "sh -c 'echo rm -rf sub'",
+    "python3 -c 'print(\"rm -rf ~\")'",
 ]
 
 
@@ -910,7 +915,9 @@ class RmEvalPayloadDetectionTest(unittest.TestCase):
             "eval 'rm -rf \\\n~'",
         ]:
             with self.subTest(command=command):
-                self.assertTrue(bash_module._eval_payloads_hide_recursive_force_rm(command))
+                self.assertTrue(
+                    bash_module._wrapped_payloads_hide_recursive_force_rm(command)
+                )
 
     def test_safe_eval_payloads_stay_unflagged(self):
         for command in [
@@ -921,7 +928,97 @@ class RmEvalPayloadDetectionTest(unittest.TestCase):
             "echo 'eval rm -rf ~'",
         ]:
             with self.subTest(command=command):
-                self.assertFalse(bash_module._eval_payloads_hide_recursive_force_rm(command))
+                self.assertFalse(
+                    bash_module._wrapped_payloads_hide_recursive_force_rm(command)
+                )
+
+
+class RmWrapperPayloadDetectionTest(unittest.TestCase):
+    def test_shell_dash_c_payloads_hiding_recursive_force_rm(self):
+        for command in [
+            "sh -c 'rm -rf ~'",
+            'bash -c "rm -rf ~"',
+            "zsh -c 'rm -rf $HOME'",
+            "/bin/sh -c 'rm -rf sub'",
+            "dash -c 'rm -rf sub'",
+            "sh -c 'cd / && rm -rf x'",
+            'sh -c "sh -c \'rm -rf sub\'"',
+            "bash -c 'eval \"rm -rf sub\"'",
+            "eval 'sh -c \"rm -rf sub\"'",
+            "sudo bash -c 'rm -rf sub'",
+            "busybox sh -c 'rm -rf sub'",
+            'sh -c \'rm -rf "$1"\' sh ~',
+            '$BASH -c "rm -rf sub"',
+        ]:
+            with self.subTest(command=command):
+                self.assertTrue(
+                    bash_module._wrapped_payloads_hide_recursive_force_rm(command)
+                )
+
+    def test_safe_dash_c_payloads_stay_unflagged(self):
+        for command in [
+            "sh -c 'echo hi'",
+            "bash -c 'ls -la'",
+            "sh -c 'rm -r sub'",
+            "sh -c 'rm -f sub'",
+            "sh -c",
+            "python3 -c 'print(\"rm -rf ~\")'",
+            "echo 'sh -c \"rm -rf ~\"'",
+        ]:
+            with self.subTest(command=command):
+                self.assertFalse(
+                    bash_module._wrapped_payloads_hide_recursive_force_rm(command)
+                )
+
+
+class TrackedCwdDetectionTest(unittest.TestCase):
+    def test_cd_tracking_scopes_subshells(self):
+        command = "(cd /tmp; rm -rf a) && rm -rf b"
+        words = bash_module._scan_shell_words(command)
+        tracked = bash_module._tracked_cwd_at_words(command, words, "/ws")
+        rm_indices = [i for i, w in enumerate(words) if w.value == "rm"]
+        self.assertEqual(tracked[rm_indices[0]], os.path.realpath("/tmp"))
+        self.assertEqual(tracked[rm_indices[1]], os.path.realpath("/ws"))
+
+    def test_unresolvable_cd_targets_fail_closed(self):
+        command = "cd $UNSET; rm -rf sub"
+        words = bash_module._scan_shell_words(command)
+        tracked = bash_module._tracked_cwd_at_words(command, words, "/ws")
+        rm_index = next(i for i, w in enumerate(words) if w.value == "rm")
+        self.assertIsNone(tracked[rm_index])
+
+    def test_bare_cd_goes_home(self):
+        command = "cd; rm -rf sub"
+        words = bash_module._scan_shell_words(command)
+        tracked = bash_module._tracked_cwd_at_words(command, words, "/ws")
+        rm_index = next(i for i, w in enumerate(words) if w.value == "rm")
+        home = os.environ.get("HOME")
+        self.assertEqual(tracked[rm_index], os.path.realpath(home) if home else None)
+
+
+class RmExpansionDetectionTest(unittest.TestCase):
+    def test_unresolvable_expansion_reasons(self):
+        for command, expected in [
+            ("R=rm; $R -rf x", "$R"),
+            ("flags=-rf; rm $flags /", "$flags"),
+            ("rm {--recursive,--force} sub", "--recursive,--force"),
+        ]:
+            with self.subTest(command=command):
+                words = bash_module._scan_shell_words(command)
+                reasons = bash_module._unresolvable_expansion_rm_reasons(words)
+                self.assertTrue(any(expected in reason for reason in reasons), reasons)
+
+    def test_resolvable_expansion_tokens_stay_unflagged(self):
+        for command in [
+            "rm -rf $PWD/sub",
+            "rm -rf $HOME/sub",
+            "rm -rf sub",
+        ]:
+            with self.subTest(command=command):
+                words = bash_module._scan_shell_words(command)
+                self.assertEqual(
+                    bash_module._unresolvable_expansion_rm_reasons(words), []
+                )
 
 
 class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
@@ -1211,6 +1308,167 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(DestructiveRmRefusalError):
             bash("rm -rf link")
         self.assertTrue(Path(victim.name, "keep").exists())
+
+    async def test_refuses_shell_dash_c_wrapped_rm(self):
+        # A quoted argument to sh/bash -c is a live command string: the
+        # payload must be scanned, not treated as data.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            f"sh -c 'rm -rf {outside}'",
+            f'bash -c "rm -rf {outside}"',
+            f"zsh -c 'rm -rf {outside}'",
+            f"sh -c 'sh -c \"rm -rf {outside}\"'",
+            f"eval 'sh -c \"rm -rf {outside}\"'",
+            f"busybox sh -c 'rm -rf {outside}'",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError) as caught:
+                    bash(command)
+                self.assertIn("wraps rm in", str(caught.exception))
+                self.assertTrue(Path(outside, "file.txt").exists())
+
+    async def test_safe_shell_dash_c_commands_still_run(self):
+        result = await bash("sh -c 'echo hi'")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("hi", result.output)
+        # Non-shell -c payloads are not shell syntax and stay unscanned.
+        result = await bash("python3 -c 'print(\"safe\")'")
+        self.assertEqual(result.exit_code, 0)
+
+    async def test_refuses_rm_hidden_behind_quoted_paren(self):
+        # A paren inside quotes must not close a $(...) scan early: the
+        # live rm after it runs inside the substitution.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            f'echo $(echo ")"; rm -rf {outside})',
+            f"echo $(echo ')'; rm -rf {outside})",
+            f"echo \"$(echo ')'; rm -rf {outside})\"",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError) as caught:
+                    bash(command)
+                self.assertIn(
+                    "Refusing to run this recursive-force rm command",
+                    str(caught.exception),
+                )
+                self.assertTrue(Path(outside, "file.txt").exists())
+
+    async def test_refuses_expansion_hidden_rm(self):
+        # $VAR command words and $VAR/brace followers expand after the
+        # guard runs; they cannot be resolved statically, so refuse them.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            f"R=rm; $R -rf {outside}",
+            f"flags=-rf; rm $flags {outside}",
+            f"$R -rf {outside}",
+            "rm {--recursive,--force} " + outside,
+            f"rm -rf {{sub,{outside}}}",
+        ]:
+            with self.subTest(command=command):
+                self._make_tree()
+                with self.assertRaises(DestructiveRmRefusalError) as caught:
+                    bash(command)
+                self.assertIn(
+                    "Refusing to run this recursive-force rm command",
+                    str(caught.exception),
+                )
+                self.assertTrue(Path(outside, "file.txt").exists())
+                self.assertTrue(self._tracked("sub", "nested", "file.txt").exists())
+
+    async def test_refuses_relocated_rm_after_cd(self):
+        # Relative operands resolve against the directory the shell runs
+        # from after cd/pushd, not the kernel cwd; an unresolvable
+        # relocation fails closed too.
+        self._make_tree()
+        outside = self._outside_target()
+        Path(outside, "victim").mkdir()
+        Path(outside, "victim", "file.txt").write_text("keep\n")
+        for command in [
+            f"cd {outside}; rm -rf victim",
+            f"cd {outside} && rm -rf victim",
+            f"cd {outside}; rm -rf $PWD/victim",
+            f"pushd {outside}; rm -rf victim",
+            "cd $UNRESOLVED_DIR; rm -rf sub",
+        ]:
+            with self.subTest(command=command):
+                self._make_tree()
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "victim", "file.txt").exists())
+                self.assertTrue(self._tracked("sub", "nested", "file.txt").exists())
+
+    async def test_cd_into_workspace_still_allows_in_workspace_rm(self):
+        self._make_tree()
+        result = await bash("cd sub && rm -rf nested")
+        self.assertEqual(result.exit_code, 0)
+        self.assertFalse(self._tracked("sub", "nested").exists())
+        self.assertTrue(self._tracked("sub").exists())
+        # A subshell's cd does not relocate the caller's shell.
+        self._make_tree()
+        outside = self._outside_target()
+        result = await bash(f"(cd {outside}; echo hi) && rm -rf sub")
+        self.assertEqual(result.exit_code, 0)
+        self.assertFalse(self._tracked("sub").exists())
+        self.assertTrue(Path(outside, "file.txt").exists())
+
+    async def test_refuses_brace_expanded_rm(self):
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "rm {--recursive,--force} sub",
+            f"rm -rf {{sub,{outside}}}",
+        ]:
+            with self.subTest(command=command):
+                self._make_tree()
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(self._tracked("sub", "nested", "file.txt").exists())
+                self.assertTrue(Path(outside, "file.txt").exists())
+
+    async def test_guard_scans_the_spawn_prefix(self):
+        # The spawn prepends PRIME_AGENT_BASH_COMMAND_PREFIX, and that env
+        # value is model-writable mid-session: the guard must scan exactly
+        # what the shell will run.
+        outside = self._outside_target()
+        with mock.patch.dict(
+            os.environ, {"PRIME_AGENT_BASH_COMMAND_PREFIX": f"rm -rf {outside}"}
+        ):
+            with self.assertRaises(DestructiveRmRefusalError) as caught:
+                bash("echo hi")
+        self.assertIn(
+            "Refusing to run this recursive-force rm command",
+            str(caught.exception),
+        )
+        self.assertTrue(Path(outside, "file.txt").exists())
+        # A benign prefix stays harmless.
+        with mock.patch.dict(
+            os.environ, {"PRIME_AGENT_BASH_COMMAND_PREFIX": "export PREFIX_OK=1"}
+        ):
+            result = await bash("echo $PREFIX_OK")
+        self.assertEqual(result.exit_code, 0)
+
+    async def test_refuses_symlink_swaps_and_missing_operands(self):
+        self._make_tree()
+        outside = self._outside_target()
+        # The command creates the symlink and deletes through it in one
+        # go: at guard time the operand does not exist yet.
+        with self.assertRaises(DestructiveRmRefusalError):
+            bash(f"ln -s {outside} swap && rm -rf swap/")
+        self.assertTrue(Path(outside, "file.txt").exists())
+        # A symlink operand can be swapped between check and run, even
+        # when it currently points inside the workspace.
+        os.symlink(str(self._tracked("sub")), str(self._tracked("alias")))
+        with self.assertRaises(DestructiveRmRefusalError):
+            bash("rm -rf alias/")
+        self.assertTrue(self._tracked("sub", "nested", "file.txt").exists())
+        # Missing paths cannot be verified: they may be created as
+        # symlinks before the rm runs.
+        with self.assertRaises(DestructiveRmRefusalError):
+            bash("rm -rf never-created-yet")
+        self.assertTrue(self._tracked("sub", "nested", "file.txt").exists())
 
     async def test_operands_after_end_of_options_are_checked(self):
         self._make_tree()

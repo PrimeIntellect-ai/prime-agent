@@ -13,6 +13,7 @@ import selectors
 import shutil
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -3244,20 +3245,67 @@ class _ShellWord:
     starts_command: bool  # first word of a fresh (sub)command context
 
 
+def _quote_span_end(command: str, start: int, end: int) -> int:
+    """Index just past the quoted span starting at `command[start]` (a single
+    or double quote), skipping escaped characters inside double quotes."""
+    quote = command[start]
+    i = start + 1
+    while i < end:
+        ch = command[i]
+        if quote == '"' and ch == "\\":
+            i += 2
+            continue
+        if ch == quote:
+            return i + 1
+        i += 1
+    return end
+
+
 def _matching_paren(command: str, open_index: int, end: int) -> int:
-    """Index of the `)` matching the `(` at `open_index`, or `end - 1`."""
+    """Index of the `)` matching the `(` at `open_index`, or `end - 1`.
+
+    Quote-aware: a `)` inside a single- or double-quoted span or after a
+    backslash escape never closes the substitution, mirroring how the shell
+    parses it. Unterminated quotes or an unmatched `(` scan to the end, so
+    the whole region stays live-command territory rather than a miss."""
     depth = 0
     i = open_index
     while i < end:
         ch = command[i]
-        if ch == "(":
+        if ch == "\\":
+            i += 2
+        elif ch in "'\"":
+            i = _quote_span_end(command, i, end)
+        elif ch == "(":
             depth += 1
+            i += 1
         elif ch == ")":
             depth -= 1
             if depth == 0:
                 return i
-        i += 1
+            i += 1
+        else:
+            i += 1
     return end - 1  # unterminated: scan to the end
+
+
+def _paren_positions(command: str) -> list[tuple[int, str]]:
+    """Positions of every unquoted `(` and `)` in `command`, skipping quoted
+    spans and backslash escapes; the pairs scope cd tracking to subshells."""
+    positions: list[tuple[int, str]] = []
+    i = 0
+    end = len(command)
+    while i < end:
+        ch = command[i]
+        if ch == "\\":
+            i += 2
+        elif ch in "'\"":
+            i = _quote_span_end(command, i, end)
+        else:
+            if ch in "()":
+                positions.append((i, ch))
+            i += 1
+    return positions
 
 
 def _scan_shell_words(command: str) -> list[_ShellWord]:
@@ -3376,14 +3424,15 @@ def _is_rm_word(value: str) -> bool:
     return os.path.basename(value) == "rm"
 
 
-def _find_recursive_force_rm_invocations(command: str) -> list[list[str]]:
+def _find_rf_rm_invocations_in_words(
+    words: list[_ShellWord],
+) -> list[tuple[int, list[str]]]:
     """Find every rm invocation combining recursive and force flags
     (-r/-R/--recursive plus -f, including combined -rf/-fr), returning the
-    operand list of each matched invocation. Flags may sit anywhere in the
-    invocation (`rm sub -rf`); a lone -r or lone -f never matches."""
-    prepared = _mask_shell_redirections(_normalize_line_continuations(command))
-    words = _scan_shell_words(prepared)
-    invocations: list[list[str]] = []
+    rm word index and operand list of each matched invocation. Flags may sit
+    anywhere in the invocation (`rm sub -rf`); a lone -r or lone -f never
+    matches."""
+    invocations: list[tuple[int, list[str]]] = []
     for index, word in enumerate(words):
         if not _is_rm_word(word.value):
             continue
@@ -3410,8 +3459,18 @@ def _find_recursive_force_rm_invocations(command: str) -> list[list[str]]:
             recursive = recursive or "r" in body or "R" in body
             force = force or "f" in body
         if recursive and force:
-            invocations.append(operands)
+            invocations.append((index, operands))
     return invocations
+
+
+def _find_recursive_force_rm_invocations(command: str) -> list[list[str]]:
+    """The operand lists of every recursive-force rm invocation in `command`;
+    see _find_rf_rm_invocations_in_words for the matching rules."""
+    prepared = _mask_shell_redirections(_normalize_line_continuations(command))
+    return [
+        operands
+        for _, operands in _find_rf_rm_invocations_in_words(_scan_shell_words(prepared))
+    ]
 
 
 def is_recursive_force_rm_command(command: str) -> bool:
@@ -3421,42 +3480,232 @@ def is_recursive_force_rm_command(command: str) -> bool:
     return bool(_find_recursive_force_rm_invocations(command))
 
 
-def _eval_payloads_hide_recursive_force_rm(command: str, depth: int = 0) -> bool:
-    """True when a quoted `eval` payload hides a recursive-force rm.
+# Expansion characters that can turn one scanned word into different shell
+# argv at run time. `$HOME`/`$PWD` prefixes are statically resolvable, so
+# they are stripped before a word counts as unresolvable.
+_UNRESOLVED_EXPANSION_CHARS = ("$", "`", "{", "}")
 
-    Mirrors the git guard's eval scan: only unquoted eval tokens are scanned,
-    each payload is unquoted one shell quoting layer at a time, and a
-    recursive-force rm in any layer is refused outright because the payload
-    can relocate or chain freely."""
-    if depth > _MAX_EVAL_SCAN_DEPTH:
-        return True  # absurdly nested evals: refuse rather than risk a miss
-    words = _scan_shell_words(command)
+
+def _expansion_is_resolvable(token: str) -> bool:
+    """True when every expansion in `token` is a statically resolvable
+    `$HOME`/`${HOME}`/`$PWD`/`${PWD}` prefix (mirrors _resolve_rm_operand)."""
+    for prefix in ("${HOME}", "$HOME", "${PWD}", "$PWD"):
+        if token.startswith(prefix):
+            return _expansion_is_resolvable(token[len(prefix) :])
+    return not any(ch in token for ch in _UNRESOLVED_EXPANSION_CHARS)
+
+
+def _unresolvable_expansion_rm_reasons(words: list[_ShellWord]) -> list[str]:
+    """Refusal reasons for rm-shaped invocations whose command word or
+    flags/operands hide behind expansion the shell performs after the guard
+    runs. A `R=rm; $R -rf x` command word and a `flags=-rf; rm $flags /`
+    follower cannot be resolved statically, so the invocation is refused as
+    unresolvable instead of guessed at. Fail closed."""
+    reasons: list[str] = []
     for index, word in enumerate(words):
-        if word.value != "eval":
-            continue
-        payload_parts: list[str] = []
+        followers: list[str] = []
         for follower in words[index + 1 :]:
             if follower.starts_command:
                 break
-            payload_parts.append(command[follower.start : follower.end])
+            followers.append(follower.value)
+        if word.starts_command and not _expansion_is_resolvable(word.value):
+            # The command word itself expands: if any follower could be an
+            # rm flag, the pair could complete into recursive-force rm.
+            shows_rm_flag = False
+            for token in followers:
+                if token.startswith("--"):
+                    name = token[2:].split("=", 1)[0]
+                    shows_rm_flag = shows_rm_flag or name in ("recursive", "force")
+                elif token.startswith("-") and token != "-":
+                    body = token[1:]
+                    shows_rm_flag = (
+                        shows_rm_flag or "r" in body or "R" in body or "f" in body
+                    )
+            if shows_rm_flag:
+                reasons.append(
+                    f"{word.value!r}: names the command through shell"
+                    " expansion, which the guard cannot resolve"
+                )
+        elif _is_rm_word(word.value):
+            # An rm follower carrying unresolved expansion could expand to
+            # recursive-force flags or out-of-workspace paths.
+            for token in followers:
+                if not _expansion_is_resolvable(token):
+                    reasons.append(
+                        f"{token!r}: expands inside an rm invocation, so the"
+                        " flags or paths it produces cannot be checked"
+                    )
+                    break
+    return reasons
+
+
+# A quoted argument to `sh -c` (and friends) is a live command string, so
+# those payloads are scanned exactly like eval payloads. Only shell
+# interpreters are listed: non-shell `-c` payloads (python, awk, node) are
+# not shell syntax, and any shell command substitution in them already runs
+# before their own parser sees the text.
+_SHELL_DASH_C_INTERPRETERS = frozenset(
+    {"sh", "ash", "bash", "csh", "dash", "ksh", "tcsh", "zsh"}
+)
+
+
+def _wrapped_payloads_hide_recursive_force_rm(command: str, depth: int = 0) -> bool:
+    """True when a quoted `eval` or shell `-c` payload hides a
+    recursive-force rm.
+
+    Mirrors the git guard's eval scan: only unquoted wrapper tokens are
+    scanned, each payload is unquoted one shell quoting layer at a time, and
+    a recursive-force rm in any layer is refused outright because the payload
+    can relocate or chain freely. Shell `-c` payloads are scanned when the
+    wrapper word names a shell interpreter or carries unresolvable expansion
+    (`$BASH -c ...`): literal non-shell wrappers (`python -c`) stay unscanned
+    because their payload is not shell syntax."""
+    if depth > _MAX_EVAL_SCAN_DEPTH:
+        return True  # absurdly nested wrappers: refuse rather than risk a miss
+    words = _scan_shell_words(command)
+    for index, word in enumerate(words):
+        payload_parts: list[str] = []
+        if word.value == "eval":
+            for follower in words[index + 1 :]:
+                if follower.starts_command:
+                    break
+                payload_parts.append(command[follower.start : follower.end])
+        else:
+            flag = words[index + 1 : index + 2]
+            payload_word = words[index + 2 : index + 3]
+            if not flag or flag[0].value != "-c" or flag[0].starts_command:
+                continue
+            is_shell = os.path.basename(word.value) in _SHELL_DASH_C_INTERPRETERS
+            if not is_shell and _expansion_is_resolvable(word.value):
+                continue  # python/node -c payloads are not shell syntax
+            if not payload_word or payload_word[0].starts_command:
+                continue  # bare `sh -c` with no payload string: nothing to scan
+            payload_parts.append(command[payload_word[0].start : payload_word[0].end])
         payload = _unquote_one_level(" ".join(payload_parts))
         if _find_recursive_force_rm_invocations(payload):
             return True
-        if _eval_payloads_hide_recursive_force_rm(payload, depth + 1):
+        if _wrapped_payloads_hide_recursive_force_rm(payload, depth + 1):
             return True
     return False
 
 
+# cd and pushd relocate the spawned shell before later words run, so rm
+# operands must resolve against the tracked directory, not the kernel cwd.
+_CD_BUILTINS = ("cd", "pushd")
+
+
+def _resolve_cd_target(
+    targets: list[str], tracked: str | None, builtin: str
+) -> str | None:
+    """The shell's directory after `cd`/`pushd` with the follower values
+    `targets`, or None when the destination cannot be established statically
+    (variable, glob, brace, substitution, or stack-relative targets). Fail
+    closed: never guess."""
+    if tracked is None:
+        return None
+    if not targets:
+        if builtin == "pushd":
+            return None  # swaps with the directory stack: unknowable statically
+        home = os.environ.get("HOME")
+        if not home:
+            return None  # bare cd goes to HOME, which is unset here
+        try:
+            return os.path.realpath(home)
+        except (OSError, ValueError):
+            return None
+    if len(targets) > 1:
+        # cd errors on extra operands; refuse rather than guess which one
+        # wins in other shells.
+        return None
+    target = targets[0]
+    if target == "-":
+        return None  # $OLDPWD is unknowable statically
+    if target == "":
+        return tracked  # cd '' errors; the shell stays put
+    home = os.environ.get("HOME")
+    expanded = target
+    if expanded.startswith("~"):
+        if not home:
+            return None
+        if expanded == "~":
+            expanded = home
+        elif expanded.startswith("~/"):
+            expanded = home + expanded[1:]
+        else:
+            return None  # ~otheruser homes cannot be checked statically
+    else:
+        for prefix in ("${HOME}", "$HOME"):
+            if expanded.startswith(prefix):
+                if not home:
+                    return None
+                expanded = home + expanded[len(prefix) :]
+                break
+        else:
+            for prefix in ("${PWD}", "$PWD"):
+                if expanded.startswith(prefix):
+                    expanded = tracked + expanded[len(prefix) :]
+                    break
+    if not _expansion_is_resolvable(expanded) or any(
+        ch in expanded for ch in "*?\\"
+    ):
+        return None
+    try:
+        return os.path.realpath(
+            expanded if os.path.isabs(expanded) else os.path.join(tracked, expanded)
+        )
+    except (OSError, ValueError):
+        return None
+
+
+def _tracked_cwd_at_words(
+    command: str, words: list[_ShellWord], start_cwd: str
+) -> list[str | None]:
+    """For each word, the shell's working directory when that word runs.
+
+    `cd`/`pushd` relocations are resolved statically against the directory
+    tracked so far, and unquoted parens scope those changes the way `(...)`
+    isolates them in the shell (command substitutions included). None means
+    the runtime directory could not be established, so relative rm operands
+    after it must be refused."""
+    tracked: str | None = start_cwd
+    paren_stack: list[str | None] = []
+    parens = _paren_positions(command)
+    paren_index = 0
+    result: list[str | None] = []
+    for index, word in enumerate(words):
+        while paren_index < len(parens) and parens[paren_index][0] < word.start:
+            if parens[paren_index][1] == "(":
+                paren_stack.append(tracked)
+            else:
+                tracked = paren_stack.pop() if paren_stack else tracked
+            paren_index += 1
+        if word.value in _CD_BUILTINS:
+            targets: list[str] = []
+            for follower in words[index + 1 :]:
+                if follower.starts_command:
+                    break
+                targets.append(follower.value)
+            tracked = _resolve_cd_target(targets, tracked, word.value)
+        result.append(tracked)
+    return result
+
+
 def _resolve_rm_operand(operand: str, workspace_root: str, cwd: str) -> str | None:
     """Return why `operand` (one unquoted rm argv entry) must be refused from
-    inside `workspace_root`, or None when it is safe. $PWD expands to the
-    real kernel cwd because the spawned shell recomputes PWD at startup;
-    `~` and `$HOME` expand from the environment the spawned shell inherits.
-    Fail closed: anything that cannot be resolved statically is refused."""
+    inside `workspace_root`, or None when it is safe. `cwd` is the directory
+    the rm will actually run in (cd-relocated, not the kernel cwd), so $PWD
+    and relative operands resolve the way the spawned shell sees them; `~`
+    and `$HOME` expand from the environment the spawned shell inherits.
+    Fail closed: anything that cannot be resolved statically is refused,
+    including symlinked operands (their target can change between check and
+    run) and paths that do not exist yet (they can still be created as
+    symlinks)."""
     if operand == "-":
         return "reads the list of names from stdin, so its targets cannot be checked"
     if "{}" in operand:
         return "is a find -exec placeholder, so its targets cannot be checked"
+    if "{" in operand or "}" in operand:
+        return "uses brace expansion, which expands to multiple paths at run time"
     home = os.environ.get("HOME")
     expanded = operand
     if expanded.startswith("~"):
@@ -3495,9 +3744,27 @@ def _resolve_rm_operand(operand: str, workspace_root: str, cwd: str) -> str | No
     if dot is not None:
         return f"names the dot path {dot!r}; dot files and dot directories (.env-class, .git) are refused"
     try:
-        resolved = os.path.realpath(
-            expanded if os.path.isabs(expanded) else os.path.join(workspace_root, expanded)
+        raw = expanded if os.path.isabs(expanded) else os.path.join(cwd, expanded)
+    except (OSError, ValueError):
+        return "cannot be resolved on this filesystem"
+    try:
+        # A trailing slash makes lstat follow the link, so probe the link
+        # itself: `rm -rf alias/` deletes through the symlink.
+        st = os.lstat(raw.rstrip("/") or raw)
+    except FileNotFoundError:
+        return (
+            "does not exist yet, so its runtime target cannot be verified"
+            " (a command could still create or replace it as a symlink)"
         )
+    except (OSError, ValueError):
+        return "cannot be checked on this filesystem"
+    if stat.S_ISLNK(st.st_mode):
+        return (
+            "names a symlink, whose target can change between the check and"
+            " the run; remove the link itself without -rf or list explicit paths"
+        )
+    try:
+        resolved = os.path.realpath(raw)
     except (OSError, ValueError):
         return "cannot be resolved on this filesystem"
     if resolved == os.sep:
@@ -3543,11 +3810,12 @@ def _format_rm_operand_refusal(reasons: list[str], live_bypass_attempt: bool) ->
     return "\n".join(lines)
 
 
-def _format_rm_eval_refusal() -> str:
+def _format_rm_wrapper_refusal() -> str:
     return "\n".join(
         [
             "Refusing to run this recursive-force rm command: it wraps rm in"
-            " eval, and the paths it would delete cannot be checked safely.",
+            " eval or a `sh -c`/`bash -c` payload, and the paths it would"
+            " delete cannot be checked safely.",
             "",
             "Run the deletion directly with explicit paths, or retry with"
             " bash(command, allow_destructive_rm=True), or set"
@@ -3561,33 +3829,53 @@ def _guard_destructive_rm(command: str, allow_destructive_rm: bool) -> None:
     """Refuse recursive-force rm invocations whose operands escape the
     workspace or name protected paths. The word scan is pure string work and
     runs only when an rm invocation carries both flags, so other commands pay
-    nothing."""
+    nothing. The scan covers exactly what the spawned shell will run (spawn
+    prefix included) and refuses what it cannot resolve statically: quoted
+    shell `-c` and eval payloads, quote-blind substitution layouts,
+    expansion-hidden commands and flags, cd/pushd relocations, brace
+    expansion, symlinked operands, and paths that do not exist yet."""
     frozen_bypass = _is_truthy_env_value(_BASH_RM_BYPASS_AT_KERNEL_START)
     if allow_destructive_rm or frozen_bypass:
         return
-    prepared = _mask_shell_redirections(_normalize_line_continuations(command))
-    if "eval" in prepared and _eval_payloads_hide_recursive_force_rm(prepared):
-        raise DestructiveRmRefusalError(_format_rm_eval_refusal())
-    invocations = _find_recursive_force_rm_invocations(prepared)
-    if not invocations:
-        return
-    try:
-        cwd = os.getcwd()
-        workspace_root = os.path.realpath(cwd)
-    except OSError:
-        return  # the spawn itself will fail; the guard must not mask that error
+    # Scan what the shell will run: the spawn prepends
+    # PRIME_AGENT_BASH_COMMAND_PREFIX, and that env value is model-writable
+    # mid-session, so the guard must not assume it stays benign.
+    prepared = _mask_shell_redirections(
+        _normalize_line_continuations(_with_prefix(command))
+    )
+    if ("eval" in prepared or "-c" in prepared) and _wrapped_payloads_hide_recursive_force_rm(
+        prepared
+    ):
+        raise DestructiveRmRefusalError(_format_rm_wrapper_refusal())
+    words = _scan_shell_words(prepared)
+    invocations = _find_rf_rm_invocations_in_words(words)
     reasons: list[str] = []
-    for operands in invocations:
-        if not operands:
-            reasons.append(
-                "receives no explicit operand, so names could arrive from"
-                " xargs or stdin and cannot be checked"
-            )
-            continue
-        for operand in operands:
-            reason = _resolve_rm_operand(operand, workspace_root, cwd)
-            if reason:
-                reasons.append(f"{operand!r}: {reason}")
+    if invocations:
+        try:
+            cwd = os.getcwd()
+            workspace_root = os.path.realpath(cwd)
+        except OSError:
+            return  # the spawn itself will fail; the guard must not mask that error
+        tracked_at = _tracked_cwd_at_words(prepared, words, workspace_root)
+        for word_index, operands in invocations:
+            tracked = tracked_at[word_index]
+            if not operands:
+                reasons.append(
+                    "receives no explicit operand, so names could arrive from"
+                    " xargs or stdin and cannot be checked"
+                )
+                continue
+            if tracked is None:
+                reasons.append(
+                    "runs after a cd/pushd the guard cannot resolve, so its"
+                    " relative targets cannot be checked"
+                )
+                continue
+            for operand in operands:
+                reason = _resolve_rm_operand(operand, workspace_root, tracked)
+                if reason:
+                    reasons.append(f"{operand!r}: {reason}")
+    reasons.extend(_unresolvable_expansion_rm_reasons(words))
     if reasons:
         live_bypass_attempt = _is_truthy_env_value(
             os.environ.get(BASH_DESTRUCTIVE_RM_BYPASS_ENV)
@@ -3622,10 +3910,12 @@ def bash(command: str, *, allow_destructive_git: bool = False, allow_destructive
 
     Recursive-force rm commands (`rm -rf`, `-fr`, `-Rf`,
     `--recursive --force`) are refused when an operand resolves outside the
-    current workspace (HOME itself, /, parent directories, other trees),
-    names a protected dot path (`..`, `.git`, `.env`-class), or cannot be
-    checked statically (globs, substitutions, stdin lists, eval payloads);
-    retry with allow_destructive_rm=True (or
+    current workspace (HOME itself, /, parent directories, other trees,
+    relocations through cd/pushd), names a protected dot path (`..`, `.git`,
+    `.env`-class), or cannot be checked statically (globs, substitutions,
+    stdin lists, eval and `sh -c`/`bash -c` payloads, brace expansion,
+    symlinked operands, paths that do not exist yet); retry with
+    allow_destructive_rm=True (or
     PI_BASH_ALLOW_DESTRUCTIVE_RM=1 frozen at kernel start) only when the
     deletion is intentional.
     """
