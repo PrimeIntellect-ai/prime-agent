@@ -351,8 +351,10 @@ function mergeIncidentWindowedEntries(
  * rotation still surface in a fresh view; later polls read only appended
  * agent.jsonl bytes (re-reading .old would duplicate supervisor starts into
  * phantom update restarts). Returns true when that line changed so the caller
- * can re-render. Never throws for a missing or unreadable log — that simply
- * retries a bounded tail on the next poll.
+ * can re-render. Never throws for a missing or unreadable log: that poll keeps
+ * the consumed offset (a re-tail would fabricate restarts) but still
+ * re-derives, so the notice expires with its window instead of surviving
+ * forever while the log stays unreadable.
  */
 export function refreshIncidentNoticeState(state: IncidentNoticeState, logPath: string, nowMs: number): boolean {
 	// The first successful read bridges the rotated generation: the CLI reads
@@ -364,15 +366,6 @@ export function refreshIncidentNoticeState(state: IncidentNoticeState, logPath: 
 	// supervisor-start), which is also why the consumed offset never resets.
 	const firstRead = state.logOffset === undefined && state.logFileId === undefined;
 	const chunk = readIncidentLogLines(logPath, state.logOffset, state.logFileId);
-	if (chunk === undefined) {
-		// Missing or unreadable: keep the consumed offset and file id. Resetting
-		// them would make the next poll re-tail and re-parse consumed lines — a
-		// phantom second supervisor start (a false update restart; the classifier
-		// does not dedupe supervisor-start) and doubled timeout counts. A real
-		// rotation is still caught by the file id changing (or the offset
-		// passing the size) on the next successful read.
-		return false;
-	}
 	const sinceMs = nowMs - INCIDENT_NOTICE_WINDOW_MS;
 	// CLI window parity (buildIncidentReport bounds events by >= since && <=
 	// until): future-dated entries fall outside the window and never surface.
@@ -383,18 +376,29 @@ export function refreshIncidentNoticeState(state: IncidentNoticeState, logPath: 
 				(entry): entry is IncidentLogEntry =>
 					entry !== undefined && entry.timeMs >= sinceMs && entry.timeMs <= nowMs,
 			);
-	// Mirror the CLI's [agent.jsonl.old, agent.jsonl] source order (merge sorts
-	// by time anyway), tailing .old with the same bounded tail as the main log.
 	let parsed: IncidentLogEntry[] = [];
-	if (firstRead) {
-		const rotated = readIncidentLogLines(`${logPath}.old`, undefined, undefined);
-		if (rotated !== undefined) {
-			parsed = parseWindowedLines(rotated.lines);
+	if (chunk !== undefined) {
+		// Mirror the CLI's [agent.jsonl.old, agent.jsonl] source order (merge sorts
+		// by time anyway), tailing .old with the same bounded tail as the main log.
+		if (firstRead) {
+			const rotated = readIncidentLogLines(`${logPath}.old`, undefined, undefined);
+			if (rotated !== undefined) {
+				parsed = parseWindowedLines(rotated.lines);
+			}
 		}
+		parsed = parsed.concat(parseWindowedLines(chunk.lines));
+		state.logOffset = chunk.nextOffset;
+		state.logFileId = chunk.fileId;
 	}
-	parsed = parsed.concat(parseWindowedLines(chunk.lines));
-	state.logOffset = chunk.nextOffset;
-	state.logFileId = chunk.fileId;
+	// A missing or unreadable log keeps the consumed offset and file id exactly
+	// as they are: resetting them would make the next poll re-tail and re-parse
+	// consumed lines into a phantom second supervisor start (a false update
+	// restart; the classifier does not dedupe supervisor-start) and doubled
+	// timeout counts. The poll still falls through to the merge/derive path
+	// with no new entries, so the notice ages out of its window while the log
+	// stays unreadable instead of surviving forever; a real rotation is still
+	// caught by the file id changing (or the offset passing the size) on the
+	// next successful read.
 	const previous = state.notice;
 	state.entries = mergeIncidentWindowedEntries(state.entries, parsed, sinceMs);
 	const notices = deriveIncidentNotices(state.entries, nowMs);

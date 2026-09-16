@@ -696,4 +696,24 @@ describe("agents view incident notices", () => {
 		const notices = deriveIncidentNotices(state.entries, Date.now());
 		expect(notices.some((notice) => notice.kind === "update-restart")).toBe(false);
 	});
+
+	it("expires the notice while the log stays unreadable", () => {
+		useTempAgentDir();
+		const base = Date.now();
+		writeAgentLog([workerCrashLine(base, "5b1d3aeb91ee", 120)]);
+		const state = createIncidentNoticeState();
+		const logPath = getAgentLogPath();
+		expect(refreshIncidentNoticeState(state, logPath, base)).toBe(true);
+		expect(state.notice?.kind).toBe("worker-crash");
+
+		// The log disappears for good: the consumed offset stays (a re-tail would
+		// fabricate restarts), but the poll still re-derives, so the crash ages
+		// out of the window and the notice expires instead of surviving forever.
+		rmSync(logPath);
+		const staleNowMs = base + 25 * 60 * 60_000;
+		expect(refreshIncidentNoticeState(state, logPath, staleNowMs)).toBe(true);
+		expect(state.notice).toBeUndefined();
+		expect(state.entries).toHaveLength(0);
+		expect(state.logOffset).toBeGreaterThan(0);
+	});
 });
