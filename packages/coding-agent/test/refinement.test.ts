@@ -16,6 +16,7 @@ import {
 	getRefinementHistoryPath,
 	type HarnessEntry,
 	type HarnessState,
+	harnessDigestFingerprint,
 	harnessQueryTerms,
 	inferRefinementResultScope,
 	loadGlobalRefinementHistory,
@@ -958,6 +959,22 @@ describe("harness digest relevance ranking", () => {
 		expect(() => formatHarnessStateForPrompt(state, { queryTerms: new Map([["worktree", 1]]) })).not.toThrow();
 	});
 
+	it("breaks score ties by stable identifier order, not recency", () => {
+		const state = loadHarnessState(join(makeTempDir(), "h2"), "local");
+		const older = makeEntry("aaa", "Worktree policy", "Same worktree signal.", "2026-08-01T00:00:00.000Z");
+		const newer = makeEntry("zzz", "Worktree policy", "Same worktree signal.", "2026-09-01T00:00:00.000Z");
+		state.entries.memory.aaa = older;
+		state.entries.memory.zzz = newer;
+		const ranked = formatHarnessStateForPrompt(state, {
+			maxEntriesPerKind: 1,
+			queryTerms: new Map([["worktree", 1]]),
+		});
+		// Equal scores render in stable identifier order ([path, title, id]);
+		// updated_at recency must not hoist the newer entry into the window.
+		expect(ranked).toContain("[global:aaa]");
+		expect(ranked).not.toContain("[global:zzz]");
+	});
+
 	it.each<[string, string[]]>([
 		["Worktree?", ["worktree"]],
 		["path/to/skill", ["path", "skill"]],
@@ -981,5 +998,145 @@ describe("harness digest relevance ranking", () => {
 		["𠀀𠀁𠀂", ["𠀀𠀁", "𠀁𠀂"]],
 	])("tokenizes %j into %j", (query, expected) => {
 		expect(harnessQueryTerms(query)).toEqual(expected);
+	});
+});
+
+describe("harness digest cache stability", () => {
+	const renderFlags = {
+		includeIpythonExamples: true,
+		includeShellExamples: false,
+		includeRefineExamples: true,
+	};
+
+	/** Three equal-score memory entries with distinct identifier order. */
+	function seedState(dirTag: string): HarnessState {
+		const state = loadHarnessState(join(makeTempDir(), `cache-${dirTag}`), "local");
+		for (const [id, title] of [
+			["alpha", "Alpha worktree note"],
+			["bravo", "Bravo worktree note"],
+			["charlie", "Charlie worktree note"],
+		] as const) {
+			state.entries.memory[id] = {
+				id,
+				kind: "memory",
+				title,
+				content: `${title} keeps worktree guidance.`,
+				path: "general",
+				scope: "global",
+				reference: {},
+				arguments: {},
+				metadata: {},
+				source: "test",
+				created_at: "2026-08-01T00:00:00.000Z",
+				updated_at: "2026-08-01T00:00:00.000Z",
+				version: 1,
+			};
+		}
+		return state;
+	}
+
+	function visibleIds(digest: string): string[] {
+		return [...digest.matchAll(/\[global:(\w+)\]/g)].map((match) => match[1]);
+	}
+
+	it("renders byte-identical digests for identical state and options", () => {
+		const first = seedState("render-a");
+		const second = seedState("render-b");
+		for (const queryTerms of [undefined, new Map([["worktree", 2]])] as Array<Map<string, number> | undefined>) {
+			const options = { ...renderFlags, ...(queryTerms ? { queryTerms } : {}) };
+			// Same state twice, and two fresh states with equal material.
+			expect(formatHarnessStateForPrompt(first, options)).toBe(formatHarnessStateForPrompt(first, options));
+			expect(formatHarnessStateForPrompt(first, options)).toBe(formatHarnessStateForPrompt(second, options));
+		}
+	});
+
+	it("keeps equal-score sibling order when one entry is updated", () => {
+		const state = seedState("order");
+		const options = {
+			...renderFlags,
+			maxEntriesPerKind: 2,
+			queryTerms: new Map([["worktree", 1]]),
+		};
+		const before = formatHarnessStateForPrompt(state, options);
+		expect(visibleIds(before)).toEqual(["alpha", "bravo"]);
+		// Update alpha: new content, new version, and the newest updated_at. The
+		// old recency tiebreak hoisted the updated entry above its equal-score
+		// siblings, reshuffling the visible window at the next cold boundary.
+		state.entries.memory.alpha = {
+			...state.entries.memory.alpha,
+			content: "Alpha worktree note keeps revised guidance.",
+			version: 2,
+			updated_at: "2026-09-09T00:00:00.000Z",
+		};
+		const after = formatHarnessStateForPrompt(state, options);
+		expect(visibleIds(after)).toEqual(visibleIds(before));
+		// Only the updated entry's own line text changed.
+		expect(after).not.toBe(before);
+		expect(after).toContain("v2");
+		expect(after).toContain("+1 more memory entries");
+	});
+
+	it("fingerprints the digest material, not query terms or bookkeeping timestamps", () => {
+		const state = seedState("fingerprint");
+		const fingerprint = harnessDigestFingerprint(state, renderFlags);
+
+		// Equal material across fresh objects: same fingerprint.
+		expect(harnessDigestFingerprint(seedState("fingerprint-equal"), renderFlags)).toBe(fingerprint);
+
+		// Entry content changes: different fingerprint.
+		const contentChanged = seedState("fingerprint-content");
+		contentChanged.entries.memory.alpha = {
+			...contentChanged.entries.memory.alpha,
+			content: "Rewritten guidance.",
+		};
+		expect(harnessDigestFingerprint(contentChanged, renderFlags)).not.toBe(fingerprint);
+
+		// Invisible bookkeeping (created_at/updated_at/metadata/source) does not.
+		const touched = seedState("fingerprint-touch");
+		touched.entries.memory.alpha = {
+			...touched.entries.memory.alpha,
+			metadata: { touched: true },
+			updated_at: "2026-09-10T00:00:00.000Z",
+			created_at: "2026-09-10T00:00:00.000Z",
+		};
+		expect(harnessDigestFingerprint(touched, renderFlags)).toBe(fingerprint);
+
+		// Query terms re-rank the render but never reach the fingerprint: the
+		// digest stays frozen per delivery across turns with new wording.
+		const ranked = formatHarnessStateForPrompt(state, {
+			...renderFlags,
+			queryTerms: new Map([["bravo", 3]]),
+		});
+		const unranked = formatHarnessStateForPrompt(state, renderFlags);
+		expect(ranked).not.toBe(unranked);
+		expect(visibleIds(ranked)[0]).toBe("bravo");
+		expect(harnessDigestFingerprint(state, renderFlags)).toBe(fingerprint);
+
+		// Render flags are fingerprinted.
+		expect(harnessDigestFingerprint(state, { ...renderFlags, includeShellExamples: true })).not.toBe(fingerprint);
+
+		// Refinement material is fingerprinted by its printed fields only.
+		const withRefinement = seedState("fingerprint-refine");
+		withRefinement.refinements.push({
+			id: "refine_20260910",
+			trigger: "Add worktree notes",
+			changes: ["create memory:alpha"],
+			evidence: "test evidence",
+			outcome: "Worktree notes persisted.",
+			created_at: "2026-09-10T00:00:00.000Z",
+		});
+		expect(harnessDigestFingerprint(withRefinement, renderFlags)).not.toBe(fingerprint);
+		const sameRefinementOtherTime = seedState("fingerprint-refine-time");
+		sameRefinementOtherTime.refinements.push({
+			id: "refine_20260910",
+			trigger: "Add worktree notes",
+			changes: ["create memory:alpha"],
+			evidence: "different invisible evidence",
+			outcome: "Worktree notes persisted.",
+			created_at: "2026-09-11T00:00:00.000Z",
+		});
+		expect(harnessDigestFingerprint(sameRefinementOtherTime, renderFlags)).toBe(
+			harnessDigestFingerprint(withRefinement, renderFlags),
+		);
 	});
 });

@@ -6,9 +6,22 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { BashResult } from "../../src/core/bash-executor.js";
-import { convertToLlm, HARNESS_DIGEST_CUSTOM_TYPE } from "../../src/core/messages.js";
+import {
+	convertToLlm,
+	createCompactionSummaryMessage,
+	createHarnessDigestMessage,
+	HARNESS_DIGEST_CUSTOM_TYPE,
+	HARNESS_DIGEST_PREFIX,
+	HARNESS_DIGEST_SUFFIX,
+	REFINEMENT_NOTICE_CUSTOM_TYPE,
+} from "../../src/core/messages.js";
 import type { PromptTemplate } from "../../src/core/prompt-templates.js";
-import { getLocalHarnessStateDir, loadHarnessState, saveHarnessState } from "../../src/core/refinement/index.js";
+import {
+	getGlobalHarnessStateDir,
+	getLocalHarnessStateDir,
+	loadHarnessState,
+	saveHarnessState,
+} from "../../src/core/refinement/index.js";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.js";
 import { createTestResourceLoader } from "../utilities.js";
 import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.js";
@@ -962,6 +975,31 @@ describe("Harness digest at cold boundaries", () => {
 		expect(harness.session.messages[0]).toMatchObject({ role: "custom", customType: HARNESS_DIGEST_CUSTOM_TYPE });
 	});
 
+	it("exposes the newest digest details, including the state fingerprint", async () => {
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		const internals = harness.session as unknown as {
+			_latestContextHarnessDigestDetails(): { digest: string; stateFingerprint?: string } | undefined;
+		};
+		const base = Date.now();
+		harness.session.agent.state.messages.push(
+			createHarnessDigestMessage("older digest", base + 1000, "fp-older"),
+			createCompactionSummaryMessage(
+				"summary",
+				10,
+				new Date(base + 2000).toISOString(),
+				undefined,
+				1,
+				"head digest",
+				"fp-head",
+			),
+		);
+		expect(internals._latestContextHarnessDigestDetails()).toMatchObject({
+			digest: "head digest",
+			stateFingerprint: "fp-head",
+		});
+	});
+
 	it("resume dedupes identical digests and appends a fresh one when disk state changed", async () => {
 		// Empty global store: digest content must reflect only the local test entry.
 		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
@@ -1015,4 +1053,185 @@ describe("Harness digest at cold boundaries", () => {
 		expect(resumedStale.session.messages.at(-1)).toBe(digests.at(-1));
 		expect(getMessageText(digests.at(-1))).toContain("[local:resume_test_memory] Resume test memory");
 	});
+
+	function isolatedAgentDir(prefix: string): string {
+		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
+		const agentDir = join(tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(agentDir, { recursive: true });
+		tempDirs.push(agentDir);
+		process.env.PRIME_AGENT_CODING_AGENT_DIR = agentDir;
+		onTestFinished(() => {
+			if (previousAgentDir === undefined) delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+			else process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+		});
+		return agentDir;
+	}
+
+	function seedMemory(
+		state: ReturnType<typeof loadHarnessState>,
+		id: string,
+		title: string,
+		content: string,
+		scope: "local" | "global" = "local",
+	): void {
+		state.entries.memory[id] = {
+			id,
+			kind: "memory",
+			title,
+			content,
+			path: "general",
+			scope,
+			reference: {},
+			arguments: {},
+			metadata: {},
+			source: "refine",
+			created_at: "2026-09-07T00:00:00.000Z",
+			updated_at: "2026-09-07T00:00:00.000Z",
+			version: 1,
+		};
+	}
+
+	it("skips the digest on resume when only query terms drifted and the state is unchanged", async () => {
+		isolatedAgentDir("pi-digest-freeze");
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		// Local material whose entries the resume-time query terms re-rank: the
+		// fresh render would differ, so only a state fingerprint can dedupe.
+		const localDir = getLocalHarnessStateDir(harness.sessionManager.getSessionArtifactDir());
+		expect(localDir).toBeDefined();
+		const state = loadHarnessState(localDir, "local");
+		seedMemory(state, "alpha_relevant", "Alpha second turn note", "Mentions second turns.");
+		seedMemory(state, "middle_plain", "Middle plain note", "Neutral material about tea varieties.");
+		seedMemory(state, "zeta_relevant", "Zeta hello note", "Greets with hello.");
+		saveHarnessState(localDir!, state);
+
+		harness.setResponses([fauxAssistantMessage("ack"), fauxAssistantMessage("ack")]);
+		await harness.session.prompt("hello");
+		await harness.session.prompt("second turn with different wording");
+		const before = digestMessages(harness);
+		expect(before).toHaveLength(1);
+		const digestTextBefore = getMessageText(before[0]);
+		expect(digestTextBefore).toContain("[local:alpha_relevant]");
+		const sessionFile = harness.sessionManager.getSessionFile();
+		expect(sessionFile).toBeDefined();
+		harness.session.dispose();
+
+		const resumed = await createHarness({ existingSessionFile: sessionFile });
+		harnesses.push(resumed);
+		const after = digestMessages(resumed);
+		// Unchanged state: exactly one digest, byte-identical, no re-delivery.
+		expect(after).toHaveLength(1);
+		expect(getMessageText(after[0])).toBe(digestTextBefore);
+
+		// Prove the skip was fingerprint-based, not string-based: the fresh
+		// render really did drift with the new last-4 messages.
+		const freshDigest = (resumed.session as unknown as { _harnessDigest(): string })._harnessDigest();
+		expect(HARNESS_DIGEST_PREFIX + freshDigest + HARNESS_DIGEST_SUFFIX).not.toBe(getMessageText(after[0]));
+	});
+
+	it("keeps the digest byte-identical when a refinement notice is appended", async () => {
+		isolatedAgentDir("pi-digest-refine");
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		const localDir = getLocalHarnessStateDir(harness.sessionManager.getSessionArtifactDir());
+		expect(localDir).toBeDefined();
+		const state = loadHarnessState(localDir, "local");
+		seedMemory(state, "notice_base_memory", "Notice base memory", "Baseline material.");
+		saveHarnessState(localDir!, state);
+
+		harness.setResponses([fauxAssistantMessage("ok")]);
+		await harness.session.prompt("hello");
+		const digestBefore = digestMessages(harness);
+		expect(digestBefore).toHaveLength(1);
+		const digestTextBefore = getMessageText(digestBefore[0]);
+
+		// Stub only the planner; the apply phase runs for real and appends the
+		// durable refinement notice at the end of the context.
+		const internals = harness.session as unknown as {
+			_planRefine(options: unknown, signal: AbortSignal): Promise<unknown>;
+		};
+		vi.spyOn(internals, "_planRefine").mockResolvedValue({
+			id: "refine_notice_freeze",
+			proposal: {
+				summary: "Add a notice-applied memory",
+				rationale: "Cache stability proof",
+				expectedOutcome: "Digest stays byte-identical.",
+				edits: [
+					{
+						action: "create",
+						kind: "memory",
+						title: "Notice applied memory",
+						content: "Written by the refinement.",
+						path: "general",
+					},
+				],
+			},
+		});
+		await harness.session.refine({});
+
+		// The digest in context is untouched: the notice carries the change.
+		const digestsAfter = digestMessages(harness);
+		expect(digestsAfter).toHaveLength(1);
+		expect(digestsAfter[0]).toBe(digestBefore[0]);
+		expect(getMessageText(digestsAfter[0])).toBe(digestTextBefore);
+
+		const notice = harness.session.messages.at(-1);
+		expect(notice).toMatchObject({ role: "custom", customType: REFINEMENT_NOTICE_CUSTOM_TYPE });
+		expect(harness.session.messages.indexOf(digestsAfter[0])).toBeLessThan(harness.session.messages.length - 1);
+		// The notice reaches the model as a user message after the digest.
+		const noticeLlm = convertToLlm([notice!]);
+		expect(noticeLlm).toHaveLength(1);
+		expect(noticeLlm[0]?.role).toBe("user");
+	});
+
+	it("delivers byte-identical digests to child spawns with identical harness state", async () => {
+		const agentDir = isolatedAgentDir("pi-digest-spawn");
+		// Children inherit the global store: seven memories exercise the visible
+		// window (6) plus the overflow header in each child's digest.
+		const globalState = loadHarnessState(getGlobalHarnessStateDir(agentDir), "global");
+		for (let i = 1; i <= 7; i += 1) {
+			const id = `spawn_memory_${String(i).padStart(2, "0")}`;
+			seedMemory(globalState, id, `Spawn memory ${i}`, `Spawn digest byte-stability material ${i}.`, "global");
+		}
+		saveHarnessState(getGlobalHarnessStateDir(agentDir), globalState);
+
+		const harness = await createHarness({ persistSession: true, rlmDepth: 0, rlmMaxDepth: 2 });
+		harnesses.push(harness);
+		const childContexts: { messages: { role: string }[] }[] = [];
+		harness.setResponses([
+			(context) => {
+				childContexts.push(context);
+				return fauxAssistantMessage("child one done");
+			},
+			(context) => {
+				childContexts.push(context);
+				return fauxAssistantMessage("child two done");
+			},
+		]);
+
+		const first = await harness.session.runRlmChild("first task: analyze the alpha shard", {
+			name: "spawn_digest_one",
+		});
+		const second = await harness.session.runRlmChild("second task: verify the bravo shard", {
+			name: "spawn_digest_two",
+		});
+		expect(first.rlm_child_id).not.toBe(second.rlm_child_id);
+		await vi.waitFor(() => expect(childContexts.length).toBeGreaterThanOrEqual(2), { timeout: 10_000 });
+
+		// Each child context opens with the digest, ahead of its task prompt.
+		const digestTexts = childContexts.map((context) => getMessageText(context.messages[0]));
+		expect(digestTexts).toHaveLength(2);
+		for (const digestText of digestTexts) {
+			expect(digestText).toContain("[harness-digest]");
+			// The visible window holds the first six entries; the seventh is overflow.
+			expect(digestText).toContain("Spawn memory 6");
+			expect(digestText).not.toContain("Spawn memory 7");
+			expect(digestText).toContain("+1 more memory entries");
+		}
+		// Identical harness state renders byte-identical digests across spawns,
+		// so the shared prefix stays cacheable.
+		expect(digestTexts[1]).toBe(digestTexts[0]);
+		expect(getMessageText(childContexts[0].messages[1])).toContain("first task");
+		expect(getMessageText(childContexts[1].messages[1])).toContain("second task");
+	}, 30_000);
 });

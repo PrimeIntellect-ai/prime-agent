@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
@@ -19,6 +20,12 @@ const REFINEMENT_HISTORY_FILE_NAME = "refinements.jsonl";
 const DEFAULT_OVERVIEW_ENTRY_LIMIT = 6;
 const DEFAULT_OVERVIEW_REFINEMENT_LIMIT = 5;
 const DEFAULT_OVERVIEW_CONTENT_LIMIT = 180;
+
+/**
+ * Bump when the fingerprinted material or its canonical serialization changes,
+ * so fingerprints minted under older schemes never compare equal to new ones.
+ */
+const HARNESS_DIGEST_FINGERPRINT_VERSION = 1;
 
 export type RefinementKind = "prompt" | "memory" | "skill" | "subagent";
 export type RefinementAction = "create" | "update" | "delete";
@@ -542,9 +549,10 @@ export function scoreHarnessEntryForQuery(entry: HarnessEntry, terms: HarnessQue
 function compareRankedHarnessEntries(a: HarnessEntry, b: HarnessEntry, terms: HarnessQueryTerms): number {
 	const scoreDifference = scoreHarnessEntryForQuery(b, terms) - scoreHarnessEntryForQuery(a, terms);
 	if (scoreDifference !== 0) return scoreDifference;
-	// Recency breaks ties; alphabetical order keeps selection deterministic.
-	const recencyDifference = (Date.parse(b.updated_at) || 0) - (Date.parse(a.updated_at) || 0);
-	if (recencyDifference !== 0) return recencyDifference;
+	// Equal scores tie on stable identifier order only. An `updated_at` recency
+	// tiebreak would reshuffle equal-score siblings whenever any unrelated entry
+	// is touched, flipping which entries reach the visible window and busting
+	// the provider prefix cache for the digest delivered at the next boundary.
 	return [a.path, a.title, a.id].join("\0").localeCompare([b.path, b.title, b.id].join("\0"));
 }
 
@@ -648,6 +656,56 @@ export function formatHarnessStateForPrompt(
 	}
 
 	return lines.join("\n").trim();
+}
+
+/**
+ * Stable fingerprint of the harness material a digest renders. Equal states
+ * (per the fields the digest actually prints) produce equal fingerprints, so
+ * cold boundaries can skip digest re-delivery with a state comparison instead
+ * of a rendered-text comparison that query-term relevance keeps invalidating.
+ *
+ * Covered: entry identity and content plus the three render flags and each
+ * refinement's printed fields. Excluded: `metadata`, `source`, and the
+ * invisible `created_at`/`updated_at` bookkeeping, and relevance query terms
+ * (the digest stays frozen per delivery; see `compareRankedHarnessEntries`).
+ */
+export function harnessDigestFingerprint(
+	state: HarnessState,
+	renderFlags: {
+		includeIpythonExamples: boolean;
+		includeShellExamples: boolean;
+		includeRefineExamples: boolean;
+	},
+): string {
+	const entries = (Object.keys(state.entries) as RefinementKind[])
+		.flatMap((kind) => Object.values(state.entries[kind]))
+		.map((entry) => ({
+			scope: entry.scope ?? "global",
+			kind: entry.kind,
+			id: entry.id,
+			title: entry.title,
+			path: entry.path,
+			version: entry.version,
+			content: entry.content,
+			reference: entry.reference,
+			arguments: entry.arguments,
+		}))
+		.sort((a, b) => [a.scope, a.kind, a.id].join("\0").localeCompare([b.scope, b.kind, b.id].join("\0")));
+	const refinements = [...state.refinements]
+		.sort((a, b) => a.id.localeCompare(b.id))
+		.map((event) => ({
+			id: event.id,
+			trigger: event.trigger,
+			changes: event.changes,
+			outcome: event.outcome,
+		}));
+	const material = JSON.stringify({
+		version: HARNESS_DIGEST_FINGERPRINT_VERSION,
+		renderFlags,
+		entries,
+		refinements,
+	});
+	return createHash("sha256").update(material).digest("hex");
 }
 
 function overviewForPrompt(state: HarnessState): string {

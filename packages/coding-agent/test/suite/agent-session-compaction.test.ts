@@ -1,4 +1,6 @@
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentMessage, ShouldStopAfterTurnContext } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
@@ -9,7 +11,7 @@ import {
 	type Usage,
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../../src/config.js";
 import type { AgentSession } from "../../src/core/agent-session.js";
 import type { ExtensionFactory } from "../../src/core/extensions/types.js";
@@ -160,6 +162,7 @@ function setStreaming(harness: Harness, streaming: boolean): void {
 
 describe("AgentSession compaction", () => {
 	const harnesses: Harness[] = [];
+	const tempDirs: string[] = [];
 
 	beforeEach(() => {
 		vi.useRealTimers();
@@ -171,6 +174,10 @@ describe("AgentSession compaction", () => {
 		vi.unstubAllEnvs();
 		while (harnesses.length > 0) {
 			harnesses.pop()?.cleanup();
+		}
+		while (tempDirs.length > 0) {
+			const dir = tempDirs.pop();
+			if (dir) rmSync(dir, { recursive: true, force: true });
 		}
 	});
 
@@ -269,6 +276,17 @@ describe("AgentSession compaction", () => {
 	});
 
 	it("prepends the harness digest to the compaction head message on initial and update-merge compactions", async () => {
+		// Hermetic global store: the ambient developer harness would crowd the
+		// ranked digest window and hide the local fixture entry.
+		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
+		const agentDir = join(tmpdir(), `pi-compaction-digest-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(agentDir, { recursive: true });
+		tempDirs.push(agentDir);
+		process.env.PRIME_AGENT_CODING_AGENT_DIR = agentDir;
+		onTestFinished(() => {
+			if (previousAgentDir === undefined) delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+			else process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+		});
 		const harness = await createHarness({
 			settings: { compaction: { keepRecentTokens: 1 } },
 			persistSession: true,

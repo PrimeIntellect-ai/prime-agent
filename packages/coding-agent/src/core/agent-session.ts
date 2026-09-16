@@ -234,6 +234,7 @@ import {
 	getRefinementHistory,
 	type HarnessQueryTerms,
 	type HarnessState,
+	harnessDigestFingerprint,
 	harnessQueryTerms,
 	inferRefinementResultScope,
 	loadGlobalRefinementHistory,
@@ -6897,9 +6898,13 @@ export class AgentSession {
 						// The first-turn digest rides the turn's delivery records so a
 						// cancelled first turn strips it with the rest of the turn.
 						this._harnessDigestPending = false;
-						const digest = this._harnessDigest();
-						if (this._latestContextHarnessDigest() !== digest) {
-							nextTurnMessages = [createHarnessDigestMessage(digest), ...nextTurnMessages];
+						const { digest, stateFingerprint } = this._harnessDigestWithFingerprint();
+						const latest = this._latestContextHarnessDigestDetails();
+						if (!latest || !this._harnessDigestIsFresh(latest, digest, stateFingerprint)) {
+							nextTurnMessages = [
+								createHarnessDigestMessage(digest, Date.now(), stateFingerprint),
+								...nextTurnMessages,
+							];
 						}
 					}
 					const contextRecords = nextTurnMessages.map((message) =>
@@ -8546,6 +8551,8 @@ export class AgentSession {
 			}
 			this._semanticEdges.finishCompaction(semanticCompaction.compactionId, "completed");
 			// Attached mechanically; the digest never flows through the summarizer LLM.
+			const { digest: harnessDigest, stateFingerprint: harnessStateFingerprint } =
+				this._harnessDigestWithFingerprint();
 			this.sessionManager.appendCompaction(
 				summary,
 				firstKeptEntryId,
@@ -8554,7 +8561,8 @@ export class AgentSession {
 				fromExtension,
 				customInstructions,
 				usage,
-				this._harnessDigest(),
+				harnessDigest,
+				harnessStateFingerprint,
 			);
 		} catch (error) {
 			compactionSettled = true;
@@ -9091,18 +9099,58 @@ export class AgentSession {
 		);
 	}
 
-	/** The compact harness digest delivered at cold context boundaries (session start, resume, compaction head). */
-	private _harnessDigest(): string {
+	/**
+	 * Harness digest material loaded exactly once per digest build: the merged
+	 * state plus the render options (including the current query terms).
+	 */
+	private _harnessDigestMaterial(): {
+		state: HarnessState;
+		options: {
+			includeIpythonExamples: boolean;
+			includeShellExamples: boolean;
+			includeRefineExamples: boolean;
+			queryTerms: HarnessQueryTerms;
+		};
+	} {
 		const tools = this.getActiveToolNames();
 		const hasIpython = tools.includes("ipython");
 		const visibleSkills = this._modelVisibleSkills().filter((skill) => !skill.disableModelInvocation);
 		const hasRefineSkill = visibleSkills.some((skill) => skill.name === REFINE_SKILL_NAME);
-		return formatHarnessStateForPrompt(this._loadMergedHarnessState(), {
-			includeIpythonExamples: hasIpython,
-			includeShellExamples: tools.includes("bash"),
-			includeRefineExamples: hasIpython && hasRefineSkill,
-			queryTerms: this._buildHarnessDigestQueryTerms(),
-		});
+		return {
+			state: this._loadMergedHarnessState(),
+			options: {
+				includeIpythonExamples: hasIpython,
+				includeShellExamples: tools.includes("bash"),
+				includeRefineExamples: hasIpython && hasRefineSkill,
+				queryTerms: this._buildHarnessDigestQueryTerms(),
+			},
+		};
+	}
+
+	/**
+	 * The compact harness digest delivered at cold context boundaries (session
+	 * start, resume, compaction head). Kept as the single-material wrapper for
+	 * tests that characterize the digest via internals.
+	 */
+	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: exercised by tests through internals casts
+	private _harnessDigest(): string {
+		const { state, options } = this._harnessDigestMaterial();
+		return formatHarnessStateForPrompt(state, options);
+	}
+
+	/**
+	 * Digest plus the fingerprint of the state that produced it. Cold boundaries
+	 * compare fingerprints instead of rendered text: relevance query terms
+	 * change per turn, so a rendered-text comparison re-delivers an unchanged
+	 * digest (and busts the provider prefix cache) at every boundary.
+	 */
+	private _harnessDigestWithFingerprint(): { digest: string; stateFingerprint: string } {
+		const { state, options } = this._harnessDigestMaterial();
+		const { queryTerms: _queryTerms, ...renderFlags } = options;
+		return {
+			digest: formatHarnessStateForPrompt(state, options),
+			stateFingerprint: harnessDigestFingerprint(state, renderFlags),
+		};
 	}
 
 	/**
@@ -9155,9 +9203,10 @@ export class AgentSession {
 	}
 
 	private _appendHarnessDigestIfStale(): void {
-		const digest = this._harnessDigest();
-		if (this._latestContextHarnessDigest() === digest) return;
-		const message = createHarnessDigestMessage(digest);
+		const { digest, stateFingerprint } = this._harnessDigestWithFingerprint();
+		const latest = this._latestContextHarnessDigestDetails();
+		if (latest && this._harnessDigestIsFresh(latest, digest, stateFingerprint)) return;
+		const message = createHarnessDigestMessage(digest, Date.now(), stateFingerprint);
 		try {
 			this.sessionManager.appendCustomMessageEntryWithRollback(
 				message.customType,
@@ -9171,23 +9220,56 @@ export class AgentSession {
 		this.agent.state.messages.push(message);
 	}
 
-	private _latestContextHarnessDigest(): string | undefined {
+	/**
+	 * Whether the newest in-context digest already reflects the current harness
+	 * state. The fingerprint decides; legacy digests persisted before
+	 * fingerprints existed fall back to a rendered-text comparison.
+	 */
+	private _harnessDigestIsFresh(
+		latest: { digest: string; stateFingerprint?: string },
+		freshDigest: string,
+		freshFingerprint: string,
+	): boolean {
+		return latest.stateFingerprint !== undefined
+			? latest.stateFingerprint === freshFingerprint
+			: latest.digest === freshDigest;
+	}
+
+	private _latestContextHarnessDigestDetails():
+		| { timestamp: number; digest: string; stateFingerprint?: string }
+		| undefined {
 		// Retained pre-compaction messages follow the compaction head, so recency is by timestamp, not position.
-		let latest: { timestamp: number; digest: string } | undefined;
+		let latest: { timestamp: number; digest: string; stateFingerprint?: string } | undefined;
 		for (const message of this.agent.state.messages) {
-			let digest: string | undefined;
 			if (message.role === "custom" && message.customType === HARNESS_DIGEST_CUSTOM_TYPE) {
-				digest = (message.details as HarnessDigestDetails | undefined)?.digest;
+				const details = message.details as HarnessDigestDetails | undefined;
+				if (details?.digest !== undefined && (!latest || message.timestamp >= latest.timestamp)) {
+					latest = {
+						timestamp: message.timestamp,
+						digest: details.digest,
+						stateFingerprint: details.stateFingerprint,
+					};
+				}
 			} else if (message.role === "compactionSummary") {
-				digest = message.harnessDigest;
-			} else {
-				continue;
-			}
-			if (digest !== undefined && (!latest || message.timestamp >= latest.timestamp)) {
-				latest = { timestamp: message.timestamp, digest };
+				if (message.harnessDigest !== undefined && (!latest || message.timestamp >= latest.timestamp)) {
+					latest = {
+						timestamp: message.timestamp,
+						digest: message.harnessDigest,
+						stateFingerprint: message.harnessStateFingerprint,
+					};
+				}
 			}
 		}
-		return latest?.digest;
+		return latest;
+	}
+
+	/**
+	 * Newest in-context digest text. Kept for tests that characterize the
+	 * newest-digest preference via internals casts.
+	 */
+	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: exercised by tests through internals casts
+	private _latestContextHarnessDigest(): string | undefined {
+		return this._latestContextHarnessDigestDetails()?.digest;
 	}
 
 	/** Global harness state overlaid with this session's local state, when persisted. */
