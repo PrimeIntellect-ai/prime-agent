@@ -1026,6 +1026,7 @@ describe("AgentsViewMode catalog performance", () => {
 			resolveMissingSelectionAnchor: vi.fn(),
 			refreshHeartbeats: vi.fn(async () => true),
 			loadStartupNotices: vi.fn(),
+			refreshIncidentNotices: vi.fn(),
 			rebuildRows: vi.fn(),
 			clearCtrlCExitHint: vi.fn(),
 			clearDeleteConfirmation: vi.fn(),
