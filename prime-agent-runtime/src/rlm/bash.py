@@ -3533,7 +3533,9 @@ def _find_recursive_force_rm_invocations(command: str) -> list[list[str]]:
 def is_recursive_force_rm_command(command: str) -> bool:
     """True when `command` contains an rm invocation combining recursive and
     force flags (`rm -rf x`, `-fr`, `-Rf`, `--recursive --force`), regardless
-    of its operands."""
+    of its operands. Here-document bodies are masked consumer-agnostically in
+    this helper, so rm text inside them goes undetected; guard decisions use
+    the runner-aware scan path instead."""
     return bool(_find_recursive_force_rm_invocations(command))
 
 
@@ -4480,36 +4482,52 @@ def _guard_destructive_rm(command: str, allow_destructive_rm: bool) -> None:
         # commands: scan that text against the interpreter's tracked state.
         for feed_text, interp_index in _stdin_shell_feed_texts(prepared, words):
             for variant in (feed_text, _interpret_shell_escapes(feed_text)):
-                feed_prepared = _mask_shell_redirections(variant)
-                feed_words = _scan_shell_words(feed_prepared)
-                if _wrapped_payloads_hide_recursive_force_rm(
-                    feed_prepared, words=feed_words
-                ):
-                    raise DestructiveRmRefusalError(_format_rm_wrapper_refusal())
-                feed_invocations = _find_rf_rm_invocations_in_words(feed_words)
-                if feed_invocations:
-                    for start in tracked_at[interp_index]:
-                        feed_tracked_at = _tracked_cwd_at_words(
-                            feed_prepared,
-                            feed_words,
-                            start,
-                            home_untrackable=reassigns_home,
-                            pwd_untrackable=reassigns_pwd,
-                            cdpath_untrackable=cdpath_untrackable,
-                        )
-                        reasons.extend(
-                            _rm_invocation_reasons(
+                # A fed text can itself wrap commands in heredocs; split it
+                # with the runner-aware scanner before masking, so the
+                # blanket redirection masking cannot blank an interpreter-fed
+                # body here (the blanked outer still masks > redirects).
+                feed_stack = [variant]
+                while feed_stack:
+                    text = feed_stack.pop()
+                    variant_outer, inner_texts = _rm_guard_scan_texts(text)
+                    feed_stack.extend(inner_texts)
+                    feed_prepared = _mask_shell_redirections(variant_outer)
+                    feed_words = _scan_shell_words(feed_prepared)
+                    if _wrapped_payloads_hide_recursive_force_rm(
+                        feed_prepared, words=feed_words
+                    ):
+                        raise DestructiveRmRefusalError(_format_rm_wrapper_refusal())
+                    feed_invocations = _find_rf_rm_invocations_in_words(feed_words)
+                    if feed_invocations:
+                        for start in tracked_at[interp_index]:
+                            feed_tracked_at = _tracked_cwd_at_words(
+                                feed_prepared,
                                 feed_words,
-                                feed_invocations,
-                                workspace_root,
-                                feed_tracked_at,
-                                reassigns_home,
-                                reassigns_pwd,
+                                start,
+                                home_untrackable=reassigns_home,
+                                pwd_untrackable=reassigns_pwd,
+                                cdpath_untrackable=cdpath_untrackable,
                             )
-                        )
-                reasons.extend(_unresolvable_expansion_rm_reasons(feed_words))
+                            reasons.extend(
+                                _rm_invocation_reasons(
+                                    feed_words,
+                                    feed_invocations,
+                                    workspace_root,
+                                    feed_tracked_at,
+                                    reassigns_home,
+                                    reassigns_pwd,
+                                )
+                            )
+                    reasons.extend(_unresolvable_expansion_rm_reasons(feed_words))
     # ---- body passes ----
-    for body_text in body_texts:
+    # A body can itself wrap commands in heredocs; split it with the
+    # runner-aware scanner before masking, so the blanket redirection
+    # masking cannot blank an interpreter-fed body here either (the blanked
+    # outer still masks > redirects). Data bodies never come back from the
+    # splitter, so consumer-aware silencing survives.
+    scan_queue = list(body_texts)
+    while scan_queue:
+        body_text = scan_queue.pop()
         if "$(" in body_text or "`" in body_text:
             # An unquoted heredoc body is expanded before the consuming
             # interpreter sees it, and the child executes the substitution
@@ -4519,7 +4537,9 @@ def _guard_destructive_rm(command: str, allow_destructive_rm: bool) -> None:
                 " output the consuming shell executes and the guard cannot"
                 " check statically"
             )
-        body_prepared = _mask_shell_redirections(body_text)
+        body_outer, inner_body_texts = _rm_guard_scan_texts(body_text)
+        scan_queue.extend(inner_body_texts)
+        body_prepared = _mask_shell_redirections(body_outer)
         body_words = _scan_shell_words(body_prepared)
         if _wrapped_payloads_hide_recursive_force_rm(body_prepared, words=body_words):
             raise DestructiveRmRefusalError(_format_rm_wrapper_refusal())

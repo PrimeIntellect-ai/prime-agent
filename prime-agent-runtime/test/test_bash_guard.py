@@ -2058,6 +2058,45 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
             bash("rm -rf -- ..")
         self.assertTrue(self._tracked("sub", "nested", "file.txt").exists())
 
+    async def test_refuses_nested_heredoc_bodies_reaching_runners(self):
+        # Rebase regression: a runner-reachable body can itself wrap an
+        # interpreter-fed heredoc; blanking that inner body in the body pass
+        # would hide its rm. The guard must split each body again with the
+        # runner-aware scanner instead of masking it wholesale.
+        self._make_tree()
+        outside = self._outside_target()
+        command = "sh <<'OUTER'\nsh <<INNER\nrm -rf " + outside + "\nINNER\nOUTER"
+        with self.assertRaises(DestructiveRmRefusalError):
+            bash(command)
+        self.assertTrue(Path(outside, "file.txt").exists())
+        # The same nesting with data consumers stays data end to end: cat
+        # prints the rm line instead of running it.
+        result = await bash(
+            "cat <<'OUTER'\ncat <<INNER\nrm -rf /printed-not-run\nINNER\nOUTER"
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("rm -rf /printed-not-run", result.output)
+
+    async def test_refuses_heredoc_wrapped_text_fed_to_stdin_shells(self):
+        # Rebase regression: a producer whose output wraps rm in an
+        # interpreter-fed heredoc still reaches a stdin shell as commands,
+        # whether the payload carries literal newlines or printf escapes.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "printf 'sh <<EOF\nrm -rf " + outside + "\nEOF' | sh",
+            "printf 'sh <<EOF\\nrm -rf " + outside + "\\nEOF' | sh",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # A data consumer in the fed text stays data: the fed script runs
+        # `cat <<EOF`, which prints the rm line instead of executing it.
+        result = await bash("printf 'cat <<EOF\nrm -rf /printed-not-run\nEOF' | sh")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("rm -rf /printed-not-run", result.output)
+
 
 if __name__ == "__main__":
     unittest.main()
