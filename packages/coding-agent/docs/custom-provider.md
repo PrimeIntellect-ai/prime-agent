@@ -330,7 +330,7 @@ interface OAuthLoginCallbacks {
 
 ### OAuthCredentials
 
-Credentials are persisted in `~/.preme-agent/auth.json`:
+Credentials are persisted in `~/.supreme/agent/auth.json`:
 
 ```typescript
 interface OAuthCredentials {

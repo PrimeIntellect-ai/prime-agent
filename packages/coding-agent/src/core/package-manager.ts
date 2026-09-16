@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, type ChildProcessByStdio, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -23,16 +23,12 @@ function getEnv(): NodeJS.ProcessEnv {
 }
 
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import type { Readable } from "node:stream";
 import { globSync } from "glob";
 import ignore from "ignore";
 import { minimatch } from "minimatch";
 import { CONFIG_DIR_NAME, getBundledSkillsDir } from "../config.js";
-import {
-	shouldUseWindowsShell,
-	spawnHidden,
-	spawnSyncHidden,
-	WINDOWS_HIDDEN_PROCESS_OPTIONS,
-} from "../utils/child-process.js";
+import { shouldUseWindowsShell, WINDOWS_HIDDEN_PROCESS_OPTIONS } from "../utils/child-process.js";
 import { type GitSource, parseGitUrl } from "../utils/git.js";
 import { canonicalizePath, isLocalPath } from "../utils/paths.js";
 import type { ResourceDiagnostic } from "./diagnostics.js";
@@ -180,7 +176,7 @@ interface ResourceAccumulator {
  *   2  user + settings entry (source: "local", scope: "user")
  *   3  user + auto-discovered (source: "auto", scope: "user")
  *   4  package resource (origin: "package")
- *   5  built-in resource shipped with preme-agent (source: "builtin")
+ *   5  built-in resource shipped with prime-agent (source: "builtin")
  */
 function resourcePrecedenceRank(m: PathMetadata): number {
 	if (m.source === "builtin") return 5;
@@ -2364,12 +2360,13 @@ export class DefaultPackageManager implements PackageManager {
 		command: string,
 		args: string[],
 		options?: { cwd?: string; env?: Record<string, string> },
-	): ChildProcess {
+	): ChildProcessByStdio<null, Readable, Readable> {
 		const baseEnv = getEnv();
-		return spawnHidden(command, args, {
+		return spawn(command, args, {
 			cwd: options?.cwd,
 			stdio: ["ignore", "pipe", "pipe"],
 			shell: shouldUseWindowsShell(command),
+			...WINDOWS_HIDDEN_PROCESS_OPTIONS,
 			env: options?.env ? { ...baseEnv, ...options.env } : baseEnv,
 		});
 	}
@@ -2433,10 +2430,11 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private runCommandSync(command: string, args: string[]): string {
-		const result = spawnSyncHidden(command, args, {
+		const result = spawnSync(command, args, {
 			stdio: ["ignore", "pipe", "pipe"],
 			encoding: "utf-8",
 			shell: shouldUseWindowsShell(command),
+			...WINDOWS_HIDDEN_PROCESS_OPTIONS,
 			env: getEnv(),
 		});
 		if (result.error || result.status !== 0) {

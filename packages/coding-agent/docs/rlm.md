@@ -48,22 +48,11 @@ result = await bash("npm run check")
 print(result.output)
 ```
 
-For a long command, keep the live handle and let the turn end instead of blocking:
-
-```python
-checks = bash("npm test")
-checks.pid
-```
-
-When an unawaited handle's process group finishes, Preme Agent sends a "Background command finished" notice with its PID and foreground exit code. A busy agent receives it as steering at the next safe turn boundary, without interrupting a running tool. An idle agent resumes to handle it. `await handle` and `handle.poll()` still return the foreground result before shell background jobs finish. The kernel stays resident until the process group is reaped, including for handles awaited in their creating cell. The message asks the agent to inspect the saved handle with `poll()`, `output()`, or `tail()` and continue the task. `await bash(...)` stays synchronous from the agent's perspective and does not send a second notice.
-
-Reading the finished result withdraws the notice. Any read from a live cell counts -- `await handle`, `handle.poll()`, `handle.output()`, `handle.tail()` -- so a notice that is still queued is dropped and a notice that was not sent yet is never sent. Reads that no cell receives do not count: a detached watcher polling the handle between turns leaves the notice in place, because that notice is the only wake-up an idle session gets, and an `asyncio.as_completed` or `create_task` wrapper that resolves with no live cell waiting for it does not count either. A notice the agent already received is never retracted.
-
 Each `bash()` call is its own process, while Python state, `os.chdir(...)`, and `os.environ[...]` changes persist in the kernel and apply to later `bash()` calls. Preme Agent extensions may intentionally add custom tools, but the built-in RLM design does not require a separate model tool for every capability.
 
 ### 2. Subagents are native RLM calls
 
-The `rlm` object is preloaded in the kernel. Spawn a child with `rlm`, which requires a `name`:
+The callable `rlm` object is preloaded in the kernel. Spawn a child with a direct call:
 
 ```python
 handle = await rlm("Review the authentication flow for security issues", name="auth-reviewer")

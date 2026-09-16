@@ -4,7 +4,7 @@ Preme Agent saves conversations as sessions so you can continue work, branch fro
 
 ## Session Storage
 
-Sessions auto-save to `~/.preme-agent/sessions/`. Each session is a JSONL file with a tree structure.
+Sessions auto-save to `~/.supreme/agent/sessions/`. Each session is a JSONL file with a tree structure.
 
 ```bash
 preme-agent --continue          # Continue the most recent session

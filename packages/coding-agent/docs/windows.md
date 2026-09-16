@@ -13,7 +13,7 @@ In this fork, `preme-agent` is the primary CLI name. `prime-agent` and `pi` rema
 
 Preme Agent requires a bash-compatible shell on Windows. Checked locations, in order:
 
-1. Custom path from `~/.preme-agent/settings.json`
+1. Custom path from `~/.supreme/agent/settings.json`
 2. Git Bash (`C:\Program Files\Git\bin\bash.exe`)
 3. `bash.exe` on PATH (Cygwin, MSYS2, or WSL)
 

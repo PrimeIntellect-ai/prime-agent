@@ -70,7 +70,7 @@ preme-agent
 
 Then just talk to Preme Agent. By default, Preme Agent gives the model one tool: `ipython`. The model uses the persistent kernel to read files, run commands, edit code, and inspect data. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [Preme Agent packages](#preme-agent-packages).
 
-The Python kernel runtime is set up automatically on first invocation. On Windows the managed venv uses `~/.preme-agent/kernel-venv/Scripts/python.exe`; on POSIX it uses `~/.preme-agent/kernel-venv/bin/python`. Set `PRIME_AGENT_KERNEL_PYTHON` only when you want to use an existing Python environment with `prime-agent-runtime`.
+The Python kernel runtime is set up automatically on first invocation. On Windows the managed venv uses `~/.supreme/agent/kernel-venv/Scripts/python.exe`; on POSIX it uses `~/.supreme/agent/kernel-venv/bin/python`. Set `PRIME_AGENT_KERNEL_PYTHON` only when you want to use an existing Python environment with `prime-agent-runtime`.
 
 In this fork, `supreme` and `preme-agent` are the primary CLI names. `preme-agent` and `pi` remain compatibility aliases.
 
@@ -84,9 +84,6 @@ For each built-in provider, Preme Agent maintains a list of tool-capable models,
 - Anthropic Claude Pro/Max
 - OpenAI ChatGPT Plus/Pro (Codex)
 - GitHub Copilot
-- xAI Grok (eligible subscriptions)
-
-Select the xAI subscription entry in `/login` to sign in. Model access depends on your xAI account entitlement. See [xAI setup](docs/providers.md#xai-grok).
 
 **API keys:**
 - Anthropic
@@ -117,11 +114,9 @@ Select the xAI subscription entry in `/login` to sign in. Model access depends o
 - Xiaomi MiMo Token Plan (Amsterdam)
 - Xiaomi MiMo Token Plan (Singapore)
 
-Prime Inference credentials and teams belong to Agent's `~/.prime/agent/auth.json`. Normal use ignores Prime CLI's `~/.prime/config.json`. If you previously relied on CLI credentials, run `/login` once: Agent can import a production-compatible CLI key after production validation, without changing CLI config. `PRIME_API_KEY` still overrides the saved Agent key.
-
 See [docs/providers.md](docs/providers.md) for detailed setup instructions.
 
-**Custom providers & models:** Add providers via `~/.preme-agent/models.json` if they speak a supported API (OpenAI, Anthropic, Google). For custom APIs or OAuth, use extensions. See [docs/models.md](docs/models.md) and [docs/custom-provider.md](docs/custom-provider.md).
+**Custom providers & models:** Add providers via `~/.supreme/agent/models.json` if they speak a supported API (OpenAI, Anthropic, Google). For custom APIs or OAuth, use extensions. See [docs/models.md](docs/models.md) and [docs/custom-provider.md](docs/custom-provider.md).
 
 ## Interactive Mode
 
@@ -157,7 +152,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/login`, `/logout` | OAuth authentication |
 | `/model` | Switch models |
 | `/effort` | Set reasoning/thinking level |
-| `/scoped-models` | Enable/disable models for Alt+M cycling |
+| `/scoped-models` | Enable/disable models for Ctrl+P cycling |
 | `/settings` | Thinking level, theme, message delivery, transport |
 | `/resume [id\|path]` | Open the agents view, or resume a session directly |
 | `/new`, `/clear` | Start a new session |
@@ -178,11 +173,9 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/changelog` | Display version history |
 | `/quit` | Quit Preme Agent |
 
-Trace uploads use environment or Agent-owned credentials, not live Prime CLI credentials. `/traces login` can reuse a CLI key only after production URL and scope validation. See [trace sharing credentials](docs/providers.md#trace-sharing-credentials).
-
 ### Keyboard Shortcuts
 
-See `/hotkeys` for the full list. Customize via `~/.preme-agent/keybindings.json`. See [docs/keybindings.md](docs/keybindings.md).
+See `/hotkeys` for the full list. Customize via `~/.supreme/agent/keybindings.json`. See [docs/keybindings.md](docs/keybindings.md).
 
 **Commonly used:**
 
@@ -193,8 +186,9 @@ See `/hotkeys` for the full list. Customize via `~/.preme-agent/keybindings.json
 | Escape | Clear the input without interrupting active work |
 | Escape twice | Open `/tree` |
 | Ctrl+L | Open model selector |
-| Alt+M / Shift+Alt+M | Cycle scoped models forward/backward |
-| Ctrl+O | Cycle overview → thinking and file diffs → all output |
+| Ctrl+P / Shift+Ctrl+P | Cycle scoped models forward/backward |
+| Ctrl+O | Collapse/expand tool output |
+| Ctrl+T | Collapse/expand thinking blocks |
 
 ### Message Queue
 
@@ -218,7 +212,7 @@ Sessions are stored as JSONL files with a tree structure. Each entry has an `id`
 
 ### Management
 
-Sessions auto-save as flat JSONL files under `~/.preme-agent/sessions/`. Each session header records its working directory, which the searchable session view uses to identify and open saved sessions.
+Sessions auto-save as flat JSONL files under `~/.supreme/agent/sessions/`. Each session header records its working directory, which the searchable session view uses to identify and open saved sessions.
 
 ```bash
 preme-agent -c                  # Continue most recent session
@@ -261,8 +255,8 @@ Use `/settings` to modify common options, or edit JSON files directly:
 
 | Location | Scope |
 |----------|-------|
-| `~/.preme-agent/settings.json` | Global (all projects) |
-| `.preme-agent/settings.json` | Project (overrides global) |
+| `~/.supreme/agent/settings.json` | Global (all projects) |
+| `.supreme/agent/settings.json` | Project (overrides global) |
 
 See [docs/settings.md](docs/settings.md) for all options.
 
@@ -275,7 +269,7 @@ Use `--offline` or `PI_OFFLINE=1` to disable startup network operations, includi
 ## Context Files
 
 Preme Agent loads `AGENTS.md` (or `CLAUDE.md`) at startup from:
-- `~/.preme-agent/AGENTS.md` (global)
+- `~/.supreme/agent/AGENTS.md` (global)
 - Parent directories (walking up from cwd)
 - Current directory
 
@@ -285,7 +279,7 @@ Disable context file loading with `--no-context-files` (or `-nc`).
 
 ### System Prompt
 
-Replace the default system prompt with `.preme-agent/SYSTEM.md` (project) or `~/.preme-agent/SYSTEM.md` (global). Append without replacing via `APPEND_SYSTEM.md`.
+Replace the default system prompt with `.supreme/agent/SYSTEM.md` (project) or `~/.supreme/agent/SYSTEM.md` (global). Append without replacing via `APPEND_SYSTEM.md`.
 
 ## Customization
 
@@ -294,19 +288,19 @@ Replace the default system prompt with `.preme-agent/SYSTEM.md` (project) or `~/
 Reusable prompts as Markdown files. Type `/name` to expand.
 
 ```markdown
-<!-- ~/.preme-agent/prompts/review.md -->
+<!-- ~/.supreme/agent/prompts/review.md -->
 Review this code for bugs, security issues, and performance problems.
 Focus on: {{focus}}
 ```
 
-Place in `~/.preme-agent/prompts/`, `.preme-agent/prompts/`, or a [Preme Agent package](#preme-agent-packages) to share with others. See [docs/prompt-templates.md](docs/prompt-templates.md).
+Place in `~/.supreme/agent/prompts/`, `.supreme/agent/prompts/`, or a [Preme Agent package](#preme-agent-packages) to share with others. See [docs/prompt-templates.md](docs/prompt-templates.md).
 
 ### Skills
 
 On-demand capability packages following the [Agent Skills standard](https://agentskills.io). At startup, Preme Agent gives the model each visible skill's name, type, description, and location. The full `SKILL.md` stays out of context until the model inspects it with `ipython` or you explicitly invoke `/skill:name`.
 
 ```markdown
-<!-- ~/.preme-agent/skills/my-skill/SKILL.md -->
+<!-- ~/.supreme/agent/skills/my-skill/SKILL.md -->
 ---
 name: my-skill
 description: Use this skill when the user asks about X.
@@ -321,7 +315,7 @@ description: Use this skill when the user asks about X.
 
 Skills can also be Python-backed. A Python skill is a normal skill directory with `SKILL.md` plus a Python package at `src/<import_name>/`. Preme Agent installs it into the persistent Python kernel and exposes it by import name, so the model can call it directly, inspect it with `help()`, or use any console scripts the skill declares.
 
-Place in `~/.preme-agent/skills/`, `~/.agents/skills/`, `.preme-agent/skills/`, or `.agents/skills/` (from `cwd` up through parent directories) or a [Preme Agent package](#preme-agent-packages) to share with others. See [docs/skills.md](docs/skills.md).
+Place in `~/.supreme/agent/skills/`, `~/.agents/skills/`, `.supreme/agent/skills/`, or `.agents/skills/` (from `cwd` up through parent directories) or a [Preme Agent package](#preme-agent-packages) to share with others. See [docs/skills.md](docs/skills.md).
 
 Preme Agent ships with a built-in `websearch` skill (Google search via the [Serper](https://serper.dev) API). It loads by default; run `/login`, switch to **MCP Connections**, and choose "Serper (web search)" to add your key. Disable it with `bundledSkills.websearch: false`, or override it with your own `websearch` skill in any location above. See [docs/skills.md#built-in-skills](docs/skills.md#built-in-skills).
 
@@ -343,12 +337,12 @@ Built-in integrations for Linear and Notion ship disabled. **Logging in enables 
 /mcp logout <name>   disconnect
 ```
 
-Credentials are stored once in `~/.preme-agent/auth.json` (under `mcp:<name>`); the kernel reads them directly and the host refreshes expired tokens. Enablement is derived from whether valid credentials exist, so there is no separate on/off switch.
+Credentials are stored once in `~/.supreme/agent/auth.json` (under `mcp:<name>`); the kernel reads them directly and the host refreshes expired tokens. Enablement is derived from whether valid credentials exist, so there is no separate on/off switch.
 
 **Add your own server.** Declare it under `mcpServers` in settings, then ship a tiny Python skill package that subclasses `McpIntegration`:
 
 ```jsonc
-// ~/.preme-agent/settings.json
+// ~/.supreme/agent/settings.json
 {
   "mcpServers": {
     "acme": { "type": "http", "url": "https://mcp.acme.com/mcp", "oauth": true }
@@ -357,7 +351,7 @@ Credentials are stored once in `~/.preme-agent/auth.json` (under `mcp:<name>`); 
 ```
 
 ```python
-# ~/.preme-agent/skills/acme/src/acme/__init__.py
+# ~/.supreme/agent/skills/acme/src/acme/__init__.py
 from rlm import McpIntegration
 
 class Acme(McpIntegration):
@@ -390,8 +384,6 @@ export default function (pi: ExtensionAPI) {
 
 The default export can also be `async`. Preme Agent waits for async extension factories before startup continues, which is useful for one-time initialization such as fetching remote model lists before calling `pi.registerProvider()`.
 
-Schedule timers via `ctx.setTimeout`/`ctx.setInterval` (error-isolated, auto-cancelled on unload); raw global timers are unsupported for scheduling extension work.
-
 **What's possible:**
 - Custom tools (or replace built-in tools entirely)
 - Additional orchestration workflows and plan modes
@@ -406,13 +398,13 @@ Schedule timers via `ctx.setTimeout`/`ctx.setInterval` (error-isolated, auto-can
 - Games while waiting (yes, Doom runs)
 - ...anything you can dream up
 
-Place in `~/.preme-agent/extensions/`, `.preme-agent/extensions/`, or a [Preme Agent package](#preme-agent-packages) to share with others. See [docs/extensions.md](docs/extensions.md) and [examples/extensions/](examples/extensions/).
+Place in `~/.supreme/agent/extensions/`, `.supreme/agent/extensions/`, or a [Preme Agent package](#preme-agent-packages) to share with others. See [docs/extensions.md](docs/extensions.md) and [examples/extensions/](examples/extensions/).
 
 ### Themes
 
 Built-in: `dark`, `light`. Themes hot-reload: modify the active theme file and Preme Agent immediately applies changes.
 
-Place in `~/.preme-agent/themes/`, `.preme-agent/themes/`, or a [Preme Agent package](#preme-agent-packages) to share with others. See [docs/themes.md](docs/themes.md).
+Place in `~/.supreme/agent/themes/`, `.supreme/agent/themes/`, or a [Preme Agent package](#preme-agent-packages) to share with others. See [docs/themes.md](docs/themes.md).
 
 ### Preme Agent Packages
 
@@ -437,7 +429,7 @@ preme-agent update --force                                  # reinstall Preme Ag
 preme-agent config                                          # enable/disable package resources
 ```
 
-Packages install to `~/.preme-agent/git/` (git) or global npm. Use `--local` for project-local installs (`.preme-agent/git/`, `.preme-agent/npm/`). Git packages install dependencies with `npm install --omit=dev` by default, so runtime deps must be listed under `dependencies`; when `npmCommand` is configured, git packages use plain `install` for compatibility with wrappers. If you use a Node version manager and want package installs to reuse a stable npm context, set `npmCommand` in `settings.json`, for example `["mise", "exec", "node@20", "--", "npm"]`.
+Packages install to `~/.supreme/agent/git/` (git) or global npm. Use `--local` for project-local installs (`.supreme/agent/git/`, `.supreme/agent/npm/`). Git packages install dependencies with `npm install --omit=dev` by default, so runtime deps must be listed under `dependencies`; when `npmCommand` is configured, git packages use plain `install` for compatibility with wrappers. If you use a Node version manager and want package installs to reuse a stable npm context, set `npmCommand` in `settings.json`, for example `["mise", "exec", "node@20", "--", "npm"]`.
 
 Create a package by adding the inherited `pi` manifest key to `package.json`:
 
@@ -568,7 +560,7 @@ cat README.md | preme-agent -p "Summarize this text"
 | `--model <pattern>` | Model pattern or ID (supports `provider/id` and optional `:<thinking>`) |
 | `--api-key <key>` | API key (overrides env vars) |
 | `--thinking <level>` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
-| `--models <patterns>` | Comma-separated patterns for Alt+M cycling |
+| `--models <patterns>` | Comma-separated patterns for Ctrl+P cycling |
 
 Use `preme-agent model list [search]` to list available models.
 
@@ -682,7 +674,7 @@ preme-agent --thinking high "Solve this complex problem"
 
 | Variable | Description |
 |----------|-------------|
-| `PRIME_AGENT_CODING_AGENT_DIR` | Override config directory (default: `~/.preme-agent`) |
+| `PRIME_AGENT_CODING_AGENT_DIR` | Override config directory (default: `~/.supreme/agent`) |
 | `PRIME_AGENT_SESSION_DIR` | Override session storage directory (overridden by `--session-dir`) |
 | `PRIME_AGENT_CODING_AGENT_SESSION_DIR` | Legacy alias for `PRIME_AGENT_SESSION_DIR` |
 | `PI_PACKAGE_DIR` | Override package directory (useful for Nix/Guix where store paths tokenize poorly) |
@@ -694,15 +686,12 @@ preme-agent --thinking high "Solve this complex problem"
 | `PRIME_AGENT_DOWNLOAD_BASE_URL` | Override the Preme Agent release manifest and tarball base URL |
 | `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache (Anthropic: 1h, OpenAI: 24h) |
 | `PRIME_API_KEY` | Prime Inference API key; also used for trace sharing if it has `agent_traces` scope |
-| `PRIME_TEAM_ID` | Override the Prime Inference team request header without changing the saved Agent team |
-| `PRIME_AGENT_INFERENCE_API_BASE_URL` | Override Agent authentication and team API URLs, not model inference URLs; defaults to production |
-| `PRIME_AGENT_INFERENCE_FRONTEND_URL` | Override the Agent login browser frontend; defaults to production |
 | `PRIME_AGENT_TRACES_API_KEY` | Prime API key used only for opt-in trace sharing |
 | `PRIME_AGENT_TRACES_BASE_URL` | Override the Preme Agent trace upload API base URL |
-| `PRIME_AGENT_KERNEL_PYTHON` | Use an existing Python environment with `prime-agent-runtime` instead of auto-bootstrapping `~/.preme-agent/kernel-venv` |
+| `PRIME_AGENT_KERNEL_PYTHON` | Use an existing Python environment with `prime-agent-runtime` instead of auto-bootstrapping `~/.supreme/agent/kernel-venv` |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
 
-The remaining `PI_*` variables in this table are compatibility names still read by the current runtime. They do not change the application name, command, or default `~/.preme-agent` configuration path.
+The remaining `PI_*` variables in this table are compatibility names still read by the current runtime. They do not change the application name, command, or default `~/.supreme/agent` configuration path.
 
 ## Contributing & Development
 

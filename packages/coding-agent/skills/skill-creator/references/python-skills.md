@@ -1,6 +1,6 @@
 # Python-Backed Skills
 
-A Python-backed skill is a regular markdown skill that also ships a Python package. Preme Agent installs the package editable into the kernel venv (`~/.preme-agent/kernel-venv` by default, `PRIME_AGENT_KERNEL_VENV` to override) and exposes it in the persistent Python kernel, so the agent can call it directly instead of shelling out.
+A Python-backed skill is a regular markdown skill that also ships a Python package. Preme Agent installs the package editable into the kernel venv (`~/.supreme/agent/kernel-venv` by default, `PRIME_AGENT_KERNEL_VENV` to override) and exposes it in the persistent Python kernel, so the agent can call it directly instead of shelling out.
 
 ## Detection Contract
 
@@ -119,7 +119,7 @@ Omit `[project.scripts]` when a CLI is not needed.
 - The install is editable and keyed on a hash of `pyproject.toml`: editing Python source takes effect on the next kernel start with no reinstall; editing `pyproject.toml` triggers a reinstall automatically.
 - If the user sets `PRIME_AGENT_KERNEL_PYTHON`, Preme Agent installs nothing — skills whose imports are missing there are disabled with a warning.
 
-A Python skill runs inside the agent's kernel, so it can itself spawn recursive sub-agents with `import rlm` and `await rlm.spawn("subtask", name="worker")` — useful for skills that delegate open-ended work.
+A Python skill runs inside the agent's kernel, so it can itself spawn recursive sub-agents with `import rlm` and `await rlm.run("subtask")` — useful for skills that delegate open-ended work.
 
 ## Verifying a Python Skill
 

@@ -338,23 +338,23 @@ const { session } = await createAgentSession({
   cwd: process.cwd(), // default
   
   // Global config directory
-  agentDir: "~/.preme-agent", // default (expands ~)
+  agentDir: "~/.supreme/agent", // default (expands ~)
 });
 ```
 
 `cwd` is used by `DefaultResourceLoader` for:
-- Project extensions (`.preme-agent/extensions/`)
+- Project extensions (`.supreme/agent/extensions/`)
 - Project skills:
-  - `.preme-agent/skills/`
+  - `.supreme/agent/skills/`
   - `.agents/skills/` in `cwd` and ancestor directories (up to git repo root, or filesystem root when not in a repo)
-- Project prompts (`.preme-agent/prompts/`)
+- Project prompts (`.supreme/agent/prompts/`)
 - Context files (`AGENTS.md` walking up from cwd)
 - Session storage resolution
 
 `agentDir` is used by `DefaultResourceLoader` for:
 - Global extensions (`extensions/`)
 - Global skills:
-  - `skills/` under `agentDir` (for example `~/.preme-agent/skills/`)
+  - `skills/` under `agentDir` (for example `~/.supreme/agent/skills/`)
   - `~/.agents/skills/`
 - Global prompts (`prompts/`)
 - Global context file (`AGENTS.md`)
@@ -389,7 +389,7 @@ const { session } = await createAgentSession({
   model: opus,
   thinkingLevel: "medium", // off, minimal, low, medium, high, xhigh, max
   
-  // Models for cycling (Alt+M in interactive mode)
+  // Models for cycling (Ctrl+P in interactive mode)
   scopedModels: [
     { model: opus, thinkingLevel: "high" },
     { model: haiku, thinkingLevel: "off" },
@@ -418,7 +418,7 @@ API key resolution priority (handled by AuthStorage):
 ```typescript
 import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
 
-// Default: uses ~/.preme-agent/auth.json and ~/.preme-agent/models.json
+// Default: uses ~/.supreme/agent/auth.json and ~/.supreme/agent/models.json
 const authStorage = AuthStorage.create();
 const modelRegistry = ModelRegistry.create(authStorage);
 
@@ -544,7 +544,7 @@ Custom tools passed via `customTools` are combined with extension-registered too
 
 ### Extensions
 
-Extensions are loaded by the `ResourceLoader`. `DefaultResourceLoader` discovers extensions from `~/.preme-agent/extensions/`, `.preme-agent/extensions/`, and `settings.json` extension sources.
+Extensions are loaded by the `ResourceLoader`. `DefaultResourceLoader` discovers extensions from `~/.supreme/agent/extensions/`, `.supreme/agent/extensions/`, and `settings.json` extension sources.
 
 ```typescript
 import { createAgentSession, DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
@@ -802,8 +802,8 @@ const { session } = await createAgentSession({
 **Project-specific settings:**
 
 Settings load from two locations and merge:
-1. Global: `~/.preme-agent/settings.json`
-2. Project: `<cwd>/.preme-agent/settings.json`
+1. Global: `~/.supreme/agent/settings.json`
+2. Project: `<cwd>/.supreme/agent/settings.json`
 
 Project overrides global. Nested objects merge keys. Setters modify global settings by default.
 

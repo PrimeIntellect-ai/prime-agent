@@ -39,7 +39,7 @@ Built-in integrations (Linear, Notion) ship **disabled**. Logging in enables the
 - `/mcp` lists integrations and connection status; `/mcp logout <name>`
   disconnects.
 
-Credentials are stored once in `~/.preme-agent/auth.json` under `mcp:<name>`.
+Credentials are stored once in `~/.supreme/agent/auth.json` under `mcp:<name>`.
 Enablement is derived from whether valid credentials exist — there is no separate
 on/off switch.
 
@@ -73,7 +73,7 @@ result = await linear.list_issues(team="Engineering")
 ## Generic MCP servers
 
 Manage generic servers from either the shell (which exits without starting an
-agent) or the TUI. Both surfaces update only `~/.preme-agent/settings.json`:
+agent) or the TUI. Both surfaces update only `~/.supreme/agent/settings.json`:
 
 ```bash
 preme-agent mcp add remote --url https://mcp.example.com/mcp --bearer-token-env-var EXAMPLE_TOKEN
@@ -86,7 +86,7 @@ preme-agent mcp remove remote
 Use the same forms after `/mcp` in the TUI. Add `--oauth` for the existing OAuth
 login flow and then use `/mcp login <name>`; use `--force` to replace a complete
 existing entry. Static secret values are not accepted: bearer and stdio secrets
-are environment-variable references. Project `.preme-agent/settings.json` MCP
+are environment-variable references. Project `.supreme/agent/settings.json` MCP
 entries are ignored for execution, so a repository cannot start a local process
 or shadow a user server.
 

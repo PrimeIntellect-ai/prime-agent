@@ -19,8 +19,8 @@ Themes are JSON files that define colors for the TUI.
 Preme Agent loads themes from:
 
 - Built-in: `dark`, `light`
-- Global: `~/.preme-agent/themes/*.json`
-- Project: `.preme-agent/themes/*.json`
+- Global: `~/.supreme/agent/themes/*.json`
+- Project: `.supreme/agent/themes/*.json`
 - Packages: `themes/` directories or `pi.themes` entries in `package.json`
 - Settings: `themes` array with files or directories
 - CLI: `--theme <path>` (repeatable)
@@ -44,8 +44,8 @@ On first run, Preme Agent detects your terminal background and defaults to `dark
 1. Create a theme file:
 
 ```bash
-mkdir -p ~/.preme-agent/themes
-vim ~/.preme-agent/themes/my-theme.json
+mkdir -p ~/.supreme/agent/themes
+vim ~/.supreme/agent/themes/my-theme.json
 ```
 
 2. Define the theme with all required colors (see [Color Tokens](#color-tokens)):
@@ -79,12 +79,9 @@ vim ~/.preme-agent/themes/my-theme.json
     "toolPendingBg": "#1e1e2e",
     "toolSuccessBg": "#1e2e1e",
     "toolErrorBg": "#2e1e1e",
-    "toolDiffAddedBg": "#0a2f0a",
-    "toolDiffRemovedBg": "#2f0a0a",
     "toolPanelBg": "#2d2d38",
     "toolTitle": "primary",
     "toolOutput": "",
-    "mdBody": "",
     "mdHeading": "#ffaa00",
     "mdLink": "primary",
     "mdLinkUrl": "secondary",
@@ -97,7 +94,6 @@ vim ~/.preme-agent/themes/my-theme.json
     "mdListBullet": "#00ffff",
     "toolDiffAdded": "#00ff00",
     "toolDiffRemoved": "#ff0000",
-    "toolDiffText": "secondary",
     "toolDiffContext": "secondary",
     "syntaxComment": "secondary",
     "syntaxKeyword": "primary",
@@ -144,13 +140,13 @@ vim ~/.preme-agent/themes/my-theme.json
 
 - `name` is required and must be unique.
 - `vars` is optional. Define reusable colors here, then reference them in `colors`.
-- `colors` must define all required tokens. `mdBody` is optional and defaults to `text`.
+- `colors` must define all 51 required tokens.
 
 The `$schema` field enables editor auto-completion and validation.
 
 ## Color Tokens
 
-Every theme must define the color tokens below except `mdBody`, which defaults to `text` when omitted.
+Every theme must define all 51 color tokens. There are no optional colors.
 
 ### Core UI (11 colors)
 
@@ -168,7 +164,7 @@ Every theme must define the color tokens below except `mdBody`, which defaults t
 | `text` | Default text (usually `""`) |
 | `thinkingText` | Thinking block text |
 
-### Backgrounds & Content (14 colors)
+### Backgrounds & Content (12 colors)
 
 | Token | Purpose |
 |-------|---------|
@@ -181,17 +177,14 @@ Every theme must define the color tokens below except `mdBody`, which defaults t
 | `toolPendingBg` | Tool box (pending) |
 | `toolSuccessBg` | Tool box (success) |
 | `toolErrorBg` | Tool box (error) |
-| `toolDiffAddedBg` | Added-line background in tool diffs |
-| `toolDiffRemovedBg` | Removed-line background in tool diffs |
 | `toolPanelBg` | Tool panel background |
 | `toolTitle` | Tool title |
 | `toolOutput` | Tool output text |
 
-### Markdown (11 colors)
+### Markdown (10 colors)
 
 | Token | Purpose |
 |-------|---------|
-| `mdBody` | Assistant output body text (optional; defaults to `text`) |
 | `mdHeading` | Headings |
 | `mdLink` | Link text |
 | `mdLinkUrl` | Link URL |
@@ -203,13 +196,12 @@ Every theme must define the color tokens below except `mdBody`, which defaults t
 | `mdHr` | Horizontal rule |
 | `mdListBullet` | List bullets |
 
-### Tool Diffs (4 colors)
+### Tool Diffs (3 colors)
 
 | Token | Purpose |
 |-------|---------|
 | `toolDiffAdded` | Added lines |
 | `toolDiffRemoved` | Removed lines |
-| `toolDiffText` | Text on added and removed diff backgrounds |
 | `toolDiffContext` | Context lines |
 
 ### Syntax Highlighting (9 colors)

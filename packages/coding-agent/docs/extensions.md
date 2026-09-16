@@ -4,7 +4,7 @@
 
 Extensions are TypeScript modules that extend Preme Agent's behavior. They can subscribe to lifecycle events, register custom tools callable by the LLM, add commands, and more.
 
-> **Placement for /reload:** Put extensions in `~/.preme-agent/extensions/` (global) or `.preme-agent/extensions/` (project-local) for auto-discovery. Use `preme-agent -e ./path.ts` only for quick tests. Extensions in auto-discovered locations can be hot-reloaded with `/reload`.
+> **Placement for /reload:** Put extensions in `~/.supreme/agent/extensions/` (global) or `.supreme/agent/extensions/` (project-local) for auto-discovery. Use `preme-agent -e ./path.ts` only for quick tests. Extensions in auto-discovered locations can be hot-reloaded with `/reload`.
 
 **Key capabilities:**
 - **Custom tools** - Register tools the LLM can call via `pi.registerTool()`
@@ -54,7 +54,7 @@ See [examples/extensions/](../examples/extensions/) for working implementations.
 
 ## Quick Start
 
-Create `~/.preme-agent/extensions/my-extension.ts`:
+Create `~/.supreme/agent/extensions/my-extension.ts`:
 
 ```typescript
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -113,10 +113,10 @@ Extensions are auto-discovered from:
 
 | Location | Scope |
 |----------|-------|
-| `~/.preme-agent/extensions/*.ts` | Global (all projects) |
-| `~/.preme-agent/extensions/*/index.ts` | Global (subdirectory) |
-| `.preme-agent/extensions/*.ts` | Project-local |
-| `.preme-agent/extensions/*/index.ts` | Project-local (subdirectory) |
+| `~/.supreme/agent/extensions/*.ts` | Global (all projects) |
+| `~/.supreme/agent/extensions/*/index.ts` | Global (subdirectory) |
+| `.supreme/agent/extensions/*.ts` | Project-local |
+| `.supreme/agent/extensions/*/index.ts` | Project-local (subdirectory) |
 
 Additional paths via `settings.json`:
 
@@ -221,14 +221,14 @@ This pattern makes the fetched models available during normal startup and to `pr
 **Single file** - simplest, for small extensions:
 
 ```
-~/.preme-agent/extensions/
+~/.supreme/agent/extensions/
 └── my-extension.ts
 ```
 
 **Directory with index.ts** - for multi-file extensions:
 
 ```
-~/.preme-agent/extensions/
+~/.supreme/agent/extensions/
 └── my-extension/
     ├── index.ts        # Entry point (exports default function)
     ├── tools.ts        # Helper module
@@ -238,7 +238,7 @@ This pattern makes the fetched models available during normal startup and to `pr
 **Package with dependencies** - for extensions that need npm packages:
 
 ```
-~/.preme-agent/extensions/
+~/.supreme/agent/extensions/
 └── my-extension/
     ├── package.json    # Declares dependencies and entry points
     ├── package-lock.json
@@ -327,7 +327,7 @@ user sends another prompt ◄─────────────────
   ├─► session_before_tree (can cancel or customize)
   └─► session_tree
 
-/model or Alt+M (model selection/cycling)
+/model or Ctrl+P (model selection/cycling)
   ├─► thinking_level_select (if model change changes/clamps thinking level)
   └─► model_select
 
@@ -669,7 +669,7 @@ Header availability depends on provider and transport. Providers that abstract H
 
 #### model_select
 
-Fired when the model changes via `/model` command, model cycling (`Alt+M`), or session restore.
+Fired when the model changes via `/model` command, model cycling (`Ctrl+P`), or session restore.
 
 ```typescript
 pi.on("model_select", async (event, ctx) => {
@@ -1002,20 +1002,6 @@ Returns Preme Agent's current system prompt string.
 pi.on("before_agent_start", (event, ctx) => {
   const prompt = ctx.getSystemPrompt();
   console.log(`System prompt length: ${prompt.length}`);
-});
-```
-
-### ctx.setTimeout() / ctx.setInterval()
-
-Host-owned timers for scheduling extension work. Unlike the raw globals, a throwing (or rejecting) callback is reported through the extension error boundary instead of crashing the process, and all pending timers are cancelled automatically when the extension host unloads (session dispose, reload, or replacement). Handles work with `ctx.clearTimeout()` / `ctx.clearInterval()`.
-
-Raw global `setTimeout`/`setInterval` are unsupported for scheduling extension work: an uncaught error in a global timer callback can kill the whole process (including daemon session workers), and nothing cancels them on unload.
-
-```typescript
-pi.on("session_start", (_event, ctx) => {
-  const timer = ctx.setInterval(() => pollSomething(), 2000);
-  // Optional: unload cancels it automatically, or clear it yourself:
-  // ctx.clearInterval(timer);
 });
 ```
 
@@ -2201,7 +2187,7 @@ For more control (e.g., to distinguish timeout from user cancel), use `AbortSign
 
 ```typescript
 const controller = new AbortController();
-const timeoutId = ctx.setTimeout(() => controller.abort(), 5000);
+const timeoutId = setTimeout(() => controller.abort(), 5000);
 
 const confirmed = await ctx.ui.confirm(
   "Timed Confirmation",
@@ -2209,7 +2195,7 @@ const confirmed = await ctx.ui.confirm(
   { signal: controller.signal }
 );
 
-ctx.clearTimeout(timeoutId);
+clearTimeout(timeoutId);
 
 if (confirmed) {
   // User confirmed

@@ -26,13 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/JonusNattapong/preme-agent/main/ins
 
 The installer keeps the checkout in `~/.preme-agent`, installs dependencies, and links the `preme-agent` command. Set `PREME_AGENT_SOURCE_DIR` to use a different location.
 
-On Windows PowerShell, use the native installer:
-
-```powershell
-irm https://raw.githubusercontent.com/JonusNattapong/preme-agent/main/install.ps1 | iex
-```
-
-The shell installer requires a POSIX-compatible shell such as Git Bash or WSL.
+On Windows PowerShell, use the source setup below. The shell installer requires a POSIX-compatible shell such as Git Bash or WSL.
 
 ## Requirements
 
@@ -120,25 +114,6 @@ preme-agent shutdown
 
 The source checkout exposes `preme-agent` when linked from `packages/coding-agent`. Compatibility aliases such as `prime-agent` and `pi` may remain in the source tree, but new integrations should use `preme-agent`.
 
-## Built for Long-Running Work
-
-Preme Agent is built for long-running work, especially for evaluations in research. These features are available in the TUI and autonomous runs:
-
-- **Continual Harness:** `/refine` can persist focused, reviewable lessons as supplemental prompts, memories, reusable skill descriptions, or subagent specifications.
-- **Direct agent-to-agent communication:** running agents and retained subagents can discover one another, exchange messages, and steer active work.
-- **Daemon-backed continuity:** active sessions, Python REPL state, schedules, and subagents keep running when the terminal detaches and can be reattached later.
-- **Heartbeats and schedules:** `/heartbeat`, `rlm_heartbeat`, and `preme-agent schedule` can re-enter a session periodically or at a specific time.
-- **Persistent goals:** `/goal` keeps an objective and its progress active across turns until it is completed, paused, or cleared.
-- **Bounded autonomous mode:** `/autonomous` continues within configured turn, token, and time budgets and can run user-defined quality gates.
-
-## Contributing
-
-Read the [contribution guidelines](CONTRIBUTING.md) for the development process.
-
-## Acknowledgements
-
-Preme Agent and its TUI are built on top of [`pi`](https://github.com/earendil-works/pi).
-
 ## Documentation
 
 - [Quickstart](packages/coding-agent/docs/quickstart.md)
@@ -186,18 +161,3 @@ This project is an independent fork. It retains portions of the original Prime A
 ## License
 
 Preme Agent is released under the [MIT License](LICENSE).
-
-## Citation
-
-If you use this codebase in your research, please cite Preme Agent:
-
-```bibtex
-@article{karten2026prime,
-  title={Preme Agent: A Self-Improving RLM Harness},
-  author={Karten, Seth and Zhang, Alex L. and Thomas, Kevin and Müller, Sebastian and Bakouch, Elie and Auras, Daniel and Senghaas, Mika and Obeid, Fares and Dunas, Konstantin and Hagemann, Johannes and Jaghouar, Sami},
-  journal={arXiv preprint arXiv:2608.23552},
-  year={2026}
-}
-```
-
-Available at [https://arxiv.org/abs/2608.23552](https://arxiv.org/abs/2608.23552).

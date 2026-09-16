@@ -4,8 +4,8 @@ Preme Agent uses JSON settings files with project settings overriding global set
 
 | Location | Scope |
 |----------|-------|
-| `~/.preme-agent/settings.json` | Global (all projects) |
-| `.preme-agent/settings.json` | Project (current directory) |
+| `~/.supreme/agent/settings.json` | Global (all projects) |
+| `.supreme/agent/settings.json` | Project (current directory) |
 
 Edit directly or use `/settings` for common options.
 
@@ -17,31 +17,9 @@ Edit directly or use `/settings` for common options.
 |---------|------|---------|-------------|
 | `defaultProvider` | string | - | Default provider (e.g., `"anthropic"`, `"openai"`) |
 | `defaultModel` | string | - | Default model ID |
-| `subagentDefaultModel` | string | - | Model selector (`"provider/id"`) used when `rlm.spawn` does not pin a model; unset inherits the parent model |
 | `defaultThinkingLevel` | string | `"xhigh"` | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` |
+| `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in output |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level |
-
-`subagentDefaultModel` applies only to spawned subagents whose `rlm.spawn` call omits `model=`. An explicit `model=` per spawn always wins, and an unset setting keeps the inherit-parent behavior. If the configured default is unavailable, unauthenticated, or expired, the spawn fails with that error instead of silently falling back.
-
-### Autonomous Runs
-
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `autonomous.maxContinuations` | number or `"unlimited"` | `3` | Continuation budget for autonomous runs |
-| `autonomous.maxTurns` | number or `"unlimited"` | `12` | Turn budget for autonomous runs |
-| `autonomous.maxTokens` | number or `"unlimited"` | `80000` | Token budget for autonomous runs |
-| `autonomous.timeoutMs` | number or `"unlimited"` | `1800000` | Wall-clock budget in milliseconds |
-
-```json
-{
-  "autonomous": {
-    "maxContinuations": "unlimited",
-    "maxTokens": 1000000
-  }
-}
-```
-
-These are the persisted defaults for the same limits as the `--autonomous-*` CLI flags and `/autonomous on` budget flags. Set them once so every autonomous run starts with your budget instead of the built-in defaults; explicit flags on a given run still win. Invalid values are ignored per-field, falling back to the built-in defaults.
 
 #### thinkingBudgets
 
@@ -57,8 +35,6 @@ These are the persisted defaults for the same limits as the `--autonomous-*` CLI
 ```
 
 ### UI & Display
-
-Conversation output starts in overview. Ctrl+O cycles through details and all output; the old `hideThinkingBlock` setting no longer controls visibility.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
@@ -92,7 +68,7 @@ The stable `latest.json` and beta `beta.json` manifests use the same JSON shape:
 
 Preme Agent sends pseudonymous, aggregate usage and performance events to Prime Intellect. These events include version and operating-system category, onboarding outcome and duration, execution mode (`interactive`, `print`, `json`, `rpc`, or `acp`), run outcomes, TTFT and latency, prompt and turn counts, token usage, tool success counts, retries, and compactions.
 
-Preme Agent does not send prompts, responses, thinking, tool arguments or results, command text, filenames, paths, repository information, environment variables, credentials, raw error messages, hostnames, usernames, emails, or hardware identifiers. A random installation ID is stored as `telemetry.json` in the configured agent directory (normally `~/.preme-agent/`).
+Preme Agent does not send prompts, responses, thinking, tool arguments or results, command text, filenames, paths, repository information, environment variables, credentials, raw error messages, hostnames, usernames, emails, or hardware identifiers. A random installation ID is stored as `telemetry.json` in the configured agent directory (normally `~/.supreme/agent/`).
 
 Telemetry can be disabled globally or for an individual project. Project settings can only further restrict telemetry: they cannot re-enable a global opt-out or suppress the global one-time disclosure.
 
@@ -165,45 +141,10 @@ preme-agent --offline
 | `retry.maxRetries` | number | `3` | Maximum agent-level retry attempts |
 | `retry.baseDelayMs` | number | `2000` | Base delay for agent-level exponential backoff (2s, 4s, 8s) |
 | `retry.provider.timeoutMs` | number | SDK default | Provider/SDK request timeout in milliseconds |
-| `retry.provider.maxRetryDelayMs` | number | `60000` | Max server-requested retry delay before failing (60s) |
+| `retry.provider.maxRetries` | number | SDK default | Provider/SDK retry attempts |
+| `retry.provider.maxRetryDelayMs` | number | `60000` | Max server-requested delay before failing (60s) |
 
-When a provider requests a retry delay longer than `retry.provider.maxRetryDelayMs` (e.g. a usage-limit reset hours away), auto-retry stops immediately with an informative error instead of waiting. Set to `0` to disable the cap.
-
-### Wait-for-usage and provider recovery
-
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `retry.provider.waitForUsage.enabled` | boolean | `true` | Bounded wait-for-recovery loop for quota exhaustion and provider unavailability |
-| `retry.provider.waitForUsage.baseDelayMs` | number | `1000` | First ping delay (doubles per ping) |
-| `retry.provider.waitForUsage.maxDelayMs` | number | `300000` | Per-ping ceiling (5m) |
-| `retry.provider.waitForUsage.maxAttempts` | number | `30` | Abort bound: maximum recovery pings |
-| `retry.provider.waitForUsage.maxWaitMs` | number | `900000` | Abort bound: maximum total wait (15m) |
-| `providerBackupModel` | string | none | Backup model ("provider/model-id" or bare id) used while the primary is quota-blocked or unavailable |
-
-The wait loop runs under the `retry.enabled` master switch: with retries
-disabled, no waits run either.
-
-When a request fails with quota/subscription exhaustion (429s, usage limits), the
-session waits for usage to come back: it pings the provider with exponential
-backoff and jitter (1s doubling to a 5m ceiling) and resumes automatically when
-the provider recovers. If the provider reports a reset time (Retry-After header
-or "Try again in ~90 min" style text), the resume is scheduled exactly then
-instead of pinging. Quick retries still run first for transient errors (5xx,
-overload, network, and 404 routing blips); the wait loop takes over when they
-are exhausted. Every wait shows attempts and the next check countdown in the
-status line, and both abort bounds (`maxAttempts`, `maxWaitMs`) are hard stops:
-waits never hang. When a reported reset time exceeds `maxWaitMs`, the wait gives
-up immediately with an informative error instead of pinging pointlessly — raise
-`maxWaitMs` to wait out long subscription windows.
-
-`providerBackupModel` routes failed turns to a user-defined backup model
-instead of waiting while the primary is quota-blocked or unavailable. It is
-disabled by default: with no setting, behavior is unchanged and requests never
-silently switch models. When set, the retry status line shows an explicit
-"retrying on backup model X" indicator, the switch is recorded in the session
-log, and the session returns to the primary model automatically (the next turn
-probes the primary again). If the backup reference cannot be resolved to an
-available, authenticated model, the bounded wait runs instead.
+When a provider requests a retry delay longer than `retry.provider.maxRetryDelayMs` (e.g., Google's "quota will reset after 5h"), the request fails immediately with an informative error instead of waiting silently. Set to `0` to disable the cap.
 
 ```json
 {
@@ -213,17 +154,10 @@ available, authenticated model, the bounded wait runs instead.
     "baseDelayMs": 2000,
     "provider": {
       "timeoutMs": 3600000,
-      "maxRetryDelayMs": 60000,
-      "waitForUsage": {
-        "enabled": true,
-        "baseDelayMs": 1000,
-        "maxDelayMs": 300000,
-        "maxAttempts": 30,
-        "maxWaitMs": 900000
-      }
+      "maxRetries": 0,
+      "maxRetryDelayMs": 60000
     }
-  },
-  "providerBackupModel": "anthropic/claude-opus-4-7"
+  }
 }
 ```
 
@@ -268,7 +202,7 @@ Normally the package manager's global modules location is queried using `root -g
 |---------|------|---------|-------------|
 | `idleEvictionMinutes` | number or `"off"` | `90` | Idle threshold in minutes for whole-tree worker eviction and individual idle-child passivation; `"off"` disables both. |
 
-`idleEvictionMinutes` is a global daemon policy and is read only from `~/.preme-agent/settings.json`. Set it to a positive number to configure the idle threshold.
+`idleEvictionMinutes` is a global daemon policy and is read only from `~/.supreme/agent/settings.json`. Set it to a positive number to configure the idle threshold.
 
 ### Sessions
 
@@ -277,7 +211,7 @@ Normally the package manager's global modules location is queried using `root -g
 | `sessionDir` | string | - | Directory where session files are stored. Accepts absolute or relative paths, plus `~`. |
 
 ```json
-{ "sessionDir": ".preme-agent/sessions" }
+{ "sessionDir": ".supreme/agent/sessions" }
 ```
 
 When multiple sources specify a session directory, precedence is `--session-dir`, `PRIME_AGENT_SESSION_DIR`, the legacy `PRIME_AGENT_CODING_AGENT_SESSION_DIR`, then `sessionDir` in `settings.json`.
@@ -286,7 +220,7 @@ When multiple sources specify a session directory, precedence is `--session-dir`
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `enabledModels` | string[] | - | Model patterns for Alt+M cycling (same format as `--models` CLI flag) |
+| `enabledModels` | string[] | - | Model patterns for Ctrl+P cycling (same format as `--models` CLI flag) |
 
 ```json
 {
@@ -304,7 +238,7 @@ When multiple sources specify a session directory, precedence is `--session-dir`
 
 These settings define where to load extensions, skills, prompts, and themes from.
 
-Paths in `~/.preme-agent/settings.json` resolve relative to `~/.preme-agent`. Paths in `.preme-agent/settings.json` resolve relative to `.preme-agent`. Absolute paths and `~` are supported.
+Paths in `~/.supreme/agent/settings.json` resolve relative to `~/.supreme/agent`. Paths in `.supreme/agent/settings.json` resolve relative to `.supreme/agent`. Absolute paths and `~` are supported.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
@@ -382,16 +316,16 @@ See [packages.md](packages.md) for package management details.
 
 ## Project Overrides
 
-Project settings (`.preme-agent/settings.json`) override global settings. Nested objects are merged:
+Project settings (`.supreme/agent/settings.json`) override global settings. Nested objects are merged:
 
 ```json
-// ~/.preme-agent/settings.json (global)
+// ~/.supreme/agent/settings.json (global)
 {
   "theme": "dark",
   "compaction": { "enabled": true, "reserveTokens": 16384 }
 }
 
-// .preme-agent/settings.json (project)
+// .supreme/agent/settings.json (project)
 {
   "compaction": { "reserveTokens": 8192 }
 }

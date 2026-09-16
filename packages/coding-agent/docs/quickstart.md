@@ -9,13 +9,13 @@ Windows, Linux, and macOS are supported. The release installer below targets Lin
 Install the latest stable release on Linux or macOS:
 
 ```bash
-curl --proto '=https' --proto-redir '=https' -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
+curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 ```
 
 To try the latest beta built from `main`:
 
 ```bash
-curl --proto '=https' --proto-redir '=https' -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh -s -- beta
+curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh -s -- beta
 ```
 
 Both commands fetch versioned Preme Agent release artifacts and install the `preme-agent` command. The inherited npm workspace identifiers in the source tree are not the public install path.
@@ -61,7 +61,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 preme-agent
 ```
 
-You can also run `/login` and select an API-key provider to store the key in `~/.preme-agent/auth.json`.
+You can also run `/login` and select an API-key provider to store the key in `~/.supreme/agent/auth.json`.
 
 See [Providers](providers.md) for all supported providers, environment variables, and cloud-provider setup.
 
@@ -103,7 +103,7 @@ Preme Agent loads context files at startup. Add an `AGENTS.md` file to tell it h
 
 Preme Agent loads:
 
-- `~/.preme-agent/AGENTS.md` for global instructions
+- `~/.supreme/agent/AGENTS.md` for global instructions
 - `AGENTS.md` or `CLAUDE.md` from parent directories and the current directory
 
 Restart Preme Agent, or run `/reload`, after changing context files.
@@ -133,11 +133,11 @@ The command output is sent to the model. Use `!!command` to run a command withou
 
 ### Switch Models
 
-Use `/model` or Ctrl+L to choose a model. Use `/effort` to set the reasoning level. Use Alt+M / Shift+Alt+M to cycle through scoped models when configured, or all available models otherwise.
+Use `/model` or Ctrl+L to choose a model. Use `/effort` to set the reasoning level. Use Ctrl+P / Shift+Ctrl+P to cycle through scoped models.
 
 ### Continue Later
 
-Sessions are saved automatically under `~/.preme-agent/sessions/`:
+Sessions are saved automatically under `~/.supreme/agent/sessions/`:
 
 ```bash
 preme-agent -c                  # Continue the most recent session

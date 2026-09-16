@@ -1,6 +1,6 @@
 # Providers
 
-Preme Agent supports subscription-based providers via OAuth and API key providers via environment variables or the auth file. Models for external providers are bundled with each release. Prime Inference models refresh from its `/models` endpoint, with the bundled list and a validated disk cache as fallbacks. Set `PI_OFFLINE=1` to skip network refreshes.
+Preme Agent supports subscription-based providers via OAuth and API key providers via environment variables or the auth file. Its built-in model catalog is updated with each Preme Agent release.
 
 ## Table of Contents
 
@@ -18,9 +18,8 @@ Use `/login` in interactive mode, then select a provider:
 - ChatGPT Plus/Pro (Codex)
 - Claude Pro/Max
 - GitHub Copilot
-- xAI Grok (eligible subscriptions)
 
-Use `/logout` to clear credentials. Tokens are stored in `~/.preme-agent/auth.json` and auto-refresh when expired.
+Use `/logout` to clear credentials. Tokens are stored in `~/.supreme/agent/auth.json` and auto-refresh when expired.
 
 ### OpenAI Codex
 
@@ -35,18 +34,6 @@ Anthropic subscription auth is active for Claude Pro/Max accounts. Third-party h
 
 - Press Enter for github.com, or enter your GitHub Enterprise Server domain
 - If you get "model not supported", enable it in VS Code: Copilot Chat → model selector → select model → "Enable"
-
-### xAI Grok
-
-Use `/login` and select the xAI subscription entry to open browser sign-in. Complete the authorization flow for an eligible Grok subscription. The existing xAI API-key entry still accepts a key, and `XAI_API_KEY` remains supported.
-
-Both methods use provider ID `xai` and `https://api.x.ai/v1`. Subscription requests use `/responses`; API-key requests keep the existing `/chat/completions` route and model defaults. Changing authentication updates the current session without requiring model reselection.
-
-Choose any bundled xAI tool-capable language model with `/model` after initial setup. The same catalog is shown for subscription and API-key login. Subscription requests preserve each model’s reasoning and input capabilities; reasoning-effort controls are limited to verified options. Access and usage limits depend on your account entitlement; listing a model does not guarantee a successful request. If a model is unavailable or authorization fails, check your plan or use an API key.
-
-`grok-code-fast-1` remains a legacy alias for `grok-build-0.1`, not a separate model. Image/video generators and the multi-agent model are not included because they do not support the agent’s custom function tools.
-
-`/logout` removes saved xAI authentication, but does not unset `XAI_API_KEY`; an environment key can remain active after logout.
 
 ## API Keys
 
@@ -94,7 +81,7 @@ Reference for environment variables and `auth.json` keys: [`env-api-keys.ts`](..
 
 #### Auth File
 
-Store credentials in `~/.preme-agent/auth.json`:
+Store credentials in `~/.supreme/agent/auth.json`:
 
 ```json
 {
@@ -112,7 +99,7 @@ Store credentials in `~/.preme-agent/auth.json`:
 }
 ```
 
-The file is created with `0600` permissions (user read/write only). Auth file credentials take priority over environment variables, except for Prime Inference, where `PRIME_API_KEY` takes priority.
+The file is created with `0600` permissions (user read/write only). Auth file credentials take priority over environment variables.
 
 ### Key Resolution
 
@@ -136,19 +123,7 @@ OAuth credentials are also stored here after `/login` and managed automatically.
 
 ### Prime Inference
 
-Prime Inference uses the production OpenAI-compatible endpoint at `https://api.pinference.ai/api/v1`. Set `PRIME_API_KEY` or use `/login` to save a key for `prime-inference` in `~/.supreme/agent/auth.json`.
-
-Normal startup, model discovery, inference, credential status, and team selection do not read Prime CLI credentials or URLs from `~/.prime/config.json`. If you previously relied on CLI credentials, run `/login` once. During this explicit login, Agent can reuse a CLI key only when every configured CLI URL is a canonical production URL (or absent), the resolved Agent login destinations are production, and production `/whoami` validates the key. Local or development CLI configuration falls back to the browser login flow, which defaults to production.
-
-An imported key and its CLI-file team selection are saved as an Agent-owned snapshot. Later CLI login, logout, URL, or team changes do not affect Agent. Agent login, team changes, and logout never write the CLI config. Saving a different key clears the previous Agent team to personal billing unless the login supplies a new team snapshot; saving the same key preserves the saved team.
-
-`PRIME_TEAM_ID` overrides the request's `X-Prime-Team-ID` header but is never saved as the imported team. Runtime and `PRIME_API_KEY` credentials do not inherit a saved Agent team; set `PRIME_TEAM_ID` explicitly when using those credentials with team billing.
-
-For deliberate development or test use, `PRIME_AGENT_INFERENCE_API_BASE_URL` overrides the Agent authentication and team API (default `https://api.primeintellect.ai/api/v1`). `PRIME_AGENT_INFERENCE_FRONTEND_URL` overrides the login browser frontend (default `https://app.primeintellect.ai`). These Agent-specific settings apply to browser login, manual-key validation, and team lookup. They do not change model inference URLs. CLI credential reuse is disabled when either resolved login destination is nonproduction. Legacy `PRIME_API_BASE_URL` and CLI-file URLs do not control Agent authentication.
-
-### Trace sharing credentials
-
-Trace sharing remains opt-in. Normal uploads use explicit environment or Agent-owned credentials, never a live CLI credential fallback. `/traces login` can reuse a CLI key only after the same production URL checks and production validation, including the required `agent_traces` scope. The trace API defaults to `https://api.primeintellect.ai`; only the trace-specific `PRIME_AGENT_TRACES_BASE_URL` overrides that default, not CLI URLs or `PRIME_API_BASE_URL`. Explicit trace login does not reuse CLI credentials when its resolved trace API destination is nonproduction.
+Prime Inference uses the OpenAI-compatible endpoint at `https://api.pinference.ai/api/v1`. Set `PRIME_API_KEY` or store an API key for `prime-inference` via `/login`.
 
 ### Kilo Code
 
@@ -274,16 +249,7 @@ Or set `GOOGLE_APPLICATION_CREDENTIALS` to a service account key file.
 
 ## Resolution Order
 
-For Prime Inference:
-
-1. CLI `--api-key` flag (runtime override)
-2. `PRIME_API_KEY`
-3. Agent `auth.json` entry
-4. Custom provider keys from `models.json`
-
-Prime CLI config is not part of normal credential resolution.
-
-For other providers:
+When resolving credentials for a provider:
 
 1. CLI `--api-key` flag
 2. `auth.json` entry (API key or OAuth token)

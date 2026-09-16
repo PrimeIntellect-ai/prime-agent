@@ -420,11 +420,6 @@ export async function showDeprecationWarnings(warnings: string[]): Promise<void>
 	console.log(chalk.yellow(`Documentation: ${EXTENSIONS_DOC_URL}`));
 	console.log(chalk.dim(`\nPress any key to continue...`));
 
-	if (!process.stdin.isTTY) {
-		// A non-interactive parent never delivers the keypress; don't hang waiting for it.
-		console.log();
-		return;
-	}
 	await new Promise<void>((resolve) => {
 		process.stdin.setRawMode?.(true);
 		process.stdin.resume();
@@ -444,50 +439,25 @@ export async function showDeprecationWarnings(warnings: string[]): Promise<void>
  */
 
 /**
- * Migrate user data from an old agent directory into ~/.preme-agent.
+ * Migrate user data from ~/.supreme/agent to ~/.supreme/agent.
+ *
+ * This runs once on startup when the new ~/.supreme/agent directory does not
+ * yet exist, but the legacy ~/.supreme/agent directory does. All files are
+ * copied so auth, sessions, settings, and extensions survive the rebrand.
  */
-export function migrateLegacyAgentDir(legacyDir: string, newDir: string = getAgentDir()): void {
+export function migratePrimeToSupremeDir(
+	legacyDir: string = join(homedir(), ".prime", "agent"),
+	newDir: string = getAgentDir(),
+): void {
 	if (!existsSync(legacyDir)) return;
+	if (existsSync(newDir)) return;
 
 	try {
 		mkdirSync(dirname(newDir), { recursive: true });
-		if (existsSync(newDir)) {
-			copyRecursiveMissingSync(legacyDir, newDir);
-		} else {
-			copyRecursiveSync(legacyDir, newDir);
-		}
+		copyRecursiveSync(legacyDir, newDir);
 	} catch {
-		// Best-effort migration. The legacy directory remains available for recovery.
-	}
-}
-
-/** Migrate known legacy config roots in order of newest to oldest. */
-export function migrateLegacyAgentDirectories(newDir: string = getAgentDir()): void {
-	for (const legacyDir of [
-		join(homedir(), ".supreme", "agent"),
-		join(homedir(), ".prime", "agent"),
-		join(homedir(), ".pi", "agent"),
-	]) {
-		if (existsSync(newDir)) return;
-		migrateLegacyAgentDir(legacyDir, newDir);
-	}
-}
-
-/** @deprecated Use migrateLegacyAgentDir for explicit source and destination paths. */
-export function migratePrimeToSupremeDir(legacyDir: string, newDir: string = getAgentDir()): void {
-	migrateLegacyAgentDir(legacyDir, newDir);
-}
-
-function copyRecursiveMissingSync(src: string, dst: string): void {
-	for (const entry of readdirSync(src, { withFileTypes: true })) {
-		const srcPath = join(src, entry.name);
-		const dstPath = join(dst, entry.name);
-		if (entry.isDirectory()) {
-			mkdirSync(dstPath, { recursive: true });
-			copyRecursiveMissingSync(srcPath, dstPath);
-		} else if (!existsSync(dstPath)) {
-			copyFileSync(srcPath, dstPath);
-		}
+		// Best-effort migration; if it fails, the user still has .supreme/agent
+		// and can manually copy or set PRIME_AGENT_CODING_AGENT_DIR.
 	}
 }
 
@@ -514,7 +484,7 @@ export function runMigrations(cwd: string): {
 	migratedAuthProviders: string[];
 	deprecationWarnings: string[];
 } {
-	migrateLegacyAgentDirectories();
+	migratePrimeToSupremeDir();
 	const migratedAuthProviders = migrateAuthToAuthJson();
 	migrateSessionsFromAgentRoot();
 	migrateLegacySessionDirsToSessionRoot();

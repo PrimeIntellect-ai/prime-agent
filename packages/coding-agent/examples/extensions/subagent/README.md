@@ -39,20 +39,20 @@ From the repository root, symlink the files:
 
 ```bash
 # Symlink the extension (must be in a subdirectory with index.ts)
-mkdir -p ~/.preme-agent/extensions/subagent
-ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/index.ts" ~/.preme-agent/extensions/subagent/index.ts
-ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/agents.ts" ~/.preme-agent/extensions/subagent/agents.ts
+mkdir -p ~/.supreme/agent/extensions/subagent
+ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/index.ts" ~/.supreme/agent/extensions/subagent/index.ts
+ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/agents.ts" ~/.supreme/agent/extensions/subagent/agents.ts
 
 # Symlink agents
-mkdir -p ~/.preme-agent/agents
+mkdir -p ~/.supreme/agent/agents
 for f in packages/coding-agent/examples/extensions/subagent/agents/*.md; do
-  ln -sf "$(pwd)/$f" ~/.preme-agent/agents/$(basename "$f")
+  ln -sf "$(pwd)/$f" ~/.supreme/agent/agents/$(basename "$f")
 done
 
 # Symlink workflow prompts
-mkdir -p ~/.preme-agent/prompts
+mkdir -p ~/.supreme/agent/prompts
 for f in packages/coding-agent/examples/extensions/subagent/prompts/*.md; do
-  ln -sf "$(pwd)/$f" ~/.preme-agent/prompts/$(basename "$f")
+  ln -sf "$(pwd)/$f" ~/.supreme/agent/prompts/$(basename "$f")
 done
 ```
 
@@ -60,9 +60,9 @@ done
 
 This tool executes a separate Preme Agent subprocess with a delegated system prompt and tool/model configuration.
 
-**Project-local agents** (`.preme-agent/agents/*.md`) are repo-controlled prompts that can instruct the model to run IPython, shell commands, and other tools.
+**Project-local agents** (`.supreme/agent/agents/*.md`) are repo-controlled prompts that can instruct the model to run IPython, shell commands, and other tools.
 
-**Default behavior:** Only loads **user-level agents** from `~/.preme-agent/agents`.
+**Default behavior:** Only loads **user-level agents** from `~/.supreme/agent/agents`.
 
 To enable project-local agents, pass `agentScope: "both"` (or `"project"`). Only do this for repositories you trust.
 
@@ -139,8 +139,8 @@ System prompt for the agent goes here.
 ```
 
 **Locations:**
-- `~/.preme-agent/agents/*.md` - User-level (always loaded)
-- `.preme-agent/agents/*.md` - Project-level (only with `agentScope: "project"` or `"both"`)
+- `~/.supreme/agent/agents/*.md` - User-level (always loaded)
+- `.supreme/agent/agents/*.md` - Project-level (only with `agentScope: "project"` or `"both"`)
 
 Project agents override user agents with the same name when `agentScope: "both"`.
 

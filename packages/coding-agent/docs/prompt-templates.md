@@ -8,8 +8,8 @@ Prompt templates are Markdown snippets that expand into full prompts. Type `/nam
 
 Preme Agent loads prompt templates from:
 
-- Global: `~/.preme-agent/prompts/*.md`
-- Project: `.preme-agent/prompts/*.md`
+- Global: `~/.supreme/agent/prompts/*.md`
+- Project: `.supreme/agent/prompts/*.md`
 - Packages: `prompts/` directories or `pi.prompts` entries in `package.json`
 - Settings: `prompts` array with files or directories
 - CLI: `--prompt-template <path>` (repeatable)
