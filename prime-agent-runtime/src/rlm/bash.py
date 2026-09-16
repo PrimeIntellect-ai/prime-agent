@@ -3205,7 +3205,399 @@ def _guard_destructive_git(command: str, allow_destructive_git: bool) -> None:
             )
 
 
-def bash(command: str, *, allow_destructive_git: bool = False) -> BashHandle:
+# ---------------------------------------------------------------------------
+# Recursive-force rm guard. The dirty-tree guard above protects uncommitted
+# git work; this one stops recursive-force rm invocations whose operands
+# escape the kernel workspace (HOME itself, /, parent directories, other
+# trees) or name protected dot paths (.., .git, .env-class files). Detection
+# is a word-level shell scan, conservative by design: a false positive costs
+# one explicit-bypass retry, a false negative silently deletes files.
+
+# Bypass env var for the recursive-force rm guard. Unlike the git guard's
+# bypass, the value is FROZEN at kernel start: this module is imported once
+# when the kernel boots and the guard consults only that frozen copy. A live
+# os.environ read would let one model-side os.environ write neuter the guard
+# mid-session (wave-1 safety audit, gap 1), so a mid-session change is
+# ignored and warned about loudly instead of honored.
+BASH_DESTRUCTIVE_RM_BYPASS_ENV = "PI_BASH_ALLOW_DESTRUCTIVE_RM"
+
+# The launch-time snapshot, read once at import (kernel bootstrap). Tests
+# simulate a different launch environment by patching this attribute.
+_BASH_RM_BYPASS_AT_KERNEL_START: str | None = os.environ.get(BASH_DESTRUCTIVE_RM_BYPASS_ENV)
+
+# How many refused rm operands the refusal lists before eliding the rest.
+_MAX_RM_REFUSALS_LISTED = 10
+
+
+class DestructiveRmRefusalError(RuntimeError):
+    """A recursive-force rm was refused: its targets escape the kernel
+    workspace or name protected dot paths."""
+
+
+@dataclass(frozen=True)
+class _ShellWord:
+    """One shell word: its unquoted argv value plus the span it came from."""
+
+    value: str
+    start: int
+    end: int
+    starts_command: bool  # first word of a fresh (sub)command context
+
+
+def _matching_paren(command: str, open_index: int, end: int) -> int:
+    """Index of the `)` matching the `(` at `open_index`, or `end - 1`."""
+    depth = 0
+    i = open_index
+    while i < end:
+        ch = command[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return end - 1  # unterminated: scan to the end
+
+
+def _scan_shell_words(command: str) -> list[_ShellWord]:
+    """Split `command` into shell words the way the shell builds argv.
+
+    Quotes and backslash escapes fold into the word value, comments are
+    skipped, and command substitution (`$(...)`, backticks) keeps its
+    interior scanned as live commands because it executes; the substituted
+    result itself stays in the enclosing word, so an operand carrying it
+    reads as unresolvable. Redirections are masked by the caller. This is
+    a conservative approximation, not a parse: anything it cannot represent
+    exactly ends up refused, never silently allowed.
+    """
+    words: list[_ShellWord] = []
+
+    def scan_region(start: int, end: int, *, starts_command: bool) -> None:
+        i = start
+        value: list[str] = []
+        word_start = -1
+        word_starts_command = False
+        first_word_pending = starts_command
+
+        def flush(starts_next_command: bool) -> None:
+            nonlocal word_start, first_word_pending
+            if word_start != -1:
+                words.append(_ShellWord("".join(value), word_start, i, word_starts_command))
+                value.clear()
+                word_start = -1
+                first_word_pending = starts_next_command
+            else:
+                first_word_pending = first_word_pending or starts_next_command
+
+        while i < end:
+            ch = command[i]
+            if ch in " \t\r":
+                flush(False)  # whitespace: the next word continues this command
+                i += 1
+                continue
+            if ch in "\n;|&()<>":
+                flush(True)  # command boundary: the next word starts a command
+                i += 1
+                continue
+            if ch == "#" and word_start == -1:
+                while i < end and command[i] != "\n":
+                    i += 1
+                continue
+            if word_start == -1:
+                word_start = i
+                word_starts_command = first_word_pending
+                first_word_pending = False
+            if ch == "\\" and i + 1 < end:
+                value.append(command[i + 1])
+                i += 2
+                continue
+            if ch == "'":
+                j = i + 1
+                while j < end and command[j] != "'":
+                    j += 1
+                value.append(command[i + 1 : j])
+                i = j + 1
+                continue
+            if ch == '"':
+                j = i + 1
+                while j < end:
+                    inner = command[j]
+                    if inner == "\\" and j + 1 < end:
+                        value.append(command[j + 1])
+                        j += 2
+                        continue
+                    if inner == '"':
+                        j += 1
+                        break
+                    if inner == "$" and command[j + 1 : j + 2] == "(":
+                        close = _matching_paren(command, j + 1, end)
+                        scan_region(j + 2, close, starts_command=True)
+                        value.append(command[j + 1 : close + 1])
+                        j = close + 1
+                        continue
+                    if inner == "`":
+                        close = command.find("`", j + 1, end)
+                        if close == -1:
+                            close = end - 1
+                        scan_region(j + 1, close, starts_command=True)
+                        value.append(command[j + 1 : close + 1])
+                        j = close + 1
+                        continue
+                    value.append(inner)
+                    j += 1
+                i = j
+                continue
+            if ch == "$" and command[i + 1 : i + 2] == "(":
+                close = _matching_paren(command, i + 1, end)
+                scan_region(i + 2, close, starts_command=True)
+                value.append(command[i + 1 : close + 1])
+                i = close + 1
+                continue
+            if ch == "`":
+                close = command.find("`", i + 1, end)
+                if close == -1:
+                    close = end - 1
+                scan_region(i + 1, close, starts_command=True)
+                value.append(command[i + 1 : close + 1])
+                i = close + 1
+                continue
+            value.append(ch)
+            i += 1
+        flush(False)
+
+    scan_region(0, len(command), starts_command=True)
+    return words
+
+
+def _is_rm_word(value: str) -> bool:
+    """True when the word invokes rm, including slash-qualified forms
+    (`/bin/rm`, `./rm`) that basename-match the real command."""
+    return os.path.basename(value) == "rm"
+
+
+def _find_recursive_force_rm_invocations(command: str) -> list[list[str]]:
+    """Find every rm invocation combining recursive and force flags
+    (-r/-R/--recursive plus -f, including combined -rf/-fr), returning the
+    operand list of each matched invocation. Flags may sit anywhere in the
+    invocation (`rm sub -rf`); a lone -r or lone -f never matches."""
+    prepared = _mask_shell_redirections(_normalize_line_continuations(command))
+    words = _scan_shell_words(prepared)
+    invocations: list[list[str]] = []
+    for index, word in enumerate(words):
+        if not _is_rm_word(word.value):
+            continue
+        recursive = False
+        force = False
+        operands: list[str] = []
+        end_of_options = False
+        for follower in words[index + 1 :]:
+            if follower.starts_command:
+                break
+            token = follower.value
+            if end_of_options or not token.startswith("-") or token == "-":
+                operands.append(token)
+                continue
+            if token == "--":
+                end_of_options = True
+                continue
+            if token.startswith("--"):
+                name = token[2:].split("=", 1)[0]
+                recursive = recursive or name == "recursive"
+                force = force or name == "force"
+                continue
+            body = token[1:]
+            recursive = recursive or "r" in body or "R" in body
+            force = force or "f" in body
+        if recursive and force:
+            invocations.append(operands)
+    return invocations
+
+
+def is_recursive_force_rm_command(command: str) -> bool:
+    """True when `command` contains an rm invocation combining recursive and
+    force flags (`rm -rf x`, `-fr`, `-Rf`, `--recursive --force`), regardless
+    of its operands."""
+    return bool(_find_recursive_force_rm_invocations(command))
+
+
+def _eval_payloads_hide_recursive_force_rm(command: str, depth: int = 0) -> bool:
+    """True when a quoted `eval` payload hides a recursive-force rm.
+
+    Mirrors the git guard's eval scan: only unquoted eval tokens are scanned,
+    each payload is unquoted one shell quoting layer at a time, and a
+    recursive-force rm in any layer is refused outright because the payload
+    can relocate or chain freely."""
+    if depth > _MAX_EVAL_SCAN_DEPTH:
+        return True  # absurdly nested evals: refuse rather than risk a miss
+    words = _scan_shell_words(command)
+    for index, word in enumerate(words):
+        if word.value != "eval":
+            continue
+        payload_parts: list[str] = []
+        for follower in words[index + 1 :]:
+            if follower.starts_command:
+                break
+            payload_parts.append(command[follower.start : follower.end])
+        payload = _unquote_one_level(" ".join(payload_parts))
+        if _find_recursive_force_rm_invocations(payload):
+            return True
+        if _eval_payloads_hide_recursive_force_rm(payload, depth + 1):
+            return True
+    return False
+
+
+def _resolve_rm_operand(operand: str, workspace_root: str, cwd: str) -> str | None:
+    """Return why `operand` (one unquoted rm argv entry) must be refused from
+    inside `workspace_root`, or None when it is safe. $PWD expands to the
+    real kernel cwd because the spawned shell recomputes PWD at startup;
+    `~` and `$HOME` expand from the environment the spawned shell inherits.
+    Fail closed: anything that cannot be resolved statically is refused."""
+    if operand == "-":
+        return "reads the list of names from stdin, so its targets cannot be checked"
+    if "{}" in operand:
+        return "is a find -exec placeholder, so its targets cannot be checked"
+    home = os.environ.get("HOME")
+    expanded = operand
+    if expanded.startswith("~"):
+        if not home:
+            return "expands ~ with HOME unset, so its target cannot be checked"
+        if expanded == "~":
+            expanded = home
+        elif expanded.startswith("~/"):
+            expanded = home + expanded[1:]
+        else:
+            return "expands to another user's home directory, which cannot be checked"
+    else:
+        for prefix, name in (("${HOME}", "HOME"), ("$HOME", "HOME")):
+            if expanded.startswith(prefix):
+                if not home:
+                    return f"expands {prefix} with HOME unset, so its target cannot be checked"
+                expanded = home + expanded[len(prefix) :]
+                break
+        else:
+            for prefix in ("${PWD}", "$PWD"):
+                if expanded.startswith(prefix):
+                    # The spawned shell resets PWD to its own cwd at startup,
+                    # so $PWD here is the real kernel cwd, not the env copy.
+                    expanded = cwd + expanded[len(prefix) :]
+                    break
+    if re.search(r"""[$`"']""", expanded):
+        return "uses shell expansion the guard cannot resolve (variables, substitutions)"
+    if any(ch in expanded for ch in "*?["):
+        return "uses a glob pattern; list explicit paths instead"
+    components = [part for part in expanded.split("/") if part not in ("", ".")]
+    if any(part == ".." for part in components):
+        return "names a parent directory (..), which escapes the workspace"
+    if any(part == ".git" for part in components):
+        return "names .git, destroying repository history"
+    dot = next((part for part in components if part.startswith(".")), None)
+    if dot is not None:
+        return f"names the dot path {dot!r}; dot files and dot directories (.env-class, .git) are refused"
+    try:
+        resolved = os.path.realpath(
+            expanded if os.path.isabs(expanded) else os.path.join(workspace_root, expanded)
+        )
+    except (OSError, ValueError):
+        return "cannot be resolved on this filesystem"
+    if resolved == os.sep:
+        return "resolves to the filesystem root"
+    if home:
+        try:
+            if resolved == os.path.realpath(home):
+                return "resolves to HOME itself"
+        except (OSError, ValueError):
+            pass
+    if resolved == workspace_root:
+        return "resolves to the workspace root itself, including .git"
+    if not (resolved + os.sep).startswith(workspace_root + os.sep):
+        return f"resolves outside the workspace ({workspace_root})"
+    return None
+
+
+def _format_rm_operand_refusal(reasons: list[str], live_bypass_attempt: bool) -> str:
+    listed = reasons[:_MAX_RM_REFUSALS_LISTED]
+    elided = len(reasons) - len(listed)
+    lines = [
+        "Refusing to run this recursive-force rm command: it targets paths"
+        " outside the kernel workspace or protected dot paths.",
+        *(f"  {reason}" for reason in listed),
+    ]
+    if elided > 0:
+        lines.append(f"  ... and {elided} more")
+    lines += [
+        "",
+        "Delete inside the workspace with explicit subdirectories instead.",
+        "To delete these intentionally, retry with"
+        " bash(command, allow_destructive_rm=True), or set"
+        f" {BASH_DESTRUCTIVE_RM_BYPASS_ENV}=1 in the kernel's launch"
+        " environment (the value is frozen when the kernel starts).",
+    ]
+    if live_bypass_attempt:
+        lines += [
+            "",
+            f"WARNING: {BASH_DESTRUCTIVE_RM_BYPASS_ENV} was set in os.environ"
+            " after the kernel started. Mid-session writes are ignored by"
+            " design; set the variable before the kernel launches.",
+        ]
+    return "\n".join(lines)
+
+
+def _format_rm_eval_refusal() -> str:
+    return "\n".join(
+        [
+            "Refusing to run this recursive-force rm command: it wraps rm in"
+            " eval, and the paths it would delete cannot be checked safely.",
+            "",
+            "Run the deletion directly with explicit paths, or retry with"
+            " bash(command, allow_destructive_rm=True), or set"
+            f" {BASH_DESTRUCTIVE_RM_BYPASS_ENV}=1 in the kernel's launch"
+            " environment (the value is frozen when the kernel starts).",
+        ]
+    )
+
+
+def _guard_destructive_rm(command: str, allow_destructive_rm: bool) -> None:
+    """Refuse recursive-force rm invocations whose operands escape the
+    workspace or name protected paths. The word scan is pure string work and
+    runs only when an rm invocation carries both flags, so other commands pay
+    nothing."""
+    frozen_bypass = _is_truthy_env_value(_BASH_RM_BYPASS_AT_KERNEL_START)
+    if allow_destructive_rm or frozen_bypass:
+        return
+    prepared = _mask_shell_redirections(_normalize_line_continuations(command))
+    if "eval" in prepared and _eval_payloads_hide_recursive_force_rm(prepared):
+        raise DestructiveRmRefusalError(_format_rm_eval_refusal())
+    invocations = _find_recursive_force_rm_invocations(prepared)
+    if not invocations:
+        return
+    try:
+        cwd = os.getcwd()
+        workspace_root = os.path.realpath(cwd)
+    except OSError:
+        return  # the spawn itself will fail; the guard must not mask that error
+    reasons: list[str] = []
+    for operands in invocations:
+        if not operands:
+            reasons.append(
+                "receives no explicit operand, so names could arrive from"
+                " xargs or stdin and cannot be checked"
+            )
+            continue
+        for operand in operands:
+            reason = _resolve_rm_operand(operand, workspace_root, cwd)
+            if reason:
+                reasons.append(f"{operand!r}: {reason}")
+    if reasons:
+        live_bypass_attempt = _is_truthy_env_value(
+            os.environ.get(BASH_DESTRUCTIVE_RM_BYPASS_ENV)
+        )
+        raise DestructiveRmRefusalError(
+            _format_rm_operand_refusal(reasons, live_bypass_attempt)
+        )
+
+
+def bash(command: str, *, allow_destructive_git: bool = False, allow_destructive_rm: bool = False) -> BashHandle:
     """Start a shell command immediately; await the handle for the result.
 
     `await bash(cmd)` is a one-shot: cancelling the await (e.g. an interrupt)
@@ -3227,11 +3619,21 @@ def bash(command: str, *, allow_destructive_git: bool = False) -> BashHandle:
     only when the discard is intentional. PI_BASH_ALLOW_DESTRUCTIVE_GIT=1 in
     the launching environment disables the guard for the whole kernel; it is
     read once at kernel start, so writing it mid-session has no effect.
+
+    Recursive-force rm commands (`rm -rf`, `-fr`, `-Rf`,
+    `--recursive --force`) are refused when an operand resolves outside the
+    current workspace (HOME itself, /, parent directories, other trees),
+    names a protected dot path (`..`, `.git`, `.env`-class), or cannot be
+    checked statically (globs, substitutions, stdin lists, eval payloads);
+    retry with allow_destructive_rm=True (or
+    PI_BASH_ALLOW_DESTRUCTIVE_RM=1 frozen at kernel start) only when the
+    deletion is intentional.
     """
     if not isinstance(command, str) or not command:
         raise TypeError("command must be a non-empty str")
     _install_shutdown_hook()
     _guard_destructive_git(command, allow_destructive_git)
+    _guard_destructive_rm(command, allow_destructive_rm)
     return BashHandle(command)
 
 

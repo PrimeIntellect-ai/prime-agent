@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -12,8 +13,11 @@ from unittest import mock
 from rlm import bash
 from rlm.bash import (
     BASH_DESTRUCTIVE_GIT_BYPASS_ENV,
+    BASH_DESTRUCTIVE_RM_BYPASS_ENV,
     DestructiveGitRefusalError,
+    DestructiveRmRefusalError,
     is_destructive_git_discard_command,
+    is_recursive_force_rm_command,
 )
 
 # The package re-exports the bash() function under the same name, so reach the
@@ -816,6 +820,403 @@ class DestructiveGitGuardTest(unittest.IsolatedAsyncioTestCase):
                 bash("git status")
         self.assertIn("changes directory (or repository) first", str(caught.exception))
         probe.assert_not_called()
+
+
+# Vectors for the recursive-force rm guard: an rm invocation must combine a
+# recursive flag (-r/-R/--recursive) with a force flag (-f) in any position;
+# a lone -r or lone -f must stay untouched.
+RM_MATCHING_COMMANDS = [
+    "rm -rf sub",
+    "rm -fr sub",
+    "rm -Rf sub",
+    "rm -fR sub",
+    "rm -r -f sub",
+    "rm -f -r sub",
+    "rm -rfv sub",
+    "rm -I -rf sub",
+    "rm --recursive --force sub",
+    "rm --force --recursive sub",
+    "rm --recursive -f sub",
+    "rm sub -rf",
+    "rm -rf sub && rm -fr other",
+    "rm -rf sub; git status",
+    "/bin/rm -rf sub",
+    '"rm" -rf sub',
+    "\\rm -rf sub",
+    "sudo rm -rf sub",
+    "FOO=1 rm -rf sub",
+    "xargs rm -rf",
+    "rm -rf",
+    "rm -rf sub 2>/dev/null",
+    "rm -rf &>/dev/null sub",
+    "rm 2>/dev/null -rf sub",
+    "rm -rf sub # cleanup",
+    "rm -rf \\\nsub",
+    "rm -rf -- sub",
+    "(rm -rf sub)",
+    "{ rm -rf sub; }",
+    "echo $(rm -rf sub)",
+    "echo `rm -rf sub`",
+    "rm -rf ~",
+    "rm -rf $HOME",
+    "rm -rf ..",
+    "rm -rf /",
+]
+
+RM_NON_MATCHING_COMMANDS = [
+    "rm -r sub",
+    "rm -f file.txt",
+    "rm -R sub",
+    "rm -d -f sub",
+    "rm -F sub",
+    "rm --recursive sub",
+    "rm --force sub",
+    "rm -r sub && rm -f other",
+    "rm -i sub",
+    "rm sub",
+    "rm -- sub",
+    "echo 'rm -rf sub'",
+    'echo "rm -rf ~"',
+    "# rm -rf sub",
+    "eval 'rm -rf sub'",
+    "git rm -r --cached .",
+    "npm run rm-build",
+    "permanent -rf sub",
+    "perm -rf sub",
+    "git status",
+    "echo hello world",
+]
+
+
+class RecursiveForceRmDetectionTest(unittest.TestCase):
+    def test_matches_recursive_force_rm(self):
+        for command in RM_MATCHING_COMMANDS:
+            with self.subTest(command=command):
+                self.assertTrue(is_recursive_force_rm_command(command))
+
+    def test_does_not_match_other_commands(self):
+        for command in RM_NON_MATCHING_COMMANDS:
+            with self.subTest(command=command):
+                self.assertFalse(is_recursive_force_rm_command(command))
+
+
+class RmEvalPayloadDetectionTest(unittest.TestCase):
+    def test_eval_payloads_hiding_recursive_force_rm(self):
+        for command in [
+            "eval 'rm -rf ~'",
+            'eval "rm -rf ~"',
+            "eval 'rm -rf ~' && echo done",
+            "eval 'eval \"rm -rf ~\"'",
+            "eval 'rm -rf \\\n~'",
+        ]:
+            with self.subTest(command=command):
+                self.assertTrue(bash_module._eval_payloads_hide_recursive_force_rm(command))
+
+    def test_safe_eval_payloads_stay_unflagged(self):
+        for command in [
+            "eval",
+            "eval 'echo hi'",
+            'eval "echo \'rm -rf ~\'"',
+            "npm run eval:suite",
+            "echo 'eval rm -rf ~'",
+        ]:
+            with self.subTest(command=command):
+                self.assertFalse(bash_module._eval_payloads_hide_recursive_force_rm(command))
+
+
+class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self._prev_cwd = os.getcwd()
+        os.environ.pop(BASH_DESTRUCTIVE_RM_BYPASS_ENV, None)
+        os.environ.pop("PRIME_AGENT_BASH_COMMAND_PREFIX", None)
+        # The launch-time bypass snapshot is a module attribute frozen at
+        # import; pin it to "unset" so tests stay deterministic.
+        frozen_patch = mock.patch.object(bash_module, "_BASH_RM_BYPASS_AT_KERNEL_START", None)
+        frozen_patch.start()
+        self.addCleanup(frozen_patch.stop)
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        # Restore cwd before the temp dir disappears (cleanups run LIFO).
+        self.addCleanup(os.chdir, self._prev_cwd)
+        self.test_dir = temp.name
+        os.chdir(self.test_dir)
+
+    def _make_tree(self) -> None:
+        Path(self.test_dir, "sub", "nested").mkdir(parents=True, exist_ok=True)
+        Path(self.test_dir, "sub", "nested", "file.txt").write_text("x\n")
+        Path(self.test_dir, "my dir").mkdir(exist_ok=True)
+        Path(self.test_dir, "my dir", "file.txt").write_text("x\n")
+
+    def _outside_target(self) -> str:
+        """A sibling directory outside the workspace with a file in it."""
+        name = "outside-sibling-" + os.path.basename(self.test_dir)
+        outside = str(Path(self.test_dir).parent / name)
+        Path(outside).mkdir(exist_ok=True)
+        Path(outside, "file.txt").write_text("keep\n")
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        return outside
+
+    def _tracked(self, *parts: str) -> Path:
+        return Path(self.test_dir, *parts)
+
+    async def test_refuses_escapes_to_home_and_root_and_outside(self):
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        Path(home.name, "keep.txt").write_text("keep\n")
+        for command in [
+            "rm -rf ~",
+            "rm -rf ~/",
+            "rm -rf $HOME",
+            "rm -rf $HOME/",
+            "rm -rf ~/anything",
+            "rm -rf ${HOME}/anything",
+            "rm -rf /",
+            "rm -rf //",
+            "rm -rf /tmp/pa-rm-guard-elsewhere",
+        ]:
+            with self.subTest(command=command):
+                with mock.patch.dict(os.environ, {"HOME": home.name}):
+                    with self.assertRaises(DestructiveRmRefusalError) as caught:
+                        bash(command)
+                self.assertIn("Refusing to run this recursive-force rm command", str(caught.exception))
+                self.assertTrue(Path(home.name, "keep.txt").exists())
+
+    async def test_refuses_parent_directory_escapes(self):
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "rm -rf ..",
+            f"rm -rf ../{Path(outside).name}",
+            "rm -rf ./..",
+            "rm -rf sub/..",
+            "rm -rf sub/../sub/..",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError) as caught:
+                    bash(command)
+                self.assertIn("Refusing to run this recursive-force rm command", str(caught.exception))
+                self.assertTrue(Path(outside, "file.txt").exists())
+                self.assertTrue(self._tracked("sub", "nested", "file.txt").exists())
+
+    async def test_refuses_dot_dirs_and_dotfiles(self):
+        self._make_tree()
+        Path(self.test_dir, ".git", "objects").mkdir(parents=True, exist_ok=True)
+        Path(self.test_dir, ".env").write_text("SECRET=1\n")
+        Path(self.test_dir, "sub", ".env.local").write_text("SECRET=1\n")
+        Path(self.test_dir, ".venv", "bin").mkdir(parents=True, exist_ok=True)
+        for command in [
+            "rm -rf .git",
+            "rm -rf sub/.git",
+            "rm -rf .env",
+            "rm -rf .env.local",
+            "rm -rf sub/.env.local",
+            "rm -rf .venv",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError) as caught:
+                    bash(command)
+                message = str(caught.exception)
+                self.assertIn("Refusing to run this recursive-force rm command", message)
+                self.assertIn("dot", message.lower())
+
+    async def test_refuses_the_workspace_root_itself(self):
+        self._make_tree()
+        for command in ["rm -rf .", "rm -rf ./"]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError) as caught:
+                    bash(command)
+                self.assertIn("workspace root itself", str(caught.exception))
+                self.assertTrue(self._tracked("sub", "nested", "file.txt").exists())
+
+    async def test_refuses_operands_it_cannot_resolve(self):
+        self._make_tree()
+        for command in [
+            "rm -rf *",
+            "rm -rf build/*",
+            "rm -rf $SECRET",
+            "rm -rf $(pwd)",
+            "rm -rf ~otheruser",
+            "rm -rf {}",
+            "rm -rf -",
+            "rm -rf",
+            "echo hi | xargs rm -rf",
+            "find . -name x -exec rm -rf {} +",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError) as caught:
+                    bash(command)
+                self.assertIn("Refusing to run this recursive-force rm command", str(caught.exception))
+                self.assertTrue(self._tracked("sub", "nested", "file.txt").exists())
+
+    async def test_allows_inside_workspace_rm_rf(self):
+        # Long options and flags-after-operand forms stay in the detection
+        # vectors; BSD rm rejects them, so execution here sticks to forms that
+        # work on every supported platform.
+        for command in [
+            "rm -rf sub",
+            "rm -fr sub",
+            "rm -Rf sub",
+            "rm -rf ./sub",
+            "rm -rf sub/nested",
+            'rm -rf "my dir"',
+            "rm -rf $PWD/sub",
+            'rm -rf sub ./"my dir"',
+        ]:
+            with self.subTest(command=command):
+                self._make_tree()
+                result = await bash(command)
+                self.assertEqual(result.exit_code, 0)
+
+    async def test_dash_r_without_force_and_dash_f_without_recursion_untouched(self):
+        self._make_tree()
+        Path(self.test_dir, "file.txt").write_text("x\n")
+        result = await bash("rm -r sub")
+        self.assertEqual(result.exit_code, 0)
+        self.assertFalse(self._tracked("sub").exists())
+        self._make_tree()
+        result = await bash("rm -f file.txt")
+        self.assertEqual(result.exit_code, 0)
+        self.assertFalse(self._tracked("file.txt").exists())
+        self._make_tree()
+        Path(self.test_dir, "file.txt").write_text("x\n")
+        # Neither invocation combines both flags, so the compound stays untouched too.
+        result = await bash("rm -r sub && rm -f file.txt")
+        self.assertEqual(result.exit_code, 0)
+        self.assertFalse(self._tracked("sub").exists())
+        self.assertFalse(self._tracked("file.txt").exists())
+
+    async def test_kwarg_bypass_runs_the_deletion(self):
+        outside = self._outside_target()
+        result = await bash(f"rm -rf ../{Path(outside).name}", allow_destructive_rm=True)
+        self.assertEqual(result.exit_code, 0)
+        self.assertFalse(Path(outside).exists())
+
+    async def test_frozen_bypass_env_honored_when_set_at_launch(self):
+        with mock.patch.object(bash_module, "_BASH_RM_BYPASS_AT_KERNEL_START", "1"):
+            # -f on a path that does not exist is a successful no-op, so the
+            # bypass is observable without deleting anything real.
+            result = await bash("rm -rf ~/pa-rmguard-bypass-noop")
+        self.assertEqual(result.exit_code, 0)
+
+    async def test_frozen_bypass_zero_still_refuses(self):
+        with mock.patch.object(bash_module, "_BASH_RM_BYPASS_AT_KERNEL_START", "0"):
+            with self.assertRaises(DestructiveRmRefusalError):
+                bash("rm -rf ~")
+
+    async def test_mid_session_env_write_does_not_unlock(self):
+        with mock.patch.dict(os.environ, {BASH_DESTRUCTIVE_RM_BYPASS_ENV: "1"}):
+            with self.assertRaises(DestructiveRmRefusalError) as caught:
+                bash("rm -rf ~")
+        message = str(caught.exception)
+        self.assertIn("WARNING", message)
+        self.assertIn(BASH_DESTRUCTIVE_RM_BYPASS_ENV, message)
+        self.assertIn("ignored by design", message)
+
+    async def test_refuses_eval_wrapped_rm(self):
+        self._make_tree()
+        for command in [
+            "eval 'rm -rf ~'",
+            'eval "rm -rf ~"',
+            "eval 'eval \"rm -rf ~\"'",
+            "eval 'cd ~ && rm -rf .'",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError) as caught:
+                    bash(command)
+                self.assertIn("wraps rm in eval", str(caught.exception))
+                self.assertTrue(self._tracked("sub", "nested", "file.txt").exists())
+
+    async def test_safe_eval_commands_still_run(self):
+        result = await bash("eval 'echo hi'")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("hi", result.output)
+        result = await bash("eval \"echo 'rm -rf ~'\"")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("rm -rf ~", result.output)
+
+    async def test_quoted_data_is_untouched(self):
+        for command in [
+            "echo 'rm -rf ~'",
+            'echo "rm -rf ~"',
+        ]:
+            with self.subTest(command=command):
+                result = await bash(command)
+                self.assertEqual(result.exit_code, 0)
+
+    async def test_hardened_forms_are_refused(self):
+        self._make_tree()
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        Path(home.name, "keep.txt").write_text("keep\n")
+        for command in [
+            "rm 2>/dev/null -rf ~",
+            "rm -rf \\\n~",
+            "rm -rf &>/dev/null ~",
+            "\\rm -rf ~",
+            "/bin/rm -rf ~",
+            "sudo rm -rf ~",
+            '"rm" -rf ~',
+            "FOO=1 rm -rf ~",
+            "rm -rf ~ # cleanup",
+        ]:
+            with self.subTest(command=command):
+                with mock.patch.dict(os.environ, {"HOME": home.name}):
+                    with self.assertRaises(DestructiveRmRefusalError):
+                        bash(command)
+                self.assertTrue(Path(home.name, "keep.txt").exists())
+
+    async def test_refuses_compound_when_any_invocation_escapes(self):
+        self._make_tree()
+        with self.assertRaises(DestructiveRmRefusalError):
+            bash("rm -rf sub && rm -rf ..")
+        self.assertTrue(self._tracked("sub", "nested", "file.txt").exists())
+        # Every invocation inside the workspace stays allowed.
+        self._make_tree()
+        result = await bash("rm -rf sub && rm -fr \"my dir\"")
+        self.assertEqual(result.exit_code, 0)
+
+    async def test_refusal_elides_long_operand_lists(self):
+        operands = " ".join(f"/outside-{index}" for index in range(12))
+        with self.assertRaises(DestructiveRmRefusalError) as caught:
+            bash(f"rm -rf {operands}")
+        self.assertIn("... and 2 more", str(caught.exception))
+
+    async def test_refusal_lists_both_bypasses(self):
+        with self.assertRaises(DestructiveRmRefusalError) as caught:
+            bash("rm -rf ~")
+        message = str(caught.exception)
+        self.assertIn("allow_destructive_rm=True", message)
+        self.assertIn(BASH_DESTRUCTIVE_RM_BYPASS_ENV, message)
+        self.assertIn("Delete inside the workspace", message)
+
+    async def test_kernel_cwd_is_home_scenario(self):
+        # The wave-1 audit confirmed a live kernel can boot with cwd == HOME.
+        # HOME itself must stay refused while in-workspace deletions run.
+        with mock.patch.dict(os.environ, {"HOME": self.test_dir}):
+            self._make_tree()
+            for command in ["rm -rf ~", "rm -rf .", "rm -rf $HOME"]:
+                with self.subTest(command=command):
+                    with self.assertRaises(DestructiveRmRefusalError):
+                        bash(command)
+            self.assertTrue(self._tracked("sub", "nested", "file.txt").exists())
+            result = await bash("rm -rf sub")
+            self.assertEqual(result.exit_code, 0)
+            self.assertFalse(self._tracked("sub").exists())
+
+    async def test_symlink_escape_refused(self):
+        victim = tempfile.TemporaryDirectory()
+        self.addCleanup(victim.cleanup)
+        Path(victim.name, "keep").mkdir()
+        os.symlink(victim.name, str(self._tracked("link")))
+        with self.assertRaises(DestructiveRmRefusalError):
+            bash("rm -rf link")
+        self.assertTrue(Path(victim.name, "keep").exists())
+
+    async def test_operands_after_end_of_options_are_checked(self):
+        self._make_tree()
+        with self.assertRaises(DestructiveRmRefusalError):
+            bash("rm -rf -- ..")
+        self.assertTrue(self._tracked("sub", "nested", "file.txt").exists())
 
 
 if __name__ == "__main__":
