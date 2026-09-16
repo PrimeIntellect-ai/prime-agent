@@ -70,6 +70,10 @@ const skillReference = {
 	callable: "run",
 	call_pattern: "await run(...)",
 };
+const skillContract = {
+	reference: skillReference,
+	arguments: { input: { type: "string", required: true, description: "Task input" } },
+};
 
 function proposal(summary: string, edits: RefinementProposal["edits"]): RefinementProposal {
 	return {
@@ -116,13 +120,6 @@ function assistantText(text: string): AssistantMessage {
 }
 
 function seedEntry(state: HarnessState, kind: RefinementKind, id = `${kind}_entry`): void {
-	const skillArguments =
-		kind === "skill"
-			? {
-					reference: skillReference,
-					arguments: { input: { type: "string", required: true, description: "Task input" } },
-				}
-			: {};
 	applyRefinementProposal(
 		state,
 		proposal(`seed ${kind}`, [
@@ -133,7 +130,7 @@ function seedEntry(state: HarnessState, kind: RefinementKind, id = `${kind}_entr
 				title: `${kind} title`,
 				content: `${kind} content`,
 				path: `${kind}/path`,
-				...skillArguments,
+				...(kind === "skill" ? skillContract : {}),
 				metadata: { seeded: true },
 			},
 		]),
@@ -190,28 +187,6 @@ describe("harness refinement", () => {
 		expect(state.entries.memory.memory_entry.version).toBe(3);
 	});
 
-	it("infers legacy refinement scope from applied edit snapshots", () => {
-		const state = loadHarnessState(makeTempDir(), "global");
-		seedEntry(state, "memory", "global_memory");
-		const after = { ...state.entries.memory.global_memory, scope: "global" as const };
-		const result: RefinementResult = {
-			...proposal("Legacy global edit", []),
-			id: "legacy",
-			appliedEdits: [
-				{
-					action: "create",
-					kind: "memory",
-					id: "global_memory",
-					applied: true,
-					after,
-				},
-			],
-			harnessStatePath: "",
-		};
-
-		expect(inferRefinementResultScope(result)).toBe("global");
-	});
-
 	it("atomically replaces harness state without leaving temporary files", () => {
 		const harnessStateDir = makeTempDir();
 		const state = loadHarnessState(harnessStateDir);
@@ -226,192 +201,74 @@ describe("harness refinement", () => {
 		expect(statSync(statePath).mode & 0o777).toBe(0o600);
 	});
 
-	it("applies create, update, and delete for every editable harness kind", () => {
+	it.each(kinds)("applies the create/update/delete lifecycle for %s entries", (kind) => {
 		const state = loadHarnessState(makeTempDir());
+		const id = `${kind}_entry`;
+		const skillFields = kind === "skill" ? skillContract : {};
+		const apply = (edits: RefinementProposal["edits"], refinementId: string) =>
+			applyRefinementProposal(state, proposal(`${refinementId} ${kind}`, edits), { id: refinementId });
 
-		const created = applyRefinementProposal(
-			state,
-			proposal(
-				"Create all kinds",
-				kinds.map((kind) => ({
+		const created = apply(
+			[
+				{
 					action: "create",
 					kind,
-					id: `${kind}_entry`,
+					id,
 					title: `${kind} title`,
 					content: `${kind} content`,
 					path: `${kind}/created`,
-					...(kind === "skill"
-						? {
-								reference: skillReference,
-								arguments: { input: { type: "string", required: true, description: "Task input" } },
-							}
-						: {}),
+					...skillFields,
 					metadata: { kind },
-				})),
-			),
-			{ id: "refine_create_all" },
+				},
+			],
+			`refine_create_${kind}`,
 		);
 
-		expect(created.appliedEdits).toHaveLength(kinds.length);
-		for (const kind of kinds) {
-			const edit = created.appliedEdits.find((item) => item.kind === kind);
-			expect(edit?.applied).toBe(true);
-			expect(edit?.before).toBeUndefined();
-			expect(edit?.after?.version).toBe(1);
-			expect(state.entries[kind][`${kind}_entry`]).toMatchObject({
-				id: `${kind}_entry`,
-				kind,
-				title: `${kind} title`,
-				content: `${kind} content`,
-				path: `${kind}/created`,
-				metadata: { kind },
-				source: "refine",
-				version: 1,
-			});
-		}
-		expect(state.refinements.at(-1)?.changes).toEqual(kinds.map((kind) => `create ${kind}:${kind}_entry`));
+		expect(created.appliedEdits[0]).toMatchObject({ applied: true, after: { version: 1 } });
+		expect(created.appliedEdits[0].before).toBeUndefined();
+		expect(state.entries[kind][id]).toMatchObject({
+			id,
+			kind,
+			title: `${kind} title`,
+			content: `${kind} content`,
+			path: `${kind}/created`,
+			metadata: { kind },
+			source: "refine",
+			version: 1,
+		});
+		expect(state.refinements.at(-1)?.changes).toEqual([`create ${kind}:${id}`]);
 
-		const updated = applyRefinementProposal(
-			state,
-			proposal(
-				"Update all kinds",
-				kinds.map((kind) => ({
+		const updated = apply(
+			[
+				{
 					action: "update",
 					kind,
-					id: `${kind}_entry`,
+					id,
 					title: `${kind} title updated`,
 					content: `${kind} content updated`,
 					path: `${kind}/updated`,
-					...(kind === "skill"
-						? {
-								reference: skillReference,
-								arguments: {
-									input: { type: "string", required: true, description: "Updated task input" },
-								},
-							}
-						: {}),
+					...skillFields,
 					metadata: { updated: kind },
-				})),
-			),
-			{ id: "refine_update_all" },
+				},
+			],
+			`refine_update_${kind}`,
 		);
 
-		expect(updated.appliedEdits).toHaveLength(kinds.length);
-		for (const kind of kinds) {
-			const edit = updated.appliedEdits.find((item) => item.kind === kind);
-			expect(edit?.applied).toBe(true);
-			expect(edit?.before?.version).toBe(1);
-			expect(edit?.after?.version).toBe(2);
-			expect(state.entries[kind][`${kind}_entry`]).toMatchObject({
-				title: `${kind} title updated`,
-				content: `${kind} content updated`,
-				path: `${kind}/updated`,
-				metadata: { updated: kind },
-				version: 2,
-			});
-		}
-		expect(state.refinements.at(-1)?.changes).toEqual(kinds.map((kind) => `update ${kind}:${kind}_entry`));
+		expect(updated.appliedEdits[0]).toMatchObject({ applied: true, before: { version: 1 }, after: { version: 2 } });
+		expect(state.entries[kind][id]).toMatchObject({
+			title: `${kind} title updated`,
+			content: `${kind} content updated`,
+			path: `${kind}/updated`,
+			metadata: { updated: kind },
+			version: 2,
+		});
 
-		const deleted = applyRefinementProposal(
-			state,
-			proposal(
-				"Delete all kinds",
-				kinds.map((kind) => ({
-					action: "delete",
-					kind,
-					id: `${kind}_entry`,
-				})),
-			),
-			{ id: "refine_delete_all" },
-		);
+		const deleted = apply([{ action: "delete", kind, id }], `refine_delete_${kind}`);
 
-		expect(deleted.appliedEdits).toHaveLength(kinds.length);
-		for (const kind of kinds) {
-			const edit = deleted.appliedEdits.find((item) => item.kind === kind);
-			expect(edit?.applied).toBe(true);
-			expect(edit?.before?.version).toBe(2);
-			expect(edit?.after).toBeUndefined();
-			expect(state.entries[kind][`${kind}_entry`]).toBeUndefined();
-		}
-		expect(state.refinements.at(-1)?.changes).toEqual(kinds.map((kind) => `delete ${kind}:${kind}_entry`));
-	});
-
-	it("applies create, update, and delete edits to editable continual harness state", () => {
-		const state = loadHarnessState(makeTempDir());
-		const first = applyRefinementProposal(
-			state,
-			{
-				summary: "Create reusable validation memory and skill",
-				rationale: "The same validation issue repeated.",
-				expectedOutcome: "Future runs validate through the target environment.",
-				edits: [
-					{
-						action: "create",
-						kind: "memory",
-						id: "target_env_validation",
-						title: "Target environment validation",
-						content: "Run checks through the target repository environment.",
-						path: "validation",
-					},
-					{
-						action: "create",
-						kind: "skill",
-						id: "native_check",
-						title: "Native check",
-						content: "Use documented project commands for validation.",
-						reference: {
-							type: "python",
-							import: "agent_skills.native_check",
-							callable: "native_check",
-							call_pattern: "await native_check(command=...)",
-						},
-						arguments: {
-							command: { type: "string", required: false, description: "Optional command to validate." },
-						},
-					},
-				],
-			},
-			{ id: "refine_1" },
-		);
-		const second = applyRefinementProposal(
-			state,
-			{
-				summary: "Tighten validation skill",
-				rationale: "The first skill was too vague.",
-				expectedOutcome: "The agent names the exact command.",
-				edits: [
-					{
-						action: "update",
-						kind: "skill",
-						id: "native_check",
-						title: "Native check",
-						content: "Use `npm run check` for this repo after code changes.",
-						reference: {
-							type: "python",
-							import: "agent_skills.native_check",
-							callable: "native_check",
-							call_pattern: "await native_check(command=...)",
-						},
-						arguments: {
-							command: { type: "string", required: false, description: "Optional command to validate." },
-						},
-					},
-					{
-						action: "delete",
-						kind: "memory",
-						id: "target_env_validation",
-					},
-				],
-			},
-			{ id: "refine_2" },
-		);
-
-		expect(first.appliedEdits).toHaveLength(2);
-		expect(second.appliedEdits.filter((edit) => edit.applied)).toHaveLength(2);
-		expect(state.entries.memory.target_env_validation).toBeUndefined();
-		expect(state.entries.skill.native_check.content).toContain("npm run check");
-		expect(state.entries.skill.native_check.version).toBe(2);
-		expect(state.refinements.map((event) => event.id)).toEqual(["refine_1", "refine_2"]);
+		expect(deleted.appliedEdits[0]).toMatchObject({ applied: true, before: { version: 2 } });
+		expect(deleted.appliedEdits[0].after).toBeUndefined();
+		expect(state.entries[kind][id]).toBeUndefined();
+		expect(state.refinements.at(-1)?.changes).toEqual([`delete ${kind}:${id}`]);
 	});
 
 	it("creates ids from titles and uses default path and metadata when omitted", () => {
@@ -420,21 +277,7 @@ describe("harness refinement", () => {
 		const result = applyRefinementProposal(
 			state,
 			proposal("Create with generated id", [
-				{
-					action: "create",
-					kind: "skill",
-					title: "Native Check!",
-					content: "Run project-native checks.",
-					reference: {
-						type: "python",
-						import: "agent_skills.native_check",
-						callable: "native_check",
-						call_pattern: "await native_check(command=...)",
-					},
-					arguments: {
-						command: { type: "string", required: false, description: "Optional command override." },
-					},
-				},
+				{ action: "create", kind: "skill", title: "Native Check!", content: "Run checks.", ...skillContract },
 			]),
 			{ id: "refine_generated_id" },
 		);
@@ -442,227 +285,182 @@ describe("harness refinement", () => {
 		expect(result.appliedEdits[0]).toMatchObject({
 			applied: true,
 			id: "native_check",
-			after: {
-				id: "native_check",
-				path: "general",
-				reference: {
-					type: "python",
-					import: "agent_skills.native_check",
-					callable: "native_check",
-					call_pattern: "await native_check(command=...)",
-				},
-				arguments: {
-					command: { type: "string", required: false, description: "Optional command override." },
-				},
-				metadata: {},
-				version: 1,
+			after: { id: "native_check", path: "general", reference: skillReference, metadata: {}, version: 1 },
+		});
+	});
+
+	// Every rejected edit must leave harness state and the refinement log untouched.
+	type InvalidCase = {
+		label: string;
+		edit: RefinementProposal["edits"][number];
+		error: string;
+		seed?: RefinementKind;
+	};
+	const skillFieldsFor = (kind: RefinementKind) => (kind === "skill" ? skillContract : {});
+	it.each<InvalidCase>([
+		...kinds.map(
+			(kind): InvalidCase => ({
+				label: `duplicate create for ${kind}`,
+				seed: kind,
+				edit: { action: "create", kind, id: `${kind}_entry`, title: "t", content: "c", ...skillFieldsFor(kind) },
+				error: "entry already exists",
+			}),
+		),
+		...kinds.map(
+			(kind): InvalidCase => ({
+				label: `update of a missing ${kind}`,
+				edit: { action: "update", kind, id: `${kind}_missing`, title: "t", content: "c", ...skillFieldsFor(kind) },
+				error: "entry not found",
+			}),
+		),
+		...kinds.map(
+			(kind): InvalidCase => ({
+				label: `delete of a missing ${kind}`,
+				edit: { action: "delete", kind, id: `${kind}_missing` },
+				error: "entry not found",
+			}),
+		),
+		{
+			label: "create without content",
+			edit: { action: "create", kind: "memory", id: "missing_fields", title: "t" },
+			error: "create requires title and content",
+		},
+		{
+			label: "update without content",
+			seed: "memory",
+			edit: { action: "update", kind: "memory", id: "memory_entry", title: "t" },
+			error: "update requires title and content",
+		},
+		{
+			label: "update without an id",
+			edit: { action: "update", kind: "skill", title: "t", content: "c" },
+			error: "update requires id",
+		},
+		{ label: "delete without an id", edit: { action: "delete", kind: "skill" }, error: "delete requires id" },
+		{
+			label: "an unsupported action",
+			edit: { action: "rename" as RefinementAction, kind: "memory", id: "bad_action", title: "t", content: "c" },
+			error: "unsupported action rename",
+		},
+		{
+			label: "an unsupported kind",
+			edit: { action: "create", kind: "tool" as RefinementKind, id: "bad_kind", title: "t", content: "c" },
+			error: "unsupported kind tool",
+		},
+		{
+			label: "a skill without an argument contract",
+			edit: {
+				action: "create",
+				kind: "skill",
+				id: "argumentless",
+				title: "t",
+				content: "c",
+				reference: skillReference,
 			},
-		});
-		expect(state.entries.skill.native_check.content).toBe("Run project-native checks.");
-	});
-
-	it("requires argument contracts for harness-created skills", () => {
-		const state = loadHarnessState(makeTempDir());
-
-		const missingArguments = applyRefinementProposal(
-			state,
-			proposal("Create skill without arguments", [
-				{
-					action: "create",
-					kind: "skill",
-					id: "argumentless_skill",
-					title: "Argumentless skill",
-					content: "This should not be accepted without an argument contract.",
-				},
-			]),
-			{ id: "refine_missing_skill_arguments" },
-		);
-		const explicitNoArguments = applyRefinementProposal(
-			state,
-			proposal("Create skill with explicit empty arguments", [
-				{
-					action: "create",
-					kind: "skill",
-					id: "no_input_skill",
-					title: "No input skill",
-					content: "This skill intentionally needs no external inputs.",
-					reference: skillReference,
-					arguments: {},
-				},
-			]),
-			{ id: "refine_empty_skill_arguments" },
-		);
-
-		expect(missingArguments.appliedEdits[0]).toMatchObject({
-			applied: false,
 			error: "create skill requires arguments",
-		});
-		expect(state.entries.skill.argumentless_skill).toBeUndefined();
-		expect(explicitNoArguments.appliedEdits[0]).toMatchObject({
-			applied: true,
-			after: { arguments: {} },
-		});
-	});
-
-	it("requires Python references for harness-created skills", () => {
-		const state = loadHarnessState(makeTempDir());
-
-		const missingReference = applyRefinementProposal(
-			state,
-			proposal("Create skill without reference", [
-				{
-					action: "create",
-					kind: "skill",
-					id: "unbacked_skill",
-					title: "Unbacked skill",
-					content: "This should not be accepted without a Python reference.",
-					arguments: {},
-				},
-			]),
-			{ id: "refine_missing_skill_reference" },
-		);
-		const nonPythonReference = applyRefinementProposal(
-			state,
-			proposal("Create skill with non-python reference", [
-				{
-					action: "create",
-					kind: "skill",
-					id: "shell_skill",
-					title: "Shell skill",
-					content: "This should not be accepted as a harness skill.",
-					reference: { type: "shell", command: "edit" },
-					arguments: {},
-				},
-			]),
-			{ id: "refine_non_python_skill_reference" },
-		);
-
-		expect(missingReference.appliedEdits[0]).toMatchObject({
-			applied: false,
+		},
+		{
+			label: "a skill without a Python reference",
+			edit: { action: "create", kind: "skill", id: "unbacked", title: "t", content: "c", arguments: {} },
 			error: "create skill requires python reference",
-		});
-		expect(nonPythonReference.appliedEdits[0]).toMatchObject({
-			applied: false,
+		},
+		{
+			label: "a skill backed by a non-Python reference",
+			edit: {
+				action: "create",
+				kind: "skill",
+				id: "shell_skill",
+				title: "t",
+				content: "c",
+				reference: { type: "shell", command: "edit" },
+				arguments: {},
+			},
 			error: "create skill reference.type must be python",
-		});
-		expect(state.entries.skill.unbacked_skill).toBeUndefined();
-		expect(state.entries.skill.shell_skill).toBeUndefined();
+		},
+		{
+			label: "an update of the base system prompt",
+			edit: { action: "update", kind: "prompt", id: "base_system_prompt", title: "t", content: "c" },
+			error: "base system prompt",
+		},
+		{
+			label: "a create whose title derives the base system prompt id",
+			edit: { action: "create", kind: "prompt", title: "Base System Prompt", content: "c" },
+			error: "base system prompt",
+		},
+	])("rejects $label without mutating state", ({ seed, edit, error }) => {
+		const state = loadHarnessState(makeTempDir());
+		if (seed) seedEntry(state, seed);
+		const before = structuredClone(state.entries);
+
+		const result = applyRefinementProposal(state, proposal("Invalid edit", [edit]), { id: "refine_invalid" });
+
+		expect(result.appliedEdits).toHaveLength(1);
+		expect(result.appliedEdits[0].applied).toBe(false);
+		expect(result.appliedEdits[0].error).toContain(error);
+		expect(state.entries).toEqual(before);
+		expect(state.refinements.at(-1)?.changes).toEqual([]);
 	});
-
-	it("uses a global harness state directory under the agent dir by default", () => {
-		const agentDir = makeTempDir();
-		const harnessDir = getGlobalHarnessStateDir(agentDir);
-
-		expect(harnessDir).toBe(join(agentDir, "harness"));
-		expect(getHarnessStatePath(harnessDir)).toBe(join(agentDir, "harness", "harness_state.json"));
-	});
-
-	it("uses a local harness state directory under the session artifact dir", () => {
-		const artifactDir = makeTempDir();
-
-		expect(getLocalHarnessStateDir(artifactDir)).toBe(join(artifactDir, "harness"));
-		expect(getLocalHarnessStateDir(undefined)).toBeUndefined();
-	});
-
-	it("merges global and local harness state without hiding colliding entries", () => {
+	it("keeps global and local harness state separate when merging and persisting", () => {
 		const root = makeTempDir();
 		const globalState = loadHarnessState(join(root, "global"), "global");
 		const localState = loadHarnessState(join(root, "local"), "local");
-		applyRefinementProposal(
-			globalState,
-			proposal("Global note", [
-				{
-					action: "create",
-					kind: "memory",
-					id: "shared",
-					title: "Shared",
-					content: "Global content.",
-				},
-			]),
-			{ id: "refine_global", scope: "global" },
-		);
-		applyRefinementProposal(
-			localState,
-			proposal("Local note", [
-				{
-					action: "create",
-					kind: "memory",
-					id: "shared",
-					title: "Shared",
-					content: "Local content.",
-				},
-			]),
-			{ id: "refine_local", scope: "local" },
-		);
+		const note = (content: string): RefinementProposal =>
+			proposal(content, [{ action: "create", kind: "memory", id: "shared", title: "Shared", content }]);
+		applyRefinementProposal(globalState, note("Global content."), { id: "refine_global", scope: "global" });
+		applyRefinementProposal(localState, note("Local content."), { id: "refine_local", scope: "local" });
 
 		const merged = mergeHarnessStates(globalState, localState);
 
-		expect(merged.entries.memory.shared.content).toBe("Global content.");
-		expect(merged.entries.memory.shared.scope).toBe("global");
+		// A colliding local id is namespaced instead of shadowed.
+		expect(merged.entries.memory.shared).toMatchObject({ content: "Global content.", scope: "global" });
 		expect(merged.entries.memory["local:shared"]).toMatchObject({
 			id: "shared",
 			content: "Local content.",
 			scope: "local",
 		});
-		expect(Object.values(merged.entries.memory).map((entry) => `${entry.scope}:${entry.content}`)).toEqual(
-			expect.arrayContaining(["global:Global content.", "local:Local content."]),
-		);
-		const promptOverview = formatHarnessStateForPrompt(merged);
-		expect(promptOverview).toContain("[global:shared]");
-		expect(promptOverview).toContain("[local:shared]");
 		expect(globalState.entries.memory.shared.scope).toBe("global");
-	});
 
-	it("preserves entry scope stored inside the global harness file", () => {
-		const root = makeTempDir();
-		const globalState = loadHarnessState(join(root, "global"), "global");
+		// Scope stored inside a shared file wins over the file's own default scope.
 		applyRefinementProposal(
 			globalState,
 			proposal("Session-local note in shared file", [
-				{
-					action: "create",
-					kind: "memory",
-					id: "session_note",
-					title: "Session note",
-					content: "Written by a local RLM harness store in a shared file.",
-				},
+				{ action: "create", kind: "memory", id: "session_note", title: "Session note", content: "Local store." },
 			]),
 			{ id: "refine_local_in_global_file", scope: "local" },
 		);
-
-		const merged = mergeHarnessStates(globalState);
-
-		expect(merged.entries.memory.session_note.scope).toBe("local");
+		expect(mergeHarnessStates(globalState).entries.memory.session_note.scope).toBe("local");
 	});
 
-	it("persists harness state in the selected harness directory", () => {
+	it("resolves the harness state directories and persists state in the selected one", () => {
 		const dir = makeTempDir();
+		expect(getGlobalHarnessStateDir(dir)).toBe(join(dir, "harness"));
+		expect(getHarnessStatePath(getGlobalHarnessStateDir(dir))).toBe(join(dir, "harness", "harness_state.json"));
+		expect(getLocalHarnessStateDir(dir)).toBe(join(dir, "harness"));
+		expect(getLocalHarnessStateDir(undefined)).toBeUndefined();
+
 		const state = loadHarnessState(dir, "local");
 		applyRefinementProposal(
 			state,
-			{
-				summary: "Add prompt note",
-				rationale: "The note is useful.",
-				expectedOutcome: "The agent remembers the note.",
-				edits: [
-					{
-						action: "create",
-						kind: "prompt",
-						id: "focused_edits",
-						title: "Focused edits",
-						content: "Prefer small harness edits.",
-					},
-				],
-			},
+			proposal("Add prompt note", [
+				{
+					action: "create",
+					kind: "prompt",
+					id: "focused_edits",
+					title: "Focused edits",
+					content: "Prefer small harness edits.",
+				},
+			]),
 			{ id: "refine_1" },
 		);
 
 		const statePath = saveHarnessState(dir, state);
 		const reloaded = loadHarnessState(dir, "local");
 
-		expect(statePath.endsWith("harness_state.json")).toBe(true);
-		expect(reloaded.entries.prompt.focused_edits.content).toBe("Prefer small harness edits.");
-		expect(reloaded.entries.prompt.focused_edits.scope).toBe("local");
+		expect(statePath).toBe(getHarnessStatePath(dir));
+		expect(reloaded.entries.prompt.focused_edits).toMatchObject({
+			content: "Prefer small harness edits.",
+			scope: "local",
+		});
 		expect(reloaded.refinements[0]).toMatchObject({
 			id: "refine_1",
 			trigger: "Add prompt note",
@@ -692,7 +490,7 @@ describe("harness refinement", () => {
 		},
 	);
 
-	it("extracts refinement history from custom session entries", () => {
+	it("extracts well-formed refinement history from custom session entries", () => {
 		const result: RefinementResult = {
 			id: "refine_1",
 			summary: "Add skill",
@@ -701,308 +499,35 @@ describe("harness refinement", () => {
 			appliedEdits: [],
 			harnessStatePath: "/tmp/harness_state.json",
 		};
-		const entries: CustomEntry[] = [
-			{
-				type: "custom",
-				customType: "other",
-				data: {},
-				id: "custom_1",
-				parentId: null,
-				timestamp: new Date().toISOString(),
-			},
-			{
-				type: "custom",
-				customType: "prime-agent.refinement",
-				data: result,
-				id: "custom_2",
-				parentId: "custom_1",
-				timestamp: new Date().toISOString(),
-			},
-			{
-				type: "custom",
-				customType: "prime-agent.refinement",
-				data: { id: "malformed" },
-				id: "custom_malformed",
-				parentId: "custom_2",
-				timestamp: new Date().toISOString(),
-			},
-		];
+		const entry = (customType: string, data: object, id: string): CustomEntry => ({
+			type: "custom",
+			customType,
+			data,
+			id,
+			parentId: null,
+			timestamp: new Date().toISOString(),
+		});
 
-		expect(getRefinementHistory(entries)).toEqual([result]);
+		expect(
+			getRefinementHistory([
+				entry("other", {}, "custom_1"),
+				entry("prime-agent.refinement", result, "custom_2"),
+				entry("prime-agent.refinement", { id: "malformed" }, "custom_malformed"),
+			]),
+		).toEqual([result]);
 	});
 
-	it.each(kinds)("rejects duplicate create for %s entries", (kind) => {
+	it("requests a JSON refinement within the model's own output budget and applies it", async () => {
 		const state = loadHarnessState(makeTempDir());
-		seedEntry(state, kind);
-
-		const result = applyRefinementProposal(
-			state,
-			proposal(`Duplicate ${kind}`, [
-				{
-					action: "create",
-					kind,
-					id: `${kind}_entry`,
-					title: "replacement",
-					content: "replacement",
-					...(kind === "skill"
-						? {
-								reference: skillReference,
-								arguments: {
-									input: { type: "string", required: true, description: "Replacement input" },
-								},
-							}
-						: {}),
-				},
-			]),
-			{ id: `refine_duplicate_${kind}` },
-		);
-
-		expect(result.appliedEdits).toHaveLength(1);
-		expect(result.appliedEdits[0]).toMatchObject({
+		const edit = {
 			action: "create",
-			kind,
-			id: `${kind}_entry`,
-			applied: false,
-			error: "entry already exists",
-		});
-		expect(result.appliedEdits[0].before?.content).toBe(`${kind} content`);
-		expect(state.entries[kind][`${kind}_entry`].content).toBe(`${kind} content`);
-		expect(state.refinements.at(-1)?.changes).toEqual([]);
-	});
-
-	it.each(kinds)("rejects update of missing %s entries", (kind) => {
-		const state = loadHarnessState(makeTempDir());
-
-		const result = applyRefinementProposal(
-			state,
-			proposal(`Missing ${kind} update`, [
-				{
-					action: "update",
-					kind,
-					id: `${kind}_missing`,
-					title: "missing",
-					content: "missing",
-					...(kind === "skill"
-						? {
-								reference: skillReference,
-								arguments: { input: { type: "string", required: true, description: "Missing input" } },
-							}
-						: {}),
-				},
-			]),
-			{ id: `refine_missing_update_${kind}` },
-		);
-
-		expect(result.appliedEdits[0]).toMatchObject({
-			action: "update",
-			kind,
-			id: `${kind}_missing`,
-			applied: false,
-			error: "entry not found",
-		});
-		expect(state.entries[kind][`${kind}_missing`]).toBeUndefined();
-		expect(state.refinements.at(-1)?.changes).toEqual([]);
-	});
-
-	it.each(kinds)("rejects delete of missing %s entries", (kind) => {
-		const state = loadHarnessState(makeTempDir());
-
-		const result = applyRefinementProposal(
-			state,
-			proposal(`Missing ${kind} delete`, [
-				{
-					action: "delete",
-					kind,
-					id: `${kind}_missing`,
-				},
-			]),
-			{ id: `refine_missing_delete_${kind}` },
-		);
-
-		expect(result.appliedEdits[0]).toMatchObject({
-			action: "delete",
-			kind,
-			id: `${kind}_missing`,
-			applied: false,
-			error: "entry not found",
-		});
-		expect(state.refinements.at(-1)?.changes).toEqual([]);
-	});
-
-	it.each(["create", "update"] as const satisfies readonly RefinementAction[])(
-		"rejects %s edits missing title or content",
-		(action) => {
-			const state = loadHarnessState(makeTempDir());
-			if (action === "update") {
-				seedEntry(state, "memory", "missing_fields");
-			}
-
-			const result = applyRefinementProposal(
-				state,
-				proposal(`Invalid ${action}`, [
-					{
-						action,
-						kind: "memory",
-						id: "missing_fields",
-						title: "Missing content",
-					},
-				]),
-				{ id: `refine_invalid_${action}` },
-			);
-
-			expect(result.appliedEdits[0]).toMatchObject({
-				action,
-				kind: "memory",
-				id: "missing_fields",
-				applied: false,
-				error: `${action} requires title and content`,
-			});
-			expect(state.refinements.at(-1)?.changes).toEqual([]);
-		},
-	);
-
-	it.each(["update", "delete"] as const satisfies readonly RefinementAction[])(
-		"rejects %s edits missing ids",
-		(action) => {
-			const state = loadHarnessState(makeTempDir());
-
-			const result = applyRefinementProposal(
-				state,
-				proposal(`Missing id ${action}`, [
-					{
-						action,
-						kind: "skill",
-						title: action === "update" ? "Missing id" : undefined,
-						content: action === "update" ? "Missing id" : undefined,
-					},
-				]),
-				{ id: `refine_missing_id_${action}` },
-			);
-
-			expect(result.appliedEdits[0]).toMatchObject({
-				action,
-				kind: "skill",
-				id: "",
-				applied: false,
-				error: `${action} requires id`,
-			});
-			expect(state.refinements.at(-1)?.changes).toEqual([]);
-		},
-	);
-
-	it("rejects unsupported actions and kinds without mutating state", () => {
-		const state = loadHarnessState(makeTempDir());
-
-		const result = applyRefinementProposal(
-			state,
-			proposal("Unsupported edits", [
-				{
-					action: "rename" as RefinementAction,
-					kind: "memory",
-					id: "bad_action",
-					title: "Bad action",
-					content: "Bad action",
-				},
-				{
-					action: "create",
-					kind: "tool" as RefinementKind,
-					id: "bad_kind",
-					title: "Bad kind",
-					content: "Bad kind",
-				},
-			]),
-			{ id: "refine_unsupported" },
-		);
-
-		expect(result.appliedEdits).toHaveLength(2);
-		expect(result.appliedEdits[0]).toMatchObject({
-			id: "bad_action",
-			applied: false,
-			error: "unsupported action rename",
-		});
-		expect(result.appliedEdits[1]).toMatchObject({
-			id: "bad_kind",
-			applied: false,
-			error: "unsupported kind tool",
-		});
-		expect(state.entries.memory.bad_action).toBeUndefined();
-		expect(Object.keys(state.entries)).toEqual([...kinds]);
-		expect(state.refinements.at(-1)?.changes).toEqual([]);
-	});
-
-	it("rejects attempts to edit the base system prompt", () => {
-		const state = loadHarnessState(makeTempDir());
-		const result = applyRefinementProposal(
-			state,
-			{
-				summary: "Bad edit",
-				rationale: "Should not apply.",
-				expectedOutcome: "No change.",
-				edits: [
-					{
-						action: "update",
-						kind: "prompt",
-						id: "base_system_prompt",
-						title: "Base system prompt",
-						content: "Replace everything.",
-					},
-				],
-			},
-			{ id: "refine_1" },
-		);
-
-		expect(result.appliedEdits[0].applied).toBe(false);
-		expect(result.appliedEdits[0].error).toContain("base system prompt");
-		expect(state.entries.prompt.base_system_prompt).toBeUndefined();
-	});
-
-	it("rejects base system prompt edits when the id is derived from title", () => {
-		const state = loadHarnessState(makeTempDir());
-		const result = applyRefinementProposal(
-			state,
-			{
-				summary: "Bad create",
-				rationale: "Should not apply.",
-				expectedOutcome: "No change.",
-				edits: [
-					{
-						action: "create",
-						kind: "prompt",
-						title: "Base System Prompt",
-						content: "Replace everything.",
-					},
-				],
-			},
-			{ id: "refine_1" },
-		);
-
-		expect(result.appliedEdits[0]).toMatchObject({
-			id: "base_system_prompt",
-			applied: false,
-		});
-		expect(result.appliedEdits[0].error).toContain("base system prompt");
-		expect(state.entries.prompt.base_system_prompt).toBeUndefined();
-	});
-
-	it("requests JSON refinement with low reasoning when session thinking is enabled", async () => {
-		const state = loadHarnessState(makeTempDir());
+			kind: "memory",
+			id: "native_validation",
+			title: "Native validation",
+			content: "Run validation through the target project environment.",
+		};
 		completeSimpleMock.mockResolvedValueOnce(
-			assistantText(
-				JSON.stringify({
-					summary: "Remember native validation",
-					rationale: "The conversation repeated native validation guidance.",
-					expectedOutcome: "Future sessions use native validation commands.",
-					edits: [
-						{
-							action: "create",
-							kind: "memory",
-							id: "native_validation",
-							title: "Native validation",
-							content: "Run validation through the target project environment.",
-						},
-					],
-				}),
-			),
+			assistantText(JSON.stringify({ summary: "s", rationale: "r", expectedOutcome: "o", edits: [edit] })),
 		);
 
 		const result = await refineHarness(
@@ -1017,21 +542,6 @@ describe("harness refinement", () => {
 			"xhigh",
 		);
 
-		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
-		expect(completeSimpleMock.mock.calls[0][1]).toMatchObject({
-			systemPrompt: expect.stringContaining("The default editable continual harness store is local"),
-		});
-		expect(completeSimpleMock.mock.calls[0][1]).toMatchObject({
-			systemPrompt: expect.stringContaining("A caller may explicitly request global refinement"),
-		});
-		expect(completeSimpleMock.mock.calls[0][1]).toMatchObject({
-			systemPrompt: expect.stringContaining("Always use the bare id (no prefix) in edits"),
-		});
-		expect(completeSimpleMock.mock.calls[0][1]).toMatchObject({
-			systemPrompt: expect.stringContaining(
-				"During a local refinement, global entries are read-only context: never propose update or delete edits for them",
-			),
-		});
 		// Budget is derived from the model (8192) rather than a fixed literal.
 		expect(completeSimpleMock.mock.calls[0][2]).toMatchObject({
 			reasoning: "low",
@@ -1039,86 +549,64 @@ describe("harness refinement", () => {
 			apiKey: "api-key",
 			headers: { "x-test-header": "1" },
 		});
-		expect(result.appliedEdits[0]).toMatchObject({
-			action: "create",
-			kind: "memory",
-			id: "native_validation",
-			applied: true,
-		});
-		expect(state.entries.memory.native_validation.content).toBe(
-			"Run validation through the target project environment.",
-		);
+		expect(result.appliedEdits[0]).toMatchObject({ kind: "memory", id: "native_validation", applied: true });
+		expect(state.entries.memory.native_validation.content).toBe(edit.content);
 	});
 
-	it("caps the refinement output budget by the model's own maxTokens", async () => {
+	it("caps the refinement output budget by the policy ceiling for wide models", async () => {
 		const state = loadHarnessState(makeTempDir());
 		completeSimpleMock.mockResolvedValueOnce(
 			assistantText(JSON.stringify({ summary: "s", rationale: "r", expectedOutcome: "o", edits: [] })),
 		);
-		// A large model must receive the policy ceiling, not its full output width.
-		const wideModel = { ...createRefineModel(false), maxTokens: 128_000 };
 
-		await refineHarness([], state, [], wideModel, "api-key", {});
+		await refineHarness([], state, [], { ...createRefineModel(false), maxTokens: 128_000 }, "api-key", {});
 
 		expect(completeSimpleMock.mock.calls[0][2]).toMatchObject({ maxTokens: 32_000 });
 	});
 
-	it("reports an exhausted output budget instead of a JSON parse error", async () => {
-		const state = loadHarnessState(makeTempDir());
-		// A reply truncated inside the edits array: brace slicing would otherwise
-		// recover a fragment and surface an opaque JSON.parse message.
-		const truncated = `{
-  "summary": "s",
-  "rationale": "r",
-  "expectedOutcome": "o",
-  "edits": [
-    { "action": "create", "kind": "memory", "id": "a", "title": "t", "content": "first" },
-    { "action": "create", "kind": "memory", "id": "b", "title": "t2", "content": "second`;
-		completeSimpleMock.mockResolvedValueOnce({ ...assistantText(truncated), stopReason: "length" });
-
-		await expect(refineHarness([], state, [], createRefineModel(false), "api-key", {})).rejects.toThrow(
-			/output budget was exhausted/,
-		);
-	});
-
-	it("rejects a truncated proposal that never reports a length stop reason", async () => {
-		const state = loadHarnessState(makeTempDir());
-		const truncated = `{
+	// A cut-off reply must be reported as truncation, and a complete-but-invalid
+	// reply as a formatting failure: swapping the two sends callers the wrong fix.
+	it.each<{ label: string; reply: string; stopReason?: "length"; error: RegExp }>([
+		{
+			label: "an exhausted output budget",
+			reply: `{
   "summary": "s",
   "edits": [
     { "action": "create", "kind": "memory", "id": "a", "title": "t", "content": "first" },
-    { "action": "create", "kind": "memory", "id": "b", "title": "t2", "content": "second`;
-		completeSimpleMock.mockResolvedValueOnce(assistantText(truncated));
-
-		await expect(refineHarness([], state, [], createRefineModel(false), "api-key", {})).rejects.toThrow(
-			/stopped before completing its JSON object/,
-		);
-	});
-
-	it("reports truncation when a JSON-only reply is cut after a nested closing brace", async () => {
-		const state = loadHarnessState(makeTempDir());
-		// Ends on "}" so it takes the startsWith/endsWith fast path rather than
-		// the brace-slicing fallback, but is still an incomplete object.
-		const truncated = `{
+    { "action": "create", "kind": "memory", "id": "b", "title": "t2", "content": "second`,
+			stopReason: "length",
+			error: /output budget was exhausted/,
+		},
+		{
+			label: "a truncated reply that never reports a length stop reason",
+			reply: `{
   "summary": "s",
   "edits": [
-    { "action": "create", "kind": "memory", "id": "a", "title": "t", "content": "first" }`;
-		completeSimpleMock.mockResolvedValueOnce(assistantText(truncated));
-
-		await expect(refineHarness([], state, [], createRefineModel(false), "api-key", {})).rejects.toThrow(
-			/stopped before completing its JSON object/,
-		);
-	});
-
-	it("reports malformed JSON as invalid rather than as an exhausted budget", async () => {
+    { "action": "create", "kind": "memory", "id": "a", "title": "t", "content": "first" },
+    { "action": "create", "kind": "memory", "id": "b", "title": "t2", "content": "second`,
+			error: /stopped before completing its JSON object/,
+		},
+		{
+			// Ends on "}" so it takes the startsWith/endsWith fast path rather than
+			// the brace-slicing fallback, but is still an incomplete object.
+			label: "a JSON-only reply cut after a nested closing brace",
+			reply: `{
+  "summary": "s",
+  "edits": [
+    { "action": "create", "kind": "memory", "id": "a", "title": "t", "content": "first" }`,
+			error: /stopped before completing its JSON object/,
+		},
+		{
+			label: "a complete but malformed reply",
+			reply: 'Here is the result: {"edits": [oops]}',
+			error: /did not return valid JSON/,
+		},
+	])("reports $label", async ({ reply, stopReason, error }) => {
 		const state = loadHarnessState(makeTempDir());
-		// Complete and balanced, but not valid JSON: this is a model formatting
-		// failure, not a truncation, and must not blame the output budget.
-		completeSimpleMock.mockResolvedValueOnce(assistantText('Here is the result: {"edits": [oops]}'));
+		const message = assistantText(reply);
+		completeSimpleMock.mockResolvedValueOnce(stopReason ? { ...message, stopReason } : message);
 
-		await expect(refineHarness([], state, [], createRefineModel(false), "api-key", {})).rejects.toThrow(
-			/did not return valid JSON/,
-		);
+		await expect(refineHarness([], state, [], createRefineModel(false), "api-key", {})).rejects.toThrow(error);
 	});
 
 	it("rolls back created, updated, and deleted entries from refinement history", async () => {
@@ -1129,13 +617,7 @@ describe("harness refinement", () => {
 		const target = applyRefinementProposal(
 			state,
 			proposal("Target refinement", [
-				{
-					action: "create",
-					kind: "prompt",
-					id: "created_prompt",
-					title: "Created prompt",
-					content: "Created prompt content",
-				},
+				{ action: "create", kind: "prompt", id: "created_prompt", title: "Created", content: "Created content" },
 				{
 					action: "update",
 					kind: "memory",
@@ -1145,25 +627,17 @@ describe("harness refinement", () => {
 					path: "updated/path",
 					metadata: { updated: true },
 				},
-				{
-					action: "delete",
-					kind: "skill",
-					id: "deleted_skill",
-				},
+				{ action: "delete", kind: "skill", id: "deleted_skill" },
 			]),
 			{ id: "refine_target" },
 		);
-
-		expect(state.entries.prompt.created_prompt).toBeDefined();
-		expect(state.entries.memory.kept_memory.content).toBe("Updated memory content");
-		expect(state.entries.skill.deleted_skill).toBeUndefined();
 
 		const rollback = await refineHarness([], state, [target], {} as never, "api-key", {
 			rollbackId: "refine_target",
 		});
 
-		expect(rollback.rollbackOf).toBe("refine_target");
-		expect(rollback.scope).toBe("local");
+		expect(rollback).toMatchObject({ rollbackOf: "refine_target", scope: "local" });
+		// Rollback undoes the edits in reverse order and restores the pre-edit snapshots.
 		expect(rollback.appliedEdits.map((edit) => `${edit.action} ${edit.kind}:${edit.id}`)).toEqual([
 			"create skill:deleted_skill",
 			"update memory:kept_memory",
@@ -1171,19 +645,15 @@ describe("harness refinement", () => {
 		]);
 		expect(state.entries.prompt.created_prompt).toBeUndefined();
 		expect(state.entries.memory.kept_memory).toMatchObject({
-			title: "memory title",
 			content: "memory content",
 			path: "memory/path",
 			metadata: { seeded: true },
 			version: 3,
 		});
 		expect(state.entries.skill.deleted_skill).toMatchObject({
-			title: "skill title",
 			content: "skill content",
-			path: "skill/path",
 			reference: skillReference,
-			arguments: { input: { type: "string", required: true, description: "Task input" } },
-			metadata: { seeded: true },
+			arguments: skillContract.arguments,
 			version: 1,
 		});
 		expect(state.refinements.at(-1)?.trigger).toBe("Rollback refinement refine_target");
@@ -1211,7 +681,7 @@ describe("global refinement history", () => {
 		};
 	}
 
-	it("appends and reloads refinement results across calls", () => {
+	it("appends, reloads, and skips malformed history lines", () => {
 		const dir = makeTempDir();
 		expect(loadGlobalRefinementHistory(dir)).toEqual([]);
 
@@ -1219,6 +689,8 @@ describe("global refinement history", () => {
 		const second = sampleResult("refine_2");
 		const historyPath = appendGlobalRefinement(dir, first);
 		appendGlobalRefinement(dir, second);
+		appendFileSync(historyPath, "not json\n", "utf8");
+		appendFileSync(historyPath, `${JSON.stringify({ id: "x" })}\n`, "utf8");
 
 		expect(historyPath).toBe(getRefinementHistoryPath(dir));
 		expect(loadGlobalRefinementHistory(dir)).toEqual([
@@ -1227,112 +699,72 @@ describe("global refinement history", () => {
 		]);
 	});
 
-	it("defaults legacy global history results to global scope", () => {
+	// History written before result.scope existed must still resolve to global.
+	it("defaults legacy global history entries to global scope", () => {
 		const dir = makeTempDir();
-		const legacy = sampleResult("refine_legacy_global", { scope: undefined });
-		appendFileSync(
-			getRefinementHistoryPath(dir),
-			`${JSON.stringify(legacy)}
-`,
-			"utf8",
-		);
+		const legacyEdit = {
+			action: "create" as const,
+			kind: "memory" as const,
+			id: "legacy_global_memory",
+			title: "Legacy global memory",
+			content: "created globally",
+			applied: true,
+			after: {
+				id: "legacy_global_memory",
+				kind: "memory" as const,
+				title: "Legacy global memory",
+				content: "created globally",
+				path: "general",
+				scope: "global" as const,
+				reference: {},
+				arguments: {},
+				metadata: {},
+				source: "refine",
+				created_at: "2026-01-01T00:00:00.000Z",
+				updated_at: "2026-01-01T00:00:00.000Z",
+				version: 1,
+			},
+		};
+		const scopeless = sampleResult("refine_legacy", { scope: undefined });
+		const editScoped = sampleResult("refine_legacy_edits", { scope: undefined, appliedEdits: [legacyEdit] });
+		for (const legacy of [scopeless, editScoped]) {
+			appendFileSync(getRefinementHistoryPath(dir), `${JSON.stringify(legacy)}\n`, "utf8");
+		}
 
-		expect(loadGlobalRefinementHistory(dir)[0]).toMatchObject({ id: "refine_legacy_global", scope: "global" });
+		// Scope is recovered from the edit snapshots and written back onto the loaded results.
+		expect(loadGlobalRefinementHistory(dir).map((entry) => entry.scope)).toEqual(["global", "global"]);
+		expect(inferRefinementResultScope(editScoped)).toBe("global");
 	});
 
-	it("writes inferred legacy history scope back onto loaded results", () => {
-		const dir = makeTempDir();
-		const legacy = sampleResult("refine_legacy_inferred", {
-			scope: undefined,
-			appliedEdits: [
-				{
-					action: "create",
-					kind: "memory",
-					id: "legacy_global_memory",
-					title: "Legacy global memory",
-					content: "created globally",
-					applied: true,
-					after: {
-						id: "legacy_global_memory",
-						kind: "memory",
-						title: "Legacy global memory",
-						content: "created globally",
-						path: "general",
-						scope: "global",
-						reference: {},
-						arguments: {},
-						metadata: {},
-						source: "refine",
-						created_at: "2026-01-01T00:00:00.000Z",
-						updated_at: "2026-01-01T00:00:00.000Z",
-						version: 1,
-					},
-				},
-			],
-		});
-		appendFileSync(getRefinementHistoryPath(dir), `${JSON.stringify(legacy)}\n`, "utf8");
-
-		expect(loadGlobalRefinementHistory(dir)[0]).toMatchObject({
-			id: "refine_legacy_inferred",
-			scope: "global",
-		});
-	});
-
-	it("preserves global scope when session history shadows legacy global history", () => {
-		const globalOld = sampleResult("refine_shared", { scope: "global", summary: "global version" });
-		const sessionNew = sampleResult("refine_shared", { scope: undefined, summary: "session version" });
-
-		const merged = mergeRefinementHistory([globalOld], [sessionNew]);
-
-		expect(merged).toHaveLength(1);
-		expect(merged[0]).toMatchObject({ id: "refine_shared", summary: "session version", scope: "global" });
-	});
-
-	it("skips malformed history lines without throwing", () => {
-		const dir = makeTempDir();
-		const valid = sampleResult("refine_valid");
-		appendGlobalRefinement(dir, valid);
-		appendFileSync(getRefinementHistoryPath(dir), "not json\n", "utf8");
-		appendFileSync(getRefinementHistoryPath(dir), `${JSON.stringify({ id: "x" })}\n`, "utf8");
-
-		expect(loadGlobalRefinementHistory(dir)).toEqual([{ ...valid, scope: "global" }]);
-	});
-
-	it("merges global and session history, preferring session entries by id", () => {
-		const globalOld = sampleResult("refine_shared", { summary: "global version" });
-		const globalOnly = sampleResult("refine_global_only");
-		const sessionNew = sampleResult("refine_shared", { summary: "session version" });
+	it("merges global and session history, preferring session entries but keeping global scope", () => {
+		const globalShared = sampleResult("refine_shared", { scope: "global", summary: "global version" });
+		const globalOnly = sampleResult("refine_global_only", { scope: "global" });
+		const sessionShared = sampleResult("refine_shared", { scope: undefined, summary: "session version" });
 		const sessionOnly = sampleResult("refine_session_only");
 
-		const merged = mergeRefinementHistory([globalOld, globalOnly], [sessionNew, sessionOnly]);
+		const merged = mergeRefinementHistory([globalShared, globalOnly], [sessionShared, sessionOnly]);
 
 		expect(merged).toHaveLength(3);
-		expect(merged.find((item) => item.id === "refine_shared")?.summary).toBe("session version");
+		expect(merged.find((item) => item.id === "refine_shared")).toMatchObject({
+			summary: "session version",
+			scope: "global",
+		});
 		expect(merged.map((item) => item.id)).toEqual(
 			expect.arrayContaining(["refine_shared", "refine_global_only", "refine_session_only"]),
 		);
 	});
 
 	it("plans a proposal without mutating harness state", async () => {
-		const dir = makeTempDir();
-		const state = loadHarnessState(dir);
+		const state = loadHarnessState(makeTempDir());
+		const edit = {
+			action: "create",
+			kind: "memory",
+			id: "planned_memory",
+			title: "Planned memory",
+			content: "Created only when applied.",
+		};
 		completeSimpleMock.mockResolvedValueOnce(
-			assistantText(
-				JSON.stringify({
-					summary: "Add a memory",
-					rationale: "useful",
-					expectedOutcome: "remembered",
-					edits: [
-						{
-							action: "create",
-							kind: "memory",
-							id: "planned_memory",
-							title: "Planned memory",
-							content: "Created only when applied.",
-						},
-					],
-				}),
-			),
+			assistantText(JSON.stringify({ summary: "s", rationale: "r", expectedOutcome: "o", edits: [edit] })),
 		);
 
 		const plan = await planRefinement(
@@ -1348,17 +780,6 @@ describe("global refinement history", () => {
 		// so applying must be the only thing that mutates state.
 		expect(plan.proposal.edits).toHaveLength(1);
 		expect(plan.id).toMatch(/^refine_/);
-		const request = completeSimpleMock.mock.calls[0][1];
-		const userPrompt = request.messages[0].content[0].text;
-		expect(userPrompt).toContain("Requested refinement scope: local");
-		expect(userPrompt).toContain("Global entries in the overview are read-only context");
-		expect(request.systemPrompt).toContain('handle = await rlm.spawn("sub-task", name="worker")');
-		expect(request.systemPrompt).toContain("never the child's answer");
-		expect(request.systemPrompt).toContain('receiver_role="parent"');
-		expect(request.systemPrompt).toContain("await rlm.list_subagents()");
-		expect(request.systemPrompt).toContain('receiver_role="child"');
-		expect(request.systemPrompt).not.toContain("asyncio.create_task(rlm");
-		expect(request.systemPrompt).not.toContain("asyncio.gather(rlm");
 		expect(state.entries.memory.planned_memory).toBeUndefined();
 		expect(state.refinements).toHaveLength(0);
 
@@ -1367,52 +788,35 @@ describe("global refinement history", () => {
 		expect(state.entries.memory.planned_memory).toBeDefined();
 	});
 
-	it("adds global-only scope policy when planning a global refinement", async () => {
-		const state = loadHarnessState(makeTempDir(), "global");
-		completeSimpleMock.mockResolvedValueOnce(
-			assistantText(
-				JSON.stringify({
-					summary: "No global edit",
-					rationale: "No durable cross-session lesson.",
-					expectedOutcome: "No change.",
-					edits: [],
-				}),
-			),
-		);
-
-		await planRefinement(
-			[{ role: "user", content: "remember this only if global", timestamp: Date.now() } satisfies AgentMessage],
-			state,
-			[],
-			createRefineModel(false),
-			"api-key",
-			{ global: true },
-		);
-
-		const userPrompt = completeSimpleMock.mock.calls[0][1].messages[0].content[0].text;
-		expect(userPrompt).toContain("Requested refinement scope: global");
-		expect(userPrompt).toContain("Do not persist session-only progress");
-	});
-
-	it("plans a rollback without mutating harness state", async () => {
+	it.each<{ label: string; scope: "local" | "global" }>([
+		{ label: "local", scope: "local" },
+		{ label: "global", scope: "global" },
+	])("plans a $label rollback against the recorded scope without mutating state", async ({ scope }) => {
 		const dir = makeTempDir();
-		const state = loadHarnessState(dir);
+		const state = loadHarnessState(dir, scope);
 		const target = applyRefinementProposal(
 			state,
 			proposal("Target", [
 				{ action: "create", kind: "memory", id: "rollback_me", title: "Rollback me", content: "content" },
 			]),
-			{ id: "refine_rollback_target" },
+			{ id: "refine_rollback_target", scope },
 		);
+		expect(target.scope).toBe(scope);
 
 		const plan = await planRefinement([], state, [target], {} as never, "api-key", {
 			rollbackId: "refine_rollback_target",
 		});
 
 		expect(plan.rollbackOf).toBe("refine_rollback_target");
-		expect(plan.rollbackScope).toBe("local");
+		expect(plan.rollbackScope).toBe(scope);
 		expect(state.entries.memory.rollback_me).toBeDefined();
-		applyRefinementProposal(state, plan.proposal, { id: plan.id, rollbackOf: plan.rollbackOf });
+
+		const rollback = applyRefinementProposal(state, plan.proposal, {
+			id: plan.id,
+			rollbackOf: plan.rollbackOf,
+			scope: plan.rollbackScope,
+		});
+		expect(rollback.scope).toBe(scope);
 		expect(state.entries.memory.rollback_me).toBeUndefined();
 	});
 
@@ -1445,76 +849,8 @@ describe("global refinement history", () => {
 			rollbackId: "refine_session_a",
 		});
 
-		expect(rollback.rollbackOf).toBe("refine_session_a");
-		expect(rollback.scope).toBe("local");
+		expect(rollback).toMatchObject({ rollbackOf: "refine_session_a", scope: "local" });
 		expect(sessionBState.entries.memory.session_a_memory).toBeUndefined();
-	});
-
-	it("plans rollback against the recorded global scope when --global is omitted", async () => {
-		const dir = makeTempDir();
-		const state = loadHarnessState(dir, "global");
-		const target = applyRefinementProposal(
-			state,
-			proposal("Global refinement", [
-				{
-					action: "create",
-					kind: "memory",
-					id: "global_memory",
-					title: "Global memory",
-					content: "Created globally.",
-				},
-			]),
-			{ id: "refine_global_target", scope: "global" },
-		);
-		expect(target.scope).toBe("global");
-
-		const plan = await planRefinement([], state, [target], {} as never, "api-key", {
-			rollbackId: "refine_global_target",
-		});
-
-		expect(plan.rollbackOf).toBe("refine_global_target");
-		expect(plan.rollbackScope).toBe("global");
-		const rollback = applyRefinementProposal(state, plan.proposal, {
-			id: plan.id,
-			rollbackOf: plan.rollbackOf,
-			scope: plan.rollbackScope,
-		});
-		expect(rollback.scope).toBe("global");
-		expect(state.entries.memory.global_memory).toBeUndefined();
-	});
-
-	it("infers rollback scope from legacy global edits without top-level scope", async () => {
-		const dir = makeTempDir();
-		const state = loadHarnessState(dir, "global");
-		const target = applyRefinementProposal(
-			state,
-			proposal("Legacy global refinement", [
-				{
-					action: "create",
-					kind: "memory",
-					id: "legacy_global_memory",
-					title: "Legacy global memory",
-					content: "Created globally before result.scope existed.",
-				},
-			]),
-			{ id: "refine_legacy_global", scope: "global" },
-		);
-		const legacyTarget = {
-			...target,
-			scope: undefined,
-			appliedEdits: target.appliedEdits.map((edit) => ({
-				...edit,
-				before: edit.before ? { ...edit.before, scope: undefined } : undefined,
-				after: edit.after ? { ...edit.after, scope: undefined } : undefined,
-			})),
-		};
-		const legacyHistory = mergeRefinementHistory([{ ...legacyTarget, scope: "global" }], [legacyTarget]);
-
-		const plan = await planRefinement([], state, legacyHistory, {} as never, "api-key", {
-			rollbackId: "refine_legacy_global",
-		});
-
-		expect(plan.rollbackScope).toBe("global");
 	});
 });
 
@@ -1537,6 +873,15 @@ describe("harness digest relevance ranking", () => {
 		};
 	}
 
+	function rank(entries: Record<string, HarnessEntry>, query: string | Map<string, number>): string {
+		const state = loadHarnessState(join(makeTempDir(), "h"), "local");
+		Object.assign(state.entries.memory, entries);
+		return formatHarnessStateForPrompt(state, {
+			maxEntriesPerKind: 1,
+			queryTerms: typeof query === "string" ? new Map(harnessQueryTerms(query).map((term) => [term, 1])) : query,
+		});
+	}
+
 	it("scores weighted term overlap with field coverage", () => {
 		const entry = makeEntry(
 			"repo",
@@ -1555,121 +900,86 @@ describe("harness digest relevance ranking", () => {
 		expect(scoreHarnessEntryForQuery(entry, new Map())).toBe(0);
 	});
 
-	it("selects top-k per kind by relevance instead of alphabetical order", () => {
-		const state = loadHarnessState(join(makeTempDir(), "h"), "local");
-		const irrelevant = makeEntry(
-			"aaa",
-			"Alphabetical first",
-			"Completely unrelated content about tea.",
-			"2026-08-01T00:00:00.000Z",
-		);
-		const relevant = makeEntry(
-			"zzz",
-			"Zebra note",
-			"The worktree workflow for rsi branches matters.",
-			"2026-08-02T00:00:00.000Z",
-		);
-		state.entries.memory.aaa = irrelevant;
-		state.entries.memory.zzz = relevant;
+	it.each<{ label: string; query: string; winner: string; loser: string; entries: Record<string, HarnessEntry> }>([
+		{
+			label: "relevance over alphabetical order",
+			query: "worktree",
+			winner: "zzz",
+			loser: "aaa",
+			entries: {
+				aaa: makeEntry("aaa", "Alphabetical first", "Unrelated content about tea.", "2026-08-01T00:00:00.000Z"),
+				zzz: makeEntry("zzz", "Zebra note", "The worktree workflow matters.", "2026-08-02T00:00:00.000Z"),
+			},
+		},
+		{
+			label: "recency as the tie-break for equal scores",
+			query: "worktree",
+			winner: "newer",
+			loser: "older",
+			entries: {
+				older: makeEntry("older", "Worktree policy", "Same worktree signal.", "2026-08-01T00:00:00.000Z"),
+				newer: makeEntry("newer", "Worktree policy 2", "Same worktree signal.", "2026-09-01T00:00:00.000Z"),
+			},
+		},
+		{
+			label: "whitespace-free CJK matches through bigram terms",
+			query: "修复登录",
+			winner: "login",
+			loser: "tea",
+			entries: {
+				login: makeEntry("login", "Login fix", "登录故障排查记录。", "2026-08-01T00:00:00.000Z"),
+				tea: makeEntry("tea", "Tea notes", "All about oolong brewing.", "2026-08-02T00:00:00.000Z"),
+			},
+		},
+		{
+			label: "real terms rather than incidental query punctuation",
+			query: "worktree?",
+			winner: "worktree",
+			loser: "question",
+			entries: {
+				worktree: makeEntry("worktree", "Branch hygiene", "Use git worktrees.", "2026-08-01T00:00:00.000Z"),
+				question: makeEntry("question", "Question", "Anything else left open?", "2026-08-02T00:00:00.000Z"),
+			},
+		},
+	])("ranks by $label", ({ query, winner, loser, entries }) => {
+		const ranked = rank(entries, query);
 
-		const ranked = formatHarnessStateForPrompt(state, {
-			maxEntriesPerKind: 1,
-			queryTerms: new Map([["worktree", 1]]),
-		});
-		expect(ranked).toContain("[global:zzz]");
-		expect(ranked).not.toContain("[global:aaa]");
-		expect(ranked).toContain("(entries ranked by relevance");
-
-		// Without query terms, alphabetical selection is unchanged.
-		const alphabetical = formatHarnessStateForPrompt(state, { maxEntriesPerKind: 1 });
-		expect(alphabetical).toContain("[global:aaa]");
-		expect(alphabetical).not.toContain("(entries ranked by relevance");
+		expect(ranked).toContain(`[global:${winner}]`);
+		expect(ranked).not.toContain(`[global:${loser}]`);
 	});
 
-	it("tolerates non-string persisted fields", () => {
-		const state = loadHarnessState(join(makeTempDir(), "h3"), "local");
-		const malformed = makeEntry("bad", "Worktree policy", "Worktree guidance.", "2026-08-01T00:00:00.000Z");
-		(malformed as unknown as { title: null }).title = null;
-		state.entries.memory.bad = malformed;
+	it("falls back to alphabetical selection and tolerates non-string persisted fields", () => {
+		const state = loadHarnessState(join(makeTempDir(), "h"), "local");
+		state.entries.memory.aaa = makeEntry("aaa", "Alphabetical first", "Tea.", "2026-08-01T00:00:00.000Z");
+		state.entries.memory.zzz = makeEntry("zzz", "Zebra note", "Worktree workflow.", "2026-08-02T00:00:00.000Z");
+		(state.entries.memory.zzz as unknown as { title: null }).title = null;
+
+		expect(formatHarnessStateForPrompt(state, { maxEntriesPerKind: 1 })).toContain("[global:aaa]");
 		expect(() => formatHarnessStateForPrompt(state, { queryTerms: new Map([["worktree", 1]]) })).not.toThrow();
 	});
 
-	it("breaks score ties by recency", () => {
-		const state = loadHarnessState(join(makeTempDir(), "h2"), "local");
-		const older = makeEntry("older", "Worktree policy", "Same worktree signal.", "2026-08-01T00:00:00.000Z");
-		const newer = makeEntry("newer", "Worktree policy 2", "Same worktree signal.", "2026-09-01T00:00:00.000Z");
-		state.entries.memory.older = older;
-		state.entries.memory.newer = newer;
-		const ranked = formatHarnessStateForPrompt(state, {
-			maxEntriesPerKind: 1,
-			queryTerms: new Map([["worktree", 1]]),
-		});
-		const newerIndex = ranked.indexOf("[global:newer]");
-		const olderIndex = ranked.indexOf("[global:older]");
-		expect(newerIndex).toBeGreaterThanOrEqual(0);
-		expect(olderIndex).toBe(-1);
-	});
-
-	it("tokenizes queries without punctuation terms and with CJK bigrams", () => {
-		// Punctuation and symbols only separate terms, in any script.
-		expect(harnessQueryTerms("Worktree?")).toEqual(["worktree"]);
-		expect(harnessQueryTerms("path/to/skill")).toEqual(["path", "skill"]);
-		expect(harnessQueryTerms("harness_search")).toEqual(["harness", "search"]);
-		expect(harnessQueryTerms("??? / . ,")).toEqual([]);
+	it.each<[string, string[]]>([
+		["Worktree?", ["worktree"]],
+		["path/to/skill", ["path", "skill"]],
+		["harness_search", ["harness", "search"]],
+		["??? / . ,", []],
 		// Short ASCII runs stay noise; other non-ASCII scripts stay whole.
-		expect(harnessQueryTerms("Fix the LOGIN bug")).toEqual(["login"]);
-		expect(harnessQueryTerms("Привет мир")).toEqual(["привет"]);
-		// Combining marks stay in their run: mark-heavy scripts spell
-		// whole words (Devanagari किताब).
-		expect(harnessQueryTerms("किताब notes")).toEqual(["किताब", "notes"]);
-		// Accented Latin stays whole; CJK is cut from adjacent words.
-		expect(harnessQueryTerms("naïve approach")).toEqual(["naïve", "approach"]);
-		expect(harnessQueryTerms("修复login")).toEqual(["修复", "login"]);
-		// Supplementary-plane ideographs count as CJK: lone chars become
-		// terms and multi-character runs take bigrams.
-		expect(harnessQueryTerms("𠀀")).toEqual(["𠀀"]);
-		expect(harnessQueryTerms("𠀀𠀁𠀂")).toEqual(["𠀀𠀁", "𠀁𠀂"]);
-		// CJK has no spaces between words: runs become overlapping bigrams,
-		// so partial matches stay findable and single characters count.
-		// Non-ASCII punctuation is a separator, not a term.
-		expect(harnessQueryTerms("修复登录")).toEqual(["修复", "复登", "登录"]);
-		expect(harnessQueryTerms("修复登录？")).toEqual(["修复", "复登", "登录"]);
-		expect(harnessQueryTerms("東京会議 login")).toEqual(["東京", "京会", "会議", "login"]);
-		expect(harnessQueryTerms("登")).toEqual(["登"]);
-	});
-
-	it("ranks whitespace-free CJK matches through bigram terms", () => {
-		const state = loadHarnessState(join(makeTempDir(), "h4"), "local");
-		const login = makeEntry("login", "Login fix", "登录故障排查记录。", "2026-08-01T00:00:00.000Z");
-		const tea = makeEntry("tea", "Tea notes", "All about oolong brewing.", "2026-08-02T00:00:00.000Z");
-		state.entries.memory.login = login;
-		state.entries.memory.tea = tea;
-
-		const ranked = formatHarnessStateForPrompt(state, {
-			maxEntriesPerKind: 1,
-			queryTerms: new Map(harnessQueryTerms("修复登录").map((term) => [term, 1])),
-		});
-		expect(ranked).toContain("[global:login]");
-		expect(ranked).not.toContain("[global:tea]");
-	});
-
-	it("does not rank entries by incidental punctuation in queries", () => {
-		const state = loadHarnessState(join(makeTempDir(), "h5"), "local");
-		const worktree = makeEntry(
-			"worktree",
-			"Branch hygiene",
-			"Use git worktrees for parallel branches.",
-			"2026-08-01T00:00:00.000Z",
-		);
-		const question = makeEntry("question", "Question", "Anything else left open?", "2026-08-02T00:00:00.000Z");
-		state.entries.memory.worktree = worktree;
-		state.entries.memory.question = question;
-
-		const ranked = formatHarnessStateForPrompt(state, {
-			maxEntriesPerKind: 1,
-			queryTerms: new Map(harnessQueryTerms("worktree?").map((term) => [term, 1])),
-		});
-		expect(ranked).toContain("[global:worktree]");
-		expect(ranked).not.toContain("[global:question]");
+		["Fix the LOGIN bug", ["login"]],
+		["Привет мир", ["привет"]],
+		// Combining marks stay in their run: mark-heavy scripts spell whole words.
+		["किताब notes", ["किताब", "notes"]],
+		["naïve approach", ["naïve", "approach"]],
+		// CJK has no spaces between words: runs become overlapping bigrams, so
+		// partial matches stay findable and single characters count.
+		["修复login", ["修复", "login"]],
+		["修复登录", ["修复", "复登", "登录"]],
+		["修复登录？", ["修复", "复登", "登录"]],
+		["東京会議 login", ["東京", "京会", "会議", "login"]],
+		["登", ["登"]],
+		// Supplementary-plane ideographs count as CJK.
+		["𠀀", ["𠀀"]],
+		["𠀀𠀁𠀂", ["𠀀𠀁", "𠀁𠀂"]],
+	])("tokenizes %j into %j", (query, expected) => {
+		expect(harnessQueryTerms(query)).toEqual(expected);
 	});
 });

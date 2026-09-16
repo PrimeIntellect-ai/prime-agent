@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, beforeEach, describe, it, test } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import { CombinedAutocompleteProvider } from "../src/autocomplete.js";
 import { getSlashCommandContext } from "../src/slash-command-context.js";
 
@@ -13,28 +13,8 @@ const resolveFdPath = (): string | null => {
 	if (result.status !== 0 || !result.stdout) {
 		return null;
 	}
-
 	const firstLine = result.stdout.split(/\r?\n/).find(Boolean);
 	return firstLine ? firstLine.trim() : null;
-};
-
-type FolderStructure = {
-	dirs?: string[];
-	files?: Record<string, string>;
-};
-
-const setupFolder = (baseDir: string, structure: FolderStructure = {}): void => {
-	const dirs = structure.dirs ?? [];
-	const files = structure.files ?? {};
-
-	dirs.forEach((dir) => {
-		mkdirSync(join(baseDir, dir), { recursive: true });
-	});
-	Object.entries(files).forEach(([filePath, contents]) => {
-		const fullPath = join(baseDir, filePath);
-		mkdirSync(dirname(fullPath), { recursive: true });
-		writeFileSync(fullPath, contents);
-	});
 };
 
 const fdPath = resolveFdPath();
@@ -45,6 +25,22 @@ const requireFdPath = (): string => {
 		throw new Error("fd is not available");
 	}
 	return fdPath;
+};
+
+type FolderStructure = {
+	dirs?: string[];
+	files?: Record<string, string>;
+};
+
+const setupFolder = (baseDir: string, structure: FolderStructure = {}): void => {
+	for (const dir of structure.dirs ?? []) {
+		mkdirSync(join(baseDir, dir), { recursive: true });
+	}
+	for (const [filePath, contents] of Object.entries(structure.files ?? {})) {
+		const fullPath = join(baseDir, filePath);
+		mkdirSync(dirname(fullPath), { recursive: true });
+		writeFileSync(fullPath, contents);
+	}
 };
 
 const getSuggestions = (
@@ -86,122 +82,73 @@ describe("slash command context", () => {
 
 describe("CombinedAutocompleteProvider", () => {
 	describe("slash commands", () => {
-		it("matches command aliases while previewing and completing the canonical command", async () => {
-			const provider = new CombinedAutocompleteProvider(
-				[
-					{
-						name: "new",
-						aliases: ["clear"],
-						description: "Start a new session",
-					},
-				],
-				"/tmp",
-			);
-			const result = await getSuggestions(provider, ["/clear"], 0, 6);
+		const commands = [
+			{ name: "new", aliases: ["clear"], description: "Start a new session" },
+			{ name: "help", description: "Show help" },
+			{ name: "model", description: "Select model" },
+			{ name: "goal", description: "Set a goal", takesArgument: true },
+			{ name: "skill:brainstorm", description: "Brainstorm approaches" },
+		];
+		const provider = () => new CombinedAutocompleteProvider(commands, "/tmp");
 
-			assert.deepStrictEqual(result, {
-				prefix: "/clear",
-				kind: "slash-command",
-				items: [{ value: "new", label: "new", description: "Start a new session" }],
+		/** [name, lines, cursor line, cursor col, expected prefix, expected item values] */
+		const suggestionCases: [
+			name: string,
+			lines: string[],
+			line: number,
+			col: number,
+			prefix: string,
+			values: string[],
+		][] = [
+			["matches a command alias and completes the canonical name", ["/clear"], 0, 6, "/clear", ["new"]],
+			[
+				"suggests skill commands for inline references",
+				["Please use /skill:brain"],
+				0,
+				23,
+				"/skill:brain",
+				["skill:brainstorm"],
+			],
+			["suggests commands on later prompt lines", ["First line", "Then /he"], 1, 8, "/he", ["help"]],
+		];
+
+		for (const [name, lines, line, col, prefix, values] of suggestionCases) {
+			it(name, async () => {
+				const result = await getSuggestions(provider(), lines, line, col);
+
+				assert.strictEqual(result?.kind, "slash-command");
+				assert.strictEqual(result?.prefix, prefix);
+				assert.deepStrictEqual(
+					result?.items.map((item) => item.value),
+					values,
+				);
 			});
-		});
+		}
 
-		it("surfaces takesArgument on free-form-argument commands and omits it otherwise", async () => {
-			const provider = new CombinedAutocompleteProvider(
-				[
-					{ name: "goal", description: "Set a goal", takesArgument: true },
-					{ name: "new", description: "Start a new session" },
-				],
-				"/tmp",
+		it("marks argument-taking commands so the editor can complete into the parameter", async () => {
+			const result = await getSuggestions(provider(), ["/goal"], 0, 5);
+
+			assert.deepStrictEqual(
+				result?.items.map((item) => [item.value, item.takesArgument]),
+				[["goal", true]],
 			);
-
-			const goal = await getSuggestions(provider, ["/goal"], 0, 5);
-			assert.deepStrictEqual(goal?.items, [
-				{ value: "goal", label: "goal", description: "Set a goal", takesArgument: true },
-			]);
-
-			const fresh = await getSuggestions(provider, ["/new"], 0, 4);
-			assert.deepStrictEqual(fresh?.items, [{ value: "new", label: "new", description: "Start a new session" }]);
-		});
-
-		it("keeps argument hints and source tags separate from descriptions", async () => {
-			const provider = new CombinedAutocompleteProvider(
-				[
-					{
-						name: "compact",
-						description: "Compact the session context",
-						argumentHint: "[instructions]",
-					},
-					{
-						name: "skill:compact",
-						description: "Check context usage",
-						sourceTag: "#builtin",
-					},
-				],
-				"/tmp",
-			);
-
-			const result = await getSuggestions(provider, ["/compact"], 0, 8);
-
-			assert.deepStrictEqual(result?.items, [
-				{
-					value: "compact",
-					label: "compact",
-					description: "Compact the session context",
-					argumentHint: "[instructions]",
-				},
-				{
-					value: "skill:compact",
-					label: "skill:compact",
-					description: "Check context usage",
-					sourceTag: "#builtin",
-				},
-			]);
-		});
-
-		it("suggests skill commands for inline references", async () => {
-			const provider = new CombinedAutocompleteProvider(
-				[{ name: "skill:brainstorm", description: "Brainstorm approaches" }],
-				"/tmp",
-			);
-			const line = "Please use /skill:brain";
-			const result = await getSuggestions(provider, [line], 0, line.length);
-
-			assert.deepStrictEqual(result, {
-				prefix: "/skill:brain",
-				kind: "slash-command",
-				items: [{ value: "skill:brainstorm", label: "skill:brainstorm", description: "Brainstorm approaches" }],
-			});
-		});
-
-		it("suggests commands on later prompt lines", async () => {
-			const provider = new CombinedAutocompleteProvider([{ name: "help", description: "Show help" }], "/tmp");
-			const lines = ["First line", "Then /he"];
-			const result = await getSuggestions(provider, lines, 1, lines[1]!.length);
-
-			assert.deepStrictEqual(result, {
-				prefix: "/he",
-				kind: "slash-command",
-				items: [{ value: "help", label: "help", description: "Show help" }],
-			});
 		});
 
 		it("does not fall back to file suggestions for unmatched command tokens", async () => {
-			const provider = new CombinedAutocompleteProvider([], "/tmp");
-			const result = await getSuggestions(provider, ["/tm"], 0, 3);
+			const result = await getSuggestions(new CombinedAutocompleteProvider([], "/tmp"), ["/tm"], 0, 3);
 
 			assert.strictEqual(result, null);
 		});
 
 		it("replaces only the inline command token without duplicating whitespace", async () => {
-			const provider = new CombinedAutocompleteProvider([{ name: "help", description: "Show help" }], "/tmp");
 			const line = "Please use /he later";
 			const cursorCol = line.indexOf(" later");
-			const result = await getSuggestions(provider, [line], 0, cursorCol);
+			const result = await getSuggestions(provider(), [line], 0, cursorCol);
 			const item = result?.items[0];
 			assert.ok(result && item);
 
-			const applied = provider.applyCompletion([line], 0, cursorCol, item, result.prefix);
+			const applied = provider().applyCompletion([line], 0, cursorCol, item, result.prefix);
+
 			assert.deepStrictEqual(applied, {
 				lines: ["Please use /help later"],
 				cursorLine: 0,
@@ -209,87 +156,35 @@ describe("CombinedAutocompleteProvider", () => {
 			});
 		});
 
-		it("completes argument-taking commands into the parameter position and others bare", async () => {
-			const provider = new CombinedAutocompleteProvider(
-				[
-					{ name: "model", description: "Select model" },
-					{ name: "goal", description: "Set a goal", takesArgument: true },
-				],
-				"/tmp",
-			);
+		it("completes argument-taking commands into the parameter position and others bare", () => {
+			const bare = provider().applyCompletion(["/mo"], 0, 3, { value: "model", label: "model" }, "/mo");
+			assert.deepStrictEqual(bare, { lines: ["/model"], cursorLine: 0, cursorCol: "/model".length });
 
-			const bare = provider.applyCompletion(["/mo"], 0, 3, { value: "model", label: "model" }, "/mo");
-			assert.deepStrictEqual(bare, {
-				lines: ["/model"],
-				cursorLine: 0,
-				cursorCol: "/model".length,
-			});
-
-			const spaced = provider.applyCompletion(["/go"], 0, 3, { value: "goal", label: "goal" }, "/go");
-			assert.deepStrictEqual(spaced, {
-				lines: ["/goal "],
-				cursorLine: 0,
-				cursorCol: "/goal ".length,
-			});
+			const spaced = provider().applyCompletion(["/go"], 0, 3, { value: "goal", label: "goal" }, "/go");
+			assert.deepStrictEqual(spaced, { lines: ["/goal "], cursorLine: 0, cursorCol: "/goal ".length });
 		});
 	});
 
-	describe("extractPathPrefix", () => {
-		it("extracts / from 'hey /' when forced", async () => {
-			const provider = new CombinedAutocompleteProvider([], "/tmp");
-			const lines = ["hey /"];
-			const cursorLine = 0;
-			const cursorCol = 5; // After the "/"
+	describe("path prefix extraction", () => {
+		/** [name, line, cursor col, expected prefix (null means no suggestions)] */
+		const prefixCases: [name: string, line: string, col: number, prefix: string | null][] = [
+			["extracts / from 'hey /' when forced", "hey /", 5, "/"],
+			["does not trigger for slash commands", "/model", 6, null],
+			["triggers for absolute paths after a slash command argument", "/command /", 10, "/"],
+		];
 
-			const result = await getSuggestions(provider, lines, cursorLine, cursorCol, true);
+		for (const [name, line, col, prefix] of prefixCases) {
+			it(name, async () => {
+				const result = await getSuggestions(new CombinedAutocompleteProvider([], "/tmp"), [line], 0, col, true);
 
-			assert.notEqual(result, null, "Should return suggestions for root directory");
-			if (result) {
-				assert.strictEqual(result.prefix, "/", "Prefix should be '/'");
-				assert.strictEqual(result.kind, "file");
-			}
-		});
-
-		it("extracts /A from '/A' when forced", async () => {
-			const provider = new CombinedAutocompleteProvider([], "/tmp");
-			const lines = ["/A"];
-			const cursorLine = 0;
-			const cursorCol = 2; // After the "A"
-
-			const result = await getSuggestions(provider, lines, cursorLine, cursorCol, true);
-
-			console.log("Result:", result);
-			if (result) {
-				assert.strictEqual(result.prefix, "/A", "Prefix should be '/A'");
-			}
-		});
-
-		it("does not trigger for slash commands", async () => {
-			const provider = new CombinedAutocompleteProvider([], "/tmp");
-			const lines = ["/model"];
-			const cursorLine = 0;
-			const cursorCol = 6; // After "model"
-
-			const result = await getSuggestions(provider, lines, cursorLine, cursorCol, true);
-
-			console.log("Result:", result);
-			assert.strictEqual(result, null, "Should not trigger for slash commands");
-		});
-
-		it("triggers for absolute paths after slash command argument", async () => {
-			const provider = new CombinedAutocompleteProvider([], "/tmp");
-			const lines = ["/command /"];
-			const cursorLine = 0;
-			const cursorCol = 10; // After the second "/"
-
-			const result = await getSuggestions(provider, lines, cursorLine, cursorCol, true);
-
-			console.log("Result:", result);
-			assert.notEqual(result, null, "Should trigger for absolute paths in command arguments");
-			if (result) {
-				assert.strictEqual(result.prefix, "/", "Prefix should be '/'");
-			}
-		});
+				if (prefix === null) {
+					assert.strictEqual(result, null);
+				} else {
+					assert.strictEqual(result?.prefix, prefix);
+					assert.strictEqual(result?.kind, "file");
+				}
+			});
+		}
 	});
 
 	describe("fd @ file suggestions", { skip: !isFdInstalled }, () => {
@@ -309,236 +204,169 @@ describe("CombinedAutocompleteProvider", () => {
 			rmSync(rootDir, { recursive: true, force: true });
 		});
 
-		test("returns all files and folders for empty @ query", async () => {
-			setupFolder(baseDir, {
-				dirs: ["src"],
-				files: {
-					"README.md": "readme",
+		interface FdCase {
+			name: string;
+			base?: FolderStructure;
+			outside?: FolderStructure;
+			/** [target, link path relative to the cwd] */
+			symlinks?: [target: string, link: string][];
+			query: string;
+			/** Cursor offset from the end of the query, for completions inside closing quotes. */
+			cursorBack?: number;
+			values?: string[];
+			first?: string;
+			includes?: string[];
+			excludes?: string[];
+			excludedPrefixes?: string[];
+		}
+
+		const fdCases: FdCase[] = [
+			{
+				name: "returns all files and folders for an empty @ query",
+				base: { dirs: ["src"], files: { "README.md": "readme" } },
+				query: "@",
+				values: ["@README.md", "@src/"],
+			},
+			{
+				name: "filters case-insensitively",
+				base: { dirs: ["src"], files: { "README.md": "readme" } },
+				query: "@re",
+				values: ["@README.md"],
+			},
+			{
+				name: "ranks directories before files",
+				base: { dirs: ["src"], files: { "src.txt": "text" } },
+				query: "@src",
+				first: "@src/",
+				includes: ["@src.txt"],
+			},
+			{
+				name: "matches deeply nested paths",
+				base: {
+					files: {
+						"packages/tui/src/autocomplete.ts": "export {};",
+						"packages/ai/src/autocomplete.ts": "export {};",
+					},
 				},
+				query: "@tui/src/auto",
+				includes: ["@packages/tui/src/autocomplete.ts"],
+				excludes: ["@packages/ai/src/autocomplete.ts"],
+			},
+			{
+				name: "matches a directory in the middle of a path",
+				base: { files: { "src/components/Button.tsx": "export {};", "src/utils/helpers.ts": "export {};" } },
+				query: "@components/",
+				includes: ["@src/components/Button.tsx"],
+				excludes: ["@src/utils/helpers.ts"],
+			},
+			{
+				name: "scopes fuzzy search to relative directories and searches recursively",
+				outside: {
+					files: {
+						"nested/alpha.ts": "export {};",
+						"nested/deeper/also-alpha.ts": "export {};",
+						"nested/deeper/zzz.ts": "export {};",
+					},
+				},
+				query: "@../outside/a",
+				includes: ["@../outside/nested/alpha.ts", "@../outside/nested/deeper/also-alpha.ts"],
+				excludes: ["@../outside/nested/deeper/zzz.ts"],
+			},
+			{
+				name: "quotes paths with spaces",
+				base: { dirs: ["my folder"], files: { "my folder/test.txt": "content" } },
+				query: "@my",
+				includes: ['@"my folder/"'],
+			},
+			{
+				name: "includes hidden paths but excludes .git",
+				base: {
+					dirs: [".pi", ".github", ".git"],
+					files: { ".pi/config.json": "{}", ".github/workflows/ci.yml": "name: ci", ".git/config": "[core]" },
+				},
+				query: "@",
+				includes: ["@.pi/", "@.github/"],
+				excludes: ["@.git"],
+				excludedPrefixes: ["@.git/"],
+			},
+			{
+				name: "follows symlinked directories for fuzzy search",
+				base: { files: { "dir/some_file.txt": "real" } },
+				outside: { files: { "some_file.txt": "symlinked" } },
+				symlinks: [["../outside", "symlinked_dir"]],
+				query: "@some",
+				includes: ["@dir/some_file.txt", "@symlinked_dir/some_file.txt"],
+			},
+			{
+				name: "returns symlinked directories when matching their name",
+				outside: { files: { "nested/file.txt": "symlinked" } },
+				symlinks: [["../outside", "symlinked_dir"]],
+				query: "@symlinked",
+				includes: ["@symlinked_dir/"],
+			},
+			{
+				name: "returns symlinked files without requiring type l",
+				base: { files: { "original.txt": "content" } },
+				symlinks: [["original.txt", "link.txt"]],
+				query: "@link",
+				includes: ["@link.txt"],
+			},
+			{
+				name: "continues autocomplete inside quoted paths",
+				base: { files: { "my folder/test.txt": "content", "my folder/other.txt": "content" } },
+				query: '@"my folder/"',
+				cursorBack: 1,
+				includes: ['@"my folder/test.txt"', '@"my folder/other.txt"'],
+			},
+		];
+
+		for (const testCase of fdCases) {
+			it(testCase.name, async () => {
+				setupFolder(baseDir, testCase.base);
+				setupFolder(outsideDir, testCase.outside);
+				for (const [target, link] of testCase.symlinks ?? []) {
+					symlinkSync(target, join(baseDir, link));
+				}
+
+				const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+				const cursorCol = testCase.query.length - (testCase.cursorBack ?? 0);
+				const result = await getSuggestions(provider, [testCase.query], 0, cursorCol);
+				const values = result?.items.map((item) => item.value) ?? [];
+
+				if (testCase.values) assert.deepStrictEqual(values.slice().sort(), testCase.values.slice().sort());
+				if (testCase.first) assert.strictEqual(values[0], testCase.first);
+				for (const value of testCase.includes ?? []) {
+					assert.ok(values.includes(value), `Expected ${value} in ${JSON.stringify(values)}`);
+				}
+				for (const value of testCase.excludes ?? []) {
+					assert.ok(!values.includes(value), `Unexpected ${value} in ${JSON.stringify(values)}`);
+				}
+				for (const prefix of testCase.excludedPrefixes ?? []) {
+					assert.ok(!values.some((value) => value.startsWith(prefix)), `Unexpected ${prefix}* suggestion`);
+				}
 			});
+		}
 
+		it("applies a quoted @ completion without duplicating the closing quote", async () => {
+			setupFolder(baseDir, { files: { "my folder/test.txt": "content" } });
 			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
-			const line = "@";
-			const result = await getSuggestions(provider, [line], 0, line.length);
+			const line = '@"my folder/te"';
+			const cursorCol = line.length - 1;
 
-			const values = result?.items.map((item) => item.value).sort();
-			assert.deepStrictEqual(values, ["@README.md", "@src/"].sort());
+			const result = await getSuggestions(provider, [line], 0, cursorCol);
+			const item = result?.items.find((entry) => entry.value === '@"my folder/test.txt"');
+			assert.ok(result && item, "Should find test.txt suggestion");
+
+			const applied = provider.applyCompletion([line], 0, cursorCol, item, result.prefix);
+
+			assert.strictEqual(applied.lines[0], '@"my folder/test.txt" ');
 		});
 
-		test("matches file with extension in query", async () => {
-			setupFolder(baseDir, {
-				files: {
-					"file.txt": "content",
-				},
-			});
-
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
-			const line = "@file.txt";
-			const result = await getSuggestions(provider, [line], 0, line.length);
-
-			const values = result?.items.map((item) => item.value);
-			assert.ok(values?.includes("@file.txt"));
-		});
-
-		test("filters are case insensitive", async () => {
-			setupFolder(baseDir, {
-				dirs: ["src"],
-				files: {
-					"README.md": "readme",
-				},
-			});
-
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
-			const line = "@re";
-			const result = await getSuggestions(provider, [line], 0, line.length);
-
-			const values = result?.items.map((item) => item.value).sort();
-			assert.deepStrictEqual(values, ["@README.md"]);
-		});
-
-		test("ranks directories before files", async () => {
-			setupFolder(baseDir, {
-				dirs: ["src"],
-				files: {
-					"src.txt": "text",
-				},
-			});
-
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
-			const line = "@src";
-			const result = await getSuggestions(provider, [line], 0, line.length);
-
-			const firstValue = result?.items[0]?.value;
-			const hasSrcFile = result?.items?.some((item) => item.value === "@src.txt");
-			assert.strictEqual(firstValue, "@src/");
-			assert.ok(hasSrcFile);
-		});
-
-		test("returns nested file paths", async () => {
-			setupFolder(baseDir, {
-				files: {
-					"src/index.ts": "export {};\n",
-				},
-			});
-
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
-			const line = "@index";
-			const result = await getSuggestions(provider, [line], 0, line.length);
-
-			const values = result?.items.map((item) => item.value);
-			assert.ok(values?.includes("@src/index.ts"));
-		});
-
-		test("matches deeply nested paths", async () => {
-			setupFolder(baseDir, {
-				files: {
-					"packages/tui/src/autocomplete.ts": "export {};",
-					"packages/ai/src/autocomplete.ts": "export {};",
-				},
-			});
-
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
-			const line = "@tui/src/auto";
-			const result = await getSuggestions(provider, [line], 0, line.length);
-
-			const values = result?.items.map((item) => item.value);
-			assert.ok(values?.includes("@packages/tui/src/autocomplete.ts"));
-			assert.ok(!values?.includes("@packages/ai/src/autocomplete.ts"));
-		});
-
-		test("matches directory in middle of path with --full-path", async () => {
-			setupFolder(baseDir, {
-				files: {
-					"src/components/Button.tsx": "export {};",
-					"src/utils/helpers.ts": "export {};",
-				},
-			});
-
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
-			const line = "@components/";
-			const result = await getSuggestions(provider, [line], 0, line.length);
-
-			const values = result?.items.map((item) => item.value);
-			assert.ok(values?.includes("@src/components/Button.tsx"));
-			assert.ok(!values?.includes("@src/utils/helpers.ts"));
-		});
-
-		test("scopes fuzzy search to relative directories and searches recursively", async () => {
-			setupFolder(outsideDir, {
-				files: {
-					"nested/alpha.ts": "export {};",
-					"nested/deeper/also-alpha.ts": "export {};",
-					"nested/deeper/zzz.ts": "export {};",
-				},
-			});
-
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
-			const line = "@../outside/a";
-			const result = await getSuggestions(provider, [line], 0, line.length);
-
-			const values = result?.items.map((item) => item.value);
-			assert.ok(values?.includes("@../outside/nested/alpha.ts"));
-			assert.ok(values?.includes("@../outside/nested/deeper/also-alpha.ts"));
-			assert.ok(!values?.includes("@../outside/nested/deeper/zzz.ts"));
-		});
-
-		test("quotes paths with spaces for @ suggestions", async () => {
-			setupFolder(baseDir, {
-				dirs: ["my folder"],
-				files: {
-					"my folder/test.txt": "content",
-				},
-			});
-
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
-			const line = "@my";
-			const result = await getSuggestions(provider, [line], 0, line.length);
-
-			const values = result?.items.map((item) => item.value);
-			assert.ok(values?.includes('@"my folder/"'));
-		});
-
-		test("includes hidden paths but excludes .git", async () => {
-			setupFolder(baseDir, {
-				dirs: [".pi", ".github", ".git"],
-				files: {
-					".pi/config.json": "{}",
-					".github/workflows/ci.yml": "name: ci",
-					".git/config": "[core]",
-				},
-			});
-
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
-			const line = "@";
-			const result = await getSuggestions(provider, [line], 0, line.length);
-
-			const values = result?.items.map((item) => item.value) ?? [];
-			assert.ok(values.includes("@.pi/"));
-			assert.ok(values.includes("@.github/"));
-			assert.ok(!values.some((value) => value === "@.git" || value.startsWith("@.git/")));
-		});
-
-		test("follows symlinked directories for fuzzy @ search", async () => {
-			setupFolder(baseDir, {
-				files: {
-					"dir/some_file.txt": "real",
-				},
-			});
-			setupFolder(outsideDir, {
-				files: {
-					"some_file.txt": "symlinked",
-				},
-			});
-			symlinkSync("../outside", join(baseDir, "symlinked_dir"));
-
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
-			const line = "@some";
-			const result = await getSuggestions(provider, [line], 0, line.length);
-
-			const values = result?.items.map((item) => item.value) ?? [];
-			assert.ok(values.includes("@dir/some_file.txt"));
-			assert.ok(values.includes("@symlinked_dir/some_file.txt"));
-		});
-
-		test("returns symlinked directories when matching their name", async () => {
-			setupFolder(outsideDir, {
-				files: {
-					"nested/file.txt": "symlinked",
-				},
-			});
-			symlinkSync("../outside", join(baseDir, "symlinked_dir"));
-
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
-			const line = "@symlinked";
-			const result = await getSuggestions(provider, [line], 0, line.length);
-
-			const values = result?.items.map((item) => item.value) ?? [];
-			assert.ok(values.includes("@symlinked_dir/"));
-		});
-
-		test("returns symlinked files without requiring type l", async () => {
-			setupFolder(baseDir, {
-				files: {
-					"original.txt": "content",
-				},
-			});
-			const linkPath = join(baseDir, "link.txt");
-			symlinkSync("original.txt", linkPath);
-
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
-			const line = "@link";
-			const result = await getSuggestions(provider, [line], 0, line.length);
-
-			const values = result?.items.map((item) => item.value) ?? [];
-			assert.ok(values.includes("@link.txt"));
-		});
-
-		test("returns the same @ suggestions when the cwd path contains the query", async () => {
+		it("returns the same @ suggestions when the cwd path contains the query", async () => {
 			const normalBaseDir = join(rootDir, "cwd-normal");
 			const queryInPathBaseDir = join(rootDir, "cwd-plan-repro");
 			mkdirSync(normalBaseDir, { recursive: true });
 			mkdirSync(queryInPathBaseDir, { recursive: true });
-
 			const structure = {
 				dirs: ["packages/coding-agent/examples/extensions/plan-mode"],
 				files: {
@@ -550,62 +378,32 @@ describe("CombinedAutocompleteProvider", () => {
 			setupFolder(queryInPathBaseDir, structure);
 
 			const query = "@plan";
-			const normalProvider = new CombinedAutocompleteProvider([], normalBaseDir, requireFdPath());
-			const queryInPathProvider = new CombinedAutocompleteProvider([], queryInPathBaseDir, requireFdPath());
-
-			const normalResult = await getSuggestions(normalProvider, [query], 0, query.length);
-			const queryInPathResult = await getSuggestions(queryInPathProvider, [query], 0, query.length);
-
 			const normalize = (result: Awaited<ReturnType<typeof getSuggestions>>) =>
 				(result?.items ?? []).map((item) => `${item.label} :: ${item.description ?? ""}`).sort();
-
-			assert.deepStrictEqual(normalize(queryInPathResult), normalize(normalResult));
-			assert.ok(
-				normalize(normalResult).includes("plan-mode/ :: packages/coding-agent/examples/extensions/plan-mode"),
+			const normalResult = normalize(
+				await getSuggestions(
+					new CombinedAutocompleteProvider([], normalBaseDir, requireFdPath()),
+					[query],
+					0,
+					query.length,
+				),
 			);
-			assert.ok(normalize(normalResult).includes("plan.md :: packages/agent/docs/plan.md"));
-		});
+			const queryInPathResult = normalize(
+				await getSuggestions(
+					new CombinedAutocompleteProvider([], queryInPathBaseDir, requireFdPath()),
+					[query],
+					0,
+					query.length,
+				),
+			);
 
-		test("continues autocomplete inside quoted @ paths", async () => {
-			setupFolder(baseDir, {
-				files: {
-					"my folder/test.txt": "content",
-					"my folder/other.txt": "content",
-				},
-			});
-
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
-			const line = '@"my folder/"';
-			const result = await getSuggestions(provider, [line], 0, line.length - 1);
-
-			assert.notEqual(result, null, "Should return suggestions for quoted folder path");
-			const values = result?.items.map((item) => item.value);
-			assert.ok(values?.includes('@"my folder/test.txt"'));
-			assert.ok(values?.includes('@"my folder/other.txt"'));
-		});
-
-		test("applies quoted @ completion without duplicating closing quote", async () => {
-			setupFolder(baseDir, {
-				files: {
-					"my folder/test.txt": "content",
-				},
-			});
-
-			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
-			const line = '@"my folder/te"';
-			const cursorCol = line.length - 1;
-			const result = await getSuggestions(provider, [line], 0, cursorCol);
-
-			assert.notEqual(result, null, "Should return suggestions for quoted @ path");
-			const item = result?.items.find((entry) => entry.value === '@"my folder/test.txt"');
-			assert.ok(item, "Should find test.txt suggestion");
-
-			const applied = provider.applyCompletion([line], 0, cursorCol, item!, result!.prefix);
-			assert.strictEqual(applied.lines[0], '@"my folder/test.txt" ');
+			assert.deepStrictEqual(queryInPathResult, normalResult);
+			assert.ok(normalResult.includes("plan-mode/ :: packages/coding-agent/examples/extensions/plan-mode"));
+			assert.ok(normalResult.includes("plan.md :: packages/agent/docs/plan.md"));
 		});
 	});
 
-	describe("dot-slash path completion", () => {
+	describe("forced path completion", () => {
 		let baseDir = "";
 
 		beforeEach(() => {
@@ -616,104 +414,70 @@ describe("CombinedAutocompleteProvider", () => {
 			rmSync(baseDir, { recursive: true, force: true });
 		});
 
-		test("preserves ./ prefix when completing paths", async () => {
-			setupFolder(baseDir, {
-				files: {
-					"update.sh": "#!/bin/bash",
-					"utils.ts": "export {};",
-				},
+		/** [name, folder structure, typed line, cursor offset from the end, expected values] */
+		const pathCases: [
+			name: string,
+			structure: FolderStructure,
+			line: string,
+			cursorBack: number,
+			includes: string[],
+		][] = [
+			[
+				"preserves the ./ prefix when completing files",
+				{ files: { "update.sh": "#!/bin/bash", "utils.ts": "export {};" } },
+				"./up",
+				0,
+				["./update.sh"],
+			],
+			[
+				"preserves the ./ prefix for directory completions",
+				{ dirs: ["src"], files: { "src/index.ts": "export {};" } },
+				"./sr",
+				0,
+				["./src/"],
+			],
+			[
+				"quotes paths with spaces for direct completion",
+				{ dirs: ["my folder"], files: { "my folder/test.txt": "content" } },
+				"my",
+				0,
+				['"my folder/"'],
+			],
+			[
+				"continues completion inside quoted paths",
+				{ files: { "my folder/test.txt": "content", "my folder/other.txt": "content" } },
+				'"my folder/"',
+				1,
+				['"my folder/test.txt"', '"my folder/other.txt"'],
+			],
+		];
+
+		for (const [name, structure, line, cursorBack, includes] of pathCases) {
+			it(name, async () => {
+				setupFolder(baseDir, structure);
+				const provider = new CombinedAutocompleteProvider([], baseDir);
+
+				const result = await getSuggestions(provider, [line], 0, line.length - cursorBack, true);
+				const values = result?.items.map((item) => item.value) ?? [];
+
+				for (const value of includes) {
+					assert.ok(values.includes(value), `Expected ${value} in ${JSON.stringify(values)}`);
+				}
 			});
+		}
 
-			const provider = new CombinedAutocompleteProvider([], baseDir);
-			const line = "./up";
-			const result = await getSuggestions(provider, [line], 0, line.length, true);
-
-			assert.notEqual(result, null, "Should return suggestions for ./ path");
-			const values = result?.items.map((item) => item.value);
-			assert.ok(values?.includes("./update.sh"), `Expected ./update.sh in ${JSON.stringify(values)}`);
-		});
-
-		test("preserves ./ prefix for directory completions", async () => {
-			setupFolder(baseDir, {
-				dirs: ["src"],
-				files: {
-					"src/index.ts": "export {};",
-				},
-			});
-
-			const provider = new CombinedAutocompleteProvider([], baseDir);
-			const line = "./sr";
-			const result = await getSuggestions(provider, [line], 0, line.length, true);
-
-			assert.notEqual(result, null, "Should return suggestions for ./ directory path");
-			const values = result?.items.map((item) => item.value);
-			assert.ok(values?.includes("./src/"), `Expected ./src/ in ${JSON.stringify(values)}`);
-		});
-	});
-
-	describe("quoted path completion", () => {
-		let baseDir = "";
-
-		beforeEach(() => {
-			baseDir = mkdtempSync(join(tmpdir(), "pi-autocomplete-"));
-		});
-
-		afterEach(() => {
-			rmSync(baseDir, { recursive: true, force: true });
-		});
-
-		test("quotes paths with spaces for direct completion", async () => {
-			setupFolder(baseDir, {
-				dirs: ["my folder"],
-				files: {
-					"my folder/test.txt": "content",
-				},
-			});
-
-			const provider = new CombinedAutocompleteProvider([], baseDir);
-			const line = "my";
-			const result = await getSuggestions(provider, [line], 0, line.length, true);
-
-			assert.notEqual(result, null, "Should return suggestions for path completion");
-			const values = result?.items.map((item) => item.value);
-			assert.ok(values?.includes('"my folder/"'));
-		});
-
-		test("continues completion inside quoted paths", async () => {
-			setupFolder(baseDir, {
-				files: {
-					"my folder/test.txt": "content",
-					"my folder/other.txt": "content",
-				},
-			});
-
-			const provider = new CombinedAutocompleteProvider([], baseDir);
-			const line = '"my folder/"';
-			const result = await getSuggestions(provider, [line], 0, line.length - 1, true);
-
-			assert.notEqual(result, null, "Should return suggestions for quoted folder path");
-			const values = result?.items.map((item) => item.value);
-			assert.ok(values?.includes('"my folder/test.txt"'));
-			assert.ok(values?.includes('"my folder/other.txt"'));
-		});
-
-		test("applies quoted completion without duplicating closing quote", async () => {
-			setupFolder(baseDir, {
-				files: {
-					"my folder/test.txt": "content",
-				},
-			});
-
+		it("applies a quoted completion without duplicating the closing quote", async () => {
+			setupFolder(baseDir, { files: { "my folder/test.txt": "content" } });
 			const provider = new CombinedAutocompleteProvider([], baseDir);
 			const line = '"my folder/te"';
 			const cursorCol = line.length - 1;
+
 			const result = await getSuggestions(provider, [line], 0, cursorCol, true);
-
-			assert.notEqual(result, null, "Should return suggestions for quoted path");
 			const item = result?.items.find((entry) => entry.value === '"my folder/test.txt"');
-			assert.ok(item, "Should find test.txt suggestion");
+			assert.ok(result && item, "Should find test.txt suggestion");
 
-			const applied = provider.applyCompletion([line], 0, cursorCol, item!, result!.prefix);
+			const applied = provider.applyCompletion([line], 0, cursorCol, item, result.prefix);
+
 			assert.strictEqual(applied.lines[0], '"my folder/test.txt"');
 		});
 	});

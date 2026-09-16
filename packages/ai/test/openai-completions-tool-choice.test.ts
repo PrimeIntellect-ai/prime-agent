@@ -1,15 +1,28 @@
 import { Type } from "typebox";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getModel } from "../src/models.js";
-import { streamSimple } from "../src/stream.js";
-import type { Tool } from "../src/types.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getModel, getSupportedThinkingLevels } from "../src/models.js";
+import { getOpenRouterReasoningCapabilities } from "../src/openrouter-reasoning.js";
+import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../src/providers/cloudflare.js";
+import { convertMessages } from "../src/providers/openai-completions.js";
+import { complete, streamSimple } from "../src/stream.js";
+import type {
+	AssistantMessage,
+	Context,
+	Model,
+	OpenAICompletionsCompat,
+	Tool,
+	ToolResultMessage,
+	Usage,
+} from "../src/types.js";
 import { getZaiTestModel } from "./zai-test-model.js";
 
 const mockState = vi.hoisted(() => ({
 	lastParams: undefined as unknown,
+	lastClientOptions: undefined as unknown,
 	chunks: undefined as
 		| Array<null | {
 				id?: string;
+				model?: string;
 				choices?: Array<{ delta: Record<string, unknown>; finish_reason: string | null; usage?: unknown }>;
 				usage?: {
 					prompt_tokens: number;
@@ -23,6 +36,10 @@ const mockState = vi.hoisted(() => ({
 
 vi.mock("openai", () => {
 	class FakeOpenAI {
+		constructor(options: unknown) {
+			mockState.lastClientOptions = options;
+		}
+
 		chat = {
 			completions: {
 				create: (params: unknown) => {
@@ -67,6 +84,7 @@ vi.mock("openai", () => {
 describe("openai-completions tool_choice", () => {
 	beforeEach(() => {
 		mockState.lastParams = undefined;
+		mockState.lastClientOptions = undefined;
 		mockState.chunks = undefined;
 	});
 
@@ -1200,5 +1218,342 @@ describe("openai-completions tool_choice", () => {
 			},
 		}).result();
 		expect((payload as { reasoning?: unknown }).reasoning).toEqual({ enabled: false });
+	});
+});
+
+const emptyUsage: Usage = {
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 0,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+
+const cloudflareGatewayCompatModel: Model<"openai-completions"> = {
+	...getModel("cloudflare-workers-ai", "@cf/moonshotai/kimi-k2.6"),
+	provider: "cloudflare-ai-gateway",
+	baseUrl: CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
+	id: "workers-ai/@cf/moonshotai/kimi-k2.6",
+};
+
+describe("openai-completions tools payload", () => {
+	beforeEach(() => {
+		mockState.lastParams = undefined;
+		mockState.lastClientOptions = undefined;
+		mockState.chunks = undefined;
+	});
+
+	afterEach(() => {
+		delete process.env.CLOUDFLARE_ACCOUNT_ID;
+		delete process.env.CLOUDFLARE_GATEWAY_ID;
+	});
+
+	it.each([
+		{ name: "an empty array", tools: [] as Tool[] },
+		{ name: "undefined", tools: undefined },
+	])("omits the tools field when context.tools is $name", async ({ tools }) => {
+		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const model = { ...baseModel, api: "openai-completions" } as const;
+
+		await streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }], tools },
+			{ apiKey: "test" },
+		).result();
+
+		expect("tools" in (mockState.lastParams as object)).toBe(false);
+	});
+
+	it("still emits tools: [] when the conversation has tool history", async () => {
+		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const model = { ...baseModel, api: "openai-completions" } as const;
+		const now = Date.now();
+
+		await streamSimple(
+			model,
+			{
+				messages: [
+					{ role: "user", content: "use the tool", timestamp: now },
+					{
+						role: "assistant",
+						content: [{ type: "toolCall", id: "t1", name: "noop", arguments: {} }],
+						stopReason: "toolUse",
+						usage: emptyUsage,
+						api: "openai-completions",
+						provider: "openai",
+						model: "gpt-4o-mini",
+						timestamp: now,
+					},
+					{
+						role: "toolResult",
+						toolCallId: "t1",
+						toolName: "noop",
+						content: [{ type: "text", text: "done" }],
+						isError: false,
+						timestamp: now,
+					},
+				],
+				tools: [],
+			},
+			{ apiKey: "test" },
+		).result();
+
+		expect((mockState.lastParams as { tools?: unknown[] }).tools).toEqual([]);
+	});
+
+	it("uses conservative OpenAI-compatible fields for Cloudflare AI Gateway /compat models", async () => {
+		process.env.CLOUDFLARE_ACCOUNT_ID = "account-id";
+		process.env.CLOUDFLARE_GATEWAY_ID = "gateway-id";
+
+		await streamSimple(
+			cloudflareGatewayCompatModel,
+			{
+				systemPrompt: "You are helpful.",
+				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+			},
+			{ apiKey: "test", reasoning: "high" },
+		).result();
+
+		const params = mockState.lastParams as {
+			messages: Array<{ role: string }>;
+			max_tokens?: number;
+			max_completion_tokens?: number;
+			reasoning_effort?: string;
+			store?: boolean;
+		};
+		expect(params.messages[0].role).toBe("system");
+		expect(params.max_tokens).toBeDefined();
+		expect(params.max_completion_tokens).toBeUndefined();
+		expect(params.reasoning_effort).toBeUndefined();
+		expect(params.store).toBeUndefined();
+
+		const clientOptions = mockState.lastClientOptions as {
+			baseURL?: string;
+			defaultHeaders?: Record<string, unknown>;
+		};
+		expect(clientOptions.baseURL).toBe("https://gateway.ai.cloudflare.com/v1/account-id/gateway-id/compat");
+		expect(clientOptions.defaultHeaders?.Authorization).toBeNull();
+		expect(clientOptions.defaultHeaders?.["cf-aig-authorization"]).toBe("Bearer test");
+	});
+
+	it("preserves inline upstream Authorization for Cloudflare AI Gateway BYOK requests", async () => {
+		process.env.CLOUDFLARE_ACCOUNT_ID = "account-id";
+		process.env.CLOUDFLARE_GATEWAY_ID = "gateway-id";
+
+		await streamSimple(
+			getModel("cloudflare-ai-gateway", "gpt-5.1")!,
+			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+			{ apiKey: "cf-token", headers: { Authorization: "Bearer upstream-token" } },
+		).result();
+
+		const clientOptions = mockState.lastClientOptions as { defaultHeaders?: Record<string, unknown> };
+		expect(clientOptions.defaultHeaders?.Authorization).toBe("Bearer upstream-token");
+		expect(clientOptions.defaultHeaders?.["cf-aig-authorization"]).toBe("Bearer cf-token");
+	});
+});
+
+function openRouterAuto(): Model<"openai-completions"> {
+	return {
+		id: "openrouter/auto",
+		name: "OpenRouter Auto",
+		api: "openai-completions",
+		provider: "openrouter",
+		baseUrl: "https://openrouter.ai/api/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 8192,
+	};
+}
+
+describe("openai-completions responseModel", () => {
+	const usage = {
+		prompt_tokens: 1,
+		completion_tokens: 1,
+		prompt_tokens_details: { cached_tokens: 0 },
+		completion_tokens_details: { reasoning_tokens: 0 },
+	};
+
+	it.each([
+		{ name: "a routed model", chunkModel: "anthropic/claude-opus-4.7", expected: "anthropic/claude-opus-4.7" },
+		{ name: "the requested model", chunkModel: "openrouter/auto", expected: undefined },
+		{ name: "an empty model", chunkModel: "", expected: undefined },
+		{ name: "no model", chunkModel: undefined, expected: undefined },
+	])("surfaces responseModel when chunks echo $name", async ({ chunkModel, expected }) => {
+		mockState.chunks = [
+			{ id: "chatcmpl-1", model: chunkModel, choices: [{ delta: { content: "hi" }, finish_reason: null }] },
+			{ id: "chatcmpl-1", model: chunkModel, choices: [{ delta: {}, finish_reason: "stop" }], usage },
+		];
+
+		const message = await complete(
+			openRouterAuto(),
+			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+			{ apiKey: "test" },
+		);
+
+		expect(message.model).toBe("openrouter/auto");
+		expect(message.responseModel).toBe(expected);
+		expect(message.provider).toBe("openrouter");
+		expect(message.stopReason).toBe("stop");
+	});
+});
+
+describe("openai-completions tool-result content", () => {
+	const compat: Required<OpenAICompletionsCompat> = {
+		supportsStore: true,
+		supportsDeveloperRole: true,
+		supportsReasoningEffort: true,
+		supportsUsageInStreaming: true,
+		maxTokensField: "max_completion_tokens",
+		requiresToolResultName: false,
+		requiresAssistantAfterToolResult: false,
+		requiresThinkingAsText: false,
+		requiresReasoningContentOnAssistantMessages: false,
+		thinkingFormat: "openai",
+		openRouterRouting: {},
+		vercelGatewayRouting: {},
+		zaiToolStream: false,
+		supportsStrictMode: true,
+		cacheControlFormat: "anthropic",
+		sendSessionAffinityHeaders: false,
+		supportsLongCacheRetention: true,
+	};
+
+	function imageModel(): Model<"openai-completions"> {
+		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini");
+		return { ...baseModel, api: "openai-completions", input: ["text", "image"] };
+	}
+
+	function buildContext(model: Model<"openai-completions">, toolResults: ToolResultMessage[]): Context {
+		const now = Date.now();
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: toolResults.map((result) => ({
+				type: "toolCall" as const,
+				id: result.toolCallId,
+				name: result.toolName,
+				arguments: {},
+			})),
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: emptyUsage,
+			stopReason: "toolUse",
+			timestamp: now,
+		};
+		return { messages: [{ role: "user", content: "go", timestamp: now - 1 }, assistant, ...toolResults] };
+	}
+
+	function imageResult(toolCallId: string, timestamp: number): ToolResultMessage {
+		return {
+			role: "toolResult",
+			toolCallId,
+			toolName: "read",
+			content: [
+				{ type: "text", text: "Read image file [image/png]" },
+				{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" },
+			],
+			isError: false,
+			timestamp,
+		};
+	}
+
+	it("batches tool-result images into one trailing user message", () => {
+		const model = imageModel();
+		const messages = convertMessages(
+			model,
+			buildContext(model, [imageResult("tool-1", 1), imageResult("tool-2", 2)]),
+			compat,
+		);
+
+		expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "tool", "tool", "user"]);
+		const imageParts = (messages.at(-1)?.content as Array<{ type?: string }>).filter(
+			(part) => part?.type === "image_url",
+		);
+		expect(imageParts.length).toBe(2);
+	});
+
+	it("does not emit the image placeholder for empty-text tool results with no image", () => {
+		const model = imageModel();
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "tool-1",
+			toolName: "bash",
+			content: [{ type: "text", text: "" }],
+			isError: false,
+			timestamp: 1,
+		};
+
+		const messages = convertMessages(model, buildContext(model, [toolResult]), compat);
+
+		expect(messages.find((message) => message.role === "tool")?.content).toBe("");
+	});
+});
+
+describe("OpenRouter reasoning metadata", () => {
+	function supportedLevels(thinkingLevelMap: Model<"openai-completions">["thinkingLevelMap"]) {
+		return getSupportedThinkingLevels({ reasoning: true, thinkingLevelMap } as Model<"openai-completions">);
+	}
+
+	function metadata(reasoning: Record<string, unknown>, supportsReasoning = true) {
+		return { supported_parameters: supportsReasoning ? ["tools", "reasoning"] : ["tools"], reasoning };
+	}
+
+	it.each([
+		{
+			name: "mandatory reasoning with published efforts hides off",
+			reasoning: { mandatory: true, supported_efforts: ["xhigh", "high", "medium", "low", "minimal"] },
+			supportsReasoningEffort: true,
+			levels: ["minimal", "low", "medium", "high", "xhigh"],
+		},
+		{
+			name: "optional reasoning keeps off plus advertised sparse efforts",
+			reasoning: { mandatory: false, supported_efforts: ["high", "none"] },
+			supportsReasoningEffort: true,
+			levels: ["off", "high"],
+		},
+		{
+			name: "null efforts accept every gateway effort (optional)",
+			reasoning: { mandatory: false, supported_efforts: null },
+			supportsReasoningEffort: true,
+			levels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+		},
+		{
+			name: "null efforts accept every gateway effort (mandatory)",
+			reasoning: { mandatory: true, supported_efforts: null },
+			supportsReasoningEffort: true,
+			levels: ["minimal", "low", "medium", "high", "xhigh", "max"],
+		},
+		{
+			name: "no effort selector falls back to a single toggle (optional)",
+			reasoning: { mandatory: false },
+			supportsReasoningEffort: false,
+			levels: ["off", "high"],
+		},
+		{
+			name: "no effort selector falls back to a single toggle (mandatory)",
+			reasoning: { mandatory: true },
+			supportsReasoningEffort: false,
+			levels: ["high"],
+		},
+		{
+			name: "malformed effort lists fall back to an enabled toggle",
+			reasoning: { mandatory: false, supported_efforts: ["unexpected", 123] },
+			supportsReasoningEffort: false,
+			levels: ["off", "high"],
+		},
+	])("$name", ({ reasoning, supportsReasoningEffort, levels }) => {
+		const capabilities = getOpenRouterReasoningCapabilities(metadata(reasoning));
+
+		expect(capabilities?.supportsReasoningEffort).toBe(supportsReasoningEffort);
+		expect(supportedLevels(capabilities?.thinkingLevelMap)).toEqual(levels);
+	});
+
+	it("ignores the over-reported reasoning object when the route lacks the reasoning parameter", () => {
+		expect(
+			getOpenRouterReasoningCapabilities(metadata({ mandatory: true, supported_efforts: ["high"] }, false)),
+		).toBeUndefined();
 	});
 });

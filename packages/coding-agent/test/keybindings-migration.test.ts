@@ -3,7 +3,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.js";
-import { KEYBINDINGS, KeybindingsManager } from "../src/core/keybindings.js";
+import {
+	type AppKeybinding,
+	KEYBINDINGS,
+	type KeybindingsConfig,
+	KeybindingsManager,
+	type KeyId,
+} from "../src/core/keybindings.js";
 import { runMigrations } from "../src/migrations.js";
 
 describe("keybindings migration", () => {
@@ -22,110 +28,68 @@ describe("keybindings migration", () => {
 		return agentDir;
 	}
 
-	it("rewrites old key names to namespaced ids", () => {
-		const agentDir = createAgentDir({
-			cursorUp: ["up", "ctrl+p"],
-			expandTools: "ctrl+x",
-			"app.message.dequeue": "alt+u",
-		});
-		const previousAgentDir = process.env[ENV_AGENT_DIR];
+	function migrate(config: Record<string, unknown>): Record<string, unknown> {
+		const agentDir = createAgentDir(config);
+		const previous = process.env[ENV_AGENT_DIR];
 		process.env[ENV_AGENT_DIR] = agentDir;
-		runMigrations(agentDir);
-		if (previousAgentDir === undefined) {
-			delete process.env[ENV_AGENT_DIR];
-		} else {
-			process.env[ENV_AGENT_DIR] = previousAgentDir;
+		try {
+			runMigrations(agentDir);
+		} finally {
+			if (previous === undefined) delete process.env[ENV_AGENT_DIR];
+			else process.env[ENV_AGENT_DIR] = previous;
 		}
+		return JSON.parse(fs.readFileSync(path.join(agentDir, "keybindings.json"), "utf-8")) as Record<string, unknown>;
+	}
 
-		const migrated = JSON.parse(fs.readFileSync(path.join(agentDir, "keybindings.json"), "utf-8")) as Record<
-			string,
-			unknown
-		>;
-		expect(migrated).toEqual({
-			"tui.editor.cursorUp": ["up", "ctrl+p"],
-			"app.tools.expand": "ctrl+x",
-			"app.message.navigateOlder": "alt+u",
-		});
-	});
-
-	it("keeps the namespaced value when old and new names both exist", () => {
-		const agentDir = createAgentDir({
-			expandTools: "ctrl+x",
-			"app.tools.expand": "ctrl+y",
-		});
-		const previousAgentDir = process.env[ENV_AGENT_DIR];
-		process.env[ENV_AGENT_DIR] = agentDir;
-		runMigrations(agentDir);
-		if (previousAgentDir === undefined) {
-			delete process.env[ENV_AGENT_DIR];
-		} else {
-			process.env[ENV_AGENT_DIR] = previousAgentDir;
-		}
-
-		const migrated = JSON.parse(fs.readFileSync(path.join(agentDir, "keybindings.json"), "utf-8")) as Record<
-			string,
-			unknown
-		>;
-		expect(migrated).toEqual({
-			"app.tools.expand": "ctrl+y",
-		});
+	it.each<[string, Record<string, unknown>, Record<string, unknown>]>([
+		[
+			"rewrites old key names to namespaced ids",
+			{ cursorUp: ["up", "ctrl+p"], expandTools: "ctrl+x", "app.message.dequeue": "alt+u" },
+			{
+				"tui.editor.cursorUp": ["up", "ctrl+p"],
+				"app.tools.expand": "ctrl+x",
+				"app.message.navigateOlder": "alt+u",
+			},
+		],
+		[
+			"keeps the namespaced value when old and new names both exist",
+			{ expandTools: "ctrl+x", "app.tools.expand": "ctrl+y" },
+			{ "app.tools.expand": "ctrl+y" },
+		],
+	])("%s", (_name, config, expected) => {
+		expect(migrate(config)).toEqual(expected);
 	});
 
 	it("loads old key names in memory before the file is rewritten", () => {
-		const agentDir = createAgentDir({
-			selectConfirm: "enter",
-			interrupt: "ctrl+x",
-		});
+		const keybindings = KeybindingsManager.create(createAgentDir({ selectConfirm: "enter", interrupt: "ctrl+x" }));
 
-		const keybindings = KeybindingsManager.create(agentDir);
-
-		expect(keybindings.getUserBindings()).toEqual({
-			"tui.select.confirm": "enter",
-			"app.interrupt": "ctrl+x",
-		});
-		const effective = keybindings.getEffectiveConfig();
-		expect(effective["tui.select.confirm"]).toBe("enter");
-		expect(effective["app.interrupt"]).toBe("ctrl+x");
+		expect(keybindings.getUserBindings()).toEqual({ "tui.select.confirm": "enter", "app.interrupt": "ctrl+x" });
+		expect(keybindings.getEffectiveConfig()["tui.select.confirm"]).toBe("enter");
 	});
 
-	it("binds model cycling without colliding with the models-view Ctrl+P provider toggle", () => {
-		const keybindings = new KeybindingsManager({});
-
-		expect(keybindings.getKeys("app.model.cycleForward")).toEqual(["alt+m"]);
-		expect(keybindings.getKeys("app.model.cycleBackward")).toEqual(["shift+alt+m"]);
-		// Ctrl+P remains the shipped models-view provider toggle, not model cycling.
-		expect(keybindings.getKeys("app.models.toggleProvider")).toEqual(["ctrl+p"]);
+	const editorOverride: KeybindingsConfig = { "tui.editor.cursorUp": ["up", "ctrl+o"] };
+	it.each<[KeybindingsConfig, AppKeybinding, KeyId[]]>([
+		[{}, "app.model.cycleForward", ["alt+m"]],
+		[{}, "app.model.cycleBackward", ["shift+alt+m"]],
+		[{}, "app.models.toggleProvider", ["ctrl+p"]],
+		[{ ...editorOverride, "tui.editor.cursorDown": ["down", "ctrl+n"] }, "app.tools.expand", []],
+		[{ ...editorOverride, "tui.editor.cursorDown": ["down", "ctrl+n"] }, "app.agents.new", ["ctrl+n"]],
+		[{ ...editorOverride, "app.tools.expand": "ctrl+o" }, "app.tools.expand", ["ctrl+o"]],
+		[{ "tui.editor.cursorUp": ["up", "ctrl+p"] }, "app.tools.expand", ["ctrl+o"]],
+	])("resolves %j -> %s", (config, id, keys) => {
+		expect(new KeybindingsManager(config).getKeys(id)).toEqual(keys);
 	});
 
-	it("gives explicit editor bindings precedence over application defaults", () => {
-		const keybindings = new KeybindingsManager({
-			"tui.editor.cursorUp": ["up", "ctrl+o"],
-			"tui.editor.cursorDown": ["down", "ctrl+n"],
-		});
-
-		expect(keybindings.getKeys("tui.editor.cursorUp")).toEqual(["up", "ctrl+o"]);
-		expect(keybindings.getKeys("app.tools.expand")).toEqual([]);
-		expect(keybindings.getKeys("app.models.toggleProvider")).toEqual(["ctrl+p"]);
-		expect(keybindings.getKeys("app.agents.new")).toEqual(["ctrl+n"]);
-	});
-
-	it("reports an application default that is explicitly retained against an editor binding", () => {
-		const keybindings = new KeybindingsManager({
-			"tui.editor.cursorUp": ["up", "ctrl+o"],
-			"app.tools.expand": "ctrl+o",
-		});
+	it("reports an application default explicitly retained against an editor binding", () => {
+		const keybindings = new KeybindingsManager({ ...editorOverride, "app.tools.expand": "ctrl+o" });
 
 		expect(keybindings.getConflicts()).toContainEqual({
 			key: "ctrl+o",
 			keybindings: ["tui.editor.cursorUp", "app.tools.expand"],
 		});
-		expect(keybindings.getKeys("app.tools.expand")).toEqual(["ctrl+o"]);
 	});
 
 	it("does not define an independent message expansion action", () => {
 		expect(KEYBINDINGS).not.toHaveProperty("app.messages.expand");
-		const keybindings = new KeybindingsManager({ "tui.editor.cursorUp": ["up", "ctrl+p"] });
-		expect(keybindings.getKeys("tui.editor.cursorUp")).toEqual(["up", "ctrl+p"]);
-		expect(keybindings.getKeys("app.tools.expand")).toEqual(["ctrl+o"]);
 	});
 });

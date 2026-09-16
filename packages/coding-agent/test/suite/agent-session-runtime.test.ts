@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai";
@@ -15,12 +15,15 @@ import {
 } from "../../src/core/agent-session-runtime.js";
 import { AuthStorage } from "../../src/core/auth-storage.js";
 import type { SubagentRuntimeHost } from "../../src/core/rlm-runtime.js";
+import { createAgentSession } from "../../src/core/sdk.js";
 import {
 	deriveSemanticEdges,
 	readSemanticEdgeLedger,
 	SEMANTIC_EDGES_LEDGER_FILENAME,
 } from "../../src/core/semantic-edges.js";
+import { SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../../src/core/session-lease.js";
 import { SessionManager } from "../../src/core/session-manager.js";
+import { SettingsManager } from "../../src/core/settings-manager.js";
 import type {
 	ExtensionAPI,
 	ExtensionFactory,
@@ -30,7 +33,8 @@ import type {
 	SessionStartEvent,
 } from "../../src/index.js";
 import { createDefaultRuntimeFactory } from "../../src/main.js";
-import { conversationMessages } from "./harness.js";
+import { assistantMsg, createTestResourceLoader, userMsg } from "../utilities.js";
+import { conversationMessages, createHarness, getMessageText, type Harness } from "./harness.js";
 
 type RecordedSessionEvent =
 	| SessionBeforeSwitchEvent
@@ -49,6 +53,7 @@ describe("AgentSessionRuntime characterization", () => {
 		while (cleanups.length > 0) {
 			await cleanups.pop()?.();
 		}
+		vi.unstubAllEnvs();
 	});
 
 	async function createRuntimeForTest(
@@ -996,5 +1001,356 @@ describe("AgentSessionRuntime characterization", () => {
 
 		expect(runtime.session.model?.id).toBe("faux-2");
 		expect(runtime.session.thinkingLevel).toBe("off");
+	});
+
+	it("runs beforeSessionInvalidate after session_shutdown and before rebindSession", async () => {
+		const phases: string[] = [];
+		const { runtime } = await createRuntimeForTest((pi: ExtensionAPI) => {
+			pi.on("session_shutdown", () => {
+				phases.push("session_shutdown");
+			});
+		});
+		const oldSession = runtime.session;
+		runtime.setBeforeSessionInvalidate(() => {
+			phases.push("beforeSessionInvalidate");
+			expect(oldSession.extensionRunner.createContext().cwd).toBe(oldSession.sessionManager.getCwd());
+		});
+		runtime.setRebindSession(async () => {
+			phases.push("rebindSession");
+		});
+
+		await runtime.newSession();
+
+		expect(phases).toEqual(["session_shutdown", "beforeSessionInvalidate", "rebindSession"]);
+		expect(() => oldSession.extensionRunner.createContext().cwd).toThrow("stale after session replacement or reload");
+		runtime.setBeforeSessionInvalidate(undefined);
+		runtime.setRebindSession(undefined);
+	});
+
+	it("releases a replacement lease when current-session teardown fails", async () => {
+		vi.stubEnv(SESSION_LEASES_ENABLED_ENV, "1");
+		vi.stubEnv(SESSION_LEASE_OWNER_ID_ENV, "runtime-events");
+		const { runtime } = await createRuntimeForTest(() => {});
+		runtime.setBeforeSessionInvalidate(() => {
+			throw new Error("teardown failed");
+		});
+
+		await expect(runtime.newSession()).rejects.toThrow("teardown failed");
+		runtime.setBeforeSessionInvalidate(undefined);
+		const leaseRoot = join(runtime.services.agentDir, "session-leases");
+		expect(readdirSync(leaseRoot).filter((entry) => entry.endsWith(".lock"))).toHaveLength(1);
+	});
+
+	/**
+	 * The runtime rebinds extensions before `withSession` runs, the callback targets the replacement
+	 * session, and stale pi/ctx handles from the replaced session stop working.
+	 */
+	describe("regression #2860: replaced session callbacks", () => {
+		/** Re-create the production rebind wiring so command contexts can replace the live session. */
+		async function bindCommandContextActions(runtime: AgentSessionRuntime): Promise<void> {
+			const rebindSession = async (): Promise<void> => {
+				const session = runtime.session;
+				await session.bindExtensions({
+					commandContextActions: {
+						waitForIdle: () => session.agent.waitForIdle(),
+						newSession: async (options) => runtime.newSession(options),
+						fork: async (entryId, options) => ({ cancelled: (await runtime.fork(entryId, options)).cancelled }),
+						navigateTree: async (targetId, options) => ({
+							cancelled: (await session.navigateTree(targetId, { ...options })).cancelled,
+						}),
+						switchSession: async (sessionPath, options) => runtime.switchSession(sessionPath, options),
+						reload: async () => {
+							await session.reload();
+						},
+					},
+				});
+			};
+			runtime.setRebindSession(rebindSession);
+			await rebindSession();
+		}
+
+		function conversation(runtime: AgentSessionRuntime): string[] {
+			return conversationMessages(runtime.session).map((message) => `${message.role}:${getMessageText(message)}`);
+		}
+
+		it("rebinds before withSession, targets the replacement session, and invalidates stale pi/ctx", async () => {
+			const events: string[] = [];
+			let staleCtxThrows = false;
+			let stalePiThrows = false;
+			let oldSessionFile: string | undefined;
+			let replacementSessionFile: string | undefined;
+			let instanceId = 0;
+			const { runtime, faux } = await createRuntimeForTest((pi: ExtensionAPI) => {
+				const currentInstance = ++instanceId;
+				pi.on("session_start", () => {
+					events.push(`start:${currentInstance}`);
+				});
+				pi.on("session_shutdown", () => {
+					events.push(`shutdown:${currentInstance}`);
+				});
+				pi.registerCommand("repro", {
+					description: "repro",
+					handler: async (_args, ctx) => {
+						oldSessionFile = ctx.sessionManager.getSessionFile();
+						await ctx.newSession({
+							parentSession: oldSessionFile,
+							withSession: async (replacedCtx) => {
+								events.push(`with:${currentInstance}`);
+								replacementSessionFile = replacedCtx.sessionManager.getSessionFile();
+								try {
+									ctx.sessionManager.getSessionFile();
+								} catch {
+									staleCtxThrows = true;
+								}
+								try {
+									pi.sendUserMessage("stale message");
+								} catch {
+									stalePiThrows = true;
+								}
+								await replacedCtx.sendUserMessage("Hello from the new session!");
+							},
+						});
+					},
+				});
+			});
+			faux.setResponses([fauxAssistantMessage("hello reply")]);
+			await bindCommandContextActions(runtime);
+			// The shared harness binds extensions once before the rebind wiring; start from that point.
+			events.length = 0;
+
+			await runtime.session.prompt("/repro");
+
+			expect(events).toEqual(["shutdown:1", "start:2", "with:1"]);
+			expect(replacementSessionFile).toBeDefined();
+			expect(replacementSessionFile).not.toBe(oldSessionFile);
+			expect([staleCtxThrows, stalePiThrows]).toEqual([true, true]);
+			expect(conversation(runtime)).toEqual(["user:Hello from the new session!", "assistant:hello reply"]);
+		});
+
+		it("supports withSession for fork", async () => {
+			const { runtime, faux } = await createRuntimeForTest((pi: ExtensionAPI) => {
+				pi.registerCommand("fork-it", {
+					description: "fork-it",
+					handler: async (_args, ctx) => {
+						const leafId = ctx.sessionManager.getLeafId();
+						if (!leafId) throw new Error("Missing leaf id");
+						await ctx.fork(leafId, {
+							position: "at",
+							withSession: async (replacedCtx) => {
+								await replacedCtx.sendUserMessage("fork callback message");
+							},
+						});
+					},
+				});
+			});
+			faux.setResponses([fauxAssistantMessage("seed reply"), fauxAssistantMessage("fork reply")]);
+			await bindCommandContextActions(runtime);
+
+			await runtime.session.prompt("seed");
+			await runtime.session.prompt("/fork-it");
+
+			expect(conversation(runtime)).toEqual([
+				"user:seed",
+				"assistant:seed reply",
+				"user:fork callback message",
+				"assistant:fork reply",
+			]);
+		});
+
+		it("supports withSession for switchSession", async () => {
+			let targetSessionPath = "";
+			const { runtime, faux } = await createRuntimeForTest((pi: ExtensionAPI) => {
+				pi.registerCommand("switch-it", {
+					description: "switch-it",
+					handler: async (_args, ctx) => {
+						await ctx.switchSession(targetSessionPath, {
+							withSession: async (replacedCtx) => {
+								await replacedCtx.sendUserMessage("switch callback message");
+							},
+						});
+					},
+				});
+			});
+			faux.setResponses([
+				fauxAssistantMessage("root reply"),
+				fauxAssistantMessage("target reply"),
+				fauxAssistantMessage("switch reply"),
+			]);
+			await bindCommandContextActions(runtime);
+
+			await runtime.session.prompt("root");
+			const originalSessionPath = runtime.session.sessionFile;
+			expect((await runtime.newSession()).cancelled).toBe(false);
+			await runtime.session.prompt("target");
+			targetSessionPath = runtime.session.sessionFile!;
+			await runtime.switchSession(originalSessionPath!);
+
+			await runtime.session.prompt("/switch-it");
+
+			expect(runtime.session.sessionFile).toBe(targetSessionPath);
+			expect(conversation(runtime)).toEqual([
+				"user:target",
+				"assistant:target reply",
+				"user:switch callback message",
+				"assistant:switch reply",
+			]);
+		});
+	});
+});
+
+describe("ENG-4620 fast mode settings", () => {
+	let harness: Harness | undefined;
+	const fastModeSessions: AgentSession[] = [];
+
+	afterEach(() => {
+		for (const session of fastModeSessions.splice(0)) {
+			session.dispose();
+		}
+		harness?.cleanup();
+		harness = undefined;
+	});
+
+	/** Codex models support the priority tier; gpt-5.3 and gpt-4-turbo do not. */
+	async function createFastModeHarness(
+		models: string[],
+		options: { api?: string; provider?: string; persistSession?: boolean } = {},
+	): Promise<Harness> {
+		harness = await createHarness({
+			api: options.api ?? "openai-codex-responses",
+			provider: options.provider ?? "openai-codex",
+			models: models.map((id) => ({ id })),
+			persistSession: options.persistSession,
+		});
+		return harness;
+	}
+
+	function createFastModeSession(
+		current: Harness,
+		modelId?: string,
+		sessionManager = SessionManager.inMemory(current.tempDir),
+	) {
+		return createAgentSession({
+			cwd: current.tempDir,
+			authStorage: current.authStorage,
+			model: modelId === undefined ? current.getModel() : current.getModel(modelId),
+			resourceLoader: createTestResourceLoader(),
+			sessionManager,
+			settingsManager: current.settingsManager,
+		});
+	}
+
+	it.each([
+		{
+			name: "explicit model selection clamps an unsupported model and restores the preference",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			models: ["gpt-5.4", "gpt-5.3"],
+			switchTo: async (current: Harness, modelId: string) => {
+				await current.session.setModel(current.getModel(modelId)!);
+				return current.session.serviceTier;
+			},
+		},
+		{
+			name: "cycling models returns the effective service tier",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			models: ["gpt-5.4", "gpt-5.3"],
+			switchTo: async (current: Harness, modelId: string) => {
+				const result = await current.session.cycleModel();
+				expect(result?.model.id).toBe(modelId);
+				return result?.serviceTier;
+			},
+		},
+		{
+			name: "OpenAI API-key models admit fast mode and clamp unsupported ones",
+			api: "openai-responses",
+			provider: "openai",
+			models: ["gpt-5.5", "gpt-4-turbo"],
+			switchTo: async (current: Harness, modelId: string) => {
+				await current.session.setModel(current.getModel(modelId)!);
+				return current.session.serviceTier;
+			},
+		},
+	])("$name", async ({ api, provider, models, switchTo }) => {
+		const [supported, unsupported] = models as [string, string];
+		const current = await createFastModeHarness(models, { api, provider });
+
+		current.session.setServiceTier("priority");
+		expect(current.session.serviceTier).toBe("priority");
+
+		expect(await switchTo(current, unsupported)).toBe("default");
+		// The clamp is transient: the saved preference is untouched.
+		expect(current.settingsManager.getDefaultServiceTier()).toBe("priority");
+
+		expect(await switchTo(current, supported)).toBe("priority");
+	});
+
+	it("persists the preference across settings manager restarts", async () => {
+		const current = await createFastModeHarness(["gpt-5.4"]);
+		const agentDir = join(current.tempDir, "agent");
+		const settingsManager = SettingsManager.create(current.tempDir, agentDir);
+
+		settingsManager.setDefaultServiceTier("priority");
+		await settingsManager.flush();
+
+		expect(SettingsManager.create(current.tempDir, agentDir).getDefaultServiceTier()).toBe("priority");
+	});
+
+	it("uses the saved preference for new sessions and preserves it across tree navigation", async () => {
+		const current = await createFastModeHarness(["gpt-5.4"]);
+		const targetId = current.sessionManager.appendMessage(userMsg("first"));
+		current.sessionManager.appendMessage(assistantMsg("reply"));
+		current.session.setServiceTier("priority");
+		current.sessionManager.appendMessage(userMsg("second"));
+		expect(current.settingsManager.getDefaultServiceTier()).toBe("priority");
+
+		await current.session.navigateTree(targetId, { summarize: false });
+		expect(current.session.serviceTier).toBe("priority");
+
+		const { session } = await createFastModeSession(current);
+		fastModeSessions.push(session);
+		expect(session.serviceTier).toBe("priority");
+
+		session.setServiceTier("default");
+		const { session: nextSession } = await createFastModeSession(current);
+		fastModeSessions.push(nextSession);
+		expect(nextSession.serviceTier).toBe("default");
+	});
+
+	it.each([
+		{
+			name: "a temporary clamp is not persisted into a resumed session",
+			persistSession: true,
+			setup: async (current: Harness) => {
+				current.sessionManager.appendMessage(userMsg("hello"));
+				current.session.setServiceTier("priority");
+				await current.session.setModel(current.getModel("gpt-5.3")!);
+				expect(current.session.serviceTier).toBe("default");
+				current.session.dispose();
+				return current.sessionManager;
+			},
+		},
+		{
+			name: "a new session starting on an unsupported model still stores the preference",
+			persistSession: false,
+			setup: async (current: Harness) => {
+				const sessionManager = SessionManager.inMemory(current.tempDir);
+				current.settingsManager.setDefaultServiceTier("priority");
+				const { session } = await createFastModeSession(current, "gpt-5.3", sessionManager);
+				fastModeSessions.push(session);
+				expect(session.serviceTier).toBe("default");
+				session.dispose();
+				return sessionManager;
+			},
+		},
+	])("$name", async ({ persistSession, setup }) => {
+		const current = await createFastModeHarness(["gpt-5.4", "gpt-5.3"], { persistSession });
+
+		const sessionManager = await setup(current);
+
+		expect(sessionManager.buildSessionContext().serviceTier).toBe("priority");
+		const { session: supportedSession } = await createFastModeSession(current, "gpt-5.4", sessionManager);
+		fastModeSessions.push(supportedSession);
+		expect(supportedSession.serviceTier).toBe("priority");
 	});
 });

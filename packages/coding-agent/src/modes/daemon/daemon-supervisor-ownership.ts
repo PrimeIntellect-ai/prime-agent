@@ -133,7 +133,7 @@ class RenewableRegistryRecord {
 	constructor(
 		private readonly registryDir: string,
 		refreshMs: number,
-		private readonly renewUnderGuard: () => void,
+		private readonly renewUnderGuard: () => boolean,
 		private readonly createLostError: () => Error,
 	) {
 		this.refreshTimer = setInterval(() => {
@@ -153,19 +153,21 @@ class RenewableRegistryRecord {
 	}
 
 	private async performRenew(): Promise<void> {
-		try {
-			await withDaemonSupervisorRegistryGuard(this.registryDir, () => {
-				// stop() may have completed while this call waited on the guard;
-				// a stopped record must never be rewritten to disk.
-				if (this.stopped || this.lost) {
-					throw this.createLostError();
-				}
-				this.renewUnderGuard();
-			});
-		} catch (error) {
+		// A guard or filesystem failure means the record could not be read, not that another process
+		// took it; retiring the lease on that would strand a holder that still owns its record, so
+		// only a renew that observes a missing or foreign record is terminal.
+		const held = await withDaemonSupervisorRegistryGuard(this.registryDir, () => {
+			// stop() may have completed while this call waited on the guard;
+			// a stopped record must never be rewritten to disk.
+			if (this.stopped || this.lost) {
+				return false;
+			}
+			return this.renewUnderGuard();
+		});
+		if (!held) {
 			this.lost = true;
 			clearInterval(this.refreshTimer);
-			throw error;
+			throw this.createLostError();
 		}
 	}
 
@@ -267,23 +269,26 @@ class DaemonShutdownAdmission {
 		await this.renewal.assertOrRenew();
 	}
 
-	private renewUnderGuard(): void {
+	private renewUnderGuard(): boolean {
 		const path = shutdownAdmissionPath(this.registryDir);
 		const current = readShutdownAdmission(path);
+		// An elapsed lease is not loss. The refresh timer cannot fire while this process blocks its
+		// event loop in the synchronous `ps`/`lsof`/`ss` scans that shutdown runs, so a late renew
+		// re-arms a record that is still ours; only another process replacing it ends the admission.
 		if (
 			!current ||
 			current.token !== this.record.token ||
 			current.pid !== this.record.pid ||
 			current.processStartId !== this.record.processStartId ||
-			Date.parse(current.expiresAt) <= Date.now() ||
 			!matchesExactProcessIdentity(this.record)
 		) {
-			throw new DaemonShutdownAdmissionError("Daemon shutdown admission was lost");
+			return false;
 		}
 		const now = Date.now();
 		this.record.updatedAt = new Date(now).toISOString();
 		this.record.expiresAt = new Date(now + SHUTDOWN_ADMISSION_LEASE_MS).toISOString();
 		writeJsonAtomically(path, this.record);
+		return true;
 	}
 
 	async release(): Promise<void> {
@@ -644,9 +649,15 @@ export async function acquireDaemonShutdownAdmission(): Promise<DaemonShutdownAd
 	}
 }
 
+/**
+ * Read-only probe: reclaiming here would let a bystander delete the record of a live holder whose
+ * lease merely elapsed, so only acquireDaemonShutdownAdmission removes an abandoned admission.
+ */
 export async function isDaemonShutdownAdmissionActive(): Promise<boolean> {
 	const registryDir = defaultDaemonSupervisorRegistryDir();
-	return withDaemonSupervisorRegistryGuard(registryDir, () => readActiveShutdownAdmission(registryDir) !== undefined);
+	return withDaemonSupervisorRegistryGuard(registryDir, () =>
+		shutdownAdmissionIsActive(readShutdownAdmission(shutdownAdmissionPath(registryDir))),
+	);
 }
 
 export async function persistDaemonStartupFenceFromOwner(
@@ -960,13 +971,17 @@ function readStartupFence(path: string): DaemonStartupFenceRecord | undefined {
 	}
 }
 
+function shutdownAdmissionIsActive(admission: DaemonShutdownAdmissionRecord | undefined): boolean {
+	return admission !== undefined && Date.parse(admission.expiresAt) > Date.now() && isProcessIdentityAlive(admission);
+}
+
 function readActiveShutdownAdmission(registryDir: string): DaemonShutdownAdmissionRecord | undefined {
 	const path = shutdownAdmissionPath(registryDir);
 	const admission = readShutdownAdmission(path);
 	if (!admission) {
 		return undefined;
 	}
-	if (Date.parse(admission.expiresAt) > Date.now() && isProcessIdentityAlive(admission)) {
+	if (shutdownAdmissionIsActive(admission)) {
 		return admission;
 	}
 	rmSync(path, { force: true });

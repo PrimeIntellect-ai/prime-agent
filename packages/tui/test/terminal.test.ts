@@ -1,6 +1,7 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
 import { ProcessTerminal } from "../src/terminal.js";
+import { parseOscColorResponse } from "../src/terminal-colors.js";
 
 describe("ProcessTerminal dimensions", () => {
 	it("falls back to COLUMNS and LINES before default dimensions", () => {
@@ -240,6 +241,34 @@ describe("ProcessTerminal alternate screen handoff", () => {
 			process.stdout.write = originalWrite;
 		}
 	});
+});
+
+describe("OSC 10/11 color replies", () => {
+	const cases: Array<[name: string, reply: string, parsed: ReturnType<typeof parseOscColorResponse>]> = [
+		[
+			"OSC 10 foreground with 16-bit components and an ST terminator",
+			"\x1b]10;rgb:ffff/8000/0000\x1b\\",
+			{ kind: "foreground", rgb: { r: 255, g: 128, b: 0 } },
+		],
+		[
+			"OSC 10 foreground with 12-bit components",
+			"\x1b]10;rgb:fff/800/000\x1b\\",
+			{ kind: "foreground", rgb: { r: 255, g: 128, b: 0 } },
+		],
+		[
+			"OSC 11 background with 8-bit components and a BEL terminator",
+			"\x1b]11;rgb:00/5f/87\x07",
+			{ kind: "background", rgb: { r: 0, g: 95, b: 135 } },
+		],
+		["an unsupported OSC number", "\x1b]12;rgb:ffff/ffff/ffff\x1b\\", undefined],
+		["a malformed color payload", "\x1b]11;not-a-color\x1b\\", undefined],
+	];
+
+	for (const [name, reply, parsed] of cases) {
+		it(`parses ${name}`, () => {
+			assert.deepStrictEqual(parseOscColorResponse(reply), parsed);
+		});
+	}
 });
 
 function restoreProperty(object: object, key: PropertyKey, descriptor: PropertyDescriptor | undefined): void {

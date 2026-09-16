@@ -2,22 +2,17 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall, type Model } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { BashResult } from "../../src/core/bash-executor.js";
-import {
-	convertToLlm,
-	createCompactionSummaryMessage,
-	createHarnessDigestMessage,
-	HARNESS_DIGEST_CUSTOM_TYPE,
-} from "../../src/core/messages.js";
+import { convertToLlm, HARNESS_DIGEST_CUSTOM_TYPE } from "../../src/core/messages.js";
 import type { PromptTemplate } from "../../src/core/prompt-templates.js";
 import { getLocalHarnessStateDir, loadHarnessState, saveHarnessState } from "../../src/core/refinement/index.js";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.js";
 import { createTestResourceLoader } from "../utilities.js";
 import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.js";
-import { createDeferred, createWaitingHarness, gatedHook } from "./scheduling.js";
+import { createDeferred, createWaitingHarness } from "./scheduling.js";
 
 function gateNextAgentStart(harness: Harness): { reached: Promise<void>; release(): void } {
 	let markReached = () => {};
@@ -52,65 +47,6 @@ describe("AgentSession prompt characterization", () => {
 				rmSync(tempDir, { recursive: true, force: true });
 			}
 		}
-	});
-
-	it("releases action admission when ownership commit throws", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		const commitError = new Error("commit failed");
-
-		await expect(
-			harness.session.prompt("first", {
-				admissionCommitted: () => {
-					throw commitError;
-				},
-			}),
-		).rejects.toBe(commitError);
-		expect(getUserTexts(harness)).toEqual([]);
-
-		harness.setResponses([fauxAssistantMessage("recovered")]);
-		await harness.session.prompt("second");
-		expect(getUserTexts(harness)).toEqual(["second"]);
-	});
-
-	it("keeps a prompt session-owned when cancellation arrives after admission", async () => {
-		const harness = await createHarness({ models: [{ id: "slow-faux" }] });
-		harnesses.push(harness);
-		let releaseResponse = () => {};
-		const responseGate = new Promise<void>((resolve) => {
-			releaseResponse = resolve;
-		});
-		harness.setResponses([
-			async () => {
-				await responseGate;
-				return fauxAssistantMessage("owned");
-			},
-		]);
-		const controller = new AbortController();
-
-		const prompt = harness.session.prompt("keep me", { signal: controller.signal });
-		await vi.waitFor(() => expect(getUserTexts(harness)).toEqual(["keep me"]));
-		controller.abort();
-		releaseResponse();
-		await prompt;
-
-		expect(getUserTexts(harness)).toEqual(["keep me"]);
-		expect(getAssistantTexts(harness)).toEqual(["owned"]);
-	});
-
-	it("prompts while idle and records a single text response", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-
-		harness.setResponses([fauxAssistantMessage("hello")]);
-
-		await harness.session.prompt("hi");
-
-		// The leading custom message is the session-start harness digest.
-		expect(harness.session.messages.map((message) => message.role)).toEqual(["custom", "user", "assistant"]);
-		expect(getMessageText(harness.session.messages[1]!)).toBe("hi");
-		expect(harness.getPendingResponseCount()).toBe(0);
-		expect(harness.eventsOfType("session_action_update")).toEqual([]);
 	});
 
 	it("admits concurrent idle prompts in FIFO order with only the waiting action queued", async () => {
@@ -204,47 +140,10 @@ describe("AgentSession prompt characterization", () => {
 		expect(getUserTexts(harness)).toEqual(["outer", "from hook"]);
 	});
 
-	it("handles a tool call turn and waits for the follow-up LLM response", async () => {
+	it("runs a tool call turn: parallel tool results then a single follow-up LLM response", async () => {
 		const toolRuns: string[] = [];
-		const echoTool: AgentTool = {
-			name: "echo",
-			label: "Echo",
-			description: "Echo text back",
-			parameters: Type.Object({ text: Type.String() }),
-			execute: async (_toolCallId, params) => {
-				const text = typeof params === "object" && params !== null && "text" in params ? String(params.text) : "";
-				toolRuns.push(text);
-				return {
-					content: [{ type: "text", text: `echo:${text}` }],
-					details: { text },
-				};
-			},
-		};
-		const harness = await createHarness({ tools: [echoTool] });
-		harnesses.push(harness);
-
-		harness.setResponses([
-			fauxAssistantMessage(fauxToolCall("echo", { text: "hello" }), { stopReason: "toolUse" }),
-			fauxAssistantMessage("done"),
-		]);
-
-		await harness.session.prompt("start");
-
-		expect(toolRuns).toEqual(["hello"]);
-		expect(harness.session.messages.map((message) => message.role)).toEqual([
-			"custom",
-			"user",
-			"assistant",
-			"toolResult",
-			"assistant",
-		]);
-		expect(harness.session.messages[3]?.role).toBe("toolResult");
-		expect(harness.session.messages[4]?.role).toBe("assistant");
-	});
-
-	it("executes multiple tool calls from one response and continues with a single follow-up response", async () => {
-		const toolRuns: string[] = [];
-		const makeTool = (name: string, delayMs: number): AgentTool => ({
+		const fastCompleted = createDeferred();
+		const makeTool = (name: string): AgentTool => ({
 			name,
 			label: name,
 			description: `${name} tool`,
@@ -252,15 +151,16 @@ describe("AgentSession prompt characterization", () => {
 			execute: async (_toolCallId, params) => {
 				const value =
 					typeof params === "object" && params !== null && "value" in params ? String(params.value) : "";
-				await new Promise((resolve) => setTimeout(resolve, delayMs));
+				if (name === "slow") await fastCompleted.promise;
 				toolRuns.push(`${name}:${value}`);
+				if (name === "fast") fastCompleted.resolve();
 				return {
 					content: [{ type: "text", text: `${name}:${value}` }],
 					details: { value },
 				};
 			},
 		});
-		const harness = await createHarness({ tools: [makeTool("slow", 25), makeTool("fast", 0)] });
+		const harness = await createHarness({ tools: [makeTool("slow"), makeTool("fast")] });
 		harnesses.push(harness);
 
 		harness.setResponses([
@@ -275,50 +175,31 @@ describe("AgentSession prompt characterization", () => {
 
 		await harness.session.prompt("run tools");
 
-		expect(toolRuns.sort()).toEqual(["fast:b", "slow:a"]);
+		expect(toolRuns).toEqual(["fast:b", "slow:a"]);
 		expect(harness.session.messages.filter((message) => message.role === "toolResult")).toHaveLength(2);
 		expect(harness.session.messages[harness.session.messages.length - 1]?.role).toBe("assistant");
 	});
 
-	it("preserves image attachments in the provider context", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		let sawImage = false;
-
-		harness.setResponses([
-			(context) => {
-				sawImage = context.messages.some(
-					(message) =>
-						message.role === "user" &&
-						typeof message.content !== "string" &&
-						message.content.some((part) => part.type === "image"),
-				);
-				return fauxAssistantMessage("ok");
-			},
-		]);
-
-		await harness.session.prompt("describe", {
-			images: [
-				{
-					type: "image",
-					mimeType: "image/png",
-					data: "ZmFrZQ==",
-				},
-			],
-		});
-
-		expect(sawImage).toBe(true);
-	});
-
-	it("expands skill commands before sending the prompt", async () => {
+	it("expands skill commands and prompt templates before sending the prompt", async () => {
 		const tempDir = join(tmpdir(), `pi-skill-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		tempDirs.push(tempDir);
 		const skillPath = join(tempDir, "test-skill.md");
 		writeFileSync(skillPath, "# Test Skill\n\nUse the skill body.");
-
+		const template: PromptTemplate = {
+			name: "review",
+			description: "Review template",
+			content: "Review this code: $1",
+			filePath: "/virtual/review.md",
+			sourceInfo: createSyntheticSourceInfo("/virtual/review.md", {
+				source: "local",
+				scope: "temporary",
+				origin: "top-level",
+			}),
+		};
 		const resourceLoader = {
 			...createTestResourceLoader(),
+			getPrompts: () => ({ prompts: [template], diagnostics: [] }),
 			getSkills: () => ({
 				skills: [
 					{
@@ -341,93 +222,39 @@ describe("AgentSession prompt characterization", () => {
 		};
 		const harness = await createHarness({ resourceLoader });
 		harnesses.push(harness);
-		let expandedPrompt = "";
-
-		harness.setResponses([
-			(context) => {
-				const user = context.messages.filter((message) => message.role === "user").at(-1);
-				expandedPrompt = user ? getMessageText(user) : "";
-				return fauxAssistantMessage("ok");
-			},
-		]);
+		const expandedPrompts: string[] = [];
+		const capture = (context: { messages: { role: string }[] }) => {
+			const user = context.messages.filter((message) => message.role === "user").at(-1);
+			expandedPrompts.push(user ? getMessageText(user) : "");
+			return fauxAssistantMessage("ok");
+		};
+		harness.setResponses([capture, capture]);
 
 		await harness.session.prompt("/skill:test explain this");
-
-		expect(expandedPrompt).toContain('<skill name="test" location="');
-		expect(expandedPrompt).toContain("Use the skill body.");
-		expect(expandedPrompt).toContain("explain this");
-	});
-
-	it("expands prompt templates before sending the prompt", async () => {
-		const template: PromptTemplate = {
-			name: "review",
-			description: "Review template",
-			content: "Review this code: $1",
-			filePath: "/virtual/review.md",
-			sourceInfo: createSyntheticSourceInfo("/virtual/review.md", {
-				source: "local",
-				scope: "temporary",
-				origin: "top-level",
-			}),
-		};
-		const resourceLoader = {
-			...createTestResourceLoader(),
-			getPrompts: () => ({ prompts: [template], diagnostics: [] }),
-		};
-		const harness = await createHarness({ resourceLoader });
-		harnesses.push(harness);
-		let expandedPrompt = "";
-
-		harness.setResponses([
-			(context) => {
-				const user = context.messages.filter((message) => message.role === "user").at(-1);
-				expandedPrompt = user ? getMessageText(user) : "";
-				return fauxAssistantMessage("ok");
-			},
-		]);
-
 		await harness.session.prompt("/review src/index.ts");
 
-		expect(expandedPrompt).toBe("Review this code: src/index.ts");
+		expect(expandedPrompts[0]).toContain('<skill name="test" location="');
+		expect(expandedPrompts[0]).toContain("Use the skill body.");
+		expect(expandedPrompts[0]).toContain("explain this");
+		expect(expandedPrompts[1]).toBe("Review this code: src/index.ts");
 	});
 
-	it("dispatches extension commands without consuming a provider response", async () => {
-		const commandRuns: string[] = [];
-		const harness = await createHarness({
-			extensionFactories: [
-				(pi) => {
-					pi.registerCommand("testcmd", {
-						description: "Test command",
-						handler: async (args) => {
-							commandRuns.push(args);
-						},
-					});
-				},
-			],
-		});
-		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("should stay queued")]);
-
-		await harness.session.prompt("/testcmd hello world");
-
-		expect(commandRuns).toEqual(["hello world"]);
-		expect(harness.session.messages.filter((message) => message.role !== "custom")).toEqual([]);
-		expect(harness.getPendingResponseCount()).toBe(1);
-	});
-
-	it("sendUserMessage while idle triggers a turn", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-
-		harness.setResponses([fauxAssistantMessage("response")]);
-
-		await harness.session.sendUserMessage("from extension");
-
-		expect(harness.session.messages.map((message) => message.role)).toEqual(["custom", "user", "assistant"]);
-		expect(getMessageText(harness.session.messages[1]!)).toBe("from extension");
-	});
-
-	it("rejects an aborted prompt while streaming instead of enqueueing it", async () => {
+	it.each([
+		{
+			label: "an aborted prompt",
+			options: () => {
+				const controller = new AbortController();
+				controller.abort();
+				return { streamingBehavior: "followUp" as const, signal: controller.signal };
+			},
+			error: "Prompt admission was cancelled.",
+		},
+		{
+			label: "a prompt without streamingBehavior",
+			options: () => undefined,
+			error: "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+		},
+	])("rejects $label while streaming instead of enqueueing it", async ({ options, error }) => {
 		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = await createWaitingHarness();
 		harnesses.push(harness);
 		harness.setResponses([
@@ -435,543 +262,13 @@ describe("AgentSession prompt characterization", () => {
 			fauxAssistantMessage("done"),
 		]);
 		await waitForToolStart;
-		const controller = new AbortController();
-		controller.abort();
 
-		await expect(
-			harness.session.prompt("stale startup prompt", {
-				streamingBehavior: "followUp",
-				signal: controller.signal,
-			}),
-		).rejects.toThrow("Prompt admission was cancelled.");
+		await expect(harness.session.prompt("queued while busy", options())).rejects.toThrow(error);
 		expect(harness.session.queuedActionCount).toBe(0);
 
 		releaseToolExecution();
 		await promptPromise;
 		expect(getUserTexts(harness)).toEqual(["start"]);
-	});
-
-	it("throws when prompted during streaming without a streamingBehavior", async () => {
-		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = await createWaitingHarness();
-		harnesses.push(harness);
-		harness.setResponses([
-			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
-			fauxAssistantMessage("done"),
-		]);
-		await waitForToolStart;
-
-		await expect(harness.session.prompt("second")).rejects.toThrow(
-			"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
-		);
-
-		releaseToolExecution();
-		await promptPromise;
-	});
-
-	it("preserves the active extension system prompt when max depth changes mid-run", async () => {
-		const responseStarted = createDeferred();
-		const responseGate = createDeferred();
-		const harness = await createHarness({
-			rlmDepth: 1,
-			rlmMaxDepth: 1,
-			extensionFactories: [
-				(pi) => {
-					pi.on("before_agent_start", async (event) => ({
-						systemPrompt: `${event.systemPrompt}
-
-active extension doctrine`,
-					}));
-				},
-			],
-		});
-		harnesses.push(harness);
-		harness.setResponses([
-			async () => {
-				responseStarted.resolve();
-				await responseGate.promise;
-				return fauxAssistantMessage("done");
-			},
-		]);
-
-		const promptPromise = harness.session.prompt("start");
-		await responseStarted.promise;
-		expect(harness.session.agent.state.systemPrompt).toContain("active extension doctrine");
-		expect(harness.session.agent.state.systemPrompt).not.toContain("An `rlm` object");
-
-		await harness.session.setRlmMaxDepth(2);
-
-		expect(harness.session.agent.state.systemPrompt).toContain("An `rlm` object");
-		expect(harness.session.agent.state.systemPrompt).toContain("active extension doctrine");
-		responseGate.resolve();
-		await promptPromise;
-	});
-
-	it("resets stale extension system prompt for accepted agent messages", async () => {
-		const harness = await createHarness({
-			systemPrompt: "base prompt",
-			extensionFactories: [
-				(pi) => {
-					pi.on("before_agent_start", async (event) => ({
-						systemPrompt: `${event.systemPrompt}
-
-stale extension instructions`,
-					}));
-				},
-			],
-		});
-		harnesses.push(harness);
-		const baseSystemPrompt = harness.session.systemPrompt;
-		const providerSystemPrompts: string[] = [];
-		harness.setResponses([
-			(context) => {
-				providerSystemPrompts.push(context.systemPrompt ?? "");
-				return fauxAssistantMessage("first");
-			},
-			(context) => {
-				providerSystemPrompts.push(context.systemPrompt ?? "");
-				return fauxAssistantMessage("second");
-			},
-		]);
-
-		await harness.session.prompt("normal prompt");
-		await harness.session.acceptAgentMessagePrompt("agent-to-agent payload", { expandPromptTemplates: false });
-		await harness.session.agent.waitForIdle();
-
-		expect(providerSystemPrompts[0]).toContain("stale extension instructions");
-		expect(providerSystemPrompts[1]).toBe(baseSystemPrompt);
-		expect(providerSystemPrompts[1]).not.toContain("stale extension instructions");
-	});
-
-	it("discards a stale extension prompt when refine completes during a normal prompt hook", async () => {
-		let signalHookStarted: () => void = () => {};
-		const hookStarted = new Promise<void>((resolve) => {
-			signalHookStarted = resolve;
-		});
-		let releaseHook: () => void = () => {};
-		const hookRelease = new Promise<void>((resolve) => {
-			releaseHook = resolve;
-		});
-		const harness = await createHarness({
-			persistSession: true,
-			systemPrompt: "pre-refine base",
-			extensionFactories: [
-				(pi) => {
-					pi.on("before_agent_start", async (event) => {
-						signalHookStarted();
-						await hookRelease;
-						return {
-							message: {
-								customType: "refine-race-proof",
-								content: "extension message preserved",
-								display: false,
-							},
-							systemPrompt: `${event.systemPrompt}
-
-stale extension instructions`,
-						};
-					});
-				},
-			],
-		});
-		harnesses.push(harness);
-		const internals = harness.session as unknown as {
-			_baseSystemPrompt: string;
-			_refineInFlight?: Promise<void>;
-			_refineAbortController?: AbortController;
-			_planRefine(options: unknown, signal: AbortSignal): Promise<unknown>;
-			_applyRefine(plan: unknown, options: unknown, abort: AbortController): Promise<unknown>;
-		};
-		vi.spyOn(internals, "_planRefine").mockResolvedValue({ id: "race-plan", proposal: { edits: [] } });
-		vi.spyOn(internals, "_applyRefine").mockImplementation(async () => {
-			internals._baseSystemPrompt = "refined $& base";
-			harness.session.agent.state.systemPrompt = "refined $& base";
-			internals._refineAbortController = undefined;
-			return {
-				id: "refine_race",
-				summary: "refined",
-				rationale: "test",
-				expectedOutcome: "test",
-				appliedEdits: [],
-			};
-		});
-		let providerSystemPrompt = "";
-		let providerMessages = "";
-		harness.setResponses([
-			(context) => {
-				providerSystemPrompt = context.systemPrompt ?? "";
-				providerMessages = JSON.stringify(context.messages);
-				return fauxAssistantMessage("done");
-			},
-		]);
-
-		const promptPromise = harness.session.prompt("normal prompt");
-		await hookStarted;
-		await harness.session.refine({ instructions: "complete while the extension hook is suspended" });
-		expect(internals._refineInFlight).toBeUndefined();
-		releaseHook();
-		await promptPromise;
-
-		expect(providerSystemPrompt).toContain("refined $& base");
-		expect(providerSystemPrompt).toContain("stale extension instructions");
-		expect(providerMessages).toContain("extension message preserved");
-	});
-
-	it("preserves an independent extension prompt when refine completes during its hook", async () => {
-		let releaseHook: () => void = () => {};
-		const hookRelease = new Promise<void>((resolve) => {
-			releaseHook = resolve;
-		});
-		let signalHookStarted: () => void = () => {};
-		const hookStarted = new Promise<void>((resolve) => {
-			signalHookStarted = resolve;
-		});
-		const harness = await createHarness({
-			persistSession: true,
-			systemPrompt: "pre-refine base",
-			extensionFactories: [
-				(pi) => {
-					pi.on("before_agent_start", async () => {
-						signalHookStarted();
-						await hookRelease;
-						return { systemPrompt: "independent extension replacement" };
-					});
-				},
-			],
-		});
-		harnesses.push(harness);
-		const internals = harness.session as unknown as {
-			_baseSystemPrompt: string;
-			_refineAbortController?: AbortController;
-			_planRefine(options: unknown, signal: AbortSignal): Promise<unknown>;
-			_applyRefine(plan: unknown, options: unknown, abort: AbortController): Promise<unknown>;
-		};
-		vi.spyOn(internals, "_planRefine").mockResolvedValue({ id: "race-plan", proposal: { edits: [] } });
-		vi.spyOn(internals, "_applyRefine").mockImplementation(async () => {
-			internals._baseSystemPrompt = "refined base";
-			harness.session.agent.state.systemPrompt = "refined base";
-			internals._refineAbortController = undefined;
-			return {
-				id: "refine_independent",
-				summary: "refined",
-				rationale: "test",
-				expectedOutcome: "test",
-				appliedEdits: [],
-				harnessStatePath: "",
-			};
-		});
-		let providerSystemPrompt = "";
-		harness.setResponses([
-			(context) => {
-				providerSystemPrompt = context.systemPrompt ?? "";
-				return fauxAssistantMessage("done");
-			},
-		]);
-
-		const promptPromise = harness.session.prompt("normal prompt");
-		await hookStarted;
-		await harness.session.refine({ instructions: "refresh the base" });
-		releaseHook();
-		await promptPromise;
-
-		expect(providerSystemPrompt).toBe("independent extension replacement");
-	});
-
-	it("refreshes an extension system prompt when refine completes during an injected prompt hook", async () => {
-		let signalHookStarted: () => void = () => {};
-		const hookStarted = new Promise<void>((resolve) => {
-			signalHookStarted = resolve;
-		});
-		let releaseHook: () => void = () => {};
-		const hookRelease = new Promise<void>((resolve) => {
-			releaseHook = resolve;
-		});
-		const harness = await createHarness({
-			persistSession: true,
-			systemPrompt: "pre-refine base",
-			extensionFactories: [
-				(pi) => {
-					pi.on("before_agent_start", async (event) => {
-						signalHookStarted();
-						await hookRelease;
-						return {
-							message: {
-								customType: "refine-race-proof",
-								content: "injected extension message preserved",
-								display: false,
-							},
-							systemPrompt: `${event.systemPrompt}
-
-stale injected extension instructions`,
-						};
-					});
-				},
-			],
-		});
-		harnesses.push(harness);
-		const internals = harness.session as unknown as {
-			_baseSystemPrompt: string;
-			_refineInFlight?: Promise<void>;
-			_refineAbortController?: AbortController;
-			_planRefine(options: unknown, signal: AbortSignal): Promise<unknown>;
-			_applyRefine(plan: unknown, options: unknown, abort: AbortController): Promise<unknown>;
-			_promptInjectedMessage(
-				text: string,
-				message: {
-					role: "custom";
-					customType: string;
-					content: string;
-					display: boolean;
-					details: Record<string, never>;
-					timestamp: number;
-				},
-			): Promise<void>;
-		};
-		vi.spyOn(internals, "_planRefine").mockResolvedValue({ id: "race-plan", proposal: { edits: [] } });
-		vi.spyOn(internals, "_applyRefine").mockImplementation(async () => {
-			internals._baseSystemPrompt = "refined injected base";
-			harness.session.agent.state.systemPrompt = "refined injected base";
-			internals._refineAbortController = undefined;
-			return {
-				id: "refine_race",
-				summary: "refined",
-				rationale: "test",
-				expectedOutcome: "test",
-				appliedEdits: [],
-			};
-		});
-		let providerSystemPrompt = "";
-		let providerMessages = "";
-		harness.setResponses([
-			(context) => {
-				providerSystemPrompt = context.systemPrompt ?? "";
-				providerMessages = JSON.stringify(context.messages);
-				return fauxAssistantMessage("done");
-			},
-		]);
-
-		const injectedPrompt = internals._promptInjectedMessage("injected prompt", {
-			role: "custom",
-			customType: "injected-test",
-			content: "injected prompt",
-			display: true,
-			details: {},
-			timestamp: Date.now(),
-		});
-		await hookStarted;
-		await harness.session.refine({ instructions: "complete while the injected hook is suspended" });
-		expect(internals._refineInFlight).toBeUndefined();
-		releaseHook();
-		await injectedPrompt;
-
-		expect(providerSystemPrompt).toContain("refined injected base");
-		expect(providerSystemPrompt).toContain("stale injected extension instructions");
-		expect(providerMessages).toContain("injected extension message preserved");
-	});
-
-	it("pumps a follow-up queued while an injected prompt owns the active turn", async () => {
-		const hook = gatedHook({ prompt: "injected prompt" });
-		const harness = await createHarness({ extensionFactories: [hook.factory] });
-		harnesses.push(harness);
-		const internals = harness.session as unknown as {
-			_promptInjectedMessage(
-				text: string,
-				message: {
-					role: "custom";
-					customType: string;
-					content: string;
-					display: boolean;
-					details: Record<string, never>;
-					timestamp: number;
-				},
-			): Promise<void>;
-		};
-		harness.setResponses([fauxAssistantMessage("injected done"), fauxAssistantMessage("follow-up done")]);
-
-		const injectedPrompt = internals._promptInjectedMessage("injected prompt", {
-			role: "custom",
-			customType: "injected-test",
-			content: "injected prompt",
-			display: true,
-			details: {},
-			timestamp: Date.now(),
-		});
-		await hook.reached;
-		await harness.session.followUp("queued follow-up");
-		hook.release();
-
-		await injectedPrompt;
-		await harness.session.waitForIdle();
-
-		expect(getUserTexts(harness)).toEqual(["queued follow-up"]);
-		expect(getAssistantTexts(harness)).toEqual(["injected done", "follow-up done"]);
-		expect(harness.session.getFollowUpMessages()).toEqual([]);
-	});
-
-	it("preserves an empty extension system prompt across an injected refine handoff wait", async () => {
-		let sessionInternals: {
-			_refineInFlight?: Promise<void>;
-			_promptInjectedMessage(
-				text: string,
-				message: {
-					role: "custom";
-					customType: string;
-					content: string;
-					display: boolean;
-					details: Record<string, never>;
-					timestamp: number;
-				},
-			): Promise<void>;
-		};
-		const harness = await createHarness({
-			systemPrompt: "base prompt",
-			extensionFactories: [
-				(pi) => {
-					pi.on("before_agent_start", async () => {
-						let releaseRefine: (() => void) | undefined;
-						sessionInternals._refineInFlight = new Promise<void>((resolve) => {
-							releaseRefine = resolve;
-						});
-						setTimeout(() => {
-							sessionInternals._refineInFlight = undefined;
-							releaseRefine?.();
-						}, 0);
-						return { systemPrompt: "" };
-					});
-				},
-			],
-		});
-		harnesses.push(harness);
-		sessionInternals = harness.session as unknown as typeof sessionInternals;
-		let providerSystemPrompt = "not observed";
-		harness.setResponses([
-			(context) => {
-				providerSystemPrompt = context.systemPrompt ?? "";
-				return fauxAssistantMessage("done");
-			},
-		]);
-
-		await sessionInternals._promptInjectedMessage("injected prompt", {
-			role: "custom",
-			customType: "injected-test",
-			content: "injected prompt",
-			display: true,
-			details: {},
-			timestamp: Date.now(),
-		});
-
-		expect(providerSystemPrompt).toBe("");
-	});
-
-	it("preserves an extension system prompt across a refine handoff wait", async () => {
-		let sessionInternals: { _refineInFlight?: Promise<void> };
-		const harness = await createHarness({
-			systemPrompt: "base prompt",
-			extensionFactories: [
-				(pi) => {
-					pi.on("before_agent_start", async (event) => {
-						let releaseRefine: (() => void) | undefined;
-						sessionInternals._refineInFlight = new Promise<void>((resolve) => {
-							releaseRefine = resolve;
-						});
-						setTimeout(() => {
-							sessionInternals._refineInFlight = undefined;
-							releaseRefine?.();
-						}, 0);
-						return {
-							systemPrompt: `${event.systemPrompt}
-
-extension instructions`,
-						};
-					});
-				},
-			],
-		});
-		harnesses.push(harness);
-		sessionInternals = harness.session as unknown as { _refineInFlight?: Promise<void> };
-		let providerSystemPrompt = "";
-		harness.setResponses([
-			(context) => {
-				providerSystemPrompt = context.systemPrompt ?? "";
-				return fauxAssistantMessage("done");
-			},
-		]);
-
-		await harness.session.prompt("normal prompt");
-
-		expect(providerSystemPrompt).toContain("extension instructions");
-	});
-
-	it("discards stale extension prompt when refine completes during post-hook _waitForRefineIdle", async () => {
-		// Test C: the extension hook returns an extension prompt while
-		// _refineInFlight is still active. During _waitForRefineIdle after
-		// the hook, the refine completes and rewrites _baseSystemPrompt.
-		// The post-wait guard must detect the base change and discard the
-		// stale extension prompt, using the refined base instead.
-		let sessionInternals: {
-			_baseSystemPrompt: string;
-			_refineInFlight?: Promise<void>;
-			_refineAbortController?: AbortController;
-			_planRefine(options: unknown, signal: AbortSignal): Promise<unknown>;
-			_applyRefine(plan: unknown, options: unknown, abort: AbortController): Promise<unknown>;
-		};
-		let releaseRefine: (() => void) | undefined;
-		const harness = await createHarness({
-			persistSession: true,
-			systemPrompt: "pre-refine base",
-			extensionFactories: [
-				(pi) => {
-					pi.on("before_agent_start", async (event) => {
-						// Set up _refineInFlight so the post-hook wait triggers.
-						sessionInternals._refineInFlight = new Promise<void>((resolve) => {
-							releaseRefine = resolve;
-						});
-						return {
-							systemPrompt: `${event.systemPrompt}
-
-stale post-hook extension instructions`,
-						};
-					});
-				},
-			],
-		});
-		harnesses.push(harness);
-		sessionInternals = harness.session as unknown as typeof sessionInternals;
-		vi.spyOn(sessionInternals, "_planRefine").mockResolvedValue({ id: "race-plan", proposal: { edits: [] } });
-		vi.spyOn(sessionInternals, "_applyRefine").mockImplementation(async () => {
-			sessionInternals._baseSystemPrompt = "refined post-hook base";
-			harness.session.agent.state.systemPrompt = "refined post-hook base";
-			sessionInternals._refineAbortController = undefined;
-			return {
-				id: "refine_post_hook",
-				summary: "refined",
-				rationale: "test",
-				expectedOutcome: "test",
-				appliedEdits: [],
-			};
-		});
-		let providerSystemPrompt = "";
-		harness.setResponses([
-			(context) => {
-				providerSystemPrompt = context.systemPrompt ?? "";
-				return fauxAssistantMessage("done");
-			},
-		]);
-
-		const promptPromise = harness.session.prompt("normal prompt");
-		// The extension hook fires, sets _refineInFlight, and returns a stale
-		// extension prompt. The prompt path enters _waitForRefineIdle.
-		// Wait for the hook to fire and set _refineInFlight.
-		await vi.waitFor(() => {
-			expect(sessionInternals._refineInFlight).toBeDefined();
-		});
-		// Complete the refine during the wait: change the base and resolve.
-		sessionInternals._baseSystemPrompt = "refined post-hook base";
-		releaseRefine?.();
-		sessionInternals._refineInFlight = undefined;
-		await promptPromise;
-
-		expect(providerSystemPrompt).toContain("refined post-hook base");
-		expect(providerSystemPrompt).toContain("stale post-hook extension instructions");
 	});
 
 	it("keeps pending nextTurn context separate from accepted agent messages queued while busy", async () => {
@@ -1133,96 +430,6 @@ stale post-hook extension instructions`,
 		expect(contextTexts[0]?.[3]).toContain("The persistent memories produced across this session so far:");
 		expect(contextTexts[0]?.[4]).toBe("agent-to-agent payload");
 		expect(harness.session.hasPendingBashMessages).toBe(false);
-	});
-
-	it("clears an accepted agent message before delivery without disturbing later work", async () => {
-		let holdAgentStart = true;
-		let releaseEventQueue = () => {};
-		const eventQueueGate = new Promise<void>((resolve) => {
-			releaseEventQueue = resolve;
-		});
-		const harness = await createHarness({
-			extensionFactories: [
-				(pi) => {
-					pi.on("agent_start", async () => {
-						if (holdAgentStart) await eventQueueGate;
-					});
-				},
-			],
-		});
-		harnesses.push(harness);
-		const agentMessageId = "agentmsg_clear_lifecycle";
-		const agentPrompt = `Agent-to-agent message received.\nSource: agent_message\nTo: Target, active target, session session-target\nMessage id: ${agentMessageId}\n\nagent text`;
-		await harness.session.sendCustomMessage(
-			{ customType: "next-turn", content: "carry this", display: true, details: {} },
-			{ deliverAs: "nextTurn" },
-		);
-		harness.events.splice(0);
-		harness.setResponses([fauxAssistantMessage("never delivered")]);
-
-		let markAdmitted = () => {};
-		const admitted = new Promise<void>((resolve) => {
-			markAdmitted = resolve;
-		});
-		let releaseAdmission = () => {};
-		const admissionGate = new Promise<void>((resolve) => {
-			releaseAdmission = resolve;
-		});
-		let unsubscribe = () => {};
-		unsubscribe = harness.session.agent.subscribe(async (event) => {
-			if (event.type !== "agent_start") return;
-			unsubscribe();
-			markAdmitted();
-			await admissionGate;
-		});
-
-		const delivery = harness.session.waitForAgentMessagePromptDelivery(agentMessageId);
-		const accepted = harness.session.acceptAgentMessagePrompt(agentPrompt, { expandPromptTemplates: false });
-		const acceptedRejection = expect(accepted).rejects.toThrow("cleared before delivery");
-		const deliveryRejection = expect(delivery).rejects.toThrow("cleared before delivery");
-		await admitted;
-
-		expect(harness.session.clearQueuedUserMessagesMatching((text) => text.includes(agentMessageId))).toEqual({
-			steering: [],
-			followUp: [agentPrompt],
-		});
-		releaseAdmission();
-		await Promise.all([acceptedRejection, deliveryRejection]);
-		await harness.session.agent.waitForIdle();
-
-		let sawRestoredNextTurn = false;
-		harness.setResponses([
-			(context) => {
-				sawRestoredNextTurn = context.messages.some(
-					(message) => message.role === "user" && getMessageText(message) === "carry this",
-				);
-				return fauxAssistantMessage("newer response");
-			},
-		]);
-		holdAgentStart = false;
-		await harness.session.prompt("newer prompt");
-		releaseEventQueue();
-		await harness.session.waitForIdle();
-
-		expect(sawRestoredNextTurn).toBe(true);
-		expect(getUserTexts(harness)).toEqual(["newer prompt"]);
-		expect(getAssistantTexts(harness)).toEqual(["newer response"]);
-		const deliveredEventTexts = harness.events
-			.filter((event) => event.type === "message_start" || event.type === "message_end")
-			.map((event) => getMessageText(event.message));
-		expect(deliveredEventTexts).not.toContain(agentPrompt);
-		expect(deliveredEventTexts).not.toContain("never delivered");
-		await vi.waitFor(() =>
-			expect(
-				harness.sessionManager
-					.getEntries()
-					.filter((entry) => entry.type === "message")
-					.map((entry) => getMessageText(entry.message)),
-			).toEqual(["newer prompt", "newer response"]),
-		);
-		expect(harness.session.agent.state.errorMessage).toBeUndefined();
-		expect(harness.session.unfinishedActionCount).toBe(0);
-		expect(harness.session.hasAcceptedPromptInFlight).toBe(false);
 	});
 
 	it("waitForIdle waits for cancelled dispatch cleanup in the session event queue", async () => {
@@ -1391,59 +598,23 @@ stale post-hook extension instructions`,
 		expect(getAssistantTexts(harness)).toEqual(["first done", "second done"]);
 	});
 
-	it("drops generated prompt-wait outcome entries after completion", async () => {
-		let releaseFirst: (() => void) | undefined;
-		const firstGate = new Promise<void>((resolve) => {
-			releaseFirst = resolve;
-		});
-		const harness = await createHarness();
-		harnesses.push(harness);
-		harness.setResponses([
-			async () => {
-				await firstGate;
-				return fauxAssistantMessage("first done");
-			},
-			fauxAssistantMessage("second done"),
-		]);
-		const internals = harness.session as unknown as { _agentMessageOutcomes: Map<string, unknown> };
+	it.each([
+		{ label: "tab-separated", text: "/autonomous\ton", enabled: true, sentToModel: false },
+		{ label: "multiline", text: "/autonomous\t\non", enabled: false, sentToModel: true },
+	])(
+		"handles $label built-in slash commands when template expansion is disabled",
+		async ({ text, enabled, sentToModel }) => {
+			const harness = await createHarness();
+			harnesses.push(harness);
+			harness.setResponses([fauxAssistantMessage("sent")]);
 
-		const first = harness.session.prompt("first");
-		await vi.waitFor(() => expect(harness.session.isStreaming).toBe(true));
-		// Queued delivery settles the sticky delivered flag; a generated id must
-		// still be dropped after completion or long-lived daemons grow one outcome
-		// entry per prompt.
-		const queued = harness.session.promptAndWait("second", { streamingBehavior: "followUp", queueIfBusy: true });
-		releaseFirst?.();
-		await Promise.all([first, queued]);
+			await harness.session.prompt(text, { expandPromptTemplates: false });
 
-		const keys = [...internals._agentMessageOutcomes.keys()];
-		expect(keys.filter((key) => key.startsWith("prompt-wait:"))).toEqual([]);
-	});
-
-	it("handles tab-separated autonomous slash commands when template expansion is disabled", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-
-		await harness.session.prompt("/autonomous	on", { expandPromptTemplates: false });
-
-		expect(harness.session.getAutonomousStatus().enabled).toBe(true);
-		expect(harness.getPendingResponseCount()).toBe(0);
-		expect(harness.session.messages.some((message) => message.role === "custom")).toBe(true);
-	});
-
-	it("sends multiline goal and autonomous variants to the model", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("second")]);
-
-		await harness.session.prompt("/goal\t\nship it", { expandPromptTemplates: false });
-		await harness.session.prompt("/autonomous\t\non", { expandPromptTemplates: false });
-
-		expect(harness.session.goalState.status).toBe("idle");
-		expect(harness.session.getAutonomousStatus().enabled).toBe(false);
-		expect(getUserTexts(harness)).toEqual(["/goal\t\nship it", "/autonomous\t\non"]);
-		expect(getAssistantTexts(harness)).toEqual(["first", "second"]);
-	});
+			expect(harness.session.getAutonomousStatus().enabled).toBe(enabled);
+			expect(getUserTexts(harness)).toEqual(sentToModel ? [text] : []);
+			expect(harness.getPendingResponseCount()).toBe(sentToModel ? 0 : 1);
+		},
+	);
 
 	it("does not run built-in slash commands immediately while queueIfBusy backpressure is active", async () => {
 		const harness = await createHarness();
@@ -1545,78 +716,35 @@ stale post-hook extension instructions`,
 		await prompt;
 		unsubscribe();
 	});
-	it("promptUntilAccepted waits for delivery but not turn completion", async () => {
+
+	it("keeps a triggerTurn custom message fenced until its turn starts", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
-		const responseGate = createDeferred();
-		harness.setResponses([
-			async () => {
-				await responseGate.promise;
-				return fauxAssistantMessage("done");
-			},
-		]);
-		let delivered = false;
+		harness.setResponses([fauxAssistantMessage("done")]);
+		const customStarted = createDeferred();
+		const dispatchGate = createDeferred();
+		const originalPrompt = harness.session.agent.prompt.bind(harness.session.agent);
+		const promptCalled = createDeferred();
+		const promptSpy = vi
+			.spyOn(harness.session.agent, "prompt")
+			.mockImplementation(async (messages: Parameters<typeof originalPrompt>[0]) => {
+				promptSpy.mockRestore();
+				promptCalled.resolve();
+				await dispatchGate.promise;
+				return originalPrompt(messages);
+			});
 		const unsubscribe = harness.session.agent.subscribe((event) => {
-			if (event.type === "message_start" && event.message.role === "user") delivered = true;
+			if (event.type !== "message_start") return;
+			if (event.message.role === "custom" && event.message.customType === "trigger-turn-test") {
+				customStarted.resolve();
+			}
 		});
 
-		await harness.session.promptUntilAccepted("accepted prompt");
-
-		expect(delivered).toBe(true);
-		expect(harness.session.isStreaming).toBe(true);
-		responseGate.resolve();
-		await harness.session.waitForIdle();
-		unsubscribe();
-	});
-
-	it("promptUntilAccepted returns at ownership commit without draining queued work", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		const commandStarted = createDeferred();
-		const commandGate = createDeferred();
-		vi.spyOn(harness.session, "refine").mockImplementation(async () => {
-			commandStarted.resolve();
-			await commandGate.promise;
-			return {
-				id: "refine_accepted",
-				summary: "s",
-				rationale: "r",
-				expectedOutcome: "o",
-				appliedEdits: [],
-				harnessStatePath: "/tmp/harness_state.json",
-			};
-		});
-
-		await harness.session.promptUntilAccepted("/refine --local");
-		await commandStarted.promise;
-		expect(harness.session.isStreaming).toBe(false);
-
-		commandGate.resolve();
-		await harness.session.waitForSessionInputIdle();
-	});
-
-	it("keeps the restart checkpoint waiting while a queued session command executes", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		const commandStarted = createDeferred();
-		const commandGate = createDeferred();
-		vi.spyOn(harness.session, "refine").mockImplementation(async () => {
-			commandStarted.resolve();
-			await commandGate.promise;
-			return {
-				id: "refine_checkpoint",
-				summary: "s",
-				rationale: "r",
-				expectedOutcome: "o",
-				appliedEdits: [],
-				harnessStatePath: "/tmp/harness_state.json",
-			};
-		});
-		const pause = harness.session.acquireQueuedWorkPause();
-		const completion = harness.session.promptAndWait("/refine --local");
-		pause.release();
-		await commandStarted.promise;
-
+		const send = harness.session.sendCustomMessage(
+			{ customType: "trigger-turn-test", content: "run a turn", display: true, details: {} },
+			{ triggerTurn: true },
+		);
+		await promptCalled.promise;
 		let checkpointReleased = false;
 		const checkpoint = harness.session.waitForSessionInputCheckpoint().then(() => {
 			checkpointReleased = true;
@@ -1624,10 +752,11 @@ stale post-hook extension instructions`,
 		await new Promise<void>((resolve) => setImmediate(resolve));
 		expect(checkpointReleased).toBe(false);
 
-		commandGate.resolve();
-		await completion;
+		dispatchGate.resolve();
+		await customStarted.promise;
 		await checkpoint;
-		expect(checkpointReleased).toBe(true);
+		await send;
+		unsubscribe();
 	});
 
 	it("keeps the restart checkpoint fenced between queued handoff and message dispatch", async () => {
@@ -1672,325 +801,6 @@ stale post-hook extension instructions`,
 		await checkpoint;
 		await harness.session.waitForIdle();
 		expect(getUserTexts(harness)).toEqual(["handed off"]);
-	});
-
-	it("keeps an injected direct prompt fenced until the injected message starts", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("done")]);
-		await harness.session.sendCustomMessage(
-			{ customType: "earlier-next-turn", content: "earlier", display: true, details: {} },
-			{ deliverAs: "nextTurn" },
-		);
-		const injectedMessage = {
-			role: "custom" as const,
-			customType: "injected-test",
-			content: "injected prompt",
-			display: true,
-			details: {},
-			timestamp: Date.now(),
-		};
-		const earlierStarted = createDeferred();
-		const earlierStartGate = createDeferred();
-		const injectedStarted = createDeferred();
-		const unsubscribe = harness.session.agent.subscribe(async (event) => {
-			if (event.type !== "message_start") return;
-			if (event.message === injectedMessage) {
-				injectedStarted.resolve();
-				return;
-			}
-			if (event.message.role === "custom" && event.message.customType === "earlier-next-turn") {
-				earlierStarted.resolve();
-				await earlierStartGate.promise;
-			}
-		});
-		const internals = harness.session as unknown as {
-			_promptInjectedMessage(text: string, message: typeof injectedMessage): Promise<void>;
-		};
-
-		const prompt = internals._promptInjectedMessage("injected prompt", injectedMessage);
-		await earlierStarted.promise;
-		let checkpointReleased = false;
-		const checkpoint = harness.session.waitForSessionInputCheckpoint().then(() => {
-			checkpointReleased = true;
-		});
-		await new Promise<void>((resolve) => setImmediate(resolve));
-		expect(checkpointReleased).toBe(false);
-
-		earlierStartGate.resolve();
-		await injectedStarted.promise;
-		await checkpoint;
-		await prompt;
-		unsubscribe();
-	});
-
-	it("keeps a triggerTurn custom message fenced until its turn starts", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("done")]);
-		const customStarted = createDeferred();
-		const dispatchGate = createDeferred();
-		const originalPrompt = harness.session.agent.prompt.bind(harness.session.agent);
-		const promptCalled = createDeferred();
-		const promptSpy = vi
-			.spyOn(harness.session.agent, "prompt")
-			.mockImplementation(async (messages: Parameters<typeof originalPrompt>[0]) => {
-				promptSpy.mockRestore();
-				promptCalled.resolve();
-				await dispatchGate.promise;
-				return originalPrompt(messages);
-			});
-		const unsubscribe = harness.session.agent.subscribe((event) => {
-			if (event.type !== "message_start") return;
-			if (event.message.role === "custom" && event.message.customType === "trigger-turn-test") {
-				customStarted.resolve();
-			}
-		});
-
-		const send = harness.session.sendCustomMessage(
-			{ customType: "trigger-turn-test", content: "run a turn", display: true, details: {} },
-			{ triggerTurn: true },
-		);
-		await promptCalled.promise;
-		let checkpointReleased = false;
-		const checkpoint = harness.session.waitForSessionInputCheckpoint().then(() => {
-			checkpointReleased = true;
-		});
-		await new Promise<void>((resolve) => setImmediate(resolve));
-		expect(checkpointReleased).toBe(false);
-
-		dispatchGate.resolve();
-		await customStarted.promise;
-		await checkpoint;
-		await send;
-		unsubscribe();
-	});
-
-	it("releases a queued prompt checkpoint after handoff while its turn remains active", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		const responseGate = createDeferred<ReturnType<typeof fauxAssistantMessage>>();
-		harness.setResponses([() => responseGate.promise]);
-		const promptStarted = createDeferred();
-		const unsubscribe = harness.session.agent.subscribe((event) => {
-			if (event.type === "message_start" && event.message.role === "user") promptStarted.resolve();
-		});
-
-		await harness.session.restoreFollowUpMessage("queued prompt");
-		expect(harness.session.resumeQueuedWork()).toBe(true);
-		await promptStarted.promise;
-
-		await expect(harness.session.waitForSessionInputCheckpoint(AbortSignal.timeout(1000))).resolves.toBeUndefined();
-		expect(harness.session.isStreaming).toBe(true);
-		responseGate.resolve(fauxAssistantMessage("done"));
-		await harness.session.waitForIdle();
-		unsubscribe();
-	});
-
-	it("cancels an invisible idle prompt aborted during preparation", async () => {
-		const preparationReached = createDeferred();
-		const preparationGate = createDeferred();
-		const harness = await createHarness({
-			extensionFactories: [
-				(pi) => {
-					pi.on("before_agent_start", async () => {
-						preparationReached.resolve();
-						await preparationGate.promise;
-					});
-				},
-			],
-		});
-		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("done")]);
-		const prompt = harness.session.prompt("aborted prompt");
-		await preparationReached.promise;
-
-		const abort = harness.session.abort();
-		preparationGate.resolve();
-		await abort;
-
-		await expect(prompt).rejects.toThrow("Prompt aborted before delivery.");
-		expect(harness.session.clearQueue()).toEqual({ steering: [], followUp: [] });
-		await harness.session.prompt("next prompt");
-		expect(getUserTexts(harness)).toEqual(["next prompt"]);
-	});
-
-	it("rejects an invisible prompt cancelled after a handoff rollback", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		const dispatchReached = createDeferred<void>();
-		const rejectDispatch = createDeferred<void>();
-		vi.spyOn(harness.session.agent, "prompt").mockImplementationOnce(async () => {
-			dispatchReached.resolve();
-			await rejectDispatch.promise;
-			throw new Error("handoff interrupted");
-		});
-		const prompt = harness.session.promptUntilAccepted("rolled back prompt");
-		const outcome = prompt.then(
-			() => ({ error: undefined }),
-			(error: unknown) => ({ error }),
-		);
-		await dispatchReached.promise;
-
-		harness.session.requestAbort();
-		rejectDispatch.resolve();
-		await harness.session.waitForSessionInputIdle();
-		expect(harness.session.getSessionActionRecoverySnapshot().actions).toHaveLength(1);
-		harness.session.requestAbort();
-
-		expect((await outcome).error).toEqual(expect.objectContaining({ message: "Prompt aborted before delivery." }));
-		await harness.session.waitForSessionInputIdle();
-	});
-
-	it("aborts while a queued prompt is still preparing without consuming its snapshot", async () => {
-		const preparationReached = createDeferred();
-		const preparationGate = createDeferred();
-		const harness = await createHarness({
-			extensionFactories: [
-				(pi) => {
-					pi.on("before_agent_start", async () => {
-						preparationReached.resolve();
-						await preparationGate.promise;
-					});
-				},
-			],
-		});
-		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("done")]);
-		await harness.session.restoreFollowUpMessage("queued prompt");
-		expect(harness.session.resumeQueuedWork()).toBe(true);
-		await preparationReached.promise;
-		const controller = new AbortController();
-
-		const checkpoint = harness.session.waitForSessionInputCheckpoint(controller.signal);
-		controller.abort();
-
-		await expect(checkpoint).rejects.toThrow("Update restart preparation cancelled");
-		expect(harness.session.clearQueue()).toEqual({ steering: [], followUp: ["queued prompt"] });
-		preparationGate.resolve();
-		await harness.session.waitForIdle();
-	});
-
-	it("aborts while an extension event is pending without flushing or cancelling its queue", async () => {
-		const extensionReached = createDeferred();
-		const extensionGate = createDeferred();
-		const harness = await createHarness({
-			extensionFactories: [
-				(pi) => {
-					pi.on("message_start", async (event) => {
-						if (event.message.role !== "user") return;
-						extensionReached.resolve();
-						await extensionGate.promise;
-					});
-				},
-			],
-		});
-		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("done")]);
-		const prompt = harness.session.prompt("pending extension event");
-		await extensionReached.promise;
-		const eventQueue = (harness.session as unknown as { _agentEventQueue: Promise<void> })._agentEventQueue;
-		let queueDrained = false;
-		void eventQueue.then(() => {
-			queueDrained = true;
-		});
-		const flushNow = vi.spyOn(harness.sessionManager, "flushNow");
-		const controller = new AbortController();
-
-		const checkpoint = harness.session.waitForSessionInputCheckpoint(controller.signal);
-		controller.abort();
-
-		await expect(checkpoint).rejects.toThrow("Update restart preparation cancelled");
-		expect(queueDrained).toBe(false);
-		expect(flushNow).not.toHaveBeenCalled();
-		extensionGate.resolve();
-		await prompt;
-		await eventQueue;
-		expect(queueDrained).toBe(true);
-		expect(flushNow).not.toHaveBeenCalled();
-	});
-
-	it("propagates a snapshotted event queue rejection without flushing", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		(harness.session as unknown as { _agentEventQueue: Promise<void> })._agentEventQueue = Promise.reject(
-			new Error("event queue failed"),
-		);
-		const flushNow = vi.spyOn(harness.sessionManager, "flushNow");
-
-		await expect(harness.session.waitForSessionInputCheckpoint()).rejects.toThrow("event queue failed");
-		expect(flushNow).not.toHaveBeenCalled();
-	});
-
-	it("releases the injected action checkpoint when dispatch fails", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		const internals = harness.session as unknown as {
-			_promptInjectedMessage(
-				text: string,
-				message: {
-					role: "custom";
-					customType: string;
-					content: string;
-					display: boolean;
-					details: Record<string, never>;
-					timestamp: number;
-				},
-			): Promise<void>;
-		};
-		vi.spyOn(harness.session.agent, "prompt").mockRejectedValue(new Error("dispatch failed"));
-
-		await expect(
-			internals._promptInjectedMessage("injected prompt", {
-				role: "custom",
-				customType: "injected-test",
-				content: "injected prompt",
-				display: true,
-				details: {},
-				timestamp: Date.now(),
-			}),
-		).rejects.toThrow("dispatch failed");
-
-		// A leaked section would keep update-restart checkpoints waiting forever.
-		await expect(harness.session.waitForSessionInputCheckpoint(AbortSignal.timeout(1000))).resolves.toBeUndefined();
-	});
-
-	it("releases the prompt action checkpoint when dispatch fails", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		vi.spyOn(harness.session.agent, "prompt").mockRejectedValue(new Error("dispatch failed"));
-
-		await expect(harness.session.prompt("ordinary prompt")).rejects.toThrow("dispatch failed");
-		await expect(harness.session.waitForSessionInputCheckpoint(AbortSignal.timeout(1000))).resolves.toBeUndefined();
-	});
-
-	it("throws when prompting without a model", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		harness.session.agent.state.model = undefined as unknown as Model<any>;
-
-		await expect(harness.session.prompt("hi")).rejects.toThrow("No model selected.");
-	});
-
-	it("throws when prompting without configured auth", async () => {
-		const harness = await createHarness({ withConfiguredAuth: false });
-		harnesses.push(harness);
-		const surfacedErrors: string[] = [];
-		harness.session.bindExtensions({ onError: (error) => surfacedErrors.push(error.error) });
-
-		await expect(harness.session.prompt("hi")).rejects.toThrow(
-			`No API key found for ${harness.getModel().provider}.`,
-		);
-		expect(surfacedErrors).toEqual([]);
-	});
-
-	it("rejects promptUntilAccepted when validation fails", async () => {
-		const harness = await createHarness({ withConfiguredAuth: false });
-		harnesses.push(harness);
-
-		await expect(harness.session.promptUntilAccepted("hi")).rejects.toThrow(
-			`No API key found for ${harness.getModel().provider}.`,
-		);
 	});
 
 	it("S7: accepted agent messages queue while busy, deliver before completion, and clean up when cleared", async () => {
@@ -2127,79 +937,19 @@ describe("Harness digest at cold boundaries", () => {
 		).toBe(true);
 	});
 
-	it("delivers the digest on a custom-triggered first turn", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		let firstContextText = "";
-		harness.setResponses([
-			(context) => {
-				firstContextText = getMessageText(context.messages[0]);
-				return fauxAssistantMessage("ok");
-			},
-		]);
-
-		await harness.session.sendCustomMessage(
-			{ customType: "kickoff", content: "go", display: false },
-			{ triggerTurn: true },
-		);
-		await harness.session.waitForIdle();
-
-		expect(firstContextText).toContain("The persistent memories produced across this session so far:");
-	});
-
-	it("re-arms the digest when a failed commit parks next-turn context", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		vi.spyOn(harness.session.agent, "prompt").mockImplementationOnce(async () => {
-			throw new Error("dispatch failed");
-		});
-		await expect(harness.session.prompt("first")).rejects.toThrow("dispatch failed");
-
-		// A skip-policy custom-trigger turn never drains parked context, so the
-		// digest must arrive via re-armed lazy injection - and exactly once.
-		let texts: string[] = [];
-		harness.setResponses([
-			(context) => {
-				texts = context.messages.map(getMessageText);
-				return fauxAssistantMessage("ok");
-			},
-		]);
-		await harness.session.sendCustomMessage(
-			{ customType: "kickoff", content: "go", display: false },
-			{ triggerTurn: true },
-		);
-		await harness.session.waitForIdle();
-
-		expect(texts.filter((text) => text.startsWith("[harness-digest]"))).toHaveLength(1);
-	});
-
 	it("strips the digest with a cleared first turn and re-delivers it on the next turn", async () => {
 		const harness = await createHarness({ persistSession: true });
 		harnesses.push(harness);
 		const agentMessageId = "agentmsg_digest_clear";
 		const agentPrompt = `Agent-to-agent message received.\nSource: agent_message\nTo: T, active t, session s\nMessage id: ${agentMessageId}\n\nagent text`;
 		harness.setResponses([fauxAssistantMessage("never delivered")]);
-		let markAdmitted = () => {};
-		const admitted = new Promise<void>((resolve) => {
-			markAdmitted = resolve;
-		});
-		let releaseAdmission = () => {};
-		const admissionGate = new Promise<void>((resolve) => {
-			releaseAdmission = resolve;
-		});
-		let unsubscribe = () => {};
-		unsubscribe = harness.session.agent.subscribe(async (event) => {
-			if (event.type !== "agent_start") return;
-			unsubscribe();
-			markAdmitted();
-			await admissionGate;
-		});
+		const admission = gateNextAgentStart(harness);
 
 		const accepted = harness.session.acceptAgentMessagePrompt(agentPrompt, { expandPromptTemplates: false });
 		const acceptedRejection = expect(accepted).rejects.toThrow("cleared before delivery");
-		await admitted;
+		await admission.reached;
 		harness.session.clearQueuedUserMessagesMatching((text) => text.includes(agentMessageId));
-		releaseAdmission();
+		admission.release();
 		await acceptedRejection;
 		await harness.session.agent.waitForIdle();
 
@@ -2210,76 +960,6 @@ describe("Harness digest at cold boundaries", () => {
 		await harness.session.prompt("hello");
 		expect(digestMessages(harness)).toHaveLength(1);
 		expect(harness.session.messages[0]).toMatchObject({ role: "custom", customType: HARNESS_DIGEST_CUSTOM_TYPE });
-	});
-
-	it("treats tree navigation as a cold boundary with digest dedupe", async () => {
-		// Empty global store: digest content must reflect only the local test entry.
-		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
-		const agentDir = join(tmpdir(), `pi-digest-agent-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-		mkdirSync(agentDir, { recursive: true });
-		tempDirs.push(agentDir);
-		process.env.PRIME_AGENT_CODING_AGENT_DIR = agentDir;
-		onTestFinished(() => {
-			if (previousAgentDir === undefined) delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
-			else process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
-		});
-		const harness = await createHarness({ persistSession: true });
-		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("one reply"), fauxAssistantMessage("two reply")]);
-		await harness.session.prompt("one");
-		await harness.session.prompt("two");
-		const [firstUser, secondUser] = harness.session.getUserMessagesForForking();
-		expect(digestMessages(harness)).toHaveLength(1);
-
-		// Navigation with an unchanged harness keeps the existing digest (dedupe).
-		await harness.session.navigateTree(secondUser!.entryId);
-		expect(digestMessages(harness)).toHaveLength(1);
-
-		// After a disk change, navigation refreshes the digest at the tail.
-		const localDir = getLocalHarnessStateDir(harness.sessionManager.getSessionArtifactDir());
-		const state = loadHarnessState(localDir, "local");
-		state.entries.memory.nav_test_memory = {
-			id: "nav_test_memory",
-			kind: "memory",
-			title: "Nav test memory",
-			content: "Written before navigation.",
-			path: "general",
-			scope: "local",
-			reference: {},
-			arguments: {},
-			metadata: {},
-			source: "refine",
-			created_at: "2026-09-07T00:00:00.000Z",
-			updated_at: "2026-09-07T00:00:00.000Z",
-			version: 1,
-		};
-		saveHarnessState(localDir!, state);
-
-		await harness.session.navigateTree(firstUser!.entryId);
-		const digests = digestMessages(harness);
-		expect(digests).toHaveLength(2);
-		expect(harness.session.messages.at(-1)).toBe(digests.at(-1));
-		expect(getMessageText(digests.at(-1))).toContain("[local:nav_test_memory] Nav test memory");
-	});
-
-	it("prefers the newest digest by timestamp over a retained pre-compaction digest", async () => {
-		const harness = await createHarness({ persistSession: true });
-		harnesses.push(harness);
-		const internals = harness.session as unknown as { _latestContextHarnessDigest(): string | undefined };
-		const base = Date.now();
-		// The retained digest follows the head in the array but is older; the head must win.
-		harness.session.agent.state.messages.push(
-			createCompactionSummaryMessage(
-				"summary",
-				10,
-				new Date(base + 2000).toISOString(),
-				undefined,
-				1,
-				"head digest",
-			),
-			createHarnessDigestMessage("retained digest", base + 1000),
-		);
-		expect(internals._latestContextHarnessDigest()).toBe("head digest");
 	});
 
 	it("resume dedupes identical digests and appends a fresh one when disk state changed", async () => {

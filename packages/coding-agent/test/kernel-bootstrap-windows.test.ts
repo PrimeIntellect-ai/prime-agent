@@ -1,9 +1,20 @@
-import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import type * as childProcess from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { buildBatchShimInvocation, windowsExecutableCandidates } from "../src/core/kernel/bootstrap.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	buildBatchShimInvocation,
+	ensureKernelPython,
+	windowsExecutableCandidates,
+} from "../src/core/kernel/bootstrap.js";
+import { ReplKernelManager } from "../src/core/kernel/repl-manager.js";
+
+const { spawn } = vi.hoisted(() => ({ spawn: vi.fn<typeof childProcess.spawn>() }));
+vi.mock("node:child_process", async (importOriginal) => ({
+	...(await importOriginal<typeof childProcess>()),
+	spawn,
+}));
 
 let tempDir = "";
 
@@ -89,8 +100,9 @@ describe("batch shim round-trip (Windows only)", () => {
 			const invocation = buildBatchShimInvocation(shimPath, testArgs, process.env, "roundtrip");
 			const comSpec = process.env.ComSpec ?? "cmd.exe";
 
+			const { spawn: realSpawn } = await vi.importActual<typeof childProcess>("node:child_process");
 			await new Promise<void>((resolve, reject) => {
-				const child = spawn(comSpec, invocation.args, {
+				const child = realSpawn(comSpec, invocation.args, {
 					env: invocation.env,
 					stdio: "ignore",
 					windowsVerbatimArguments: true,
@@ -110,38 +122,95 @@ describe("batch shim round-trip (Windows only)", () => {
 });
 
 describe("windowsExecutableCandidates", () => {
-	it("appends PATHEXT extensions in order for a bare name", () => {
-		const candidates = windowsExecutableCandidates("uv", ".COM;.EXE;.BAT;.CMD");
-		expect(candidates).toEqual(["uv", "uv.com", "uv.exe", "uv.bat", "uv.cmd"]);
+	it.each([
+		{ name: "uv", pathext: ".COM;.EXE;.BAT;.CMD", expected: ["uv", "uv.com", "uv.exe", "uv.bat", "uv.cmd"] },
+		{ name: "uv.exe", pathext: ".EXE;.CMD", expected: ["uv.exe"] },
+		{ name: "build.cmd", pathext: ".COM;.EXE;.BAT;.CMD", expected: ["build.cmd"] },
+		{ name: "UV.CMD", pathext: ".cmd;.exe", expected: ["UV.CMD"] },
+		{ name: "uv.exe", pathext: undefined, expected: ["uv.exe"] },
+		{ name: "uv", pathext: ".EXE;.exe;.BAT;.bat", expected: ["uv", "uv.exe", "uv.bat"] },
+		{ name: "uv", pathext: "", expected: ["uv", "uv.COM", "uv.EXE", "uv.BAT", "uv.CMD"] },
+		{ name: "uv", pathext: ".EXE; .BAT", expected: ["uv", "uv.exe", "uv.bat"] },
+		{ name: "uv", pathext: ".JS;.EXE;.VBS;.CMD", expected: ["uv", "uv.exe", "uv.cmd"] },
+	])("resolves $name with PATHEXT $pathext", ({ name, pathext, expected }) => {
+		expect(windowsExecutableCandidates(name, pathext)).toEqual(expected);
+	});
+});
+
+describe("Windows kernel subprocesses", () => {
+	const originalPlatform = process.platform;
+	let originalEnv: NodeJS.ProcessEnv;
+
+	beforeEach(() => {
+		originalEnv = { ...process.env };
+		spawn.mockReset().mockImplementation(() => {
+			throw new Error("spawn refused by test");
+		});
+		Object.defineProperty(process, "platform", { value: "win32" });
+		process.env.PYTHONUTF8 = "0";
 	});
 
-	it("returns the name as-is when it already carries a known extension", () => {
-		expect(windowsExecutableCandidates("uv.exe", ".EXE;.CMD")).toEqual(["uv.exe"]);
-		expect(windowsExecutableCandidates("build.cmd", ".COM;.EXE;.BAT;.CMD")).toEqual(["build.cmd"]);
-		expect(windowsExecutableCandidates("UV.CMD", ".cmd;.exe")).toEqual(["UV.CMD"]);
-		expect(windowsExecutableCandidates("uv.exe", ".CMD")).toEqual(["uv.exe"]);
-		expect(windowsExecutableCandidates("uv.exe", undefined)).toEqual(["uv.exe"]);
+	afterEach(() => {
+		Object.defineProperty(process, "platform", { value: originalPlatform });
+		process.env = originalEnv;
+		spawn.mockReset();
 	});
 
-	it("skips duplicate candidates when PATHEXT has duplicate entries", () => {
-		const candidates = windowsExecutableCandidates("uv", ".EXE;.exe;.BAT;.bat");
-		expect(candidates.filter((c) => c.toLowerCase().endsWith(".exe"))).toHaveLength(1);
-		expect(candidates.filter((c) => c.toLowerCase().endsWith(".bat"))).toHaveLength(1);
+	it("forces UTF-8 for the hidden background Python bootstrap without changing the parent environment", async () => {
+		process.env.PRIME_AGENT_KERNEL_PYTHON = join(tempDir, "python.exe");
+		await expect(ensureKernelPython()).rejects.toThrow("PRIME_AGENT_KERNEL_PYTHON");
+		expect(spawn.mock.calls[0]?.[2]).toMatchObject({ windowsHide: true, stdio: "ignore", env: { PYTHONUTF8: "1" } });
+		expect(process.env.PYTHONUTF8).toBe("0");
 	});
 
-	it("falls back to WINDOWS_PATHEXT_DEFAULT when pathext is empty", () => {
-		const candidates = windowsExecutableCandidates("uv", "");
-		expect(candidates).toContain("uv.EXE");
-		expect(candidates).toContain("uv.CMD");
-		expect(candidates).toContain("uv.BAT");
+	it.each(["cmd", "bat"])("rejects a .%s Python override instead of accepting an unowned child", async (extension) => {
+		process.env.PRIME_AGENT_KERNEL_PYTHON = join(tempDir, `Python & tools!.${extension}`);
+		await expect(ensureKernelPython()).rejects.toThrow("must point directly to a Python executable");
+		expect(spawn).not.toHaveBeenCalled();
 	});
 
-	it("trims whitespace from PATHEXT entries", () => {
-		const candidates = windowsExecutableCandidates("uv", ".EXE; .BAT");
-		expect(candidates).toEqual(["uv", "uv.exe", "uv.bat"]);
+	it("finds a uv.cmd shim through PATHEXT and launches it hidden", async () => {
+		delete process.env.PRIME_AGENT_KERNEL_PYTHON;
+		process.env.PRIME_AGENT_KERNEL_VENV = join(tempDir, "venv");
+		process.env.PATH = tempDir;
+		process.env.PATHEXT = ".CMD";
+		const uv = join(tempDir, "uv.cmd");
+		writeFileSync(uv, "@echo off\r\n");
+		chmodSync(uv, 0o755);
+
+		await expect(ensureKernelPython({ onProgress: () => {} })).rejects.toThrow("spawn refused by test");
+
+		const call = spawn.mock.calls.at(-1);
+		expect(call?.[0]).toBe(process.env.ComSpec ?? "cmd.exe");
+		expect(call?.[2]).toMatchObject({ windowsHide: true, windowsVerbatimArguments: true, stdio: "ignore" });
+		expect(Object.values(call?.[2]?.env ?? {})).toContain(uv);
 	});
 
-	it("ignores PATHEXT entries that CreateProcess cannot execute", () => {
-		expect(windowsExecutableCandidates("uv", ".JS;.EXE;.VBS;.CMD")).toEqual(["uv", "uv.exe", "uv.cmd"]);
+	it("launches the canonical piped CPython REPL directly with UTF-8", async () => {
+		const python = join(tempDir, "python.exe");
+		const manager = new ReplKernelManager({ python, cwd: tempDir, env: { PYTHONUTF8: "0" } });
+		try {
+			await expect(manager.start()).rejects.toThrow("spawn refused by test");
+			const call = spawn.mock.calls.at(-1);
+			expect(call?.[0]).toBe(python);
+			expect(call?.[1]).toEqual(["-m", "rlm.repl"]);
+			expect(call?.[2]).toMatchObject({
+				windowsHide: true,
+				stdio: ["pipe", "pipe", "pipe"],
+				env: { PYTHONUTF8: "1", PRIME_AGENT_KERNEL_OWNER_PID: String(process.pid) },
+			});
+			expect(call?.[2]?.windowsVerbatimArguments).toBeUndefined();
+		} finally {
+			await manager.shutdown();
+		}
+	});
+
+	it("preserves the configured Python encoding and direct launch outside Windows", async () => {
+		Object.defineProperty(process, "platform", { value: "linux" });
+		const python = join(tempDir, "python.cmd");
+		process.env.PRIME_AGENT_KERNEL_PYTHON = python;
+		await expect(ensureKernelPython()).rejects.toThrow("PRIME_AGENT_KERNEL_PYTHON");
+		expect(spawn.mock.calls[0]?.[0]).toBe(python);
+		expect(spawn.mock.calls[0]?.[2]?.env?.PYTHONUTF8).toBe("0");
 	});
 });

@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { CreateAgentSessionRuntimeFactory } from "../src/core/agent-session-runtime.js";
 import {
 	type AgentCronJob,
 	AgentCronJobStore,
@@ -14,6 +15,9 @@ import {
 	SESSION_SCHEDULED_JOBS_FILENAME,
 	shouldDeferHeartbeatCronJob,
 } from "../src/core/cron-jobs.js";
+import type { ActiveSessionState } from "../src/modes/daemon/active-session-state.js";
+import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
+import { createHarness, type Harness } from "./suite/harness.js";
 
 const start = new Date("2026-01-01T12:34:00.000Z");
 
@@ -1496,3 +1500,101 @@ function makeTempDir(tempDirs: string[]): string {
 	tempDirs.push(dir);
 	return dir;
 }
+
+// Data-loss guard folded in from the deleted ENG-4519 one-off regression file:
+// a due heartbeat must never resurrect a session the user archived or deleted.
+describe("AgentCronScheduler session resurrection guard (ENG-4519)", () => {
+	const harnesses: Harness[] = [];
+
+	afterEach(() => {
+		while (harnesses.length > 0) {
+			harnesses.pop()?.cleanup();
+		}
+	});
+
+	interface CronDaemonInternals {
+		cronStore: AgentCronJobStore;
+		cronScheduler: AgentCronScheduler;
+		sessions: Map<string, ActiveSessionState>;
+	}
+
+	async function createDueHeartbeatDaemon(options: {
+		sessionId: (harness: Harness) => string;
+		sessionFile: (harness: Harness) => string;
+		persistStates?: readonly ("active" | "archived")[];
+	}): Promise<{
+		harness: Harness;
+		internals: CronDaemonInternals;
+		createRuntime: ReturnType<typeof vi.fn>;
+		jobId: string;
+	}> {
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		for (const status of options.persistStates ?? []) {
+			harness.sessionManager.appendSessionState({ status });
+		}
+		const createRuntime = vi.fn<CreateAgentSessionRuntimeFactory>(async () => {
+			throw new Error("unreachable sessions must not be reopened");
+		});
+		const daemon = new AgentDaemon(join(harness.tempDir, "daemon.sock"), {
+			defaultSessionConfig: {
+				agentDir: harness.tempDir,
+				cwd: harness.tempDir,
+				sessionDir: join(harness.tempDir, "sessions"),
+			},
+			createRuntime,
+		});
+		const internals = daemon as unknown as CronDaemonInternals;
+		const job = internals.cronStore.createHeartbeat({
+			activeSessionId: "old-active",
+			sessionId: options.sessionId(harness),
+			sessionFile: options.sessionFile(harness),
+			cwd: harness.tempDir,
+			scheduleText: "every 10s",
+			prompt: "continue scheduled work",
+			now: new Date(Date.now() - 20_000),
+		});
+		return { harness, internals, createRuntime, jobId: job.id };
+	}
+
+	it("cancels legacy jobs instead of reopening an archived session", async () => {
+		const { harness, internals, createRuntime, jobId } = await createDueHeartbeatDaemon({
+			sessionId: (h) => h.session.sessionId,
+			sessionFile: (h) => h.session.sessionFile!,
+			persistStates: ["active", "archived"],
+		});
+		const pausedHeartbeat = internals.cronStore.createRlmHeartbeat({
+			activeSessionId: "old-active",
+			sessionId: harness.session.sessionId,
+			sessionFile: harness.session.sessionFile!,
+			cwd: harness.tempDir,
+			scheduleText: "every 1m",
+			prompt: "check internal work",
+			now: new Date(),
+		});
+		internals.cronStore.updateRlmHeartbeat("old-active", pausedHeartbeat.id, { status: "pause" });
+
+		await expect(internals.cronScheduler.runDue(new Date())).resolves.toBe(0);
+
+		expect(createRuntime).not.toHaveBeenCalled();
+		expect(internals.sessions.size).toBe(0);
+		for (const id of [jobId, pausedHeartbeat.id]) {
+			expect(internals.cronStore.list().find((job) => job.id === id)).toMatchObject({ status: "cancelled" });
+		}
+	});
+
+	it("cancels a job without recreating its deleted session file", async () => {
+		const deletedSessionFile = (harness: Harness) => join(harness.tempDir, "sessions", "deleted-session.jsonl");
+		const { harness, internals, createRuntime, jobId } = await createDueHeartbeatDaemon({
+			sessionId: () => "deleted-session",
+			sessionFile: deletedSessionFile,
+		});
+
+		await expect(internals.cronScheduler.runDue(new Date())).resolves.toBe(0);
+
+		expect(createRuntime).not.toHaveBeenCalled();
+		expect(existsSync(deletedSessionFile(harness))).toBe(false);
+		expect(internals.sessions.size).toBe(0);
+		expect(internals.cronStore.list().find((job) => job.id === jobId)).toMatchObject({ status: "cancelled" });
+	});
+});

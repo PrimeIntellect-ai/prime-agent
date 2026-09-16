@@ -16,47 +16,56 @@ import {
 } from "../src/modes/daemon/daemon-session-list.js";
 
 describe("buildSessionList", () => {
-	it("derives active session lifecycle and activity", () => {
-		const oneMessage = [{ role: "user", content: "hi" }] as unknown as AgentMessage[];
-		const currentSummary = { basedOnMessageCount: 1 } as ActiveSessionState["summaryState"];
-		const entries = buildSessionList(
-			[
-				makeState({
-					activeSessionId: "model",
-					sessionFile: "/tmp/model.jsonl",
-					isStreaming: true,
-					messages: oneMessage,
-				}),
-				makeState({
-					activeSessionId: "tool",
-					sessionFile: "/tmp/tool.jsonl",
-					isStreaming: true,
-					pendingToolCalls: ["tool-1"],
-					messages: oneMessage,
-				}),
-				makeState({
-					activeSessionId: "needs-user",
-					sessionFile: "/tmp/needs-user.jsonl",
-					clients: 1,
-					messages: oneMessage,
-					summaryState: currentSummary,
-				}),
-				makeState({
-					activeSessionId: "done",
-					sessionFile: "/tmp/done.jsonl",
-					messages: oneMessage,
-					summaryState: currentSummary,
-				}),
-			],
-			[],
-		);
+	const oneMessage = [{ role: "user", content: "hi" }] as unknown as AgentMessage[];
+	const currentSummary = { basedOnMessageCount: 1 } as ActiveSessionState["summaryState"];
 
-		expect(entries.map((entry) => [entry.id, entry.lifecycle, entry.activity])).toEqual([
-			["model", "live", "working"],
-			["tool", "live", "working"],
-			["needs-user", "live", "idle"],
-			["done", "live", "idle"],
-		]);
+	// Activity/lifecycle projection: one row per state shape the view must render honestly.
+	it.each([
+		["a streaming session is working", { isStreaming: true, messages: oneMessage }, { activity: "working" }],
+		[
+			"a streaming session waiting on a tool is working",
+			{ isStreaming: true, pendingToolCalls: ["tool-1"], messages: oneMessage },
+			{ activity: "working" },
+		],
+		[
+			"an attached settled session is idle",
+			{ clients: 1, messages: oneMessage, summaryState: currentSummary },
+			{ activity: "idle" },
+		],
+		[
+			"a detached settled session is idle",
+			{ messages: oneMessage, summaryState: currentSummary },
+			{ activity: "idle" },
+		],
+		["an empty resident session is idle", {}, { activity: "idle" }],
+		[
+			"a finished subagent is idle instead of stuck working",
+			{
+				isStreaming: false,
+				hasRunningRlmChildren: false,
+				messages: oneMessage,
+				metadata: { kind: "subagent" as const, createdAt: 1, parentActiveSessionId: "parent", rlmChildId: "c1" },
+			},
+			{ activity: "idle" },
+		],
+		[
+			"an accepted in-flight prompt is working with no queued work",
+			{ messages: oneMessage, summaryState: currentSummary, hasAcceptedPromptInFlight: true },
+			{ activity: "working", sessionActions: { queuedCount: 0, active: { kind: "turn", phase: "running" } } },
+		],
+		[
+			"the exact unfinished action count survives the visible action snapshot",
+			{ unfinishedActionCount: 3, hasAcceptedPromptInFlight: true },
+			{
+				activity: "working",
+				unfinishedActionCount: 3,
+				sessionActions: { queuedCount: 0, active: { kind: "turn" } },
+			},
+		],
+	])("%s", (_name, options, expected) => {
+		const summary = summaryForActiveSession(makeState({ activeSessionId: "active-1", ...options }));
+
+		expect(summary).toMatchObject(expected);
 	});
 
 	it("counts direct peers separately so the supervisor can add them to its own attachment count", () => {
@@ -228,59 +237,6 @@ describe("buildSessionList", () => {
 		);
 
 		expect(entry).toMatchObject({ hasRegisteredHeartbeat: true, hasRegisteredCronJob: true });
-	});
-
-	it("reports accepted in-flight prompts as active with no queued work", () => {
-		const oneMessage = [{ role: "user", content: "hi" }] as unknown as AgentMessage[];
-		const summary = summaryForActiveSession(
-			makeState({
-				activeSessionId: "accepted",
-				messages: oneMessage,
-				summaryState: { basedOnMessageCount: 1 } as ActiveSessionState["summaryState"],
-				hasAcceptedPromptInFlight: true,
-			}),
-		);
-
-		expect(summary.sessionActions).toMatchObject({ queuedCount: 0, active: { kind: "turn", phase: "running" } });
-		expect(summary.activity).toBe("working");
-	});
-
-	it("reports the exact unfinished action count independently of the visible action snapshot", () => {
-		const summary = summaryForActiveSession(
-			makeState({
-				activeSessionId: "batched",
-				unfinishedActionCount: 3,
-				hasAcceptedPromptInFlight: true,
-			}),
-		);
-
-		expect(summary.sessionActions).toMatchObject({ queuedCount: 0, active: { kind: "turn" } });
-		expect(summary.unfinishedActionCount).toBe(3);
-		expect(summary.activity).toBe("working");
-	});
-
-	it("marks an empty resident session idle instead of holding it at working", () => {
-		const summary = summaryForActiveSession(makeState({ activeSessionId: "empty" }));
-		expect(summary.activity).toBe("idle");
-	});
-
-	it("marks a finished subagent idle instead of holding it at working", () => {
-		const oneMessage = [{ role: "user", content: "hi" }] as unknown as AgentMessage[];
-		const entries = buildSessionList(
-			[
-				makeState({
-					activeSessionId: "child",
-					sessionFile: "/tmp/child.jsonl",
-					isStreaming: false,
-					hasRunningRlmChildren: false,
-					messages: oneMessage,
-					// No current summary verdict — a resident finished subagent never gets one.
-					metadata: { kind: "subagent", createdAt: 1, parentActiveSessionId: "parent", rlmChildId: "c1" },
-				}),
-			],
-			[],
-		);
-		expect(entries[0]?.activity).toBe("idle");
 	});
 
 	it("marks a retained completed subagent with an active RLM heartbeat", () => {
@@ -512,37 +468,38 @@ describe("summaryForActiveSession recap currency", () => {
 		{ role: "assistant", content: "ok" },
 	] as AgentMessage[];
 
-	it("surfaces both recap and verdict while the summary matches the turn", () => {
+	it.each([
+		[
+			"surfaces both recap and verdict while the summary matches the turn",
+			twoMessages,
+			{ summary: "Editing the router", taskState: "completed" as const, basedOnMessageCount: 2 },
+			{ summary: "Editing the router", taskState: "completed" },
+		],
+		[
+			// The recap text must survive so the agents view does not flicker to blank, but a
+			// stale "completed" verdict must not show on a turn that is active again.
+			"keeps the prior recap and drops the stale verdict once a new turn outpaces the summary",
+			[...twoMessages, { role: "user", content: "next" } as AgentMessage],
+			{ summary: "Editing the router", taskState: "completed" as const, basedOnMessageCount: 2 },
+			{ summary: "Editing the router", taskState: undefined },
+		],
+		[
+			"omits the recap entirely when there is no summary yet",
+			twoMessages,
+			undefined,
+			{ summary: undefined, taskState: undefined },
+		],
+	])("%s", (_name, messages, summaryState, expected) => {
 		const summary = summaryForActiveSession(
 			makeState({
 				activeSessionId: "s1",
-				messages: twoMessages,
-				summaryState: { summary: "Editing the router", taskState: "completed", basedOnMessageCount: 2 },
+				messages,
+				summaryState: summaryState as ActiveSessionState["summaryState"],
 			}),
 		);
-		expect(summary.summary).toBe("Editing the router");
-		expect(summary.taskState).toBe("completed");
-	});
 
-	it("keeps showing the prior recap once a new turn outpaces the summary", () => {
-		// New messages arrived (count 3) but the summary is still based on 2; the
-		// recap text must survive so the agents view does not flicker to blank.
-		const summary = summaryForActiveSession(
-			makeState({
-				activeSessionId: "s1",
-				messages: [...twoMessages, { role: "user", content: "next" } as AgentMessage],
-				summaryState: { summary: "Editing the router", taskState: "completed", basedOnMessageCount: 2 },
-			}),
-		);
-		expect(summary.summary).toBe("Editing the router");
-		// ...but a stale "completed" verdict must not show on a turn that is active again.
-		expect(summary.taskState).toBeUndefined();
-	});
-
-	it("omits the recap entirely when there is no summary yet", () => {
-		const summary = summaryForActiveSession(makeState({ activeSessionId: "s1", messages: twoMessages }));
-		expect(summary.summary).toBeUndefined();
-		expect(summary.taskState).toBeUndefined();
+		expect(summary.summary).toBe(expected.summary);
+		expect(summary.taskState).toBe(expected.taskState);
 	});
 });
 
@@ -606,20 +563,20 @@ describe("resolveAttachModelFallbackMessage", () => {
 		};
 	}
 
-	it("prefers the daemon's own fallback message", () => {
-		const summary = makeSummary({ modelFallbackMessage: "Could not restore model a/b. Using c/d" });
-
-		expect(resolveAttachModelFallbackMessage(summary, startupMessage)).toBe("Could not restore model a/b. Using c/d");
-	});
-
-	it("ignores the attaching process's snapshot when the session has a model", () => {
-		const summary = makeSummary({ model: { provider: "prime-inference", id: "gpt-5.5" } as SessionSummary["model"] });
-
-		expect(resolveAttachModelFallbackMessage(summary, startupMessage)).toBeUndefined();
-	});
-
-	it("falls back to the attaching process's snapshot when the session has no model", () => {
-		expect(resolveAttachModelFallbackMessage(makeSummary({}), startupMessage)).toBe(startupMessage);
+	it.each([
+		[
+			"prefers the daemon's own fallback message",
+			{ modelFallbackMessage: "Could not restore model a/b. Using c/d" },
+			"Could not restore model a/b. Using c/d",
+		],
+		[
+			"ignores the attaching process's snapshot when the session has a model",
+			{ model: { provider: "prime-inference", id: "gpt-5.5" } as SessionSummary["model"] },
+			undefined,
+		],
+		["falls back to the attaching process's snapshot when the session has no model", {}, startupMessage],
+	])("%s", (_name, overrides, expected) => {
+		expect(resolveAttachModelFallbackMessage(makeSummary(overrides), startupMessage)).toBe(expected);
 	});
 });
 

@@ -5,7 +5,6 @@ import { describe, expect, test } from "vitest";
 import { mergeAgentSessionRuntimeConfig } from "../src/core/agent-session-config.js";
 import type { CreateAgentSessionOptions } from "../src/core/sdk.js";
 import {
-	type AppMode,
 	type DaemonInteractiveSessionManagerDecision,
 	daemonServerDefaultSessionConfig,
 	findActiveDaemonSessionSummaryForSessionFile,
@@ -37,27 +36,22 @@ describe("interactive startup routing", () => {
 		expect(isClientOwnedDaemonSession(appMode, noSession)).toBe(expected);
 	});
 
-	test.each(["interactive", "print", "json", "rpc"] as const)(
-		"uses the daemon runtime for the %s client",
-		(appMode) => {
-			expect(
-				shouldUseDaemonClient({
-					appMode,
-					startupBenchmark: false,
-				}),
-			).toBe(true);
+	test.each([
+		["interactive client", { appMode: "interactive", startupBenchmark: false }, true],
+		["print client", { appMode: "print", startupBenchmark: false }, true],
+		["json client", { appMode: "json", startupBenchmark: false }, true],
+		["rpc client", { appMode: "rpc", startupBenchmark: false }, true],
+		["--no-session", { appMode: "interactive", startupBenchmark: false, noSession: true }, true],
+		["daemon process", { appMode: "daemon", startupBenchmark: false }, false],
+		["startup benchmark", { appMode: "interactive", startupBenchmark: true }, false],
+		["help", { appMode: "interactive", startupBenchmark: false, help: true }, false],
+		["model listing", { appMode: "interactive", startupBenchmark: false, listModels: true }, false],
+	] satisfies Array<[string, InteractiveDaemonStartupDecision, boolean]>)(
+		"routes %s to the daemon client runtime: %s",
+		(_label, decision, expected) => {
+			expect(shouldUseDaemonClient(decision)).toBe(expected);
 		},
 	);
-
-	test("uses a client-owned daemon session for --no-session", () => {
-		expect(
-			shouldUseDaemonClient({
-				appMode: "interactive",
-				startupBenchmark: false,
-				noSession: true,
-			}),
-		).toBe(true);
-	});
 
 	test("keeps process-local extension factories and rollback workers in process", () => {
 		expect(
@@ -77,62 +71,21 @@ describe("interactive startup routing", () => {
 	});
 
 	test.each([
-		["daemon process", { appMode: "daemon", startupBenchmark: false }],
-		["startup benchmark", { appMode: "interactive", startupBenchmark: true }],
-		["help", { appMode: "interactive", startupBenchmark: false, help: true }],
-		["model listing", { appMode: "interactive", startupBenchmark: false, listModels: true }],
-	] satisfies Array<[string, InteractiveDaemonStartupDecision]>)(
-		"keeps %s out of daemon client routing",
-		(_label, decision) => {
-			expect(shouldUseDaemonClient(decision)).toBe(false);
+		["normal interactive startup", { appMode: "interactive", startupBenchmark: false }, true],
+		["print mode", { appMode: "print", startupBenchmark: false }, false],
+		["json mode", { appMode: "json", startupBenchmark: false }, false],
+		["rpc mode", { appMode: "rpc", startupBenchmark: false }, false],
+		["daemon mode", { appMode: "daemon", startupBenchmark: false }, false],
+		["startup benchmark", { appMode: "interactive", startupBenchmark: true }, false],
+		["--no-session", { appMode: "interactive", startupBenchmark: false, noSession: true }, false],
+		["--list-models", { appMode: "interactive", startupBenchmark: false, listModels: true }, false],
+		["--list-models search", { appMode: "interactive", startupBenchmark: false, listModels: "claude" }, false],
+	] satisfies Array<[string, InteractiveDaemonStartupDecision, boolean]>)(
+		"uses daemon-backed interactive mode for %s: %s",
+		(_label, decision, expected) => {
+			expect(shouldUseDaemonInteractive(decision)).toBe(expected);
 		},
 	);
-
-	test("uses daemon-backed interactive mode for normal interactive startup", () => {
-		expect(
-			shouldUseDaemonInteractive({
-				appMode: "interactive",
-				startupBenchmark: false,
-			}),
-		).toBe(true);
-	});
-
-	const nonInteractiveModes: Array<[AppMode, string]> = [
-		["print", "print mode"],
-		["json", "json mode"],
-		["rpc", "rpc mode"],
-		["daemon", "daemon mode"],
-	];
-
-	test.each(nonInteractiveModes)("does not use daemon-backed interactive mode for %s", (appMode) => {
-		expect(
-			shouldUseDaemonInteractive({
-				appMode,
-				startupBenchmark: false,
-			}),
-		).toBe(false);
-	});
-
-	type InteractiveFallbackOverrides = Partial<
-		Pick<InteractiveDaemonStartupDecision, "startupBenchmark" | "noSession" | "listModels">
-	>;
-
-	const fallbackCases: Array<[string, InteractiveFallbackOverrides]> = [
-		["startup benchmark", { startupBenchmark: true }],
-		["--no-session", { noSession: true }],
-		["--list-models", { listModels: true }],
-		["--list-models search", { listModels: "claude" }],
-	];
-
-	test.each(fallbackCases)("keeps %s on the non-daemon interactive path", (_label, overrides) => {
-		expect(
-			shouldUseDaemonInteractive({
-				appMode: "interactive",
-				startupBenchmark: false,
-				...overrides,
-			}),
-		).toBe(false);
-	});
 
 	test("rejects interactive-only selectors before non-interactive startup", () => {
 		expect(shouldRejectNonInteractiveAttach("worker", "print")).toBe(true);
@@ -152,58 +105,42 @@ describe("interactive startup routing", () => {
 });
 
 describe("daemon-backed interactive session manager routing", () => {
-	test("opens a new chat (not the agents view) for default daemon-backed interactive startup", () => {
-		expect(
-			shouldOpenAgentsViewForDaemonInteractive({
-				useDaemonInteractive: true,
-				needsOnboarding: false,
-			}),
-		).toBe(false);
-	});
-
-	test("opens the agents view when explicitly requested", () => {
-		expect(
-			shouldOpenAgentsViewForDaemonInteractive({
-				useDaemonInteractive: true,
-				needsOnboarding: false,
-				explicitAgentsView: true,
-			}),
-		).toBe(true);
-	});
-
-	const directAttachCases: Array<[string, Parameters<typeof shouldOpenAgentsViewForDaemonInteractive>[0]]> = [
+	test.each([
+		["default daemon-backed startup", { useDaemonInteractive: true, needsOnboarding: false }, false],
 		[
-			"non-daemon interactive path",
-			{ useDaemonInteractive: false, needsOnboarding: false, explicitAgentsView: true },
+			"an explicit agents view request",
+			{ useDaemonInteractive: true, needsOnboarding: false, explicitAgentsView: true },
+			true,
 		],
-		["pending onboarding", { useDaemonInteractive: true, needsOnboarding: true, explicitAgentsView: true }],
+		["bare --resume", { useDaemonInteractive: true, needsOnboarding: false, resume: true }, true],
+		["bare --resume during onboarding", { useDaemonInteractive: true, needsOnboarding: true, resume: true }, true],
 		[
-			"resume selector",
+			"the non-daemon interactive path",
+			{ useDaemonInteractive: false, needsOnboarding: false, explicitAgentsView: true },
+			false,
+		],
+		["pending onboarding", { useDaemonInteractive: true, needsOnboarding: true, explicitAgentsView: true }, false],
+		[
+			"a resume selector",
 			{ useDaemonInteractive: true, needsOnboarding: false, explicitAgentsView: true, resume: "active-1" },
+			false,
 		],
 		[
 			"continue recent",
 			{ useDaemonInteractive: true, needsOnboarding: false, explicitAgentsView: true, continue: true },
+			false,
 		],
 		[
 			"fork",
 			{ useDaemonInteractive: true, needsOnboarding: false, explicitAgentsView: true, fork: "source-session-id" },
+			false,
 		],
-	];
-
-	test.each(directAttachCases)("does not open agents view for %s", (_label, decision) => {
-		expect(shouldOpenAgentsViewForDaemonInteractive(decision)).toBe(false);
-	});
-
-	test.each([false, true])("opens the agents view for bare --resume (onboarding=%s)", (needsOnboarding) => {
-		expect(
-			shouldOpenAgentsViewForDaemonInteractive({
-				useDaemonInteractive: true,
-				needsOnboarding,
-				resume: true,
-			}),
-		).toBe(true);
-	});
+	] satisfies Array<[string, Parameters<typeof shouldOpenAgentsViewForDaemonInteractive>[0], boolean]>)(
+		"opens the agents view for %s: %s",
+		(_label, decision, expected) => {
+			expect(shouldOpenAgentsViewForDaemonInteractive(decision)).toBe(expected);
+		},
+	);
 
 	test("ensures daemon is available before probing non-path session selectors", () => {
 		expect(
@@ -233,24 +170,19 @@ describe("daemon-backed interactive session manager routing", () => {
 		).toBe(false);
 	});
 
-	test("uses an ephemeral local session manager for fresh daemon-owned sessions", () => {
-		expect(shouldUseEphemeralSessionManagerForDaemonInteractive({})).toBe(true);
-	});
-
-	const persistentSelectionCases: Array<[string, DaemonInteractiveSessionManagerDecision]> = [
-		["active daemon attach", { hasActiveDaemonSession: true }],
-		["explicit saved session", { resume: "saved-session-id" }],
-		["continue recent", { continue: true }],
-		["fork", { fork: "source-session-id" }],
-	];
-
-	test.each(persistentSelectionCases)("keeps %s on a concrete local session manager", (_label, decision) => {
-		expect(shouldUseEphemeralSessionManagerForDaemonInteractive(decision)).toBe(false);
-	});
-
-	test("uses an ephemeral local session manager for bare --resume", () => {
-		expect(shouldUseEphemeralSessionManagerForDaemonInteractive({ resume: true })).toBe(true);
-	});
+	test.each([
+		["a fresh daemon-owned session", {}, true],
+		["bare --resume", { resume: true }, true],
+		["an active daemon attach", { hasActiveDaemonSession: true }, false],
+		["an explicit saved session", { resume: "saved-session-id" }, false],
+		["continue recent", { continue: true }, false],
+		["fork", { fork: "source-session-id" }, false],
+	] satisfies Array<[string, DaemonInteractiveSessionManagerDecision, boolean]>)(
+		"uses an ephemeral local session manager for %s: %s",
+		(_label, decision, expected) => {
+			expect(shouldUseEphemeralSessionManagerForDaemonInteractive(decision)).toBe(expected);
+		},
+	);
 
 	test("finds an active daemon session by resolved session file", () => {
 		const inactiveSummary = makeSessionSummary({
@@ -293,29 +225,13 @@ describe("daemon-backed interactive session manager routing", () => {
 });
 
 describe("agents view command parsing", () => {
-	test("routes the agents verb to the agents view and strips it", () => {
-		expect(parseAgentsViewCommand(["agents"])).toEqual({ explicitAgentsView: true, args: [] });
-	});
-
-	test("does not treat manage as an alias", () => {
-		expect(parseAgentsViewCommand(["manage", "--verbose"])).toEqual({
-			explicitAgentsView: false,
-			args: ["manage", "--verbose"],
-		});
-	});
-
-	test("leaves a normal message untouched", () => {
-		expect(parseAgentsViewCommand(["fix the agents view"])).toEqual({
-			explicitAgentsView: false,
-			args: ["fix the agents view"],
-		});
-	});
-
-	test("only matches the verb as the first token", () => {
-		expect(parseAgentsViewCommand(["--verbose", "agents"])).toEqual({
-			explicitAgentsView: false,
-			args: ["--verbose", "agents"],
-		});
+	test.each([
+		{ args: ["agents"], explicitAgentsView: true, rest: [] as string[] },
+		{ args: ["manage", "--verbose"], explicitAgentsView: false, rest: ["manage", "--verbose"] },
+		{ args: ["fix the agents view"], explicitAgentsView: false, rest: ["fix the agents view"] },
+		{ args: ["--verbose", "agents"], explicitAgentsView: false, rest: ["--verbose", "agents"] },
+	])("parses $args", ({ args, explicitAgentsView, rest }) => {
+		expect(parseAgentsViewCommand(args)).toEqual({ explicitAgentsView, args: rest });
 	});
 });
 
@@ -327,10 +243,6 @@ describe("runtime session option resolution", () => {
 			initialGoal: { objective: "solve the verifier task", tokenBudget: 100_000 },
 		};
 
-		expect(headlessCreateConfig.initialGoal).toEqual({
-			objective: "solve the verifier task",
-			tokenBudget: 100_000,
-		});
 		const daemonFallback = daemonServerDefaultSessionConfig(headlessCreateConfig);
 		expect(daemonFallback).toEqual({
 			cwd: "/repo",
@@ -380,27 +292,26 @@ describe("runtime session option resolution", () => {
 		});
 	});
 
-	test("preserves the runtime child parent-agent identity", () => {
-		const resolved = resolveRuntimeSessionOptions({}, { rlmDepth: 1, rlmParentAgent: "parent-worker" });
-
-		expect(resolved.rlmParentAgent).toBe("parent-worker");
-	});
-
-	test("forwards semantic spawn lineage to the created child session", () => {
+	test("forwards child lineage - parent agent, semantic parent and spawn request - to the child session", () => {
 		const resolved = resolveRuntimeSessionOptions(
 			{},
 			{
 				rlmDepth: 1,
+				rlmParentAgent: "parent-worker",
 				semanticParentSessionId: "parent-session-id",
 				semanticSpawnedByRequestId: "a".repeat(32),
 			},
 		);
 
+		expect(resolved.rlmParentAgent).toBe("parent-worker");
 		expect(resolved.semanticParentSessionId).toBe("parent-session-id");
 		expect(resolved.semanticSpawnedByRequestId).toBe("a".repeat(32));
 	});
 
-	test("deep-merges autonomous runtime session overrides", () => {
+	test.each([
+		{ name: "a top-level runtime session", rlmDepth: undefined, enabled: true },
+		{ name: "a subagent runtime session", rlmDepth: 1, enabled: false },
+	])("deep-merges autonomous overrides for $name", ({ rlmDepth, enabled }) => {
 		const resolved = resolveRuntimeSessionOptions(
 			{
 				autonomous: {
@@ -410,6 +321,7 @@ describe("runtime session option resolution", () => {
 				},
 			},
 			{
+				...(rlmDepth === undefined ? {} : { rlmDepth }),
 				autonomous: {
 					maxContinuations: 5,
 					gates: { timeoutMs: 1000 },
@@ -418,33 +330,7 @@ describe("runtime session option resolution", () => {
 		);
 
 		expect(resolved.autonomous).toEqual({
-			enabled: true,
-			maxTurns: 20,
-			maxContinuations: 5,
-			gates: { commands: ["npm test"], maxRetries: 3, timeoutMs: 1000 },
-		});
-	});
-
-	test("disables autonomous mode for subagent runtime sessions", () => {
-		const resolved = resolveRuntimeSessionOptions(
-			{
-				autonomous: {
-					enabled: true,
-					maxTurns: 20,
-					gates: { commands: ["npm test"], maxRetries: 3 },
-				},
-			},
-			{
-				rlmDepth: 1,
-				autonomous: {
-					maxContinuations: 5,
-					gates: { timeoutMs: 1000 },
-				},
-			},
-		);
-
-		expect(resolved.autonomous).toEqual({
-			enabled: false,
+			enabled,
 			maxTurns: 20,
 			maxContinuations: 5,
 			gates: { commands: ["npm test"], maxRetries: 3, timeoutMs: 1000 },

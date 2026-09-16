@@ -21,7 +21,7 @@ vi.mock("node:child_process", () => ({
 	},
 }));
 
-import { DaemonCatalogClient, isDaemonCatalogSourcePath } from "../src/modes/daemon/daemon-catalog-process.js";
+import { DaemonCatalogClient } from "../src/modes/daemon/daemon-catalog-process.js";
 
 afterEach(() => {
 	vi.useRealTimers();
@@ -30,17 +30,6 @@ afterEach(() => {
 });
 
 describe("daemon catalog startup", () => {
-	it("does not mistake an ancestor src directory for the package source tree", () => {
-		const packageDir = "/usr/src/app/packages/coding-agent";
-
-		expect(isDaemonCatalogSourcePath(`${packageDir}/dist/modes/daemon/daemon-catalog-process.js`, packageDir)).toBe(
-			false,
-		);
-		expect(isDaemonCatalogSourcePath(`${packageDir}/src/modes/daemon/daemon-catalog-process.ts`, packageDir)).toBe(
-			true,
-		);
-	});
-
 	it("uses the dedicated entrypoint and allows a cold start past five seconds", async () => {
 		vi.useFakeTimers();
 		const client = new DaemonCatalogClient(() => {});

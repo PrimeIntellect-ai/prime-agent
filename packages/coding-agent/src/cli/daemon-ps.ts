@@ -703,6 +703,9 @@ async function stopHiddenSupervisors(
 	assertAdmission: () => Promise<void>,
 ): Promise<void> {
 	while (true) {
+		// Renew before the scan: scanListeningDaemons blocks the event loop in synchronous ps/lsof/ss
+		// calls, and the admission lease cannot refresh itself while that runs.
+		await assertAdmission();
 		const listeners = scanListeningDaemons().filter((listener) => !isWorkerSocketPath(listener.socketPath));
 		const bySocket = new Map<string, DiscoveredDaemonProcess[]>();
 		for (const listener of listeners) {

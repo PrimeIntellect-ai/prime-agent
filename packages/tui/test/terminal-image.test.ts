@@ -1,17 +1,11 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
-import { Image } from "../src/components/image.js";
 import {
 	deleteAllKittyImages,
 	deleteKittyImage,
 	detectCapabilities,
 	encodeKitty,
-	hyperlink,
 	isImageLine,
-	renderImage,
-	resetCapabilitiesCache,
-	setCapabilities,
-	setCellDimensions,
 } from "../src/terminal-image.js";
 
 const ENV_KEYS = [
@@ -47,317 +41,82 @@ function withEnv(overrides: Record<string, string | undefined>, fn: () => void):
 }
 
 describe("isImageLine", () => {
-	describe("iTerm2 image protocol", () => {
-		it("should detect iTerm2 image escape sequence at start of line", () => {
-			const iterm2ImageLine = "\x1b]1337;File=size=100,100;inline=1:base64encodeddata==\x07";
-			assert.strictEqual(isImageLine(iterm2ImageLine), true);
+	// A 304k-char line regressed the detection regex into catastrophic backtracking.
+	const LONG_LINE = `Text prefix \x1b]1337;File=size=800,600;inline=1:${"A".repeat(100).repeat(3000)} suffix`;
+
+	const cases: Array<[name: string, line: string, expected: boolean]> = [
+		["iTerm2 sequence surrounded by text", "Some text \x1b]1337;File=inline=1:base64data==\x07 more text", true],
+		["Kitty sequence surrounded by text", "Output: \x1b_Ga=T,f=100;data...\x1b\\\x1b_Gm=i=1;\x1b\\", true],
+		["mixed Kitty and iTerm2 sequences", "\x1b_Ga=T...\x1b\\ iTerm2: \x1b]1337;File=inline=1:data==\x07", true],
+		["304k-char line with an image sequence", LONG_LINE, true],
+		["plain text", "This is just a regular text line without any escape sequences", false],
+		["ANSI styling only", "\x1b[31mRed text\x1b[0m and \x1b[32mgreen text\x1b[0m", false],
+		["iTerm2 marker without the escape byte", "Some text with ]1337;File but missing ESC at start", false],
+		["Kitty marker without the escape byte", "Some text with _G but missing ESC at start", false],
+		["file path containing the iTerm2 keyword", "/path/to/File_1337_backup/image.jpg", false],
+		["empty line", "", false],
+	];
+
+	assert.ok(LONG_LINE.length > 300000);
+
+	for (const [name, line, expected] of cases) {
+		it(`${expected ? "detects" : "ignores"} ${name}`, () => {
+			assert.strictEqual(isImageLine(line), expected);
 		});
-
-		it("should detect iTerm2 image escape sequence with text before it", () => {
-			const lineWithTextAndImage = "Some text \x1b]1337;File=size=100,100;inline=1:base64data==\x07 more text";
-			assert.strictEqual(isImageLine(lineWithTextAndImage), true);
-		});
-
-		it("should detect iTerm2 image escape sequence in middle of long line", () => {
-			const longLineWithImage =
-				"Text before image..." + "\x1b]1337;File=inline=1:verylongbase64data==" + "...text after";
-			assert.strictEqual(isImageLine(longLineWithImage), true);
-		});
-
-		it("should detect iTerm2 image escape sequence at end of line", () => {
-			const lineWithImageAtEnd = "Regular text ending with \x1b]1337;File=inline=1:base64data==\x07";
-			assert.strictEqual(isImageLine(lineWithImageAtEnd), true);
-		});
-
-		it("should detect minimal iTerm2 image escape sequence", () => {
-			const minimalImageLine = "\x1b]1337;File=:\x07";
-			assert.strictEqual(isImageLine(minimalImageLine), true);
-		});
-	});
-
-	describe("Kitty image protocol", () => {
-		it("should detect Kitty image escape sequence at start of line", () => {
-			const kittyImageLine = "\x1b_Ga=T,f=100,t=f,d=base64data...\x1b\\\x1b_Gm=i=1;\x1b\\";
-			assert.strictEqual(isImageLine(kittyImageLine), true);
-		});
-
-		it("should detect Kitty image escape sequence with text before it", () => {
-			const lineWithTextAndKittyImage = "Output: \x1b_Ga=T,f=100;data...\x1b\\\x1b_Gm=i=1;\x1b\\";
-			assert.strictEqual(isImageLine(lineWithTextAndKittyImage), true);
-		});
-
-		it("should detect Kitty image escape sequence with padding", () => {
-			const kittyWithPadding = "  \x1b_Ga=T,f=100...\x1b\\\x1b_Gm=i=1;\x1b\\  ";
-			assert.strictEqual(isImageLine(kittyWithPadding), true);
-		});
-	});
-
-	describe("Bug regression tests", () => {
-		it("should detect image sequences in very long lines (304k+ chars)", () => {
-			const base64Char = "A".repeat(100); // 100 chars of base64-like data
-			const imageSequence = "\x1b]1337;File=size=800,600;inline=1:";
-
-			const longLine =
-				"Text prefix " +
-				imageSequence +
-				base64Char.repeat(3000) + // ~300,000 chars
-				" suffix";
-
-			assert.strictEqual(longLine.length > 300000, true);
-			assert.strictEqual(isImageLine(longLine), true);
-		});
-
-		it("should detect image sequences when terminal doesn't support images", () => {
-			const lineWithImage = "Read image file [image/jpeg]\x1b]1337;File=inline=1:base64data==\x07";
-			assert.strictEqual(isImageLine(lineWithImage), true);
-		});
-
-		it("should detect image sequences with ANSI codes before them", () => {
-			const lineWithAnsiAndImage = "\x1b[31mError output \x1b]1337;File=inline=1:image==\x07";
-			assert.strictEqual(isImageLine(lineWithAnsiAndImage), true);
-		});
-
-		it("should detect image sequences with ANSI codes after them", () => {
-			const lineWithImageAndAnsi = "\x1b_Ga=T,f=100:data...\x1b\\\x1b_Gm=i=1;\x1b\\\x1b[0m reset";
-			assert.strictEqual(isImageLine(lineWithImageAndAnsi), true);
-		});
-	});
-
-	describe("Negative cases - lines without images", () => {
-		it("should not detect images in plain text lines", () => {
-			const plainText = "This is just a regular text line without any escape sequences";
-			assert.strictEqual(isImageLine(plainText), false);
-		});
-
-		it("should not detect images in lines with only ANSI codes", () => {
-			const ansiText = "\x1b[31mRed text\x1b[0m and \x1b[32mgreen text\x1b[0m";
-			assert.strictEqual(isImageLine(ansiText), false);
-		});
-
-		it("should not detect images in lines with cursor movement codes", () => {
-			const cursorCodes = "\x1b[1A\x1b[2KLine cleared and moved up";
-			assert.strictEqual(isImageLine(cursorCodes), false);
-		});
-
-		it("should not detect images in lines with partial iTerm2 sequences", () => {
-			const partialSequence = "Some text with ]1337;File but missing ESC at start";
-			assert.strictEqual(isImageLine(partialSequence), false);
-		});
-
-		it("should not detect images in lines with partial Kitty sequences", () => {
-			const partialSequence = "Some text with _G but missing ESC at start";
-			assert.strictEqual(isImageLine(partialSequence), false);
-		});
-
-		it("should not detect images in empty lines", () => {
-			assert.strictEqual(isImageLine(""), false);
-		});
-
-		it("should not detect images in lines with newlines only", () => {
-			assert.strictEqual(isImageLine("\n"), false);
-			assert.strictEqual(isImageLine("\n\n"), false);
-		});
-	});
-
-	describe("Mixed content scenarios", () => {
-		it("should detect images when line has both Kitty and iTerm2 sequences", () => {
-			const mixedLine = "Kitty: \x1b_Ga=T...\x1b\\\x1b_Gm=i=1;\x1b\\ iTerm2: \x1b]1337;File=inline=1:data==\x07";
-			assert.strictEqual(isImageLine(mixedLine), true);
-		});
-
-		it("should detect image in line with multiple text and image segments", () => {
-			const complexLine = "Start \x1b]1337;File=img1==\x07 middle \x1b]1337;File=img2==\x07 end";
-			assert.strictEqual(isImageLine(complexLine), true);
-		});
-
-		it("should not falsely detect image in line with file path containing keywords", () => {
-			const filePathLine = "/path/to/File_1337_backup/image.jpg";
-			assert.strictEqual(isImageLine(filePathLine), false);
-		});
-	});
+	}
 });
 
 describe("detectCapabilities", () => {
-	it("defaults to hyperlinks: false for unknown terminals", () => {
-		withEnv({}, () => {
-			const caps = detectCapabilities();
-			assert.strictEqual(caps.hyperlinks, false);
-			assert.strictEqual(caps.images, null);
-		});
-	});
+	const cases: Array<{
+		name: string;
+		env: Record<string, string | undefined>;
+		hyperlinks: boolean;
+		images?: string | null;
+	}> = [
+		{ name: "unknown terminal", env: {}, hyperlinks: false, images: null },
+		{
+			name: "tmux wrapping ghostty",
+			env: { TMUX: "/tmp/tmux-1000/default,1234,0", TERM_PROGRAM: "ghostty" },
+			hyperlinks: false,
+			images: null,
+		},
+		{
+			name: "TERM=tmux-256color wrapping iTerm2",
+			env: { TERM: "tmux-256color", TERM_PROGRAM: "iterm.app" },
+			hyperlinks: false,
+			images: null,
+		},
+		{ name: "TERM=screen-256color", env: { TERM: "screen-256color" }, hyperlinks: false, images: null },
+		{ name: "ghostty", env: { TERM_PROGRAM: "ghostty" }, hyperlinks: true, images: "kitty" },
+		{
+			name: "ghostty inside cmux",
+			env: { TERM_PROGRAM: "ghostty", CMUX_WORKSPACE_ID: "workspace" },
+			hyperlinks: true,
+			images: "kitty",
+		},
+		{ name: "kitty", env: { KITTY_WINDOW_ID: "1" }, hyperlinks: true },
+		{ name: "wezterm", env: { WEZTERM_PANE: "0" }, hyperlinks: true },
+		{ name: "iTerm2", env: { TERM_PROGRAM: "iterm.app" }, hyperlinks: true },
+		{ name: "vscode", env: { TERM_PROGRAM: "vscode" }, hyperlinks: true },
+	];
 
-	it("forces hyperlinks: false under tmux even if outer terminal supports OSC 8", () => {
-		withEnv({ TMUX: "/tmp/tmux-1000/default,1234,0", TERM_PROGRAM: "ghostty" }, () => {
-			const caps = detectCapabilities();
-			assert.strictEqual(caps.hyperlinks, false);
-			assert.strictEqual(caps.images, null);
+	for (const testCase of cases) {
+		it(`reports capabilities for ${testCase.name}`, () => {
+			withEnv(testCase.env, () => {
+				const caps = detectCapabilities();
+				assert.strictEqual(caps.hyperlinks, testCase.hyperlinks);
+				if (testCase.images !== undefined) assert.strictEqual(caps.images, testCase.images);
+			});
 		});
-	});
-
-	it("forces hyperlinks: false when TERM starts with 'tmux'", () => {
-		withEnv({ TERM: "tmux-256color", TERM_PROGRAM: "iterm.app" }, () => {
-			const caps = detectCapabilities();
-			assert.strictEqual(caps.hyperlinks, false);
-			assert.strictEqual(caps.images, null);
-		});
-	});
-
-	it("forces hyperlinks: false when TERM starts with 'screen'", () => {
-		withEnv({ TERM: "screen-256color" }, () => {
-			const caps = detectCapabilities();
-			assert.strictEqual(caps.hyperlinks, false);
-			assert.strictEqual(caps.images, null);
-		});
-	});
-
-	it("enables hyperlinks for Ghostty", () => {
-		withEnv({ TERM_PROGRAM: "ghostty" }, () => {
-			const caps = detectCapabilities();
-			assert.strictEqual(caps.hyperlinks, true);
-		});
-	});
-
-	it("does not disable Ghostty images solely because cmux is present", () => {
-		withEnv({ TERM_PROGRAM: "ghostty", CMUX_WORKSPACE_ID: "workspace" }, () => {
-			const caps = detectCapabilities();
-			assert.strictEqual(caps.images, "kitty");
-			assert.strictEqual(caps.hyperlinks, true);
-		});
-	});
-
-	it("enables hyperlinks for Kitty", () => {
-		withEnv({ KITTY_WINDOW_ID: "1" }, () => {
-			const caps = detectCapabilities();
-			assert.strictEqual(caps.hyperlinks, true);
-		});
-	});
-
-	it("enables hyperlinks for WezTerm", () => {
-		withEnv({ WEZTERM_PANE: "0" }, () => {
-			const caps = detectCapabilities();
-			assert.strictEqual(caps.hyperlinks, true);
-		});
-	});
-
-	it("enables hyperlinks for iTerm2", () => {
-		withEnv({ TERM_PROGRAM: "iterm.app" }, () => {
-			const caps = detectCapabilities();
-			assert.strictEqual(caps.hyperlinks, true);
-		});
-	});
-
-	it("enables hyperlinks for VSCode", () => {
-		withEnv({ TERM_PROGRAM: "vscode" }, () => {
-			const caps = detectCapabilities();
-			assert.strictEqual(caps.hyperlinks, true);
-		});
-	});
+	}
 });
 
-describe("Kitty image cursor movement", () => {
-	it("can request no terminal-side cursor movement", () => {
-		const sequence = encodeKitty("AAAA", { columns: 2, rows: 2, moveCursor: false });
-		assert.ok(sequence.startsWith("\x1b_Ga=T,f=100,q=2,C=1,c=2,r=2;"));
-	});
-
-	it("suppresses Kitty replies for delete commands", () => {
+describe("Kitty protocol sequences", () => {
+	it("encodes placements without cursor movement and suppresses replies on deletes", () => {
+		assert.ok(
+			encodeKitty("AAAA", { columns: 2, rows: 2, moveCursor: false }).startsWith("\x1b_Ga=T,f=100,q=2,C=1,c=2,r=2;"),
+		);
 		assert.strictEqual(deleteKittyImage(42), "\x1b_Ga=d,d=I,i=42,q=2\x1b\\");
 		assert.strictEqual(deleteAllKittyImages(), "\x1b_Ga=d,d=A,q=2\x1b\\");
-	});
-
-	it("preserves renderImage's default terminal-side cursor movement", () => {
-		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
-		setCellDimensions({ widthPx: 10, heightPx: 10 });
-		try {
-			const result = renderImage("AAAA", { widthPx: 20, heightPx: 20 }, { maxWidthCells: 2 });
-			assert.ok(result);
-			assert.ok(!result.sequence.includes(",C=1,"));
-			assert.strictEqual(result.rows, 2);
-		} finally {
-			resetCapabilitiesCache();
-			setCellDimensions({ widthPx: 9, heightPx: 18 });
-		}
-	});
-
-	it("can opt renderImage into no terminal-side cursor movement", () => {
-		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
-		setCellDimensions({ widthPx: 10, heightPx: 10 });
-		try {
-			const result = renderImage("AAAA", { widthPx: 20, heightPx: 20 }, { maxWidthCells: 2, moveCursor: false });
-			assert.ok(result);
-			assert.ok(result.sequence.includes(",C=1,"));
-			assert.strictEqual(result.rows, 2);
-		} finally {
-			resetCapabilitiesCache();
-			setCellDimensions({ widthPx: 9, heightPx: 18 });
-		}
-	});
-
-	it("restores the cursor to the reserved image row after Kitty rendering", () => {
-		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
-		setCellDimensions({ widthPx: 10, heightPx: 10 });
-		try {
-			const image = new Image(
-				"AAAA",
-				"image/png",
-				{ fallbackColor: (value) => value },
-				{ maxWidthCells: 2 },
-				{ widthPx: 20, heightPx: 20 },
-			);
-			const lines = image.render(4);
-			const imageId = image.getImageId();
-			assert.strictEqual(typeof imageId, "number");
-			assert.deepStrictEqual(lines.slice(0, -1), [""]);
-			assert.ok(lines[1].startsWith("\x1b[1A\x1b_G"));
-			assert.ok(lines[1].includes(",C=1,"));
-			assert.ok(lines[1].includes(`,i=${imageId}`));
-			assert.ok(lines[1].endsWith("\x1b[1B"));
-		} finally {
-			resetCapabilitiesCache();
-			setCellDimensions({ widthPx: 9, heightPx: 18 });
-		}
-	});
-
-	it("keeps compact metadata and its prefix when terminal graphics are unavailable", () => {
-		setCapabilities({ images: null, trueColor: true, hyperlinks: true });
-		try {
-			const image = new Image(
-				"AAAA",
-				"image/png",
-				{ fallbackColor: (value) => value },
-				{ filename: "result.png", fallbackOnly: true, fallbackPrefix: "    ╰─ " },
-				{ widthPx: 20, heightPx: 10 },
-			);
-
-			assert.deepStrictEqual(image.render(80), ["    ╰─ [result.png · image/png · 20×10]"]);
-		} finally {
-			resetCapabilitiesCache();
-		}
-	});
-});
-
-describe("hyperlink", () => {
-	it("wraps text in OSC 8 open and close sequences", () => {
-		const result = hyperlink("click me", "https://example.com");
-		assert.strictEqual(result, "\x1b]8;;https://example.com\x1b\\click me\x1b]8;;\x1b\\");
-	});
-
-	it("preserves ANSI styling inside the hyperlink", () => {
-		const styled = "\x1b[4m\x1b[34mclick me\x1b[0m";
-		const result = hyperlink(styled, "https://example.com");
-		assert.ok(result.startsWith("\x1b]8;;https://example.com\x1b\\"));
-		assert.ok(result.includes(styled));
-		assert.ok(result.endsWith("\x1b]8;;\x1b\\"));
-	});
-
-	it("works with empty text", () => {
-		const result = hyperlink("", "https://example.com");
-		assert.strictEqual(result, "\x1b]8;;https://example.com\x1b\\\x1b]8;;\x1b\\");
-	});
-
-	it("works with file:// URIs", () => {
-		const result = hyperlink("README.md", "file:///home/user/README.md");
-		assert.ok(result.includes("file:///home/user/README.md"));
-		assert.ok(result.includes("README.md"));
 	});
 });

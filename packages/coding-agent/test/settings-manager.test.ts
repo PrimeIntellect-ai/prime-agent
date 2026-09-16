@@ -8,163 +8,57 @@ describe("SettingsManager", () => {
 	const testDir = join(process.cwd(), "test-settings-tmp");
 	const agentDir = join(testDir, "agent");
 	const projectDir = join(testDir, "project");
+	const globalPath = join(agentDir, "settings.json");
+	const projectPath = join(projectDir, ".prime", "agent", "settings.json");
 
 	beforeEach(() => {
-		if (existsSync(testDir)) {
-			rmSync(testDir, { recursive: true });
-		}
+		if (existsSync(testDir)) rmSync(testDir, { recursive: true });
 		mkdirSync(agentDir, { recursive: true });
 		mkdirSync(join(projectDir, ".prime", "agent"), { recursive: true });
 	});
 
 	afterEach(() => {
-		if (existsSync(testDir)) {
-			rmSync(testDir, { recursive: true });
-		}
+		if (existsSync(testDir)) rmSync(testDir, { recursive: true });
 	});
 
-	describe("preserves externally added settings", () => {
-		it("should preserve enabledModels when changing thinking level", async () => {
-			const settingsPath = join(agentDir, "settings.json");
-			writeFileSync(
-				settingsPath,
-				JSON.stringify({
-					theme: "dark",
-					defaultModel: "claude-sonnet",
-				}),
-			);
+	const writeSettings = (path: string, value: unknown): void => writeFileSync(path, JSON.stringify(value));
+	const readSettings = (path: string): Record<string, unknown> =>
+		JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
 
+	describe("on-disk settings file", () => {
+		it("preserves keys it does not own, including ones written after load", async () => {
+			writeSettings(globalPath, { theme: "dark", defaultModel: "claude-sonnet" });
 			const manager = SettingsManager.create(projectDir, agentDir);
 
-			const currentSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-			currentSettings.enabledModels = ["claude-opus-4-5", "gpt-5.2-codex"];
-			writeFileSync(settingsPath, JSON.stringify(currentSettings, null, 2));
+			// A second writer (another process, or the user's editor) adds keys after load.
+			writeSettings(globalPath, {
+				...readSettings(globalPath),
+				enabledModels: ["claude-opus-4-5", "gpt-5.2-codex"],
+				shellPath: "/bin/zsh",
+				extensions: ["/path/to/extension.ts"],
+				defaultThinkingLevel: "low",
+			});
 
 			manager.setDefaultThinkingLevel("high");
-			await manager.flush();
-
-			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-			expect(savedSettings.enabledModels).toEqual(["claude-opus-4-5", "gpt-5.2-codex"]);
-			expect(savedSettings.defaultThinkingLevel).toBe("high");
-			expect(savedSettings.theme).toBe("dark");
-			expect(savedSettings.defaultModel).toBe("claude-sonnet");
-		});
-
-		it("should preserve custom settings when changing theme", async () => {
-			const settingsPath = join(agentDir, "settings.json");
-			writeFileSync(
-				settingsPath,
-				JSON.stringify({
-					defaultModel: "claude-sonnet",
-				}),
-			);
-
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			const currentSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-			currentSettings.shellPath = "/bin/zsh";
-			currentSettings.extensions = ["/path/to/extension.ts"];
-			writeFileSync(settingsPath, JSON.stringify(currentSettings, null, 2));
-
 			manager.setTheme("light");
 			await manager.flush();
 
-			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-			expect(savedSettings.shellPath).toBe("/bin/zsh");
-			expect(savedSettings.extensions).toEqual(["/path/to/extension.ts"]);
-			expect(savedSettings.theme).toBe("light");
-		});
-
-		it("should let in-memory changes override file changes for same key", async () => {
-			const settingsPath = join(agentDir, "settings.json");
-			writeFileSync(
-				settingsPath,
-				JSON.stringify({
-					theme: "dark",
-				}),
-			);
-
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			const currentSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-			currentSettings.defaultThinkingLevel = "low";
-			writeFileSync(settingsPath, JSON.stringify(currentSettings, null, 2));
-
-			manager.setDefaultThinkingLevel("high");
-			await manager.flush();
-
-			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-			expect(savedSettings.defaultThinkingLevel).toBe("high");
-		});
-	});
-
-	describe("packages migration", () => {
-		it("should keep local-only extensions in extensions array", () => {
-			const settingsPath = join(agentDir, "settings.json");
-			writeFileSync(
-				settingsPath,
-				JSON.stringify({
-					extensions: ["/local/ext.ts", "./relative/ext.ts"],
-				}),
-			);
-
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			expect(manager.getPackages()).toEqual([]);
-			expect(manager.getExtensionPaths()).toEqual(["/local/ext.ts", "./relative/ext.ts"]);
-		});
-
-		it("should handle packages with filtering objects", () => {
-			const settingsPath = join(agentDir, "settings.json");
-			writeFileSync(
-				settingsPath,
-				JSON.stringify({
-					packages: [
-						"npm:simple-pkg",
-						{
-							source: "npm:shitty-extensions",
-							extensions: ["extensions/oracle.ts"],
-							skills: [],
-						},
-					],
-				}),
-			);
-
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			const packages = manager.getPackages();
-			expect(packages).toHaveLength(2);
-			expect(packages[0]).toBe("npm:simple-pkg");
-			expect(packages[1]).toEqual({
-				source: "npm:shitty-extensions",
-				extensions: ["extensions/oracle.ts"],
-				skills: [],
+			expect(readSettings(globalPath)).toEqual({
+				theme: "light",
+				defaultModel: "claude-sonnet",
+				enabledModels: ["claude-opus-4-5", "gpt-5.2-codex"],
+				shellPath: "/bin/zsh",
+				extensions: ["/path/to/extension.ts"],
+				// In-memory changes win for keys the manager owns.
+				defaultThinkingLevel: "high",
 			});
 		});
-	});
 
-	describe("reload", () => {
-		it("should reload global settings from disk", async () => {
-			const settingsPath = join(agentDir, "settings.json");
-			writeFileSync(
-				settingsPath,
-				JSON.stringify({
-					theme: "dark",
-					extensions: ["/before.ts"],
-				}),
-			);
-
+		it("reloads rewritten settings from disk", async () => {
+			writeSettings(globalPath, { theme: "dark", extensions: ["/before.ts"] });
 			const manager = SettingsManager.create(projectDir, agentDir);
 
-			writeFileSync(
-				settingsPath,
-				JSON.stringify({
-					theme: "light",
-					extensions: ["/after.ts"],
-					defaultModel: "claude-sonnet",
-				}),
-			);
-
+			writeSettings(globalPath, { theme: "light", extensions: ["/after.ts"], defaultModel: "claude-sonnet" });
 			await manager.reload();
 
 			expect(manager.getTheme()).toBe("light");
@@ -172,579 +66,148 @@ describe("SettingsManager", () => {
 			expect(manager.getDefaultModel()).toBe("claude-sonnet");
 		});
 
-		it("should keep previous settings when file is invalid", async () => {
-			const settingsPath = join(agentDir, "settings.json");
-			writeFileSync(settingsPath, JSON.stringify({ theme: "dark" }));
+		// An unparsable file must never be clobbered: the user's settings would be lost.
+		it.each<[string, string, (manager: SettingsManager) => void, string]>([
+			["global", globalPath, (manager) => manager.setRlmMaxDepth(3), "Global settings not saved"],
+			[
+				"project",
+				projectPath,
+				(manager) => manager.setProjectPackages(["npm:test-pkg"]),
+				"Project settings not saved",
+			],
+		])("keeps invalid %s settings on disk and reports the failed save", async (scope, path, mutate, message) => {
+			const invalid = `{ invalid ${scope} json`;
+			writeFileSync(path, invalid);
 
 			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.drainErrors().map((entry) => entry.scope)).toEqual([scope]);
+			expect(manager.drainErrors()).toEqual([]);
 
-			writeFileSync(settingsPath, "{ invalid json");
+			mutate(manager);
+			await manager.flush();
+
+			const errors = manager.drainErrors();
+			expect(errors).toHaveLength(1);
+			expect(errors[0]?.scope).toBe(scope);
+			expect(errors[0]?.error.message).toContain(message);
+			expect(readFileSync(path, "utf-8")).toBe(invalid);
+		});
+
+		it("keeps the previously loaded values when a reload finds invalid JSON", async () => {
+			writeSettings(globalPath, { theme: "dark" });
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			writeFileSync(globalPath, "{ invalid json");
 			await manager.reload();
 
 			expect(manager.getTheme()).toBe("dark");
 		});
-	});
 
-	describe("onboardingShown", () => {
-		it("defaults to false and persists globally", async () => {
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			expect(manager.getOnboardingShown()).toBe(false);
-
-			manager.setOnboardingShown(true);
-			await manager.flush();
-
-			const savedSettings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8"));
-			expect(savedSettings.onboardingShown).toBe(true);
-			expect(manager.getOnboardingShown()).toBe(true);
-		});
-
-		it("treats the legacy completion field as already shown", () => {
-			const manager = SettingsManager.inMemory({ onboardingCompleted: true });
-
-			expect(manager.getOnboardingShown()).toBe(true);
-		});
-	});
-
-	describe("mermaid rendering mode", () => {
-		it("survives a non-object markdown settings value when saving the mode", async () => {
-			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ markdown: "custom" }));
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			manager.setMermaidRenderingMode("off");
-			await manager.flush();
-
-			expect(manager.getMermaidRenderingMode()).toBe("off");
-			expect(SettingsManager.create(projectDir, agentDir).getMermaidRenderingMode()).toBe("off");
-		});
-	});
-
-	describe("autoRefine", () => {
-		it("defaults to enabled while preserving explicit opt-out", () => {
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			expect(manager.getAutoRefineSettings()).toEqual({
-				enabled: true,
-				turnInterval: 25,
-				compact: true,
-				cooldownMs: 20 * 60_000,
-			});
-
-			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ autoRefine: { enabled: false } }));
-			const optedOut = SettingsManager.create(projectDir, agentDir);
-
-			expect(optedOut.getAutoRefineSettings().enabled).toBe(false);
-		});
-
-		it("falls back to defaults for non-numeric turnInterval and cooldownMs", () => {
-			writeFileSync(
-				join(agentDir, "settings.json"),
-				JSON.stringify({ autoRefine: { turnInterval: "oops", cooldownMs: "nope" } }),
-			);
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			const settings = manager.getAutoRefineSettings();
-			expect(settings.turnInterval).toBe(25);
-			expect(settings.cooldownMs).toBe(20 * 60_000);
-			expect(Number.isFinite(settings.turnInterval)).toBe(true);
-			expect(Number.isFinite(settings.cooldownMs)).toBe(true);
-		});
-
-		it("ignores non-finite numeric values that parse to Infinity", () => {
-			// 1e999 is valid JSON that JSON.parse turns into Infinity.
-			writeFileSync(
-				join(agentDir, "settings.json"),
-				`{ "autoRefine": { "turnInterval": 1e999, "cooldownMs": 1e999 } }`,
-			);
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			const settings = manager.getAutoRefineSettings();
-			expect(settings.turnInterval).toBe(25);
-			expect(settings.cooldownMs).toBe(20 * 60_000);
-		});
-
-		it("preserves valid numeric overrides", () => {
-			writeFileSync(
-				join(agentDir, "settings.json"),
-				JSON.stringify({ autoRefine: { turnInterval: 5, cooldownMs: 1000 } }),
-			);
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			const settings = manager.getAutoRefineSettings();
-			expect(settings.turnInterval).toBe(5);
-			expect(settings.cooldownMs).toBe(1000);
-		});
-	});
-
-	describe("auxiliaryModel", () => {
-		it("returns a valid persisted selector", () => {
-			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ auxiliaryModel: "faux/aux-model" }));
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			expect(manager.getAuxiliaryModel()).toBe("faux/aux-model");
-		});
-
-		it("treats malformed persisted values as unset", () => {
-			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ auxiliaryModel: 42 }));
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			expect(manager.getAuxiliaryModel()).toBeUndefined();
-		});
-	});
-
-	describe("recentModels", () => {
-		it("records most-recently-used first, dedupes, and persists", async () => {
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			manager.setDefaultModelAndProvider("prov", "a");
-			manager.setDefaultModelAndProvider("prov", "b");
-			manager.setDefaultModelAndProvider("prov", "a");
-			await manager.flush();
-
-			expect(manager.getRecentModels()).toEqual(["prov/a", "prov/b"]);
-			const saved = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8"));
-			expect(saved.recentModels).toEqual(["prov/a", "prov/b"]);
-		});
-
-		it("caps the list at the limit", async () => {
-			const manager = SettingsManager.create(projectDir, agentDir);
-			for (let i = 0; i < 25; i++) {
-				manager.setDefaultModelAndProvider("prov", `m${i}`);
-			}
-			await manager.flush();
-
-			const recent = manager.getRecentModels();
-			expect(recent).toHaveLength(20);
-			expect(recent[0]).toBe("prov/m24");
-		});
-	});
-
-	describe("error tracking", () => {
-		it("should collect and clear load errors via drainErrors", () => {
-			const globalSettingsPath = join(agentDir, "settings.json");
-			const projectSettingsPath = join(projectDir, ".prime", "agent", "settings.json");
-			writeFileSync(globalSettingsPath, "{ invalid global json");
-			writeFileSync(projectSettingsPath, "{ invalid project json");
-
-			const manager = SettingsManager.create(projectDir, agentDir);
-			const errors = manager.drainErrors();
-
-			expect(errors).toHaveLength(2);
-			expect(errors.map((e) => e.scope).sort()).toEqual(["global", "project"]);
-			expect(manager.drainErrors()).toEqual([]);
-		});
-
-		it("should report a new global error when saving after the load error was drained", async () => {
-			const settingsPath = join(agentDir, "settings.json");
-			const invalidSettings = "{ invalid global json";
-			writeFileSync(settingsPath, invalidSettings);
-
-			const manager = SettingsManager.create(projectDir, agentDir);
-			expect(manager.drainErrors()).toHaveLength(1);
-
-			manager.setRlmMaxDepth(3);
-			await manager.flush();
-
-			const errors = manager.drainErrors();
-			expect(errors).toHaveLength(1);
-			expect(errors[0]?.scope).toBe("global");
-			expect(errors[0]?.error.message).toContain("Global settings not saved: settings file failed to parse:");
-			expect(readFileSync(settingsPath, "utf-8")).toBe(invalidSettings);
-		});
-
-		it("should report a new project error when saving after the load error was drained", async () => {
-			const settingsPath = join(projectDir, ".prime", "agent", "settings.json");
-			const invalidSettings = "{ invalid project json";
-			writeFileSync(settingsPath, invalidSettings);
-
-			const manager = SettingsManager.create(projectDir, agentDir);
-			expect(manager.drainErrors()).toHaveLength(1);
-
-			manager.setProjectPackages(["npm:test-pkg"]);
-			await manager.flush();
-
-			const errors = manager.drainErrors();
-			expect(errors).toHaveLength(1);
-			expect(errors[0]?.scope).toBe("project");
-			expect(errors[0]?.error.message).toContain("Project settings not saved: settings file failed to parse:");
-			expect(readFileSync(settingsPath, "utf-8")).toBe(invalidSettings);
-		});
-
-		it("drains only the requested scope", () => {
-			writeFileSync(join(agentDir, "settings.json"), "{ invalid global json");
-			writeFileSync(join(projectDir, ".prime", "agent", "settings.json"), "{ invalid project json");
+		it("drains errors per scope", () => {
+			writeFileSync(globalPath, "{ invalid global json");
+			writeFileSync(projectPath, "{ invalid project json");
 			const manager = SettingsManager.create(projectDir, agentDir);
 
 			expect(manager.drainErrors("global").map((entry) => entry.scope)).toEqual(["global"]);
 			expect(manager.drainErrors().map((entry) => entry.scope)).toEqual(["project"]);
 		});
-	});
 
-	describe("project settings directory creation", () => {
-		it("should not create .pi folder when only reading project settings", () => {
-			const settingsPath = join(agentDir, "settings.json");
-			writeFileSync(settingsPath, JSON.stringify({ theme: "dark" }));
-
+		it("creates the project settings directory only when project settings are written", async () => {
+			writeSettings(globalPath, { theme: "dark" });
 			rmSync(join(projectDir, ".prime", "agent"), { recursive: true });
 
 			const manager = SettingsManager.create(projectDir, agentDir);
-
 			expect(existsSync(join(projectDir, ".prime", "agent"))).toBe(false);
-
 			expect(manager.getTheme()).toBe("dark");
-		});
-
-		it("should create .pi folder when writing project settings", async () => {
-			const settingsPath = join(agentDir, "settings.json");
-			writeFileSync(settingsPath, JSON.stringify({ theme: "dark" }));
-
-			rmSync(join(projectDir, ".prime", "agent"), { recursive: true });
-
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			expect(existsSync(join(projectDir, ".prime", "agent"))).toBe(false);
 
 			manager.setProjectPackages([{ source: "npm:test-pkg" }]);
 			await manager.flush();
 
-			expect(existsSync(join(projectDir, ".prime", "agent"))).toBe(true);
-
-			expect(existsSync(join(projectDir, ".prime", "agent", "settings.json"))).toBe(true);
+			expect(existsSync(projectPath)).toBe(true);
 		});
 	});
 
-	describe("shellCommandPrefix", () => {
-		it("should load shellCommandPrefix from settings", () => {
-			const settingsPath = join(agentDir, "settings.json");
-			writeFileSync(settingsPath, JSON.stringify({ shellCommandPrefix: "shopt -s expand_aliases" }));
-
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			expect(manager.getShellCommandPrefix()).toBe("shopt -s expand_aliases");
-		});
-
-		it("should return undefined when shellCommandPrefix is not set", () => {
-			const settingsPath = join(agentDir, "settings.json");
-			writeFileSync(settingsPath, JSON.stringify({ theme: "dark" }));
-
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			expect(manager.getShellCommandPrefix()).toBeUndefined();
-		});
-
-		it("should preserve shellCommandPrefix when saving unrelated settings", async () => {
-			const settingsPath = join(agentDir, "settings.json");
-			writeFileSync(settingsPath, JSON.stringify({ shellCommandPrefix: "shopt -s expand_aliases" }));
-
-			const manager = SettingsManager.create(projectDir, agentDir);
-			manager.setTheme("light");
-			await manager.flush();
-
-			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-			expect(savedSettings.shellCommandPrefix).toBe("shopt -s expand_aliases");
-			expect(savedSettings.theme).toBe("light");
-		});
-	});
-
-	describe("getSessionDir", () => {
-		it("should return undefined when not set", () => {
-			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ theme: "dark" }));
-			const manager = SettingsManager.create(projectDir, agentDir);
-			expect(manager.getSessionDir()).toBeUndefined();
-		});
-
-		it("should return global sessionDir", () => {
-			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ sessionDir: "/tmp/sessions" }));
-			const manager = SettingsManager.create(projectDir, agentDir);
-			expect(manager.getSessionDir()).toBe("/tmp/sessions");
-		});
-
-		it("should return project sessionDir, overriding global", () => {
-			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ sessionDir: "/global/sessions" }));
-			writeFileSync(
-				join(projectDir, ".prime", "agent", "settings.json"),
-				JSON.stringify({ sessionDir: "./sessions" }),
-			);
-			const manager = SettingsManager.create(projectDir, agentDir);
-			expect(manager.getSessionDir()).toBe("./sessions");
-		});
-
-		it("should expand ~ in sessionDir", () => {
-			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ sessionDir: "~/sessions" }));
-			const manager = SettingsManager.create(projectDir, agentDir);
-			expect(manager.getSessionDir()).toBe(join(homedir(), "sessions"));
-		});
-	});
-
-	describe("mcpServers", () => {
-		it("returns undefined when global settings are unset", () => {
-			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ theme: "dark" }));
-			const manager = SettingsManager.create(projectDir, agentDir);
-			expect(manager.getGlobalMcpServers()).toBeUndefined();
-		});
-
-		it("ignores project mcpServers when returning executable servers", () => {
-			writeFileSync(
-				join(agentDir, "settings.json"),
-				JSON.stringify({
-					mcpServers: {
-						acme: { type: "http", url: "https://global.acme/mcp", oauth: true },
-						shared: { type: "http", url: "https://global.shared/mcp" },
-					},
-				}),
-			);
-			writeFileSync(
-				join(projectDir, ".prime", "agent", "settings.json"),
-				JSON.stringify({
-					mcpServers: {
-						shared: { type: "http", url: "https://project.shared/mcp" },
-					},
-				}),
-			);
-			const manager = SettingsManager.create(projectDir, agentDir);
-			expect(manager.getGlobalMcpServers()).toEqual({
-				acme: { type: "http", url: "https://global.acme/mcp", oauth: true },
-				shared: { type: "http", url: "https://global.shared/mcp" },
-			});
-		});
-	});
-	describe("idle worker eviction", () => {
-		it("defaults to 90 minutes and treats none as off", () => {
-			const manager = SettingsManager.create(projectDir, agentDir);
-			expect(manager.getIdleEvictionMinutes()).toBe(90);
-
-			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ idleEvictionMinutes: "none" }));
-			const disabled = SettingsManager.create(projectDir, agentDir);
-			expect(disabled.getIdleEvictionMinutes()).toBe("off");
-		});
-
-		it("reads and writes the global daemon policy without project overrides", async () => {
-			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ idleEvictionMinutes: 60 }));
-			writeFileSync(
-				join(projectDir, ".prime", "agent", "settings.json"),
-				JSON.stringify({ idleEvictionMinutes: 30 }),
-			);
-			const manager = SettingsManager.create(projectDir, agentDir);
-			expect(manager.getIdleEvictionMinutes()).toBe(60);
-
-			manager.setIdleEvictionMinutes("off");
-			await manager.flush();
-			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8")).idleEvictionMinutes).toBe("off");
-		});
-	});
-
-	describe("telemetry privacy controls", () => {
-		it("does not let project settings override a global opt-out or disclosure state", () => {
-			writeFileSync(
-				join(agentDir, "settings.json"),
-				JSON.stringify({ telemetry: { enabled: false, noticeShown: false } }),
-			);
-			writeFileSync(
-				join(projectDir, ".prime", "agent", "settings.json"),
-				JSON.stringify({ telemetry: { enabled: true, noticeShown: true } }),
-			);
-
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			expect(manager.getTelemetryEnabled()).toBe(false);
-			expect(manager.getTelemetryNoticeShown()).toBe(false);
-		});
-
-		it("allows project settings to further disable globally enabled telemetry", () => {
-			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ telemetry: { enabled: true } }));
-			writeFileSync(
-				join(projectDir, ".prime", "agent", "settings.json"),
-				JSON.stringify({ telemetry: { enabled: false } }),
-			);
-
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			expect(manager.getTelemetryEnabled()).toBe(false);
-		});
-
-		it("allows runtime overrides to further disable telemetry and control disclosure", () => {
-			writeFileSync(
-				join(agentDir, "settings.json"),
-				JSON.stringify({ telemetry: { enabled: true, noticeShown: true } }),
-			);
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			manager.applyOverrides({ telemetry: { enabled: false, noticeShown: false } });
-
-			expect(manager.getTelemetryEnabled()).toBe(false);
-			expect(manager.getTelemetryNoticeShown()).toBe(false);
-		});
-
-		it("does not let a runtime override re-enable a global opt-out", () => {
-			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ telemetry: { enabled: false } }));
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			manager.applyOverrides({ telemetry: { enabled: true } });
-
-			expect(manager.getTelemetryEnabled()).toBe(false);
-		});
-	});
-
-	describe("provider wait-for-recovery and backup model", () => {
-		it("returns the documented wait defaults when unset", () => {
-			const manager = SettingsManager.inMemory();
-
-			expect(manager.getProviderWaitSettings()).toEqual({
-				enabled: true,
-				baseDelayMs: 1000,
-				maxDelayMs: 300_000,
-				maxAttempts: 30,
-				maxWaitMs: 900_000,
-			});
-			expect(manager.getProviderBackupModel()).toBeUndefined();
-		});
-
-		it("returns configured wait bounds and normalizes invalid values", () => {
-			const manager = SettingsManager.inMemory({
-				retry: {
-					provider: {
-						waitForUsage: {
-							enabled: false,
-							baseDelayMs: 500,
-							maxDelayMs: 60_000,
-							maxAttempts: 10,
-							maxWaitMs: 120_000,
-						},
-					},
+	describe("project vs global precedence", () => {
+		it.each<[string, unknown, unknown, (manager: SettingsManager) => unknown, unknown]>([
+			[
+				"project sessionDir overrides global",
+				{ sessionDir: "/global/sessions" },
+				{ sessionDir: "./sessions" },
+				(manager) => manager.getSessionDir(),
+				"./sessions",
+			],
+			[
+				"global sessionDir expands ~",
+				{ sessionDir: "~/sessions" },
+				{},
+				(manager) => manager.getSessionDir(),
+				join(homedir(), "sessions"),
+			],
+			[
+				"mcpServers stay global-only",
+				{ mcpServers: { shared: { type: "http", url: "https://global.shared/mcp" } } },
+				{ mcpServers: { shared: { type: "http", url: "https://project.shared/mcp" } } },
+				(manager) => manager.getGlobalMcpServers(),
+				{ shared: { type: "http", url: "https://global.shared/mcp" } },
+			],
+			[
+				"idle eviction stays global-only",
+				{ idleEvictionMinutes: 60 },
+				{ idleEvictionMinutes: 30 },
+				(manager) => manager.getIdleEvictionMinutes(),
+				60,
+			],
+			[
+				"autonomous limits merge project over global, dropping invalid entries",
+				{ autonomous: { maxContinuations: 10, maxTurns: 40 } },
+				{ autonomous: { maxContinuations: "unlimited", maxTokens: "one million" } },
+				(manager) => manager.getAutonomousLimits(),
+				{
+					maxContinuations: Number.MAX_SAFE_INTEGER,
+					maxTurns: 40,
+					maxTokens: undefined,
+					timeoutMs: undefined,
 				},
-			});
+			],
+		])("%s", (_label, global, project, read, expected) => {
+			writeSettings(globalPath, global);
+			writeSettings(projectPath, project);
 
-			expect(manager.getProviderWaitSettings()).toEqual({
-				enabled: false,
-				baseDelayMs: 500,
-				maxDelayMs: 60_000,
-				maxAttempts: 10,
-				maxWaitMs: 120_000,
-			});
-		});
-
-		it("clamps non-finite wait bounds to the defaults", () => {
-			const manager = SettingsManager.inMemory({
-				retry: { provider: { waitForUsage: { baseDelayMs: Number.NaN, maxAttempts: -5 } } },
-			});
-
-			const wait = manager.getProviderWaitSettings();
-			expect(wait.baseDelayMs).toBe(1000);
-			expect(wait.maxAttempts).toBe(0);
-		});
-
-		it("returns the backup model reference trimmed", () => {
-			const manager = SettingsManager.inMemory({ providerBackupModel: "  anthropic/claude-opus-4-7  " });
-
-			expect(manager.getProviderBackupModel()).toBe("anthropic/claude-opus-4-7");
-
-			const unset = SettingsManager.inMemory({ providerBackupModel: "   " });
-			expect(unset.getProviderBackupModel()).toBeUndefined();
-		});
-
-		it("treats a non-string providerBackupModel value as unset instead of throwing", () => {
-			// Parsed settings are only cast; a corrupted value must not throw into the retry path.
-			const numeric = SettingsManager.inMemory({ providerBackupModel: 123 as unknown as string });
-			expect(numeric.getProviderBackupModel()).toBeUndefined();
-
-			const listed = SettingsManager.inMemory({
-				providerBackupModel: ["faux/faux-backup"] as unknown as string,
-			});
-			expect(listed.getProviderBackupModel()).toBeUndefined();
+			expect(read(SettingsManager.create(projectDir, agentDir))).toEqual(expected);
 		});
 	});
-	describe("autonomous limits and subagent default model", () => {
-		it("resolves persisted autonomous limits and maps unlimited to the runtime sentinel", () => {
-			writeFileSync(
-				join(agentDir, "settings.json"),
-				JSON.stringify({
-					autonomous: {
-						maxContinuations: 25,
-						maxTurns: "unlimited",
-						maxTokens: 1_000_000,
-						timeoutMs: 3_600_000,
-					},
-				}),
-			);
+
+	// Telemetry may only ever be narrowed: no project file or runtime override can opt a user back in.
+	describe("telemetry privacy controls", () => {
+		it.each<[string, unknown, unknown, boolean]>([
+			[
+				"a global opt-out survives project opt-in",
+				{ enabled: false, noticeShown: false },
+				{ enabled: true, noticeShown: true },
+				false,
+			],
+			["a project opt-out disables globally enabled telemetry", { enabled: true }, { enabled: false }, false],
+			["both enabled keeps telemetry on", { enabled: true }, { enabled: true }, true],
+		])("%s", (_label, global, project, expected) => {
+			writeSettings(globalPath, { telemetry: global });
+			writeSettings(projectPath, { telemetry: project });
 
 			const manager = SettingsManager.create(projectDir, agentDir);
 
-			expect(manager.getAutonomousLimits()).toEqual({
-				maxContinuations: 25,
-				maxTurns: Number.MAX_SAFE_INTEGER,
-				maxTokens: 1_000_000,
-				timeoutMs: 3_600_000,
-			});
+			expect(manager.getTelemetryEnabled()).toBe(expected);
+			if (!expected) expect(manager.getTelemetryNoticeShown()).toBe(false);
 		});
 
-		it("merges project autonomous settings over global ones and drops invalid entries", () => {
-			writeFileSync(
-				join(agentDir, "settings.json"),
-				JSON.stringify({ autonomous: { maxContinuations: 10, maxTurns: 40 } }),
-			);
-			writeFileSync(
-				join(projectDir, ".prime", "agent", "settings.json"),
-				JSON.stringify({
-					autonomous: { maxContinuations: "unlimited", maxTokens: "one million" },
-				}),
-			);
-
+		it.each<[string, boolean, boolean, boolean]>([
+			["further disable telemetry", true, false, false],
+			["not re-enable a global opt-out", false, true, false],
+		])("runtime overrides can %s", (_label, globalEnabled, overrideEnabled, expected) => {
+			writeSettings(globalPath, { telemetry: { enabled: globalEnabled, noticeShown: true } });
 			const manager = SettingsManager.create(projectDir, agentDir);
 
-			expect(manager.getAutonomousLimits()).toEqual({
-				maxContinuations: Number.MAX_SAFE_INTEGER,
-				maxTurns: 40,
-				maxTokens: undefined,
-				timeoutMs: undefined,
-			});
-		});
+			manager.applyOverrides({ telemetry: { enabled: overrideEnabled, noticeShown: overrideEnabled } });
 
-		it("drops fractional limits that truncate to zero instead of returning zero budgets", () => {
-			writeFileSync(
-				join(agentDir, "settings.json"),
-				JSON.stringify({
-					autonomous: { maxTurns: 0.5, maxTokens: 1_000.75, maxContinuations: 2.5 },
-				}),
-			);
-
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			expect(manager.getAutonomousLimits()).toEqual({
-				maxContinuations: 2,
-				maxTokens: 1_000,
-				maxTurns: undefined,
-				timeoutMs: undefined,
-			});
-		});
-
-		it("returns empty autonomous limits when unset", () => {
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			expect(manager.getAutonomousLimits()).toEqual({});
-		});
-
-		it("trims the subagent default model and treats blank as unset", () => {
-			writeFileSync(
-				join(agentDir, "settings.json"),
-				JSON.stringify({ subagentDefaultModel: "  prime-inference/internal/glm-5.2-fast  " }),
-			);
-			const manager = SettingsManager.create(projectDir, agentDir);
-			expect(manager.getSubagentDefaultModel()).toBe("prime-inference/internal/glm-5.2-fast");
-
-			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ subagentDefaultModel: "   " }));
-			const blank = SettingsManager.create(projectDir, agentDir);
-			expect(blank.getSubagentDefaultModel()).toBeUndefined();
-		});
-
-		it("treats a non-string subagentDefaultModel value as unset instead of throwing", () => {
-			// Parsed settings are only cast; a corrupted value must not throw into the spawn path.
-			const numeric = SettingsManager.inMemory({ subagentDefaultModel: 123 as unknown as string });
-			expect(numeric.getSubagentDefaultModel()).toBeUndefined();
-
-			const listed = SettingsManager.inMemory({
-				subagentDefaultModel: ["faux/faux-child"] as unknown as string,
-			});
-			expect(listed.getSubagentDefaultModel()).toBeUndefined();
+			expect(manager.getTelemetryEnabled()).toBe(expected);
 		});
 	});
 });

@@ -19,6 +19,7 @@ import { AgentCronJobStore } from "../src/core/cron-jobs.js";
 import { readActiveOrphanProcesses } from "../src/core/orphan-process-journal.js";
 import {
 	acquireSessionLease,
+	getPsProcessStartId,
 	SESSION_LEASE_OWNER_ID_ENV,
 	SESSION_LEASES_ENABLED_ENV,
 } from "../src/core/session-lease.js";
@@ -1823,5 +1824,38 @@ describe("daemon supervisor resident workers", () => {
 			chmodSync(socketDir, 0o755);
 		}
 		workerPids.delete(workerPid);
+	});
+});
+
+describe("issue #879 stable daemon process identity across timezone changes", () => {
+	it("pins the portable process query to UTC across caller timezone changes", () => {
+		const calls: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv | undefined }> = [];
+		const query = (command: string, args: string[], options?: { env?: NodeJS.ProcessEnv }) => {
+			calls.push({ command, args, env: options?.env });
+			return options?.env?.TZ === "UTC" ? "Sat Aug 29 20:55:18 2026\n" : "Sat Aug 29 16:55:18 2026\n";
+		};
+		const originalTimezone = process.env.TZ;
+		let before: string | undefined;
+		let after: string | undefined;
+		try {
+			process.env.TZ = "America/Los_Angeles";
+			before = getPsProcessStartId(42, query);
+			process.env.TZ = "America/New_York";
+			after = getPsProcessStartId(42, query);
+		} finally {
+			if (originalTimezone === undefined) delete process.env.TZ;
+			else process.env.TZ = originalTimezone;
+		}
+
+		expect(before).toBe("ps:Sat Aug 29 20:55:18 2026");
+		expect(after).toBe(before);
+		expect(calls).toHaveLength(2);
+		for (const call of calls) {
+			expect(call).toMatchObject({
+				command: "ps",
+				args: ["-p", "42", "-o", "lstart="],
+				env: { LC_ALL: "C", LC_TIME: "C", LANG: "C", TZ: "UTC" },
+			});
+		}
 	});
 });

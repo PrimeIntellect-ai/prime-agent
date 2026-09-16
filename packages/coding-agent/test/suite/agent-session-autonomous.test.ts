@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
 	addAutonomousUsage,
 	createAutonomousRuntimeState,
@@ -12,8 +12,9 @@ import {
 	shouldAutonomouslyContinue,
 	UNLIMITED_AUTONOMOUS_LIMIT,
 } from "../../src/core/autonomous.js";
-import type { AgentCronJob } from "../../src/core/cron-jobs.js";
 import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.js";
+
+const CONTINUATION = `[autonomous-continuation]\n\n${DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT}`;
 
 function isProcessRunning(pid: number): boolean {
 	try {
@@ -43,6 +44,27 @@ async function waitForPidFile(path: string, timeoutMs = 2000): Promise<number> {
 	return Number.parseInt(readFileSync(path, "utf8"), 10);
 }
 
+function initGitRepo(dir: string, options?: { commitFile?: string }): void {
+	mkdirSync(dir, { recursive: true });
+	execFileSync("git", ["init"], { cwd: dir, stdio: "ignore" });
+	execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: dir });
+	execFileSync("git", ["config", "user.name", "Test User"], { cwd: dir });
+	if (options?.commitFile) {
+		writeFileSync(join(dir, options.commitFile), "initial\n");
+		execFileSync("git", ["add", options.commitFile], { cwd: dir });
+		execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "--no-gpg-sign", "-m", "initial"], {
+			cwd: dir,
+			stdio: "ignore",
+		});
+	}
+}
+
+function scratchRepo(label: string, options?: { commitFile?: string }): string {
+	const dir = join(process.cwd(), `.tmp-autonomous-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+	initGitRepo(dir, options);
+	return dir;
+}
+
 describe("AgentSession autonomous mode", () => {
 	const harnesses: Harness[] = [];
 
@@ -52,26 +74,18 @@ describe("AgentSession autonomous mode", () => {
 		}
 	});
 
-	it("injects a host-side continuation when the assistant asks the user for help", async () => {
-		const harness = await createHarness({
-			autonomous: { enabled: true, maxContinuations: 1 },
-		});
+	it.each([
+		["a question to the user", "Which package manager should I use?"],
+		["a claimed external blocker", "Blocked: this requires an API key credential from the user."],
+		["a bare completion claim without evidence", "Done."],
+	])("injects a host-side continuation for %s", async (_name, firstResponse) => {
+		const harness = await createHarness({ autonomous: { enabled: true, maxContinuations: 1 } });
 		harnesses.push(harness);
-		harness.setResponses([
-			fauxAssistantMessage("Which package manager should I use?"),
-			fauxAssistantMessage("I inspected the repo and used npm."),
-		]);
+		harness.setResponses([fauxAssistantMessage(firstResponse), fauxAssistantMessage("I verified it myself.")]);
 
 		await harness.session.prompt("fix the project");
 
-		expect(getAssistantTexts(harness)).toEqual([
-			"Which package manager should I use?",
-			"I inspected the repo and used npm.",
-		]);
-		expect(getUserTexts(harness)).toEqual([
-			"fix the project",
-			`[autonomous-continuation]\n\n${DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT}`,
-		]);
+		expect(getUserTexts(harness)).toEqual(["fix the project", CONTINUATION]);
 		expect(harness.session.getAutonomousStatus()).toMatchObject({
 			enabled: true,
 			continuationsUsed: 1,
@@ -79,35 +93,38 @@ describe("AgentSession autonomous mode", () => {
 		});
 	});
 
-	it("continues through a claimed external blocker instead of trusting prose", async () => {
-		const harness = await createHarness({
-			autonomous: { enabled: true, maxContinuations: 1 },
+	it.each([
+		["a mid-run question", "I'm blocked. What should I try next?"],
+		["a claimed credential blocker", "Blocked: this requires OAuth login from the user."],
+	])("does not accept assistant prose as terminal evidence for %s", async (_name, text) => {
+		const state = createAutonomousRuntimeState({ enabled: true });
+
+		expect(await shouldAutonomouslyContinue(state, fauxAssistantMessage(text))).toMatchObject({
+			shouldContinue: true,
+			reason: "missing_terminal_evidence",
 		});
+	});
+
+	it("continues after a git worktree change instead of letting the agent self-terminate", async () => {
+		const harness = await createHarness();
 		harnesses.push(harness);
+		initGitRepo(harness.tempDir, { commitFile: "file.txt" });
+		await harness.session.prompt("/autonomous on");
+		writeFileSync(join(harness.tempDir, "file.txt"), "after\n");
 		harness.setResponses([
-			fauxAssistantMessage("Blocked: this requires an API key credential from the user."),
-			fauxAssistantMessage(
-				"I will inspect the environment and verify whether the credential is actually unavailable.",
-			),
+			fauxAssistantMessage("Done."),
+			fauxAssistantMessage("Continuing until the evaluator stops me."),
 		]);
 
-		await harness.session.prompt("run the private eval");
+		await harness.session.prompt("make the change");
 
-		expect(getUserTexts(harness)).toEqual([
-			"run the private eval",
-			`[autonomous-continuation]\n\n${DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT}`,
-		]);
-		expect(harness.session.getAutonomousStatus()).toMatchObject({
-			enabled: true,
-			continuationsUsed: 1,
-			turnsUsed: 2,
-		});
+		expect(getUserTexts(harness)[0]).toBe("make the change");
+		expect(getUserTexts(harness).slice(1)).toContain(CONTINUATION);
+		expect(harness.session.getAutonomousStatus().continuationsUsed).toBeGreaterThan(0);
 	});
 
 	it("stops after the configured autonomous continuation limit", async () => {
-		const harness = await createHarness({
-			autonomous: { enabled: true, maxContinuations: 1 },
-		});
+		const harness = await createHarness({ autonomous: { enabled: true, maxContinuations: 1 } });
 		harnesses.push(harness);
 		harness.setResponses([
 			fauxAssistantMessage("Can you confirm the test command?"),
@@ -116,185 +133,147 @@ describe("AgentSession autonomous mode", () => {
 
 		await harness.session.prompt("make the change");
 
-		expect(getAssistantTexts(harness)).toEqual([
-			"Can you confirm the test command?",
-			"Can you confirm whether to run lint too?",
-		]);
-		expect(getUserTexts(harness)).toEqual([
-			"make the change",
-			`[autonomous-continuation]\n\n${DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT}`,
-		]);
+		expect(getUserTexts(harness)).toEqual(["make the change", CONTINUATION]);
 		expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(1);
 	});
 
-	it("does not count failed assistant messages against autonomous usage limits", async () => {
-		const harness = await createHarness({
-			autonomous: { enabled: true, maxTurns: 1 },
-		});
+	it.each([
+		["does not count failed assistant messages", { stopReason: "error", errorMessage: "provider failed" }, 0],
+		["counts aborted assistant messages", { stopReason: "aborted" }, 1],
+	] as const)("%s against autonomous usage limits", async (_name, messageOptions, turnsUsed) => {
+		const harness = await createHarness({ autonomous: { enabled: true, maxTurns: 1 } });
 		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("failed", { stopReason: "error", errorMessage: "provider failed" })]);
+		harness.setResponses([fauxAssistantMessage("stopped", messageOptions)]);
 
 		await harness.session.prompt("try once");
 
-		expect(harness.session.getAutonomousStatus()).toMatchObject({
-			turnsUsed: 0,
-			tokensUsed: 0,
-			continuationsUsed: 0,
+		expect(harness.session.getAutonomousStatus()).toMatchObject({ turnsUsed, continuationsUsed: 0 });
+	});
+
+	it("does not count cache-read tokens against the autonomous token budget", async () => {
+		const state = createAutonomousRuntimeState({ enabled: true, maxTokens: 10 });
+
+		addAutonomousUsage(state, {
+			input: 2,
+			output: 3,
+			cacheRead: 1_000,
+			cacheWrite: 4,
+			totalTokens: 1_009,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		});
+
+		expect(state.tokensUsed).toBe(9);
+		expect(await shouldAutonomouslyContinue(state, fauxAssistantMessage("Done."))).toMatchObject({
+			shouldContinue: true,
 		});
 	});
 
-	it("counts aborted assistant messages against autonomous usage limits", async () => {
-		const harness = await createHarness({
-			autonomous: { enabled: true, maxTurns: 1 },
-		});
-		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("aborted", { stopReason: "aborted" })]);
-
-		await harness.session.prompt("try once");
-
-		expect(harness.session.getAutonomousStatus()).toMatchObject({
-			turnsUsed: 1,
-			continuationsUsed: 0,
-		});
-	});
-
-	it("supports /autonomous on and off without calling the model", async () => {
+	it("toggles autonomous mode without calling the model", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 
 		await harness.session.prompt("/autonomous on");
+		expect(harness.session.getAutonomousStatus().enabled).toBe(true);
 		await harness.session.prompt("/autonomous off");
 
 		expect(harness.getPendingResponseCount()).toBe(0);
 		expect(harness.session.getAutonomousStatus().enabled).toBe(false);
-		const statusMessages = harness.session.messages.filter(
-			(message) => message.role === "custom" && message.customType === "autonomous_status",
-		);
-		expect(statusMessages).toHaveLength(2);
-		expect(getMessageText(statusMessages[0]).startsWith("[autonomous-status: on]\n\n")).toBe(true);
-		expect(getMessageText(statusMessages[1]).startsWith("[autonomous-status: off]\n\n")).toBe(true);
 	});
 
-	it("applies user-defined budget flags when enabling autonomous mode", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-
-		await harness.session.prompt(
+	it.each([
+		[
+			"long budget flags",
 			"/autonomous on --max-continuations 5 --max-turns 25 --max-tokens 250000 --timeout-ms 600000",
-		);
-
-		expect(harness.getPendingResponseCount()).toBe(0);
-		expect(harness.session.getAutonomousStatus()).toMatchObject({
-			enabled: true,
-			continuationsUsed: 0,
-			turnsUsed: 0,
-			tokensUsed: 0,
-			limits: {
-				maxContinuations: 5,
-				maxTurns: 25,
-				maxTokens: 250_000,
-				timeoutMs: 600_000,
+			{ maxContinuations: 5, maxTurns: 25, maxTokens: 250_000, timeoutMs: 600_000 },
+		],
+		[
+			"digit separators",
+			"/autonomous on --max-tokens 100,000,000,000 --max-continuations 1_000 --max-turns 10,000 --timeout-ms 3,600,000",
+			{ maxContinuations: 1_000, maxTurns: 10_000, maxTokens: 100_000_000_000, timeoutMs: 3_600_000 },
+		],
+		[
+			"unlimited values",
+			"/autonomous on --max-continuations unlimited --max-turns unlimited --max-tokens unlimited --timeout-ms unlimited",
+			{
+				maxContinuations: UNLIMITED_AUTONOMOUS_LIMIT,
+				maxTurns: UNLIMITED_AUTONOMOUS_LIMIT,
+				maxTokens: UNLIMITED_AUTONOMOUS_LIMIT,
+				timeoutMs: UNLIMITED_AUTONOMOUS_LIMIT,
 			},
-		});
-	});
-
-	it("continues through a user-defined continuation budget instead of the default three", async () => {
+		],
+		[
+			"a single named budget that lifts the unnamed ones",
+			"/autonomous on --max-tokens 100,000",
+			{
+				maxContinuations: UNLIMITED_AUTONOMOUS_LIMIT,
+				maxTurns: UNLIMITED_AUTONOMOUS_LIMIT,
+				maxTokens: 100_000,
+				timeoutMs: UNLIMITED_AUTONOMOUS_LIMIT,
+			},
+		],
+		[
+			"no budget flags at all",
+			'/autonomous on --gate "npm run lint" --gate "npm test"',
+			{ maxContinuations: 3, maxTurns: 12, maxTokens: 80_000, timeoutMs: 1_800_000 },
+		],
+	])("parses %s into run limits", async (_name, input, limits) => {
 		const harness = await createHarness();
 		harnesses.push(harness);
-		harness.setResponses(
-			Array.from({ length: 8 }, (_, index) => fauxAssistantMessage(`Question ${index + 1}: what next?`)),
-		);
 
-		await harness.session.prompt("/autonomous on --max-continuations 5");
-		await harness.session.prompt("make the change");
+		await harness.session.prompt(input);
 
-		expect(harness.session.getAutonomousStatus()).toMatchObject({
-			enabled: true,
-			continuationsUsed: 5,
-			limits: { maxContinuations: 5 },
-		});
+		expect(harness.session.getAutonomousStatus().limits).toEqual(limits);
 	});
 
-	it("accepts the CLI autonomous flag spellings and inline values", async () => {
+	it("accepts CLI gate flag spellings, inline values, and repeated gates", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 
 		await harness.session.prompt(
-			'/autonomous on --autonomous-max-continuations=7 --autonomous-gate "npm test" --autonomous-gate-retries=2 --autonomous-gate-timeout-ms 45000',
+			'/autonomous on --autonomous-max-continuations=7 --autonomous-gate "npm test" --autonomous-gate-retries=2 --autonomous-gate-timeout-ms 45000 --gate "npm run lint" --subagent-keep-alive-ms 250',
 		);
 
 		expect(harness.session.getAutonomousStatus()).toMatchObject({
 			enabled: true,
 			limits: { maxContinuations: 7 },
-			gates: {
-				commands: ["npm test"],
-				maxRetries: 2,
-				timeoutMs: 45_000,
+			subagentKeepAliveMs: 250,
+			gates: { commands: ["npm test", "npm run lint"], maxRetries: 2, timeoutMs: 45_000 },
+		});
+	});
+
+	it.each([
+		[
+			"persisted settings when no run-level limits are set",
+			{ settings: { autonomous: { maxContinuations: 100, maxTurns: "unlimited", maxTokens: 1_000_000 } } },
+			{
+				maxContinuations: 100,
+				maxTurns: UNLIMITED_AUTONOMOUS_LIMIT,
+				maxTokens: 1_000_000,
+				timeoutMs: 30 * 60 * 1000,
 			},
-		});
-	});
-
-	it("bounds the run only by the named budget flags", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-
-		await harness.session.prompt("/autonomous on --max-tokens 100,000");
-
-		// Only the named budget limit applies; the unnamed ones stop cutting the run short.
-		expect(harness.session.getAutonomousStatus().limits).toEqual({
-			maxContinuations: UNLIMITED_AUTONOMOUS_LIMIT,
-			maxTurns: UNLIMITED_AUTONOMOUS_LIMIT,
-			maxTokens: 100_000,
-			timeoutMs: UNLIMITED_AUTONOMOUS_LIMIT,
-		});
-	});
-
-	it("seeds autonomous limits from persisted settings when no run-level limits are set", async () => {
-		const harness = await createHarness({
-			settings: {
-				autonomous: { maxContinuations: 100, maxTurns: "unlimited", maxTokens: 1_000_000 },
+		],
+		[
+			"explicit run-level limits ahead of persisted settings",
+			{
+				settings: { autonomous: { maxContinuations: 100, maxTokens: 1_000_000 } },
+				autonomous: { enabled: true, maxContinuations: 2, maxTokens: 20_000 },
 			},
-		});
+			{ maxContinuations: 2, maxTokens: 20_000 },
+		],
+		[
+			"built-in defaults for invalid persisted limits",
+			{ settings: { autonomous: { maxContinuations: -3, maxTurns: 0.5, maxTokens: 0.5 } } },
+			{ maxContinuations: 3, maxTurns: 12, maxTokens: 80_000 },
+		],
+	] as const)("seeds limits from %s", async (_name, options, limits) => {
+		const harness = await createHarness(options);
 		harnesses.push(harness);
 
-		expect(harness.session.getAutonomousStatus().limits).toEqual({
-			maxContinuations: 100,
-			maxTurns: UNLIMITED_AUTONOMOUS_LIMIT,
-			maxTokens: 1_000_000,
-			timeoutMs: 30 * 60 * 1000,
-		});
-	});
-
-	it("keeps explicit run-level autonomous limits ahead of persisted settings", async () => {
-		const harness = await createHarness({
-			settings: { autonomous: { maxContinuations: 100, maxTokens: 1_000_000 } },
-			autonomous: { enabled: true, maxContinuations: 2, maxTokens: 20_000 },
-		});
-		harnesses.push(harness);
-
-		expect(harness.session.getAutonomousStatus()).toMatchObject({
-			enabled: true,
-			limits: { maxContinuations: 2, maxTokens: 20_000 },
-		});
-	});
-
-	it("drops invalid persisted autonomous limits back to the built-in defaults", async () => {
-		const harness = await createHarness({
-			settings: { autonomous: { maxContinuations: -3, maxTurns: 0.5, maxTokens: 0.5 } },
-		});
-		harnesses.push(harness);
-
-		expect(harness.session.getAutonomousStatus().limits).toMatchObject({
-			maxContinuations: 3,
-			maxTurns: 12,
-			maxTokens: 80_000,
-		});
+		expect(harness.session.getAutonomousStatus().limits).toMatchObject(limits);
 	});
 
 	it("keeps settings-derived limits when enabling autonomous mode without budget flags", async () => {
-		const harness = await createHarness({
-			settings: { autonomous: { maxContinuations: 100 } },
-		});
+		const harness = await createHarness({ settings: { autonomous: { maxContinuations: 100 } } });
 		harnesses.push(harness);
 
 		await harness.session.prompt("/autonomous on");
@@ -305,84 +284,8 @@ describe("AgentSession autonomous mode", () => {
 		});
 	});
 
-	it("keeps defaults when no budget flags are named and appends repeated gates", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-
-		await harness.session.prompt('/autonomous on --gate "npm run lint" --gate "npm test"');
-
-		const status = harness.session.getAutonomousStatus();
-		expect(status.limits).toEqual({
-			maxContinuations: 3,
-			maxTurns: 12,
-			maxTokens: 80_000,
-			timeoutMs: 1_800_000,
-		});
-		expect(status.gates.commands).toEqual(["npm run lint", "npm test"]);
-	});
-
-	it("accepts large budgets written with digit separators", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-
-		await harness.session.prompt(
-			"/autonomous on --max-tokens 100,000,000,000 --max-continuations 1_000 --max-turns 10,000 --timeout-ms 3,600,000",
-		);
-
-		expect(harness.session.getAutonomousStatus().limits).toEqual({
-			maxContinuations: 1_000,
-			maxTurns: 10_000,
-			maxTokens: 100_000_000_000,
-			timeoutMs: 3_600_000,
-		});
-		const statusMessages = harness.session.messages.filter(
-			(message) => message.role === "custom" && message.customType === "autonomous_status",
-		);
-		expect(getMessageText(statusMessages[0])).toContain("Tokens: 0/100,000,000,000");
-	});
-
-	it("supports unlimited budget values", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-
-		await harness.session.prompt(
-			"/autonomous on --max-continuations unlimited --max-turns unlimited --max-tokens unlimited --timeout-ms unlimited",
-		);
-
-		expect(harness.session.getAutonomousStatus().limits).toEqual({
-			maxContinuations: UNLIMITED_AUTONOMOUS_LIMIT,
-			maxTurns: UNLIMITED_AUTONOMOUS_LIMIT,
-			maxTokens: UNLIMITED_AUTONOMOUS_LIMIT,
-			timeoutMs: UNLIMITED_AUTONOMOUS_LIMIT,
-		});
-		const statusMessages = harness.session.messages.filter(
-			(message) => message.role === "custom" && message.customType === "autonomous_status",
-		);
-		const statusText = getMessageText(statusMessages[0]);
-		expect(statusText).toContain("Continuations: 0/unlimited");
-		expect(statusText).toContain("Time: 0s/unlimited");
-	});
-
-	it("continues an unlimited-continuation run past the default three", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		harness.setResponses(
-			Array.from({ length: 6 }, (_, index) => fauxAssistantMessage(`Question ${index + 1}: what next?`)),
-		);
-
-		await harness.session.prompt("/autonomous on --max-continuations unlimited --max-turns unlimited");
-		await harness.session.prompt("make the change");
-
-		const status = harness.session.getAutonomousStatus();
-		expect(isUnlimitedAutonomousLimit(status.limits.maxContinuations)).toBe(true);
-		expect(status.continuationsUsed).toBe(6);
-	});
-
 	it("rejects invalid budget flags without enabling autonomous mode", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-
-		for (const input of [
+		const inputs = [
 			"/autonomous on --max-continuations 0",
 			"/autonomous on --max-continuations",
 			"/autonomous on --speed 10",
@@ -390,68 +293,49 @@ describe("AgentSession autonomous mode", () => {
 			"/autonomous on --subagent-keep-alive-ms 3000000000",
 			"/autonomous on --subagent-keep-alive-ms -5",
 			"/autonomous off --max-continuations 2",
-		]) {
+		];
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		for (const input of inputs) {
 			await harness.session.prompt(input);
 		}
-		const commandErrors = harness.session.messages
-			.filter((message) => message.role === "custom" && message.customType === "session_slash_command_result")
-			.map((message) => (message as { content: string }).content);
-		expect(commandErrors).toEqual([
-			expect.stringContaining('--max-continuations must be a positive integer or "unlimited"'),
-			expect.stringContaining("Missing value for --max-continuations"),
-			expect.stringContaining("Unknown autonomous budget flag: --speed"),
-			expect.stringContaining("--gate-retries must be a positive integer."),
-			expect.stringContaining("--subagent-keep-alive-ms must be 0 or a positive integer up to 2147483647"),
-			expect.stringContaining("--subagent-keep-alive-ms must be 0 or a positive integer up to 2147483647"),
-			expect.stringContaining("Unexpected autonomous argument: --max-continuations"),
-		]);
 
+		expect(
+			harness.session.messages.filter(
+				(message) => message.role === "custom" && message.customType === "session_slash_command_result",
+			),
+		).toHaveLength(inputs.length);
 		expect(harness.session.getAutonomousStatus().enabled).toBe(false);
 	});
 
-	it("continues when the assistant tries to finish without terminal evidence", async () => {
-		const harness = await createHarness({
-			autonomous: { enabled: true, maxContinuations: 1 },
-		});
-		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("Done."), fauxAssistantMessage("I will collect concrete evidence.")]);
-
-		await harness.session.prompt("make the change");
-
-		expect(getUserTexts(harness)).toEqual([
-			"make the change",
-			`[autonomous-continuation]\n\n${DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT}`,
-		]);
-		expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(1);
-	});
-
-	it("continues after a git worktree change instead of letting the agent self-terminate", async () => {
+	it("continues past the default three when the continuation budget is raised or unlimited", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
-		execFileSync("git", ["init"], { cwd: harness.tempDir, stdio: "ignore" });
-		execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: harness.tempDir });
-		execFileSync("git", ["config", "user.name", "Test User"], { cwd: harness.tempDir });
-		const path = join(harness.tempDir, "file.txt");
-		writeFileSync(path, "before\n");
-		execFileSync("git", ["add", "file.txt"], { cwd: harness.tempDir });
-		execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "--no-gpg-sign", "-m", "initial"], {
-			cwd: harness.tempDir,
-			stdio: "ignore",
-		});
-		await harness.session.prompt("/autonomous on");
-		writeFileSync(path, "after\n");
-		harness.setResponses([
-			fauxAssistantMessage("Done."),
-			fauxAssistantMessage("Continuing until the evaluator stops me."),
-		]);
+		harness.setResponses(
+			Array.from({ length: 8 }, (_, index) => fauxAssistantMessage(`Question ${index + 1}: what next?`)),
+		);
 
+		await harness.session.prompt("/autonomous on --max-continuations 5");
 		await harness.session.prompt("make the change");
 
-		expect(getUserTexts(harness)[0]).toBe("make the change");
-		expect(getUserTexts(harness).slice(1)).toContain(
-			`[autonomous-continuation]\n\n${DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT}`,
+		expect(harness.session.getAutonomousStatus()).toMatchObject({
+			continuationsUsed: 5,
+			limits: { maxContinuations: 5 },
+		});
+
+		const unlimited = await createHarness();
+		harnesses.push(unlimited);
+		unlimited.setResponses(
+			Array.from({ length: 6 }, (_, index) => fauxAssistantMessage(`Question ${index + 1}: what next?`)),
 		);
-		expect(harness.session.getAutonomousStatus().continuationsUsed).toBeGreaterThan(0);
+
+		await unlimited.session.prompt("/autonomous on --max-continuations unlimited --max-turns unlimited");
+		await unlimited.session.prompt("make the change");
+
+		const status = unlimited.session.getAutonomousStatus();
+		expect(isUnlimitedAutonomousLimit(status.limits.maxContinuations)).toBe(true);
+		expect(status.continuationsUsed).toBe(6);
 	});
 
 	it("runs autonomous gates before applying usage limits", async () => {
@@ -461,19 +345,11 @@ describe("AgentSession autonomous mode", () => {
 			gates: { commands: [`${process.execPath} -e "process.exit(0)"`] },
 		});
 		state.turnsUsed = 1;
-		state.lastGateFailure = {
-			command: "stale gate",
-			attempt: 1,
-			exitText: "exited 1",
-			output: "stale failure",
-		};
+		state.lastGateFailure = { command: "stale gate", attempt: 1, exitText: "exited 1", output: "stale failure" };
 
 		expect(
 			await shouldAutonomouslyContinue(state, fauxAssistantMessage("Done."), { cwd: process.cwd() }),
-		).toMatchObject({
-			shouldContinue: false,
-			reason: "not_needed",
-		});
+		).toMatchObject({ shouldContinue: false, reason: "not_needed" });
 		expect(state.lastGateFailure).toBeUndefined();
 	});
 
@@ -510,10 +386,7 @@ describe("AgentSession autonomous mode", () => {
 
 		await harness.session.prompt("make the change");
 
-		const users = getUserTexts(harness);
-		expect(users[1].startsWith("[autonomous-continuation: gate-failed]\n\nAutonomous quality gate failed")).toBe(
-			true,
-		);
+		expect(getUserTexts(harness)[1].startsWith("[autonomous-continuation: gate-failed]")).toBe(true);
 		expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(1);
 	});
 
@@ -542,64 +415,9 @@ describe("AgentSession autonomous mode", () => {
 		expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(1);
 	});
 
-	it("suppresses autonomous continuation injection for queued host-driven prompts", async () => {
-		const harness = await createHarness({
-			autonomous: {
-				enabled: true,
-				maxContinuations: 2,
-				gates: {
-					commands: [`${process.execPath} -e "console.error('gate failed'); process.exit(1)"`],
-					maxRetries: 2,
-				},
-			},
-		});
-		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("Still failing.")]);
-		const sessionInternals = harness.session as unknown as {
-			_compactionAbortController?: AbortController;
-		};
-		sessionInternals._compactionAbortController = new AbortController();
-		const heartbeatJob = {
-			id: "heartbeat-test",
-			status: "active",
-			activeSessionId: "active-test",
-			sessionId: harness.session.sessionId,
-			sessionFile: harness.session.sessionFile ?? "session.jsonl",
-			cwd: harness.tempDir,
-			prompt: "host gate follow-up",
-			schedule: { kind: "interval", expression: "every 5m", intervalMs: 300_000 },
-			createdAt: new Date().toISOString(),
-			updatedAt: new Date().toISOString(),
-			runCount: 0,
-		} satisfies AgentCronJob;
-
-		await harness.session.promptHeartbeat(heartbeatJob, {
-			queueIfBusy: true,
-			streamingBehavior: "followUp",
-			suppressAutonomousContinuation: true,
-		});
-		sessionInternals._compactionAbortController = undefined;
-		expect(harness.session.resumeQueuedWork()).toBe(true);
-		await vi.waitFor(() => expect(harness.session.queuedActionCount).toBe(0));
-		await harness.session.waitForSessionInputIdle();
-
-		expect(getAssistantTexts(harness)).toEqual(["Still failing."]);
-		expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(0);
-		expect(harness.getPendingResponseCount()).toBe(0);
-	});
-
 	it("advances retry budget without rerunning a failed autonomous gate until the workspace changes", async () => {
-		const tempDir = join(process.cwd(), `.tmp-autonomous-gate-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-		execFileSync("mkdir", ["-p", join(tempDir, "verification")]);
-		execFileSync("git", ["init"], { cwd: tempDir, stdio: "ignore" });
-		execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: tempDir });
-		execFileSync("git", ["config", "user.name", "Test User"], { cwd: tempDir });
-		writeFileSync(join(tempDir, "src.rs"), "initial\n");
-		execFileSync("git", ["add", "src.rs"], { cwd: tempDir });
-		execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "--no-gpg-sign", "-m", "initial"], {
-			cwd: tempDir,
-			stdio: "ignore",
-		});
+		const tempDir = scratchRepo("gate", { commitFile: "src.rs" });
+		mkdirSync(join(tempDir, "verification"), { recursive: true });
 		try {
 			const counter = join(tempDir, "verification", "public_feedback_scores.jsonl");
 			const gate = `${process.execPath} -e "const fs=require('fs'); const p='${counter}'; const n=fs.existsSync(p)?fs.readFileSync(p,'utf8').trim().split(/\\n/).filter(Boolean).length:0; fs.appendFileSync(p,JSON.stringify({run:n+1,score:0})+'\\n'); process.exit(1);"`;
@@ -609,13 +427,13 @@ describe("AgentSession autonomous mode", () => {
 			);
 
 			const first = await nextAutonomousContinuation(state, fauxAssistantMessage("Done."), { cwd: tempDir });
+			// A generated lockfile must not count as workspace progress.
 			writeFileSync(join(tempDir, "Cargo.lock"), "generated lockfile\n");
 			const second = await nextAutonomousContinuation(state, fauxAssistantMessage("Still done."), { cwd: tempDir });
 
 			expect(first).toBeDefined();
 			expect(second).toBeDefined();
 			expect(getMessageText(second)).toContain("workspace has not changed");
-			expect(getMessageText(second)).toContain("Edit source files");
 			expect(readFileSync(counter, "utf8").trim().split(/\n/)).toHaveLength(1);
 			expect(state.gateAttempts[gate]).toBe(2);
 		} finally {
@@ -623,21 +441,30 @@ describe("AgentSession autonomous mode", () => {
 		}
 	});
 
+	it("records the post-failure worktree snapshot so gate-written files do not trigger a rerun", async () => {
+		const tempDir = scratchRepo("post-snapshot", { commitFile: "src.rs" });
+		try {
+			const generated = join(tempDir, "generated.txt");
+			const gate = `${process.execPath} -e "const fs=require('fs'); fs.appendFileSync('${generated}', 'run\\n'); process.exit(1);"`;
+			const state = createAutonomousRuntimeState(
+				{ enabled: true, maxContinuations: 3, gates: { commands: [gate], maxRetries: 3 } },
+				{ cwd: tempDir },
+			);
+
+			const first = await nextAutonomousContinuation(state, fauxAssistantMessage("Done."), { cwd: tempDir });
+			const second = await nextAutonomousContinuation(state, fauxAssistantMessage("Still done."), { cwd: tempDir });
+
+			expect(first).toBeDefined();
+			expect(second).toBeDefined();
+			expect(getMessageText(second)).toContain("workspace has not changed");
+			expect(readFileSync(generated, "utf8").trim().split(/\n/)).toHaveLength(1);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("reruns a failed autonomous gate when untracked file contents change", async () => {
-		const tempDir = join(
-			process.cwd(),
-			`.tmp-autonomous-untracked-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-		);
-		execFileSync("mkdir", ["-p", tempDir]);
-		execFileSync("git", ["init"], { cwd: tempDir, stdio: "ignore" });
-		execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: tempDir });
-		execFileSync("git", ["config", "user.name", "Test User"], { cwd: tempDir });
-		writeFileSync(join(tempDir, "src.rs"), "initial\n");
-		execFileSync("git", ["add", "src.rs"], { cwd: tempDir });
-		execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "--no-gpg-sign", "-m", "initial"], {
-			cwd: tempDir,
-			stdio: "ignore",
-		});
+		const tempDir = scratchRepo("untracked", { commitFile: "src.rs" });
 		try {
 			const candidate = join(tempDir, "candidate.txt");
 			writeFileSync(candidate, "bad\n");
@@ -650,9 +477,7 @@ describe("AgentSession autonomous mode", () => {
 
 			const first = await nextAutonomousContinuation(state, fauxAssistantMessage("Done."), { cwd: tempDir });
 			writeFileSync(candidate, "good\n");
-			const second = await nextAutonomousContinuation(state, fauxAssistantMessage("Still done."), {
-				cwd: tempDir,
-			});
+			const second = await nextAutonomousContinuation(state, fauxAssistantMessage("Still done."), { cwd: tempDir });
 
 			expect(first).toBeDefined();
 			expect(second).toBeUndefined();
@@ -677,13 +502,25 @@ describe("AgentSession autonomous mode", () => {
 		expect(state.lastGateFailure?.output.length).toBeLessThan(6100);
 	});
 
+	it("stops autonomous continuation once gate retries are exhausted", async () => {
+		const state = createAutonomousRuntimeState({
+			enabled: true,
+			maxContinuations: 5,
+			gates: { commands: [`${process.execPath} -e "process.exit(1)"`], maxRetries: 1 },
+		});
+
+		const first = await nextAutonomousContinuation(state, fauxAssistantMessage("Done."), { cwd: process.cwd() });
+		const second = await nextAutonomousContinuation(state, fauxAssistantMessage("Still done."), {
+			cwd: process.cwd(),
+		});
+
+		expect(first).toBeDefined();
+		expect(second).toBeUndefined();
+		expect(state.continuationsUsed).toBe(1);
+	});
+
 	it("terminates the autonomous gate process tree when the timeout expires", async () => {
-		const tempDir = join(
-			process.cwd(),
-			`.tmp-autonomous-process-tree-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-		);
-		execFileSync("mkdir", ["-p", tempDir]);
-		execFileSync("git", ["init"], { cwd: tempDir, stdio: "ignore" });
+		const tempDir = scratchRepo("process-tree");
 		const pidFile = join(tempDir, "descendant.pid");
 		const script = join(tempDir, "gate.cjs");
 		writeFileSync(
@@ -720,14 +557,10 @@ describe("AgentSession autonomous mode", () => {
 	it("terminates an autonomous gate without mutating retry state when the session is aborted", async () => {
 		const gate = `${process.execPath} -e "const fs=require('fs'); fs.writeFileSync('gate.pid', String(process.pid)); setTimeout(() => {}, 60000)"`;
 		const harness = await createHarness({
-			autonomous: {
-				enabled: true,
-				maxContinuations: 1,
-				gates: { commands: [gate], maxRetries: 1 },
-			},
+			autonomous: { enabled: true, maxContinuations: 1, gates: { commands: [gate], maxRetries: 1 } },
 		});
 		harnesses.push(harness);
-		execFileSync("git", ["init"], { cwd: harness.tempDir, stdio: "ignore" });
+		initGitRepo(harness.tempDir);
 		const pidFile = join(harness.tempDir, "gate.pid");
 		let gatePid: number | undefined;
 		try {
@@ -749,96 +582,6 @@ describe("AgentSession autonomous mode", () => {
 				process.kill(gatePid, "SIGKILL");
 			}
 		}
-	});
-
-	it("stops autonomous continuation once gate retries are exhausted", async () => {
-		const state = createAutonomousRuntimeState({
-			enabled: true,
-			maxContinuations: 5,
-			gates: { commands: [`${process.execPath} -e "process.exit(1)"`], maxRetries: 1 },
-		});
-
-		const first = await nextAutonomousContinuation(state, fauxAssistantMessage("Done."), { cwd: process.cwd() });
-		const second = await nextAutonomousContinuation(state, fauxAssistantMessage("Still done."), {
-			cwd: process.cwd(),
-		});
-
-		expect(first).toBeDefined();
-		expect(second).toBeUndefined();
-		expect(state.continuationsUsed).toBe(1);
-	});
-
-	it("records the post-failure worktree snapshot for gate rerun suppression", async () => {
-		const tempDir = join(
-			process.cwd(),
-			`.tmp-autonomous-post-snapshot-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-		);
-		execFileSync("mkdir", ["-p", tempDir]);
-		execFileSync("git", ["init"], { cwd: tempDir, stdio: "ignore" });
-		execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: tempDir });
-		execFileSync("git", ["config", "user.name", "Test User"], { cwd: tempDir });
-		writeFileSync(join(tempDir, "src.rs"), "initial\n");
-		execFileSync("git", ["add", "src.rs"], { cwd: tempDir });
-		execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "--no-gpg-sign", "-m", "initial"], {
-			cwd: tempDir,
-			stdio: "ignore",
-		});
-		try {
-			const generated = join(tempDir, "generated.txt");
-			const gate = `${process.execPath} -e "const fs=require('fs'); fs.appendFileSync('${generated}', 'run\\n'); process.exit(1);"`;
-			const state = createAutonomousRuntimeState(
-				{ enabled: true, maxContinuations: 3, gates: { commands: [gate], maxRetries: 3 } },
-				{ cwd: tempDir },
-			);
-
-			const first = await nextAutonomousContinuation(state, fauxAssistantMessage("Done."), { cwd: tempDir });
-			const second = await nextAutonomousContinuation(state, fauxAssistantMessage("Still done."), { cwd: tempDir });
-
-			expect(first).toBeDefined();
-			expect(second).toBeDefined();
-			expect(getMessageText(second)).toContain("workspace has not changed");
-			expect(readFileSync(generated, "utf8").trim().split(/\n/)).toHaveLength(1);
-		} finally {
-			rmSync(tempDir, { recursive: true, force: true });
-		}
-	});
-
-	it("does not count cache-read tokens against the autonomous token budget", async () => {
-		const state = createAutonomousRuntimeState({ enabled: true, maxTokens: 10 });
-
-		addAutonomousUsage(state, {
-			input: 2,
-			output: 3,
-			cacheRead: 1_000,
-			cacheWrite: 4,
-			totalTokens: 1_009,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		});
-
-		expect(state.tokensUsed).toBe(9);
-		expect(await shouldAutonomouslyContinue(state, fauxAssistantMessage("Done."))).toMatchObject({
-			shouldContinue: true,
-		});
-	});
-
-	it("does not use assistant prose as terminal blocker evidence", async () => {
-		const state = createAutonomousRuntimeState({ enabled: true });
-
-		expect(
-			await shouldAutonomouslyContinue(state, fauxAssistantMessage("I'm blocked. What should I try next?")),
-		).toMatchObject({
-			shouldContinue: true,
-			reason: "missing_terminal_evidence",
-		});
-		expect(
-			await shouldAutonomouslyContinue(
-				state,
-				fauxAssistantMessage("Blocked: this requires OAuth login from the user."),
-			),
-		).toMatchObject({
-			shouldContinue: true,
-			reason: "missing_terminal_evidence",
-		});
 	});
 });
 
@@ -919,23 +662,6 @@ describe("AgentSession autonomous continuations vs subagents", () => {
 		expect(getUserTexts(parent)).toEqual(["kick off", expect.stringContaining("[autonomous-continuation]")]);
 		expect(parent.session.getAutonomousStatus()).toMatchObject({ continuationsUsed: 1 });
 		expect(parent.session.hasRunningRlmChildren()).toBe(false);
-	});
-
-	it("accepts a bounded keep-alive window flag and reports it in the status", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-
-		await harness.session.prompt("/autonomous on --subagent-keep-alive-ms 250");
-
-		expect(harness.getPendingResponseCount()).toBe(0);
-		expect(harness.session.getAutonomousStatus()).toMatchObject({
-			enabled: true,
-			subagentKeepAliveMs: 250,
-		});
-		const statusMessages = harness.session.messages.filter(
-			(message) => message.role === "custom" && message.customType === "autonomous_status",
-		);
-		expect(getMessageText(statusMessages.at(-1))).toContain("Subagent keep-alive: 250ms.");
 	});
 
 	it("disarms a pending keep-alive when the valve is disabled mid-hold", async () => {

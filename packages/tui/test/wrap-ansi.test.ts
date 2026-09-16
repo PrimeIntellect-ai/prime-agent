@@ -1,7 +1,16 @@
 import assert from "node:assert";
 import { performance } from "node:perf_hooks";
 import { describe, it } from "node:test";
-import { extractAnsiCode, sliceByColumn, stripAnsi, visibleWidth, wrapTextWithAnsi } from "../src/utils.js";
+import {
+	extractAnsiCode,
+	normalizeTerminalOutput,
+	sliceByColumn,
+	stripAnsi,
+	truncateToWidth,
+	visibleContentSpan,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "../src/utils.js";
 
 describe("wrapTextWithAnsi", () => {
 	describe("underline styling", () => {
@@ -290,4 +299,91 @@ describe("ANSI sequence scanning", () => {
 
 		assert.strictEqual(visibleWidth(text), visibleWidth("Punterminatedx"));
 	});
+});
+
+describe("truncateToWidth", () => {
+	const cases: Array<[name: string, actual: () => string, expected: string]> = [
+		["does not add ANSI resets to plain text", () => truncateToWidth("abcdef", 4, "…"), "abc…"],
+		["clips a wide ellipsis that does not fit", () => truncateToWidth("abcdef", 1, "🙂"), ""],
+		["keeps a wide ellipsis that exactly fits", () => truncateToWidth("abcdef", 2, "🙂"), "🙂"],
+		["returns text that already fits even if the ellipsis is wider", () => truncateToWidth("界", 2, "🙂"), "界"],
+		[
+			"keeps a contiguous prefix instead of resuming after a wide grapheme",
+			() => truncateToWidth("🙂\t界 \x1b_abc\x07", 7, "…", true),
+			"🙂\t… ",
+		],
+	];
+
+	for (const [name, actual, expected] of cases) {
+		it(name, () => {
+			assert.strictEqual(actual(), expected);
+		});
+	}
+
+	const widthCases: Array<[name: string, text: string, width: number, ellipsis: string]> = [
+		["stays within width for very large unicode input", "🙂界".repeat(100_000), 40, "…"],
+		["handles malformed ANSI escape prefixes without hanging", `abc\x1bnot-ansi ${"🙂".repeat(1000)}`, 20, "…"],
+		["preserves styling while staying within width", `\x1b[31m${"hello ".repeat(1000)}\x1b[0m`, 20, "…"],
+	];
+
+	for (const [name, text, width, ellipsis] of widthCases) {
+		it(name, () => {
+			const truncated = truncateToWidth(text, width, ellipsis);
+			assert.ok(visibleWidth(truncated) <= width, `width ${visibleWidth(truncated)} exceeds ${width}`);
+		});
+	}
+
+	it("pads truncated output to the requested width", () => {
+		assert.strictEqual(visibleWidth(truncateToWidth("🙂界🙂界🙂界", 8, "…", true)), 8);
+	});
+
+	it("resets styling at the end of truncated styled text", () => {
+		assert.ok(truncateToWidth(`\x1b[31m${"hello".repeat(100)}`, 10, "").endsWith("\x1b[0m"));
+		assert.ok(truncateToWidth(`\x1b[31m${"hello ".repeat(1000)}\x1b[0m`, 20, "…").endsWith("\x1b[0m…\x1b[0m"));
+	});
+});
+
+describe("visibleWidth of controls, tabs and wide clusters", () => {
+	for (const [text, width] of [
+		["", 0],
+		[" ~", 2],
+		["abc\n", 3],
+		["a\x1fb", 2],
+		["a\x7fb", 2],
+		["abc\t", 6],
+		["a界b", 4],
+		["\t\x1b[31m界\x1b[0m", 5],
+		["ำ", 1],
+		["ຳ", 1],
+		["กำ", 2],
+		["ກຳ", 2],
+	] as const) {
+		it(`measures ${JSON.stringify(text)} as ${width} columns`, () => {
+			assert.strictEqual(visibleWidth(text), width);
+		});
+	}
+
+	it("normalizes Thai and Lao AM vowels only for terminal output", () => {
+		assert.strictEqual(normalizeTerminalOutput("ำ"), "ํา");
+		assert.strictEqual(normalizeTerminalOutput("ຳ"), "ໍາ");
+		assert.strictEqual(visibleWidth(normalizeTerminalOutput("ำabc")), visibleWidth("ำabc"));
+	});
+});
+
+describe("visibleContentSpan", () => {
+	for (const [name, line, width, expected] of [
+		["surrounding and interior whitespace", "  alpha beta  ", 80, { from: 2, to: 12 }],
+		["ANSI styling and styled padding", "\x1b[48;5;236m  \x1b[1malpha\x1b[22m  \x1b[49m", 80, { from: 2, to: 7 }],
+		["a fully blank styled line", "\x1b[48;5;236m      \x1b[49m", 80, null],
+		["tabs", "\talpha\t", 80, { from: 3, to: 8 }],
+		["wide graphemes", " 界🙂 ", 80, { from: 1, to: 5 }],
+		["combining marks", " e\u0301 ", 80, { from: 1, to: 2 }],
+		["a span clipped to the requested width", "  alpha", 4, { from: 2, to: 4 }],
+		["a wide grapheme clipped to the requested width", "   界", 4, { from: 3, to: 4 }],
+		["a zero-width request", "alpha", 0, null],
+	] as const) {
+		it(`measures ${name}`, () => {
+			assert.deepStrictEqual(visibleContentSpan(line, width), expected);
+		});
+	}
 });

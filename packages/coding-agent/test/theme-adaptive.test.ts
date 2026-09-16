@@ -2,7 +2,9 @@ import { clearDefaultTerminalColors, setDefaultTerminalColors } from "@earendil-
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getEditorTheme, initTheme, setThemeInstance, Theme, theme } from "../src/modes/interactive/theme/theme.js";
 
-function ansi256IndexToRgb(index: number): { r: number; g: number; b: number } {
+type Rgb = { r: number; g: number; b: number };
+
+function ansi256IndexToRgb(index: number): Rgb {
 	if (index >= 232) {
 		const v = 8 + (index - 232) * 10;
 		return { r: v, g: v, b: v };
@@ -12,15 +14,28 @@ function ansi256IndexToRgb(index: number): { r: number; g: number; b: number } {
 	return { r: cube[Math.floor(n / 36)]!, g: cube[Math.floor((n % 36) / 6)]!, b: cube[n % 6]! };
 }
 
-function luminanceRgb(color: { r: number; g: number; b: number }): number {
-	return 0.299 * color.r + 0.587 * color.g + 0.114 * color.b;
+const luminance = (c: Rgb): number => 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+
+function renderedLuminance(rendered: string): number {
+	const truecolor = /48;2;(\d+);(\d+);(\d+)m/.exec(rendered);
+	if (truecolor) return luminance({ r: +truecolor[1]!, g: +truecolor[2]!, b: +truecolor[3]! });
+	const indexed = /48;5;(\d+)m/.exec(rendered);
+	if (indexed) return luminance(ansi256IndexToRgb(Number(indexed[1])));
+	throw new Error(`Expected a background color escape, got: ${JSON.stringify(rendered)}`);
 }
 
-function extractRgbLuminance(rendered: string): number {
-	const match = /48;2;(\d+);(\d+);(\d+)m/.exec(rendered);
-	if (!match) throw new Error(`Expected truecolor background escape, got: ${JSON.stringify(rendered)}`);
-	return 0.299 * Number(match[1]) + 0.587 * Number(match[2]) + 0.114 * Number(match[3]);
+function setThemeColors(colors: Record<string, string | number>, depth: "truecolor" | "256color"): void {
+	setThemeInstance(
+		new Theme({} as ConstructorParameters<typeof Theme>[0], colors as ConstructorParameters<typeof Theme>[1], depth),
+	);
 }
+
+const setBackground = (background: Rgb, foreground: Rgb = { r: 255, g: 255, b: 255 }) =>
+	setDefaultTerminalColors({ foreground, background });
+
+/** Minimum luminance contrast the adaptive theme keeps between selection and terminal background. */
+const MIN_CONTRAST = 27.5;
+const TRUECOLOR_BG = /\x1b\[48;2;\d+;\d+;\d+mx\x1b\[49m/;
 
 describe("adaptive TUI theme colors", () => {
 	let previousColorTerm: string | undefined;
@@ -37,333 +52,132 @@ describe("adaptive TUI theme colors", () => {
 
 	afterEach(() => {
 		clearDefaultTerminalColors();
-		if (previousColorTerm === undefined) {
-			delete process.env.COLORTERM;
+		if (previousColorTerm === undefined) delete process.env.COLORTERM;
+		else process.env.COLORTERM = previousColorTerm;
+		if (previousColorFgBg === undefined) delete process.env.COLORFGBG;
+		else process.env.COLORFGBG = previousColorFgBg;
+		initTheme("prime");
+	});
+
+	it.each([
+		["unknown terminal background", undefined, false],
+		["a dark terminal background", { r: 0, g: 0, b: 0 }, false],
+		["a light terminal background", { r: 255, g: 255, b: 255 }, false],
+		["a terminal background matching the editor surface", { r: 26, g: 26, b: 31 }, true],
+	] as const)("resolves editor chrome against %s", (_name, background, nudged) => {
+		if (background) setBackground(background);
+
+		const editorTheme = getEditorTheme();
+		const rendered = editorTheme.backgroundColor?.("x");
+
+		if (nudged) {
+			expect(rendered).not.toBe(theme.bg("userMessageBg", "x"));
+			expect(rendered).toMatch(TRUECOLOR_BG);
 		} else {
-			process.env.COLORTERM = previousColorTerm;
+			expect(rendered).toBe(theme.bg("userMessageBg", "x"));
 		}
-		if (previousColorFgBg === undefined) {
-			delete process.env.COLORFGBG;
-		} else {
-			process.env.COLORFGBG = previousColorFgBg;
+		// Border chrome never adapts to the terminal background.
+		expect(editorTheme.borderColor("x")).toBe(theme.fg("borderMuted", "x"));
+	});
+
+	// [name, theme, selectedBg override, terminal background, adapts, luminance bound]
+	it.each([
+		["unknown terminal background", "prime", undefined, undefined, false, undefined],
+		["a clearly darker terminal background", "prime", undefined, { r: 0, g: 0, b: 0 }, false, undefined],
+		["a nearly matching terminal background", "prime", undefined, { r: 29, g: 32, b: 33 }, true, undefined],
+		// Selection luminance 34.5 vs terminal 60: blending darker reaches the minimum
+		// without crossing the background.
+		["a lighter dark terminal background", "prime", undefined, { r: 60, g: 60, b: 60 }, true, { max: 34.5 }],
+		// #222226 (~34.5) is only slightly darker, so the capped same-side blend cannot
+		// reach the threshold and must cross upward instead.
+		["a capped same-side blend", "prime", undefined, { r: 35, g: 35, b: 35 }, true, undefined],
+		// Light selectedBg #d0d0e0 has luminance ~209.7 against 200.
+		["a darker light terminal background", "light", undefined, { r: 200, g: 200, b: 200 }, true, { min: 209.7 }],
+		["a nearly matching light terminal background", "light", undefined, { r: 210, g: 210, b: 220 }, true, undefined],
+		// Blending toward black cannot change a black selection, so it must cross upward.
+		["a selection at the blend endpoint", "prime", "#000000", { r: 1, g: 1, b: 1 }, true, undefined],
+	] as const)(
+		"keeps truecolor selection contrast against %s",
+		(_name, themeName, selectedBg, background, adapts, bound) => {
+			initTheme(themeName);
+			if (selectedBg !== undefined) setThemeColors({ selectedBg }, "truecolor");
+			if (background) setBackground(background);
+
+			const rendered = theme.getSelectionBackgroundColor()("x");
+
+			if (!adapts) {
+				expect(rendered).toBe(theme.bg("selectedBg", "x"));
+				return;
+			}
+			expect(rendered).not.toBe(theme.bg("selectedBg", "x"));
+			expect(rendered).toMatch(TRUECOLOR_BG);
+			const selection = renderedLuminance(rendered);
+			expect(Math.abs(selection - luminance(background!))).toBeGreaterThanOrEqual(MIN_CONTRAST);
+			if (bound && "min" in bound) expect(selection).toBeGreaterThan(bound.min);
+			if (bound && "max" in bound) expect(selection).toBeLessThan(bound.max);
+		},
+	);
+
+	// [name, selectedBg, terminal background, adapts]
+	it.each([
+		// The pre-quantized blend is fine, but naive quantization lands on #af5f5f,
+		// matching the terminal background exactly.
+		["quantization erasing a valid blend", "#e93e4d", { r: 44, g: 166, b: 73 }, true],
+		// Both exact-target blends quantize far below the threshold; a stronger blend
+		// toward white quantizes to #87afaf and clears it.
+		["quantization undershooting both exact blends", "#2f4d50", { r: 117, g: 29, b: 206 }, true],
+		// Raw delta 33 passes, but the selection quantizes to #d7005f, nearly matching.
+		["quantization collapsing the configured contrast", "#e82d6a", { r: 214, g: 0, b: 93 }, true],
+		["a selectedBg deferring to the terminal default", "", { r: 29, g: 32, b: 33 }, true],
+		["a terminal-defined basic ANSI selection color", 0, { r: 29, g: 32, b: 33 }, false],
+	] as const)("keeps 256-color selection contrast with %s", (_name, selectedBg, background, adapts) => {
+		setThemeColors({ selectedBg }, "256color");
+		setBackground(background);
+
+		const rendered = theme.getSelectionBackgroundColor()("x");
+
+		if (!adapts) {
+			expect(rendered).toBe(theme.bg("selectedBg", "x"));
+			return;
 		}
-	});
-
-	it("uses theme colors for editor chrome when the terminal background is unknown", () => {
-		const editorTheme = getEditorTheme();
-
-		expect(editorTheme.backgroundColor?.("x")).toBe(theme.bg("userMessageBg", "x"));
-		expect(editorTheme.borderColor("x")).toBe(theme.fg("borderMuted", "x"));
-	});
-
-	it("keeps theme editor chrome on dark terminal backgrounds", () => {
-		setDefaultTerminalColors({
-			foreground: { r: 255, g: 255, b: 255 },
-			background: { r: 0, g: 0, b: 0 },
-		});
-
-		const editorTheme = getEditorTheme();
-
-		expect(editorTheme.backgroundColor?.("x")).toBe(theme.bg("userMessageBg", "x"));
-		expect(editorTheme.borderColor("x")).toBe(theme.fg("borderMuted", "x"));
-	});
-
-	it("nudges the editor surface when it matches the terminal background", () => {
-		setDefaultTerminalColors({
-			foreground: { r: 255, g: 255, b: 255 },
-			background: { r: 26, g: 26, b: 31 },
-		});
-
-		const editorTheme = getEditorTheme();
-
-		expect(editorTheme.backgroundColor?.("x")).not.toBe(theme.bg("userMessageBg", "x"));
-		expect(editorTheme.backgroundColor?.("x")).toMatch(/\x1b\[48;2;\d+;\d+;\d+mx\x1b\[49m/);
-		expect(editorTheme.borderColor("x")).toBe(theme.fg("borderMuted", "x"));
-	});
-
-	it("keeps theme editor chrome on light terminal backgrounds", () => {
-		setDefaultTerminalColors({
-			foreground: { r: 0, g: 0, b: 0 },
-			background: { r: 255, g: 255, b: 255 },
-		});
-
-		const editorTheme = getEditorTheme();
-
-		expect(editorTheme.backgroundColor?.("x")).toBe(theme.bg("userMessageBg", "x"));
-		expect(editorTheme.borderColor("x")).toBe(theme.fg("borderMuted", "x"));
-	});
-
-	it("keeps the theme selection background when the terminal background is unknown", () => {
-		expect(theme.getSelectionBackgroundColor()("x")).toBe(theme.bg("selectedBg", "x"));
-	});
-
-	it("keeps the theme selection background on clearly different terminal backgrounds", () => {
-		setDefaultTerminalColors({
-			foreground: { r: 255, g: 255, b: 255 },
-			background: { r: 0, g: 0, b: 0 },
-		});
-
-		expect(theme.getSelectionBackgroundColor()("x")).toBe(theme.bg("selectedBg", "x"));
-	});
-
-	it("strengthens the selection background when it nearly matches the terminal background", () => {
-		setDefaultTerminalColors({
-			foreground: { r: 235, g: 219, b: 178 },
-			background: { r: 29, g: 32, b: 33 },
-		});
-
-		const selection = theme.getSelectionBackgroundColor()("x");
-		expect(selection).not.toBe(theme.bg("selectedBg", "x"));
-		expect(selection).toMatch(/\x1b\[48;2;\d+;\d+;\d+mx\x1b\[49m/);
-	});
-
-	it("darkens a selection background that is darker than a dark terminal background", () => {
-		setDefaultTerminalColors({
-			foreground: { r: 255, g: 255, b: 255 },
-			background: { r: 60, g: 60, b: 60 },
-		});
-
-		const rendered = theme.getSelectionBackgroundColor()("x");
 		expect(rendered).not.toBe(theme.bg("selectedBg", "x"));
-		// Selection luminance 34.5 against a terminal luminance of 60 has delta 25.5;
-		// blending darker reaches the minimum without crossing the background.
-		expect(Math.abs(extractRgbLuminance(rendered) - 60)).toBeGreaterThanOrEqual(27.5);
-		expect(extractRgbLuminance(rendered)).toBeLessThan(34.5);
-	});
-
-	it("lightens a selection background that is brighter than a light terminal background", () => {
-		initTheme("light");
-		setDefaultTerminalColors({
-			foreground: { r: 0, g: 0, b: 0 },
-			background: { r: 200, g: 200, b: 200 },
-		});
-
-		const rendered = theme.getSelectionBackgroundColor()("x");
-		expect(rendered).not.toBe(theme.bg("selectedBg", "x"));
-		// light theme selectedBg #d0d0e0 has luminance ~209.7, terminal has 200.
-		expect(extractRgbLuminance(rendered)).toBeGreaterThan(209.7);
-		expect(Math.abs(extractRgbLuminance(rendered) - 200)).toBeGreaterThanOrEqual(27.5);
-	});
-
-	it("crosses the background when the selection sits at the blend endpoint", () => {
-		setThemeInstance(
-			new Theme(
-				{} as ConstructorParameters<typeof Theme>[0],
-				{ selectedBg: "#000000" } as ConstructorParameters<typeof Theme>[1],
-				"truecolor",
-			),
-		);
-		setDefaultTerminalColors({
-			foreground: { r: 255, g: 255, b: 255 },
-			background: { r: 1, g: 1, b: 1 },
-		});
-
-		const rendered = theme.getSelectionBackgroundColor()("x");
-		expect(rendered).not.toBe(theme.bg("selectedBg", "x"));
-		// Blending toward black cannot change a black selection, so it must blend
-		// upward across the background to reach the minimum contrast.
-		expect(Math.abs(extractRgbLuminance(rendered) - 1)).toBeGreaterThanOrEqual(27.5);
-
-		initTheme("prime");
-	});
-
-	it("falls back across the background when the same-side blend is capped", () => {
-		// Prime selectedBg (#222226, luminance ~34.5) is slightly darker than this
-		// terminal background; blending darker is capped at 0.5 and cannot reach 28,
-		// so the highlight must cross upward instead.
-		setDefaultTerminalColors({
-			foreground: { r: 255, g: 255, b: 255 },
-			background: { r: 35, g: 35, b: 35 },
-		});
-
-		const rendered = theme.getSelectionBackgroundColor()("x");
-		expect(rendered).not.toBe(theme.bg("selectedBg", "x"));
-		expect(Math.abs(extractRgbLuminance(rendered) - 35)).toBeGreaterThanOrEqual(27.5);
-	});
-
-	it("keeps contrast after 256-color quantization", () => {
-		setThemeInstance(
-			new Theme(
-				{} as ConstructorParameters<typeof Theme>[0],
-				{ selectedBg: "#e93e4d" } as ConstructorParameters<typeof Theme>[1],
-				"256color",
-			),
-		);
-		// #e93e4d (luminance 114.9) on #2ca649 (luminance 118.9): the pre-quantized
-		// blend is fine, but naive quantization lands on #af5f5f, matching the
-		// terminal background exactly.
-		setDefaultTerminalColors({
-			foreground: { r: 255, g: 255, b: 255 },
-			background: { r: 44, g: 166, b: 73 },
-		});
-
-		const rendered = theme.getSelectionBackgroundColor()("x");
-		const match = /48;5;(\d+)m/.exec(rendered);
-		if (!match) throw new Error(`Expected 256-color background escape, got: ${JSON.stringify(rendered)}`);
-		const quantized = ansi256IndexToRgb(Number(match[1]));
-		expect(Math.abs(luminanceRgb(quantized) - 118.9)).toBeGreaterThanOrEqual(27.5);
-
-		initTheme("prime");
-	});
-
-	it("searches stronger blends when 256-color quantization undershoots", () => {
-		setThemeInstance(
-			new Theme(
-				{} as ConstructorParameters<typeof Theme>[0],
-				{ selectedBg: "#2f4d50" } as ConstructorParameters<typeof Theme>[1],
-				"256color",
-			),
-		);
-		// #2f4d50 (luminance 68.4) on #751dce (luminance 75.5): both exact-target
-		// blends quantize far below the threshold; a stronger blend toward white
-		// quantizes to #87afaf and clears it.
-		setDefaultTerminalColors({
-			foreground: { r: 255, g: 255, b: 255 },
-			background: { r: 117, g: 29, b: 206 },
-		});
-
-		const rendered = theme.getSelectionBackgroundColor()("x");
-		const match = /48;5;(\d+)m/.exec(rendered);
-		if (!match) throw new Error(`Expected 256-color background escape, got: ${JSON.stringify(rendered)}`);
-		expect(Math.abs(luminanceRgb(ansi256IndexToRgb(Number(match[1]))) - 75.5)).toBeGreaterThanOrEqual(27.5);
-
-		initTheme("prime");
-	});
-
-	it("adapts when 256-color quantization erases the configured contrast", () => {
-		setThemeInstance(
-			new Theme(
-				{} as ConstructorParameters<typeof Theme>[0],
-				{ selectedBg: "#e82d6a" } as ConstructorParameters<typeof Theme>[1],
-				"256color",
-			),
-		);
-		// #e82d6a (luminance ~108) on #d6005d (luminance ~74.6): raw delta 33 passes,
-		// but the selection quantizes to #d7005f which nearly matches the terminal.
-		setDefaultTerminalColors({
-			foreground: { r: 255, g: 255, b: 255 },
-			background: { r: 214, g: 0, b: 93 },
-		});
-
-		const rendered = theme.getSelectionBackgroundColor()("x");
-		expect(rendered).not.toBe(theme.bg("selectedBg", "x"));
-		const match = /48;5;(\d+)m/.exec(rendered);
-		if (!match) throw new Error(`Expected 256-color background escape, got: ${JSON.stringify(rendered)}`);
-		expect(Math.abs(luminanceRgb(ansi256IndexToRgb(Number(match[1]))) - 74.6)).toBeGreaterThanOrEqual(27.5);
-
-		initTheme("prime");
-	});
-
-	it("leaves terminal-defined basic ANSI selection colors alone", () => {
-		setThemeInstance(
-			new Theme(
-				{} as ConstructorParameters<typeof Theme>[0],
-				{ selectedBg: 0 } as ConstructorParameters<typeof Theme>[1],
-				"256color",
-			),
-		);
-		setDefaultTerminalColors({
-			foreground: { r: 235, g: 219, b: 178 },
-			background: { r: 29, g: 32, b: 33 },
-		});
-
-		expect(theme.getSelectionBackgroundColor()("x")).toBe(theme.bg("selectedBg", "x"));
-
-		initTheme("prime");
-	});
-
-	it("derives a contrasting selection when selectedBg uses the terminal default", () => {
-		setThemeInstance(
-			new Theme(
-				{} as ConstructorParameters<typeof Theme>[0],
-				{ selectedBg: "" } as ConstructorParameters<typeof Theme>[1],
-				"256color",
-			),
-		);
-		setDefaultTerminalColors({
-			foreground: { r: 235, g: 219, b: 178 },
-			background: { r: 29, g: 32, b: 33 },
-		});
-
-		const rendered = theme.getSelectionBackgroundColor()("x");
-		expect(rendered).not.toBe(theme.bg("selectedBg", "x"));
-		const match = /48;5;(\d+)m/.exec(rendered);
-		if (!match) throw new Error(`Expected 256-color background escape, got: ${JSON.stringify(rendered)}`);
-		// Terminal background luminance is 31.2; the derived highlight must clear it.
-		expect(Math.abs(luminanceRgb(ansi256IndexToRgb(Number(match[1]))) - 31.2)).toBeGreaterThanOrEqual(27.5);
-
-		initTheme("prime");
-	});
-
-	it("darkens a light selection background that nearly matches a light terminal background", () => {
-		initTheme("light");
-		setDefaultTerminalColors({
-			foreground: { r: 0, g: 0, b: 0 },
-			background: { r: 210, g: 210, b: 220 },
-		});
-
-		const selection = theme.getSelectionBackgroundColor()("x");
-		expect(selection).not.toBe(theme.bg("selectedBg", "x"));
-		expect(selection).toMatch(/\x1b\[48;2;\d+;\d+;\d+mx\x1b\[49m/);
-	});
-
-	it("blends the soft selection halfway toward the editor surface", () => {
-		setDefaultTerminalColors({
-			foreground: { r: 235, g: 219, b: 178 },
-			background: { r: 29, g: 32, b: 33 },
-		});
-
-		const soft = theme.getSoftSelectionBackgroundColor()("x");
-		expect(soft).toMatch(/\x1b\[48;2;\d+;\d+;\d+mx\x1b\[49m/);
-		const selectionLuminance = extractRgbLuminance(theme.bg("selectedBg", "x"));
-		const surfaceLuminance = extractRgbLuminance(theme.bg("userMessageBg", "x"));
-		const softLuminance = extractRgbLuminance(soft);
-		expect(softLuminance).toBeLessThan(selectionLuminance);
-		expect(softLuminance).toBeGreaterThan(surfaceLuminance);
-		expect(Math.abs(softLuminance - (selectionLuminance + surfaceLuminance) / 2)).toBeLessThan(1.5);
+		expect(Math.abs(renderedLuminance(rendered) - luminance(background))).toBeGreaterThanOrEqual(MIN_CONTRAST);
 	});
 
 	it("keeps the plain selection background for soft highlights when the terminal background is unknown", () => {
 		expect(theme.getSoftSelectionBackgroundColor()("x")).toBe(theme.bg("selectedBg", "x"));
 	});
 
+	it("blends the soft selection halfway toward the editor surface", () => {
+		setBackground({ r: 29, g: 32, b: 33 }, { r: 235, g: 219, b: 178 });
+
+		const soft = renderedLuminance(theme.getSoftSelectionBackgroundColor()("x"));
+		const selection = renderedLuminance(theme.bg("selectedBg", "x"));
+		const surface = renderedLuminance(theme.bg("userMessageBg", "x"));
+		expect(soft).toBeLessThan(selection);
+		expect(soft).toBeGreaterThan(surface);
+		expect(Math.abs(soft - (selection + surface) / 2)).toBeLessThan(1.5);
+	});
+
 	it("strengthens the soft selection when quantization collapses it into the editor surface", () => {
-		// Prime selectedBg #222226 and userMessageBg #1a1a1f quantize to the same
-		// 256-color cell for every blend alpha, so the soft highlight falls back
-		// to the adaptive selection machinery to stay visible.
-		setThemeInstance(
-			new Theme(
-				{} as ConstructorParameters<typeof Theme>[0],
-				{ selectedBg: "#222226", userMessageBg: "#1a1a1f" } as ConstructorParameters<typeof Theme>[1],
-				"256color",
-			),
-		);
-		setDefaultTerminalColors({
-			foreground: { r: 235, g: 219, b: 178 },
-			background: { r: 29, g: 32, b: 33 },
-		});
+		// #222226 and #1a1a1f quantize to the same 256-color cell for every blend alpha,
+		// so the soft highlight falls back to the adaptive selection machinery.
+		setThemeColors({ selectedBg: "#222226", userMessageBg: "#1a1a1f" }, "256color");
+		setBackground({ r: 29, g: 32, b: 33 }, { r: 235, g: 219, b: 178 });
 
 		const soft = theme.getSoftSelectionBackgroundColor()("x");
-		const match = /48;5;(\d+)m/.exec(soft);
-		if (!match) throw new Error(`Expected 256-color background escape, got: ${JSON.stringify(soft)}`);
-		const surfaceMatch = /48;5;(\d+)m/.exec(theme.bg("userMessageBg", "x"));
-		if (!surfaceMatch) throw new Error("Expected a 256-color editor surface escape");
-		expect(Number(match[1])).not.toBe(Number(surfaceMatch[1]));
-
-		initTheme("prime");
+		expect(renderedLuminance(soft)).not.toBe(renderedLuminance(theme.bg("userMessageBg", "x")));
 	});
 
 	it("uses COLORFGBG for automatic default theme selection when OSC colors are unavailable", () => {
 		process.env.COLORFGBG = "0;15";
 		clearDefaultTerminalColors();
 		initTheme(undefined);
-
 		expect(theme.name).toBe("light");
 
 		process.env.COLORFGBG = "15;0";
 		clearDefaultTerminalColors();
 		initTheme(undefined);
-
 		expect(theme.name).toBe("prime");
 	});
 });

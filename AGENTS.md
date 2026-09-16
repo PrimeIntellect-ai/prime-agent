@@ -30,7 +30,19 @@
 - If you create or modify a test file, you MUST run that test file and iterate until it passes.
 - When writing tests, run them, identify issues in either the test or implementation, and iterate until fixed.
 - For `packages/coding-agent/test/suite/`, use `test/suite/harness.ts` plus the faux provider. Do not use real provider APIs, real API keys, or paid tokens.
-- Put issue-specific regressions under `packages/coding-agent/test/suite/regressions/` and name them `<issue-number>-<short-slug>.test.ts`.
+## Testing Policy
+
+- `npm run check:test-policy` is required. Never weaken it or add a broad exclusion. A platform exception must use `// test-policy: allow <rule> -- <specific reason>` immediately above one expression, and CI must run that test on a supported platform.
+- A test must fail when the behavior it covers is broken. Temporarily revert or stub the production behavior to prove the failure. If the test still passes, delete it.
+- Test observable behavior at process boundaries, durable formats, concurrency/ordering, crash recovery, and load. Do not assert a mock's own return value, private implementation steps, or exact rendered copy unless that text is a protocol contract.
+- CI tests must be unconditional and self-contained. Do not use live provider APIs, real credentials, paid tokens, `.skip`, `.skipIf`, `.runIf`, `.todo`, `.only`, environment-gated early returns, or optional assertions. Put manual live-provider probes outside the CI test suite.
+- Never use runner retries or retry-to-green wrappers. Every failed attempt counts as a failure. Fix the race or delete the test.
+- Never use a fixed sleep, real-time delay, polling loop, or larger timeout as a readiness signal. Await a concrete event or deferred promise, use a fake clock, or expose the missing completion signal. A timer may only bound failure; it must not make the test pass.
+- Tests using subprocesses, sockets, concurrency, or shared process state must bind port `0`, use unique temporary paths, restore environment/cwd/globals/fake timers, and close every resource in `finally`.
+- Run every modified test file directly. For concurrency, process, timer, or ordering changes, also run the focused suite repeatedly with multiple shuffle seeds. Stop on the first failure; repeated runs are evidence, never retries.
+- A change may not add more lines of test than source. A test-only change must delete at least as many test lines as it adds.
+- Regressions go in the existing suite for the module that broke, with the issue number in the test name. Never create one file per issue. One test file per source module; repeated cases belong in an `it.each` table.
+- Deleting code deletes its tests. A flaky test is made deterministic or deleted, never skipped or retried.
 
 ## Daemon Protocol Changes
 

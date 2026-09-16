@@ -1,0 +1,1 @@
+- Changed agent trace uploads to report every scheduled upload and retry wait, and to expose when the startup catch-up and in-flight uploads have finished.

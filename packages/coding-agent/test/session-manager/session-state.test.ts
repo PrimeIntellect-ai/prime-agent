@@ -2,7 +2,12 @@ import { appendFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadEntriesFromFile, SessionManager, type SessionStateEntry } from "../../src/core/session-manager.js";
+import {
+	buildSessionContext,
+	loadEntriesFromFile,
+	SessionManager,
+	type SessionStateEntry,
+} from "../../src/core/session-manager.js";
 import { inactiveLifecycleForSession } from "../../src/modes/daemon/daemon-session-list.js";
 import { assistantMsg, userMsg } from "../utilities.js";
 
@@ -255,6 +260,124 @@ describe("SessionManager session state", () => {
 			expect(entries[0]).toMatchObject({ type: "session", id: session.getSessionId() });
 			expect(entries.filter((entry) => entry.type === "message")).toHaveLength(2);
 			expect(entries.filter((entry) => entry.type === "session_state")).toHaveLength(1);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+});
+describe("SessionManager agent status", () => {
+	it("persists the latest agent status append-only, per branch, and keeps it out of model context", () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "agent-status-"));
+		try {
+			const session = SessionManager.create(join(tempDir, "project"), join(tempDir, "sessions"));
+
+			const m1 = session.appendMessage(userMsg("add a login endpoint"));
+			const m2 = session.appendMessage(assistantMsg("done"));
+			session.appendAgentStatus({ summary: "Working", taskState: undefined, basedOnMessageCount: 2 });
+			session.appendAgentStatus({ summary: "Added login endpoint", taskState: "completed", basedOnMessageCount: 2 });
+
+			// Latest entry wins.
+			expect(session.getLatestAgentStatus()).toEqual({
+				summary: "Added login endpoint",
+				taskState: "completed",
+				basedOnMessageCount: 2,
+			});
+
+			// Append-only: re-reading the raw file recovers both status entries and
+			// the two conversation messages untouched.
+			const entries = loadEntriesFromFile(session.getSessionFile()!);
+			expect(entries.filter((entry) => entry.type === "agent_status")).toHaveLength(2);
+			expect(entries.filter((entry) => entry.type === "message")).toHaveLength(2);
+
+			// Status never reaches the model.
+			const context = buildSessionContext(session.getEntries(), session.getLeafId());
+			expect(context.messages).toHaveLength(2);
+			expect(context.messages.every((message) => message.role === "user" || message.role === "assistant")).toBe(
+				true,
+			);
+
+			// Branch A off m1, then branch B off m2 with a later status in the file.
+			session.branch(m1);
+			const branchAStatus = session.appendAgentStatus({ summary: "branch A", basedOnMessageCount: 1 });
+			session.branch(m2);
+			session.appendAgentStatus({ summary: "branch B", basedOnMessageCount: 1 });
+
+			// Re-activating branch A reads its own status, not the later sibling entry.
+			session.branch(branchAStatus);
+			expect(session.getLatestAgentStatus()?.summary).toBe("branch A");
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("SessionManager.hasUserContent", () => {
+	// createAgentSession writes the model/thinking/tier defaults for every new
+	// session, so only edits made after creation count as real user content.
+	const defaults = (s: SessionManager): void => {
+		s.appendModelChange("anthropic", "claude-opus-4-8");
+		s.appendThinkingLevelChange("off");
+	};
+	const cases: Array<{ name: string; setup: (session: SessionManager) => void; expected: boolean }> = [
+		{
+			name: "creation defaults only",
+			setup: (s) => {
+				defaults(s);
+				s.appendServiceTierChange("default");
+			},
+			expected: false,
+		},
+		{ name: "no model available at creation", setup: (s) => s.appendThinkingLevelChange("off"), expected: false },
+		{
+			name: "model changed after creation",
+			setup: (s) => {
+				defaults(s);
+				s.appendModelChange("openai", "gpt-5");
+			},
+			expected: true,
+		},
+		{
+			name: "thinking level changed after creation",
+			setup: (s) => {
+				defaults(s);
+				s.appendThinkingLevelChange("high");
+			},
+			expected: true,
+		},
+		{
+			name: "thinking level changed on a no-model session",
+			setup: (s) => {
+				s.appendThinkingLevelChange("off");
+				s.appendThinkingLevelChange("high");
+			},
+			expected: true,
+		},
+		{
+			name: "Fast mode enabled after creation",
+			setup: (s) => {
+				defaults(s);
+				s.appendServiceTierChange("default");
+				s.appendServiceTierChange("priority");
+			},
+			expected: true,
+		},
+		{ name: "a message was sent", setup: (s) => s.appendMessage(userMsg("hello")), expected: true },
+		{
+			name: "the session was named",
+			setup: (s) => {
+				defaults(s);
+				s.appendSessionInfo("my draft");
+			},
+			expected: true,
+		},
+	];
+
+	it.each(cases)("is $expected for: $name", ({ setup, expected }) => {
+		const tempDir = mkdtempSync(join(tmpdir(), "has-user-content-"));
+		try {
+			const session = SessionManager.create(join(tempDir, "project"), join(tempDir, "sessions"));
+			setup(session);
+			expect(session.hasUserContent()).toBe(expected);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}

@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { loginAnthropic, refreshAnthropicToken } from "../src/utils/oauth/anthropic.js";
 import { loginGitHubCopilot } from "../src/utils/oauth/github-copilot.js";
+import { refreshOpenAICodexToken } from "../src/utils/oauth/openai-codex.js";
 
 function jsonResponse(body: unknown, status: number = 200): Response {
 	return new Response(JSON.stringify(body), {
@@ -192,5 +194,111 @@ describe("GitHub Copilot OAuth device flow", () => {
 			startTime.getTime() + 20000,
 			startTime.getTime() + 25000,
 		]);
+	});
+});
+
+function getJsonBody(init?: RequestInit): Record<string, string> {
+	if (typeof init?.body !== "string") {
+		throw new Error(`Expected string request body, got ${typeof init?.body}`);
+	}
+	return JSON.parse(init.body) as Record<string, string>;
+}
+
+describe.sequential("Anthropic OAuth", () => {
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it("keeps the localhost redirect_uri for manual callback login", async () => {
+		let authUrl = "";
+		const requests: Record<string, string>[] = [];
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: unknown, init?: RequestInit): Promise<Response> => {
+				expect(getUrl(input)).toBe("https://platform.claude.com/v1/oauth/token");
+				expect(init?.method).toBe("POST");
+				requests.push(getJsonBody(init));
+				return jsonResponse({ access_token: "access-token", refresh_token: "refresh-token", expires_in: 3600 });
+			}),
+		);
+
+		const credentials = await loginAnthropic({
+			onAuth: (info) => {
+				authUrl = info.url;
+			},
+			onPrompt: async () => "",
+			onManualCodeInput: async () => {
+				const url = new URL(authUrl);
+				const state = url.searchParams.get("state");
+				const redirectUri = url.searchParams.get("redirect_uri");
+				if (!state || !redirectUri) throw new Error("Missing OAuth state or redirect_uri in auth URL");
+				return `${redirectUri}?code=manual-code&state=${state}`;
+			},
+		});
+
+		expect(requests).toHaveLength(1);
+		expect(requests[0]).toMatchObject({
+			grant_type: "authorization_code",
+			code: "manual-code",
+			redirect_uri: "http://localhost:53692/callback",
+		});
+		expect(credentials.access).toBe("access-token");
+		expect(credentials.refresh).toBe("refresh-token");
+	});
+
+	it("omits scope from refresh token requests", async () => {
+		const requests: Record<string, string>[] = [];
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: unknown, init?: RequestInit): Promise<Response> => {
+				expect(getUrl(input)).toBe("https://platform.claude.com/v1/oauth/token");
+				requests.push(getJsonBody(init));
+				return jsonResponse({
+					access_token: "new-access-token",
+					refresh_token: "new-refresh-token",
+					expires_in: 3600,
+				});
+			}),
+		);
+
+		const credentials = await refreshAnthropicToken("refresh-token");
+
+		expect(requests).toHaveLength(1);
+		expect(requests[0]).toMatchObject({ grant_type: "refresh_token", refresh_token: "refresh-token" });
+		expect(requests[0].client_id).toBeTruthy();
+		expect(requests[0]).not.toHaveProperty("scope");
+		expect(credentials.access).toBe("new-access-token");
+		expect(credentials.refresh).toBe("new-refresh-token");
+	});
+});
+
+describe("OpenAI Codex OAuth", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+		vi.unstubAllGlobals();
+	});
+
+	it("does not write token refresh failures to stderr", async () => {
+		const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async (): Promise<Response> =>
+					jsonResponse(
+						{
+							error: {
+								message: "Could not validate your token. Please try signing in again.",
+								type: "invalid_request_error",
+							},
+						},
+						401,
+					),
+			),
+		);
+
+		await expect(refreshOpenAICodexToken("invalid-refresh-token")).rejects.toThrow(
+			/OpenAI Codex token refresh failed \(401\).*Could not validate your token/,
+		);
+		expect(consoleError).not.toHaveBeenCalled();
 	});
 });

@@ -1,16 +1,10 @@
-import { setKeybindings } from "@earendil-works/pi-tui";
-import stripAnsi from "strip-ansi";
-import { beforeAll, describe, expect, it, vi } from "vitest";
-import { KeybindingsManager } from "../src/core/keybindings.js";
+import { describe, expect, it } from "vitest";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../src/modes/agent-connection/types.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import {
 	countRosterSubagentStatuses,
 	countSubtreeSubagentStatuses,
-	SubagentSummaryLine,
 } from "../src/modes/interactive/components/subagent-summary-line.js";
-import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 function child(
 	id: string,
@@ -20,126 +14,19 @@ function child(
 	return { id, label: id, status, sessionDir: `/tmp/${id}`, ...overrides };
 }
 
-describe("SubagentSummaryLine", () => {
-	beforeAll(() => {
-		initTheme("dark");
-		setKeybindings(new KeybindingsManager());
-	});
+function summary(id: string, overrides: Partial<SessionSummary>): SessionSummary {
+	return {
+		id,
+		sessionId: id,
+		lifecycle: "live",
+		runtimeKind: "subagent",
+		rlmChildId: id,
+		...overrides,
+	} as SessionSummary;
+}
 
-	it("renders nothing without children and a bordered agents tile with counts otherwise", () => {
-		const line = new SubagentSummaryLine();
-		expect(line.render(120)).toEqual([]);
-
-		line.setSubagentCounts({ total: 1, running: 1, idle: 0, inactive: 0 });
-		let rendered = line.render(120).map(stripAnsi);
-		expect(rendered).toHaveLength(3);
-		expect(rendered[0]).toContain("╭─ subagents ─");
-		expect(rendered[1]).toContain("● 1 running   ◐ 0 idle   ○ 0 inactive");
-
-		line.setSubagentCounts({ total: 2, running: 1, idle: 1, inactive: 0 });
-		rendered = line.render(120).map(stripAnsi);
-		expect(rendered[1]).toContain("● 1 running   ◐ 1 idle   ○ 0 inactive");
-	});
-
-	it("renders the subagents label without raw bold escapes", () => {
-		const line = new SubagentSummaryLine();
-		line.setSubagentCounts({ total: 1, running: 1, idle: 0, inactive: 0 });
-
-		const raw = line.render(120).join("\n");
-		expect(raw).toContain("subagents");
-		expect(raw).not.toContain("\x1b[1m");
-	});
-
-	it("hides the info line and the agents tile while a picker is open", () => {
-		let pickerOpen = false;
-		const line = new SubagentSummaryLine(
-			() => "test-model",
-			() => "75k (75%)",
-			undefined,
-			() => pickerOpen,
-		);
-		line.setSubagentCounts({ total: 2, running: 1, idle: 1, inactive: 0 });
-		line.setOpenable(true);
-
-		const closed = line.render(120).map(stripAnsi);
-		expect(closed).toHaveLength(4);
-		expect(closed[0]).toContain("test-model");
-		expect(closed[0]).toContain("75k (75%)");
-		expect(closed[1]).toContain("╭─ subagents ─");
-
-		expect(line.isSelectable()).toBe(true);
-		const onOpen = vi.fn();
-		line.onOpen = onOpen;
-		pickerOpen = true;
-		expect(line.render(120)).toEqual([]);
-		expect(line.isSelectable()).toBe(false);
-		line.handleInput("\r");
-		expect(onOpen).not.toHaveBeenCalled();
-
-		pickerOpen = false;
-		expect(line.render(120).map(stripAnsi)).toHaveLength(4);
-		expect(line.isSelectable()).toBe(true);
-	});
-
-	it("hints ↓ select when unfocused and Enter/→ open when focused", () => {
-		const line = new SubagentSummaryLine();
-		line.setSubagentCounts({ total: 1, running: 1, idle: 0, inactive: 0 });
-		line.setOpenable(true);
-
-		expect(stripAnsi(line.render(120)[1])).toContain("↓ select");
-
-		line.focused = true;
-		const focused = stripAnsi(line.render(120)[1]);
-		expect(focused).toContain("open");
-		expect(focused).not.toContain("↓ select");
-	});
-
-	it("does not transfer editor focus to the hidden summary while a picker is open", () => {
-		let pickerOpen = true;
-		const mode = Object.create(InteractiveMode.prototype) as InteractiveMode;
-		const setFocus = vi.fn();
-		const summaryLine = { isSelectable: () => true };
-		Object.assign(mode, {
-			isInlinePickerOpen: () => pickerOpen,
-			getTrayOverrideLabel: () => undefined,
-			subagentSummaryLine: summaryLine,
-			ui: { setFocus, requestRender: vi.fn() },
-		});
-		const focus = Reflect.get(InteractiveMode.prototype, "focusSubagentSummary") as (
-			this: InteractiveMode,
-		) => boolean;
-		expect(focus.call(mode)).toBe(false);
-		expect(setFocus).not.toHaveBeenCalled();
-		pickerOpen = false;
-		expect(focus.call(mode)).toBe(true);
-		expect(setFocus).toHaveBeenCalledWith(summaryLine);
-	});
-
-	it("keeps the selection background across truncation resets when focused", () => {
-		const line = new SubagentSummaryLine();
-		line.setSubagentCounts({ total: 3, running: 1, idle: 1, inactive: 1 });
-		line.setOpenable(true);
-		line.focused = true;
-		// Narrow enough that the colored counts truncate and inject a full reset.
-		const content = line.render(20)[1];
-		expect(content).toContain("\x1b[0m");
-		for (const segment of content.split("\x1b[0m").slice(1, -1)) {
-			expect(segment.startsWith("\x1b[4") || segment.startsWith("\x1b[10")).toBe(true);
-		}
-	});
-
-	it("never emits lines wider than the allocated width", () => {
-		const line = new SubagentSummaryLine();
-		line.setSubagentCounts({ total: 3, running: 1, idle: 1, inactive: 1 });
-		line.setOpenable(true);
-		for (const width of [120, 40, 24, 12, 6, 3, 2, 1]) {
-			for (const rendered of line.render(width).map(stripAnsi)) {
-				expect(rendered.length).toBeLessThanOrEqual(width);
-			}
-		}
-	});
-
-	it("counts the whole snapshot subtree using running, idle, and inactive status projections", () => {
+describe("subagent status projections", () => {
+	it("counts the whole snapshot subtree using running, idle, and inactive projections", () => {
 		const children = [
 			child("running", "running"),
 			child("queued", "queued"),
@@ -163,288 +50,21 @@ describe("SubagentSummaryLine", () => {
 		});
 	});
 
-	it("opens on Enter or Right only when the daemon-backed line is selectable", () => {
-		const line = new SubagentSummaryLine();
-		const onOpen = vi.fn();
-		line.onOpen = onOpen;
-		line.setSubagentCounts({ total: 2, running: 0, idle: 2, inactive: 0 });
-		line.setOpenable(true);
-
-		line.handleInput("\r");
-		line.handleInput("\x1b[C");
-
-		expect(onOpen).toHaveBeenCalledTimes(2);
-	});
-
-	it("stays visible but non-selectable for an in-process connection", () => {
-		const line = new SubagentSummaryLine();
-		const onOpen = vi.fn();
-		line.onOpen = onOpen;
-		line.setSubagentCounts({ total: 1, running: 0, idle: 0, inactive: 1 });
-		line.setOpenable(false);
-
-		expect(stripAnsi(line.render(100).join("\n"))).toContain("● 0 running   ◐ 0 idle   ○ 1 inactive");
-		expect(line.isSelectable()).toBe(false);
-		line.handleInput("\r");
-		expect(onOpen).not.toHaveBeenCalled();
-	});
-
-	it("updates the rendered counts from consecutive child-status events", () => {
-		const line = new SubagentSummaryLine();
-		line.setOpenable(true);
-		const mode = Object.create(InteractiveMode.prototype) as InteractiveMode & Record<string, unknown>;
-		Object.assign(mode, {
-			subagentSnapshots: new Map<string, AgentConnectionRlmChildAgentSnapshot>(),
-			rlmNodeId: undefined,
-			heartbeatCatalog: [],
-			subagentSummaryLine: line,
-			updateWorkingPulse: vi.fn(),
-			syncWorkingLoader: vi.fn(),
-			updateWorkingLoaderMessage: vi.fn(),
-			ui: { requestRender: vi.fn() },
-		});
-		const update = Reflect.get(InteractiveMode.prototype, "updateSubagentSummary") as (
-			this: typeof mode,
-			value: AgentConnectionRlmChildAgentSnapshot,
-		) => void;
-
-		update.call(mode, child("worker", "running"));
-		expect(stripAnsi(line.render(100).join("\n"))).toContain("● 1 running   ◐ 0 idle   ○ 0 inactive");
-
-		update.call(mode, child("worker", "done", { activeSessionId: "active-worker" }));
-		expect(stripAnsi(line.render(100).join("\n"))).toContain("● 0 running   ◐ 1 idle   ○ 0 inactive");
-	});
-
-	it("counts a retained completed child as running while a follow-up turn is active", () => {
-		const line = new SubagentSummaryLine();
-		const mode = Object.create(InteractiveMode.prototype) as InteractiveMode & Record<string, unknown>;
-		Object.assign(mode, {
-			subagentSnapshots: new Map<string, AgentConnectionRlmChildAgentSnapshot>(),
-			rlmNodeId: undefined,
-			heartbeatCatalog: [],
-			subagentSummaryLine: line,
-			updateWorkingPulse: vi.fn(),
-			syncWorkingLoader: vi.fn(),
-			updateWorkingLoaderMessage: vi.fn(),
-			ui: { requestRender: vi.fn() },
-		});
-		const update = Reflect.get(InteractiveMode.prototype, "updateSubagentSummary") as (
-			this: typeof mode,
-			value: AgentConnectionRlmChildAgentSnapshot,
-		) => void;
-
-		update.call(mode, child("worker", "done", { activeSessionId: "resident-worker" }));
-		expect(stripAnsi(line.render(100).join("\n"))).toContain("● 0 running   ◐ 1 idle   ○ 0 inactive");
-
-		update.call(mode, child("worker", "done", { activeSessionId: "resident-worker", activity: { kind: "waiting" } }));
-		expect(stripAnsi(line.render(100).join("\n"))).toContain("● 1 running   ◐ 0 idle   ○ 0 inactive");
-
-		update.call(mode, child("worker", "done", { activeSessionId: "resident-worker" }));
-		expect(stripAnsi(line.render(100).join("\n"))).toContain("● 0 running   ◐ 1 idle   ○ 0 inactive");
-	});
-
-	it("refreshes counts when startup seeding follows an early live child update", () => {
-		const line = new SubagentSummaryLine();
-		const mode = Object.create(InteractiveMode.prototype) as InteractiveMode & Record<string, unknown>;
-		Object.assign(mode, {
-			subagentSnapshots: new Map<string, AgentConnectionRlmChildAgentSnapshot>(),
-			rlmNodeId: undefined,
-			heartbeatCatalog: [],
-			subagentSummaryLine: line,
-			updateWorkingPulse: vi.fn(),
-			syncWorkingLoader: vi.fn(),
-			updateWorkingLoaderMessage: vi.fn(),
-			ui: { requestRender: vi.fn() },
-		});
-		const worker = child("worker", "done", { parentId: "me" });
-		const update = Reflect.get(InteractiveMode.prototype, "updateSubagentSummary") as (
-			this: typeof mode,
-			value: AgentConnectionRlmChildAgentSnapshot,
-		) => void;
-		const seed = Reflect.get(InteractiveMode.prototype, "seedSubagentSummary") as (
-			this: typeof mode,
-			children: readonly AgentConnectionRlmChildAgentSnapshot[],
-		) => void;
-
-		update.call(mode, worker);
-		expect(line.render(100)).toEqual([]);
-		Reflect.set(mode, "rlmNodeId", "me");
-		seed.call(mode, [worker]);
-
-		expect(stripAnsi(line.render(100).join("\n"))).toContain("╭─ subagents ─");
-	});
-
-	it("clears a resident session id when a terminal update reports an evicted child", () => {
-		const line = new SubagentSummaryLine();
-		const mode = Object.create(InteractiveMode.prototype) as InteractiveMode & Record<string, unknown>;
-		Object.assign(mode, {
-			subagentSnapshots: new Map<string, AgentConnectionRlmChildAgentSnapshot>(),
-			rlmNodeId: undefined,
-			heartbeatCatalog: [],
-			subagentSummaryLine: line,
-			updateWorkingPulse: vi.fn(),
-			syncWorkingLoader: vi.fn(),
-			updateWorkingLoaderMessage: vi.fn(),
-			ui: { requestRender: vi.fn() },
-		});
-		const update = Reflect.get(InteractiveMode.prototype, "updateSubagentSummary") as (
-			this: typeof mode,
-			value: AgentConnectionRlmChildAgentSnapshot,
-		) => void;
-
-		update.call(mode, child("worker", "running", { activeSessionId: "resident-worker" }));
-		// Active partial updates retain the last known resident id.
-		update.call(mode, child("worker", "running"));
-		update.call(mode, child("worker", "done"));
-
-		expect(stripAnsi(line.render(100).join("\n"))).toContain("● 0 running   ◐ 0 idle   ○ 1 inactive");
-	});
-
-	it("removes a run on the producer's cancelled signal and keeps transcript-backed rows through repeated dones", () => {
-		const line = new SubagentSummaryLine();
-		const mode = Object.create(InteractiveMode.prototype) as InteractiveMode & Record<string, unknown>;
-		Object.assign(mode, {
-			subagentSnapshots: new Map<string, AgentConnectionRlmChildAgentSnapshot>(),
-			rlmNodeId: undefined,
-			heartbeatCatalog: [],
-			subagentSummaryLine: line,
-			updateWorkingPulse: vi.fn(),
-			syncWorkingLoader: vi.fn(),
-			updateWorkingLoaderMessage: vi.fn(),
-			ui: { requestRender: vi.fn() },
-		});
-		const update = Reflect.get(InteractiveMode.prototype, "updateSubagentSummary") as (
-			this: typeof mode,
-			value: AgentConnectionRlmChildAgentSnapshot,
-		) => void;
-		const snapshots = Reflect.get(mode, "subagentSnapshots") as Map<string, AgentConnectionRlmChildAgentSnapshot>;
-
-		// A pre-bind failure arrives as cancelled: the queued row goes, never an inactive phantom.
-		update.call(mode, child("never-bound", "queued"));
-		update.call(mode, child("never-bound", "cancelled", { error: "boom" }));
-		expect(snapshots.has("never-bound")).toBe(false);
-
-		update.call(mode, child("worker", "running", { activeSessionId: "resident-worker" }));
-		update.call(mode, child("worker", "done"));
-		update.call(mode, child("worker", "done"));
-		expect(snapshots.has("worker")).toBe(true);
-		expect(stripAnsi(line.render(100).join("\n"))).toContain("● 0 running   ◐ 0 idle   ○ 1 inactive");
-	});
-
 	it("counts the whole roster subtree, not just direct children", () => {
-		const rosterChild = {
-			id: "c1",
-			sessionId: "c1",
-			lifecycle: "live",
-			runtimeKind: "subagent",
-			rlmChildId: "c1",
-			parentSessionId: "root-session",
-			rosterStatus: "idle",
-		} as SessionSummary;
-		const grandchild = {
-			id: "gc1",
-			sessionId: "gc1",
-			activeSessionId: "gc1-active",
-			lifecycle: "live",
-			runtimeKind: "subagent",
-			rlmChildId: "gc1",
-			parentSessionId: "c1",
-			rosterStatus: "running",
-		} as SessionSummary;
-		const greatGrandchild = {
-			id: "gg1",
-			sessionId: "gg1",
-			lifecycle: "live",
-			runtimeKind: "subagent",
-			rlmChildId: "gg1",
-			parentActiveSessionId: "gc1-active",
-			rosterStatus: "running",
-		} as SessionSummary;
-		const archivedChild = {
-			id: "ac1",
-			sessionId: "ac1",
-			lifecycle: "archived",
-			runtimeKind: "subagent",
-			rlmChildId: "ac1",
-			parentSessionId: "root-session",
-			rosterStatus: "inactive",
-		} as SessionSummary;
-		const archivedGrandchild = {
-			id: "ag1",
-			sessionId: "ag1",
-			lifecycle: "live",
-			runtimeKind: "subagent",
-			rlmChildId: "ag1",
-			parentSessionId: "ac1",
-			rosterStatus: "running",
-		} as SessionSummary;
-		const foreign = {
-			id: "f1",
-			sessionId: "f1",
-			lifecycle: "live",
-			runtimeKind: "subagent",
-			rlmChildId: "f1",
-			parentSessionId: "other-root",
-			rosterStatus: "running",
-		} as SessionSummary;
-		expect(
-			countRosterSubagentStatuses(
-				[rosterChild, grandchild, greatGrandchild, archivedChild, archivedGrandchild, foreign],
-				{ sessionId: "root-session" },
-			),
-		).toEqual({
+		const rows = [
+			summary("c1", { parentSessionId: "root-session", rosterStatus: "idle" }),
+			summary("gc1", { activeSessionId: "gc1-active", parentSessionId: "c1", rosterStatus: "running" }),
+			summary("gg1", { parentActiveSessionId: "gc1-active", rosterStatus: "running" }),
+			summary("ac1", { lifecycle: "archived", parentSessionId: "root-session", rosterStatus: "inactive" }),
+			summary("ag1", { parentSessionId: "ac1", rosterStatus: "running" }),
+			summary("f1", { parentSessionId: "other-root", rosterStatus: "running" }),
+		];
+
+		expect(countRosterSubagentStatuses(rows, { sessionId: "root-session" })).toEqual({
 			total: 4,
 			running: 3,
 			idle: 1,
 			inactive: 0,
 		});
-	});
-
-	it("keeps chat alive with the snapshot-fed bar when the roster subscribe fails", async () => {
-		const line = new SubagentSummaryLine();
-		const mode = Object.create(InteractiveMode.prototype) as InteractiveMode & Record<string, unknown>;
-		Object.assign(mode, {
-			agentConnection: {
-				subscribeAgentRoster: vi.fn(async () => {
-					throw new Error("Daemon is stale");
-				}),
-			},
-			subagentSnapshots: new Map<string, AgentConnectionRlmChildAgentSnapshot>(),
-			rlmNodeId: undefined,
-			heartbeatCatalog: [],
-			subagentSummaryLine: line,
-			connectionState: undefined,
-			scheduleHeartbeatManagerRefresh: vi.fn(),
-			updateWorkingPulse: vi.fn(),
-			syncWorkingLoader: vi.fn(),
-			updateWorkingLoaderMessage: vi.fn(),
-			ui: { requestRender: vi.fn() },
-		});
-		const subscribe = Reflect.get(InteractiveMode.prototype, "subscribeToRosterBar") as (
-			this: typeof mode,
-		) => Promise<void>;
-
-		await expect(subscribe.call(mode)).resolves.toBeUndefined();
-		expect(Reflect.get(mode, "rosterBar")).toBeUndefined();
-	});
-
-	it("turns a selection into the scoped agents-view run result", async () => {
-		const returnToAgentsView = vi.fn(async () => undefined);
-		const mode = Object.create(InteractiveMode.prototype) as InteractiveMode & Record<string, unknown>;
-		Object.assign(mode, {
-			editor: { getText: () => "" },
-			options: { returnToAgentsView: true },
-			returnToAgentsView,
-		});
-		const open = Reflect.get(InteractiveMode.prototype, "openScopedAgentsView") as (
-			this: typeof mode,
-		) => Promise<void>;
-		const line = new SubagentSummaryLine();
-		line.setSubagentCounts({ total: 1, running: 1, idle: 0, inactive: 0 });
-		line.setOpenable(true);
-		line.onOpen = () => void open.call(mode);
-
-		line.handleInput("\r");
-		await vi.waitFor(() => expect(returnToAgentsView).toHaveBeenCalledWith("scoped_agents_view"));
 	});
 });

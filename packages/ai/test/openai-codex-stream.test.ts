@@ -1,14 +1,19 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ResponseStreamEvent } from "openai/resources/responses/responses.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { supportsFastMode } from "../src/models.js";
 import {
 	getOpenAICodexWebSocketDebugStats,
 	resetOpenAICodexWebSocketDebugStats,
 	streamOpenAICodexResponses,
 	streamSimpleOpenAICodexResponses,
 } from "../src/providers/openai-codex-responses.js";
-import type { AssistantMessage, Context, Model } from "../src/types.js";
+import { convertResponsesMessages, processResponsesStream } from "../src/providers/openai-responses-shared.js";
+import { buildBaseOptions } from "../src/providers/simple-options.js";
+import type { Api, AssistantMessage, Context, Model, ToolResultMessage } from "../src/types.js";
+import { AssistantMessageEventStream } from "../src/utils/event-stream.js";
 
 const originalFetch = global.fetch;
 const originalWebSocket = globalThis.WebSocket;
@@ -1473,5 +1478,149 @@ describe("openai-codex streaming", () => {
 
 		expect(result.stopReason).toBe("error");
 		expect(failureDetails(result)?.retryAfterMs).toBe(60000);
+	});
+});
+
+describe("openai-responses shared conversions", () => {
+	const responsesModel: Model<"openai-responses"> = {
+		id: "gpt-5-mini",
+		name: "GPT-5 Mini",
+		api: "openai-responses",
+		provider: "openai",
+		baseUrl: "https://api.openai.com/v1",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 400000,
+		maxTokens: 128000,
+	};
+
+	const emptyUsage = {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+
+	function toolResultContext(toolResult: ToolResultMessage): Context {
+		return {
+			messages: [
+				{ role: "user", content: "Run it", timestamp: 1 },
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "tool-1", name: toolResult.toolName, arguments: {} }],
+					api: "openai-responses",
+					provider: "openai",
+					model: responsesModel.id,
+					usage: emptyUsage,
+					stopReason: "toolUse",
+					timestamp: 2,
+				} satisfies AssistantMessage,
+				toolResult,
+			],
+		};
+	}
+
+	function toolResult(toolName: string, content: ToolResultMessage["content"]): ToolResultMessage {
+		return { role: "toolResult", toolCallId: "tool-1", toolName, content, isError: false, timestamp: 3 };
+	}
+
+	it("removes partialJson from persisted tool-call blocks at output_item.done", async () => {
+		const argumentsJson = '{"path":"README.md","content":"updated"}';
+		async function* events(): AsyncIterable<ResponseStreamEvent> {
+			const item = { type: "function_call", id: "fc_test", call_id: "call_test", name: "edit" };
+			yield { type: "response.output_item.added", item: { ...item, arguments: "" } } as ResponseStreamEvent;
+			yield { type: "response.function_call_arguments.delta", delta: '{"path":"README.md"' } as ResponseStreamEvent;
+			yield {
+				type: "response.function_call_arguments.delta",
+				delta: ',"content":"updated"}',
+			} as ResponseStreamEvent;
+			yield { type: "response.function_call_arguments.done", arguments: argumentsJson } as ResponseStreamEvent;
+			yield {
+				type: "response.output_item.done",
+				item: { ...item, arguments: argumentsJson },
+			} as ResponseStreamEvent;
+		}
+
+		const output: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: responsesModel.api,
+			provider: responsesModel.provider,
+			model: responsesModel.id,
+			usage: emptyUsage,
+			stopReason: "stop",
+			timestamp: 1,
+		};
+		const stream = new AssistantMessageEventStream();
+
+		await processResponsesStream(events(), output, stream, responsesModel);
+
+		expect(output.content).toHaveLength(1);
+		const persisted = output.content[0];
+		if (persisted?.type !== "toolCall") throw new Error("Expected toolCall block");
+		expect(persisted.arguments).toEqual({ path: "README.md", content: "updated" });
+		expect("partialJson" in persisted).toBe(false);
+	});
+
+	it("does not emit the image placeholder for empty-text tool results with no image", () => {
+		const messages = convertResponsesMessages(
+			responsesModel,
+			toolResultContext(toolResult("bash", [{ type: "text", text: "" }])),
+			new Set(["openai"]),
+		);
+
+		expect(messages.find((message) => message.type === "function_call_output")?.output).toBe("");
+	});
+
+	it("still attaches images for tool results that contain an image", () => {
+		const messages = convertResponsesMessages(
+			responsesModel,
+			toolResultContext(toolResult("read", [{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" }])),
+			new Set(["openai"]),
+		);
+
+		const output = messages.find((message) => message.type === "function_call_output")?.output;
+		expect(Array.isArray(output)).toBe(true);
+		expect((output as Array<{ type?: string }>).some((part) => part.type === "input_image")).toBe(true);
+	});
+});
+
+describe("fast mode", () => {
+	function fastModeModel(provider: string, id: string, api: Api): Model<Api> {
+		return {
+			id,
+			name: id,
+			api,
+			provider,
+			baseUrl: "https://example.com",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1000,
+			maxTokens: 100,
+		};
+	}
+
+	it.each([
+		{ provider: "openai-codex", id: "gpt-5.4", api: "openai-codex-responses" as Api, supported: true },
+		{ provider: "openai-codex", id: "gpt-5.5", api: "openai-codex-responses" as Api, supported: true },
+		{ provider: "openai-codex", id: "gpt-5.6-luna", api: "openai-codex-responses" as Api, supported: true },
+		{ provider: "openai-codex", id: "gpt-5.3-codex", api: "openai-codex-responses" as Api, supported: false },
+		{ provider: "openai-codex", id: "gpt-5.4-mini", api: "openai-codex-responses" as Api, supported: false },
+		{ provider: "openai", id: "gpt-5.1", api: "openai-responses" as Api, supported: false },
+		{ provider: "openai", id: "gpt-5.5", api: "openai-responses" as Api, supported: true },
+		{ provider: "github-copilot", id: "gpt-5.5", api: "openai-responses" as Api, supported: false },
+	])("gates $provider/$id at $supported", ({ provider, id, api, supported }) => {
+		expect(supportsFastMode(fastModeModel(provider, id, api))).toBe(supported);
+	});
+
+	it.each(["openai-codex", "openai"])("forwards priority service tier for %s models", (provider) => {
+		const api: Api = provider === "openai-codex" ? "openai-codex-responses" : "openai-responses";
+		expect(buildBaseOptions(fastModeModel(provider, "gpt-5.5", api), { serviceTier: "priority" }).serviceTier).toBe(
+			"priority",
+		);
 	});
 });

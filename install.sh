@@ -1995,7 +1995,8 @@ prime_agent_native_probe() (
 	"$@" &
 	native_probe_pid=$!
 	native_probe_timeout=$(prime_agent_native_probe_timeout)
-	native_probe_deadline=$(($(date +%s) + native_probe_timeout))
+	# date +%s truncates to whole seconds, so add one to avoid killing a probe early.
+	native_probe_deadline=$(($(date +%s) + native_probe_timeout + 1))
 	while kill -0 "$native_probe_pid" 2>/dev/null; do
 		if [ "$(date +%s)" -ge "$native_probe_deadline" ]; then
 			printf 'error: executable probe timed out after %s seconds.\n' "$native_probe_timeout" >&2

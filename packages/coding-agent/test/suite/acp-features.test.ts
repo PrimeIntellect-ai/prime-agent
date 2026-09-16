@@ -1,12 +1,17 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as acp from "@agentclientprotocol/sdk";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../../src/config.js";
 import type { AgentSessionRuntime } from "../../src/core/agent-session-runtime.js";
+import type { ExtensionContext, ToolDefinition } from "../../src/core/extensions/types.js";
+import type { ExecuteResult } from "../../src/core/kernel/index.js";
+import { McpManager } from "../../src/core/mcp/mcp-manager.js";
+import { acpMcpToolNames, createAcpMcpToolDefinitions } from "../../src/core/tools/acp-mcp.js";
+import type { IpythonKernelProvisioner } from "../../src/core/tools/ipython.js";
 import { PRIME_AGENT_META_NAMESPACE } from "../../src/modes/acp/acp-meta.js";
 import { runAcpModeWithConnection } from "../../src/modes/acp/index.js";
 import { InProcessAgentConnection } from "../../src/modes/agent-connection/in-process-agent-connection.js";
@@ -771,4 +776,148 @@ describe("ACP mode preserves prime-agent features", () => {
 		expect(init.agentCapabilities?.sessionCapabilities?.close).toBeDefined();
 		harness.cleanup();
 	}, 30_000);
+});
+
+/** ACP `session/new` against an arbitrary cwd, which `connectAcp` pins to the harness temp dir. */
+async function newAcpSessionAt(harness: Harness, cwd: string) {
+	const connection = new InProcessAgentConnection(runtimeHostFor(harness.session));
+	const toAgent = new TransformStream<Uint8Array, Uint8Array>();
+	const toClient = new TransformStream<Uint8Array, Uint8Array>();
+	void runAcpModeWithConnection(connection, {
+		stream: acp.ndJsonStream(toClient.writable, toAgent.readable),
+	} as any);
+	const handle = acp.client({ name: "cwd-regression" }).connect(acp.ndJsonStream(toAgent.writable, toClient.readable));
+	await handle.agent.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+	return handle.agent.request("session/new", { cwd, mcpServers: [] });
+}
+
+function cwdMeta(created: { _meta?: Record<string, unknown> | null }): unknown {
+	return (created._meta?.[PRIME_AGENT_META_NAMESPACE] as { cwd?: unknown } | undefined)?.cwd;
+}
+
+function acpMcpHttpServer(name: string) {
+	return { name, type: "http" as const, url: `https://${name}.example/mcp`, headers: {} };
+}
+
+function acpMcpProvisioner(result: ExecuteResult): IpythonKernelProvisioner {
+	return {
+		ensure: vi.fn(async () => ({ execute: vi.fn(async (_code: string) => result) })),
+	} as unknown as IpythonKernelProvisioner;
+}
+
+function requireAcpMcpTool(tool: ToolDefinition | undefined): ToolDefinition {
+	if (!tool) throw new Error("Expected ACP MCP tool definition");
+	return tool;
+}
+
+describe("ACP mode regressions", () => {
+	const acpDirectories: string[] = [];
+	const acpHarnesses: Harness[] = [];
+
+	afterEach(() => {
+		for (const directory of acpDirectories.splice(0)) {
+			rmSync(directory, { recursive: true, force: true });
+		}
+		for (const harness of acpHarnesses.splice(0)) {
+			harness.cleanup();
+		}
+	});
+
+	it("#623: compares session cwd canonically instead of textually", async () => {
+		const harness = await createHarness();
+		acpHarnesses.push(harness);
+		const aliasRoot = mkdtempSync(join(tmpdir(), "prime-agent-acp-cwd-"));
+		acpDirectories.push(aliasRoot);
+		const alias = join(aliasRoot, "alias");
+		// macOS exposes /var as /private/var; a portable symlink exercises the
+		// same distinction between a displayed path and its canonical path.
+		symlinkSync(process.cwd(), alias, process.platform === "win32" ? "junction" : "dir");
+
+		const created = await newAcpSessionAt(harness, alias);
+
+		expect(created.sessionId).toBeTruthy();
+		expect(cwdMeta(created)).toBeUndefined();
+	});
+
+	it("#623: preserves mismatch metadata when canonicalization falls back", async () => {
+		const harness = await createHarness();
+		acpHarnesses.push(harness);
+		const requested = join(harness.tempDir, "missing");
+
+		const created = await newAcpSessionAt(harness, requested);
+
+		expect(created.sessionId).toBeTruthy();
+		expect(cwdMeta(created)).toEqual({ requested, actual: process.cwd() });
+	});
+
+	it("PR 2002: rejects invalid or duplicate ACP MCP server names before generating ambiguous tools", () => {
+		expect(() => acpMcpToolNames([acpMcpHttpServer("foo.bar")])).toThrow("Invalid ACP MCP server name");
+		expect(() => acpMcpToolNames([acpMcpHttpServer("task"), acpMcpHttpServer("task")])).toThrow(
+			"Duplicate ACP MCP server",
+		);
+	});
+
+	it.each([
+		{
+			name: "a failed kernel cell surfaces its traceback",
+			provisioner: () =>
+				acpMcpProvisioner({
+					stdout: "",
+					stderr: "cell failed",
+					status: "error",
+					error: { ename: "RuntimeError", evalue: "boom", traceback: ["traceback line"] },
+					durationMs: 2,
+				}),
+			expected: "traceback line",
+		},
+		{
+			name: "an unavailable kernel surfaces the provisioning failure",
+			provisioner: () =>
+				({
+					ensure: vi.fn(async () => {
+						throw new Error("kernel unavailable");
+					}),
+				}) as unknown as IpythonKernelProvisioner,
+			expected: "kernel unavailable",
+		},
+	])("PR 2002: maps kernel failures to ACP MCP tool errors - $name", async ({ provisioner, expected }) => {
+		const [listTool] = createAcpMcpToolDefinitions([acpMcpHttpServer("task")], provisioner());
+
+		await expect(
+			requireAcpMcpTool(listTool).execute("call-1", {}, undefined, undefined, {} as ExtensionContext),
+		).rejects.toThrow(expected);
+	});
+
+	it("PR 2002: registers ACP MCP proxies per owner and releases them again", async () => {
+		const harness = await createHarness();
+		acpHarnesses.push(harness);
+		const manager = new McpManager({ authStorage: harness.authStorage });
+		Reflect.set(harness.session, "_mcpManager", manager);
+
+		harness.session.replaceAcpMcpServers([acpMcpHttpServer("task")], "owner-a");
+		expect(harness.session.getAllTools().map((tool) => tool.name)).toEqual(
+			expect.arrayContaining(["mcp_list_tools_task", "mcp_call_task"]),
+		);
+		expect(harness.session.getActiveToolNames()).toContain("mcp_call_task");
+
+		await harness.session.reload();
+		expect(harness.session.getActiveToolNames()).toContain("mcp_call_task");
+
+		await harness.session.releaseAcpMcpServers("owner-a", ["task"]);
+		expect(harness.session.getAllTools().map((tool) => tool.name)).not.toContain("mcp_call_task");
+		expect(harness.session.getActiveToolNames()).not.toContain("mcp_call_task");
+		expect(manager.getAcpServers()).toEqual([]);
+	});
+
+	it("PR 2002: rejects ACP MCP servers when the built-in cpython runtime is unavailable", async () => {
+		const harness = await createHarness({ tools: [] });
+		acpHarnesses.push(harness);
+		const manager = new McpManager({ authStorage: harness.authStorage });
+		Reflect.set(harness.session, "_mcpManager", manager);
+
+		expect(() => harness.session.replaceAcpMcpServers([acpMcpHttpServer("task")], "owner-a")).toThrow(
+			"require the built-in cpython tool",
+		);
+		expect(manager.getAcpServers()).toEqual([]);
+	});
 });
