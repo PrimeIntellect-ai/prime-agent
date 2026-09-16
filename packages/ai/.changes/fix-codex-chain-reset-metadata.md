@@ -1,0 +1,1 @@
+- Fixed Codex stale-continuation recovery when WebSocket lifecycle or metadata events arrive before the provider error.
