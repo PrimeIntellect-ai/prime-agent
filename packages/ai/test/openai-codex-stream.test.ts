@@ -8,7 +8,7 @@ import {
 	streamOpenAICodexResponses,
 	streamSimpleOpenAICodexResponses,
 } from "../src/providers/openai-codex-responses.js";
-import type { AssistantMessage, Context, Model } from "../src/types.js";
+import type { AssistantMessage, AssistantMessageEvent, Context, Model } from "../src/types.js";
 
 const originalFetch = global.fetch;
 const originalWebSocket = globalThis.WebSocket;
@@ -1168,6 +1168,56 @@ describe("openai-codex streaming", () => {
 			websocketFailures: 0,
 			sseFallbacks: 0,
 		});
+	});
+
+	it("recovers a stale previous_response_id after lifecycle and metadata events without exposing an error", async () => {
+		const token = mockToken();
+		const sentBodies = installScriptedCodexWebSocket([
+			(socket) => socket.emit(codexResponseEvents({ responseId: "resp_1", messageId: "msg_1", text: "Hello" })),
+			(socket) =>
+				socket.emit([
+					{ type: "response.created", response: { id: "resp_stale" } },
+					{ type: "response.in_progress", response: { id: "resp_stale" } },
+					{ type: "codex.response.metadata", headers: {} },
+					{ type: "responsesapi.websocket_timing", elapsed_ms: 1 },
+					...codexErrorEvents("previous_response_not_found", "Previous response with id 'resp_1' not found"),
+				]),
+			(socket) => socket.emit(codexResponseEvents({ responseId: "resp_2", messageId: "msg_2", text: "Done" })),
+		]);
+
+		const model = codexTestModel();
+		const firstContext: Context = {
+			systemPrompt: "You are a helpful assistant.",
+			messages: [{ role: "user", content: "Say hello", timestamp: 1 }],
+		};
+		const first = await streamOpenAICodexResponses(model, firstContext, {
+			apiKey: token,
+			sessionId: "session-chain-reset-lifecycle",
+			transport: "websocket-cached",
+		}).result();
+
+		const secondContext: Context = {
+			systemPrompt: "You are a helpful assistant.",
+			messages: [...firstContext.messages, first, { role: "user", content: "Now finish", timestamp: 2 }],
+		};
+		const secondStream = streamOpenAICodexResponses(model, secondContext, {
+			apiKey: token,
+			sessionId: "session-chain-reset-lifecycle",
+			transport: "websocket-cached",
+		});
+		const secondEvents: AssistantMessageEvent[] = [];
+		for await (const event of secondStream) secondEvents.push(event);
+		const second = await secondStream.result();
+
+		expect(second.stopReason).toBe("stop");
+		expect(second.content[0]).toMatchObject({ type: "text", text: "Done" });
+		expect(second.responseId).toBe("resp_2");
+		expect(sentBodies).toHaveLength(3);
+		expect(sentBodies[1].previous_response_id).toBe("resp_1");
+		expect(sentBodies[2].previous_response_id).toBeUndefined();
+		expect(secondEvents.filter((event) => event.type === "start")).toHaveLength(1);
+		expect(secondEvents.at(-1)?.type).toBe("done");
+		expect(global.fetch).not.toHaveBeenCalled();
 	});
 
 	it("surfaces the error without further retries when the chain-reset retry fails again", async () => {
