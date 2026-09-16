@@ -1595,6 +1595,97 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
         result = await bash("t\\rap 'echo done' EXIT; echo hi")
         self.assertEqual(result.exit_code, 0)
 
+    async def test_refuses_home_reassignments_before_home_operands(self):
+        # The guard expands $HOME from the kernel environment; a command that
+        # reassigns HOME first changes the expansion at run time. The bypass
+        # needs the kernel HOME to be the workspace itself.
+        outside = self._outside_target()
+        Path(outside, "victim").mkdir()
+        Path(outside, "victim", "file.txt").write_text("keep\n")
+        with mock.patch.dict(os.environ, {"HOME": self.test_dir}):
+            self._make_tree()
+            Path(self.test_dir, "victim").mkdir()
+            Path(self.test_dir, "victim", "file.txt").write_text("keep\n")
+            for command in [
+                f"HOME={outside}; export HOME; rm -rf \"$HOME/victim\"",
+                f"export HOME={outside}; rm -rf \"$HOME/victim\"",
+                f"HOME={outside}; rm -rf \"$HOME/victim\"",
+                f"HOME={outside}; rm -rf ~/victim",
+            ]:
+                with self.subTest(command=command):
+                    with self.assertRaises(DestructiveRmRefusalError):
+                        bash(command)
+                    self.assertTrue(Path(self.test_dir, "victim", "file.txt").exists())
+                    self.assertTrue(Path(outside, "victim", "file.txt").exists())
+            # Without a reassignment the kernel HOME still governs the
+            # expansion, so an in-workspace deletion keeps working.
+            result = await bash("rm -rf victim")
+            self.assertEqual(result.exit_code, 0)
+            self.assertFalse(self._tracked("victim").exists())
+
+    async def test_refuses_intra_token_line_continuations(self):
+        # Bash removes a backslash-newline pair entirely, so `r\<newline>m`
+        # is one `rm` token at run time.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "r\\\nm -rf " + outside,
+            "rm -r\\\nf " + outside,
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+
+    async def test_bash_env_startup_file_is_not_sourced(self):
+        # Non-interactive bash sources $BASH_ENV before the command; the
+        # spawn must not let model-writable env smuggle an unscanned file.
+        outside = self._outside_target()
+        Path(outside, "victim").mkdir()
+        Path(outside, "victim", "file.txt").write_text("keep\n")
+        startup = str(self._tracked("startup.sh"))
+        Path(startup).write_text(f"rm -rf {outside}/victim\n")
+        with mock.patch.dict(os.environ, {"BASH_ENV": startup}):
+            result = await bash("echo hi")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("hi", result.output)
+        self.assertTrue(Path(outside, "victim", "file.txt").exists())
+
+    async def test_refuses_heredoc_bodies_reaching_script_runners(self):
+        # A heredoc body written to a script can run through `sh s.sh`,
+        # `. s.sh`, `source s.sh`, or `./s.sh`: those words keep bodies live.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "cat <<EOF > s.sh\nrm -rf " + outside + "\nEOF\n. s.sh",
+            "cat <<EOF > s.sh\nrm -rf " + outside + "\nEOF\nsource s.sh",
+            "cat <<EOF > s.sh\nrm -rf " + outside + "\nEOF\n./s.sh",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+
+    async def test_heredoc_scan_sees_later_interpreters_past_body_quotes(self):
+        # An unclosed quote in an earlier data body must not swallow the
+        # scan: a later interpreter-fed heredoc stays live.
+        self._make_tree()
+        outside = self._outside_target()
+        command = (
+            "cat <<'EOF'\n"
+            "don't\n"
+            "EOF\n"
+            "sh <<EOF\n"
+            f"rm -rf {outside}\n"
+            "EOF"
+        )
+        with self.assertRaises(DestructiveRmRefusalError):
+            bash(command)
+        self.assertTrue(Path(outside, "file.txt").exists())
+        # The earlier data body is still allowed on its own.
+        result = await bash("cat <<'EOF'\ndon't\nEOF")
+        self.assertEqual(result.exit_code, 0)
+
     async def test_operands_after_end_of_options_are_checked(self):
         self._make_tree()
         with self.assertRaises(DestructiveRmRefusalError):

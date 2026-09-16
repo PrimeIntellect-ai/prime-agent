@@ -1153,6 +1153,54 @@ def _separates_commands(text: str) -> bool:
     them (redirections do not and are masked out before this runs).
     """
     return any(ch in ";&|\n()" for ch in text)
+def _join_line_continuations(command: str) -> str:
+    """Remove backslash-newline line continuations the way the shell does.
+
+    Bash deletes an unquoted or double-quoted backslash-newline pair
+    entirely, so `r\\\n`m -rf x` is the single token sequence `rm -rf x`;
+    the space-preserving rewrite below would see `r  m` and miss it.
+    Positions in the result no longer map back to the source, which is fine
+    for the rm guard: every downstream scan runs on this joined form.
+    Single-quoted pairs are literal data and stay; a newline always ends a
+    comment, so comments are passed through whole."""
+    out: list[str] = []
+    quote: str | None = None
+    comment = False
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if comment:
+            out.append(ch)
+            if ch == "\n":
+                comment = False
+        elif quote is None:
+            if ch in ('"', "'"):
+                quote = ch
+                out.append(ch)
+            elif ch == "#" and (i == 0 or command[i - 1] in " \t\r\n;&|(){}"):
+                comment = True
+                out.append(ch)
+            elif ch == "\\" and i + 1 < n and command[i + 1] == "\n":
+                i += 1  # the shell removes the pair: tokens on both sides join
+            else:
+                out.append(ch)
+        elif quote == "'":
+            out.append(ch)
+            if ch == "'":
+                quote = None
+        else:  # double quotes
+            if ch == "\\" and i + 1 < n and command[i + 1] == "\n":
+                i += 1  # removed inside double quotes too
+            else:
+                out.append(ch)
+                if ch == '"':
+                    quote = None
+                elif ch == "\\" and i + 1 < n:
+                    out.append(command[i + 1])
+                    i += 1
+        i += 1
+    return "".join(out)
 
 
 def _segment_separator(text: str, from_end: bool = True) -> str | None:
@@ -3468,7 +3516,7 @@ def _find_rf_rm_invocations_in_words(
 def _find_recursive_force_rm_invocations(command: str) -> list[list[str]]:
     """The operand lists of every recursive-force rm invocation in `command`;
     see _find_rf_rm_invocations_in_words for the matching rules."""
-    prepared = _mask_shell_redirections(_normalize_line_continuations(command))
+    prepared = _mask_shell_redirections(_join_line_continuations(command))
     return [
         operands
         for _, operands in _find_rf_rm_invocations_in_words(_scan_shell_words(prepared))
@@ -3810,21 +3858,16 @@ def _resolve_rm_operand(operand: str, workspace_root: str, cwd: str) -> str | No
     return None
 
 
-def _mask_heredoc_data_bodies(command: str) -> str:
-    """Blank out here-document bodies that feed non-interpreter commands,
-    keeping character positions and leaving interpreter-fed bodies live.
+def _heredoc_body_spans(command: str) -> list[tuple[int, int]]:
+    """Body extents of every parsable here-document in `command`.
 
-    A heredoc body is data for the command that reads it (`cat <<EOF`), so
-    scanning it as live commands only produces false refusals. A body can
-    still reach an interpreter through stdin (`sh <<EOF`), a pipeline
-    consumer after the terminator (`{ cat <<EOF ... } | sh`), or a script
-    file written in the same command (`cat <<EOF > s.sh; sh s.sh`), so any
-    interpreter or unresolvable-expansion word anywhere in the command
-    keeps all bodies live for the word scan. Quote- and comment-aware;
-    unterminated heredocs stay live (conservative)."""
-    chars = list(command)
-    n = len(command)
+    Structural and quote- and comment-aware: heredoc operators inside quoted
+    spans, comments, or other heredoc bodies are skipped, and an unterminated
+    or unparsable heredoc reports no span (its body stays live, which is the
+    conservative direction)."""
+    spans: list[tuple[int, int]] = []
     i = 0
+    n = len(command)
     while i < n:
         ch = command[i]
         if ch in "'\"":
@@ -3885,18 +3928,58 @@ def _mask_heredoc_data_bodies(command: str) -> str:
             if end is None:
                 i = j  # unterminated heredoc: leave live
                 continue
-            feeds_interpreter = any(
-                os.path.basename(word.value) in _SHELL_DASH_C_INTERPRETERS
-                or not _expansion_is_resolvable(word.value)
-                for word in _scan_shell_words(command)
-            )
-            if not feeds_interpreter:
-                for pos in range(body_start + 1, end):
-                    chars[pos] = " "
+            spans.append((body_start + 1, end))
             i = end
             continue
         i += 1
-    return "".join(chars)
+    return spans
+
+
+def _heredoc_bodies_reach_script_runners(command_without_bodies: str) -> bool:
+    """True when a word in `command_without_bodies` (heredoc bodies already
+    blanked) can run heredoc text: an interpreter feeding on stdin
+    (`sh <<EOF`), a pipeline consumer after the terminator
+    (`{ cat <<EOF ... } | sh`), a script invocation (`sh s.sh`, `./s.sh`,
+    `. s.sh`, `source s.sh`), or an unresolvable-expansion word that could be
+    any of them."""
+    for word in _scan_shell_words(command_without_bodies):
+        if os.path.basename(word.value) in _SHELL_DASH_C_INTERPRETERS:
+            return True
+        if word.value == "source":
+            return True
+        if word.starts_command and ("/" in word.value or word.value == "."):
+            return True
+        if not _expansion_is_resolvable(word.value):
+            return True
+    return False
+
+
+def _rm_guard_scan_texts(normalized: str) -> list[str]:
+    """Scan texts for the rm guard: the command with here-document bodies
+    blanked, plus each body that can reach a script runner as its own
+    command text.
+
+    A heredoc body is data for the command that reads it (`cat <<EOF`), so
+    blanking it avoids false refusals from data text. But a body can still
+    run through stdin (`sh <<EOF`), a pipeline consumer after the terminator
+    (`{ cat <<EOF ... } | sh`), or a script file written in the same command
+    and run through `sh s.sh`, `./s.sh`, `. s.sh`, or `source s.sh`; when
+    any word outside the bodies can run shell text, every body is scanned as
+    its own command, so its rm invocations are still seen and an unbalanced
+    quote inside one body cannot swallow the scan of later text. Bodies that
+    cannot reach a runner are never scanned at all. Unterminated heredocs
+    report no span and stay part of the outer text (conservative)."""
+    spans = _heredoc_body_spans(normalized)
+    if not spans:
+        return [normalized]
+    outer = list(normalized)
+    for start, end in spans:
+        for pos in range(start, end):
+            outer[pos] = " "
+    outer_text = "".join(outer)
+    if not _heredoc_bodies_reach_script_runners(outer_text):
+        return [outer_text]
+    return [outer_text, *(normalized[start:end] for start, end in spans)]
 
 
 def _format_rm_operand_refusal(reasons: list[str], live_bypass_attempt: bool) -> str:
@@ -3942,6 +4025,21 @@ def _format_rm_wrapper_refusal() -> str:
     )
 
 
+def _command_reassigns_env(words: list[_ShellWord], name: str) -> bool:
+    """True when the command assigns or exports `name`, so operands whose
+    expansion depends on it cannot be taken from the kernel environment."""
+    for index, word in enumerate(words):
+        if re.match(rf"^{name}=", word.value):
+            return True
+        if word.value == "export":
+            for follower in words[index + 1 :]:
+                if follower.starts_command:
+                    break
+                if re.match(rf"^{name}(=|$)", follower.value):
+                    return True
+    return False
+
+
 def _guard_destructive_rm(command: str, allow_destructive_rm: bool) -> None:
     """Refuse recursive-force rm invocations whose operands escape the
     workspace or name protected paths. The word scan is pure string work and
@@ -3950,52 +4048,70 @@ def _guard_destructive_rm(command: str, allow_destructive_rm: bool) -> None:
     prefix included) and refuses what it cannot resolve statically: quoted
     shell `-c` and eval payloads, quote-blind substitution layouts,
     expansion-hidden commands and flags, cd/pushd relocations, brace
-    expansion, symlinked operands, and paths that do not exist yet."""
+    expansion, HOME/PWD reassignments, symlinked operands, and paths that do
+    not exist yet."""
     frozen_bypass = _is_truthy_env_value(_BASH_RM_BYPASS_AT_KERNEL_START)
     if allow_destructive_rm or frozen_bypass:
         return
     # Scan what the shell will run: the spawn prepends
     # PRIME_AGENT_BASH_COMMAND_PREFIX, and that env value is model-writable
     # mid-session, so the guard must not assume it stays benign.
-    # Heredoc bodies that feed non-interpreter commands are data, not
-    # commands: blank them before the word scan (interpreter-fed bodies
-    # stay live, so `sh <<EOF` cannot smuggle rm through as stdin text).
-    normalized = _normalize_line_continuations(_with_prefix(command))
-    prepared = _mask_shell_redirections(_mask_heredoc_data_bodies(normalized))
-    # The wrapper scan matches parsed word values, so escaped names
-    # (`t\rap`, `ev\al`) cannot slip past a raw substring gate; it runs on
-    # the pre-scanned words, so non-wrapper commands only pay a light pass.
-    words = _scan_shell_words(prepared)
-    if _wrapped_payloads_hide_recursive_force_rm(prepared, words=words):
-        raise DestructiveRmRefusalError(_format_rm_wrapper_refusal())
-    invocations = _find_rf_rm_invocations_in_words(words)
+    normalized = _join_line_continuations(_with_prefix(command))
+    # Heredoc bodies split out as separate scan texts (see _rm_guard_scan_texts).
+    scan_texts = _rm_guard_scan_texts(normalized)
     reasons: list[str] = []
-    if invocations:
-        try:
-            cwd = os.getcwd()
-            workspace_root = os.path.realpath(cwd)
-        except OSError:
-            return  # the spawn itself will fail; the guard must not mask that error
-        tracked_at = _tracked_cwd_at_words(prepared, words, workspace_root)
-        for word_index, operands in invocations:
-            tracked = tracked_at[word_index]
-            if not operands:
-                reasons.append(
-                    "receives no explicit operand, so names could arrive from"
-                    " xargs or stdin and cannot be checked"
-                )
-                continue
-            if tracked is None:
-                reasons.append(
-                    "runs after a cd/pushd the guard cannot resolve, so its"
-                    " relative targets cannot be checked"
-                )
-                continue
-            for operand in operands:
-                reason = _resolve_rm_operand(operand, workspace_root, tracked)
-                if reason:
-                    reasons.append(f"{operand!r}: {reason}")
-    reasons.extend(_unresolvable_expansion_rm_reasons(words))
+    for scan_text in scan_texts:
+        prepared = _mask_shell_redirections(scan_text)
+        # The wrapper scan matches parsed word values, so escaped names
+        # (`t\\rap`, `ev\\al`) cannot slip past a raw substring gate; it
+        # runs on the pre-scanned words, so other commands only pay a light
+        # pass.
+        words = _scan_shell_words(prepared)
+        if _wrapped_payloads_hide_recursive_force_rm(prepared, words=words):
+            raise DestructiveRmRefusalError(_format_rm_wrapper_refusal())
+        invocations = _find_rf_rm_invocations_in_words(words)
+        if invocations:
+            try:
+                cwd = os.getcwd()
+                workspace_root = os.path.realpath(cwd)
+            except OSError:
+                return  # the spawn itself will fail; the guard must not mask that error
+            tracked_at = _tracked_cwd_at_words(prepared, words, workspace_root)
+            reassigns_home = _command_reassigns_env(words, "HOME")
+            reassigns_pwd = _command_reassigns_env(words, "PWD")
+            for word_index, operands in invocations:
+                tracked = tracked_at[word_index]
+                if not operands:
+                    reasons.append(
+                        "receives no explicit operand, so names could arrive from"
+                        " xargs or stdin and cannot be checked"
+                    )
+                    continue
+                if tracked is None:
+                    reasons.append(
+                        "runs after a cd/pushd the guard cannot resolve, so its"
+                        " relative targets cannot be checked"
+                    )
+                    continue
+                for operand in operands:
+                    if reassigns_home and (
+                        operand.startswith("~") or re.match(r"^\$\{?HOME", operand)
+                    ):
+                        reasons.append(
+                            f"{operand!r}: the command reassigns HOME, so the"
+                            " expansion the shell performs cannot be tracked"
+                        )
+                        continue
+                    if reassigns_pwd and re.match(r"^\$\{?PWD", operand):
+                        reasons.append(
+                            f"{operand!r}: the command reassigns PWD, so the"
+                            " expansion the shell performs cannot be tracked"
+                        )
+                        continue
+                    reason = _resolve_rm_operand(operand, workspace_root, tracked)
+                    if reason:
+                        reasons.append(f"{operand!r}: {reason}")
+        reasons.extend(_unresolvable_expansion_rm_reasons(words))
     if reasons:
         live_bypass_attempt = _is_truthy_env_value(
             os.environ.get(BASH_DESTRUCTIVE_RM_BYPASS_ENV)
@@ -4138,6 +4254,11 @@ def _child_env() -> dict[str, str]:
         # freeze their own launch-time copy, and an inherited forged value
         # would arm as if the user had authorized it at launch.
         env.pop(BASH_DESTRUCTIVE_GIT_BYPASS_ENV, None)
+    # Non-interactive bash sources $BASH_ENV (and some shells $ENV) before
+    # the command; the env is model-writable mid-session, so never let it
+    # smuggle an unscanned startup file past the guards.
+    env.pop("BASH_ENV", None)
+    env.pop("ENV", None)
     return env
 
 
