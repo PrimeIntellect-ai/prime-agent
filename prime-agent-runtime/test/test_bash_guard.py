@@ -1976,6 +1976,67 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
         result = await bash("echo $((1<<2))")
         self.assertEqual(result.exit_code, 0)
 
+    async def test_refuses_alias_expanded_wrapper_payloads(self):
+        # An alias defined in the command expands inside eval payloads.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            f"shopt -s expand_aliases; alias wipe='rm -rf {outside}'; eval wipe",
+            f"alias wipe='rm -rf {outside}'; trap wipe EXIT",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # Unrelated aliases keep eval payloads running.
+        result = await bash("shopt -s expand_aliases; alias greet='echo hi'; eval greet")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("hi", result.output)
+
+    async def test_refuses_live_heredoc_bodies_with_substitution(self):
+        # An unquoted heredoc body undergoes command substitution before the
+        # consuming interpreter sees it; the output is unknowable.
+        self._make_tree()
+        outside = self._outside_target()
+        command = "bash <<EOF\n$(printf 'rm -rf " + outside + "')\nEOF"
+        with self.assertRaises(DestructiveRmRefusalError):
+            bash(command)
+        self.assertTrue(Path(outside, "file.txt").exists())
+        # Data heredocs with substitution stay allowed.
+        result = await bash("cat <<EOF\necho $(date)\nEOF")
+        self.assertEqual(result.exit_code, 0)
+
+    async def test_arithmetic_skip_is_quote_aware(self):
+        # A quoted paren inside $((...)) must not keep the skip open past a
+        # real heredoc whose body quotes could then hide a live rm.
+        self._make_tree()
+        outside = self._outside_target()
+        command = (
+            'echo $(("(" <<1))\n'
+            "cat <<EOF\n"
+            "don't\n"
+            "EOF\n"
+            "rm -rf " + outside
+        )
+        with self.assertRaises(DestructiveRmRefusalError):
+            bash(command)
+        self.assertTrue(Path(outside, "file.txt").exists())
+
+    async def test_refuses_any_expansion_command_word_in_payloads(self):
+        # $HOME and $PWD resolve as paths, but as a payload command word
+        # they expand to whatever the environment holds (a reassigned HOME
+        # is a command path); $HOMEFOO is a different variable entirely.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            'sh -c "$HOMEFOO"',
+            f"HOME=/bin/rm; sh -c \"$HOME -rf {outside}\"",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+
     async def test_operands_after_end_of_options_are_checked(self):
         self._make_tree()
         with self.assertRaises(DestructiveRmRefusalError):

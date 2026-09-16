@@ -3543,13 +3543,27 @@ def is_recursive_force_rm_command(command: str) -> bool:
 _UNRESOLVED_EXPANSION_CHARS = ("$", "`", "{", "}")
 
 
+_EXPANSION_NAME = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)")
+
+
 def _expansion_is_resolvable(token: str) -> bool:
     """True when every expansion in `token` is a statically resolvable
-    `$HOME`/`${HOME}`/`$PWD`/`${PWD}` prefix (mirrors _resolve_rm_operand)."""
-    for prefix in ("${HOME}", "$HOME", "${PWD}", "$PWD"):
-        if token.startswith(prefix):
-            return _expansion_is_resolvable(token[len(prefix) :])
-    return not any(ch in token for ch in _UNRESOLVED_EXPANSION_CHARS)
+    `$HOME`/`${HOME}`/`$PWD`/`${PWD}` reference, matched by full variable
+    name so `$HOMEFOO` (a different variable) stays unresolvable."""
+    rest = token
+    while rest:
+        match = _EXPANSION_NAME.search(rest)
+        if match is None:
+            return not any(ch in rest for ch in _UNRESOLVED_EXPANSION_CHARS)
+        if match.group(1) not in ("HOME", "PWD"):
+            return False
+        rest = rest[match.end() :]
+        if match.group(0).startswith("${"):
+            if rest.startswith("}"):
+                rest = rest[1:]
+            else:
+                return False  # unterminated ${NAME: treat as unresolvable
+    return True
 
 
 def _unresolvable_expansion_rm_reasons(words: list[_ShellWord]) -> list[str]:
@@ -3613,8 +3627,31 @@ _SHELL_DASH_C_INTERPRETERS = frozenset(
 )
 
 
+def _alias_definitions(words: list[_ShellWord]) -> dict[str, str]:
+    """Alias definitions made by the command (`alias name='command text'`),
+    applied in order so redefinitions and `unalias` win."""
+    aliases: dict[str, str] = {}
+    for index, word in enumerate(words):
+        if word.value not in ("alias", "unalias"):
+            continue
+        for follower in words[index + 1 :]:
+            if follower.starts_command:
+                break
+            token = follower.value
+            if word.value == "alias" and "=" in token:
+                name, _, value = token.partition("=")
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                    aliases[name] = value
+            elif word.value == "unalias":
+                aliases.pop(token, None)
+    return aliases
+
+
 def _wrapped_payloads_hide_recursive_force_rm(
-    command: str, depth: int = 0, words: list[_ShellWord] | None = None
+    command: str,
+    depth: int = 0,
+    words: list[_ShellWord] | None = None,
+    aliases: dict[str, str] | None = None,
 ) -> bool:
     """True when a quoted `eval` or shell `-c` payload hides a
     recursive-force rm.
@@ -3633,13 +3670,19 @@ def _wrapped_payloads_hide_recursive_force_rm(
         return True  # absurdly nested wrappers: refuse rather than risk a miss
     if words is None:
         words = _scan_shell_words(command)
+    if aliases is None:
+        aliases = _alias_definitions(words)
+    else:
+        aliases = {**aliases, **_alias_definitions(words)}
     for index, word in enumerate(words):
         payload_parts: list[str] = []
         if word.value == "eval":
             for follower in words[index + 1 :]:
                 if follower.starts_command:
                     break
-                payload_parts.append(follower.value)
+                # Aliases expand at parse time in the same shell, so an
+                # eval payload word may be an alias defined earlier.
+                payload_parts.append(aliases.get(follower.value, follower.value))
         elif word.value == "trap":
             # The action string is the first argument after any -l/-p flags
             # or a `--` end-of-options marker; the rest are signals.
@@ -3653,7 +3696,8 @@ def _wrapped_payloads_hide_recursive_force_rm(
                 break
             if action is None:
                 continue
-            payload_parts.append(action.value)
+            # Trap actions run in the same shell, so aliases apply.
+            payload_parts.append(aliases.get(action.value, action.value))
         else:
             is_shell = os.path.basename(word.value) in _SHELL_DASH_C_INTERPRETERS
             if not is_shell and _expansion_is_resolvable(word.value):
@@ -3682,17 +3726,17 @@ def _wrapped_payloads_hide_recursive_force_rm(
             payload_parts.append(payload_word.value)
         payload = " ".join(payload_parts)
         # A payload word in command position that expands at run time
-        # (`sh -c "$SCRIPT"`) could be any command, including rm: refuse
-        # rather than scan the expansion text literally.
+        # (`sh -c "$SCRIPT"`, `sh -c "$HOME ..."`) could be any command,
+        # including rm — even $HOME/$PWD resolve to a path the environment
+        # controls: refuse rather than scan the expansion text literally.
         if any(
-            payload_word.starts_command
-            and not _expansion_is_resolvable(payload_word.value)
+            payload_word.starts_command and "$" in payload_word.value
             for payload_word in _scan_shell_words(payload)
         ):
             return True
         if _find_recursive_force_rm_invocations(payload):
             return True
-        if _wrapped_payloads_hide_recursive_force_rm(payload, depth + 1):
+        if _wrapped_payloads_hide_recursive_force_rm(payload, depth + 1, aliases=aliases):
             return True
     return False
 
@@ -4029,14 +4073,22 @@ def _heredoc_body_spans(command: str) -> list[tuple[int, int]]:
             continue
         if ch == "$" and command[i + 1 : i + 3] == "((":
             # Arithmetic substitution: its `<<` is a shift, not a heredoc.
-            # Skip to the matching `))` (parens stay balanced in valid
-            # arithmetic); unterminated input skips to the end.
+            # Skip to the matching `))` — quote- and escape-aware, so a
+            # quoted paren cannot keep the skip open past real heredocs;
+            # unterminated input skips to the end.
             depth = 2
             j = i + 3
             while j < n and depth > 0:
-                if command[j] == "(":
+                inner = command[j]
+                if inner == "\\":
+                    j += 2
+                    continue
+                if inner in "'\"":
+                    j = _quote_span_end(command, j, n)
+                    continue
+                if inner == "(":
                     depth += 1
-                elif command[j] == ")":
+                elif inner == ")":
                     depth -= 1
                 j += 1
             i = j
@@ -4456,6 +4508,15 @@ def _guard_destructive_rm(command: str, allow_destructive_rm: bool) -> None:
                 reasons.extend(_unresolvable_expansion_rm_reasons(feed_words))
     # ---- body passes ----
     for body_text in body_texts:
+        if "$(" in body_text or "`" in body_text:
+            # An unquoted heredoc body is expanded before the consuming
+            # interpreter sees it, and the child executes the substitution
+            # output either way: that text is unknowable at guard time.
+            reasons.append(
+                "its here-document body carries command substitution, whose"
+                " output the consuming shell executes and the guard cannot"
+                " check statically"
+            )
         body_prepared = _mask_shell_redirections(body_text)
         body_words = _scan_shell_words(body_prepared)
         if _wrapped_payloads_hide_recursive_force_rm(body_prepared, words=body_words):
