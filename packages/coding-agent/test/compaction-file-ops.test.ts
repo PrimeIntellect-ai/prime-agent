@@ -5,6 +5,7 @@ import {
 	createFileOps,
 	extractFileOpsFromMessage,
 	formatFileOperations,
+	stripFileListBlocks,
 } from "../src/core/compaction/utils.js";
 
 const usage: Usage = {
@@ -97,5 +98,60 @@ describe("compaction file-op extraction", () => {
 		expect(formatFileOperations(readFiles, modifiedFiles)).toContain(
 			"<modified-files>\nsrc/kernel-edit.ts\n</modified-files>",
 		);
+	});
+
+	it("caps combined file-list characters, dropping read-only entries first", () => {
+		const fileOps = createFileOps();
+		// ~101 chars each: 200 read-only entries alone are ~20400 chars.
+		const readOnlyPath = (i: number) => `src/read-only-${String(i).padStart(3, "0")}-${"y".repeat(80)}.ts`;
+		for (let i = 0; i < 200; i++) fileOps.read.add(readOnlyPath(i));
+		for (const path of ["src/a.ts", "src/b.ts", "src/c.ts"]) fileOps.edited.add(path);
+
+		const { readFiles, modifiedFiles } = computeFileLists(fileOps);
+		expect(modifiedFiles).toEqual(["src/a.ts", "src/b.ts", "src/c.ts"]);
+		// Over the combined budget: read-only entries drop from the alphabetical end.
+		expect(readFiles.length).toBeGreaterThan(0);
+		expect(readFiles.length).toBeLessThan(200);
+		expect(readFiles).not.toContain(readOnlyPath(199));
+		const combinedChars = [...readFiles, ...modifiedFiles].reduce((total, file) => total + file.length + 1, 0);
+		expect(combinedChars).toBeLessThanOrEqual(6000);
+	});
+
+	it("drops every read-only file before touching modified files", () => {
+		const fileOps = createFileOps();
+		// Two 7000-char read-only paths: even one exceeds the residual budget,
+		// so the read-only list empties while the modified list stays intact.
+		for (const name of ["huge-a", "huge-b"]) fileOps.read.add(`src/${name}-${"y".repeat(7000)}.ts`);
+		fileOps.edited.add("src/keeps-me.ts");
+
+		const { readFiles, modifiedFiles } = computeFileLists(fileOps);
+		expect(readFiles).toEqual([]);
+		expect(modifiedFiles).toEqual(["src/keeps-me.ts"]);
+	});
+
+	it("truncates modified files only after read-only files are gone", () => {
+		const fileOps = createFileOps();
+		// ~401 chars per modified path: 20 entries alone exceed the 6000 budget.
+		for (let i = 0; i < 20; i++) {
+			fileOps.edited.add(`src/mod-${String(i).padStart(2, "0")}-${"x".repeat(390)}.ts`);
+		}
+		const { readFiles, modifiedFiles } = computeFileLists(fileOps);
+		expect(readFiles).toEqual([]);
+		const combinedChars = modifiedFiles.reduce((total, file) => total + file.length + 1, 0);
+		expect(combinedChars).toBeLessThanOrEqual(6000);
+		expect(modifiedFiles.length).toBeLessThan(20);
+		expect(modifiedFiles.at(-1)).not.toBe(`src/mod-19-${"x".repeat(390)}.ts`);
+	});
+
+	it("strips read and modified file blocks from stored summaries", () => {
+		const summary =
+			"## Goal\nship it\n\n<read-files>\nsrc/a.ts\nsrc/b.ts\n</read-files>\n\n<modified-files>\nsrc/c.ts\n</modified-files>";
+		expect(stripFileListBlocks(summary)).toBe("## Goal\nship it");
+		expect(stripFileListBlocks("<read-files>\nonly-lists.ts\n</read-files>")).toBe("");
+		expect(stripFileListBlocks("<modified-files>\nonly.ts\n</modified-files>")).toBe("");
+		// Mid-summary blocks (never produced by formatFileOperations, but
+		// handwritten or hook summaries may contain them) are removed too.
+		expect(stripFileListBlocks("before\n\n<read-files>\na.ts\n</read-files>\n\nafter")).toBe("before\n\nafter");
+		expect(stripFileListBlocks("no blocks here")).toBe("no blocks here");
 	});
 });

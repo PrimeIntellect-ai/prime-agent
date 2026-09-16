@@ -18,7 +18,8 @@ import { isSessionSlashCommandName, parseSessionSlashCommand, type SessionSlashC
 
 export const COMPACTION_SUMMARY_PREFIX = `[compaction-summary]
 
-The conversation history before this point was compacted into the following summary:
+The conversation history before this point was compacted into the following summary.
+The retained messages below are authoritative; this summary may lag behind them.
 
 <summary>
 `;
