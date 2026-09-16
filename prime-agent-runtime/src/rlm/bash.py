@@ -4524,10 +4524,16 @@ def _guard_destructive_rm(command: str, allow_destructive_rm: bool) -> None:
     # runner-aware scanner before masking, so the blanket redirection
     # masking cannot blank an interpreter-fed body here either (the blanked
     # outer still masks > redirects). Data bodies never come back from the
-    # splitter, so consumer-aware silencing survives.
-    scan_queue = list(body_texts)
+    # splitter, so consumer-aware silencing survives. Each queued text
+    # carries the HOME/PWD/CDPATH reassignment context of everything above
+    # it: a reassignment made in an outer body keeps tracking the bodies it
+    # wraps, the way the pre-split whole-body scan saw it.
+    scan_queue = [
+        (text, reassigns_home, reassigns_pwd, cdpath_untrackable)
+        for text in body_texts
+    ]
     while scan_queue:
-        body_text = scan_queue.pop()
+        body_text, body_home, body_pwd, body_cdpath_inherited = scan_queue.pop()
         if "$(" in body_text or "`" in body_text:
             # An unquoted heredoc body is expanded before the consuming
             # interpreter sees it, and the child executes the substitution
@@ -4538,20 +4544,23 @@ def _guard_destructive_rm(command: str, allow_destructive_rm: bool) -> None:
                 " check statically"
             )
         body_outer, inner_body_texts = _rm_guard_scan_texts(body_text)
-        scan_queue.extend(inner_body_texts)
         body_prepared = _mask_shell_redirections(body_outer)
         body_words = _scan_shell_words(body_prepared)
         if _wrapped_payloads_hide_recursive_force_rm(body_prepared, words=body_words):
             raise DestructiveRmRefusalError(_format_rm_wrapper_refusal())
+        body_reassigns_home = body_home or _command_reassigns_env(body_words, "HOME")
+        body_reassigns_pwd = body_pwd or _command_reassigns_env(body_words, "PWD")
+        body_cdpath = body_cdpath_inherited or bool(os.environ.get("CDPATH")) or _command_reassigns_env(
+            body_words, "CDPATH"
+        )
+        scan_queue.extend(
+            (text, body_reassigns_home, body_reassigns_pwd, body_cdpath)
+            for text in inner_body_texts
+        )
         body_invocations = _find_rf_rm_invocations_in_words(body_words)
         if not body_invocations:
             reasons.extend(_unresolvable_expansion_rm_reasons(body_words))
             continue
-        body_reassigns_home = reassigns_home or _command_reassigns_env(body_words, "HOME")
-        body_reassigns_pwd = reassigns_pwd or _command_reassigns_env(body_words, "PWD")
-        body_cdpath = cdpath_untrackable or bool(os.environ.get("CDPATH")) or _command_reassigns_env(
-            body_words, "CDPATH"
-        )
         for start in runner_starts or [workspace_root]:
             body_tracked_at = _tracked_cwd_at_words(
                 body_prepared,

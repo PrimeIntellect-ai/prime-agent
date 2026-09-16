@@ -2104,6 +2104,49 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("rm -rf /printed-not-run", result.output)
 
+    async def test_refuses_reassignments_from_outer_body_context(self):
+        # A reassignment in a runner-fed body must keep tracking the bodies
+        # it wraps: the nested rm expands $HOME/$PWD against the reassigned
+        # value at run time. The guard-resolved paths exist on purpose, so a
+        # lost reassignment context would resolve inside the workspace and
+        # fail open.
+        self._make_tree()
+        with mock.patch.dict(os.environ, {"HOME": self.test_dir}):
+            outside = self._outside_target()
+            Path(outside, "ctx_home").mkdir()
+            Path(outside, "ctx_home", "file.txt").write_text("keep\n")
+            Path(self.test_dir, "ctx_home").mkdir()
+            Path(self.test_dir, "ctx_home", "file.txt").write_text("keep\n")
+            command = (
+                "sh <<'OUTER'\n"
+                f"HOME={outside}\n"
+                "sh <<INNER\n"
+                "rm -rf $HOME/ctx_home\n"
+                "INNER\n"
+                "OUTER"
+            )
+            with self.assertRaises(DestructiveRmRefusalError) as caught:
+                bash(command)
+            self.assertIn("reassigns HOME", str(caught.exception))
+            self.assertTrue(Path(outside, "ctx_home", "file.txt").exists())
+        outside = self._outside_target()
+        Path(outside, "ctx").mkdir()
+        Path(outside, "ctx", "file.txt").write_text("keep\n")
+        Path(self.test_dir, "ctx").mkdir(exist_ok=True)
+        Path(self.test_dir, "ctx", "file.txt").write_text("keep\n")
+        command = (
+            "sh <<'OUTER'\n"
+            f"PWD={outside}\n"
+            "sh <<INNER\n"
+            "rm -rf $PWD/ctx\n"
+            "INNER\n"
+            "OUTER"
+        )
+        with self.assertRaises(DestructiveRmRefusalError) as caught:
+            bash(command)
+        self.assertIn("reassigns PWD", str(caught.exception))
+        self.assertTrue(Path(outside, "ctx", "file.txt").exists())
+
     async def test_refuses_heredoc_wrapped_text_fed_to_stdin_shells(self):
         # Rebase regression: a producer whose output wraps rm in an
         # interpreter-fed heredoc still reaches a stdin shell as commands,
