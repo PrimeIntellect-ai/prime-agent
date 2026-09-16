@@ -406,6 +406,27 @@ describe("agents view incident notices", () => {
 		}
 	});
 
+	it("cancels an armed delete confirmation with Esc instead of dismissing the notice", () => {
+		useTempAgentDir();
+		const base = Date.now();
+		writeAgentLog([workerCrashLine(base, "5b1d3aeb91ee", 120)]);
+		const view = newView();
+		try {
+			invoke("refreshIncidentNotices", view);
+			expect(renderedIncidentLines(view)).toHaveLength(1);
+
+			// A delete confirmation is armed: Esc must cancel it and keep the
+			// notice, or the next delete press would fire without a fresh
+			// confirmation.
+			invoke("showDeleteConfirmation", view);
+			view.handleInput("\x1b");
+			expect(Reflect.get(view, "deleteConfirmExpiresAt")).toBe(0);
+			expect(renderedIncidentLines(view)).toHaveLength(1);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
 	it("does not dismiss while the search prompt has text", () => {
 		useTempAgentDir();
 		const base = Date.now();

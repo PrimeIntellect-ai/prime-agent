@@ -959,11 +959,16 @@ export class AgentsViewMode implements Component, Focusable {
 		}
 		// Esc (tui.select.cancel) dismisses the incident notice while it is the
 		// only thing to cancel: no armed reply, no autocomplete popup, an empty
-		// search prompt. Without a visible notice, Esc keeps its back/exit meaning.
+		// search prompt. An armed delete confirmation is the more dangerous state:
+		// Esc cancels it (below) and keeps the notice instead of dismissing the
+		// notice and leaving the delete armed to fire on the next press without
+		// a fresh confirmation. Without a visible notice, Esc keeps its back/exit
+		// meaning.
 		if (
 			this.editor.getText().length === 0 &&
 			!this.replyTarget &&
 			!this.editor.isShowingAutocomplete() &&
+			!this.isDeleteConfirmationVisible() &&
 			this.keybindings.matches(data, "tui.select.cancel") &&
 			this.dismissIncidentNotice()
 		) {
