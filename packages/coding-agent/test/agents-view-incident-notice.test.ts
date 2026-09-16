@@ -616,6 +616,44 @@ describe("agents view incident notices", () => {
 		}
 	});
 
+	it("keeps the first tail record when the cut lands on a line boundary", () => {
+		useTempAgentDir();
+		const base = Date.now();
+		// Every record is exactly 512 bytes, so with 1026 records the bounded
+		// tail cut lands exactly on a record boundary: the first record in the
+		// tail is a complete crash record, not a torn fragment. Padding goes
+		// into a harmless extra JSON field, so the msg stays unmodified and
+		// the record still parses.
+		const fixedLengthLine = (fields: Record<string, unknown>): string => {
+			const unpadded = logLine(fields);
+			const padded = `${unpadded.slice(0, -1)},"pad":"${"x".repeat(502 - unpadded.length)}"}`;
+			expect(`${padded}\n`).toHaveLength(512);
+			return `${padded}\n`;
+		};
+		const filler = () =>
+			fixedLengthLine({
+				ts: tsAgo(base, 3600_000),
+				component: "coding-agent.daemon-supervisor",
+				msg: "filler",
+			});
+		const crash = fixedLengthLine({
+			ts: tsAgo(base, 60_000),
+			component: "coding-agent.daemon-supervisor",
+			msg: "Session worker 5b1d3aeb91ee stderr: uncaught exception: Error: write EPIPE",
+		});
+		// The tail bound spans the last 1024 records; the crash is the FIRST of
+		// them (the byte before the cut is its predecessor's newline).
+		const lines = [filler(), filler(), crash];
+		while (lines.length < 1026) {
+			lines.push(filler());
+		}
+		writeFileSync(getAgentLogPath(), lines.join(""));
+		const state = createIncidentNoticeState();
+		expect(refreshIncidentNoticeState(state, getAgentLogPath(), base)).toBe(true);
+		expect(state.notice?.kind).toBe("worker-crash");
+		expect(state.notice?.subject).toBe("worker 5b1d3aeb91ee");
+	});
+
 	it("bridges the rotated .old generation on the first read", () => {
 		useTempAgentDir();
 		const base = Date.now();

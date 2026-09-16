@@ -267,12 +267,14 @@ interface IncidentLogChunk {
 /**
  * Rotation-safe incremental read of agent.jsonl. Without a previous offset — or
  * after rotation (a changed inode), a shrink (recreation in place), or more
- * than one tail bound of new bytes — read the bounded tail and drop the leading
- * partial line; otherwise read only appended bytes (every read stays bounded).
- * A trailing partial line is held back (the offset stops at its newline), so a
- * mid-write line parses only once complete, on a later poll. A missing or
- * unreadable file returns undefined; offsets beyond the file size are never
- * re-processed.
+ * than one tail bound of new bytes — read the bounded tail: the cut may begin
+ * mid-line (drop the torn leading fragment) or exactly at a record boundary
+ * (the byte before the cut is a newline; keep the intact first record, which
+ * dropping would silently lose for the lifetime of the state). Otherwise read
+ * only appended bytes (every read stays bounded). A trailing partial line is
+ * held back (the offset stops at its newline), so a mid-write line parses only
+ * once complete, on a later poll. A missing or unreadable file returns
+ * undefined; offsets beyond the file size are never re-processed.
  */
 function readIncidentLogLines(
 	logPath: string,
@@ -306,14 +308,23 @@ function readIncidentLogLines(
 		const bytesRead = readSync(fd, buffer, 0, buffer.length, start);
 		let lineStart = 0;
 		if (retailed && start > 0) {
-			// The tail begins mid-line; drop the first (partial) line. A chunk
-			// with no newline at all is one mid-write line: hold it back so the
-			// completed line is still parsed by the next poll.
-			const firstNewline = buffer.subarray(0, bytesRead).indexOf(NEWLINE_BYTE);
-			if (firstNewline === -1) {
-				return { lines: [], nextOffset: start, fileId };
+			// The bounded tail may begin mid-line (the cut split a record: drop
+			// the torn leading fragment) or exactly at a record boundary (the byte
+			// before the cut is a newline: the first line in the buffer is a
+			// complete record, and dropping it would silently lose a qualifying
+			// incident for the lifetime of the state). Read that one byte to tell
+			// the cases apart; the read happens only on this bounded re-tail path.
+			const preceding = Buffer.alloc(1);
+			const beginsMidLine = readSync(fd, preceding, 0, 1, start - 1) !== 1 || preceding[0] !== NEWLINE_BYTE;
+			if (beginsMidLine) {
+				// A chunk with no newline at all is one mid-write line: hold it
+				// back so the completed line is still parsed by the next poll.
+				const firstNewline = buffer.subarray(0, bytesRead).indexOf(NEWLINE_BYTE);
+				if (firstNewline === -1) {
+					return { lines: [], nextOffset: start, fileId };
+				}
+				lineStart = firstNewline + 1;
 			}
-			lineStart = firstNewline + 1;
 		}
 		let end = bytesRead;
 		if (end > 0 && buffer[end - 1] !== NEWLINE_BYTE) {
