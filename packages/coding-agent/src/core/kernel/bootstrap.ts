@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants, existsSync, readdirSync, readFileSync } from "node:fs";
-import { access, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { stderr, stdin } from "node:process";
@@ -97,6 +97,7 @@ const REQUIRED_HARNESS_METHODS = [
 ];
 export const RUNTIME_READY_CHECK = `import inspect; import rlm; from rlm import McpIntegration; import rlm.mcp as mcp; from rlm.harness import HarnessEntry; _harness_methods = ${JSON.stringify(REQUIRED_HARNESS_METHODS)}; assert callable(mcp.list_tools); assert callable(mcp.call_tool); assert all(callable(getattr(mcp, _m, None)) for _m in ${JSON.stringify(REQUIRED_MCP_DISCOVERY_METHODS)}), "rlm.mcp is missing MCP discovery methods (list_plugins, search_plugins, list_connections, search_tools, describe_tool); the kernel venv needs a current prime-agent-runtime"; assert callable(rlm.spawn); assert hasattr(rlm, 'rlm'); assert callable(rlm.rlm.spawn); assert inspect.signature(rlm.spawn).parameters['name'].default is inspect.Parameter.empty; assert not hasattr(rlm, 'run'); assert not hasattr(rlm.rlm, 'run'); assert callable(rlm.host_request); assert callable(rlm.find_models); assert callable(rlm.rlm.find_models); assert callable(rlm.create_session); assert callable(rlm.rlm.create_session); assert callable(rlm.progress_note); assert callable(rlm.rlm.progress_note); assert hasattr(rlm, 'harness'); assert hasattr(rlm, 'get_harness_state'); assert hasattr(rlm.rlm, 'harness'); assert hasattr(rlm.rlm, 'get_harness_state'); assert all(callable(getattr(_harness, _method, None)) for _harness in (rlm.harness, rlm.rlm.harness) for _method in _harness_methods); assert 'reference' in HarnessEntry.__dataclass_fields__; assert 'scope' in HarnessEntry.__dataclass_fields__; assert 'reference' in inspect.signature(rlm.harness.create_skill).parameters; assert 'reference' in inspect.signature(rlm.harness.update_skill).parameters; assert 'global_' in inspect.signature(rlm.harness.create_memory).parameters; assert 'global_' in inspect.signature(rlm.get_harness_state).parameters; assert not hasattr(rlm, 'background'); assert not hasattr(rlm.rlm, 'background'); from rlm.bash import BashHandle, BashResult; assert callable(rlm.bash); assert all(callable(getattr(BashHandle, _m, None)) for _m in ('tail', 'output', 'poll', 'kill')); assert {'exit_code', 'output', 'duration'} <= set(BashResult.__dataclass_fields__); import rlm.repl as _repl; assert callable(_repl.main); assert callable(_repl.emit); assert callable(_repl.host_request); assert callable(_repl.is_active); assert _repl.PROTOCOL_VERSION == 3; assert callable(rlm.emit); assert not hasattr(rlm, 'HOST_COMM_TARGET'); assert not hasattr(mcp, 'install_shutdown_hook')`;
 const BOOTSTRAP_VERSION_FILE = ".bootstrap-version";
+const BOOTSTRAP_VERSION_TMP_FILE = `${BOOTSTRAP_VERSION_FILE}.tmp`;
 const BOOTSTRAP_LOCK_NAME = ".bootstrap.lock";
 const BOOTSTRAP_LOCK_RETRY_MS = 100;
 const BOOTSTRAP_LOCK_STALE_WITHOUT_PID_MS = 30_000;
@@ -689,7 +690,17 @@ async function writeBootstrapVersion(
 		extraUvArgs: DEFAULT_RLM_EXTRA_UV_ARGS,
 		pythonSkills: [...pythonSkills],
 	};
-	await writeFile(path.join(venv, BOOTSTRAP_VERSION_FILE), `${JSON.stringify(version)}\n`, "utf8");
+	const filePath = path.join(venv, BOOTSTRAP_VERSION_FILE);
+	const serialized = `${JSON.stringify(version)}\n`;
+	try {
+		// Write-then-rename is atomic: a kill mid-write can never leave a
+		// partial marker, which would read as absent and force a rebuild.
+		const tmpPath = path.join(venv, BOOTSTRAP_VERSION_TMP_FILE);
+		await writeFile(tmpPath, serialized, "utf8");
+		await rename(tmpPath, filePath);
+	} catch {
+		await writeFile(filePath, serialized, "utf8");
+	}
 }
 
 function runtimeCandidateDirs(): string[] {
@@ -779,6 +790,10 @@ async function bootstrapVenv(
 		STATE_SNAPSHOT_REQUIREMENT,
 		...DEFAULT_RLM_EXTRA_UV_ARGS,
 	]);
+	// Land the base marker before the skill sync: a session killed mid-sync
+	// must leave the next one on the skills-only path instead of wiping the
+	// venv and re-paying the runtime install.
+	await writeBootstrapVersion(venv, runtimeIdentity, []);
 	await syncPythonSkills(uv, venv, python, runtimeIdentity, pythonSkills, options);
 }
 
@@ -846,16 +861,20 @@ async function syncPythonSkills(
 				...formatPythonSkillInstallArgs(skill),
 				...localDependencyArgs,
 			]);
-			installedPythonSkills.push(
-				skill,
-				...localDependencies.filter((dependency) => !installedPythonSkills.includes(dependency)),
-			);
 		} catch (error) {
 			reportProgress(
 				options,
 				`Warning: Python skill ${skill.importName} failed to install and will be unavailable: ${errorMessage(error)}`,
 			);
+			continue;
 		}
+		installedPythonSkills.push(
+			skill,
+			...localDependencies.filter((dependency) => !installedPythonSkills.includes(dependency)),
+		);
+		// Persist progress after every completed install so a killed session
+		// resumes at the first missing skill instead of re-syncing from scratch.
+		await writeBootstrapVersion(venv, runtimeIdentity, installedPythonSkills);
 	}
 	await writeBootstrapVersion(venv, runtimeIdentity, installedPythonSkills);
 }
