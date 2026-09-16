@@ -476,8 +476,8 @@ describe.sequential("MCP OAuth provider", () => {
 			prm: { resource: "https://mcp.notion.test/other", authorization_servers: [NOTION_ORIGIN] },
 		},
 	])("rejects protected-resource metadata for $name", async ({ prm }) => {
-		const url = prm.resource.startsWith("https://mcp.notion.test") ? NOTION_URL : RESOURCE;
-		const prmUrl = prm.resource.startsWith("https://mcp.notion.test") ? NOTION_PRM_PATH : PLANE_PRM_URL;
+		const isNotion = new URL(prm.resource).origin === new URL(NOTION_URL).origin;
+		const [url, prmUrl] = isNotion ? [NOTION_URL, NOTION_PRM_PATH] : [RESOURCE, PLANE_PRM_URL];
 		vi.stubGlobal(
 			"fetch",
 			vi.fn(async (input: unknown): Promise<Response> => {

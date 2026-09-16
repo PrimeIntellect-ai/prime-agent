@@ -607,7 +607,26 @@ async function auditEndpoint(server: string, endpoint: string): Promise<AuditRes
 	// selected (discover() in oauth.ts). An unfetchable first issuer is
 	// therefore an honest AS-unavailable outcome — auditing a later server the
 	// engine would never use would classify against the wrong authorization server.
-	const issuer = selected?.evidence?.authorizationServers?.[0] ?? new URL(endpoint).origin;
+	const advertisedIssuer = selected?.evidence?.authorizationServers?.[0];
+	const issuer = advertisedIssuer ?? new URL(endpoint).origin;
+	// Mirror the engine's fail-closed validation: a malformed issuer string the
+	// engine would reject during protected-resource validation is an honest
+	// AS-unavailable outcome here — never a crash of the whole audit run.
+	if (advertisedIssuer !== undefined && !isFetchableUrl(advertisedIssuer)) {
+		return {
+			server,
+			endpoint,
+			probe,
+			protectedResource,
+			authorizationServer: {
+				sourceUrls: [],
+				status: "unavailable",
+				evidence: {
+					error: `engine rejects the protected-resource document: authorization_servers[0] is not a valid https url (${advertisedIssuer})`,
+				},
+			},
+		};
+	}
 	const asCandidates = authorizationServerUrls(issuer);
 	const authorizationServer: AuditResult["authorizationServer"] = {
 		sourceUrls: asCandidates,
