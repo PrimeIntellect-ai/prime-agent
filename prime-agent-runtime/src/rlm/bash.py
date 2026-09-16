@@ -3558,7 +3558,9 @@ _SHELL_DASH_C_INTERPRETERS = frozenset(
 )
 
 
-def _wrapped_payloads_hide_recursive_force_rm(command: str, depth: int = 0) -> bool:
+def _wrapped_payloads_hide_recursive_force_rm(
+    command: str, depth: int = 0, words: list[_ShellWord] | None = None
+) -> bool:
     """True when a quoted `eval` or shell `-c` payload hides a
     recursive-force rm.
 
@@ -3573,7 +3575,8 @@ def _wrapped_payloads_hide_recursive_force_rm(command: str, depth: int = 0) -> b
     argument is scanned as a payload too."""
     if depth > _MAX_EVAL_SCAN_DEPTH:
         return True  # absurdly nested wrappers: refuse rather than risk a miss
-    words = _scan_shell_words(command)
+    if words is None:
+        words = _scan_shell_words(command)
     for index, word in enumerate(words):
         payload_parts: list[str] = []
         if word.value == "eval":
@@ -3582,11 +3585,19 @@ def _wrapped_payloads_hide_recursive_force_rm(command: str, depth: int = 0) -> b
                     break
                 payload_parts.append(command[follower.start : follower.end])
         elif word.value == "trap":
-            # The action string is the first argument; the rest are signals.
-            action = words[index + 1 : index + 2]
-            if not action or action[0].starts_command:
+            # The action string is the first argument after any -l/-p flags
+            # or a `--` end-of-options marker; the rest are signals.
+            action = None
+            for follower in words[index + 1 :]:
+                if follower.starts_command:
+                    break
+                if follower.value.startswith("-"):
+                    continue
+                action = follower
+                break
+            if action is None:
                 continue
-            payload_parts.append(command[action[0].start : action[0].end])
+            payload_parts.append(command[action.start : action.end])
         else:
             flag = words[index + 1 : index + 2]
             payload_word = words[index + 2 : index + 3]
@@ -3804,11 +3815,13 @@ def _mask_heredoc_data_bodies(command: str) -> str:
     keeping character positions and leaving interpreter-fed bodies live.
 
     A heredoc body is data for the command that reads it (`cat <<EOF`), so
-    scanning it as live commands only produces false refusals. When the
-    feeding command line runs (or could run) a shell interpreter — directly
-    (`sh <<EOF`) or through a pipeline (`cat <<EOF | sh`) — the body is
-    script text, so it stays live for the word scan. Quote- and
-    comment-aware; unterminated heredocs stay live (conservative)."""
+    scanning it as live commands only produces false refusals. A body can
+    still reach an interpreter through stdin (`sh <<EOF`), a pipeline
+    consumer after the terminator (`{ cat <<EOF ... } | sh`), or a script
+    file written in the same command (`cat <<EOF > s.sh; sh s.sh`), so any
+    interpreter or unresolvable-expansion word anywhere in the command
+    keeps all bodies live for the word scan. Quote- and comment-aware;
+    unterminated heredocs stay live (conservative)."""
     chars = list(command)
     n = len(command)
     i = 0
@@ -3851,8 +3864,6 @@ def _mask_heredoc_data_bodies(command: str) -> str:
             if not delimiter:
                 i = j
                 continue
-            line_start = command.rfind("\n", 0, i)
-            line_start = line_start + 1 if line_start != -1 else 0
             body_start = command.find("\n", j)
             if body_start == -1:
                 i = j  # unterminated: leave the whole thing live
@@ -3874,11 +3885,10 @@ def _mask_heredoc_data_bodies(command: str) -> str:
             if end is None:
                 i = j  # unterminated heredoc: leave live
                 continue
-            feeding = command[line_start:body_start]
             feeds_interpreter = any(
                 os.path.basename(word.value) in _SHELL_DASH_C_INTERPRETERS
                 or not _expansion_is_resolvable(word.value)
-                for word in _scan_shell_words(feeding)
+                for word in _scan_shell_words(command)
             )
             if not feeds_interpreter:
                 for pos in range(body_start + 1, end):
@@ -3952,11 +3962,12 @@ def _guard_destructive_rm(command: str, allow_destructive_rm: bool) -> None:
     # stay live, so `sh <<EOF` cannot smuggle rm through as stdin text).
     normalized = _normalize_line_continuations(_with_prefix(command))
     prepared = _mask_shell_redirections(_mask_heredoc_data_bodies(normalized))
-    if (
-        "eval" in prepared or "-c" in prepared or "trap" in prepared
-    ) and _wrapped_payloads_hide_recursive_force_rm(prepared):
-        raise DestructiveRmRefusalError(_format_rm_wrapper_refusal())
+    # The wrapper scan matches parsed word values, so escaped names
+    # (`t\rap`, `ev\al`) cannot slip past a raw substring gate; it runs on
+    # the pre-scanned words, so non-wrapper commands only pay a light pass.
     words = _scan_shell_words(prepared)
+    if _wrapped_payloads_hide_recursive_force_rm(prepared, words=words):
+        raise DestructiveRmRefusalError(_format_rm_wrapper_refusal())
     invocations = _find_rf_rm_invocations_in_words(words)
     reasons: list[str] = []
     if invocations:

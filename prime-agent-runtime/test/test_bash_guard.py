@@ -1561,6 +1561,40 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
                     bash(command)
                 self.assertTrue(Path(outside, "file.txt").exists())
 
+    async def test_refuses_heredoc_bodies_reaching_interpreters(self):
+        # The body may reach an interpreter through a pipeline consumer after
+        # the terminator or through a script file written in the same
+        # command: any interpreter word in the command keeps bodies live.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "{ cat <<EOF\nrm -rf %s\nEOF\n} | sh" % outside,
+            "cat <<EOF > script.sh\nrm -rf %s\nEOF\nsh script.sh" % outside,
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+
+    async def test_refuses_trap_end_of_options_and_escaped_wrappers(self):
+        # `trap --` puts the action behind an end-of-options marker, and a
+        # backslash inside a wrapper name folds to the plain word, so the
+        # scan must match parsed word values, not raw substrings.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "trap -- 'rm -rf %s' EXIT" % outside,
+            "t\\rap 'rm -rf %s' EXIT" % outside,
+            "ev\\al 'rm -rf %s'" % outside,
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # Benign escaped wrappers still run.
+        result = await bash("t\\rap 'echo done' EXIT; echo hi")
+        self.assertEqual(result.exit_code, 0)
+
     async def test_operands_after_end_of_options_are_checked(self):
         self._make_tree()
         with self.assertRaises(DestructiveRmRefusalError):
