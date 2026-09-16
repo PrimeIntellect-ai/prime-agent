@@ -2079,6 +2079,25 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
                     bash(command)
                 self.assertTrue(Path(outside, "file.txt").exists())
 
+    async def test_refuses_substitution_in_data_heredoc_bodies(self):
+        # An unquoted data body still expands $(...) before cat sees the
+        # text, so blanking the body must keep substitution spans live:
+        # the substitution executes even when the consumer only prints.
+        self._make_tree()
+        outside = self._outside_target()
+        command = "printf 'cat <<EOF\n$(rm -rf " + outside + ")\nEOF' | sh"
+        with self.assertRaises(DestructiveRmRefusalError):
+            bash(command)
+        self.assertTrue(Path(outside, "file.txt").exists())
+        # Benign substitutions in data bodies keep running (and print).
+        result = await bash("printf 'cat <<EOF\n$(echo hi)\nEOF' | sh")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("hi", result.output)
+        # The same rule closes the plain top-level cat shape: the
+        # substitution executes there too.
+        with self.assertRaises(DestructiveRmRefusalError):
+            bash("cat <<EOF\n$(rm -rf ~)\nEOF")
+
     async def test_operands_after_end_of_options_are_checked(self):
         self._make_tree()
         with self.assertRaises(DestructiveRmRefusalError):

@@ -4286,8 +4286,11 @@ def _rm_guard_scan_texts(normalized: str) -> tuple[str, list[str]]:
     any word outside the bodies can run shell text, every body is scanned as
     its own command, so its rm invocations are still seen and an unbalanced
     quote inside one body cannot swallow the scan of later text. Bodies that
-    cannot reach a runner are never scanned at all. Unterminated heredocs
-    report no span and stay part of the outer text (conservative)."""
+    cannot reach a runner are never scanned as commands, but their command
+    substitution stays live in the outer text: the shell expands $(...) and
+    backticks in an unquoted body even when the consumer only prints it.
+    Unterminated heredocs report no span and stay part of the outer text
+    (conservative)."""
     spans = _heredoc_body_spans(normalized)
     if not spans:
         return normalized, []
@@ -4297,6 +4300,15 @@ def _rm_guard_scan_texts(normalized: str) -> tuple[str, list[str]]:
             outer[pos] = " "
     outer_text = "".join(outer)
     if not _heredoc_bodies_reach_script_runners(outer_text):
+        # Data bodies are inert for the outer scan, but their command
+        # substitution stays live: the shell expands $(...) and backticks in
+        # an unquoted heredoc body even when the consumer (cat) only prints
+        # the result, so those spans still execute (same rule as the git
+        # guard's heredoc masking).
+        outer = list(normalized)
+        for start, end in spans:
+            _mask_heredoc_body(outer, normalized, start, end)
+        outer_text = "".join(outer)
         return outer_text, []
     return outer_text, [normalized[start:end] for start, end in spans]
 
