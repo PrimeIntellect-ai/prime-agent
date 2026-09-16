@@ -703,6 +703,23 @@ async function writeBootstrapVersion(
 	}
 }
 
+// Incremental marker write that merges fresh entries into the skills already
+// recorded on disk. A missing or corrupt marker contributes no base entries.
+async function writeMergedBootstrapVersion(
+	venv: string,
+	runtimeIdentity: string,
+	pythonSkills: readonly BootstrapPythonSkill[],
+): Promise<void> {
+	const version = await readBootstrapVersion(venv);
+	const merged = new Map(
+		(version?.pythonSkills ?? []).map((skill) => [`${skill.importName}\0${skill.packagePath}`, skill]),
+	);
+	for (const skill of pythonSkills) {
+		merged.set(`${skill.importName}\0${skill.packagePath}`, skill);
+	}
+	await writeBootstrapVersion(venv, runtimeIdentity, [...merged.values()]);
+}
+
 function runtimeCandidateDirs(): string[] {
 	const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 	// Compiled executables use a flat sidecar layout; Node packages keep sources in dist/.
@@ -874,7 +891,10 @@ async function syncPythonSkills(
 		);
 		// Persist progress after every completed install so a killed session
 		// resumes at the first missing skill instead of re-syncing from scratch.
-		await writeBootstrapVersion(venv, runtimeIdentity, installedPythonSkills);
+		// Merge with the on-disk marker so skills already recorded but not yet
+		// visited this sync (they sit later in install order) survive this
+		// incremental write; the final write below stays an authoritative replace.
+		await writeMergedBootstrapVersion(venv, runtimeIdentity, installedPythonSkills);
 	}
 	await writeBootstrapVersion(venv, runtimeIdentity, installedPythonSkills);
 }

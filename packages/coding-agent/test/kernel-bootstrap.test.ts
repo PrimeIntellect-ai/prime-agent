@@ -462,6 +462,123 @@ dependencies = ["httpx"]
 		]);
 	});
 
+	it("keeps already-recorded skills in the marker when a kill interrupts a later install", {
+		timeout: 60_000,
+	}, async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "bin", "python");
+		const changedSkill = createPythonSkill("agent-a");
+		const matchingSkillB = createPythonSkill("agent-b");
+		const matchingSkillC = createPythonSkill("agent-c");
+		const hangingSkill = createPythonSkill("agent-d");
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		// Records [changedSkill, B, C] with changedSkill's pre-change hash.
+		writeBootstrapVersion(venv, [changedSkill, matchingSkillB, matchingSkillC]);
+		// changedSkill is now the only recorded skill whose hash no longer matches.
+		writeFileSync(
+			changedSkill.pyprojectPath,
+			`[project]
+name = "${changedSkill.name}"
+version = "0.2.0"
+`,
+		);
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+
+		const child = spawn(process.execPath, [tsxPath, kernelSyncChildPath], {
+			env: {
+				...process.env,
+				KERNEL_SYNC_CHILD_SKILLS: JSON.stringify([changedSkill, matchingSkillB, matchingSkillC, hangingSkill]),
+				TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json"),
+				UV_HANG_ARG: hangingSkill.packagePath,
+			},
+			stdio: ["ignore", "ignore", "pipe"],
+			detached: true,
+		});
+		let childStderr = "";
+		child.stderr?.on("data", (chunk: Buffer) => {
+			childStderr += chunk.toString();
+		});
+		const killChildGroup = () => {
+			const pid = child.pid;
+			if (pid === undefined) return;
+			try {
+				process.kill(-pid, "SIGKILL");
+			} catch {
+				try {
+					child.kill("SIGKILL");
+				} catch {
+					// Already gone.
+				}
+			}
+		};
+		try {
+			// The hanging skill's editable line proves changedSkill's incremental
+			// marker write already landed: it happens strictly between installs.
+			const deadline = Date.now() + 30_000;
+			while (Date.now() < deadline) {
+				if (child.exitCode !== null || child.signalCode !== null) break;
+				const log = existsSync(logPath) ? readFileSync(logPath, "utf8") : "";
+				if (
+					log.includes(`--editable ${changedSkill.packagePath}`) &&
+					log.includes(`--editable ${hangingSkill.packagePath}`)
+				) {
+					break;
+				}
+				await sleep(50);
+			}
+			const logAtKill = readFileSync(logPath, "utf8");
+			expect(logAtKill, childStderr).toContain(`--editable ${changedSkill.packagePath}`);
+			expect(logAtKill, childStderr).toContain(`--editable ${hangingSkill.packagePath}`);
+			killChildGroup();
+		} finally {
+			killChildGroup();
+		}
+		// Let the killed group (and the bootstrap lock holder) disappear; the
+		// rerun must steal the stale lock via PID liveness.
+		const pid = child.pid;
+		if (pid !== undefined) {
+			const deadDeadline = Date.now() + 10_000;
+			while (Date.now() < deadDeadline) {
+				try {
+					process.kill(pid, 0);
+					await sleep(20);
+				} catch {
+					break;
+				}
+			}
+		}
+
+		// Killing mid-install must not drop the already-recorded skills (nor the
+		// fresh hash) that sit later in install order from the persisted marker.
+		const versionAtKill = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
+		expect(versionAtKill.pythonSkills.map((skill: { importName: string }) => skill.importName)).toEqual([
+			changedSkill.importName,
+			matchingSkillB.importName,
+			matchingSkillC.importName,
+		]);
+		expect(versionAtKill.pythonSkills[0].pyprojectHash).toBe(pyprojectHash(changedSkill.pyprojectPath));
+
+		await expect(
+			ensureKernelPython({ pythonSkills: [changedSkill, matchingSkillB, matchingSkillC, hangingSkill] }),
+		).resolves.toBe(python);
+
+		const lines = readFileSync(logPath, "utf8").split("\n");
+		expect(lines.some((line) => line.startsWith(`venv ${venv} `))).toBe(false);
+		expect(lines.filter((line) => line.includes(`--editable ${changedSkill.packagePath}`))).toHaveLength(1);
+		expect(lines.filter((line) => line.includes(`--editable ${matchingSkillB.packagePath}`))).toHaveLength(0);
+		expect(lines.filter((line) => line.includes(`--editable ${matchingSkillC.packagePath}`))).toHaveLength(0);
+		expect(lines.filter((line) => line.includes(`--editable ${hangingSkill.packagePath}`))).toHaveLength(2);
+		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
+		expect(version.pythonSkills.map((skill: { importName: string }) => skill.importName)).toEqual([
+			changedSkill.importName,
+			matchingSkillB.importName,
+			matchingSkillC.importName,
+			hangingSkill.importName,
+		]);
+	});
+
 	it("re-syncs a changed skill alongside unsynced skills", async () => {
 		const logPath = installFakeUv();
 		const venv = join(tempDir, "kernel-venv");
