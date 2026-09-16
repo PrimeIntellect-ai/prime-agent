@@ -628,8 +628,22 @@ function buildParams(
 			(params as any).tool_stream = true;
 		}
 	} else if (hasToolHistory(context.messages)) {
-		// Anthropic (via LiteLLM/proxy) requires tools param when conversation has tool_calls/tool_results
-		params.tools = [];
+		// Bedrock Converse (via LiteLLM/proxy) requires at least one tool in toolConfig
+		// when conversation history has tool calls or results. Sending an empty array []
+		// causes Bedrock to reject with: "The toolConfig field must be defined when using toolUse and toolResult content blocks."
+		params.tools = [
+			{
+				type: "function",
+				function: {
+					name: "dummy_tool",
+					description: "Dummy tool to satisfy provider constraints when history contains tool calls.",
+					parameters: {
+						type: "object",
+						properties: {},
+					},
+				},
+			},
+		];
 	}
 
 	if (cacheControl) {
