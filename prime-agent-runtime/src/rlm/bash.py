@@ -1181,8 +1181,15 @@ def _join_line_continuations(command: str) -> str:
             elif ch == "#" and (i == 0 or command[i - 1] in " \t\r\n;&|(){}"):
                 comment = True
                 out.append(ch)
-            elif ch == "\\" and i + 1 < n and command[i + 1] == "\n":
-                i += 1  # the shell removes the pair: tokens on both sides join
+            elif ch == "\\" and i + 1 < n:
+                if command[i + 1] == "\n":
+                    pass  # the shell removes the pair: tokens on both sides join
+                else:
+                    # The escape keeps the next character from opening a
+                    # quoted span (`\'` is a literal quote, not a span).
+                    out.append(ch)
+                    out.append(command[i + 1])
+                i += 1
             else:
                 out.append(ch)
         elif quote == "'":
@@ -3647,16 +3654,34 @@ def _wrapped_payloads_hide_recursive_force_rm(
                 continue
             payload_parts.append(command[action.start : action.end])
         else:
-            flag = words[index + 1 : index + 2]
-            payload_word = words[index + 2 : index + 3]
-            if not flag or flag[0].value != "-c" or flag[0].starts_command:
-                continue
             is_shell = os.path.basename(word.value) in _SHELL_DASH_C_INTERPRETERS
             if not is_shell and _expansion_is_resolvable(word.value):
                 continue  # python/node -c payloads are not shell syntax
-            if not payload_word or payload_word[0].starts_command:
+            # `-c` may follow other options (`bash -e -c ...`) or be bundled
+            # (`bash -uc ...`); locate it among the options and take the word
+            # that follows it as the command string.
+            payload_word = None
+            for offset, follower in enumerate(words[index + 1 :]):
+                if follower.starts_command:
+                    break
+                token = follower.value
+                if token == "--":
+                    break  # end of options: a later -c is a positional
+                if token == "-c" or (
+                    token.startswith("-")
+                    and token != "-"
+                    and not token.startswith("--")
+                    and token.endswith("c")
+                ):
+                    candidate = words[index + 2 + offset : index + 3 + offset]
+                    if candidate and not candidate[0].starts_command:
+                        payload_word = candidate[0]
+                    break
+                if not token.startswith("-"):
+                    break  # first non-option argument: no -c present
+            if payload_word is None:
                 continue  # bare `sh -c` with no payload string: nothing to scan
-            payload_parts.append(command[payload_word[0].start : payload_word[0].end])
+            payload_parts.append(command[payload_word.start : payload_word.end])
         payload = _unquote_one_level(" ".join(payload_parts))
         if _find_recursive_force_rm_invocations(payload):
             return True
@@ -3671,7 +3696,7 @@ _CD_BUILTINS = ("cd", "pushd")
 
 
 def _resolve_cd_target(
-    targets: list[str], tracked: str | None, builtin: str
+    targets: list[str], tracked: str | None, builtin: str, *, home_untrackable: bool = False
 ) -> str | None:
     """The shell's directory after `cd`/`pushd` with the follower values
     `targets`, or None when the destination cannot be established statically
@@ -3701,6 +3726,8 @@ def _resolve_cd_target(
     home = os.environ.get("HOME")
     expanded = target
     if expanded.startswith("~"):
+        if home_untrackable:
+            return None  # HOME is reassigned in this command: untrackable
         if not home:
             return None
         if expanded == "~":
@@ -3712,7 +3739,7 @@ def _resolve_cd_target(
     else:
         for prefix in ("${HOME}", "$HOME"):
             if expanded.startswith(prefix):
-                if not home:
+                if home_untrackable or not home:
                     return None
                 expanded = home + expanded[len(prefix) :]
                 break
@@ -3734,7 +3761,11 @@ def _resolve_cd_target(
 
 
 def _tracked_cwd_at_words(
-    command: str, words: list[_ShellWord], start_cwd: str
+    command: str,
+    words: list[_ShellWord],
+    start_cwd: str | None,
+    *,
+    home_untrackable: bool = False,
 ) -> list[str | None]:
     """For each word, the shell's working directory when that word runs.
 
@@ -3761,7 +3792,9 @@ def _tracked_cwd_at_words(
                 if follower.starts_command:
                     break
                 targets.append(follower.value)
-            tracked = _resolve_cd_target(targets, tracked, word.value)
+            tracked = _resolve_cd_target(
+                targets, tracked, word.value, home_untrackable=home_untrackable
+            )
         result.append(tracked)
     return result
 
@@ -3935,29 +3968,50 @@ def _heredoc_body_spans(command: str) -> list[tuple[int, int]]:
     return spans
 
 
-def _heredoc_bodies_reach_script_runners(command_without_bodies: str) -> bool:
-    """True when a word in `command_without_bodies` (heredoc bodies already
-    blanked) can run heredoc text: an interpreter feeding on stdin
-    (`sh <<EOF`), a pipeline consumer after the terminator
+# Words that run other commands: their followers are command-position too
+# (`exec ./s.sh`, `sudo ./s.sh`), so a slash-qualified word after them is a
+# script invocation even without starting one itself.
+_EXEC_STYLE_PREFIXES = frozenset(
+    {"exec", "sudo", "env", "nohup", "command", "builtin", "timeout", "nice", "time", "stdbuf"}
+)
+
+
+def _script_runner_word_indices(words: list[_ShellWord]) -> list[int]:
+    """Indices of words that can run heredoc text: an interpreter feeding on
+    stdin (`sh <<EOF`), a pipeline consumer after the terminator
     (`{ cat <<EOF ... } | sh`), a script invocation (`sh s.sh`, `./s.sh`,
-    `. s.sh`, `source s.sh`), or an unresolvable-expansion word that could be
-    any of them."""
-    for word in _scan_shell_words(command_without_bodies):
-        if os.path.basename(word.value) in _SHELL_DASH_C_INTERPRETERS:
-            return True
-        if word.value == "source":
-            return True
-        if word.starts_command and ("/" in word.value or word.value == "."):
-            return True
-        if not _expansion_is_resolvable(word.value):
-            return True
-    return False
+    `. s.sh`, `source s.sh`, `exec ./s.sh`), or an unresolvable-expansion
+    word that could be any of them. cd/pushd targets are not runners."""
+    indices: list[int] = []
+    for index, word in enumerate(words):
+        value = word.value
+        if os.path.basename(value) in _SHELL_DASH_C_INTERPRETERS:
+            indices.append(index)
+        elif value == "source":
+            indices.append(index)
+        elif word.starts_command and ("/" in value or value == "."):
+            indices.append(index)
+        elif (
+            "/" in value
+            and words[index - 1].starts_command
+            and words[index - 1].value in _EXEC_STYLE_PREFIXES
+        ):
+            indices.append(index)
+        elif not _expansion_is_resolvable(value):
+            indices.append(index)
+    return indices
 
 
-def _rm_guard_scan_texts(normalized: str) -> list[str]:
+def _heredoc_bodies_reach_script_runners(command_without_bodies: str) -> bool:
+    """True when any word in `command_without_bodies` (heredoc bodies already
+    blanked) can run heredoc text; see _script_runner_word_indices."""
+    return bool(_script_runner_word_indices(_scan_shell_words(command_without_bodies)))
+
+
+def _rm_guard_scan_texts(normalized: str) -> tuple[str, list[str]]:
     """Scan texts for the rm guard: the command with here-document bodies
     blanked, plus each body that can reach a script runner as its own
-    command text.
+    command text (returned as a pair).
 
     A heredoc body is data for the command that reads it (`cat <<EOF`), so
     blanking it avoids false refusals from data text. But a body can still
@@ -3971,15 +4025,15 @@ def _rm_guard_scan_texts(normalized: str) -> list[str]:
     report no span and stay part of the outer text (conservative)."""
     spans = _heredoc_body_spans(normalized)
     if not spans:
-        return [normalized]
+        return normalized, []
     outer = list(normalized)
     for start, end in spans:
         for pos in range(start, end):
             outer[pos] = " "
     outer_text = "".join(outer)
     if not _heredoc_bodies_reach_script_runners(outer_text):
-        return [outer_text]
-    return [outer_text, *(normalized[start:end] for start, end in spans)]
+        return outer_text, []
+    return outer_text, [normalized[start:end] for start, end in spans]
 
 
 def _format_rm_operand_refusal(reasons: list[str], live_bypass_attempt: bool) -> str:
@@ -4026,18 +4080,65 @@ def _format_rm_wrapper_refusal() -> str:
 
 
 def _command_reassigns_env(words: list[_ShellWord], name: str) -> bool:
-    """True when the command assigns or exports `name`, so operands whose
-    expansion depends on it cannot be taken from the kernel environment."""
+    """True when the command assigns, appends to, exports, or unsets `name`,
+    so operands whose expansion depends on it cannot be taken from the
+    kernel environment."""
     for index, word in enumerate(words):
-        if re.match(rf"^{name}=", word.value):
+        if re.match(rf"^{name}\+?=", word.value):
             return True
-        if word.value == "export":
+        if word.value in ("export", "unset"):
             for follower in words[index + 1 :]:
                 if follower.starts_command:
                     break
                 if re.match(rf"^{name}(=|$)", follower.value):
                     return True
     return False
+
+
+def _rm_invocation_reasons(
+    words: list[_ShellWord],
+    invocations: list[tuple[int, list[str]]],
+    workspace_root: str,
+    tracked_at: list[str | None],
+    reassigns_home: bool,
+    reassigns_pwd: bool,
+) -> list[str]:
+    """Refusal reasons for one scan text's recursive-force rm invocations,
+    resolving operands against the precomputed per-word tracked directories."""
+    reasons: list[str] = []
+    for word_index, operands in invocations:
+        tracked = tracked_at[word_index]
+        if not operands:
+            reasons.append(
+                "receives no explicit operand, so names could arrive from"
+                " xargs or stdin and cannot be checked"
+            )
+            continue
+        if tracked is None:
+            reasons.append(
+                "runs after a cd/pushd the guard cannot resolve, so its"
+                " relative targets cannot be checked"
+            )
+            continue
+        for operand in operands:
+            if reassigns_home and (
+                operand.startswith("~") or re.match(r"^\$\{?HOME", operand)
+            ):
+                reasons.append(
+                    f"{operand!r}: the command reassigns HOME, so the"
+                    " expansion the shell performs cannot be tracked"
+                )
+                continue
+            if reassigns_pwd and re.match(r"^\$\{?PWD", operand):
+                reasons.append(
+                    f"{operand!r}: the command reassigns PWD, so the"
+                    " expansion the shell performs cannot be tracked"
+                )
+                continue
+            reason = _resolve_rm_operand(operand, workspace_root, tracked)
+            if reason:
+                reasons.append(f"{operand!r}: {reason}")
+    return reasons
 
 
 def _guard_destructive_rm(command: str, allow_destructive_rm: bool) -> None:
@@ -4057,61 +4158,71 @@ def _guard_destructive_rm(command: str, allow_destructive_rm: bool) -> None:
     # PRIME_AGENT_BASH_COMMAND_PREFIX, and that env value is model-writable
     # mid-session, so the guard must not assume it stays benign.
     normalized = _join_line_continuations(_with_prefix(command))
-    # Heredoc bodies split out as separate scan texts (see _rm_guard_scan_texts).
-    scan_texts = _rm_guard_scan_texts(normalized)
+    outer_text, body_texts = _rm_guard_scan_texts(normalized)
     reasons: list[str] = []
-    for scan_text in scan_texts:
-        prepared = _mask_shell_redirections(scan_text)
-        # The wrapper scan matches parsed word values, so escaped names
-        # (`t\\rap`, `ev\\al`) cannot slip past a raw substring gate; it
-        # runs on the pre-scanned words, so other commands only pay a light
-        # pass.
-        words = _scan_shell_words(prepared)
-        if _wrapped_payloads_hide_recursive_force_rm(prepared, words=words):
-            raise DestructiveRmRefusalError(_format_rm_wrapper_refusal())
-        invocations = _find_rf_rm_invocations_in_words(words)
-        if invocations:
-            try:
-                cwd = os.getcwd()
-                workspace_root = os.path.realpath(cwd)
-            except OSError:
-                return  # the spawn itself will fail; the guard must not mask that error
-            tracked_at = _tracked_cwd_at_words(prepared, words, workspace_root)
-            reassigns_home = _command_reassigns_env(words, "HOME")
-            reassigns_pwd = _command_reassigns_env(words, "PWD")
-            for word_index, operands in invocations:
-                tracked = tracked_at[word_index]
-                if not operands:
-                    reasons.append(
-                        "receives no explicit operand, so names could arrive from"
-                        " xargs or stdin and cannot be checked"
-                    )
-                    continue
-                if tracked is None:
-                    reasons.append(
-                        "runs after a cd/pushd the guard cannot resolve, so its"
-                        " relative targets cannot be checked"
-                    )
-                    continue
-                for operand in operands:
-                    if reassigns_home and (
-                        operand.startswith("~") or re.match(r"^\$\{?HOME", operand)
-                    ):
-                        reasons.append(
-                            f"{operand!r}: the command reassigns HOME, so the"
-                            " expansion the shell performs cannot be tracked"
-                        )
-                        continue
-                    if reassigns_pwd and re.match(r"^\$\{?PWD", operand):
-                        reasons.append(
-                            f"{operand!r}: the command reassigns PWD, so the"
-                            " expansion the shell performs cannot be tracked"
-                        )
-                        continue
-                    reason = _resolve_rm_operand(operand, workspace_root, tracked)
-                    if reason:
-                        reasons.append(f"{operand!r}: {reason}")
+    try:
+        cwd = os.getcwd()
+        workspace_root = os.path.realpath(cwd)
+    except OSError:
+        cwd = None  # the spawn itself will fail; the guard must not mask that error
+    # ---- outer pass ----
+    prepared = _mask_shell_redirections(outer_text)
+    # The wrapper scan matches parsed word values, so escaped names
+    # (`t\\rap`, `ev\\al`) cannot slip past a raw substring gate; it runs on
+    # the pre-scanned words, so other commands only pay a light pass.
+    words = _scan_shell_words(prepared)
+    if _wrapped_payloads_hide_recursive_force_rm(prepared, words=words):
+        raise DestructiveRmRefusalError(_format_rm_wrapper_refusal())
+    invocations = _find_rf_rm_invocations_in_words(words)
+    reassigns_home = _command_reassigns_env(words, "HOME")
+    reassigns_pwd = _command_reassigns_env(words, "PWD")
+    if cwd is None:
+        if invocations or body_texts:
+            return  # the spawn itself will fail; the guard must not mask that error
         reasons.extend(_unresolvable_expansion_rm_reasons(words))
+    else:
+        tracked_at = _tracked_cwd_at_words(
+            prepared, words, workspace_root, home_untrackable=reassigns_home
+        )
+        reasons.extend(
+            _rm_invocation_reasons(
+                words, invocations, workspace_root, tracked_at, reassigns_home, reassigns_pwd
+            )
+        )
+        reasons.extend(_unresolvable_expansion_rm_reasons(words))
+        # The bodies run wherever the outer command has relocated to: resolve
+        # them against every script runner's tracked directory (any escape
+        # refuses), and inherit the outer HOME/PWD reassignments.
+        runner_starts = [
+            tracked_at[word_index] for word_index in _script_runner_word_indices(words)
+        ]
+    # ---- body passes ----
+    for body_text in body_texts:
+        body_prepared = _mask_shell_redirections(body_text)
+        body_words = _scan_shell_words(body_prepared)
+        if _wrapped_payloads_hide_recursive_force_rm(body_prepared, words=body_words):
+            raise DestructiveRmRefusalError(_format_rm_wrapper_refusal())
+        body_invocations = _find_rf_rm_invocations_in_words(body_words)
+        if not body_invocations:
+            reasons.extend(_unresolvable_expansion_rm_reasons(body_words))
+            continue
+        body_reassigns_home = reassigns_home or _command_reassigns_env(body_words, "HOME")
+        body_reassigns_pwd = reassigns_pwd or _command_reassigns_env(body_words, "PWD")
+        for start in runner_starts or [workspace_root]:
+            body_tracked_at = _tracked_cwd_at_words(
+                body_prepared, body_words, start, home_untrackable=body_reassigns_home
+            )
+            reasons.extend(
+                _rm_invocation_reasons(
+                    body_words,
+                    body_invocations,
+                    workspace_root,
+                    body_tracked_at,
+                    body_reassigns_home,
+                    body_reassigns_pwd,
+                )
+            )
+        reasons.extend(_unresolvable_expansion_rm_reasons(body_words))
     if reasons:
         live_bypass_attempt = _is_truthy_env_value(
             os.environ.get(BASH_DESTRUCTIVE_RM_BYPASS_ENV)

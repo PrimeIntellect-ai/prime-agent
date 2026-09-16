@@ -1686,6 +1686,96 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
         result = await bash("cat <<'EOF'\ndon't\nEOF")
         self.assertEqual(result.exit_code, 0)
 
+    async def test_refuses_interpreter_options_before_dash_c(self):
+        # `-c` may follow other interpreter options (`bash -e -c ...`) or be
+        # bundled (`bash -uc ...`); the payload must still be scanned.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            f"bash -e -c 'rm -rf {outside}'",
+            f"bash -uc 'rm -rf {outside}'",
+            f"/bin/sh -e -c 'rm -rf {outside}'",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+
+    async def test_refuses_rm_split_after_escaped_quote_continuation(self):
+        # An escaped quote must not open a fake quoted span in the
+        # continuation joiner: the real continuation still joins.
+        self._make_tree()
+        outside = self._outside_target()
+        command = "echo \\' ; r\\\nm -rf " + outside
+        with self.assertRaises(DestructiveRmRefusalError):
+            bash(command)
+        self.assertTrue(Path(outside, "file.txt").exists())
+
+    async def test_refuses_heredoc_bodies_relocated_by_outer_command(self):
+        # The body runs wherever the outer command has relocated to, so its
+        # relative operands must resolve against the runner's directory.
+        self._make_tree()
+        outside = self._outside_target()
+        Path(outside, "victim").mkdir()
+        Path(outside, "victim", "file.txt").write_text("keep\n")
+        for command in [
+            f"cd {outside}; sh <<EOF\nrm -rf victim\nEOF",
+            f"cd {outside}; cat <<EOF > s.sh\nrm -rf victim\nEOF\n. s.sh",
+            f"HOME={outside}; cat <<EOF > s.sh\nrm -rf \"$HOME/victim\"\nEOF\nsource s.sh",
+        ]:
+            with self.subTest(command=command):
+                Path(self.test_dir, "victim").mkdir(exist_ok=True)
+                Path(self.test_dir, "victim", "file.txt").write_text("keep\n")
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "victim", "file.txt").exists())
+        # Without relocations the body scan keeps allowing in-workspace paths.
+        self._make_tree()
+        result = await bash("sh <<EOF\nrm -rf sub\nEOF")
+        self.assertEqual(result.exit_code, 0)
+        self.assertFalse(self._tracked("sub").exists())
+
+    async def test_refuses_unset_and_append_home_reassignments(self):
+        self._make_tree()
+        outside = self._outside_target()
+        Path(outside, "victim").mkdir()
+        Path(outside, "victim", "file.txt").write_text("keep\n")
+        # `HOME+=` changes the value the shell expands at run time.
+        with mock.patch.dict(os.environ, {"HOME": self.test_dir}):
+            command = f"HOME+=/../../..; rm -rf \"$HOME/{Path(outside).name}\""
+            with self.assertRaises(DestructiveRmRefusalError):
+                bash(command)
+        # A reassigned HOME also relocates `cd ~`: the tracker must not
+        # expand it from the kernel environment.
+        with mock.patch.dict(os.environ, {"HOME": self.test_dir}):
+            command = f"HOME={outside}; cd ~; rm -rf victim"
+            Path(self.test_dir, "victim").mkdir(exist_ok=True)
+            Path(self.test_dir, "victim", "file.txt").write_text("keep\n")
+            with self.assertRaises(DestructiveRmRefusalError):
+                bash(command)
+            self.assertTrue(Path(outside, "file.txt").exists())
+        # `unset HOME` makes $HOME-dependent operands untrackable at the
+        # detection level (executing it would aim at the filesystem root).
+        words = bash_module._scan_shell_words("unset HOME; rm -rf \"$HOME/x\"")
+        self.assertTrue(bash_module._command_reassigns_env(words, "HOME"))
+
+    async def test_refuses_exec_prefixed_script_runners(self):
+        # `exec ./s.sh` and friends keep heredoc bodies live too.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "cat <<EOF > s.sh\nrm -rf " + outside + "\nEOF\nexec ./s.sh",
+            "cat <<EOF > s.sh\nrm -rf " + outside + "\nEOF\nsudo ./s.sh",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # A plain cd target is not a script runner: data heredocs after a cd
+        # stay masked and allowed.
+        result = await bash("cd sub && cat <<EOF\nrm -rf /printed-not-run\nEOF")
+        self.assertEqual(result.exit_code, 0)
+
     async def test_operands_after_end_of_options_are_checked(self):
         self._make_tree()
         with self.assertRaises(DestructiveRmRefusalError):
