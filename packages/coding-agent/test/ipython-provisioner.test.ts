@@ -11,7 +11,11 @@ import {
 	type KernelClient,
 	ReplKernelManager,
 } from "../src/core/kernel/index.js";
-import { createIpythonToolDefinition, IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
+import {
+	createIpythonToolDefinition,
+	IpythonKernelProvisioner,
+	PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER,
+} from "../src/core/tools/ipython.js";
 
 let tempDir = "";
 
@@ -67,7 +71,11 @@ function createBusyKernelContext(
 
 function writeFakeReplRuntime(
 	markerPath: string,
-	options: { gatedExecute?: { startedPath: string; gatePath: string } } = {},
+	options: {
+		gatedExecute?: { startedPath: string; gatePath: string };
+		/** Text the fake runtime prints for the bootstrap execute, or null to fail it. */
+		executeStdout?: string | null;
+	} = {},
 ): string {
 	const python = join(tempDir, "python-repl");
 	const refuse = `emit({ event: "error", id: request.id, ename: "RuntimeError", evalue: "bootstrap refused", traceback: [] });
@@ -80,6 +88,11 @@ function writeFakeReplRuntime(
 			${refuse}
 		}, 10);`
 		: refuse;
+	const executeOk =
+		options.executeStdout !== undefined && options.executeStdout !== null
+			? `emit({ event: "stdout", id: request.id, text: ${JSON.stringify(options.executeStdout)} });
+		emit({ event: "done", id: request.id, status: "ok" });`
+			: "";
 	writeFileSync(
 		python,
 		`#!/usr/bin/env node
@@ -102,7 +115,7 @@ input.on("line", (line) => {
 		return;
 	}
 	if (request.type === "execute") {
-		${executeBranch}
+		${executeOk || executeBranch}
 		return;
 	}
 	if (request.type === "shutdown") {
@@ -125,6 +138,35 @@ describe("IpythonKernelProvisioner", () => {
 		if (tempDir) {
 			rmSync(tempDir, { recursive: true, force: true });
 			tempDir = "";
+		}
+	});
+
+	it("reports unavailable python skills parsed from the bootstrap cell stdout", async () => {
+		const marker = join(tempDir, "snapshot-flushed");
+		const python = writeFakeReplRuntime(marker, {
+			executeStdout: `${PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER}{"websearch":"No module named 'websearch'"}`,
+		});
+		const onUnavailableSkills = vi.fn();
+		const provisioner = new IpythonKernelProvisioner(tempDir, { python, onUnavailableSkills });
+		try {
+			await provisioner.ensure();
+			expect(onUnavailableSkills).toHaveBeenCalledTimes(1);
+			expect(onUnavailableSkills).toHaveBeenCalledWith({ websearch: "No module named 'websearch'" });
+		} finally {
+			await provisioner.dispose();
+		}
+	});
+
+	it("does not report unavailable python skills after a clean bootstrap", async () => {
+		const marker = join(tempDir, "snapshot-flushed");
+		const python = writeFakeReplRuntime(marker, { executeStdout: "" });
+		const onUnavailableSkills = vi.fn();
+		const provisioner = new IpythonKernelProvisioner(tempDir, { python, onUnavailableSkills });
+		try {
+			await provisioner.ensure();
+			expect(onUnavailableSkills).not.toHaveBeenCalled();
+		} finally {
+			await provisioner.dispose();
 		}
 	});
 
