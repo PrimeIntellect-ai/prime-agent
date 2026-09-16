@@ -50,7 +50,10 @@ function createFakeTui(overlays: Component[] = []): TUI {
 	} as unknown as TUI;
 }
 
-function createHost(authStorage: AuthStorage, models: Model<Api>[] = []): {
+function createHost(
+	authStorage: AuthStorage,
+	models: Model<Api>[] = [],
+): {
 	host: ProviderAuthFlowsHost;
 	statusMessages: string[];
 	errorMessages: string[];
