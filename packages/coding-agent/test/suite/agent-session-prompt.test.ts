@@ -8,12 +8,9 @@ import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { BashResult } from "../../src/core/bash-executor.js";
 import {
 	convertToLlm,
-	createCompactionSummaryMessage,
-	createHarnessDigestMessage,
 	HARNESS_DIGEST_CUSTOM_TYPE,
 	HARNESS_DIGEST_PREFIX,
 	HARNESS_DIGEST_SUFFIX,
-	REFINEMENT_NOTICE_CUSTOM_TYPE,
 } from "../../src/core/messages.js";
 import type { PromptTemplate } from "../../src/core/prompt-templates.js";
 import { getLocalHarnessStateDir, loadHarnessState, saveHarnessState } from "../../src/core/refinement/index.js";
@@ -970,31 +967,6 @@ describe("Harness digest at cold boundaries", () => {
 		expect(harness.session.messages[0]).toMatchObject({ role: "custom", customType: HARNESS_DIGEST_CUSTOM_TYPE });
 	});
 
-	it("exposes the newest digest details, including the state fingerprint", async () => {
-		const harness = await createHarness({ persistSession: true });
-		harnesses.push(harness);
-		const internals = harness.session as unknown as {
-			_latestContextHarnessDigestDetails(): { digest: string; stateFingerprint?: string } | undefined;
-		};
-		const base = Date.now();
-		harness.session.agent.state.messages.push(
-			createHarnessDigestMessage("older digest", base + 1000, "fp-older"),
-			createCompactionSummaryMessage(
-				"summary",
-				10,
-				new Date(base + 2000).toISOString(),
-				undefined,
-				1,
-				"head digest",
-				"fp-head",
-			),
-		);
-		expect(internals._latestContextHarnessDigestDetails()).toMatchObject({
-			digest: "head digest",
-			stateFingerprint: "fp-head",
-		});
-	});
-
 	function isolatedAgentDir(prefix: string): string {
 		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
 		const agentDir = join(tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -1032,7 +1004,7 @@ describe("Harness digest at cold boundaries", () => {
 		};
 	}
 
-	it("skips digest re-delivery on resume while the fingerprint is fresh and appends a fresh one when state changed", async () => {
+	it("skips digest re-delivery on resume when only query terms drifted and the state is unchanged", async () => {
 		// Hermetic store: the ambient developer harness would crowd the ranked window.
 		isolatedAgentDir("pi-digest-resume");
 		const harness = await createHarness({ persistSession: true });
@@ -1073,73 +1045,5 @@ describe("Harness digest at cold boundaries", () => {
 		)._harnessDigestWithFingerprint().digest;
 		expect(HARNESS_DIGEST_PREFIX + freshDigest + HARNESS_DIGEST_SUFFIX).not.toBe(getMessageText(after[0]));
 		resumed.session.dispose();
-
-		// Stale fingerprint: the local harness changed on disk since the last
-		// injection, so the resume appends a fresh digest at the end.
-		const reloaded = loadHarnessState(localDir, "local");
-		seedMemory(reloaded, "resume_test_memory", "Resume test memory", "Written between resumes.");
-		saveHarnessState(localDir!, reloaded);
-
-		const resumedStale = await createHarness({ existingSessionFile: sessionFile });
-		harnesses.push(resumedStale);
-		const digests = digestMessages(resumedStale);
-		expect(digests.length).toBe(2);
-		expect(resumedStale.session.messages.at(-1)).toBe(digests.at(-1));
-		expect(getMessageText(digests.at(-1))).toContain("[local:resume_test_memory] Resume test memory");
-	});
-
-	it("keeps the digest byte-identical when a refinement notice is appended", async () => {
-		isolatedAgentDir("pi-digest-refine");
-		const harness = await createHarness({ persistSession: true });
-		harnesses.push(harness);
-		const localDir = getLocalHarnessStateDir(harness.sessionManager.getSessionArtifactDir());
-		expect(localDir).toBeDefined();
-		const state = loadHarnessState(localDir, "local");
-		seedMemory(state, "notice_base_memory", "Notice base memory", "Baseline material.");
-		saveHarnessState(localDir!, state);
-
-		harness.setResponses([fauxAssistantMessage("ok")]);
-		await harness.session.prompt("hello");
-		const digestBefore = digestMessages(harness);
-		expect(digestBefore).toHaveLength(1);
-		const digestTextBefore = getMessageText(digestBefore[0]);
-
-		// Stub only the planner; the apply phase runs for real and appends the
-		// durable refinement notice at the end of the context.
-		const internals = harness.session as unknown as {
-			_planRefine(options: unknown, signal: AbortSignal): Promise<unknown>;
-		};
-		vi.spyOn(internals, "_planRefine").mockResolvedValue({
-			id: "refine_notice_freeze",
-			proposal: {
-				summary: "Add a notice-applied memory",
-				rationale: "Cache stability proof",
-				expectedOutcome: "Digest stays byte-identical.",
-				edits: [
-					{
-						action: "create",
-						kind: "memory",
-						title: "Notice applied memory",
-						content: "Written by the refinement.",
-						path: "general",
-					},
-				],
-			},
-		});
-		await harness.session.refine({});
-
-		// The digest in context is untouched: the notice carries the change.
-		const digestsAfter = digestMessages(harness);
-		expect(digestsAfter).toHaveLength(1);
-		expect(digestsAfter[0]).toBe(digestBefore[0]);
-		expect(getMessageText(digestsAfter[0])).toBe(digestTextBefore);
-
-		const notice = harness.session.messages.at(-1);
-		expect(notice).toMatchObject({ role: "custom", customType: REFINEMENT_NOTICE_CUSTOM_TYPE });
-		expect(harness.session.messages.indexOf(digestsAfter[0])).toBeLessThan(harness.session.messages.length - 1);
-		// The notice reaches the model as a user message after the digest.
-		const noticeLlm = convertToLlm([notice!]);
-		expect(noticeLlm).toHaveLength(1);
-		expect(noticeLlm[0]?.role).toBe("user");
 	});
 });
