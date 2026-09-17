@@ -317,10 +317,19 @@ class DestructiveGitGuardTest(unittest.IsolatedAsyncioTestCase):
         result = await bash("echo 'git reset --hard'")
         self.assertEqual(result.exit_code, 0)
         self.assertIn("git reset --hard", result.output)
-        # A dry run never deletes, and the copy follows the same-command reassignment: both run unguarded.
-        for safe in ["git clean -n", "G='git reset --hard'; G='echo hi' H=\"$G\"; $H"]:
-            result = await bash(safe)
-            self.assertEqual(result.exit_code, 0)
+        # A dry run never deletes, and the copy follows the same-command
+        # reassignment, so the git guard reads the live harmless value and lets
+        # both run. The stacked rm guard still fail-closes on the mirror's
+        # expansion-built command word (`H="$G"` runs text it cannot read
+        # statically), so this end-to-end git-guard check passes its documented
+        # bypass kwarg.
+        result = await bash("git clean -n")
+        self.assertEqual(result.exit_code, 0)
+        result = await bash(
+            "G='git reset --hard'; G='echo hi' H=\"$G\"; $H",
+            allow_destructive_rm=True,
+        )
+        self.assertEqual(result.exit_code, 0)
         self.assertIn("hi", result.output)
         self.assertEqual(self._tracked("tracked.txt").read_text(), "modified\n")
         self.assertTrue(self._tracked("untracked.txt").exists())
