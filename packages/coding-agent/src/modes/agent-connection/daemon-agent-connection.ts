@@ -26,7 +26,11 @@ import {
 	type DaemonTransportClient,
 	getDaemonSocketCloseReason,
 } from "../daemon/daemon-client.js";
-import { deserializeDaemonError } from "../daemon/daemon-errors.js";
+import {
+	DaemonCommandResultUncertainError,
+	DaemonSessionRecoveringError,
+	deserializeDaemonError,
+} from "../daemon/daemon-errors.js";
 import {
 	collectDaemonClientEnv,
 	collectDaemonLaunchEnv,
@@ -55,6 +59,9 @@ import {
 import type {
 	AgentConnection,
 	AgentConnectionBeforeSessionInvalidateListener,
+	AgentConnectionCloudDelegateOptions,
+	AgentConnectionCloudDelegationSummary,
+	AgentConnectionCloudProgress,
 	AgentConnectionEvent,
 	AgentConnectionEventListener,
 	AgentConnectionExecuteBashOptions,
@@ -601,6 +608,108 @@ export class DaemonAgentConnection implements AgentConnection {
 
 	async releaseAcpMcpServers(ownerId: string, _serverNames: readonly string[]): Promise<void> {
 		await this.replaceAcpMcpServers([], ownerId);
+	}
+
+	supportsCloudSessions(): boolean {
+		return this.client.supportsServerCapability("cloud_sessions");
+	}
+
+	private async retryCloudMutation<T>(request: () => Promise<T>): Promise<T> {
+		for (let attempt = 0; ; attempt += 1) {
+			try {
+				return await request();
+			} catch (error) {
+				const retryable =
+					error instanceof DaemonDirectTransportClosedError ||
+					error instanceof DaemonSessionRecoveringError ||
+					error instanceof DaemonCommandResultUncertainError;
+				if (!retryable || attempt >= 20) throw error;
+				await new Promise((resolve) => setTimeout(resolve, 250));
+			}
+		}
+	}
+
+	async cloudDelegate(
+		prompt: string,
+		options?: AgentConnectionCloudDelegateOptions,
+		onProgress?: (progress: AgentConnectionCloudProgress) => void,
+	): Promise<AgentConnectionCloudDelegationSummary> {
+		if (!this.supportsCloudSessions()) {
+			throw new DaemonCapabilityUnavailableError("cloud_delegate", "cloud_sessions");
+		}
+		const delegationId = `sess_${randomUUID()}`;
+		const command = {
+			type: "cloud_delegate" as const,
+			activeSessionId: this.activeSessionId,
+			delegationId,
+			prompt,
+			...(options ? { options } : {}),
+		};
+		const request = () =>
+			this.requestData<{ delegation: AgentConnectionCloudDelegationSummary }>(
+				command,
+				DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS,
+				{
+					onProgress: (update) => {
+						if (update.type === "cloud_delegate_progress") {
+							onProgress?.({
+								...(update.delegationId ? { delegationId: update.delegationId } : {}),
+								phase: update.phase,
+								message: update.message,
+							});
+						}
+					},
+				},
+			);
+		return (await this.retryCloudMutation(request)).delegation;
+	}
+
+	async cloudDelegationsList(): Promise<AgentConnectionCloudDelegationSummary[]> {
+		if (!this.supportsCloudSessions()) {
+			throw new DaemonCapabilityUnavailableError("cloud_delegations_list", "cloud_sessions");
+		}
+		const data = await this.retryCloudMutation(() =>
+			this.requestData<{ delegations: AgentConnectionCloudDelegationSummary[] }>({
+				type: "cloud_delegations_list",
+				activeSessionId: this.activeSessionId,
+			}),
+		);
+		return data.delegations;
+	}
+
+	async cloudDelegationStop(delegationId: string, forfeit = false): Promise<AgentConnectionCloudDelegationSummary> {
+		if (!this.supportsCloudSessions()) {
+			throw new DaemonCapabilityUnavailableError("cloud_delegation_stop", "cloud_sessions");
+		}
+		const data = await this.retryCloudMutation(() =>
+			this.requestData<{ delegation: AgentConnectionCloudDelegationSummary }>(
+				{
+					type: "cloud_delegation_stop",
+					activeSessionId: this.activeSessionId,
+					delegationId,
+					...(forfeit ? { forfeit: true } : {}),
+				},
+				DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS,
+			),
+		);
+		return data.delegation;
+	}
+
+	async cloudDelegationApply(delegationId: string): Promise<AgentConnectionCloudDelegationSummary> {
+		if (!this.supportsCloudSessions()) {
+			throw new DaemonCapabilityUnavailableError("cloud_delegation_apply", "cloud_sessions");
+		}
+		const data = await this.retryCloudMutation(() =>
+			this.requestData<{ delegation: AgentConnectionCloudDelegationSummary }>(
+				{
+					type: "cloud_delegation_apply",
+					activeSessionId: this.activeSessionId,
+					delegationId,
+				},
+				DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS,
+			),
+		);
+		return data.delegation;
 	}
 
 	async getAvailableModels(): Promise<AgentConnectionModel[]> {

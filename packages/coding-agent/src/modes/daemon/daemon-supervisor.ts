@@ -94,6 +94,7 @@ import {
 	type DaemonCommand,
 	type DaemonOutbound,
 	type DaemonPeerTransportTicket,
+	type DaemonRequestProgress,
 	type DaemonResponse,
 	type DaemonServerCapability,
 	type DaemonUpdateRestartManifest,
@@ -188,7 +189,13 @@ export function handshakeBudgetMs(deadline: number, now = Date.now()): number {
 const ROSTER_WATCHDOG_INTERVAL_MS = 15_000;
 const ROSTER_STALE_AFTER_MS = 3 * ROSTER_HEARTBEAT_INTERVAL_MS;
 const SUPERVISOR_SERVER_CAPABILITIES: readonly DaemonServerCapability[] = [
-	...DAEMON_DEFAULT_SERVER_CAPABILITIES,
+	...DAEMON_DEFAULT_SERVER_CAPABILITIES.filter(
+		(capability) =>
+			capability !== "cloud_sessions" ||
+			Boolean(
+				process.env.PRIME_AGENT_CLOUD_IMAGE?.trim() && process.env.PRIME_AGENT_CLOUD_INFERENCE_API_KEY?.trim(),
+			),
+	),
 	"agent_roster",
 	"direct_peer_transport",
 ];
@@ -233,6 +240,10 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"roster_subscribe",
 	"roster_unsubscribe",
 	"list_saved_sessions",
+	"cloud_delegate",
+	"cloud_delegations_list",
+	"cloud_delegation_stop",
+	"cloud_delegation_apply",
 	"create",
 	"attach",
 	"reattach",
@@ -333,6 +344,10 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"restart",
 	"shutdown",
 ]);
+
+export function isDaemonSupervisorCommandType(type: string): boolean {
+	return DAEMON_COMMAND_TYPES.has(type);
+}
 
 interface ResidentWorker {
 	descriptor: DaemonWorkerDescriptor;
@@ -1772,7 +1787,7 @@ export class DaemonSupervisor {
 			client.id = envelopeClientId;
 		}
 		this.cancelOwnedWorkerCleanup(client.id);
-		if (!DAEMON_COMMAND_TYPES.has(command.type)) {
+		if (!isDaemonSupervisorCommandType(command.type)) {
 			this.write(client, failure(command.id, command.type, `Unknown daemon command: ${command.type}`));
 			return;
 		}
@@ -2618,7 +2633,17 @@ export class DaemonSupervisor {
 				(match.summary.activeSessionId ?? match.summary.id) === match.worker.descriptor.rootActiveSessionId;
 			if (!isRootKill) {
 				const forward = async () => {
-					const response = await this.forwardToWorker(match.worker, resolvedCommand);
+					const onProgress =
+						command.type === "cloud_delegate"
+							? (progress: DaemonRequestProgress) =>
+									this.write(client, { ...progress, id: command.id, activeSessionId: command.activeSessionId })
+							: undefined;
+					const response = await this.forwardToWorker(
+						match.worker,
+						resolvedCommand,
+						WORKER_REQUEST_TIMEOUT_MS,
+						onProgress,
+					);
 					if (admission && response.success) admission.status = "owned";
 					return response;
 				};
@@ -5007,6 +5032,7 @@ export class DaemonSupervisor {
 		worker: ResidentWorker,
 		command: DaemonCommand,
 		timeoutMs = WORKER_REQUEST_TIMEOUT_MS,
+		onProgress?: (progress: DaemonRequestProgress) => void,
 	): Promise<DaemonResponse> {
 		// Every forwarded command is a touch: a cached failed roster row must not outrank
 		// the descriptor truth that the worker is recoverable (--attach-agent's get_state preflight lands here).
@@ -5017,7 +5043,7 @@ export class DaemonSupervisor {
 			await worker.recovery;
 		}
 		const client = this.requireAvailableWorkerClient(worker, command.type === "kill");
-		const response = await client.request(withoutCommandId(command), timeoutMs);
+		const response = await client.request(withoutCommandId(command), timeoutMs, { onProgress });
 		if (command.type === "get_state" && response.success && isSessionSummary(response.data)) {
 			return { ...response, id: command.id, data: this.publicSummary(worker, response.data) };
 		}

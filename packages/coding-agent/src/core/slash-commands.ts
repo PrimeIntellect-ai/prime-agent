@@ -187,6 +187,12 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	},
 	{ name: "heartbeats", description: "View and manage all user and agent heartbeats" },
 	{
+		name: "cloud",
+		description: "Run and manage direct Prime Sandbox delegations",
+		argumentHint: "[run <prompt>|status|stop <id> [--forfeit]|apply <id>]",
+		takesArgument: true,
+	},
+	{
 		name: "resume",
 		description: "Open the agents view, or resume a session by id or path",
 		argumentHint: "[id|path]",
@@ -208,6 +214,7 @@ const BUILTIN_SLASH_COMMAND_ALIASES: ReadonlyArray<BuiltinSlashCommandAlias> = [
 	{ name: "thinking", aliasFor: "effort" },
 	{ name: "rename", aliasFor: "name" },
 	{ name: "side", aliasFor: "btw" },
+	{ name: "sandbox", aliasFor: "cloud" },
 ];
 
 function buildBuiltinSlashCommands(): ReadonlyArray<BuiltinSlashCommand> {

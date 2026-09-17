@@ -72,6 +72,8 @@ import {
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionRuntime,
 } from "../../core/agent-session-runtime.js";
+import type { CloudDelegationProgress } from "../../core/cloud/delegation-orchestrator.js";
+import { DirectCloudService, isDirectCloudConfigured } from "../../core/cloud/direct-cloud-service.js";
 import {
 	type AgentCronJob,
 	AgentCronJobStore,
@@ -271,6 +273,10 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"ack_result",
 	"list",
 	"list_saved_sessions",
+	"cloud_delegate",
+	"cloud_delegations_list",
+	"cloud_delegation_stop",
+	"cloud_delegation_apply",
 	"create",
 	"attach",
 	"detach",
@@ -545,6 +551,7 @@ export class AgentDaemon {
 	private readonly signalCleanupHandlers: Array<() => void> = [];
 	private readonly cronStore: AgentCronJobStore;
 	private readonly agentDir: string;
+	private cloudService?: DirectCloudService;
 	private readonly cronScheduler: AgentCronScheduler;
 	private readonly agentMessageRateLimiter = new AgentSessionMessageRateLimiter();
 	// Sessions inserted into `sessions` but still awaiting extension binding;
@@ -624,6 +631,75 @@ export class AgentDaemon {
 			this.broadcastGlobal({ type: "heartbeats_changed" });
 			this.scheduleRosterFlush();
 		});
+	}
+
+	private getCloudService(): DirectCloudService {
+		this.cloudService ??= new DirectCloudService({
+			stateDirectory: join(this.agentDir, "cloud"),
+			traceSink: (ownerSessionId, cloudSessionId, envelope) => {
+				const state = [...this.sessions.values()].find(
+					(candidate) => candidate.runtime.session.sessionManager.getSessionId() === ownerSessionId,
+				);
+				if (!state) throw new Error(`Cannot mirror cloud trace for inactive session ${ownerSessionId}`);
+				const alreadyMirrored = state.runtime.session.sessionManager
+					.getEntries()
+					.some(
+						(entry) =>
+							entry.type === "custom" &&
+							entry.customType === "prime-agent.cloud-event" &&
+							typeof entry.data === "object" &&
+							entry.data !== null &&
+							"eventId" in entry.data &&
+							entry.data.eventId === envelope.eventId,
+					);
+				if (alreadyMirrored) return;
+				state.runtime.session.sessionManager.appendCustomEntry("prime-agent.cloud-event", {
+					cloudSessionId,
+					generation: envelope.generation,
+					eventId: envelope.eventId,
+					event: envelope.event,
+				});
+			},
+		});
+		return this.cloudService;
+	}
+
+	private cloudOwnerId(state: ActiveSessionState): string {
+		return state.runtime.session.sessionManager.getSessionId();
+	}
+
+	private cloudProgressPhase(
+		progress: CloudDelegationProgress,
+	):
+		| "capturing"
+		| "provisioning"
+		| "uploading"
+		| "starting"
+		| "running"
+		| "retrieving"
+		| "stopping"
+		| "applying"
+		| "complete" {
+		switch (progress.phase) {
+			case "capturing":
+				return "capturing";
+			case "allocating":
+			case "provisioning":
+			case "waiting":
+				return "provisioning";
+			case "uploading":
+				return "uploading";
+			case "starting":
+				return "starting";
+			case "running":
+				return "running";
+			case "retrieving":
+				return "retrieving";
+			case "review":
+			case "released":
+			case "lost":
+				return "complete";
+		}
 	}
 
 	// The daemon runs detached with no terminal, so route its diagnostics to its
@@ -3503,7 +3579,9 @@ export class AgentDaemon {
 			appVersion: VERSION,
 			runtime: getDaemonRuntimeIdentity(),
 			clientId: client.id,
-			serverCapabilities: DAEMON_DEFAULT_SERVER_CAPABILITIES,
+			serverCapabilities: isDirectCloudConfigured()
+				? DAEMON_DEFAULT_SERVER_CAPABILITIES
+				: DAEMON_DEFAULT_SERVER_CAPABILITIES.filter((capability) => capability !== "cloud_sessions"),
 		});
 
 		if (client.transport === "private-framed") {
@@ -4073,6 +4151,52 @@ export class AgentDaemon {
 		switch (command.type) {
 			case "ack_result":
 				return undefined;
+			case "cloud_delegate": {
+				const state = this.getBoundSessionState(command.activeSessionId);
+				const delegation = await this.getCloudService().delegate({
+					activeSessionId: this.cloudOwnerId(state),
+					delegationId: command.delegationId,
+					cwd: state.runtime.cwd,
+					prompt: command.prompt,
+					options: command.options,
+					onProgress: (progress) => {
+						if (!command.id) return;
+						this.write(client, {
+							id: command.id,
+							type: "cloud_delegate_progress",
+							command: "cloud_delegate",
+							activeSessionId: state.activeSessionId,
+							delegationId: progress.sessionId,
+							phase: this.cloudProgressPhase(progress),
+							message: progress.detail ?? progress.phase,
+						});
+					},
+				});
+				return success(command.id, command.type, { delegation });
+			}
+			case "cloud_delegations_list": {
+				const state = this.getBoundSessionState(command.activeSessionId);
+				const delegations = await this.getCloudService().list(this.cloudOwnerId(state));
+				return success(command.id, command.type, { delegations });
+			}
+			case "cloud_delegation_stop": {
+				const state = this.getBoundSessionState(command.activeSessionId);
+				const delegation = await this.getCloudService().stop(
+					this.cloudOwnerId(state),
+					command.delegationId,
+					command.forfeit === true,
+				);
+				return success(command.id, command.type, { delegation });
+			}
+			case "cloud_delegation_apply": {
+				const state = this.getBoundSessionState(command.activeSessionId);
+				const delegation = await this.getCloudService().apply(
+					this.cloudOwnerId(state),
+					command.delegationId,
+					state.runtime.cwd,
+				);
+				return success(command.id, command.type, { delegation });
+			}
 			case "list": {
 				const activeSessions = Array.from(this.sessions.values());
 				const scheduledJobs = this.cronStore.list();

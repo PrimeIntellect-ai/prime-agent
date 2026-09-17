@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DAEMON_PROTOCOL_INFO } from "../src/modes/daemon/daemon-protocol.js";
-import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
+import { DaemonSupervisor, isDaemonSupervisorCommandType } from "../src/modes/daemon/daemon-supervisor.js";
 import { DaemonWorkerClient, DaemonWorkerProbeTimeoutError } from "../src/modes/daemon/daemon-worker-client.js";
 
 const hello = {
@@ -100,5 +100,96 @@ describe("daemon worker probe retries", () => {
 		expect(attempts).toEqual(process.platform === "win32" ? [0, 25, 75] : [0, 25, 50, 75]);
 		expect(Date.now() - started).toBe(100);
 		expect(vi.getTimerCount()).toBe(0);
+	});
+});
+
+describe("daemon worker request progress", () => {
+	it("admits every cloud command at the supervisor boundary", () => {
+		for (const type of [
+			"cloud_delegate",
+			"cloud_delegations_list",
+			"cloud_delegation_stop",
+			"cloud_delegation_apply",
+		]) {
+			expect(isDaemonSupervisorCommandType(type)).toBe(true);
+		}
+	});
+
+	it("forwards worker progress through the supervisor request callback", async () => {
+		const progress = {
+			id: "worker_1",
+			type: "cloud_delegate_progress" as const,
+			command: "cloud_delegate" as const,
+			activeSessionId: "active",
+			delegationId: "sess_cloud-1",
+			phase: "running" as const,
+			message: "running",
+		};
+		const request = vi.fn(async (_command, _timeout, options) => {
+			options.onProgress(progress);
+			return { type: "response" as const, command: "cloud_delegate", success: true as const };
+		});
+		const worker = { descriptor: { lifecycle: "ready" }, client: { request } };
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			canRetryFailedWorker: () => false,
+			requireAvailableWorkerClient: () => worker.client,
+		}) as unknown as {
+			forwardToWorker(
+				worker: unknown,
+				command: unknown,
+				timeoutMs: number,
+				onProgress: (value: typeof progress) => void,
+			): Promise<unknown>;
+		};
+		const onProgress = vi.fn();
+		await supervisor.forwardToWorker(
+			worker,
+			{ type: "cloud_delegate", activeSessionId: "active", delegationId: "sess_cloud-1", prompt: "fix" },
+			100,
+			onProgress,
+		);
+		expect(onProgress).toHaveBeenCalledWith(progress);
+	});
+
+	it("correlates cloud progress with the pending direct request", () => {
+		const client = new DaemonWorkerClient("unused");
+		const onProgress = vi.fn();
+		const timeout = setTimeout(() => {}, 10_000);
+		const internals = client as unknown as {
+			pending: Map<
+				string,
+				{
+					resolve: () => void;
+					reject: () => void;
+					timeout: ReturnType<typeof setTimeout>;
+					onProgress: typeof onProgress;
+				}
+			>;
+			handleFrame(frame: unknown): void;
+		};
+		internals.pending.set("worker_1", { resolve: () => {}, reject: () => {}, timeout, onProgress });
+		internals.handleFrame({
+			header: {
+				kind: "outbound",
+				outboundType: "cloud_delegate_progress",
+				requestId: "worker_1",
+				payloadEncoding: "jsonl",
+			},
+			payload: Buffer.from(
+				JSON.stringify({
+					id: "worker_1",
+					type: "cloud_delegate_progress",
+					command: "cloud_delegate",
+					activeSessionId: "active",
+					delegationId: "sess_cloud-1",
+					phase: "running",
+					message: "running",
+				}),
+			),
+		});
+		clearTimeout(timeout);
+		expect(onProgress).toHaveBeenCalledWith(
+			expect.objectContaining({ type: "cloud_delegate_progress", delegationId: "sess_cloud-1", phase: "running" }),
+		);
 	});
 });

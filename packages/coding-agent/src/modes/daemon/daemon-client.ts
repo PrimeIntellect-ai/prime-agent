@@ -678,8 +678,35 @@ function isDaemonRequestProgress(value: unknown): value is DaemonRequestProgress
 		loaded?: unknown;
 		total?: unknown;
 		session?: unknown;
+		delegationId?: unknown;
+		phase?: unknown;
+		message?: unknown;
 	};
-	if (candidate.command !== "list_saved_sessions" || typeof candidate.id !== "string") {
+	if (typeof candidate.id !== "string") {
+		return false;
+	}
+	if (candidate.command === "cloud_delegate" && candidate.type === "cloud_delegate_progress") {
+		const phases = new Set([
+			"capturing",
+			"provisioning",
+			"uploading",
+			"starting",
+			"running",
+			"reconnecting",
+			"retrieving",
+			"stopping",
+			"applying",
+			"complete",
+		]);
+		return (
+			typeof candidate.activeSessionId === "string" &&
+			(candidate.delegationId === undefined || typeof candidate.delegationId === "string") &&
+			typeof candidate.phase === "string" &&
+			phases.has(candidate.phase) &&
+			typeof candidate.message === "string"
+		);
+	}
+	if (candidate.command !== "list_saved_sessions") {
 		return false;
 	}
 	if (candidate.type === "session_list_progress") {

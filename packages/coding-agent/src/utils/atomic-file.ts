@@ -49,13 +49,17 @@ export interface WriteFileAtomicOptions {
 }
 
 /** Durable-write owner: temp file beside the destination, then an atomic rename. */
-export function writeFileAtomicSync(path: string, data: string, options: WriteFileAtomicOptions = {}): void {
+export function writeFileAtomicSync(
+	path: string,
+	data: string | Uint8Array,
+	options: WriteFileAtomicOptions = {},
+): void {
 	const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
 	try {
 		const descriptor = options.mode === undefined ? openSync(tempPath, "wx") : openSync(tempPath, "wx", options.mode);
 		try {
 			// writeSync may return a short count without throwing; a partial temp must never be renamed in.
-			const bytes = Buffer.from(data, "utf8");
+			const bytes = typeof data === "string" ? Buffer.from(data, "utf8") : Buffer.from(data);
 			let offset = 0;
 			while (offset < bytes.length) {
 				const written = writeSync(descriptor, bytes, offset, bytes.length - offset);

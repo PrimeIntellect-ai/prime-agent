@@ -258,6 +258,34 @@ describe("daemon protocol helpers", () => {
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("owned_prompt_cancellation");
 	});
 
+	it("capability-gates direct cloud delegation at its introducing schema revision 29", () => {
+		for (const type of [
+			"cloud_delegate",
+			"cloud_delegations_list",
+			"cloud_delegation_stop",
+			"cloud_delegation_apply",
+		] as const) {
+			expect(DAEMON_COMMAND_COMPATIBILITY[type]).toEqual({
+				minProtocol: 7,
+				minSchemaRevision: 29,
+				capability: "cloud_sessions",
+			});
+			expect(isSessionPlaneDaemonCommand(type)).toBe(true);
+		}
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("cloud_sessions");
+		expect(isDaemonMutatingCommand({ type: "cloud_delegations_list" })).toBe(true);
+		expect(isDaemonMutatingCommand({ type: "cloud_delegate" })).toBe(true);
+		expect(DAEMON_OUTBOUND_COMPATIBILITY.cloud_delegate_progress).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 29,
+			capability: "cloud_sessions",
+		});
+		// Revision 28 belongs to the saved-session model wire change already on
+		// main; the cloud commands must gate at the revision that actually
+		// introduces them, and the daemon must advertise at least that revision.
+		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(29);
+	});
+
 	it("gates honest worker-state reporting at its introducing schema revision", () => {
 		// Revision 16 adds the "stopping" workerState and stops reporting
 		// disconnected workers as "ready". The field is optional and old clients

@@ -73,8 +73,10 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 25 adds capability-gated direct worker peer transport discovery.
 // Revision 26 publishes own-session usage totals on session summary and saved-session rows.
 // Revision 27 adds structured session_recovering failure info for known-but-unaddressable sessions.
-export const DAEMON_SCHEMA_REVISION = 27;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-27-962b8b4c5e35";
+// Revision 28 publishes the last recorded model on saved-session rows.
+// Revision 29 adds capability-gated direct cloud sandbox delegation commands and progress.
+export const DAEMON_SCHEMA_REVISION = 29;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-29-aaab243a15c7";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -121,7 +123,8 @@ export type DaemonServerCapability =
 	| "session_input_pause"
 	| "owned_prompt_cancellation"
 	| "acp_mcp_servers"
-	| "direct_peer_transport";
+	| "direct_peer_transport"
+	| "cloud_sessions";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -166,6 +169,7 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"rlm_quiescence_barrier",
 	"session_input_pause",
 	"acp_mcp_servers",
+	"cloud_sessions",
 ];
 
 /** Single-use short-lived credential for one direct TUI connection to one worker process incarnation. */
@@ -387,6 +391,54 @@ export type DaemonSavedSessionListCommand =
 			sessionDir?: string;
 			scope: AgentConnectionSavedSessionScope;
 	  };
+
+export type DaemonCloudDelegationStatus =
+	| "preparing"
+	| "provisioning"
+	| "running"
+	| "retrieving"
+	| "completed"
+	| "stopping"
+	| "stopped"
+	| "failed";
+
+export interface DaemonCloudDelegateOptions {
+	instanceType?: string;
+	model?: string;
+	timeoutMinutes?: number;
+}
+
+export interface DaemonCloudDelegationSummary {
+	id: string;
+	activeSessionId: string;
+	status: DaemonCloudDelegationStatus;
+	createdAt: string;
+	updatedAt: string;
+	promptPreview: string;
+	sandboxId?: string;
+	resultReady: boolean;
+	resultApplied: boolean;
+	changedPaths?: string[];
+	changedPathCount?: number;
+	patchPreview?: string;
+	patchTruncated?: boolean;
+	outcome?: "completed" | "failed" | "stopped";
+	outputPreview?: string;
+	stderrPreview?: string;
+	error?: string;
+}
+
+export type DaemonCloudProgressPhase =
+	| "capturing"
+	| "provisioning"
+	| "uploading"
+	| "starting"
+	| "running"
+	| "reconnecting"
+	| "retrieving"
+	| "stopping"
+	| "applying"
+	| "complete";
 
 export type DaemonCommand =
 	| {
@@ -676,6 +728,28 @@ export type DaemonCommand =
 			requestId: string;
 			response: DaemonExtensionUIResponse;
 	  }
+	| {
+			id?: string;
+			type: "cloud_delegate";
+			activeSessionId: string;
+			delegationId: string;
+			prompt: string;
+			options?: DaemonCloudDelegateOptions;
+	  }
+	| { id?: string; type: "cloud_delegations_list"; activeSessionId: string }
+	| {
+			id?: string;
+			type: "cloud_delegation_stop";
+			activeSessionId: string;
+			delegationId: string;
+			forfeit?: boolean;
+	  }
+	| {
+			id?: string;
+			type: "cloud_delegation_apply";
+			activeSessionId: string;
+			delegationId: string;
+	  }
 	| { id?: string; type: "ack_result"; commandId: string }
 	| { id?: string; type: "prepare_update_restart" }
 	| { id?: string; type: "retry_worker"; activeSessionId: string }
@@ -743,8 +817,17 @@ const DIRECT_PEER_TRANSPORT_COMMAND = {
 	minSchemaRevision: 25,
 	capability: "direct_peer_transport",
 } as const;
+const CLOUD_SESSIONS_COMMAND = {
+	minProtocol: 7,
+	minSchemaRevision: 29,
+	capability: "cloud_sessions",
+} as const;
 
 export const DAEMON_COMMAND_COMPATIBILITY = {
+	cloud_delegate: CLOUD_SESSIONS_COMMAND,
+	cloud_delegations_list: CLOUD_SESSIONS_COMMAND,
+	cloud_delegation_stop: CLOUD_SESSIONS_COMMAND,
+	cloud_delegation_apply: CLOUD_SESSIONS_COMMAND,
 	ack_result: LEGACY_DAEMON_COMMAND,
 	list: LEGACY_DAEMON_COMMAND,
 	list_saved_sessions: LEGACY_DAEMON_COMMAND,
@@ -965,6 +1048,10 @@ export const DAEMON_COMMAND_PLANE = {
 	get_tool_definition: "session",
 	set_session_entry_label: "session",
 	extension_ui_response: "session",
+	cloud_delegate: "session",
+	cloud_delegations_list: "session",
+	cloud_delegation_stop: "session",
+	cloud_delegation_apply: "session",
 	prepare_update_restart: "control",
 	retry_worker: "control",
 	restart: "control",
@@ -1062,6 +1149,15 @@ export type DaemonRequestProgress =
 			command: "list_saved_sessions";
 			activeSessionId?: string;
 			session: DaemonSavedSessionInfo;
+	  }
+	| {
+			id?: string;
+			type: "cloud_delegate_progress";
+			command: "cloud_delegate";
+			activeSessionId: string;
+			delegationId?: string;
+			phase: DaemonCloudProgressPhase;
+			message: string;
 	  };
 
 export interface DaemonSavedSessionInfo {
@@ -1201,6 +1297,7 @@ export const DAEMON_OUTBOUND_COMPATIBILITY = {
 	response: LEGACY_DAEMON_COMMAND,
 	session_list_progress: LEGACY_DAEMON_COMMAND,
 	session_list_item: LEGACY_DAEMON_COMMAND,
+	cloud_delegate_progress: { minProtocol: 7, minSchemaRevision: 29, capability: "cloud_sessions" },
 	daemon_hello: LEGACY_DAEMON_COMMAND,
 	daemon_closing: LEGACY_DAEMON_COMMAND,
 	heartbeats_changed: { minProtocol: 7, capability: "heartbeat_catalog" },

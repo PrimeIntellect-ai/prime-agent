@@ -139,7 +139,12 @@ export class DaemonRoutedClient implements DaemonTransportClient {
 		}
 		const direct = this.direct;
 		if (direct?.isConnected && this.servesDirect(direct, command)) {
-			return direct.request(command, timeoutMs, options);
+			return direct.request(command, timeoutMs, options).catch((error: unknown) => {
+				const cause = error instanceof Error ? error : new Error(String(error));
+				if (!(cause instanceof DaemonSocketClosedError) && direct.isConnected) throw cause;
+				if (this.direct === direct) this.fallbackToSupervisor();
+				throw new DaemonDirectTransportClosedError(cause);
+			});
 		}
 		return this.requestControlPlane(command, timeoutMs, options);
 	}

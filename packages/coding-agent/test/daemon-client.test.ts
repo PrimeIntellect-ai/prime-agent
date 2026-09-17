@@ -488,7 +488,7 @@ describe("DaemonClient", () => {
 				onProgress: (message) => {
 					if (message.type === "session_list_progress") {
 						progress.push([message.loaded, message.total]);
-					} else {
+					} else if (message.type === "session_list_item") {
 						discovered.push(message.session.id);
 						discoveredStatus = message.session.agentStatus;
 					}

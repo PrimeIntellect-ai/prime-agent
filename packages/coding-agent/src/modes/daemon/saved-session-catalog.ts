@@ -32,7 +32,7 @@ export async function listDaemonSavedSessions(
 		onProgress: (update) => {
 			if (update.type === "session_list_progress") {
 				callbacks?.onProgress?.(update.loaded, update.total);
-			} else {
+			} else if (update.type === "session_list_item") {
 				callbacks?.onSession?.(deserializeSavedSessionInfo(update.session));
 			}
 		},

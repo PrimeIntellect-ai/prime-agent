@@ -637,6 +637,58 @@ export interface AgentConnectionSessionInputPause {
 	release(): Promise<void>;
 }
 
+export interface AgentConnectionCloudDelegateOptions {
+	instanceType?: string;
+	model?: string;
+	timeoutMinutes?: number;
+}
+
+export type AgentConnectionCloudDelegationStatus =
+	| "preparing"
+	| "provisioning"
+	| "running"
+	| "retrieving"
+	| "completed"
+	| "stopping"
+	| "stopped"
+	| "failed";
+
+export interface AgentConnectionCloudDelegationSummary {
+	id: string;
+	activeSessionId: string;
+	status: AgentConnectionCloudDelegationStatus;
+	createdAt: string;
+	updatedAt: string;
+	promptPreview: string;
+	sandboxId?: string;
+	resultReady: boolean;
+	resultApplied: boolean;
+	changedPaths?: string[];
+	changedPathCount?: number;
+	patchPreview?: string;
+	patchTruncated?: boolean;
+	outcome?: "completed" | "failed" | "stopped";
+	outputPreview?: string;
+	stderrPreview?: string;
+	error?: string;
+}
+
+export interface AgentConnectionCloudProgress {
+	delegationId?: string;
+	phase:
+		| "capturing"
+		| "provisioning"
+		| "uploading"
+		| "starting"
+		| "running"
+		| "reconnecting"
+		| "retrieving"
+		| "stopping"
+		| "applying"
+		| "complete";
+	message: string;
+}
+
 export interface AgentConnection {
 	subscribe(listener: AgentConnectionEventListener): () => void;
 	onBeforeSessionInvalidate(listener: AgentConnectionBeforeSessionInvalidateListener): () => void;
@@ -699,6 +751,15 @@ export interface AgentConnection {
 	supportsAcpMcpServers?(): boolean;
 	replaceAcpMcpServers?(servers: readonly AcpMcpServerConfig[], ownerId: string): Promise<void>;
 	releaseAcpMcpServers?(ownerId: string, serverNames: readonly string[]): Promise<void>;
+	supportsCloudSessions?(): boolean;
+	cloudDelegate?(
+		prompt: string,
+		options?: AgentConnectionCloudDelegateOptions,
+		onProgress?: (progress: AgentConnectionCloudProgress) => void,
+	): Promise<AgentConnectionCloudDelegationSummary>;
+	cloudDelegationsList?(): Promise<AgentConnectionCloudDelegationSummary[]>;
+	cloudDelegationStop?(delegationId: string, forfeit?: boolean): Promise<AgentConnectionCloudDelegationSummary>;
+	cloudDelegationApply?(delegationId: string): Promise<AgentConnectionCloudDelegationSummary>;
 
 	prompt(message: string, options?: AgentConnectionPromptOptions): Promise<void>;
 	promptAndWait(message: string, options?: AgentConnectionPromptOptions): Promise<void>;

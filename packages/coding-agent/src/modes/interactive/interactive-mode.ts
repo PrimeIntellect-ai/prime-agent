@@ -4838,6 +4838,12 @@ export class InteractiveMode {
 					await this.showHeartbeatManager();
 					return;
 				}
+				if (commandName === "cloud") {
+					this.echoLocalCommand(text);
+					this.editor.setText("");
+					await this.handleCloudCommand(commandArgs);
+					return;
+				}
 				if (commandName === "changelog" && !commandArgs) {
 					this.echoLocalCommand(text);
 					this.handleChangelogCommand();
@@ -9603,6 +9609,138 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(info, 1, 0));
 		this.ui.requestRender();
+	}
+
+	private async handleCloudCommand(args: string): Promise<void> {
+		const usage = "Usage: /cloud run <prompt> | /cloud status | /cloud stop [id] [--forfeit] | /cloud apply <id>";
+		if (!this.agentConnection.supportsCloudSessions?.()) {
+			this.showError("Cloud sandbox delegation requires a newer daemon with the cloud_sessions capability.");
+			return;
+		}
+		const trimmed = args.trim();
+		if (!trimmed) {
+			this.showStatus(usage);
+			return;
+		}
+		const firstSpace = trimmed.search(/\s/);
+		const verb = firstSpace === -1 ? trimmed : trimmed.slice(0, firstSpace);
+		const rest = firstSpace === -1 ? "" : trimmed.slice(firstSpace).trim();
+		const format = (item: {
+			id: string;
+			status: string;
+			promptPreview: string;
+			resultReady: boolean;
+			resultApplied: boolean;
+			changedPaths?: string[];
+			changedPathCount?: number;
+			patchPreview?: string;
+			patchTruncated?: boolean;
+			outputPreview?: string;
+			stderrPreview?: string;
+			error?: string;
+		}): string => {
+			const result = item.resultApplied ? "applied" : item.resultReady ? "ready to apply" : "no result yet";
+			const lines = [
+				`${item.id}  ${item.status}  ${result}  ${item.promptPreview}${item.error ? `  (${item.error})` : ""}`,
+			];
+			if (item.changedPaths && item.changedPaths.length > 0) {
+				const suffix = (item.changedPathCount ?? item.changedPaths.length) > item.changedPaths.length ? " …" : "";
+				lines.push(`Changed paths: ${item.changedPaths.join(", ")}${suffix}`);
+			}
+			if (item.outputPreview?.trim()) lines.push(`Output:\n${item.outputPreview.trimEnd()}`);
+			if (item.stderrPreview?.trim()) lines.push(`Stderr:\n${item.stderrPreview.trimEnd()}`);
+			return lines.join("\n");
+		};
+
+		try {
+			if (verb === "status") {
+				if (rest) {
+					this.showError(usage);
+					return;
+				}
+				const items = await this.agentConnection.cloudDelegationsList?.();
+				this.showStatus(items && items.length > 0 ? items.map(format).join("\n") : "No cloud delegations.");
+				return;
+			}
+			if (verb === "stop") {
+				const tokens = rest.split(/\s+/).filter(Boolean);
+				const forfeit = tokens.includes("--forfeit");
+				const ids = tokens.filter((token) => token !== "--forfeit");
+				if (ids.length > 1 || tokens.some((token) => token.startsWith("--") && token !== "--forfeit")) {
+					this.showError(usage);
+					return;
+				}
+				let delegationId: string | undefined = ids[0];
+				if (!delegationId) {
+					const items = (await this.agentConnection.cloudDelegationsList?.()) ?? [];
+					delegationId = [...items]
+						.reverse()
+						.find((candidate) =>
+							["preparing", "provisioning", "running", "retrieving", "stopping"].includes(candidate.status),
+						)?.id;
+					if (!delegationId) {
+						this.showError("No active cloud delegation to stop.");
+						return;
+					}
+				}
+				const item = await this.agentConnection.cloudDelegationStop?.(delegationId, forfeit);
+				if (item) this.showStatus(format(item));
+				return;
+			}
+			if (verb === "apply") {
+				if (!rest || /\s/.test(rest)) {
+					this.showError(usage);
+					return;
+				}
+				const current = (await this.agentConnection.cloudDelegationsList?.())?.find((item) => item.id === rest);
+				if (!current?.resultReady) {
+					this.showError(`Cloud delegation ${rest} has no result ready to apply.`);
+					return;
+				}
+				const paths = current.changedPaths?.length ? current.changedPaths.join("\n") : "No file changes";
+				const patch = current.patchPreview
+					? `${current.patchPreview}${current.patchTruncated ? "\n… patch preview truncated" : ""}`
+					: "No patch content";
+				const confirmed = await this.showExtensionConfirm(
+					"Apply cloud result",
+					`${format(current)}\n\nFiles to apply:\n${paths}\n\nPatch preview:\n${patch}\n\nApply this patch to the captured repository?`,
+				);
+				if (!confirmed) {
+					this.showStatus("Cloud result was not applied.");
+					return;
+				}
+				const item = await this.agentConnection.cloudDelegationApply?.(rest);
+				if (item) this.showStatus(format(item));
+				return;
+			}
+			if (verb !== "run") {
+				this.showError(usage);
+				return;
+			}
+			const prompt = rest;
+			if (!prompt) {
+				this.showError(usage);
+				return;
+			}
+			const confirmed = await this.showExtensionConfirm(
+				"Run in a Prime Sandbox",
+				[
+					"Upload the current Git workspace, including tracked files and unignored untracked files.",
+					"Provision 4 vCPUs, 16 GB memory, and 50 GB disk for up to 120 minutes.",
+					"The remote agent can run commands and access the network. Changes return as a patch and are never applied automatically.",
+				].join("\n"),
+			);
+			if (!confirmed) {
+				this.showStatus("Cloud delegation cancelled before provisioning.");
+				return;
+			}
+			const item = await this.agentConnection.cloudDelegate?.(prompt, undefined, (progress) => {
+				this.showStatus(`[cloud${progress.delegationId ? ` ${progress.delegationId}` : ""}] ${progress.message}`);
+			});
+			if (item) this.showStatus(format(item));
+		} catch (error) {
+			this.showError(`Cloud delegation failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
 	}
 
 	private async handleHeartbeatCommand(text: string): Promise<void> {

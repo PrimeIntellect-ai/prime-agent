@@ -2,7 +2,7 @@
 
 Implementation plan for delegating Prime Agent sessions and subagents to Prime Sandboxes, with the local daemon driving the Prime Sandbox platform APIs directly. This document is the engineering plan; it references the current daemon, connection, and session code as the seams to build on.
 
-- Status: plan. Foundation PRs (`core/cloud/` protocol, command journal, workspace snapshot) are in flight on `feat/direct-cloud-sandbox`.
+- Status: M0 implementation on `feat/direct-cloud-sandbox`. `/cloud run`, status, stop/forfeit, reconnect recovery, durable result retrieval, and explicit apply are implemented; live steering remains a later transport milestone.
 - Source snapshot: Agent `427ea4c72cc606ac061a14287c0c15c471eff002`; Prime Sandboxes SDK `0.2.42`; platform source observations as cited in the design investigation.
 - Companion requirements: the Prime Agent Sandbox Implementation design (Notion) and the parent task brief. Where the design assumed a platform agent-session controller, this plan replaces it with the direct model described here.
 
@@ -10,14 +10,23 @@ Implementation plan for delegating Prime Agent sessions and subagents to Prime S
 
 Prime Agent continues to run locally by default. A user can delegate a session or subagent to a Prime Sandbox when it needs cloud compute, a Linux environment, isolation, or the ability to continue while the laptop is disconnected.
 
-1. Start a session as usual.
-2. Use `/cloud` (or its alias `/sandbox`) to delegate that session — or a child of it — to a Prime Sandbox.
-3. The local daemon captures the current repository or worktree, asks the Sandbox platform to create a sandbox, and starts a cloud daemon inside it.
-4. The local daemon connects the existing TUI to that cloud daemon through the local session catalog.
-5. The cloud daemon runs the complete session: inference, tools, Python kernels, subprocesses, and delegated children.
-6. Answers, events, usage, artifacts, and file changes stream back to the local daemon and land in ordinary local session history.
+1. Start a local session as usual.
+2. Use `/cloud run <prompt>` (or the `/sandbox` alias) and confirm the transfer and resource grant.
+3. The local daemon durably captures the current Git repository or worktree before it allocates compute.
+4. The daemon creates a VM Sandbox, uploads the fixed task inputs, and starts `prime-agent --print` as a resident command session.
+5. The remote one-shot agent owns inference, tools, Python, subprocesses, and delegated children for that task.
+6. The local daemon monitors completion, retrieves bounded stdout/stderr and a binary Git patch, and keeps the patch for review. It changes the checkout only after `/cloud apply <id>` and a second confirmation.
 
-The first release supports one delegated session or subagent, transfer of the current repository, cloud inference and execution, live progress in the local TUI, steering, cancellation, reconnect, local trace synchronization, and reviewed result import.
+M0 supports one-shot task delegation, provisioning progress, stop/forfeit, reconnect recovery, background result retrieval while the owning daemon stays online, durable lifecycle traces, changed-path review, and explicit patch apply. It does not attach the TUI to a remote daemon, stream full remote history, or accept live steering. Those features remain in the later bridge milestone.
+
+## Configuration
+
+Cloud delegation is capability-gated and is advertised only when both variables are configured before daemon startup:
+
+- `PRIME_AGENT_CLOUD_IMAGE`: a pinned VM image that contains `prime-agent` and its runtime dependencies.
+- `PRIME_AGENT_CLOUD_INFERENCE_API_KEY`: a guest-scoped inference credential. Prime Agent never falls back to the platform control key because this credential is uploaded into the sandbox for the task lifetime.
+
+Sandbox control authentication still comes from `PRIME_API_KEY` or the logged-in Prime CLI. The guest credential is written with mode `0600` and removed before the terminal result is published.
 
 ## The direct model: what is removed, what is kept
 
@@ -29,13 +38,13 @@ The first release supports one delegated session or subagent, transfer of the cu
 |---|---|
 | Provision / terminate compute, sandbox-bound gateway tokens, egress policy, sandbox lifetime | Sandbox platform (generic APIs, existing today) |
 | Session records, identity allocation, generation fencing, admission, cleanup sequencing, result import, trace mirroring | Local daemon (new `core/cloud/` modules) |
-| The delegated agent loop, inference requests, kernels, tools, descendants, event outbox | Cloud daemon (same code as the local daemon) |
+| The one-shot delegated agent loop, inference requests, kernels, tools, descendants, terminal result files | Resident `prime-agent --print` process in the Sandbox (M0) |
 
 Consequences of this choice, stated up front:
 
 - The generic Sandbox REST and CommandSession APIs needed by M0 exist today, so M0 needs no new platform service. Prime Agent must implement a TypeScript client: `undici` for REST plus generated Node Connect/protobuf types for the VM process API, because no TypeScript Sandbox SDK is published today.
 - Session durability beyond the sandbox's own lifetime, per-session inference budget enforcement, and platform-side scoped grant issuance do not exist in this model. The local daemon is the only durability sink; the sandbox's ordered spool is the only remote buffer. These gaps are tracked explicitly in Risks.
-- The delegated session keeps working while the laptop is disconnected because the sandbox (with its platform-enforced lifetime) keeps the cloud daemon running. If the sandbox dies while the laptop is gone, M0 does not promise recovery; it records a lost or uncertain execution and preserves any confirmed outputs. External durability is the M3 milestone.
+- The delegated task keeps working while the laptop is disconnected because the sandbox keeps its resident command session running. The local daemon retrieves results while connected; if both the local daemon and sandbox disappear before retrieval, M0 cannot recover the work. External durability is the M3 milestone.
 
 ### Non-goals
 
@@ -48,19 +57,19 @@ Consequences of this choice, stated up front:
 
 | Local | Prime Sandbox |
 |---|---|
-| TUI, local daemon, session catalog, local trace history, user input and approvals, result review | Cloud daemon, agent loop, inference requests, tools, Python kernels, subprocesses, child agents, and the submitted repository |
+| TUI, local daemon, durable delegation records, lifecycle traces, user confirmations, result review and patch apply | One-shot Prime Agent process, inference requests, tools, Python kernels, subprocesses, child agents, and the submitted repository |
 
-The cloud daemon is the authority for the delegated session while it is running. The local daemon does not broker its inference or execute part of its agent loop. The local daemon sends prompts, steering, approvals, and cancellation; receives the ordered event stream; mirrors it into local history; and retrieves results.
+The remote Prime Agent process is the authority for the one-shot task while it runs. The local daemon does not broker inference or execute part of the agent loop. M0 sends one fixed prompt, monitors the resident process, retrieves terminal files, mirrors lifecycle events, and applies the reviewed patch only on request. Live steering and full event-history mirroring are not M0 features.
 
 ## Invariants
 
 1. `local` is the default execution target. `ExecutionTarget` defaults to `{ kind: "local" }` when omitted. Existing local behavior remains available without Sandbox availability, without Prime credentials, and without any cloud code path active.
 2. The TUI keeps talking to the local daemon through `AgentConnection`. It does not become a separate sandbox client.
-3. The cloud daemon owns the complete delegated session: agent loop, inference requests, kernels, tools, subprocesses, descendants, submitted repository, command journal, and event outbox — independently of any local connection.
+3. In M0, the resident one-shot Prime Agent process owns the delegated task: inference requests, kernels, tools, subprocesses, descendants, and submitted repository. A remote daemon, command journal, and event outbox belong to the later bridge milestone.
 4. Delegation is explicit and per session or per child. A local root may have local children and sandbox children at the same time; a child of a local root stays local unless explicitly delegated.
-5. The complete product trace is stored locally. During a disconnect, the sandbox retains an ordered spool until the local daemon durably imports and acknowledges it. "All traces stored locally" is an eventual guarantee, complete after successful reconciliation.
+5. M0 stores lifecycle events and terminal output locally. It does not claim a complete streamed remote product trace; an ordered guest event spool and acknowledgement protocol belong to the later bridge milestone.
 6. Remote compute deletion and remote trace-spool deletion are separate. The spool is eligible for deletion only after local acknowledgement or an explicit retention policy; in the direct model, deleting the sandbox destroys the spool, so the local daemon deletes compute only after the local mirror is complete or the user explicitly forfeits it.
-7. Parent/child rosters, messages, observation, cancellation, usage, and completion use the same local workflows regardless of execution location.
+7. M0 exposes task lifecycle, stop, output, and patch results through the local workflow. Cross-location rosters, messages, observation, usage streaming, and live cancellation are later bridge features.
 8. Session identity is allocated before compute, and identity validation never depends on guest filesystem paths.
 9. Prime Agent never silently overwrites concurrent local edits. Returned changes are compared with the submitted baseline and opened for local review.
 10. No live Python heap migration, ever; only conversation-plus-snapshot handoff at an idle boundary (later release).
@@ -286,22 +295,21 @@ Every local daemon wire change follows the repo's daemon protocol rules (`AGENTS
 `/cloud` is the canonical command; `/sandbox` is its alias (registered in `core/slash-commands.ts` the same way `clear` aliases `new`). Both are client-side commands: the TUI validates arguments, shows the delegation surface, and drives the local daemon through the new capability-gated daemon commands. The local daemon owns the cloud-session records, so the TUI can close freely without stopping a delegation.
 
 ```
-/cloud                      status: execution target of the current session, active delegations,
-                            sandbox id/region/image, lifetime remaining, connectivity, cursor, usage
-/cloud run [prompt]         delegate the current session's next task (M0 surface; flags below)
-/cloud stop [id]            stop intent: retrieve results, open review, delete the sandbox after import
-/cloud attach <id>          attach the TUI to a delegated session through the local catalog
-/cloud results [id]         re-open the review flow for a completed delegation
-/cloud logs [id]            tail sandbox/cloud-daemon logs
+/cloud run <prompt>         confirm, capture the current Git workspace, and start one remote task
+/cloud status               reconcile and show delegations, output previews, and changed paths
+/cloud stop [id]            request stop and retrieve results when available
+/cloud stop [id] --forfeit  release compute even if results cannot be retained
+/cloud apply <id>           review changed paths and a bounded diff preview, confirm, and apply the stored patch
 ```
+
 
 Flags for `run` are explicit because defaults differ across the platform's CLI, SDK, and docs: `--model`, `--cpu`, `--mem`, `--disk`, `--lifetime`, `--idle`, `--image`, `--network`, `--add-path` (extra paths, separate confirmation), `--live-repo` (live repository access, later release, separate confirmation). A VM `--region` flag is not exposed until the Sandbox API supports caller-selected VM regions.
 
 Behavior rules:
 
-1. No argument shows status, never silently delegates.
-2. `run` shows exactly what will be transferred and granted, and asks for confirmation before allocating anything (workspace capture preview happens before the sandbox is created, so the confirmation reflects real bytes and exclusions).
-3. While a session is delegated, the footer shows the execution location and connectivity; user input, approvals, and steering continue to work through the same TUI flow.
+1. No argument shows usage and never silently delegates; `/cloud status` is explicit.
+2. `run` explains the repository transfer, remote permissions, resources, lifetime, and reviewed-patch behavior, then asks for confirmation before allocating anything.
+3. M0 shows lifecycle progress and terminal output in the local TUI. It does not forward new prompts, approvals, or steering into an already-running task.
 4. Without Prime credentials or with an unsupported daemon capability, `/cloud` degrades to a clear error. Local sessions and startup are never blocked by cloud state.
 5. `/sandbox` behaves identically (pure alias, one code path).
 

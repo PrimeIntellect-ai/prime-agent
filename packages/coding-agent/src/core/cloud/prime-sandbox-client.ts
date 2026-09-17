@@ -933,20 +933,25 @@ export class PrimeSandboxClient {
 	/** Delete a sandbox by id. */
 	async deleteSandbox(sandboxId: string): Promise<void> {
 		assertSandboxId(sandboxId);
-		await this.requestJson({
-			method: "DELETE",
-			url: `${this.baseUrl}/api/v1/sandbox/${sandboxId}`,
-			headers: this.platformHeaders(),
-			timeoutMs: this.requestTimeoutMs,
-			secrets: this.platformSecrets(),
-			context: "Sandbox delete",
-			parse: (value) => {
-				if (!isRecord(value)) {
-					throw new PrimeSandboxError("invalid_response", "Sandbox delete response must be a JSON object");
-				}
-				return undefined;
-			},
-		});
+		try {
+			await this.requestJson({
+				method: "DELETE",
+				url: `${this.baseUrl}/api/v1/sandbox/${sandboxId}`,
+				headers: this.platformHeaders(),
+				timeoutMs: this.requestTimeoutMs,
+				secrets: this.platformSecrets(),
+				context: "Sandbox delete",
+				parse: (value) => {
+					if (!isRecord(value)) {
+						throw new PrimeSandboxError("invalid_response", "Sandbox delete response must be a JSON object");
+					}
+					return undefined;
+				},
+			});
+		} catch (error) {
+			if (error instanceof PrimeSandboxError && error.code === "http" && error.status === 404) return;
+			throw error;
+		}
 	}
 
 	/**

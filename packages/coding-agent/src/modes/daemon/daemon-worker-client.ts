@@ -11,6 +11,7 @@ import type {
 	DaemonCommand,
 	DaemonOutbound,
 	DaemonPeerTransportTicket,
+	DaemonRequestProgress,
 	DaemonResponse,
 	DaemonServerCapability,
 } from "./daemon-protocol.js";
@@ -50,6 +51,7 @@ export class DaemonWorkerClient {
 			resolve: (response: DaemonResponse) => void;
 			reject: (error: Error) => void;
 			timeout: ReturnType<typeof setTimeout>;
+			onProgress?: (message: DaemonRequestProgress) => void;
 		}
 	>();
 	private requestId = 0;
@@ -152,10 +154,9 @@ export class DaemonWorkerClient {
 	request(
 		command: DaemonCommandBody,
 		timeoutMs = 30_000,
-		// Progress/recovery options are supervisor-transport features; a direct request fails fast instead of replaying (no double execution).
-		_options: DaemonClientRequestOptions = {},
+		options: DaemonClientRequestOptions = {},
 	): Promise<DaemonResponse> {
-		return this.requestWire(command, timeoutMs);
+		return this.requestWire(command, timeoutMs, options);
 	}
 
 	requestWorker(command: DaemonWorkerCommandBody, timeoutMs = 30_000): Promise<DaemonResponse> {
@@ -201,7 +202,11 @@ export class DaemonWorkerClient {
 		this.directClosingReason = undefined;
 	}
 
-	private async requestWire(command: DaemonWorkerWireCommandBody, timeoutMs: number): Promise<DaemonResponse> {
+	private async requestWire(
+		command: DaemonWorkerWireCommandBody,
+		timeoutMs: number,
+		options: DaemonClientRequestOptions = {},
+	): Promise<DaemonResponse> {
 		if (!this.channel || !this.socket || this.socket.destroyed) {
 			throw new Error("Daemon worker client is not connected");
 		}
@@ -214,7 +219,7 @@ export class DaemonWorkerClient {
 					new DaemonWorkerProbeTimeoutError(`Timed out waiting for daemon worker response to ${command.type}`),
 				);
 			}, timeoutMs);
-			this.pending.set(id, { resolve, reject, timeout });
+			this.pending.set(id, { resolve, reject, timeout, onProgress: options.onProgress });
 		});
 		try {
 			await this.channel.send(
@@ -234,6 +239,18 @@ export class DaemonWorkerClient {
 
 	private handleFrame(frame: PrivateFrame<DaemonWorkerFrameHeader>): void {
 		if (frame.header.kind !== "outbound") {
+			return;
+		}
+		if (frame.header.outboundType === "cloud_delegate_progress" && frame.header.requestId) {
+			const pending = this.pending.get(frame.header.requestId);
+			if (pending?.onProgress) {
+				try {
+					const progress = JSON.parse(frame.payload.toString("utf8")) as DaemonRequestProgress;
+					if (progress.type === "cloud_delegate_progress") pending.onProgress(progress);
+				} catch {
+					// Malformed progress is ignored; the terminal response remains authoritative.
+				}
+			}
 			return;
 		}
 		if (frame.header.outboundType === "response" && frame.header.requestId) {

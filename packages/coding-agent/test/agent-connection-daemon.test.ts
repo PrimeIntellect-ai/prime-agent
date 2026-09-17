@@ -31,7 +31,7 @@ import {
 	type DaemonOutbound,
 	type DaemonResponse,
 } from "../src/modes/daemon/daemon-protocol.js";
-import { DaemonRoutedClient } from "../src/modes/daemon/daemon-routed-client.js";
+import { DaemonDirectTransportClosedError, DaemonRoutedClient } from "../src/modes/daemon/daemon-routed-client.js";
 import type { DaemonWorkerClient } from "../src/modes/daemon/daemon-worker-client.js";
 
 class FakeDaemonClient {
@@ -59,6 +59,8 @@ class FakeDaemonClient {
 	promptGate: Promise<void> | undefined;
 	promptError: Error | undefined;
 	promptResponseError: string | undefined;
+	cloudDelegateDirectFailures = 0;
+	cloudDelegateUncertainFailures = 0;
 	cancelPromptAdmissionStatus: "cancelled" | "owned" | "unknown" = "owned";
 	serverCapabilities = new Set<string>();
 	updateRestartSessions: Array<Record<string, unknown>> = [];
@@ -98,6 +100,70 @@ class FakeDaemonClient {
 					command: command.type,
 					success: true,
 					data: { status: this.cancelPromptAdmissionStatus },
+				};
+			case "cloud_delegate":
+				if (this.cloudDelegateUncertainFailures > 0) {
+					this.cloudDelegateUncertainFailures--;
+					return {
+						type: "response",
+						command: command.type,
+						success: false,
+						error: "The previous command result is uncertain and was not replayed",
+						errorInfo: {
+							code: "command_result_uncertain",
+							clientId: "fake-client",
+							commandId: "cmd-original",
+						},
+					};
+				}
+				if (this.cloudDelegateDirectFailures > 0) {
+					this.cloudDelegateDirectFailures--;
+					throw new DaemonDirectTransportClosedError(new Error("direct link closed"));
+				}
+				options.onProgress?.({
+					id: command.id,
+					type: "cloud_delegate_progress",
+					command: "cloud_delegate",
+					activeSessionId: command.activeSessionId,
+					delegationId: command.delegationId,
+					phase: "running",
+					message: "running",
+				});
+				return {
+					type: "response",
+					command: command.type,
+					success: true,
+					data: {
+						delegation: {
+							id: command.delegationId,
+							activeSessionId: command.activeSessionId,
+							status: "running",
+							createdAt: "2026-01-01T00:00:00.000Z",
+							updatedAt: "2026-01-01T00:00:00.000Z",
+							promptPreview: command.prompt,
+							resultReady: false,
+							resultApplied: false,
+						},
+					},
+				};
+			case "cloud_delegation_stop":
+			case "cloud_delegation_apply":
+				return {
+					type: "response",
+					command: command.type,
+					success: true,
+					data: {
+						delegation: {
+							id: command.delegationId,
+							activeSessionId: command.activeSessionId,
+							status: command.type === "cloud_delegation_apply" ? "completed" : "stopped",
+							createdAt: "2026-01-01T00:00:00.000Z",
+							updatedAt: "2026-01-01T00:00:00.000Z",
+							promptPreview: "fix it",
+							resultReady: true,
+							resultApplied: command.type === "cloud_delegation_apply",
+						},
+					},
 				};
 			case "list":
 				return {
@@ -3709,5 +3775,29 @@ describe("DaemonAgentConnection", () => {
 		expect(fakeClient.getCloseListenerCount()).toBe(0);
 		expect(fakeClient.requests.map((request) => request.type)).toEqual(["attach", "detach"]);
 		expect(fakeClient.closeCount).toBe(1);
+	});
+});
+
+describe("DaemonAgentConnection cloud delegation", () => {
+	it("retries a direct-link loss with the same delegation identity and preserves progress", async () => {
+		const client = new FakeDaemonClient();
+		client.serverCapabilities.add("cloud_sessions");
+		client.cloudDelegateDirectFailures = 1;
+		client.cloudDelegateUncertainFailures = 1;
+		const connection = new DaemonAgentConnection(asDaemonClient(client), "active-1");
+		const progress = vi.fn();
+
+		const delegation = await connection.cloudDelegate("fix it", undefined, progress);
+		const requests = client.requests.filter(
+			(command): command is Extract<DaemonCommand, { type: "cloud_delegate" }> => command.type === "cloud_delegate",
+		);
+		expect(requests).toHaveLength(3);
+		expect(new Set(requests.map((request) => request.delegationId))).toEqual(new Set([requests[0]?.delegationId]));
+		expect(delegation.id).toBe(requests[0]?.delegationId);
+		expect(progress).toHaveBeenCalledWith(expect.objectContaining({ phase: "running", delegationId: delegation.id }));
+		expect(client.requestTimeouts.slice(-3).every((timeout) => timeout > 60_000)).toBe(true);
+		await connection.cloudDelegationStop(delegation.id);
+		await connection.cloudDelegationApply(delegation.id);
+		expect(client.requestTimeouts.slice(-2).every((timeout) => timeout > 60_000)).toBe(true);
 	});
 });

@@ -4,6 +4,18 @@ import { SessionAlreadyActiveError } from "../../core/session-lease.js";
 import type { DaemonErrorInfo, DaemonResponse } from "./daemon-protocol.js";
 
 /** A known session (a persisted descriptor names it) that cannot be routed to yet; retryable, unlike "Unknown active session". */
+export class DaemonCommandResultUncertainError extends Error {
+	readonly code = "command_result_uncertain" as const;
+
+	constructor(
+		readonly clientId: string,
+		readonly commandId: string,
+	) {
+		super(`The previous command result is uncertain (${clientId}/${commandId})`);
+		this.name = "DaemonCommandResultUncertainError";
+	}
+}
+
 export class DaemonSessionRecoveringError extends Error {
 	readonly code = "session_recovering" as const;
 
@@ -60,6 +72,9 @@ export function deserializeDaemonError(response: Extract<DaemonResponse, { succe
 	}
 	if (errorInfo?.code === "session_recovering") {
 		return new DaemonSessionRecoveringError(errorInfo.activeSessionId);
+	}
+	if (errorInfo?.code === "command_result_uncertain") {
+		return new DaemonCommandResultUncertainError(errorInfo.clientId, errorInfo.commandId);
 	}
 	return new Error(response.error);
 }

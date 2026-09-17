@@ -57,6 +57,21 @@ describe("built-in slash commands", () => {
 		expect(builtinSlashCommandTakesArgument("side")).toBe(true);
 	});
 
+	test("exposes /cloud with /sandbox as a hidden alias", () => {
+		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "cloud")).toMatchObject({
+			takesArgument: true,
+			aliases: ["sandbox"],
+		});
+		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "sandbox")).toBeUndefined();
+		expect(resolveBuiltinSlashCommandName("sandbox")).toBe("cloud");
+		expect(resolveSlashCommand(parseSlashCommand("/sandbox run fix it")!)).toEqual({
+			name: "cloud",
+			args: "run fix it",
+			originalName: "sandbox",
+			isAlias: true,
+		});
+	});
+
 	test("describes /mcp as the MCP Connections menu entry point", () => {
 		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "mcp")).toMatchObject({
 			description: "Open MCP Connections or manage MCP integrations",

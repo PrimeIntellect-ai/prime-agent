@@ -492,6 +492,12 @@ describe("deleteSandbox", () => {
 		expect(getAuthorization(init)).toBe(`Bearer ${API_KEY}`);
 	});
 
+	it("treats an already-missing sandbox as an idempotent delete", async () => {
+		const fetchMock = makeFetch(() => jsonResponse({ error: "missing" }, 404));
+		const client = makeClient(fetchMock);
+		await expect(client.deleteSandbox(SANDBOX_ID)).resolves.toBeUndefined();
+	});
+
 	it("rejects non-object delete responses", async () => {
 		const fetchMock = makeFetch(() => jsonResponse("deleted"));
 		const client = makeClient(fetchMock);
