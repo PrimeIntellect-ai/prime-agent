@@ -58,25 +58,20 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         awaited = await handle
         self.assertEqual(handle.poll(), awaited)
 
-    def test_handle_construction_binds_asyncio_without_event_loop(self):
-        # rlm.bash defers its asyncio import and binds it on first handle
-        # construction: a fresh interpreter (no event loop, no bash() call yet)
-        # must construct a handle and reap it without NameError.
+    def test_handle_construction_binds_asyncio_without_an_event_loop(self):
+        # rlm.bash defers its asyncio import and binds it on the first handle
+        # construction, so a fresh interpreter with no event loop reaps one.
         code = (
             "import rlm, sys, time\n"
             "assert 'asyncio' not in sys.modules\n"
             "handle = rlm.BashHandle('exit 7')\n"
             "for _ in range(250):\n"
-            "    result = handle.poll()\n"
-            "    if result is not None:\n"
+            "    if handle.poll() is not None:\n"
             "        break\n"
             "    time.sleep(0.02)\n"
-            "assert result is not None, 'handle never completed'\n"
-            "assert result.exit_code == 7\n"
-            "sys.exit(0)"
+            "assert handle.poll() is not None, 'handle never completed'\n"
+            "assert handle.poll().exit_code == 7"
         )
-        # The runtime test venv has the rlm package installed, so the child
-        # interpreter resolves it the same way this process does.
         subprocess.run([sys.executable, "-c", code], check=True, timeout=30)
 
     def test_construction_cleanup_uses_windows_signal_without_sigkill(self):

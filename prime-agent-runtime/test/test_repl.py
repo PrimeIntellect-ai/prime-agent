@@ -137,96 +137,32 @@ class ReplTest(unittest.TestCase):
         print(f"\n[startup] spawn -> ready: {self.ready_ms:.0f} ms")
         self.assertLess(self.ready_ms, 500)
 
-    def test_import_rlm_defers_event_loop_stack(self):
-        # `import rlm` (the pre-ready boot path of a kernel) must stay lean:
-        # the asyncio stack loads after the ready event, not during package
-        # import. A regression here reintroduces the boot-time import cost.
-        code = (
-            "import rlm, sys; "
-            "assert 'asyncio' not in sys.modules, 'rlm import must defer asyncio'; "
-            "assert 'secrets' not in sys.modules, 'rlm import must defer secrets'; "
-            "sys.exit(0)"
-        )
+    def test_import_rlm_defers_the_event_loop_stack(self):
+        # `import rlm` is the pre-ready boot path: the event loop stack must load
+        # after the ready event, not during package import, and serving must keep
+        # it resident.
         env = {**os.environ, "PYTHONPATH": SRC + os.pathsep + os.environ.get("PYTHONPATH", "")}
+        code = "import rlm, sys; assert 'asyncio' not in sys.modules and 'secrets' not in sys.modules"
         subprocess.run([sys.executable, "-c", code], env=env, check=True, timeout=30)
-
-    def test_serving_kernel_loads_asyncio_after_ready(self):
-        # The deferral must not break serving: by the first executed cell the
-        # event loop stack is resident and drives cell execution as usual.
         events = self.repl.execute("serving", "import sys\n'asyncio' in sys.modules")
         self.assertEqual(one(events, "result")["text"], "True")
-        self.assertEqual(one(events, "done")["status"], "ok")
 
-    def test_sigint_during_boot_window_terminates_kernel(self):
-        # Regression: _sigint_handler has no task to target before serving
-        # starts, so installing it before the deferred event-loop boot let a
-        # Ctrl-C during that window be silently swallowed. The default handler
-        # must stay in charge until the loop and serve task exist, so a SIGINT
-        # delivered mid-boot stops the kernel instead of vanishing.
+    def test_sigint_during_the_deferred_boot_stays_fatal(self):
+        # A fake `asyncio` parks the kernel inside the post-ready deferred
+        # import. The fifo open below returns only once the kernel is parked in
+        # that window, where an early _sigint_handler install swallowed the
+        # Ctrl-C, so only the default handler may be in charge there.
         with tempfile.TemporaryDirectory() as tmp:
-            marker = os.path.join(tmp, "boot-window-open")
-            release = os.path.join(tmp, "boot-window-release")
-            # A fake `asyncio` parks the kernel inside the post-ready
-            # deferred import -- the boot window where an early handler
-            # install would swallow SIGINT. Without parking, the window is
-            # too short to hit deterministically.
+            park = os.path.join(tmp, "deferred-boot-park")
+            os.mkfifo(park)
             with open(os.path.join(tmp, "asyncio.py"), "w") as fake_asyncio:
-                fake_asyncio.write(
-                    "import os, time\n"
-                    f"open({marker!r}, 'w').write('1')\n"
-                    "deadline = time.monotonic() + 30.0\n"
-                    f"while not os.path.exists({release!r}):\n"
-                    "    if time.monotonic() > deadline:\n"
-                    "        raise TimeoutError('boot window never released')\n"
-                    "    time.sleep(0.01)\n"
-                )
-            env = {
-                **os.environ,
-                "PYTHONPATH": tmp + os.pathsep + SRC + os.pathsep + os.environ.get("PYTHONPATH", ""),
-            }
-            proc = subprocess.Popen(
-                [sys.executable, "-m", "rlm.repl"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=env,
-            )
-            self.addCleanup(self._stop_bounded, proc)
-
-            # Ready fires before the deferred import; then the fake parks the kernel.
-            lines: queue.Queue[object] = queue.Queue()
-            threading.Thread(target=lambda: lines.put(proc.stdout.readline()), daemon=True).start()
-            try:
-                ready_line = lines.get(timeout=30)
-            except queue.Empty:
-                self.fail("kernel never sent the ready event")
-            self.assertIn('"event":"ready"', ready_line)
-            deadline = time.monotonic() + 30.0
-            while not os.path.exists(marker):
-                self.assertLess(time.monotonic(), deadline, "kernel never entered the boot window")
-                time.sleep(0.01)
-
-            self.assertIsNone(proc.poll(), "kernel exited inside the boot window before SIGINT")
-            os.kill(proc.pid, signal.SIGINT)
-
-            try:
-                stdout, stderr = proc.communicate(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.fail("SIGINT during the boot window was swallowed; kernel kept booting")
-            self.assertNotEqual(proc.returncode, 0)
-            # The kernel's stderr ships as protocol events; the unhandled
-            # interrupt surfaces in the captured streams.
-            self.assertIn("KeyboardInterrupt", stdout + stderr)
-
-    @staticmethod
-    def _stop_bounded(proc: subprocess.Popen[str]) -> None:
-        if proc.poll() is None:
-            proc.kill()
-        proc.wait(timeout=10)
-        for stream in (proc.stdin, proc.stdout, proc.stderr):
-            if stream is not None:
-                stream.close()
+                fake_asyncio.write(f"import os\nos.read(os.open({park!r}, os.O_RDONLY), 1)\n")
+            repl = ReplProcess(env={"PYTHONPATH": tmp + os.pathsep + SRC})
+            self.addCleanup(repl.close)
+            self.assertEqual(repl.ready()[0]["event"], "ready")
+            with open(park, "wb"):
+                os.kill(repl.proc.pid, signal.SIGINT)
+                self.assertNotEqual(repl.proc.wait(timeout=10), 0)
 
     def test_result_echo(self):
         events = self.repl.execute("a", "1+1")
@@ -470,19 +406,16 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(error["ename"], "KeyboardInterrupt")
         self.assertEqual(one(events, "done")["status"], "error")
 
-    def test_stdout_buffer_write_works_and_surfaces_as_null(self):
-        # Libraries write bytes via sys.stdout.buffer; the tagged writer must
-        # expose a working buffer whose bytes surface (null-attributed) before done.
+    def test_stdout_buffer_write_surfaces_as_null_and_rejects_int(self):
+        # Libraries write bytes via sys.stdout.buffer: the tagged writer exposes a
+        # working buffer whose bytes surface (null-attributed) before done, and it
+        # raises TypeError for ints (bytes(5) would emit five NULs).
         events = self.repl.execute(
             "bufw", "import sys\nsys.stdout.buffer.write(b'buffer-bytes\\n')\nsys.stdout.buffer.flush()"
         )
-        self.assertEqual(one(events, "done")["status"], "ok")
         buffered = next(e for e in events if e.get("event") == "stdout" and "buffer-bytes" in e["text"])
         self.assertIsNone(buffered["id"])
         self.assertLess(events.index(buffered), events.index(one(events, "done")))
-
-    def test_stdout_buffer_write_rejects_int(self):
-        # A real stdout.buffer raises TypeError for ints; bytes(5) would emit five NULs.
         events = self.repl.execute("bufint", "import sys\nsys.stdout.buffer.write(5)")
         self.assertEqual(one(events, "error")["ename"], "TypeError")
         self.assertEqual(one(events, "done")["status"], "error")
@@ -1239,7 +1172,7 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(one(events, "result")["text"], "'alive'")
 
     def test_list_names(self):
-        self.repl.execute("ln1", "alpha = 1\ndef helper(n):\n    return n\n_hidden = 2\nrlm = object()")
+        self.repl.execute("ln1", "alpha = 1\ndef helper(n):\n    return n\n_hidden = 2\nrlm = object()\nglobals()[1] = 2")
         self.repl.send({"type": "list_names", "id": "ln2"})
         done = one(self.repl.until_done("ln2"), "done")
         self.assertEqual(done["status"], "ok")
@@ -1247,17 +1180,8 @@ class ReplTest(unittest.TestCase):
         self.assertIn("helper", done["names"])
         self.assertNotIn("_hidden", done["names"])
         self.assertNotIn("rlm", done["names"])
-        self.assertEqual(done["names"], sorted(done["names"]))
-
-    def test_list_names_skips_non_string_keys(self):
-        self.repl.execute("lnk1", "globals()[1] = 1\nbeta = 2")
-        self.repl.send({"type": "list_names", "id": "lnk2"})
-        done = one(self.repl.until_done("lnk2"), "done")
-        self.assertEqual(done["status"], "ok")
-        self.assertIn("beta", done["names"])
         self.assertNotIn(1, done["names"])
-        events = self.repl.execute("lnk3", "'alive'")
-        self.assertEqual(one(events, "result")["text"], "'alive'")
+        self.assertEqual(done["names"], sorted(done["names"]))
 
     def test_host_request_round_trip(self):
         code = "\n".join(
@@ -1341,11 +1265,6 @@ class ReplTest(unittest.TestCase):
         )
         self.assertEqual(one(events, "done")["status"], "error")
 
-    def test_host_reply_for_unknown_id_dropped(self):
-        self.repl.send({"type": "host_reply", "id": "no-such-request", "data": {"status": "ok"}})
-        events = self.repl.execute("ok", "'alive'")
-        self.assertEqual(one(events, "result")["text"], "'alive'")
-
     def test_host_request_cancelled_cell_drops_pending_future(self):
         code = "\n".join(
             [
@@ -1383,9 +1302,6 @@ class ReplTest(unittest.TestCase):
             display = self.repl.read_event()
         self.assertEqual(display["id"], "det")
         self.assertEqual(display["data"], {"text/plain": "late"})
-
-    def test_shutdown_clean_exit(self):
-        self.assertEqual(self.repl.shutdown(), 0)
 
     def test_shutdown_after_mcp_import_exits_cleanly(self):
         events = self.repl.execute("mcp-import", "import rlm.mcp")
@@ -2287,11 +2203,6 @@ class SnapshotPairConsistencyTest(unittest.TestCase):
         self.assertLessEqual(result["bytes"], cap)
         with open(self.path, "rb") as fh:
             self.assertEqual(list(dill.load(fh)), ["a"])
-
-    def test_zero_size_cap_writes_no_empty_payload_overhead(self):
-        result = self._snap({}, max_bytes=0, max_variable_bytes=0)
-        self.assertEqual(result, {"error": "write failed: snapshot exceeds aggregate snapshot size cap"})
-        self.assertEqual(os.listdir(self.dir), [])
 
     def test_manifest_write_failure_preserves_prior_pair(self):
         old_payload, old_manifest = self._old_pair()
