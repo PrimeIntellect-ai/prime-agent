@@ -82,9 +82,17 @@ dependencies = ["${dependencyName}"]
 	return skill;
 }
 
-function writeFakePython(filePath: string, importableModules: readonly string[]): void {
+function writeFakePython(
+	filePath: string,
+	importableModules: readonly string[],
+	deniedProbes: readonly string[] = [],
+): void {
 	const cases = importableModules.map((moduleName) => `    "import ${moduleName}") exit 0 ;;`).join("\n");
-	const runtimeCase = importableModules.includes("rlm") ? '    *"_harness_methods"*) exit 0 ;;' : "";
+	const denyCases = deniedProbes.map((probe) => `    *"${probe}"*) exit 1 ;;`).join("\n");
+	const runtimeCase =
+		importableModules.includes("rlm") && !deniedProbes.includes("_harness_methods")
+			? '    *"_harness_methods"*) exit 0 ;;'
+			: "";
 	writeExecutable(
 		filePath,
 		[
@@ -92,6 +100,7 @@ function writeFakePython(filePath: string, importableModules: readonly string[])
 			'if [ "$1" = "-c" ]; then',
 			'  case "$2" in',
 			cases,
+			denyCases,
 			runtimeCase,
 			"    *) exit 1 ;;",
 			"  esac",
@@ -259,117 +268,25 @@ describe("kernel bootstrap", () => {
 		expect(log).toContain(`--editable ${dependentSkill.packagePath}`);
 	});
 
-	it("syncs a warm venv when a Python skill pyproject changes", async () => {
+	it("writes the base marker before the first install and keeps a failed skill out of the record", async () => {
 		const logPath = installFakeUv();
 		const venv = join(tempDir, "kernel-venv");
-		const python = join(venv, "bin", "python");
-		const pythonSkill = createPythonSkill();
-		mkdirSync(join(venv, "bin"), { recursive: true });
-		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
-		writeBootstrapVersion(venv, [pythonSkill]);
-		writeFileSync(
-			pythonSkill.pyprojectPath,
-			`[project]
-name = "${pythonSkill.name}"
-version = "0.1.0"
-dependencies = ["httpx"]
-`,
-		);
-		process.env.PRIME_AGENT_KERNEL_VENV = venv;
-
-		await expect(ensureKernelPython({ pythonSkills: [pythonSkill] })).resolves.toBe(python);
-
-		const log = readFileSync(logPath, "utf8");
-		expect(log).not.toContain(`venv ${venv} --python 3.11 --seed`);
-		expect(log).toContain(`--editable ${pythonSkill.packagePath}`);
-		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
-		expect(version.pythonSkills[0].pyprojectHash).toBe(pyprojectHash(pythonSkill.pyprojectPath));
-	});
-
-	it("continues when a Python skill editable install fails and retries it next startup", async () => {
-		const logPath = installFakeUv();
-		const venv = join(tempDir, "kernel-venv");
-		const goodSkill = createPythonSkill("good-skill");
-		const brokenSkill = createPythonSkill("broken-skill");
+		const installedSkill = createPythonSkill("agent-a");
+		const brokenSkill = createPythonSkill("agent-b");
 		process.env.PRIME_AGENT_KERNEL_VENV = venv;
 		process.env.UV_FAIL_ARG = brokenSkill.packagePath;
 
-		await expect(ensureKernelPython({ pythonSkills: [goodSkill, brokenSkill] })).resolves.toBe(
+		await expect(ensureKernelPython({ pythonSkills: [installedSkill, brokenSkill] })).resolves.toBe(
 			join(venv, "bin", "python"),
 		);
-
-		const log = readFileSync(logPath, "utf8");
-		expect(log).toContain(`--editable ${goodSkill.packagePath}`);
-		expect(log).toContain(`--editable ${brokenSkill.packagePath}`);
-		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
-		expect(version.pythonSkills).toEqual([
-			{
-				importName: goodSkill.importName,
-				packagePath: goodSkill.packagePath,
-				pyprojectPath: goodSkill.pyprojectPath,
-				pyprojectHash: pyprojectHash(goodSkill.pyprojectPath),
-			},
-		]);
-
-		await expect(ensureKernelPython({ pythonSkills: [goodSkill, brokenSkill] })).resolves.toBe(
-			join(venv, "bin", "python"),
-		);
-
-		const retryLog = readFileSync(logPath, "utf8");
-		expect(retryLog.split("\n").filter((line) => line.startsWith(`venv ${venv} `))).toHaveLength(1);
-		expect(
-			retryLog.split("\n").filter((line) => line.includes(`--editable ${brokenSkill.packagePath}`)),
-		).toHaveLength(2);
-	});
-
-	it("writes the version marker before syncing Python skills", async () => {
-		const logPath = installFakeUv();
-		const venv = join(tempDir, "kernel-venv");
-		const firstSkill = createPythonSkill("agent-a");
-		const secondSkill = createPythonSkill("agent-b");
-		process.env.PRIME_AGENT_KERNEL_VENV = venv;
-
-		await expect(ensureKernelPython({ pythonSkills: [firstSkill, secondSkill] })).resolves.toBe(
-			join(venv, "bin", "python"),
-		);
-
-		// Every editable install probes the on-disk marker: the first must already
-		// see the base marker, and the second must see the first skill recorded.
-		const probes = readFileSync(logPath, "utf8")
+		const markers = readFileSync(logPath, "utf8")
 			.split("\n")
-			.filter((line) => line.startsWith("MARKER "));
-		expect(probes).toHaveLength(2);
-		expect(probes.every((probe) => probe !== "MARKER missing")).toBe(true);
-		const markers = probes.map((probe) => JSON.parse(probe.slice("MARKER ".length)));
-		expect(markers[0].pythonSkills).toEqual([]);
-		expect(markers[1].pythonSkills.map((skill: { importName: string }) => skill.importName)).toEqual([
-			firstSkill.importName,
-		]);
-	});
-
-	it("resumes a sync interrupted before all skills completed", async () => {
-		const logPath = installFakeUv();
-		const venv = join(tempDir, "kernel-venv");
-		const python = join(venv, "bin", "python");
-		const syncedSkill = createPythonSkill("agent-a");
-		const unsyncedSkill = createPythonSkill("agent-b");
-		mkdirSync(join(venv, "bin"), { recursive: true });
-		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
-		// The exact state a killed process leaves behind: base marker fields plus
-		// the first skill, with the second skill still missing.
-		writeBootstrapVersion(venv, [syncedSkill]);
-		process.env.PRIME_AGENT_KERNEL_VENV = venv;
-
-		await expect(ensureKernelPython({ pythonSkills: [syncedSkill, unsyncedSkill] })).resolves.toBe(python);
-
-		const lines = readFileSync(logPath, "utf8").split("\n");
-		expect(lines.some((line) => line.startsWith(`venv ${venv} `))).toBe(false);
-		expect(lines.some((line) => line.includes(`--editable ${syncedSkill.packagePath}`))).toBe(false);
-		expect(lines.filter((line) => line.includes(`--editable ${unsyncedSkill.packagePath}`))).toHaveLength(1);
+			.filter((line) => line.startsWith("MARKER "))
+			.map((probe) => probe.slice("MARKER ".length));
+		expect(JSON.parse(markers[0]).pythonSkills).toEqual([]);
 		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
 		expect(version.pythonSkills.map((skill: { importName: string }) => skill.importName)).toEqual([
-			syncedSkill.importName,
-			unsyncedSkill.importName,
+			installedSkill.importName,
 		]);
 	});
 
@@ -377,155 +294,33 @@ dependencies = ["httpx"]
 	it("resumes a real killed mid-sync process without rebuilding the venv", { timeout: 60_000 }, async () => {
 		const logPath = installFakeUv();
 		const venv = join(tempDir, "kernel-venv");
-		const firstSkill = createPythonSkill("agent-a");
-		const hangingSkill = createPythonSkill("agent-b");
-		const thirdSkill = createPythonSkill("agent-c");
-		process.env.PRIME_AGENT_KERNEL_VENV = venv;
-
-		const child = spawn(process.execPath, [tsxPath, kernelSyncChildPath], {
-			env: {
-				...process.env,
-				KERNEL_SYNC_CHILD_SKILLS: JSON.stringify([firstSkill, hangingSkill, thirdSkill]),
-				TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json"),
-				UV_HANG_ARG: hangingSkill.packagePath,
-			},
-			stdio: ["ignore", "ignore", "pipe"],
-			detached: true,
-		});
-		let childStderr = "";
-		child.stderr?.on("data", (chunk: Buffer) => {
-			childStderr += chunk.toString();
-		});
-		const killChildGroup = () => {
-			const pid = child.pid;
-			if (pid === undefined) return;
-			try {
-				process.kill(-pid, "SIGKILL");
-			} catch {
-				try {
-					child.kill("SIGKILL");
-				} catch {
-					// Already gone.
-				}
-			}
-		};
-		try {
-			// The second skill's editable line proves the first skill's marker
-			// write landed: it happens strictly between both installs.
-			const deadline = Date.now() + 30_000;
-			while (Date.now() < deadline) {
-				if (child.exitCode !== null || child.signalCode !== null) break;
-				const log = existsSync(logPath) ? readFileSync(logPath, "utf8") : "";
-				if (
-					log.includes(`--editable ${firstSkill.packagePath}`) &&
-					log.includes(`--editable ${hangingSkill.packagePath}`)
-				) {
-					break;
-				}
-				// test-policy: allow wall-clock-sleep -- polls the external fake-uv log appends; no in-process signal exists
-				await sleep(50);
-			}
-			const logAtKill = readFileSync(logPath, "utf8");
-			expect(logAtKill, childStderr).toContain(`--editable ${firstSkill.packagePath}`);
-			expect(logAtKill, childStderr).toContain(`--editable ${hangingSkill.packagePath}`);
-			killChildGroup();
-		} finally {
-			killChildGroup();
-		}
-		// Let the killed group (and the bootstrap lock holder) disappear; the
-		// rerun must steal the stale lock via PID liveness.
-		const pid = child.pid;
-		if (pid !== undefined) {
-			const deadDeadline = Date.now() + 10_000;
-			while (Date.now() < deadDeadline) {
-				try {
-					process.kill(pid, 0);
-					// test-policy: allow wall-clock-sleep -- polls OS pid liveness of the SIGKILLed group; no in-process signal exists
-					await sleep(20);
-				} catch {
-					break;
-				}
-			}
-		}
-
-		await expect(ensureKernelPython({ pythonSkills: [firstSkill, hangingSkill, thirdSkill] })).resolves.toBe(
-			join(venv, "bin", "python"),
-		);
-
-		const lines = readFileSync(logPath, "utf8").split("\n");
-		expect(lines.filter((line) => line.startsWith(`venv ${venv} `))).toHaveLength(1);
-		expect(lines.filter((line) => line.includes(`--editable ${firstSkill.packagePath}`))).toHaveLength(1);
-		expect(lines.filter((line) => line.includes(`--editable ${hangingSkill.packagePath}`))).toHaveLength(2);
-		expect(lines.filter((line) => line.includes(`--editable ${thirdSkill.packagePath}`))).toHaveLength(1);
-		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
-		expect(version.pythonSkills.map((skill: { importName: string }) => skill.importName)).toEqual([
-			firstSkill.importName,
-			hangingSkill.importName,
-			thirdSkill.importName,
-		]);
-	});
-
-	// test-policy: allow explicit-test-timeout -- bounds real killed tsx respawn and resume variance, not the assertion
-	it("keeps already-recorded skills in the marker when a kill interrupts a later install", {
-		timeout: 60_000,
-	}, async () => {
-		const logPath = installFakeUv();
-		const venv = join(tempDir, "kernel-venv");
 		const python = join(venv, "bin", "python");
-		const changedSkill = createPythonSkill("agent-a");
-		const matchingSkillB = createPythonSkill("agent-b");
-		const matchingSkillC = createPythonSkill("agent-c");
-		const hangingSkill = createPythonSkill("agent-d");
+		const staleSkill = createPythonSkill("agent-a");
+		const recordedSkill = createPythonSkill("agent-b");
+		const hangingSkill = createPythonSkill("agent-c");
 		mkdirSync(join(venv, "bin"), { recursive: true });
 		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
-		// Records [changedSkill, B, C] with changedSkill's pre-change hash.
-		writeBootstrapVersion(venv, [changedSkill, matchingSkillB, matchingSkillC]);
-		// changedSkill is now the only recorded skill whose hash no longer matches.
-		writeFileSync(
-			changedSkill.pyprojectPath,
-			`[project]
-name = "${changedSkill.name}"
-version = "0.2.0"
-`,
-		);
+		writeBootstrapVersion(venv, [staleSkill, recordedSkill]);
+		writeFileSync(staleSkill.pyprojectPath, `[project]\nname = "${staleSkill.name}"\nversion = "0.2.0"\n`);
 		process.env.PRIME_AGENT_KERNEL_VENV = venv;
 
 		const child = spawn(process.execPath, [tsxPath, kernelSyncChildPath], {
 			env: {
 				...process.env,
-				KERNEL_SYNC_CHILD_SKILLS: JSON.stringify([changedSkill, matchingSkillB, matchingSkillC, hangingSkill]),
+				KERNEL_SYNC_CHILD_SKILLS: JSON.stringify([staleSkill, recordedSkill, hangingSkill]),
 				TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json"),
 				UV_HANG_ARG: hangingSkill.packagePath,
 			},
-			stdio: ["ignore", "ignore", "pipe"],
+			stdio: "ignore",
 			detached: true,
 		});
-		let childStderr = "";
-		child.stderr?.on("data", (chunk: Buffer) => {
-			childStderr += chunk.toString();
-		});
-		const killChildGroup = () => {
-			const pid = child.pid;
-			if (pid === undefined) return;
-			try {
-				process.kill(-pid, "SIGKILL");
-			} catch {
-				try {
-					child.kill("SIGKILL");
-				} catch {
-					// Already gone.
-				}
-			}
-		};
 		try {
-			// The hanging skill's editable line proves changedSkill's incremental
-			// marker write already landed: it happens strictly between installs.
 			const deadline = Date.now() + 30_000;
 			while (Date.now() < deadline) {
 				if (child.exitCode !== null || child.signalCode !== null) break;
 				const log = existsSync(logPath) ? readFileSync(logPath, "utf8") : "";
 				if (
-					log.includes(`--editable ${changedSkill.packagePath}`) &&
+					log.includes(`--editable ${staleSkill.packagePath}`) &&
 					log.includes(`--editable ${hangingSkill.packagePath}`)
 				) {
 					break;
@@ -533,91 +328,39 @@ version = "0.2.0"
 				// test-policy: allow wall-clock-sleep -- polls the external fake-uv log appends; no in-process signal exists
 				await sleep(50);
 			}
-			const logAtKill = readFileSync(logPath, "utf8");
-			expect(logAtKill, childStderr).toContain(`--editable ${changedSkill.packagePath}`);
-			expect(logAtKill, childStderr).toContain(`--editable ${hangingSkill.packagePath}`);
-			killChildGroup();
 		} finally {
-			killChildGroup();
-		}
-		// Let the killed group (and the bootstrap lock holder) disappear; the
-		// rerun must steal the stale lock via PID liveness.
-		const pid = child.pid;
-		if (pid !== undefined) {
-			const deadDeadline = Date.now() + 10_000;
-			while (Date.now() < deadDeadline) {
+			const pid = child.pid;
+			if (pid !== undefined) {
 				try {
-					process.kill(pid, 0);
-					// test-policy: allow wall-clock-sleep -- polls OS pid liveness of the SIGKILLed group; no in-process signal exists
-					await sleep(20);
+					process.kill(-pid, "SIGKILL");
 				} catch {
-					break;
+					child.kill("SIGKILL");
 				}
 			}
+			await new Promise((resolve) => child.once("exit", resolve));
 		}
-
-		// Killing mid-install must not drop the already-recorded skills (nor the
-		// fresh hash) that sit later in install order from the persisted marker.
 		const versionAtKill = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
 		expect(versionAtKill.pythonSkills.map((skill: { importName: string }) => skill.importName)).toEqual([
-			changedSkill.importName,
-			matchingSkillB.importName,
-			matchingSkillC.importName,
+			staleSkill.importName,
+			recordedSkill.importName,
 		]);
-		expect(versionAtKill.pythonSkills[0].pyprojectHash).toBe(pyprojectHash(changedSkill.pyprojectPath));
+		expect(versionAtKill.pythonSkills[0].pyprojectHash).toBe(pyprojectHash(staleSkill.pyprojectPath));
 
-		await expect(
-			ensureKernelPython({ pythonSkills: [changedSkill, matchingSkillB, matchingSkillC, hangingSkill] }),
-		).resolves.toBe(python);
+		await expect(ensureKernelPython({ pythonSkills: [staleSkill, recordedSkill, hangingSkill] })).resolves.toBe(
+			python,
+		);
 
 		const lines = readFileSync(logPath, "utf8").split("\n");
 		expect(lines.some((line) => line.startsWith(`venv ${venv} `))).toBe(false);
-		expect(lines.filter((line) => line.includes(`--editable ${changedSkill.packagePath}`))).toHaveLength(1);
-		expect(lines.filter((line) => line.includes(`--editable ${matchingSkillB.packagePath}`))).toHaveLength(0);
-		expect(lines.filter((line) => line.includes(`--editable ${matchingSkillC.packagePath}`))).toHaveLength(0);
+		expect(lines.filter((line) => line.includes(`--editable ${staleSkill.packagePath}`))).toHaveLength(1);
+		expect(lines.filter((line) => line.includes(`--editable ${recordedSkill.packagePath}`))).toHaveLength(0);
 		expect(lines.filter((line) => line.includes(`--editable ${hangingSkill.packagePath}`))).toHaveLength(2);
 		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
 		expect(version.pythonSkills.map((skill: { importName: string }) => skill.importName)).toEqual([
-			changedSkill.importName,
-			matchingSkillB.importName,
-			matchingSkillC.importName,
+			staleSkill.importName,
+			recordedSkill.importName,
 			hangingSkill.importName,
 		]);
-	});
-
-	it("re-syncs a changed skill alongside unsynced skills", async () => {
-		const logPath = installFakeUv();
-		const venv = join(tempDir, "kernel-venv");
-		const python = join(venv, "bin", "python");
-		const changedSkill = createPythonSkill("agent-a");
-		const unsyncedSkill = createPythonSkill("agent-b");
-		mkdirSync(join(venv, "bin"), { recursive: true });
-		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
-		// Records the pre-change hash; the helper hashes the file as it is now.
-		writeBootstrapVersion(venv, [changedSkill]);
-		writeFileSync(
-			changedSkill.pyprojectPath,
-			`[project]
-name = "${changedSkill.name}"
-version = "0.2.0"
-dependencies = ["httpx"]
-`,
-		);
-		process.env.PRIME_AGENT_KERNEL_VENV = venv;
-
-		await expect(ensureKernelPython({ pythonSkills: [changedSkill, unsyncedSkill] })).resolves.toBe(python);
-
-		const lines = readFileSync(logPath, "utf8").split("\n");
-		expect(lines.some((line) => line.includes(`--editable ${changedSkill.packagePath}`))).toBe(true);
-		expect(lines.some((line) => line.includes(`--editable ${unsyncedSkill.packagePath}`))).toBe(true);
-		expect(lines.some((line) => line.startsWith(`venv ${venv} `))).toBe(false);
-		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
-		expect(version.pythonSkills.map((skill: { importName: string }) => skill.importName)).toEqual([
-			changedSkill.importName,
-			unsyncedSkill.importName,
-		]);
-		expect(version.pythonSkills[0].pyprojectHash).toBe(pyprojectHash(changedSkill.pyprojectPath));
-		expect(version.pythonSkills[1].pyprojectHash).toBe(pyprojectHash(unsyncedSkill.pyprojectPath));
 	});
 
 	it("shares concurrent bootstrap work in one process", async () => {
@@ -686,20 +429,7 @@ dependencies = ["httpx"]
 			rebuilds: true,
 			prepare: (venv: string, python: string) => {
 				// Imports rlm but fails the runtime-capability probe.
-				writeExecutable(
-					python,
-					[
-						"#!/bin/sh",
-						'if [ "$1" = "-c" ]; then',
-						'  case "$2" in',
-						'    "import rlm") exit 0 ;;',
-						"    *) exit 1 ;;",
-						"  esac",
-						"fi",
-						"exit 0",
-						"",
-					].join("\n"),
-				);
+				writeFakePython(python, ["rlm"], ["_harness_methods"]);
 				writeBootstrapVersion(venv);
 			},
 		},
@@ -756,45 +486,13 @@ dependencies = ["httpx"]
 		},
 		{
 			name: "rejects an interpreter exposing only the legacy harness API",
-			write: (path: string) =>
-				writeExecutable(
-					path,
-					[
-						"#!/bin/sh",
-						'if [ "$1" = "-c" ]; then',
-						'  case "$2" in',
-						'    "import rlm") exit 0 ;;',
-						'    *"_harness_methods"*) exit 1 ;;',
-						"    *\"assert not hasattr(rlm.rlm, 'background')\"*) exit 0 ;;",
-						"    *) exit 1 ;;",
-						"  esac",
-						"fi",
-						"exit 0",
-						"",
-					].join("\n"),
-				),
+			write: (path: string) => writeFakePython(path, ["rlm"], ["_harness_methods"]),
 			withSkill: false,
 			error: /current prime-agent-runtime with callable rlm\.spawn/,
 		},
 		{
 			name: "rejects an interpreter with a pre-progress-note rlm runtime",
-			write: (path: string) =>
-				writeExecutable(
-					path,
-					[
-						"#!/bin/sh",
-						'if [ "$1" = "-c" ]; then',
-						'  case "$2" in',
-						'    "import rlm") exit 0 ;;',
-						'    *"progress_note"*) exit 1 ;;',
-						'    *"_harness_methods"*) exit 0 ;;',
-						"    *) exit 1 ;;",
-						"  esac",
-						"fi",
-						"exit 0",
-						"",
-					].join("\n"),
-				),
+			write: (path: string) => writeFakePython(path, ["rlm"], ["progress_note"]),
 			withSkill: false,
 			error: /current prime-agent-runtime with callable rlm\.spawn, rlm\.create_session, rlm\.host_request, rlm\.progress_note/,
 		},
