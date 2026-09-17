@@ -7,6 +7,10 @@ if BUILD_ID="$(git -C "$SCRIPT_DIR" describe --tags --always --dirty 2>/dev/null
   export PRIME_AGENT_BUILD_ID="$BUILD_ID"
 fi
 
+# Pin tsx to this checkout's tsconfig: an inherited TSX_TSCONFIG_PATH can point
+# at a stale checkout, and without it tsx resolves from the caller's cwd.
+export TSX_TSCONFIG_PATH="$SCRIPT_DIR/tsconfig.json"
+
 # Check for --no-env / --dist flags
 NO_ENV=false
 USE_DIST=false

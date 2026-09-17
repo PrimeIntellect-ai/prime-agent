@@ -1,0 +1,1 @@
+- Fixed the source launcher crashing in tsx when the environment carries a stale TSX_TSCONFIG_PATH, and made it resolve the checkout's tsconfig from any working directory.
