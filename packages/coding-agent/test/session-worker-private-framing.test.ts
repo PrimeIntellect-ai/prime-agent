@@ -27,21 +27,27 @@ const isTestHeader: PrivateFrameHeaderValidator<TestHeader> = (value: unknown): 
 
 describe("private worker framing", () => {
 	it("decodes headers and opaque payloads across arbitrary chunk boundaries", () => {
-		const first = encodePrivateFrame({ type: "event", requestId: "one" }, Buffer.from([0, 1, 2, 255]));
-		const second = encodePrivateFrame({ type: "response", requestId: "two" }, Buffer.from("payload"));
-		const combined = Buffer.concat([first, second]);
-		const decoder = new PrivateFrameDecoder(isTestHeader);
-		const frames = [];
-
-		for (let offset = 0; offset < combined.length; offset += 3) {
-			frames.push(...decoder.push(combined.subarray(offset, offset + 3)));
-		}
-		decoder.finish();
-
-		expect(frames).toEqual([
+		const frames = [
+			encodePrivateFrame({ type: "event", requestId: "one" }, Buffer.from([0, 1, 2, 255])),
+			encodePrivateFrame({ type: "response", requestId: "two" }, Buffer.from("payload")),
+			encodePrivateFrame({ type: "event" }, Buffer.alloc(0)),
+		];
+		const expected = [
 			{ header: { type: "event", requestId: "one" }, payload: Buffer.from([0, 1, 2, 255]) },
 			{ header: { type: "response", requestId: "two" }, payload: Buffer.from("payload") },
-		]);
+			{ header: { type: "event" }, payload: Buffer.alloc(0) },
+		];
+		// One byte at a time and three-byte chunks both cover splits at every boundary.
+		const combined = Buffer.concat(frames);
+		for (const chunkSize of [3, 1]) {
+			const decoder = new PrivateFrameDecoder(isTestHeader);
+			const decoded: PrivateFrame<TestHeader>[] = [];
+			for (let offset = 0; offset < combined.length; offset += chunkSize) {
+				decoded.push(...decoder.push(combined.subarray(offset, Math.min(offset + chunkSize, combined.length))));
+			}
+			decoder.finish();
+			expect(decoded).toEqual(expected);
+		}
 	});
 
 	it("rejects invalid lengths, JSON, and routing headers", () => {
@@ -68,26 +74,6 @@ describe("private worker framing", () => {
 		expect(() => decoder.finish()).toThrow("incomplete bytes");
 	});
 
-	it("decodes frames split one byte at a time", () => {
-		const frames = [
-			encodePrivateFrame({ type: "event", requestId: "one" }, Buffer.from([0, 1, 2, 255])),
-			encodePrivateFrame({ type: "response", requestId: "two" }, Buffer.from("payload")),
-			encodePrivateFrame({ type: "event" }, Buffer.alloc(0)),
-		];
-		const decoder = new PrivateFrameDecoder(isTestHeader);
-		const decoded: PrivateFrame<TestHeader>[] = [];
-		for (const byte of Buffer.concat(frames)) {
-			decoded.push(...decoder.push(Buffer.from([byte])));
-		}
-		decoder.finish();
-
-		expect(decoded).toEqual([
-			{ header: { type: "event", requestId: "one" }, payload: Buffer.from([0, 1, 2, 255]) },
-			{ header: { type: "response", requestId: "two" }, payload: Buffer.from("payload") },
-			{ header: { type: "event" }, payload: Buffer.alloc(0) },
-		]);
-	});
-
 	it("tracks unread bytes while frames span chunk boundaries", () => {
 		const frame = encodePrivateFrame({ type: "event" }, Buffer.from("a".repeat(100)));
 		const decoder = new PrivateFrameDecoder(isTestHeader);
@@ -103,39 +89,37 @@ describe("private worker framing", () => {
 		decoder.finish();
 	});
 
-	it("decodes a large frame delivered in small chunks in near-linear time", () => {
-		// A decoder that re-copies its whole pending buffer on every socket read
-		// turns one ~8MB frame into ~8GB of memcpy at 4KB reads. A linear decoder
-		// finishes in well under a second; the quadratic one cannot. The budget
-		// stays generous so slow CI runners do not flake on the linear path.
-		const frame = encodePrivateFrame({ type: "event", requestId: "large" }, Buffer.alloc(8 * 1024 * 1024, 7));
-		const decoder = new PrivateFrameDecoder(isTestHeader);
+	it("decodes large frames delivered in small chunks within per-size budgets", () => {
+		// A decoder that re-copies its whole pending buffer per socket read is quadratic
+		// in the chunk count; both vectors finish far under budget on the linear path.
+		for (const [payloadBytes, chunkBytes, budgetMs] of [
+			[8 * 1024 * 1024, 4096, 2000],
+			[64 * 1024 * 1024, 256, 2500],
+		] as const) {
+			const frame = encodePrivateFrame({ type: "event", requestId: "large" }, Buffer.alloc(payloadBytes, 7));
+			const decoder = new PrivateFrameDecoder(isTestHeader);
 
-		const started = performance.now();
-		const decoded: PrivateFrame<TestHeader>[] = [];
-		for (let offset = 0; offset < frame.length; offset += 4096) {
-			decoded.push(...decoder.push(frame.subarray(offset, Math.min(offset + 4096, frame.length))));
+			const started = performance.now();
+			const decoded: PrivateFrame<TestHeader>[] = [];
+			for (let offset = 0; offset < frame.length; offset += chunkBytes) {
+				decoded.push(...decoder.push(frame.subarray(offset, Math.min(offset + chunkBytes, frame.length))));
+			}
+			const elapsed = performance.now() - started;
+
+			expect(decoded).toHaveLength(1);
+			expect(decoded[0]?.header).toEqual({ type: "event", requestId: "large" });
+			const payload = decoded[0]?.payload;
+			expect(payload?.length).toBe(payloadBytes);
+			expect(payload?.[0]).toBe(7);
+			expect(payload?.[payloadBytes - 1]).toBe(7);
+			expect(elapsed).toBeLessThan(budgetMs);
+			decoder.finish();
 		}
-		const elapsed = performance.now() - started;
-
-		expect(decoded).toHaveLength(1);
-		expect(decoded[0]?.header).toEqual({ type: "event", requestId: "large" });
-		const payload = decoded[0]?.payload;
-		expect(payload?.length).toBe(8 * 1024 * 1024);
-		expect(payload?.[0]).toBe(7);
-		expect(payload?.[4 * 1024 * 1024]).toBe(7);
-		expect(payload?.[8 * 1024 * 1024 - 1]).toBe(7);
-		expect(elapsed).toBeLessThan(2000);
-		decoder.finish();
 	});
 
 	it("consumes a frame split across many chunks without calling Array.prototype.shift", () => {
-		// The decoder used to shift every fully consumed chunk off the pending
-		// queue, so a frame delivered in N small socket writes cost O(N^2)
-		// array element moves inside a single consume() call. A head cursor skips
-		// spent chunks instead of shifting them, so a fully synchronous decode
-		// loop run under a shift-counting Array.prototype.shift patch must see
-		// zero shift calls.
+		// The head cursor must skip spent chunks instead of shifting each one off
+		// the front, which is quadratic in the chunk count.
 		const frame = encodePrivateFrame({ type: "event", requestId: "large" }, Buffer.alloc(8 * 1024 * 1024, 3));
 		const decoder = new PrivateFrameDecoder(isTestHeader);
 		const decoded: PrivateFrame<TestHeader>[] = [];
@@ -158,30 +142,6 @@ describe("private worker framing", () => {
 		expect(decoded).toHaveLength(1);
 		expect(decoded[0]?.header).toEqual({ type: "event", requestId: "large" });
 		expect(decoded[0]?.payload.length).toBe(8 * 1024 * 1024);
-		decoder.finish();
-	});
-
-	it("decodes a large frame delivered in tiny chunks within a per-chunk work budget", () => {
-		// Per-chunk bookkeeping costs scale with the chunk count, not just total
-		// bytes: a 64MB frame in 256B writes spans ~262k chunks, and any cost
-		// proportional to the pending queue per consumed chunk (shifting or
-		// splicing one entry off the front at a time) is quadratic in that
-		// count. The budget keeps generous margin for slow runners on the
-		// linear path; the quadratic path needs several seconds even locally.
-		const frame = encodePrivateFrame({ type: "event", requestId: "tiny-chunks" }, Buffer.alloc(64 * 1024 * 1024, 7));
-		const decoder = new PrivateFrameDecoder(isTestHeader);
-
-		const started = performance.now();
-		const decoded: PrivateFrame<TestHeader>[] = [];
-		for (let offset = 0; offset < frame.length; offset += 256) {
-			decoded.push(...decoder.push(frame.subarray(offset, Math.min(offset + 256, frame.length))));
-		}
-		const elapsed = performance.now() - started;
-
-		expect(decoded).toHaveLength(1);
-		expect(decoded[0]?.header).toEqual({ type: "event", requestId: "tiny-chunks" });
-		expect(decoded[0]?.payload.length).toBe(64 * 1024 * 1024);
-		expect(elapsed).toBeLessThan(2500);
 		decoder.finish();
 	});
 

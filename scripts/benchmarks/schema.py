@@ -27,6 +27,7 @@ Metric = Literal[
     "restore",
     "kernel_rss",
     "loaded_rss",
+    "frame_decode",
     "resume_large",
     "resume_large_cpu",
     "switch_large",
@@ -235,6 +236,7 @@ PHASE_METRICS: dict[str, tuple[Metric, ...]] = {
         "kernel_rss",
         "loaded_rss",
     ),
+    "transport": ("frame_decode",),
     "ui": (
         "resume_large",
         "resume_large_cpu",
