@@ -7358,9 +7358,7 @@ export class InteractiveMode {
 			void this.agentConnection.abortBash();
 		}
 		if (this.isAgentStreaming()) {
-			// The queue is preserved server-side; draining resumes on the next
-			// submit or queued-message edit.
-			void this.agentConnection.abort().catch((error) => {
+			void this.agentConnection.abortAndSendQueued().catch((error) => {
 				this.showError(error instanceof Error ? error.message : String(error));
 			});
 		}

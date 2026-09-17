@@ -1668,6 +1668,40 @@ describe("AgentSession queue regressions", () => {
 		}
 	});
 
+	it("ENG-5991: interrupt delivers every queued steering message in one new turn and stays abort-only at the edges", async () => {
+		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = await createWaitingHarness();
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("queued handled"),
+			fauxAssistantMessage("injected handled"),
+			fauxAssistantMessage("later handled"),
+		]);
+		await waitForToolStart;
+		await harness.session.steer("first");
+		await completeShell(harness);
+		await harness.session.steer("second");
+		expect(harness.session.abortAndSendQueued()).toBe(true);
+		await harness.session.steer("later", undefined, { priority: "background" });
+		releaseToolExecution();
+		await Promise.all([promptPromise, harness.session.waitForIdle()]);
+		expect(getUserTexts(harness)).toEqual(["start", "first", "second", "later"]);
+		expect(getAssistantTexts(harness)).toEqual(["", "queued handled", "injected handled", "later handled"]);
+		expect(harness.session.steeringMode).toBe("one-at-a-time");
+		await harness.session.followUp("follow-up boundary");
+		expect(harness.session.abortAndSendQueued()).toBe(false);
+		expect(harness.session.getFollowUpMessages()).toEqual(["follow-up boundary"]);
+		harness.session.clearQueue();
+		harness.session.resumeQueuedWork();
+		await harness.session.steer("queued for restart");
+		harness.session.abortForUpdateRestart();
+		expect(harness.session.abortAndSendQueued()).toBe(false);
+		expect(harness.session.getSteeringMessages()).toEqual(["queued for restart"]);
+		await expect(
+			harness.session.sendCustomMessage({ customType: "g", content: "t", display: false }, { triggerTurn: true }),
+		).rejects.toThrow("queued session input is suspended");
+	});
+
 	it("ENG-4531: persists sent agent messages that arrive after their Python cell completes", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);

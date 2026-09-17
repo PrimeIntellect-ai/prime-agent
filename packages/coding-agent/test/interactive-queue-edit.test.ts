@@ -586,6 +586,7 @@ describe("interactive interrupt preserves the queue", () => {
 			isAgentStreaming: () => true,
 			agentConnection: {
 				abort: vi.fn(async () => {}),
+				abortAndSendQueued: vi.fn(async () => {}),
 				abortBash: vi.fn(),
 				clearQueue: vi.fn(async () => ({ steering: [], followUp: [] })),
 				abortAndClearQueue: vi.fn(async () => ({ steering: [], followUp: [] })),
@@ -603,12 +604,13 @@ describe("interactive interrupt preserves the queue", () => {
 		return harness as unknown as InterruptHarness;
 	}
 
-	it("aborts streaming without clearing or restoring the queue or the draft", () => {
+	it("interrupts streaming by aborting and sending the queued messages without clearing the queue or the draft", () => {
 		const harness = createInterruptHarness("draft");
 
 		Reflect.get(InteractiveMode.prototype, "handleCtrlC").call(harness);
 
-		expect(harness.agentConnection.abort).toHaveBeenCalledOnce();
+		expect(harness.agentConnection.abortAndSendQueued).toHaveBeenCalledOnce();
+		expect(harness.agentConnection.abort).not.toHaveBeenCalled();
 		expect(harness.agentConnection.abortAndClearQueue).not.toHaveBeenCalled();
 		expect(harness.agentConnection.clearQueue).not.toHaveBeenCalled();
 		expect(harness.editor.setText).not.toHaveBeenCalled();
@@ -628,7 +630,7 @@ describe("interactive interrupt preserves the queue", () => {
 		handleCtrlC.call(harness);
 
 		// The interrupt runs once; the repeat exits instead of aborting again.
-		expect(harness.agentConnection.abort).toHaveBeenCalledOnce();
+		expect(harness.agentConnection.abortAndSendQueued).toHaveBeenCalledOnce();
 		expect(harness.shutdown).toHaveBeenCalledOnce();
 	});
 });
