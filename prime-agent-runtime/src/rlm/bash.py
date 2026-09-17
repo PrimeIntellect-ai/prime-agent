@@ -5390,8 +5390,14 @@ def _assigned_command_rm_reasons(
     executing keyword (`{ $X; }`, `if $X; then ...; fi`), or after an
     exec-style prefix (`env $X`, `command $X`); exec-style options and their
     arguments keep the stated option-argument residual, and list positions
-    (`for i in $X`) stay unresolvable."""
-    words = _scan_shell_words(text)
+    (`for i in $X`) stay unresolvable.
+
+    Redirections are masked before the word scan (character positions are
+    kept), so a redirection target the scanner would otherwise mark as the
+    first word of a fresh command (`cat > if X=b`) stays what the shell reads
+    it as: the target and the words after it belong to the running command,
+    never to a new command position."""
+    words = _scan_shell_words(_mask_shell_redirections(text))
     assignments: dict[str, tuple[str, bool]] = {}
     edits: list[tuple[int, int, str]] = []
     reasons: list[str] = []

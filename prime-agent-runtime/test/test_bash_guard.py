@@ -2466,6 +2466,12 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
             f"export A X='rm -rf {outside}'; $X",
             f"X='echo hi'; export A X='rm -rf {outside}'; $X",
             f"X='echo hi'; declare +x X='rm -rf {outside}'; $X",
+            # A redirection target and the words after it belong to the
+            # running command (`cat > if X=b` names two files for cat), so
+            # they cannot reopen a command position or record the decoy —
+            # real bash ran the expanded `rm -rf <outside>` pre-fix.
+            f"X='rm -rf {outside}'; cat > if X=b; $X",
+            f"X='rm -rf {outside}'; cat > outfile X=b; $X",
             # Every position the shell runs a word from substitutes the same
             # way a command-boundary reference does (real bash runs the
             # expanded `rm -rf <outside>` pre-fix).
@@ -2492,6 +2498,7 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
         for command in [
             "X='echo hi'; echo a X=b; $X",
             "X='echo hi'; echo if X=b; $X",
+            "X='echo hi'; cat > if X=b; $X",
             "X='echo hi'; FOO=1 $X",
             "X='echo hi'; { $X; }",
             "X='echo hi'; if $X; then :; fi",
