@@ -2449,6 +2449,22 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
             f'X=rm; "$X" -rf {outside}',
             f'X="rm -rf {outside}"; $X',
             "X=$(cat cmd.txt); $X",
+            # An ordinary argument that looks like an assignment is data for
+            # its command, so it cannot overwrite the recorded value a later
+            # `$NAME` runs (real bash runs `rm -rf <outside>` pre-fix).
+            f"X='rm -rf {outside}'; echo a X=b; $X",
+            f"X='rm -rf {outside}'; echo export X=hi; $X",
+            f"X='rm -rf {outside}'; echo unset X; $X",
+            # `unset -f` names functions, so the variable stays assigned.
+            f"X='rm -rf {outside}'; unset -f X; $X",
+            # Every position the shell runs a word from substitutes the same
+            # way a command-boundary reference does (real bash runs the
+            # expanded `rm -rf <outside>` pre-fix).
+            f"X='rm -rf {outside}'; FOO=1 $X",
+            f"X='rm -rf {outside}'; {{ $X; }}",
+            f"X='rm -rf {outside}'; if $X; then :; fi",
+            f"X='rm -rf {outside}'; env $X",
+            f"X='rm -rf {outside}'; command $X",
         ]:
             with self.subTest(command=command):
                 with self.assertRaises(DestructiveRmRefusalError):
@@ -2461,6 +2477,25 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("hi", result.output)
         result = await bash('ECHO_BIN=echo; "$ECHO_BIN" -u hi')
         self.assertEqual(result.exit_code, 0)
+        # The same positions keep running harmless assigned text end to end,
+        # a real `unset` removes the name, and a list position (`for i in
+        # $X`) never executes its words.
+        for command in [
+            "X='echo hi'; echo a X=b; $X",
+            "X='echo hi'; FOO=1 $X",
+            "X='echo hi'; { $X; }",
+            "X='echo hi'; if $X; then :; fi",
+            "X='echo hi'; env $X",
+            "X='echo hi'; command $X",
+            "X='echo hi'; unset X; $X",
+            "X='echo hi'; unset -f X; $X",
+            "X='echo hi'; export X; $X",
+            "X='echo hi'; for i in $X; do :; done",
+            "X='echo hi'; case $X in *) :;; esac",
+        ]:
+            with self.subTest(command=command):
+                result = await bash(command)
+                self.assertEqual(result.exit_code, 0)
 
     async def test_refuses_expansion_inside_wrapper_payloads(self):
         # Unresolvable flags or operands inside a payload hide the same

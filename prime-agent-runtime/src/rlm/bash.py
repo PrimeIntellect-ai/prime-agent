@@ -1861,6 +1861,15 @@ _SHELL_KEYWORDS = frozenset(
 # `if true; then PWD=/x; fi`). The grouping parens never reach the word list as
 # words, but the shell reads an assignment after them the same way.
 _COMMAND_CONTEXT_TOKENS = _SHELL_KEYWORDS | frozenset({"(", ")"})
+# Reserved words after which the next word runs as a command, so an assigned
+# `$NAME` there is substituted like a command-boundary reference (`{ $X; }`,
+# `if $X; then ...; fi`); list and terminator positions (`for`, `in`, `case`,
+# `fi`, `done`) never execute their next word, so those stay unresolvable.
+_EXECUTING_KEYWORDS = frozenset(
+    {
+        "{", "!", "if", "elif", "else", "then", "while", "until", "do", "time",
+    }
+)
 
 
 class _ShellWord(NamedTuple):
@@ -5365,16 +5374,91 @@ def _assigned_command_rm_reasons(
     command assigned to NAME and rescanned; a word whose value the command
     builds from expansion or substitution (`X=$(cat cmd); $X`) runs text the
     guard cannot read, so it is refused. A reference the command never assigns
-    stays unresolvable, which the caller's refusal keeps covering."""
+    stays unresolvable, which the caller's refusal keeps covering.
+
+    An assignment is recorded only where the shell reads one, the same position
+    rule `_command_reassigns_env` applies for HOME/PWD: an assignment prefix, a
+    word after a keyword or grouping token, or an argument to `export`,
+    `declare`, `typeset`, `local`, or `readonly` when that builtin is the
+    command. An ordinary argument that merely looks like one (`echo a X=b`) is
+    data for its command, so it cannot overwrite a recorded assignment and hide
+    the text a later `$NAME` runs. `unset` removes only plain names in its own
+    argument list, and `-f` names functions, so neither can hide a variable.
+
+    The reference gate covers every position the shell runs a word from: a
+    command boundary, an assignment prefix (`FOO=1 $X`), the word after an
+    executing keyword (`{ $X; }`, `if $X; then ...; fi`), or after an
+    exec-style prefix (`env $X`, `command $X`); exec-style options and their
+    arguments keep the stated option-argument residual, and list positions
+    (`for i in $X`) stay unresolvable."""
     words = _scan_shell_words(text)
     assignments: dict[str, tuple[str, bool]] = {}
     edits: list[tuple[int, int, str]] = []
     reasons: list[str] = []
-    for index, word in enumerate(words):
-        name, separator, assigned = word.value.partition("=")
+    assignment_slot = True
+    builtin_args = ""
+    unset_functions = False
+    after_assignment = False
+    after_executing_keyword = False
+    after_exec_style = False
+    for word in words:
+        token = word.value
+        if token in _COMMAND_CONTEXT_TOKENS:
+            # A keyword or grouping token opens a command context without
+            # being the command word, so an assignment after it still counts
+            # (`{ PWD=/x; }`, `if true; then PWD=/x; fi`).
+            assignment_slot = True
+            builtin_args = ""
+            unset_functions = False
+            after_assignment = False
+            after_executing_keyword = token in _EXECUTING_KEYWORDS
+            after_exec_style = False
+            continue
+        if word.starts_command:
+            assignment_slot = True
+            builtin_args = ""
+            unset_functions = False
+            after_assignment = False
+            after_executing_keyword = False
+            after_exec_style = False
+        name, separator, assigned = token.partition("=")
         appended = name.endswith("+")
         base = name[:-1] if appended else name
-        if separator and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", base):
+        is_assignment = separator and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", base)
+        if builtin_args:
+            # The builtin itself is the command word, so its arguments assign,
+            # unset, or keep the list as options exactly as the shell reads
+            # them.
+            if is_assignment and builtin_args != "unset":
+                # The shell expands the assigned word at run time, so a value
+                # built from an expansion or substitution cannot be read
+                # statically.
+                literal = not any(ch in text[word.start : word.end] for ch in "$`\\")
+                if appended and base not in assignments:
+                    assignments[base] = (assigned, False)
+                else:
+                    previous, previous_literal = assignments.get(base, ("", True))
+                    assignments[base] = (
+                        previous + assigned if appended else assigned,
+                        literal and previous_literal,
+                    )
+                continue
+            if token.startswith("-"):
+                if builtin_args == "unset" and token == "-f":
+                    unset_functions = True
+                continue
+            if (
+                builtin_args == "unset"
+                and not unset_functions
+                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token)
+            ):
+                assignments.pop(token, None)
+                continue
+            # An ordinary word ends the builtin's argument list; the word
+            # itself is then read in its own position below.
+            builtin_args = ""
+            unset_functions = False
+        if is_assignment and assignment_slot:
             # The shell expands the assigned word at run time, so a value built
             # from an expansion or substitution cannot be read statically.
             literal = not any(ch in text[word.start : word.end] for ch in "$`\\")
@@ -5384,35 +5468,58 @@ def _assigned_command_rm_reasons(
                 # `$NAME` runs cannot be read: keep the appended piece but mark
                 # the value untrackable, and refuse the reference.
                 assignments[base] = (assigned, False)
-                continue
-            previous, previous_literal = assignments.get(base, ("", True))
-            assignments[base] = (
-                previous + assigned if appended else assigned,
-                literal and previous_literal,
-            )
+            else:
+                previous, previous_literal = assignments.get(base, ("", True))
+                assignments[base] = (
+                    previous + assigned if appended else assigned,
+                    literal and previous_literal,
+                )
+            after_assignment = True
             continue
-        if word.value == "unset":
-            for follower in words[index + 1 :]:
-                if follower.starts_command:
-                    break
-                assignments.pop(follower.value, None)
+        if is_assignment:
+            # An ordinary argument that merely looks like an assignment is
+            # data for its command: it cannot overwrite a recorded assignment
+            # and hide the text a later `$NAME` runs.
             continue
-        if not word.starts_command:
+        command_position = (
+            word.starts_command
+            or after_assignment
+            or after_executing_keyword
+            or after_exec_style
+        )
+        if command_position and (token in _EXPORT_COMMANDS or token == "unset"):
+            builtin_args = token
+            assignment_slot = False
+            after_assignment = False
+            after_executing_keyword = False
+            after_exec_style = False
             continue
-        reference = _VARIABLE_REFERENCE.fullmatch(word.value)
-        if reference is None:
+        if command_position:
+            reference = _VARIABLE_REFERENCE.fullmatch(token)
+            if reference is not None:
+                assignment = assignments.get(reference.group(1) or reference.group(2))
+                if assignment is not None:
+                    assigned, literal = assignment
+                    if not literal:
+                        reasons.append(
+                            f"{token!r}: is assigned text the guard cannot read"
+                            " statically, so the command it runs cannot be"
+                            " checked"
+                        )
+                    else:
+                        edits.append((word.start, word.end, assigned))
+            # This word is the command word, so the prefix run ends here; an
+            # exec-style prefix runs its next word as the command, so a
+            # reference after it substitutes too.
+            after_exec_style = token in _EXEC_STYLE_PREFIXES
+            after_executing_keyword = False
+            after_assignment = False
+            assignment_slot = False
             continue
-        assignment = assignments.get(reference.group(1) or reference.group(2))
-        if assignment is None:
-            continue  # not assigned in this command: leave the word unresolvable
-        assigned, literal = assignment
-        if not literal:
-            reasons.append(
-                f"{word.value!r}: is assigned text the guard cannot read"
-                " statically, so the command it runs cannot be checked"
-            )
-            continue
-        edits.append((word.start, word.end, assigned))
+        assignment_slot = False
+        after_assignment = False
+        after_executing_keyword = False
+        after_exec_style = False
     if not edits:
         return reasons
     resolved = text
