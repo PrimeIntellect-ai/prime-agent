@@ -1,9 +1,8 @@
 #!/bin/sh
 # Pre-push guard against mirror-like pushes and remote branch deletions.
-# Git invokes the pre-push hook for every push, whatever process calls it; on
-# 2026-09-17 a bot's `git push --mi` (git resolves it to --mirror) from a
-# worktree deleted 62 remote branches and auto-closed 63 PRs, and kernel
-# command guards cannot see pushes made through raw subprocesses.
+# Provenance: a 2026-09-17 mirror push deleted 62 remote branches and auto-closed 63 PRs.
+# Git invokes the pre-push hook for every push, whatever process calls it, and
+# kernel command guards cannot see pushes made through raw subprocesses.
 #
 # Rules for real GitHub remotes, reading the ref list from stdin: allow if
 # stdin is empty (up-to-date push) or if every line updates a refs/heads/* or
@@ -107,8 +106,7 @@ fi
 
 {
 	echo "pre-push guard: refusing push to $url: $detail"
-	echo "A bot's 'git push --mirror' once deleted 62 remote branches and auto-closed 63 PRs on 2026-09-17."
-	echo "Only small updates of refs/heads and refs/tags are allowed on real GitHub remotes."
+	echo "Allowed on real GitHub remotes: updates of refs/heads and refs/tags only, no deletions, at most $max_refs refs."
 	echo "Mirror pushes copy refs/remotes/* onto the remote; normal pushes never target them."
 	echo "To push anyway: PRIME_AGENT_ALLOW_MIRROR_PUSH=1 git push $remote ..."
 } >&2

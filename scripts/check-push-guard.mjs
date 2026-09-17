@@ -57,9 +57,13 @@ for (const [name, url, input, code, env] of cases) {
 		env: { ...process.env, PRIME_AGENT_ALLOW_MIRROR_PUSH: "", ...env },
 	});
 	const stderr = result.stderr ?? "";
+	// Behavioral refusal signature, not message copy: the refusal line, the
+	// reason detail the hook always emits (rule refusal with its ref and
+	// deletion counts, or the malformed-stdin failure), and the escape hatch.
 	const refusedWell =
 		stderr.includes("refusing push to") &&
-		stderr.includes("deleted 62 remote branches and auto-closed 63 PRs on 2026-09-17") &&
+		(/\d+ refs \(mirror-like\), including \d+ deletion\(s\)/.test(stderr) ||
+			stderr.includes("malformed ref line")) &&
 		stderr.includes("PRIME_AGENT_ALLOW_MIRROR_PUSH=1 git push origin ...");
 	if (result.status !== code || (code === 1 && !refusedWell)) {
 		failures += 1;

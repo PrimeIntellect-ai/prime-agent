@@ -32,7 +32,7 @@ git config core.hooksPath .husky
 
 The setting is shared across worktrees and the relative path resolves per tree. Running `npm ci` in any tree regenerates husky's shims and resets the shared `core.hooksPath` to `.husky/_`, which silences the tracked hooks in shimless worktrees again; re-run the one-liner after `npm ci`, or run `npx husky` inside a worktree to give it its own shims.
 
-Intentional pushes can opt out once with `PRIME_AGENT_ALLOW_MIRROR_PUSH=1 git push ...`. Pushes with more than 10 refs (a `git push --tags` release) are refused; use the escape hatch. Not caught: deletions of remote-only refs through `--mirror` pruning (git never lists them on the pre-push stdin), ssh alias remotes, `insteadOf` rewrites to a proxy, and uppercase hostnames.
+Intentional pushes can opt out once with `PRIME_AGENT_ALLOW_MIRROR_PUSH=1 git push ...`. Pushes with more than 10 refs (a `git push --tags` release) are refused; use the escape hatch. Not caught: deletions of remote-only refs through `--mirror` pruning (git never lists them on the pre-push stdin), ssh alias remotes, `insteadOf` rewrites to a proxy, and uppercase hostnames. `git push --no-verify` bypasses pre-push hooks entirely, so this guard is advisory; server-side, GitHub branch protection rules are the real mitigation, and `main` is protected — that is what rejected the incident's force update to `main`.
 
 ## Product and Source Names
 
