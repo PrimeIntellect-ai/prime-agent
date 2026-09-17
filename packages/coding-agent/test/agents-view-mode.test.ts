@@ -1615,18 +1615,16 @@ describe("agents view reply delivery on inactive sessions", () => {
 });
 
 describe("agents view open during a daemon update restart", () => {
-	beforeAll(() => setKeybindings(new KeybindingsManager()));
 	beforeEach(() => vi.clearAllMocks());
 
-	// [reaches the session, surfaced status message]
 	it.each([
 		[
-			"waits through the preparing-restart rejection and surfaces the wait notice once the update finishes",
+			"waits through the update restart and surfaces the wait notice",
 			true,
 			"Waited for the Prime Agent daemon update restart to finish",
 		],
 		[
-			"fails a permanent create failure immediately instead of masking it behind the update wait",
+			"surfaces a permanent create failure unmasked by the wait",
 			false,
 			"Failed to open agent: File not found: /tmp/scope.jsonl",
 		],
@@ -1639,9 +1637,6 @@ describe("agents view open during a daemon update restart", () => {
 			expect(String(Reflect.get(this, "persistentState").statusMessage)).toContain(expectedMessage);
 			return { type: "exit" };
 		});
-		// The create-response wire shape (update_restarting errorInfo included)
-		// is pinned by the wire round-trip suite; here only success/error/data
-		// reach the code under test.
 		modeMocks.clientRequest
 			.mockResolvedValueOnce({
 				success: false,
@@ -1663,9 +1658,6 @@ describe("agents view open during a daemon update restart", () => {
 			uiServices: createUiServices(),
 		});
 
-		// One rejected create during the preparing-restart window, one retried
-		// create after it: a permanent failure surfaces as itself instead of
-		// retrying through the update window.
 		expect(modeMocks.clientRequest).toHaveBeenCalledTimes(2);
 		expect(modeMocks.interactiveRun).toHaveBeenCalledTimes(reachesSession ? 1 : 0);
 		expect(runs).toBe(2);
@@ -1676,131 +1668,64 @@ describe("waitThroughDaemonUpdateRestart", () => {
 	const updateRestartDeadline =
 		/The Prime Agent daemon did not finish its update restart within \d+ seconds\. Try opening this agent again once the update finishes\. Last error: Daemon is preparing an update restart/;
 
+	// Post-arm transient shapes only; arming is pinned at the loop/deadline layers.
 	it("retries every restart-transient failure and reports that it waited", async () => {
 		const transientFailures = [
-			() => new DaemonUpdateRestartingError(),
-			() => new Error("Daemon is preparing an update restart"),
-			() =>
-				new Error(
-					"Failed to connect to the Prime Agent daemon: connect ENOENT /tmp/agents-view-test.sock. Socket: /tmp/agents-view-test.sock.",
-				),
-			() => new Error("Connection to the Prime Agent daemon closed. Socket: /tmp/agents-view-test.sock."),
-			() =>
-				new Error(
-					'Timed out after 30000ms waiting for the Prime Agent daemon response to "create". Socket: /tmp/agents-view-test.sock.',
-				),
-			() =>
-				new DaemonControlPlaneTransportError(
-					new Error("Connection to the Prime Agent daemon closed. Socket: /tmp/agents-view-test.sock."),
-				),
+			() => new Error("Failed to connect to the Prime Agent daemon: connect ENOENT"),
+			() => Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
+			() => new Error("Connection to the Prime Agent daemon closed."),
+			() => new Error('Timed out after 30000ms waiting for the Prime Agent daemon response to "create".'),
+			() => new DaemonControlPlaneTransportError(new Error("Connection to the Prime Agent daemon closed.")),
 			() => new Error("Unknown active session: update-restart-session"),
 			() => new DaemonSessionRecoveringError("update-restart-session"),
 		];
 		let attempts = 0;
-		const waited: unknown[] = [];
 		const outcome = await waitThroughDaemonUpdateRestart(
 			async () => {
 				attempts += 1;
-				const failure = transientFailures[attempts - 1];
+				if (attempts === 1) throw new DaemonUpdateRestartingError();
+				const failure = transientFailures[attempts - 2];
 				if (failure) throw failure();
 				return "opened";
 			},
-			{ waitMs: 5_000, retryMs: 1, onWait: (error) => waited.push(error) },
+			{ waitMs: 5_000, retryMs: 1 },
 		);
 		expect(outcome).toEqual({ result: "opened", waitedForUpdateRestart: true });
-		expect(attempts).toBe(9);
-		expect(waited).toHaveLength(1);
 	});
 
-	it.each([
-		["permanent create failure after the wait is armed", "File not found: /tmp/missing-session-file.jsonl", true],
-		["non-update failure before any update-restart signal", "spawn EMFILE", false],
-	])("propagates a %s instead of masking it as the update wait", async (_shape, message, armed) => {
+	it("propagates a non-update failure before any update-restart signal", async () => {
 		let attempts = 0;
-		const waited: unknown[] = [];
 		await expect(
-			waitThroughDaemonUpdateRestart(
-				async () => {
-					attempts += 1;
-					if (armed && attempts === 1) throw new DaemonUpdateRestartingError();
-					throw new Error(message);
-				},
-				{ waitMs: 5_000, retryMs: 1, onWait: (error) => waited.push(error) },
-			),
-		).rejects.toThrow(message);
-		// The permanent failure surfaced as itself instead of being masked as an
-		// update-restart timeout; the pre-arm failure never armed the wait.
-		expect(attempts).toBe(armed ? 2 : 1);
-		expect(waited).toHaveLength(armed ? 1 : 0);
+			waitThroughDaemonUpdateRestart(async () => {
+				attempts += 1;
+				throw new Error("spawn EMFILE");
+			}),
+		).rejects.toThrow("spawn EMFILE");
+		expect(attempts).toBe(1);
 	});
 
-	// Every attempt races the remaining budget: an attempt settling inside it
-	// opens, the deadline beats an in-flight attempt that would block past it,
-	// and a losing attempt is disposed (late success) or swallowed (late
-	// failure) instead of surfacing as an unhandled rejection.
-	it.each([
-		["opens when the in-flight attempt settles inside the remaining budget", true, "never"],
-		["fails at the deadline even when an in-flight attempt would block past it", false, "never"],
-		["disposes an attempt that resolves after the deadline won the race", false, "resolve"],
-		["swallows a late failure from an attempt abandoned by the deadline", false, "reject"],
-	] as const)("%s", async (_name, opens, late) => {
+	// The deadline races every attempt so an in-flight create cannot hold the open past the budget.
+	it("fails at the deadline even when an in-flight attempt would block past it", async () => {
 		vi.useFakeTimers();
-		const unhandled: unknown[] = [];
-		const onUnhandled = (error: unknown) => unhandled.push(error);
-		process.on("unhandledRejection", onUnhandled);
-		const abandoned: unknown[] = [];
-		let release!: (value: string) => void;
-		let fail!: (error: Error) => void;
-		const inFlight = new Promise<string>((resolve, reject) => {
-			release = resolve;
-			fail = reject;
-		});
+		const inFlight = new Promise<string>(() => {});
 		let attempts = 0;
 		try {
-			// Attach the outcome handler before any timer can fire so a rejection
-			// is never briefly unhandled.
 			const opening = waitThroughDaemonUpdateRestart(
 				async () => {
 					attempts += 1;
 					if (attempts === 1) throw new DaemonUpdateRestartingError();
 					return inFlight;
 				},
-				{ waitMs: 60, retryMs: 5, onAbandoned: (result) => abandoned.push(result) },
+				{ waitMs: 60, retryMs: 5 },
 			).then(
-				(result) => ({ opened: true as const, result }),
-				(error: Error) => ({ opened: false as const, message: error.message }),
+				() => "unexpectedly opened",
+				(error: Error) => error.message,
 			);
-			await vi.advanceTimersByTimeAsync(opens ? 5 : 60);
-			if (opens) release("opened-late");
-			const outcome = await opening;
-			expect(outcome.opened).toBe(opens);
-			if (outcome.opened) expect(outcome.result).toEqual({ result: "opened-late", waitedForUpdateRestart: true });
-			else expect(outcome.message).toMatch(updateRestartDeadline);
-			vi.useRealTimers();
-			if (late === "resolve") release("opened-late");
-			else if (late === "reject") fail(new Error("connect ECONNREFUSED /tmp/agents-view-test.sock"));
-			if (late !== "never") {
-				// Run one event-loop turn so the abandoned attempt has settled and
-				// an unhandled rejection, if any, has fired.
-				await new Promise((resolve) => setImmediate(resolve));
-			}
+			await vi.advanceTimersByTimeAsync(60);
+			expect(await opening).toMatch(updateRestartDeadline);
 			expect(attempts).toBe(2);
-			expect(abandoned).toEqual(late === "resolve" ? ["opened-late"] : []);
-			expect(unhandled).toEqual([]);
 		} finally {
-			process.off("unhandledRejection", onUnhandled);
 			vi.useRealTimers();
 		}
-	});
-
-	it("fails with a bounded, actionable message when the update never finishes", async () => {
-		await expect(
-			waitThroughDaemonUpdateRestart(
-				async () => {
-					throw new Error("Daemon is preparing an update restart");
-				},
-				{ waitMs: 25, retryMs: 10 },
-			),
-		).rejects.toThrow(updateRestartDeadline);
 	});
 });

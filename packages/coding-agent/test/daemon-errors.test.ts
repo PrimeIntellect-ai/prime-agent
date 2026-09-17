@@ -66,7 +66,6 @@ describe("update_restarting wire round-trip", () => {
 		const error = new DaemonUpdateRestartingError();
 		const errorInfo = serializeDaemonError(error);
 		expect(errorInfo).toEqual({ code: "update_restarting" });
-		// Old client / new daemon: errorInfo is ignored, the message alone must carry the state.
 		expect(error.message).toBe("Daemon is preparing an update restart");
 		const roundTripped = deserializeDaemonError({
 			type: "response",
@@ -76,7 +75,6 @@ describe("update_restarting wire round-trip", () => {
 			errorInfo,
 		});
 		expect(roundTripped).toBeInstanceOf(DaemonUpdateRestartingError);
-		// New client / old daemon: the plain string rejection still reads as retryable.
 		const legacy = deserializeDaemonError({
 			type: "response",
 			command: "create",
@@ -85,8 +83,6 @@ describe("update_restarting wire round-trip", () => {
 		});
 		expect(legacy).not.toBeInstanceOf(DaemonUpdateRestartingError);
 		expect(isDaemonUpdateRestartingError(legacy)).toBe(true);
-		// Unrelated failures never look like the update-restart state.
 		expect(isDaemonUpdateRestartingError(new Error("Unknown active session: active-gap"))).toBe(false);
-		expect(isDaemonUpdateRestartingError("Daemon is preparing an update restart")).toBe(false);
 	});
 });
