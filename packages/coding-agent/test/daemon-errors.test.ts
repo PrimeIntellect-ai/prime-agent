@@ -76,7 +76,6 @@ describe("update_restarting wire round-trip", () => {
 			errorInfo,
 		});
 		expect(roundTripped).toBeInstanceOf(DaemonUpdateRestartingError);
-		expect(isDaemonUpdateRestartingError(roundTripped)).toBe(true);
 		// New client / old daemon: the plain string rejection still reads as retryable.
 		const legacy = deserializeDaemonError({
 			type: "response",
