@@ -73,7 +73,7 @@ describe("daemon mode helpers", () => {
 			parentManager.appendSessionInfo("parent");
 			const parentSessionFile = parentManager.getSessionFile();
 			if (!parentSessionFile) throw new Error("Missing parent session file");
-			const artifactDir = parentManager.getSessionArtifactDir()!;
+			const childSessionDir = join(parentManager.getSessionArtifactDir()!, "child-1");
 			const createRuntime = vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => ({
 				session: makeRuntimeSession(options.sessionManager),
 				extensionsResult: { extensions: [], errors: [], runtime: {} } as unknown as Awaited<
@@ -125,7 +125,7 @@ describe("daemon mode helpers", () => {
 					id,
 					prompt: "complete and persist",
 					sessionName: "real-worker",
-					sessionDir: join(artifactDir, id),
+					sessionDir: join(parentManager.getSessionArtifactDir()!, id),
 					model: { provider: "test", id: "model" } as Model<Api>,
 					thinkingLevel: "off" as const,
 					serviceTier: null,
@@ -138,9 +138,6 @@ describe("daemon mode helpers", () => {
 					rlmMaxDepth: 4,
 					rlmParentNodeId: id,
 				});
-			// While the first admission is still in flight, a same-name spawn must
-			// fail closed at the daemon boundary instead of appending a duplicate
-			// durable ledger edge once both admissions settle.
 			const admission = spawn("child-1");
 			await expect(spawn("child-2")).rejects.toThrow('Agent name "real-worker" is unavailable');
 			const childRuntime = await admission;
@@ -173,7 +170,7 @@ describe("daemon mode helpers", () => {
 			// The registry is legacy read-only now: spawn and completion must land
 			// in the per-child display file, never in rlm-subagents.jsonl.
 			expect(existsSync(join(parentManager.getSessionArtifactDir()!, "rlm-subagents.jsonl"))).toBe(false);
-			const display = JSON.parse(readFileSync(join(artifactDir, "child-1", "rlm-subagent.json"), "utf8")) as Record<
+			const display = JSON.parse(readFileSync(join(childSessionDir, "rlm-subagent.json"), "utf8")) as Record<
 				string,
 				unknown
 			>;
@@ -183,6 +180,12 @@ describe("daemon mode helpers", () => {
 				status: "completed",
 				prompt: "complete and persist",
 			});
+			await host.deleteRlmSubagentRuntime?.("child-1", childRuntime.session);
+			await spawn("child-3");
+			const edgesAfter = await internals.rlmSpawnLedger().liveEdges();
+			const namedEdges = edgesAfter.filter((edge) => edge.name === "real-worker");
+			expect(namedEdges).toHaveLength(1);
+			expect(namedEdges[0]?.childId).toBe("child-3");
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}

@@ -552,17 +552,14 @@ describe("AgentSession rlm recursion", () => {
 			},
 		});
 		const internals = root as unknown as InspectableRlmSession & { _pendingRlmSubagentSessionNames: Set<string> };
+		const unavailable = formatAgentSessionNameUnavailable("slow-worker", root.rlmDepth + 1);
 		const spawned = await root.runRlmChild("slow admitting child", { name: "slow-worker" });
 		expect(internals._pendingRlmSubagentSessionNames.has("slow-worker")).toBe(true);
-		await expect(root.runRlmChild("racing spawn", { name: "slow-worker" })).rejects.toThrow(
-			formatAgentSessionNameUnavailable("slow-worker", root.rlmDepth + 1),
-		);
+		await expect(root.runRlmChild("racing spawn", { name: "slow-worker" })).rejects.toThrow(unavailable);
 		releaseAdmission.resolve();
 		await internals._activeRlmChildRuns.get(spawned.rlm_child_id)!.settlement!.promise;
 		expect(internals._pendingRlmSubagentSessionNames.has("slow-worker")).toBe(false);
-		await expect(root.runRlmChild("respawn while retained", { name: "slow-worker" })).rejects.toThrow(
-			formatAgentSessionNameUnavailable("slow-worker", root.rlmDepth + 1),
-		);
+		await expect(root.runRlmChild("respawn while retained", { name: "slow-worker" })).rejects.toThrow(unavailable);
 	});
 
 	it("makes an externally restored retained child listable and deletable", async () => {
