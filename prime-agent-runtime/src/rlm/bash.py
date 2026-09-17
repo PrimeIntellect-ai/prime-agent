@@ -2310,6 +2310,11 @@ _MAX_EVAL_SCAN_DEPTH = 10
 # split-spelled command word (`e\val`, `e'va'l`) still runs the builtin.
 _EVAL_GATE_STRIP = re.compile(r"""["'\\]""")
 
+# Alias expansion is iterated to a fixed point; each pass resolves at least one
+# link of an alias chain, and a definition is dropped once it has been used, so
+# a self-referential alias (`alias rm='rm -rf x'`) cannot grow without bound.
+_MAX_ALIAS_EXPANSION_PASSES = 8
+
 
 def _unquote_one_level(text: str) -> str:
     """Remove the outermost quoting layer from `text`.
@@ -3300,6 +3305,7 @@ class _RmShellWord:
     start: int
     end: int
     starts_command: bool  # first word of a fresh (sub)command context
+    splittable: bool = False  # carries an unquoted expansion, so it can split
 
 
 def _quote_span_end(command: str, start: int, end: int) -> int:
@@ -3372,9 +3378,11 @@ def _scan_shell_words(command: str) -> list[_RmShellWord]:
     skipped, and command substitution (`$(...)`, backticks) keeps its
     interior scanned as live commands because it executes; the substituted
     result itself stays in the enclosing word, so an operand carrying it
-    reads as unresolvable. Redirections are masked by the caller. This is
-    a conservative approximation, not a parse: anything it cannot represent
-    exactly ends up refused, never silently allowed.
+    reads as unresolvable. `splittable` marks a word holding an unquoted
+    expansion, which the shell splits into whatever words the value carries.
+    Redirections are masked by the caller. This is a conservative
+    approximation, not a parse: anything it cannot represent exactly ends up
+    refused, never silently allowed.
     """
     words: list[_RmShellWord] = []
 
@@ -3383,14 +3391,24 @@ def _scan_shell_words(command: str) -> list[_RmShellWord]:
         value: list[str] = []
         word_start = -1
         word_starts_command = False
+        word_splittable = False
         first_word_pending = starts_command
 
         def flush(starts_next_command: bool) -> None:
-            nonlocal word_start, first_word_pending
+            nonlocal word_start, word_splittable, first_word_pending
             if word_start != -1:
-                words.append(_RmShellWord("".join(value), word_start, i, word_starts_command))
+                words.append(
+                    _RmShellWord(
+                        "".join(value),
+                        word_start,
+                        i,
+                        word_starts_command,
+                        word_splittable,
+                    )
+                )
                 value.clear()
                 word_start = -1
+                word_splittable = False
                 first_word_pending = starts_next_command
             else:
                 first_word_pending = first_word_pending or starts_next_command
@@ -3457,6 +3475,7 @@ def _scan_shell_words(command: str) -> list[_RmShellWord]:
                 close = _matching_paren(command, i + 1, end)
                 scan_region(i + 2, close, starts_command=True)
                 value.append(command[i + 1 : close + 1])
+                word_splittable = True  # an unquoted substitution word-splits
                 i = close + 1
                 continue
             if ch == "`":
@@ -3465,8 +3484,11 @@ def _scan_shell_words(command: str) -> list[_RmShellWord]:
                     close = end - 1
                 scan_region(i + 1, close, starts_command=True)
                 value.append(command[i + 1 : close + 1])
+                word_splittable = True  # an unquoted substitution word-splits
                 i = close + 1
                 continue
+            if ch in "$`{}":
+                word_splittable = True  # unquoted, so it splits into any words
             value.append(ch)
             i += 1
         flush(False)
@@ -3578,11 +3600,12 @@ def _unresolvable_expansion_rm_reasons(words: list[_RmShellWord]) -> list[str]:
     unresolvable instead of guessed at. Fail closed."""
     reasons: list[str] = []
     for index, word in enumerate(words):
-        followers: list[str] = []
+        follower_words: list[_RmShellWord] = []
         for follower in words[index + 1 :]:
             if follower.starts_command:
                 break
-            followers.append(follower.value)
+            follower_words.append(follower)
+        followers = [follower.value for follower in follower_words]
         if not _expansion_is_resolvable(word.value):
             # The word expands at run time. In command position — first word,
             # after an assignment prefix, env/sudo-style words, keywords, or
@@ -3610,15 +3633,34 @@ def _unresolvable_expansion_rm_reasons(words: list[_RmShellWord]) -> list[str]:
                 )
         elif _is_rm_word(word.value):
             # An rm follower carrying unresolved expansion could expand to
-            # recursive-force flags or out-of-workspace paths.
-            for token in followers:
-                if not _expansion_is_resolvable(token):
+            # recursive-force flags or out-of-workspace paths. A follower the
+            # shell word-splits (`rm $flags /`) can supply those flags on its
+            # own, and a single-word expansion sharing the invocation with
+            # another operand (`rm "$flags" /outside`) can be that operand's
+            # flags, so both stay refused. A lone unresolvable operand with
+            # nothing but options around it (`rm "$file"`, `rm -f "$file"`,
+            # `rm -- "$file"`) cannot turn an rm into a recursive-force rm, so
+            # variable-based cleanup keeps running.
+            for follower in follower_words:
+                if _expansion_is_resolvable(follower.value):
+                    continue
+                if follower.splittable or any(
+                    other is not follower and _could_be_operand(other)
+                    for other in follower_words
+                ):
                     reasons.append(
-                        f"{token!r}: expands inside an rm invocation, so the"
-                        " flags or paths it produces cannot be checked"
+                        f"{follower.value!r}: expands inside an rm invocation,"
+                        " so the flags or paths it produces cannot be checked"
                     )
                     break
     return reasons
+
+
+def _could_be_operand(word: _RmShellWord) -> bool:
+    """True when rm could read the word as an operand: anything but an option
+    cluster or the `--` end-of-options marker (`-` alone is still an operand,
+    and rm reads the names from stdin for it)."""
+    return word.value == "-" or not word.value.startswith("-")
 
 
 # A quoted argument to `sh -c` (and friends) is a live command string, so
@@ -3702,6 +3744,15 @@ def _wrapped_payloads_hide_recursive_force_rm(
                 continue
             # Trap actions run in the same shell, so aliases apply.
             payload_parts.append(aliases.get(action.value, action.value))
+        elif "BASH_FUNC_" in word.value and "%%=" in word.value:
+            # An exported shell function travels in the environment
+            # (`env 'BASH_FUNC_rm%%=() { rm -rf /; }' bash -c 'rm x'`), where
+            # the child shell imports it and runs the body under a command name
+            # the literal scan reads as harmless: scan the body as its own
+            # command text, with the `() {...}` wrapper stripped.
+            body = word.value.split("%%=", 1)[1]
+            body = re.sub(r"^\s*\(\s*\)\s*(?:\{|\()", "", body)
+            payload_parts.append(re.sub(r"(?:\}|\))\s*$", "", body))
         else:
             is_shell = os.path.basename(word.value) in _SHELL_DASH_C_INTERPRETERS
             if not is_shell and _expansion_is_resolvable(word.value):
@@ -3743,6 +3794,16 @@ def _wrapped_payloads_hide_recursive_force_rm(
         if _find_recursive_force_rm_invocations(payload):
             return True
         if _wrapped_payloads_hide_recursive_force_rm(payload, depth + 1, aliases=aliases):
+            return True
+        # The shell a payload runs in parses its own input one command at a
+        # time, so an alias the payload defines on an earlier line does expand
+        # there (`sh -c 'alias rm=...\nrm x'`), even though the enclosing
+        # command's parse unit never sees it.
+        expanded = _expand_effective_aliases(payload)
+        if expanded is not None and (
+            _find_recursive_force_rm_invocations(expanded)
+            or _wrapped_payloads_hide_recursive_force_rm(expanded, depth + 1, aliases=aliases)
+        ):
             return True
     return False
 
@@ -4062,6 +4123,29 @@ def _resolve_rm_operand(operand: str, workspace_root: str, cwd: str) -> str | No
     return None
 
 
+def _arithmetic_substitution_end(command: str, start: int) -> int:
+    """Index just past the `$((...))` arithmetic substitution starting at
+    `start` (quote- and escape-aware, so a quoted paren cannot keep the skip
+    open past a real heredoc); unterminated input scans to the end."""
+    depth = 2
+    i = start + 3
+    n = len(command)
+    while i < n and depth > 0:
+        ch = command[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch in "'\"":
+            i = _quote_span_end(command, i, n)
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        i += 1
+    return i
+
+
 def _heredoc_body_spans(command: str) -> list[tuple[int, int, bool]]:
     """Body extents of every parsable here-document in `command`.
 
@@ -4082,25 +4166,7 @@ def _heredoc_body_spans(command: str) -> list[tuple[int, int, bool]]:
             continue
         if ch == "$" and command[i + 1 : i + 3] == "((":
             # Arithmetic substitution: its `<<` is a shift, not a heredoc.
-            # Skip to the matching `))` — quote- and escape-aware, so a
-            # quoted paren cannot keep the skip open past real heredocs;
-            # unterminated input skips to the end.
-            depth = 2
-            j = i + 3
-            while j < n and depth > 0:
-                inner = command[j]
-                if inner == "\\":
-                    j += 2
-                    continue
-                if inner in "'\"":
-                    j = _quote_span_end(command, j, n)
-                    continue
-                if inner == "(":
-                    depth += 1
-                elif inner == ")":
-                    depth -= 1
-                j += 1
-            i = j
+            i = _arithmetic_substitution_end(command, i)
             continue
         if ch == "#" and (i == 0 or command[i - 1] in " \t\n;&|(){}"):
             while i < n and command[i] != "\n":
@@ -4280,6 +4346,286 @@ def _stdin_shell_feed_texts(prepared: str, words: list[_RmShellWord]) -> list[tu
     return feeds
 
 
+def _shell_word_end(command: str, start: int) -> int:
+    """Index just past the shell word starting at `start`: quote- and
+    escape-aware, and stopping at whitespace and unquoted shell operators."""
+    i = start
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if ch in " \t\n;&|<>()":
+            break
+        if ch in "'\"":
+            i = _quote_span_end(command, i, n)
+            continue
+        if ch == "\\":
+            i += 2
+            continue
+        i += 1
+    return i
+
+
+def _inline_shell_text_spans(
+    command: str,
+) -> tuple[list[tuple[int, int, int]], list[tuple[int, int, int]]]:
+    """Spans of the shell text a command hands to another shell inline.
+
+    Returns `(here_strings, process_substitutions)`. A here-string span is
+    `(operator_start, operand_start, operand_end)`: `sh <<< 'rm -rf x'` feeds
+    the operand word to the interpreter's stdin. A process-substitution span is
+    `(word_start, interior_start, interior_end)`: `bash <(printf ...)` runs the
+    producer's output as a script file. Both are found outside quoted spans,
+    comments, and here-document bodies, so a command that only prints an
+    operator keeps it as data."""
+    here_strings: list[tuple[int, int, int]] = []
+    substitutions: list[tuple[int, int, int]] = []
+    bodies = _heredoc_body_spans(command)
+    body_index = 0
+    i = 0
+    n = len(command)
+    while i < n:
+        while body_index < len(bodies) and bodies[body_index][1] <= i:
+            body_index += 1
+        if body_index < len(bodies) and bodies[body_index][0] <= i:
+            i = bodies[body_index][1]  # a here-document body never runs inline
+            continue
+        ch = command[i]
+        if ch in "'\"":
+            i = _quote_span_end(command, i, n)
+            continue
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "#" and (i == 0 or command[i - 1] in " \t\n;&|(){}"):
+            while i < n and command[i] != "\n":
+                i += 1
+            continue
+        if ch == "$" and command[i + 1 : i + 3] == "((":
+            i = _arithmetic_substitution_end(command, i)
+            continue
+        if ch == "<" and command[i + 1 : i + 2] == "<":
+            if command[i + 2 : i + 3] == "<":
+                operand_start = i + 3
+                while operand_start < n and command[operand_start] in " \t":
+                    operand_start += 1
+                operand_end = _shell_word_end(command, operand_start)
+                if operand_end > operand_start:
+                    here_strings.append((i, operand_start, operand_end))
+                i = max(operand_end, i + 3)
+                continue
+            i += 2  # a here-document: its body spans were computed above
+            continue
+        if ch == "<" and command[i + 1 : i + 2] == "(":
+            close = _matching_paren(command, i + 1, n)
+            substitutions.append((i, i + 2, close))
+            i = close + 1
+            continue
+        i += 1
+    return here_strings, substitutions
+
+
+def _static_here_string_text(operand: str) -> str | None:
+    """The literal text a here-string feeds to a shell's stdin, or None when
+    the shell builds that text from expansion the guard cannot resolve."""
+    if len(operand) >= 2 and operand[0] == operand[-1] and operand[0] in "'\"":
+        inner = operand[1:-1]
+        if operand[0] == '"' and any(ch in inner for ch in "$`"):
+            return None  # double quotes still expand
+        return inner
+    if any(ch in operand for ch in "$`{}'\"\\"):
+        return None
+    return operand
+
+
+def _stdin_shell_interpreter_index(
+    words: list[_RmShellWord], operand_start: int, operand_end: int
+) -> int | None:
+    """Index of the word that reads a here-string operand from its stdin: a
+    shell interpreter with no `-c` payload and no script argument (`-s` keeps
+    stdin live with positional arguments), or a word that expands at run time
+    and could be one."""
+    for index, word in enumerate(words):
+        if operand_start <= word.start and word.end <= operand_end:
+            continue  # the operand word itself
+        is_shell = os.path.basename(word.value) in _SHELL_DASH_C_INTERPRETERS
+        if not (is_shell or not _expansion_is_resolvable(word.value)):
+            continue
+        has_c = has_s = has_argument = False
+        for follower in words[index + 1 :]:
+            if follower.starts_command:
+                break
+            if operand_start <= follower.start and follower.end <= operand_end:
+                continue  # the here-string is stdin, not an argument
+            token = follower.value
+            if token.startswith("-") and token != "-":
+                if not token.startswith("--"):
+                    has_c = has_c or "c" in token[1:]
+                    has_s = has_s or "s" in token[1:]
+                continue
+            has_argument = True
+            break
+        if has_c or (has_argument and not has_s):
+            continue
+        return index
+    return None
+
+
+def _here_string_shell_feed_texts(
+    command: str, words: list[_RmShellWord]
+) -> tuple[list[tuple[str, int]], list[str]]:
+    """(feed texts, refusal reasons) for here-strings a shell executes.
+
+    `sh <<< 'rm -rf x'` hands the operand to the interpreter's stdin exactly
+    like `printf ... | sh`, so a bare stdin shell's operand is scanned as
+    command text. A data consumer (`cat <<< ...`) keeps its operand as data.
+    An operand the shell builds from expansion (`sh <<< "$payload"`) runs text
+    the guard cannot check statically, so it is refused."""
+    feeds: list[tuple[str, int]] = []
+    reasons: list[str] = []
+    if "<<<" not in command:
+        return feeds, reasons  # cheap gate: no here-string to check
+    here_strings, _substitutions = _inline_shell_text_spans(command)
+    for _operator, operand_start, operand_end in here_strings:
+        interpreter = _stdin_shell_interpreter_index(words, operand_start, operand_end)
+        if interpreter is None:
+            continue
+        operand = command[operand_start:operand_end]
+        literal = _static_here_string_text(operand)
+        if literal is None:
+            reasons.append(
+                f"{operand!r}: a here-string feeding a shell names the text it"
+                " runs through expansion, which the guard cannot resolve"
+            )
+            continue
+        if literal.strip():
+            feeds.append((literal, interpreter))
+    return feeds, reasons
+
+
+def _process_substitution_script_reasons(
+    command: str, words: list[_RmShellWord], runner_indices: list[int]
+) -> list[str]:
+    """Refusal reasons for process substitutions a script-running word consumes.
+
+    `bash <(printf 'rm -rf /\n')` runs the producer's output as a script file,
+    so the text the shell executes is built at run time and cannot be checked:
+    refuse it. A data argument (`cat <(...)`, `diff <(...) <(...)`) is not a
+    script, and a runner with its own `-c` payload or script argument keeps the
+    substitution as a positional argument, so both stay untouched."""
+    reasons: list[str] = []
+    if "<(" not in command:
+        return reasons  # cheap gate: no process substitution to check
+    _here_strings, substitutions = _inline_shell_text_spans(command)
+    for word_start, interior_start, interior_end in substitutions:
+        for index in runner_indices:
+            word = words[index]
+            if word.start >= word_start:
+                continue
+            has_c = has_argument = False
+            for follower in words[index + 1 :]:
+                if follower.starts_command:
+                    break
+                if word_start <= follower.start and follower.end <= interior_end:
+                    continue  # the substitution is the script argument itself
+                token = follower.value
+                if token.startswith("-") and token != "-":
+                    if not token.startswith("--"):
+                        has_c = has_c or "c" in token[1:]
+                    continue
+                has_argument = True
+                break
+            if has_c or has_argument:
+                continue
+            reasons.append(
+                f"{command[word_start : interior_end + 1]!r}: hands this shell a"
+                " process substitution whose produced script text the guard"
+                " cannot check"
+            )
+            break
+    return reasons
+
+
+def _rm_feed_reasons(
+    text: str,
+    prepared: str,
+    words: list[_RmShellWord],
+    *,
+    workspace_root: str,
+    starts_for: Callable[[int], list[str]],
+    reassigns_home: bool,
+    reassigns_pwd: bool,
+    cdpath_untrackable: bool,
+) -> list[str]:
+    """Refusal reasons for command text a shell is handed at run time.
+
+    Pipelines feeding a bare stdin shell run the producer's output as
+    commands, and a here-string operand is the same text for an interpreter's
+    stdin, so both are scanned against the interpreter's tracked directories
+    (`starts_for`). A process substitution consumed as a script argument is
+    refused instead: its produced script text cannot be checked. The fed shell
+    parses its input one command at a time, so alias definitions inside the fed
+    text substitute command words there too."""
+    reasons: list[str] = []
+    reasons.extend(
+        _process_substitution_script_reasons(
+            text, words, _script_runner_word_indices(words)
+        )
+    )
+    here_feeds, here_reasons = _here_string_shell_feed_texts(text, words)
+    reasons.extend(here_reasons)
+    for feed_text, interp_index in (
+        *_stdin_shell_feed_texts(prepared, words),
+        *here_feeds,
+    ):
+        for variant in (feed_text, _interpret_shell_escapes(feed_text)):
+            # A fed text can itself wrap commands in heredocs; split it
+            # with the runner-aware scanner before masking, so the
+            # blanket redirection masking cannot blank an interpreter-fed
+            # body here (the blanked outer still masks > redirects).
+            feed_stack = [variant]
+            while feed_stack:
+                fed = feed_stack.pop()
+                expanded_fed = _expand_effective_aliases(fed)
+                if expanded_fed is not None:
+                    feed_stack.append(expanded_fed)
+                fed_outer, inner_texts = _rm_guard_scan_texts(fed)
+                feed_stack.extend(inner_texts)
+                fed_prepared = _mask_shell_redirections(fed_outer)
+                fed_words = _scan_shell_words(fed_prepared)
+                if _wrapped_payloads_hide_recursive_force_rm(
+                    fed_prepared, words=fed_words
+                ):
+                    raise DestructiveRmRefusalError(_format_rm_wrapper_refusal())
+                reasons.extend(
+                    _process_substitution_script_reasons(
+                        fed_outer, fed_words, _script_runner_word_indices(fed_words)
+                    )
+                )
+                fed_invocations = _find_rf_rm_invocations_in_words(fed_words)
+                if fed_invocations:
+                    for start in starts_for(interp_index):
+                        fed_tracked_at = _tracked_cwd_at_words(
+                            fed_prepared,
+                            fed_words,
+                            start,
+                            home_untrackable=reassigns_home,
+                            pwd_untrackable=reassigns_pwd,
+                            cdpath_untrackable=cdpath_untrackable,
+                        )
+                        reasons.extend(
+                            _rm_invocation_reasons(
+                                fed_words,
+                                fed_invocations,
+                                workspace_root,
+                                fed_tracked_at,
+                                reassigns_home,
+                                reassigns_pwd,
+                            )
+                        )
+                reasons.extend(_unresolvable_expansion_rm_reasons(fed_words))
+    return reasons
+
+
 def _rm_guard_scan_texts(normalized: str) -> tuple[str, list[str]]:
     """Scan texts for the rm guard: the command with here-document bodies
     blanked, plus each body that can reach a script runner as its own
@@ -4430,6 +4776,135 @@ def _rm_invocation_reasons(
     return reasons
 
 
+def _expand_effective_aliases(text: str) -> str | None:
+    """`text` with every command word an alias replaces substituted by its
+    body, or None when no alias applies.
+
+    Aliases substitute command text at parse time, so a later line can run a
+    command the source never names (`alias del='rm'` then `del -rf /outside`).
+    Only definitions the shell can still apply count: it reads one complete
+    command at a time, so a definition only reaches a command on a *later*
+    line, and a definition is dropped once its name has been substituted so a
+    self-referential alias cannot grow without bound. The substitution is
+    iterated (up to _MAX_ALIAS_EXPANSION_PASSES), so alias chains resolve."""
+    if "alias" not in text:
+        return None  # cheap gate: no definition can apply
+    current = text
+    for _pass in range(_MAX_ALIAS_EXPANSION_PASSES):
+        words = _scan_shell_words(current)
+        definitions: list[tuple[int, str, str, tuple[int, int]]] = []
+        edits: list[tuple[int, int, str]] = []
+        for index, word in enumerate(words):
+            if word.value in ("alias", "unalias"):
+                line_end = current.find("\n", word.end)
+                if line_end == -1:
+                    continue  # a same-line definition parses before it applies
+                for follower in words[index + 1 :]:
+                    if follower.starts_command:
+                        break
+                    if word.value == "unalias":
+                        definitions.append(
+                            (line_end, follower.value, "", (follower.start, follower.start))
+                        )
+                        continue
+                    name, separator, body = follower.value.partition("=")
+                    if separator and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                        definitions.append(
+                            (line_end, name, body, (follower.start, follower.end))
+                        )
+                continue
+            if not word.starts_command:
+                continue
+            chosen: tuple[int, str, str, tuple[int, int]] | None = None
+            for definition in definitions:
+                if definition[0] >= word.start:
+                    break
+                if definition[1] == word.value:
+                    chosen = definition
+            if chosen is None:
+                continue
+            if not chosen[2]:
+                continue  # unaliased (or an empty body): nothing to substitute
+            edits.append((word.start, word.end, chosen[2]))
+            start, end = chosen[3]
+            edits.append((start, end, " " * (end - start)))
+        if not edits:
+            return current if current != text else None
+        for start, end, replacement in reversed(edits):
+            current = current[:start] + replacement + current[end:]
+    return current
+
+
+def _alias_expanded_rm_reasons(
+    text: str,
+    *,
+    workspace_root: str,
+    starts: list[str],
+    reassigns_home: bool,
+    reassigns_pwd: bool,
+    cdpath_untrackable: bool,
+) -> list[str]:
+    """Refusal reasons for the command text with effective aliases substituted.
+
+    The expanded text is scanned as its own command against every directory the
+    invocation may run in: an alias can turn `del victim` into `rm -rf victim`,
+    so the text the shell actually runs must pass the same operand checks. An
+    alias body that wraps rm (`alias wipe='sh -c "rm -rf x"'`) is refused like
+    any other wrapper payload."""
+    expanded = _expand_effective_aliases(text)
+    if expanded is None:
+        return []
+    prepared = _mask_shell_redirections(expanded)
+    words = _scan_shell_words(prepared)
+    if _wrapped_payloads_hide_recursive_force_rm(prepared, words=words):
+        raise DestructiveRmRefusalError(_format_rm_wrapper_refusal())
+    reasons: list[str] = []
+    home = reassigns_home or _command_reassigns_env(words, "HOME")
+    pwd = reassigns_pwd or _command_reassigns_env(words, "PWD")
+    cdpath = cdpath_untrackable or _command_reassigns_env(words, "CDPATH")
+    invocations = _find_rf_rm_invocations_in_words(words)
+    for start in starts:
+        reasons.extend(
+            _rm_invocation_reasons(
+                words,
+                invocations,
+                workspace_root,
+                _tracked_cwd_at_words(
+                    prepared,
+                    words,
+                    start,
+                    home_untrackable=home,
+                    pwd_untrackable=pwd,
+                    cdpath_untrackable=cdpath,
+                ),
+                home,
+                pwd,
+            )
+        )
+    reasons.extend(_unresolvable_expansion_rm_reasons(words))
+    return reasons
+
+
+def _shell_startup_env_reasons(words: list[_RmShellWord]) -> list[str]:
+    """Refusal reasons for assignments that point a child shell's startup at
+    text the guard cannot check.
+
+    Non-interactive bash sources `$BASH_ENV` before it runs a command, so
+    `BASH_ENV=file bash -c ...` executes a file the guard never sees (the spawn
+    already strips an inherited `BASH_ENV`). Exported shell functions travel
+    through the environment the same way; their bodies are scanned as wrapper
+    payloads by _wrapped_payloads_hide_recursive_force_rm."""
+    reasons: list[str] = []
+    for word in words:
+        name, separator, value = word.value.partition("=")
+        if separator and name == "BASH_ENV" and value:
+            reasons.append(
+                f"{word.value!r}: points a child shell's startup file at a path"
+                " whose commands the guard cannot check"
+            )
+    return reasons
+
+
 def _guard_destructive_rm(command: str, allow_destructive_rm: bool) -> None:
     """Refuse recursive-force rm invocations whose operands escape the
     workspace or name protected paths. The word scan is pure string work and
@@ -4463,6 +4938,7 @@ def _guard_destructive_rm(command: str, allow_destructive_rm: bool) -> None:
     if _wrapped_payloads_hide_recursive_force_rm(prepared, words=words):
         raise DestructiveRmRefusalError(_format_rm_wrapper_refusal())
     invocations = _find_rf_rm_invocations_in_words(words)
+    runner_indices = _script_runner_word_indices(words)
     reassigns_home = _command_reassigns_env(words, "HOME")
     reassigns_pwd = _command_reassigns_env(words, "PWD")
     if cwd is None:
@@ -4487,57 +4963,46 @@ def _guard_destructive_rm(command: str, allow_destructive_rm: bool) -> None:
             )
         )
         reasons.extend(_unresolvable_expansion_rm_reasons(words))
+        if runner_indices:
+            # A command-level BASH_ENV points a child shell's startup file at a
+            # path whose commands the guard never sees (the spawn already
+            # strips an inherited value).
+            reasons.extend(_shell_startup_env_reasons(words))
+        # Aliases substitute command text at parse time, so a later line can
+        # run a command the source never names.
+        reasons.extend(
+            _alias_expanded_rm_reasons(
+                outer_text,
+                workspace_root=workspace_root,
+                starts=[workspace_root],
+                reassigns_home=reassigns_home,
+                reassigns_pwd=reassigns_pwd,
+                cdpath_untrackable=cdpath_untrackable,
+            )
+        )
         # The bodies run wherever the outer command has relocated to: resolve
         # them against every script runner's tracked directory (any escape
         # refuses), and inherit the outer HOME/PWD reassignments.
         runner_starts = list(
             dict.fromkeys(
-                candidate
-                for word_index in _script_runner_word_indices(words)
-                for candidate in tracked_at[word_index]
+                candidate for word_index in runner_indices for candidate in tracked_at[word_index]
             )
         )
         # Pipelines feeding a bare stdin shell run the producer's output as
-        # commands: scan that text against the interpreter's tracked state.
-        for feed_text, interp_index in _stdin_shell_feed_texts(prepared, words):
-            for variant in (feed_text, _interpret_shell_escapes(feed_text)):
-                # A fed text can itself wrap commands in heredocs; split it
-                # with the runner-aware scanner before masking, so the
-                # blanket redirection masking cannot blank an interpreter-fed
-                # body here (the blanked outer still masks > redirects).
-                feed_stack = [variant]
-                while feed_stack:
-                    text = feed_stack.pop()
-                    variant_outer, inner_texts = _rm_guard_scan_texts(text)
-                    feed_stack.extend(inner_texts)
-                    feed_prepared = _mask_shell_redirections(variant_outer)
-                    feed_words = _scan_shell_words(feed_prepared)
-                    if _wrapped_payloads_hide_recursive_force_rm(
-                        feed_prepared, words=feed_words
-                    ):
-                        raise DestructiveRmRefusalError(_format_rm_wrapper_refusal())
-                    feed_invocations = _find_rf_rm_invocations_in_words(feed_words)
-                    if feed_invocations:
-                        for start in tracked_at[interp_index]:
-                            feed_tracked_at = _tracked_cwd_at_words(
-                                feed_prepared,
-                                feed_words,
-                                start,
-                                home_untrackable=reassigns_home,
-                                pwd_untrackable=reassigns_pwd,
-                                cdpath_untrackable=cdpath_untrackable,
-                            )
-                            reasons.extend(
-                                _rm_invocation_reasons(
-                                    feed_words,
-                                    feed_invocations,
-                                    workspace_root,
-                                    feed_tracked_at,
-                                    reassigns_home,
-                                    reassigns_pwd,
-                                )
-                            )
-                    reasons.extend(_unresolvable_expansion_rm_reasons(feed_words))
+        # commands, and a here-string hands a bare stdin shell the text it
+        # runs: scan both against the interpreter's tracked state.
+        reasons.extend(
+            _rm_feed_reasons(
+                outer_text,
+                prepared,
+                words,
+                workspace_root=workspace_root,
+                starts_for=lambda index: tracked_at[index],
+                reassigns_home=reassigns_home,
+                reassigns_pwd=reassigns_pwd,
+                cdpath_untrackable=cdpath_untrackable,
+            )
+        )
     # ---- body passes ----
     # A body can itself wrap commands in heredocs; split it with the
     # runner-aware scanner before masking, so the blanket redirection
@@ -4575,6 +5040,32 @@ def _guard_destructive_rm(command: str, allow_destructive_rm: bool) -> None:
         scan_queue.extend(
             (text, body_reassigns_home, body_reassigns_pwd, body_cdpath)
             for text in inner_body_texts
+        )
+        # A body can itself feed a shell inline: a pipeline producer or a
+        # here-string inside it hands that shell text to run.
+        reasons.extend(
+            _rm_feed_reasons(
+                body_outer,
+                body_prepared,
+                body_words,
+                workspace_root=workspace_root,
+                starts_for=lambda _index: runner_starts or [workspace_root],
+                reassigns_home=body_reassigns_home,
+                reassigns_pwd=body_reassigns_pwd,
+                cdpath_untrackable=body_cdpath,
+            )
+        )
+        # A body runs in its own shell, so aliases it defines and invokes on a
+        # later line substitute command text the body never names.
+        reasons.extend(
+            _alias_expanded_rm_reasons(
+                body_outer,
+                workspace_root=workspace_root,
+                starts=runner_starts or [workspace_root],
+                reassigns_home=body_reassigns_home,
+                reassigns_pwd=body_reassigns_pwd,
+                cdpath_untrackable=body_cdpath,
+            )
         )
         body_invocations = _find_rf_rm_invocations_in_words(body_words)
         if not body_invocations:
@@ -4752,6 +5243,11 @@ def _child_env() -> dict[str, str]:
     # smuggle an unscanned startup file past the guards.
     env.pop("BASH_ENV", None)
     env.pop("ENV", None)
+    # Bash also imports exported shell functions from `BASH_FUNC_name%%`
+    # entries in its environment, which would run under a command name the
+    # guards read literally (`BASH_FUNC_rm%%=() { rm -rf /; }` shadows rm).
+    for name in [name for name in env if name.startswith("BASH_FUNC_")]:
+        env.pop(name, None)
     return env
 
 

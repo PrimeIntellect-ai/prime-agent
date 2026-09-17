@@ -1029,6 +1029,52 @@ class RmExpansionDetectionTest(unittest.TestCase):
                     bash_module._unresolvable_expansion_rm_reasons(words), []
                 )
 
+    def test_lone_expansion_operands_are_not_flagged(self):
+        # A quoted single-word expansion with nothing but options around it
+        # cannot turn the invocation into recursive-force rm: `rm "$file"` and
+        # `rm -f "$file"` delete one resolved path non-recursively.
+        for command in [
+            'rm "$file"',
+            'rm -f "$file"',
+            'rm -- "$file"',
+            'rm -f "$a" -v',
+            "rm '$file'",
+        ]:
+            with self.subTest(command=command):
+                words = bash_module._scan_shell_words(command)
+                self.assertEqual(
+                    bash_module._unresolvable_expansion_rm_reasons(words), []
+                )
+
+    def test_expansions_that_can_supply_flags_stay_flagged(self):
+        for command in [
+            "rm $flags",
+            "flags='-rf /outside'; rm $flags",
+            'rm "$flags" /outside',
+            'rm "$file" other',
+            "rm -f $flags",
+        ]:
+            with self.subTest(command=command):
+                words = bash_module._scan_shell_words(command)
+                self.assertTrue(
+                    bash_module._unresolvable_expansion_rm_reasons(words), command
+                )
+
+    def test_word_splitting_is_tracked_from_the_source(self):
+        for command, expected in [
+            ("rm $flags", True),
+            ('rm "$flags"', False),
+            ("rm '$flags'", False),
+            ("rm $((1 + 1))", True),
+            ("rm $(pwd)", True),
+            ("rm `pwd`", True),
+        ]:
+            with self.subTest(command=command):
+                words = bash_module._scan_shell_words(command)
+                # A substitution scans its interior first, so the enclosing
+                # word is the last one appended.
+                self.assertEqual(words[-1].splittable, expected)
+
 
 class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -2185,6 +2231,238 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
         result = await bash("printf 'cat <<EOF\nrm -rf /printed-not-run\nEOF' | sh")
         self.assertEqual(result.exit_code, 0)
         self.assertIn("rm -rf /printed-not-run", result.output)
+
+
+    async def test_refuses_here_strings_a_shell_runs(self):
+        # `sh <<< 'rm -rf x'` hands the operand to the interpreter's stdin
+        # exactly like `printf ... | sh`, so the operand is live command text.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            f"sh <<< 'rm -rf {outside}'",
+            f'bash <<< "rm -rf {outside}"',
+            f"sh -s <<< 'rm -rf {outside}'",
+            f"sudo sh <<< 'rm -rf {outside}'",
+            f"echo hi\nsh <<< 'rm -rf {outside}'",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # An operand the shell builds from expansion runs text the guard
+        # cannot check.
+        with self.assertRaises(DestructiveRmRefusalError) as caught:
+            bash('sh <<< "$payload"')
+        self.assertIn("here-string", str(caught.exception))
+        # A data consumer keeps the operand as data, and a script argument
+        # makes the interpreter ignore stdin.
+        result = await bash("cat <<< 'rm -rf /printed-not-run'")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("rm -rf /printed-not-run", result.output)
+        Path(self._tracked("s.sh")).write_text("echo hi\n")
+        result = await bash("sh s.sh <<< 'rm -rf /printed-not-run'")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("hi", result.output)
+
+    async def test_allows_variable_based_non_recursive_rm(self):
+        # The unresolvable-operand refusal targets recursive-force rm: a lone
+        # expansion operand with nothing but options around it cannot supply
+        # the flags, so variable-based cleanup keeps running.
+        self._make_tree()
+        for command in ['file=file.txt; rm "$file"', 'file=file.txt; rm -f "$file"']:
+            with self.subTest(command=command):
+                Path(self._tracked("file.txt")).write_text("x\n")
+                result = await bash(command)
+                self.assertEqual(result.exit_code, 0)
+                self.assertFalse(self._tracked("file.txt").exists())
+        # A word-splitting expansion can supply the flags itself, and a
+        # single-word expansion sharing the invocation with another operand can
+        # be that operand's flags.
+        outside = self._outside_target()
+        for command in [
+            f"flags='-rf {outside}'; rm $flags",
+            f'flags=-rf; rm "$flags" {outside}',
+            f'rm "$file" {outside}',
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+
+    async def test_refuses_process_substitution_scripts(self):
+        # `bash <(printf 'rm -rf x')` runs the producer's output as a script
+        # file, so the text the shell executes is built at run time.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "bash <(printf 'rm -rf %s\\n')" % outside,
+            "sh <(echo 'rm -rf %s')" % outside,
+            "source <(printf 'rm -rf %s\\n')" % outside,
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError) as caught:
+                    bash(command)
+                self.assertIn("process substitution", str(caught.exception))
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # A data argument is not a script, and a runner with its own -c payload
+        # takes the substitution as a positional argument.
+        result = await bash("cat <(printf 'rm -rf /printed-not-run\\n')")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("rm -rf /printed-not-run", result.output)
+        result = await bash("bash -c 'echo hi' <(printf 'rm -rf /printed-not-run\\n')")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("hi", result.output)
+
+    async def test_refuses_exported_shell_function_bodies(self):
+        # An exported function travels in `BASH_FUNC_name%%` environment
+        # entries: the child shell imports it and runs the body under a command
+        # name the literal scan reads as harmless.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            f"env 'BASH_FUNC_rm%%=() {{ /bin/rm -rf {outside}; }}' bash -c 'rm harmless'",
+            f"env 'BASH_FUNC_wipe%%=() {{ /bin/rm -rf {outside}; }}' bash -c 'wipe'",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError) as caught:
+                    bash(command)
+                self.assertIn("wraps rm in", str(caught.exception))
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # A benign exported function keeps running.
+        result = await bash("env 'BASH_FUNC_greet%%=() { echo hi; }' bash -c 'greet'")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("hi", result.output)
+
+    async def test_exported_function_entries_are_not_inherited(self):
+        # The same entry in the kernel environment would be imported by every
+        # spawned shell, so the spawn strips it.
+        outside = self._outside_target()
+        Path(outside, "victim").mkdir()
+        Path(outside, "victim", "file.txt").write_text("keep\n")
+        with mock.patch.dict(
+            os.environ, {"BASH_FUNC_rm%%": f"() {{ /bin/rm -rf {outside}/victim; }}"}
+        ):
+            child_env = bash_module._child_env()
+            self.assertNotIn("BASH_FUNC_rm%%", child_env)
+            result = await bash("rm -f harmless")
+        self.assertEqual(result.exit_code, 0)
+        self.assertTrue(Path(outside, "victim", "file.txt").exists())
+
+    async def test_refuses_command_level_bash_env_startup_files(self):
+        # Non-interactive bash sources $BASH_ENV before it runs anything, so a
+        # command-level assignment points the child shell at a file the guard
+        # never sees (the spawn only strips the inherited value).
+        self._make_tree()
+        outside = self._outside_target()
+        Path(outside, "victim").mkdir()
+        Path(outside, "victim", "file.txt").write_text("keep\n")
+        startup = str(self._tracked("startup.sh"))
+        Path(startup).write_text(f"rm -rf {outside}/victim\n")
+        for command in [
+            f"BASH_ENV={startup} bash -c 'echo hi'",
+            f"env BASH_ENV={startup} bash -c 'echo hi'",
+            f"export BASH_ENV={startup}; bash -c 'echo hi'",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError) as caught:
+                    bash(command)
+                self.assertIn("startup file", str(caught.exception))
+                self.assertTrue(Path(outside, "victim", "file.txt").exists())
+        # Without a shell that reads it, the value is an ordinary variable.
+        result = await bash("BASH_ENV=startup.sh echo hi")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("hi", result.output)
+
+    async def test_refuses_alias_substituted_invocations(self):
+        # Aliases substitute command text at parse time, so a later line can
+        # run a command the source never names. The shell reads one complete
+        # command at a time, so a definition does not reach commands on its
+        # own line.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "shopt -s expand_aliases\nalias rm='rm -rf %s'\nrm harmless" % outside,
+            "shopt -s expand_aliases\nalias del='rm'\ndel -rf %s" % outside,
+            "shopt -s expand_aliases\nalias del='rm -rf %s'\ndel a\ndel b" % outside,
+            "shopt -s expand_aliases\nalias a='rm'\nalias b='a -rf %s'\nb x" % outside,
+            'shopt -s expand_aliases\nalias wipe=\'sh -c "rm -rf %s"\'\nwipe' % outside,
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # An alias body that hides no recursive-force rm keeps running: the
+        # kernel spawns the command inside one brace group, so bash itself
+        # reads it as a single parse unit and never expands the alias there.
+        result = await bash(
+            "shopt -s expand_aliases\nalias ll='echo hi'\nll || echo no-expansion"
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("no-expansion", result.output)
+        result = await bash(
+            f"shopt -s expand_aliases; alias rm='rm -rf {outside}'; rm -f harmless"
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertTrue(Path(outside, "file.txt").exists())
+
+    async def test_refuses_alias_substituted_payload_and_fed_text(self):
+        # A shell that parses its own input one command at a time does expand
+        # an alias defined on an earlier line, so payload text and text fed to
+        # a stdin shell substitute the aliased command too.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "sh -c 'alias rm=\"rm -rf %s\"\nrm harmless'" % outside,
+            "sh -c 'shopt -s expand_aliases\nalias rm=\"rm -rf %s\"\nrm harmless'"
+            % outside,
+            "eval 'shopt -s expand_aliases\nalias rm=\"rm -rf %s\"\nrm harmless'" % outside,
+            "trap 'alias rm=\"rm -rf %s\"\nrm harmless' EXIT" % outside,
+            "printf 'alias rm=\"rm -rf %s\"\nrm harmless' | sh" % outside,
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # A payload that only prints the alias text stays data.
+        result = await bash("sh -c 'echo \"alias rm=rm -rf /printed-not-run\"'")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("alias rm=rm -rf /printed-not-run", result.output)
+
+    async def test_refuses_inline_shell_feeds_inside_bodies(self):
+        # A runner-fed body can itself hand a shell text inline: the pipeline
+        # producer's output and a here-string operand are commands that shell
+        # runs, and a process substitution is its script argument.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "sh <<'OUTER'\nsh <<< 'rm -rf %s'\nOUTER" % outside,
+            "sh <<'OUTER'\nprintf 'rm -rf %s\\n' | sh\nOUTER" % outside,
+            "sh <<'OUTER'\nbash <(printf 'rm -rf %s\\n')\nOUTER" % outside,
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # A data body keeps its inline text as data.
+        result = await bash("cat <<'OUTER'\nsh <<< 'rm -rf /printed-not-run'\nOUTER")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("rm -rf /printed-not-run", result.output)
+
+    async def test_refuses_alias_substituted_invocations_inside_bodies(self):
+        # A runner-fed body runs in its own shell, so aliases that body defines
+        # and invokes on a later line substitute text it never names.
+        self._make_tree()
+        outside = self._outside_target()
+        command = (
+            "sh <<'EOF'\n"
+            "shopt -s expand_aliases\n"
+            "alias del='rm -rf %s'\n"
+            "del victim\n"
+            "EOF"
+        ) % outside
+        with self.assertRaises(DestructiveRmRefusalError):
+            bash(command)
+        self.assertTrue(Path(outside, "file.txt").exists())
 
 
 if __name__ == "__main__":
