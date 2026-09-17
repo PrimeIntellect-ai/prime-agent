@@ -1,12 +1,14 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
 import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.js";
 import { createAgentSessionServices } from "../src/core/agent-session-services.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
+import type { McpRemoveAccountResult } from "../src/core/mcp/connection-store.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import { createAgentSession } from "../src/core/sdk.js";
@@ -143,6 +145,7 @@ describe("ProviderAuthFlows", () => {
 	});
 
 	beforeEach(() => {
+		resetOAuthProviders();
 		vi.stubEnv("PRIME_AGENT_INFERENCE_API_BASE_URL", "");
 		vi.stubEnv("PRIME_AGENT_INFERENCE_FRONTEND_URL", "");
 		tempDir = join(tmpdir(), `pi-auth-flows-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -168,6 +171,7 @@ describe("ProviderAuthFlows", () => {
 		if (existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true });
 		}
+		resetOAuthProviders();
 		vi.restoreAllMocks();
 		vi.unstubAllEnvs();
 	});
@@ -258,6 +262,147 @@ describe("ProviderAuthFlows", () => {
 		expect(authStorage.has(PRIME_INFERENCE_PROVIDER_ID)).toBe(false);
 		// The login dialog mounts inline in the host, never as an overlay.
 		expect(overlays).toHaveLength(0);
+	});
+
+	it("the generic /logout route delegates MCP logouts whole before touching auth", async () => {
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		authStorage.set("mcp:acme-2", {
+			type: "oauth",
+			access: "real-for-acme-2",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		const { host, panels, statusMessages, errorMessages } = createHost(authStorage);
+		const logout = vi.spyOn(authStorage, "logout");
+		const delegated = vi.fn(async () => "removed" as McpRemoveAccountResult);
+		(host as { onMcpAccountLogout?: unknown }).onMcpAccountLogout = delegated;
+
+		const logoutResult = new ProviderAuthFlows(host).runLogout();
+		expect(panels).toHaveLength(1); // #2331: the route selector mounts inline, not as an overlay
+		for (const char of "acme-2") {
+			panels[0]?.handleInput?.(char);
+		}
+		panels[0]?.handleInput?.("\r");
+		await expect(logoutResult).resolves.toBe("mcp:acme-2");
+		// The route never touched auth directly for the MCP id: the host-owned
+		// critical section (store->auth) did everything.
+		expect(logout).not.toHaveBeenCalled();
+		expect(delegated).toHaveBeenCalledWith("mcp:acme-2");
+		expect(errorMessages).toEqual([]);
+		expect(statusMessages.join("\n")).toContain("Logged out of acme-2");
+	});
+
+	it("a failed MCP logout outcome reports the failure honestly instead of success", async () => {
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		authStorage.set("mcp:acme-2", {
+			type: "oauth",
+			access: "real-for-acme-2",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://mcp.acme.test/mcp",
+		});
+		const { host, panels, statusMessages, errorMessages } = createHost(authStorage);
+		(host as { onMcpAccountLogout?: unknown }).onMcpAccountLogout = vi.fn(
+			async () => "failed" as McpRemoveAccountResult,
+		);
+
+		const logoutResult = new ProviderAuthFlows(host).runLogout();
+		expect(panels).toHaveLength(1); // #2331: the route selector mounts inline, not as an overlay
+		for (const char of "acme-2") {
+			panels[0]?.handleInput?.(char);
+		}
+		panels[0]?.handleInput?.("\r");
+		await expect(logoutResult).resolves.toBeNull();
+		expect(errorMessages.join("\n")).toContain("Logout failed");
+		expect(statusMessages.join("\n")).not.toContain("Logged out of acme-2");
+	});
+
+	// The honest partial-state wording ("could not be saved... try again") is pinned ONCE at the removeAction seam in
+	// mcp-activation-queue.test.ts ("a removeAccount whose record write fails after the logout reports the honest
+	// partial state").
+
+	it("the generic /login service option for an MCP account delegates to the guarded host hook", async () => {
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		const { host } = createHost(authStorage);
+		const delegated = vi.fn(async () => ({
+			status: "success" as const,
+			providerId: "mcp:acme",
+			providerName: "Acme",
+			authType: "oauth" as const,
+			kind: "service" as const,
+		}));
+		(host as { onMcpAccountLogin?: unknown }).onMcpAccountLogin = delegated;
+
+		const result = await new ProviderAuthFlows(host).loginProvider({
+			id: "mcp:acme",
+			name: "Acme",
+			authType: "oauth",
+			category: "service",
+		});
+
+		// The MCP login went through the guarded hook — never a raw dialog writing the final credential directly.
+		expect(delegated).toHaveBeenCalledWith("mcp:acme");
+		expect(result.status).toBe("success");
+	});
+
+	it("an MCP login without a guarded host hook fails closed without opening a dialog", async () => {
+		const { host, overlays, errorMessages } = createHost(
+			AuthStorage.create(authJsonPath, { usePrimeCliConfig: false }),
+		);
+		const result = await new ProviderAuthFlows(host).loginProvider({
+			id: "mcp:my--service",
+			name: "My service",
+			authType: "oauth",
+			category: "service",
+		});
+		expect(result).toEqual({ status: "failed" });
+		expect(overlays).toEqual([]);
+		expect(errorMessages.join("\n")).toContain("guarded host");
+	});
+
+	it("an unresolvable MCP login reports an explicit failure — never a raw-dialog fallback", async () => {
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		const { host } = createHost(authStorage);
+		const delegated = vi.fn(async () => ({ status: "failed" as const }));
+		(host as { onMcpAccountLogin?: unknown }).onMcpAccountLogin = delegated;
+
+		const result = await new ProviderAuthFlows(host).loginProvider({
+			id: "mcp:acme",
+			name: "Acme",
+			authType: "oauth",
+			category: "service",
+		});
+
+		// The hook OWNS every MCP login (including unresolvable names): its explicit failed outcome is the route's result —
+		// no raw dialog ever writes the final credential directly.
+		expect(delegated).toHaveBeenCalledWith("mcp:acme");
+		expect(result).toEqual({ status: "failed" });
+	});
+
+	// A refused stale staged logout staying state-neutral is pinned at the STORE level in mcp-connection-store.test.ts
+	// ("a staged-key logout queued behind a finalize-first move refuses fail-closed" and "a staged-key logout with a
+	// bystander on the real key preserves the account shell") and at the resolution seam in
+	// mcp-activation-queue.test.ts ("logoutMcpAccount resolves exact ids first...").
+
+	it("non-MCP logouts stay unchanged: the route removes them directly", async () => {
+		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		authStorage.set("anthropic", { type: "api_key", key: "sk-ant-test" });
+		const { host, panels, statusMessages } = createHost(authStorage);
+		const delegated = vi.fn(async () => "removed" as McpRemoveAccountResult);
+		(host as { onMcpAccountLogout?: unknown }).onMcpAccountLogout = delegated;
+		const logout = vi.spyOn(authStorage, "logout");
+
+		const logoutResult = new ProviderAuthFlows(host).runLogout();
+		expect(panels).toHaveLength(1); // #2331: the route selector mounts inline, not as an overlay
+		for (const char of "anthropic") {
+			panels[0]?.handleInput?.(char);
+		}
+		panels[0]?.handleInput?.("\r");
+		await expect(logoutResult).resolves.toBe("anthropic");
+		expect(delegated).not.toHaveBeenCalled();
+		expect(logout).toHaveBeenCalledWith("anthropic");
+		expect(statusMessages.join("\n")).toContain("Removed stored API key for anthropic");
 	});
 
 	it("does not offer logout for credentials owned only by the Prime CLI", async () => {

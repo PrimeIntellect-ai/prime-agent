@@ -131,6 +131,8 @@ export class LoginDialogComponent extends Container implements Focusable {
 		this.authUrl = url;
 		const linkedUrl = getCapabilities().hyperlinks ? `\x1b]8;;${url}\x07${url}\x1b]8;;\x07` : url;
 		this.contentContainer.addChild(new Text(theme.fg("text", linkedUrl), 0, 0));
+		// Keep the browser-step text visually distinct from the URL.
+		this.addSectionSpacer();
 		// Provider instructions already describe the browser step.
 		if (instructions) {
 			this.addInstructions(instructions);

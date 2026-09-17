@@ -4,71 +4,106 @@ Connect external services (Linear, Notion, …) to Prime Agent over the
 [Model Context Protocol](https://modelcontextprotocol.io).
 
 Consistent with Prime Agent's single-tool design, MCP integrations are **not**
-exposed as new agent tools. Each integration is a [Python-backed skill](skills.md)
-that the model imports and calls from the Python kernel:
+exposed as new agent tools. Every service is reached through the one generic
+Python `mcp` module that is pre-imported in the kernel:
 
 ```python
-import linear
-issues = await linear.list_issues(team="Engineering")
+# Discover, then call. Connection ids come from /plugins or the connections list.
+tools = await mcp.list_tools("linear")
+result = await mcp.call_tool("linear", "list_issues", {"team": "Engineering"})
 ```
 
 The MCP connection runs inside the kernel via the official `mcp` Python SDK. The
-host's only jobs are interactive login (browser OAuth) and minting/refreshing
-credentials in `auth.json`.
+host's jobs are the service catalog, interactive login (browser OAuth), credential
+storage and refresh, and connection verification.
 
 ## Table of Contents
 
-- [Using a built-in integration](#using-a-built-in-integration)
+- [Connecting a service](#connecting-a-service)
 - [How a call works](#how-a-call-works)
-- [Authoring your own integration](#authoring-your-own-integration)
-  - [1. Declare the server](#1-declare-the-server)
-  - [2. Ship the skill package](#2-ship-the-skill-package)
-  - [Authentication](#authentication)
-- [The `McpIntegration` API](#the-mcpintegration-api)
-- [Enable-by-login lifecycle](#enable-by-login-lifecycle)
+- [Connection states](#connection-states)
+- [The model-facing inventory](#the-model-facing-inventory)
+- [Generic MCP servers](#generic-mcp-servers)
+- [Migration from the authored wrappers](#migration-from-the-authored-wrappers)
 - [Caveats](#caveats)
 
-## Using a built-in integration
+## Connecting a service
 
-Built-in integrations (Linear, Notion) ship **disabled**. Logging in enables them:
+`/plugins` and bare `/mcp` open the same searchable external-service screen:
 
-- Open `/login`, switch to **MCP Connections**, pick the integration, and
-  complete OAuth in the browser. `/mcp login <name>` does the same from the TUI command line.
-- Once connected, the integration's skill becomes visible to the model and is
-  auto-imported into the kernel.
-- `/mcp` lists integrations and connection status; `/mcp logout <name>`
-  disconnects.
+- Type to search (e.g. "Notion") — one canonical card per service, no duplicates.
+- Each card shows its honest state: **Connect**, **Connected**, **Reconnect**,
+  **Verifying**, **Requires setup**, or **Disabled**.
+- Press Enter on a **Connect** card to review and complete browser OAuth. The
+  credentials are stored locally in `~/.prime/agent/auth.json` under
+  `mcp:<service>`; Prime Agent never proxies them.
+- After login, Prime Agent verifies the connection with a real MCP handshake
+  (initialize + `tools/list`). A stored token alone is never reported as
+  Connected: until the handshake succeeds the state stays **Verifying** or
+  **Reconnect**. On success the connection activates in the current conversation
+  without a restart, and the discovered tool count is shown.
+- Enter on a **Connected** card disconnects it (removes the local credentials and
+  connection record; revoking the provider grant stays a provider-side action).
+- Cards marked **Requires setup** explain what is missing (developer app, API
+  key, tenant URL, stdio adapter). They never show a fake Connect button.
 
-Credentials are stored once in `~/.prime/agent/auth.json` under `mcp:<name>`.
-Enablement is derived from whether valid credentials exist — there is no separate
-on/off switch.
+`/mcp login <name>` and `/mcp logout <name>` work from the command line for the
+same connections. The advanced subcommands (`/mcp add|list|get|remove`) remain
+available and unchanged.
+
+Connection records live in `~/.prime/agent/mcp-connections.json`. They keep the
+`connectionId` (the dispatch id and credential key), the catalog `serviceId`, the
+bound endpoint, and the last verification result. Multiple accounts per service
+will use distinct connection ids; grants are never merged because names look
+similar.
 
 ## How a call works
 
-The tool set is defined by the **server**, not the skill, so discover before you
-call — don't assume tool names or arguments:
+The tool set is defined by the **server**, not by Prime Agent, so discover before
+you call — don't assume tool names or arguments:
 
 ```python
-import linear
-
 # 1. Discover available tools
-for tool in await linear.list_tools():
+for tool in await mcp.list_tools("notion"):
     print(tool["name"], "-", tool["description"])
 
-# 2. Inspect a tool's argument schema
-help(linear.list_issues)        # populated once list_tools() has run
-
-# 3. Call it; keyword args match the tool's JSON Schema
-result = await linear.list_issues(team="Engineering")
+# 2. Call with a JSON-Schema-shaped dict
+result = await mcp.call_tool("notion", "notion-search", {"query": "meeting notes"})
 ```
 
-- Every tool is an `async` method — always `await`.
+- Every call is `async` — always `await`.
 - Results are already-parsed Python: a `dict` for structured output, a string for
-  text, or a list of content blocks otherwise. No need to `json.loads` them.
-- A tool whose name isn't a valid Python identifier (e.g. Notion's `notion-search`)
-  is called via the escape hatch: `await notion.call_tool("notion-search", {...})`.
-- A call against an integration with no credentials raises `NotEnabled` (telling
-  the user to `/mcp login`); a tool that returns an error raises `McpToolError`.
+  text, or a list of content blocks otherwise.
+- Missing credentials surface as an explicit error telling the user to run
+  `/plugins`; a tool that returns an error raises `McpToolError`.
+- Configuration is re-read per call; `await mcp.reload()` closes all current
+  connections immediately.
+
+## Connection states
+
+- **Connected** — a real MCP handshake succeeded against the bound endpoint
+  with the stored credentials. Token presence alone never yields this state.
+- **Verifying / pending** — credentials exist but the handshake has not
+  succeeded (yet), e.g. right after login or while the endpoint is unreachable.
+  The connection is usable; dispatch performs the live handshake.
+- **Reconnect / error** — the credential was rejected (expired with no refresh
+  token, or bound to a different endpoint). Reconnecting from `/plugins` fixes
+  it; existing grants are not deleted by a failed verification.
+- **Requires setup** — the service needs manual setup (developer app, API key,
+  tenant URL, or a stdio adapter). The card states what is needed.
+- **Disabled** — the server entry is disabled in settings.
+
+Account/workspace identity is shown only when the provider exposes it; MCP has
+no universal identity capability, so unknown is reported honestly.
+
+## The model-facing inventory
+
+The kernel can ask the host for both supported-but-unconnected services and the
+user's actual connections (via `mcp.list_plugins`, `mcp.search_plugins`, and
+`mcp.list_connections`). The full catalog is never injected into the prompt; the
+model queries it on demand and searches it server-side. A recommendation to
+connect a service never installs it or opens a browser by itself: connecting is
+an explicit user action in `/plugins`.
 
 ## Generic MCP servers
 
@@ -90,12 +125,11 @@ are environment-variable references. Project `.prime/agent/settings.json` MCP
 entries are ignored for execution, so a repository cannot start a local process
 or shadow a user server.
 
-Built-in integration names (`linear`, `notion`, ...) are reserved: `mcp add`
-rejects them, and a hand-edited `mcpServers` entry with such a name disables the
-built-in skill instead of reconfiguring it. Earlier releases documented a
-catalog-name override (custom `url` plus `bearerTokenEnvVar` under a built-in
-name); that override no longer works — rename the entry (for example
-`linear-proxy`) to reach a custom endpoint through the generic runtime.
+Bundled integration names (`linear`, `notion`) are reserved: `mcp add` rejects
+them, and a hand-edited `mcpServers` entry with such a name is ignored instead of
+reconfiguring the built-in service. For service ids added later by the service
+catalog, a user-declared server with the same name keeps working and owns the id;
+connect the official endpoint instead through a differently-named entry.
 
 Advanced runtime options may still be written directly
 to the user settings file:
@@ -145,35 +179,20 @@ by that kernel. Configuration changes replace the connection on the next call;
 calls have separate bounded timeouts, and kernel shutdown closes HTTP sessions
 and terminates stdio children.
 
-Authored Linear and Notion skills remain available as optional typed wrappers.
-They use the same existing login and credential behavior.
+## Migration from the authored wrappers
 
-## Authored wrapper API
-
-Built-in wrappers subclass `rlm.McpIntegration` and expose `list_tools()`,
-`call_tool(name, arguments)`, and Python methods for identifier-safe tool names.
-They raise `NotEnabled` when credentials are unavailable and `McpToolError` when
-a service returns a tool error. Generic servers do not need a wrapper and should
-use the pre-imported `mcp` API above.
-
-## Enable-by-login lifecycle
-
-This auth-gating applies to the **built-in** integrations (Linear, Notion):
-
-1. The built-in skill ships installed but **disabled** — excluded from the prompt
-   and not imported into the kernel — because no credentials exist.
-2. The user logs in; credentials land in `auth.json` under `mcp:<server>`.
-3. A resource reload (automatic after `/login`/`/mcp login`, or `/reload`) detects
-   the credentials, enables the skill, and the kernel installs + imports the
-   package.
-4. Logout (or losing credentials) disables it again.
-
-If you log in mid-turn, the reload is deferred — run `/reload` after the turn to
-activate the integration.
+Earlier releases shipped authored Linear/Notion Python wrapper packages
+(`import linear`, `import notion`) and the `rlm.McpIntegration` authoring API.
+These are removed: every service now uses the same generic `mcp` route — no
+per-service Python packages, and adding a service is catalog data, not code.
+Existing `mcp:linear` / `mcp:notion` credentials keep working unchanged; run
+`await mcp.list_tools("linear")` where you previously imported `linear`.
 
 ## Caveats
 
 - Discover before assuming tool names or argument schemas.
+- Token presence is not connection readiness; the Connected state requires a
+  verified handshake.
 - Generic MCP connections are kernel-local. Separate Prime Agent sessions use
   separate connections even when they reference the same user setting.
 - A custom `PRIME_AGENT_KERNEL_PYTHON` must include the current

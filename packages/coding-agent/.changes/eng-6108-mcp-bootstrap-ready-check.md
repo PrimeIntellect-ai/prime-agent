@@ -1,0 +1,1 @@
+- Changed the kernel runtime readiness check to require the MCP discovery methods (list_plugins, search_plugins, list_connections, search_tools, describe_tool), so a stale cached kernel venv is rebuilt instead of silently accepted (ENG-6108).

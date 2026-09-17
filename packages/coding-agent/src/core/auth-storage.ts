@@ -41,7 +41,28 @@ export type OAuthCredential = {
 	type: "oauth";
 } & OAuthCredentials;
 
-export type AuthCredential = ApiKeyCredential | OAuthCredential;
+/**
+ * A static token pasted for one MCP connection through the inline paste flow.
+ * Deliberately NOT the OAuth shape: there is no refresh token, no expiry, and
+ * no client identity to fake — the handshake sends `bearer` as
+ * `Authorization: Bearer`. Exactly ONE credential per connection (the paste
+ * flow prompts once; multiple catalog fields may only be alternative names for
+ * that one credential). Bound to the exact endpoint it was pasted for, stored
+ * only in the credential store under the owning connection's
+ * `mcp:<connectionId>` key — never in settings.json.
+ */
+export type McpStaticTokenCredential = {
+	type: "mcp_static_token";
+	/** The endpoint the pasted token is bound to; a retargeted entry fails closed. */
+	endpoint: string;
+	/** The value the MCP handshake sends as the bearer. */
+	bearer: string;
+	/** The catalog setup field id the token was collected for (the first alternative name). */
+	bearerFieldId: string;
+	createdAt: number;
+};
+
+export type AuthCredential = ApiKeyCredential | OAuthCredential | McpStaticTokenCredential;
 
 export type AuthStorageData = Record<string, AuthCredential>;
 
@@ -372,6 +393,9 @@ export class AuthStorage {
 			}
 			return `api_key:${credential.key}\0${resolveConfigValue(credential.key) ?? ""}`;
 		}
+		// Static MCP tokens are not model-provider key material: they never
+		// resolve to a provider API key value fingerprint.
+		if (credential.type !== "oauth") return undefined;
 		const provider = getOAuthProvider(providerId);
 		const apiKey = provider?.getApiKey(credential) ?? credential.access;
 		return `oauth:${apiKey}\0${credential.refresh}\0${credential.expires}`;
@@ -701,18 +725,196 @@ export class AuthStorage {
 	 * load or write failure instead of recording it, so callers can refuse to
 	 * proceed while the credential may still exist on disk. Disk-authoritative
 	 * and idempotent — in-memory state is only updated after the write succeeds.
+	 * Returns whether a credential was actually removed from disk.
 	 */
-	removeVerified(provider: string): void {
-		this.storage.withLock((current) => {
+	removeVerified(provider: string): boolean {
+		const removed = this.storage.withLock((current) => {
 			const currentData = this.parseStorageData(current);
-			if (!(provider in currentData)) return { result: undefined };
+			if (!(provider in currentData)) return { result: false };
 			const merged: AuthStorageData = { ...currentData };
 			delete merged[provider];
-			return { result: undefined, next: JSON.stringify(merged, null, 2) };
+			return { result: true, next: JSON.stringify(merged, null, 2) };
 		});
-		delete this.data[provider];
-		// Post-success only: a failed removal must not make a stale-marked credential selectable again.
-		this.clearStaleAuthSource(provider, "stored");
+		if (removed) {
+			delete this.data[provider];
+			// Post-success only: a failed removal must not make a stale-marked credential selectable again.
+			this.clearStaleAuthSource(provider, "stored");
+		}
+		return removed;
+	}
+
+	/**
+	 * Disk-authoritative conditional move for staged MCP logins: move
+	 * `stagedProvider`'s credential to `provider` ONLY when no credential
+	 * exists at `provider` ON DISK, reading and writing under the backend's
+	 * own file lock. An ordinary login in another process — invisible to this
+	 * instance's cache — can never be clobbered by a race between the get and
+	 * the set. Returns "occupied" when the destination already holds a
+	 * credential, "nothing" when the staged slot is empty, or the exact
+	 * credential that moved (for exact-own rollback).
+	 */
+	moveStagedCredential(
+		stagedProvider: string,
+		provider: string,
+	): { status: "occupied" } | { status: "nothing" } | { status: "moved"; credential: AuthCredential } {
+		type MoveOutcome =
+			| { status: "occupied" }
+			| { status: "nothing" }
+			| { status: "moved"; credential: AuthCredential };
+		const outcome = this.storage.withLock<MoveOutcome>((current) => {
+			const currentData = this.parseStorageData(current);
+			if (provider in currentData) {
+				return { result: { status: "occupied" } };
+			}
+			const staged = currentData[stagedProvider];
+			if (!staged) {
+				return { result: { status: "nothing" } };
+			}
+			const merged: AuthStorageData = { ...currentData, [provider]: staged };
+			delete merged[stagedProvider];
+			return {
+				result: { status: "moved", credential: staged },
+				next: JSON.stringify(merged, null, 2),
+			};
+		});
+		// Post-success only: refresh the cache from disk under the same lock
+		// discipline so no stale entry survives the move.
+		if (outcome.status === "moved") {
+			this.reload();
+		}
+		return outcome;
+	}
+
+	/**
+	 * Disk-authoritative conditional restore: write `credential` to
+	 * `provider` ONLY when the slot is empty ON DISK. A credential written by
+	 * anyone else is never overwritten.
+	 */
+	restoreCredentialIfAbsent(provider: string, credential: AuthCredential): boolean {
+		const restored = this.storage.withLock((current) => {
+			const currentData = this.parseStorageData(current);
+			if (provider in currentData) {
+				return { result: false };
+			}
+			const merged: AuthStorageData = { ...currentData, [provider]: credential };
+			return { result: true, next: JSON.stringify(merged, null, 2) };
+		});
+		if (restored) {
+			this.data[provider] = credential;
+			this.clearStaleAuthSource(provider, "stored");
+		}
+		return restored;
+	}
+
+	/**
+	 * Disk-authoritative conditional removal: remove `provider`'s credential
+	 * ONLY when the ON-DISK value is exactly `expected` (full-object
+	 * comparison, not token equality) — a credential written by anyone else is
+	 * never deleted. The in-memory cache drops the key only after the write
+	 * succeeds.
+	 */
+	removeIfCredentialMatches(provider: string, expected: AuthCredential): boolean {
+		const removed = this.storage.withLock((current) => {
+			const currentData = this.parseStorageData(current);
+			const currentCredential = currentData[provider];
+			if (currentCredential === undefined) {
+				return { result: false };
+			}
+			if (JSON.stringify(currentCredential) !== JSON.stringify(expected)) {
+				return { result: false };
+			}
+			const merged: AuthStorageData = { ...currentData };
+			delete merged[provider];
+			return { result: true, next: JSON.stringify(merged, null, 2) };
+		});
+		if (removed) {
+			delete this.data[provider];
+			this.clearStaleAuthSource(provider, "stored");
+		}
+		return removed;
+	}
+
+	/**
+	 * Disk-authoritative credential read under the backend's own file lock —
+	 * a cross-instance writer is always visible, unlike the cached `get()`.
+	 * Used to capture the full identity a guarded login's compare-and-swap
+	 * expects to replace (legacy/credential-only accounts included).
+	 */
+	getVerified(provider: string): AuthCredential | undefined {
+		return this.storage.withLock((current) => {
+			const currentData = this.parseStorageData(current);
+			return { result: currentData[provider] };
+		});
+	}
+
+	/**
+	 * Atomic full-identity compare-and-swap move for guarded MCP logins:
+	 * move `stagedProvider`'s credential to `provider` ONLY when the on-disk
+	 * value at `provider` is exactly `expectedOld` — the comparison INCLUDES
+	 * absence (both present, or both absent) — read and written under the
+	 * backend's own file lock. A changed OR deleted grant refuses ("occupied"):
+	 * a logged-out account is never reactivated and a newer writer is never
+	 * clobbered. Returns the exact credential that moved (for full-identity
+	 * rollback).
+	 */
+	replaceStagedCredential(
+		stagedProvider: string,
+		provider: string,
+		expectedOld: AuthCredential | undefined,
+	): { status: "occupied" } | { status: "nothing" } | { status: "replaced"; credential: AuthCredential } {
+		type ReplaceOutcome =
+			| { status: "occupied" }
+			| { status: "nothing" }
+			| { status: "replaced"; credential: AuthCredential };
+		const outcome = this.storage.withLock<ReplaceOutcome>((current) => {
+			const currentData = this.parseStorageData(current);
+			const existing = currentData[provider];
+			// FULL-IDENTITY comparison INCLUDING absence: the on-disk value must
+			// be exactly `expectedOld` (both present, or both absent). A
+			// changed OR deleted grant refuses — never reactivate a logged-out
+			// account, never clobber a newer writer.
+			if (JSON.stringify(existing) !== JSON.stringify(expectedOld)) {
+				return { result: { status: "occupied" as const } };
+			}
+			const staged = currentData[stagedProvider];
+			if (!staged) {
+				return { result: { status: "nothing" as const } };
+			}
+			const merged: AuthStorageData = { ...currentData, [provider]: staged };
+			delete merged[stagedProvider];
+			return {
+				result: { status: "replaced" as const, credential: staged },
+				next: JSON.stringify(merged, null, 2),
+			};
+		});
+		// Post-success only: refresh the cache under the same lock discipline.
+		if (outcome.status === "replaced") {
+			this.reload();
+		}
+		return outcome;
+	}
+
+	/**
+	 * Atomic full-identity compare-and-swap write: set `provider` to `next`
+	 * ONLY when the on-disk value is exactly `expected`. Used to roll back a
+	 * guarded replacement (restoring the PREVIOUS credential) and to undo
+	 * only this attempt's own write — a newer writer is never clobbered.
+	 */
+	replaceCredentialIfMatches(provider: string, expected: AuthCredential, next: AuthCredential): boolean {
+		const replaced = this.storage.withLock((current) => {
+			const currentData = this.parseStorageData(current);
+			const existing = currentData[provider];
+			if (existing === undefined || JSON.stringify(existing) !== JSON.stringify(expected)) {
+				return { result: false };
+			}
+			const merged: AuthStorageData = { ...currentData, [provider]: next };
+			return { result: true, next: JSON.stringify(merged, null, 2) };
+		});
+		if (replaced) {
+			this.data[provider] = next;
+			this.clearStaleAuthSource(provider, "stored");
+		}
+		return replaced;
 	}
 
 	/**

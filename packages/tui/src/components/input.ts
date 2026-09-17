@@ -12,6 +12,16 @@ interface InputState {
 	cursor: number;
 }
 
+export interface InputOptions {
+	/**
+	 * Render the value as bullets while keeping the real buffer for edits and
+	 * submit: a pasted secret is never drawn, but getValue()/onSubmit still
+	 * return exactly what was typed. Cursor math maps by grapheme so editing
+	 * (backspace, word moves, paste) behaves exactly like the unmasked input.
+	 */
+	masked?: boolean;
+}
+
 /**
  * Input component - single-line text input with horizontal scrolling
  */
@@ -22,6 +32,8 @@ export class Input implements Component, Focusable {
 	public onEscape?: () => void;
 
 	focused: boolean = false;
+
+	constructor(private readonly options: InputOptions = {}) {}
 
 	private pasteBuffer: string = "";
 	private isInPaste: boolean = false;
@@ -401,6 +413,19 @@ export class Input implements Component, Focusable {
 
 	invalidate(): void {}
 
+	/**
+	 * The (value, cursor) pair rendering operates on. Unmasked input renders the
+	 * real buffer; masked input renders one bullet per grapheme with the cursor
+	 * mapped by grapheme count, so the displayed text never contains the secret
+	 * while the real buffer keeps every edit and submit.
+	 */
+	private displayState(): { value: string; cursor: number } {
+		if (this.options.masked !== true) return { value: this.value, cursor: this.cursor };
+		const graphemes = [...segmenter.segment(this.value)];
+		const beforeCursor = [...segmenter.segment(this.value.slice(0, this.cursor))];
+		return { value: graphemes.map(() => "•").join(""), cursor: beforeCursor.length };
+	}
+
 	render(width: number): string[] {
 		const prompt = "> ";
 		const availableWidth = width - prompt.length;
@@ -409,15 +434,16 @@ export class Input implements Component, Focusable {
 			return [prompt];
 		}
 
+		const display = this.displayState();
 		let visibleText = "";
-		let cursorDisplay = this.cursor;
-		const totalWidth = visibleWidth(this.value);
+		let cursorDisplay = display.cursor;
+		const totalWidth = visibleWidth(display.value);
 
 		if (totalWidth < availableWidth) {
-			visibleText = this.value;
+			visibleText = display.value;
 		} else {
-			const scrollWidth = this.cursor === this.value.length ? availableWidth - 1 : availableWidth;
-			const cursorCol = visibleWidth(this.value.slice(0, this.cursor));
+			const scrollWidth = display.cursor === display.value.length ? availableWidth - 1 : availableWidth;
+			const cursorCol = visibleWidth(display.value.slice(0, display.cursor));
 
 			if (scrollWidth > 0) {
 				const halfWidth = Math.floor(scrollWidth / 2);
@@ -431,8 +457,8 @@ export class Input implements Component, Focusable {
 					startCol = Math.max(0, cursorCol - halfWidth);
 				}
 
-				visibleText = sliceByColumn(this.value, startCol, scrollWidth, true);
-				const beforeCursor = sliceByColumn(this.value, startCol, Math.max(0, cursorCol - startCol), true);
+				visibleText = sliceByColumn(display.value, startCol, scrollWidth, true);
+				const beforeCursor = sliceByColumn(display.value, startCol, Math.max(0, cursorCol - startCol), true);
 				cursorDisplay = beforeCursor.length;
 			} else {
 				visibleText = "";

@@ -6,9 +6,11 @@ import {
 	COMPACTION_OUTCOME_CUSTOM_TYPE,
 	type CustomMessage,
 	isCompactionOutcomeMessage,
+	isMcpConnectionOutcomeMessage,
 	isRefinementOutcomeMessage,
 	isSessionSlashCommandMessage,
 	isSessionSlashCommandResultMessage,
+	MCP_CONNECTION_OUTCOME_CUSTOM_TYPE,
 	REFINEMENT_OUTCOME_CUSTOM_TYPE,
 	SESSION_SLASH_COMMAND_CUSTOM_TYPE,
 	SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE,
@@ -22,6 +24,10 @@ import {
 } from "./compaction-outcome-message.js";
 import { InjectedPromptMessageComponent, isInjectedPromptMessage } from "./injected-prompt-message.js";
 import { IPythonCellComponent } from "./ipython-cell.js";
+import {
+	MalformedMcpConnectionOutcomeMessageComponent,
+	McpConnectionOutcomeMessageComponent,
+} from "./mcp-connection-outcome-message.js";
 import {
 	MalformedRefinementOutcomeMessageComponent,
 	RefinementOutcomeMessageComponent,
@@ -230,6 +236,13 @@ export function buildConversationComponents(
 					? new CompactionOutcomeMessageComponent(message)
 					: new MalformedCompactionOutcomeMessageComponent(),
 			);
+		} else if (message.role === "custom" && message.customType === MCP_CONNECTION_OUTCOME_CUSTOM_TYPE) {
+			if (!message.display) continue;
+			const component = isMcpConnectionOutcomeMessage(message)
+				? new McpConnectionOutcomeMessageComponent(message)
+				: new MalformedMcpConnectionOutcomeMessageComponent();
+			component.setExpanded(expanded);
+			components.push(component);
 		} else if (message.role === "custom" && message.customType === REFINEMENT_OUTCOME_CUSTOM_TYPE) {
 			if (!message.display) continue;
 			const component = isRefinementOutcomeMessage(message)

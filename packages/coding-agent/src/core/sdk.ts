@@ -160,7 +160,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const mcpManager =
 		options.mcpManager ??
 		new McpManager({ authStorage, getUserServers: () => settingsManager.getGlobalMcpServers() });
-	modelRegistry.setOnOAuthProvidersReset(() => mcpManager.registerUserProviders());
+	modelRegistry.setOnOAuthProvidersReset(() => mcpManager.registerAllProviders());
 
 	if (!resourceLoader) {
 		resourceLoader = new DefaultResourceLoader({

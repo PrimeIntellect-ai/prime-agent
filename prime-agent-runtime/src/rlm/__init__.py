@@ -593,9 +593,7 @@ __all__ = [
     "HarnessEntry",
     "HarnessScope",
     "HarnessState",
-    "McpIntegration",
     "McpToolError",
-    "NotEnabled",
     "RLMCreateSessionHandle",
     "RLMModel",
     "RLMProgressNoteResult",
@@ -617,8 +615,8 @@ __all__ = [
     "spawn",
 ]
 
-# Lazily re-export the MCP base class. Kept lazy so `import rlm` never requires
-# the optional `mcp` SDK — only integration packages that subclass it do.
+# Lazily re-export the generic MCP error type. Kept lazy so `import rlm` never
+# requires the optional `mcp` SDK — only modules that call into it do.
 _LAZY_MCP = {"McpIntegration", "McpToolError", "NotEnabled"}
 
 

@@ -1,0 +1,1 @@
+- Added a masked option to the Input component (and MenuSearchInput): the rendered line shows one bullet per grapheme while edits and submit keep the real buffer, so secret paste fields never draw the pasted value. The TUI's first consumer is the MCP token paste panel.

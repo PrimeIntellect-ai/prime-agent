@@ -1,0 +1,5138 @@
+{
+	"version": 2,
+	"sources": [
+		{
+			"source": "openai-plugins",
+			"repository": "openai/plugins",
+			"commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89"
+		},
+		{
+			"source": "claude-plugins-official",
+			"repository": "anthropics/claude-plugins-official",
+			"commit": "3deb821cb71ccfaaf2ffa9935e977df314ce5cd5"
+		}
+	],
+	"counts": {
+		"total": 68,
+		"http": 68,
+		"httpTemplate": 0,
+		"sse": 0,
+		"stdio": 0,
+		"ready": 57,
+		"requiresSetup": 11,
+		"metadataReviewed": 2,
+		"oauthStrategy": 5,
+		"apiKeyStrategy": 10,
+		"mergedFromBothSources": 10,
+		"readinessOauthReady": 57,
+		"readinessUserSetup": 11,
+		"readinessPrimeRestricted": 0,
+		"readinessUnknown": 0,
+		"metadataAvailable": 66,
+		"metadataUnavailable": 2
+	},
+	"entries": [
+		{
+			"server": "airtable",
+			"service": "airtable",
+			"label": "Airtable",
+			"url": "https://mcp.airtable.com/mcp",
+			"description": "Bring operational data and context into the flow of your ChatGPT conversations. You can ask questions, create and update records, and analyze your data—all through conversation. Use the data in Airtable as input to the work you’re doing in ChatGPT, like building a landing page using content you’ve organized in Airtable. Make quick updates to Airtable without leaving the chat. Airtable for ChatGPT is ideal anytime you need quick access to structured internal data to inform your conversation.\n\nAirtable's App connects ChatGPT directly to your Airtable bases, so you can ask questions, create and update records, and analyze your data—all through conversation",
+			"category": "Productivity",
+			"aliases": [],
+			"publisher": "Airtable",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.airtable.com/mcp"
+			},
+			"auth": {
+				"strategy": "oauth",
+				"clientRegistration": "unknown",
+				"alternatives": [
+					{
+						"kind": "api-key",
+						"readiness": "user-setup",
+						"note": "Airtable also documents personal access tokens as a distinct API access path; OAuth dynamic client registration is the default route for the MCP server",
+						"sourceUrl": "https://airtable.com/developers/agents/mcp/getting-started"
+					}
+				],
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://airtable.com/oauth2/v1",
+					"resource": "https://mcp.airtable.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"data.records:read",
+						"data.records:write",
+						"schema.bases:read",
+						"schema.bases:write",
+						"data.recordComments:read",
+						"data.recordComments:write",
+						"workspacesAndBases:read"
+					],
+					"authorizationServerScopes": [
+						"data.records:read",
+						"data.records:write",
+						"schema.bases:read",
+						"schema.bases:write",
+						"data.recordComments:read",
+						"data.recordComments:write",
+						"workspacesAndBases:read"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.airtable.com/mcp",
+						"https://mcp.airtable.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.airtable.com/.well-known/oauth-protected-resource",
+						"https://airtable.com/.well-known/oauth-authorization-server/oauth2/v1",
+						"https://airtable.com/oauth2/v1/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "openai-plugins",
+					"repository": "openai/plugins",
+					"commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+					"path": "plugins/airtable/.mcp.json",
+					"url": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/airtable/.mcp.json"
+				},
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/Airtable/skills.git",
+					"commit": "812ee67f1fd3d76fb45ff8df40afaa0448602ba8",
+					"path": "plugins/airtable",
+					"url": "https://raw.githubusercontent.com/Airtable/skills/812ee67f1fd3d76fb45ff8df40afaa0448602ba8/plugins/airtable/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "placeholder-only upstream OAuth blocks cleared: provider docs confirm OAuth for the Airtable MCP server and the committed audit evidence confirms a live registration endpoint"
+				}
+			],
+			"homepage": "https://airtable.com",
+			"privacyUrl": "https://www.airtable.com/company/privacy",
+			"supportUrl": "https://support.airtable.com/docs/contacting-airtable-support",
+			"oauth": {
+				"kind": "oauth"
+			}
+		},
+		{
+			"server": "aiven",
+			"service": "aiven",
+			"label": "Aiven",
+			"url": "https://mcp.aiven.live/mcp",
+			"aliases": [],
+			"publisher": "Aiven",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.aiven.live/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://api.aiven.io",
+					"resource": "https://mcp.aiven.live/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"projects",
+						"services",
+						"accounts:read"
+					],
+					"authorizationServerScopes": [
+						"projects",
+						"services",
+						"accounts:read"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.aiven.live/mcp",
+						"https://mcp.aiven.live/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.aiven.live/.well-known/oauth-protected-resource",
+						"https://api.aiven.io/.well-known/oauth-authorization-server",
+						"https://api.aiven.io/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/aiven/aiven-ai-plugins.git",
+					"commit": "634f41d6852957cb9280e9245f2ea6f74645b4f1",
+					"url": "https://raw.githubusercontent.com/aiven/aiven-ai-plugins/634f41d6852957cb9280e9245f2ea6f74645b4f1/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "amplitude",
+			"service": "amplitude",
+			"label": "Amplitude",
+			"url": "https://mcp.amplitude.com/mcp",
+			"aliases": [],
+			"publisher": "Amplitude",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.amplitude.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.amplitude.com",
+					"resource": "https://mcp.amplitude.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"mcp:read",
+						"mcp:write"
+					],
+					"authorizationServerScopes": [
+						"mcp:read",
+						"mcp:write",
+						"offline_access"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.amplitude.com/mcp",
+						"https://mcp.amplitude.com/.well-known/oauth-protected-resource",
+						"https://mcp.amplitude.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.amplitude.com/.well-known/oauth-authorization-server",
+						"https://mcp.amplitude.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/amplitude/mcp-marketplace.git",
+					"commit": "96fc7d4c58bb33b4e60c334d34ad944c8a246869",
+					"path": "plugins/amplitude",
+					"url": "https://raw.githubusercontent.com/amplitude/mcp-marketplace/96fc7d4c58bb33b4e60c334d34ad944c8a246869/plugins/amplitude/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "apollo",
+			"service": "apollo-io",
+			"label": "Apollo.io",
+			"url": "https://mcp.apollo.io/mcp",
+			"aliases": [
+				"apollo-io"
+			],
+			"publisher": "Apollo.io",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.apollo.io/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.apollo.io",
+					"resource": "https://mcp.apollo.io/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"read_user_profile",
+						"app_scopes",
+						"people_bulk_match",
+						"organizations_bulk_enrich",
+						"organizations_enrich",
+						"people_match",
+						"webhook_result_read",
+						"mixed_people_api_search",
+						"organizations_job_posting",
+						"mixed_companies_search",
+						"organizations_search",
+						"contact_write",
+						"contact_update",
+						"contacts_search",
+						"contact_read",
+						"account_write",
+						"account_update",
+						"context_center_read",
+						"context_center_write",
+						"emailer_campaigns_search",
+						"emailer_campaigns_create",
+						"emailer_campaigns_update",
+						"emailer_campaigns_approve",
+						"emailer_campaigns_add_contact_ids",
+						"emailer_campaigns_remove_or_stop_contact_ids",
+						"emailer_schedules_list",
+						"emailer_messages_search",
+						"emailer_messages_create",
+						"emailer_messages_send_now",
+						"emailer_messages_email_send_status"
+					],
+					"authorizationServerScopes": [
+						"read_user_profile",
+						"app_scopes",
+						"people_bulk_match",
+						"organizations_bulk_enrich",
+						"organizations_enrich",
+						"people_match",
+						"webhook_result_read",
+						"mixed_people_api_search",
+						"organizations_job_posting",
+						"mixed_companies_search",
+						"organizations_search",
+						"contact_write",
+						"contact_update",
+						"contacts_search",
+						"contact_read",
+						"account_write",
+						"account_update",
+						"context_center_read",
+						"context_center_write",
+						"emailer_campaigns_search",
+						"emailer_campaigns_create",
+						"emailer_campaigns_update",
+						"emailer_campaigns_approve",
+						"emailer_campaigns_add_contact_ids",
+						"emailer_campaigns_remove_or_stop_contact_ids",
+						"emailer_schedules_list",
+						"emailer_messages_search",
+						"emailer_messages_create",
+						"emailer_messages_send_now",
+						"emailer_messages_email_send_status"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.apollo.io/mcp",
+						"https://mcp.apollo.io/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.apollo.io/.well-known/oauth-protected-resource",
+						"https://mcp.apollo.io/.well-known/oauth-authorization-server",
+						"https://mcp.apollo.io/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/apolloio/apollo-mcp-plugin.git",
+					"commit": "2adde980e45f421b7e9383d92870455627936bce",
+					"url": "https://raw.githubusercontent.com/apolloio/apollo-mcp-plugin/2adde980e45f421b7e9383d92870455627936bce/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "appwrite",
+			"service": "appwrite",
+			"label": "Appwrite",
+			"url": "https://mcp.appwrite.io/",
+			"aliases": [],
+			"publisher": "Appwrite",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.appwrite.io/"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://fra.cloud.appwrite.io/v1/oauth2/console",
+					"resource": "https://mcp.appwrite.io/",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"email",
+						"phone",
+						"all",
+						"project:all",
+						"organization:all",
+						"project:project.read",
+						"project:project.write",
+						"project:keys.read",
+						"project:keys.write",
+						"project:platforms.read",
+						"project:platforms.write",
+						"project:mocks.read",
+						"project:mocks.write",
+						"project:project.policies.read",
+						"project:project.policies.write",
+						"project:project.oauth2.read",
+						"project:project.oauth2.write",
+						"project:templates.read",
+						"project:templates.write",
+						"project:stages.read",
+						"project:stages.write",
+						"project:users.read",
+						"project:users.write",
+						"project:sessions.read",
+						"project:sessions.write",
+						"project:teams.read",
+						"project:teams.write",
+						"project:databases.read"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"email",
+						"phone",
+						"all",
+						"project:all",
+						"organization:all",
+						"project:project.read",
+						"project:project.write",
+						"project:keys.read",
+						"project:keys.write",
+						"project:platforms.read",
+						"project:platforms.write",
+						"project:mocks.read",
+						"project:mocks.write",
+						"project:policies.read",
+						"project:policies.write",
+						"project:project.policies.read",
+						"project:project.policies.write",
+						"project:project.oauth2.read",
+						"project:project.oauth2.write",
+						"project:templates.read",
+						"project:templates.write",
+						"project:stages.read",
+						"project:stages.write",
+						"project:users.read",
+						"project:users.write",
+						"project:sessions.read",
+						"project:sessions.write",
+						"project:teams.read"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.appwrite.io/",
+						"https://mcp.appwrite.io/.well-known/oauth-protected-resource",
+						"https://fra.cloud.appwrite.io/.well-known/oauth-authorization-server/v1/oauth2/console",
+						"https://fra.cloud.appwrite.io/v1/oauth2/console/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/appwrite/claude-plugin.git",
+					"commit": "ab3c90b37c95b7068f0c064dc562cf21958e8e19",
+					"url": "https://raw.githubusercontent.com/appwrite/claude-plugin/ab3c90b37c95b7068f0c064dc562cf21958e8e19/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "atlassian",
+			"service": "atlassian",
+			"label": "Atlassian",
+			"url": "https://mcp.atlassian.com/v2/mcp",
+			"aliases": [],
+			"publisher": "Atlassian",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.atlassian.com/v2/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://auth.atlassian.com/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3",
+					"resource": "https://mcp.atlassian.com/v2/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"read:me",
+						"read:account",
+						"offline_access",
+						"email",
+						"read:jira:agent-interface",
+						"write:jira:agent-interface",
+						"search:jira:agent-interface",
+						"delete:jira:agent-interface",
+						"manage:jira:agent-interface",
+						"read:confluence:agent-interface",
+						"write:confluence:agent-interface",
+						"search:confluence:agent-interface",
+						"search:rovo:agent-interface",
+						"search:code:agent-interface",
+						"read:all:twg",
+						"write:all:twg",
+						"read:goals:agent-interface",
+						"write:goals:agent-interface",
+						"read:projects:agent-interface",
+						"write:projects:agent-interface",
+						"read:bitbucket:agent-interface",
+						"write:bitbucket:agent-interface",
+						"read:loom:agent-interface",
+						"write:loom:agent-interface",
+						"read:talent:agent-interface",
+						"write:talent:agent-interface",
+						"read:teams:agent-interface",
+						"write:teams:agent-interface",
+						"read:artifacts:agent-interface",
+						"write:artifacts:agent-interface"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post",
+						"client_secret_basic",
+						"private_key_jwt"
+					],
+					"sourceUrls": [
+						"https://mcp.atlassian.com/v2/mcp",
+						"https://mcp.atlassian.com/.well-known/oauth-protected-resource/v2/mcp",
+						"https://mcp.atlassian.com/.well-known/oauth-protected-resource",
+						"https://auth.atlassian.com/.well-known/oauth-authorization-server/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3",
+						"https://auth.atlassian.com/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/atlassian/atlassian-mcp-server.git",
+					"commit": "7e9591607a5ae6c7e8f58c821da7af96fd1d8200",
+					"url": "https://raw.githubusercontent.com/atlassian/atlassian-mcp-server/7e9591607a5ae6c7e8f58c821da7af96fd1d8200/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
+				}
+			]
+		},
+		{
+			"server": "atlassian-rovo",
+			"service": "atlassian-rovo",
+			"label": "Atlassian Rovo",
+			"url": "https://mcp.atlassian.com/v1/mcp/authv2",
+			"description": "Manage Jira and Confluence fast",
+			"category": "Productivity",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.atlassian.com/v1/mcp/authv2"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://auth.atlassian.com/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3",
+					"resource": "https://mcp.atlassian.com/v1/mcp/authv2",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"read:me",
+						"read:account",
+						"offline_access",
+						"email",
+						"read:jira-work",
+						"write:jira-work",
+						"search:confluence",
+						"read:confluence-user",
+						"read:page:confluence",
+						"write:page:confluence",
+						"read:comment:confluence",
+						"write:comment:confluence",
+						"read:space:confluence",
+						"read:hierarchical-content:confluence",
+						"write:component:compass",
+						"read:component:compass",
+						"read:scorecard:compass",
+						"write:scorecard:compass",
+						"read:event:compass",
+						"read:metric:compass",
+						"read:all:twg",
+						"write:all:twg"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post",
+						"client_secret_basic",
+						"private_key_jwt"
+					],
+					"sourceUrls": [
+						"https://mcp.atlassian.com/v1/mcp/authv2",
+						"https://mcp.atlassian.com/.well-known/oauth-protected-resource/v1/mcp/authv2",
+						"https://mcp.atlassian.com/.well-known/oauth-protected-resource",
+						"https://auth.atlassian.com/.well-known/oauth-authorization-server/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3",
+						"https://auth.atlassian.com/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "openai-plugins",
+					"repository": "openai/plugins",
+					"commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+					"path": "plugins/atlassian-rovo/.mcp.json",
+					"url": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/atlassian-rovo/.mcp.json",
+					"license": "MIT"
+				}
+			],
+			"homepage": "https://www.atlassian.com",
+			"privacyUrl": "https://www.atlassian.com/legal/privacy-policy"
+		},
+		{
+			"server": "aws-devops-agent",
+			"service": "amazon-web-services",
+			"label": "AWS Agents for DevSecOps",
+			"url": "https://connect.aidevops.us-east-1.api.aws/mcp",
+			"aliases": [
+				"amazon-web-services",
+				"aws-agents-for-devsecops"
+			],
+			"publisher": "Amazon Web Services",
+			"transport": {
+				"type": "http",
+				"url": "https://connect.aidevops.us-east-1.api.aws/mcp"
+			},
+			"auth": {
+				"strategy": "api_key",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "unavailable",
+					"sourceUrls": [
+						"https://connect.aidevops.us-east-1.api.aws/mcp",
+						"https://connect.aidevops.us-east-1.api.aws/.well-known/oauth-protected-resource/mcp",
+						"https://connect.aidevops.us-east-1.api.aws/.well-known/oauth-protected-resource",
+						"https://connect.aidevops.us-east-1.api.aws/.well-known/oauth-authorization-server",
+						"https://connect.aidevops.us-east-1.api.aws/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "paste your AWS DevSecOps agent token (DEVOPS_AGENT_TOKEN)",
+				"fields": [
+					{
+						"id": "DEVOPS_AGENT_TOKEN",
+						"label": "DEVOPS_AGENT_TOKEN",
+						"description": "Environment variable DEVOPS_AGENT_TOKEN",
+						"required": true,
+						"kind": "bearer-token"
+					}
+				],
+				"requirement": "bearer-token",
+				"readiness": "user-setup"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/aws/agent-toolkit-for-aws.git",
+					"commit": "68d9e8541c45afd2510662bcea69fe1e433ea9db",
+					"path": "plugins/aws-agents-for-devsecops",
+					"url": "https://raw.githubusercontent.com/aws/agent-toolkit-for-aws/68d9e8541c45afd2510662bcea69fe1e433ea9db/plugins/aws-agents-for-devsecops/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
+				}
+			]
+		},
+		{
+			"server": "canva",
+			"service": "canva",
+			"label": "Canva",
+			"url": "https://mcp.canva.com/mcp",
+			"description": "Bring your Canva design workflow into Codex and create, refine, and review designs through natural conversation.\nAvailable skills:\nResize for social media: Adapt a design for Facebook, Instagram, and LinkedIn in one step.\nBulk create: Generate multiple designs from spreadsheet data using a brand template.\nEdit designs: Update text, media, and formatting, or reposition and resize elements.\nGet design feedback: Receive structured feedback on visual hierarchy, layout, readability, consistency, and accessibility.\nImplement feedback: Review comment threads and apply clear, actionable changes.\nBrand check: Check colors, fonts, logo usage, and copy against your Brand Kit.\nOnce installed, describe what you want in plain language or invoke Canva directly with @Canva.\nTry prompts like:\n- @Canva, resize this design for social media.\n- @Canva, create designs from this spreadsheet using my brand template.\n- @Canva, update the headline in this design.\n- @Canva, review this design’s visual hierarchy and readability.\n- @Canva, implement the feedback in the comment threads.\n- @Canva, check this design against my Brand Kit.\n\nRequirements: Connect your Canva account to use the plugin. Bulk Create requires an eligible Canva Enterprise plan.\n\nWant to take a more hands-on approach? Instantly open your design in Canva’s powerful editor for the final touches.",
+			"category": "Creativity",
+			"aliases": [],
+			"publisher": "Canva",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.canva.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.canva.com",
+					"resource": "https://mcp.canva.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"profile:read",
+						"design:meta:read",
+						"design:content:write",
+						"design:content:read",
+						"folder:read",
+						"folder:write",
+						"brandtemplate:content:read",
+						"brandtemplate:meta:read",
+						"brandtemplate:content:write",
+						"comment:write",
+						"comment:read",
+						"asset:read",
+						"asset:write",
+						"brandkit:read",
+						"help:answers:read",
+						"help:answers:write"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.canva.com/mcp",
+						"https://mcp.canva.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.canva.com/.well-known/oauth-protected-resource",
+						"https://mcp.canva.com/.well-known/oauth-authorization-server",
+						"https://mcp.canva.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "openai-plugins",
+					"repository": "openai/plugins",
+					"commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+					"path": "plugins/canva/.mcp.json",
+					"url": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/canva/.mcp.json"
+				},
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/canva-sdks/canva-skills.git",
+					"commit": "b56291ea0a36d0a941e1478b47959be5f1771dee",
+					"path": "plugins/canva",
+					"url": "https://raw.githubusercontent.com/canva-sdks/canva-skills/b56291ea0a36d0a941e1478b47959be5f1771dee/plugins/canva/.mcp.json"
+				}
+			],
+			"homepage": "https://www.canva.com",
+			"privacyUrl": "https://www.canva.com/policies/privacy-policy/",
+			"supportUrl": "https://www.canva.com/help/contact-us/"
+		},
+		{
+			"server": "catalyst-by-zoho",
+			"service": "zoho-catalyst",
+			"label": "Zoho Catalyst",
+			"url": "https://catalyst.zohomcp.com/mcp/message",
+			"aliases": [
+				"zoho-catalyst"
+			],
+			"publisher": "Zoho Catalyst",
+			"transport": {
+				"type": "http",
+				"url": "https://catalyst.zohomcp.com/mcp/message"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://catalyst.zohomcp.com",
+					"resource": "https://catalyst.zohomcp.com/mcp/message",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"ZohoCatalyst.fullaccess.ALL",
+						"ZohoCatalyst.functions.execute.CUSTOM",
+						"QuickML.projects.READ",
+						"QuickML.pipelines.READ",
+						"QuickML.pipelines.CREATE",
+						"QuickML.pipelines.UPDATE",
+						"QuickML.pipelines.DELETE",
+						"QuickML.datasets.READ",
+						"QuickML.datasets.UPDATE",
+						"QuickML.datasets.DELETE",
+						"QuickML.datasets.CREATE",
+						"QuickML.models.READ",
+						"QuickML.models.UPDATE",
+						"QuickML.models.DELETE",
+						"QuickML.endpoints.CREATE",
+						"QuickML.endpoints.READ",
+						"QuickML.endpoints.UPDATE",
+						"QuickML.endpoints.DELETE",
+						"QuickML.deployment.READ",
+						"QuickML.rag.READ",
+						"QuickML.rag.CREATE",
+						"QuickML.rag.DELETE",
+						"ZohoCatalyst.Slate.app.READ",
+						"ZohoCatalyst.Slate.app.CREATE",
+						"ZohoCatalyst.automationtesting.execute",
+						"ZohoCatalyst.circuits.execute",
+						"ZohoMCP.tool.execute"
+					],
+					"authorizationServerScopes": [
+						"ZohoCatalyst.fullaccess.ALL",
+						"ZohoCatalyst.functions.execute.CUSTOM",
+						"QuickML.projects.READ",
+						"QuickML.pipelines.READ",
+						"QuickML.pipelines.CREATE",
+						"QuickML.pipelines.UPDATE",
+						"QuickML.pipelines.DELETE",
+						"QuickML.datasets.READ",
+						"QuickML.datasets.UPDATE",
+						"QuickML.datasets.DELETE",
+						"QuickML.datasets.CREATE",
+						"QuickML.models.READ",
+						"QuickML.models.UPDATE",
+						"QuickML.models.DELETE",
+						"QuickML.endpoints.CREATE",
+						"QuickML.endpoints.READ",
+						"QuickML.endpoints.UPDATE",
+						"QuickML.endpoints.DELETE",
+						"QuickML.deployment.READ",
+						"QuickML.rag.READ",
+						"QuickML.rag.CREATE",
+						"QuickML.rag.DELETE",
+						"ZohoCatalyst.Slate.app.READ",
+						"ZohoCatalyst.Slate.app.CREATE",
+						"ZohoCatalyst.automationtesting.execute",
+						"ZohoCatalyst.circuits.execute",
+						"ZohoMCP.tool.execute"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://catalyst.zohomcp.com/mcp/message",
+						"https://catalyst.zohomcp.com/.well-known/oauth-protected-resource",
+						"https://catalyst.zohomcp.com/.well-known/oauth-protected-resource/mcp/message",
+						"https://catalyst.zohomcp.com/.well-known/oauth-authorization-server",
+						"https://catalyst.zohomcp.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/catalystbyzoho/claude-plugin.git",
+					"commit": "9670b79d72fe4923cc845ca0414d009ef3684ccb",
+					"url": "https://raw.githubusercontent.com/catalystbyzoho/claude-plugin/9670b79d72fe4923cc845ca0414d009ef3684ccb/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "circleback",
+			"service": "circleback",
+			"label": "Circleback",
+			"url": "https://circleback.ai/api/mcp",
+			"aliases": [],
+			"publisher": "Circleback",
+			"transport": {
+				"type": "http",
+				"url": "https://circleback.ai/api/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://circleback.ai",
+					"resource": "https://circleback.ai/api/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"user"
+					],
+					"authorizationServerScopes": [
+						"user"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://circleback.ai/api/mcp",
+						"https://circleback.ai/.well-known/oauth-protected-resource/api/mcp",
+						"https://circleback.ai/.well-known/oauth-protected-resource",
+						"https://circleback.ai/.well-known/oauth-authorization-server",
+						"https://circleback.ai/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/circlebackai/claude-code-plugin.git",
+					"commit": "a610634c95ab310accf20a0cabdf0fa7ab784fa3",
+					"url": "https://raw.githubusercontent.com/circlebackai/claude-code-plugin/a610634c95ab310accf20a0cabdf0fa7ab784fa3/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "clickhouse",
+			"service": "clickhouse",
+			"label": "ClickHouse",
+			"url": "https://mcp.clickhouse.cloud/mcp",
+			"aliases": [],
+			"publisher": "ClickHouse",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.clickhouse.cloud/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.clickhouse.cloud",
+					"resource": "https://mcp.clickhouse.cloud/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"mcp:access",
+						"openid",
+						"profile",
+						"email"
+					],
+					"authorizationServerScopes": [
+						"mcp:access",
+						"clickstack:access",
+						"openid",
+						"profile",
+						"email"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.clickhouse.cloud/mcp",
+						"https://mcp.clickhouse.cloud/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.clickhouse.cloud/.well-known/oauth-protected-resource",
+						"https://mcp.clickhouse.cloud/.well-known/oauth-authorization-server",
+						"https://mcp.clickhouse.cloud/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/ClickHouse/clickhouse-claude-code-plugin.git",
+					"commit": "988a7a39834af9c9e14ec3650365243e2cfc6882",
+					"url": "https://raw.githubusercontent.com/ClickHouse/clickhouse-claude-code-plugin/988a7a39834af9c9e14ec3650365243e2cfc6882/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "clickup",
+			"service": "clickup",
+			"label": "ClickUp",
+			"url": "https://mcp.clickup.com/mcp",
+			"description": "Turn Codex into your ClickUp command center.",
+			"category": "Productivity",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.clickup.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.clickup.com",
+					"resource": "https://mcp.clickup.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"read",
+						"write"
+					],
+					"authorizationServerScopes": [
+						"read",
+						"write"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.clickup.com/mcp",
+						"https://mcp.clickup.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.clickup.com/.well-known/oauth-protected-resource",
+						"https://mcp.clickup.com/.well-known/oauth-authorization-server",
+						"https://mcp.clickup.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "openai-plugins",
+					"repository": "openai/plugins",
+					"commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+					"path": "plugins/clickup/.mcp.json",
+					"url": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/clickup/.mcp.json",
+					"license": "MIT"
+				}
+			],
+			"homepage": "https://clickup.com"
+		},
+		{
+			"server": "cloudflare-api",
+			"service": "cloudflare",
+			"label": "Cloudflare",
+			"url": "https://mcp.cloudflare.com/mcp",
+			"description": "Cloudflare platform plugin with curated skills for Workers, Wrangler, and Agents SDK plus the official Cloudflare API MCP server.",
+			"category": "Developer Tools",
+			"aliases": [
+				"cloudflare"
+			],
+			"publisher": "Cloudflare",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.cloudflare.com/mcp"
+			},
+			"auth": {
+				"strategy": "oauth",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.cloudflare.com",
+					"resource": "https://mcp.cloudflare.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.cloudflare.com/mcp",
+						"https://mcp.cloudflare.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.cloudflare.com/.well-known/oauth-protected-resource",
+						"https://mcp.cloudflare.com/.well-known/oauth-authorization-server",
+						"https://mcp.cloudflare.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "openai-plugins",
+					"repository": "openai/plugins",
+					"commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+					"path": "plugins/cloudflare/.mcp.json",
+					"url": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/cloudflare/.mcp.json",
+					"license": "MIT"
+				},
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/cloudflare/skills.git",
+					"commit": "b052c32bab7dd493513260228a36c88294f343f1",
+					"url": "https://raw.githubusercontent.com/cloudflare/skills/b052c32bab7dd493513260228a36c88294f343f1/.mcp.json"
+				}
+			],
+			"homepage": "https://workers.cloudflare.com/",
+			"privacyUrl": "https://www.cloudflare.com/privacypolicy/",
+			"oauth": {
+				"kind": "oauth"
+			}
+		},
+		{
+			"server": "cloudinary-analysis",
+			"service": "cloudinary",
+			"label": "Cloudinary Analysis",
+			"url": "https://analysis.mcp.cloudinary.com/mcp",
+			"aliases": [
+				"cloudinary"
+			],
+			"publisher": "Cloudinary",
+			"transport": {
+				"type": "http",
+				"url": "https://analysis.mcp.cloudinary.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://analysis.mcp.cloudinary.com",
+					"resource": "https://analysis.mcp.cloudinary.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"media_analysis",
+						"query_analysis_tasks"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"media_analysis",
+						"query_analysis_tasks"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"none"
+					],
+					"sourceUrls": [
+						"https://analysis.mcp.cloudinary.com/mcp",
+						"https://analysis.mcp.cloudinary.com/.well-known/oauth-protected-resource/mcp",
+						"https://analysis.mcp.cloudinary.com/.well-known/oauth-protected-resource",
+						"https://analysis.mcp.cloudinary.com/.well-known/oauth-authorization-server",
+						"https://analysis.mcp.cloudinary.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/cloudinary-devs/cloudinary-plugin.git",
+					"commit": "86be53409e3fb1c465cd5ff4d1dc937a2860f45c",
+					"url": "https://raw.githubusercontent.com/cloudinary-devs/cloudinary-plugin/86be53409e3fb1c465cd5ff4d1dc937a2860f45c/mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
+				}
+			]
+		},
+		{
+			"server": "cloudinary-asset-mgmt",
+			"service": "cloudinary",
+			"label": "Cloudinary Asset Management",
+			"url": "https://asset-management.mcp.cloudinary.com/mcp",
+			"aliases": [
+				"cloudinary",
+				"cloudinary-asset-management"
+			],
+			"publisher": "Cloudinary",
+			"transport": {
+				"type": "http",
+				"url": "https://asset-management.mcp.cloudinary.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://asset-management.mcp.cloudinary.com",
+					"resource": "https://asset-management.mcp.cloudinary.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"asset_management",
+						"upload",
+						"media_generation"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"asset_management",
+						"upload",
+						"media_generation"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"none"
+					],
+					"sourceUrls": [
+						"https://asset-management.mcp.cloudinary.com/mcp",
+						"https://asset-management.mcp.cloudinary.com/.well-known/oauth-protected-resource/mcp",
+						"https://asset-management.mcp.cloudinary.com/.well-known/oauth-protected-resource",
+						"https://asset-management.mcp.cloudinary.com/.well-known/oauth-authorization-server",
+						"https://asset-management.mcp.cloudinary.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/cloudinary-devs/cloudinary-plugin.git",
+					"commit": "86be53409e3fb1c465cd5ff4d1dc937a2860f45c",
+					"url": "https://raw.githubusercontent.com/cloudinary-devs/cloudinary-plugin/86be53409e3fb1c465cd5ff4d1dc937a2860f45c/mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
+				}
+			]
+		},
+		{
+			"server": "cloudinary-env-config",
+			"service": "cloudinary",
+			"label": "Cloudinary Environment Config",
+			"url": "https://environment-config.mcp.cloudinary.com/mcp",
+			"aliases": [
+				"cloudinary",
+				"cloudinary-environment-config"
+			],
+			"publisher": "Cloudinary",
+			"transport": {
+				"type": "http",
+				"url": "https://environment-config.mcp.cloudinary.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://environment-config.mcp.cloudinary.com",
+					"resource": "https://environment-config.mcp.cloudinary.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"asset_management",
+						"upload"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"asset_management",
+						"upload"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"none"
+					],
+					"sourceUrls": [
+						"https://environment-config.mcp.cloudinary.com/mcp",
+						"https://environment-config.mcp.cloudinary.com/.well-known/oauth-protected-resource/mcp",
+						"https://environment-config.mcp.cloudinary.com/.well-known/oauth-protected-resource",
+						"https://environment-config.mcp.cloudinary.com/.well-known/oauth-authorization-server",
+						"https://environment-config.mcp.cloudinary.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/cloudinary-devs/cloudinary-plugin.git",
+					"commit": "86be53409e3fb1c465cd5ff4d1dc937a2860f45c",
+					"url": "https://raw.githubusercontent.com/cloudinary-devs/cloudinary-plugin/86be53409e3fb1c465cd5ff4d1dc937a2860f45c/mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
+				}
+			]
+		},
+		{
+			"server": "cloudinary-smd",
+			"service": "cloudinary",
+			"label": "Cloudinary Structured Metadata",
+			"url": "https://structured-metadata.mcp.cloudinary.com/mcp",
+			"aliases": [
+				"cloudinary",
+				"cloudinary-structured-metadata"
+			],
+			"publisher": "Cloudinary",
+			"transport": {
+				"type": "http",
+				"url": "https://structured-metadata.mcp.cloudinary.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://structured-metadata.mcp.cloudinary.com",
+					"resource": "https://structured-metadata.mcp.cloudinary.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"asset_management",
+						"upload"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"asset_management",
+						"upload"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"none"
+					],
+					"sourceUrls": [
+						"https://structured-metadata.mcp.cloudinary.com/mcp",
+						"https://structured-metadata.mcp.cloudinary.com/.well-known/oauth-protected-resource/mcp",
+						"https://structured-metadata.mcp.cloudinary.com/.well-known/oauth-protected-resource",
+						"https://structured-metadata.mcp.cloudinary.com/.well-known/oauth-authorization-server",
+						"https://structured-metadata.mcp.cloudinary.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/cloudinary-devs/cloudinary-plugin.git",
+					"commit": "86be53409e3fb1c465cd5ff4d1dc937a2860f45c",
+					"url": "https://raw.githubusercontent.com/cloudinary-devs/cloudinary-plugin/86be53409e3fb1c465cd5ff4d1dc937a2860f45c/mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
+				}
+			]
+		},
+		{
+			"server": "codspeed",
+			"service": "codspeed",
+			"label": "CodSpeed",
+			"url": "https://mcp.codspeed.io/mcp",
+			"aliases": [],
+			"publisher": "CodSpeed",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.codspeed.io/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://api.codspeed.io",
+					"resource": "https://mcp.codspeed.io/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.codspeed.io/mcp",
+						"https://mcp.codspeed.io/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.codspeed.io/.well-known/oauth-protected-resource",
+						"https://api.codspeed.io/.well-known/oauth-authorization-server",
+						"https://api.codspeed.io/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/CodSpeedHQ/codspeed.git",
+					"commit": "37eba9ed92b0f1a17cf386303446475df380af37",
+					"url": "https://raw.githubusercontent.com/CodSpeedHQ/codspeed/37eba9ed92b0f1a17cf386303446475df380af37/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "dropbox",
+			"service": "dropbox",
+			"label": "Dropbox",
+			"url": "https://mcp.dropbox.com/mcp",
+			"description": "The Dropbox plugin for ChatGPT connects your Dropbox files directly to ChatGPT. You can access files, save ChatGPT-generated content to Dropbox, and create sharing links without switching tools. Everything respects your existing Dropbox permissions, and ChatGPT only works with files you already have access to.",
+			"category": "Productivity",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.dropbox.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://www.dropbox.com",
+					"resource": "https://mcp.dropbox.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"account_info.read",
+						"file_requests.read",
+						"file_requests.write",
+						"files.content.read",
+						"files.content.write",
+						"files.metadata.read",
+						"sharing.read",
+						"sharing.write"
+					],
+					"authorizationServerScopes": [
+						"account_info.read",
+						"contacts.read",
+						"contacts.write",
+						"files.metadata.read",
+						"files.content.read",
+						"files.content.write",
+						"files.permanent_delete",
+						"files.metadata.write",
+						"sharing.read",
+						"sharing.write",
+						"file_requests.read",
+						"file_requests.write",
+						"openid",
+						"profile",
+						"email",
+						"account_info.write",
+						"backup.read",
+						"backup.write",
+						"dash/content.read",
+						"dash/content.write",
+						"team_info.read",
+						"team_info.write",
+						"sessions.list",
+						"sessions.modify",
+						"members.read",
+						"members.write",
+						"members.delete",
+						"groups.read",
+						"groups.write",
+						"events.read"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.dropbox.com/mcp",
+						"https://mcp.dropbox.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.dropbox.com/.well-known/oauth-protected-resource",
+						"https://www.dropbox.com/.well-known/oauth-authorization-server",
+						"https://www.dropbox.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "openai-plugins",
+					"repository": "openai/plugins",
+					"commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+					"path": "plugins/dropbox/.mcp.json",
+					"url": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/dropbox/.mcp.json"
+				}
+			],
+			"homepage": "https://www.dropbox.com",
+			"privacyUrl": "https://www.dropbox.com/privacy",
+			"supportUrl": "https://www.dropbox.com/get_help"
+		},
+		{
+			"server": "expo",
+			"service": "expo",
+			"label": "Expo",
+			"url": "https://mcp.expo.dev/mcp",
+			"aliases": [],
+			"publisher": "Expo",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.expo.dev/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.expo.dev",
+					"resource": "https://mcp.expo.dev/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"mcp:access"
+					],
+					"authorizationServerScopes": [
+						"mcp:access"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"private_key_jwt",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.expo.dev/mcp",
+						"https://mcp.expo.dev/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.expo.dev/.well-known/oauth-protected-resource",
+						"https://mcp.expo.dev/.well-known/oauth-authorization-server",
+						"https://mcp.expo.dev/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/expo/skills.git",
+					"commit": "170589a7ee8963156f63de8202fa96cf08a9e610",
+					"path": "plugins/expo",
+					"url": "https://raw.githubusercontent.com/expo/skills/170589a7ee8963156f63de8202fa96cf08a9e610/plugins/expo/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "fullstory",
+			"service": "fullstory",
+			"label": "Fullstory",
+			"url": "https://api.fullstory.com/mcp/fullstory",
+			"aliases": [],
+			"publisher": "Fullstory",
+			"transport": {
+				"type": "http",
+				"url": "https://api.fullstory.com/mcp/fullstory"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://auth.fullstory.com",
+					"resource": "https://api.fullstory.com/mcp/fullstory",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"playback:read",
+						"search:read",
+						"search.metadata:read",
+						"sessions:read",
+						"metrics:read",
+						"metrics.funnel:read",
+						"metrics.page:read",
+						"library.objects:read",
+						"playback.spec:read",
+						"playback.page.definitions:read",
+						"specs.mappings:read",
+						"settings.own:read",
+						"settings.own:write"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://api.fullstory.com/mcp/fullstory",
+						"https://api.fullstory.com/.well-known/oauth-protected-resource/mcp/fullstory",
+						"https://api.fullstory.com/.well-known/oauth-protected-resource",
+						"https://auth.fullstory.com/.well-known/oauth-authorization-server",
+						"https://auth.fullstory.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/fullstorydev/fullstory-skills.git",
+					"commit": "b20614e2d08d7a7c70775bb62b5af640f60b024b",
+					"url": "https://raw.githubusercontent.com/fullstorydev/fullstory-skills/b20614e2d08d7a7c70775bb62b5af640f60b024b/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "gc-ai",
+			"service": "gc-ai",
+			"label": "GC AI",
+			"url": "https://app.gc.ai/api/mcp",
+			"aliases": [],
+			"publisher": "GC AI",
+			"transport": {
+				"type": "http",
+				"url": "https://app.gc.ai/api/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://app.gc.ai/",
+					"resource": "https://app.gc.ai/api/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_basic",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://app.gc.ai/api/mcp",
+						"https://app.gc.ai/.well-known/oauth-protected-resource/api/mcp",
+						"https://app.gc.ai/.well-known/oauth-protected-resource",
+						"https://app.gc.ai/.well-known/oauth-authorization-server",
+						"https://app.gc.ai/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/GC-AI-Inc/gc-ai-claude-plugin.git",
+					"commit": "efda779972c7b7162e79234e164bc2f359a8a518",
+					"url": "https://raw.githubusercontent.com/GC-AI-Inc/gc-ai-claude-plugin/efda779972c7b7162e79234e164bc2f359a8a518/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "github",
+			"service": "github",
+			"label": "GitHub",
+			"url": "https://api.githubcopilot.com/mcp/",
+			"description": "Inspect repositories, triage pull requests and issues, debug CI, and publish changes through a hybrid GitHub connector and CLI workflow.",
+			"category": "Developer Tools",
+			"aliases": [],
+			"publisher": "GitHub",
+			"transport": {
+				"type": "http",
+				"url": "https://api.githubcopilot.com/mcp/"
+			},
+			"auth": {
+				"strategy": "api_key",
+				"clientRegistration": "unknown",
+				"alternatives": [
+					{
+						"kind": "oauth",
+						"readiness": "unknown",
+						"note": "GitHub's MCP endpoint advertises standard OAuth (PKCE S256 observed) but no dynamic client registration; a Prime-controlled registered client is not established",
+						"sourceUrl": "https://github.com/login/oauth/.well-known/oauth-authorization-server"
+					}
+				],
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://github.com/login/oauth",
+					"resource": "https://api.githubcopilot.com/mcp/",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"repo",
+						"read:org",
+						"read:user",
+						"user:email",
+						"read:packages",
+						"write:packages",
+						"read:project",
+						"project",
+						"gist",
+						"notifications"
+					],
+					"authorizationServerScopes": [
+						"offline_access"
+					],
+					"sourceUrls": [
+						"https://api.githubcopilot.com/mcp/",
+						"https://api.githubcopilot.com/.well-known/oauth-protected-resource/mcp/",
+						"https://api.githubcopilot.com/.well-known/oauth-protected-resource",
+						"https://github.com/.well-known/oauth-authorization-server/login/oauth",
+						"https://github.com/login/oauth/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "paste a GitHub personal access token (GITHUB_PAT_TOKEN or GITHUB_PERSONAL_ACCESS_TOKEN)",
+				"fields": [
+					{
+						"id": "GITHUB_PAT_TOKEN",
+						"label": "GITHUB_PAT_TOKEN",
+						"description": "Environment variable GITHUB_PAT_TOKEN",
+						"required": true,
+						"kind": "bearer-token",
+						"credentialSet": "github-pat"
+					},
+					{
+						"id": "GITHUB_PERSONAL_ACCESS_TOKEN",
+						"label": "GITHUB_PERSONAL_ACCESS_TOKEN",
+						"description": "Environment variable GITHUB_PERSONAL_ACCESS_TOKEN",
+						"required": true,
+						"kind": "bearer-token",
+						"credentialSet": "github-pat"
+					}
+				],
+				"requirement": "bearer-token",
+				"readiness": "user-setup"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "openai-plugins",
+					"repository": "openai/plugins",
+					"commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+					"path": "plugins/github/.mcp.json",
+					"url": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/github/.mcp.json",
+					"license": "MIT"
+				},
+				{
+					"source": "claude-plugins-official",
+					"repository": "anthropics/claude-plugins-official",
+					"commit": "3deb821cb71ccfaaf2ffa9935e977df314ce5cd5",
+					"path": "./external_plugins/github",
+					"url": "https://raw.githubusercontent.com/anthropics/claude-plugins-official/3deb821cb71ccfaaf2ffa9935e977df314ce5cd5/external_plugins/github/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
+				}
+			],
+			"homepage": "https://github.com/",
+			"privacyUrl": "https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement"
+		},
+		{
+			"server": "grafana-cloud",
+			"service": "grafana",
+			"label": "Grafana",
+			"url": "https://mcp.grafana.com/mcp",
+			"aliases": [
+				"grafana",
+				"grafana-cloud-mcp"
+			],
+			"publisher": "Grafana",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.grafana.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.grafana.com/mcp",
+					"resource": "https://mcp.grafana.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"grafana:read",
+						"grafana:query",
+						"grafana:write"
+					],
+					"authorizationServerScopes": [
+						"grafana:read",
+						"grafana:query",
+						"grafana:write"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_basic",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://mcp.grafana.com/mcp",
+						"https://mcp.grafana.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.grafana.com/.well-known/oauth-protected-resource",
+						"https://mcp.grafana.com/.well-known/oauth-authorization-server/mcp",
+						"https://mcp.grafana.com/mcp/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/grafana/ai-marketplace.git",
+					"commit": "12be5634a492f73c189d466c5449d09b853ad7a4",
+					"path": "plugins/grafana-cloud-mcp",
+					"url": "https://raw.githubusercontent.com/grafana/ai-marketplace/12be5634a492f73c189d466c5449d09b853ad7a4/plugins/grafana-cloud-mcp/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "granola",
+			"service": "granola",
+			"label": "Granola",
+			"url": "https://mcp.granola.ai/mcp",
+			"description": "Granola MCP connects your meeting history to ChatGPT so your assistant can pull real context from past conversations while you work.\n\nUse MCP when you're already working on something bigger:\n\n-   Writing PRDs or proposals: Pull customer feedback, stakeholder input, and decisions from relevant meetings directly into your draft\n    \n-   Building presentations or reports: Combine insights from multiple conversations with your other research and data\n    \n-   Coding with context: Give your AI the project background, requirements, and technical decisions discussed in planning meetings\n    \n-   Strategic analysis: Merge meeting insights with documents, data, and other sources for comprehensive analysis\n    \nHow it works:\n\nYour AI assistant can search your Granola meetings by topic, person, company, or timeframe - then cite specific conversations in its responses. No more switching tabs to find \"what the customer said\" or \"when we decided that.\"\n\nThe difference:\n\nInstead of copy-pasting meeting notes into prompts, your AI pulls exactly what it needs from your meeting history automatically. You stay focused on the work, not the research or context.",
+			"category": "Productivity",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.granola.ai/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp-auth.granola.ai",
+					"resource": "https://mcp.granola.ai/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"mcp"
+					],
+					"authorizationServerScopes": [
+						"email",
+						"offline_access",
+						"openid",
+						"profile"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post",
+						"client_secret_basic",
+						"private_key_jwt"
+					],
+					"sourceUrls": [
+						"https://mcp.granola.ai/mcp",
+						"https://mcp.granola.ai/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.granola.ai/.well-known/oauth-protected-resource",
+						"https://mcp-auth.granola.ai/.well-known/oauth-authorization-server",
+						"https://mcp-auth.granola.ai/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "openai-plugins",
+					"repository": "openai/plugins",
+					"commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+					"path": "plugins/granola/.mcp.json",
+					"url": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/granola/.mcp.json",
+					"license": "MIT"
+				}
+			],
+			"homepage": "https://www.granola.ai",
+			"privacyUrl": "https://help.granola.ai/article/privacy-policy",
+			"supportUrl": "https://help.granola.ai/"
+		},
+		{
+			"server": "greptile",
+			"service": "greptile",
+			"label": "Greptile",
+			"url": "https://api.greptile.com/mcp",
+			"aliases": [],
+			"publisher": "Greptile",
+			"transport": {
+				"type": "http",
+				"url": "https://api.greptile.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://auth.greptile.com",
+					"resource": "https://api.greptile.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"read",
+						"write"
+					],
+					"authorizationServerScopes": [
+						"offline_access",
+						"offline",
+						"openid",
+						"read"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"private_key_jwt",
+						"none"
+					],
+					"sourceUrls": [
+						"https://api.greptile.com/mcp",
+						"https://api.greptile.com/.well-known/oauth-protected-resource/mcp",
+						"https://api.greptile.com/.well-known/oauth-protected-resource",
+						"https://auth.greptile.com/.well-known/oauth-authorization-server",
+						"https://auth.greptile.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/greptileai/claude-plugin.git",
+					"commit": "6b725af2636072cab79e0a5426f6a960b0fd29ef",
+					"path": "plugins/greptile",
+					"url": "https://raw.githubusercontent.com/greptileai/claude-plugin/6b725af2636072cab79e0a5426f6a960b0fd29ef/plugins/greptile/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "higgsfield",
+			"service": "higgsfield",
+			"label": "Higgsfield",
+			"url": "https://mcp.higgsfield.ai/mcp",
+			"description": "Generate images and videos from a text prompt or your own photo. Turn a product shot into a video ad, restyle a photo, animate a still, or build a two-minute narrated explainer. Every major image and video model in one place.",
+			"category": "Creativity",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.higgsfield.ai/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://clerk.higgsfield.ai",
+					"resource": "https://mcp.higgsfield.ai/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"openid",
+						"email",
+						"offline_access"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"email",
+						"public_metadata",
+						"private_metadata",
+						"offline_access",
+						"user:org:read"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"none",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://mcp.higgsfield.ai/mcp",
+						"https://mcp.higgsfield.ai/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.higgsfield.ai/.well-known/oauth-protected-resource",
+						"https://clerk.higgsfield.ai/.well-known/oauth-authorization-server",
+						"https://clerk.higgsfield.ai/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "openai-plugins",
+					"repository": "openai/plugins",
+					"commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+					"path": "plugins/higgsfield/.mcp.json",
+					"url": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/higgsfield/.mcp.json"
+				}
+			],
+			"homepage": "https://higgsfield.ai",
+			"privacyUrl": "https://higgsfield.ai/privacy-policy",
+			"supportUrl": "https://discord.com/invite/higgsfield"
+		},
+		{
+			"server": "honeycomb",
+			"service": "honeycomb",
+			"label": "Honeycomb",
+			"url": "https://mcp.honeycomb.io/mcp",
+			"aliases": [],
+			"publisher": "Honeycomb",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.honeycomb.io/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://ui.honeycomb.io",
+					"resource": "https://mcp.honeycomb.io/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"mcp:read",
+						"mcp:write"
+					],
+					"authorizationServerScopes": [
+						"mcp:read",
+						"mcp:write"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_basic",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://mcp.honeycomb.io/mcp",
+						"https://mcp.honeycomb.io/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.honeycomb.io/.well-known/oauth-protected-resource",
+						"https://ui.honeycomb.io/.well-known/oauth-authorization-server",
+						"https://ui.honeycomb.io/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/honeycombio/agent-skill.git",
+					"commit": "41214b7dfb97f262adabf295fa6f0fcad85bc0f6",
+					"path": "honeycomb",
+					"url": "https://raw.githubusercontent.com/honeycombio/agent-skill/41214b7dfb97f262adabf295fa6f0fcad85bc0f6/honeycomb/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "hostinger",
+			"service": "hostinger",
+			"label": "Hostinger",
+			"url": "https://mcp.hostinger.com",
+			"aliases": [],
+			"publisher": "Hostinger",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.hostinger.com"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://auth.hostinger.com",
+					"resource": "https://mcp.hostinger.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"mcp:use"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.hostinger.com",
+						"https://mcp.hostinger.com/.well-known/oauth-protected-resource",
+						"https://auth.hostinger.com/.well-known/oauth-authorization-server",
+						"https://auth.hostinger.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/hostinger/claude-plugin.git",
+					"commit": "569880c60681a7068b3ca8ca84e2fe7ab6cfa7ff",
+					"url": "https://raw.githubusercontent.com/hostinger/claude-plugin/569880c60681a7068b3ca8ca84e2fe7ab6cfa7ff/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "hunter",
+			"service": "hunter-io",
+			"label": "Hunter.io",
+			"url": "https://mcp.hunter.io/mcp",
+			"aliases": [
+				"hunter-io"
+			],
+			"publisher": "Hunter.io",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.hunter.io/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://hunter.io",
+					"resource": "https://mcp.hunter.io",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"read",
+						"write"
+					],
+					"authorizationServerScopes": [
+						"read",
+						"write"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.hunter.io/mcp",
+						"https://mcp.hunter.io/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.hunter.io/.well-known/oauth-protected-resource",
+						"https://hunter.io/.well-known/oauth-authorization-server",
+						"https://hunter.io/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/hunter-io/claude-plugin.git",
+					"commit": "2a6de2a00f7f459a05c146c6f0712417b8d30db9",
+					"url": "https://raw.githubusercontent.com/hunter-io/claude-plugin/2a6de2a00f7f459a05c146c6f0712417b8d30db9/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "intercom",
+			"service": "intercom",
+			"label": "Intercom",
+			"url": "https://mcp.intercom.com/mcp",
+			"aliases": [],
+			"publisher": "Intercom",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.intercom.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.intercom.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.intercom.com/mcp",
+						"https://mcp.intercom.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.intercom.com/.well-known/oauth-protected-resource",
+						"https://mcp.intercom.com/.well-known/oauth-authorization-server",
+						"https://mcp.intercom.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/intercom/claude-plugin-external.git",
+					"commit": "62773a7d4b8aac31545d6888fe6479be3bc53804",
+					"url": "https://raw.githubusercontent.com/intercom/claude-plugin-external/62773a7d4b8aac31545d6888fe6479be3bc53804/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "linear",
+			"service": "linear",
+			"label": "Linear",
+			"url": "https://mcp.linear.app/mcp",
+			"description": "Search, create and update Linear issues, projects, and initiatives. Draft PRDs, write updates, analyze customer requests, and keep plans up to date — all from within ChatGPT",
+			"category": "Productivity",
+			"aliases": [
+				"linear-app"
+			],
+			"publisher": "Linear",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.linear.app/mcp"
+			},
+			"auth": {
+				"strategy": "oauth",
+				"clientRegistration": "dynamic",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.linear.app",
+					"resource": "https://mcp.linear.app/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"read",
+						"write"
+					],
+					"authorizationServerScopes": [
+						"read",
+						"write",
+						"openid",
+						"email"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.linear.app/mcp",
+						"https://mcp.linear.app/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.linear.app/.well-known/oauth-protected-resource",
+						"https://mcp.linear.app/.well-known/oauth-authorization-server",
+						"https://mcp.linear.app/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "metadata-reviewed"
+			},
+			"legacyBuiltin": true,
+			"provenance": [
+				{
+					"source": "openai-plugins",
+					"repository": "openai/plugins",
+					"commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+					"path": "plugins/linear/.mcp.json",
+					"url": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/linear/.mcp.json",
+					"license": "MIT"
+				},
+				{
+					"source": "claude-plugins-official",
+					"repository": "anthropics/claude-plugins-official",
+					"commit": "3deb821cb71ccfaaf2ffa9935e977df314ce5cd5",
+					"path": "./external_plugins/linear",
+					"url": "https://raw.githubusercontent.com/anthropics/claude-plugins-official/3deb821cb71ccfaaf2ffa9935e977df314ce5cd5/external_plugins/linear/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "legacy built-in integration; OAuth dynamic client registration (plus CIMD) reviewed against public provider metadata"
+				}
+			],
+			"homepage": "https://linear.app/",
+			"privacyUrl": "https://linear.app/privacy",
+			"supportUrl": "https://linear.app/contact",
+			"oauth": {
+				"kind": "oauth"
+			}
+		},
+		{
+			"server": "logfire",
+			"service": "pydantic-logfire",
+			"label": "Pydantic Logfire",
+			"url": "https://logfire-us.pydantic.dev/mcp",
+			"aliases": [
+				"pydantic-logfire"
+			],
+			"publisher": "Pydantic Logfire",
+			"transport": {
+				"type": "http",
+				"url": "https://logfire-us.pydantic.dev/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://logfire-us.pydantic.dev",
+					"resource": "https://logfire-us.pydantic.dev/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"organization:create_project",
+						"organization:read_channel",
+						"organization:write_channel",
+						"project:read",
+						"project:read_alert",
+						"project:read_dashboard",
+						"project:read_variables",
+						"project:trigger_workflow",
+						"project:write",
+						"project:write_alert",
+						"project:write_dashboard",
+						"project:write_token",
+						"project:write_variables"
+					],
+					"authorizationServerScopes": [
+						"instance:admin",
+						"instance:billing",
+						"organization:admin",
+						"organization:read",
+						"organization:write",
+						"organization:create_project",
+						"organization:read_member",
+						"organization:write_member",
+						"organization:read_channel",
+						"organization:write_channel",
+						"organization:create_api_key",
+						"organization:read_api_key",
+						"organization:write_api_key",
+						"organization:read_invitation",
+						"organization:write_invitation",
+						"project:read",
+						"project:write",
+						"project:write_token",
+						"project:read_token",
+						"project:read_dashboard",
+						"project:write_dashboard",
+						"project:trigger_workflow",
+						"project:read_alert",
+						"project:write_alert",
+						"project:read_datasets",
+						"project:write_datasets",
+						"project:read_variables",
+						"project:write_variables",
+						"project:read_external_variables",
+						"project:gateway_proxy"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"none"
+					],
+					"sourceUrls": [
+						"https://logfire-us.pydantic.dev/mcp",
+						"https://logfire-us.pydantic.dev/.well-known/oauth-protected-resource/mcp",
+						"https://logfire-us.pydantic.dev/.well-known/oauth-protected-resource",
+						"https://logfire-us.pydantic.dev/.well-known/oauth-authorization-server",
+						"https://logfire-us.pydantic.dev/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/pydantic/skills.git",
+					"commit": "9e9390ee24d44b32cf5379c58acaebd7563f5f86",
+					"path": "plugins/logfire",
+					"url": "https://raw.githubusercontent.com/pydantic/skills/9e9390ee24d44b32cf5379c58acaebd7563f5f86/plugins/logfire/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "lovable",
+			"service": "lovable",
+			"label": "Lovable",
+			"url": "https://mcp.lovable.dev/?src=cc-plugin",
+			"aliases": [],
+			"publisher": "Lovable",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.lovable.dev/?src=cc-plugin"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://lovable.dev/oauth",
+					"resource": "https://mcp.lovable.dev",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"offline",
+						"projects:read",
+						"projects:write",
+						"workspaces:read",
+						"workspaces:write"
+					],
+					"authorizationServerScopes": [
+						"offline",
+						"openid",
+						"email",
+						"profile",
+						"projects:create",
+						"projects:read",
+						"projects:write",
+						"workspaces:create",
+						"workspaces:read",
+						"workspaces:write"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.lovable.dev/?src=cc-plugin",
+						"https://mcp.lovable.dev/.well-known/oauth-protected-resource?src=cc-plugin",
+						"https://lovable.dev/.well-known/oauth-authorization-server/oauth",
+						"https://lovable.dev/oauth/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/lovablelabs/mcp.git",
+					"commit": "0336e6db8026b0f02cb89d1451cc48ea3f469791",
+					"url": "https://raw.githubusercontent.com/lovablelabs/mcp/0336e6db8026b0f02cb89d1451cc48ea3f469791/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "mapbox",
+			"service": "mapbox",
+			"label": "Mapbox",
+			"url": "https://mcp.mapbox.com/mcp",
+			"aliases": [],
+			"publisher": "Mapbox",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.mapbox.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.mapbox.com",
+					"resource": "https://mcp.mapbox.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"styles:tiles",
+						"styles:read",
+						"fonts:read",
+						"datasets:read",
+						"tokens:read"
+					],
+					"authorizationServerScopes": [
+						"styles:tiles",
+						"styles:read",
+						"fonts:read",
+						"datasets:read",
+						"tokens:read"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.mapbox.com/mcp",
+						"https://mcp.mapbox.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.mapbox.com/.well-known/oauth-protected-resource",
+						"https://mcp.mapbox.com/.well-known/oauth-authorization-server",
+						"https://mcp.mapbox.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/mapbox/mapbox-agent-skills.git",
+					"commit": "209e8c408fd65edfff45e491c941e8a00025a1a6",
+					"url": "https://raw.githubusercontent.com/mapbox/mapbox-agent-skills/209e8c408fd65edfff45e491c941e8a00025a1a6/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
+				}
+			]
+		},
+		{
+			"server": "mapbox-devkit",
+			"service": "mapbox",
+			"label": "Mapbox DevKit",
+			"url": "https://mcp-devkit.mapbox.com/mcp",
+			"aliases": [
+				"mapbox"
+			],
+			"publisher": "Mapbox",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp-devkit.mapbox.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp-devkit.mapbox.com",
+					"resource": "https://mcp-devkit.mapbox.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"styles:tiles",
+						"styles:read",
+						"styles:write",
+						"styles:list",
+						"fonts:read",
+						"datasets:read",
+						"tokens:read",
+						"tilesets:read",
+						"user-feedback:read"
+					],
+					"authorizationServerScopes": [
+						"styles:tiles",
+						"styles:read",
+						"styles:write",
+						"styles:list",
+						"fonts:read",
+						"datasets:read",
+						"tokens:read",
+						"tilesets:read",
+						"user-feedback:read"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp-devkit.mapbox.com/mcp",
+						"https://mcp-devkit.mapbox.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp-devkit.mapbox.com/.well-known/oauth-protected-resource",
+						"https://mcp-devkit.mapbox.com/.well-known/oauth-authorization-server",
+						"https://mcp-devkit.mapbox.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/mapbox/mapbox-agent-skills.git",
+					"commit": "209e8c408fd65edfff45e491c941e8a00025a1a6",
+					"url": "https://raw.githubusercontent.com/mapbox/mapbox-agent-skills/209e8c408fd65edfff45e491c941e8a00025a1a6/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
+				}
+			]
+		},
+		{
+			"server": "mercadopago",
+			"service": "mercado-pago",
+			"label": "Mercado Pago",
+			"url": "https://mcp.mercadopago.com/mcp",
+			"aliases": [
+				"mcp",
+				"mercado-pago"
+			],
+			"publisher": "Mercado Pago",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.mercadopago.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.mercadopago.com/mcp",
+					"resource": "https://mcp.mercadopago.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"offline_access",
+						"write",
+						"read"
+					],
+					"authorizationServerScopes": [
+						"offline_access",
+						"write",
+						"read"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.mercadopago.com/mcp",
+						"https://mcp.mercadopago.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.mercadopago.com/.well-known/oauth-protected-resource",
+						"https://mcp.mercadopago.com/.well-known/oauth-authorization-server/mcp",
+						"https://mcp.mercadopago.com/mcp/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/mercadopago/mercadopago-claude-marketplace.git",
+					"commit": "c0d06959afc90b2f3d637c35eeb51c36f512c005",
+					"path": "plugins/mercadopago",
+					"url": "https://raw.githubusercontent.com/mercadopago/mercadopago-claude-marketplace/c0d06959afc90b2f3d637c35eeb51c36f512c005/plugins/mercadopago/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "neon",
+			"service": "neon",
+			"label": "Neon",
+			"url": "https://mcp.neon.tech/mcp",
+			"aliases": [],
+			"publisher": "Neon",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.neon.tech/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.neon.tech",
+					"resource": "https://mcp.neon.tech/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"authorizationServerScopes": [
+						"read",
+						"write"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.neon.tech/mcp",
+						"https://mcp.neon.tech/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.neon.tech/.well-known/oauth-protected-resource",
+						"https://mcp.neon.tech/.well-known/oauth-authorization-server",
+						"https://mcp.neon.tech/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/neondatabase/agent-skills.git",
+					"commit": "2e0da3a1653bcdd227565ac14bb3e9e453a8b854",
+					"path": "plugins/neon-postgres",
+					"url": "https://raw.githubusercontent.com/neondatabase/agent-skills/2e0da3a1653bcdd227565ac14bb3e9e453a8b854/plugins/neon-postgres/mcp.json"
+				}
+			]
+		},
+		{
+			"server": "netlify",
+			"service": "netlify",
+			"label": "Netlify",
+			"url": "https://netlify-mcp.netlify.app/mcp",
+			"description": "Official Netlify MCP server (hosted, streamable HTTP). Authorizes via OAuth on first connection — the agent is prompted to sign in to Netlify; no token or local install required. Lets the agent create and manage Netlify projects, deploys, and environment variables.",
+			"aliases": [
+				"netlify-skills"
+			],
+			"publisher": "Netlify",
+			"transport": {
+				"type": "http",
+				"url": "https://netlify-mcp.netlify.app/mcp"
+			},
+			"auth": {
+				"strategy": "oauth",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://netlify-mcp.netlify.app/",
+					"resource": "https://netlify-mcp.netlify.app/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"offline_access",
+						"read",
+						"write",
+						"claudeai"
+					],
+					"authorizationServerScopes": [
+						"offline_access",
+						"read",
+						"write",
+						"claudeai"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post",
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://netlify-mcp.netlify.app/mcp",
+						"https://netlify-mcp.netlify.app/.well-known/oauth-protected-resource/mcp",
+						"https://netlify-mcp.netlify.app/.well-known/oauth-protected-resource",
+						"https://netlify-mcp.netlify.app/.well-known/oauth-authorization-server",
+						"https://netlify-mcp.netlify.app/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/netlify/context-and-tools.git",
+					"commit": "b4fd870cf2f1f4cc66b28ead16277e1d799b510f",
+					"url": "https://raw.githubusercontent.com/netlify/context-and-tools/b4fd870cf2f1f4cc66b28ead16277e1d799b510f/.mcp.json"
+				}
+			],
+			"oauth": {
+				"kind": "oauth"
+			}
+		},
+		{
+			"server": "newrelic",
+			"service": "new-relic",
+			"label": "New Relic",
+			"url": "https://mcp.newrelic.com/mcp/",
+			"aliases": [
+				"new-relic"
+			],
+			"publisher": "New Relic",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.newrelic.com/mcp/"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://oauth2.service.newrelic.com",
+					"resource": "https://mcp.newrelic.com/mcp/",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"observability:read",
+						"offline",
+						"offline_access"
+					],
+					"authorizationServerScopes": [
+						"offline_access",
+						"offline",
+						"openid",
+						"observability:read"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic",
+						"private_key_jwt",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.newrelic.com/mcp/",
+						"https://mcp.newrelic.com/.well-known/oauth-protected-resource",
+						"https://mcp.newrelic.com/.well-known/oauth-protected-resource/mcp/",
+						"https://oauth2.service.newrelic.com/.well-known/oauth-authorization-server",
+						"https://oauth2.service.newrelic.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/newrelic/claude-code-plugin.git",
+					"commit": "f8e5f8b62139072a22153ec92de1c0cc1af2f56a",
+					"url": "https://raw.githubusercontent.com/newrelic/claude-code-plugin/f8e5f8b62139072a22153ec92de1c0cc1af2f56a/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "notion",
+			"service": "notion",
+			"label": "Notion",
+			"url": "https://mcp.notion.com/mcp",
+			"description": "Notion workflows for implementation planning, research synthesis, meeting preparation, and knowledge capture.",
+			"category": "Productivity",
+			"aliases": [
+				"notion-workspace"
+			],
+			"publisher": "Notion",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.notion.com/mcp"
+			},
+			"auth": {
+				"strategy": "oauth",
+				"clientRegistration": "dynamic",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.notion.com",
+					"resource": "https://mcp.notion.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"default"
+					],
+					"authorizationServerScopes": [
+						"default"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.notion.com/mcp",
+						"https://mcp.notion.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.notion.com/.well-known/oauth-protected-resource",
+						"https://mcp.notion.com/.well-known/oauth-authorization-server",
+						"https://mcp.notion.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "metadata-reviewed"
+			},
+			"legacyBuiltin": true,
+			"provenance": [
+				{
+					"source": "openai-plugins",
+					"repository": "openai/plugins",
+					"commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+					"path": "plugins/notion/.mcp.json",
+					"url": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/notion/.mcp.json",
+					"license": "MIT"
+				},
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/makenotion/claude-code-notion-plugin.git",
+					"commit": "9847f2aa1a15f25df35ed1fb7b4557dbb60cd651",
+					"url": "https://raw.githubusercontent.com/makenotion/claude-code-notion-plugin/9847f2aa1a15f25df35ed1fb7b4557dbb60cd651/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "legacy built-in integration; OAuth dynamic client registration (plus CIMD) reviewed against public provider metadata"
+				}
+			],
+			"homepage": "https://www.notion.so/",
+			"privacyUrl": "https://www.notion.com/help/privacy",
+			"oauth": {
+				"kind": "oauth"
+			}
+		},
+		{
+			"server": "pagerduty",
+			"service": "pagerduty",
+			"label": "PagerDuty",
+			"url": "https://mcp.pagerduty.com/mcp",
+			"aliases": [],
+			"publisher": "PagerDuty",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.pagerduty.com/mcp"
+			},
+			"auth": {
+				"strategy": "api_key",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.pagerduty.com/",
+					"resource": "https://mcp.pagerduty.com/mcp",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"incidents.read",
+						"extension_schemas.read",
+						"subscribers.write",
+						"users:sessions.write",
+						"recommendations.write",
+						"recommendations.read",
+						"none",
+						"users:contact_methods.read",
+						"users.write",
+						"templates.read",
+						"incident_types.read",
+						"jira_cloud_rules.read",
+						"workflow_integrations:connections.write",
+						"session_configurations.write",
+						"addons.write",
+						"oncalls.read",
+						"standards.write",
+						"users:contact_methods.write",
+						"users.read",
+						"incident_workflows.write",
+						"notifications.read",
+						"workflow_integrations:connections.read",
+						"copilot:chat.write",
+						"write",
+						"incident_types.write",
+						"contextual_data.write",
+						"event_orchestrations.read",
+						"read",
+						"webhook_subscriptions.write",
+						"openid"
+					],
+					"authorizationServerScopes": [
+						"incidents.read",
+						"extension_schemas.read",
+						"subscribers.write",
+						"users:sessions.write",
+						"recommendations.write",
+						"recommendations.read",
+						"none",
+						"users:contact_methods.read",
+						"users.write",
+						"templates.read",
+						"incident_types.read",
+						"jira_cloud_rules.read",
+						"workflow_integrations:connections.write",
+						"session_configurations.write",
+						"addons.write",
+						"oncalls.read",
+						"standards.write",
+						"users:contact_methods.write",
+						"users.read",
+						"incident_workflows.write",
+						"notifications.read",
+						"workflow_integrations:connections.read",
+						"copilot:chat.write",
+						"write",
+						"incident_types.write",
+						"contextual_data.write",
+						"event_orchestrations.read",
+						"read",
+						"webhook_subscriptions.write",
+						"openid"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post",
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.pagerduty.com/mcp",
+						"https://mcp.pagerduty.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.pagerduty.com/.well-known/oauth-protected-resource",
+						"https://mcp.pagerduty.com/.well-known/oauth-authorization-server",
+						"https://mcp.pagerduty.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "paste your PagerDuty API key (PAGERDUTY_API_KEY)",
+				"fields": [
+					{
+						"id": "PAGERDUTY_API_KEY",
+						"label": "PAGERDUTY_API_KEY",
+						"description": "Environment variable PAGERDUTY_API_KEY",
+						"required": true,
+						"kind": "bearer-token"
+					}
+				],
+				"requirement": "bearer-token",
+				"readiness": "user-setup"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/PagerDuty/claude-code-plugins.git",
+					"commit": "761cba75bd50fd561405c3b173ecf36084432089",
+					"url": "https://raw.githubusercontent.com/PagerDuty/claude-code-plugins/761cba75bd50fd561405c3b173ecf36084432089/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
+				}
+			]
+		},
+		{
+			"server": "posthog",
+			"service": "posthog",
+			"label": "PostHog",
+			"url": "https://mcp.posthog.com/mcp",
+			"description": "PostHog gives your AI agent direct access to your product analytics, feature flags, experiments, error tracking, surveys, logs, and LLM analytics. Ask questions about your data, create insights, toggle feature flags, analyze errors, search docs, and more — all from chat.",
+			"category": "Data & Analytics",
+			"aliases": [],
+			"publisher": "PostHog",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.posthog.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://oauth.posthog.com",
+					"resource": "https://mcp.posthog.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"email",
+						"introspection",
+						"action:read",
+						"action:write",
+						"access_control:read",
+						"account:read",
+						"account:write",
+						"activity_log:read",
+						"alert:read",
+						"alert:write",
+						"annotation:read",
+						"annotation:write",
+						"approvals:read",
+						"approvals:write",
+						"batch_export:read",
+						"batch_export:write",
+						"billing:read",
+						"business_knowledge:read",
+						"business_knowledge:write",
+						"canvas:read",
+						"canvas:write",
+						"cohort:read",
+						"cohort:write",
+						"comment:read",
+						"comment:write",
+						"conversation:read",
+						"customer_analytics:read",
+						"customer_analytics:write"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"email",
+						"introspection",
+						"action:read",
+						"action:write",
+						"access_control:read",
+						"access_control:write",
+						"account:read",
+						"account:write",
+						"activity_log:read",
+						"activity_log:write",
+						"alert:read",
+						"alert:write",
+						"annotation:read",
+						"annotation:write",
+						"approvals:read",
+						"approvals:write",
+						"autoresearch:read",
+						"autoresearch:write",
+						"batch_export:read",
+						"batch_export:write",
+						"batch_import:read",
+						"batch_import:write",
+						"billing:read",
+						"billing:write",
+						"business_knowledge:read",
+						"business_knowledge:write",
+						"canvas:read",
+						"canvas:write"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post",
+						"private_key_jwt"
+					],
+					"sourceUrls": [
+						"https://mcp.posthog.com/mcp",
+						"https://mcp.posthog.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.posthog.com/.well-known/oauth-protected-resource",
+						"https://oauth.posthog.com/.well-known/oauth-authorization-server",
+						"https://oauth.posthog.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "openai-plugins",
+					"repository": "openai/plugins",
+					"commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+					"path": "plugins/posthog/.mcp.json",
+					"url": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/posthog/.mcp.json",
+					"license": "MIT"
+				},
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/PostHog/ai-plugin.git",
+					"commit": "33c066c80776a962a4233d76b20a3317733070b4",
+					"url": "https://raw.githubusercontent.com/PostHog/ai-plugin/33c066c80776a962a4233d76b20a3317733070b4/.mcp.json"
+				}
+			],
+			"homepage": "https://posthog.com",
+			"privacyUrl": "https://posthog.com/privacy",
+			"supportUrl": "https://posthog.com/support"
+		},
+		{
+			"server": "postman",
+			"service": "postman",
+			"label": "Postman",
+			"url": "https://mcp.postman.com/mcp",
+			"aliases": [],
+			"publisher": "Postman",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.postman.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.postman.com",
+					"resource": "https://mcp.postman.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_basic",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://mcp.postman.com/mcp",
+						"https://mcp.postman.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.postman.com/.well-known/oauth-protected-resource",
+						"https://mcp.postman.com/.well-known/oauth-authorization-server",
+						"https://mcp.postman.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/Postman-Devrel/postman-claude-code-plugin.git",
+					"commit": "27f652ea98d9ae0cec0ccc9f2b46128239a36a8f",
+					"url": "https://raw.githubusercontent.com/Postman-Devrel/postman-claude-code-plugin/27f652ea98d9ae0cec0ccc9f2b46128239a36a8f/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "prisma",
+			"service": "prisma",
+			"label": "Prisma",
+			"url": "https://mcp.prisma.io/mcp",
+			"aliases": [
+				"prisma-remote"
+			],
+			"publisher": "Prisma",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.prisma.io/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://auth.prisma.io",
+					"resource": "https://mcp.prisma.io/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"workspace:admin",
+						"offline_access"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.prisma.io/mcp",
+						"https://mcp.prisma.io/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.prisma.io/.well-known/oauth-protected-resource",
+						"https://auth.prisma.io/.well-known/oauth-authorization-server",
+						"https://auth.prisma.io/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/prisma/claude-plugin.git",
+					"commit": "815dbc4a045a29e3b81510ba0e3ab806f1baaf0e",
+					"url": "https://raw.githubusercontent.com/prisma/claude-plugin/815dbc4a045a29e3b81510ba0e3ab806f1baaf0e/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
+				}
+			]
+		},
+		{
+			"server": "railway",
+			"service": "railway",
+			"label": "Railway",
+			"url": "https://mcp.railway.com",
+			"aliases": [],
+			"publisher": "Railway",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.railway.com"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://backboard.railway.com",
+					"resource": "https://mcp.railway.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"workspace:member"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"workspace:member"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none",
+						"private_key_jwt"
+					],
+					"sourceUrls": [
+						"https://mcp.railway.com",
+						"https://mcp.railway.com/.well-known/oauth-protected-resource",
+						"https://backboard.railway.com/.well-known/oauth-authorization-server",
+						"https://backboard.railway.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/railwayapp/railway-skills.git",
+					"commit": "950acebcef3445f3915ea0709876c3ba9c237a7f",
+					"path": "plugins/railway",
+					"url": "https://raw.githubusercontent.com/railwayapp/railway-skills/950acebcef3445f3915ea0709876c3ba9c237a7f/plugins/railway/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "resend",
+			"service": "resend",
+			"label": "Resend",
+			"url": "https://mcp.resend.com/mcp",
+			"aliases": [],
+			"publisher": "Resend",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.resend.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://api.resend.com",
+					"resource": "https://mcp.resend.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"authorizationServerScopes": [
+						"full_access",
+						"emails:send"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_basic",
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://mcp.resend.com/mcp",
+						"https://mcp.resend.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.resend.com/.well-known/oauth-protected-resource",
+						"https://api.resend.com/.well-known/oauth-authorization-server",
+						"https://api.resend.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/resend/resend-skills.git",
+					"commit": "5f9f97958a785429ab8e4534d61fe2d712d74e3d",
+					"url": "https://raw.githubusercontent.com/resend/resend-skills/5f9f97958a785429ab8e4534d61fe2d712d74e3d/.claude-plugin/plugin.json"
+				}
+			]
+		},
+		{
+			"server": "revenuecat",
+			"service": "revenuecat",
+			"label": "RevenueCat",
+			"url": "https://mcp.revenuecat.ai/mcp",
+			"aliases": [
+				"rc"
+			],
+			"publisher": "RevenueCat",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.revenuecat.ai/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.revenuecat.ai",
+					"resource": "https://mcp.revenuecat.ai/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"*:*:read",
+						"*:*:read_write"
+					],
+					"authorizationServerScopes": [
+						"*:*:read",
+						"*:*:read_write"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.revenuecat.ai/mcp",
+						"https://mcp.revenuecat.ai/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.revenuecat.ai/.well-known/oauth-protected-resource",
+						"https://mcp.revenuecat.ai/.well-known/oauth-authorization-server",
+						"https://mcp.revenuecat.ai/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/RevenueCat/rc-claude-code-plugin.git",
+					"commit": "b9b77b12da33213c9c2e750b06cd6270c1d8ed65",
+					"url": "https://raw.githubusercontent.com/RevenueCat/rc-claude-code-plugin/b9b77b12da33213c9c2e750b06cd6270c1d8ed65/revenuecat/.mcp.json"
+				},
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/RevenueCat/rc-claude-code-plugin.git",
+					"commit": "b9b77b12da33213c9c2e750b06cd6270c1d8ed65",
+					"url": "https://raw.githubusercontent.com/RevenueCat/rc-claude-code-plugin/b9b77b12da33213c9c2e750b06cd6270c1d8ed65/revenuecat/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "rootly",
+			"service": "rootly",
+			"label": "Rootly",
+			"url": "https://mcp.rootly.com/mcp",
+			"aliases": [],
+			"publisher": "Rootly",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.rootly.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://rootly.com",
+					"resource": "https://mcp.rootly.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"email",
+						"all"
+					],
+					"authorizationServerScopes": [
+						"profile",
+						"email",
+						"all",
+						"ir.all",
+						"oc.all",
+						"ir.incidents:read",
+						"ir.incidents:write",
+						"ir.services:read",
+						"ir.services:write",
+						"ir.environments:read",
+						"ir.environments:write",
+						"ir.functionalities:read",
+						"ir.functionalities:write",
+						"ir.severities:read",
+						"ir.severities:write",
+						"ir.incident_types:read",
+						"ir.incident_types:write",
+						"ir.incident_roles:read",
+						"ir.incident_roles:write",
+						"ir.workflows:read",
+						"ir.workflows:write",
+						"ir.catalogs:read",
+						"ir.catalogs:write",
+						"ir.groups:read",
+						"ir.groups:write",
+						"ir.playbooks:read",
+						"ir.playbooks:write",
+						"ir.retrospectives:read",
+						"ir.retrospectives:write",
+						"ir.status_pages:read"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post",
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.rootly.com/mcp",
+						"https://mcp.rootly.com/.well-known/oauth-protected-resource",
+						"https://mcp.rootly.com/.well-known/oauth-protected-resource/mcp",
+						"https://rootly.com/.well-known/oauth-authorization-server",
+						"https://rootly.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/Rootly-AI-Labs/rootly-claude-plugin.git",
+					"commit": "65832aa6ff7a7b39c6bd64899a7a64646e3948ed",
+					"url": "https://raw.githubusercontent.com/Rootly-AI-Labs/rootly-claude-plugin/65832aa6ff7a7b39c6bd64899a7a64646e3948ed/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "sanity",
+			"service": "sanity",
+			"label": "Sanity",
+			"url": "https://mcp.sanity.io",
+			"aliases": [],
+			"publisher": "Sanity",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.sanity.io"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.sanity.io",
+					"resource": "https://mcp.sanity.io",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"global"
+					],
+					"authorizationServerScopes": [
+						"global"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.sanity.io",
+						"https://mcp.sanity.io/.well-known/oauth-protected-resource",
+						"https://mcp.sanity.io/.well-known/oauth-authorization-server",
+						"https://mcp.sanity.io/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/sanity-io/agent-toolkit.git",
+					"commit": "8675ed36b5f5da950c3920c118d025cd1c94f58e",
+					"url": "https://raw.githubusercontent.com/sanity-io/agent-toolkit/8675ed36b5f5da950c3920c118d025cd1c94f58e/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "sentry",
+			"service": "sentry",
+			"label": "Sentry",
+			"url": "https://mcp.sentry.dev/mcp",
+			"description": "Inspect recent issues and events in Sentry from Codex.",
+			"category": "Developer Tools",
+			"aliases": [],
+			"publisher": "Sentry",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.sentry.dev/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.sentry.dev",
+					"resource": "https://mcp.sentry.dev/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"clientIdMetadataDocument": true,
+					"protectedResourceScopes": [
+						"org:read",
+						"project:write",
+						"team:write",
+						"event:write"
+					],
+					"authorizationServerScopes": [
+						"org:read",
+						"project:write",
+						"team:write",
+						"event:write"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.sentry.dev/mcp",
+						"https://mcp.sentry.dev/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.sentry.dev/.well-known/oauth-protected-resource",
+						"https://mcp.sentry.dev/.well-known/oauth-authorization-server",
+						"https://mcp.sentry.dev/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "openai-plugins",
+					"repository": "openai/plugins",
+					"commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+					"path": "plugins/sentry/.mcp.json",
+					"url": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/sentry/.mcp.json",
+					"license": "MIT"
+				},
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/getsentry/plugin-claude.git",
+					"commit": "73e53541d7af21672e27428c7067f4264b8a3d65",
+					"url": "https://raw.githubusercontent.com/getsentry/plugin-claude/73e53541d7af21672e27428c7067f4264b8a3d65/.claude-plugin/plugin.json"
+				}
+			],
+			"homepage": "https://sentry.io/",
+			"privacyUrl": "https://sentry.io/privacy/"
+		},
+		{
+			"server": "shippo",
+			"service": "shippo",
+			"label": "Shippo",
+			"url": "https://mcp.shippo.com",
+			"aliases": [
+				"shippo-mcp"
+			],
+			"publisher": "Shippo",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.shippo.com"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://goshippo.com",
+					"resource": "https://mcp.shippo.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"*"
+					],
+					"authorizationServerScopes": [
+						"*"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.shippo.com",
+						"https://mcp.shippo.com/.well-known/oauth-protected-resource",
+						"https://goshippo.com/.well-known/oauth-authorization-server",
+						"https://goshippo.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/goshippo/ai.git",
+					"commit": "15cbb6364fbcfd465a134f5972da9179436d0787",
+					"path": "providers/claude/plugin",
+					"url": "https://raw.githubusercontent.com/goshippo/ai/15cbb6364fbcfd465a134f5972da9179436d0787/providers/claude/plugin/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "sonatype-guide",
+			"service": "sonatype-guide",
+			"label": "Sonatype Guide",
+			"url": "https://mcp.guide.sonatype.com/mcp",
+			"aliases": [],
+			"publisher": "Sonatype Guide",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.guide.sonatype.com/mcp"
+			},
+			"auth": {
+				"strategy": "api_key",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "unavailable",
+					"sourceUrls": [
+						"https://mcp.guide.sonatype.com/mcp",
+						"https://mcp.guide.sonatype.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.guide.sonatype.com/.well-known/oauth-protected-resource",
+						"https://mcp.guide.sonatype.com/.well-known/oauth-authorization-server",
+						"https://mcp.guide.sonatype.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "paste your Sonatype Guide token (SONATYPE_GUIDE_TOKEN)",
+				"fields": [
+					{
+						"id": "SONATYPE_GUIDE_TOKEN",
+						"label": "SONATYPE_GUIDE_TOKEN",
+						"description": "Environment variable SONATYPE_GUIDE_TOKEN",
+						"required": true,
+						"kind": "bearer-token"
+					}
+				],
+				"requirement": "bearer-token",
+				"readiness": "user-setup"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/sonatype/sonatype-guide-claude-plugin.git",
+					"commit": "1dae73980f591d3196f5532ac72186513563d028",
+					"url": "https://raw.githubusercontent.com/sonatype/sonatype-guide-claude-plugin/1dae73980f591d3196f5532ac72186513563d028/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
+				}
+			]
+		},
+		{
+			"server": "stripe",
+			"service": "stripe",
+			"label": "Stripe",
+			"url": "https://mcp.stripe.com",
+			"description": "Develop your payments integration faster with the ability to create products, prices, and payment links directly in ChatGPT. Run your business from ChatGPT with the ability to retrieve and manage payments, subscriptions, invoices, refunds, disputes, and customers. Build and debug your payment integration quicker than ever by searching the Stripe documentation and getting integration recommendations without needing to leave ChatGPT.",
+			"category": "Finance",
+			"aliases": [],
+			"publisher": "Stripe",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.stripe.com"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://access.stripe.com/mcp",
+					"resource": "https://mcp.stripe.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"authorizationServerScopes": [
+						"mcp"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.stripe.com",
+						"https://mcp.stripe.com/.well-known/oauth-protected-resource",
+						"https://access.stripe.com/.well-known/oauth-authorization-server/mcp",
+						"https://access.stripe.com/mcp/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "openai-plugins",
+					"repository": "openai/plugins",
+					"commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+					"path": "plugins/stripe/.mcp.json",
+					"url": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/stripe/.mcp.json"
+				},
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/stripe/ai.git",
+					"commit": "68382523846ea5bfad75ba1ef58dc5db031d0a5a",
+					"path": "providers/claude/plugin",
+					"url": "https://raw.githubusercontent.com/stripe/ai/68382523846ea5bfad75ba1ef58dc5db031d0a5a/providers/claude/plugin/.mcp.json"
+				}
+			],
+			"homepage": "https://stripe.com",
+			"privacyUrl": "https://stripe.com/privacy",
+			"supportUrl": "https://support.stripe.com"
+		},
+		{
+			"server": "valtown",
+			"service": "val-town",
+			"label": "Val Town",
+			"url": "https://api.val.town/v3/mcp",
+			"aliases": [
+				"val-town"
+			],
+			"publisher": "Val Town",
+			"transport": {
+				"type": "http",
+				"url": "https://api.val.town/v3/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://www.val.town/oauth",
+					"resource": "https://api.val.town/v3/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"email",
+						"offline_access",
+						"project_rw",
+						"user_r",
+						"blob_rw",
+						"email_rw",
+						"sqlite_rw",
+						"telemetry_r"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"offline_access",
+						"project_rw",
+						"user_r",
+						"user_rw",
+						"blob_rw",
+						"email_rw",
+						"sqlite_rw",
+						"telemetry_r",
+						"telemetry_rw",
+						"val_r",
+						"val_rw",
+						"profile",
+						"email"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post",
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://api.val.town/v3/mcp",
+						"https://api.val.town/.well-known/oauth-protected-resource",
+						"https://api.val.town/.well-known/oauth-protected-resource/v3/mcp",
+						"https://www.val.town/.well-known/oauth-authorization-server/oauth",
+						"https://www.val.town/oauth/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/val-town/plugins.git",
+					"commit": "2d3ec654b6a7d93e209afb8f2e8848eddcb9f17b",
+					"path": "plugin",
+					"url": "https://raw.githubusercontent.com/val-town/plugins/2d3ec654b6a7d93e209afb8f2e8848eddcb9f17b/plugin/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "vanta",
+			"service": "vanta",
+			"label": "Vanta (US)",
+			"url": "https://mcp.vanta.com/mcp",
+			"aliases": [
+				"vanta-mcp-plugin",
+				"vanta-us"
+			],
+			"publisher": "Vanta",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.vanta.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://api.vanta.com/mcp",
+					"resource": "https://mcp.vanta.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"mcp-api.all:write"
+					],
+					"authorizationServerScopes": [
+						"mcp-api.all:write"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.vanta.com/mcp",
+						"https://mcp.vanta.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.vanta.com/.well-known/oauth-protected-resource",
+						"https://api.vanta.com/.well-known/oauth-authorization-server/mcp",
+						"https://api.vanta.com/mcp/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/VantaInc/vanta-mcp-plugin.git",
+					"commit": "345d86b55faa649e955b7ea5569cf52d8425c2d5",
+					"url": "https://raw.githubusercontent.com/VantaInc/vanta-mcp-plugin/345d86b55faa649e955b7ea5569cf52d8425c2d5/.mcp.json"
+				},
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/VantaInc/vanta-mcp-plugin.git",
+					"commit": "345d86b55faa649e955b7ea5569cf52d8425c2d5",
+					"url": "https://raw.githubusercontent.com/VantaInc/vanta-mcp-plugin/345d86b55faa649e955b7ea5569cf52d8425c2d5/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
+				}
+			]
+		},
+		{
+			"server": "vanta-aus",
+			"service": "vanta",
+			"label": "Vanta (Australia)",
+			"url": "https://mcp.aus.vanta.com/mcp",
+			"aliases": [
+				"vanta",
+				"vanta-australia",
+				"vanta-mcp-plugin"
+			],
+			"publisher": "Vanta",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.aus.vanta.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://api.vanta.com/mcp",
+					"resource": "https://mcp.aus.vanta.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"mcp-api.all:write"
+					],
+					"authorizationServerScopes": [
+						"mcp-api.all:write"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.aus.vanta.com/mcp",
+						"https://mcp.aus.vanta.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.aus.vanta.com/.well-known/oauth-protected-resource",
+						"https://api.vanta.com/.well-known/oauth-authorization-server/mcp",
+						"https://api.vanta.com/mcp/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/VantaInc/vanta-mcp-plugin.git",
+					"commit": "345d86b55faa649e955b7ea5569cf52d8425c2d5",
+					"url": "https://raw.githubusercontent.com/VantaInc/vanta-mcp-plugin/345d86b55faa649e955b7ea5569cf52d8425c2d5/.mcp.json"
+				},
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/VantaInc/vanta-mcp-plugin.git",
+					"commit": "345d86b55faa649e955b7ea5569cf52d8425c2d5",
+					"url": "https://raw.githubusercontent.com/VantaInc/vanta-mcp-plugin/345d86b55faa649e955b7ea5569cf52d8425c2d5/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
+				}
+			]
+		},
+		{
+			"server": "vanta-eu",
+			"service": "vanta",
+			"label": "Vanta (EU)",
+			"url": "https://mcp.eu.vanta.com/mcp",
+			"aliases": [
+				"vanta",
+				"vanta-mcp-plugin"
+			],
+			"publisher": "Vanta",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.eu.vanta.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://api.vanta.com/mcp",
+					"resource": "https://mcp.eu.vanta.com",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"mcp-api.all:write"
+					],
+					"authorizationServerScopes": [
+						"mcp-api.all:write"
+					],
+					"tokenAuthMethods": [
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.eu.vanta.com/mcp",
+						"https://mcp.eu.vanta.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.eu.vanta.com/.well-known/oauth-protected-resource",
+						"https://api.vanta.com/.well-known/oauth-authorization-server/mcp",
+						"https://api.vanta.com/mcp/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/VantaInc/vanta-mcp-plugin.git",
+					"commit": "345d86b55faa649e955b7ea5569cf52d8425c2d5",
+					"url": "https://raw.githubusercontent.com/VantaInc/vanta-mcp-plugin/345d86b55faa649e955b7ea5569cf52d8425c2d5/.mcp.json"
+				},
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/VantaInc/vanta-mcp-plugin.git",
+					"commit": "345d86b55faa649e955b7ea5569cf52d8425c2d5",
+					"url": "https://raw.githubusercontent.com/VantaInc/vanta-mcp-plugin/345d86b55faa649e955b7ea5569cf52d8425c2d5/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
+				}
+			]
+		},
+		{
+			"server": "wix",
+			"service": "wix",
+			"label": "Wix",
+			"url": "https://mcp.wix.com/mcp",
+			"aliases": [
+				"wix-mcp"
+			],
+			"publisher": "Wix",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.wix.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.wix.com",
+					"resource": "https://mcp.wix.com/mcp",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"offline_access"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic",
+						"client_secret_post",
+						"none"
+					],
+					"sourceUrls": [
+						"https://mcp.wix.com/mcp",
+						"https://mcp.wix.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.wix.com/.well-known/oauth-protected-resource",
+						"https://mcp.wix.com/.well-known/oauth-authorization-server",
+						"https://mcp.wix.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/wix/skills.git",
+					"commit": "d8247b9f4603ecadc2891d3ded9bb285d5ee433b",
+					"url": "https://raw.githubusercontent.com/wix/skills/d8247b9f4603ecadc2891d3ded9bb285d5ee433b/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "zapier",
+			"service": "zapier",
+			"label": "Zapier",
+			"url": "https://mcp.zapier.com/api/v1/connect",
+			"aliases": [],
+			"publisher": "Zapier",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.zapier.com/api/v1/connect"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.zapier.com",
+					"resource": "https://mcp.zapier.com/api/v1/connect",
+					"pkceS256": true,
+					"dynamicClientRegistration": true,
+					"protectedResourceScopes": [
+						"openid",
+						"profile",
+						"email"
+					],
+					"authorizationServerScopes": [
+						"openid",
+						"profile",
+						"email"
+					],
+					"tokenAuthMethods": [
+						"none",
+						"client_secret_post",
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.zapier.com/api/v1/connect",
+						"https://mcp.zapier.com/.well-known/oauth-protected-resource/api/v1/connect",
+						"https://mcp.zapier.com/.well-known/oauth-protected-resource",
+						"https://mcp.zapier.com/.well-known/oauth-authorization-server",
+						"https://mcp.zapier.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/zapier/zapier-mcp.git",
+					"commit": "217d65a980f9b75536babf89ba64bf03ad95beea",
+					"path": "plugins/zapier",
+					"url": "https://raw.githubusercontent.com/zapier/zapier-mcp/217d65a980f9b75536babf89ba64bf03ad95beea/plugins/zapier/.mcp.json"
+				}
+			]
+		},
+		{
+			"server": "zoom",
+			"service": "zoom",
+			"label": "Zoom",
+			"url": "https://mcp.zoom.us/mcp/zoom/streamable",
+			"aliases": [
+				"zoom-mcp",
+				"zoom-plugin"
+			],
+			"publisher": "Zoom",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.zoom.us/mcp/zoom/streamable"
+			},
+			"auth": {
+				"strategy": "api_key",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://zoom.us",
+					"resource": "https://mcp.zoom.us/mcp/zoom/streamable",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"docs:update:collaborator",
+						"docs:write:collaborator",
+						"docs:read:list_file_collaborators",
+						"docs:delete:collaborator",
+						"my_notes:read:content",
+						"meeting:write:meeting",
+						"meeting:read:search",
+						"meeting:update:meeting",
+						"cloud_recording:read:list_user_recordings",
+						"docs:write:import",
+						"cloud_recording:read:content",
+						"docs:read:export",
+						"hub:write:content",
+						"meeting:update:in_meeting_controls",
+						"agentic_search:read:search",
+						"hub:read:content",
+						"meeting:delete:meeting",
+						"meeting:read:assets",
+						"agentic_search:read:ask"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.zoom.us/mcp/zoom/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource/mcp/zoom/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource",
+						"https://zoom.us/.well-known/oauth-authorization-server",
+						"https://zoom.us/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "paste your Zoom access token (ZOOM_MCP_ACCESS_TOKEN)",
+				"fields": [
+					{
+						"id": "ZOOM_MCP_ACCESS_TOKEN",
+						"label": "ZOOM_MCP_ACCESS_TOKEN",
+						"description": "Environment variable ZOOM_MCP_ACCESS_TOKEN",
+						"required": true,
+						"kind": "bearer-token"
+					}
+				],
+				"requirement": "bearer-token",
+				"readiness": "user-setup"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/zoom/zoom-plugin.git",
+					"commit": "9311dd4b31e8e55c27b95479a84601576e449e97",
+					"url": "https://raw.githubusercontent.com/zoom/zoom-plugin/9311dd4b31e8e55c27b95479a84601576e449e97/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
+				}
+			]
+		},
+		{
+			"server": "zoom-canvas",
+			"service": "zoom",
+			"label": "Zoom Canvas",
+			"url": "https://mcp.zoom.us/mcp/canvas/streamable",
+			"aliases": [
+				"zoom",
+				"zoom-canvas-mcp",
+				"zoom-plugin"
+			],
+			"publisher": "Zoom",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.zoom.us/mcp/canvas/streamable"
+			},
+			"auth": {
+				"strategy": "api_key",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://zoom.us",
+					"resource": "https://mcp.zoom.us/mcp/canvas/streamable",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"docs:update:file",
+						"docs:read:export",
+						"docs:update:content",
+						"canvas:read:data_table",
+						"docs:delete:file",
+						"docs:write:file",
+						"docs:update:collaborator",
+						"canvas:write:data_table",
+						"docs:delete:collaborator",
+						"docs:read:general_access",
+						"canvas:delete:data_table",
+						"docs:write:collaborator",
+						"docs:write:content",
+						"canvas:update:data_table",
+						"canvas:write:file_search",
+						"hub:write:move",
+						"docs:delete:content",
+						"docs:write:import",
+						"docs:read:file",
+						"docs:read:list_children",
+						"docs:read:list_file_collaborators",
+						"docs:update:file_owner",
+						"docs:update:general_access"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.zoom.us/mcp/canvas/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource/mcp/canvas/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource",
+						"https://zoom.us/.well-known/oauth-authorization-server",
+						"https://zoom.us/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "paste your Zoom Canvas access token (ZOOM_CANVAS_MCP_ACCESS_TOKEN)",
+				"fields": [
+					{
+						"id": "ZOOM_CANVAS_MCP_ACCESS_TOKEN",
+						"label": "ZOOM_CANVAS_MCP_ACCESS_TOKEN",
+						"description": "Environment variable ZOOM_CANVAS_MCP_ACCESS_TOKEN",
+						"required": true,
+						"kind": "bearer-token"
+					}
+				],
+				"requirement": "bearer-token",
+				"readiness": "user-setup"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/zoom/zoom-plugin.git",
+					"commit": "9311dd4b31e8e55c27b95479a84601576e449e97",
+					"url": "https://raw.githubusercontent.com/zoom/zoom-plugin/9311dd4b31e8e55c27b95479a84601576e449e97/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
+				}
+			]
+		},
+		{
+			"server": "zoom-chat",
+			"service": "zoom",
+			"label": "Zoom Chat",
+			"url": "https://mcp.zoom.us/mcp/chat/streamable",
+			"aliases": [
+				"zoom",
+				"zoom-chat-mcp",
+				"zoom-plugin"
+			],
+			"publisher": "Zoom",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.zoom.us/mcp/chat/streamable"
+			},
+			"auth": {
+				"strategy": "api_key",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://zoom.us",
+					"resource": "https://mcp.zoom.us/mcp/chat/streamable",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"team_chat:read:list_user_messages",
+						"team_chat:update:user_message",
+						"team_chat:read:list_user_sessions",
+						"team_chat:write:contact_information",
+						"team_chat:update:user_channel",
+						"chat_channel:read",
+						"chat_channel:write",
+						"team_chat:read:channel",
+						"team_chat:read:list_contacts",
+						"team_chat:write:members",
+						"team_chat:write:user_message",
+						"team_chat:read:list_user_channels",
+						"team_chat:read:list_members",
+						"team_chat:write:user_channel",
+						"team_chat:update:channel_member_role",
+						"team_chat:read:list_user_files"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.zoom.us/mcp/chat/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource/mcp/chat/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource",
+						"https://zoom.us/.well-known/oauth-authorization-server",
+						"https://zoom.us/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "paste your Zoom Chat access token (ZOOM_CHAT_MCP_ACCESS_TOKEN)",
+				"fields": [
+					{
+						"id": "ZOOM_CHAT_MCP_ACCESS_TOKEN",
+						"label": "ZOOM_CHAT_MCP_ACCESS_TOKEN",
+						"description": "Environment variable ZOOM_CHAT_MCP_ACCESS_TOKEN",
+						"required": true,
+						"kind": "bearer-token"
+					}
+				],
+				"requirement": "bearer-token",
+				"readiness": "user-setup"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/zoom/zoom-plugin.git",
+					"commit": "9311dd4b31e8e55c27b95479a84601576e449e97",
+					"url": "https://raw.githubusercontent.com/zoom/zoom-plugin/9311dd4b31e8e55c27b95479a84601576e449e97/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
+				}
+			]
+		},
+		{
+			"server": "zoom-meetings",
+			"service": "zoom",
+			"label": "Zoom Meetings",
+			"url": "https://mcp.zoom.us/mcp/meeting/streamable",
+			"description": "Smart meeting insights from Zoom",
+			"category": "Communication",
+			"aliases": [
+				"zoom",
+				"zoom-meetings-mcp",
+				"zoom-plugin"
+			],
+			"publisher": "Zoom",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.zoom.us/mcp/meeting/streamable"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://zoom.us",
+					"resource": "https://mcp.zoom.us/mcp/meeting/streamable",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"meeting:write:meeting",
+						"meeting:read:search",
+						"meeting:delete:meeting",
+						"meeting:update:in_meeting_controls",
+						"meeting:update:meeting",
+						"meeting:read:assets",
+						"cloud_recording:read:list_user_recordings",
+						"cloud_recording:read:content"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.zoom.us/mcp/meeting/streamable",
+						"https://zoom.us/.well-known/oauth-protected-resource/mcp/meeting/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource/mcp/meeting/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource",
+						"https://zoom.us/.well-known/oauth-authorization-server",
+						"https://zoom.us/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "paste your Zoom Meetings access token (ZOOM_MEETINGS_MCP_ACCESS_TOKEN)",
+				"fields": [
+					{
+						"id": "ZOOM_MEETINGS_MCP_ACCESS_TOKEN",
+						"label": "ZOOM_MEETINGS_MCP_ACCESS_TOKEN",
+						"description": "Environment variable ZOOM_MEETINGS_MCP_ACCESS_TOKEN",
+						"required": true,
+						"kind": "bearer-token"
+					}
+				],
+				"requirement": "bearer-token",
+				"readiness": "user-setup"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "openai-plugins",
+					"repository": "openai/plugins",
+					"commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+					"path": "plugins/zoom/.mcp.json",
+					"url": "https://raw.githubusercontent.com/openai/plugins/1dc195897af4161d039b80d8471ec0a10c9bbc89/plugins/zoom/.mcp.json",
+					"license": "MIT"
+				},
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/zoom/zoom-plugin.git",
+					"commit": "9311dd4b31e8e55c27b95479a84601576e449e97",
+					"url": "https://raw.githubusercontent.com/zoom/zoom-plugin/9311dd4b31e8e55c27b95479a84601576e449e97/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "the upstream OpenAI zoom plugin targets the Zoom meetings MCP endpoint; renamed to keep the general zoom endpoint distinct"
+				}
+			],
+			"homepage": "https://zoom.us",
+			"privacyUrl": "https://zoom.us/privacy"
+		},
+		{
+			"server": "zoom-revenue-accelerator",
+			"service": "zoom",
+			"label": "Zoom Revenue Accelerator",
+			"url": "https://mcp.zoom.us/mcp/revenue_accelerator/streamable",
+			"aliases": [
+				"zoom",
+				"zoom-plugin",
+				"zoom-revenue-accelerator-mcp"
+			],
+			"publisher": "Zoom",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.zoom.us/mcp/revenue_accelerator/streamable"
+			},
+			"auth": {
+				"strategy": "api_key",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://zoom.us",
+					"resource": "https://mcp.zoom.us/mcp/revenue_accelerator/streamable",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"zra:read:conversation_analysis",
+						"zra:read:list_conversations",
+						"zra:read:list_deal_activities",
+						"zra:read:deal",
+						"zra:read:list_conversation_comments",
+						"zra:read:crm_customer_contact",
+						"zra:read:indicator",
+						"zra:read:conversations",
+						"zra:read:team",
+						"zra:read:conversation_scorecards",
+						"zra:read:user",
+						"zra:read:list_deals"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.zoom.us/mcp/revenue_accelerator/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource/mcp/revenue_accelerator/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource",
+						"https://zoom.us/.well-known/oauth-authorization-server",
+						"https://zoom.us/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "paste your Zoom Revenue Accelerator access token (ZOOM_REVENUE_ACCELERATOR_MCP_ACCESS_TOKEN)",
+				"fields": [
+					{
+						"id": "ZOOM_REVENUE_ACCELERATOR_MCP_ACCESS_TOKEN",
+						"label": "ZOOM_REVENUE_ACCELERATOR_MCP_ACCESS_TOKEN",
+						"description": "Environment variable ZOOM_REVENUE_ACCELERATOR_MCP_ACCESS_TOKEN",
+						"required": true,
+						"kind": "bearer-token"
+					}
+				],
+				"requirement": "bearer-token",
+				"readiness": "user-setup"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/zoom/zoom-plugin.git",
+					"commit": "9311dd4b31e8e55c27b95479a84601576e449e97",
+					"url": "https://raw.githubusercontent.com/zoom/zoom-plugin/9311dd4b31e8e55c27b95479a84601576e449e97/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
+				}
+			]
+		},
+		{
+			"server": "zoom-tasks",
+			"service": "zoom",
+			"label": "Zoom Tasks",
+			"url": "https://mcp.zoom.us/mcp/tasks/streamable",
+			"aliases": [
+				"zoom",
+				"zoom-plugin",
+				"zoom-tasks-mcp"
+			],
+			"publisher": "Zoom",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.zoom.us/mcp/tasks/streamable"
+			},
+			"auth": {
+				"strategy": "api_key",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://zoom.us",
+					"resource": "https://mcp.zoom.us/mcp/tasks/streamable",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"tasks:read:list_tasks",
+						"tasks:update:task",
+						"tasks:delete:comment",
+						"tasks:write:task",
+						"tasks:write:assignees",
+						"tasks:write:collaborators",
+						"tasks:write:comment",
+						"tasks:read:comments",
+						"tasks:read:task",
+						"tasks:delete:assignees",
+						"tasks:delete:trash_task",
+						"tasks:delete:collaborator",
+						"tasks:read:list_collaborators",
+						"tasks:read:assignees"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.zoom.us/mcp/tasks/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource/mcp/tasks/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource",
+						"https://zoom.us/.well-known/oauth-authorization-server",
+						"https://zoom.us/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "paste your Zoom Tasks access token (ZOOM_TASKS_MCP_ACCESS_TOKEN)",
+				"fields": [
+					{
+						"id": "ZOOM_TASKS_MCP_ACCESS_TOKEN",
+						"label": "ZOOM_TASKS_MCP_ACCESS_TOKEN",
+						"description": "Environment variable ZOOM_TASKS_MCP_ACCESS_TOKEN",
+						"required": true,
+						"kind": "bearer-token"
+					}
+				],
+				"requirement": "bearer-token",
+				"readiness": "user-setup"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/zoom/zoom-plugin.git",
+					"commit": "9311dd4b31e8e55c27b95479a84601576e449e97",
+					"url": "https://raw.githubusercontent.com/zoom/zoom-plugin/9311dd4b31e8e55c27b95479a84601576e449e97/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
+				}
+			]
+		},
+		{
+			"server": "zoom-whiteboard",
+			"service": "zoom",
+			"label": "Zoom Whiteboard",
+			"url": "https://mcp.zoom.us/mcp/whiteboard/streamable",
+			"aliases": [
+				"zoom",
+				"zoom-plugin",
+				"zoom-whiteboard-mcp"
+			],
+			"publisher": "Zoom",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.zoom.us/mcp/whiteboard/streamable"
+			},
+			"auth": {
+				"strategy": "api_key",
+				"clientRegistration": "unknown",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://zoom.us",
+					"resource": "https://mcp.zoom.us/mcp/whiteboard/streamable",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"whiteboard:delete:whiteboard",
+						"whiteboard:write:collaborator",
+						"whiteboard:update:collaborator",
+						"whiteboard:read:list_collaborators",
+						"whiteboard:update:whiteboard",
+						"whiteboard:write:content",
+						"whiteboard:read:list_whiteboards",
+						"whiteboard:read:whiteboard",
+						"whiteboard:write:whiteboard",
+						"whiteboard:read:content",
+						"whiteboard:delete:content",
+						"whiteboard:delete:collaborator"
+					],
+					"tokenAuthMethods": [
+						"client_secret_basic"
+					],
+					"sourceUrls": [
+						"https://mcp.zoom.us/mcp/whiteboard/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource/mcp/whiteboard/streamable",
+						"https://mcp.zoom.us/.well-known/oauth-protected-resource",
+						"https://zoom.us/.well-known/oauth-authorization-server",
+						"https://zoom.us/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12"
+				}
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "paste your Zoom Whiteboard access token (ZOOM_WHITEBOARD_MCP_ACCESS_TOKEN)",
+				"fields": [
+					{
+						"id": "ZOOM_WHITEBOARD_MCP_ACCESS_TOKEN",
+						"label": "ZOOM_WHITEBOARD_MCP_ACCESS_TOKEN",
+						"description": "Environment variable ZOOM_WHITEBOARD_MCP_ACCESS_TOKEN",
+						"required": true,
+						"kind": "bearer-token"
+					}
+				],
+				"requirement": "bearer-token",
+				"readiness": "user-setup"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/zoom/zoom-plugin.git",
+					"commit": "9311dd4b31e8e55c27b95479a84601576e449e97",
+					"url": "https://raw.githubusercontent.com/zoom/zoom-plugin/9311dd4b31e8e55c27b95479a84601576e449e97/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
+				}
+			]
+		}
+	]
+}

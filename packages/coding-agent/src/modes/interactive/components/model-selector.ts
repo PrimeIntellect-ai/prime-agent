@@ -24,6 +24,7 @@ import { keyHint } from "./keybinding-hints.js";
 import {
 	getInlineTrailingWidth,
 	getMenuListLayout,
+	inlineMenuPanelTopRuleRows,
 	MenuList,
 	MenuPanel,
 	MenuRow,
@@ -206,6 +207,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	});
 	private responsiveLayoutKey = "";
 	private readonly viewport: MenuViewportProvider;
+	/** Rows the inline MenuPanel draws above its children (separator rule). */
+	private inlineTopRuleRows = 0;
 	private readonly getHeaderRows: () => number;
 
 	constructor(
@@ -272,6 +275,11 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		// Create list container
 		this.listContainer = new MenuList({ compact: () => this.listLayout.compact, inline: this.inline });
 		this.panel.addChild(this.listContainer);
+		// The inline panel opens with its separator rule; budget it.
+		this.inlineTopRuleRows = inlineMenuPanelTopRuleRows({
+			subtitle: options.subtitle,
+			children: this.panel.children,
+		});
 		this.updateResponsiveLayout();
 
 		this.loadModels();
@@ -796,7 +804,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 				getRows: this.viewport.getRows,
 				preferredVisibleItems: 8,
 				totalItems: this.filteredModels.length,
-				reservedRows: this.getHeaderRows() + 3 + scopeRows + detailRows,
+				reservedRows: this.getHeaderRows() + 3 + scopeRows + detailRows + this.inlineTopRuleRows,
 				comfortableItemRows: 1,
 				comfortableListPaddingRows: 0,
 				scrollIndicatorRows: 1,
