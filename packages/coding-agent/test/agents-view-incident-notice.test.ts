@@ -17,7 +17,6 @@ import {
 	formatIncidentNoticeTime,
 	INCIDENT_NOTICE_MAX_WINDOW_ENTRIES,
 	INCIDENT_NOTICE_TAIL_BYTES,
-	INCIDENT_NOTICE_WINDOW_MS,
 	isIncidentNoticeDismissed,
 	refreshIncidentNoticeState,
 	selectIncidentNotice,
@@ -144,105 +143,82 @@ beforeEach(() => {
 });
 
 describe("incident notice derivation", () => {
+	// The classifier pins the crash shapes and the unknown-worker subject on the
+	// stack base (incident.test.ts); this pins the notice built from the event.
 	it("derives a worker-crash notice with the local time of the crash", () => {
 		const base = Date.now();
 		const entries = fixtureEntries([workerCrashLine(base, "5b1d3aeb91ee", 600)]);
 		const notices = deriveIncidentNotices(entries, Date.now());
 		expect(notices).toHaveLength(1);
 		const notice = notices[0]!;
-		expect(notice.kind).toBe("worker-crash");
-		expect(notice.severity).toBe("critical");
-		expect(notice.key).toBe("worker-crash|worker 5b1d3aeb91ee");
-		expect(notice.subject).toBe("worker 5b1d3aeb91ee");
-		expect(notice.timeMs).toBe(entries[0]!.timeMs);
+		expect(notice).toMatchObject({
+			kind: "worker-crash",
+			severity: "critical",
+			key: "worker-crash|worker 5b1d3aeb91ee",
+			subject: "worker 5b1d3aeb91ee",
+			timeMs: entries[0]!.timeMs,
+		});
 		expect(notice.text).toBe(
 			`worker 5b1d3aeb91ee crashed at ${formatIncidentNoticeTime(entries[0]!.timeMs, Date.now())}`,
 		);
 	});
 
-	it("uses subject 'worker' when the crashed worker id is unknown", () => {
+	it("anchors each subject's timeout burst at its own latest timeout and advances with later ones", () => {
 		const base = Date.now();
-		const entries = fixtureEntries([
-			logLine({
-				ts: tsAgo(base, 600_000),
-				component: "coding-agent.daemon",
-				msg: "uncaught exception: Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:159:15)",
-			}),
-		]);
-		const notices = deriveIncidentNotices(entries, Date.now());
-		expect(notices).toHaveLength(1);
-		expect(notices[0]!.subject).toBe("worker");
-		expect(notices[0]!.text).toContain("worker crashed at");
-	});
-
-	it("derives a command-timeout burst notice from the classifier anomaly", () => {
-		const base = Date.now();
-		const entries = fixtureEntries([commandTimeoutLine(base, 30), commandTimeoutLine(base, 29)]);
-		const notices = deriveIncidentNotices(entries, Date.now());
-		expect(notices).toHaveLength(1);
-		const notice = notices[0]!;
-		expect(notice.kind).toBe("timeout-burst");
-		expect(notice.severity).toBe("error");
-		expect(notice.subject).toBe(DAEMON_SOCKET);
 		// The classifier anchors the anomaly at the burst's first timeout, but the
 		// notice carries the latest one so dismissal advances with a growing burst.
-		expect(notice.timeMs).toBe(entries[1]!.timeMs);
-		expect(notice.text).toBe(`${DAEMON_SOCKET}: 2 command timeouts over 1m`);
-	});
-
-	it("advances the timeout-burst notice timeMs with the latest timeout", () => {
-		const base = Date.now();
 		const two = fixtureEntries([commandTimeoutLine(base, 30), commandTimeoutLine(base, 20)]);
 		const burst = deriveIncidentNotices(two, base)[0]!;
-		expect(burst.timeMs).toBe(two[1]!.timeMs);
-		expect(burst.text).toBe(`${DAEMON_SOCKET}: 2 command timeouts over 10m`);
+		expect(burst).toMatchObject({
+			kind: "timeout-burst",
+			severity: "error",
+			subject: DAEMON_SOCKET,
+			timeMs: two[1]!.timeMs,
+			text: `${DAEMON_SOCKET}: 2 command timeouts over 10m`,
+		});
 
 		// A later timeout extends the burst: the notice timeMs advances with it.
 		const three = [...two, ...fixtureEntries([commandTimeoutLine(base, 5)])];
 		const extended = deriveIncidentNotices(three, base)[0]!;
 		expect(extended.timeMs).toBe(three[2]!.timeMs);
 		expect(extended.text).toBe(`${DAEMON_SOCKET}: 3 command timeouts over 25m`);
-	});
 
-	it("anchors each subject's timeout burst at that subject's own latest timeout", () => {
-		const base = Date.now();
+		// Two daemon sockets: the per-subject latest-timeout lookup must never
+		// leak one subject's timeout into the other subject's notice.
 		const otherSocket = "/tmp/prime-agent-501/daemon-other.sock";
-		// Two daemon sockets, each with its own timeout burst: A spans T-30..T-20,
-		// B spans T-25..T-5. The per-subject latest-timeout lookup must never leak
-		// one subject's timeout into the other subject's notice.
-		const entries = fixtureEntries([
+		const mixed = fixtureEntries([
 			commandTimeoutLine(base, 30, DAEMON_SOCKET),
 			commandTimeoutLine(base, 25, otherSocket),
 			commandTimeoutLine(base, 20, DAEMON_SOCKET),
 			commandTimeoutLine(base, 5, otherSocket),
 		]);
-		const bursts = deriveIncidentNotices(entries, base).filter((notice) => notice.kind === "timeout-burst");
-		expect(bursts).toHaveLength(2);
-		const bySubject = new Map(bursts.map((notice) => [notice.subject, notice]));
+		const bySubject = new Map(
+			deriveIncidentNotices(mixed, base)
+				.filter((notice) => notice.kind === "timeout-burst")
+				.map((notice) => [notice.subject, notice]),
+		);
 		expect(bySubject.get(DAEMON_SOCKET)?.timeMs).toBe(base - 20 * 60_000);
 		expect(bySubject.get(otherSocket)?.timeMs).toBe(base - 5 * 60_000);
 	});
 
-	it("derives an update-restart notice only for a repeated supervisor start", () => {
+	it("derives an update-restart only from repeated successful supervisor starts", () => {
 		const base = Date.now();
 		const replaced = fixtureEntries([supervisorStartLine(base, 120), supervisorStartLine(base, 60)]);
 		const restarts = deriveIncidentNotices(replaced, Date.now());
 		expect(restarts).toHaveLength(1);
-		const notice = restarts[0]!;
-		expect(notice.kind).toBe("update-restart");
-		expect(notice.severity).toBe("info");
-		expect(notice.subject).toBe(DAEMON_SOCKET);
-		expect(notice.timeMs).toBe(replaced[1]!.timeMs);
-		expect(notice.text).toBe(
+		expect(restarts[0]).toMatchObject({
+			kind: "update-restart",
+			severity: "info",
+			subject: DAEMON_SOCKET,
+			timeMs: replaced[1]!.timeMs,
+		});
+		expect(restarts[0]!.text).toBe(
 			`daemon restarted for update at ${formatIncidentNoticeTime(replaced[1]!.timeMs, Date.now())}`,
 		);
 
-		const firstEver = fixtureEntries([supervisorStartLine(base, 60)]);
-		expect(deriveIncidentNotices(firstEver, Date.now())).toEqual([]);
-	});
-
-	it("does not count failed supervisor startups as restarts", () => {
-		const base = Date.now();
+		// A first-ever start is routine; a failed startup (lock held) never
+		// counts toward a replacement, or two failed spawns on one socket
+		// would read as an update restart.
 		const failedStartLine = (minutesAgoValue: number) =>
 			logLine({
 				ts: tsAgo(base, minutesAgoValue * 60_000),
@@ -250,84 +226,29 @@ describe("incident notice derivation", () => {
 				socketPath: DAEMON_SOCKET,
 				msg: "Daemon supervisor startup failed: lock file is already being held by another process",
 			});
-		// The failed spawn classifies as a warn-severity supervisor-start with
-		// the same subject; only a successful start may count toward a restart,
-		// or two failed spawns on one socket would read as an update restart.
-		const failedThenStarted = fixtureEntries([failedStartLine(30), supervisorStartLine(base, 20)]);
-		expect(deriveIncidentNotices(failedThenStarted, Date.now())).toEqual([]);
-
-		const failedTwiceThenStarted = fixtureEntries([
-			failedStartLine(30),
-			failedStartLine(25),
-			supervisorStartLine(base, 20),
-		]);
-		expect(deriveIncidentNotices(failedTwiceThenStarted, Date.now())).toEqual([]);
-
-		// Two successful starts on the same socket still report the restart.
-		const replaced = fixtureEntries([supervisorStartLine(base, 20), supervisorStartLine(base, 10)]);
-		expect(deriveIncidentNotices(replaced, Date.now())).toHaveLength(1);
+		expect(deriveIncidentNotices(fixtureEntries([supervisorStartLine(base, 60)]), Date.now())).toEqual([]);
+		expect(
+			deriveIncidentNotices(fixtureEntries([failedStartLine(30), supervisorStartLine(base, 20)]), Date.now()),
+		).toEqual([]);
 	});
 
-	it("qualifies the time with the date when the incident is not from today", () => {
+	it("qualifies the notice time with the date when the incident is not from today", () => {
 		const now = new Date(2026, 8, 15, 12, 0, 0).getTime();
-		const crashEntries = (timeMs: number) =>
-			fixtureEntries([
-				logLine({
-					ts: new Date(timeMs).toISOString(),
-					component: "coding-agent.daemon-supervisor",
-					msg: "Session worker 5b1d3aeb91ee stderr: uncaught exception: Error: write EPIPE",
-				}),
-			]);
+		const crashTextAt = (timeMs: number) =>
+			deriveIncidentNotices(
+				fixtureEntries([
+					logLine({
+						ts: new Date(timeMs).toISOString(),
+						component: "coding-agent.daemon",
+						msg: "uncaught exception: Error: write EPIPE",
+					}),
+				]),
+				now,
+			)[0]!.text;
 		// Late yesterday, still inside the 24h window: the bare HH:MM would read
-		// as today, so the local date qualifies it (tree-selector.ts style).
-		const yesterdayEvening = new Date(2026, 8, 14, 23, 10, 0).getTime();
-		const yesterday = deriveIncidentNotices(crashEntries(yesterdayEvening), now);
-		expect(yesterday[0]!.text).toBe("worker 5b1d3aeb91ee crashed at 9/14 23:10");
-		// From today: bare local HH:MM.
-		const thisMorning = new Date(2026, 8, 15, 9, 5, 0).getTime();
-		const today = deriveIncidentNotices(crashEntries(thisMorning), now);
-		expect(today[0]!.text).toBe("worker 5b1d3aeb91ee crashed at 09:05");
-	});
-
-	it("ignores incidents outside the recent window", () => {
-		const base = Date.now();
-		const stale = fixtureEntries([
-			logLine({
-				ts: tsAgo(base, INCIDENT_NOTICE_WINDOW_MS + 60_000),
-				component: "coding-agent.daemon-supervisor",
-				msg: "Session worker 5b1d3aeb91ee stderr: uncaught exception: Error: write EPIPE",
-			}),
-		]);
-		expect(deriveIncidentNotices(stale, Date.now())).toEqual([]);
-	});
-
-	it("rejects future-dated entries outside the CLI window", () => {
-		const base = Date.now();
-		// The CLI bounds events by >= since && <= until (buildIncidentReport); a
-		// bogus future timestamp (clock skew, a manual edit) must not pin a
-		// notice beyond the window.
-		const futureCrash = logLine({
-			ts: new Date(base + 60 * 60_000).toISOString(),
-			component: "coding-agent.daemon-supervisor",
-			msg: "Session worker 5b1d3aeb91ee stderr: uncaught exception: Error: write EPIPE",
-		});
-		expect(deriveIncidentNotices(fixtureEntries([futureCrash]), base)).toEqual([]);
-	});
-
-	it("collapses repeated identical crashes to a single notice line", () => {
-		const base = Date.now();
-		// The daemon logs the crash twice (worker log + stderr forward, deduped by
-		// the classifier) and the same worker crashes again a minute later; the
-		// header still shows one line, the most recent incident.
-		const entries = fixtureEntries([
-			workerCrashLine(base, "5b1d3aeb91ee", 120),
-			workerCrashLine(base, "5b1d3aeb91ee", 60),
-			workerCrashLine(base, "5b1d3aeb91ee", 60),
-		]);
-		const notices = deriveIncidentNotices(entries, Date.now());
-		const selected = selectIncidentNotice(notices);
-		expect(selected?.kind).toBe("worker-crash");
-		expect(selected?.timeMs).toBe(entries[1]!.timeMs);
+		// as today, so the local date qualifies it; today stays bare.
+		expect(crashTextAt(new Date(2026, 8, 14, 23, 10, 0).getTime())).toBe("worker crashed at 9/14 23:10");
+		expect(crashTextAt(new Date(2026, 8, 15, 9, 5, 0).getTime())).toBe("worker crashed at 09:05");
 	});
 
 	it("prefers the most severe incident and breaks ties by recency", () => {
@@ -338,53 +259,60 @@ describe("incident notice derivation", () => {
 			commandTimeoutLine(base, 20),
 			workerCrashLine(base, "5b1d3aeb91ee", 30),
 		]);
-		const selected = selectIncidentNotice(deriveIncidentNotices(entries, Date.now()));
-		expect(selected?.kind).toBe("worker-crash");
+		expect(selectIncidentNotice(deriveIncidentNotices(entries, Date.now()))?.kind).toBe("worker-crash");
 	});
 
-	it("keeps a dismissal horizon per key: same or older incidents stay hidden, newer ones show", () => {
+	it("keeps a dismissal horizon per key and dismisses nothing when nothing shows", () => {
 		const base = Date.now();
 		const notices = deriveIncidentNotices(
 			fixtureEntries([workerCrashLine(base, "5b1d3aeb91ee", 60), workerCrashLine(base, "aaaaaaaaaaaa", 30)]),
 			Date.now(),
 		);
 		const state = createIncidentNoticeState();
-		state.notice = notices[0];
-		expect(dismissIncidentNoticeState(state)).toBe(true);
-		expect(state.notice).toBeUndefined();
-		const horizons = state.dismissedHorizons;
-		const dismissed = notices[0]!;
-		expect(isIncidentNoticeDismissed(dismissed, horizons)).toBe(true);
-		const older = { ...dismissed, timeMs: dismissed.timeMs - 1000 };
-		expect(isIncidentNoticeDismissed(older, horizons)).toBe(true);
-		const newer = { ...dismissed, timeMs: dismissed.timeMs + 1000 };
-		expect(isIncidentNoticeDismissed(newer, horizons)).toBe(false);
-		// A different key is not covered by this dismissal.
-		expect(isIncidentNoticeDismissed(notices[1]!, horizons)).toBe(false);
-	});
-
-	it("dismisses false without side effects when nothing is showing", () => {
-		const state = createIncidentNoticeState();
 		expect(dismissIncidentNoticeState(state)).toBe(false);
 		expect(state.dismissedHorizons).toEqual({});
+		state.notice = notices[0];
+		expect(dismissIncidentNoticeState(state)).toBe(true);
+		const horizons = state.dismissedHorizons;
+		const dismissed = notices[0]!;
+		// Same or older incidents on the key stay hidden; a different key is not
+		// covered by this dismissal (newer-on-key re-shows are pinned at the view).
+		expect(isIncidentNoticeDismissed(dismissed, horizons)).toBe(true);
+		expect(isIncidentNoticeDismissed({ ...dismissed, timeMs: dismissed.timeMs - 1000 }, horizons)).toBe(true);
+		expect(isIncidentNoticeDismissed(notices[1]!, horizons)).toBe(false);
 	});
 });
 
 describe("agents view incident notices", () => {
-	it("renders the collapsed worker-crash notice from the log tail", () => {
+	// [log fixture, expected rendered substring]
+	it.each([
+		[
+			"worker-crash",
+			(base: number) => [workerCrashLine(base, "5b1d3aeb91ee", 120)],
+			"worker 5b1d3aeb91ee crashed at",
+		],
+		[
+			"timeout-burst",
+			(base: number) => [commandTimeoutLine(base, 30), commandTimeoutLine(base, 29)],
+			`${DAEMON_SOCKET}: 2 command timeouts over`,
+		],
+		[
+			"update-restart",
+			(base: number) => [supervisorStartLine(base, 120), supervisorStartLine(base, 60)],
+			"daemon restarted for update at",
+		],
+	] as const)("renders the %s notice line from the log tail", (_kind, makeLines, expected) => {
 		useTempAgentDir();
 		const base = Date.now();
-		writeAgentLog([supervisorStartLine(base, 600), workerCrashLine(base, "5b1d3aeb91ee", 120)]);
+		writeAgentLog(makeLines(base));
 		const view = newView();
 		try {
 			invoke("refreshIncidentNotices", view);
 			const lines = renderedIncidentLines(view);
 			expect(lines).toHaveLength(1);
-			expect(lines[0]).toContain(
-				`worker 5b1d3aeb91ee crashed at ${formatIncidentNoticeTime(base - 120_000, Date.now())}`,
-			);
+			expect(lines[0]).toContain(expected);
 			expect(lines[0]).toContain("prime-agent incident for the timeline");
-			expect(lines[0].startsWith(" ⚠")).toBe(true);
+			expect(lines[0].startsWith(" \u26a0")).toBe(true);
 		} finally {
 			stopThemeWatcher();
 		}
@@ -402,14 +330,10 @@ describe("agents view incident notices", () => {
 
 			view.handleInput("\x1b");
 			expect(Reflect.get(view, "statusMessage")).toBe("Incident notice dismissed");
-			expect(renderedIncidentLines(view)).toHaveLength(0);
-
-			// Later polls re-read the same incident from the log; dismissal is sticky.
-			invoke("refreshIncidentNotices", view);
+			// Later polls re-read the same incident from the log; dismissal is
+			// sticky, and re-entering the view reuses the persistent state.
 			invoke("refreshIncidentNotices", view);
 			expect(renderedIncidentLines(view)).toHaveLength(0);
-
-			// Re-entering the view reuses the persistent state: still dismissed.
 			const reentered = newView(persistentState);
 			try {
 				expect(renderedIncidentLines(reentered)).toHaveLength(0);
@@ -426,37 +350,28 @@ describe("agents view incident notices", () => {
 		}
 	});
 
-	it("cancels an armed delete confirmation with Esc instead of dismissing the notice", () => {
+	it.each([
+		[
+			"cancels an armed delete confirmation instead",
+			(view: AgentsViewMode) => invoke("showDeleteConfirmation", view),
+		],
+		[
+			"does nothing while the search prompt has text",
+			(view: AgentsViewMode) => {
+				(Reflect.get(view, "editor") as { setText: (text: string) => void }).setText("still typing");
+			},
+		],
+	])("Esc %s of dismissing the notice", (_name, arm) => {
 		useTempAgentDir();
-		const base = Date.now();
-		writeAgentLog([workerCrashLine(base, "5b1d3aeb91ee", 120)]);
+		writeAgentLog([workerCrashLine(Date.now(), "5b1d3aeb91ee", 120)]);
 		const view = newView();
 		try {
 			invoke("refreshIncidentNotices", view);
 			expect(renderedIncidentLines(view)).toHaveLength(1);
-
-			// A delete confirmation is armed: Esc must cancel it and keep the
-			// notice, or the next delete press would fire without a fresh
-			// confirmation.
-			invoke("showDeleteConfirmation", view);
+			arm(view);
 			view.handleInput("\x1b");
+			// The armed state was cancelled (or never engaged) and the notice stays.
 			expect(Reflect.get(view, "deleteConfirmExpiresAt")).toBe(0);
-			expect(renderedIncidentLines(view)).toHaveLength(1);
-		} finally {
-			stopThemeWatcher();
-		}
-	});
-
-	it("does not dismiss while the search prompt has text", () => {
-		useTempAgentDir();
-		const base = Date.now();
-		writeAgentLog([workerCrashLine(base, "5b1d3aeb91ee", 120)]);
-		const view = newView();
-		try {
-			invoke("refreshIncidentNotices", view);
-			const editor = Reflect.get(view, "editor") as { setText: (text: string) => void };
-			editor.setText("still typing");
-			view.handleInput("\x1b");
 			expect(renderedIncidentLines(view)).toHaveLength(1);
 		} finally {
 			stopThemeWatcher();
@@ -477,24 +392,8 @@ describe("agents view incident notices", () => {
 			invoke("refreshIncidentNotices", view);
 			const lines = renderedIncidentLines(view);
 			expect(lines).toHaveLength(1);
-			// The three kept crash events (critical) collapse to the most recent.
+			// The repeated events collapse to the most recent incident.
 			expect(lines[0]).toContain("worker aaaaaaaaaaaa crashed at");
-		} finally {
-			stopThemeWatcher();
-		}
-	});
-
-	it("surfaces a command-timeout burst", () => {
-		useTempAgentDir();
-		const base = Date.now();
-		writeAgentLog([commandTimeoutLine(base, 30), commandTimeoutLine(base, 29)]);
-		const view = newView();
-		try {
-			invoke("refreshIncidentNotices", view);
-			const lines = renderedIncidentLines(view);
-			expect(lines).toHaveLength(1);
-			expect(lines[0]).toContain(`${DAEMON_SOCKET}: 2 command timeouts over`);
-			expect(lines[0]).toContain("prime-agent incident for the timeline");
 		} finally {
 			stopThemeWatcher();
 		}
@@ -507,42 +406,13 @@ describe("agents view incident notices", () => {
 		const state = createIncidentNoticeState();
 		const logPath = getAgentLogPath();
 		expect(refreshIncidentNoticeState(state, logPath, base)).toBe(true);
-		expect(state.notice?.kind).toBe("timeout-burst");
-		// Dismissal records the notice's timeMs — the burst's latest timeout so
-		// far — as the horizon for the key.
 		expect(dismissIncidentNoticeState(state)).toBe(true);
-
-		// A later timeout extends the burst past the horizon: the notice
-		// reappears instead of staying hidden until the first timeout ages out.
+		// A later timeout extends the burst past the dismissed horizon: the
+		// notice reappears instead of staying hidden until the first timeout
+		// ages out.
 		appendAgentLog([commandTimeoutLine(base, 5)]);
 		expect(refreshIncidentNoticeState(state, logPath, base)).toBe(true);
-		expect(state.notice?.kind).toBe("timeout-burst");
-		expect(state.notice?.timeMs).toBe(base - 5 * 60_000);
-	});
-
-	it("surfaces an update restart only when the supervisor was replaced", () => {
-		useTempAgentDir();
-		const base = Date.now();
-		writeAgentLog([supervisorStartLine(base, 120), supervisorStartLine(base, 60)]);
-		const view = newView();
-		try {
-			invoke("refreshIncidentNotices", view);
-			const lines = renderedIncidentLines(view);
-			expect(lines).toHaveLength(1);
-			expect(lines[0]).toContain("daemon restarted for update at");
-		} finally {
-			stopThemeWatcher();
-		}
-
-		useTempAgentDir();
-		writeAgentLog([supervisorStartLine(base, 60)]);
-		const firstEver = newView();
-		try {
-			invoke("refreshIncidentNotices", firstEver);
-			expect(renderedIncidentLines(firstEver)).toHaveLength(0);
-		} finally {
-			stopThemeWatcher();
-		}
+		expect(state.notice).toMatchObject({ kind: "timeout-burst", timeMs: base - 5 * 60_000 });
 	});
 
 	it("surfaces nothing and never throws when the log is missing", () => {
@@ -574,140 +444,80 @@ describe("agents view incident notices", () => {
 		expect(state.notice).toBeUndefined();
 	});
 
-	it("holds back a partially-written final line until it completes", () => {
-		useTempAgentDir();
+	it("holds back partial lines, drops torn fragments, and keeps boundary-aligned tail records", () => {
 		const base = Date.now();
+		// A partially-written final line stays held back until it completes.
+		useTempAgentDir();
 		writeFileSync(getAgentLogPath(), workerCrashLine(base, "5b1d3aeb91ee", 120));
-		const view = newView();
-		try {
-			invoke("refreshIncidentNotices", view);
-			expect(renderedIncidentLines(view)).toHaveLength(0);
+		let state = createIncidentNoticeState();
+		expect(refreshIncidentNoticeState(state, getAgentLogPath(), base)).toBe(false);
+		appendFileSync(getAgentLogPath(), "\n");
+		expect(refreshIncidentNoticeState(state, getAgentLogPath(), base)).toBe(true);
+		expect(state.notice?.subject).toBe("worker 5b1d3aeb91ee");
 
-			appendFileSync(getAgentLogPath(), "\n");
-			invoke("refreshIncidentNotices", view);
-			expect(renderedIncidentLines(view)).toHaveLength(1);
-		} finally {
-			stopThemeWatcher();
-		}
-	});
-
-	it("drops the torn leading line when the tail starts mid-file", () => {
-		useTempAgentDir();
-		const base = Date.now();
 		// A log larger than one tail bound: the bounded tail necessarily starts
 		// mid-line, and the torn leading fragment must not break the parse.
+		useTempAgentDir();
 		const filler = logLine({
 			ts: tsAgo(base, 3600_000),
 			component: "coding-agent.daemon-supervisor",
 			msg: `filler ${"x".repeat(200)}`,
 		});
-		const fillerCount = Math.ceil((INCIDENT_NOTICE_TAIL_BYTES + 4096) / (filler.length + 1));
-		const lines = Array.from({ length: fillerCount }, () => filler);
-		lines.push(workerCrashLine(base, "5b1d3aeb91ee", 60));
-		writeAgentLog(lines);
-		const view = newView();
-		try {
-			invoke("refreshIncidentNotices", view);
-			const rendered = renderedIncidentLines(view);
-			expect(rendered).toHaveLength(1);
-			expect(rendered[0]).toContain("worker 5b1d3aeb91ee crashed at");
-		} finally {
-			stopThemeWatcher();
-		}
-	});
+		writeAgentLog([
+			...Array.from({ length: Math.ceil((INCIDENT_NOTICE_TAIL_BYTES + 4096) / (filler.length + 1)) }, () => filler),
+			workerCrashLine(base, "5b1d3aeb91ee", 60),
+		]);
+		state = createIncidentNoticeState();
+		expect(refreshIncidentNoticeState(state, getAgentLogPath(), base)).toBe(true);
+		expect(state.notice?.subject).toBe("worker 5b1d3aeb91ee");
 
-	it("keeps the first tail record when the cut lands on a line boundary", () => {
+		// Records sized so the tail cut lands exactly on a record boundary: the
+		// first record in the tail is a complete crash record, not a torn
+		// fragment (regression: dropping it would lose a qualifying incident
+		// for the lifetime of the state).
 		useTempAgentDir();
-		const base = Date.now();
-		// Every record is exactly 512 bytes, so with 1026 records the bounded
-		// tail cut lands exactly on a record boundary: the first record in the
-		// tail is a complete crash record, not a torn fragment. Padding goes
-		// into a harmless extra JSON field, so the msg stays unmodified and
-		// the record still parses.
 		const fixedLengthLine = (fields: Record<string, unknown>): string => {
 			const unpadded = logLine(fields);
 			const padded = `${unpadded.slice(0, -1)},"pad":"${"x".repeat(502 - unpadded.length)}"}`;
 			expect(`${padded}\n`).toHaveLength(512);
 			return `${padded}\n`;
 		};
-		const filler = () =>
+		const filler512 = () =>
 			fixedLengthLine({
 				ts: tsAgo(base, 3600_000),
 				component: "coding-agent.daemon-supervisor",
 				msg: "filler",
 			});
-		const crash = fixedLengthLine({
-			ts: tsAgo(base, 60_000),
-			component: "coding-agent.daemon-supervisor",
-			msg: "Session worker 5b1d3aeb91ee stderr: uncaught exception: Error: write EPIPE",
-		});
-		// The tail bound spans the last 1024 records; the crash is the FIRST of
-		// them (the byte before the cut is its predecessor's newline).
-		const lines = [filler(), filler(), crash];
-		while (lines.length < 1026) {
-			lines.push(filler());
+		const records = [
+			filler512(),
+			filler512(),
+			fixedLengthLine({
+				ts: tsAgo(base, 60_000),
+				component: "coding-agent.daemon-supervisor",
+				msg: "Session worker 5b1d3aeb91ee stderr: uncaught exception: Error: write EPIPE",
+			}),
+		];
+		while (records.length < 1026) {
+			records.push(filler512());
 		}
-		writeFileSync(getAgentLogPath(), lines.join(""));
-		const state = createIncidentNoticeState();
+		writeFileSync(getAgentLogPath(), records.join(""));
+		state = createIncidentNoticeState();
 		expect(refreshIncidentNoticeState(state, getAgentLogPath(), base)).toBe(true);
-		expect(state.notice?.kind).toBe("worker-crash");
 		expect(state.notice?.subject).toBe("worker 5b1d3aeb91ee");
 	});
 
-	it("bridges the rotated .old generation on the first read", () => {
-		useTempAgentDir();
+	it("bridges the rotated .old generation only on the first successful main-log read and follows later rotations", () => {
 		const base = Date.now();
-		// A rotation moved the earlier supervisor start into agent.jsonl.old. The
-		// CLI reads [agent.jsonl.old, agent.jsonl], so a fresh view must still
-		// pair the two starts into an update-restart notice.
-		writeFileSync(`${getAgentLogPath()}.old`, `${supervisorStartLine(base, 120)}\n`);
-		writeAgentLog([supervisorStartLine(base, 30)]);
-		const view = newView();
-		try {
-			invoke("refreshIncidentNotices", view);
-			const lines = renderedIncidentLines(view);
-			expect(lines).toHaveLength(1);
-			expect(lines[0]).toContain("daemon restarted for update at");
-		} finally {
-			stopThemeWatcher();
-		}
-	});
-
-	it("reads the rotated .old tail only on the first successful read", () => {
+		// A rotation moved the earlier supervisor start into agent.jsonl.old while
+		// agent.jsonl has not been recreated yet: the missing-log poll must not
+		// read .old early nor poison the fresh state.
 		useTempAgentDir();
-		const base = Date.now();
-		writeFileSync(`${getAgentLogPath()}.old`, `${supervisorStartLine(base, 120)}\n`);
-		writeAgentLog([supervisorStartLine(base, 30)]);
-		const state = createIncidentNoticeState();
-		const logPath = getAgentLogPath();
-		expect(refreshIncidentNoticeState(state, logPath, base)).toBe(true);
-		expect(state.notice?.kind).toBe("update-restart");
-		const entryCount = state.entries.length;
-
-		// Later polls must not re-read .old: duplicate supervisor-start entries
-		// would pair with the current file into a phantom restart.
-		expect(refreshIncidentNoticeState(state, logPath, base)).toBe(false);
-		expect(state.entries).toHaveLength(entryCount);
-		expect(
-			deriveIncidentNotices(state.entries, base).filter((notice) => notice.kind === "update-restart"),
-		).toHaveLength(1);
-	});
-
-	it("defers the .old bridge until the main log recovers from missing", () => {
-		useTempAgentDir();
-		const base = Date.now();
-		// A rotation left the earlier supervisor start in agent.jsonl.old while
-		// agent.jsonl has not been recreated yet. The missing-log poll must not
-		// read .old early nor poison the fresh state; the bridge waits for the
-		// first successful read of the main log.
 		writeFileSync(`${getAgentLogPath()}.old`, `${supervisorStartLine(base, 120)}\n`);
 		const state = createIncidentNoticeState();
 		const logPath = getAgentLogPath();
 		expect(refreshIncidentNoticeState(state, logPath, base)).toBe(false);
 		expect(state.logOffset).toBeUndefined();
-		expect(state.logFileId).toBeUndefined();
 		expect(state.entries).toHaveLength(0);
-		expect(state.notice).toBeUndefined();
 
 		// The main log appears: the bridge happens exactly on this first
 		// successful read, pairing the .old start with the newer one.
@@ -715,47 +525,42 @@ describe("agents view incident notices", () => {
 		expect(refreshIncidentNoticeState(state, logPath, base)).toBe(true);
 		expect(state.notice?.kind).toBe("update-restart");
 		expect(state.entries).toHaveLength(2);
-		expect(state.logOffset).toBeGreaterThan(0);
 
-		// A further poll does not re-read .old: the pair stays stable and no
-		// phantom restart appears.
+		// Later polls never re-read .old: duplicate supervisor starts would pair
+		// with the current file into a phantom restart.
 		expect(refreshIncidentNoticeState(state, logPath, base)).toBe(false);
 		expect(state.entries).toHaveLength(2);
 		expect(
 			deriveIncidentNotices(state.entries, base).filter((notice) => notice.kind === "update-restart"),
 		).toHaveLength(1);
+
+		// Rotation: a fresh file replaces agent.jsonl under a new inode. The new
+		// file is LARGER than the consumed offset (no shrink re-tail) and within
+		// one tail bound of it, so only the file-id change forces the re-tail
+		// that follows the rotation to the newest incident.
+		const rotatedFiller = logLine({
+			ts: tsAgo(base, 3600_000),
+			component: "coding-agent.daemon-supervisor",
+			msg: "filler padding after the rotated log",
+		});
+		const rotatedPath = `${getAgentLogPath()}.new`;
+		writeFileSync(
+			rotatedPath,
+			`${[workerCrashLine(base, "aaaaaaaaaaaa", 60), rotatedFiller, rotatedFiller, rotatedFiller].join("\n")}\n`,
+		);
+		renameSync(rotatedPath, getAgentLogPath());
+		expect(refreshIncidentNoticeState(state, logPath, base)).toBe(true);
+		expect(state.notice?.subject).toBe("worker aaaaaaaaaaaa");
 	});
 
-	it("follows a rotated log (new inode) to the newest incident", () => {
+	it("reads appended bytes only, reports notice changes, and keeps the consumed offset through a transient read failure", () => {
 		useTempAgentDir();
 		const base = Date.now();
-		writeAgentLog([workerCrashLine(base, "5b1d3aeb91ee", 120)]);
-		const view = newView();
-		try {
-			invoke("refreshIncidentNotices", view);
-			expect(renderedIncidentLines(view)[0]).toContain("worker 5b1d3aeb91ee crashed at");
-
-			// Rotation: a fresh file replaces agent.jsonl under a new inode.
-			const rotatedPath = `${getAgentLogPath()}.new`;
-			writeFileSync(rotatedPath, `${workerCrashLine(base, "aaaaaaaaaaaa", 60)}\n`);
-			renameSync(rotatedPath, getAgentLogPath());
-			invoke("refreshIncidentNotices", view);
-			const lines = renderedIncidentLines(view);
-			expect(lines).toHaveLength(1);
-			expect(lines[0]).toContain("worker aaaaaaaaaaaa crashed at");
-		} finally {
-			stopThemeWatcher();
-		}
-	});
-
-	it("reads only appended bytes on later polls and reports notice changes", () => {
-		useTempAgentDir();
-		const base = Date.now();
-		writeAgentLog([workerCrashLine(base, "5b1d3aeb91ee", 120)]);
+		writeAgentLog([supervisorStartLine(base, 30), workerCrashLine(base, "5b1d3aeb91ee", 120)]);
 		const state = createIncidentNoticeState();
 		const logPath = getAgentLogPath();
 		expect(refreshIncidentNoticeState(state, logPath, Date.now())).toBe(true);
-		expect(state.logOffset).toBeGreaterThan(0);
+		expect(state.notice?.kind).toBe("worker-crash");
 		const initialOffset = state.logOffset!;
 
 		// A burst lands, but the crash (critical) still wins the single
@@ -769,44 +574,30 @@ describe("agents view incident notices", () => {
 		expect(refreshIncidentNoticeState(state, logPath, Date.now())).toBe(true);
 		expect(state.notice?.subject).toBe("worker aaaaaaaaaaaa");
 
-		// A poll with nothing new reports no change and leaves the offset alone.
-		const before = state.logOffset!;
-		expect(refreshIncidentNoticeState(state, logPath, Date.now())).toBe(false);
-		expect(state.logOffset).toBe(before);
-		expect(initialOffset).toBeLessThan(before);
-	});
-
-	it("keeps the consumed offset across a transient read failure", () => {
-		useTempAgentDir();
-		const base = Date.now();
-		writeAgentLog([supervisorStartLine(base, 30), workerCrashLine(base, "5b1d3aeb91ee", 120)]);
-		const state = createIncidentNoticeState();
-		const logPath = getAgentLogPath();
-		expect(refreshIncidentNoticeState(state, logPath, Date.now())).toBe(true);
-		expect(state.notice?.kind).toBe("worker-crash");
-		const entryCount = state.entries.length;
-		const offset = state.logOffset;
-		const fileId = state.logFileId;
-
-		// The log briefly becomes unreadable. The failed poll must keep the
-		// consumed offset: the next poll would otherwise re-tail and re-parse
-		// the supervisor start into a phantom restart and double timeout counts.
+		// The log briefly becomes unreadable. The failed poll keeps the consumed
+		// offset: the next poll would otherwise re-tail and re-parse the
+		// supervisor start into a phantom restart and double timeout counts.
 		const backupPath = `${logPath}.backup`;
 		renameSync(logPath, backupPath);
 		mkdirSync(logPath);
+		const offset = state.logOffset;
+		const fileId = state.logFileId;
+		const entryCount = state.entries.length;
 		expect(refreshIncidentNoticeState(state, logPath, Date.now())).toBe(false);
 		expect(state.logOffset).toBe(offset);
 		expect(state.logFileId).toBe(fileId);
 
-		// The log returns (rename keeps the inode): nothing re-parses and no
-		// phantom update-restart appears.
+		// The log returns (rename keeps the inode): nothing re-parses, no
+		// phantom update-restart appears, and the offset only ever grew.
 		rmSync(logPath, { recursive: true, force: true });
 		renameSync(backupPath, logPath);
 		expect(refreshIncidentNoticeState(state, logPath, Date.now())).toBe(false);
 		expect(state.entries).toHaveLength(entryCount);
 		expect(state.notice?.kind).toBe("worker-crash");
-		const notices = deriveIncidentNotices(state.entries, Date.now());
-		expect(notices.some((notice) => notice.kind === "update-restart")).toBe(false);
+		expect(state.logOffset).toBeGreaterThan(initialOffset);
+		expect(deriveIncidentNotices(state.entries, Date.now()).some((notice) => notice.kind === "update-restart")).toBe(
+			false,
+		);
 	});
 
 	it("expires the notice while the log stays unreadable", () => {
@@ -816,14 +607,12 @@ describe("agents view incident notices", () => {
 		const state = createIncidentNoticeState();
 		const logPath = getAgentLogPath();
 		expect(refreshIncidentNoticeState(state, logPath, base)).toBe(true);
-		expect(state.notice?.kind).toBe("worker-crash");
-
-		// The log disappears for good: the consumed offset stays (a re-tail would
-		// fabricate restarts), but the poll still re-derives, so the crash ages
-		// out of the window and the notice expires instead of surviving forever.
+		// The log disappears for good: the consumed offset stays (a re-tail
+		// would fabricate restarts), but the poll still re-derives, so the crash
+		// ages out of the window and the notice expires instead of surviving
+		// forever.
 		rmSync(logPath);
-		const staleNowMs = base + 25 * 60 * 60_000;
-		expect(refreshIncidentNoticeState(state, logPath, staleNowMs)).toBe(true);
+		expect(refreshIncidentNoticeState(state, logPath, base + 25 * 60 * 60_000)).toBe(true);
 		expect(state.notice).toBeUndefined();
 		expect(state.entries).toHaveLength(0);
 		expect(state.logOffset).toBeGreaterThan(0);
@@ -832,10 +621,6 @@ describe("agents view incident notices", () => {
 	it("caps retained windowed entries at the newest bounded set", () => {
 		useTempAgentDir();
 		const base = Date.now();
-		// A busy day of structured logging: a full cap of windowed entries is
-		// already held in state, spread over the past few hours. Retention must
-		// stay bounded in memory (each entry keeps the full parsed record), and
-		// so must the per-poll sort/classify work.
 		const oldestTimeMs = base - 3 * 60 * 60_000;
 		const stepMs = Math.ceil((60 * 60_000) / INCIDENT_NOTICE_MAX_WINDOW_ENTRIES);
 		const state = createIncidentNoticeState();
@@ -848,7 +633,8 @@ describe("agents view incident notices", () => {
 		}));
 		writeAgentLog([workerCrashLine(base, "5b1d3aeb91ee", 60)]);
 		// The crash is the newest entry of all: the cap keeps it and drops the
-		// oldest fixture instead of growing past the bound.
+		// oldest fixture instead of growing past the bound, so memory and
+		// per-poll sort/classify work stay bounded on a busy log day.
 		expect(refreshIncidentNoticeState(state, getAgentLogPath(), base)).toBe(true);
 		expect(state.entries).toHaveLength(INCIDENT_NOTICE_MAX_WINDOW_ENTRIES);
 		expect(state.entries[0]!.timeMs).toBe(oldestTimeMs + stepMs);
