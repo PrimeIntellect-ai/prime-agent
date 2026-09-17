@@ -2496,6 +2496,114 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertFalse(self._tracked("sub", "nested").exists())
 
+    async def test_refuses_here_strings_with_option_arguments(self):
+        # `-o`/`-O`/`--option` consume the following word, so an interpreter
+        # carrying them still takes its command text from stdin.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "bash -O extglob <<< 'rm -rf %s'" % outside,
+            "bash -o pipefail <<< 'rm -rf %s'" % outside,
+            "bash --option extglob <<< 'rm -rf %s'" % outside,
+            "printf 'rm -rf %s\\n' | bash -O extglob" % outside,
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # An option-taking shell with its own -c payload keeps stdin unused,
+        # and a benign operand still runs.
+        result = await bash(
+            "bash -O extglob -c 'echo hi' <<< 'rm -rf /printed-not-run'"
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("hi", result.output)
+        result = await bash("bash -O extglob <<< 'echo hi'")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("hi", result.output)
+
+    async def test_refuses_braced_parameter_command_words(self):
+        # `"${@}"`, `"${*}"`, and the sliced forms split like `"$@"` even when
+        # quoted, so they can supply the flags and the operand separately.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            'set -- -rf %s; rm "${@}"' % outside,
+            'set -- -rf %s extra; rm "${@:1:2}"' % outside,
+            'set -- -rf; rm "${*}" %s' % outside,
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # A benign braced parameter keeps running, and a literal `[@]` is data.
+        result = await bash('set -- file.txt; echo "${@}"')
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("file.txt", result.output)
+        result = await bash('echo "[@]"')
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("[@]", result.output)
+
+    async def test_refuses_prefixed_printf_producers(self):
+        # The reconstruction must find the producer's command word through the
+        # assignment, grouping, and exec-style prefixes in front of it.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "X=1 printf '%s%s %s %s\\n' r m -rf " + outside + " | sh",
+            "command printf '%s%s %s %s\\n' r m -rf " + outside + " | sh",
+            "! printf '%s%s %s %s\\n' r m -rf " + outside + " | sh",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # A prefixed producer that only spells benign text keeps running.
+        result = await bash("X=1 printf 'echo hi\\n' | sh")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("hi", result.output)
+
+    async def test_refuses_printf_format_reuse_producers(self):
+        # Arguments that outlast the format reuse it, so every assembled line
+        # is command text the consumer shell runs.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "printf '%s%s %s %s\\n' r m -rf " + outside + " dummy | sh",
+            "printf '%s%s %s %s' r m -rf " + outside + " x y | sh",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # Reused benign lines keep running.
+        result = await bash("printf '%s\\n' 'echo hi' 'echo there' | sh")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("hi", result.output)
+        self.assertIn("there", result.output)
+
+    async def test_refuses_appends_without_a_same_command_value(self):
+        # `NAME+=` with no value the command itself set means the shell appends
+        # to something the guard cannot read, so a later `$NAME` is refused.
+        self._make_tree()
+        outside = self._outside_target()
+        with self.assertRaises(DestructiveRmRefusalError):
+            bash("X+='rm -rf %s'; $X" % outside)
+        self.assertTrue(Path(outside, "file.txt").exists())
+        with mock.patch.dict(os.environ, {"X": "rm -rf "}):
+            with self.assertRaises(DestructiveRmRefusalError) as caught:
+                bash("X+=" + outside + "; $X")
+        self.assertIn("is assigned text the guard cannot read", str(caught.exception))
+        self.assertTrue(Path(outside, "file.txt").exists())
+        # A value the command sets itself still resolves, and an append that is
+        # never expanded keeps running.
+        result = await bash("X='echo h'; X+='i'; $X")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("hi", result.output)
+        result = await bash("X+='not-run'; echo done")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("done", result.output)
+
     async def test_refuses_env_chdir_relocated_rm(self):
         # GNU `env -C dir` relocates the command it runs, so a relative operand
         # resolves against that directory, not the kernel cwd.

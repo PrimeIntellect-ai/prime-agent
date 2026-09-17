@@ -3352,6 +3352,14 @@ def _matching_paren(command: str, open_index: int, end: int) -> int:
     return end - 1  # unterminated: scan to the end
 
 
+# Quoted references the shell still splits into separate words: `"$@"`, `"$*"`,
+# the braced positional forms (`"${@}"`, `"${*}"`, `"${@:1:2}"`), and array
+# expansions (`"${name[@]}"`, `"${name[*]}"`).
+_SPLITTING_QUOTED_REFERENCE = re.compile(
+    r"\$(?:[@*]|\{[^{}]*\[[@*]\]\}|\{[@*](?::[^}]*)?\})"
+)
+
+
 _ANSI_C_ESCAPES = {
     "a": "\a",
     "b": "\b",
@@ -3518,9 +3526,7 @@ def _scan_shell_words(command: str) -> list[_RmShellWord]:
                         continue
                     value.append(inner)
                     j += 1
-                if any(
-                    marker in command[span_start:j] for marker in ("$@", "$*", "[@]", "[*]")
-                ):
+                if _SPLITTING_QUOTED_REFERENCE.search(command[span_start:j]):
                     word_splittable = True  # `"$@"` splits into separate words
                 i = j
                 continue
@@ -4421,15 +4427,39 @@ def _interpret_shell_escapes(text: str) -> str:
     )
 
 
+def _producer_command_index(producer: list[_RmShellWord]) -> int | None:
+    """Index of the word that runs the producer's text generator.
+
+    Assignment words, grouping tokens (`{`, `(`, `!`), and exec-style prefixes
+    with their options sit in front of it (`X=1 printf ...`, `{ printf ...; }`,
+    `command printf ...`), so the caller must look past them before deciding
+    which producer it is looking at."""
+    index = 0
+    while index < len(producer):
+        value = producer[index].value
+        name, separator, _assigned = value.rpartition("=")
+        if separator and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\+?", name):
+            index += 1
+            continue
+        if value in ("{", "(", "!", "time") or value in _EXEC_STYLE_PREFIXES:
+            index += 1
+            while index < len(producer) and producer[index].value.startswith("-"):
+                index += 1
+            continue
+        return index
+    return None
+
+
 def _printf_output_text(producer: list[_RmShellWord]) -> str | None:
     """The text a `printf` producer writes to its pipe, or None when the guard
     cannot reconstruct it.
 
     `printf '%s%s %s %s\n' r m -rf /outside` writes `rm -rf /outside`, so the
     consumer runs commands the format string alone does not spell out. `%s`
-    conversions are substituted with their argument text in order; any other
-    conversion, a missing argument, or arguments the format would reuse make
-    the output unreadable, so the caller keeps its synthetic-text scan."""
+    conversions are substituted with their argument text in order, a missing
+    argument renders empty the way the builtin does, and arguments that outlast
+    the format reuse it (which the builtin also does), so every assembled line
+    is returned; any other conversion makes the output unreadable."""
     arguments = [word for word in producer[1:] if word.value != "--"]
     if not arguments:
         return None
@@ -4437,30 +4467,32 @@ def _printf_output_text(producer: list[_RmShellWord]) -> str | None:
     values = [word.value for word in arguments[1:]]
     pieces: list[str] = []
     index = 0
-    position = 0
-    while position < len(format_text):
-        ch = format_text[position]
-        if ch == "\\" and position + 1 < len(format_text):
-            pieces.append(format_text[position : position + 2])
+    while True:
+        consumed = False
+        position = 0
+        while position < len(format_text):
+            ch = format_text[position]
+            if ch == "\\" and position + 1 < len(format_text):
+                pieces.append(format_text[position : position + 2])
+                position += 2
+                continue
+            if ch != "%":
+                pieces.append(ch)
+                position += 1
+                continue
+            conversion = format_text[position + 1 : position + 2]
+            if conversion == "%":
+                pieces.append("%")
+                position += 2
+                continue
+            if conversion != "s":
+                return None  # other conversions are not literal text
+            pieces.append(values[index] if index < len(values) else "")
+            index += 1
+            consumed = True
             position += 2
-            continue
-        if ch != "%":
-            pieces.append(ch)
-            position += 1
-            continue
-        conversion = format_text[position + 1 : position + 2]
-        if conversion == "%":
-            pieces.append("%")
-            position += 2
-            continue
-        if conversion != "s" or index >= len(values):
-            return None
-        pieces.append(values[index])
-        index += 1
-        position += 2
-    if index != len(values):
-        return None  # the format would be reused for the remaining arguments
-    return "".join(pieces)
+        if not consumed or index >= len(values):
+            return "".join(pieces)
 
 
 def _stdin_shell_feed_texts(prepared: str, words: list[_RmShellWord]) -> list[tuple[str, int]]:
@@ -4481,19 +4513,7 @@ def _stdin_shell_feed_texts(prepared: str, words: list[_RmShellWord]) -> list[tu
         if not (is_shell or is_expansion_shell):
             continue
         if is_shell:
-            has_c = has_s = False
-            has_argument = False
-            for follower in words[index + 1 :]:
-                if follower.starts_command:
-                    break
-                token = follower.value
-                if token.startswith("-") and token != "-":
-                    if not token.startswith("--"):
-                        has_c = has_c or "c" in token[1:]
-                        has_s = has_s or "s" in token[1:]
-                    continue
-                has_argument = True
-                break
+            has_c, has_s, has_argument = _shell_option_words(words, index)
             if has_c:
                 continue  # a -c payload is handled by the wrapper scan
             if has_argument and not has_s:
@@ -4521,8 +4541,12 @@ def _stdin_shell_feed_texts(prepared: str, words: list[_RmShellWord]) -> list[tu
         if not producer_words:
             continue
         feeds.append((" ".join(other.value for other in producer_words), index))
-        if os.path.basename(producer_words[0].value) == "printf":
-            written = _printf_output_text(producer_words)
+        command_index = _producer_command_index(producer_words)
+        if (
+            command_index is not None
+            and os.path.basename(producer_words[command_index].value) == "printf"
+        ):
+            written = _printf_output_text(producer_words[command_index:])
             if written is not None:
                 # Scan what printf actually writes, not just the words that
                 # build it: a format string can assemble the command.
@@ -4741,6 +4765,55 @@ def _payload_reads_stdin(payload: str) -> bool:
     return False
 
 
+def _shell_option_words(
+    words: list[_RmShellWord], index: int, skip: tuple[int, int] | None = None
+) -> tuple[bool, bool, bool]:
+    """How the shell word at `index` is invoked: `(has_c, has_s, has_argument)`.
+
+    Options are read the way the shell reads them, so `-o`/`-O`/`--option`
+    consume the following word (`bash -O extglob <<< ...` still takes its
+    command from stdin instead of running `extglob` as a script), and `-s`
+    keeps stdin live with positional arguments. `skip` is a (start, end) span
+    that already belongs to stdin, so its words do not count as arguments."""
+    has_c = has_s = has_argument = False
+    pending_option_value = False
+    for follower in words[index + 1 :]:
+        if follower.starts_command:
+            break
+        if skip is not None and skip[0] <= follower.start and follower.end <= skip[1]:
+            continue
+        token = follower.value
+        if pending_option_value:
+            pending_option_value = False  # the option's value, not a script
+            continue
+        if token.startswith("-") and token != "-":
+            if not token.startswith("--"):
+                has_c = has_c or "c" in token[1:]
+                has_s = has_s or "s" in token[1:]
+                pending_option_value = token[-1] in "oO"
+            elif token == "--option":
+                pending_option_value = True
+            continue
+        has_argument = True
+        break
+    return has_c, has_s, has_argument
+
+
+def _dash_c_payload(words: list[_RmShellWord], index: int) -> str | None:
+    """The command string a shell word runs through `-c`, or None when it
+    carries no such payload."""
+    for offset, follower in enumerate(words[index + 1 :]):
+        if follower.starts_command:
+            break
+        token = follower.value
+        if token.startswith("-") and not token.startswith("--") and "c" in token[1:]:
+            candidate = words[index + 2 + offset : index + 3 + offset]
+            if candidate and not candidate[0].starts_command:
+                return candidate[0].value
+            return None
+    return None
+
+
 def _stdin_shell_interpreter_index(
     words: list[_RmShellWord],
     operand_start: int,
@@ -4759,30 +4832,12 @@ def _stdin_shell_interpreter_index(
         is_shell = os.path.basename(word.value) in _SHELL_DASH_C_INTERPRETERS
         if not (is_shell or not _expansion_is_resolvable(word.value)):
             continue
-        has_c = has_s = has_argument = False
-        for follower in words[index + 1 :]:
-            if follower.starts_command:
-                break
-            if operand_start <= follower.start and follower.end <= operand_end:
-                continue  # the here-string is stdin, not an argument
-            token = follower.value
-            if token.startswith("-") and token != "-":
-                if not token.startswith("--"):
-                    has_c = has_c or "c" in token[1:]
-                    has_s = has_s or "s" in token[1:]
-                continue
-            has_argument = True
-            break
+        has_c, has_s, has_argument = _shell_option_words(
+            words, index, (operand_start, operand_end)
+        )
         if has_c:
             # A `-c` payload ignores stdin, unless its own command reads it.
-            payload = None
-            for offset, follower in enumerate(words[index + 1 :]):
-                token = follower.value
-                if token.startswith("-") and not token.startswith("--") and "c" in token[1:]:
-                    candidate = words[index + 2 + offset : index + 3 + offset]
-                    if candidate and not candidate[0].starts_command:
-                        payload = candidate[0].value
-                    break
+            payload = _dash_c_payload(words, index)
             if payload is None or not _payload_reads_stdin(payload):
                 continue
             return index
@@ -5286,6 +5341,13 @@ def _assigned_command_rm_reasons(
             # The shell expands the assigned word at run time, so a value built
             # from an expansion or substitution cannot be read statically.
             literal = not any(ch in text[word.start : word.end] for ch in "$`\\")
+            if appended and base not in assignments:
+                # The shell appends to a value this command never set (the
+                # environment, `read`, or another builtin), so the text a later
+                # `$NAME` runs cannot be read: keep the appended piece but mark
+                # the value untrackable, and refuse the reference.
+                assignments[base] = (assigned, False)
+                continue
             previous, previous_literal = assignments.get(base, ("", True))
             assignments[base] = (
                 previous + assigned if appended else assigned,
