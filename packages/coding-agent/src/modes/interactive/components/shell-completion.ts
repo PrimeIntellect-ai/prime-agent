@@ -1,4 +1,4 @@
-import type { Component } from "@earendil-works/pi-tui";
+import type { ClickRegion, Component } from "@earendil-works/pi-tui";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import {
 	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
@@ -112,6 +112,7 @@ export function shellCompletionLabel(completion: ShellCompletion | undefined): s
 
 export class ShellCompletionComponent implements Component {
 	private expanded = false;
+	private clickRegions: ClickRegion[] = [];
 	constructor(
 		private readonly message: CustomMessage,
 		private attached = false,
@@ -127,8 +128,14 @@ export class ShellCompletionComponent implements Component {
 		return !this.attached || this.expanded;
 	}
 	invalidate(): void {}
+	getClickRegions(): ReadonlyArray<ClickRegion> {
+		return this.clickRegions;
+	}
 	render(width: number): string[] {
-		if (this.attached && !this.expanded) return [];
+		if (this.attached && !this.expanded) {
+			this.clickRegions = [];
+			return [];
+		}
 		const completion = readShellCompletion(this.message);
 		const color = completion?.details.exitCode ? "error" : "muted";
 		const label = shellCompletionLabel(completion);
@@ -137,6 +144,9 @@ export class ShellCompletionComponent implements Component {
 			: `${completion?.details.exitCode ? "✗" : "✓"} ${label}`;
 		const header = truncateToWidth(theme.fg(color, ` ${heading}`), width, "");
 		const leadingSpace = this.options.shouldAddLeadingSpace?.(this.expanded) ?? this.expanded;
+		this.clickRegions = [
+			{ line: leadingSpace ? 1 : 0, col: 0, width, height: 1, onClick: () => this.setExpanded(!this.expanded) },
+		];
 		if (!this.expanded) return leadingSpace ? ["", header] : [header];
 		const raw = completion
 			? shellCompletionText(completion)

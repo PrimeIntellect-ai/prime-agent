@@ -1,4 +1,4 @@
-import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type ClickRegion, type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { theme } from "../theme/theme.js";
 
 export const TOOL_PANEL_PADDING_X = 2;
@@ -30,6 +30,7 @@ export function toolPanelLine(line: string, width: number): string {
 export class ToolPanel implements Component {
 	private children: Component[] = [];
 	private header = "";
+	private clickRegions: ClickRegion[] = [];
 	private cache?: {
 		width: number;
 		header: string;
@@ -50,6 +51,11 @@ export class ToolPanel implements Component {
 	clear(): void {
 		this.children = [];
 		this.cache = undefined;
+		this.clickRegions = [];
+	}
+
+	getClickRegions(): ReadonlyArray<ClickRegion> {
+		return this.clickRegions;
 	}
 
 	invalidate(): void {
@@ -61,9 +67,20 @@ export class ToolPanel implements Component {
 
 	render(width: number): string[] {
 		const childLines: string[] = [];
+		const clickRegions: ClickRegion[] = [];
 		for (const child of this.children) {
+			const lineOffset = childLines.length;
 			childLines.push(...child.render(toolPanelContentWidth(width)));
+			for (const region of child.getClickRegions?.() ?? []) {
+				clickRegions.push({
+					...region,
+					// Child rows start below the header and separator rows.
+					line: region.line + lineOffset + 2,
+					col: region.col + TOOL_PANEL_PADDING_X,
+				});
+			}
 		}
+		this.clickRegions = clickRegions;
 
 		// The background sample detects theme changes that don't go through
 		// invalidate().

@@ -27,6 +27,7 @@ import type {
 	SlashCommand,
 } from "@earendil-works/pi-tui";
 import {
+	type ClickRegion,
 	CombinedAutocompleteProvider,
 	type Component,
 	Container,
@@ -392,6 +393,9 @@ function hasEditDiffsExpansion(obj: unknown): obj is EditDiffsExpandable {
 }
 
 class ExpandableText extends Text implements Expandable {
+	private expandedState: boolean;
+	private clickRegions: ClickRegion[] = [];
+
 	constructor(
 		private readonly getCollapsedText: () => string,
 		private readonly getExpandedText: () => string,
@@ -400,10 +404,25 @@ class ExpandableText extends Text implements Expandable {
 		paddingY = 0,
 	) {
 		super(expanded ? getExpandedText() : getCollapsedText(), paddingX, paddingY);
+		this.expandedState = expanded;
 	}
 
 	setExpanded(expanded: boolean): void {
+		this.expandedState = expanded;
 		this.setText(expanded ? this.getExpandedText() : this.getCollapsedText());
+	}
+
+	override render(width: number): string[] {
+		const lines = super.render(width);
+		this.clickRegions =
+			lines.length > 0
+				? [{ line: 0, col: 0, width, height: 1, onClick: () => this.setExpanded(!this.expandedState) }]
+				: [];
+		return lines;
+	}
+
+	getClickRegions(): ReadonlyArray<ClickRegion> {
+		return this.clickRegions;
 	}
 }
 

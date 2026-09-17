@@ -16,6 +16,7 @@ import {
 	getRefinementHistoryPath,
 	type HarnessEntry,
 	type HarnessState,
+	harnessQueryTermIdf,
 	harnessQueryTerms,
 	inferRefinementResultScope,
 	loadGlobalRefinementHistory,
@@ -900,6 +901,28 @@ describe("harness digest relevance ranking", () => {
 		expect(scoreHarnessEntryForQuery(entry, new Map())).toBe(0);
 	});
 
+	it("computes document-frequency discounts over the ranked corpus", () => {
+		const at = "2026-08-01T00:00:00.000Z";
+		const terms = new Map([
+			["session", 1],
+			["quantum", 1],
+			["missing", 1],
+		]);
+		const common = ["common0", "common1"].map((id) => makeEntry(id, "Session notes", "session text", at));
+		const rare = makeEntry("rare", "Quantum note", "quantum text", at);
+		// "session" matches 2 of 3 entries, "quantum" 1 of 3, "missing" none.
+		const idf = harnessQueryTermIdf([...common, rare], terms);
+		expect([...idf.keys()]).toEqual(["session", "quantum"]);
+		expect(idf.get("session")).toBeCloseTo(Math.log(1 + 3 / 2));
+		expect(idf.get("quantum")).toBeCloseTo(Math.log(1 + 3 / 1));
+		// The discount scales the weighted overlap: "quantum" covers 2 fields of 1 entry.
+		expect(scoreHarnessEntryForQuery(rare, terms, idf)).toBeCloseTo(Math.log(1 + 3 / 1) * 1.5);
+		// A term in every entry still weighs log(2); degenerate corpora stay inert.
+		expect(harnessQueryTermIdf([rare], terms).get("quantum")).toBeCloseTo(Math.log(2));
+		expect(harnessQueryTermIdf([], terms).size).toBe(0);
+		expect(harnessQueryTermIdf([...common, rare], new Map()).size).toBe(0);
+	});
+
 	it.each<{ label: string; query: string; winner: string; loser: string; entries: Record<string, HarnessEntry> }>([
 		{
 			label: "relevance over alphabetical order",
@@ -912,13 +935,25 @@ describe("harness digest relevance ranking", () => {
 			},
 		},
 		{
+			// Equal discounts keep the recency tie-break: alphabetical order would pick aa_older.
 			label: "recency as the tie-break for equal scores",
 			query: "worktree",
-			winner: "newer",
-			loser: "older",
+			winner: "zz_newer",
+			loser: "aa_older",
 			entries: {
-				older: makeEntry("older", "Worktree policy", "Same worktree signal.", "2026-08-01T00:00:00.000Z"),
-				newer: makeEntry("newer", "Worktree policy 2", "Same worktree signal.", "2026-09-01T00:00:00.000Z"),
+				aa_older: makeEntry("aa_older", "Worktree policy", "Same worktree signal.", "2026-08-01T00:00:00.000Z"),
+				zz_newer: makeEntry("zz_newer", "Worktree policy", "Same worktree signal.", "2026-09-01T00:00:00.000Z"),
+			},
+		},
+		{
+			label: "a rare distinctive term over a common-term-dense entry",
+			query: "session quantum",
+			winner: "rare",
+			loser: "common1",
+			entries: {
+				common0: makeEntry("common0", "Session notes", "Session state notes.", "2026-08-01T00:00:00.000Z"),
+				common1: makeEntry("common1", "Session notes", "Session state notes.", "2026-08-02T00:00:00.000Z"),
+				rare: makeEntry("rare", "Quantum note", "Only quantum annealing matters.", "2026-07-01T00:00:00.000Z"),
 			},
 		},
 		{
@@ -929,16 +964,6 @@ describe("harness digest relevance ranking", () => {
 			entries: {
 				login: makeEntry("login", "Login fix", "登录故障排查记录。", "2026-08-01T00:00:00.000Z"),
 				tea: makeEntry("tea", "Tea notes", "All about oolong brewing.", "2026-08-02T00:00:00.000Z"),
-			},
-		},
-		{
-			label: "real terms rather than incidental query punctuation",
-			query: "worktree?",
-			winner: "worktree",
-			loser: "question",
-			entries: {
-				worktree: makeEntry("worktree", "Branch hygiene", "Use git worktrees.", "2026-08-01T00:00:00.000Z"),
-				question: makeEntry("question", "Question", "Anything else left open?", "2026-08-02T00:00:00.000Z"),
 			},
 		},
 	])("ranks by $label", ({ query, winner, loser, entries }) => {

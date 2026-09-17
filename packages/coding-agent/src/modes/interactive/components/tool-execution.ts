@@ -368,6 +368,7 @@ export class ToolExecutionComponent extends Container {
 
 	override render(width: number): string[] {
 		if (this.hideComponent) {
+			this.clickRegions = [];
 			return [];
 		}
 		// Refresh the animated glyph without rebuilding the whole panel, for as long
@@ -376,9 +377,19 @@ export class ToolExecutionComponent extends Container {
 			this.contentPanel.setHeader(this.panelHeader());
 		}
 		const lines = super.render(width);
-		return this.expanded && this.shouldUseIpythonRenderer() && this.shouldAddLeadingSpace?.()
-			? ["", ...lines]
-			: lines;
+		// The header row toggles only this component: panel header line for the
+		// default shell, the fixed summary line for self-rendered ipython cells.
+		// That ipython shell prepends a blank row, so aggregated child regions
+		// shift with it.
+		const leadingBlank = this.expanded && this.shouldUseIpythonRenderer() && this.shouldAddLeadingSpace?.() ? 1 : 0;
+		this.clickRegions =
+			lines.length > 0
+				? [
+						...this.clickRegions.map((region) => ({ ...region, line: region.line + leadingBlank })),
+						{ line: leadingBlank, col: 0, width, height: 1, onClick: () => this.setExpanded(!this.expanded) },
+					]
+				: [];
+		return leadingBlank ? ["", ...lines] : lines;
 	}
 
 	private isStatusAnimating(): boolean {

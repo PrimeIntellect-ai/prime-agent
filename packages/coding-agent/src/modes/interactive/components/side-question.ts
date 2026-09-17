@@ -1,4 +1,4 @@
-import { Box, type Component, Markdown, Text, visibleWidth } from "@earendil-works/pi-tui";
+import { Box, type ClickRegion, type Component, Markdown, Text, visibleWidth } from "@earendil-works/pi-tui";
 import type { AgentConnectionSideQuestionEvent } from "../../agent-connection/types.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
 
@@ -21,6 +21,7 @@ export class SideQuestionComponent implements Component {
 	private readonly paddingX: number;
 	private readonly entries: (SideQuestionTurnState | SideQuestionBashState)[] = [];
 	private expanded = false;
+	private clickRegions: ClickRegion[] = [];
 
 	constructor(event: AgentConnectionSideQuestionEvent, paddingX = 2) {
 		this.paddingX = Math.max(2, paddingX);
@@ -89,9 +90,14 @@ export class SideQuestionComponent implements Component {
 		}
 	}
 
+	getClickRegions(): ReadonlyArray<ClickRegion> {
+		return this.clickRegions;
+	}
+
 	render(width: number): string[] {
 		const blank = " ".repeat(Math.max(1, width));
 		const lines: string[] = [];
+		const clickRegions: ClickRegion[] = [];
 		const pushSurfaced = (raw: string[]) => {
 			for (const line of raw) {
 				lines.push(this.applySurface(line, width));
@@ -101,7 +107,11 @@ export class SideQuestionComponent implements Component {
 		pushSurfaced([blank]);
 		for (const entry of this.entries) {
 			if (entry.kind === "bash") {
+				const lineOffset = lines.length;
 				pushSurfaced([...entry.component.render(width), blank]);
+				for (const region of entry.component.getClickRegions?.() ?? []) {
+					clickRegions.push({ ...region, line: region.line + lineOffset });
+				}
 				continue;
 			}
 			if (entry.questionBubble) {
@@ -118,6 +128,7 @@ export class SideQuestionComponent implements Component {
 			pushSurfaced([blank, ...this.renderAnswer(entry, width), blank]);
 		}
 		pushSurfaced([...this.renderHint(width), blank]);
+		this.clickRegions = clickRegions;
 		return lines;
 	}
 

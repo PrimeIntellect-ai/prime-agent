@@ -140,6 +140,10 @@ export class CustomEditor extends Editor {
 		this.actionHandlers.set(action, handler);
 	}
 
+	protected override getContentLineOffset(): number {
+		return this.getHeaderLine?.() !== undefined ? 2 : 0;
+	}
+
 	override render(width: number): string[] {
 		const commandMatch = COMMAND_TOKEN_PATTERN.exec(this.getLines()[0] ?? "");
 		const isArgumentCommandLine = commandMatch !== null && this.isArgumentCommand(commandMatch[2]!);

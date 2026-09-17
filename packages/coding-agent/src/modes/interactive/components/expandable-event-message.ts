@@ -1,4 +1,4 @@
-import { type Component, Container, Text, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Clickable, type Component, Container, Text, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { type ThemeColor, theme } from "../theme/theme.js";
 
 class EventSummary implements Component {
@@ -34,13 +34,17 @@ export abstract class ExpandableEventMessage extends Container {
 		this.updateDisplay();
 	}
 
+	toggleExpanded(): void {
+		this.setExpanded(!this.expanded);
+	}
+
 	override invalidate(): void {
 		super.invalidate();
 		this.updateDisplay();
 	}
 
 	protected addSummary(summary: string, metadata?: string, color: ThemeColor = "customMessageText"): void {
-		this.addChild(new EventSummary(summary, this.expanded, color));
+		this.addChild(new Clickable(new EventSummary(summary, this.expanded, color), () => this.toggleExpanded()));
 		if (metadata) this.addChild(new Text(theme.fg("dim", metadata), 1, 0));
 	}
 

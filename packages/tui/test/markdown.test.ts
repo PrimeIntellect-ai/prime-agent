@@ -5,14 +5,11 @@ import { Chalk } from "chalk";
 import { Markdown } from "../src/components/markdown.js";
 import { resetCapabilitiesCache, setCapabilities } from "../src/terminal-image.js";
 import { TUI } from "../src/tui.js";
+import { hyperlinkAtColumn, stripAnsi } from "../src/utils.js";
 import { defaultMarkdownTheme } from "./test-themes.js";
 import { VirtualTerminal } from "./virtual-terminal.js";
 
 const chalk = new Chalk({ level: 3 });
-
-function stripAnsi(line: string): string {
-	return line.replace(/\x1b\[[0-9;]*m/g, "");
-}
 
 function render(text: string, width = 80, paddingX = 0): string[] {
 	return new Markdown(text, paddingX, 0, defaultMarkdownTheme).render(width);
@@ -33,6 +30,19 @@ function getCellUnderline(terminal: VirtualTerminal, row: number, col: number): 
 }
 
 describe("Markdown component", () => {
+	it("keeps labeled links clickable when the visible URL fallback is shown (ENG-6126)", () => {
+		setCapabilities({ images: null, trueColor: false, hyperlinks: false });
+		try {
+			const url = "https://www.google.com";
+			const line = render(`[Google](${url})`)[0]!;
+
+			assert.strictEqual(hyperlinkAtColumn(line, 0), url);
+			assert.strictEqual(stripAnsi(line).trimEnd(), `Google (${url})`);
+		} finally {
+			resetCapabilitiesCache();
+		}
+	});
+
 	describe("Table layout", () => {
 		const table = (header: string, separator: string, ...rows: string[]) => [header, separator, ...rows].join("\n");
 		const longWord = "superlongword";

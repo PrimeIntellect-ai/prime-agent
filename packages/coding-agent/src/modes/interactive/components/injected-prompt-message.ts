@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
+	Clickable,
 	Container,
 	Markdown,
 	type MarkdownTheme,
@@ -121,7 +122,7 @@ export class InjectedPromptMessageComponent extends Container {
 			return;
 		}
 		this.header.setText(this.headerText());
-		this.content.addChild(this.header);
+		this.content.addChild(new Clickable(this.header, () => this.setExpanded(!this.expanded)));
 		if (this.expanded && this.message.customType !== IPYTHON_STATE_RESTORED_CUSTOM_TYPE) {
 			this.content.addChild(
 				new Markdown(readCustomText(this.message), 1, 0, this.markdownTheme, {

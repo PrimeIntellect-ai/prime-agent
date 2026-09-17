@@ -5,8 +5,10 @@ export {
 	CombinedAutocompleteProvider,
 	type SlashCommand,
 } from "./autocomplete.js";
+export type { ClickPosition, ClickRegion } from "./click-regions.js";
 export { Box } from "./components/box.js";
 export { CancellableLoader } from "./components/cancellable-loader.js";
+export { Clickable } from "./components/clickable.js";
 export { Editor, type EditorOptions, type EditorTheme } from "./components/editor.js";
 export { Image, type ImageOptions, type ImageTheme } from "./components/image.js";
 export { Input } from "./components/input.js";

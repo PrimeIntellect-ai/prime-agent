@@ -1,6 +1,6 @@
 import type { TextContent } from "@earendil-works/pi-ai";
 import type { Component } from "@earendil-works/pi-tui";
-import { Box, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
+import { Box, Clickable, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
 import type { MessageRenderer } from "../../../core/extensions/types.js";
 import type { CustomMessage } from "../../../core/messages.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
@@ -66,7 +66,7 @@ export class CustomMessageComponent extends Container {
 		this.box.clear();
 
 		const label = theme.fg("customMessageLabel", `\x1b[1m[${this.message.customType}]\x1b[22m`);
-		this.box.addChild(new Text(label, 0, 0));
+		this.box.addChild(new Clickable(new Text(label, 0, 0), () => this.setExpanded(!this._expanded)));
 		this.box.addChild(new Spacer(1));
 
 		let text: string;

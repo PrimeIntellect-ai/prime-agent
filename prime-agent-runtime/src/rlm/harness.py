@@ -10,6 +10,7 @@ Execution still belongs to Prime Agent's TypeScript host and the existing
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import stat
@@ -870,7 +871,10 @@ class HarnessState:
         """Return harness entries ranked by weighted term overlap with *query*.
 
         Terms are scored against an entry's title, content, path, and id;
-        matches in more distinct fields count more.
+        matches in more distinct fields count more. Each matched term is
+        discounted by its document frequency across the ranked corpus
+        (tf-idf style, ``weight * log(1 + N / df)``), so a rare,
+        distinctive term outranks terms present in most entries.
         """
         if target := self._global_target(global_, kwargs):
             return target.search(query, kind=kind, limit=limit)
@@ -883,20 +887,37 @@ class HarnessState:
         if not terms:
             return []
 
+        entries = self.list(kind, **kwargs) if kind is not None else self.list(None, **kwargs)
+
+        # Document frequency per term over the ranked corpus: a term in
+        # every entry weighs log(2), a term in one entry of N weighs
+        # log(1 + N), so rare distinctive terms outrank ubiquitous ones.
+        matches: dict[str, int] = {term: 0 for term in terms}
+        for entry in entries:
+            title = entry.title.lower()
+            content = entry.content.lower()
+            path_and_id = f"{entry.path} {entry.id}".lower()
+            for term in terms:
+                if term in title or term in content or term in path_and_id:
+                    matches[term] += 1
+        term_idf = {
+            term: math.log(1 + len(entries) / count)
+            for term, count in matches.items()
+            if count > 0
+        }
+
         def score(entry: HarnessEntry) -> float:
             title = entry.title.lower()
             content = entry.content.lower()
             path_and_id = f"{entry.path} {entry.id}".lower()
             total = 0.0
-            for term in terms:
+            for term, idf in term_idf.items():
                 fields = (1 if term in title else 0) + (1 if term in content else 0) + (
                     1 if term in path_and_id else 0
                 )
                 if fields:
-                    total += 1 + (fields - 1) * 0.5
+                    total += idf * (1 + (fields - 1) * 0.5)
             return total
-
-        entries = self.list(kind, **kwargs) if kind is not None else self.list(None, **kwargs)
 
         def recency(entry: HarnessEntry) -> str:
             return entry.updated_at if isinstance(entry.updated_at, str) else ""

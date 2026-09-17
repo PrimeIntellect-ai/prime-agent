@@ -61,8 +61,9 @@ describe("conversation event row hierarchy", () => {
 
 		const component = new AgentMessageComponent(message);
 		component.setExpanded(true);
-		const raw = component.render(100).join("\n");
+		const raw = component.render(30).join("\n");
 
+		expect(component.getClickRegions()[0]?.height).toBeGreaterThan(1);
 		expect(raw).toContain(theme.fg("muted", "Agent message received"));
 		expect(raw).toContain(theme.fg("dim", "from parent Planner"));
 		expect(raw).toContain(theme.fg("customMessageText", "Review shard seven."));

@@ -62,6 +62,18 @@ export class AgentMessageComponent extends Container {
 	override render(width: number): string[] {
 		const lines = super.render(width);
 		const leadingSpace = this.shouldAddLeadingSpace?.(this.expanded) ?? true;
+		this.clickRegions =
+			lines.length > 0
+				? [
+						{
+							line: leadingSpace ? 1 : 0,
+							col: 0,
+							width,
+							height: this.header.render(width).length,
+							onClick: () => this.setExpanded(!this.expanded),
+						},
+					]
+				: [];
 		return leadingSpace ? ["", ...lines] : lines;
 	}
 

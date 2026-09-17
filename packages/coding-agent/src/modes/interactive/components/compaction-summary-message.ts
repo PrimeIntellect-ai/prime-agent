@@ -1,4 +1,4 @@
-import { Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
+import { Clickable, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
 import type { CompactionSummaryMessage } from "../../../core/messages.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
 import { ExpandableEventMessage } from "./expandable-event-message.js";
@@ -15,7 +15,11 @@ export class CompactionSummaryMessageComponent extends ExpandableEventMessage {
 
 	protected updateDisplay(): void {
 		this.clear();
-		this.addChild(new Text(theme.fg("refinementHeader", "◆ Context compacted"), 1, 0));
+		this.addChild(
+			new Clickable(new Text(theme.fg("refinementHeader", "◆ Context compacted"), 1, 0), () =>
+				this.toggleExpanded(),
+			),
+		);
 		const summary = this.message.summary.trim()
 			? this.message.summary
 			: "No summary was recorded for this compaction.";

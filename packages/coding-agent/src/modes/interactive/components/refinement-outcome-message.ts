@@ -1,4 +1,4 @@
-import { type Component, Spacer, Text } from "@earendil-works/pi-tui";
+import { Clickable, type Component, Spacer, Text } from "@earendil-works/pi-tui";
 import type { RefinementOutcomeMessage } from "../../../core/messages.js";
 import type { AppliedRefinementEdit, HarnessEntry } from "../../../core/refinement/refinement.js";
 import { generateDiffString } from "../../../core/tools/edit-diff.js";
@@ -195,7 +195,9 @@ export class RefinementOutcomeMessageComponent extends ExpandableEventMessage {
 		this.addChild(new Spacer(1));
 		const outcome = refinementHeader(this.message);
 		const header = outcome.startsWith("Harness refined ·") ? "Harness refined" : outcome;
-		this.addChild(new Text(theme.fg("refinementHeader", `◆ ${header}`), 1, 0));
+		this.addChild(
+			new Clickable(new Text(theme.fg("refinementHeader", `◆ ${header}`), 1, 0), () => this.toggleExpanded()),
+		);
 		this.addSummary(
 			summary.trim() || "No summary was recorded for this harness change.",
 			undefined,

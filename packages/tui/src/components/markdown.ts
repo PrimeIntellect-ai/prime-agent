@@ -614,27 +614,24 @@ export class Markdown implements Component {
 				case "link": {
 					const linkText = this.renderInlineTokens(token.tokens || [], resolvedStyleContext);
 					const styledLink = this.theme.link(this.theme.underline(linkText));
+					// A Windows drive letter is a file path, not a URL scheme.
+					const target = token.href.replace(/^([a-z]:[\\/])/i, "file:///$1");
+					const href =
+						!target.startsWith("#") &&
+						(this.options.baseUrl || target !== token.href) &&
+						URL.canParse(target, this.options.baseUrl)
+							? new URL(target, this.options.baseUrl).href
+							: target;
+					const linkedText = hyperlink(styledLink, href);
 					if (getCapabilities().hyperlinks) {
-						// A Windows drive letter is a file path, not a URL scheme.
-						const target = token.href.replace(/^([a-z]:[\\/])/i, "file:///$1");
-						const href =
-							!target.startsWith("#") &&
-							(this.options.baseUrl || target !== token.href) &&
-							URL.canParse(target, this.options.baseUrl)
-								? new URL(target, this.options.baseUrl).href
-								: target;
-						// OSC 8: render as a clickable hyperlink. The URL is not printed inline,
-						// so we always show only the link text regardless of whether it matches href.
-						result += hyperlink(styledLink, href) + stylePrefix;
+						result += linkedText + stylePrefix;
 					} else {
-						// Compare raw token.text (not styled) against href for the equality check.
-						// For mailto: links strip the prefix (autolinked emails use text="foo@bar.com"
-						// but href="mailto:foo@bar.com").
+						// Keep the visible URL fallback while letting fullscreen hit testing open the label.
 						const hrefForComparison = token.href.startsWith("mailto:") ? token.href.slice(7) : token.href;
 						if (token.text === token.href || token.text === hrefForComparison) {
-							result += styledLink + stylePrefix;
+							result += linkedText + stylePrefix;
 						} else {
-							result += styledLink + this.theme.linkUrl(` (${token.href})`) + stylePrefix;
+							result += linkedText + this.theme.linkUrl(` (${token.href})`) + stylePrefix;
 						}
 					}
 					break;
