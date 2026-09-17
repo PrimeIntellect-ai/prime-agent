@@ -177,7 +177,7 @@ describe("visible conversation spacing", () => {
 		const reopened = createMode(harness);
 		await reopened.renderSessionContext(context);
 		for (const mode of [live, reopened])
-			for (const detail of [0, 1, 2, 0]) {
+			for (const detail of [1, 2, 0, 1]) {
 				assertSpacing(rows(mode.chatContainer.children), detail);
 				mode.defaultEditor.handleInput("\x0f");
 			}
@@ -227,7 +227,7 @@ describe("visible conversation spacing", () => {
 		await reopened.renderSessionContext({ messages, thinkingLevel: "off", serviceTier: "default", model: null });
 		for (const mode of [live, reopened]) {
 			const [refinementComponent, empty, firstShell, thinking, secondShell] = mode.chatContainer.children;
-			for (const detail of [0, 1, 2, 0]) {
+			for (const detail of [1, 2, 0, 1]) {
 				expect(empty!.render(120)).toEqual([]);
 				const refinementRows = refinementComponent!.render(120);
 				const firstShellRows = firstShell!.render(120);

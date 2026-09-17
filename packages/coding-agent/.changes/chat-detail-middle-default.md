@@ -1,0 +1,1 @@
+- Chats now start at the middle conversation-detail level (edit diffs expanded, thinking visible, tool output still summarized) instead of the most-collapsed overview; Ctrl+O keeps cycling overview -> details -> all unchanged.

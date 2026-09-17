@@ -1228,9 +1228,9 @@ export class InteractiveMode {
 	private rosterBar: { summaries(): SessionSummary[]; dispose(): Promise<void> } | undefined;
 
 	private toolOutputExpanded = false;
-	private editDiffsExpanded = false;
+	private editDiffsExpanded = true;
 
-	private hideThinkingBlock = true;
+	private hideThinkingBlock = false;
 	private readonly mermaidMarkdownTransform = createMermaidMarkdownTransform({
 		getMode: () => this.settingsManager.getMermaidRenderingMode(),
 		theme,
