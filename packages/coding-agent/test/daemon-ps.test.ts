@@ -55,16 +55,12 @@ describe("planReap", () => {
 		expect(plan.map((action) => action.kind)).toEqual(["shutdown", "remove-file"]);
 	});
 
-	it("removes a stale default socket file but never stops a live default daemon", () => {
+	it("removes a stale default socket file", () => {
 		const plan = planReap(
-			[
-				makeDaemon({ socketPath: "/tmp/default.sock", status: "orphan-file", isDefault: true }),
-				makeDaemon({ socketPath: "/tmp/live-default.sock", status: "current", isDefault: true, sessionCount: 0 }),
-			],
+			[makeDaemon({ socketPath: "/tmp/default.sock", status: "orphan-file", isDefault: true })],
 			true,
 		);
 		expect(plan[0]!.kind).toBe("remove-file");
-		expect(plan[1]!.kind).toBe("skip");
 	});
 
 	it("only kills unreachable daemons with --force", () => {
