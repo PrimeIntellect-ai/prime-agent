@@ -23,13 +23,12 @@ const DEFAULT_OVERVIEW_CONTENT_LIMIT = 180;
 
 /**
  * Bump when the fingerprinted material or its canonical serialization changes,
- * so fingerprints minted under older schemes never compare equal to new ones.
- * Normalizing a render-ignored flag out of the material is not a scheme
- * change under this rule: an old-scheme material can equal a new-scheme one
- * only when both would render the same digest (with IPython examples off
- * the normalization is a no-op; with them on, equality means the shell flag
- * was already false, i.e. identical renders), so stale cross-scheme
- * fingerprints are render-safe and no bump is needed.
+ * so fingerprints minted under different versions never compare equal.
+ * Normalizing a render-ignored flag out of the material does not need a
+ * bump: fingerprint equality still implies identical renders (with IPython
+ * examples off the normalization is a no-op; with them on, equality means
+ * the shell flag was already false, i.e. identical renders), so equality
+ * across the change is render-safe.
  */
 const HARNESS_DIGEST_FINGERPRINT_VERSION = 1;
 

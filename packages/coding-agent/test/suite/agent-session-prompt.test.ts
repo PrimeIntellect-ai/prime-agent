@@ -1275,5 +1275,5 @@ describe("Harness digest at cold boundaries", () => {
 		expect(digestTexts[1]).toBe(digestTexts[0]);
 		expect(getMessageText(childContexts[0].messages[1])).toContain("first task");
 		expect(getMessageText(childContexts[1].messages[1])).toContain("second task");
-	}, 30_000);
+	});
 });
