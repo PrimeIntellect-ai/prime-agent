@@ -100,6 +100,10 @@ const BOOTSTRAP_VERSION_FILE = ".bootstrap-version";
 const BOOTSTRAP_VERSION_TMP_FILE = `${BOOTSTRAP_VERSION_FILE}.tmp`;
 const BOOTSTRAP_LOCK_NAME = ".bootstrap.lock";
 const BOOTSTRAP_LOCK_RETRY_MS = 100;
+// Bounded retry for the atomic marker swap: replacing an existing marker can
+// fail while a scanner or editor holds the file open.
+const BOOTSTRAP_MARKER_SWAP_ATTEMPTS = 3;
+const BOOTSTRAP_MARKER_SWAP_RETRY_MS = 50;
 const BOOTSTRAP_LOCK_STALE_WITHOUT_PID_MS = 30_000;
 
 let inFlightEnsureKernelPython: { key: string; promise: Promise<string> } | null = null;
@@ -691,16 +695,33 @@ async function writeBootstrapVersion(
 		pythonSkills: [...pythonSkills],
 	};
 	const filePath = path.join(venv, BOOTSTRAP_VERSION_FILE);
+	const tmpPath = path.join(venv, BOOTSTRAP_VERSION_TMP_FILE);
 	const serialized = `${JSON.stringify(version)}\n`;
-	try {
-		// Write-then-rename is atomic: a kill mid-write can never leave a
-		// partial marker, which would read as absent and force a rebuild.
-		const tmpPath = path.join(venv, BOOTSTRAP_VERSION_TMP_FILE);
-		await writeFile(tmpPath, serialized, "utf8");
-		await rename(tmpPath, filePath);
-	} catch {
-		await writeFile(filePath, serialized, "utf8");
+	// Write-then-rename is atomic: a kill mid-write can never leave a partial
+	// marker, which would read as absent and force a rebuild. Replacing an
+	// existing marker can fail transiently while another process holds it, so
+	// retry the swap. A marker that stays unwritten is only stale: the next
+	// startup re-syncs skills, whereas an in-place overwrite truncated by a
+	// failure or a kill would read as absent and rebuild the whole venv.
+	let lastError: unknown;
+	for (let attempt = 1; attempt <= BOOTSTRAP_MARKER_SWAP_ATTEMPTS; attempt += 1) {
+		try {
+			await writeFile(tmpPath, serialized, "utf8");
+			await rename(tmpPath, filePath);
+			return;
+		} catch (error) {
+			lastError = error;
+			// Retry below; the previous marker is still intact.
+		}
+		if (attempt < BOOTSTRAP_MARKER_SWAP_ATTEMPTS) await sleep(BOOTSTRAP_MARKER_SWAP_RETRY_MS);
 	}
+	// Give up without overwriting the marker in place: a write truncated there
+	// by a failure or a kill reads as absent and forces a full venv rebuild,
+	// while the untouched previous marker stays valid. The failure still
+	// surfaces: a marker this process cannot write is one the next startup
+	// cannot trust.
+	await rm(tmpPath, { force: true }).catch(() => undefined);
+	throw lastError;
 }
 
 // Incremental marker write that merges fresh entries into the skills already
