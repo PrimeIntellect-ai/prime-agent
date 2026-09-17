@@ -988,11 +988,19 @@ async function ensureKernelPythonUncached(
 	const venv = await resolveWritableKernelVenvDir();
 	const python = kernelVenvPython(venv);
 	const runtimeIdentity = await resolveRuntimeIdentity();
-	if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return python;
+	// No-skill callers (postinstall, runtime-bootstrap, bootstrap-cli) never sync skills;
+	// letting them reach syncPythonSkills would rewrite the marker with an empty list,
+	// wiping the recorded skills and forcing the next real session to re-sync every
+	// skill. They only need the base kernel to be ready.
+	const readyForCaller = async (): Promise<boolean> =>
+		pythonSkills.length === 0
+			? kernelBaseReady(python, venv, runtimeIdentity)
+			: kernelReady(python, venv, runtimeIdentity, pythonSkills);
+	if (await readyForCaller()) return python;
 
 	const releaseLock = await acquireBootstrapLock(venv);
 	try {
-		if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return python;
+		if (await readyForCaller()) return python;
 		if (await kernelBaseReady(python, venv, runtimeIdentity)) {
 			await syncPythonSkills(await ensureUv(options), venv, python, runtimeIdentity, pythonSkills, options);
 			return python;

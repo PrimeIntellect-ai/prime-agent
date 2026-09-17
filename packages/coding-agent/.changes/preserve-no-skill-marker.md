@@ -1,0 +1,1 @@
+- Fixed no-skill kernel bootstrap calls (postinstall, runtime-bootstrap) wiping the recorded Python skill map from the .bootstrap-version marker, which forced the next real session to re-sync every skill: a no-skill call now leaves the recorded skill set untouched and only skill-syncing callers rewrite the marker.

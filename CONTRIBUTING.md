@@ -40,6 +40,17 @@ If a maintainer has invited a pull request:
 
 Development setup and commands are documented in the [development guide](packages/coding-agent/docs/development.md).
 
+## Pre-release behavioral evaluation
+
+Maintainers may apply the exact `pre-release` label to a release-candidate pull request.
+This approves the current head for a fixed Short SWE comparison with its exact base.
+Remove and reapply the label after every new head revision or base advancement. Removing
+the label revokes any prior result. Do not add it for ordinary CI. A labeled PR must pass
+the current `Behavioral Eval / pre-release approval` and `Behavioral Eval / pre-release`
+statuses before merge. Repository rules must require both contexts with strict up-to-date-branch
+enforcement; the workflow refuses evaluation success otherwise. See
+[`scripts/evals/short_swe/README.md`](scripts/evals/short_swe/README.md).
+
 ## Changelog entries
 
 Do not edit `packages/*/CHANGELOG.md` directly. Instead, add one fragment
