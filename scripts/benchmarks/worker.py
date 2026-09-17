@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import pwd
 import shutil
@@ -41,6 +42,8 @@ RESULTS = ROOT / "results"
 VERSION = "0.0.0-benchmark"
 ORIGIN = "http://127.0.0.1:18741"
 BUN_VERSION = "1.4.0"
+# Node transport benches: harness script, recorded metric, and the run timeout.
+TRANSPORT_BENCHES: tuple[tuple[str, Metric, int], ...] = (("frame-decode-bench.mjs", "frame_decode", 180),)
 
 
 def clean_error(error: Exception) -> str:
@@ -545,9 +548,75 @@ def runtime(side: Side, trial: int) -> None:
             shutil.rmtree(state)
 
 
+def transport_value(output: str) -> float:
+    """Read the single RESULT line a transport harness prints."""
+    for line in output.splitlines():
+        if line.startswith("RESULT "):
+            result = json.loads(line.removeprefix("RESULT "))
+            value = result.get("value") if isinstance(result, dict) else None
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise RuntimeError("Transport benchmark result is not a number")
+            if not math.isfinite(value) or value < 0:
+                raise RuntimeError("Transport benchmark result is not a non-negative number")
+            return float(value)
+    raise RuntimeError("Transport benchmark printed no RESULT line")
+
+
+def stop_transport_processes() -> None:
+    """Stop leftover builder-owned node processes; the python3 artifact server stays up."""
+    uid = pwd.getpwnam("builder").pw_uid
+    for sig, delay in ((signal.SIGTERM, 3), (signal.SIGKILL, 2)):
+        agents = [process.pid for process in memory(uid) if process.name == "node"]
+        if not agents:
+            return
+        for pid in agents:
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+        deadline = time.monotonic() + delay
+        while time.monotonic() < deadline:
+            if not any(process.name == "node" for process in memory(uid)):
+                return
+            time.sleep(0.05)
+    if any(process.name == "node" for process in memory(uid)):
+        raise RuntimeError("Builder node processes remain after the transport phase")
+
+
+def transport(side: Side, trial: int) -> None:
+    """Run the node transport benches against the prepared source build."""
+    dist = SOURCE / "packages/coding-agent/dist"
+    try:
+        for script, metric, timeout in TRANSPORT_BENCHES:
+            try:
+                output = run_as(
+                    "builder",
+                    ["node", str(ROOT / script), "--dist", str(dist)],
+                    SOURCE,
+                    timeout=timeout,
+                    merge_output=True,
+                )
+                (RESULTS / f"{metric}-{trial}.output").write_text(output)
+                record(side, metric, trial, transport_value(output))
+            except subprocess.CalledProcessError as error:
+                # Keep the harness's own failure text available in the saved output
+                # and in the recorded error, not only in the sandbox log.
+                failure_output = error.output if isinstance(error.output, str) else ""
+                (RESULTS / f"{metric}-{trial}.output").write_text(failure_output or clean_error(error))
+                detail = clean_error(error)
+                first_line = failure_output.strip().splitlines()[0] if failure_output.strip() else ""
+                if first_line:
+                    detail = f"{detail}: {first_line}"[:500]
+                record(side, metric, trial, error=detail)
+            except Exception as error:
+                record(side, metric, trial, error=clean_error(error))
+    finally:
+        stop_transport_processes()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("phase", choices=("prepare", "install", "measure", "runtime", "ui"))
+    parser.add_argument("phase", choices=("prepare", "install", "measure", "runtime", "transport", "ui"))
     parser.add_argument("--trial", type=int, default=0)
     args = parser.parse_args()
     RESULTS.mkdir(exist_ok=True)
@@ -569,6 +638,8 @@ def main() -> None:
             install(request, result.side, args.trial)
         elif args.phase == "measure":
             measure(request, result.side, args.trial)
+        elif args.phase == "transport":
+            transport(result.side, args.trial)
         elif args.phase == "ui":
             from ui import ui_measure
 

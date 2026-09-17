@@ -261,6 +261,44 @@ dependencies = ["httpx"]
 		expect(version.pythonSkills[0].pyprojectHash).toBe(pyprojectHash(pythonSkill.pyprojectPath));
 	});
 
+	it("preserves recorded Python skills when a no-skill bootstrap call reuses a warm venv", async () => {
+		installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "bin", "python");
+		const pythonSkill = createPythonSkill();
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv, [pythonSkill]);
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+
+		await expect(ensureKernelPython()).resolves.toBe(python);
+
+		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
+		expect(version.pythonSkills).toEqual([
+			{
+				importName: pythonSkill.importName,
+				packagePath: pythonSkill.packagePath,
+				pyprojectPath: pythonSkill.pyprojectPath,
+				pyprojectHash: pyprojectHash(pythonSkill.pyprojectPath),
+			},
+		]);
+	});
+
+	it("keeps a skill-synced venv fast for real sessions after a no-skill bootstrap call", async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const pythonSkill = createPythonSkill();
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+
+		await expect(ensureKernelPython({ pythonSkills: [pythonSkill] })).resolves.toBe(join(venv, "bin", "python"));
+		const syncedLog = readFileSync(logPath, "utf8");
+
+		await expect(ensureKernelPython()).resolves.toBe(join(venv, "bin", "python"));
+		await expect(ensureKernelPython({ pythonSkills: [pythonSkill] })).resolves.toBe(join(venv, "bin", "python"));
+
+		expect(readFileSync(logPath, "utf8")).toBe(syncedLog);
+	});
+
 	it("continues when a Python skill editable install fails and retries it next startup", async () => {
 		const logPath = installFakeUv();
 		const venv = join(tempDir, "kernel-venv");

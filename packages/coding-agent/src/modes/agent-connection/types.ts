@@ -747,6 +747,8 @@ export interface AgentConnection {
 	steer(message: string, images?: ImageContent[]): Promise<void>;
 	followUp(message: string, images?: ImageContent[]): Promise<void>;
 	abort(): Promise<void>;
+	/** Abort the active run and start all queued user steering together in one new turn; abort-only when the queue is empty. */
+	abortAndSendQueued(): Promise<void>;
 	cancelRlmChild(childId: string): Promise<boolean>;
 	waitForIdle(): Promise<void>;
 	waitForHeadlessCompletion(options?: AgentConnectionHeadlessCompletionOptions): Promise<AgentAutonomousStatus>;

@@ -26,7 +26,16 @@ from schema import (
 
 REMOTE = "/opt/prime-benchmark"
 OWNER_LABEL = "prime-agent-benchmarks-v1"
-FILES = ("schema.py", "terminal.py", "kernel.py", "worker.py", "ui.py", "pyproject.toml", "uv.lock")
+FILES = (
+    "schema.py",
+    "terminal.py",
+    "kernel.py",
+    "worker.py",
+    "ui.py",
+    "frame-decode-bench.mjs",
+    "pyproject.toml",
+    "uv.lock",
+)
 
 
 def elapsed_seconds(start: datetime) -> float:
@@ -279,6 +288,7 @@ class Controller:
                 ("install", self.report.config.install_trials),
                 ("measure", self.report.config.trials),
                 ("runtime", self.report.config.trials),
+                ("transport", self.report.config.trials),
                 ("ui", self.report.config.ui_trials),
             ):
                 blocked: set[str] = set()

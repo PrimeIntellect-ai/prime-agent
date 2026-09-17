@@ -272,6 +272,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"agent_messages_resume",
 	"agent_messages_clear",
 	"abort",
+	"abort_and_send_queued",
 	"start_side_question",
 	"abort_side_question",
 	"execute_bash",
