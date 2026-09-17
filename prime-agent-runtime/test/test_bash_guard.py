@@ -2496,6 +2496,71 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertFalse(self._tracked("sub", "nested").exists())
 
+    async def test_refuses_env_chdir_relocated_rm(self):
+        # GNU `env -C dir` relocates the command it runs, so a relative operand
+        # resolves against that directory, not the kernel cwd.
+        self._make_tree()
+        outside = self._outside_target()
+        Path(outside, "victim").mkdir()
+        Path(outside, "victim", "file.txt").write_text("keep\n")
+        Path(self.test_dir, "victim").mkdir(exist_ok=True)
+        Path(self.test_dir, "victim", "inside.txt").write_text("inside\n")
+        for command in [
+            f"env -C {outside} rm -rf victim",
+            f"env --chdir={outside} rm -rf victim",
+            f"env -iC {outside} rm -rf victim",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "victim", "file.txt").exists())
+        # A relocation inside the workspace keeps working.
+        result = await bash("env -C sub rm -rf nested")
+        self.assertEqual(result.exit_code, 0)
+        self.assertFalse(self._tracked("sub", "nested").exists())
+
+    async def test_refuses_env_split_string_argv(self):
+        # GNU `env -S` splits its string into the argv it runs, so the split
+        # words must be scanned like any other command text.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "env -S 'rm -rf %s'" % outside,
+            "env --split-string='rm -rf %s'" % outside,
+            "env -S 'CMD=$CMD rm -rf %s'" % outside,
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # A split string that runs benign argv keeps working, and a string the
+        # guard cannot read is refused rather than guessed at.
+        result = await bash("env -S 'VAR=1 echo hi'")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("hi", result.output)
+        with self.assertRaises(DestructiveRmRefusalError) as caught:
+            bash("env -S '$SPLIT'")
+        self.assertIn("expansion", str(caught.exception))
+
+    async def test_refuses_ansi_c_quoted_words(self):
+        # ANSI-C quoting decodes to the command the shell runs, so the decoded
+        # text is what the scan reads (`$'rm'` is `rm`, `$'\x2drf'` is `-rf`).
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "$'rm' $'-rf' %s" % outside,
+            "$'\x72m' $'-rf' %s" % outside,
+            "$'rm' -rf %s" % outside,
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # Decoded benign words keep running, escapes included.
+        result = await bash("$'echo' $'a\tb'")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("a\tb", result.output)
+
     async def test_refuses_glob_expanded_command_and_flag_words(self):
         # A glob expands before the command runs, so `?m -rf /outside` runs
         # `rm -rf /outside` when a matching file exists, and `-?f` becomes

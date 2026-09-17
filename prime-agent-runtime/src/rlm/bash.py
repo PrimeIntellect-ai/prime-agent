@@ -3352,6 +3352,73 @@ def _matching_paren(command: str, open_index: int, end: int) -> int:
     return end - 1  # unterminated: scan to the end
 
 
+_ANSI_C_ESCAPES = {
+    "a": "\a",
+    "b": "\b",
+    "e": "\x1b",
+    "E": "\x1b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+    "\\": "\\",
+    "'": "'",
+    '"': '"',
+    "?": "?",
+}
+
+
+def _decode_ansi_c_quotes(text: str) -> str:
+    """The literal text a `$'...'` word passes to the command.
+
+    The shell decodes the escapes and hands the result over as one literal
+    word (`$'rm'` runs `rm`, `$'\x2drf'` is `-rf`), so the guard must read the
+    decoded text rather than the quoted source. An escape the shell does not
+    know keeps its backslash, and an out-of-range code point keeps its source
+    text, both in the scanner's conservative direction."""
+    decoded: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch != "\\" or i + 1 >= n:
+            decoded.append(ch)
+            i += 1
+            continue
+        escape = text[i + 1]
+        if escape in _ANSI_C_ESCAPES:
+            decoded.append(_ANSI_C_ESCAPES[escape])
+            i += 2
+            continue
+        digits: str | None = None
+        base = width = 0
+        if escape in "01234567":
+            match = re.match(r"[0-7]{1,3}", text[i + 1 :])
+            base, width = 8, 0
+        elif escape == "x":
+            match = re.match(r"[0-9a-fA-F]{1,2}", text[i + 2 :])
+            base, width = 16, 1
+        elif escape in "uU":
+            match = re.match(rf"[0-9a-fA-F]{{1,{4 if escape == 'u' else 8}}}", text[i + 2 :])
+            base, width = 16, 2
+        else:
+            match = None
+        if match is not None:
+            digits = match.group(0)
+            try:
+                decoded.append(chr(int(digits, base) & 0x10FFFF))
+            except ValueError:
+                digits = None
+        if digits is not None:
+            i += 1 + (0 if base == 8 else width) + len(digits)
+            continue
+        decoded.append(ch)
+        decoded.append(escape)  # an escape the shell does not know keeps both
+        i += 2
+    return "".join(decoded)
+
+
 def _scan_shell_words(command: str) -> list[_RmShellWord]:
     """Split `command` into shell words the way the shell builds argv.
 
@@ -3456,6 +3523,29 @@ def _scan_shell_words(command: str) -> list[_RmShellWord]:
                 ):
                     word_splittable = True  # `"$@"` splits into separate words
                 i = j
+                continue
+            if ch == "$" and command[i + 1 : i + 2] == "'":
+                # ANSI-C quoting: the shell decodes the escapes and passes the
+                # result as one literal word, so reading the quoted source
+                # (`$rm`) would hide the command it runs.
+                j = i + 2
+                escaped = False
+                while j < end:
+                    inner = command[j]
+                    if escaped:
+                        escaped = False
+                    elif inner == "\\":
+                        escaped = True
+                    elif inner == "'":
+                        break
+                    j += 1
+                value.append(_decode_ansi_c_quotes(command[i + 2 : j]))
+                i = min(j + 1, end)
+                continue
+            if ch == "$" and command[i + 1 : i + 2] == '"':
+                # `$"..."` is a translated double-quoted string: drop the `$`
+                # and let the quoting path fold it (expansion still applies).
+                i += 1
                 continue
             if ch == "$" and command[i + 1 : i + 2] == "(":
                 close = _matching_paren(command, i + 1, end)
@@ -3978,6 +4068,26 @@ def _tracked_cwd_at_words(
     def dedupe(values: list[str | None]) -> list[str | None]:
         return list(dict.fromkeys(values))
 
+    def apply_relocation(
+        current: list[str | None],
+        chain: list[str | None],
+        relocated: list[str | None],
+    ) -> tuple[list[str | None], list[str | None]]:
+        definite = all(
+            target is not None and os.path.isdir(target) for target in relocated
+        )
+        if may_skip or not definite:
+            # The relocation may be skipped (|| continuation) or may fail
+            # (missing target): the earlier directories stay in play
+            # alongside the relocated ones.
+            chain = dedupe(chain + current)
+            current = dedupe(current + relocated)
+        else:
+            # The relocation provably runs and succeeds, so no earlier
+            # directory can survive it inside this chain.
+            current = dedupe(relocated)
+        return current, dedupe(chain + current)
+
     states: list[str | None] = [start_cwd]
     # Directories from which the current chain can exit early: a failed
     # command leaves the `&&` chain (and a `;` statement then runs in that
@@ -4024,20 +4134,25 @@ def _tracked_cwd_at_words(
                 )
                 for state in states
             ]
-            definite = all(
-                target is not None and os.path.isdir(target) for target in relocated
-            )
-            if may_skip or not definite:
-                # The relocation may be skipped (|| continuation) or may
-                # fail (missing target): the earlier directories stay in
-                # play alongside the relocated ones.
-                chain_states = dedupe(chain_states + states)
-                states = dedupe(states + relocated)
-            else:
-                # The relocation provably runs and succeeds, so no earlier
-                # directory can survive it inside this chain.
-                states = dedupe(relocated)
-            chain_states = dedupe(chain_states + states)
+            states, chain_states = apply_relocation(states, chain_states, relocated)
+        elif os.path.basename(word.value) == "env" and (
+            chdir_target := _env_option_value(words, index, "C", "chdir")
+        ) is not None:
+            # GNU `env -C dir` relocates the command it runs, so operands after
+            # it resolve against that directory (an unresolvable one leaves the
+            # directory unknowable, which fails closed).
+            relocated = [
+                _resolve_cd_target(
+                    [chdir_target],
+                    state,
+                    "cd",
+                    home_untrackable=home_untrackable,
+                    pwd_untrackable=pwd_untrackable,
+                    cdpath_untrackable=cdpath_untrackable,
+                )
+                for state in states
+            ]
+            states, chain_states = apply_relocation(states, chain_states, relocated)
         elif word.value == "popd":
             # The stack top is whatever earlier pushd or stack subtraction left
             # there, which the tracker does not model, so the runtime directory
@@ -4415,6 +4530,102 @@ def _stdin_shell_feed_texts(prepared: str, words: list[_RmShellWord]) -> list[tu
     return feeds
 
 
+def _env_option_value(
+    words: list[_RmShellWord], index: int, short: str, long: str
+) -> str | None:
+    """The value `env` passes for one of its options, or None when the command
+    does not use it.
+
+    GNU `env` accepts the short form with a detached or attached value
+    (`-C dir`, `-Cdir`), a bundled cluster with a detached value (`-iC dir`),
+    and the long form with an attached value (`--chdir=dir`)."""
+    followers: list[_RmShellWord] = []
+    for follower in words[index + 1 :]:
+        if follower.starts_command:
+            break
+        followers.append(follower)
+    for offset, follower in enumerate(followers):
+        token = follower.value
+        if token == f"-{short}" or token == f"--{long}":
+            return followers[offset + 1].value if offset + 1 < len(followers) else None
+        if token.startswith(f"--{long}="):
+            return token.split("=", 1)[1]
+        if token.startswith(f"-{short}"):
+            return token[len(short) + 1 :]
+        if token.startswith("-") and not token.startswith("--") and short in token[1:]:
+            return followers[offset + 1].value if offset + 1 < len(followers) else None
+    return None
+
+
+def _split_env_string(value: str) -> str | None:
+    """The argv text `env -S` splits its string into, or None when the string
+    carries expansion.
+
+    GNU `env` splits the string on whitespace, honors single and double quotes
+    and backslash escapes, and expands variables; the guard reads the literal
+    words and refuses a string it cannot read statically rather than guessing
+    what `env` would run."""
+    if any(ch in value for ch in "$`"):
+        return None
+    parts: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    i = 0
+    while i < len(value):
+        ch = value[i]
+        if ch == "\\" and i + 1 < len(value):
+            current.append(value[i + 1])
+            i += 2
+            continue
+        if quote is None and ch in "'\"":
+            quote = ch
+            i += 1
+            continue
+        if quote is not None and ch == quote:
+            quote = None
+            i += 1
+            continue
+        if quote is None and ch.isspace():
+            if current:
+                parts.append("".join(current))
+                current = []
+            i += 1
+            continue
+        current.append(ch)
+        i += 1
+    if current:
+        parts.append("".join(current))
+    return " ".join(parts)
+
+
+def _env_split_string_feeds(
+    words: list[_RmShellWord]
+) -> tuple[list[tuple[str, int]], list[str]]:
+    """(feed texts, refusal reasons) for `env -S <string>` argv text.
+
+    GNU `env` splits that string into the argv it runs (`env -S 'rm -rf x'`),
+    so the split words are scanned like any other command text; a string
+    carrying expansion is refused, because the words `env` builds cannot be
+    read statically."""
+    feeds: list[tuple[str, int]] = []
+    reasons: list[str] = []
+    for index, word in enumerate(words):
+        if os.path.basename(word.value) != "env":
+            continue
+        value = _env_option_value(words, index, "S", "split-string")
+        if value is None or not value.strip():
+            continue
+        split = _split_env_string(value)
+        if split is None:
+            reasons.append(
+                f"{value!r}: names the argv env runs through shell expansion,"
+                " which the guard cannot resolve"
+            )
+            continue
+        feeds.append((split, index))
+    return feeds, reasons
+
+
 def _shell_word_end(command: str, start: int) -> int:
     """Index just past the shell word starting at `start`: quote- and
     escape-aware, and stopping at whitespace and unquoted shell operators."""
@@ -4531,13 +4742,18 @@ def _payload_reads_stdin(payload: str) -> bool:
 
 
 def _stdin_shell_interpreter_index(
-    words: list[_RmShellWord], operand_start: int, operand_end: int
+    words: list[_RmShellWord],
+    operand_start: int,
+    operand_end: int,
+    candidates: list[int] | None = None,
 ) -> int | None:
     """Index of the word that reads a here-string operand from its stdin: a
     shell interpreter with no `-c` payload and no script argument (`-s` keeps
     stdin live with positional arguments), or a word that expands at run time
-    and could be one."""
-    for index, word in enumerate(words):
+    and could be one. `candidates` narrows the scan to the words that could be
+    one, so a command carrying many here-strings stays linear."""
+    for index in range(len(words)) if candidates is None else candidates:
+        word = words[index]
         if operand_start <= word.start and word.end <= operand_end:
             continue  # the operand word itself
         is_shell = os.path.basename(word.value) in _SHELL_DASH_C_INTERPRETERS
@@ -4591,8 +4807,16 @@ def _here_string_shell_feed_texts(
     if "<<<" not in command:
         return feeds, reasons  # cheap gate: no here-string to check
     here_strings, _substitutions = _inline_shell_text_spans(command)
+    candidates = [
+        index
+        for index, word in enumerate(words)
+        if os.path.basename(word.value) in _SHELL_DASH_C_INTERPRETERS
+        or not _expansion_is_resolvable(word.value)
+    ]
     for _operator, operand_start, operand_end in here_strings:
-        interpreter = _stdin_shell_interpreter_index(words, operand_start, operand_end)
+        interpreter = _stdin_shell_interpreter_index(
+            words, operand_start, operand_end, candidates
+        )
         if interpreter is None:
             continue
         operand = command[operand_start:operand_end]
@@ -4679,9 +4903,12 @@ def _rm_feed_reasons(
     )
     here_feeds, here_reasons = _here_string_shell_feed_texts(text, words)
     reasons.extend(here_reasons)
+    env_feeds, env_reasons = _env_split_string_feeds(words)
+    reasons.extend(env_reasons)
     for feed_text, interp_index in (
         *_stdin_shell_feed_texts(prepared, words),
         *here_feeds,
+        *env_feeds,
     ):
         for variant in (feed_text, _interpret_shell_escapes(feed_text)):
             # A fed text can itself wrap commands in heredocs; split it
