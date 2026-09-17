@@ -1856,6 +1856,11 @@ _SHELL_KEYWORDS = frozenset(
         "do", "done", "for", "in", "case", "esac", "select", "time", "function",
     }
 )
+# Tokens that open a command context without being the command word, so the
+# shell still reads an assignment after them (`{ PWD=/x; }`,
+# `if true; then PWD=/x; fi`). The grouping parens never reach the word list as
+# words, but the shell reads an assignment after them the same way.
+_COMMAND_CONTEXT_TOKENS = _SHELL_KEYWORDS | frozenset({"(", ")"})
 
 
 class _ShellWord(NamedTuple):
@@ -5115,13 +5120,21 @@ def _command_reassigns_env(words: list[_RmShellWord], name: str) -> bool:
     kernel environment.
 
     Only words the shell reads as assignments count: an assignment prefix
-    (`PWD=/x cmd`) or an argument to an assignment builtin (`export PWD=/x`).
+    (`PWD=/x cmd`), an argument to an assignment builtin (`export PWD=/x`), or
+    an assignment the shell applies after a keyword or grouping token
+    (`{ PWD=/x; }`, `if true; then PWD=/x; fi`, `for i in 1; do PWD=/x; done`).
     An ordinary argument that merely looks like one (`echo PWD=/tmp`) leaves the
     environment alone, so it must not make the expansion untrackable."""
     assignment_slot = True
     builtin_args = False
     for word in words:
         token = word.value
+        if token in _COMMAND_CONTEXT_TOKENS:
+            # A keyword or grouping token opens a command context without
+            # being the command word, so the assignment slot survives it.
+            assignment_slot = True
+            builtin_args = False
+            continue
         if word.starts_command:
             assignment_slot = True
             builtin_args = False
