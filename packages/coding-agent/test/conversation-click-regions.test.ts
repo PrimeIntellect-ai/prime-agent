@@ -44,7 +44,7 @@ describe("conversation click regions", () => {
 		const lines = chat.render(80);
 		const regions = chat.getClickRegions();
 		const toolRegion = regionFor(lines, regions, "read");
-		const compactionRegion = regionFor(lines, regions, "Context compacted");
+		const compactionRegion = regionFor(lines, regions, "Retained the current task.");
 
 		toolRegion.onClick({ row: 0, col: 0 });
 		expect(tool.render(80).join("\n")).toContain("out 9");
