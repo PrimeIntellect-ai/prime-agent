@@ -3424,6 +3424,7 @@ def _scan_shell_words(command: str) -> list[_RmShellWord]:
                 i = j + 1
                 continue
             if ch == '"':
+                span_start = i
                 j = i + 1
                 while j < end:
                     inner = command[j]
@@ -3450,6 +3451,10 @@ def _scan_shell_words(command: str) -> list[_RmShellWord]:
                         continue
                     value.append(inner)
                     j += 1
+                if any(
+                    marker in command[span_start:j] for marker in ("$@", "$*", "[@]", "[*]")
+                ):
+                    word_splittable = True  # `"$@"` splits into separate words
                 i = j
                 continue
             if ch == "$" and command[i + 1 : i + 2] == "(":
@@ -3587,7 +3592,7 @@ def _unresolvable_expansion_rm_reasons(words: list[_RmShellWord]) -> list[str]:
                 break
             follower_words.append(follower)
         followers = [follower.value for follower in follower_words]
-        if not _expansion_is_resolvable(word.value):
+        if not _rm_word_is_literal(word.value):
             # The word expands at run time. In command position — first word,
             # after an assignment prefix, env/sudo-style words, keywords, or
             # grouping tokens — it could expand to rm, so if any follower
@@ -3623,7 +3628,7 @@ def _unresolvable_expansion_rm_reasons(words: list[_RmShellWord]) -> list[str]:
             # `rm -- "$file"`) cannot turn an rm into a recursive-force rm, so
             # variable-based cleanup keeps running.
             for follower in follower_words:
-                if _expansion_is_resolvable(follower.value):
+                if _rm_word_is_literal(follower.value):
                     continue
                 if follower.splittable or any(
                     other is not follower and _could_be_operand(other)
@@ -3635,6 +3640,25 @@ def _unresolvable_expansion_rm_reasons(words: list[_RmShellWord]) -> list[str]:
                     )
                     break
     return reasons
+
+
+_GLOB_CHARS = "*?["
+
+
+def _rm_word_is_literal(value: str) -> bool:
+    """True when the rm guard can read the word as written: no expansion and no
+    glob. A glob in command or flag position expands before the command runs,
+    so `?m -rf /outside` becomes `rm -rf /outside` when a matching file exists,
+    and `-?f` becomes `-rf` the same way. `*` and `?` always glob; `[` only
+    opens a pattern when the word also closes it, so the `[` test builtin and
+    the `[[ ... ]]` conditional stay literal command and keyword words."""
+    if not _expansion_is_resolvable(value):
+        return False
+    if any(ch in value for ch in "*?"):
+        return False
+    if value.startswith("[[") and value.endswith("]]"):
+        return False
+    return re.search(r"\[[^]]*\]", value) is None
 
 
 def _could_be_operand(word: _RmShellWord) -> bool:
@@ -3784,7 +3808,9 @@ def _wrapped_payloads_hide_recursive_force_rm(
         # time, so an alias the payload defines on an earlier line does expand
         # there (`sh -c 'alias rm=...\nrm x'`), even though the enclosing
         # command's parse unit never sees it.
-        expanded = _expand_effective_aliases(payload)
+        expanded, complete = _expand_effective_aliases(payload)
+        if not complete:
+            return True  # an unexpanded alias chain: refuse rather than guess
         if expanded is not None and (
             _find_recursive_force_rm_invocations(expanded)
             or _wrapped_payloads_hide_recursive_force_rm(expanded, depth + 1, aliases=aliases)
@@ -4280,6 +4306,48 @@ def _interpret_shell_escapes(text: str) -> str:
     )
 
 
+def _printf_output_text(producer: list[_RmShellWord]) -> str | None:
+    """The text a `printf` producer writes to its pipe, or None when the guard
+    cannot reconstruct it.
+
+    `printf '%s%s %s %s\n' r m -rf /outside` writes `rm -rf /outside`, so the
+    consumer runs commands the format string alone does not spell out. `%s`
+    conversions are substituted with their argument text in order; any other
+    conversion, a missing argument, or arguments the format would reuse make
+    the output unreadable, so the caller keeps its synthetic-text scan."""
+    arguments = [word for word in producer[1:] if word.value != "--"]
+    if not arguments:
+        return None
+    format_text = arguments[0].value
+    values = [word.value for word in arguments[1:]]
+    pieces: list[str] = []
+    index = 0
+    position = 0
+    while position < len(format_text):
+        ch = format_text[position]
+        if ch == "\\" and position + 1 < len(format_text):
+            pieces.append(format_text[position : position + 2])
+            position += 2
+            continue
+        if ch != "%":
+            pieces.append(ch)
+            position += 1
+            continue
+        conversion = format_text[position + 1 : position + 2]
+        if conversion == "%":
+            pieces.append("%")
+            position += 2
+            continue
+        if conversion != "s" or index >= len(values):
+            return None
+        pieces.append(values[index])
+        index += 1
+        position += 2
+    if index != len(values):
+        return None  # the format would be reused for the remaining arguments
+    return "".join(pieces)
+
+
 def _stdin_shell_feed_texts(prepared: str, words: list[_RmShellWord]) -> list[tuple[str, int]]:
     """(producer text, interpreter word index) pairs for pipelines feeding a
     bare stdin shell: `printf 'rm -rf x\\n' | sh` runs the producer's
@@ -4333,11 +4401,17 @@ def _stdin_shell_feed_texts(prepared: str, words: list[_RmShellWord]) -> list[tu
         if pipe_position is None:
             continue
         producer_words = [
-            other for other in words if segment_start < other.start < pipe_position
+            other for other in words if segment_start <= other.start < pipe_position
         ]
         if not producer_words:
             continue
         feeds.append((" ".join(other.value for other in producer_words), index))
+        if os.path.basename(producer_words[0].value) == "printf":
+            written = _printf_output_text(producer_words)
+            if written is not None:
+                # Scan what printf actually writes, not just the words that
+                # build it: a format string can assemble the command.
+                feeds.append((written, index))
     return feeds
 
 
@@ -4432,6 +4506,30 @@ def _static_here_string_text(operand: str) -> str | None:
     return operand
 
 
+def _payload_reads_stdin(payload: str) -> bool:
+    """True when a `-c` command string can read its own stdin: it names a shell
+    interpreter that takes stdin (`sh -c 'exec sh'`), or a word that expands at
+    run time and could be one. A payload that only carries its own `-c` string
+    keeps stdin unused."""
+    payload_words = _scan_shell_words(payload)
+    for index, word in enumerate(payload_words):
+        if not _expansion_is_resolvable(word.value):
+            return True
+        if os.path.basename(word.value) not in _SHELL_DASH_C_INTERPRETERS:
+            continue
+        followers = [
+            follower.value
+            for follower in payload_words[index + 1 :]
+            if not follower.starts_command
+        ]
+        if not any(
+            token.startswith("-") and "c" in token[1:] and not token.startswith("--")
+            for token in followers
+        ):
+            return True  # a nested shell here reads the operand from stdin
+    return False
+
+
 def _stdin_shell_interpreter_index(
     words: list[_RmShellWord], operand_start: int, operand_end: int
 ) -> int | None:
@@ -4459,8 +4557,21 @@ def _stdin_shell_interpreter_index(
                 continue
             has_argument = True
             break
-        if has_c or (has_argument and not has_s):
-            continue
+        if has_c:
+            # A `-c` payload ignores stdin, unless its own command reads it.
+            payload = None
+            for offset, follower in enumerate(words[index + 1 :]):
+                token = follower.value
+                if token.startswith("-") and not token.startswith("--") and "c" in token[1:]:
+                    candidate = words[index + 2 + offset : index + 3 + offset]
+                    if candidate and not candidate[0].starts_command:
+                        payload = candidate[0].value
+                    break
+            if payload is None or not _payload_reads_stdin(payload):
+                continue
+            return index
+        if has_argument and not has_s:
+            continue  # runs a script file, not stdin
         return index
     return None
 
@@ -4580,8 +4691,14 @@ def _rm_feed_reasons(
             feed_stack = [variant]
             while feed_stack:
                 fed = feed_stack.pop()
-                expanded_fed = _expand_effective_aliases(fed)
-                if expanded_fed is not None:
+                expanded_fed, complete = _expand_effective_aliases(fed)
+                if not complete:
+                    reasons.append(
+                        "the text fed to this shell carries an alias chain"
+                        " longer than the guard expands, so the commands it"
+                        " runs cannot be checked"
+                    )
+                elif expanded_fed is not None:
                     feed_stack.append(expanded_fed)
                 fed_outer, inner_texts = _rm_guard_scan_texts(fed)
                 feed_stack.extend(inner_texts)
@@ -4771,9 +4888,9 @@ def _rm_invocation_reasons(
     return reasons
 
 
-def _expand_effective_aliases(text: str) -> str | None:
-    """`text` with every command word an alias replaces substituted by its
-    body, or None when no alias applies.
+def _expand_effective_aliases(text: str) -> tuple[str | None, bool]:
+    """`(text with every command word an alias replaces substituted by its body
+    or None, complete)`.
 
     Aliases substitute command text at parse time, so a later line can run a
     command the source never names (`alias del='rm'` then `del -rf /outside`).
@@ -4781,12 +4898,15 @@ def _expand_effective_aliases(text: str) -> str | None:
     command at a time, so a definition only reaches a command on a *later*
     line, and a definition is dropped once its name has been substituted so a
     self-referential alias cannot grow without bound. The substitution is
-    iterated (up to _MAX_ALIAS_EXPANSION_PASSES), so alias chains resolve."""
-    if "alias" not in text:
-        return None  # cheap gate: no definition can apply
+    iterated (up to _MAX_ALIAS_EXPANSION_PASSES), so alias chains resolve;
+    `complete` is False when the pass limit was reached with substitutions
+    still pending, which the caller refuses instead of scanning a partial
+    expansion."""
     current = text
     for _pass in range(_MAX_ALIAS_EXPANSION_PASSES):
         words = _scan_shell_words(current)
+        if not any(word.value in ("alias", "unalias") for word in words):
+            return (current if current != text else None), True
         definitions: list[tuple[int, str, str, tuple[int, int]]] = []
         edits: list[tuple[int, int, str]] = []
         for index, word in enumerate(words):
@@ -4824,10 +4944,10 @@ def _expand_effective_aliases(text: str) -> str | None:
             start, end = chosen[3]
             edits.append((start, end, " " * (end - start)))
         if not edits:
-            return current if current != text else None
+            return (current if current != text else None), True
         for start, end, replacement in reversed(edits):
             current = current[:start] + replacement + current[end:]
-    return current
+    return current, False
 
 
 def _built_command_rm_reasons(
@@ -4892,7 +5012,12 @@ def _alias_expanded_rm_reasons(
     A later line can invoke a command the source never names (`alias
     del='rm'`), so the substituted text is scanned as its own command; see
     _built_command_rm_reasons."""
-    expanded = _expand_effective_aliases(text)
+    expanded, complete = _expand_effective_aliases(text)
+    if not complete:
+        return [
+            "its alias chain is longer than the guard expands, so the command"
+            " it runs cannot be checked"
+        ]
     if expanded is None:
         return []
     return _built_command_rm_reasons(
@@ -4928,11 +5053,17 @@ def _assigned_command_rm_reasons(
     reasons: list[str] = []
     for index, word in enumerate(words):
         name, separator, assigned = word.value.partition("=")
-        if separator and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        appended = name.endswith("+")
+        base = name[:-1] if appended else name
+        if separator and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", base):
             # The shell expands the assigned word at run time, so a value built
             # from an expansion or substitution cannot be read statically.
             literal = not any(ch in text[word.start : word.end] for ch in "$`\\")
-            assignments[name] = (assigned, literal)
+            previous, previous_literal = assignments.get(base, ("", True))
+            assignments[base] = (
+                previous + assigned if appended else assigned,
+                literal and previous_literal,
+            )
             continue
         if word.value == "unset":
             for follower in words[index + 1 :]:

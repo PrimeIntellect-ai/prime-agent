@@ -2496,6 +2496,133 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertFalse(self._tracked("sub", "nested").exists())
 
+    async def test_refuses_glob_expanded_command_and_flag_words(self):
+        # A glob expands before the command runs, so `?m -rf /outside` runs
+        # `rm -rf /outside` when a matching file exists, and `-?f` becomes
+        # `-rf` the same way.
+        self._make_tree()
+        outside = self._outside_target()
+        Path(self.test_dir, "rm").write_text("x\n")
+        Path(self.test_dir, "-rf").write_text("x\n")
+        for command in [f"?m -rf {outside}", f"rm -?f {outside}"]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # Unrelated globs, a glob operand of a non-recursive rm, and the `[`
+        # test builtin (no pattern) still run.
+        Path(self.test_dir, "a.log").write_text("x\n")
+        result = await bash("rm -f *.log")
+        self.assertEqual(result.exit_code, 0)
+        result = await bash("ls -d sub >/dev/null")
+        self.assertEqual(result.exit_code, 0)
+        result = await bash("[ -d sub ] && echo ok")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("ok", result.output)
+
+    async def test_refuses_format_string_pipeline_producers(self):
+        # `printf` assembles the consumer's command text from its format string.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "printf '%s%s %s %s\\n' r m -rf " + outside + " | sh",
+            "printf '%s %s\\n' 'rm -rf' " + outside + " | sh",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # A format string that only spells benign text keeps running.
+        result = await bash("printf '%s\\n' 'echo hi' | sh")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("hi", result.output)
+
+    async def test_refuses_alias_chains_past_the_expansion_limit(self):
+        # A chain longer than the pass limit must fail closed instead of
+        # scanning a partial expansion.
+        self._make_tree()
+        outside = self._outside_target()
+        chain = [
+            "shopt -s expand_aliases",
+            "alias a1='rm'",
+            "alias a2='a1 -rf'",
+            f"alias a3='a2 {outside}'",
+        ]
+        chain += [f"alias a{index}='a{index - 1}'" for index in range(4, 10)]
+        chain.append("a9")
+        with self.assertRaises(DestructiveRmRefusalError):
+            bash("\n".join(chain))
+        self.assertTrue(Path(outside, "file.txt").exists())
+
+    async def test_refuses_quoted_at_and_array_command_words(self):
+        # `"$@"` and `"${name[@]}"` split into separate words even when quoted,
+        # so one of them can supply the flags while another names the operand.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            f'set -- -rf {outside}; rm "$@"',
+            f'arr=(-rf {outside}); rm "${{arr[@]}}"',
+            f'arr=(-rf); rm "${{arr[*]}}" {outside}',
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # A quoted positional parameter that is not `$@` stays a single word.
+        result = await bash('set -- file.txt; : "$1"; echo ok')
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("ok", result.output)
+
+    async def test_refuses_appended_assignment_command_words(self):
+        # `X+='...'` appends to the value the shell expands for a later `$X`.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            f"X+='rm -rf {outside}'; $X",
+            f"X=rm; X+=' -rf {outside}'; $X",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # Appending to a value that hides nothing keeps running.
+        result = await bash("X='echo h'; X+='i'; $X")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("hi", result.output)
+
+    async def test_refuses_alias_names_split_across_quotes(self):
+        # Adjacent quoted fragments fold into one word, so `al''ias` defines an
+        # alias the raw text never spells out.
+        self._make_tree()
+        outside = self._outside_target()
+        command = (
+            "sh <<'EOT'\n"
+            "al''ias rm='rm -rf %s'\n"
+            "rm harmless\n"
+            "EOT"
+        ) % outside
+        with self.assertRaises(DestructiveRmRefusalError):
+            bash(command)
+        self.assertTrue(Path(outside, "file.txt").exists())
+
+    async def test_refuses_here_strings_read_by_payload_shells(self):
+        # A `-c` payload that reads stdin (`sh -c 'sh'`) runs the here-string
+        # operand as its commands.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "sh -c 'sh' <<< 'rm -rf %s'" % outside,
+            "sh -c 'exec sh' <<< 'rm -rf %s'" % outside,
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # A payload that only prints the operand keeps it as data.
+        result = await bash("sh -c 'cat' <<< 'rm -rf /printed-not-run'")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("rm -rf /printed-not-run", result.output)
+
     async def test_refuses_inline_shell_feeds_inside_bodies(self):
         # A runner-fed body can itself hand a shell text inline: the pipeline
         # producer's output and a here-string operand are commands that shell
