@@ -1135,54 +1135,25 @@ class HarnessSearchTest(unittest.TestCase):
             with self.assertRaises(TypeError):
                 state.search("worktree", limit=0)
 
-    def test_search_discounts_common_terms_below_rare_terms(self) -> None:
+    def test_search_discounts_common_terms_and_keeps_frequency_ties(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state = HarnessState(Path(temp_dir) / "harness_state.json")
-            for index in range(5):
-                state.create_memory(
-                    f"Session notes {index}",
-                    f"Session state notes about session handling {index}.",
-                    id=f"common{index}",
-                )
-                state.entries["memory"][f"common{index}"].updated_at = (
-                    f"2026-08-0{index + 1}T00:00:00+00:00"
-                )
-            # The rare entry is the oldest, so it ranks first on
-            # distinctiveness alone, not recency.
+
+            # An empty corpus scores nothing, and a lone entry (N=1, df=1 -> log(2)) still scores.
+            self.assertEqual(state.search("session"), [])
+            state.create_memory("Session notes", "Session signal.", id="solo")
+            self.assertEqual([entry.id for entry in state.search("session")], ["solo"])
+            state.entries["memory"]["solo"].updated_at = "2026-07-01T00:00:00+00:00"
+
+            # Equal frequency discounts every match alike, so recency still orders them: id order
+            # alone would put aa_older first.
+            for entry_id, day in (("aa_older", "08-01"), ("zz_newer", "09-01")):
+                state.create_memory("Session notes", "Same session signal.", id=entry_id)
+                state.entries["memory"][entry_id].updated_at = f"2026-{day}T00:00:00+00:00"
+            self.assertEqual([entry.id for entry in state.search("session")], ["zz_newer", "aa_older", "solo"])
+
+            # "session" matches 3 of 4 (log(1 + 4/3)), "quantum" 1 of 4 (log(1 + 4)): rare ranks first.
             state.create_memory("Quantum note", "Only quantum annealing matters once.", id="rare")
             state.entries["memory"]["rare"].updated_at = "2026-07-01T00:00:00+00:00"
-
-            results = state.search("session quantum")
-
-            # "session" matches 5 of 6 entries (log(1 + 6/5)) while "quantum"
-            # matches 1 of 6 (log(1 + 6/1)), so the rare term wins even though
-            # the dense entries are newer; without the discount they would
-            # win the recency tie-break instead.
-            self.assertTrue(results)
-            self.assertEqual(results[0].id, "rare")
-            # Common terms are discounted, not erased: every matching entry still ranks.
-            self.assertEqual({entry.id for entry in results}, {"rare"} | {f"common{i}" for i in range(5)})
-
-    def test_search_keeps_stable_order_for_equal_frequency_terms(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            state = HarnessState(Path(temp_dir) / "harness_state.json")
-            state.create_memory("Session notes", "Same session signal.", id="older")
-            state.create_memory("Session notes", "Same session signal.", id="newer")
-            state.entries["memory"]["older"].updated_at = "2026-08-01T00:00:00+00:00"
-            state.entries["memory"]["newer"].updated_at = "2026-09-01T00:00:00+00:00"
-
-            # Identical field coverage discounts both entries the same way, so
-            # the recency tie-break is unchanged.
-            self.assertEqual([entry.id for entry in state.search("session")], ["newer", "older"])
-
-    def test_search_handles_empty_and_single_entry_corpora(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            state = HarnessState(Path(temp_dir) / "harness_state.json")
-
-            self.assertEqual(state.search("session"), [])
-
-            state.create_memory("Session notes", "Session signal.", id="solo")
-            # N=1 with df=1 discounts to log(2): a lone match still scores
-            # above zero and is returned.
-            self.assertEqual([entry.id for entry in state.search("session")], ["solo"])
+            self.assertEqual([entry.id for entry in state.search("session quantum")], ["rare", "zz_newer", "aa_older", "solo"])
 
