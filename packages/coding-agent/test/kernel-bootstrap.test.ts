@@ -373,6 +373,7 @@ dependencies = ["httpx"]
 		]);
 	});
 
+	// test-policy: allow explicit-test-timeout -- bounds real killed tsx respawn and resume variance, not the assertion
 	it("resumes a real killed mid-sync process without rebuilding the venv", { timeout: 60_000 }, async () => {
 		const logPath = installFakeUv();
 		const venv = join(tempDir, "kernel-venv");
@@ -421,6 +422,7 @@ dependencies = ["httpx"]
 				) {
 					break;
 				}
+				// test-policy: allow wall-clock-sleep -- polls the external fake-uv log appends; no in-process signal exists
 				await sleep(50);
 			}
 			const logAtKill = readFileSync(logPath, "utf8");
@@ -438,6 +440,7 @@ dependencies = ["httpx"]
 			while (Date.now() < deadDeadline) {
 				try {
 					process.kill(pid, 0);
+					// test-policy: allow wall-clock-sleep -- polls OS pid liveness of the SIGKILLed group; no in-process signal exists
 					await sleep(20);
 				} catch {
 					break;
@@ -462,6 +465,7 @@ dependencies = ["httpx"]
 		]);
 	});
 
+	// test-policy: allow explicit-test-timeout -- bounds real killed tsx respawn and resume variance, not the assertion
 	it("keeps already-recorded skills in the marker when a kill interrupts a later install", {
 		timeout: 60_000,
 	}, async () => {
@@ -526,6 +530,7 @@ version = "0.2.0"
 				) {
 					break;
 				}
+				// test-policy: allow wall-clock-sleep -- polls the external fake-uv log appends; no in-process signal exists
 				await sleep(50);
 			}
 			const logAtKill = readFileSync(logPath, "utf8");
@@ -543,6 +548,7 @@ version = "0.2.0"
 			while (Date.now() < deadDeadline) {
 				try {
 					process.kill(pid, 0);
+					// test-policy: allow wall-clock-sleep -- polls OS pid liveness of the SIGKILLed group; no in-process signal exists
 					await sleep(20);
 				} catch {
 					break;
