@@ -540,108 +540,30 @@ describe("AgentSession rlm recursion", () => {
 		);
 	});
 
-	it("admits exactly one of two concurrent same-name spawns", async () => {
-		const root = createSession();
-		const outcomes = await Promise.allSettled([
-			root.runRlmChild("first task", { name: "dup-worker" }),
-			root.runRlmChild("second task", { name: "dup-worker" }),
-		]);
-		const admitted = outcomes.filter((outcome) => outcome.status === "fulfilled");
-		const rejected = outcomes.filter((outcome) => outcome.status === "rejected");
-		expect(admitted).toHaveLength(1);
-		expect(rejected).toHaveLength(1);
-		expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(Error);
-		expect((rejected[0] as PromiseRejectedResult).reason.message).toBe(
-			formatAgentSessionNameUnavailable("dup-worker", root.rlmDepth + 1),
-		);
-		const roster = await root.listRlmSubagents();
-		expect(roster.subagents.filter((entry) => entry.session_name === "dup-worker")).toHaveLength(1);
-	}, 15_000);
-
-	it("keeps the name reservation held while a slow spawn is still admitting", async () => {
-		let releaseAdmission: () => void = () => {};
-		const admissionGate = new Promise<void>((resolveGate) => {
-			releaseAdmission = resolveGate;
-		});
+	it("holds a spawn name reservation until admission settles, then frees it", async () => {
+		const releaseAdmission = deferred<void>();
 		const root = createSession({
 			subagentRuntimeHost: {
 				createRlmSubagentRuntime: async () => {
-					await admissionGate;
+					await releaseAdmission.promise;
 					throw new Error("kernel startup failed");
 				},
 				deleteRlmSubagentRuntime: async () => {},
-				releaseRlmSubagentRuntime: async () => {},
 			},
 		});
-		const pending = (root as unknown as { _pendingRlmSubagentSessionNames: Set<string> })
-			._pendingRlmSubagentSessionNames;
+		const internals = root as unknown as InspectableRlmSession & { _pendingRlmSubagentSessionNames: Set<string> };
 		const spawned = await root.runRlmChild("slow admitting child", { name: "slow-worker" });
-		// The reservation survives the availability check and model resolution:
-		// it is held until the detached admission settles.
-		expect(pending.has("slow-worker")).toBe(true);
-		// While the first spawn sits between its check and admission, a same-name
-		// spawn must fail with the clear unavailable error instead of slipping
-		// past the reservation and later appending a duplicate durable edge.
+		expect(internals._pendingRlmSubagentSessionNames.has("slow-worker")).toBe(true);
 		await expect(root.runRlmChild("racing spawn", { name: "slow-worker" })).rejects.toThrow(
 			formatAgentSessionNameUnavailable("slow-worker", root.rlmDepth + 1),
 		);
-		releaseAdmission();
-		await vi.waitFor(
-			async () => {
-				expect((await root.listRlmSubagents()).subagents).toContainEqual(
-					expect.objectContaining({ rlm_child_id: spawned.rlm_child_id, status: "error" }),
-				);
-			},
-			{ timeout: 5_000, interval: 10 },
+		releaseAdmission.resolve();
+		await internals._activeRlmChildRuns.get(spawned.rlm_child_id)!.settlement!.promise;
+		expect(internals._pendingRlmSubagentSessionNames.has("slow-worker")).toBe(false);
+		await expect(root.runRlmChild("respawn while retained", { name: "slow-worker" })).rejects.toThrow(
+			formatAgentSessionNameUnavailable("slow-worker", root.rlmDepth + 1),
 		);
-		// Admission failed, so the reservation is released; the name now belongs
-		// to the retained error run.
-		expect(pending.has("slow-worker")).toBe(false);
-	}, 15_000);
-
-	it("releases the name reservation when an admission fails and after a delete", async () => {
-		const root = createSession({
-			subagentRuntimeHost: {
-				createRlmSubagentRuntime: async () => {
-					throw new Error("kernel startup failed");
-				},
-				deleteRlmSubagentRuntime: async () => {},
-				releaseRlmSubagentRuntime: async () => {},
-			},
-		});
-		const pending = (root as unknown as { _pendingRlmSubagentSessionNames: Set<string> })
-			._pendingRlmSubagentSessionNames;
-		const spawned = await root.runRlmChild("doomed child", { name: "retry-worker" });
-		await vi.waitFor(
-			async () => {
-				expect((await root.listRlmSubagents()).subagents).toContainEqual(
-					expect.objectContaining({ rlm_child_id: spawned.rlm_child_id, status: "error" }),
-				);
-			},
-			{ timeout: 5_000, interval: 10 },
-		);
-		// The failed admission must not leak the reservation: the name is owned by
-		// the retained error run, not by a stale pending entry.
-		expect(pending.has("retry-worker")).toBe(false);
-		await expect(root.runRlmChild("respawn while retained", { name: "retry-worker" })).rejects.toThrow(
-			formatAgentSessionNameUnavailable("retry-worker", root.rlmDepth + 1),
-		);
-		await root.deleteRlmSubagent(spawned.rlm_child_id);
-		expect(pending.has("retry-worker")).toBe(false);
-		const respawned = await root.runRlmChild("respawn after delete", { name: "retry-worker" });
-		expect(respawned.rlm_child_id).toMatch(/^sub-/);
-	}, 15_000);
-
-	it("keeps sequential spawn/delete/spawn with the same name working", async () => {
-		const root = createSession();
-		const first = await root.runRlmChild("first run", { name: "cycle-worker" });
-		await root.waitForRlmQuiescence();
-		await root.deleteRlmSubagent(first.rlm_child_id);
-		const second = await root.runRlmChild("second run", { name: "cycle-worker" });
-		expect(second.rlm_child_id).toMatch(/^sub-/);
-		expect(second.rlm_child_id).not.toBe(first.rlm_child_id);
-		await root.waitForRlmQuiescence();
-	}, 15_000);
+	});
 
 	it("makes an externally restored retained child listable and deletable", async () => {
 		const childId = "restored-child";

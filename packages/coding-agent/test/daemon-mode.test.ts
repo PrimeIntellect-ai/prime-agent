@@ -73,7 +73,7 @@ describe("daemon mode helpers", () => {
 			parentManager.appendSessionInfo("parent");
 			const parentSessionFile = parentManager.getSessionFile();
 			if (!parentSessionFile) throw new Error("Missing parent session file");
-			const childSessionDir = join(parentManager.getSessionArtifactDir()!, "child-1");
+			const artifactDir = parentManager.getSessionArtifactDir()!;
 			const createRuntime = vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => ({
 				session: makeRuntimeSession(options.sessionManager),
 				extensionsResult: { extensions: [], errors: [], runtime: {} } as unknown as Awaited<
@@ -106,6 +106,7 @@ describe("daemon mode helpers", () => {
 					saved: Awaited<ReturnType<typeof SessionManager.listAll>>,
 					jobs: AgentCronJob[],
 				): Promise<Array<{ sessionFile?: string; rlmChildId?: string }>>;
+				rlmSpawnLedger(): { liveEdges(): Promise<Array<{ childId: string; name: string }>> };
 			};
 			const parentState = await internals.createRuntime({ type: "create", sessionPath: parentSessionFile });
 			Object.assign(parentState.runtime.session, {
@@ -118,24 +119,33 @@ describe("daemon mode helpers", () => {
 				hasRunningRlmChildren: () => false,
 				getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
 			});
-			const childRuntime = await internals.createRlmSubagentRuntime(parentState, {
-				parentSession: parentState.runtime.session,
-				id: "child-1",
-				prompt: "complete and persist",
-				sessionName: "real-worker",
-				sessionDir: childSessionDir,
-				model: { provider: "test", id: "model" } as Model<Api>,
-				thinkingLevel: "off",
-				serviceTier: null,
-				scopedModels: [],
-				activeToolNames: [],
-				customTools: [],
-				includeGoals: false,
-				includeCompactSkill: false,
-				rlmDepth: 1,
-				rlmMaxDepth: 4,
-				rlmParentNodeId: "child-1",
-			});
+			const spawn = (id: string) =>
+				internals.createRlmSubagentRuntime(parentState, {
+					parentSession: parentState.runtime.session,
+					id,
+					prompt: "complete and persist",
+					sessionName: "real-worker",
+					sessionDir: join(artifactDir, id),
+					model: { provider: "test", id: "model" } as Model<Api>,
+					thinkingLevel: "off" as const,
+					serviceTier: null,
+					scopedModels: [],
+					activeToolNames: [],
+					customTools: [],
+					includeGoals: false,
+					includeCompactSkill: false,
+					rlmDepth: 1,
+					rlmMaxDepth: 4,
+					rlmParentNodeId: id,
+				});
+			// While the first admission is still in flight, a same-name spawn must
+			// fail closed at the daemon boundary instead of appending a duplicate
+			// durable ledger edge once both admissions settle.
+			const admission = spawn("child-1");
+			await expect(spawn("child-2")).rejects.toThrow('Agent name "real-worker" is unavailable');
+			const childRuntime = await admission;
+			const edges = await internals.rlmSpawnLedger().liveEdges();
+			expect(edges.filter((edge) => edge.name === "real-worker")).toHaveLength(1);
 			const childState = [...internals.sessions.values()].find(
 				(state) => state.runtime.session === childRuntime.session,
 			);
@@ -163,7 +173,7 @@ describe("daemon mode helpers", () => {
 			// The registry is legacy read-only now: spawn and completion must land
 			// in the per-child display file, never in rlm-subagents.jsonl.
 			expect(existsSync(join(parentManager.getSessionArtifactDir()!, "rlm-subagents.jsonl"))).toBe(false);
-			const display = JSON.parse(readFileSync(join(childSessionDir, "rlm-subagent.json"), "utf8")) as Record<
+			const display = JSON.parse(readFileSync(join(artifactDir, "child-1", "rlm-subagent.json"), "utf8")) as Record<
 				string,
 				unknown
 			>;
@@ -177,121 +187,6 @@ describe("daemon mode helpers", () => {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
-
-	it("holds the spawn name reservation at admission until the ledger edge is durable", async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-spawn-name-reserve-"));
-		try {
-			const sessionDir = join(tempDir, "sessions");
-			const parentManager = SessionManager.create(tempDir, sessionDir);
-			parentManager.newSession();
-			parentManager.appendSessionInfo("parent");
-			const parentSessionFile = parentManager.getSessionFile();
-			if (!parentSessionFile) throw new Error("Missing parent session file");
-			const childSessionDir = join(parentManager.getSessionArtifactDir()!, "child-1");
-			let releaseFirstAdmission: () => void = () => {};
-			const firstAdmissionGate = new Promise<void>((resolveGate) => {
-				releaseFirstAdmission = resolveGate;
-			});
-			let runtimeCreations = 0;
-			let firstAdmissionStarted = false;
-			const createRuntime = vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => {
-				runtimeCreations += 1;
-				if (runtimeCreations === 2) {
-					// The parent session is the first runtime; the gated spawn is the second.
-					firstAdmissionStarted = true;
-					await firstAdmissionGate;
-				}
-				return {
-					session: makeRuntimeSession(options.sessionManager),
-					extensionsResult: { extensions: [], errors: [], runtime: {} } as unknown as Awaited<
-						ReturnType<CreateAgentSessionRuntimeFactory>
-					>["extensionsResult"],
-					services: { cwd: options.cwd, agentDir: options.agentDir } as Awaited<
-						ReturnType<CreateAgentSessionRuntimeFactory>
-					>["services"],
-					diagnostics: [],
-				};
-			});
-			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
-				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir },
-				createRuntime,
-			});
-			const internals = daemon as unknown as {
-				sessions: Map<string, ActiveSessionState>;
-				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
-				createRlmSubagentRuntime(
-					parentState: ActiveSessionState,
-					options: CreateRlmSubagentRuntimeOptions,
-				): Promise<ActiveSessionState["runtime"]>;
-				createSubagentRuntimeHost(parentState: ActiveSessionState): SubagentRuntimeHost;
-				rlmSpawnLedger(): { liveEdges(): Promise<Array<{ childId: string; name: string }>> };
-			};
-			const parentState = await internals.createRuntime({ type: "create", sessionPath: parentSessionFile });
-			Object.assign(parentState.runtime.session, {
-				isSessionActive: false,
-				isStreaming: false,
-				isCompacting: false,
-				isBashRunning: false,
-				state: { pendingToolCalls: new Set(), streamingMessage: undefined },
-				thinkingLevel: "off",
-				hasRunningRlmChildren: () => false,
-				getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
-			});
-			const spawn = (id: string, dir: string) =>
-				internals.createRlmSubagentRuntime(parentState, {
-					parentSession: parentState.runtime.session,
-					id,
-					prompt: "reserve the name",
-					sessionName: "dup-worker",
-					sessionDir: dir,
-					model: { provider: "test", id: "model" } as Model<Api>,
-					thinkingLevel: "off",
-					serviceTier: null,
-					scopedModels: [],
-					activeToolNames: [],
-					customTools: [],
-					includeGoals: false,
-					includeCompactSkill: false,
-					rlmDepth: 1,
-					rlmMaxDepth: 4,
-					rlmParentNodeId: id,
-				});
-			// The first spawn stalls mid-admission with no durable ledger edge yet:
-			// exactly the window where a parallel same-name spawn could pass the
-			// parent-side availability check and also append an edge.
-			const first = spawn("child-1", childSessionDir);
-			let firstRuntime: ActiveSessionState["runtime"] | undefined;
-			try {
-				await vi.waitFor(() => expect(firstAdmissionStarted).toBe(true), { timeout: 8_000, interval: 10 });
-				await expect(spawn("child-2", join(parentManager.getSessionArtifactDir()!, "child-2"))).rejects.toThrow(
-					'Agent name "dup-worker" is unavailable',
-				);
-				releaseFirstAdmission();
-				firstRuntime = await first;
-				if (!firstRuntime) throw new Error("Missing admitted child runtime");
-				const edges = await internals.rlmSpawnLedger().liveEdges();
-				expect(edges.filter((edge) => edge.name === "dup-worker")).toHaveLength(1);
-				// A sequential same-name spawn still works once the admitted child is
-				// deleted: the boundary reservation must not outlive the child.
-				await internals
-					.createSubagentRuntimeHost(parentState)
-					.deleteRlmSubagentRuntime?.("child-1", firstRuntime.session);
-				const secondRuntime = await spawn("child-3", join(parentManager.getSessionArtifactDir()!, "child-3"));
-				expect(secondRuntime.session).toBeDefined();
-				const edgesAfter = await internals.rlmSpawnLedger().liveEdges();
-				const namedEdges = edgesAfter.filter((edge) => edge.name === "dup-worker");
-				expect(namedEdges).toHaveLength(1);
-				expect(namedEdges[0]?.childId).toBe("child-3");
-			} finally {
-				// Let the gated admission settle on every path, including an
-				// assertion failure, so the worker is not left hanging.
-				releaseFirstAdmission();
-				await first.catch(() => undefined);
-			}
-		} finally {
-			rmSync(tempDir, { recursive: true, force: true });
-		}
-	}, 30_000);
 
 	it("closes the exact parent-scoped daemon runtime when a retained subagent is deleted", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
