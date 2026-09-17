@@ -1232,13 +1232,21 @@ describe("Harness digest at cold boundaries", () => {
 		const harness = await createHarness({ persistSession: true, rlmDepth: 0, rlmMaxDepth: 2 });
 		harnesses.push(harness);
 		const childContexts: { messages: { role: string }[] }[] = [];
+		// Both children report their first context from their own runtime turn, so
+		// wait on the second report instead of polling the clock.
+		let reportBothChildren = () => {};
+		const bothChildrenReported = new Promise<void>((resolve) => {
+			reportBothChildren = resolve;
+		});
 		harness.setResponses([
 			(context) => {
 				childContexts.push(context);
+				if (childContexts.length === 2) reportBothChildren();
 				return fauxAssistantMessage("child one done");
 			},
 			(context) => {
 				childContexts.push(context);
+				if (childContexts.length === 2) reportBothChildren();
 				return fauxAssistantMessage("child two done");
 			},
 		]);
@@ -1250,7 +1258,7 @@ describe("Harness digest at cold boundaries", () => {
 			name: "spawn_digest_two",
 		});
 		expect(first.rlm_child_id).not.toBe(second.rlm_child_id);
-		await vi.waitFor(() => expect(childContexts.length).toBeGreaterThanOrEqual(2), { timeout: 10_000 });
+		await bothChildrenReported;
 
 		// Each child context opens with the digest, ahead of its task prompt.
 		const digestTexts = childContexts.map((context) => getMessageText(context.messages[0]));

@@ -669,11 +669,13 @@ export function formatHarnessStateForPrompt(
  * cold boundaries can skip digest re-delivery with a state comparison instead
  * of a rendered-text comparison that query-term relevance keeps invalidating.
  *
- * Covered: entry identity and content plus the render flags and each
- * refinement's printed fields. The shell-examples flag participates only
- * when IPython examples are not rendered: the formatter never reads it then,
- * so it is normalized out of the fingerprint to keep an unchanged digest
- * fresh. Excluded: `metadata`, `source`, and the invisible
+ * Covered: entry identity and content (entry order is normalized away, as is
+ * the call contract on non-skill entries, which the formatter never prints),
+ * plus the render flags and each refinement's printed fields in stored order,
+ * since the formatter renders a positional newest tail. The shell-examples
+ * flag participates only when IPython examples are not rendered: the formatter
+ * never reads it then, so it is normalized out of the fingerprint to keep an
+ * unchanged digest fresh. Excluded: `metadata`, `source`, and the invisible
  * `created_at`/`updated_at` bookkeeping, and relevance query terms (the
  * digest stays frozen per delivery; see `compareRankedHarnessEntries`).
  */
@@ -695,18 +697,21 @@ export function harnessDigestFingerprint(
 			path: entry.path,
 			version: entry.version,
 			content: entry.content,
-			reference: entry.reference,
-			arguments: entry.arguments,
+			// Only skills render the kernel call contract, so another kind can
+			// change these fields without changing a single digest byte.
+			reference: entry.kind === "skill" ? entry.reference : undefined,
+			arguments: entry.kind === "skill" ? entry.arguments : undefined,
 		}))
 		.sort((a, b) => [a.scope, a.kind, a.id].join("\0").localeCompare([b.scope, b.kind, b.id].join("\0")));
-	const refinements = [...state.refinements]
-		.sort((a, b) => a.id.localeCompare(b.id))
-		.map((event) => ({
-			id: event.id,
-			trigger: event.trigger,
-			changes: event.changes,
-			outcome: event.outcome,
-		}));
+	// Refinements keep their stored order: the formatter renders the newest
+	// tail of the array, so an order-only change renders differently and must
+	// not reuse the previous digest.
+	const refinements = state.refinements.map((event) => ({
+		id: event.id,
+		trigger: event.trigger,
+		changes: event.changes,
+		outcome: event.outcome,
+	}));
 	// The formatter renders the shell call-contract only when IPython examples
 	// are absent, so the shell flag cannot change the digest while IPython
 	// examples take precedence; fingerprint only the flags the render reads.

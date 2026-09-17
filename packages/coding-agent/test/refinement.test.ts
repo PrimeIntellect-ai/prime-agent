@@ -1007,6 +1007,10 @@ describe("harness digest cache stability", () => {
 		includeShellExamples: false,
 		includeRefineExamples: true,
 	};
+	const fp = (state: HarnessState, flags: Parameters<typeof harnessDigestFingerprint>[1] = renderFlags) =>
+		harnessDigestFingerprint(state, flags);
+	const digest = (state: HarnessState, flags: Parameters<typeof formatHarnessStateForPrompt>[1] = renderFlags) =>
+		formatHarnessStateForPrompt(state, flags);
 
 	/** Three equal-score memory entries with distinct identifier order. */
 	function seedState(dirTag: string): HarnessState {
@@ -1052,11 +1056,7 @@ describe("harness digest cache stability", () => {
 
 	it("keeps equal-score sibling order when one entry is updated", () => {
 		const state = seedState("order");
-		const options = {
-			...renderFlags,
-			maxEntriesPerKind: 2,
-			queryTerms: new Map([["worktree", 1]]),
-		};
+		const options = { ...renderFlags, maxEntriesPerKind: 2, queryTerms: new Map([["worktree", 1]]) };
 		const before = formatHarnessStateForPrompt(state, options);
 		expect(visibleIds(before)).toEqual(["alpha", "bravo"]);
 		// Update alpha: new content, new version, and the newest updated_at. The
@@ -1103,12 +1103,8 @@ describe("harness digest cache stability", () => {
 
 		// Query terms re-rank the render but never reach the fingerprint: the
 		// digest stays frozen per delivery across turns with new wording.
-		const ranked = formatHarnessStateForPrompt(state, {
-			...renderFlags,
-			queryTerms: new Map([["bravo", 3]]),
-		});
-		const unranked = formatHarnessStateForPrompt(state, renderFlags);
-		expect(ranked).not.toBe(unranked);
+		const ranked = digest(state, { ...renderFlags, queryTerms: new Map([["bravo", 3]]) });
+		expect(ranked).not.toBe(digest(state));
 		expect(visibleIds(ranked)[0]).toBe("bravo");
 		expect(harnessDigestFingerprint(state, renderFlags)).toBe(fingerprint);
 
@@ -1131,16 +1127,22 @@ describe("harness digest cache stability", () => {
 		expect(harnessDigestFingerprint(withRefinement, renderFlags)).not.toBe(fingerprint);
 		const sameRefinementOtherTime = seedState("fingerprint-refine-time");
 		sameRefinementOtherTime.refinements.push({
-			id: "refine_20260910",
-			trigger: "Add worktree notes",
-			changes: ["create memory:alpha"],
+			...withRefinement.refinements[0],
 			evidence: "different invisible evidence",
-			outcome: "Worktree notes persisted.",
 			created_at: "2026-09-11T00:00:00.000Z",
 		});
-		expect(harnessDigestFingerprint(sameRefinementOtherTime, renderFlags)).toBe(
-			harnessDigestFingerprint(withRefinement, renderFlags),
-		);
+		expect(fp(sameRefinementOtherTime)).toBe(fp(withRefinement));
+
+		// Refinement order is fingerprinted too: the formatter renders a
+		// positional newest tail, so reordering the same events must not read as
+		// fresh and reuse the previous digest.
+		const secondEvent = { ...withRefinement.refinements[0], id: "refine_20260911" };
+		const ordered = seedState("fingerprint-refine-order");
+		ordered.refinements.push(withRefinement.refinements[0], secondEvent);
+		const reordered = seedState("fingerprint-refine-order-swap");
+		reordered.refinements.push(secondEvent, withRefinement.refinements[0]);
+		expect(digest(reordered)).not.toBe(digest(ordered));
+		expect(fp(reordered)).not.toBe(fp(ordered));
 	});
 
 	it("fingerprints the shell-example flag only while IPython examples are absent", () => {
@@ -1149,18 +1151,10 @@ describe("harness digest cache stability", () => {
 		// With IPython examples the formatter never reads the shell flag, so it
 		// must not reach the fingerprint: a session whose bash tool drops out
 		// keeps its byte-identical digest and its prompt-cache hit.
-		const withIpython = {
-			includeIpythonExamples: true,
-			includeShellExamples: true,
-			includeRefineExamples: false,
-		};
-		expect(harnessDigestFingerprint(state, withIpython)).toBe(
-			harnessDigestFingerprint(state, { ...withIpython, includeShellExamples: false }),
-		);
+		const withIpython = { includeIpythonExamples: true, includeShellExamples: true, includeRefineExamples: false };
+		expect(fp(state, withIpython)).toBe(fp(state, { ...withIpython, includeShellExamples: false }));
 		// The flag sets are render-equivalent, which is why the fingerprints are.
-		expect(formatHarnessStateForPrompt(state, withIpython)).toBe(
-			formatHarnessStateForPrompt(state, { ...withIpython, includeShellExamples: false }),
-		);
+		expect(digest(state, withIpython)).toBe(digest(state, { ...withIpython, includeShellExamples: false }));
 
 		// Without IPython examples the shell flag drives the call-contract line,
 		// so it must still change the fingerprint.
@@ -1169,8 +1163,6 @@ describe("harness digest cache stability", () => {
 			includeShellExamples: true,
 			includeRefineExamples: false,
 		};
-		expect(harnessDigestFingerprint(state, withoutIpython)).not.toBe(
-			harnessDigestFingerprint(state, { ...withoutIpython, includeShellExamples: false }),
-		);
+		expect(fp(state, withoutIpython)).not.toBe(fp(state, { ...withoutIpython, includeShellExamples: false }));
 	});
 });
