@@ -1059,12 +1059,12 @@ describe("harness digest cache stability", () => {
 		const options = { ...renderFlags, maxEntriesPerKind: 2, queryTerms: new Map([["worktree", 1]]) };
 		const before = formatHarnessStateForPrompt(state, options);
 		expect(visibleIds(before)).toEqual(["alpha", "bravo"]);
-		// Update alpha: new content, new version, and the newest updated_at. The
+		// Update bravo: new content, new version, and the newest updated_at. The
 		// old recency tiebreak hoisted the updated entry above its equal-score
 		// siblings, reshuffling the visible window at the next cold boundary.
-		state.entries.memory.alpha = {
-			...state.entries.memory.alpha,
-			content: "Alpha worktree note keeps revised guidance.",
+		state.entries.memory.bravo = {
+			...state.entries.memory.bravo,
+			content: "Bravo worktree note keeps revised guidance.",
 			version: 2,
 			updated_at: "2026-09-09T00:00:00.000Z",
 		};
