@@ -5404,15 +5404,27 @@ def _assigned_command_rm_reasons(
     for word in words:
         token = word.value
         if token in _COMMAND_CONTEXT_TOKENS:
+            if builtin_args and not (word.starts_command or assignment_slot):
+                # A reserved word inside a builtin's argument list is one of
+                # its arguments (`export if` exports a variable named "if"),
+                # so the list keeps running.
+                continue
             # A keyword or grouping token opens a command context without
             # being the command word, so an assignment after it still counts
-            # (`{ PWD=/x; }`, `if true; then PWD=/x; fi`).
-            assignment_slot = True
+            # (`{ PWD=/x; }`, `if true; then PWD=/x; fi`) — but only when the
+            # token itself is at command position: a reserved word in an
+            # argument position (`echo if X=b`) is data for its command and
+            # cannot reopen the slot.
             builtin_args = ""
             unset_functions = False
             after_assignment = False
-            after_executing_keyword = token in _EXECUTING_KEYWORDS
             after_exec_style = False
+            if word.starts_command or assignment_slot:
+                assignment_slot = True
+                after_executing_keyword = token in _EXECUTING_KEYWORDS
+            else:
+                assignment_slot = False
+                after_executing_keyword = False
             continue
         if word.starts_command:
             assignment_slot = True
@@ -5426,9 +5438,11 @@ def _assigned_command_rm_reasons(
         base = name[:-1] if appended else name
         is_assignment = separator and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", base)
         if builtin_args:
-            # The builtin itself is the command word, so its arguments assign,
-            # unset, or keep the list as options exactly as the shell reads
-            # them.
+            # The builtin itself is the command word, and its argument list
+            # runs to the command boundary (a `starts_command` word or a
+            # context token ends it at the top of the loop), so a plain name
+            # or option never ends the list early the way the shell's parser
+            # does not: `export A X=1` assigns X.
             if is_assignment and builtin_args != "unset":
                 # The shell expands the assigned word at run time, so a value
                 # built from an expansion or substitution cannot be read
@@ -5442,22 +5456,20 @@ def _assigned_command_rm_reasons(
                         previous + assigned if appended else assigned,
                         literal and previous_literal,
                     )
-                continue
-            if token.startswith("-"):
-                if builtin_args == "unset" and token == "-f":
+            elif builtin_args == "unset":
+                if token == "-f":
+                    # `unset -f` names functions, so the variables stay
+                    # recorded and a later reference still resolves.
                     unset_functions = True
-                continue
-            if (
-                builtin_args == "unset"
-                and not unset_functions
-                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token)
-            ):
-                assignments.pop(token, None)
-                continue
-            # An ordinary word ends the builtin's argument list; the word
-            # itself is then read in its own position below.
-            builtin_args = ""
-            unset_functions = False
+                elif (
+                    not unset_functions
+                    and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token)
+                ):
+                    assignments.pop(token, None)
+            # A plain name exports an existing value (no assignment to
+            # record), options belong to the builtin, and any other word is
+            # the builtin's own error: all keep the argument list.
+            continue
         if is_assignment and assignment_slot:
             # The shell expands the assigned word at run time, so a value built
             # from an expansion or substitution cannot be read statically.

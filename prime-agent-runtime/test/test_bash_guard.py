@@ -2457,6 +2457,15 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
             f"X='rm -rf {outside}'; echo unset X; $X",
             # `unset -f` names functions, so the variable stays assigned.
             f"X='rm -rf {outside}'; unset -f X; $X",
+            # A reserved word in an argument position is data (`echo if X=b`),
+            # and a builtin's argument list runs to the command boundary, so a
+            # later NAME=value in it assigns (`export A X=...`, `declare +x
+            # X=...`) — real bash ran the expanded `rm -rf <outside>` through
+            # each pre-fix.
+            f"X='rm -rf {outside}'; echo if X=b; $X",
+            f"export A X='rm -rf {outside}'; $X",
+            f"X='echo hi'; export A X='rm -rf {outside}'; $X",
+            f"X='echo hi'; declare +x X='rm -rf {outside}'; $X",
             # Every position the shell runs a word from substitutes the same
             # way a command-boundary reference does (real bash runs the
             # expanded `rm -rf <outside>` pre-fix).
@@ -2482,6 +2491,7 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
         # $X`) never executes its words.
         for command in [
             "X='echo hi'; echo a X=b; $X",
+            "X='echo hi'; echo if X=b; $X",
             "X='echo hi'; FOO=1 $X",
             "X='echo hi'; { $X; }",
             "X='echo hi'; if $X; then :; fi",
@@ -2490,6 +2500,8 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
             "X='echo hi'; unset X; $X",
             "X='echo hi'; unset -f X; $X",
             "X='echo hi'; export X; $X",
+            "X='echo hi'; export if; $X",
+            "X='echo hi'; export A X='echo there'; $X",
             "X='echo hi'; for i in $X; do :; done",
             "X='echo hi'; case $X in *) :;; esac",
         ]:
