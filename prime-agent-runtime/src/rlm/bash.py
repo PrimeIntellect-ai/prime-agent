@@ -3352,25 +3352,6 @@ def _matching_paren(command: str, open_index: int, end: int) -> int:
     return end - 1  # unterminated: scan to the end
 
 
-def _paren_positions(command: str) -> list[tuple[int, str]]:
-    """Positions of every unquoted `(` and `)` in `command`, skipping quoted
-    spans and backslash escapes; the pairs scope cd tracking to subshells."""
-    positions: list[tuple[int, str]] = []
-    i = 0
-    end = len(command)
-    while i < end:
-        ch = command[i]
-        if ch == "\\":
-            i += 2
-        elif ch in "'\"":
-            i = _quote_span_end(command, i, end)
-        else:
-            if ch in "()":
-                positions.append((i, ch))
-            i += 1
-    return positions
-
-
 def _scan_shell_words(command: str) -> list[_RmShellWord]:
     """Split `command` into shell words the way the shell builds argv.
 
@@ -3793,6 +3774,10 @@ def _wrapped_payloads_hide_recursive_force_rm(
             return True
         if _find_recursive_force_rm_invocations(payload):
             return True
+        # Expansion inside the payload hides the same recursion the outer scan
+        # refuses (`sh -c 'flags=-rf; rm $flags /outside'`).
+        if _unresolvable_expansion_rm_reasons(_scan_shell_words(payload)):
+            return True
         if _wrapped_payloads_hide_recursive_force_rm(payload, depth + 1, aliases=aliases):
             return True
         # The shell a payload runs in parses its own input one command at a
@@ -3857,6 +3842,8 @@ def _resolve_cd_target(
     target = targets[0]
     if target == "-":
         return None  # $OLDPWD is unknowable statically
+    if builtin == "pushd" and re.fullmatch(r"[+-]\d+", target):
+        return None  # a stack rotation lands on another stack entry
     if target == "":
         return tracked  # cd '' errors; the shell stays put
     home = os.environ.get("HOME")
@@ -4024,6 +4011,14 @@ def _tracked_cwd_at_words(
                 # The relocation provably runs and succeeds, so no earlier
                 # directory can survive it inside this chain.
                 states = dedupe(relocated)
+            chain_states = dedupe(chain_states + states)
+        elif word.value == "popd":
+            # The stack top is whatever earlier pushd or stack subtraction left
+            # there, which the tracker does not model, so the runtime directory
+            # stays unknowable until a later cd/pushd pins it down (a failed
+            # popd leaves the current directory in play).
+            chain_states = dedupe(chain_states + states)
+            states = dedupe(states + [None])
             chain_states = dedupe(chain_states + states)
         elif word.starts_command:
             chain_states = dedupe(chain_states + states)
@@ -4835,8 +4830,8 @@ def _expand_effective_aliases(text: str) -> str | None:
     return current
 
 
-def _alias_expanded_rm_reasons(
-    text: str,
+def _built_command_rm_reasons(
+    expanded: str,
     *,
     workspace_root: str,
     starts: list[str],
@@ -4844,16 +4839,14 @@ def _alias_expanded_rm_reasons(
     reassigns_pwd: bool,
     cdpath_untrackable: bool,
 ) -> list[str]:
-    """Refusal reasons for the command text with effective aliases substituted.
+    """Refusal reasons for command text the shell builds at run time.
 
-    The expanded text is scanned as its own command against every directory the
-    invocation may run in: an alias can turn `del victim` into `rm -rf victim`,
-    so the text the shell actually runs must pass the same operand checks. An
-    alias body that wraps rm (`alias wipe='sh -c "rm -rf x"'`) is refused like
-    any other wrapper payload."""
-    expanded = _expand_effective_aliases(text)
-    if expanded is None:
-        return []
+    The text is scanned as its own command against every directory the
+    invocation may run in, because the shell runs it exactly as written here:
+    an alias can turn `del victim` into `rm -rf victim`, and a literal
+    assignment can turn `$X` into `rm -rf /outside`. Command text that wraps rm
+    (`alias wipe='sh -c "rm -rf x"'`) is refused like any other wrapper
+    payload."""
     prepared = _mask_shell_redirections(expanded)
     words = _scan_shell_words(prepared)
     if _wrapped_payloads_hide_recursive_force_rm(prepared, words=words):
@@ -4882,6 +4875,102 @@ def _alias_expanded_rm_reasons(
             )
         )
     reasons.extend(_unresolvable_expansion_rm_reasons(words))
+    return reasons
+
+
+def _alias_expanded_rm_reasons(
+    text: str,
+    *,
+    workspace_root: str,
+    starts: list[str],
+    reassigns_home: bool,
+    reassigns_pwd: bool,
+    cdpath_untrackable: bool,
+) -> list[str]:
+    """Refusal reasons for the command text with effective aliases substituted.
+
+    A later line can invoke a command the source never names (`alias
+    del='rm'`), so the substituted text is scanned as its own command; see
+    _built_command_rm_reasons."""
+    expanded = _expand_effective_aliases(text)
+    if expanded is None:
+        return []
+    return _built_command_rm_reasons(
+        expanded,
+        workspace_root=workspace_root,
+        starts=starts,
+        reassigns_home=reassigns_home,
+        reassigns_pwd=reassigns_pwd,
+        cdpath_untrackable=cdpath_untrackable,
+    )
+
+
+def _assigned_command_rm_reasons(
+    text: str,
+    *,
+    workspace_root: str,
+    starts: list[str],
+    reassigns_home: bool,
+    reassigns_pwd: bool,
+    cdpath_untrackable: bool,
+) -> list[str]:
+    """Refusal reasons for command words the command builds through assignment.
+
+    `X='rm -rf /outside'; $X` runs exactly that invocation, so a command word
+    that is a plain `$NAME` reference is substituted with the literal value the
+    command assigned to NAME and rescanned; a word whose value the command
+    builds from expansion or substitution (`X=$(cat cmd); $X`) runs text the
+    guard cannot read, so it is refused. A reference the command never assigns
+    stays unresolvable, which the caller's refusal keeps covering."""
+    words = _scan_shell_words(text)
+    assignments: dict[str, tuple[str, bool]] = {}
+    edits: list[tuple[int, int, str]] = []
+    reasons: list[str] = []
+    for index, word in enumerate(words):
+        name, separator, assigned = word.value.partition("=")
+        if separator and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            # The shell expands the assigned word at run time, so a value built
+            # from an expansion or substitution cannot be read statically.
+            literal = not any(ch in text[word.start : word.end] for ch in "$`\\")
+            assignments[name] = (assigned, literal)
+            continue
+        if word.value == "unset":
+            for follower in words[index + 1 :]:
+                if follower.starts_command:
+                    break
+                assignments.pop(follower.value, None)
+            continue
+        if not word.starts_command:
+            continue
+        reference = _VARIABLE_REFERENCE.fullmatch(word.value)
+        if reference is None:
+            continue
+        assignment = assignments.get(reference.group(1) or reference.group(2))
+        if assignment is None:
+            continue  # not assigned in this command: leave the word unresolvable
+        assigned, literal = assignment
+        if not literal:
+            reasons.append(
+                f"{word.value!r}: is assigned text the guard cannot read"
+                " statically, so the command it runs cannot be checked"
+            )
+            continue
+        edits.append((word.start, word.end, assigned))
+    if not edits:
+        return reasons
+    resolved = text
+    for start, end, replacement in reversed(edits):
+        resolved = resolved[:start] + replacement + resolved[end:]
+    reasons.extend(
+        _built_command_rm_reasons(
+            resolved,
+            workspace_root=workspace_root,
+            starts=starts,
+            reassigns_home=reassigns_home,
+            reassigns_pwd=reassigns_pwd,
+            cdpath_untrackable=cdpath_untrackable,
+        )
+    )
     return reasons
 
 
@@ -4969,17 +5058,22 @@ def _guard_destructive_rm(command: str, allow_destructive_rm: bool) -> None:
             # strips an inherited value).
             reasons.extend(_shell_startup_env_reasons(words))
         # Aliases substitute command text at parse time, so a later line can
-        # run a command the source never names.
-        reasons.extend(
-            _alias_expanded_rm_reasons(
-                outer_text,
-                workspace_root=workspace_root,
-                starts=[workspace_root],
-                reassigns_home=reassigns_home,
-                reassigns_pwd=reassigns_pwd,
-                cdpath_untrackable=cdpath_untrackable,
+        # run a command the source never names, and a literal assignment can
+        # hand a later `$NAME` command word a whole invocation.
+        for built_command_reasons in (
+            _alias_expanded_rm_reasons,
+            _assigned_command_rm_reasons,
+        ):
+            reasons.extend(
+                built_command_reasons(
+                    outer_text,
+                    workspace_root=workspace_root,
+                    starts=[workspace_root],
+                    reassigns_home=reassigns_home,
+                    reassigns_pwd=reassigns_pwd,
+                    cdpath_untrackable=cdpath_untrackable,
+                )
             )
-        )
         # The bodies run wherever the outer command has relocated to: resolve
         # them against every script runner's tracked directory (any escape
         # refuses), and inherit the outer HOME/PWD reassignments.
@@ -5056,17 +5150,22 @@ def _guard_destructive_rm(command: str, allow_destructive_rm: bool) -> None:
             )
         )
         # A body runs in its own shell, so aliases it defines and invokes on a
-        # later line substitute command text the body never names.
-        reasons.extend(
-            _alias_expanded_rm_reasons(
-                body_outer,
-                workspace_root=workspace_root,
-                starts=runner_starts or [workspace_root],
-                reassigns_home=body_reassigns_home,
-                reassigns_pwd=body_reassigns_pwd,
-                cdpath_untrackable=body_cdpath,
+        # later line, or a command word it builds by assignment, substitute
+        # command text the body never names.
+        for body_built_reasons in (
+            _alias_expanded_rm_reasons,
+            _assigned_command_rm_reasons,
+        ):
+            reasons.extend(
+                body_built_reasons(
+                    body_outer,
+                    workspace_root=workspace_root,
+                    starts=runner_starts or [workspace_root],
+                    reassigns_home=body_reassigns_home,
+                    reassigns_pwd=body_reassigns_pwd,
+                    cdpath_untrackable=body_cdpath,
+                )
             )
-        )
         body_invocations = _find_rf_rm_invocations_in_words(body_words)
         if not body_invocations:
             reasons.extend(_unresolvable_expansion_rm_reasons(body_words))

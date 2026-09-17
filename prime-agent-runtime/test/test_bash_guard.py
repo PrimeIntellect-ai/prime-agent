@@ -2428,6 +2428,74 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("alias rm=rm -rf /printed-not-run", result.output)
 
+    async def test_refuses_command_words_built_by_assignment(self):
+        # A literal assignment hands a later `$NAME` command word a whole
+        # invocation, so the resolved text is scanned; a value the guard cannot
+        # read statically is refused outright.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            f"X='rm -rf {outside}'; $X",
+            f"X='rm -rf {outside}'; $X harmless",
+            f'X=rm; "$X" -rf {outside}',
+            f'X="rm -rf {outside}"; $X',
+            "X=$(cat cmd.txt); $X",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # A revealed value that hides nothing keeps running, and a reference
+        # the command never assigns stays an ordinary shell variable.
+        result = await bash("X='echo hi'; $X")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("hi", result.output)
+        result = await bash('ECHO_BIN=echo; "$ECHO_BIN" -u hi')
+        self.assertEqual(result.exit_code, 0)
+
+    async def test_refuses_expansion_inside_wrapper_payloads(self):
+        # Unresolvable flags or operands inside a payload hide the same
+        # recursion the outer scan refuses.
+        self._make_tree()
+        outside = self._outside_target()
+        for command in [
+            "sh -c 'flags=-rf; rm $flags %s'" % outside,
+            "eval 'flags=-rf; rm $flags %s'" % outside,
+            "trap 'flags=-rf; rm $flags %s' EXIT" % outside,
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "file.txt").exists())
+        # Benign payloads with expansion keep running.
+        result = await bash("sh -c 'echo $UNSET_ARG hi'")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("hi", result.output)
+
+    async def test_refuses_popd_relocated_rm(self):
+        # `popd` and stack rotations move the shell to a directory the tracker
+        # does not model, so a later relative rm can run outside the workspace.
+        self._make_tree()
+        outside = self._outside_target()
+        Path(outside, "victim").mkdir()
+        Path(outside, "victim", "file.txt").write_text("keep\n")
+        Path(self.test_dir, "victim").mkdir(exist_ok=True)
+        Path(self.test_dir, "victim", "inside.txt").write_text("inside\n")
+        for command in [
+            f"cd {outside} && pushd {self.test_dir} && popd && rm -rf victim",
+            f"cd {outside}; pushd {self.test_dir}; popd && rm -rf victim",
+            f"cd {outside} && pushd {self.test_dir} && pushd +1 && rm -rf victim",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError):
+                    bash(command)
+                self.assertTrue(Path(outside, "victim", "file.txt").exists())
+        # A plain pushd relocation still resolves precisely.
+        self._make_tree()
+        result = await bash(f"pushd {self.test_dir}/sub >/dev/null && rm -rf nested")
+        self.assertEqual(result.exit_code, 0)
+        self.assertFalse(self._tracked("sub", "nested").exists())
+
     async def test_refuses_inline_shell_feeds_inside_bodies(self):
         # A runner-fed body can itself hand a shell text inline: the pipeline
         # producer's output and a here-string operand are commands that shell
