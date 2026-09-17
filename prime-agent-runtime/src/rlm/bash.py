@@ -4990,6 +4990,12 @@ def _rm_feed_reasons(
                     fed_prepared, words=fed_words
                 ):
                     raise DestructiveRmRefusalError(_format_rm_wrapper_refusal())
+                if _script_runner_word_indices(fed_words):
+                    # The fed shell reads $BASH_ENV before it runs anything, so
+                    # an assignment inside the fed text hides a startup file
+                    # exactly like one in the outer command
+                    # (`env -S 'BASH_ENV=startup.sh bash -c true'`).
+                    reasons.extend(_shell_startup_env_reasons(fed_words))
                 reasons.extend(
                     _process_substitution_script_reasons(
                         fed_outer, fed_words, _script_runner_word_indices(fed_words)
@@ -5106,16 +5112,34 @@ def _format_rm_wrapper_refusal() -> str:
 def _command_reassigns_env(words: list[_RmShellWord], name: str) -> bool:
     """True when the command assigns, appends to, exports, or unsets `name`,
     so operands whose expansion depends on it cannot be taken from the
-    kernel environment."""
-    for index, word in enumerate(words):
-        if re.match(rf"^{name}\+?=", word.value):
+    kernel environment.
+
+    Only words the shell reads as assignments count: an assignment prefix
+    (`PWD=/x cmd`) or an argument to an assignment builtin (`export PWD=/x`).
+    An ordinary argument that merely looks like one (`echo PWD=/tmp`) leaves the
+    environment alone, so it must not make the expansion untrackable."""
+    assignment_slot = True
+    builtin_args = False
+    for word in words:
+        token = word.value
+        if word.starts_command:
+            assignment_slot = True
+            builtin_args = False
+        if (assignment_slot or builtin_args) and re.match(rf"^{name}\+?=", token):
             return True
-        if word.value in ("export", "unset"):
-            for follower in words[index + 1 :]:
-                if follower.starts_command:
-                    break
-                if re.match(rf"^{name}(=|$)", follower.value):
-                    return True
+        if builtin_args:
+            if token == name:
+                return True  # `unset PWD`, `export PWD`
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*\+?=", token) or token.startswith("-"):
+                continue  # another assignment or option keeps the argument list
+            assignment_slot = builtin_args = False
+            continue
+        if token in _EXPORT_COMMANDS or token == "unset":
+            builtin_args = True
+            continue
+        if assignment_slot and re.match(r"^[A-Za-z_][A-Za-z0-9_]*\+?=", token):
+            continue  # another assignment prefix: the command word still follows
+        assignment_slot = False
     return False
 
 

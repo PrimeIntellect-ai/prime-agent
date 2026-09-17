@@ -2627,6 +2627,55 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertFalse(self._tracked("sub", "nested").exists())
 
+    async def test_refuses_startup_env_in_fed_argv_text(self):
+        # `env -S` builds the argv of a shell that reads $BASH_ENV before it
+        # runs anything, so a startup assignment inside the fed text must be
+        # refused exactly like one in the outer command.
+        self._make_tree()
+        outside = self._outside_target()
+        Path(outside, "victim").mkdir()
+        Path(outside, "victim", "file.txt").write_text("keep\n")
+        startup = str(self._tracked("startup.sh"))
+        Path(startup).write_text(f"rm -rf {outside}/victim\n")
+        for command in [
+            "env -S 'BASH_ENV=startup.sh bash -c true'",
+            "env -S 'BASH_ENV=startup.sh bash -c true' extra",
+            "BASH_ENV=startup.sh bash -c true",
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError) as caught:
+                    bash(command)
+                self.assertIn("startup file", str(caught.exception))
+                self.assertTrue(Path(outside, "victim", "file.txt").exists())
+        # A fed argv that names no startup file keeps running.
+        result = await bash("env -S 'VAR=1 echo hi'")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("hi", result.output)
+
+    async def test_allows_argument_position_env_assignments(self):
+        # An argument that merely looks like an assignment does not change the
+        # environment, so it must not make `$PWD`/`$HOME` untrackable.
+        self._make_tree()
+        result = await bash('echo PWD=/tmp; rm -rf "$PWD/sub"')
+        self.assertEqual(result.exit_code, 0)
+        self.assertFalse(self._tracked("sub").exists())
+        self._make_tree()
+        with mock.patch.dict(os.environ, {"HOME": self.test_dir}):
+            result = await bash('echo HOME=/tmp; rm -rf "$HOME/sub"')
+        self.assertEqual(result.exit_code, 0)
+        self.assertFalse(self._tracked("sub").exists())
+        # The real reassignment forms stay refused, prefix and builtin alike.
+        self._make_tree()
+        for command, message in [
+            ('PWD=/tmp; rm -rf "$PWD/sub"', "reassigns PWD"),
+            ('export PWD=/tmp; rm -rf "$PWD/sub"', "reassigns PWD"),
+            ('unset PWD; rm -rf "${PWD:-.}/sub"', "reassigns PWD"),
+        ]:
+            with self.subTest(command=command):
+                with self.assertRaises(DestructiveRmRefusalError) as caught:
+                    bash(command)
+                self.assertIn(message, str(caught.exception))
+
     async def test_refuses_env_split_string_argv(self):
         # GNU `env -S` splits its string into the argv it runs, so the split
         # words must be scanned like any other command text.
