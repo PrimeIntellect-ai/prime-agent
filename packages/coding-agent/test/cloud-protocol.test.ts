@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import type { CloudEvent } from "../src/core/cloud/protocol.js";
 import {
 	advanceCursor,
 	CLOUD_MAX_MESSAGE_BYTES,
@@ -392,6 +393,74 @@ describe("parseCloudMessage and serializeCloudMessage", () => {
 				sessionId: "sess-1",
 			} as unknown as CloudHello),
 		).toThrow(/invalid cloud message/);
+	});
+
+	it("carries an optional protocol authentication token on hello", () => {
+		const withToken = roundTrip({ ...validHello(), authToken: "bridge-token-0123456789abcdef" });
+		expect(withToken.type).toBe("hello");
+		expect(problemOf({ ...validHello(), authToken: "" })).toContain("hello.authToken");
+		expect(problemOf({ ...validHello(), authToken: "t".repeat(257) })).toContain("hello.authToken");
+		expect(problemOf({ ...validHello(), authToken: "tok", auth: "tok" })).toContain("unexpected field");
+	});
+
+	it("validates live events push batches", () => {
+		const events: CloudMessage = {
+			type: "events",
+			sessionId: "sess-1",
+			generation: 2,
+			events: [
+				{
+					sequence: 3,
+					kind: "output_delta",
+					recordedAt: "2026-09-16T00:00:00.000Z",
+					taskId: "task-1",
+					stream: "stdout",
+					text: "chunk\n",
+				},
+			],
+		};
+		expect(roundTrip(events).type).toBe("events");
+		expect(roundTrip({ ...events, events: [] } as CloudMessage).type).toBe("events");
+		expect(problemOf({ ...(events as object), generation: 0 })).toContain("events.generation");
+		expect(problemOf({ ...(events as object), sessionId: "" })).toContain("events.sessionId");
+		const decreasing = {
+			type: "events",
+			sessionId: "sess-1",
+			generation: 2,
+			events: [
+				{
+					sequence: 3,
+					kind: "session_status",
+					recordedAt: "2026-09-16T00:00:00.000Z",
+					status: "busy",
+				},
+				{
+					sequence: 2,
+					kind: "session_status",
+					recordedAt: "2026-09-16T00:00:00.000Z",
+					status: "idle",
+				},
+			],
+		};
+		expect(problemOf(decreasing)).toContain("strictly increase");
+	});
+
+	it("validates output_delta event payloads inside event batches", () => {
+		const delta = {
+			sequence: 1,
+			kind: "output_delta",
+			recordedAt: "2026-09-16T00:00:00.000Z",
+			taskId: "task-1",
+			stream: "stdout",
+			text: "chunk",
+		};
+		const wrap = (event: unknown): CloudMessage => {
+			return { type: "events", sessionId: "sess-1", generation: 2, events: [event as CloudEvent] };
+		};
+		expect(problemOf(wrap({ ...delta, stream: "mixed" }))).toContain("events[0].stream");
+		expect(problemOf(wrap({ ...delta, taskId: "" }))).toContain("events[0].taskId");
+		expect(problemOf(wrap({ ...delta, text: "x".repeat(65_537) }))).toContain("events[0].text");
+		expect(problemOf(wrap({ ...delta, extra: 1 }))).toContain("unexpected field");
 	});
 
 	it("exposes request and id runtime validation", () => {

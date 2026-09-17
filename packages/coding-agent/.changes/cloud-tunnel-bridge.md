@@ -1,0 +1,3 @@
+- Added opt-in live steering for cloud delegations: `/cloud run --tunnel` registers a Prime Tunnel, the sandbox bridge serves the session protocol on loopback, and `/cloud steer <id> <text>` submits follow-up prompts while the task runs.
+- Added a cloud-scoped `PRIME_AGENT_CLOUD_TEAM_ID` override and secure `PRIME_AGENT_CLOUD_INFERENCE_API_KEY_FILE` key-file loading (default `~/.config/prime-agent-cloud/inference-api-key`, owner-only permissions enforced).
+- Added guest inference team billing: the daemon passes the delegation team to the sandbox as `PRIME_TEAM_ID` so remote model calls bill the team instead of the guest key's personal balance, with `PRIME_AGENT_CLOUD_INFERENCE_TEAM_ID` as a dedicated override.

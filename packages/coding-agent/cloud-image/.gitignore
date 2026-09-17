@@ -1,0 +1,4 @@
+# Prepared build artifacts (fetched and checksum-verified by prepare.sh);
+# never commit the large release tarballs.
+prime-agent-*.tgz
+frp_*.tar.gz

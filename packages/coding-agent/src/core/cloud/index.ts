@@ -1,3 +1,8 @@
+export * from "./bridge/guest-bridge-script.js";
+export * from "./bridge/tunnel-attachment.js";
+export * from "./bridge/tunnel-secrets.js";
+export * from "./bridge/tunnel-transport.js";
+export * from "./bridge/ws-frames.js";
 export * from "./cloud-session-store.js";
 export * from "./command-journal.js";
 export * from "./command-session-proto.js";
@@ -5,6 +10,7 @@ export * from "./delegation-orchestrator.js";
 export * from "./direct-cloud-service.js";
 export * from "./event-outbox.js";
 export * from "./prime-sandbox-client.js";
+export * from "./prime-tunnel-client.js";
 export * from "./protocol.js";
 export * from "./result-import.js";
 export * from "./trace-mirror.js";

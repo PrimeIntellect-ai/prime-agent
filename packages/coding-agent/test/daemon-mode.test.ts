@@ -135,6 +135,12 @@ describe("daemon mode helpers", () => {
 			list: vi.fn(async () => [delegation]),
 			stop: vi.fn(async () => ({ ...delegation, status: "stopped" as const })),
 			apply: vi.fn(async () => ({ ...delegation, status: "completed" as const, resultApplied: true })),
+			steer: vi.fn(async () => ({
+				delegation: { ...delegation, status: "running" as const },
+				commandId: "cmd_steer_1",
+				taskId: "task_steer_1",
+				state: "acknowledged" as const,
+			})),
 		};
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
@@ -194,9 +200,31 @@ describe("daemon mode helpers", () => {
 			activeSessionId: state.activeSessionId,
 			delegationId: delegation.id,
 		});
+		const steerResponse = await internals.handleCommand(client, {
+			id: "cloud-steer-1",
+			type: "cloud_delegation_steer",
+			activeSessionId: state.activeSessionId,
+			delegationId: delegation.id,
+			text: "tighten the loop",
+			steerId: "steer-identity-1",
+		});
+		expect(steerResponse).toMatchObject({
+			type: "response",
+			command: "cloud_delegation_steer",
+			success: true,
+			data: { steered: expect.objectContaining({ state: "acknowledged" }) },
+		});
 		expect(cloudService.list).toHaveBeenCalledWith("durable-cloud-owner");
 		expect(cloudService.stop).toHaveBeenCalledWith("durable-cloud-owner", delegation.id, false);
 		expect(cloudService.apply).toHaveBeenCalledWith("durable-cloud-owner", delegation.id, "/repo/cloud");
+		// The caller-supplied steer identity rides through so retried daemon
+		// commands deduplicate on the guest journal.
+		expect(cloudService.steer).toHaveBeenCalledWith(
+			"durable-cloud-owner",
+			delegation.id,
+			"tighten the loop",
+			"steer-identity-1",
+		);
 	});
 
 	it("waits for overlapping Bash commands with a bounded close deadline", async () => {

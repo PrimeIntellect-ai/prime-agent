@@ -641,6 +641,8 @@ export interface AgentConnectionCloudDelegateOptions {
 	instanceType?: string;
 	model?: string;
 	timeoutMinutes?: number;
+	/** Opt in to a Prime Tunnel bridge for live steering; requires cloud_tunnel. */
+	tunnel?: boolean;
 }
 
 export type AgentConnectionCloudDelegationStatus =
@@ -663,6 +665,14 @@ export interface AgentConnectionCloudDelegationSummary {
 	sandboxId?: string;
 	resultReady: boolean;
 	resultApplied: boolean;
+	/** Prime Tunnel registration when the delegation opted into live steering. */
+	tunnel?: {
+		tunnelId: string;
+		url: string;
+		attached: boolean;
+	};
+	/** Bounded tail of live output streamed over the tunnel bridge. */
+	liveOutput?: string;
 	changedPaths?: string[];
 	changedPathCount?: number;
 	patchPreview?: string;
@@ -671,6 +681,14 @@ export interface AgentConnectionCloudDelegationSummary {
 	outputPreview?: string;
 	stderrPreview?: string;
 	error?: string;
+}
+
+/** Live-steering submission result for a tunnel-backed delegation. */
+export interface AgentConnectionCloudSteerResult {
+	delegation: AgentConnectionCloudDelegationSummary;
+	commandId: string;
+	taskId: string;
+	state: "acknowledged" | "queued";
 }
 
 export interface AgentConnectionCloudProgress {
@@ -752,6 +770,7 @@ export interface AgentConnection {
 	replaceAcpMcpServers?(servers: readonly AcpMcpServerConfig[], ownerId: string): Promise<void>;
 	releaseAcpMcpServers?(ownerId: string, serverNames: readonly string[]): Promise<void>;
 	supportsCloudSessions?(): boolean;
+	supportsCloudTunnel?(): boolean;
 	cloudDelegate?(
 		prompt: string,
 		options?: AgentConnectionCloudDelegateOptions,
@@ -759,6 +778,7 @@ export interface AgentConnection {
 	): Promise<AgentConnectionCloudDelegationSummary>;
 	cloudDelegationsList?(): Promise<AgentConnectionCloudDelegationSummary[]>;
 	cloudDelegationStop?(delegationId: string, forfeit?: boolean): Promise<AgentConnectionCloudDelegationSummary>;
+	cloudDelegationSteer?(delegationId: string, text: string): Promise<AgentConnectionCloudSteerResult>;
 	cloudDelegationApply?(delegationId: string): Promise<AgentConnectionCloudDelegationSummary>;
 
 	prompt(message: string, options?: AgentConnectionPromptOptions): Promise<void>;

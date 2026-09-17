@@ -62,6 +62,7 @@ import type {
 	AgentConnectionCloudDelegateOptions,
 	AgentConnectionCloudDelegationSummary,
 	AgentConnectionCloudProgress,
+	AgentConnectionCloudSteerResult,
 	AgentConnectionEvent,
 	AgentConnectionEventListener,
 	AgentConnectionExecuteBashOptions,
@@ -614,6 +615,10 @@ export class DaemonAgentConnection implements AgentConnection {
 		return this.client.supportsServerCapability("cloud_sessions");
 	}
 
+	supportsCloudTunnel(): boolean {
+		return this.client.supportsServerCapability("cloud_tunnel");
+	}
+
 	private async retryCloudMutation<T>(request: () => Promise<T>): Promise<T> {
 		for (let attempt = 0; ; attempt += 1) {
 			try {
@@ -636,6 +641,9 @@ export class DaemonAgentConnection implements AgentConnection {
 	): Promise<AgentConnectionCloudDelegationSummary> {
 		if (!this.supportsCloudSessions()) {
 			throw new DaemonCapabilityUnavailableError("cloud_delegate", "cloud_sessions");
+		}
+		if (options?.tunnel === true && !this.supportsCloudTunnel()) {
+			throw new DaemonCapabilityUnavailableError("cloud_delegate", "cloud_tunnel");
 		}
 		const delegationId = `sess_${randomUUID()}`;
 		const command = {
@@ -693,6 +701,28 @@ export class DaemonAgentConnection implements AgentConnection {
 			),
 		);
 		return data.delegation;
+	}
+
+	async cloudDelegationSteer(delegationId: string, text: string): Promise<AgentConnectionCloudSteerResult> {
+		if (!this.supportsCloudTunnel()) {
+			throw new DaemonCapabilityUnavailableError("cloud_delegation_steer", "cloud_tunnel");
+		}
+		// Generated once per call, outside the retry closure: a retried request
+		// reuses the identity so the guest journal deduplicates the steer.
+		const steerId = randomUUID();
+		const data = await this.retryCloudMutation(() =>
+			this.requestData<{ steered: AgentConnectionCloudSteerResult }>(
+				{
+					type: "cloud_delegation_steer",
+					activeSessionId: this.activeSessionId,
+					delegationId,
+					text,
+					steerId,
+				},
+				DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS,
+			),
+		);
+		return data.steered;
 	}
 
 	async cloudDelegationApply(delegationId: string): Promise<AgentConnectionCloudDelegationSummary> {

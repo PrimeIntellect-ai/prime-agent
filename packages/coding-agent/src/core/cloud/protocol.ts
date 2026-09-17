@@ -9,6 +9,8 @@ import { createHash, randomUUID } from "node:crypto";
  * - hello        client -> gateway: attach to a pre-allocated session.
  * - snapshot     gateway -> client: bounded session state plus an event tail;
  *                also the catch-up answer to subscribe.
+ * - events       gateway -> client: live ordered events after a subscribe,
+ *                pushed in bounded batches as they are recorded.
  * - subscribe    client -> gateway: request every event after a cursor.
  * - submit       client -> gateway: idempotent command submission; the
  *                response is a command receipt frame.
@@ -48,6 +50,8 @@ export const CLOUD_MAX_MODEL_ID_CHARS = 256;
 export const CLOUD_MAX_CAPABILITIES = 16;
 export const CLOUD_MAX_QUEUED_COMMANDS = 64;
 export const CLOUD_MAX_SNAPSHOT_EVENTS = 256;
+export const CLOUD_MAX_TOKEN_CHARS = 256;
+export const CLOUD_MAX_OUTPUT_CHARS = 65_536;
 
 export type CloudSessionId = string;
 export type CloudClientId = string;
@@ -139,7 +143,16 @@ export interface CloudCommandReceipt {
 export type CloudEvent =
 	| { sequence: number; kind: "command_accepted"; recordedAt: string; receipt: CloudCommandReceipt }
 	| { sequence: number; kind: "command_state"; recordedAt: string; receipt: CloudCommandReceipt }
-	| { sequence: number; kind: "session_status"; recordedAt: string; status: CloudSessionStatus };
+	| { sequence: number; kind: "session_status"; recordedAt: string; status: CloudSessionStatus }
+	| {
+			sequence: number;
+			kind: "output_delta";
+			recordedAt: string;
+			taskId: CloudTaskId;
+			stream: "stdout" | "stderr";
+			/** Bounded live output fragment; the guest batches and caps it. */
+			text: string;
+	  };
 
 export interface CloudSessionState {
 	cwd: string;
@@ -158,6 +171,12 @@ export interface CloudHello {
 	clientId: CloudClientId;
 	/** Pre-allocated session to attach; sessions are never created by hello. */
 	sessionId: CloudSessionId;
+	/**
+	 * Protocol authentication secret for transports that terminate outside the
+	 * trusted VM boundary (e.g. a public tunnel edge). Loopback transports may
+	 * omit it; a tunnel bridge always requires it.
+	 */
+	authToken?: string;
 	/** The client's last consumed position; its generation must match generation. */
 	cursor?: CloudCursor;
 	capabilities?: readonly CloudCapability[];
@@ -180,6 +199,15 @@ export interface CloudSubscribe {
 	type: "subscribe";
 	sessionId: CloudSessionId;
 	cursor: CloudCursor;
+}
+
+/** Live ordered events pushed after a subscribe; bounded batches. */
+export interface CloudEvents {
+	type: "events";
+	sessionId: CloudSessionId;
+	/** Event-log epoch the batch belongs to. */
+	generation: number;
+	events: readonly CloudEvent[];
 }
 
 export interface CloudSubmit {
@@ -226,6 +254,7 @@ export type CloudMessage =
 	| CloudHello
 	| CloudSnapshot
 	| CloudSubscribe
+	| CloudEvents
 	| CloudSubmit
 	| CloudGetCommand
 	| CloudCommand
@@ -392,6 +421,7 @@ function eventProblem(value: unknown, label: string): string | undefined {
 		"command_accepted",
 		"command_state",
 		"session_status",
+		"output_delta",
 	]);
 	if (kindProblem !== undefined) {
 		return kindProblem;
@@ -402,10 +432,49 @@ function eventProblem(value: unknown, label: string): string | undefined {
 			expectOneOf(value.status, `${label}.status`, CLOUD_SESSION_STATUSES),
 		);
 	}
+	if (value.kind === "output_delta") {
+		return firstProblem(
+			expectFields(value, ["sequence", "kind", "recordedAt", "taskId", "stream", "text"]),
+			cloudIdProblem(value.taskId, `${label}.taskId`),
+			expectOneOf(value.stream, `${label}.stream`, ["stdout", "stderr"]),
+			expectString(value.text, `${label}.text`, CLOUD_MAX_OUTPUT_CHARS, 0),
+		);
+	}
 	return firstProblem(
 		expectFields(value, ["sequence", "kind", "recordedAt", "receipt"]),
 		receiptProblem(value.receipt, `${label}.receipt`),
 	);
+}
+
+function eventsProblem(value: Record<string, unknown>): string | undefined {
+	const base = firstProblem(
+		expectFields(value, ["type", "sessionId", "generation", "events"]),
+		cloudIdProblem(value.sessionId, "events.sessionId"),
+		expectInteger(value.generation, "events.generation", 1),
+	);
+	if (base !== undefined) {
+		return base;
+	}
+	const events = value.events;
+	if (!Array.isArray(events)) {
+		return "events.events must be an array";
+	}
+	if (events.length > CLOUD_MAX_SNAPSHOT_EVENTS) {
+		return `events.events must hold at most ${CLOUD_MAX_SNAPSHOT_EVENTS} entries`;
+	}
+	let lastSequence = 0;
+	for (let index = 0; index < events.length; index++) {
+		const problem = eventProblem(events[index], `events.events[${index}]`);
+		if (problem !== undefined) {
+			return problem;
+		}
+		const sequence = (events[index] as { sequence: number }).sequence;
+		if (sequence <= lastSequence) {
+			return `events.events[${index}].sequence must strictly increase`;
+		}
+		lastSequence = sequence;
+	}
+	return undefined;
 }
 
 function sessionStateProblem(value: unknown): string | undefined {
@@ -440,7 +509,16 @@ function sessionStateProblem(value: unknown): string | undefined {
 
 function helloProblem(value: Record<string, unknown>): string | undefined {
 	const base = firstProblem(
-		expectFields(value, ["type", "protocolVersion", "generation", "clientId", "sessionId", "cursor", "capabilities"]),
+		expectFields(value, [
+			"type",
+			"protocolVersion",
+			"generation",
+			"clientId",
+			"sessionId",
+			"authToken",
+			"cursor",
+			"capabilities",
+		]),
 		expectInteger(value.protocolVersion, "hello.protocolVersion", 1),
 		value.protocolVersion === CLOUD_PROTOCOL_VERSION
 			? undefined
@@ -448,6 +526,9 @@ function helloProblem(value: Record<string, unknown>): string | undefined {
 		expectInteger(value.generation, "hello.generation", 1),
 		cloudIdProblem(value.clientId, "hello.clientId"),
 		cloudIdProblem(value.sessionId, "hello.sessionId"),
+		value.authToken === undefined
+			? undefined
+			: expectString(value.authToken, "hello.authToken", CLOUD_MAX_TOKEN_CHARS),
 		value.cursor === undefined ? undefined : cursorProblem(value.cursor, "hello.cursor"),
 		capabilitiesProblem(value.capabilities, "hello.capabilities"),
 	);
@@ -593,6 +674,8 @@ export function cloudMessageProblem(value: unknown): string | undefined {
 			return snapshotProblem(value);
 		case "subscribe":
 			return subscribeProblem(value);
+		case "events":
+			return eventsProblem(value);
 		case "submit":
 			return submitProblem(value);
 		case "get_command":
@@ -639,7 +722,16 @@ export function serializeCloudMessage(message: CloudMessage): string {
 	return serialized;
 }
 
-const CLOUD_MESSAGE_TYPES = ["hello", "snapshot", "subscribe", "submit", "get_command", "command", "ack"] as const;
+const CLOUD_MESSAGE_TYPES = [
+	"hello",
+	"snapshot",
+	"subscribe",
+	"events",
+	"submit",
+	"get_command",
+	"command",
+	"ack",
+] as const;
 
 type Problem = string | undefined;
 

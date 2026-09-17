@@ -508,12 +508,21 @@ export interface CommandSessionDataEvent {
 	data: Uint8Array;
 }
 
-/** End event: the terminal record, replayed for sessions retained after exit. */
+/**
+ * End event: the terminal record, replayed for sessions retained after exit.
+ * The deployed CommandSession service marks every field of the EndEvent proto
+ * optional and omits the ones it does not know (observed end events carry
+ * only a subset, sometimes none at all): the event itself is the terminal
+ * signal, `exited` defaults true, and missing details stay undefined.
+ */
 export interface CommandSessionEndEvent {
 	kind: "end";
-	exitCode: number;
+	/** Process exit code when the platform reports one. */
+	exitCode?: number;
+	/** True when the session ended by process exit; true unless the platform says otherwise. */
 	exited: boolean;
-	status: string;
+	/** Platform status token when provided. */
+	status?: string;
 	error?: string;
 }
 
@@ -703,13 +712,16 @@ function decodeEndEvent(reader: Reader, context: string): CommandSessionEndEvent
 				reader.skip(wire, `${context}.${field}`);
 		}
 	}
-	if (exitCode === undefined || exited === undefined || status === undefined) {
-		throw new CommandSessionProtoError("invalid_wire", `${context}: end event misses exit_code, exited, or status`);
-	}
-	const end: CommandSessionEndEvent = { kind: "end", exitCode, exited, status };
-	if (errorSeen) {
-		end.error = error;
-	}
+	// Tolerant by necessity: the deployed end event is valid with any subset
+	// of its fields, so nothing here is required. An end event always means
+	// the session is no longer running, hence the defaulted `exited`.
+	const end: CommandSessionEndEvent = {
+		kind: "end",
+		exited: exited ?? true,
+		...(exitCode === undefined ? {} : { exitCode }),
+		...(status === undefined ? {} : { status }),
+		...(errorSeen ? { error } : {}),
+	};
 	return end;
 }
 

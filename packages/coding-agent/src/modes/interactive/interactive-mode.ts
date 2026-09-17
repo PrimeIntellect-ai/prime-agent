@@ -9612,7 +9612,8 @@ export class InteractiveMode {
 	}
 
 	private async handleCloudCommand(args: string): Promise<void> {
-		const usage = "Usage: /cloud run <prompt> | /cloud status | /cloud stop [id] [--forfeit] | /cloud apply <id>";
+		const usage =
+			"Usage: /cloud run [--tunnel] <prompt> | /cloud status | /cloud stop [id] [--forfeit] | /cloud steer <id> <text> | /cloud apply <id>";
 		if (!this.agentConnection.supportsCloudSessions?.()) {
 			this.showError("Cloud sandbox delegation requires a newer daemon with the cloud_sessions capability.");
 			return;
@@ -9629,6 +9630,8 @@ export class InteractiveMode {
 			id: string;
 			status: string;
 			promptPreview: string;
+			tunnel?: { tunnelId: string; url: string; attached: boolean };
+			liveOutput?: string;
 			resultReady: boolean;
 			resultApplied: boolean;
 			changedPaths?: string[];
@@ -9640,8 +9643,11 @@ export class InteractiveMode {
 			error?: string;
 		}): string => {
 			const result = item.resultApplied ? "applied" : item.resultReady ? "ready to apply" : "no result yet";
+			const tunnelSuffix = item.tunnel
+				? `  tunnel ${item.tunnel.attached ? "attached" : "down"} (${item.tunnel.tunnelId})`
+				: "";
 			const lines = [
-				`${item.id}  ${item.status}  ${result}  ${item.promptPreview}${item.error ? `  (${item.error})` : ""}`,
+				`${item.id}  ${item.status}  ${result}  ${item.promptPreview}${item.error ? `  (${item.error})` : ""}${tunnelSuffix}`,
 			];
 			if (item.changedPaths && item.changedPaths.length > 0) {
 				const suffix = (item.changedPathCount ?? item.changedPaths.length) > item.changedPaths.length ? " …" : "";
@@ -9649,6 +9655,7 @@ export class InteractiveMode {
 			}
 			if (item.outputPreview?.trim()) lines.push(`Output:\n${item.outputPreview.trimEnd()}`);
 			if (item.stderrPreview?.trim()) lines.push(`Stderr:\n${item.stderrPreview.trimEnd()}`);
+			if (item.liveOutput?.trim()) lines.push(`Live output:\n${item.liveOutput.trimEnd()}`);
 			return lines.join("\n");
 		};
 
@@ -9713,31 +9720,77 @@ export class InteractiveMode {
 				if (item) this.showStatus(format(item));
 				return;
 			}
+			if (verb === "steer") {
+				const firstSpace = rest.search(/\s/);
+				if (firstSpace === -1 || !rest.slice(firstSpace).trim()) {
+					this.showError(usage);
+					return;
+				}
+				const delegationId = rest.slice(0, firstSpace);
+				const text = rest.slice(firstSpace).trim();
+				if (!this.agentConnection.supportsCloudTunnel?.()) {
+					this.showError("Cloud steering requires a newer daemon with the cloud_tunnel capability.");
+					return;
+				}
+				const steered = await this.agentConnection.cloudDelegationSteer?.(delegationId, text);
+				if (steered) {
+					this.showStatus(
+						`Steered ${delegationId}: ${steered.state === "acknowledged" ? "submitted to the running task" : "queued for the next tunnel attachment"}`,
+					);
+				}
+				return;
+			}
 			if (verb !== "run") {
 				this.showError(usage);
 				return;
 			}
-			const prompt = rest;
+			let tunnel = false;
+			let prompt = rest;
+			if (prompt.startsWith("--tunnel")) {
+				const afterFlag = prompt.slice("--tunnel".length);
+				if (afterFlag && !afterFlag.startsWith(" ")) {
+					this.showError(usage);
+					return;
+				}
+				tunnel = true;
+				prompt = afterFlag.trim();
+			}
 			if (!prompt) {
 				this.showError(usage);
 				return;
 			}
-			const confirmed = await this.showExtensionConfirm(
-				"Run in a Prime Sandbox",
-				[
-					"Upload the current Git workspace, including tracked files and unignored untracked files.",
-					"Provision 4 vCPUs, 16 GB memory, and 50 GB disk for up to 120 minutes.",
-					"The remote agent can run commands and access the network. Changes return as a patch and are never applied automatically.",
-				].join("\n"),
-			);
+			if (tunnel && !this.agentConnection.supportsCloudTunnel?.()) {
+				this.showError("Cloud tunnel steering requires a newer daemon with the cloud_tunnel capability.");
+				return;
+			}
+			const confirmLines = [
+				"Upload the current Git workspace, including tracked files and unignored untracked files.",
+				"Provision 4 vCPUs, 16 GB memory, and 50 GB disk for up to 120 minutes.",
+				"The remote agent can run commands and access the network. Changes return as a patch and are never applied automatically.",
+			];
+			if (tunnel) {
+				confirmLines.push(
+					"Register a Prime Tunnel: the sandbox's loopback bridge is exposed over HTTPS with edge basic auth, and the task can be steered live with /cloud steer while it runs.",
+				);
+			}
+			const confirmed = await this.showExtensionConfirm("Run in a Prime Sandbox", confirmLines.join("\n"));
 			if (!confirmed) {
 				this.showStatus("Cloud delegation cancelled before provisioning.");
 				return;
 			}
-			const item = await this.agentConnection.cloudDelegate?.(prompt, undefined, (progress) => {
-				this.showStatus(`[cloud${progress.delegationId ? ` ${progress.delegationId}` : ""}] ${progress.message}`);
-			});
-			if (item) this.showStatus(format(item));
+			const item = await this.agentConnection.cloudDelegate?.(
+				prompt,
+				tunnel ? { tunnel: true } : undefined,
+				(progress) => {
+					this.showStatus(
+						`[cloud${progress.delegationId ? ` ${progress.delegationId}` : ""}] ${progress.message}`,
+					);
+				},
+			);
+			if (item) {
+				const formatted = format(item);
+				this.showStatus(item.tunnel?.attached ? `${formatted}\nTunnel: ${item.tunnel.url}` : formatted);
+			}
 		} catch (error) {
 			this.showError(`Cloud delegation failed: ${error instanceof Error ? error.message : String(error)}`);
 		}

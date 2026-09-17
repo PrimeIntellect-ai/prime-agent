@@ -61,6 +61,7 @@ class FakeDaemonClient {
 	promptResponseError: string | undefined;
 	cloudDelegateDirectFailures = 0;
 	cloudDelegateUncertainFailures = 0;
+	cloudSteerUncertainFailures = 0;
 	cancelPromptAdmissionStatus: "cancelled" | "owned" | "unknown" = "owned";
 	serverCapabilities = new Set<string>();
 	updateRestartSessions: Array<Record<string, unknown>> = [];
@@ -162,6 +163,43 @@ class FakeDaemonClient {
 							promptPreview: "fix it",
 							resultReady: true,
 							resultApplied: command.type === "cloud_delegation_apply",
+						},
+					},
+				};
+			case "cloud_delegation_steer":
+				if (this.cloudSteerUncertainFailures > 0) {
+					this.cloudSteerUncertainFailures--;
+					return {
+						type: "response",
+						command: command.type,
+						success: false,
+						error: "The previous command result is uncertain and was not replayed",
+						errorInfo: {
+							code: "command_result_uncertain",
+							clientId: "fake-client",
+							commandId: "cmd-original",
+						},
+					};
+				}
+				return {
+					type: "response",
+					command: command.type,
+					success: true,
+					data: {
+						steered: {
+							delegation: {
+								id: command.delegationId,
+								activeSessionId: command.activeSessionId,
+								status: "running",
+								createdAt: "2026-01-01T00:00:00.000Z",
+								updatedAt: "2026-01-01T00:00:00.000Z",
+								promptPreview: "fix it",
+								resultReady: false,
+								resultApplied: false,
+							},
+							commandId: "cmd_steer_1",
+							taskId: "task_steer_1",
+							state: "acknowledged",
 						},
 					},
 				};
@@ -3799,5 +3837,49 @@ describe("DaemonAgentConnection cloud delegation", () => {
 		await connection.cloudDelegationStop(delegation.id);
 		await connection.cloudDelegationApply(delegation.id);
 		expect(client.requestTimeouts.slice(-2).every((timeout) => timeout > 60_000)).toBe(true);
+	});
+
+	it("gates the tunnel opt-in and steer on the cloud_tunnel capability", async () => {
+		const client = new FakeDaemonClient();
+		client.serverCapabilities.add("cloud_sessions");
+		const connection = new DaemonAgentConnection(asDaemonClient(client), "active-1");
+
+		// Without the capability the client refuses to send either surface.
+		await expect(connection.cloudDelegate("fix it", { tunnel: true })).rejects.toThrow(/cloud_tunnel/);
+		expect(connection.supportsCloudTunnel()).toBe(false);
+		client.serverCapabilities.add("cloud_tunnel");
+		expect(connection.supportsCloudTunnel()).toBe(true);
+
+		const delegation = await connection.cloudDelegate("fix it", { tunnel: true });
+		expect(delegation).toMatchObject({ id: expect.stringMatching(/^sess_/) as unknown as string });
+		const tunneled = client.requests.find(
+			(command): command is Extract<DaemonCommand, { type: "cloud_delegate" }> =>
+				command.type === "cloud_delegate" && command.options?.tunnel === true,
+		);
+		expect(tunneled?.options).toEqual({ tunnel: true });
+
+		const steered = await connection.cloudDelegationSteer(delegation.id, "go deeper");
+		expect(steered).toMatchObject({ state: "acknowledged", commandId: "cmd_steer_1" });
+		const steerCommands = client.requests.filter(
+			(command): command is Extract<DaemonCommand, { type: "cloud_delegation_steer" }> =>
+				command.type === "cloud_delegation_steer",
+		);
+		expect(steerCommands).toHaveLength(1);
+		expect(steerCommands[0]).toMatchObject({ delegationId: delegation.id, text: "go deeper" });
+		expect(typeof steerCommands[0]?.steerId).toBe("string");
+
+		// A retried steer must keep the same identity: the guest journal
+		// deduplicates by command id, so a fresh identity would run the
+		// follow-up task twice.
+		client.requests.length = 0;
+		client.cloudSteerUncertainFailures = 1;
+		await connection.cloudDelegationSteer(delegation.id, "retry me");
+		const retried = client.requests.filter(
+			(command): command is Extract<DaemonCommand, { type: "cloud_delegation_steer" }> =>
+				command.type === "cloud_delegation_steer",
+		);
+		expect(retried).toHaveLength(2);
+		expect(typeof retried[0]?.steerId).toBe("string");
+		expect(retried[0]?.steerId).toBe(retried[1]?.steerId);
 	});
 });

@@ -7,6 +7,8 @@ import type {
 	CloudSessionBaseline,
 	CloudSessionCreateInput,
 	CloudSessionRecord,
+	CloudSessionTunnel,
+	CloudTunnelState,
 } from "../src/core/cloud/cloud-session-store.js";
 import {
 	CLOUD_DELEGATION_BOOTSTRAP_SCRIPT,
@@ -187,6 +189,19 @@ class FakeRecordStore implements CloudDelegationRecordStore {
 	setResultImportState(sessionId: string, state: CloudResultImportState): CloudSessionRecord {
 		return this.mutate(sessionId, (record) => {
 			record.resultImportState = state;
+		});
+	}
+
+	setTunnel(sessionId: string, tunnel: CloudSessionTunnel): CloudSessionRecord {
+		return this.mutate(sessionId, (record) => {
+			record.tunnel = { ...tunnel };
+			record.tunnelState = "registered";
+		});
+	}
+
+	setTunnelState(sessionId: string, state: CloudTunnelState): CloudSessionRecord {
+		return this.mutate(sessionId, (record) => {
+			record.tunnelState = state;
 		});
 	}
 
@@ -837,8 +852,24 @@ describe("CloudDelegationOrchestrator", () => {
 		await expectFailure(() => h.orchestrator.forfeit("sess_missing-1"), "not_found");
 	});
 
+	it("carries the guest inference billing team on the resident process env", async () => {
+		const h = harness();
+		await h.orchestrator.delegate(delegationRequest({ sessionId: "sess_team-1", inferenceTeamId: "team_guest" }));
+		const start = h.process.starts[0];
+		if (start === undefined) throw new Error("expected a resident process start");
+		expect(start.env.PRIME_TEAM_ID).toBe("team_guest");
+
+		const bare = harness();
+		await bare.orchestrator.delegate(delegationRequest({ sessionId: "sess_team-2" }));
+		expect(bare.process.starts[0]?.env.PRIME_TEAM_ID).toBeUndefined();
+	});
+
 	it("keeps the bootstrap contract: fixed script, terminal writes, binary patch", () => {
 		expect(CLOUD_DELEGATION_BOOTSTRAP_SCRIPT).toContain("trap finish EXIT");
+		// The workspace extraction must not preserve contributor ownership:
+		// a root extraction of a macOS uid on the "." entry makes git refuse
+		// the repo ("not in a git directory") in the deployed sandbox.
+		expect(CLOUD_DELEGATION_BOOTSTRAP_SCRIPT).toContain("tar --no-same-owner -xf");
 		expect(CLOUD_DELEGATION_BOOTSTRAP_SCRIPT).toContain("status.txt");
 		expect(CLOUD_DELEGATION_BOOTSTRAP_SCRIPT).toContain("stdout.txt");
 		expect(CLOUD_DELEGATION_BOOTSTRAP_SCRIPT).toContain("stderr.txt");

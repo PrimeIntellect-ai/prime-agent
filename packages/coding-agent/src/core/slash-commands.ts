@@ -189,7 +189,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{
 		name: "cloud",
 		description: "Run and manage direct Prime Sandbox delegations",
-		argumentHint: "[run <prompt>|status|stop <id> [--forfeit]|apply <id>]",
+		argumentHint: "[run [--tunnel] <prompt>|status|stop <id> [--forfeit]|steer <id> <text>|apply <id>]",
 		takesArgument: true,
 	},
 	{

@@ -286,6 +286,31 @@ describe("daemon protocol helpers", () => {
 		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(29);
 	});
 
+	it("capability-gates the cloud tunnel opt-in and steer command at their introducing schema revision 30", () => {
+		// The steer command is new: it requires the cloud_tunnel capability.
+		expect(DAEMON_COMMAND_COMPATIBILITY.cloud_delegation_steer).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 30,
+			capability: "cloud_tunnel",
+		});
+		expect(isSessionPlaneDaemonCommand("cloud_delegation_steer")).toBe(true);
+		expect(isDaemonMutatingCommand({ type: "cloud_delegation_steer" })).toBe(true);
+		// The tunnel opt-in rides the existing cloud_delegate command as an
+		// optional field and only requires the capability when it is present.
+		const plain = { type: "cloud_delegate", activeSessionId: "a", delegationId: "d", prompt: "p" } as const;
+		expect(getDaemonCommandCompatibilities(plain)).toEqual([DAEMON_COMMAND_COMPATIBILITY.cloud_delegate]);
+		const tunneled = { ...plain, options: { tunnel: true } };
+		expect(getDaemonCommandCompatibilities(tunneled)).toEqual([
+			{ minProtocol: 7, minSchemaRevision: 30, capability: "cloud_tunnel" },
+			DAEMON_COMMAND_COMPATIBILITY.cloud_delegate,
+		]);
+		// An old client never sends the field; an old daemon never advertises the
+		// capability, and both directions keep working because everything is
+		// optional and the summary tunnel fields degrade locally.
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("cloud_tunnel");
+		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(30);
+	});
+
 	it("gates honest worker-state reporting at its introducing schema revision", () => {
 		// Revision 16 adds the "stopping" workerState and stops reporting
 		// disconnected workers as "ready". The field is optional and old clients

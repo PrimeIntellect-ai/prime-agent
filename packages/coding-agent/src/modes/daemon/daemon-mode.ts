@@ -277,6 +277,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"cloud_delegations_list",
 	"cloud_delegation_stop",
 	"cloud_delegation_apply",
+	"cloud_delegation_steer",
 	"create",
 	"attach",
 	"detach",
@@ -3581,7 +3582,9 @@ export class AgentDaemon {
 			clientId: client.id,
 			serverCapabilities: isDirectCloudConfigured()
 				? DAEMON_DEFAULT_SERVER_CAPABILITIES
-				: DAEMON_DEFAULT_SERVER_CAPABILITIES.filter((capability) => capability !== "cloud_sessions"),
+				: DAEMON_DEFAULT_SERVER_CAPABILITIES.filter(
+						(capability) => capability !== "cloud_sessions" && capability !== "cloud_tunnel",
+					),
 		});
 
 		if (client.transport === "private-framed") {
@@ -4196,6 +4199,16 @@ export class AgentDaemon {
 					state.runtime.cwd,
 				);
 				return success(command.id, command.type, { delegation });
+			}
+			case "cloud_delegation_steer": {
+				const state = this.getBoundSessionState(command.activeSessionId);
+				const steered = await this.getCloudService().steer(
+					this.cloudOwnerId(state),
+					command.delegationId,
+					command.text,
+					command.steerId,
+				);
+				return success(command.id, command.type, { steered });
 			}
 			case "list": {
 				const activeSessions = Array.from(this.sessions.values());

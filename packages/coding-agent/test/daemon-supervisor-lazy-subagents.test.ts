@@ -654,6 +654,46 @@ describe("daemon supervisor passive subagent topology", () => {
 		await expect(first).resolves.toMatchObject({ success: true });
 	});
 
+	it("forwards plain commands without request options and progress-bearing cloud commands with them", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-forward-arity-"));
+		tempDirs.push(directory);
+		const activeSummary = summary({
+			id: "active-1",
+			activeSessionId: "active-1",
+			sessionId: "session-1",
+			rlmDepth: 0,
+		});
+		const resident = worker("resident", [activeSummary]);
+		resident.client.request.mockResolvedValue(success(undefined, "cloud_delegate", {}));
+		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			descriptorDir: join(directory, "workers"),
+		}) as unknown as SupervisorInternals;
+		supervisor.workers.set("resident", resident);
+		seedSupervisorRoster(supervisor, resident);
+		const client = { id: "client", attachedActiveSessionIds: new Set<string>() };
+
+		// A cloud delegation carries a progress listener in request options.
+		await supervisor.handleCommand(client, {
+			type: "cloud_delegate",
+			activeSessionId: "active-1",
+			delegationId: "sess_cloud_1",
+			prompt: "work",
+		});
+		expect(resident.client.request).toHaveBeenCalledTimes(1);
+		expect(resident.client.request.mock.calls[0]).toHaveLength(3);
+		expect(resident.client.request.mock.calls[0]?.[2]).toMatchObject({
+			onProgress: expect.any(Function),
+		});
+
+		// Every other command keeps the two-argument request shape: options are
+		// optional and must not surface as a progress object that is absent.
+		resident.client.request.mockClear();
+		await supervisor.handleCommand(client, { type: "heartbeat_get", activeSessionId: "active-1" });
+		expect(resident.client.request).toHaveBeenCalledTimes(1);
+		expect(resident.client.request.mock.calls[0]).toHaveLength(2);
+	});
+
 	it("serializes same-scope inactive renames across catalog validation and commit", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-saved-rename-race-"));
 		tempDirs.push(directory);

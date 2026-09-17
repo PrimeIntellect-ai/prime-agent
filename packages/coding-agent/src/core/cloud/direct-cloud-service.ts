@@ -1,22 +1,29 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
 	chmodSync,
 	closeSync,
 	existsSync,
 	fsyncSync,
+	lstatSync,
 	mkdirSync,
 	openSync,
 	readFileSync,
 	realpathSync,
 	renameSync,
 	rmSync,
+	type Stats,
 	statSync,
 	writeSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join } from "node:path";
 import { spawnHidden, waitForChildProcess } from "../../utils/child-process.js";
 import { findGitPaths } from "../../utils/git.js";
 import { loadPrimeCliConfig } from "../prime-inference-auth.js";
+import { CloudTunnelAttachment, type CloudTunnelAttachmentTarget } from "./bridge/tunnel-attachment.js";
+import { CloudTunnelSecretStore } from "./bridge/tunnel-secrets.js";
+import type { CloudTunnelTransport } from "./bridge/tunnel-transport.js";
+import { WsTunnelTransport } from "./bridge/tunnel-transport.js";
 import { type CloudSessionRecord, CloudSessionStore } from "./cloud-session-store.js";
 import {
 	CLOUD_GUEST_RESULTS_DIR,
@@ -26,6 +33,10 @@ import {
 	type CloudDelegationReadiness,
 	type CloudDelegationResultsClient,
 	type CloudDelegationTaskResult,
+	type CloudDelegationTunnelClient,
+	type CloudDelegationTunnelInfo,
+	type CloudDelegationTunnelRegistration,
+	type CloudDelegationTunnelRequest,
 	type CloudDelegationVmProcessClient,
 	type CloudDelegationVmProcessHandle,
 	type CloudDelegationVmProcessStartRequest,
@@ -39,6 +50,7 @@ import {
 	PrimeSandboxClient,
 	PrimeSandboxError,
 } from "./prime-sandbox-client.js";
+import { PrimeTunnelClient } from "./prime-tunnel-client.js";
 import type { CloudSessionStatus } from "./protocol.js";
 import { CloudResultStore, decodeCloudResultPatch } from "./result-import.js";
 import { DurableCloudTraceMirror } from "./trace-mirror.js";
@@ -49,6 +61,16 @@ export interface DirectCloudDelegateOptions {
 	instanceType?: string;
 	model?: string;
 	timeoutMinutes?: number;
+	/** Opt in to a Prime Tunnel bridge for live steering; off by default. */
+	tunnel?: boolean;
+}
+
+/** Live-steering result of a submitted command over the tunnel bridge. */
+export interface DirectCloudSteerResult {
+	delegation: DirectCloudDelegationSummary;
+	commandId: string;
+	taskId: string;
+	state: "acknowledged" | "queued";
 }
 
 export interface DirectCloudDelegationSummary {
@@ -59,6 +81,14 @@ export interface DirectCloudDelegationSummary {
 	updatedAt: string;
 	promptPreview: string;
 	sandboxId?: string;
+	/** Prime Tunnel registration when the delegation opted into live steering. */
+	tunnel?: {
+		tunnelId: string;
+		url: string;
+		attached: boolean;
+	};
+	/** Bounded tail of live output streamed over the tunnel bridge. */
+	liveOutput?: string;
 	resultReady: boolean;
 	resultApplied: boolean;
 	changedPaths?: string[];
@@ -86,6 +116,14 @@ export interface DirectCloudServiceOptions {
 	workspace?: CloudDelegationWorkspaceTransfer;
 	results?: CloudDelegationResultsClient;
 	readiness?: CloudDelegationReadiness;
+	/** Team the guest's inference requests bill to; defaults to the delegation team. */
+	inferenceTeamId?: string;
+	/** Prime Tunnel registration boundary; registers live-steering tunnels. */
+	tunnels?: CloudDelegationTunnelClient;
+	/** Durable per-session tunnel secrets; defaults to a 0600 store. */
+	tunnelSecrets?: CloudTunnelSecretStore;
+	/** WebSocket transport for tunnel attachments; defaults to the real client. */
+	tunnelTransport?: CloudTunnelTransport;
 	monitorPollIntervalMs?: number;
 	/** Called before a cloud event acknowledgement advances. It must persist durably. */
 	traceSink?: (activeSessionId: string, cloudSessionId: string, event: CloudOutboxEvent) => void | Promise<void>;
@@ -106,6 +144,126 @@ const DEFAULT_MEMORY_GB = 16;
 const DEFAULT_DISK_GB = 50;
 const DEFAULT_TIMEOUT_MINUTES = 120;
 const MAX_RESULT_TEXT_BYTES = 16 * 1024 * 1024;
+/** Loopback port inside the sandbox that frpc forwards the tunnel edge to. */
+export const CLOUD_TUNNEL_BRIDGE_PORT = 8740;
+/** Bounded preview of the live output tail surfaced on delegation summaries. */
+const MAX_LIVE_OUTPUT_CHARS = 4_000;
+const TUNNEL_GUEST_CURSOR_FILE = "tunnel-guest-cursor.json";
+const TUNNEL_GUEST_CURSOR_MAX_BYTES = 4_096;
+
+/**
+ * Cloud-scoped team override. The daemon bills sandboxes and registers
+ * tunnels under this team when set, without touching the user's global Prime
+ * CLI team selection.
+ */
+export function cloudTeamOverride(env: NodeJS.ProcessEnv = process.env): string | undefined {
+	const value = env.PRIME_AGENT_CLOUD_TEAM_ID?.trim();
+	return value === "" || value === undefined ? undefined : value;
+}
+
+/**
+ * Team the guest's inference requests bill to (PRIME_TEAM_ID in the guest).
+ * Defaults to the delegation team: without a team header the guest credential
+ * bills its personal balance, which typically holds no funds and fails every
+ * inference request with 402.
+ */
+export function cloudInferenceTeamOverride(env: NodeJS.ProcessEnv = process.env): string | undefined {
+	const value = env.PRIME_AGENT_CLOUD_INFERENCE_TEAM_ID?.trim();
+	return value === "" || value === undefined ? undefined : value;
+}
+
+/** Durable guest-cursor persistence for tunnel attachments (pre-ack). */
+function saveTunnelGuestCursor(eventsDirectory: string, cursor: { generation: number; sequence: number }): void {
+	const path = join(eventsDirectory, TUNNEL_GUEST_CURSOR_FILE);
+	const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+	const fd = openSync(temporary, "wx", 0o600);
+	try {
+		writeSync(
+			fd,
+			`${JSON.stringify({ version: 1, ...cursor })}
+`,
+		);
+		fsyncSync(fd);
+	} finally {
+		closeSync(fd);
+	}
+	renameSync(temporary, path);
+}
+
+function loadTunnelGuestCursor(eventsDirectory: string): { generation: number; sequence: number } | undefined {
+	const path = join(eventsDirectory, TUNNEL_GUEST_CURSOR_FILE);
+	if (!existsSync(path)) return undefined;
+	if (statSync(path).size > TUNNEL_GUEST_CURSOR_MAX_BYTES) {
+		throw new Error("tunnel guest cursor file is too large");
+	}
+	const value = JSON.parse(readFileSync(path, "utf8")) as Partial<{
+		version: number;
+		generation: number;
+		sequence: number;
+	}>;
+	if (
+		value.version !== 1 ||
+		typeof value.generation !== "number" ||
+		!Number.isInteger(value.generation) ||
+		value.generation < 1 ||
+		typeof value.sequence !== "number" ||
+		!Number.isInteger(value.sequence) ||
+		value.sequence < 0
+	) {
+		throw new Error("tunnel guest cursor file is corrupt");
+	}
+	return { generation: value.generation, sequence: value.sequence };
+}
+
+/** Adapter from the typed Prime Tunnel REST client to the orchestrator boundary. */
+class ConcreteTunnels implements CloudDelegationTunnelClient {
+	constructor(private readonly client: PrimeTunnelClient) {}
+
+	async register(request: {
+		sessionId: string;
+		guestPort: number;
+		name?: string;
+		teamId?: string;
+		labels?: string[];
+		httpUser?: string;
+	}): Promise<CloudDelegationTunnelRegistration> {
+		const registration = await this.client.createTunnel({
+			guestPort: request.guestPort,
+			...(request.name === undefined ? {} : { name: request.name }),
+			...(request.teamId === undefined ? {} : { teamId: request.teamId }),
+			...(request.labels === undefined ? {} : { labels: request.labels }),
+			...(request.httpUser === undefined ? {} : { httpUser: request.httpUser }),
+		});
+		return {
+			tunnelId: registration.tunnelId,
+			url: registration.url,
+			hostname: registration.hostname,
+			httpUser: registration.httpUser,
+			expiresAt: registration.expiresAt,
+			httpPassword: registration.httpPassword,
+			frpServerHost: registration.serverHost,
+			frpServerPort: registration.serverPort,
+			frpToken: registration.frpToken,
+			bindingSecret: registration.bindingSecret,
+		};
+	}
+
+	async delete(tunnelId: string): Promise<void> {
+		await this.client.deleteTunnel(tunnelId);
+	}
+
+	async get(tunnelId: string): Promise<CloudDelegationTunnelInfo | undefined> {
+		const tunnel = await this.client.getTunnel(tunnelId);
+		if (tunnel === undefined) return undefined;
+		return {
+			tunnelId: tunnel.tunnelId,
+			url: tunnel.url,
+			hostname: tunnel.hostname,
+			httpUser: tunnel.httpUser ?? "",
+			expiresAt: tunnel.expiresAt,
+		};
+	}
+}
 
 function boundedText(bytes: Uint8Array, label: string, maxBytes = MAX_RESULT_TEXT_BYTES, truncate = false): string {
 	if (bytes.byteLength > maxBytes && !truncate) throw new Error(`${label} exceeds ${maxBytes} bytes`);
@@ -257,10 +415,13 @@ class ConcreteVmProcesses implements CloudDelegationVmProcessClient {
 		void (async () => {
 			try {
 				for await (const event of stream) {
-					if (event.kind === "end") tracked.state = { state: "exited", exitCode: event.exitCode };
+					if (event.kind === "end") {
+						// The deployed end event may omit exit_code; unknown codes stay null.
+						tracked.state = { state: "exited", exitCode: event.exitCode ?? null };
+					}
 				}
 				const exit = await stream.exit;
-				tracked.state = { state: "exited", exitCode: exit.exitCode };
+				tracked.state = { state: "exited", exitCode: exit.exitCode ?? null };
 			} catch {
 				tracked.state = { state: "unknown" };
 			}
@@ -275,6 +436,8 @@ interface StoredDelegationInput {
 	cwd: string;
 	prompt: string;
 	model?: string;
+	/** Persisted tunnel opt-in so crash recovery re-registers the bridge. */
+	tunnel?: boolean;
 	timeoutMinutes: number;
 	baseline: CloudDelegationCapturedWorkspace["baseline"];
 	totalSizeBytes: number;
@@ -314,6 +477,7 @@ class CloudDelegationInputStore {
 			cwd: request.cwd,
 			prompt: request.prompt,
 			...(request.options?.model ? { model: request.options.model } : {}),
+			...(request.options?.tunnel ? { tunnel: true } : {}),
 			timeoutMinutes,
 			baseline: captured.baseline,
 			totalSizeBytes: captured.totalSizeBytes,
@@ -339,6 +503,7 @@ class CloudDelegationInputStore {
 			typeof value.cwd !== "string" ||
 			typeof value.prompt !== "string" ||
 			(value.model !== undefined && typeof value.model !== "string") ||
+			(value.tunnel !== undefined && typeof value.tunnel !== "boolean") ||
 			!Number.isInteger(value.timeoutMinutes) ||
 			typeof value.totalSizeBytes !== "number" ||
 			!value.baseline ||
@@ -391,6 +556,7 @@ class CloudDelegationInputStore {
 			metadata.cwd !== request.cwd ||
 			metadata.prompt !== request.prompt ||
 			metadata.model !== request.options?.model ||
+			(metadata.tunnel === true) !== (request.options?.tunnel === true) ||
 			metadata.timeoutMinutes !== timeoutMinutes ||
 			metadata.baseline.manifestDigest !== baseline.manifestDigest
 		) {
@@ -622,8 +788,80 @@ function cloudStatusForProgress(phase: CloudDelegationProgress["phase"]): CloudS
 	}
 }
 
-export function isDirectCloudConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
-	return Boolean(env.PRIME_AGENT_CLOUD_IMAGE?.trim() && env.PRIME_AGENT_CLOUD_INFERENCE_API_KEY?.trim());
+/**
+ * Resolution of the guest-scoped cloud inference credential.
+ *
+ * The credential never needs to live in a shell profile or command history:
+ * `PRIME_AGENT_CLOUD_INFERENCE_API_KEY_FILE` (default
+ * `~/.config/prime-agent-cloud/inference-api-key`) loads it from a local key
+ * file that must be a regular, non-symlink file readable only by the owner.
+ * `PRIME_AGENT_CLOUD_INFERENCE_API_KEY` remains an explicit override.
+ */
+export interface CloudInferenceCredentialResolution {
+	/** The guest-scoped credential when one was resolved. */
+	credential?: string;
+	/** Human-readable reason when no credential was resolved. */
+	problem?: string;
+}
+
+/** Key-file path used for the cloud inference credential. */
+export function cloudInferenceKeyFilePath(env: NodeJS.ProcessEnv = process.env, home = homedir()): string {
+	const explicit = env.PRIME_AGENT_CLOUD_INFERENCE_API_KEY_FILE?.trim();
+	if (explicit !== undefined && explicit !== "") return explicit;
+	return join(home, ".config", "prime-agent-cloud", "inference-api-key");
+}
+
+const CLOUD_INFERENCE_CREDENTIAL_MAX_CHARS = 8192;
+
+/**
+ * Shared loader for capability gating and {@link DirectCloudService}. An
+ * insecure file fails closed: it never yields a credential, and the reason
+ * explains what to fix.
+ */
+export function resolveCloudInferenceCredential(
+	env: NodeJS.ProcessEnv = process.env,
+	home = homedir(),
+): CloudInferenceCredentialResolution {
+	const fromEnv = env.PRIME_AGENT_CLOUD_INFERENCE_API_KEY?.trim();
+	if (fromEnv !== undefined && fromEnv !== "") return { credential: fromEnv };
+	const path = cloudInferenceKeyFilePath(env, home);
+	if (!isAbsolute(path)) {
+		return { problem: "PRIME_AGENT_CLOUD_INFERENCE_API_KEY_FILE must be an absolute path" };
+	}
+	let stat: Stats;
+	try {
+		// lstat so a symlink is rejected by its own type, never followed.
+		stat = lstatSync(path);
+	} catch {
+		return {
+			problem: `no cloud inference credential configured: set PRIME_AGENT_CLOUD_INFERENCE_API_KEY or create ${path}`,
+		};
+	}
+	if (!stat.isFile()) {
+		return { problem: `cloud inference key file ${path} is not a regular file` };
+	}
+	if ((stat.mode & 0o077) !== 0) {
+		return { problem: `cloud inference key file ${path} must be readable only by its owner (chmod 600)` };
+	}
+	if (stat.size > CLOUD_INFERENCE_CREDENTIAL_MAX_CHARS) {
+		return { problem: `cloud inference key file ${path} is too large` };
+	}
+	let contents: string;
+	try {
+		contents = readFileSync(path, "utf8");
+	} catch {
+		return { problem: `cloud inference key file ${path} is not readable` };
+	}
+	const credential = contents.trim();
+	if (credential === "" || credential.includes("\0") || /\n|\r/.test(credential)) {
+		return { problem: `cloud inference key file ${path} must hold one single-line key` };
+	}
+	return { credential };
+}
+
+export function isDirectCloudConfigured(env: NodeJS.ProcessEnv = process.env, home = homedir()): boolean {
+	if (!env.PRIME_AGENT_CLOUD_IMAGE?.trim()) return false;
+	return resolveCloudInferenceCredential(env, home).credential !== undefined;
 }
 
 export class DirectCloudService {
@@ -647,6 +885,13 @@ export class DirectCloudService {
 	private readonly readiness: CloudDelegationReadiness;
 	private readonly inferenceApiKey: string;
 	private readonly dockerImage: string;
+	private readonly teamId: string | undefined;
+	/** Team the guest's inference requests bill to. */
+	private readonly inferenceTeamId: string | undefined;
+	private readonly tunnels: CloudDelegationTunnelClient | undefined;
+	private readonly tunnelSecrets: CloudTunnelSecretStore;
+	private readonly tunnelTransport: CloudTunnelTransport;
+	private readonly attachments = new Map<string, CloudTunnelAttachment>();
 
 	constructor(options: DirectCloudServiceOptions) {
 		this.stateDirectory = options.stateDirectory;
@@ -662,22 +907,41 @@ export class DirectCloudService {
 		if (!apiKey) throw new Error("Cloud delegation requires PRIME_API_KEY or a logged-in Prime CLI");
 		const dockerImage = options.dockerImage ?? process.env.PRIME_AGENT_CLOUD_IMAGE;
 		if (!dockerImage) throw new Error("Cloud delegation requires PRIME_AGENT_CLOUD_IMAGE");
-		const inferenceApiKey = options.inferenceApiKey ?? process.env.PRIME_AGENT_CLOUD_INFERENCE_API_KEY;
-		if (!inferenceApiKey) {
-			throw new Error("Cloud delegation requires a guest-scoped PRIME_AGENT_CLOUD_INFERENCE_API_KEY");
+		const resolved =
+			options.inferenceApiKey === undefined
+				? resolveCloudInferenceCredential()
+				: { credential: options.inferenceApiKey };
+		const inferenceApiKey = resolved.credential;
+		if (inferenceApiKey === undefined) {
+			throw new Error(
+				`Cloud delegation requires a guest-scoped inference credential: ${resolved.problem ?? "none configured"}`,
+			);
 		}
 		this.inferenceApiKey = inferenceApiKey;
 		this.dockerImage = dockerImage;
+		this.teamId = options.teamId ?? cloudTeamOverride() ?? config.teamId;
+		this.inferenceTeamId = options.inferenceTeamId ?? cloudInferenceTeamOverride() ?? this.teamId;
 		this.store = options.store ?? new CloudSessionStore(join(options.stateDirectory, "sessions"));
 		this.resultStore = options.resultStore ?? new CloudResultStore(join(options.stateDirectory, "results"));
 		this.inputStore = new CloudDelegationInputStore(join(options.stateDirectory, "inputs"));
 		this.outputStore = new CloudTaskOutputStore(join(options.stateDirectory, "outputs"));
+		this.tunnelSecrets =
+			options.tunnelSecrets ?? new CloudTunnelSecretStore(join(options.stateDirectory, "tunnel-secrets"));
+		this.tunnelTransport = options.tunnelTransport ?? new WsTunnelTransport();
+		this.tunnels =
+			options.tunnels ??
+			new ConcreteTunnels(
+				new PrimeTunnelClient({
+					apiKey,
+					baseUrl: options.baseUrl ?? config.baseUrl ?? DEFAULT_BASE_URL,
+				}),
+			);
 		this.platform =
 			options.platform ??
 			new PrimeSandboxClient({
 				apiKey,
 				baseUrl: options.baseUrl ?? config.baseUrl ?? DEFAULT_BASE_URL,
-				teamId: options.teamId ?? config.teamId,
+				teamId: this.teamId,
 			});
 		this.process = options.process ?? new ConcreteVmProcesses(this.platform, this.store);
 		this.workspace = options.workspace ?? new ConcreteWorkspaceTransfer(this.platform);
@@ -720,6 +984,14 @@ export class DirectCloudService {
 			request.onProgress?.(progress);
 		};
 		try {
+			const tunnel: CloudDelegationTunnelRequest | undefined =
+				request.options?.tunnel === true
+					? {
+							bridgeToken: randomBytes(32).toString("hex"),
+							guestPort: CLOUD_TUNNEL_BRIDGE_PORT,
+							...(this.teamId === undefined ? {} : { teamId: this.teamId }),
+						}
+					: undefined;
 			const handle = await this.orchestrator(onProgress).delegate({
 				sessionId: request.delegationId,
 				parentSessionId: request.activeSessionId,
@@ -736,12 +1008,55 @@ export class DirectCloudService {
 					idleTimeoutMinutes: timeoutMinutes,
 				},
 				inferenceCredential: this.inferenceApiKey,
+				...(this.inferenceTeamId === undefined ? {} : { inferenceTeamId: this.inferenceTeamId }),
+				...(tunnel === undefined ? {} : { tunnel }),
 			});
 			this.startResultMonitor(request.activeSessionId, handle.record.sessionId);
+			if (tunnel !== undefined) this.ensureAttachment(request.activeSessionId, handle.record.sessionId);
 			return this.summary(handle.record, request.prompt);
 		} finally {
 			if (traceSessionId) await this.safeFlushTrace(request.activeSessionId, traceSessionId);
 		}
+	}
+
+	/** Live-steer one running tunnel delegation; requires an active bridge. */
+	async steer(
+		activeSessionId: string,
+		sessionId: string,
+		text: string,
+		steerId?: string,
+	): Promise<DirectCloudSteerResult> {
+		return await this.withOperationLock(sessionId, () =>
+			this.steerUnlocked(activeSessionId, sessionId, text, steerId),
+		);
+	}
+
+	private async steerUnlocked(
+		activeSessionId: string,
+		sessionId: string,
+		text: string,
+		steerId?: string,
+	): Promise<DirectCloudSteerResult> {
+		const record = this.owned(activeSessionId, sessionId);
+		if (!record.tunnel || record.tunnelState !== "registered") {
+			throw new Error(`Cloud delegation ${sessionId} has no live tunnel bridge; rerun it with --tunnel`);
+		}
+		if (text.trim() === "") throw new Error("steer text must not be empty");
+		const attachment = this.ensureAttachment(activeSessionId, sessionId);
+		// The identity is caller-supplied when it exists: a retried daemon
+		// command must map to the same command id and request digest, so the
+		// guest journal deduplicates instead of running the steer twice.
+		const identity = steerId ?? randomUUID();
+		const commandId = `cmd_${identity}`;
+		const taskId = `task_${identity}`;
+		const outcome = await attachment.submit(commandId, { kind: "steer", taskId, text });
+		const current = this.owned(activeSessionId, sessionId);
+		return {
+			delegation: this.summary(current),
+			commandId,
+			taskId,
+			state: outcome.state === "acknowledged" ? "acknowledged" : "queued",
+		};
 	}
 
 	async list(activeSessionId: string): Promise<DirectCloudDelegationSummary[]> {
@@ -757,6 +1072,10 @@ export class DirectCloudService {
 					const current = this.store.get(record.sessionId) ?? record;
 					this.recordStatus(activeSessionId, current.sessionId, this.statusForRecord(current));
 					await this.safeFlushTrace(activeSessionId, current.sessionId);
+					// Durable attachment resume: a restarted daemon re-attaches running tunnels.
+					if (this.isSteerable(current) && !this.attachments.has(current.sessionId)) {
+						this.ensureAttachment(activeSessionId, current.sessionId);
+					}
 				});
 			} catch (error) {
 				this.store.setLastError(
@@ -783,6 +1102,7 @@ export class DirectCloudService {
 			const handle = forfeit
 				? await this.orchestrator(onProgress).forfeit(record.sessionId)
 				: await this.orchestrator(onProgress).stop(record.sessionId);
+			await this.releaseTunnel(this.owned(activeSessionId, sessionId));
 			return this.summary(handle.record);
 		} finally {
 			await this.safeFlushTrace(activeSessionId, sessionId);
@@ -835,6 +1155,7 @@ export class DirectCloudService {
 		record = this.owned(activeSessionId, sessionId);
 		if (record.cleanupState !== "released") {
 			if (record.cleanupState !== "releasing") this.store.setCleanupState(sessionId, "releasing");
+			await this.releaseTunnel(record);
 			if (record.sandboxId) {
 				try {
 					await this.platform.deleteSandbox(record.sandboxId);
@@ -868,6 +1189,121 @@ export class DirectCloudService {
 		}
 	}
 
+	/**
+	 * Ensure the tunnel attachment supervisor for one session is running.
+	 * Durable across daemon restarts: the record, secrets, and guest cursor all
+	 * live on disk, so `list()` re-attaches a running delegation.
+	 */
+	private ensureAttachment(activeSessionId: string, sessionId: string): CloudTunnelAttachment {
+		const existing = this.attachments.get(sessionId);
+		if (existing !== undefined) return existing;
+		const eventsDirectory = join(this.stateDirectory, "events", sessionId);
+		const attachment = new CloudTunnelAttachment({
+			sessionId,
+			generation: this.store.get(sessionId)?.generation ?? 1,
+			transport: this.tunnelTransport,
+			callbacks: {
+				resolveTarget: (): CloudTunnelAttachmentTarget | undefined => {
+					const record = this.store.get(sessionId);
+					if (record?.tunnel === undefined || record.tunnelState !== "registered" || !this.isSteerable(record)) {
+						return undefined;
+					}
+					const secrets = this.tunnelSecrets.get(sessionId);
+					if (secrets === undefined) return undefined;
+					return {
+						url: record.tunnel.url,
+						httpUser: record.tunnel.httpUser,
+						httpPassword: secrets.httpPassword,
+						bridgeToken: secrets.bridgeToken,
+					};
+				},
+				appendGuestEvent: (event) => {
+					const outbox = new DurableCloudEventOutbox({ directory: eventsDirectory, sessionId });
+					outbox.append(event);
+				},
+				flushTrace: () => this.safeFlushTrace(activeSessionId, sessionId),
+				persistGuestCursor: (cursor) => saveTunnelGuestCursor(eventsDirectory, cursor),
+				loadGuestCursor: () => loadTunnelGuestCursor(eventsDirectory),
+				recordAttachment: (attachmentUuid) => {
+					if (this.store.get(sessionId)) this.store.recordAttachment(sessionId, attachmentUuid);
+				},
+				isSessionLive: () => {
+					const record = this.store.get(sessionId);
+					return record !== undefined && this.isSteerable(record);
+				},
+				checkTunnelAlive: async () => {
+					const record = this.store.get(sessionId);
+					if (record?.tunnel === undefined || this.tunnels === undefined) return false;
+					return (await this.tunnels.get(record.tunnel.tunnelId)) !== undefined;
+				},
+				onAttachmentError: (message) => {
+					if (this.store.get(sessionId)) this.store.setLastError(sessionId, message);
+				},
+				onTerminal: (reason) => {
+					const record = this.store.get(sessionId);
+					if (record === undefined) return;
+					this.store.setLastError(sessionId, `tunnel bridge stopped: ${reason}`);
+					if (record.tunnelState === "registered" && record.tunnel !== undefined) {
+						// The supervisor is terminal and nothing else will
+						// release the registration: delete it before forgetting
+						// the tunnel. Fire-and-forget because this callback runs
+						// on the attachment's own loop, which must not await its
+						// own stop.
+						const tunnelId = record.tunnel.tunnelId;
+						void this.tunnels?.delete(tunnelId).catch(() => {
+							// An unreachable platform cannot keep the tunnel
+							// alive locally; the state is terminal either way.
+						});
+					}
+					if (record.tunnelState !== "released") this.store.setTunnelState(sessionId, "released");
+					this.tunnelSecrets.delete(sessionId);
+					this.attachments.delete(sessionId);
+				},
+			},
+		});
+		this.attachments.set(sessionId, attachment);
+		attachment.start();
+		return attachment;
+	}
+
+	/** True while the delegation can still accept steering over its tunnel. */
+	private isSteerable(record: CloudSessionRecord): boolean {
+		return (
+			record.tunnel !== undefined &&
+			record.tunnelState === "registered" &&
+			record.resultImportState === "pending" &&
+			(record.observedLifecycle === "running" || record.observedLifecycle === "provisioning") &&
+			(record.desiredLifecycle === "running" || record.desiredLifecycle === "provisioning") &&
+			record.cleanupState !== "releasing" &&
+			record.cleanupState !== "released"
+		);
+	}
+
+	/** Release the tunnel: stop the attachment, delete the registration, clear secrets. */
+	private async releaseTunnel(record: CloudSessionRecord): Promise<void> {
+		const attachment = this.attachments.get(record.sessionId);
+		if (attachment !== undefined) {
+			await attachment.stop();
+			this.attachments.delete(record.sessionId);
+		}
+		if (record.tunnel !== undefined && record.tunnelState === "registered") {
+			try {
+				await this.tunnels?.delete(record.tunnel.tunnelId);
+			} catch (error) {
+				this.store.setLastError(
+					record.sessionId,
+					`tunnel release failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+			try {
+				this.store.setTunnelState(record.sessionId, "released");
+			} catch {
+				// Terminal state conflicts are benign here.
+			}
+		}
+		this.tunnelSecrets.delete(record.sessionId);
+	}
+
 	private startResultMonitor(activeSessionId: string, sessionId: string): void {
 		if (this.monitors.has(sessionId)) return;
 		const monitor = this.monitorResults(activeSessionId, sessionId)
@@ -896,6 +1332,7 @@ export class DirectCloudService {
 		}
 		if (record.cleanupState !== "releasing") this.store.setCleanupState(record.sessionId, "releasing");
 		try {
+			await this.releaseTunnel(record);
 			await this.platform.deleteSandbox(record.sandboxId);
 		} catch (error) {
 			this.store.setCleanupState(record.sessionId, "failed");
@@ -1033,6 +1470,7 @@ export class DirectCloudService {
 			prompt: stored.metadata.prompt,
 			options: {
 				...(stored.metadata.model ? { model: stored.metadata.model } : {}),
+				...(stored.metadata.tunnel ? { tunnel: true } : {}),
 				timeoutMinutes: stored.metadata.timeoutMinutes,
 			},
 		});
@@ -1062,6 +1500,7 @@ export class DirectCloudService {
 				record.sessionId,
 				"the cloud sandbox no longer exists and no terminal result was found",
 			);
+			await this.releaseTunnel(record);
 			return;
 		}
 		this.store.setSandbox(record.sessionId, sandbox.id, sandbox.status);
@@ -1076,6 +1515,7 @@ export class DirectCloudService {
 		if (processState.state === "lost") {
 			this.store.setObservedLifecycle(record.sessionId, "lost");
 			this.store.setLastError(record.sessionId, "the cloud agent process could not be reattached");
+			await this.releaseTunnel(record);
 			return;
 		}
 		if (processState.state !== "exited") return;
@@ -1112,9 +1552,31 @@ export class DirectCloudService {
 				workspace: this.workspace,
 				results: this.results,
 				readiness: this.readiness,
+				...(this.tunnels === undefined ? {} : { tunnel: this.tunnels }),
+				tunnelSecrets: this.tunnelSecrets,
 			},
 			{ onProgress },
 		);
+	}
+
+	/** Bounded tail of streamed guest output, read back from the durable outbox. */
+	private liveOutputPreview(sessionId: string): string | undefined {
+		const eventsDirectory = join(this.stateDirectory, "events", sessionId);
+		try {
+			const outbox = new DurableCloudEventOutbox({ directory: eventsDirectory, sessionId });
+			const tail = outbox.tailCursor.sequence;
+			const from = Math.max(0, tail - 40);
+			if (from >= tail) return undefined;
+			const events = outbox.eventsAfter({ generation: outbox.generation, sequence: from });
+			const texts: string[] = [];
+			for (const item of events) {
+				if (item.event.kind === "output_delta") texts.push(item.event.text);
+			}
+			if (texts.length === 0) return undefined;
+			return texts.join("").slice(-MAX_LIVE_OUTPUT_CHARS);
+		} catch {
+			return undefined;
+		}
 	}
 
 	private summary(record: CloudSessionRecord, prompt?: string): DirectCloudDelegationSummary {
@@ -1154,6 +1616,19 @@ export class DirectCloudService {
 			promptPreview:
 				prompt?.slice(0, 120) ?? this.outputStore.getPromptPreview(record.sessionId) ?? "cloud delegation",
 			...(record.sandboxId ? { sandboxId: record.sandboxId } : {}),
+			...(record.tunnel !== undefined
+				? {
+						tunnel: {
+							tunnelId: record.tunnel.tunnelId,
+							url: record.tunnel.url,
+							attached: this.attachments.get(record.sessionId)?.attached ?? false,
+						},
+					}
+				: {}),
+			...(() => {
+				const liveOutput = this.liveOutputPreview(record.sessionId);
+				return liveOutput === undefined ? {} : { liveOutput };
+			})(),
 			resultReady,
 			resultApplied: resultRecord?.state === "applied" || record.resultImportState === "imported",
 			...(resultRecord

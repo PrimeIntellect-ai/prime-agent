@@ -85,6 +85,25 @@ export interface CloudSessionBaseline {
 	manifestDigest: string;
 }
 
+/** Prime Tunnel registration attached to a delegation; non-secret fields only. */
+export interface CloudSessionTunnel {
+	/** Platform tunnel id; also the frpc subdomain. */
+	tunnelId: string;
+	/** Public HTTPS origin the local daemon attaches over. */
+	url: string;
+	/** Public hostname of the tunnel edge. */
+	hostname: string;
+	/** Edge basic-auth username; the password lives only in the secret store. */
+	httpUser: string;
+	/** ISO-8601 registration expiry; reconnects must survive until cleanup. */
+	expiresAt: string;
+	/** Registration timestamp. */
+	registeredAt: string;
+}
+
+export const CLOUD_TUNNEL_STATES = ["registered", "released"] as const;
+export type CloudTunnelState = (typeof CLOUD_TUNNEL_STATES)[number];
+
 /** Versioned cloud-session record persisted at `<directory>/<sessionId>.json`. */
 export interface CloudSessionRecord {
 	version: 1;
@@ -98,6 +117,10 @@ export interface CloudSessionRecord {
 	residentProcessUuid: string;
 	/** Latest bridge attachment UUID; replaced on every reconnect. */
 	attachmentUuid?: string;
+	/** Registered Prime Tunnel for this incarnation; non-secret fields only. */
+	tunnel?: CloudSessionTunnel;
+	/** Tunnel release state; `released` is terminal. */
+	tunnelState?: CloudTunnelState;
 	/** Sandbox create idempotency key for this incarnation. */
 	createIdempotencyKey?: string;
 	/** Platform sandbox id once allocated. */
@@ -154,6 +177,8 @@ const RECORD_FIELDS = [
 	"generation",
 	"residentProcessUuid",
 	"attachmentUuid",
+	"tunnel",
+	"tunnelState",
 	"createIdempotencyKey",
 	"sandboxId",
 	"sandboxStatus",
@@ -204,6 +229,10 @@ export function cloudSessionRecordProblem(value: unknown): string | undefined {
 		expectInteger(value.generation, "record.generation", 1),
 		expectUuid(value.residentProcessUuid, "record.residentProcessUuid"),
 		value.attachmentUuid === undefined ? undefined : expectUuid(value.attachmentUuid, "record.attachmentUuid"),
+		value.tunnel === undefined ? undefined : tunnelProblem(value.tunnel, "record.tunnel"),
+		value.tunnelState === undefined
+			? undefined
+			: expectOneOf(value.tunnelState, "record.tunnelState", CLOUD_TUNNEL_STATES),
 		value.createIdempotencyKey === undefined
 			? undefined
 			: expectSegment(value.createIdempotencyKey, "record.createIdempotencyKey"),
@@ -494,6 +523,50 @@ export class CloudSessionStore {
 				return false;
 			}
 			record.attachmentUuid = attachmentUuid;
+			return true;
+		});
+	}
+
+	/**
+	 * Record the registered Prime Tunnel for this incarnation. Set once; a
+	 * re-registration replaces it only after the previous tunnel was released.
+	 */
+	setTunnel(sessionId: string, tunnel: CloudSessionTunnel): CloudSessionRecord {
+		const problem = tunnelProblem(tunnel, "tunnel");
+		if (problem !== undefined) {
+			throw new CloudSessionStoreError("invalid", problem);
+		}
+		return this.mutate(sessionId, (record) => {
+			if (record.tunnel?.tunnelId === tunnel.tunnelId) {
+				if (record.tunnelState === "registered") return false;
+				record.tunnelState = "registered";
+				return true;
+			}
+			if (record.tunnel !== undefined && record.tunnelState !== "released") {
+				throw new CloudSessionStoreError(
+					"conflict",
+					`cloud session ${sessionId} already holds tunnel ${record.tunnel.tunnelId}; release it first`,
+				);
+			}
+			record.tunnel = { ...tunnel };
+			record.tunnelState = "registered";
+			return true;
+		});
+	}
+
+	/** Mark the tunnel released; terminal for this incarnation. */
+	setTunnelState(sessionId: string, state: CloudTunnelState): CloudSessionRecord {
+		if (!CLOUD_TUNNEL_STATES.includes(state)) {
+			throw new CloudSessionStoreError("invalid", `tunnelState must be one of ${CLOUD_TUNNEL_STATES.join(", ")}`);
+		}
+		return this.mutate(sessionId, (record) => {
+			if (record.tunnelState === state) {
+				return false;
+			}
+			if (record.tunnelState === "released") {
+				throw new CloudSessionStoreError("conflict", `tunnel state is terminal: ${record.tunnelState}`);
+			}
+			record.tunnelState = state;
 			return true;
 		});
 	}
@@ -845,6 +918,23 @@ function baselineProblem(value: unknown, label: string): string | undefined {
 		typeof value.manifestDigest === "string" && isCloudDigest(value.manifestDigest)
 			? undefined
 			: `${label}.manifestDigest must be a sha256:<64 hex> digest`,
+	);
+}
+
+function tunnelProblem(value: unknown, label: string): string | undefined {
+	if (!isRecord(value)) {
+		return `${label} must be an object`;
+	}
+	return firstProblem(
+		expectFields(value, ["tunnelId", "url", "hostname", "httpUser", "expiresAt", "registeredAt"]),
+		typeof value.tunnelId === "string" && PLATFORM_SEGMENT_PATTERN.test(value.tunnelId)
+			? undefined
+			: `${label}.tunnelId must be a URL-safe segment`,
+		expectString(value.url, `${label}.url`, 2048),
+		expectString(value.hostname, `${label}.hostname`, 255),
+		expectString(value.httpUser, `${label}.httpUser`, 128),
+		expectString(value.expiresAt, `${label}.expiresAt`, CLOUD_MAX_TIMESTAMP_CHARS),
+		expectString(value.registeredAt, `${label}.registeredAt`, CLOUD_MAX_TIMESTAMP_CHARS),
 	);
 }
 

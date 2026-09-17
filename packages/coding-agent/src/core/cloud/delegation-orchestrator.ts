@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { CLOUD_GUEST_BRIDGE_SCRIPT } from "./bridge/guest-bridge-script.js";
 import type {
 	CloudCleanupState,
 	CloudDesiredLifecycle,
@@ -7,6 +8,8 @@ import type {
 	CloudSessionBaseline,
 	CloudSessionCreateInput,
 	CloudSessionRecord,
+	CloudSessionTunnel,
+	CloudTunnelState,
 } from "./cloud-session-store.js";
 import {
 	MAX_TRANSFER_BYTES,
@@ -91,6 +94,8 @@ export const CLOUD_GUEST_BOOTSTRAP_PATH = `${CLOUD_GUEST_ROOT}/bootstrap/bootstr
 export const CLOUD_GUEST_PROMPT_PATH = `${CLOUD_GUEST_ROOT}/task/prompt.txt`;
 export const CLOUD_GUEST_AUTH_PATH = `${CLOUD_GUEST_ROOT}/auth/inference.token`;
 export const CLOUD_GUEST_RESULTS_DIR = `${CLOUD_GUEST_ROOT}/results`;
+export const CLOUD_GUEST_BRIDGE_PATH = `${CLOUD_GUEST_ROOT}/bridge/bridge-server.mjs`;
+export const CLOUD_GUEST_BRIDGE_STATE_DIR = `${CLOUD_GUEST_ROOT}/bridge/state`;
 
 /** Fixed-name environment variables carried by the resident process. */
 export const CLOUD_DELEGATION_ENV_KEYS = {
@@ -105,6 +110,20 @@ export const CLOUD_DELEGATION_ENV_KEYS = {
 	agentBin: "PRIME_AGENT_CLOUD_AGENT_BIN",
 	model: "PRIME_AGENT_CLOUD_MODEL",
 	pkg: "PRIME_AGENT_CLOUD_PACKAGE",
+	/** Guest inference billing team; consumed by the image's prime-agent. */
+	inferenceTeamId: "PRIME_TEAM_ID",
+	bridgeEnabled: "PRIME_AGENT_CLOUD_BRIDGE_ENABLED",
+	bridgePath: "PRIME_AGENT_CLOUD_BRIDGE_PATH",
+	bridgePort: "PRIME_AGENT_CLOUD_BRIDGE_PORT",
+	bridgeToken: "PRIME_AGENT_CLOUD_BRIDGE_TOKEN",
+	bridgeStateDir: "PRIME_AGENT_CLOUD_BRIDGE_STATE_DIR",
+	bridgeNodeBin: "PRIME_AGENT_CLOUD_NODE_BIN",
+	frpcBin: "PRIME_AGENT_CLOUD_FRPC_BIN",
+	tunnelId: "PRIME_AGENT_CLOUD_TUNNEL_ID",
+	tunnelFrpServerHost: "PRIME_AGENT_CLOUD_TUNNEL_FRP_SERVER_HOST",
+	tunnelFrpServerPort: "PRIME_AGENT_CLOUD_TUNNEL_FRP_SERVER_PORT",
+	tunnelFrpToken: "PRIME_AGENT_CLOUD_TUNNEL_FRP_TOKEN",
+	tunnelBindingSecret: "PRIME_AGENT_CLOUD_TUNNEL_BINDING_SECRET",
 } as const;
 
 /** Fixed VM start command: a shell-free argv that runs the uploaded script. */
@@ -166,9 +185,12 @@ trap finish EXIT
 trap 'OUTCOME="stopped"; exit 143' INT TERM
 
 # Unpack the uploaded workspace and reconstruct the git baseline so status,
-# diff, and commit work against the submitted state.
+# diff, and commit work against the submitted state. --no-same-owner: the
+# archive may carry the contributor's macOS uid/gid on its "." entry, and a
+# root extraction that applied it would leave git refusing the foreign-owned
+# repository ("not in a git directory").
 mkdir -p "$WORKSPACE_DIR"
-tar -xf "$ARCHIVE_PATH" -C "$WORKSPACE_DIR" 2>> "$RESULTS_DIR/stderr.txt"
+tar --no-same-owner -xf "$ARCHIVE_PATH" -C "$WORKSPACE_DIR" 2>> "$RESULTS_DIR/stderr.txt"
 if [ ! -d "$WORKSPACE_DIR/.git" ]; then
 	git init -q "$WORKSPACE_DIR" 2>> "$RESULTS_DIR/stderr.txt"
 	git -C "$WORKSPACE_DIR" config user.name "prime-agent-cloud"
@@ -179,6 +201,13 @@ fi
 BASELINE="$(git -C "$WORKSPACE_DIR" rev-parse HEAD 2>> "$RESULTS_DIR/stderr.txt")"
 chmod 600 "$AUTH_PATH" 2>> "$RESULTS_DIR/stderr.txt"
 cp "$MANIFEST_PATH" "$RESULTS_DIR/workspace-manifest.json" 2>> "$RESULTS_DIR/stderr.txt"
+
+# Tunnel mode: the uploaded bridge supervises tasks, serves the session
+# protocol on loopback, and owns the terminal results contract from here on.
+if [ -n "\${PRIME_AGENT_CLOUD_BRIDGE_ENABLED:-}" ]; then
+	export PRIME_AGENT_CLOUD_GIT_BASELINE="$BASELINE"
+	exec "\${PRIME_AGENT_CLOUD_NODE_BIN:-node}" "\${PRIME_AGENT_CLOUD_BRIDGE_PATH:?bridge path is required}"
+fi
 
 # Run the configured Prime Agent package/model in the submitted workspace: inference,
 # tools, the Python kernel, and delegated children all execute here.
@@ -318,6 +347,8 @@ export interface CloudDelegationRecordStore {
 	setLastError(sessionId: string, error?: string): CloudSessionRecord;
 	setCleanupState(sessionId: string, state: CloudCleanupState): CloudSessionRecord;
 	setResultImportState(sessionId: string, state: CloudResultImportState): CloudSessionRecord;
+	setTunnel(sessionId: string, tunnel: CloudSessionTunnel): CloudSessionRecord;
+	setTunnelState(sessionId: string, state: CloudTunnelState): CloudSessionRecord;
 }
 
 /** Generic Prime Sandbox platform surface (`PrimeSandboxClient`-compatible). */
@@ -403,6 +434,65 @@ export interface CloudDelegationReadiness {
 	isReady(sandbox: PrimeSandbox): Promise<boolean>;
 }
 
+/**
+ * Prime Tunnel registration boundary (Direction A). The LOCAL daemon owns
+ * tunnel lifecycle with the user's platform credentials; the guest receives
+ * only this one tunnel's frp connection details.
+ */
+export interface CloudDelegationTunnelClient {
+	/** Register a tunnel forwarding the edge to a guest loopback port. */
+	register(request: {
+		sessionId: string;
+		guestPort: number;
+		name?: string;
+		teamId?: string;
+		labels?: string[];
+		httpUser?: string;
+	}): Promise<CloudDelegationTunnelRegistration>;
+	/** Delete one tunnel; idempotent. */
+	delete(tunnelId: string): Promise<void>;
+	/** Tunnel status; undefined when the registration no longer exists. */
+	get(tunnelId: string): Promise<CloudDelegationTunnelInfo | undefined>;
+}
+
+/** Non-secret tunnel facts, safe to record on the cloud-session record. */
+export interface CloudDelegationTunnelInfo {
+	tunnelId: string;
+	url: string;
+	hostname: string;
+	httpUser: string;
+	expiresAt: string;
+}
+
+/** Registration result; every field except the non-secret facts is a secret. */
+export interface CloudDelegationTunnelRegistration extends CloudDelegationTunnelInfo {
+	/** One-time edge basic-auth password; persist durably, never log it. */
+	httpPassword: string;
+	frpServerHost: string;
+	frpServerPort: number;
+	/** frp connection token; valid only for this tunnel's frpc. */
+	frpToken: string;
+	bindingSecret: string;
+}
+
+/** Durable per-session tunnel secrets (bridge protocol token + edge password). */
+export interface CloudDelegationTunnelSecrets {
+	save(sessionId: string, secrets: { bridgeToken: string; httpPassword: string }): void;
+	delete(sessionId: string): void;
+}
+
+/** Opt-in tunnel request on a delegation; off unless explicitly requested. */
+export interface CloudDelegationTunnelRequest {
+	/** Protocol authentication token the guest bridge will require on hello. */
+	bridgeToken: string;
+	/** Loopback port inside the sandbox frpc forwards the edge to. */
+	guestPort: number;
+	/** Edge basic-auth username; defaults to a fixed application name. */
+	httpUser?: string;
+	/** Team scope for the tunnel registration; defaults to the platform client's team. */
+	teamId?: string;
+}
+
 /** Every external effect of a delegation, injected. */
 export interface CloudDelegationBoundaries {
 	store: CloudDelegationRecordStore;
@@ -411,6 +501,9 @@ export interface CloudDelegationBoundaries {
 	workspace: CloudDelegationWorkspaceTransfer;
 	results: CloudDelegationResultsClient;
 	readiness: CloudDelegationReadiness;
+	/** Present only in daemon configurations that can register Prime Tunnels. */
+	tunnel?: CloudDelegationTunnelClient;
+	tunnelSecrets?: CloudDelegationTunnelSecrets;
 }
 
 /** Explicit sandbox resources; defaults differ across platform surfaces. */
@@ -442,6 +535,14 @@ export interface CloudDelegationRequest {
 	sandbox: CloudDelegationSandboxSpec;
 	/** Cloud inference credential; uploaded to the VM, never recorded. */
 	inferenceCredential: string;
+	/**
+	 * Team the guest's inference requests bill to (X-Prime-Team-ID). Omitting
+	 * it bills the guest credential's personal balance, which regularly has
+	 * no funds and fails every request with 402.
+	 */
+	inferenceTeamId?: string;
+	/** Opt in to a Prime Tunnel bridge for live steering; off by default. */
+	tunnel?: CloudDelegationTunnelRequest;
 }
 
 export interface CloudDelegationOrchestratorOptions {
@@ -474,6 +575,11 @@ export interface CloudDelegationHandle {
 
 const SESSION_ID_PATTERN = /^sess_[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const TERMINAL_SANDBOX_STATUSES: ReadonlySet<string> = new Set(["ERROR", "TERMINATED", "TIMEOUT"]);
+
+/** A tunnel registered for this launch; carries the guest env to install. */
+interface TunnelGrant {
+	registration: CloudDelegationTunnelRegistration;
+}
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -883,13 +989,25 @@ export class CloudDelegationOrchestrator {
 		if (this.requireRecord(sessionId).desiredLifecycle === "stopping") {
 			return this.handle(this.requireRecord(sessionId), "uncertain");
 		}
-		flow.progress("uploading", "uploading bootstrap, prompt, credential, and workspace");
-		await this.uploadInputs(ready.id, record, request, captured, secrets);
-		if (this.requireRecord(sessionId).desiredLifecycle === "stopping") {
-			return this.handle(this.requireRecord(sessionId), "uncertain");
+		let tunnelGrant: TunnelGrant | undefined;
+		if (request.tunnel !== undefined) {
+			flow.progress("waiting", "registering the Prime Tunnel for live steering");
+			tunnelGrant = await this.ensureTunnel(record, request.tunnel, secrets);
+			secrets.push(tunnelGrant.registration.httpPassword, request.tunnel.bridgeToken);
 		}
-		flow.progress("starting", "starting the resident process");
-		await this.startResident(record, request, ready.id, secrets);
+		try {
+			flow.progress("uploading", "uploading bootstrap, prompt, credential, and workspace");
+			await this.uploadInputs(ready.id, record, request, captured, secrets, tunnelGrant);
+			if (this.requireRecord(sessionId).desiredLifecycle === "stopping") {
+				return this.handle(this.requireRecord(sessionId), "uncertain");
+			}
+			flow.progress("starting", "starting the resident process");
+			await this.startResident(record, request, ready.id, secrets, tunnelGrant);
+		} catch (error) {
+			// A registered tunnel must not outlive a failed launch.
+			if (tunnelGrant !== undefined) await this.releaseTunnel(record.sessionId, tunnelGrant.registration, secrets);
+			throw error;
+		}
 		this.boundaries.store.setObservedLifecycle(sessionId, "running");
 		try {
 			this.boundaries.store.setDesiredLifecycle(sessionId, "running");
@@ -901,6 +1019,92 @@ export class CloudDelegationOrchestrator {
 		if (updated.desiredLifecycle === "stopping") return await this.stop(sessionId);
 		flow.progress("running", "the resident process is running");
 		return this.handle(updated, "running");
+	}
+
+	private async ensureTunnel(
+		record: CloudSessionRecord,
+		request: CloudDelegationTunnelRequest,
+		secrets: readonly string[],
+	): Promise<TunnelGrant> {
+		const tunnel = this.boundaries.tunnel;
+		const tunnelSecrets = this.boundaries.tunnelSecrets;
+		if (tunnel === undefined || tunnelSecrets === undefined) {
+			throw new CloudDelegationError(
+				"invalid_request",
+				"tunnel delegation was requested but this daemon has no Prime Tunnel client configured",
+			);
+		}
+		const guestPortProblem =
+			!Number.isInteger(request.guestPort) || request.guestPort < 1 || request.guestPort > 65535
+				? "tunnel.guestPort must be an integer from 1 to 65535"
+				: request.bridgeToken.length < 16 || request.bridgeToken.length > 256 || request.bridgeToken.includes("\0")
+					? "tunnel.bridgeToken must be a NUL-free string of 16-256 characters"
+					: undefined;
+		if (guestPortProblem !== undefined) {
+			throw new CloudDelegationError("invalid_request", guestPortProblem);
+		}
+		// A new incarnation needs fresh frp connection details in its environment,
+		// so a stale tunnel from an earlier incarnation is released first.
+		if (record.tunnel !== undefined && record.tunnelState !== "released") {
+			await this.releaseTunnel(record.sessionId, record.tunnel, secrets);
+		}
+		const registration = await this.guarded(
+			"provision_failed",
+			"registering the Prime Tunnel",
+			record.sessionId,
+			secrets,
+			() =>
+				tunnel.register({
+					sessionId: record.sessionId,
+					guestPort: request.guestPort,
+					name: `prime-agent-${record.sessionId}`,
+					...(request.teamId === undefined ? {} : { teamId: request.teamId }),
+					labels: ["prime-agent-cloud", `session:${record.sessionId}`],
+					...(request.httpUser === undefined ? { httpUser: "prime-agent" } : { httpUser: request.httpUser }),
+				}),
+		);
+		secrets = [
+			...secrets,
+			registration.httpPassword,
+			registration.frpToken,
+			registration.bindingSecret,
+			request.bridgeToken,
+		];
+		tunnelSecrets.save(record.sessionId, {
+			bridgeToken: request.bridgeToken,
+			httpPassword: registration.httpPassword,
+		});
+		this.boundaries.store.setTunnel(record.sessionId, {
+			tunnelId: registration.tunnelId,
+			url: registration.url,
+			hostname: registration.hostname,
+			httpUser: registration.httpUser,
+			expiresAt: registration.expiresAt,
+			registeredAt: new Date().toISOString(),
+		});
+		return { registration };
+	}
+
+	/** Delete the tunnel registration and mark it released; idempotent, best-effort. */
+	private async releaseTunnel(
+		sessionId: string,
+		tunnel: { tunnelId: string },
+		secrets: readonly string[],
+	): Promise<void> {
+		const client = this.boundaries.tunnel;
+		try {
+			if (client !== undefined) {
+				await client.delete(tunnel.tunnelId);
+			}
+		} catch (error) {
+			this.safeSetLastError(sessionId, this.redactMessage(`tunnel release failed: ${errorMessage(error)}`, secrets));
+		}
+		try {
+			this.boundaries.store.setTunnelState(sessionId, "released");
+		} catch {
+			// Already released is the common case; anything else is a record issue.
+		}
+		this.boundaries.tunnelSecrets?.delete(sessionId);
 	}
 
 	private async ensureSandbox(
@@ -1000,6 +1204,7 @@ export class CloudDelegationOrchestrator {
 		request: CloudDelegationRequest,
 		captured: CloudDelegationCapturedWorkspace,
 		secrets: string[],
+		tunnelGrant: TunnelGrant | undefined,
 	): Promise<void> {
 		const sessionId = record.sessionId;
 		const auth = await this.guarded("upload_failed", "fetching sandbox gateway credentials", sessionId, secrets, () =>
@@ -1028,7 +1233,17 @@ export class CloudDelegationOrchestrator {
 				content: new TextEncoder().encode(request.inferenceCredential),
 			},
 		];
-		for (const upload of uploads) {
+		const bridgeUpload =
+			tunnelGrant === undefined
+				? []
+				: [
+						{
+							path: CLOUD_GUEST_BRIDGE_PATH,
+							filename: "bridge-server.mjs",
+							content: new TextEncoder().encode(CLOUD_GUEST_BRIDGE_SCRIPT),
+						},
+					];
+		for (const upload of [...uploads, ...bridgeUpload]) {
 			await this.guarded("upload_failed", `uploading ${upload.path}`, sessionId, secrets, () =>
 				this.boundaries.platform.uploadFile(
 					sandboxId,
@@ -1039,7 +1254,11 @@ export class CloudDelegationOrchestrator {
 		}
 	}
 
-	private buildProcessEnv(record: CloudSessionRecord, request: CloudDelegationRequest): Record<string, string> {
+	private buildProcessEnv(
+		record: CloudSessionRecord,
+		request: CloudDelegationRequest,
+		tunnelGrant: TunnelGrant | undefined,
+	): Record<string, string> {
 		const env: Record<string, string> = {
 			[CLOUD_DELEGATION_ENV_KEYS.sessionId]: record.sessionId,
 			[CLOUD_DELEGATION_ENV_KEYS.generation]: String(record.generation),
@@ -1053,6 +1272,24 @@ export class CloudDelegationOrchestrator {
 			[CLOUD_DELEGATION_ENV_KEYS.model]: request.model ?? "",
 			[CLOUD_DELEGATION_ENV_KEYS.pkg]: request.packageSpec ?? "",
 		};
+		if (request.inferenceTeamId !== undefined) {
+			env[CLOUD_DELEGATION_ENV_KEYS.inferenceTeamId] = request.inferenceTeamId;
+		}
+		if (tunnelGrant !== undefined && request.tunnel !== undefined) {
+			const registration = tunnelGrant.registration;
+			env[CLOUD_DELEGATION_ENV_KEYS.bridgeEnabled] = "1";
+			env[CLOUD_DELEGATION_ENV_KEYS.bridgePath] = CLOUD_GUEST_BRIDGE_PATH;
+			env[CLOUD_DELEGATION_ENV_KEYS.bridgePort] = String(request.tunnel.guestPort);
+			env[CLOUD_DELEGATION_ENV_KEYS.bridgeToken] = request.tunnel.bridgeToken;
+			env[CLOUD_DELEGATION_ENV_KEYS.bridgeStateDir] = CLOUD_GUEST_BRIDGE_STATE_DIR;
+			env[CLOUD_DELEGATION_ENV_KEYS.bridgeNodeBin] = "node";
+			env[CLOUD_DELEGATION_ENV_KEYS.frpcBin] = "frpc";
+			env[CLOUD_DELEGATION_ENV_KEYS.tunnelId] = registration.tunnelId;
+			env[CLOUD_DELEGATION_ENV_KEYS.tunnelFrpServerHost] = registration.frpServerHost;
+			env[CLOUD_DELEGATION_ENV_KEYS.tunnelFrpServerPort] = String(registration.frpServerPort);
+			env[CLOUD_DELEGATION_ENV_KEYS.tunnelFrpToken] = registration.frpToken;
+			env[CLOUD_DELEGATION_ENV_KEYS.tunnelBindingSecret] = registration.bindingSecret;
+		}
 		for (const [key, value] of Object.entries(env)) {
 			if (value.includes("\0")) {
 				throw new CloudDelegationError("invalid_request", `process env ${key} must be NUL-free`);
@@ -1066,8 +1303,9 @@ export class CloudDelegationOrchestrator {
 		request: CloudDelegationRequest,
 		sandboxId: string,
 		secrets: readonly string[],
+		tunnelGrant: TunnelGrant | undefined,
 	): Promise<void> {
-		const env = this.buildProcessEnv(record, request);
+		const env = this.buildProcessEnv(record, request, tunnelGrant);
 		await this.guarded("start_failed", "starting the resident process", record.sessionId, secrets, () =>
 			this.boundaries.process.start({
 				sandboxId,

@@ -374,6 +374,36 @@ describe("VmProcessClient.start", () => {
 		await expect(stream.exit).resolves.toMatchObject({ exitCode: 3 });
 	});
 
+	it("accepts the deployed partial end event shape without faulting the stream", async () => {
+		// The deployed CommandSession service marks every EndEvent field
+		// optional and observed exits carry only a subset (sometimes none):
+		// the end event itself is the terminal signal and must never fault.
+		const partialEnd = (body: Uint8Array): Uint8Array => eventFrame(tlenField(3, body));
+		const scenarios = [
+			{ label: "exit code only", body: tvarintField(1, ((0 << 1) ^ (0 >> 31)) | 0) },
+			{ label: "status only", body: tstrField(3, "exited") },
+			{ label: "exited flag only", body: tvarintField(2, 1) },
+			{ label: "no fields at all", body: new Uint8Array(0) },
+		];
+		for (const scenario of scenarios) {
+			const { mock } = fetchRouter([() => streamResponse(env(startEvent(PID)), env(partialEnd(scenario.body)))]);
+			const client = makeClient(mock);
+			const stream = await client.start({ ...startRequest, sessionUuid: SESSION_UUID }, { sleepFn: noSleep });
+			const end = await stream.exit;
+			expect(end.kind).toBe("end");
+			expect(end.exited).toBe(true);
+			await stream.release();
+		}
+		// Fields that ARE present still decode faithfully.
+		const { mock: full } = fetchRouter([
+			() => streamResponse(env(startEvent(PID)), env(endEvent({ exitCode: 7, status: "stopped" }))),
+		]);
+		const client = makeClient(full);
+		const stream = await client.start({ ...startRequest, sessionUuid: SESSION_UUID }, { sleepFn: noSleep });
+		await expect(stream.exit).resolves.toMatchObject({ exitCode: 7, exited: true, status: "stopped" });
+		await stream.release();
+	});
+
 	it("rejects invalid session UUIDs before any network call", async () => {
 		const { mock, calls } = fetchRouter([() => streamResponse()]);
 		const client = makeClient(mock);

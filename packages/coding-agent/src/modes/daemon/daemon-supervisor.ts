@@ -244,6 +244,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"cloud_delegations_list",
 	"cloud_delegation_stop",
 	"cloud_delegation_apply",
+	"cloud_delegation_steer",
 	"create",
 	"attach",
 	"reattach",
@@ -5043,7 +5044,13 @@ export class DaemonSupervisor {
 			await worker.recovery;
 		}
 		const client = this.requireAvailableWorkerClient(worker, command.type === "kill");
-		const response = await client.request(withoutCommandId(command), timeoutMs, { onProgress });
+		// Keep the two-argument request shape when nothing rides the command:
+		// request options are optional and arity-sensitive callers (tests,
+		// worker clients) must not observe a progress object that is absent.
+		const response =
+			onProgress === undefined
+				? await client.request(withoutCommandId(command), timeoutMs)
+				: await client.request(withoutCommandId(command), timeoutMs, { onProgress });
 		if (command.type === "get_state" && response.success && isSessionSummary(response.data)) {
 			return { ...response, id: command.id, data: this.publicSummary(worker, response.data) };
 		}

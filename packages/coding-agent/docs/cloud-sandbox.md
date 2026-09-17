@@ -2,7 +2,7 @@
 
 Implementation plan for delegating Prime Agent sessions and subagents to Prime Sandboxes, with the local daemon driving the Prime Sandbox platform APIs directly. This document is the engineering plan; it references the current daemon, connection, and session code as the seams to build on.
 
-- Status: M0 implementation on `feat/direct-cloud-sandbox`. `/cloud run`, status, stop/forfeit, reconnect recovery, durable result retrieval, and explicit apply are implemented; live steering remains a later transport milestone.
+- Status: M0 implementation on `feat/direct-cloud-sandbox`. `/cloud run`, status, stop/forfeit, reconnect recovery, durable result retrieval, and explicit apply are implemented. Live steering over a Prime Tunnel bridge (`/cloud run --tunnel`, `/cloud steer`) is implemented and opt-in; the gateway remains the fallback transport for control, upload, and download.
 - Source snapshot: Agent `427ea4c72cc606ac061a14287c0c15c471eff002`; Prime Sandboxes SDK `0.2.42`; platform source observations as cited in the design investigation.
 - Companion requirements: the Prime Agent Sandbox Implementation design (Notion) and the parent task brief. Where the design assumed a platform agent-session controller, this plan replaces it with the direct model described here.
 
@@ -21,12 +21,19 @@ M0 supports one-shot task delegation, provisioning progress, stop/forfeit, recon
 
 ## Configuration
 
-Cloud delegation is capability-gated and is advertised only when both variables are configured before daemon startup:
+Cloud delegation is capability-gated and is advertised only when both inputs resolve before daemon startup:
 
-- `PRIME_AGENT_CLOUD_IMAGE`: a pinned VM image that contains `prime-agent` and its runtime dependencies.
-- `PRIME_AGENT_CLOUD_INFERENCE_API_KEY`: a guest-scoped inference credential. Prime Agent never falls back to the platform control key because this credential is uploaded into the sandbox for the task lifetime.
+- `PRIME_AGENT_CLOUD_IMAGE`: a pinned VM image that contains `prime-agent` and its runtime dependencies. For tunnel delegations the image must also contain an `frpc` binary on `PATH` (see the Prime Tunnel bridge section); the bridge server itself is uploaded by the daemon on every delegation, so no image change is needed for bridge logic alone. The maintained build recipe (validated runtime base, current published `prime-agent`, checksum-pinned `frpc`) lives in `packages/coding-agent/cloud-image/`; see its README for the prepare/push/build-vm flow.
+- A guest-scoped inference credential, resolved by one shared loader in this order:
+  - `PRIME_AGENT_CLOUD_INFERENCE_API_KEY` (explicit override, e.g. from a secret manager), or
+  - `PRIME_AGENT_CLOUD_INFERENCE_API_KEY_FILE`, defaulting to `~/.config/prime-agent-cloud/inference-api-key`. The key file must be a regular file (never a symlink) readable only by its owner (`chmod 600`), holding one single-line key. An insecure file fails closed: the cloud capability is not advertised and the reason names the file.
 
-Sandbox control authentication still comes from `PRIME_API_KEY` or the logged-in Prime CLI. The guest credential is written with mode `0600` and removed before the terminal result is published.
+Sandbox and tunnel control authentication still comes from `PRIME_API_KEY` or the logged-in Prime CLI. The guest credential is written with mode `0600` and removed before the terminal result is published.
+
+Optional overrides:
+
+- `PRIME_AGENT_CLOUD_TEAM_ID`: bills sandbox compute and registers tunnels under this team without touching the user's global Prime CLI team selection. Precedence: explicit daemon option, then `PRIME_AGENT_CLOUD_TEAM_ID`, then the CLI config team.
+- Guest inference billing: the daemon passes the delegation team to the guest as `PRIME_TEAM_ID`, so the image's `prime-agent` sends `X-Prime-Team-ID` and inference bills the team instead of the guest credential's personal balance (which typically holds no funds and fails every request with 402). `PRIME_AGENT_CLOUD_INFERENCE_TEAM_ID` overrides only the guest inference team when it must differ from the compute team; setting neither sends no team and the guest bills the personal balance.
 
 ## The direct model: what is removed, what is kept
 
@@ -227,6 +234,120 @@ Durability rules, backed by the durable append-only command journal in `core/clo
 
 Events, not just commands, are bounded: token fragments batch into bounded updates; ephemeral previews may be dropped under backpressure and reconstructed from the latest message snapshot; large tool output becomes an artifact reference with a bounded preview. A snapshot carries a consistent cursor; subscription replays subsequent durable events; an expired cursor or generation mismatch requires a fresh snapshot.
 
+## Prime Tunnel bridge (live steering, Direction A)
+
+M0's data path is a gateway process stream, which cannot carry interactive
+steering. The tunnel bridge adds a second, opt-in attachment transport that
+can. The direction is fixed:
+
+**Direction A: the local daemon owns the tunnel; the sandbox dials out.**
+
+1. `/cloud run --tunnel <prompt>` registers a Prime Tunnel with the Prime
+   platform REST API (`POST /api/v1/tunnel`) using the local daemon's existing
+   platform credentials. The registration carries edge HTTP basic auth (fixed
+   username `prime-agent`, backend-generated one-time password) and labels
+   (`prime-agent-cloud`, `session:<id>`).
+2. The guest receives only that one tunnel's frp connection details (frp
+   token, per-tunnel binding secret, frps host/port, subdomain) as fixed-name
+   environment variables on the resident process. It never receives the
+   platform API key and can never call the tunnel REST API itself.
+3. Inside the sandbox, the uploaded bridge server binds `127.0.0.1:<port>`
+   only, and `frpc` (from the image) forwards the public tunnel edge to that
+   loopback listener. The bridge is the only network surface: it speaks the
+   bounded cloud session protocol over WebSocket frames.
+4. The local daemon attaches over the public `https://` tunnel URL with the
+   edge basic-auth password in the upgrade headers and the bridge protocol
+   token in `hello`. Both layers are required: the edge gates anyone who
+   reaches the URL, the protocol token gates anyone who survives the edge.
+
+```mermaid
+flowchart LR
+    LocalDaemon["Local daemon<br/>tunnel REST + attachment"]
+    PrimeAPI["Prime platform<br/>POST /api/v1/tunnel"]
+    Edge["Tunnel edge<br/>HTTPS + basic auth"]
+    Frpc["frpc<br/>(sandbox, outbound)"]
+    GuestBridge["Guest bridge<br/>127.0.0.1 only"]
+    CloudDaemon["Resident tasks<br/>prime-agent --print"]
+
+    LocalDaemon -->|"register / delete"| PrimeAPI
+    LocalDaemon -->|"wss: hello(authToken) + basic auth"| Edge
+    Edge --> Frpc
+    Frpc -->|"loopback"| GuestBridge
+    GuestBridge -->|"supervises"| CloudDaemon
+    GuestBridge -->|"snapshot, events, receipts"| LocalDaemon
+```
+
+### What runs in the guest
+
+The bridge is a standalone, dependency-free Node script
+(`core/cloud/bridge/guest-bridge-script.ts`) uploaded by the daemon alongside
+the bootstrap. In tunnel mode the bootstrap sets up the workspace baseline,
+then `exec`s the bridge; the bridge owns the rest of the delegation:
+
+- It supervises tasks: the initial prompt task from the uploaded prompt file,
+  then queued `steer` commands as follow-up `prime-agent --print` tasks in the
+  same workspace (real live steering without re-provisioning), and
+  `cancel_task` by signalling the active child. A `/cloud stop` reaches it as
+  SIGTERM through the ordinary VM process signal path.
+- It serves the full session protocol: `hello` (protocol authentication,
+  generation fencing), `snapshot`, `subscribe` with cursor replay and bounded
+  live push (`events` frames), idempotent `submit` with digest verification and
+  a durable command journal, `get_command` receipts, and `ack` trimming.
+- It streams live output as bounded `output_delta` events, batched and capped
+  (64 KiB per event).
+- It writes the same terminal results contract as the plain bootstrap:
+  `stdout.txt`, `stderr.txt`, a baseline-relative `changes.patch`, removal of
+  the guest credential, and `status.txt` last as the commit marker. The
+  gateway download path retrieves them unchanged.
+
+This is a real bridge for steering, not a status page: every wire frame it
+accepts is a validated session-protocol message, and `test/cloud-guest-bridge.test.ts`
+executes it end-to-end against a fake agent process over loopback.
+
+### What runs locally
+
+`core/cloud/bridge/tunnel-attachment.ts` owns one durable attachment per
+delegation:
+
+- **Durable**: the tunnel record on the cloud-session record (non-secret facts
+  only), the bridge token and edge password in a 0600 secret store, and the
+  acknowledged guest cursor on disk. A daemon restart re-attaches a running
+  delegation from `list()`.
+- **Reconnectable**: capped exponential backoff with jitter; on every
+  reconnect it re-authenticates, resubscribes from the last durably
+  acknowledged cursor, and re-sends unacknowledged commands with the same
+  command id and digest (the guest journal deduplicates). Acknowledgement is
+  sent only after the mirrored events are fsynced into the local trace.
+- **Bounded**: tunnel-liveness probes stop the supervisor when the platform
+  registration is gone, and the delegation falls back to gateway-only
+  monitoring without failing the task.
+
+### Gating, cleanup, and fallback
+
+- `/cloud run --tunnel` is opt-in. The daemon advertises a `cloud_tunnel`
+  capability (schema revision 30) alongside `cloud_sessions`; the TUI checks
+  it before showing or sending the option, and `/cloud steer` is gated the
+  same way. Old clients and daemons keep working in both directions: every new
+  field is optional and degrades locally.
+- The tunnel is registered before the resident process starts and deleted with
+  sandbox cleanup: stop, forfeit, apply, and every sandbox-loss path release
+  it, and a failed launch releases its own registration. The sandbox and
+  tunnel deletions are separately inspectable.
+- Gateway control (create/status/delete), workspace upload, and result
+  download remain the fallback and the primary control path. If the tunnel is
+  gone, the delegation still completes and results still flow through the
+  gateway; only steering becomes unavailable.
+
+### Image and platform requirements
+
+- The pinned image must contain `frpc` on `PATH`. The bridge server itself
+  needs no image support beyond Node ≥ 22, because the daemon uploads it
+  verbatim on every tunnel delegation.
+- Tunnel registration TTL, edge behavior on expiry, and re-registration into a
+  running sandbox remain to be validated against the deployed tunnel service;
+  the current implementation falls back to the gateway when a tunnel expires
+  mid-session (see Risks).
+
 ## Workspace capture and result review
 
 The default workspace grant is the current repository or worktree, including its local changes. It does not require a GitHub token or any repository credential.
@@ -296,11 +417,17 @@ Every local daemon wire change follows the repo's daemon protocol rules (`AGENTS
 
 ```
 /cloud run <prompt>         confirm, capture the current Git workspace, and start one remote task
+/cloud run --tunnel <prompt> as above, plus a Prime Tunnel bridge for live steering
 /cloud status               reconcile and show delegations, output previews, and changed paths
 /cloud stop [id]            request stop and retrieve results when available
 /cloud stop [id] --forfeit  release compute even if results cannot be retained
+/cloud steer <id> <text>    submit a follow-up prompt to a running tunnel delegation
 /cloud apply <id>           review changed paths and a bounded diff preview, confirm, and apply the stored patch
 ```
+
+`--tunnel` and `steer` require the daemon's `cloud_tunnel` capability; the
+delegation confirmation states the tunnel exposure before anything is
+registered.
 
 
 Flags for `run` are explicit because defaults differ across the platform's CLI, SDK, and docs: `--model`, `--cpu`, `--mem`, `--disk`, `--lifetime`, `--idle`, `--image`, `--network`, `--add-path` (extra paths, separate confirmation), `--live-repo` (live repository access, later release, separate confirmation). A VM `--region` flag is not exposed until the Sandbox API supports caller-selected VM regions.
@@ -343,6 +470,7 @@ Exit gate: faux-provider end-to-end test shows one full task (inference + tool +
 
 **PR c5 — bridge + attachment transport.**
 Files: `packages/coding-agent/src/core/cloud/bridge.ts`, `packages/coding-agent/src/modes/cloud/bridge-main.ts`; test `test/cloud-bridge.test.ts`.
+(Implemented on this branch in its Prime Tunnel form instead: `core/cloud/bridge/` holds the uploaded guest bridge script, the local WebSocket frame codec and transport, the durable attachment supervisor, and the tunnel secret store; see the Prime Tunnel bridge section above.)
 Scope: stateless bridge process (stdin/stdout ↔ VM-local socket), per-attachment UUID, bounded frame handling, backpressure-safe forwarding; local-daemon attach/reconnect loop (fresh `POST /sandbox/{id}/auth` + fresh bridge Start per attachment; never a second agent session; resident handle released after start confirmation).
 Tests: fake process transports for frame round-trip, mid-stream drop, reconnect with snapshot + gap fill, bridge replacement while the cloud daemon keeps running.
 Exit gate: fault-injection test proves bridge loss and replacement preserve cloud-daemon state and event continuity via cursor replay; `npm run check` clean.
@@ -436,7 +564,9 @@ Platform source observations (sandboxd, gateway, inference auth) come from speci
 9. **Linux transfer.** A macOS session configuration does not transfer unchanged; the capability manifest must reject what the Linux image cannot honor before allocation.
 10. **Cost.** A delegated session bills sandbox compute for its whole lifetime plus inference; idle timeouts and the review-before-cleanup flow are the guardrails. Child fan-out inherits this per additional sandbox.
 11. **Image drift.** The cloud image must pin Node (engines: `>=22.8`), Python/`uv` kernel bootstrap, `prime-agent-runtime`, and skills in lockstep with the agent package version; drift shows up as capability-negotiation failures, which must fail closed.
-12. **Known non-goals restated.** No live heap migration; no continuous workspace sync; no platform agent-session controller; recovery is conservative and explicit.
+12. **Tunnel lifecycle validation.** The deployed tunnel service's registration TTL, edge behavior on expiry, and basic-auth enforcement at the edge must be confirmed before activation. The implementation treats a vanished tunnel as a release: it stops the attachment, records the reason, and continues the delegation on gateway-only monitoring; it never re-registers into a running sandbox (the resident process carries its env from start time).
+13. **frpc in the image.** Direction A requires `frpc` in the pinned cloud image; an image without it leaves the bridge unreachable (the delegation still completes through the gateway, and the tunnel is deleted at cleanup).
+14. **Known non-goals restated.** No live heap migration; no continuous workspace sync; no platform agent-session controller; recovery is conservative and explicit.
 
 ## Companion follow-ups (not in this plan)
 

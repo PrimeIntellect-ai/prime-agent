@@ -504,4 +504,50 @@ describe("CloudSessionStore", () => {
 		store.setDesiredLifecycle(sessionId, "running");
 		expect(statSync(path).mode & 0o777).toBe(0o600);
 	});
+
+	it("records a Prime Tunnel registration once and marks its release terminal", () => {
+		const directory = createDirectory();
+		const store = new CloudSessionStore(directory);
+		const { sessionId } = createSession(store);
+		const tunnel = {
+			tunnelId: "tun_abc123",
+			url: "https://tun-abc123.tunnels.example.com",
+			hostname: "tun-abc123.tunnels.example.com",
+			httpUser: "prime-agent",
+			expiresAt: "2027-01-01T00:00:00.000Z",
+			registeredAt: "2026-09-16T00:00:00.000Z",
+		};
+		const updated = store.setTunnel(sessionId, tunnel);
+		expect(updated.tunnel).toEqual(tunnel);
+		expect(updated.tunnelState).toBe("released" === updated.tunnelState ? "registered" : "registered");
+		// Idempotent re-registration of the same tunnel is a no-op.
+		expect(store.setTunnel(sessionId, tunnel).updatedAt).toBe(updated.updatedAt);
+		// A different tunnel is a conflict until the previous one is released.
+		expectCode(
+			() =>
+				store.setTunnel(sessionId, {
+					...tunnel,
+					tunnelId: "tun_other",
+					url: "https://tun-other.tunnels.example.com",
+					hostname: "tun-other.tunnels.example.com",
+				}),
+			"conflict",
+		);
+		const released = store.setTunnelState(sessionId, "released");
+		expect(released.tunnelState).toBe("released");
+		expectCode(() => store.setTunnelState(sessionId, "registered"), "conflict");
+		// After release, a fresh registration replaces the tunnel.
+		store.setTunnel(sessionId, { ...tunnel, tunnelId: "tun_other" });
+		expect(store.get(sessionId)?.tunnel?.tunnelId).toBe("tun_other");
+		// Validation fails closed on malformed tunnel records.
+		expect(cloudSessionRecordProblem({ ...store.get(sessionId), tunnel: { tunnelId: "bad id" } })).toContain(
+			"record.tunnel",
+		);
+		expectCode(() => store.setTunnel(sessionId, { ...tunnel, url: "" }), "invalid");
+		// Old records without tunnel fields still validate.
+		const legacy = { ...store.get(sessionId) } as Record<string, unknown>;
+		delete legacy.tunnel;
+		delete legacy.tunnelState;
+		expect(cloudSessionRecordProblem(legacy)).toBeUndefined();
+	});
 });

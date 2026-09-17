@@ -75,8 +75,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 27 adds structured session_recovering failure info for known-but-unaddressable sessions.
 // Revision 28 publishes the last recorded model on saved-session rows.
 // Revision 29 adds capability-gated direct cloud sandbox delegation commands and progress.
-export const DAEMON_SCHEMA_REVISION = 29;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-29-aaab243a15c7";
+// Revision 30 adds the capability-gated cloud tunnel opt-in and steer command.
+export const DAEMON_SCHEMA_REVISION = 30;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-30-2177cb4caea1";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -124,7 +125,8 @@ export type DaemonServerCapability =
 	| "owned_prompt_cancellation"
 	| "acp_mcp_servers"
 	| "direct_peer_transport"
-	| "cloud_sessions";
+	| "cloud_sessions"
+	| "cloud_tunnel";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -170,6 +172,7 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"session_input_pause",
 	"acp_mcp_servers",
 	"cloud_sessions",
+	"cloud_tunnel",
 ];
 
 /** Single-use short-lived credential for one direct TUI connection to one worker process incarnation. */
@@ -406,6 +409,8 @@ export interface DaemonCloudDelegateOptions {
 	instanceType?: string;
 	model?: string;
 	timeoutMinutes?: number;
+	/** Opt in to a Prime Tunnel bridge for live steering; requires cloud_tunnel. */
+	tunnel?: boolean;
 }
 
 export interface DaemonCloudDelegationSummary {
@@ -418,6 +423,14 @@ export interface DaemonCloudDelegationSummary {
 	sandboxId?: string;
 	resultReady: boolean;
 	resultApplied: boolean;
+	/** Prime Tunnel registration when the delegation opted into live steering. */
+	tunnel?: {
+		tunnelId: string;
+		url: string;
+		attached: boolean;
+	};
+	/** Bounded tail of live output streamed over the tunnel bridge. */
+	liveOutput?: string;
 	changedPaths?: string[];
 	changedPathCount?: number;
 	patchPreview?: string;
@@ -750,6 +763,15 @@ export type DaemonCommand =
 			activeSessionId: string;
 			delegationId: string;
 	  }
+	| {
+			id?: string;
+			type: "cloud_delegation_steer";
+			activeSessionId: string;
+			delegationId: string;
+			text: string;
+			/** Client-generated steer identity: retries reuse it so the guest journal deduplicates. */
+			steerId?: string;
+	  }
 	| { id?: string; type: "ack_result"; commandId: string }
 	| { id?: string; type: "prepare_update_restart" }
 	| { id?: string; type: "retry_worker"; activeSessionId: string }
@@ -822,12 +844,18 @@ const CLOUD_SESSIONS_COMMAND = {
 	minSchemaRevision: 29,
 	capability: "cloud_sessions",
 } as const;
+const CLOUD_TUNNEL_COMMAND = {
+	minProtocol: 7,
+	minSchemaRevision: 30,
+	capability: "cloud_tunnel",
+} as const;
 
 export const DAEMON_COMMAND_COMPATIBILITY = {
 	cloud_delegate: CLOUD_SESSIONS_COMMAND,
 	cloud_delegations_list: CLOUD_SESSIONS_COMMAND,
 	cloud_delegation_stop: CLOUD_SESSIONS_COMMAND,
 	cloud_delegation_apply: CLOUD_SESSIONS_COMMAND,
+	cloud_delegation_steer: CLOUD_TUNNEL_COMMAND,
 	ack_result: LEGACY_DAEMON_COMMAND,
 	list: LEGACY_DAEMON_COMMAND,
 	list_saved_sessions: LEGACY_DAEMON_COMMAND,
@@ -1052,6 +1080,7 @@ export const DAEMON_COMMAND_PLANE = {
 	cloud_delegations_list: "session",
 	cloud_delegation_stop: "session",
 	cloud_delegation_apply: "session",
+	cloud_delegation_steer: "session",
 	prepare_update_restart: "control",
 	retry_worker: "control",
 	restart: "control",
@@ -1079,6 +1108,9 @@ export function getDaemonCommandCompatibilities(command: DaemonCommand): readonl
 	}
 	if (command.type === "cancel_prompt_admission" && command.cancelOwned === true) {
 		requirements.push(OWNED_PROMPT_CANCELLATION_COMMAND);
+	}
+	if (command.type === "cloud_delegate" && command.options?.tunnel !== undefined) {
+		requirements.push(CLOUD_TUNNEL_COMMAND);
 	}
 	return [...requirements, DAEMON_COMMAND_COMPATIBILITY[command.type]];
 }
