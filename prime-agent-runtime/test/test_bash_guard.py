@@ -2613,12 +2613,17 @@ class RecursiveForceRmGuardTest(unittest.IsolatedAsyncioTestCase):
             result = await bash('echo HOME=/tmp; rm -rf "$HOME/sub"')
         self.assertEqual(result.exit_code, 0)
         self.assertFalse(self._tracked("sub").exists())
-        # The real reassignment forms stay refused, prefix and builtin alike.
+        # The real reassignment forms stay refused, prefix and builtin alike,
+        # and a keyword or grouping token does not close the assignment slot:
+        # the shell still applies the assignment that follows it.
         self._make_tree()
         for command, message in [
             ('PWD=/tmp; rm -rf "$PWD/sub"', "reassigns PWD"),
-            ('export PWD=/tmp; rm -rf "$PWD/sub"', "reassigns PWD"),
+            ('export FOO=1 PWD=/tmp; rm -rf "$PWD/sub"', "reassigns PWD"),
             ('unset PWD; rm -rf "${PWD:-.}/sub"', "reassigns PWD"),
+            ('if true; then PWD=/tmp; fi; rm -rf "$PWD/sub"', "reassigns PWD"),
+            ('{ PWD=/tmp; }; rm -rf "$PWD/sub"', "reassigns PWD"),
+            ('for i in 1; do PWD=/tmp; done; rm -rf "$PWD/sub"', "reassigns PWD"),
         ]:
             with self.subTest(command=command):
                 with self.assertRaises(DestructiveRmRefusalError) as caught:
