@@ -4160,65 +4160,90 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(client.attachedActiveSessionIds).toEqual(new Set());
 	});
 
-	it("marks each busy worker session interrupted independently", async () => {
-		type RecoveryWorker = {
-			descriptor: {
-				workerId: string;
-				pid: number;
-				rootActiveSessionId: string;
-				recoveryJournalPath: string;
-				orphanProcessJournalPath: string;
-			};
+	/** Shared recovery fixture inputs for the tests below. */
+	type RecoveryWorker = {
+		descriptor: {
+			workerId: string;
+			pid: number;
+			rootActiveSessionId: string;
+			recoveryJournalPath: string;
+			orphanProcessJournalPath: string;
 		};
+	};
+
+	function recoveryFixture(options: {
+		sessions?: Array<{ activeSessionId: string; sessionFile: string; operation: string }>;
+		workerPid?: number;
+		orphan?: { pid: number; processStartId?: string };
+	}): { root: string; worker: RecoveryWorker; recoveryJournalPath: string; orphanJournalPath: string } {
 		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-recovery-test-"));
-		const journalPath = join(root, "worker.recovery.jsonl");
+		const workerPid = options.workerPid ?? process.pid;
 		const orphanJournalPath = join(root, "worker.orphans.jsonl");
-		writeFileSync(
+		if (options.orphan)
+			writeFileSync(
+				orphanJournalPath,
+				`${JSON.stringify({ version: 1, pid: options.orphan.pid, ownerPid: workerPid, ...(options.orphan.processStartId && { processStartId: options.orphan.processStartId }), active: true, recordedAt: new Date().toISOString() })}\n`,
+			);
+		const recoveryJournalPath = join(root, "worker.recovery.jsonl");
+		const journal = new WorkerRecoveryJournal(recoveryJournalPath);
+		for (const session of options.sessions ?? []) {
+			journal.record({
+				activeSessionId: session.activeSessionId,
+				sessionId: `${session.activeSessionId}-session`,
+				sessionFile: session.sessionFile,
+				busy: true,
+				operation: session.operation,
+			});
+		}
+		return {
+			root,
+			recoveryJournalPath,
 			orphanJournalPath,
-			`${JSON.stringify({
-				version: 1,
-				pid: 987_654,
-				ownerPid: process.pid,
-				processStartId: "reused-process",
-				active: true,
-				recordedAt: new Date().toISOString(),
-			})}\n`,
-		);
-		const journal = new WorkerRecoveryJournal(journalPath);
-		journal.record({
-			activeSessionId: "root-active",
-			sessionId: "root-session",
-			sessionFile: "/tmp/root.jsonl",
-			busy: true,
-			operation: "model_stream",
-		});
-		journal.record({
-			activeSessionId: "child-active",
-			sessionId: "child-session",
-			sessionFile: "/tmp/child.jsonl",
-			busy: true,
-			operation: "tool_execution",
-		});
-		const worker: RecoveryWorker = {
-			descriptor: {
-				workerId: "worker-1",
-				pid: process.pid,
-				rootActiveSessionId: "root-active",
-				recoveryJournalPath: journalPath,
-				orphanProcessJournalPath: orphanJournalPath,
+			worker: {
+				descriptor: {
+					workerId: "worker-recovery",
+					pid: workerPid,
+					rootActiveSessionId: options.sessions?.[0]?.activeSessionId ?? "root-active",
+					recoveryJournalPath,
+					orphanProcessJournalPath: orphanJournalPath,
+				},
 			},
 		};
-		const markInterrupted = vi.fn(async () => undefined);
-		const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+	}
+
+	function recoverySupervisor(
+		worker: RecoveryWorker,
+		catalog: { start?: () => Promise<void>; markInterrupted?: () => Promise<void> } = {},
+	): {
+		supervisor: { recoverUncertainWorkerOperations(target: RecoveryWorker): Promise<void> };
+		log: ReturnType<typeof vi.fn>;
+	} {
+		const log = vi.fn();
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
 			workers: new Map([[worker.descriptor.workerId, worker]]),
 			shuttingDown: false,
-			catalog: { start: vi.fn(async () => undefined), markInterrupted },
-			log: vi.fn(),
-			assertRecoveryAllowed: vi.fn(async () => {}),
-		}) as {
-			recoverUncertainWorkerOperations(worker: RecoveryWorker): Promise<void>;
-		};
+			catalog: {
+				start: catalog.start ?? vi.fn(async () => undefined),
+				markInterrupted: catalog.markInterrupted ?? vi.fn(async () => undefined),
+			},
+			log,
+			assertRecoveryAllowed: vi.fn(async () => undefined),
+		}) as { recoverUncertainWorkerOperations(target: RecoveryWorker): Promise<void> };
+		return { supervisor, log };
+	}
+
+	it("marks each busy worker session interrupted independently", async () => {
+		// A stale pid whose journaled start id no longer matches is left alone.
+		const { root, worker } = recoveryFixture({
+			sessions: [
+				{ activeSessionId: "root-active", sessionFile: "/tmp/root.jsonl", operation: "model_stream" },
+				{ activeSessionId: "child-active", sessionFile: "/tmp/child.jsonl", operation: "tool_execution" },
+			],
+			orphan: { pid: 987_654, processStartId: "reused-process" },
+		});
+		const markInterrupted = vi.fn(async () => undefined);
+		const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+		const { supervisor } = recoverySupervisor(worker, { markInterrupted });
 
 		try {
 			await supervisor.recoverUncertainWorkerOperations(worker);
@@ -4290,26 +4315,11 @@ describe("daemon worker supervisor monitoring", () => {
 	});
 
 	it("skips catalog startup when recovery has no interrupted operations", async () => {
-		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-empty-recovery-test-"));
-		const worker = {
-			descriptor: {
-				workerId: "worker-empty-recovery",
-				pid: 987_654,
-				rootActiveSessionId: "root-active",
-				recoveryJournalPath: join(root, "worker.recovery.jsonl"),
-			},
-		};
+		const { root, worker } = recoveryFixture({});
 		const catalogStart = vi.fn(async () => {
 			throw new Error("catalog unavailable");
 		});
-		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
-			workers: new Map([[worker.descriptor.workerId, worker]]),
-			shuttingDown: false,
-			catalog: { start: catalogStart, markInterrupted: vi.fn() },
-			assertRecoveryAllowed: vi.fn(async () => undefined),
-		}) as {
-			recoverUncertainWorkerOperations(target: typeof worker): Promise<void>;
-		};
+		const { supervisor } = recoverySupervisor(worker, { start: catalogStart });
 
 		try {
 			await expect(supervisor.recoverUncertainWorkerOperations(worker)).resolves.toBeUndefined();
@@ -4320,54 +4330,18 @@ describe("daemon worker supervisor monitoring", () => {
 	});
 
 	it("does not reap interrupted worker resources before the catalog is ready", async () => {
-		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-catalog-readiness-test-"));
-		const recoveryJournalPath = join(root, "worker.recovery.jsonl");
-		const orphanJournalPath = join(root, "worker.orphans.jsonl");
-		const workerPid = 987_654;
-		new WorkerRecoveryJournal(recoveryJournalPath).record({
-			activeSessionId: "root-active",
-			sessionId: "root-session",
-			sessionFile: "/tmp/root.jsonl",
-			busy: true,
-			operation: "model_stream",
+		const { root, worker, orphanJournalPath } = recoveryFixture({
+			sessions: [{ activeSessionId: "root-active", sessionFile: "/tmp/root.jsonl", operation: "model_stream" }],
+			workerPid: 987_654,
+			orphan: { pid: process.pid, processStartId: getProcessStartId(process.pid) },
 		});
-		writeFileSync(
-			orphanJournalPath,
-			`${JSON.stringify({
-				version: 1,
-				pid: process.pid,
-				ownerPid: workerPid,
-				processStartId: getProcessStartId(process.pid),
-				active: true,
-				recordedAt: new Date().toISOString(),
-			})}
-`,
-		);
-		const worker = {
-			descriptor: {
-				workerId: "worker-catalog-blocked",
-				pid: workerPid,
-				rootActiveSessionId: "root-active",
-				recoveryJournalPath,
-				orphanProcessJournalPath: orphanJournalPath,
-			},
-			intentionalStop: false,
-		};
 		const catalogError = new Error("Timed out starting daemon catalog");
 		const kill = vi.spyOn(orphanProcessModule, "killOrphanProcess").mockReturnValue(true);
-		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
-			workers: new Map([[worker.descriptor.workerId, worker]]),
-			shuttingDown: false,
-			catalog: {
-				start: vi.fn(async () => {
-					throw catalogError;
-				}),
-				markInterrupted: vi.fn(),
-			},
-			assertRecoveryAllowed: vi.fn(async () => {}),
-		}) as {
-			recoverUncertainWorkerOperations(target: typeof worker): Promise<void>;
-		};
+		const { supervisor } = recoverySupervisor(worker, {
+			start: vi.fn(async () => {
+				throw catalogError;
+			}),
+		});
 
 		try {
 			await expect(supervisor.recoverUncertainWorkerOperations(worker)).rejects.toThrow(catalogError);

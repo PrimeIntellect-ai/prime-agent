@@ -765,6 +765,213 @@ export async function loadEntriesFromFileAsync(
 	return finalizeLoadedEntries(entries);
 }
 
+// --- Append-only metadata writes for closed sessions -------------------------
+//
+// Catalog metadata operations (rename, archive, mark_interrupted) append a
+// single entry to a file no live session holds. Opening a SessionManager for
+// that parses and indexes the entire transcript — an O(session) stall and a
+// memory spike proportional to session size for every routine UI action. The
+// fast path below reads only a leading header window and a bounded tail window
+// instead, and falls back to a full open whenever those two windows cannot place
+// the entry (a file version this build does not write, a header beyond the
+// window, or a tail too large to resolve the leaf).
+
+const APPEND_HEADER_WINDOW_BYTES = 64 * 1024;
+const APPEND_TAIL_WINDOW_BYTES = 256 * 1024;
+
+/** Ids and timestamps shared by live appends and the append-only fast path. */
+interface AppendEntrySeed {
+	leafId: string | null;
+	newId(): string;
+	timestamp: string;
+}
+
+function buildSessionInfoEntry(name: string, seed: AppendEntrySeed): SessionInfoEntry {
+	return {
+		type: "session_info",
+		id: seed.newId(),
+		parentId: seed.leafId,
+		timestamp: seed.timestamp,
+		name: name.trim(),
+	};
+}
+
+function buildSessionStateEntry(state: SessionState, seed: AppendEntrySeed): SessionStateEntry {
+	return {
+		type: "session_state",
+		id: seed.newId(),
+		parentId: seed.leafId,
+		timestamp: seed.timestamp,
+		state: { status: state.status },
+	};
+}
+
+function buildCustomMessageEntry<T>(
+	customType: string,
+	content: string | (TextContent | ImageContent)[],
+	display: boolean,
+	details: T | undefined,
+	seed: AppendEntrySeed,
+): CustomMessageEntry<T> {
+	return {
+		type: "custom_message",
+		customType,
+		content,
+		display,
+		details,
+		id: seed.newId(),
+		parentId: seed.leafId,
+		timestamp: seed.timestamp,
+	};
+}
+
+/**
+ * First line that parses as JSON in the leading window, mirroring how the
+ * loader skips malformed or blank leading lines. Returns "window-truncated"
+ * when the window held no parseable line but stopped before the end of the
+ * file: a longer leading line may hide the header past it, and only a full
+ * load can tell.
+ */
+function readFirstParseableLine(
+	filePath: string,
+): { type?: unknown; id?: unknown; version?: unknown } | "window-truncated" | undefined {
+	const buffer = readBytesSync(filePath, 0, APPEND_HEADER_WINDOW_BYTES);
+	let start = 0;
+	while (start < buffer.length) {
+		let end = buffer.indexOf(0x0a, start);
+		if (end === -1) end = buffer.length;
+		const line = buffer.subarray(start, end);
+		if (line.length > 0) {
+			try {
+				return JSON.parse(line.toString("utf8")) as { type?: unknown; id?: unknown; version?: unknown };
+			} catch {
+				// Skip malformed or blank lines like appendEntryFromBuffer.
+			}
+		}
+		start = end + 1;
+	}
+	// A window shorter than the cap means the read reached EOF, so the file
+	// really has no parseable leading line.
+	return buffer.length < APPEND_HEADER_WINDOW_BYTES ? undefined : "window-truncated";
+}
+
+/**
+ * Reads a bounded tail window and returns the id of the file's current leaf
+ * entry: the last line that parses as a non-session entry, like _buildIndex
+ * computes on a full load. Returns null for a legacy leaf without an id or a
+ * file without entries, and undefined when the window is too small to decide —
+ * the caller then falls back to a full load.
+ */
+function readTailLeafId(filePath: string, fileSize: number): string | null | undefined {
+	const windowBytes = Math.min(fileSize, APPEND_TAIL_WINDOW_BYTES);
+	const buffer = readBytesSync(filePath, fileSize - windowBytes, fileSize);
+	const lines: Buffer[] = [];
+	let start = 0;
+	while (start < buffer.length) {
+		let end = buffer.indexOf(0x0a, start);
+		if (end === -1) end = buffer.length;
+		lines.push(buffer.subarray(start, end));
+		start = end + 1;
+	}
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const line = lines[i]!;
+		if (line.length === 0) continue;
+		let parsed: { type?: unknown; id?: unknown };
+		try {
+			parsed = JSON.parse(line.toString("utf8")) as { type?: unknown; id?: unknown };
+		} catch {
+			continue;
+		}
+		if (parsed.type === "session") continue;
+		return typeof parsed.id === "string" ? parsed.id : null;
+	}
+	return windowBytes === fileSize ? null : undefined;
+}
+
+/**
+ * Appends one metadata entry to an existing session file without parsing the
+ * transcript. Repairs crash damage like a full open would, validates the
+ * session header, then appends the entry in one line. Throws when the file is
+ * missing or its header is invalid; returns undefined whenever only a full open
+ * can place the entry (an older or newer version, a header beyond the window,
+ * or a tail too large to resolve the leaf), so the caller can fall back.
+ */
+function appendEntryToExistingFile(
+	sessionFile: string,
+	buildEntry: (seed: AppendEntrySeed) => SessionEntry,
+): string | undefined {
+	const targetPath = resolve(sessionFile);
+	if (!existsSync(targetPath)) {
+		throw new Error(`Cannot append to missing session file: ${sessionFile}`);
+	}
+	repairJsonlDamage(targetPath);
+	const header = readFirstParseableLine(targetPath);
+	if (header === "window-truncated") {
+		return undefined;
+	}
+	if (!header || header.type !== "session" || typeof header.id !== "string") {
+		throw new Error(`Session file has no valid session header: ${sessionFile}`);
+	}
+	// Append directly only to a file this build writes: a v1/v2 file needs the
+	// migration a full open performs and may not carry the ids an appended
+	// parentId chains to, and a future version may change the entry shape.
+	if (header.version !== CURRENT_SESSION_VERSION) {
+		return undefined;
+	}
+	const leafId = readTailLeafId(targetPath, statSync(targetPath).size);
+	if (leafId === undefined) {
+		return undefined;
+	}
+	// generateId checks the in-memory entry index, which only a full parse can
+	// build; without it, take generateId's guaranteed-unique fallback form. A
+	// duplicate short id would cycle the leaf-to-root walk in buildSessionContext.
+	const entry = buildEntry({ leafId, newId: () => randomUUID(), timestamp: new Date().toISOString() });
+	mkdirSync(dirname(targetPath), { recursive: true });
+	appendFileSync(targetPath, `${JSON.stringify(entry)}\n`);
+	return entry.id;
+}
+
+/**
+ * Appends a rename (session_info) entry to a closed session file without a
+ * full transcript parse; falls back to opening a SessionManager when only a
+ * full open can place the entry.
+ */
+export function appendSessionInfoToExistingFile(sessionFile: string, name: string): string {
+	const fastId = appendEntryToExistingFile(sessionFile, (seed) => buildSessionInfoEntry(name, seed));
+	return fastId ?? SessionManager.open(sessionFile).appendSessionInfo(name);
+}
+
+/**
+ * Appends a lifecycle (session_state) entry to a closed session file without a
+ * full transcript parse; falls back like appendSessionInfoToExistingFile.
+ */
+export function appendSessionStateToExistingFile(sessionFile: string, state: SessionState): string {
+	const fastId = appendEntryToExistingFile(sessionFile, (seed) => buildSessionStateEntry(state, seed));
+	return fastId ?? SessionManager.open(sessionFile).appendSessionState(state);
+}
+
+/**
+ * Appends a custom message entry to a closed session file without a full
+ * transcript parse; falls back like appendSessionInfoToExistingFile. Unlike a
+ * live append, this writes even when the file has no assistant entry yet:
+ * SessionManager._persist suppresses custom entries until then, which would
+ * drop the notice on the floor for a session whose first reply never landed.
+ * A session that falls back to a full open keeps the full-open behavior: with
+ * no assistant entry, _persist drops the entry and nothing is appended.
+ */
+export function appendCustomMessageToExistingFile<T = unknown>(
+	sessionFile: string,
+	customType: string,
+	content: string | (TextContent | ImageContent)[],
+	display: boolean,
+	details?: T,
+): string {
+	const fastId = appendEntryToExistingFile(sessionFile, (seed) =>
+		buildCustomMessageEntry(customType, content, display, details, seed),
+	);
+	return fastId ?? SessionManager.open(sessionFile).appendCustomMessageEntry(customType, content, display, details);
+}
+
 function readSessionHeader(filePath: string): Partial<SessionHeader> | undefined {
 	const firstLine = readFirstLineSync(filePath);
 	if (!firstLine) {
@@ -1744,6 +1951,14 @@ export class SessionManager {
 		}
 	}
 
+	private appendEntrySeed(): AppendEntrySeed {
+		return {
+			leafId: this.leafId,
+			newId: () => generateId(this.byId),
+			timestamp: new Date().toISOString(),
+		};
+	}
+
 	private _appendEntry(entry: SessionEntry): void {
 		this.fileEntries.push(entry);
 		if (entry.type === "message" && entry.message.role === "assistant") {
@@ -1877,25 +2092,13 @@ export class SessionManager {
 	}
 
 	appendSessionInfo(name: string): string {
-		const entry: SessionInfoEntry = {
-			type: "session_info",
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			name: name.trim(),
-		};
+		const entry = buildSessionInfoEntry(name, this.appendEntrySeed());
 		this._appendEntry(entry);
 		return entry.id;
 	}
 
 	appendSessionState(state: SessionState): string {
-		const entry: SessionStateEntry = {
-			type: "session_state",
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			state: { status: state.status },
-		};
+		const entry = buildSessionStateEntry(state, this.appendEntrySeed());
 		this._appendEntry(entry);
 		return entry.id;
 	}
@@ -2017,16 +2220,13 @@ export class SessionManager {
 		display: boolean,
 		details?: T,
 	): string {
-		const entry: CustomMessageEntry<T> = {
-			type: "custom_message",
+		const entry: CustomMessageEntry<T> = buildCustomMessageEntry(
 			customType,
 			content,
 			display,
 			details,
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-		};
+			this.appendEntrySeed(),
+		);
 		this._appendEntry(entry);
 		return entry.id;
 	}

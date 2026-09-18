@@ -4282,11 +4282,19 @@ export class DaemonSupervisor {
 			throw new SupervisorRecoveryCancelledError("Worker recovery was cancelled before interruption was recorded");
 		}
 		await Promise.all(
-			[...interruptedSessions.values()].map((interrupted) =>
-				this.catalog.markInterrupted(interrupted.sessionFile, interrupted.activeSessionId, [
-					...interrupted.operations,
-				]),
-			),
+			[...interruptedSessions.values()].map(async (interrupted) => {
+				try {
+					await this.catalog.markInterrupted(interrupted.sessionFile, interrupted.activeSessionId, [
+						...interrupted.operations,
+					]);
+				} catch (error) {
+					// The notice is advisory: an unwritable session file must not abort
+					// the orphan reap, the journal resolution, or the recovery retry.
+					this.log(
+						`Could not record the interrupted session notice for ${interrupted.sessionFile}: ${String(error)}`,
+					);
+				}
+			}),
 		);
 		await this.assertRecoveryAllowed();
 		if (this.isWorkerCleanupCancelled(worker)) {
