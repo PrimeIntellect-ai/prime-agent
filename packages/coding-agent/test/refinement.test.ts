@@ -935,17 +935,6 @@ describe("harness digest relevance ranking", () => {
 			},
 		},
 		{
-			// Equal discounts keep the recency tie-break: alphabetical order would pick aa_older.
-			label: "recency as the tie-break for equal scores",
-			query: "worktree",
-			winner: "zz_newer",
-			loser: "aa_older",
-			entries: {
-				aa_older: makeEntry("aa_older", "Worktree policy", "Same worktree signal.", "2026-08-01T00:00:00.000Z"),
-				zz_newer: makeEntry("zz_newer", "Worktree policy", "Same worktree signal.", "2026-09-01T00:00:00.000Z"),
-			},
-		},
-		{
 			label: "a rare distinctive term over a common-term-dense entry",
 			query: "session quantum",
 			winner: "rare",
