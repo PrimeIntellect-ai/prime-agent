@@ -16,7 +16,7 @@ Prime Intellect is an open superintelligence lab building open-source AGI infras
 | Hosted Evaluations | Run evals on Prime-managed infra (`prime eval run --hosted`) | [environments.md](references/environments.md) |
 | Hosted Training | Post-train models against environments (`prime train`, Lab) | [environments.md](references/environments.md) |
 | prime-rl | Large-scale async RL framework for self-managed training | [environments.md](references/environments.md) |
-| Sandboxes | Secure disposable Docker environments for AI-generated code | [sandboxes.md](references/sandboxes.md) |
+| Sandboxes | Secure disposable VM sandboxes for AI-generated code | [sandboxes.md](references/sandboxes.md) |
 | Tunnels | Public HTTPS URLs for local/sandboxed services | [sandboxes.md](references/sandboxes.md) |
 | Inference | OpenAI-compatible API for frontier models | [inference.md](references/inference.md) |
 | Compute | Rent single GPU pods or multi-node clusters | [compute.md](references/compute.md) |

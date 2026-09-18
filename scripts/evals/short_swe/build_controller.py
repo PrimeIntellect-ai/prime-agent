@@ -123,7 +123,6 @@ def build(
             cpu_cores=config["cpu_cores"],
             memory_gb=config["memory_gb"],
             disk_size_gb=config["disk_gb"],
-            vm=False,
             region=config["region"],
             timeout_minutes=BUILD_SANDBOX_TIMEOUT_MINUTES,
             team_id=os.environ.get("PRIME_TEAM_ID") or None,

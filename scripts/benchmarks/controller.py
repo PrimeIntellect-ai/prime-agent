@@ -137,7 +137,6 @@ class Controller:
                 cpu_cores=config.cpu_cores,
                 memory_gb=config.memory_gb,
                 disk_size_gb=config.disk_gb,
-                vm=False,
                 region=config.region,
                 timeout_minutes=config.ttl_minutes,
                 labels=labels(self.report.repository, self.report.run_id, self.report.attempt)

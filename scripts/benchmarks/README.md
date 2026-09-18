@@ -36,7 +36,7 @@ The existing Vouch gate controls who can trigger compute usage.
 
 ## Measurements
 
-The default configuration uses two Linux x64 containers, each with 4 vCPU, 8 GB RAM, and 20 GB disk.
+The default configuration uses two Linux x64 VM sandboxes, each with 4 vCPU, 8 GB RAM, and 20 GB disk.
 `config.json` pins the image and sampling policy. Harness dependencies are locked with a seven-day
 release cutoff. Provisioning, harness setup, and source compilation have separate recorded durations
 outside the timed installation interval. Interactive runs use the same small committed Git fixture.
