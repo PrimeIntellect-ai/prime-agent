@@ -10,6 +10,7 @@ from typing import Any
 
 from .bash import BashHandle, BashResult, bash
 from .harness import HarnessEntry, HarnessScope, HarnessState, RefinementEvent, get_harness_state
+from .swarm import resume_swarm, run_swarm, status_swarm, stop_swarm
 
 _NOT_CALLABLE_MESSAGE = "'rlm' is not callable; spawn a child with: handle = await rlm.spawn('sub-task', name='worker')"
 _RENAMED_RUN_MESSAGE = "rlm.run was renamed; spawn a child with: handle = await rlm.spawn('sub-task', name='worker')"
@@ -527,8 +528,32 @@ class _HarnessProxy:
 _harness_state = _HarnessProxy()
 
 
+class _RLMSwarmNamespace:
+    """Run stored state-machine swarms: rlm.swarm.run/status/stop/resume.
+
+    ``run('<spec_id>')`` validates a stored swarm entry (machine form, or
+    dag sugar that compiles to one), enters the entry states up to the
+    spec's max_parallel, and returns immediately; a kernel asyncio task
+    continues the run (nonblocking control loop). Runs live in kernel
+    memory only; children stay supervisor-owned.
+    """
+
+    async def run(self, spec_id: str, *, name: str | None = None) -> dict[str, Any]:
+        return await run_swarm(spec_id, name=name)
+
+    async def status(self, run_id: str) -> dict[str, Any]:
+        return await status_swarm(run_id)
+
+    async def stop(self, run_id: str) -> dict[str, Any]:
+        return await stop_swarm(run_id)
+
+    async def resume(self, run_id: str) -> dict[str, Any]:
+        return await resume_swarm(run_id)
+
+
 class _RLMNamespace:
     harness = _harness_state
+    swarm = _RLMSwarmNamespace()
     get_harness_state = staticmethod(get_harness_state)
 
     async def spawn(

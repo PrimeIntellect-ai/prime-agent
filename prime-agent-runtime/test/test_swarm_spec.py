@@ -813,6 +813,37 @@ class ValidateSwarmMachineTest(unittest.TestCase):
             ["state a entry must be a boolean", "swarm machine requires at least one entry state"],
         )
 
+    def test_optional_input_flag(self) -> None:
+        ok = {
+            "states": [
+                {"id": "seed", "entry": True, "subagent": "w", "outputs": [{"name": "o", "type": "json"}]},
+                {
+                    "id": "loop",
+                    "subagent": "w",
+                    "inputs": [{"name": "o", "type": "json", "from": "seed.o", "optional": True}],
+                },
+            ],
+            "transitions": [{"from": "seed", "to": "loop"}],
+        }
+        self.assertEqual(validate_swarm_machine(ok), [])
+        for bad in ("yes", 1, []):
+            machine = {
+                "states": [
+                    state("seed", entry=True, outputs=[{"name": "o", "type": "json"}]),
+                    {
+                        "id": "loop",
+                        "subagent": "w",
+                        "inputs": [{"name": "o", "type": "json", "from": "seed.o", "optional": bad}],
+                    },
+                ],
+                "transitions": [{"from": "seed", "to": "loop"}],
+            }
+            self.assertEqual(
+                validate_swarm_machine(machine),
+                ["state loop input 'o' optional must be a boolean when provided"],
+                repr(bad),
+            )
+
     def test_entry_states_cannot_declare_inputs(self) -> None:
         with_inputs = {
             "states": [
@@ -1202,7 +1233,12 @@ class ValidateSwarmMachineTest(unittest.TestCase):
         contains_needs_list = machine_with({"output": "verdict", "op": "contains", "value": "x"})
         self.assertEqual(
             validate_swarm_machine(contains_needs_list),
-            ["transitions[0] when.op 'contains' requires a list value"],
+            ["transitions[0] when.op 'contains' requires a non-empty list value"],
+        )
+        contains_empty_list = machine_with({"output": "verdict", "op": "contains", "value": []})
+        self.assertEqual(
+            validate_swarm_machine(contains_empty_list),
+            ["transitions[0] when.op 'contains' requires a non-empty list value"],
         )
         eq_rejects_list = machine_with({"output": "verdict", "op": "eq", "value": [1]})
         self.assertEqual(

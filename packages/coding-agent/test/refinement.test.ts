@@ -91,6 +91,18 @@ const swarmDag = {
 	],
 };
 
+const swarmMachine = {
+	states: [
+		{ id: "collect", entry: true, subagent: "researcher", outputs: [{ name: "findings", type: "text" }] },
+		{
+			id: "review",
+			subagent: { prompt: "Review the findings." },
+			inputs: [{ name: "draft", type: "text", from: "collect.findings" }],
+		},
+	],
+	transitions: [{ from: "collect", to: "review" }],
+};
+
 function proposal(summary: string, edits: RefinementProposal["edits"]): RefinementProposal {
 	return {
 		summary,
@@ -287,12 +299,12 @@ describe("harness refinement", () => {
 		expect(state.refinements.at(-1)?.changes).toEqual([`delete ${kind}:${id}`]);
 	});
 
-	it("requires a dag object in arguments for swarm creates and updates", () => {
+	it("requires exactly one dag or machine object in arguments for swarm creates and updates", () => {
 		const state = loadHarnessState(makeTempDir());
 
-		const missingDag = applyRefinementProposal(
+		const missingSpec = applyRefinementProposal(
 			state,
-			proposal("Create swarm without a dag", [
+			proposal("Create swarm without a spec", [
 				{
 					action: "create",
 					kind: "swarm",
@@ -304,9 +316,9 @@ describe("harness refinement", () => {
 			{ id: "refine_swarm_missing_dag" },
 		);
 
-		expect(missingDag.appliedEdits[0]).toMatchObject({
+		expect(missingSpec.appliedEdits[0]).toMatchObject({
 			applied: false,
-			error: "swarm entry requires a dag object in arguments",
+			error: "swarm entry requires a dag or machine object in arguments",
 		});
 		expect(state.entries.swarm.swarm_entry).toBeUndefined();
 		expect(state.refinements.at(-1)?.changes).toEqual([]);
@@ -328,8 +340,29 @@ describe("harness refinement", () => {
 
 		expect(nonObjectDag.appliedEdits[0]).toMatchObject({
 			applied: false,
-			error: "swarm entry requires a dag object in arguments",
+			error: "swarm entry requires a dag or machine object in arguments",
 		});
+
+		const bothForms = applyRefinementProposal(
+			state,
+			proposal("Create swarm with both forms", [
+				{
+					action: "create",
+					kind: "swarm",
+					id: "swarm_entry",
+					title: "Swarm title",
+					content: "Swarm content",
+					arguments: { dag: swarmDag, machine: swarmMachine },
+				},
+			]),
+			{ id: "refine_swarm_both_forms" },
+		);
+
+		expect(bothForms.appliedEdits[0]).toMatchObject({
+			applied: false,
+			error: "pass either dag or machine form, not both",
+		});
+		expect(state.entries.swarm.swarm_entry).toBeUndefined();
 
 		const created = applyRefinementProposal(
 			state,
@@ -351,9 +384,27 @@ describe("harness refinement", () => {
 		expect(created.appliedEdits[0].applied).toBe(true);
 		expect(state.entries.swarm.swarm_entry.arguments).toEqual({ dag: swarmDag });
 
-		const updateWithoutDag = applyRefinementProposal(
+		const machineCreated = applyRefinementProposal(
 			state,
-			proposal("Update swarm without a dag", [
+			proposal("Create swarm with a machine", [
+				{
+					action: "create",
+					kind: "swarm",
+					id: "swarm_machine_entry",
+					title: "Swarm machine",
+					content: "Swarm machine content",
+					arguments: { machine: swarmMachine },
+				},
+			]),
+			{ id: "refine_swarm_machine_valid" },
+		);
+
+		expect(machineCreated.appliedEdits[0].applied).toBe(true);
+		expect(state.entries.swarm.swarm_machine_entry.arguments).toEqual({ machine: swarmMachine });
+
+		const updateWithoutSpec = applyRefinementProposal(
+			state,
+			proposal("Update swarm without a spec", [
 				{
 					action: "update",
 					kind: "swarm",
@@ -365,9 +416,9 @@ describe("harness refinement", () => {
 			{ id: "refine_swarm_update_missing_dag" },
 		);
 
-		expect(updateWithoutDag.appliedEdits[0]).toMatchObject({
+		expect(updateWithoutSpec.appliedEdits[0]).toMatchObject({
 			applied: false,
-			error: "swarm entry requires a dag object in arguments",
+			error: "swarm entry requires a dag or machine object in arguments",
 		});
 		expect(state.entries.swarm.swarm_entry.title).toBe("Swarm title");
 	});

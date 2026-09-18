@@ -914,7 +914,8 @@ class HarnessState:
             "Swarm entries declare validated state-machine workflows of subagent states in arguments['machine'] "
             "(the original DAG sugar in arguments['dag'] compiles to machine form): manage them with "
             "create_swarm/update_swarm/delete_swarm (create_swarm validates either form at write time); run "
-            "them with rlm.swarm.run(\"<id>\") once the executor lands in a follow-up PR.",
+            "them with await rlm.swarm.run(\"<id>\"), watch with rlm.swarm.status(run_id), stop with "
+            "rlm.swarm.stop(run_id), and resume a paused run with rlm.swarm.resume(run_id).",
         ]
         for kind in _KINDS:
             records = self.list(kind)[:max_entries_per_kind]

@@ -49,6 +49,8 @@ export const RLM_CHILD_FAILURE_CUSTOM_TYPE = "rlm_child_failure";
 export const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE = "rlm_child_terminal_notice";
 export const ASYNC_BASH_COMPLETION_CUSTOM_TYPE = "async_bash_completion";
 export const ASYNC_BASH_COMPLETION_PREVIEW_LABEL = "Background command finished";
+export const SWARM_PROGRESS_NOTICE_CUSTOM_TYPE = "swarm_progress_notice";
+export const SWARM_PROGRESS_PREVIEW_LABEL = "Swarm progress";
 
 /**
  * Names and other metadata interpolated into a `[<kind> ...]` header line must not
@@ -259,6 +261,34 @@ export function createAsyncBashCompletionMessage(
 		content: `[bash-done pid:${details.pid} exit:${details.exitCode}]
 
 Command: ${JSON.stringify(details.command)}`,
+		display: true,
+		details,
+		timestamp,
+	};
+}
+
+export interface SwarmProgressDetails {
+	runId: string;
+	kind: "finished" | "failed" | "paused" | "budget_exceeded" | "max_transitions_exceeded";
+	node?: string;
+	detail: string;
+}
+
+interface SwarmProgressMessage extends CustomMessage<SwarmProgressDetails> {
+	customType: typeof SWARM_PROGRESS_NOTICE_CUSTOM_TYPE;
+	content: string;
+}
+
+export function createSwarmProgressMessage(
+	details: SwarmProgressDetails,
+	timestamp = Date.now(),
+): SwarmProgressMessage {
+	// The wire kind budget_exceeded renders as the friendlier budget-exceeded label.
+	const kind = details.kind === "budget_exceeded" ? "budget-exceeded" : details.kind;
+	return {
+		role: "custom",
+		customType: SWARM_PROGRESS_NOTICE_CUSTOM_TYPE,
+		content: `[swarm-progress run:${sanitizeMessageHeaderValue(details.runId)}] ${kind}: ${details.detail}`,
 		display: true,
 		details,
 		timestamp,
