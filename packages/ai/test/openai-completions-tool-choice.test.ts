@@ -1145,6 +1145,25 @@ describe("openai-completions tool_choice", () => {
 		expect((payload as { reasoning_effort?: unknown }).reasoning_effort).toBe("none");
 	});
 
+	it("sends no thinking parameter to Prime Inference GLM routes but keeps the z.ai toggle", async () => {
+		const context = { messages: [{ role: "user" as const, content: "Hi", timestamp: Date.now() }] };
+		const payloads = new Map<string, Record<string, unknown>>();
+		for (const model of [getModel("prime-inference", "z-ai/glm-5.3")!, getModel("zai", "glm-5.3")!]) {
+			await streamSimple(model, context, {
+				apiKey: "test",
+				reasoning: "high",
+				onPayload: (params: unknown) => {
+					payloads.set(model.id, params as Record<string, unknown>);
+				},
+			}).result();
+		}
+		const prime = payloads.get("z-ai/glm-5.3");
+		expect(prime?.enable_thinking).toBeUndefined();
+		expect(prime?.reasoning_effort).toBeUndefined();
+		expect(prime?.reasoning).toBeUndefined();
+		expect(payloads.get("glm-5.3")?.enable_thinking).toBe(true);
+	});
+
 	it("serializes explicit off only for models that allow disabling reasoning", async () => {
 		const baseModel = getModel("openrouter", "deepseek/deepseek-r1")!;
 		const effortCompat = { ...baseModel.compat, supportsReasoningEffort: true };

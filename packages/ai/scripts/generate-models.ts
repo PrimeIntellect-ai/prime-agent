@@ -113,6 +113,13 @@ const ZAI_THINKING_COMPAT: OpenAICompletionsCompat = {
 	thinkingFormat: "zai",
 };
 
+// Prime Inference rejects `enable_thinking` on GLM routes with a 400 on every
+// request. The routes think by default, so send no thinking parameter (and no
+// reasoning_effort, whose support is unverified).
+const PRIME_INFERENCE_ZAI_COMPAT: OpenAICompletionsCompat = {
+	supportsReasoningEffort: false,
+};
+
 const PRIME_INFERENCE_BASE_URL = "https://api.pinference.ai/api/v1";
 const PRIME_INFERENCE_COMPAT: OpenAICompletionsCompat = {
 	supportsStore: false,
@@ -448,6 +455,10 @@ function isPrimeInferenceReasoningModel(modelId: string, catalogReasoning?: bool
 	);
 }
 
+function isPrimeInferenceZaiModelId(modelId: string): boolean {
+	return modelId.toLowerCase().startsWith("z-ai/glm-");
+}
+
 function getPrimeInferenceCompat(modelId: string): OpenAICompletionsCompat {
 	const id = modelId.toLowerCase();
 	if (id.includes("deepseek-v4")) {
@@ -456,10 +467,10 @@ function getPrimeInferenceCompat(modelId: string): OpenAICompletionsCompat {
 			...DEEPSEEK_V4_COMPAT,
 		};
 	}
-	if (id.startsWith("z-ai/glm-")) {
+	if (isPrimeInferenceZaiModelId(id)) {
 		return {
 			...PRIME_INFERENCE_COMPAT,
-			...ZAI_THINKING_COMPAT,
+			...PRIME_INFERENCE_ZAI_COMPAT,
 		};
 	}
 
@@ -606,7 +617,11 @@ function createPrimeInferenceModel(
 			...(openRouter?.supportsReasoningEffort === false
 				? {
 						supportsReasoningEffort: false,
-						...(!compat.thinkingFormat ? { thinkingFormat: "openrouter" as const } : {}),
+						// GLM routes must not receive any thinking parameter; the
+						// `reasoning` object is not verified against the gateway.
+						...(!compat.thinkingFormat && !isPrimeInferenceZaiModelId(entry.id)
+							? { thinkingFormat: "openrouter" as const }
+							: {}),
 					}
 				: {}),
 		},

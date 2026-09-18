@@ -174,9 +174,8 @@ function buildFallbackModel(provider: string, modelId: string, availableModels: 
 	// Daemon-created sessions (rlm.create_session) re-resolve their model from
 	// provider/id strings in a registry that has not refreshed the team-authorized
 	// private catalog, so unknown private ids reach this fallback. They must
-	// inherit a private-route template: the public provider default carries the
-	// zai thinking format, whose enable_thinking parameter the private endpoint
-	// rejects with a 400 on every request.
+	// inherit a private-route template: public-route limits and thinking-level
+	// maps do not describe private routes.
 	if (isPrivatePrimeInferenceModel({ provider, id: modelId })) {
 		const privateTemplate = providerModels.find((m) => isPrivatePrimeInferenceModel(m));
 		if (!privateTemplate) return undefined;
