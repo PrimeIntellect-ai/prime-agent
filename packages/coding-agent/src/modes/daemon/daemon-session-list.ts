@@ -91,6 +91,31 @@ export interface SessionSummary {
 	workerState?: "starting" | "ready" | "recovering" | "stopping" | "failed";
 	/** Diagnostic process identity; clients must not use this as a stable session identifier. */
 	workerPid?: number;
+	/**
+	 * Where the session's agent loop executes. Absent on local rows (a plain
+	 * omission degrades locally); a cloud row carries connectivity that the
+	 * supervisor keeps current.
+	 */
+	execution?: SessionExecutionInfo;
+}
+
+/** Execution location marker for a session summary; cloud rows always carry it. */
+export const CLOUD_SESSION_CONNECTIVITY_STATES = [
+	"provisioning",
+	"connected",
+	"reconnecting",
+	"disconnected",
+	"stopped",
+	"lost",
+] as const;
+export type CloudSessionConnectivity = (typeof CLOUD_SESSION_CONNECTIVITY_STATES)[number];
+
+export interface SessionExecutionInfo {
+	location: "cloud";
+	/** Platform sandbox executing the session, once provisioned. */
+	sandboxId?: string;
+	/** Supervisor-computed attachment state; drives the cloud marker and its transitions. */
+	connectivity: CloudSessionConnectivity;
 }
 
 /**

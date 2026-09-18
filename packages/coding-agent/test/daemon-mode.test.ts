@@ -106,125 +106,30 @@ describe("daemon mode helpers", () => {
 		expect(client.id).toBe("public-client");
 	});
 
-	it("routes cloud commands through the session cwd and correlates delegate progress", async () => {
+	it("rejects cloud commands with the unknown-command contract (supervisor owns the surface)", async () => {
 		const daemon = new AgentDaemon("/tmp/unused-daemon.sock", {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
 			createRuntime: vi.fn(),
 		});
 		const state = makeState("active-cloud");
-		state.runtime = {
-			...state.runtime,
-			cwd: "/repo/cloud",
-			session: { sessionManager: { getSessionId: () => "durable-cloud-owner" } },
-		} as never;
-		const delegation = {
-			id: "sess_cloud-1",
-			activeSessionId: state.activeSessionId,
-			status: "running" as const,
-			createdAt: "2026-01-01T00:00:00.000Z",
-			updatedAt: "2026-01-01T00:00:00.000Z",
-			promptPreview: "fix it",
-			resultReady: false,
-			resultApplied: false,
-		};
-		const cloudService = {
-			delegate: vi.fn(async (request) => {
-				request.onProgress({ sessionId: delegation.id, phase: "allocating", detail: "allocating sandbox" });
-				return delegation;
-			}),
-			list: vi.fn(async () => [delegation]),
-			stop: vi.fn(async () => ({ ...delegation, status: "stopped" as const })),
-			apply: vi.fn(async () => ({ ...delegation, status: "completed" as const, resultApplied: true })),
-			steer: vi.fn(async () => ({
-				delegation: { ...delegation, status: "running" as const },
-				commandId: "cmd_steer_1",
-				taskId: "task_steer_1",
-				state: "acknowledged" as const,
-			})),
-		};
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
-			cloudService: typeof cloudService;
 			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<DaemonOutbound | undefined>;
 		};
 		internals.sessions.set(state.activeSessionId, state);
-		internals.cloudService = cloudService;
-		const writes: string[] = [];
 		const client = makeClient("cloud-client", state.activeSessionId);
-		client.socket = {
-			destroyed: false,
-			write: (data: string | Uint8Array) => {
-				writes.push(String(data));
-				return true;
-			},
-		} as Socket;
-
-		const run = await internals.handleCommand(client, {
+		// The worker no longer hosts the cloud service: the supervisor-owned
+		// registry serves every cloud command (legacy one-shot verbs included),
+		// and a worker never touches cloud state.
+		const response = await internals.handleCommand(client, {
 			id: "cloud-run-1",
 			type: "cloud_delegate",
 			activeSessionId: state.activeSessionId,
-			delegationId: delegation.id,
+			delegationId: "sess_cloud-1",
 			prompt: "fix it",
 		});
-		expect(run).toMatchObject({ type: "response", command: "cloud_delegate", success: true, data: { delegation } });
-		expect(cloudService.delegate).toHaveBeenCalledWith(
-			expect.objectContaining({
-				activeSessionId: "durable-cloud-owner",
-				delegationId: delegation.id,
-				cwd: "/repo/cloud",
-				prompt: "fix it",
-			}),
-		);
-		expect(JSON.parse(writes[0] ?? "{}")).toMatchObject({
-			id: "cloud-run-1",
-			type: "cloud_delegate_progress",
-			delegationId: delegation.id,
-			phase: "provisioning",
-		});
-
-		await internals.handleCommand(client, {
-			id: "cloud-list-1",
-			type: "cloud_delegations_list",
-			activeSessionId: state.activeSessionId,
-		});
-		await internals.handleCommand(client, {
-			id: "cloud-stop-1",
-			type: "cloud_delegation_stop",
-			activeSessionId: state.activeSessionId,
-			delegationId: delegation.id,
-			forfeit: false,
-		});
-		await internals.handleCommand(client, {
-			id: "cloud-apply-1",
-			type: "cloud_delegation_apply",
-			activeSessionId: state.activeSessionId,
-			delegationId: delegation.id,
-		});
-		const steerResponse = await internals.handleCommand(client, {
-			id: "cloud-steer-1",
-			type: "cloud_delegation_steer",
-			activeSessionId: state.activeSessionId,
-			delegationId: delegation.id,
-			text: "tighten the loop",
-			steerId: "steer-identity-1",
-		});
-		expect(steerResponse).toMatchObject({
-			type: "response",
-			command: "cloud_delegation_steer",
-			success: true,
-			data: { steered: expect.objectContaining({ state: "acknowledged" }) },
-		});
-		expect(cloudService.list).toHaveBeenCalledWith("durable-cloud-owner");
-		expect(cloudService.stop).toHaveBeenCalledWith("durable-cloud-owner", delegation.id, false);
-		expect(cloudService.apply).toHaveBeenCalledWith("durable-cloud-owner", delegation.id, "/repo/cloud");
-		// The caller-supplied steer identity rides through so retried daemon
-		// commands deduplicate on the guest journal.
-		expect(cloudService.steer).toHaveBeenCalledWith(
-			"durable-cloud-owner",
-			delegation.id,
-			"tighten the loop",
-			"steer-identity-1",
-		);
+		expect(response).toBeUndefined();
+		expect(daemon).not.toHaveProperty("cloudService");
 	});
 
 	it("waits for overlapping Bash commands with a bounded close deadline", async () => {

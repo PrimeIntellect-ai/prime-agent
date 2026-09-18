@@ -10,6 +10,7 @@ import type { AgentSessionRuntimeConfig } from "../../core/agent-session-config.
 import type { AgentSessionRuntimeMetadata } from "../../core/agent-session-runtime.js";
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
 import type { BashResult } from "../../core/bash-executor.js";
+import type { CloudSessionLocation as CloudSessionRecordLocation } from "../../core/cloud/cloud-session-store.js";
 import type {
 	AgentCronJob,
 	AgentHeartbeatDeliveryMode,
@@ -41,7 +42,7 @@ import type {
 	AgentConnectionState,
 } from "../agent-connection/types.js";
 import type { AgentRosterEntry } from "./agent-roster.js";
-import type { SessionSummary } from "./daemon-session-list.js";
+import type { CloudSessionConnectivity, SessionExecutionInfo, SessionSummary } from "./daemon-session-list.js";
 
 /**
  * Local daemon JSONL protocol.
@@ -76,8 +77,8 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 28 publishes the last recorded model on saved-session rows.
 // Revision 29 adds capability-gated direct cloud sandbox delegation commands and progress.
 // Revision 30 adds the capability-gated cloud tunnel opt-in and steer command.
-export const DAEMON_SCHEMA_REVISION = 30;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-30-2177cb4caea1";
+export const DAEMON_SCHEMA_REVISION = 31;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-31-2c940b5d3b03";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -126,7 +127,11 @@ export type DaemonServerCapability =
 	| "acp_mcp_servers"
 	| "direct_peer_transport"
 	| "cloud_sessions"
-	| "cloud_tunnel";
+	| "cloud_tunnel"
+	// Supervisor-owned resident cloud sessions (registry-backed shadow rows,
+	// attach/prompt translation, cloud_session_* commands). Deprecated: the
+	// one-shot cloud_sessions/cloud_tunnel surface is superseded by it.
+	| "cloud_resident_sessions";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -173,6 +178,7 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"acp_mcp_servers",
 	"cloud_sessions",
 	"cloud_tunnel",
+	"cloud_resident_sessions",
 ];
 
 /** Single-use short-lived credential for one direct TUI connection to one worker process incarnation. */
@@ -440,6 +446,35 @@ export interface DaemonCloudDelegationSummary {
 	stderrPreview?: string;
 	error?: string;
 }
+
+/** One supervisor-owned resident cloud session (cloud_session_list / cloud_session_update). */
+export interface DaemonCloudSessionInfo {
+	/** Cloud session id; equals the shadow session's header id. */
+	sessionId: string;
+	/** Supervisor active-session id while the row is live; the attach/prompt address. */
+	activeSessionId?: string;
+	/** Canonical local shadow transcript path. */
+	sessionFile?: string;
+	sandboxId?: string;
+	/** Sandbox incarnation; fences stale attachments. */
+	generation: number;
+	connectivity: CloudSessionConnectivity;
+	status: CloudSessionStatusSummary;
+	/** Resident provenance; absent on legacy one-shot delegations. */
+	location?: CloudSessionRecordLocation;
+	/** True when this record is a legacy one-shot delegation, not a resident session. */
+	legacyDelegation?: boolean;
+	sessionName?: string;
+	/** Remote descendant count currently mirrored as roster rows. */
+	remoteSessionCount?: number;
+	lastError?: string;
+	createdAt: string;
+	updatedAt: string;
+}
+
+export type CloudSessionStatusSummary = "provisioning" | "running" | "stopping" | "stopped" | "failed" | "lost";
+
+export type { CloudSessionConnectivity };
 
 export type DaemonCloudProgressPhase =
 	| "capturing"
@@ -772,6 +807,38 @@ export type DaemonCommand =
 			/** Client-generated steer identity: retries reuse it so the guest journal deduplicates. */
 			steerId?: string;
 	  }
+	| {
+			id?: string;
+			type: "cloud_session_create";
+			/** The idle local session to convert into a resident cloud session. */
+			activeSessionId: string;
+			/** Sandbox lifetime cap in minutes; defaults to the daemon's cloud default. */
+			timeoutMinutes?: number;
+	  }
+	| { id?: string; type: "cloud_session_list"; activeSessionId?: string }
+	| {
+			id?: string;
+			type: "cloud_session_stop";
+			/** The cloud roster row (its supervisor active-session id) or cloud session id. */
+			activeSessionId: string;
+			/** Release the sandbox without result review when true. */
+			forfeit?: boolean;
+	  }
+	| {
+			id?: string;
+			type: "cloud_session_reprovision";
+			activeSessionId: string;
+			/** Sandbox lifetime cap in minutes for the new incarnation. */
+			timeoutMinutes?: number;
+	  }
+	| {
+			id?: string;
+			type: "cloud_session_import_result";
+			/** The cloud roster row (its supervisor active-session id) or cloud session id. */
+			activeSessionId: string;
+			/** Target checkout for the imported result patch; defaults to the record's cwd. */
+			cwd?: string;
+	  }
 	| { id?: string; type: "ack_result"; commandId: string }
 	| { id?: string; type: "prepare_update_restart" }
 	| { id?: string; type: "retry_worker"; activeSessionId: string }
@@ -849,6 +916,14 @@ const CLOUD_TUNNEL_COMMAND = {
 	minSchemaRevision: 30,
 	capability: "cloud_tunnel",
 } as const;
+// The resident surface supersedes the one-shot commands above; both stay
+// wired for in-flight daemons from the previous release (see the migration
+// plan in docs/cloud-sandbox.md).
+const CLOUD_RESIDENT_SESSIONS_COMMAND = {
+	minProtocol: 7,
+	minSchemaRevision: 31,
+	capability: "cloud_resident_sessions",
+} as const;
 
 export const DAEMON_COMMAND_COMPATIBILITY = {
 	cloud_delegate: CLOUD_SESSIONS_COMMAND,
@@ -856,6 +931,11 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	cloud_delegation_stop: CLOUD_SESSIONS_COMMAND,
 	cloud_delegation_apply: CLOUD_SESSIONS_COMMAND,
 	cloud_delegation_steer: CLOUD_TUNNEL_COMMAND,
+	cloud_session_create: CLOUD_RESIDENT_SESSIONS_COMMAND,
+	cloud_session_list: CLOUD_RESIDENT_SESSIONS_COMMAND,
+	cloud_session_stop: CLOUD_RESIDENT_SESSIONS_COMMAND,
+	cloud_session_reprovision: CLOUD_RESIDENT_SESSIONS_COMMAND,
+	cloud_session_import_result: CLOUD_RESIDENT_SESSIONS_COMMAND,
 	ack_result: LEGACY_DAEMON_COMMAND,
 	list: LEGACY_DAEMON_COMMAND,
 	list_saved_sessions: LEGACY_DAEMON_COMMAND,
@@ -1081,6 +1161,11 @@ export const DAEMON_COMMAND_PLANE = {
 	cloud_delegation_stop: "session",
 	cloud_delegation_apply: "session",
 	cloud_delegation_steer: "session",
+	cloud_session_create: "control",
+	cloud_session_list: "control",
+	cloud_session_stop: "control",
+	cloud_session_reprovision: "control",
+	cloud_session_import_result: "control",
 	prepare_update_restart: "control",
 	retry_worker: "control",
 	restart: "control",
@@ -1207,6 +1292,8 @@ export interface DaemonSavedSessionInfo {
 	allMessagesText: string;
 	agentStatus?: AgentConnectionAgentStatus;
 	usage?: SessionUsageSummary;
+	/** Present when the saved row is a resident cloud session's shadow. */
+	execution?: SessionExecutionInfo;
 }
 
 export type DaemonDeleteSavedSessionResult = DeleteSessionFileResult;
@@ -1323,6 +1410,12 @@ export type DaemonOutbound =
 			event: string;
 			error: string;
 			meta?: DaemonEventMeta;
+	  }
+	| {
+			type: "cloud_session_update";
+			/** Supervisor active-session id while the cloud row is live. */
+			activeSessionId?: string;
+			record: DaemonCloudSessionInfo;
 	  };
 
 export const DAEMON_OUTBOUND_COMPATIBILITY = {
@@ -1348,6 +1441,7 @@ export const DAEMON_OUTBOUND_COMPATIBILITY = {
 	session_closed: LEGACY_DAEMON_COMMAND,
 	extension_ui_request: LEGACY_DAEMON_COMMAND,
 	extension_error: LEGACY_DAEMON_COMMAND,
+	cloud_session_update: { minProtocol: 7, minSchemaRevision: 31, capability: "cloud_resident_sessions" },
 } as const satisfies Record<DaemonOutbound["type"], DaemonCommandCompatibility>;
 
 export function createDaemonCommandEnvelope<TCommand extends DaemonCommand>(

@@ -67,6 +67,15 @@ export interface DirectCloudDelegateOptions {
 	timeoutMinutes?: number;
 	/** Opt in to a Prime Tunnel bridge for live steering; off by default. */
 	tunnel?: boolean;
+	/**
+	 * Resident session provisioning (supervisor cloud registry): the guest
+	 * boots a resident daemon instead of running one prompt, the tunnel is
+	 * always on, the empty prompt is legal, and terminal-result monitoring
+	 * is skipped (the registry drives the session over the tunnel).
+	 */
+	resident?: boolean;
+	/** Tunnel bridge token override (tests pin the guest's expected token). */
+	bridgeToken?: string;
 }
 
 /** Live-steering result of a submitted command over the tunnel bridge. */
@@ -104,6 +113,15 @@ export interface DirectCloudDelegationSummary {
 	error?: string;
 }
 
+/**
+ * True when the record belongs to a supervisor-owned resident cloud session
+ * (registry-backed shadow rows) rather than a legacy one-shot delegation.
+ * Records without v2 fields stay one-shot delegations forever.
+ */
+export function isResidentCloudSessionRecord(record: CloudSessionRecord): boolean {
+	return record.shadowSessionFile !== undefined || record.location !== undefined;
+}
+
 export interface DirectCloudServiceOptions {
 	stateDirectory: string;
 	apiKey?: string;
@@ -130,10 +148,22 @@ export interface DirectCloudServiceOptions {
 	monitorPollIntervalMs?: number;
 	/** Called before a cloud event acknowledgement advances. It must persist durably. */
 	traceSink?: (activeSessionId: string, cloudSessionId: string, event: CloudOutboxEvent) => void | Promise<void>;
+	/**
+	 * Scope filter: records the service may touch. The supervisor registry
+	 * passes a filter excluding resident records so the registry owns their
+	 * attachments exclusively; the default accepts every record.
+	 */
+	recordFilter?: (record: CloudSessionRecord) => boolean;
 }
 
 export interface DirectCloudDelegateRequest {
 	activeSessionId: string;
+	/**
+	 * Explicit parent override for resident provisioning. A converted root
+	 * omits it (the cloud session is its own root); omitting falls back to
+	 * the legacy owner semantics of `activeSessionId`.
+	 */
+	parentSessionId?: string;
 	delegationId: string;
 	cwd: string;
 	prompt: string;
@@ -176,7 +206,8 @@ export function cloudInferenceTeamOverride(env: NodeJS.ProcessEnv = process.env)
 }
 
 /** Durable guest-cursor persistence for tunnel attachments (pre-ack). */
-function saveTunnelGuestCursor(eventsDirectory: string, cursor: CloudGuestCursorRecord): void {
+/** Persist the durable guest-mirror cursor beside the local event outbox. */
+export function saveTunnelGuestCursor(eventsDirectory: string, cursor: CloudGuestCursorRecord): void {
 	const path = join(eventsDirectory, TUNNEL_GUEST_CURSOR_FILE);
 	const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
 	const fd = openSync(temporary, "wx", 0o600);
@@ -193,7 +224,8 @@ function saveTunnelGuestCursor(eventsDirectory: string, cursor: CloudGuestCursor
 	renameSync(temporary, path);
 }
 
-function loadTunnelGuestCursor(eventsDirectory: string): CloudGuestCursorRecord | undefined {
+/** Load the durable guest-mirror cursor written by `saveTunnelGuestCursor`. */
+export function loadTunnelGuestCursor(eventsDirectory: string): CloudGuestCursorRecord | undefined {
 	const path = join(eventsDirectory, TUNNEL_GUEST_CURSOR_FILE);
 	if (!existsSync(path)) return undefined;
 	if (statSync(path).size > TUNNEL_GUEST_CURSOR_MAX_BYTES) {
@@ -893,6 +925,7 @@ export class DirectCloudService {
 	readonly store: CloudSessionStore;
 	readonly resultStore: CloudResultStore;
 	readonly platform: PrimeSandboxClient;
+	private readonly residentTunnels: CloudDelegationTunnelClient | undefined;
 	private readonly inputStore: CloudDelegationInputStore;
 	private readonly outputStore: CloudTaskOutputStore;
 	private readonly stateDirectory: string;
@@ -916,6 +949,7 @@ export class DirectCloudService {
 	private readonly tunnels: CloudDelegationTunnelClient | undefined;
 	private readonly tunnelSecrets: CloudTunnelSecretStore;
 	private readonly tunnelTransport: CloudTunnelTransport;
+	private readonly recordFilter: (record: CloudSessionRecord) => boolean;
 	private readonly attachments = new Map<string, CloudTunnelAttachment>();
 
 	constructor(options: DirectCloudServiceOptions) {
@@ -973,6 +1007,63 @@ export class DirectCloudService {
 		const results = options.results ?? new ConcreteResults(this.platform, this.store, this.resultStore);
 		this.results = new PersistingResults(results, this.outputStore);
 		this.readiness = options.readiness ?? new ConcreteReadiness(this.platform);
+		this.recordFilter = options.recordFilter ?? (() => true);
+		this.residentTunnels = this.tunnels;
+	}
+
+	/** Tunnel registration boundary (resident registry connectivity checks). */
+	get tunnelClient(): CloudDelegationTunnelClient | undefined {
+		return this.residentTunnels;
+	}
+
+	/** Durable tunnel secret store (attachment targets). */
+	get tunnelSecretStore(): CloudTunnelSecretStore {
+		return this.tunnelSecrets;
+	}
+
+	/** Tunnel transport shared with resident attachments. */
+	get tunnelTransportClient(): CloudTunnelTransport {
+		return this.tunnelTransport;
+	}
+
+	/**
+	 * Stop a resident session by cloud session id (registry ownership): send
+	 * the drain signal through the orchestrator, then release the tunnel and
+	 * sandbox when `release` is set, leaving the record stopped and its shadow
+	 * locally readable.
+	 */
+	async stopResidentSession(sessionId: string, release = true): Promise<CloudSessionRecord> {
+		return await this.withOperationLock(sessionId, async () => {
+			await this.orchestrator().stop(sessionId);
+			const current = this.requireSessionRecord(sessionId);
+			if (release) {
+				await this.releaseTunnel(current);
+				if (current.sandboxId !== undefined) {
+					try {
+						await this.platform.deleteSandbox(current.sandboxId);
+					} catch (error) {
+						if (!isMissing(error)) throw error;
+					}
+				}
+				if (current.cleanupState !== "released") this.store.setCleanupState(sessionId, "releasing");
+				if (current.cleanupState !== "released") this.store.setCleanupState(sessionId, "released");
+				if (current.observedLifecycle !== "stopped") this.store.setObservedLifecycle(sessionId, "stopped");
+			}
+			return this.requireSessionRecord(sessionId);
+		});
+	}
+
+	/** Forfeit a resident session by cloud session id: release without review. */
+	async forfeitResidentSession(sessionId: string): Promise<CloudSessionRecord> {
+		return await this.withOperationLock(sessionId, async () => {
+			await this.orchestrator().forfeit(sessionId);
+			return this.requireSessionRecord(sessionId);
+		});
+	}
+
+	/** Refresh one record's sandbox/process state (loss detection). */
+	async refreshResident(record: CloudSessionRecord): Promise<void> {
+		await this.refresh(record);
 	}
 
 	async delegate(request: DirectCloudDelegateRequest): Promise<DirectCloudDelegationSummary> {
@@ -980,7 +1071,8 @@ export class DirectCloudService {
 	}
 
 	private async delegateUnlocked(request: DirectCloudDelegateRequest): Promise<DirectCloudDelegationSummary> {
-		if (!request.prompt.trim()) throw new Error("Cloud delegation prompt must not be empty");
+		const resident = request.options?.resident === true;
+		if (!resident && !request.prompt.trim()) throw new Error("Cloud delegation prompt must not be empty");
 		if (request.options?.instanceType) {
 			throw new Error("Cloud instanceType selection is not supported by the current Sandbox API");
 		}
@@ -988,7 +1080,10 @@ export class DirectCloudService {
 		let stored = this.inputStore.get(request.delegationId);
 		let captured: CloudDelegationCapturedWorkspace;
 		if (stored) {
-			this.inputStore.assertRequest(request.delegationId, request, timeoutMinutes);
+			// Resident provisioning is registry-driven and may change the
+			// sandbox lifetime across generations; the input store stays a
+			// one-shot crash-recovery aid and never rejects it.
+			if (!resident) this.inputStore.assertRequest(request.delegationId, request, timeoutMinutes);
 			captured = stored.captured;
 		} else {
 			captured = await this.workspace.capture({ cwd: request.cwd });
@@ -1010,16 +1105,19 @@ export class DirectCloudService {
 		};
 		try {
 			const tunnel: CloudDelegationTunnelRequest | undefined =
-				request.options?.tunnel === true
+				request.options?.tunnel === true || resident
 					? {
-							bridgeToken: randomBytes(32).toString("hex"),
+							bridgeToken: request.options?.bridgeToken ?? randomBytes(32).toString("hex"),
 							guestPort: CLOUD_TUNNEL_BRIDGE_PORT,
 							...(this.teamId === undefined ? {} : { teamId: this.teamId }),
 						}
 					: undefined;
 			const handle = await this.orchestrator(onProgress).delegate({
 				sessionId: request.delegationId,
-				parentSessionId: request.activeSessionId,
+				...(resident ? { resident: true } : {}),
+				...(resident && request.parentSessionId === undefined
+					? {}
+					: { parentSessionId: request.parentSessionId ?? request.activeSessionId }),
 				prompt: request.prompt,
 				cwd: request.cwd,
 				capturedWorkspace: captured,
@@ -1036,8 +1134,10 @@ export class DirectCloudService {
 				...(this.inferenceTeamId === undefined ? {} : { inferenceTeamId: this.inferenceTeamId }),
 				...(tunnel === undefined ? {} : { tunnel }),
 			});
-			this.startResultMonitor(request.activeSessionId, handle.record.sessionId);
-			if (tunnel !== undefined) this.ensureAttachment(request.activeSessionId, handle.record.sessionId);
+			if (!resident) this.startResultMonitor(request.activeSessionId, handle.record.sessionId);
+			if (tunnel !== undefined && !resident) {
+				this.ensureAttachment(request.activeSessionId, handle.record.sessionId);
+			}
 			return this.summary(handle.record, request.prompt);
 		} finally {
 			if (traceSessionId) await this.safeFlushTrace(request.activeSessionId, traceSessionId);
@@ -1083,7 +1183,9 @@ export class DirectCloudService {
 	}
 
 	async list(activeSessionId: string): Promise<DirectCloudDelegationSummary[]> {
-		const records = this.store.list().filter((record) => record.parentSessionId === activeSessionId);
+		const records = this.store
+			.list()
+			.filter((record) => record.parentSessionId === activeSessionId && this.recordFilter(record));
 		for (const record of records) {
 			try {
 				await this.withOperationLock(record.sessionId, async () => {
@@ -1137,11 +1239,14 @@ export class DirectCloudService {
 	}
 
 	private async applyUnlocked(
-		activeSessionId: string,
+		activeSessionId: string | undefined,
 		sessionId: string,
 		cwd: string,
 	): Promise<DirectCloudDelegationSummary> {
-		let record = this.owned(activeSessionId, sessionId);
+		// Legacy delegations are owned by one local session; resident cloud
+		// sessions are keyed by the cloud session id alone (the registry).
+		let record =
+			activeSessionId === undefined ? this.requireSessionRecord(sessionId) : this.owned(activeSessionId, sessionId);
 		if (record.resultImportState === "skipped") {
 			throw new Error(`Cloud delegation ${sessionId} was forfeited and cannot be applied`);
 		}
@@ -1153,7 +1258,8 @@ export class DirectCloudService {
 			return this.summary(record);
 		}
 		await this.refresh(record);
-		record = this.owned(activeSessionId, sessionId);
+		record =
+			activeSessionId === undefined ? this.requireSessionRecord(sessionId) : this.owned(activeSessionId, sessionId);
 		if (record.resultImportState === "skipped") {
 			throw new Error(`Cloud delegation ${sessionId} was forfeited and cannot be applied`);
 		}
@@ -1175,7 +1281,8 @@ export class DirectCloudService {
 			if (!applied.applied) throw new Error(applied.error);
 		}
 		if (record.resultImportState !== "imported") this.store.setResultImportState(sessionId, "imported");
-		record = this.owned(activeSessionId, sessionId);
+		record =
+			activeSessionId === undefined ? this.requireSessionRecord(sessionId) : this.owned(activeSessionId, sessionId);
 		if (record.cleanupState !== "released") {
 			if (record.cleanupState !== "releasing") this.store.setCleanupState(sessionId, "releasing");
 			await this.releaseTunnel(record);
@@ -1190,9 +1297,16 @@ export class DirectCloudService {
 		}
 		if (record.desiredLifecycle !== "deleted") this.store.setDesiredLifecycle(sessionId, "deleted");
 		if (record.observedLifecycle !== "deleted") this.store.setObservedLifecycle(sessionId, "deleted");
-		this.recordStatus(activeSessionId, sessionId, "stopped");
-		await this.safeFlushTrace(activeSessionId, sessionId);
-		return this.summary(this.owned(activeSessionId, sessionId));
+		if (activeSessionId !== undefined) this.recordStatus(activeSessionId, sessionId, "stopped");
+		if (activeSessionId !== undefined) await this.safeFlushTrace(activeSessionId, sessionId);
+		return this.summary(this.requireSessionRecord(sessionId));
+	}
+
+	/** Fetch one record by id; resident and legacy records both resolve. */
+	private requireSessionRecord(sessionId: string): CloudSessionRecord {
+		const record = this.store.get(sessionId);
+		if (!record) throw new Error(`Unknown cloud session: ${sessionId}`);
+		return record;
 	}
 
 	private async withOperationLock<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
@@ -1563,7 +1677,17 @@ export class DirectCloudService {
 		const record = this.store.get(sessionId);
 		if (!record || record.parentSessionId !== activeSessionId)
 			throw new Error(`Unknown cloud delegation: ${sessionId}`);
+		if (!this.recordFilter(record)) {
+			throw new Error(
+				`Cloud delegation ${sessionId} is a resident cloud session; use the cloud_session_* commands instead`,
+			);
+		}
 		return record;
+	}
+
+	/** Apply a resident session's retrieved result patch, keyed by cloud session id. */
+	async applyForSession(sessionId: string, cwd: string): Promise<DirectCloudDelegationSummary> {
+		return await this.withOperationLock(sessionId, () => this.applyUnlocked(undefined, sessionId, cwd));
 	}
 
 	private orchestrator(onProgress?: (progress: CloudDelegationProgress) => void): CloudDelegationOrchestrator {

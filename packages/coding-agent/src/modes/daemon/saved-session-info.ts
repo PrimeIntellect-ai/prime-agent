@@ -1,6 +1,7 @@
 import type { SessionInfo } from "../../core/session-manager.js";
 import type { AgentConnectionSavedSessionInfo } from "../agent-connection/types.js";
 import type { DaemonSavedSessionInfo } from "./daemon-protocol.js";
+import type { SessionExecutionInfo } from "./daemon-session-list.js";
 
 export function serializeSavedSessionInfo(session: SessionInfo): DaemonSavedSessionInfo {
 	return {
@@ -21,6 +22,14 @@ export function serializeSavedSessionInfo(session: SessionInfo): DaemonSavedSess
 	};
 }
 
+/** Overlay the resident cloud execution marker on a saved shadow row. */
+export function withSavedSessionExecution(
+	session: DaemonSavedSessionInfo,
+	execution: SessionExecutionInfo | undefined,
+): DaemonSavedSessionInfo {
+	return execution === undefined ? session : { ...session, execution };
+}
+
 export function deserializeSavedSessionInfo(session: DaemonSavedSessionInfo): AgentConnectionSavedSessionInfo {
 	return {
 		path: session.path,
@@ -37,5 +46,6 @@ export function deserializeSavedSessionInfo(session: DaemonSavedSessionInfo): Ag
 		allMessagesText: session.allMessagesText,
 		agentStatus: session.agentStatus,
 		usage: session.usage,
+		...(session.execution ? { execution: session.execution } : {}),
 	};
 }

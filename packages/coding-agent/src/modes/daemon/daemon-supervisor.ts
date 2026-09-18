@@ -28,6 +28,7 @@ import {
 	durableAgentSessionRuntimeConfig,
 	mergeAgentSessionRuntimeConfig,
 } from "../../core/agent-session-config.js";
+import { isDirectCloudConfigured } from "../../core/cloud/direct-cloud-service.js";
 import {
 	type AgentCronJob,
 	AgentCronJobStore,
@@ -49,7 +50,12 @@ import {
 	type WorkerEvictionSnapshot,
 } from "../../core/session-action-store.js";
 import { canonicalSessionPath, getProcessStartId, SessionAlreadyActiveError } from "../../core/session-lease.js";
-import { getSessionArtifactPathForFile, readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
+import {
+	getDefaultSessionDir,
+	getSessionArtifactPathForFile,
+	readSessionInfo,
+	type SessionInfo,
+} from "../../core/session-manager.js";
 import { looksLikeSessionPath } from "../../core/session-resolver.js";
 import { SettingsManager } from "../../core/settings-manager.js";
 import { writeFileAtomicSync } from "../../utils/atomic-file.js";
@@ -59,7 +65,7 @@ import {
 	signalProcessGroupOrProcess,
 	spawnHidden,
 } from "../../utils/child-process.js";
-import type { AgentConnectionHeartbeat } from "../agent-connection/types.js";
+import type { AgentConnectionHeartbeat, AgentConnectionSessionEvent } from "../agent-connection/types.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../rpc/jsonl.js";
 import type { PrivateFrame } from "../session-worker/private-framing.js";
 import { createActiveSessionId, type DaemonSocketClient } from "./active-session-state.js";
@@ -73,6 +79,13 @@ import {
 	type WorkerRosterEntry,
 	workerRosterEntryFromSummary,
 } from "./agent-roster.js";
+import {
+	CloudSessionRegistry,
+	type CloudSessionRegistryCallbacks,
+	type CloudSessionTarget,
+	CloudShadowSessionError,
+	isCloudSessionCommand,
+} from "./cloud-session-registry.js";
 import { CommandRecoveryJournal, createCommandIdempotencyKey } from "./command-recovery-journal.js";
 import { CompactAssistantStreamReconstructor, isCompactAssistantDelta } from "./compact-session-stream.js";
 import { DAEMON_CATALOG_ROLE_ENV, DaemonCatalogClient } from "./daemon-catalog-process.js";
@@ -91,7 +104,9 @@ import {
 	type DaemonAttachResult,
 	type DaemonClientCapability,
 	type DaemonClosingReason,
+	type DaemonCloudProgressPhase,
 	type DaemonCommand,
+	type DaemonEventMeta,
 	type DaemonOutbound,
 	type DaemonPeerTransportTicket,
 	type DaemonRequestProgress,
@@ -166,7 +181,7 @@ import {
 	tombstoneSavedSessionDelete,
 	withPassiveRlmDescendantInfos,
 } from "./rlm-ledger.js";
-import { serializeSavedSessionInfo } from "./saved-session-info.js";
+import { serializeSavedSessionInfo, withSavedSessionExecution } from "./saved-session-info.js";
 import { SNAPSHOT_TARGET_CHUNK_BYTES, SnapshotTranscriptCache } from "./snapshot-transcript-cache.js";
 import { WorkerRecoveryJournal } from "./worker-recovery-journal.js";
 
@@ -191,10 +206,14 @@ const ROSTER_STALE_AFTER_MS = 3 * ROSTER_HEARTBEAT_INTERVAL_MS;
 const SUPERVISOR_SERVER_CAPABILITIES: readonly DaemonServerCapability[] = [
 	...DAEMON_DEFAULT_SERVER_CAPABILITIES.filter(
 		(capability) =>
-			capability !== "cloud_sessions" ||
-			Boolean(
-				process.env.PRIME_AGENT_CLOUD_IMAGE?.trim() && process.env.PRIME_AGENT_CLOUD_INFERENCE_API_KEY?.trim(),
-			),
+			// The cloud session surface is advertised only when the daemon can
+			// actually provision: a pinned image plus a guest-scoped inference
+			// credential. The tunnel capability follows the same gate now that
+			// the resident registry owns every cloud attachment.
+			(capability !== "cloud_sessions" &&
+				capability !== "cloud_resident_sessions" &&
+				capability !== "cloud_tunnel") ||
+			isDirectCloudConfigured(),
 	),
 	"agent_roster",
 	"direct_peer_transport",
@@ -245,6 +264,11 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"cloud_delegation_stop",
 	"cloud_delegation_apply",
 	"cloud_delegation_steer",
+	"cloud_session_create",
+	"cloud_session_list",
+	"cloud_session_stop",
+	"cloud_session_reprovision",
+	"cloud_session_import_result",
 	"create",
 	"attach",
 	"reattach",
@@ -497,6 +521,32 @@ function rosterFamilyDescendsFrom(
 
 function isDaemonWorkerProbeTimeout(error: unknown): boolean {
 	return error instanceof DaemonWorkerProbeTimeoutError;
+}
+
+/** Map the orchestrator's workflow phases onto the wire's progress phases. */
+function cloudProgressPhase(progress: { phase: string }): DaemonCloudProgressPhase {
+	switch (progress.phase) {
+		case "capturing":
+			return "capturing";
+		case "allocating":
+		case "provisioning":
+		case "waiting":
+			return "provisioning";
+		case "uploading":
+			return "uploading";
+		case "starting":
+			return "starting";
+		case "running":
+			return "running";
+		case "retrieving":
+			return "retrieving";
+		case "review":
+		case "released":
+		case "lost":
+			return "complete";
+		default:
+			return "provisioning";
+	}
 }
 
 function isSupervisorShutdownAdmissionCancelled(error: unknown): boolean {
@@ -752,6 +802,8 @@ export class DaemonSupervisor {
 	private readonly publishedRosterIds = new Set<string>();
 	private rosterPushScheduled = false;
 	private rosterWatchdogTimer?: ReturnType<typeof setInterval>;
+	/** Supervisor-owned cloud session registry; undefined when cloud is unconfigured. */
+	private cloudRegistry?: CloudSessionRegistry;
 	private rlmSpawnLedgerInstance?: RlmSpawnLedger;
 	private idleEvictionTimer?: ReturnType<typeof setTimeout>;
 	private idleEvictionSweep?: Promise<void>;
@@ -841,6 +893,12 @@ export class DaemonSupervisor {
 			await this.catalog.start().catch((error) => this.log(`Could not start daemon catalog: ${String(error)}`));
 			this.assertSocketLeaseHeld();
 			await this.seedRosterLedger();
+			// Cloud registry recovery is best-effort at startup: records,
+			// shadows, and cursors are on disk, so a failure only costs the
+			// live rows until the next command or restart.
+			await this.cloud()
+				?.recover()
+				.catch((error) => this.log(`Cloud session registry recovery failed: ${String(error)}`));
 			let adoptionFailure: unknown;
 			let adoptionFailed = false;
 			await Promise.all(
@@ -1950,6 +2008,117 @@ export class DaemonSupervisor {
 			case "ack_result":
 				this.commandJournal.acknowledge(client.id, command.commandId);
 				return undefined;
+			case "cloud_session_create": {
+				const registry = this.requireCloudRegistry();
+				const match = await this.findWorkerForClient(client, command.activeSessionId);
+				const summary = match.summary;
+				if (
+					summary.isStreaming ||
+					summary.isCompacting ||
+					summary.isSessionActive ||
+					summary.messageCount > 0 ||
+					summary.hasRunningRlmChildren === true
+				) {
+					throw new Error(
+						"Converting to a cloud session requires an idle session with no messages yet; convert in a new session",
+					);
+				}
+				const session = await registry.convertSession({
+					cwd: summary.cwd,
+					...(summary.sessionName ? { sessionName: summary.sessionName } : {}),
+					...(summary.model ? { model: summary.model.id } : {}),
+					...(command.timeoutMinutes ? { timeoutMinutes: command.timeoutMinutes } : {}),
+				});
+				return success(command.id, command.type, { session });
+			}
+			case "cloud_session_list": {
+				const registry = this.requireCloudRegistry();
+				return success(command.id, command.type, { sessions: await registry.listSessions() });
+			}
+			case "cloud_session_stop": {
+				const registry = this.requireCloudRegistry();
+				const session = await registry.stopSession(command.activeSessionId, command.forfeit === true);
+				return success(command.id, command.type, { session });
+			}
+			case "cloud_session_reprovision": {
+				const registry = this.requireCloudRegistry();
+				const session = await registry.reprovisionSession(command.activeSessionId, command.timeoutMinutes);
+				return success(command.id, command.type, { session });
+			}
+			case "cloud_session_import_result": {
+				const registry = this.requireCloudRegistry();
+				const record = registry.recordForSelector(command.activeSessionId);
+				if (record === undefined) throw new Error(`Unknown cloud session: ${command.activeSessionId}`);
+				const cwd = command.cwd ?? record.baseline?.repoRoot ?? this.defaultSessionConfig.cwd;
+				if (cwd === undefined) {
+					throw new Error(`Cloud session ${record.sessionId} has no repository to import into`);
+				}
+				const session = await registry.importResult(command.activeSessionId, cwd);
+				return success(command.id, command.type, { session });
+			}
+			// Legacy one-shot delegation surface: still functional, now served
+			// by the supervisor-owned registry instead of a session worker.
+			case "cloud_delegate": {
+				const registry = this.requireCloudRegistry();
+				const match = await this.findWorkerForClient(client, command.activeSessionId);
+				const delegation = await registry.legacyDelegate({
+					activeSessionId: match.summary.sessionId,
+					delegationId: command.delegationId,
+					cwd: match.summary.cwd,
+					prompt: command.prompt,
+					...(command.options ? { options: command.options } : {}),
+					onProgress: (progress) => {
+						if (!command.id) return;
+						this.write(client, {
+							id: command.id,
+							type: "cloud_delegate_progress",
+							command: "cloud_delegate",
+							activeSessionId: command.activeSessionId,
+							delegationId: progress.sessionId,
+							phase: cloudProgressPhase(progress),
+							message: progress.detail ?? progress.phase,
+						});
+					},
+				});
+				return success(command.id, command.type, { delegation });
+			}
+			case "cloud_delegations_list": {
+				const registry = this.requireCloudRegistry();
+				const match = await this.findWorkerForClient(client, command.activeSessionId);
+				const delegations = await registry.legacyList(match.summary.sessionId);
+				return success(command.id, command.type, { delegations });
+			}
+			case "cloud_delegation_stop": {
+				const registry = this.requireCloudRegistry();
+				const match = await this.findWorkerForClient(client, command.activeSessionId);
+				const delegation = await registry.legacyStop(
+					match.summary.sessionId,
+					command.delegationId,
+					command.forfeit === true,
+				);
+				return success(command.id, command.type, { delegation });
+			}
+			case "cloud_delegation_apply": {
+				const registry = this.requireCloudRegistry();
+				const match = await this.findWorkerForClient(client, command.activeSessionId);
+				const delegation = await registry.legacyApply(
+					match.summary.sessionId,
+					command.delegationId,
+					match.summary.cwd,
+				);
+				return success(command.id, command.type, { delegation });
+			}
+			case "cloud_delegation_steer": {
+				const registry = this.requireCloudRegistry();
+				const match = await this.findWorkerForClient(client, command.activeSessionId);
+				const steered = await registry.legacySteer(
+					match.summary.sessionId,
+					command.delegationId,
+					command.text,
+					command.steerId,
+				);
+				return success(command.id, command.type, { steered });
+			}
 			case "list":
 				return this.handleList(client, command);
 			case "roster_subscribe":
@@ -1979,6 +2148,12 @@ export class DaemonSupervisor {
 				return success(command.id, command.type, { peers });
 			}
 			case "get_direct_worker_transport": {
+				if (this.cloud()?.resolveActive(command.activeSessionId) !== undefined) {
+					// Cloud sessions are served exclusively through the
+					// supervisor control plane; a remote worker socket can
+					// never be stat'ed or connected by a local client.
+					throw new Error("Direct transport is unavailable for cloud sessions");
+				}
 				const match = await this.findWorkerForClient(client, command.activeSessionId);
 				if (match.worker.descriptor.ownerClientId !== undefined) {
 					throw new Error("Direct transport is unavailable for client-owned workers");
@@ -1989,6 +2164,10 @@ export class DaemonSupervisor {
 			case "list_saved_sessions":
 				return this.handleSavedSessionList(client, command);
 			case "create": {
+				const cloudCreate = await this.cloudCreateIntercept(client, command);
+				if (cloudCreate !== undefined) {
+					return success(command.id, "create", cloudCreate);
+				}
 				const worker = await this.createOrReuseWorker(this.protocolClientId(client), command);
 				const requestedSummary = command.sessionPath
 					? this.findSummaryInWorker(worker, command.sessionPath)
@@ -2012,6 +2191,11 @@ export class DaemonSupervisor {
 				return success(command.id, "create", this.publicSummary(worker, sessionSummaryFromRosterEntry(root)));
 			}
 			case "attach": {
+				const cloudTarget = this.cloud()?.resolveActive(command.activeSessionId);
+				if (cloudTarget !== undefined) {
+					const result = await this.attachCloudClient(client, command, cloudTarget);
+					return success(command.id, "attach", result);
+				}
 				const attached = await this.attachClient(client, command);
 				if (client.capabilities.has("chunked_snapshot")) {
 					const transcript = attached.transcript;
@@ -2042,6 +2226,20 @@ export class DaemonSupervisor {
 				return success(command.id, "attach", attached.result);
 			}
 			case "reattach": {
+				const cloudTarget = this.cloud()?.resolveActive(command.targetActiveSessionId);
+				if (cloudTarget !== undefined) {
+					const targetActiveSessionId = cloudTarget.activeSessionId;
+					if (targetActiveSessionId === command.activeSessionId) {
+						return success(command.id, command.type, { cancelled: false });
+					}
+					const result = await this.attachCloudClient(
+						client,
+						{ ...command, type: "attach", activeSessionId: targetActiveSessionId },
+						cloudTarget,
+					);
+					this.detachClient(client, command.activeSessionId);
+					return success(command.id, command.type, result);
+				}
 				const target = await this.findWorkerForClient(client, command.targetActiveSessionId);
 				const targetActiveSessionId = target.summary.activeSessionId ?? target.summary.id;
 				if (targetActiveSessionId === command.activeSessionId) {
@@ -2528,9 +2726,28 @@ export class DaemonSupervisor {
 
 		if (command.type === "send_message") {
 			// agentOrigin without fromActiveSessionId is trusted only at the direct socket-client boundary.
-			const source = command.fromActiveSessionId
-				? await this.findWorkerForClient(client, command.fromActiveSessionId)
+			const sourceCloudTarget = command.fromActiveSessionId
+				? this.cloud()?.resolveActive(command.fromActiveSessionId)
 				: undefined;
+			const source = sourceCloudTarget
+				? undefined
+				: command.fromActiveSessionId
+					? await this.findWorkerForClient(client, command.fromActiveSessionId)
+					: undefined;
+			const targetCloudTarget = this.cloud()?.resolveActive(command.targetActiveSessionId);
+			if (targetCloudTarget !== undefined) {
+				// Cloud row target: family reach is asserted over the same
+				// summary edges, then the message rides the cloud protocol.
+				const sourceSummary = sourceCloudTarget?.summary ?? source?.summary;
+				if (sourceSummary && command.agentOrigin === true) {
+					assertAgentFamilyReach(
+						this.familyCatalogEntry(sourceSummary),
+						this.familyCatalogEntry(targetCloudTarget.summary),
+					);
+				}
+				const registry = this.requireCloudRegistry();
+				return await registry.handleSessionCommand(command, targetCloudTarget);
+			}
 			let target: WorkerMatch;
 			try {
 				target = await this.findWorkerForClient(client, command.targetActiveSessionId);
@@ -2604,6 +2821,41 @@ export class DaemonSupervisor {
 		if (!("activeSessionId" in command) || typeof command.activeSessionId !== "string") {
 			throw new Error(`Supervisor cannot route daemon command: ${command.type}`);
 		}
+		// Cloud rows are registry-owned: intercept before the worker lookup so
+		// a cloud active session id never falls into worker addressing.
+		const cloudTarget = this.cloud()?.resolveActive(command.activeSessionId);
+		if (cloudTarget !== undefined) {
+			if (isCloudSessionCommand(command)) {
+				return await this.handleCloudSessionCommand(client, command, cloudTarget);
+			}
+			if (command.type === "kill") {
+				const registry = this.requireCloudRegistry();
+				if (cloudTarget.descendant && cloudTarget.summary.rlmChildId !== undefined) {
+					// Killing one remote descendant cancels that child; the
+					// sandbox itself only stops through cloud_session_stop.
+					return await registry.handleSessionCommand(
+						{
+							type: "cancel_rlm_child",
+							activeSessionId: cloudTarget.record.sessionId,
+							childId: cloudTarget.summary.rlmChildId,
+							...(command.id ? { id: command.id } : {}),
+						},
+						{
+							...cloudTarget,
+							descendant: false,
+							activeSessionId: cloudTarget.record.sessionId,
+						},
+					);
+				}
+				const session = await registry.stopSession(command.activeSessionId, false);
+				return success(command.id, command.type, { session });
+			}
+			return failure(
+				command.id,
+				command.type,
+				`Command ${command.type} is not supported on a cloud session; it runs in the session's sandbox`,
+			);
+		}
 		const admission =
 			(command.type === "prompt" || command.type === "prompt_and_wait") && command.admissionId
 				? this.getPromptAdmission(client, command.activeSessionId, command.admissionId)
@@ -2634,17 +2886,7 @@ export class DaemonSupervisor {
 				(match.summary.activeSessionId ?? match.summary.id) === match.worker.descriptor.rootActiveSessionId;
 			if (!isRootKill) {
 				const forward = async () => {
-					const onProgress =
-						command.type === "cloud_delegate"
-							? (progress: DaemonRequestProgress) =>
-									this.write(client, { ...progress, id: command.id, activeSessionId: command.activeSessionId })
-							: undefined;
-					const response = await this.forwardToWorker(
-						match.worker,
-						resolvedCommand,
-						WORKER_REQUEST_TIMEOUT_MS,
-						onProgress,
-					);
+					const response = await this.forwardToWorker(match.worker, resolvedCommand, WORKER_REQUEST_TIMEOUT_MS);
 					if (admission && response.success) admission.status = "owned";
 					return response;
 				};
@@ -2682,6 +2924,13 @@ export class DaemonSupervisor {
 		const active: SessionSummary[] = [];
 		const activeByFile = new Map<string, SessionSummary>();
 		let busyClientOwnedSessionCount = 0;
+		// Cloud roster rows are registry-owned; the roster store already holds
+		// them, and the live summaries carry the execution marker.
+		for (const cloudRow of this.cloud()?.liveSummaries() ?? []) {
+			const summary = this.publicCloudSummary(cloudRow);
+			active.push(summary);
+			if (summary.sessionFile) activeByFile.set(canonicalSessionPath(summary.sessionFile), summary);
+		}
 		for (const entry of this.roster().values()) {
 			if (entry.queuedChild) continue;
 			const worker = entry.workerId !== undefined ? this.workers.get(entry.workerId) : undefined;
@@ -2722,7 +2971,9 @@ export class DaemonSupervisor {
 				continue;
 			}
 			// The on-disk scan is public: an unserved (client-owned) worker row hides its live metadata only.
-			merged.push(summaryForInactiveSession(info));
+			const inactiveSummary = summaryForInactiveSession(info);
+			const execution = this.cloud()?.executionForShadowFile(file);
+			merged.push(execution === undefined ? inactiveSummary : { ...inactiveSummary, execution });
 		}
 		// The boot seed covers registered workers' families only, so dead families (pure on-disk
 		// history, no registered worker anywhere in the tree) are not roster-resident. Their
@@ -2859,7 +3110,14 @@ export class DaemonSupervisor {
 			...(callbacks ? { onSession: callbacks.onSession } : {}),
 			log: (message) => this.log(message),
 		});
-		return success(command.id, "list_saved_sessions", { sessions: sessions.map(serializeSavedSessionInfo) });
+		const cloudRegistry = this.cloud();
+		return success(command.id, "list_saved_sessions", {
+			sessions: sessions.map((session) => {
+				const base = serializeSavedSessionInfo(session);
+				const execution = cloudRegistry?.executionForShadowFile(canonicalSessionPath(session.path));
+				return withSavedSessionExecution(base, execution);
+			}),
+		});
 	}
 
 	private async createOrReuseWorker(clientId: string, command: DaemonCreateCommand): Promise<ResidentWorker> {
@@ -2872,6 +3130,7 @@ export class DaemonSupervisor {
 			createCommand = { ...command, name: normalizedName };
 		}
 		const ownerClientId = command.lifecycle === "client_owned" ? clientId : undefined;
+		this.assertNotCloudShadowSession(command.sessionPath);
 		if (command.sessionPath) {
 			const activeMatches = this.matchWorkers(command.sessionPath);
 			if (
@@ -2887,6 +3146,7 @@ export class DaemonSupervisor {
 			const sessionPath = looksLikeSessionPath(command.sessionPath)
 				? resolve(command.sessionPath)
 				: await this.catalog.resolve(command.sessionPath, config.cwd ?? process.cwd(), config.sessionDir);
+			this.assertNotCloudShadowSession(sessionPath);
 			createCommand = { ...createCommand, sessionPath };
 		}
 		const key = createCommand.sessionPath
@@ -4252,6 +4512,75 @@ export class DaemonSupervisor {
 		});
 	}
 
+	/** The supervisor-owned cloud registry, created on first use when configured. */
+	private cloud(): CloudSessionRegistry | undefined {
+		if (!isDirectCloudConfigured()) return undefined;
+		this.cloudRegistry ??= new CloudSessionRegistry({
+			stateDirectory: join(this.defaultSessionConfig.agentDir ?? "", "cloud"),
+			sessionDir:
+				this.defaultSessionConfig.sessionDir ??
+				getDefaultSessionDir(this.defaultSessionConfig.cwd ?? process.cwd()),
+			cwd: this.defaultSessionConfig.cwd ?? process.cwd(),
+			callbacks: this.cloudRegistryCallbacks(),
+		});
+		return this.cloudRegistry;
+	}
+
+	/** The registry or a typed error; used by the capability-gated command surface. */
+	private requireCloudRegistry(): CloudSessionRegistry {
+		const registry = this.cloud();
+		if (registry === undefined) {
+			throw new Error("Cloud sessions are not configured on this daemon");
+		}
+		return registry;
+	}
+
+	private cloudRegistryCallbacks(): CloudSessionRegistryCallbacks {
+		return {
+			log: (message) => this.log(message),
+			writeRosterEntry: (entry) => this.writeRosterEntry(entry),
+			deleteRosterEntry: (agentId) => {
+				this.roster().delete(agentId);
+			},
+			appendLedgerEdge: (input) => this.rlmSpawnLedger().appendSpawn(input),
+			deleteLedgerChild: (input) =>
+				this.rlmSpawnLedger().appendDelete({ childId: input.childId, child: input.child, reason: "gc" }),
+			writeSessionEvent: (activeSessionId, event, meta) => this.writeCloudSessionEvent(activeSessionId, event, meta),
+			writeSessionStatus: (activeSessionId, recap) => {
+				for (const client of this.clients) {
+					if (!client.attachedActiveSessionIds.has(activeSessionId)) continue;
+					this.write(client, { type: "session_status", activeSessionId, recap });
+				}
+			},
+			broadcastCloudSessionUpdate: (record) => {
+				for (const client of this.clients) {
+					this.write(client, {
+						type: "cloud_session_update",
+						...(record.activeSessionId ? { activeSessionId: record.activeSessionId } : {}),
+						record,
+					});
+				}
+			},
+			attachedClientCount: (activeSessionId) =>
+				[...this.clients].filter((client) => client.attachedActiveSessionIds.has(activeSessionId)).length,
+		};
+	}
+
+	/** Fan one cloud live event out to the clients attached to the cloud row. */
+	private writeCloudSessionEvent(
+		activeSessionId: string,
+		event: AgentConnectionSessionEvent,
+		meta: DaemonEventMeta,
+	): boolean {
+		let delivered = false;
+		for (const client of this.clients) {
+			if (client.socket.destroyed || !client.attachedActiveSessionIds.has(activeSessionId)) continue;
+			this.write(client, { type: "session_event", activeSessionId, event, meta });
+			delivered = true;
+		}
+		return delivered;
+	}
+
 	private roster(): AgentRoster {
 		this.rosterStore ??= new AgentRoster(canonicalSessionPath, (mutation) => this.onRosterMutation(mutation));
 		return this.rosterStore;
@@ -4882,6 +5211,11 @@ export class DaemonSupervisor {
 
 	private publicSummary(worker: ResidentWorker, summary: SessionSummary): SessionSummary {
 		const activeSessionId = summary.activeSessionId ?? summary.id;
+		// Cloud rows never carry worker state; they overlay supervisor-computed
+		// connectivity instead (the registry owns their roster rows).
+		if (summary.execution?.location === "cloud") {
+			return this.publicCloudSummary(summary);
+		}
 		return {
 			...summary,
 			attachedClients: this.attachedClientCount(summary, activeSessionId),
@@ -5059,6 +5393,171 @@ export class DaemonSupervisor {
 			return { ...response, id: command.id, data: this.publicSummary(worker, response.data) };
 		}
 		return responseWithId(response, command.id);
+	}
+
+	/**
+	 * Attach a client to a live cloud row. The snapshot and replay come from
+	 * the local shadow plus the registry's cached meta; the only transport is
+	 * this supervisor socket (never a direct-worker ticket).
+	 */
+	private async attachCloudClient(
+		client: DaemonSocketClient,
+		command: Extract<DaemonCommand, { type: "attach" }>,
+		target: CloudSessionTarget,
+	): Promise<DaemonAttachResult> {
+		const registry = this.cloud();
+		if (registry === undefined) throw new Error("Cloud sessions are not configured");
+		if (command.clientId) {
+			client.id = command.clientId;
+		}
+		client.capabilities = normalizeCapabilities(command.capabilities, command.supportsExtensionUi);
+		client.supportsExtensionUi = client.capabilities.has("extension_ui");
+		const activeSessionId = target.activeSessionId;
+		const snapshot = registry.attachSnapshot(target);
+		const publicSummary = this.publicCloudSummary(snapshot.summary);
+		const slim = client.capabilities.has("slim_attach");
+		client.attachedActiveSessionIds.add(activeSessionId);
+		const result: DaemonAttachResult = {
+			protocol: DAEMON_PROTOCOL_INFO,
+			activeSessionId,
+			...(slim ? {} : { state: publicSummary, messages: snapshot.messages }),
+			snapshot: {
+				activeSessionId,
+				summary: publicSummary,
+				state: snapshot.state,
+				messages: snapshot.messages,
+				sessionContext: snapshot.sessionContext,
+				children: snapshot.children,
+				lastEventSequence: snapshot.lastEventSequence,
+			},
+			replay: { status: "complete", toSequence: snapshot.lastEventSequence },
+			lastEventSequence: snapshot.lastEventSequence,
+			client: { id: client.id, capabilities: [...client.capabilities] },
+		};
+		this.write(client, {
+			type: "session_attached",
+			activeSessionId,
+			state: publicSummary,
+			messages: snapshot.messages,
+			snapshot: result.snapshot,
+			replay: result.replay,
+			lastEventSequence: result.lastEventSequence,
+		});
+		return result;
+	}
+
+	/** Supervisor-computed cloud fields for a cloud row summary. */
+	private publicCloudSummary(summary: SessionSummary): SessionSummary {
+		const activeSessionId = summary.activeSessionId ?? summary.id;
+		const refreshed = this.cloud()?.resolveActive(activeSessionId)?.summary.execution;
+		return {
+			...summary,
+			attachedClients: this.attachedClientCount(summary, activeSessionId),
+			...(summary.execution
+				? {
+						execution: refreshed
+							? { ...summary.execution, connectivity: refreshed.connectivity }
+							: summary.execution,
+					}
+				: {}),
+		};
+	}
+
+	/**
+	 * Intercept create-with-sessionPath for cloud shadows: a live cloud
+	 * record serves its roster row instead of opening a local worker, and a
+	 * stopped/lost record refuses the local open (reprovision instead).
+	 * Returns the summary to answer with, or undefined when the path is not a
+	 * registered cloud shadow.
+	 */
+	private async cloudCreateIntercept(
+		client: DaemonSocketClient,
+		command: DaemonCreateCommand,
+	): Promise<SessionSummary | undefined> {
+		const registry = this.cloud();
+		if (registry === undefined || !command.sessionPath) return undefined;
+		const sessionPath = looksLikeSessionPath(command.sessionPath)
+			? resolve(command.sessionPath)
+			: await this.catalog
+					.resolve(
+						command.sessionPath,
+						this.defaultSessionConfig.cwd ?? process.cwd(),
+						this.defaultSessionConfig.sessionDir,
+					)
+					.catch(() => undefined);
+		if (sessionPath === undefined) return undefined;
+		const record = registry.recordForShadowFile(canonicalSessionPath(sessionPath));
+		if (record === undefined) return undefined;
+		const target = registry.resolveActive(record.activeSessionId ?? record.sessionId);
+		if (target === undefined) {
+			throw new Error(
+				`Session "${command.sessionPath}" is a ${
+					record.observedLifecycle === "lost" ? "lost" : "stopped"
+				} cloud session; reprovision it instead of opening it locally`,
+			);
+		}
+		void client;
+		return this.publicCloudSummary(target.summary);
+	}
+
+	/**
+	 * Split-brain guard: no local worker may ever open a registered cloud
+	 * shadow. Both the live and terminal states refuse; the create command
+	 * intercepts live rows earlier, so this is the hard backstop for every
+	 * other createOrReuseWorker caller (wake paths, message delivery).
+	 */
+	private assertNotCloudShadowSession(sessionPath: string | undefined): void {
+		if (sessionPath === undefined) return;
+		const registry = this.cloudRegistry;
+		if (registry === undefined) return;
+		const record = registry.recordForShadowFile(canonicalSessionPath(resolve(sessionPath)));
+		if (record === undefined) return;
+		throw new CloudShadowSessionError(
+			`Session "${sessionPath}" is the shadow transcript of cloud session ${record.sessionId} (${record.observedLifecycle}); the supervisor owns its only writer`,
+		);
+	}
+
+	/** Route one session-plane command at a cloud row through the registry. */
+	private async handleCloudSessionCommand(
+		client: DaemonSocketClient,
+		command: DaemonCommand,
+		target: CloudSessionTarget,
+	): Promise<DaemonResponse | undefined> {
+		const registry = this.cloud();
+		if (registry === undefined) throw new Error("Cloud sessions are not configured");
+		if (command.type === "prompt" || command.type === "prompt_and_wait") {
+			const admission =
+				command.admissionId !== undefined
+					? this.getPromptAdmission(client, target.activeSessionId, command.admissionId)
+					: undefined;
+			if (admission?.status === "cancelled") throw new PromptAdmissionCancelledError();
+			const response = await registry.handleSessionCommand(
+				{ ...command, activeSessionId: target.activeSessionId },
+				target,
+				admission === undefined
+					? undefined
+					: {
+							isCancelled: () => admission.status === "cancelled",
+							markOwned: () => {
+								admission.status = "owned";
+							},
+						},
+			);
+			if (admission !== undefined && (response === undefined || response.success)) {
+				admission.status = "owned";
+			}
+			return response;
+		}
+		if (command.type === "rename" || command.type === "set_session_name") {
+			const name = command.name.trim();
+			if (!name) throw new Error("Session name cannot be empty");
+			const reservation = this.summaryNameReservationInput(target.summary, name);
+			return await this.withSessionNameReservation(reservation, async () => {
+				await this.assertSupervisorSessionNameAvailable(target.summary, reservation.name);
+				return registry.handleSessionCommand({ ...command, name }, target);
+			});
+		}
+		return registry.handleSessionCommand(command, target);
 	}
 
 	private async attachClient(
@@ -6920,6 +7419,10 @@ export class DaemonSupervisor {
 		}
 		this.workers.clear();
 		this.openingWorkers.clear();
+		await this.runCleanupStep("cloud registry", async () => {
+			await this.cloudRegistry?.dispose();
+			this.cloudRegistry = undefined;
+		});
 		await this.runCleanupStep("daemon catalog", () => this.catalog.stop());
 		await this.runCleanupStep("daemon server", () => serverClosed);
 		await this.runCleanupStep("daemon socket", () => this.cleanupSocket());

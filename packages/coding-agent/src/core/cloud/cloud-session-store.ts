@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { writeFileAtomicSync } from "../../utils/atomic-file.js";
 import { PRIME_SANDBOX_STATUSES, type PrimeSandboxStatus } from "./prime-sandbox-client.js";
 import {
@@ -145,9 +145,25 @@ export interface CloudSessionRecord {
 	resultImportState: CloudResultImportState;
 	/** Last operational failure, bounded; cleared with undefined. */
 	lastError?: string;
+	/**
+	 * Canonical local shadow-session file path (resident sessions). The key
+	 * for create/attach interception: the shadow is the local mirror of the
+	 * remote session and the only permitted local writer is the supervisor.
+	 */
+	shadowSessionFile?: string;
+	/** Supervisor incarnation id of the live cloud roster row. */
+	activeSessionId?: string;
+	/** Resident provenance; absent on legacy one-shot delegations. */
+	location?: CloudSessionLocation;
+	/** Remote descendant session ids mirrored into shadow sessions. */
+	remoteSessionIds?: string[];
 	createdAt: string;
 	updatedAt: string;
 }
+
+/** Resident-session provenance recorded on the durable record. */
+export const CLOUD_SESSION_LOCATIONS = ["converted-root", "spawned-child"] as const;
+export type CloudSessionLocation = (typeof CLOUD_SESSION_LOCATIONS)[number];
 
 export interface CloudSessionCreateInput {
 	/** Preallocated session identity; allocated by the store when omitted. */
@@ -191,9 +207,16 @@ const RECORD_FIELDS = [
 	"cleanupState",
 	"resultImportState",
 	"lastError",
+	"shadowSessionFile",
+	"activeSessionId",
+	"location",
+	"remoteSessionIds",
 	"createdAt",
 	"updatedAt",
 ] as const;
+
+/** Upper bound on remote descendant sessions recorded per cloud session. */
+export const CLOUD_MAX_REMOTE_SESSIONS = 512;
 
 const DESIRED_ORDER: readonly CloudDesiredLifecycle[] = CLOUD_DESIRED_LIFECYCLE_STATES;
 const CLEANUP_PIPELINE: readonly CloudCleanupState[] = [
@@ -251,6 +274,16 @@ export function cloudSessionRecordProblem(value: unknown): string | undefined {
 		value.lastError === undefined
 			? undefined
 			: expectString(value.lastError, "record.lastError", CLOUD_MAX_ERROR_CHARS),
+		value.shadowSessionFile === undefined
+			? undefined
+			: expectString(value.shadowSessionFile, "record.shadowSessionFile", CLOUD_MAX_PATH_CHARS),
+		value.activeSessionId === undefined
+			? undefined
+			: expectString(value.activeSessionId, "record.activeSessionId", CLOUD_MAX_ID_CHARS),
+		value.location === undefined
+			? undefined
+			: expectOneOf(value.location, "record.location", CLOUD_SESSION_LOCATIONS),
+		remoteSessionIdsProblem(value.remoteSessionIds, "record.remoteSessionIds"),
 		expectTimestamp(value.createdAt, "record.createdAt"),
 		expectTimestamp(value.updatedAt, "record.updatedAt"),
 	);
@@ -528,6 +561,104 @@ export class CloudSessionStore {
 	}
 
 	/**
+	 * Record the local shadow-session file for a resident session; set once
+	 * per logical session (it survives reprovision generations), immutable.
+	 */
+	setShadowSession(sessionId: string, shadowSessionFile: string): CloudSessionRecord {
+		const problem = expectString(shadowSessionFile, "shadowSessionFile", CLOUD_MAX_PATH_CHARS, 1);
+		if (problem !== undefined) {
+			throw new CloudSessionStoreError("invalid", problem);
+		}
+		if (!isAbsolute(shadowSessionFile)) {
+			throw new CloudSessionStoreError("invalid", "shadowSessionFile must be an absolute path");
+		}
+		return this.mutate(sessionId, (record) => {
+			if (record.shadowSessionFile === shadowSessionFile) {
+				return false;
+			}
+			if (record.shadowSessionFile !== undefined) {
+				throw new CloudSessionStoreError(
+					"conflict",
+					`cloud session ${sessionId} already holds shadow session ${record.shadowSessionFile}`,
+				);
+			}
+			record.shadowSessionFile = shadowSessionFile;
+			return true;
+		});
+	}
+
+	/** Record the supervisor incarnation id of the live cloud roster row. */
+	setActiveSessionId(sessionId: string, activeSessionId: string | undefined): CloudSessionRecord {
+		if (activeSessionId !== undefined) {
+			const problem = expectString(activeSessionId, "activeSessionId", CLOUD_MAX_ID_CHARS, 1);
+			if (problem !== undefined) {
+				throw new CloudSessionStoreError("invalid", problem);
+			}
+		}
+		return this.mutate(sessionId, (record) => {
+			if (record.activeSessionId === activeSessionId) {
+				return false;
+			}
+			record.activeSessionId = activeSessionId;
+			return true;
+		});
+	}
+
+	/** Record resident provenance; set once. */
+	setLocation(sessionId: string, location: CloudSessionLocation): CloudSessionRecord {
+		return this.mutate(sessionId, (record) => {
+			if (record.location === location) {
+				return false;
+			}
+			if (record.location !== undefined) {
+				throw new CloudSessionStoreError(
+					"conflict",
+					`cloud session ${sessionId} already holds location ${record.location}`,
+				);
+			}
+			record.location = location;
+			return true;
+		});
+	}
+
+	/** Register one remote descendant session id; idempotent and bounded. */
+	addRemoteSessionId(sessionId: string, remoteSessionId: string): CloudSessionRecord {
+		const problem = expectString(remoteSessionId, "remoteSessionId", CLOUD_MAX_ID_CHARS, 1);
+		if (problem !== undefined) {
+			throw new CloudSessionStoreError("invalid", problem);
+		}
+		return this.mutate(sessionId, (record) => {
+			const existing = record.remoteSessionIds ?? [];
+			if (existing.includes(remoteSessionId)) {
+				return false;
+			}
+			if (existing.length >= CLOUD_MAX_REMOTE_SESSIONS) {
+				throw new CloudSessionStoreError(
+					"invalid",
+					`cloud session ${sessionId} already records ${CLOUD_MAX_REMOTE_SESSIONS} remote sessions`,
+				);
+			}
+			record.remoteSessionIds = [...existing, remoteSessionId];
+			return true;
+		});
+	}
+
+	/** Forget one remote descendant session id (its shadow row was deleted). */
+	removeRemoteSessionId(sessionId: string, remoteSessionId: string): CloudSessionRecord {
+		return this.mutate(sessionId, (record) => {
+			const existing = record.remoteSessionIds;
+			if (existing === undefined || !existing.includes(remoteSessionId)) {
+				return false;
+			}
+			record.remoteSessionIds = existing.filter((entry) => entry !== remoteSessionId);
+			if (record.remoteSessionIds.length === 0) {
+				record.remoteSessionIds = undefined;
+			}
+			return true;
+		});
+	}
+
+	/**
 	 * Record the registered Prime Tunnel for this incarnation. Set once; a
 	 * re-registration replaces it only after the previous tunnel was released.
 	 */
@@ -577,7 +708,9 @@ export class CloudSessionStore {
 	 * id/status, create idempotency key, deadline, attachment, last error),
 	 * and restart both cursors at the new generation. Baseline provenance,
 	 * cleanup, and result-import state belong to the logical session and are
-	 * kept. This is the one sanctioned reset of the desired/observed
+	 * kept, as do the resident shadow-session file and provenance location.
+	 * Remote descendants belong to one guest incarnation and are cleared.
+	 * This is the one sanctioned reset of the desired/observed
 	 * lifecycle back to `provisioning`.
 	 */
 	nextGeneration(sessionId: string, residentProcessUuid: string): CloudSessionRecord {
@@ -599,6 +732,7 @@ export class CloudSessionStore {
 			record.lastError = undefined;
 			record.eventCursor = cloudCursor(record.generation, 0);
 			record.ackCursor = cloudCursor(record.generation, 0);
+			record.remoteSessionIds = undefined;
 			record.desiredLifecycle = "provisioning";
 			record.observedLifecycle = "provisioning";
 			return true;
@@ -901,6 +1035,19 @@ function isCleanupState(value: unknown): value is CloudCleanupState {
 
 function isResultImportState(value: unknown): value is CloudResultImportState {
 	return typeof value === "string" && (CLOUD_RESULT_IMPORT_STATES as readonly string[]).includes(value);
+}
+
+function remoteSessionIdsProblem(value: unknown, label: string): string | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value)) return `${label} must be an array`;
+	if (value.length > CLOUD_MAX_REMOTE_SESSIONS) {
+		return `${label} must hold at most ${CLOUD_MAX_REMOTE_SESSIONS} entries`;
+	}
+	for (let index = 0; index < value.length; index++) {
+		const problem = expectString(value[index], `${label}[${index}]`, CLOUD_MAX_ID_CHARS, 1);
+		if (problem !== undefined) return problem;
+	}
+	return undefined;
 }
 
 function baselineProblem(value: unknown, label: string): string | undefined {

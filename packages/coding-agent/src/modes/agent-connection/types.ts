@@ -28,7 +28,7 @@ import type {
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import type { SessionStats } from "../../core/session-stats.js";
 import type { SessionUsageSummary } from "../../core/usage.js";
-import type { SessionSummary } from "../daemon/daemon-session-list.js";
+import type { SessionExecutionInfo, SessionSummary } from "../daemon/daemon-session-list.js";
 
 /**
  * Client-side interaction boundary consumed by InteractiveMode.
@@ -136,6 +136,8 @@ export interface AgentConnectionSavedSessionInfo {
 	allMessagesText: string;
 	agentStatus?: AgentConnectionAgentStatus;
 	usage?: SessionUsageSummary;
+	/** Present when the saved row is a resident cloud session's shadow. */
+	execution?: SessionExecutionInfo;
 }
 
 export type AgentConnectionSessionListProgress = (loaded: number, total: number) => void;

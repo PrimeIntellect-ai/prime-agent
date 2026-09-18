@@ -521,6 +521,8 @@ export interface CloudDelegationRequest {
 	sessionId?: string;
 	parentSessionId?: string;
 	prompt: string;
+	/** Resident provisioning: the empty prompt is legal (no one-shot task). */
+	resident?: boolean;
 	cwd: string;
 	/** Pre-captured durable input used for crash recovery; capture is skipped when supplied. */
 	capturedWorkspace?: CloudDelegationCapturedWorkspace;
@@ -801,7 +803,11 @@ export class CloudDelegationOrchestrator {
 		if (request.parentSessionId !== undefined) {
 			requireBoundedString(request.parentSessionId, "parentSessionId", CLOUD_MAX_ID_CHARS);
 		}
-		requireBoundedString(request.prompt, "prompt", CLOUD_MAX_PROMPT_CHARS);
+		if (request.prompt.length < 1 && request.resident !== true) {
+			requireBoundedString(request.prompt, "prompt", CLOUD_MAX_PROMPT_CHARS);
+		} else {
+			requireBoundedString(request.prompt, "prompt", CLOUD_MAX_PROMPT_CHARS, 0);
+		}
 		requireBoundedString(request.cwd, "cwd", 4096);
 		if (request.model !== undefined) {
 			requireBoundedString(request.model, "model", CLOUD_MAX_MODEL_ID_CHARS);

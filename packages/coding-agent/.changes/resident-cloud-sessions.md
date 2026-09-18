@@ -1,0 +1,3 @@
+- Added durable supervisor-owned resident cloud sessions: a session can convert to a resident cloud session, keep running through worker and daemon restarts, and stay reachable for prompt, steer, interrupt, and message flows from any client.
+- Added locally mirrored cloud session histories: every remote turn and remote descendant now lands in a local session transcript that /resume, the agents view, and offline inspection can read, including oversized entries pulled through bounded artifact transfer.
+- Added cloud rows to the global agents roster with sandbox and connectivity markers, and attach recovery that rebuilds rows and reconnects running cloud sessions after a daemon restart while stopped or lost sessions stay locally readable.
