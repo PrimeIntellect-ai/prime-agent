@@ -849,3 +849,47 @@ async function generateTurnPrefixSummary(
 		usage: response.usage,
 	};
 }
+
+/**
+ * Estimate the context window the summary model needs for the wire requests
+ * `compact` builds from this preparation, using the chars/4 heuristic this
+ * module already uses for pre-LLM token math. Mirrors the exact request
+ * bodies: `generateSummary` sends the serialized conversation (plus the
+ * previous summary on iterative updates) and asks for floor(0.8 * reserve)
+ * completion tokens, while a split turn's prefix summary serializes its own
+ * slice with the tighter floor(0.5 * reserve) budget; both carry
+ * SUMMARIZATION_SYSTEM_PROMPT as the system prompt, so its size counts too.
+ * The largest slice wins: routing must fit every request the compaction will
+ * issue, not the average. 0 means no summary request is applicable.
+ */
+export function estimateSummaryRequestTokens(preparation: CompactionPreparation, customInstructions?: string): number {
+	const { messagesToSummarize, turnPrefixMessages, isSplitTurn, previousSummary, settings } = preparation;
+	const systemPromptTokens = Math.ceil(SUMMARIZATION_SYSTEM_PROMPT.length / 4);
+	let required = 0;
+	// compact() issues the history slice for every compaction except a split
+	// turn with a non-empty prefix and nothing to summarize ("No prior history"
+	// needs no wire call); a stale previousSummary alone never adds a request
+	// compact() skips.
+	const issuesHistoryCall = messagesToSummarize.length > 0 || !(isSplitTurn && turnPrefixMessages.length > 0);
+	if (issuesHistoryCall) {
+		let promptText = `<conversation>\n${serializeConversation(convertToLlm(messagesToSummarize))}\n</conversation>\n\n`;
+		if (previousSummary) {
+			promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
+		}
+		promptText += buildSummarizationPrompt(customInstructions, previousSummary);
+		required = Math.max(
+			required,
+			systemPromptTokens + Math.ceil(promptText.length / 4) + Math.floor(0.8 * settings.reserveTokens),
+		);
+	}
+	// A split turn's prefix summary is a separate request with its own body and
+	// a smaller completion budget, so it can exceed the history slice.
+	if (turnPrefixMessages.length > 0) {
+		const promptText = `<conversation>\n${serializeConversation(convertToLlm(turnPrefixMessages))}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
+		required = Math.max(
+			required,
+			systemPromptTokens + Math.ceil(promptText.length / 4) + Math.floor(0.5 * settings.reserveTokens),
+		);
+	}
+	return required;
+}

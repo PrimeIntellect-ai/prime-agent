@@ -196,10 +196,10 @@ export interface Settings {
 	subagentDefaultModel?: string; // "provider/id" for rlm.spawn without a pinned model; unset inherits the parent model
 	updateChannel?: "stable" | "nightly"; // release channel for self-updates; unset follows the running version
 	recentModels?: string[]; // "provider/id" keys, most-recently-used first
-	// "provider/id" for background LLM passes (refinement review and planning);
-	// unset falls back to the session model. Routing these to a different model
-	// keeps their different prompt prefixes from evicting the session's provider
-	// prefix-cache entry.
+	// "provider/id" for background LLM passes (refinement review and planning,
+	// compaction summaries, branch summaries); unset falls back to the session
+	// model. Routing these to a different model keeps their different prompt
+	// prefixes from evicting the session's provider prefix-cache entry.
 	auxiliaryModel?: string;
 	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	defaultServiceTier?: ServiceTier;
@@ -813,9 +813,14 @@ export class SettingsManager {
 		this.save();
 	}
 
+	/**
+	 * "provider/id" of the model that runs background LLM passes (refinement
+	 * review and planning, compaction summaries, branch summaries). Falls back to
+	 * the session model when unset, equal to the session model, or unusable.
+	 */
 	getAuxiliaryModel(): string | undefined {
 		// Hand-edited or corrupt settings files can persist non-string values; treat
-		// anything malformed as unset so refinement falls back to the session model.
+		// anything malformed as unset so the pass falls back to the session model.
 		const value = this.settings.auxiliaryModel;
 		return typeof value === "string" ? value : undefined;
 	}

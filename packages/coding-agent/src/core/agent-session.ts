@@ -108,7 +108,9 @@ import {
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
 	compact,
+	estimateBranchSummaryRequestTokens,
 	estimateContextTokens,
+	estimateSummaryRequestTokens,
 	generateBranchSummary,
 	prepareCompaction,
 	serializeConversation,
@@ -8496,6 +8498,23 @@ export class AgentSession {
 			if (extensionCompaction) {
 				({ summary, firstKeptEntryId, tokensBefore, details, usage } = extensionCompaction);
 			} else {
+				// Compaction fires at context peak, and the summarizer runs with its own
+				// prompt prefix, so issuing the summary on the session model evicts the
+				// provider's prefix-cache entry for the session: an aborted compaction
+				// leaves the context unchanged but the next turn re-reads all of it.
+				// Route summaries to the auxiliary model when one is configured.
+				const summarization = (await this._resolveAuxiliaryModel(
+					"compaction summary",
+					{ model, apiKey, headers },
+					// The summary request serializes the whole conversation, so a
+					// smaller auxiliary window must fall back to the session model
+					// instead of failing over-limit and stranding the context.
+					estimateSummaryRequestTokens(preparation, customInstructions),
+				)) ?? {
+					model,
+					apiKey,
+					headers,
+				};
 				// Each summary wire call gets its own request ID: split turns send two
 				// different bodies, and one Idempotency-Key must never cover both. A slice
 				// that succeeds on the wire stays uncommitted until the compaction itself
@@ -8506,10 +8525,10 @@ export class AgentSession {
 				): Promise<T> => {
 					const requestId = this._semanticEdges.startCompactionRequest(semanticCompaction.compactionId);
 					if (requestId === undefined) {
-						return call(headers);
+						return call(summarization.headers);
 					}
 					try {
-						const result = await call({ ...headers, ...modelRequestHeaders(requestId) });
+						const result = await call({ ...summarization.headers, ...modelRequestHeaders(requestId) });
 						// A slice resolving after a sibling's rejection already settled the
 						// compaction would push into a drained list and stay in-flight forever.
 						if (compactionSettled) {
@@ -8525,12 +8544,15 @@ export class AgentSession {
 				};
 				({ summary, firstKeptEntryId, tokensBefore, details, usage } = await compact(
 					preparation,
-					model,
-					apiKey,
-					headers,
+					summarization.model,
+					summarization.apiKey,
+					summarization.headers,
 					customInstructions,
 					signal,
-					this.thinkingLevel,
+					// Summarizing is transcription, not reasoning: no thinking level is
+					// requested, so the summary call stays cheap and cannot trip an invalid
+					// reasoning effort for the summary model (supersedes #3438).
+					undefined,
 					summaryCall,
 					providerRetryPolicy(this.settingsManager),
 					this.sessionId,
@@ -9040,23 +9062,35 @@ export class AgentSession {
 	}
 
 	/**
-	 * Refinement passes (review and planning) run with their own prompts, so
-	 * issuing them on the session model evicts the provider's prefix-cache entry
-	 * for the session and forces a full context re-read on the next session
-	 * request. Route them to the configured auxiliary model when it is set and
-	 * usable; fall back to the session model otherwise.
+	 * Background LLM passes (refinement review and planning, compaction summaries,
+	 * branch summaries) run with their own prompts, so issuing them on the session
+	 * model evicts the provider's prefix-cache entry for the session and forces a
+	 * full context re-read on the next session request. Route them to the
+	 * configured auxiliary model when it is set and usable; fall back to the
+	 * session model otherwise.
+	 *
+	 * Callers that already resolved the session request auth pass it as
+	 * `fallback` so the fallback path reuses it instead of resolving again.
 	 */
-	private async _resolveRefinementModel(): Promise<
-		{ model: Model<Api>; apiKey: string; headers?: Record<string, string> } | undefined
-	> {
+	private async _resolveAuxiliaryModel(
+		purpose: string,
+		fallback?: { model: Model<Api>; apiKey: string; headers?: Record<string, string> },
+		requiredContextTokens?: number,
+	): Promise<{ model: Model<Api>; apiKey: string; headers?: Record<string, string> } | undefined> {
 		const sessionModel = this.model;
 		if (!sessionModel) {
-			return undefined;
+			return fallback;
 		}
-		const selector = this.settingsManager.getAuxiliaryModel()?.trim().toLowerCase();
-		if (!selector || `${sessionModel.provider}/${sessionModel.id}`.toLowerCase() === selector) {
+		const resolveSessionAuth = async () => {
+			if (fallback) {
+				return fallback;
+			}
 			const { apiKey, headers, requestModel } = await this._getRequiredRequestAuth(sessionModel);
 			return { model: requestModel, apiKey, headers };
+		};
+		const selector = this.settingsManager.getAuxiliaryModel()?.trim().toLowerCase();
+		if (!selector || `${sessionModel.provider}/${sessionModel.id}`.toLowerCase() === selector) {
+			return await resolveSessionAuth();
 		}
 		try {
 			const model = (await this._authenticatedRlmModels()).find(
@@ -9066,13 +9100,27 @@ export class AgentSession {
 				throw new Error(`model "${selector}" is unavailable, unauthenticated, or expired`);
 			}
 			const { apiKey, headers, requestModel } = await this._getRequiredRequestAuth(model);
+			// Callers that know the size of the request they will issue pass it in:
+			// an auxiliary model whose context window cannot hold that request
+			// fails over-limit on the wire (e.g. a compaction summary covering the
+			// whole conversation), leaving the caller unable to make progress. A
+			// known window that is too small routes to the session model through the
+			// warning below; an unknown window (<= 0) keeps the routing as-is
+			// rather than guessing. The throw lands in the catch, whose logging
+			// stays selector-only (CodeQL js/clear-text-logging).
+			if (
+				requiredContextTokens !== undefined &&
+				requestModel.contextWindow > 0 &&
+				requestModel.contextWindow < requiredContextTokens
+			) {
+				throw new Error("auxiliary model context window is too small for the request");
+			}
 			return { model: requestModel, apiKey, headers };
 		} catch {
 			// Error details from the auth stack can embed credential material, so only
 			// the selector is logged (CodeQL js/clear-text-logging).
-			console.warn(`Warning: auxiliaryModel "${selector}" unusable for refinement; using the session model.`);
-			const { apiKey, headers, requestModel } = await this._getRequiredRequestAuth(sessionModel);
-			return { model: requestModel, apiKey, headers };
+			console.warn(`Warning: auxiliaryModel "${selector}" unusable for ${purpose}; using the session model.`);
+			return await resolveSessionAuth();
 		}
 	}
 
@@ -9080,7 +9128,7 @@ export class AgentSession {
 		if (this._autoRefineReviewer) {
 			return this._autoRefineReviewer(context, signal);
 		}
-		const refinementModel = await this._resolveRefinementModel();
+		const refinementModel = await this._resolveAuxiliaryModel("refinement");
 		if (!refinementModel) {
 			return { shouldRefine: false, rationale: "No model selected." };
 		}
@@ -9425,7 +9473,7 @@ export class AgentSession {
 			throw new Error(formatNoModelSelectedMessage());
 		}
 
-		const refinementModel = await this._resolveRefinementModel();
+		const refinementModel = await this._resolveAuxiliaryModel("refinement");
 		if (!refinementModel) {
 			throw new Error(formatNoModelSelectedMessage());
 		}
@@ -13460,10 +13508,34 @@ export class AgentSession {
 			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
 				const { apiKey, headers, requestModel: model } = await this._getRequiredRequestAuth(this.model!);
 				const branchSummarySettings = this.settingsManager.getBranchSummarySettings();
-				const result = await generateBranchSummary(entriesToSummarize, {
+				// Branch summary fires at a tree-navigation context boundary, and the
+				// summarizer runs with its own prompt prefix (SUMMARIZATION_SYSTEM_PROMPT
+				// plus the <conversation> wrapper), so issuing it on the session model
+				// evicts the provider's prefix-cache entry for the session and re-reads
+				// the whole context at peak price. Route it to the auxiliary model when
+				// one is configured.
+				const summarization = (await this._resolveAuxiliaryModel(
+					"branch summary",
+					{ model, apiKey, headers },
+					// The estimator sizes the request the session model would issue for
+					// the branch being left. A smaller auxiliary window must fall back
+					// rather than truncate away branch context or fail over-limit and
+					// strand the navigation.
+					estimateBranchSummaryRequestTokens(entriesToSummarize, {
+						contextWindow: model.contextWindow,
+						reserveTokens: branchSummarySettings.reserveTokens,
+						customInstructions,
+						replaceInstructions,
+					}),
+				)) ?? {
 					model,
 					apiKey,
 					headers,
+				};
+				const result = await generateBranchSummary(entriesToSummarize, {
+					model: summarization.model,
+					apiKey: summarization.apiKey,
+					headers: summarization.headers,
 					signal: this._branchSummaryAbortController.signal,
 					sessionId: this.sessionId,
 					customInstructions,
