@@ -27,7 +27,7 @@ prime sandbox create python:3.11-slim \
   --yes
 ```
 
-- `--timeout-minutes` caps total lifetime; `--idle-timeout-minutes` reaps the sandbox early when no exec/upload/download/file-read arrives (1 ≤ idle ≤ timeout ≤ 1440).
+- `--timeout-minutes` caps total lifetime; `--idle-timeout-minutes` reaps the sandbox early when no exec/upload/download/file-read arrives (1 ≤ idle ≤ timeout ≤ 1440; for VM sandboxes, `timeout_minutes` may be negative to disable the lifetime deadline).
 - `--env` values are plain text; `--secret` values are encrypted at rest and obfuscated in output. Both become environment variables inside the sandbox.
 - Default start command keeps the sandbox idle, ready for `prime sandbox run`. To run your own process at boot, pass the command after `--` as separate tokens (no shell): `prime sandbox create python:3.11-slim -- python serve.py --port 8000`.
 - Outbound internet is on by default; restrict egress with network allow/deny lists (`prime sandbox network`, or `network_allowlist`/`network_denylist` in the SDK).
