@@ -878,7 +878,6 @@ export class DaemonSupervisor {
 			if (migratedJobs > 0) {
 				this.log(`Migrated ${migratedJobs} scheduled jobs into session artifacts`);
 			}
-			await this.catalog.start().catch((error) => this.log(`Could not start daemon catalog: ${String(error)}`));
 			this.assertSocketLeaseHeld();
 			await this.seedRosterLedger();
 			let adoptionFailure: unknown;

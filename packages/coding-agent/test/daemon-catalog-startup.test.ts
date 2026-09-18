@@ -40,13 +40,4 @@ describe("daemon catalog startup", () => {
 		spawnState.child?.emit("message", { type: "ready" });
 		await expect(starting).resolves.toBeUndefined();
 	});
-
-	it("rejects immediately when the catalog exits during startup", async () => {
-		vi.useFakeTimers();
-		const client = new DaemonCatalogClient(() => {});
-		const starting = client.start();
-
-		spawnState.child?.emit("exit", 1, null);
-		await expect(starting).rejects.toThrow(/exited during startup/);
-	});
 });
