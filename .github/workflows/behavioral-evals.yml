@@ -106,22 +106,48 @@ jobs:
               }
             }
 
-  evaluate:
+  authorize:
+    name: Authorize the pre-release label actor
     if: >-
       github.event_name == 'pull_request_target' && github.event.action == 'labeled' &&
       github.event.label.name == 'pre-release'
-    name: runner
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
-    permissions:
-      actions: read
-      contents: read
-      statuses: write
+    timeout-minutes: 5
+    permissions: {}
     steps:
-      - name: Record the job budget
-        # Mirrors timeout-minutes above so the orchestrator fits its waits inside the job.
-        run: echo "BEHAVIORAL_JOB_DEADLINE_EPOCH=$(( $(date +%s) + 360 * 60 ))" >> "$GITHUB_ENV"
+      - name: Validate the labeling actor's repository permission
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v8.0.0
+        with:
+          script: |
+            const actor = context.payload.sender;
+            if (!actor) {
+              core.setFailed('No labeling actor recorded for this event.');
+              return;
+            }
+            const { data: permission } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              username: actor.login,
+            });
+            const allowed = ['admin', 'maintain', 'write'];
+            if (!allowed.includes(permission.permission)) {
+              core.setFailed(
+                `Actor ${actor.login} has '${permission.permission}' access; ` +
+                'the pre-release label requires write, maintain, or admin.'
+              );
+            }
 
+  mark-pending:
+    name: Mark the requested head pending
+    if: >-
+      github.event_name == 'pull_request_target' && github.event.action == 'labeled' &&
+      github.event.label.name == 'pre-release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    needs: authorize
+    steps:
       - name: Mark the requested head pending
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v8.0.0
         with:
@@ -144,6 +170,22 @@ jobs:
               description: 'pre-release label approves this exact head',
               target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
             });
+
+  evaluate:
+    if: >-
+      github.event_name == 'pull_request_target' && github.event.action == 'labeled' &&
+      github.event.label.name == 'pre-release'
+    name: runner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    needs: [authorize, mark-pending]
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Record the job budget
+        # Mirrors timeout-minutes above so the orchestrator fits its waits inside the job.
+        run: echo "BEHAVIORAL_JOB_DEADLINE_EPOCH=$(( $(date +%s) + 360 * 60 ))" >> "$GITHUB_ENV"
 
       - name: Check out trusted evaluator
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -383,6 +425,26 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+      - name: Enforce complete paired result and regression thresholds
+        if: always()
+        run: test -f results/verdict && test "$(cat results/verdict)" = pass
+
+  report:
+    name: Publish PR report
+    needs: evaluate
+    if: always() && needs.evaluate.result != 'skipped'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: write
+    steps:
+      - name: Download evaluation results
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: behavioral-results-${{ github.run_attempt }}
+          path: .
+
       - name: Set exact-head status
         if: always()
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v8.0.0
@@ -438,24 +500,6 @@ jobs:
               target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
             });
 
-      - name: Enforce complete paired result and regression thresholds
-        if: always()
-        run: test -f results/verdict && test "$(cat results/verdict)" = pass
-
-  report:
-    name: Publish PR report
-    needs: evaluate
-    if: always() && needs.evaluate.result != 'skipped'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      pull-requests: write
-    steps:
-      - name: Download evaluation results
-        uses: actions/download-artifact@642e1d0bd1d03f3d1c2f94b1f3ae300c4d0b1b4a # v7
-        with:
-          name: behavioral-results-${{ github.run_attempt }}
-          path: .
 
       - name: Publish PR report
         if: always() && hashFiles('results/report.md') != ''
