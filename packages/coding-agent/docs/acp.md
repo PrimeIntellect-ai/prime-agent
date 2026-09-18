@@ -31,7 +31,7 @@ Likewise `session/prompt` refuses a concurrent turn while one is running, and th
 
 ## Model and reasoning effort pickers
 
-`session/new` returns standard ACP `configOptions`, allowing clients such as Zed to display a model picker and a reasoning effort picker. Models use `provider/model-id` values and come from providers configured in Prime Agent. The current model is included even if model discovery is unavailable.
+`session/new` returns standard ACP `configOptions`, allowing clients such as Zed to display a model picker and a reasoning effort picker. Models come from providers configured in Prime Agent. Model values are opaque IDs encoding the provider and model ID as a JSON pair; clients should send the advertised value unchanged. The current model is included and can be reselected even if model discovery is unavailable.
 
 The effort picker uses the `thought_level` category and contains only levels supported by the selected model. It is omitted for models without reasoning support. Changing models returns updated effort options and the effective level after Prime Agent applies its model-specific limits. Changes use the same session and saved preferences as Prime Agent's own model and effort controls.
 

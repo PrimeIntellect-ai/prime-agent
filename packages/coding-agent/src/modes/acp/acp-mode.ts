@@ -138,7 +138,7 @@ interface AcpSessionEntry {
 }
 
 function modelValue(model: AgentConnectionModel): string {
-	return `${model.provider}/${model.id}`;
+	return JSON.stringify([model.provider, model.id]);
 }
 
 function sessionConfigOptions(
@@ -923,7 +923,16 @@ export async function runAcpModeWithConnection(
 					throw acp.RequestError.invalidParams({ reason: "ACP session is closed or closing" });
 				}
 				if (configId === "model" && typeof value === "string") {
-					const models = await connection.getAvailableModels();
+					const current = (await connection.getState()).model;
+					if (current && modelValue(current) === value) {
+						return { configOptions: await refreshConfig(entry) };
+					}
+					let models: AgentConnectionModel[];
+					try {
+						models = await connection.getAvailableModels();
+					} catch {
+						throw acp.RequestError.invalidParams({ reason: "Model discovery is unavailable; try again later" });
+					}
 					const model = models.find((candidate) => modelValue(candidate) === value);
 					if (!model) throw acp.RequestError.invalidParams({ reason: `Unavailable model: ${value}` });
 					await connection.setModel(model.provider, model.id);
