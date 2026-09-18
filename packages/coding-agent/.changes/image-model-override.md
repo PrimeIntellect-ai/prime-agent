@@ -1,0 +1,2 @@
+- Added an `imageModel` setting that routes image-attaching turns to an image-capable model when the session or subagent model is text-only.
+- Image turns on a text-only session model now fail with an actionable error naming `imageModel` instead of silently dropping the images when the setting is unset or unusable.

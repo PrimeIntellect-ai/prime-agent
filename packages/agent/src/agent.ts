@@ -3,6 +3,7 @@ import {
 	type ImageContent,
 	type Message,
 	type Model,
+	type ServiceTier,
 	type SimpleStreamOptions,
 	streamSimple,
 	type TextContent,
@@ -24,6 +25,7 @@ import type {
 	GetContinuationMessagesContext,
 	ShouldStopAfterTurnContext,
 	StreamFn,
+	ThinkingLevel,
 	ToolExecutionMode,
 } from "./types.js";
 
@@ -174,6 +176,13 @@ type ActiveRun = {
 /** Why {@link Agent.continue} refused to start a continuation. */
 export type AgentContinueErrorCode = "busy" | "nothing-to-continue";
 
+/** Model that serves the LLM requests of a routed run, with per-request fields clamped for it. */
+export interface AgentModelOverride {
+	model: Model<any>;
+	thinkingLevel: ThinkingLevel;
+	serviceTier: ServiceTier;
+}
+
 /** Typed precondition failure from {@link Agent.continue}, so callers classify by code instead of message text. */
 export class AgentContinueError extends Error {
 	constructor(
@@ -211,6 +220,16 @@ export class Agent {
 		context: GetContinuationMessagesContext,
 		signal?: AbortSignal,
 	) => Promise<AgentMessage[]>;
+	/**
+	 * Per-run model override. When set, every LLM request for prompt and
+	 * continuation runs uses this model (with its own thinking level and
+	 * service tier), while `state.model` keeps identifying the session model
+	 * for UI and persistence. The owner sets it right before starting a
+	 * routed run and re-evaluates it before the next one; retries and
+	 * post-compaction continuations re-read it, so they stay on the model
+	 * that served the routed turn.
+	 */
+	modelOverride?: AgentModelOverride;
 	private activeRun?: ActiveRun;
 	public sessionId?: string;
 	public thinkingBudgets?: ThinkingBudgets;
@@ -458,10 +477,11 @@ export class Agent {
 
 	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
+		const override = this.modelOverride;
 		return {
-			model: this._state.model,
-			reasoning: this._state.thinkingLevel,
-			serviceTier: this._state.serviceTier,
+			model: override?.model ?? this._state.model,
+			reasoning: override?.thinkingLevel ?? this._state.thinkingLevel,
+			serviceTier: override?.serviceTier ?? this._state.serviceTier,
 			sessionId: this.sessionId,
 			onPayload: this.onPayload,
 			onResponse: this.onResponse,
@@ -514,12 +534,15 @@ export class Agent {
 	}
 
 	private async handleRunFailure(error: unknown, aborted: boolean): Promise<void> {
+		// The override model served the run when one was routed, so failures are
+		// tagged with it rather than the session model.
+		const runModel = this.modelOverride?.model ?? this._state.model;
 		const failureMessage = {
 			role: "assistant",
 			content: [{ type: "text", text: "" }],
-			api: this._state.model.api,
-			provider: this._state.model.provider,
-			model: this._state.model.id,
+			api: runModel.api,
+			provider: runModel.provider,
+			model: runModel.id,
 			usage: EMPTY_USAGE,
 			stopReason: aborted ? "aborted" : "error",
 			errorMessage: error instanceof Error ? error.message : String(error),

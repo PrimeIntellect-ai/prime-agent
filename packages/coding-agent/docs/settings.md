@@ -18,12 +18,26 @@ Edit directly or use `/settings` for common options.
 | `defaultProvider` | string | - | Default provider (e.g., `"anthropic"`, `"openai"`) |
 | `defaultModel` | string | - | Default model ID |
 | `subagentDefaultModel` | string | - | Model selector (`"provider/id"`) used when `rlm.spawn` does not pin a model; unset inherits the parent model |
+| `imageModel` | string | none | Model (`"provider/model-id"` or a bare id) that serves turns attaching images when the session model does not accept image input |
 | `defaultThinkingLevel` | string | `"medium"` | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level |
 
 `subagentDefaultModel` applies only to spawned subagents whose `rlm.spawn` call omits `model=`. An explicit `model=` per spawn always wins, and an unset setting keeps the inherit-parent behavior. If the configured default is unavailable, unauthenticated, or expired, the spawn fails with that error instead of silently falling back.
 
 When `defaultThinkingLevel` is unset, new sessions start at `"medium"` reasoning, clamped to the levels each model supports.
+
+`imageModel` routes image turns on text-only session or subagent models. When a
+turn attaches images and the selected model has no image input, that turn (and
+its retries and post-compaction continuations) is served by the configured
+image-capable model instead; the session model selection stays unchanged, and
+the routed assistant messages record the model that served them. Later
+image-free turns return to the session model, where images already in the
+transcript appear as "(image omitted: model does not support images)"
+placeholders. With no `imageModel` set (default), image turns on a text-only
+model fail with an actionable error instead of silently dropping the images:
+switch the session model with `/model` or configure `imageModel`. Set
+`images.blockImages: true` to drop images everywhere instead of routing or
+refusing.
 
 ### Autonomous Runs
 
