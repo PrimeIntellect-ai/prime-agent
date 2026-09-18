@@ -199,6 +199,91 @@ function connectAcpClient(connection: any, options: ClientHarnessOptions = {}): 
 }
 
 describe("ACP mode end to end", () => {
+	it("advertises model and effort pickers and applies ACP selections to the session", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "reasoner", reasoning: true },
+				{ id: "plain/model", reasoning: false },
+			],
+		});
+		const connection = new InProcessAgentConnection(runtimeHostFor(harness.session));
+		const { client, updates, close } = connectAcpClient(connection);
+		try {
+			await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+			const session = (await client.request("session/new", {
+				cwd: harness.tempDir,
+				mcpServers: [],
+			})) as acp.NewSessionResponse;
+			const model = `${harness.models[0].provider}/plain/model`;
+			expect(session.configOptions).toEqual([
+				expect.objectContaining({
+					id: "model",
+					category: "model",
+					type: "select",
+					currentValue: `${harness.models[0].provider}/reasoner`,
+					options: expect.arrayContaining([expect.objectContaining({ value: model })]),
+				}),
+				expect.objectContaining({
+					id: "thought_level",
+					category: "thought_level",
+					currentValue: harness.session.thinkingLevel,
+				}),
+			]);
+			const select = (
+				configId: string,
+				value: string,
+				sessionId = session.sessionId,
+			): Promise<acp.SetSessionConfigOptionResponse> =>
+				client.request("session/set_config_option", { sessionId, configId, value });
+			const effort = await select("thought_level", "high");
+			expect(harness.session.thinkingLevel).toBe("high");
+			expect(effort.configOptions).toContainEqual(
+				expect.objectContaining({ id: "thought_level", currentValue: "high" }),
+			);
+			expect(updates).toContainEqual(
+				expect.objectContaining({
+					sessionId: session.sessionId,
+					update: expect.objectContaining({
+						sessionUpdate: "config_option_update",
+						configOptions: effort.configOptions,
+					}),
+				}),
+			);
+			for (const [configId, value, sessionId] of [
+				["model", "missing", session.sessionId],
+				["thought_level", "invalid", session.sessionId],
+				["unknown", "high", session.sessionId],
+				["thought_level", "low", "missing-session"],
+			]) {
+				await expect(select(configId, value, sessionId)).rejects.toMatchObject({ code: -32602 });
+			}
+			expect(harness.session.thinkingLevel).toBe("high");
+			harness.session.setThinkingLevel("low");
+			const changed = await select("model", model);
+			expect(updates).toContainEqual(
+				expect.objectContaining({
+					update: expect.objectContaining({
+						sessionUpdate: "config_option_update",
+						configOptions: expect.arrayContaining([
+							expect.objectContaining({ id: "thought_level", currentValue: "low" }),
+						]),
+					}),
+				}),
+			);
+			expect(changed.configOptions).toEqual([expect.objectContaining({ id: "model", currentValue: model })]);
+			expect(harness.session.model?.id).toBe("plain/model");
+			expect(harness.session.thinkingLevel).toBe("off");
+			await expect(select("thought_level", "high")).rejects.toMatchObject({ code: -32602 });
+			const restored = await select("model", `${harness.models[0].provider}/reasoner`);
+			expect(restored.configOptions).toContainEqual(
+				expect.objectContaining({ id: "thought_level", currentValue: "low" }),
+			);
+		} finally {
+			close();
+			harness.cleanup();
+		}
+	});
+
 	it("completes a prompt turn and streams assistant text", async () => {
 		const harness = await createHarness();
 		harness.setResponses([fauxAssistantMessage("Hello from prime-agent.")]);

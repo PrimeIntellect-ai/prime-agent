@@ -12,9 +12,11 @@ import { takeOverStdout, writeRawStdout } from "../../core/output-guard.js";
 import { InProcessAgentConnection } from "../agent-connection/in-process-agent-connection.js";
 import type {
 	AgentConnection,
+	AgentConnectionModel,
 	AgentConnectionRlmChildAgentSnapshot,
 	AgentConnectionSessionEvent,
 	AgentConnectionSessionInputPause,
+	AgentConnectionState,
 } from "../agent-connection/types.js";
 import { latestAutonomousGateAttempt } from "../headless-completion.js";
 import { type AcpEventMappingState, acpUpdatesForSessionEvent } from "./acp-events.js";
@@ -119,6 +121,8 @@ interface AcpInputPauseRelease {
 
 interface AcpSessionEntry {
 	id: string;
+	configOptions: acp.SessionConfigOption[];
+	models: AgentConnectionModel[];
 	abort: AbortController | undefined;
 	cancelling: boolean;
 	cancelTask: Promise<void> | undefined;
@@ -131,6 +135,43 @@ interface AcpSessionEntry {
 	resolvePromptTask: (() => void) | undefined;
 	unsubscribe: (() => void) | undefined;
 	producer: AcpUpdateProducer;
+}
+
+function modelValue(model: AgentConnectionModel): string {
+	return `${model.provider}/${model.id}`;
+}
+
+function sessionConfigOptions(
+	state: AgentConnectionState,
+	models: readonly AgentConnectionModel[],
+): acp.SessionConfigOption[] {
+	if (!state.model) return [];
+	const available = new Map(models.map((model) => [modelValue(model), model]));
+	available.set(modelValue(state.model), state.model);
+	const configOptions: acp.SessionConfigOption[] = [
+		{
+			id: "model",
+			name: "Model",
+			category: "model",
+			type: "select",
+			currentValue: modelValue(state.model),
+			options: [...available.values()].map((model) => ({
+				value: modelValue(model),
+				name: `${model.name} (${model.provider})`,
+			})),
+		},
+	];
+	if (state.model.reasoning && state.availableThinkingLevels.length > 0) {
+		configOptions.push({
+			id: "thought_level",
+			name: "Reasoning effort",
+			category: "thought_level",
+			type: "select",
+			currentValue: state.thinkingLevel,
+			options: state.availableThinkingLevels.map((level) => ({ value: level, name: level })),
+		});
+	}
+	return configOptions;
 }
 
 /**
@@ -514,6 +555,20 @@ export async function runAcpModeWithConnection(
 	let sessionCloseInFlight = false;
 	let sessionCloseTask: Promise<void> | undefined;
 	let bound = false;
+	let configTask: Promise<unknown> = Promise.resolve();
+	const enqueueConfig = <T>(operation: () => Promise<T>): Promise<T> => {
+		const task = configTask.then(operation);
+		configTask = task.catch(() => undefined);
+		return task;
+	};
+	const refreshConfig = async (entry: AcpSessionEntry): Promise<acp.SessionConfigOption[]> => {
+		const configOptions = sessionConfigOptions(await connection.getState(), entry.models);
+		if (session === entry && JSON.stringify(configOptions) !== JSON.stringify(entry.configOptions)) {
+			entry.configOptions = configOptions;
+			await entry.producer.publish({ sessionUpdate: "config_option_update", configOptions }, 0, "event");
+		}
+		return configOptions;
+	};
 
 	const baseStream =
 		options.stream ?? acp.ndJsonStream(rawStdoutSink(), Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>);
@@ -756,6 +811,8 @@ export async function runAcpModeWithConnection(
 				}
 				const entry: AcpSessionEntry = {
 					id: sessionId,
+					configOptions: [],
+					models: [],
 					abort: undefined,
 					cancelling: false,
 					cancelTask: undefined,
@@ -777,6 +834,16 @@ export async function runAcpModeWithConnection(
 				const mappingState: AcpEventMappingState = {};
 				const observedChildren = new Map<string, unknown>();
 				const unsubscribe = connection.subscribe((event) => {
+					if (
+						event.type === "session_replaced" ||
+						event.type === "session_resynced" ||
+						(event.type === "session_event" &&
+							["thinking_level_changed", "auto_retry_start", "auto_retry_end", "agent_end"].includes(
+								event.event.type,
+							))
+					) {
+						void enqueueConfig(() => refreshConfig(entry)).catch(() => undefined);
+					}
 					// Heartbeats are connection-scoped, including if one races a prompt.
 					// They therefore intentionally use origin turn 0.
 					if (event.type === "heartbeats_changed") {
@@ -800,6 +867,16 @@ export async function runAcpModeWithConnection(
 					// Reconcile after subscribing so updates cannot be lost while the snapshot
 					// request is in flight. Do not turn a failed read into an empty roster.
 					const initialSnapshot = await connection.getInitialSnapshot();
+					// Optional picker discovery must not prevent session attachment.
+					try {
+						entry.models = await connection.getAvailableModels();
+					} catch {
+						entry.models = [];
+					}
+					entry.configOptions = sessionConfigOptions(
+						await connection.getState().catch(() => initialSnapshot.state),
+						entry.models,
+					);
 					for (const child of initialSnapshot.children ?? []) {
 						if (observedChildren.has(child.id)) continue;
 						observedChildren.set(child.id, child);
@@ -821,6 +898,7 @@ export async function runAcpModeWithConnection(
 				session = entry;
 				const response = {
 					sessionId,
+					configOptions: entry.configOptions,
 					...(cwdMismatch ? { _meta: primeAgentMeta({ cwd: cwdMismatch }) } : {}),
 				};
 				// The stream wrapper commits this gate after this exact response has
@@ -835,6 +913,33 @@ export async function runAcpModeWithConnection(
 			} finally {
 				sessionNewInFlight = false;
 			}
+		})
+		.onRequest("session/set_config_option", async (ctx) => {
+			const { sessionId, configId, value } = ctx.params;
+			const entry = session?.id === sessionId ? session : undefined;
+			if (!entry) throw acp.RequestError.invalidParams({ reason: `Unknown ACP session: ${sessionId}` });
+			return enqueueConfig(async () => {
+				if (session !== entry || sessionCloseInFlight) {
+					throw acp.RequestError.invalidParams({ reason: "ACP session is closed or closing" });
+				}
+				if (configId === "model" && typeof value === "string") {
+					const models = await connection.getAvailableModels();
+					const model = models.find((candidate) => modelValue(candidate) === value);
+					if (!model) throw acp.RequestError.invalidParams({ reason: `Unavailable model: ${value}` });
+					await connection.setModel(model.provider, model.id);
+					entry.models = models;
+				} else if (configId === "thought_level" && typeof value === "string") {
+					const state = await connection.getState();
+					const level = state.availableThinkingLevels.find((candidate) => candidate === value);
+					if (!state.model?.reasoning || !level) {
+						throw acp.RequestError.invalidParams({ reason: `Unsupported reasoning effort: ${value}` });
+					}
+					await connection.setThinkingLevel(level);
+				} else {
+					throw acp.RequestError.invalidParams({ reason: `Invalid configuration option: ${configId}` });
+				}
+				return { configOptions: await refreshConfig(entry) };
+			});
 		})
 		.onRequest("session/prompt", async (ctx: any) => {
 			const params = ctx.params as { sessionId: string; prompt: readonly unknown[] };
@@ -1013,6 +1118,7 @@ export async function runAcpModeWithConnection(
 					const inputPauseKey = closing.inputPauseKey;
 					if (!inputPauseKey) throw new Error("Missing ACP close input-pause key");
 					await stopSessionWork(pending, promptTask);
+					await configTask;
 					closing.unsubscribe?.();
 					// Keep the backing session fenced until a replacement ACP session is admitted.
 					await closing.producer.close();
