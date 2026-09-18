@@ -21,12 +21,14 @@ from pathlib import Path
 from uuid import uuid4
 from typing import Any, Literal
 
-HarnessKind = Literal["prompt", "memory", "skill", "subagent"]
+from .swarm import validate_swarm_spec
+
+HarnessKind = Literal["prompt", "memory", "skill", "subagent", "swarm"]
 HarnessScope = Literal["local", "global"]
 
 _DEFAULT_FILE_NAME = "harness_state.json"
 _DEFAULT_HARNESS_DIR_NAME = "harness"
-_KINDS: tuple[HarnessKind, ...] = ("prompt", "memory", "skill", "subagent")
+_KINDS: tuple[HarnessKind, ...] = ("prompt", "memory", "skill", "subagent", "swarm")
 _state_cache: dict[tuple[Path, HarnessScope], "HarnessState"] = {}
 
 
@@ -38,6 +40,22 @@ def _slug(raw: str, fallback: str) -> str:
     normalized = "".join(ch.lower() if ch.isalnum() else "_" for ch in raw.strip())
     normalized = "_".join(part for part in normalized.split("_") if part)
     return (normalized or fallback)[:80]
+
+
+def _swarm_spec_argument(
+    dag: Any, machine: Any
+) -> "tuple[Any, Literal['dag', 'machine']]":
+    """Pick the swarm spec payload and its arguments key from the call.
+
+    Supplying both forms at once is an error. A bare ``dag=None,
+    machine=None`` passes ``None`` through in the dag slot so the write-time
+    validation rejects it with the standard wording.
+    """
+    if dag is not None and machine is not None:
+        raise ValueError("pass either dag or machine, not both")
+    if machine is not None:
+        return machine, "machine"
+    return dag, "dag"
 
 
 _CJK_TERM_CHARS = re.compile(
@@ -765,6 +783,75 @@ class HarnessState:
     def delete_subagent(self, id: str, *, global_: bool = False, **kwargs: Any) -> bool:
         return self.delete("subagent", id, global_=global_, **kwargs)
 
+    def create_swarm(
+        self,
+        title: str,
+        content: str,
+        *,
+        id: str | None = None,
+        path: str = "general",
+        dag: dict[str, Any] | None = None,
+        machine: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        global_: bool = False,
+        **kwargs: Any,
+    ) -> HarnessEntry:
+        # Write-time dry run: an invalid spec (either form) never reaches the store.
+        spec, key = _swarm_spec_argument(dag, machine)
+        errors = validate_swarm_spec(spec)
+        if errors:
+            raise ValueError("; ".join(errors))
+        return self.create(
+            "swarm",
+            title,
+            content,
+            id=id,
+            path=path,
+            arguments={key: spec},
+            metadata=metadata,
+            global_=global_,
+            **kwargs,
+        )
+
+    def update_swarm(
+        self,
+        id: str,
+        title: str,
+        content: str,
+        *,
+        path: str | None = None,
+        dag: dict[str, Any] | None = None,
+        machine: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        global_: bool = False,
+        **kwargs: Any,
+    ) -> HarnessEntry:
+        # Only validate a spec when one is supplied; omitting both preserves the
+        # stored arguments (see _upsert) rather than forcing every title/content
+        # update to re-send the full spec, exactly like update_skill treats reference.
+        if dag is not None or machine is not None:
+            spec, key = _swarm_spec_argument(dag, machine)
+            errors = validate_swarm_spec(spec)
+            if errors:
+                raise ValueError("; ".join(errors))
+            arguments = {key: spec}
+        else:
+            arguments = None
+        return self.update(
+            "swarm",
+            id,
+            title,
+            content,
+            path=path,
+            arguments=arguments,
+            metadata=metadata,
+            global_=global_,
+            **kwargs,
+        )
+
+    def delete_swarm(self, id: str, *, global_: bool = False, **kwargs: Any) -> bool:
+        return self.delete("swarm", id, global_=global_, **kwargs)
+
     def record_refinement(
         self,
         trigger: str,
@@ -824,6 +911,10 @@ class HarnessState:
             "files; children reply with await agent_message.send(message, receiver_role='parent'). Use "
             "await rlm.list_subagents() to recover direct child handles and await agent_message.send(..., "
             "receiver_role='child', receiver_name=handle.name) for follow-ups.",
+            "Swarm entries declare validated state-machine workflows of subagent states in arguments['machine'] "
+            "(the original DAG sugar in arguments['dag'] compiles to machine form): manage them with "
+            "create_swarm/update_swarm/delete_swarm (create_swarm validates either form at write time); run "
+            "them with rlm.swarm.run(\"<id>\") once the executor lands in a follow-up PR.",
         ]
         for kind in _KINDS:
             records = self.list(kind)[:max_entries_per_kind]
