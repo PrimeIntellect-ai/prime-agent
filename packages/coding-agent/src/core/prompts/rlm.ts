@@ -9,6 +9,8 @@ export interface RlmPromptOptions {
 	depth?: number;
 	parentAgent?: string;
 	activeTools?: string[];
+	/** Emits the cloud-target sentence only when the daemon advertises the capability. */
+	cloudSpawnTarget?: boolean;
 }
 
 const LONG_RUNNING_WORK_PROMPT = [
@@ -160,6 +162,11 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 			"Choose a stable child name with `await rlm('sub-task', name='api-reviewer')`; names must be unique among siblings. If omitted, the host generates a readable unique name.",
 			"A child inherits your model. If a different model is explicitly requested, use `await rlm.find_models(...)` and an exact returned selector. An unavailable requested model fails spawn; decide whether to retry or omit `model`. Children also inherit your thinking level; the `thinking` option overrides it with any level the resolved child model supports, and an unsupported level fails spawn.",
 		);
+		if (options.cloudSpawnTarget === true) {
+			parts.push(
+				"`await rlm('sub-task', target='cloud')` runs a child as a first-class cloud session: admission still returns immediately, the child's sandbox and transcript are mirrored locally, and provisioning failures surface as a terminal child status. Collect the child's answer through agent_message or the locally mirrored files, not by reading its sandbox directly.",
+			);
+		}
 		if (hasAgentMessage) {
 			parts.push(
 				"Children reply explicitly with `await agent_message.send(message, receiver_role='parent')` when an answer is needed. Replies and follow-ups arrive as ordinary agent messages; not every task requires a reply.",

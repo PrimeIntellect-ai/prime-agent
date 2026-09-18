@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
@@ -9,7 +9,7 @@ import {
 } from "../../core/cloud/bridge/tunnel-attachment.js";
 import type { CloudTunnelTransport } from "../../core/cloud/bridge/tunnel-transport.js";
 import { WsTunnelTransport } from "../../core/cloud/bridge/tunnel-transport.js";
-import type { CloudSessionRecord } from "../../core/cloud/cloud-session-store.js";
+import type { CloudSessionRecord, CloudSessionSpawnInfo } from "../../core/cloud/cloud-session-store.js";
 import {
 	DirectCloudService,
 	type DirectCloudServiceOptions,
@@ -24,12 +24,14 @@ import {
 	type CloudCommandRequest,
 	type CloudEvent,
 	type CloudRosterRow,
+	type CloudSessionStatus,
 	isTerminalCloudCommandState,
 	newCloudSessionId,
 } from "../../core/cloud/protocol.js";
 import { type ShadowArtifactResolver, ShadowSessionWriter } from "../../core/cloud/shadow-session-writer.js";
 import { emptyGoalState } from "../../core/goals.js";
 import { PromptAdmissionCancelledError } from "../../core/prompt-admission.js";
+import { createDefaultRlmSubagentSessionName } from "../../core/rlm-runtime.js";
 import { buildSessionContext, type SessionEntry, type SessionHeader } from "../../core/session-manager.js";
 import type { SessionUsageSummary } from "../../core/usage.js";
 import type {
@@ -89,6 +91,19 @@ export interface CloudSessionRegistryCallbacks {
 	}): Promise<void>;
 	/** Remove a remote descendant's ledger edge (deleted child). */
 	deleteLedgerChild(input: { childId: string; child: string }): Promise<void>;
+	/**
+	 * Push one spawned-cloud-child status update into the local parent's
+	 * worker (feeds the parent's RlmChildRun). Provisioning is asynchronous,
+	 * so updates may arrive at any time after admission.
+	 */
+	pushChildUpdate(update: {
+		childId: string;
+		/** The local parent's active-session id (the worker update address). */
+		parentActiveSessionId: string;
+		status: "queued" | "running" | "completed" | "error" | "cancelled";
+		error?: string;
+		answerPreview?: string;
+	}): void;
 	/** Fan one live session event out to the clients attached to the cloud row. */
 	writeSessionEvent(activeSessionId: string, event: AgentConnectionSessionEvent, meta: DaemonEventMeta): boolean;
 	/** Push a session status (recap) frame to attached clients. */
@@ -133,6 +148,20 @@ export interface CloudSessionTarget {
 	/** True when the target is a remote descendant row. */
 	descendant: boolean;
 	summary: SessionSummary;
+}
+
+/** The supervisor registry's spawn-admission result (supervisor command response). */
+export interface RlmCloudSpawnAdmission {
+	/** Cloud session id; doubles as the parent's `rlm_child_id`. */
+	rlm_child_id: string;
+	name: string;
+	/** Local shadow-session directory (the handle's frozen `session_dir`). */
+	session_dir: string;
+	/** Resolved model selector "provider/modelId"; empty when unset. */
+	model: string;
+	cloud_session_id: string;
+	/** Supervisor active-session id of the cloud roster row (cancel/delete address). */
+	active_session_id: string;
 }
 
 /** Prompt admission hooks; the supervisor owns the admission registry. */
@@ -192,6 +221,19 @@ interface CloudResidentSession {
 	eventSequence: number;
 	opened: boolean;
 	usage: { inputTokens: number; outputTokens: number; requests: number };
+	/** Spawned-child task tracker; present only for `location === "spawned-child"`. */
+	spawnTask?: CloudSpawnTaskTracker;
+}
+
+/** Where a spawned cloud child's initial task stands, pushed to the parent. */
+interface CloudSpawnTaskTracker {
+	info: CloudSessionSpawnInfo;
+	/** Whether the initial prompt was admitted into the guest journal. */
+	promptAdmitted: boolean;
+	/** The admitted task produced observable guest work (streaming or busy). */
+	sawWork: boolean;
+	/** One terminal state never transitions again. */
+	terminal: boolean;
 }
 
 /** Bound on the ephemeral live-event ring (last ~60s / 1 MiB). */
@@ -200,6 +242,8 @@ const RING_MAX_BYTES = 1024 * 1024;
 const CLOUD_MAX_MIRRORED_CHILDREN = 512;
 const IDLE_WAIT_TIMEOUT_MS = 15 * 60_000;
 const IDLE_WAIT_POLL_MS = 50;
+const ATTACHMENT_WAIT_TIMEOUT_MS = 60_000;
+const ATTACHMENT_WAIT_POLL_MS = 50;
 const RECEIPT_WAIT_TIMEOUT_MS = 15_000;
 const RECEIPT_WAIT_POLL_MS = 25;
 
@@ -434,6 +478,276 @@ export class CloudSessionRegistry {
 		return info;
 	}
 
+	/**
+	 * Durably admit a first-class cloud child under a local parent and return
+	 * the standard spawn handle immediately after admission (D7). The durable
+	 * record, shadow transcript, roster row, and ledger edge exist before the
+	 * response; provisioning and the guest's task run proceed asynchronously,
+	 * with status pushes routed to the parent's worker.
+	 */
+	async spawnChild(input: {
+		parent: {
+			/** Local parent durable session id. */
+			sessionId: string;
+			/** Canonical local parent session file (ledger edge parent). */
+			sessionFile: string;
+			/** Parent active-session id (worker update routing). */
+			activeSessionId: string;
+			/** Parent RLM depth; the child is parent depth + 1. */
+			depth: number;
+			/** Workspace cwd captured for the guest. */
+			cwd: string;
+		};
+		prompt: string;
+		/** Stable child name; the registry generates a readable default when omitted. */
+		name?: string;
+		/** Pre-allocated cloud session id (tests); random by default. */
+		sessionId?: string;
+		/** Resolved model selector "provider/modelId". */
+		model?: string;
+		thinking?: string;
+		timeoutMinutes?: number;
+	}): Promise<RlmCloudSpawnAdmission> {
+		const prompt = input.prompt.trim();
+		if (!prompt) throw new Error("cloud_spawn_child prompt must not be empty");
+		const sessionId = input.sessionId ?? newCloudSessionId();
+		const shadowFile = ShadowSessionWriter.shadowSessionFile(this.options.sessionDir, sessionId);
+		if (existsSync(shadowFile)) {
+			throw new Error(`Shadow session file already exists: ${shadowFile}`);
+		}
+		const depth = input.parent.depth + 1;
+		const sessionName = input.name ?? createDefaultRlmSubagentSessionName(prompt, sessionId);
+		const model = input.model ? `${input.model}` : undefined;
+		const spawn: CloudSessionSpawnInfo = {
+			parentSessionId: input.parent.sessionId,
+			parentSessionFile: input.parent.sessionFile,
+			parentActiveSessionId: input.parent.activeSessionId,
+			depth,
+			name: sessionName,
+			prompt,
+			...(model ? { model } : {}),
+			...(input.thinking ? { thinking: input.thinking } : {}),
+		};
+		this.store.create({
+			sessionId,
+			parentSessionId: input.parent.sessionId,
+			residentProcessUuid: randomUUID(),
+		});
+		let session: CloudResidentSession | undefined;
+		try {
+			this.store.setLocation(sessionId, "spawned-child");
+			this.store.setShadowSession(sessionId, shadowFile);
+			this.store.setSpawn(sessionId, spawn);
+			// The row is live from admission (provisioning is in-flight work).
+			this.store.setObservedLifecycle(sessionId, "provisioning");
+			session = this.registerResidentSession(this.store.get(sessionId)!, { startAttachment: false });
+			this.writeRootShadow(session, this.store.get(sessionId)!);
+			session.spawnTask = { info: spawn, promptAdmitted: false, sawWork: false, terminal: false };
+			// The normal ledger edge is load-bearing: admission fails closed when
+			// the durable append fails (the same contract as a local child).
+			await this.callbacks.appendLedgerEdge({
+				childId: sessionId,
+				parent: input.parent.sessionFile,
+				child: shadowFile,
+				depth,
+				name: sessionName,
+			});
+		} catch (error) {
+			await this.rollbackSpawnedChild(session, sessionId, shadowFile).catch((rollbackError: unknown) =>
+				this.callbacks.log(`cloud spawn rollback failed for ${sessionId}: ${String(rollbackError)}`),
+			);
+			throw error;
+		}
+		this.publishRosterRows(session!);
+		this.pushSpawnTaskUpdate(session!, "queued");
+		// Provisioning is asynchronous: the handle returned before the sandbox exists.
+		void this.provisionSpawnedChild(session!, spawn, input.parent.cwd, input.timeoutMinutes).catch(
+			(error: unknown) => {
+				// provisionSpawnedChild records its own failures; this is a rethrow guard.
+				this.callbacks.log(
+					`cloud spawn provisioning crashed for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			},
+		);
+		return {
+			rlm_child_id: sessionId,
+			name: sessionName,
+			session_dir: this.options.sessionDir,
+			model: model ?? "",
+			cloud_session_id: sessionId,
+			active_session_id: session!.activeSessionId,
+		};
+	}
+
+	/** Admitted-but-failed spawn: retract the row, shadow, and durable record. */
+	private async rollbackSpawnedChild(
+		session: CloudResidentSession | undefined,
+		sessionId: string,
+		shadowFile: string,
+	): Promise<void> {
+		if (session !== undefined) {
+			await this.disposeSession(session, { closeShadows: true, broadcast: false }).catch(() => undefined);
+		}
+		// No ledger edge may exist, so the never-published shadow is inert; a
+		// stale file would block the same session id forever.
+		rmSync(shadowFile, { force: true });
+		const record = this.store.get(sessionId);
+		if (record !== undefined && record.observedLifecycle !== "deleted") {
+			this.store.setDesiredLifecycle(sessionId, "deleted");
+			this.store.setObservedLifecycle(sessionId, "deleted");
+		}
+	}
+
+	/** Provision the sandbox, open the guest session, and admit the initial task. */
+	private async provisionSpawnedChild(
+		session: CloudResidentSession,
+		spawn: CloudSessionSpawnInfo,
+		cwd: string,
+		timeoutMinutes?: number,
+	): Promise<void> {
+		const sessionId = session.sessionId;
+		try {
+			await this.service.delegate({
+				activeSessionId: "",
+				parentSessionId: spawn.parentSessionId,
+				delegationId: sessionId,
+				cwd,
+				prompt: "",
+				options: {
+					resident: true,
+					tunnel: true,
+					...(spawn.model ? { model: spawn.model } : {}),
+					timeoutMinutes: timeoutMinutes ?? this.options.timeoutMinutes ?? 120,
+					...(this.options.bridgeToken ? { bridgeToken: this.options.bridgeToken } : {}),
+				},
+			});
+			if (this.spawnTaskCancelled(session)) return;
+			// The tunnel is registered now: start the attachment and wait for
+			// the guest bridge before admitting the task prompt.
+			session.attachment.start();
+			await this.waitForAttachment(session);
+			// Recovery: a shadow that already holds the task prompt means the
+			// guest admitted it before the restart; re-sending it would run
+			// the task twice, so only the session open is repeated (idempotent).
+			const alreadyAdmitted = this.spawnTaskAlreadyAdmitted(session);
+			await this.submitResident(
+				session,
+				`open_${randomUUID()}`,
+				{
+					kind: "open_session",
+					cwd,
+					...(spawn.model ? { model: spawn.model } : {}),
+					...(spawn.thinking ? { thinking: spawn.thinking } : {}),
+					...(alreadyAdmitted ? {} : { prompt: `[task from parent]\n\n${spawn.prompt}` }),
+				},
+				true,
+			);
+			session.opened = true;
+			if (session.spawnTask !== undefined) {
+				session.spawnTask.promptAdmitted = true;
+				// The admitted task IS the work: a fast guest may finish its
+				// entire run between mirror ticks, so quiescence alone must
+				// settle it once the shadow holds the child's answer.
+				session.spawnTask.sawWork = true;
+			}
+			this.pushSpawnTaskUpdate(session, "running");
+			this.publishRosterRows(session);
+		} catch (error) {
+			if (this.spawnTaskCancelled(session)) return;
+			const message = error instanceof Error ? error.message : String(error);
+			if (this.store.get(sessionId) !== undefined) this.store.setLastError(sessionId, message);
+			this.pushSpawnTaskUpdate(session, "error", message);
+			this.publishRosterRows(session);
+		}
+	}
+
+	private spawnTaskCancelled(session: CloudResidentSession): boolean {
+		return session.spawnTask !== undefined && session.spawnTask.terminal === true;
+	}
+
+	/** True when the mirrored shadow already holds the admitted task prompt. */
+	private spawnTaskAlreadyAdmitted(session: CloudResidentSession): boolean {
+		const shadow = session.shadows.get(session.sessionId);
+		if (shadow === undefined) return false;
+		return shadow
+			.getEntries()
+			.some((entry) => entry.type === "message" && JSON.stringify(entry).includes("[task from parent]"));
+	}
+
+	/** Wait for the guest bridge to accept the tunnel attachment (provisioning gate). */
+	private async waitForAttachment(session: CloudResidentSession): Promise<void> {
+		const deadline = Date.now() + ATTACHMENT_WAIT_TIMEOUT_MS;
+		while (Date.now() < deadline && !this.disposed) {
+			if (session.attachment.attached) return;
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, ATTACHMENT_WAIT_POLL_MS));
+		}
+		throw new Error("cloud session did not attach before the wait timeout");
+	}
+
+	/** Push one task-status transition to the parent's worker; terminal states fire once. */
+	private pushSpawnTaskUpdate(
+		session: CloudResidentSession,
+		status: "queued" | "running" | "completed" | "error" | "cancelled",
+		error?: string,
+	): void {
+		const task = session.spawnTask;
+		if (task === undefined) return;
+		if (task.terminal) return;
+		if (status === "completed" || status === "error" || status === "cancelled") {
+			task.terminal = true;
+		}
+		this.callbacks.pushChildUpdate({
+			childId: session.sessionId,
+			parentActiveSessionId: task.info.parentActiveSessionId,
+			status,
+			...(error ? { error } : {}),
+			...(status === "completed" ? { answerPreview: this.shadowAnswerPreview(session) } : {}),
+		});
+	}
+
+	/** The cloud child's latest assistant text, read from the local shadow. */
+	private shadowAnswerPreview(session: CloudResidentSession): string | undefined {
+		const shadow = session.shadows.get(session.sessionId);
+		if (shadow === undefined) return undefined;
+		for (let index = shadow.getEntries().length - 1; index >= 0; index--) {
+			const entry = shadow.getEntries()[index];
+			if (entry.type !== "message") continue;
+			const message = (entry as { message?: { role?: string; content?: unknown } }).message;
+			if (message?.role !== "assistant") continue;
+			const text = readMessageText(message.content).trim();
+			if (text) return text.slice(0, 240);
+		}
+		return undefined;
+	}
+
+	/** Cancel a spawned cloud child: abort the guest run and settle the parent. */
+	private cancelSpawnedChild(session: CloudResidentSession, reason: string): void {
+		if (this.spawnTaskCancelled(session)) return;
+		if (session.opened) {
+			void this.submitResident(session, `abort_${randomUUID()}`, { kind: "abort" }).catch((error: unknown) =>
+				this.callbacks.log(`cloud spawn abort failed: ${String(error)}`),
+			);
+		}
+		if (this.store.get(session.sessionId) !== undefined) this.store.setLastError(session.sessionId, reason);
+		this.pushSpawnTaskUpdate(session, "cancelled", reason);
+		this.publishRosterRows(session);
+	}
+
+	/** Stop and retract a spawned cloud child row (explicit delete path). */
+	private async deleteSpawnedChild(session: CloudResidentSession): Promise<void> {
+		this.cancelSpawnedChild(session, "Deleted by parent orchestrator");
+		try {
+			await this.stopSession(session.sessionId, true);
+		} finally {
+			const shadowFile = this.store.get(session.sessionId)?.shadowSessionFile;
+			if (shadowFile !== undefined) {
+				this.callbacks
+					.deleteLedgerChild({ childId: session.sessionId, child: shadowFile })
+					.catch((error: unknown) => this.callbacks.log(`cloud ledger delete failed: ${String(error)}`));
+			}
+		}
+	}
+
 	/** List every cloud session record (resident and legacy) with connectivity. */
 	async listSessions(): Promise<DaemonCloudSessionInfo[]> {
 		const infos: DaemonCloudSessionInfo[] = [];
@@ -473,6 +787,10 @@ export class CloudSessionRegistry {
 			await this.submitResident(session, `release_${randomUUID()}`, { kind: "release" }).catch(() => undefined);
 			await session.attachment.stop();
 			await this.disposeSession(session, { closeShadows: true, broadcast: true });
+		}
+		if (session !== undefined && session.spawnTask !== undefined) {
+			// A stopped spawned child settles the parent's run as cancelled.
+			this.pushSpawnTaskUpdate(session, "cancelled", "Cloud session stopped");
 		}
 		const released = forfeit
 			? await this.service.forfeitResidentSession(record.sessionId)
@@ -605,6 +923,25 @@ export class CloudSessionRegistry {
 		const session = this.sessions.get(target.record.sessionId);
 		if (session === undefined) {
 			throw new Error(`Cloud session is not registered: ${target.record.sessionId}`);
+		}
+		// A spawned cloud child IS the guest root: the existing cancel/delete
+		// verbs address its own lifecycle, not a guest-side subagent row.
+		if (!target.descendant && session.spawnTask !== undefined) {
+			switch (command.type) {
+				case "cancel_rlm_child":
+					this.cancelSpawnedChild(
+						session,
+						command.childId === session.sessionId
+							? "Cancelled by parent orchestrator"
+							: `Cancelled by parent orchestrator (${command.childId})`,
+					);
+					return success(command.id, command.type);
+				case "delete_rlm_subagent":
+					await this.deleteSpawnedChild(session);
+					return success(command.id, command.type);
+				default:
+					break;
+			}
 		}
 		if (target.descendant && !this.descendantCommandAllowed(command)) {
 			return failure(
@@ -833,6 +1170,21 @@ export class CloudSessionRegistry {
 			if (current === undefined || !this.isResidentLive(current)) continue;
 			const session = this.registerResidentSession(current);
 			this.writeRootShadow(session, current);
+			if (current.location === "spawned-child" && current.spawn !== undefined) {
+				// The durable spawn record rebuilds the parent's task tracker
+				// BEFORE descendant shadows project (their depth is relative to
+				// the spawned child's own depth); a live sandbox re-attaches,
+				// a lost one re-runs provisioning idempotently.
+				session.spawnTask = {
+					info: current.spawn,
+					promptAdmitted: session.opened,
+					sawWork: session.opened,
+					terminal: false,
+				};
+				void this.provisionSpawnedChild(session, current.spawn, this.shadowCwd(current)).catch((error: unknown) =>
+					this.callbacks.log(`cloud spawn reprovision failed for ${current.sessionId}: ${String(error)}`),
+				);
+			}
 			for (const remoteSessionId of current.remoteSessionIds ?? []) {
 				this.ensureDescendantShadow(session, remoteSessionId);
 			}
@@ -862,7 +1214,10 @@ export class CloudSessionRegistry {
 	// Internals: attachment and mirroring
 	// ---------------------------------------------------------------------------
 
-	private registerResidentSession(record: CloudSessionRecord): CloudResidentSession {
+	private registerResidentSession(
+		record: CloudSessionRecord,
+		options?: { startAttachment?: boolean },
+	): CloudResidentSession {
 		const existing = this.sessions.get(record.sessionId);
 		if (existing !== undefined) return existing;
 		const activeSessionId = record.activeSessionId ?? `cloud-active-${randomUUID()}`;
@@ -894,7 +1249,11 @@ export class CloudSessionRegistry {
 		if (record.shadowSessionFile !== undefined) {
 			this.shadowIndex.set(record.shadowSessionFile, record.sessionId);
 		}
-		session.attachment.start();
+		// A spawned child registers its row at admission, before its sandbox
+		// (and tunnel) exists; the attachment starts once provisioning has
+		// registered the tunnel (an earlier start would terminate against the
+		// not-yet-registered target and never reconnect).
+		if (options?.startAttachment !== false) session.attachment.start();
 		return session;
 	}
 
@@ -993,6 +1352,50 @@ export class CloudSessionRegistry {
 		}
 	}
 
+	/**
+	 * A spawned child's guest work observation. `session_meta` streaming frames
+	 * mark the task running; the first quiescent meta after admitted work
+	 * completes the parent's run (the guest's answer is already in the shadow).
+	 */
+	private observeSpawnedChildWork(session: CloudResidentSession, remoteSessionId: string, streaming: boolean): void {
+		const task = session.spawnTask;
+		if (task === undefined || task.terminal || !task.promptAdmitted) return;
+		if (remoteSessionId !== session.sessionId) return;
+		if (streaming) {
+			task.sawWork = true;
+			this.pushSpawnTaskUpdate(session, "running");
+			return;
+		}
+		const meta = session.metaBySession.get(session.sessionId);
+		if (task.sawWork && (meta?.queue ?? 0) === 0 && (meta?.runningTools ?? 0) === 0) {
+			this.maybeCompleteSpawnedChild(session);
+		}
+	}
+
+	/** A spawned child settles when the guest's aggregate status quiets after work. */
+	private observeSpawnedChildSettle(session: CloudResidentSession, status: CloudSessionStatus): void {
+		const task = session.spawnTask;
+		if (task === undefined || task.terminal || !task.promptAdmitted) return;
+		if (status === "busy") {
+			task.sawWork = true;
+			this.pushSpawnTaskUpdate(session, "running");
+		} else if ((status === "idle" || status === "stopped") && task.sawWork) {
+			this.maybeCompleteSpawnedChild(session);
+		}
+	}
+
+	/**
+	 * Quiescence alone is ambiguous (a needs-input pause looks idle too), so
+	 * the task completes only once the durable shadow holds the child's own
+	 * assistant answer.
+	 */
+	private maybeCompleteSpawnedChild(session: CloudResidentSession): void {
+		const task = session.spawnTask;
+		if (task === undefined || task.terminal) return;
+		if (this.shadowAnswerPreview(session) === undefined) return;
+		this.pushSpawnTaskUpdate(session, "completed");
+	}
+
 	private applyGuestEvent(session: CloudResidentSession, event: CloudEvent): void {
 		switch (event.kind) {
 			case "session_entry":
@@ -1014,6 +1417,7 @@ export class CloudSessionRegistry {
 					updatedAt: new Date().toISOString(),
 				});
 				this.updateConnectivity(session, "connected");
+				this.observeSpawnedChildWork(session, event.sessionId, event.streaming);
 				this.publishRosterRows(session);
 				this.callbacks.writeSessionStatus(session.activeSessionId, event.recap);
 				return;
@@ -1032,6 +1436,7 @@ export class CloudSessionRegistry {
 				};
 				return;
 			case "session_status":
+				this.observeSpawnedChildSettle(session, event.status);
 				this.publishRosterRows(session);
 				return;
 			case "command_accepted":
@@ -1090,6 +1495,15 @@ export class CloudSessionRegistry {
 		for (const shadow of session.shadows.values()) shadow.sync();
 	}
 
+	/**
+	 * Guest-reported depths are relative to the guest's root session; a
+	 * spawned child's root sits at its own depth under the LOCAL parent, so
+	 * every remote descendant shifts by the spawn depth.
+	 */
+	private remoteDepth(session: CloudResidentSession, depth: number): number {
+		return depth + (session.spawnTask?.info.depth ?? 0);
+	}
+
 	private applyRosterDelta(session: CloudResidentSession, rows: readonly CloudRosterRow[]): void {
 		const seen = new Set<string>();
 		for (const row of rows) {
@@ -1105,14 +1519,14 @@ export class CloudSessionRegistry {
 					...(row.parentRemoteId ? { parentRemoteId: row.parentRemoteId } : {}),
 					...(row.name ? { name: row.name } : {}),
 					status: row.status,
-					depth: row.depth,
+					depth: this.remoteDepth(session, row.depth),
 					...(row.preview ? { preview: row.preview } : {}),
 					activeSessionId: `cloud-child-${randomUUID()}`,
 				};
 				session.children.set(row.childId, child);
 			} else {
 				existing.status = row.status;
-				existing.depth = row.depth;
+				existing.depth = this.remoteDepth(session, row.depth);
 				if (row.name !== undefined) existing.name = row.name;
 				if (row.preview !== undefined) existing.preview = row.preview;
 				if (row.parentRemoteId !== undefined) existing.parentRemoteId = row.parentRemoteId;
@@ -1262,7 +1676,7 @@ export class CloudSessionRegistry {
 		const existing = session.shadows.get(remoteSessionId);
 		if (existing !== undefined) return existing;
 		const child = this.childForRemote(session, remoteSessionId);
-		const depth = child?.depth ?? 1;
+		const depth = child?.depth ?? this.remoteDepth(session, 1);
 		const parentRemoteId = child?.parentRemoteId ?? session.record.sessionId;
 		const shadowFile = ShadowSessionWriter.shadowSessionFile(this.options.sessionDir, remoteSessionId);
 		const shadow = ShadowSessionWriter.openOrCreate({
@@ -1482,6 +1896,11 @@ export class CloudSessionRegistry {
 			session.usage.inputTokens > 0 || session.usage.outputTokens > 0
 				? { inputTokens: session.usage.inputTokens, outputTokens: session.usage.outputTokens, cost: 0 }
 				: undefined;
+		// A spawned child projects as a subagent row under its LOCAL parent:
+		// real parent edges (ledger + family reach) with the cloud execution marker.
+		const spawn = record.location === "spawned-child" ? record.spawn : undefined;
+		const taskStatus = session.spawnTask;
+		const spawnRunning = taskStatus !== undefined && !taskStatus.terminal;
 		return {
 			id: session.activeSessionId,
 			lifecycle: messages.length > 0 || session.opened ? "live" : "draft",
@@ -1490,7 +1909,7 @@ export class CloudSessionRegistry {
 			activeSessionId: session.activeSessionId,
 			sessionId: record.sessionId,
 			...(record.shadowSessionFile ? { sessionFile: record.shadowSessionFile } : {}),
-			sessionName: this.shadowSessionName(session, record.sessionId),
+			sessionName: spawn?.name ?? this.shadowSessionName(session, record.sessionId),
 			cwd: shadow?.header.cwd ?? this.shadowCwd(record),
 			isStreaming: meta?.streaming ?? false,
 			isCompacting: false,
@@ -1502,7 +1921,17 @@ export class CloudSessionRegistry {
 			messageCount: messages.length,
 			sessionActions: { queuedCount: meta?.queue ?? 0, steering: [], followUps: [] },
 			thinkingLevel: (context?.thinkingLevel ?? "off") as ThinkingLevel,
-			rlmDepth: 0,
+			...(spawn
+				? {
+						rlmDepth: spawn.depth,
+						runtimeKind: "subagent" as const,
+						rlmChildId: record.sessionId,
+						parentActiveSessionId: spawn.parentActiveSessionId,
+						parentSessionId: spawn.parentSessionId,
+						parentSessionPath: spawn.parentSessionFile,
+					}
+				: { rlmDepth: 0 }),
+			...(spawnRunning ? { statusLabel: "queued" as const } : {}),
 			...(info ? { created: info.created, modified: info.modified, lastActivityAt: info.modified } : {}),
 			firstMessage: firstUserMessage(messages),
 			usage,

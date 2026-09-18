@@ -839,6 +839,20 @@ export type DaemonCommand =
 			/** Target checkout for the imported result patch; defaults to the record's cwd. */
 			cwd?: string;
 	  }
+	| {
+			id?: string;
+			type: "cloud_spawn_child";
+			/** The spawning local parent (its active-session id). */
+			parentActiveSessionId: string;
+			/** The task prompt for the cloud child. */
+			prompt: string;
+			/** Stable child name; unique among the parent's children (cloud rows included). */
+			name?: string;
+			/** Resolved model selector "provider/modelId". */
+			model?: string;
+			/** Thinking level for the guest session. */
+			thinking?: string;
+	  }
 	| { id?: string; type: "ack_result"; commandId: string }
 	| { id?: string; type: "prepare_update_restart" }
 	| { id?: string; type: "retry_worker"; activeSessionId: string }
@@ -936,6 +950,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	cloud_session_stop: CLOUD_RESIDENT_SESSIONS_COMMAND,
 	cloud_session_reprovision: CLOUD_RESIDENT_SESSIONS_COMMAND,
 	cloud_session_import_result: CLOUD_RESIDENT_SESSIONS_COMMAND,
+	cloud_spawn_child: CLOUD_RESIDENT_SESSIONS_COMMAND,
 	ack_result: LEGACY_DAEMON_COMMAND,
 	list: LEGACY_DAEMON_COMMAND,
 	list_saved_sessions: LEGACY_DAEMON_COMMAND,
@@ -1166,6 +1181,7 @@ export const DAEMON_COMMAND_PLANE = {
 	cloud_session_stop: "control",
 	cloud_session_reprovision: "control",
 	cloud_session_import_result: "control",
+	cloud_spawn_child: "control",
 	prepare_update_restart: "control",
 	retry_worker: "control",
 	restart: "control",

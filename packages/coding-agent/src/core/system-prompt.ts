@@ -27,6 +27,12 @@ export interface BuildSystemPromptOptions {
 	skills?: Skill[];
 	/** Whether to include the model-facing rlm recursion guidance. */
 	allowRecursion?: boolean;
+	/**
+	 * Whether this session's daemon advertises `cloud_resident_sessions`:
+	 * adds one sentence to the recursion block about `target="cloud"`.
+	 * Absent keeps the trained local-only prompt bytes byte-identical.
+	 */
+	cloudSpawnTarget?: boolean;
 	/** Fixed recursive-agent depth for this session. */
 	rlmDepth?: number;
 	/** Human-readable parent name or id for child communication doctrine. */
@@ -120,6 +126,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		allowRecursion,
 		depth: options.rlmDepth,
 		parentAgent: options.rlmParentAgent,
+		cloudSpawnTarget: options.cloudSpawnTarget === true,
 	});
 
 	// Appended AFTER the trained buildRlmPrompt prefix: delegation doctrine precedes the subagent specs delivered via the harness digest.

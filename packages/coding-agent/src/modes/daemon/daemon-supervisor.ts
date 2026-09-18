@@ -2056,6 +2056,53 @@ export class DaemonSupervisor {
 				const session = await registry.importResult(command.activeSessionId, cwd);
 				return success(command.id, command.type, { session });
 			}
+			case "cloud_spawn_child": {
+				const registry = this.requireCloudRegistry();
+				const prompt = command.prompt.trim();
+				if (!prompt) throw new Error("cloud_spawn_child prompt must not be empty");
+				const match = await this.findWorkerForClient(client, command.parentActiveSessionId);
+				const summary = match.summary;
+				const parentFile = summary.sessionFile;
+				if (!parentFile) {
+					throw new Error(`Cannot spawn a cloud child without a persisted parent session file`);
+				}
+				const depth = summary.rlmDepth ?? 0;
+				const reservation = {
+					name: command.name?.trim() ?? "",
+					depth: depth + 1,
+					parentSessionId: summary.sessionId,
+					parentSessionPath: canonicalSessionPath(parentFile),
+				};
+				const admission = await this.withSessionNameReservation(reservation, async () => {
+					if (command.name?.trim()) {
+						// Sibling-name uniqueness includes cloud rows: the family
+						// catalog already carries every live cloud roster row.
+						await this.assertSupervisorSessionNameAvailable(
+							{
+								sessionId: "",
+								rlmDepth: depth + 1,
+								parentSessionId: summary.parentSessionId,
+								parentSessionPath: summary.parentSessionPath,
+							},
+							command.name.trim(),
+						);
+					}
+					return registry.spawnChild({
+						parent: {
+							sessionId: summary.sessionId,
+							sessionFile: canonicalSessionPath(parentFile),
+							activeSessionId: summary.activeSessionId ?? summary.id,
+							depth,
+							cwd: summary.cwd,
+						},
+						prompt,
+						...(command.name?.trim() ? { name: command.name.trim() } : {}),
+						...(command.model ? { model: command.model } : {}),
+						...(command.thinking ? { thinking: command.thinking } : {}),
+					});
+				});
+				return success(command.id, command.type, { admission });
+			}
 			// Legacy one-shot delegation surface: still functional, now served
 			// by the supervisor-owned registry instead of a session worker.
 			case "cloud_delegate": {
@@ -4563,7 +4610,46 @@ export class DaemonSupervisor {
 			},
 			attachedClientCount: (activeSessionId) =>
 				[...this.clients].filter((client) => client.attachedActiveSessionIds.has(activeSessionId)).length,
+			pushChildUpdate: (update) => this.pushCloudChildUpdate(update),
 		};
+	}
+
+	/**
+	 * Route one spawned-cloud-child status update into the worker hosting the
+	 * local parent; the worker feeds the parent session's RlmChildRun, whose
+	 * status transitions drive the normal `rlm_child_update` session events
+	 * and run settlement.
+	 */
+	private pushCloudChildUpdate(update: {
+		childId: string;
+		parentActiveSessionId: string;
+		status: "queued" | "running" | "completed" | "error" | "cancelled";
+		error?: string;
+		answerPreview?: string;
+	}): void {
+		void (async () => {
+			try {
+				const parent = await this.findWorker(update.parentActiveSessionId);
+				const workerClient = this.requireAvailableWorkerClient(parent.worker);
+				await workerClient.requestWorker(
+					{
+						type: "worker_cloud_child_update",
+						parentActiveSessionId: update.parentActiveSessionId,
+						update: {
+							childId: update.childId,
+							status: update.status,
+							...(update.error ? { error: update.error } : {}),
+							...(update.answerPreview ? { answerPreview: update.answerPreview } : {}),
+						},
+					},
+					WORKER_REQUEST_TIMEOUT_MS,
+				);
+			} catch (error) {
+				this.log(
+					`cloud child update delivery failed for ${update.childId}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		})();
 	}
 
 	/** Fan one cloud live event out to the clients attached to the cloud row. */

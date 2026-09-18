@@ -60,6 +60,8 @@ export interface AgentSessionCreationOptions {
 	agentObserveController?: AgentObserveController;
 	rlmDepth?: number;
 	rlmMaxDepth?: number;
+	/** Daemon advertises `cloud_resident_sessions` (cloud spawn target prompt line). */
+	cloudSpawnTarget?: boolean;
 	rlmSessionDir?: string;
 	rlmParentNodeId?: string;
 	rlmParentAgent?: string;
@@ -255,6 +257,7 @@ export async function createAgentSessionFromServices(
 		agentObserveController: options.agentObserveController,
 		rlmDepth: options.rlmDepth,
 		rlmMaxDepth: options.rlmMaxDepth,
+		cloudSpawnTarget: options.cloudSpawnTarget === true || undefined,
 		rlmSessionDir: options.rlmSessionDir,
 		rlmParentNodeId: options.rlmParentNodeId,
 		rlmParentAgent: options.rlmParentAgent,

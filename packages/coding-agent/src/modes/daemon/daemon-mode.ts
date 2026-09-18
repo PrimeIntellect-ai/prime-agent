@@ -93,6 +93,8 @@ import { providerRetryPolicy } from "../../core/provider-retry.js";
 import type {
 	CreateRlmRootSessionOptions,
 	CreateRlmSubagentRuntimeOptions,
+	RlmCloudChildLease,
+	RlmCloudChildSpawnRequest,
 	RlmCreateSessionResult,
 	SubagentRuntimeHost,
 } from "../../core/rlm-runtime.js";
@@ -1941,6 +1943,7 @@ export class AgentDaemon {
 						},
 						agentMessageController: this.createAgentMessageController(() => stateRef),
 						agentObserveController: this.createAgentObserveController(() => stateRef),
+						cloudSpawnTarget: isDirectCloudConfigured() || undefined,
 					},
 				}),
 			);
@@ -2471,6 +2474,10 @@ export class AgentDaemon {
 		return {
 			createRlmSubagentRuntime: async (options) => this.createRlmSubagentRuntime(parentState, options),
 			createRlmRootSession: async (options) => this.createRlmRootSession(parentState, options),
+			// First-class cloud children (`rlm(..., target="cloud")`): the
+			// supervisor registry owns admission; provisioning is asynchronous
+			// and status updates arrive as `worker_cloud_child_update` pushes.
+			spawnRlmCloudChild: async (request) => this.spawnRlmCloudChildForState(parentState, request),
 			completeRlmSubagentRuntime: (childId, session) => {
 				const state = [...this.sessions.values()].find(
 					(candidate) =>
@@ -2739,6 +2746,7 @@ export class AgentDaemon {
 					includeCompactSkill: options.includeCompactSkill,
 					agentMessageController: this.createAgentMessageController(() => stateRef),
 					agentObserveController: this.createAgentObserveController(() => stateRef),
+					cloudSpawnTarget: isDirectCloudConfigured() || undefined,
 					rlmHeartbeatController: {
 						listRlmHeartbeats: (listOptions) => {
 							if (!stateRef) {
@@ -3147,6 +3155,7 @@ export class AgentDaemon {
 						...(rehydratedModel ? { model: rehydratedModel } : {}),
 						agentMessageController: this.createAgentMessageController(() => stateRef),
 						agentObserveController: this.createAgentObserveController(() => stateRef),
+						cloudSpawnTarget: isDirectCloudConfigured() || undefined,
 						rlmHeartbeatController: {
 							listRlmHeartbeats: (listOptions) => {
 								if (!stateRef) {
@@ -3925,6 +3934,14 @@ export class AgentDaemon {
 						origin: "agent",
 					});
 					this.writeWorkerSuccess(client, command, receipt);
+					return;
+				}
+				case "worker_cloud_child_update": {
+					// A supervisor-pushed spawned-cloud-child status update feeds
+					// the local parent session's run machinery directly.
+					const state = this.getBoundSessionState(command.parentActiveSessionId);
+					state.runtime.session.applyRlmCloudChildUpdate(command.update);
+					this.writeWorkerSuccess(client, command);
 					return;
 				}
 				case "worker_prepare_update": {
@@ -6133,6 +6150,114 @@ export class AgentDaemon {
 			this.agentMessageRateLimiter.refund(rateLimitKey);
 			throw error;
 		}
+	}
+
+	/** Request one client-facing daemon command from the supervisor socket. */
+	private async requestSupervisorDaemon<T>(command: DaemonCommand, timeoutMs = 30_000): Promise<T> {
+		const supervisorSocketPath = this.supervisorSocketPathFromEnv();
+		if (!supervisorSocketPath) {
+			throw new Error(`Supervisor socket is unknown; cannot issue ${command.type}`);
+		}
+		const deadline = Date.now() + 10_000;
+		let client: DaemonClient | undefined;
+		let lastError: unknown;
+		while (Date.now() < deadline && !this.shuttingDown) {
+			const candidate = new DaemonClient(supervisorSocketPath);
+			try {
+				await candidate.connect(1000);
+				await candidate.waitForHello();
+				client = candidate;
+				break;
+			} catch (error) {
+				lastError = error;
+				candidate.close();
+			}
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
+		}
+		if (!client) {
+			throw lastError instanceof Error ? lastError : new Error(`Supervisor is unreachable; cannot ${command.type}`);
+		}
+		try {
+			const response = await client.request(command, timeoutMs);
+			if (!response.success) {
+				throw deserializeDaemonError(response);
+			}
+			if (response.data === undefined || typeof response.data !== "object") {
+				throw new Error(`Supervisor returned an invalid ${command.type} response`);
+			}
+			return response.data as T;
+		} finally {
+			client.close();
+		}
+	}
+
+	/** Spawn a first-class cloud child through the supervisor registry. */
+	private async spawnRlmCloudChildForState(
+		parentState: ActiveSessionState,
+		request: RlmCloudChildSpawnRequest,
+	): Promise<RlmCloudChildLease> {
+		if (!this.options.worker) {
+			throw new Error("cloud execution is not available in this session");
+		}
+		const { admission } = await this.requestSupervisorDaemon<{
+			admission: {
+				rlm_child_id: string;
+				name: string;
+				session_dir: string;
+				model: string;
+				cloud_session_id: string;
+				active_session_id: string;
+			};
+		}>(
+			{
+				type: "cloud_spawn_child",
+				parentActiveSessionId: parentState.activeSessionId,
+				prompt: request.prompt,
+				...(request.sessionName ? { name: request.sessionName } : {}),
+				...(request.model ? { model: request.model } : {}),
+				...(request.thinkingLevel ? { thinking: request.thinkingLevel } : {}),
+			},
+			120_000,
+		);
+		const cloudAddress = admission.active_session_id;
+		const requestCloudCommand = <T>(command: DaemonCommand, timeoutMs: number): Promise<T> =>
+			this.requestSupervisorDaemon<T>(command, timeoutMs).catch((error: unknown) => {
+				throw error instanceof Error ? error : new Error(String(error));
+			});
+		return {
+			admission: {
+				rlm_child_id: admission.rlm_child_id,
+				name: admission.name,
+				session_dir: admission.session_dir,
+				model: admission.model,
+				cloud_active_session_id: cloudAddress,
+				cloud_session_id: admission.cloud_session_id,
+			},
+			cancel: () => {
+				void requestCloudCommand(
+					{
+						type: "cancel_rlm_child",
+						activeSessionId: cloudAddress,
+						childId: admission.rlm_child_id,
+					},
+					30_000,
+				).catch((error: unknown) =>
+					this.log(
+						`cloud child cancel failed for ${admission.rlm_child_id}: ${error instanceof Error ? error.message : String(error)}`,
+					),
+				);
+			},
+			delete: async () => {
+				await requestCloudCommand(
+					{
+						type: "delete_rlm_subagent",
+						activeSessionId: cloudAddress,
+						childId: admission.rlm_child_id,
+					},
+					60_000,
+				);
+			},
+		};
 	}
 
 	private async sendRemoteAgentSessionMessage(

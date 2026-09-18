@@ -129,6 +129,28 @@ export function normalizeRequestedRlmSubagentModel(value: unknown, operation = "
 	return model;
 }
 
+/** The only supported remote spawn target; local remains the default. */
+export type RlmSubagentTarget = "cloud";
+
+/**
+ * Validate the optional `rlm.run` target kwarg. `undefined` keeps the frozen
+ * local/default behavior byte-identical; `"cloud"` requests a first-class
+ * cloud child; anything else fails with a precise error instead of being
+ * silently treated as local.
+ */
+export function normalizeRequestedRlmSubagentTarget(
+	value: unknown,
+	operation = "rlm.run",
+): RlmSubagentTarget | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (value !== "cloud") {
+		throw new Error(`${operation} target must be "cloud" when provided; got ${JSON.stringify(String(value))}`);
+	}
+	return "cloud";
+}
+
 /** Create a readable, collision-resistant default name usable as an agent-message selector. */
 export function createDefaultRlmSubagentSessionName(prompt: string, childId: string): string {
 	const promptSlug = prompt
@@ -269,6 +291,32 @@ export interface RlmSubagentRuntime {
 	session: AgentSession;
 }
 
+/** One cloud-child status push routed into the parent's RlmChildRun. */
+export interface RlmCloudChildUpdate {
+	/** Matches the admission's `rlm_child_id`. */
+	childId: string;
+	status: "queued" | "running" | "completed" | "error" | "cancelled";
+	error?: string;
+	answerPreview?: string;
+}
+
+/** The standard frozen handle plus the supervisor address of the cloud row. */
+export interface RlmCloudChildAdmission extends RlmSpawnHandle {
+	/** Supervisor active-session id of the cloud roster row; the cancel/delete address. */
+	cloud_active_session_id: string;
+	/** Cloud session id backing the row (the shadow transcript's id). */
+	cloud_session_id: string;
+}
+
+/** Host-issued cloud spawn: durable admission through the supervisor registry. */
+export interface RlmCloudChildLease {
+	admission: RlmCloudChildAdmission;
+	/** Cancel the remote child through the existing supervisor cancel API. */
+	cancel(): void;
+	/** Delete the remote child through the existing supervisor delete API. */
+	delete(): Promise<void>;
+}
+
 export interface CreateRlmSubagentRuntimeOptions {
 	parentSession: AgentSession;
 	id: string;
@@ -303,9 +351,25 @@ export interface CreateRlmRootSessionOptions {
 	thinkingLevel: ThinkingLevel;
 }
 
+export interface RlmCloudChildSpawnRequest {
+	prompt: string;
+	/** Stable child name; omitted lets the supervisor registry generate one. */
+	sessionName?: string;
+	/** Resolved model selector "provider/modelId". */
+	model: string;
+	thinkingLevel?: ThinkingLevel;
+	rlmDepth: number;
+}
+
 export interface SubagentRuntimeHost {
 	createRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): Promise<RlmSubagentRuntime>;
 	createRlmRootSession?(options: CreateRlmRootSessionOptions): Promise<RlmCreateSessionResult>;
+	/**
+	 * Durably admit a first-class cloud child through the supervisor registry.
+	 * Returns after admission (never after provisioning); the lease routes
+	 * cancellation/deletion and the parent session receives status pushes.
+	 */
+	spawnRlmCloudChild?(request: RlmCloudChildSpawnRequest): Promise<RlmCloudChildLease>;
 	/** Persist host-owned completion before the child becomes passivation-eligible. */
 	completeRlmSubagentRuntime?(childId: string, session: AgentSession): boolean;
 	/** Release a host-owned child after its detached initial task settles. */

@@ -133,6 +133,19 @@ export type DaemonWorkerCommand =
 			sender: AgentSessionMessageSender;
 			deliveryMode?: AgentSessionMessageDeliveryMode;
 	  }
+	| {
+			id?: string;
+			type: "worker_cloud_child_update";
+			/** The local parent session that spawned the cloud child. */
+			parentActiveSessionId: string;
+			/** The pushed status update for the parent's RlmChildRun. */
+			update: {
+				childId: string;
+				status: "queued" | "running" | "completed" | "error" | "cancelled";
+				error?: string;
+				answerPreview?: string;
+			};
+	  }
 	| { id?: string; type: "worker_prepare_update" }
 	| { id?: string; type: "worker_commit_update" }
 	| { id?: string; type: "worker_cancel_update" };

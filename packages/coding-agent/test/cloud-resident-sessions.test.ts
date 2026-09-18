@@ -38,6 +38,7 @@ const RESIDENT_COMMAND_TYPES = [
 	"cloud_session_stop",
 	"cloud_session_reprovision",
 	"cloud_session_import_result",
+	"cloud_spawn_child",
 ] as const;
 
 const CLOUD_RESIDENT_SESSIONS_COMMAND_COMPATIBILITY = {

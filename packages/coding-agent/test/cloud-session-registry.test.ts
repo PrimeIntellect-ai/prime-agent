@@ -108,6 +108,13 @@ interface RegistryHarness {
 	ledgerDeletes: Array<{ childId: string; child: string }>;
 	sessionEvents: Array<{ activeSessionId: string; type: string }>;
 	updates: Array<{ sessionId: string; connectivity?: string }>;
+	childUpdates: Array<{
+		childId: string;
+		parentActiveSessionId: string;
+		status: string;
+		error?: string;
+		answerPreview?: string;
+	}>;
 	cloudRoot: string;
 	sessionDir: string;
 	stateDirectory: string;
@@ -266,6 +273,7 @@ function buildRegistry(
 	const ledgerDeletes: RegistryHarness["ledgerDeletes"] = [];
 	const sessionEvents: RegistryHarness["sessionEvents"] = [];
 	const updates: RegistryHarness["updates"] = [];
+	const childUpdates: RegistryHarness["childUpdates"] = [];
 	const callbacks: CloudSessionRegistryCallbacks = {
 		log: () => undefined,
 		writeRosterEntry: (entry) => {
@@ -291,6 +299,9 @@ function buildRegistry(
 		writeSessionStatus: () => undefined,
 		broadcastCloudSessionUpdate: (record) => {
 			updates.push({ sessionId: record.sessionId, connectivity: record.connectivity });
+		},
+		pushChildUpdate: (update) => {
+			childUpdates.push(update);
 		},
 		attachedClientCount: () => 0,
 	};
@@ -320,6 +331,7 @@ function buildRegistry(
 		ledgerDeletes,
 		sessionEvents,
 		updates,
+		childUpdates,
 		cloudRoot: root,
 		sessionDir,
 		stateDirectory,

@@ -243,7 +243,10 @@ import {
 	findRlmModelMatches,
 	normalizeRequestedRlmSubagentModel,
 	normalizeRequestedRlmSubagentSessionName,
+	normalizeRequestedRlmSubagentTarget,
 	normalizeRequestedRlmSubagentThinkingLevel,
+	type RlmCloudChildLease,
+	type RlmCloudChildUpdate,
 	type RlmCreateSessionResult,
 	type RlmDeleteSubagentResult,
 	type RlmFindModelsResult,
@@ -481,6 +484,12 @@ export interface AgentSessionConfig {
 	sessionStartEvent?: SessionStartEvent;
 	rlmDepth?: number;
 	rlmMaxDepth?: number;
+	/**
+	 * Whether this session's daemon advertises `cloud_resident_sessions`:
+	 * `rlm(..., target="cloud")` is available. Absent keeps the trained
+	 * local-only prompt bytes byte-identical.
+	 */
+	cloudSpawnTarget?: boolean;
 	rlmSessionDir?: string;
 	rlmParentNodeId?: string;
 	rlmParentAgent?: string;
@@ -974,6 +983,8 @@ interface RlmChildRun {
 	emitUpdate?: () => void;
 	lastEmittedUpdate?: string;
 	unsubscribe?: () => void;
+	/** Host lease for a first-class cloud child; absent on local runs. */
+	cloudLease?: RlmCloudChildLease;
 }
 
 interface RetainedRlmChild {
@@ -1243,6 +1254,8 @@ export class AgentSession {
 	private _ipythonRuntimeBuilt = false;
 	private readonly _prewarmIpythonKernel: boolean;
 	private _rlmDepth: number;
+	/** Daemon advertises `cloud_resident_sessions`; gates the prompt's cloud-target sentence. */
+	private _cloudSpawnTarget: boolean;
 	private readonly _configuredRlmMaxDepth: number | undefined;
 	private _rlmMaxDepth: number;
 	private _rlmMaxDepthSource: RlmMaxDepthSource;
@@ -1360,6 +1373,7 @@ export class AgentSession {
 		this._rlmSessionDir = config.rlmSessionDir;
 		this._rlmParentNodeId = config.rlmParentNodeId;
 		this._rlmParentAgent = config.rlmParentAgent;
+		this._cloudSpawnTarget = config.cloudSpawnTarget === true;
 		this._semanticEdges = new SemanticEdgeRecorder({
 			ledgerPath: semanticEdgeLedgerPath({
 				rlmSessionDir: this._rlmSessionDir,
@@ -4530,6 +4544,7 @@ export class AgentSession {
 			allowRecursion: this._rlmDepth < this._rlmMaxDepth,
 			rlmDepth: this._rlmDepth,
 			rlmParentAgent: this._rlmParentAgent,
+			cloudSpawnTarget: this._cloudSpawnTarget || undefined,
 			genericMcpServers: this._mcpManager?.getEnabledPersistentGenericServers(),
 		};
 		return buildSystemPrompt(this._baseSystemPromptOptions);
@@ -10343,6 +10358,11 @@ export class AgentSession {
 	private async _deleteResolvedRlmSubagent(subagent: RlmSubagentRegistryEntry): Promise<RlmDeleteSubagentResult> {
 		const childId = subagent.rlm_child_id;
 		const run = this._activeRlmChildRuns.get(childId);
+		if (run?.cloudLease) {
+			// A cloud child's physical lifecycle is supervisor-owned; the
+			// existing delete API routes through the registry, not a local runtime.
+			return this._deleteRlmCloudChild(run, subagent);
+		}
 		if (run) {
 			if (run.deletionCleanupFailed) {
 				// Reset retry coordination only after selector preflight reaches the
@@ -10794,7 +10814,7 @@ export class AgentSession {
 		// executing now. A spawn arriving outside an active run (a detached kernel task
 		// firing while the parent is idle) has no such turn; an absent edge beats a wrong one.
 		const spawnedByRequestId = this.isStreaming ? this._semanticEdges.lastTurnRequestId : undefined;
-		const { name: rawName, model: rawModel, thinking: rawThinking, ...unsupported } = kwargs;
+		const { name: rawName, model: rawModel, thinking: rawThinking, target: rawTarget, ...unsupported } = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
 		if (unsupportedKwargs.length > 0) {
 			throw new Error(`Unsupported rlm.run kwargs: ${unsupportedKwargs.sort().join(", ")}`);
@@ -10802,6 +10822,7 @@ export class AgentSession {
 		const requestedSessionName = normalizeRequestedRlmSubagentSessionName(rawName);
 		const requestedModel = normalizeRequestedRlmSubagentModel(rawModel);
 		const requestedThinkingLevel = normalizeRequestedRlmSubagentThinkingLevel(rawThinking);
+		const requestedTarget = normalizeRequestedRlmSubagentTarget(rawTarget);
 		if (requestedSessionName) assertDirectAgentMessageTarget(requestedSessionName);
 		if (this._rlmDepth >= this._rlmMaxDepth) {
 			throw new Error(
@@ -10830,6 +10851,15 @@ export class AgentSession {
 			}
 		}
 		if (this._disposed || this._disposing) throw new Error("Cannot spawn a subagent after its parent was disposed");
+
+		if (requestedTarget === "cloud") {
+			return this._startRlmCloudChildRun({
+				prompt,
+				sessionName: requestedSessionName,
+				model: modelSelection.model,
+				thinkingLevel: requestedThinkingLevel,
+			});
+		}
 
 		const childSessionDir = this._createChildRlmSessionDir();
 		const childNodeId = basename(childSessionDir);
@@ -11259,6 +11289,160 @@ export class AgentSession {
 			session_dir: childSessionDir,
 			model: `${modelSelection.model.provider}/${modelSelection.model.id}`,
 		};
+	}
+
+	/**
+	 * Admit a first-class cloud child (`rlm(..., target="cloud")`). The host
+	 * durably admits the child through the supervisor registry and returns the
+	 * standard handle immediately after admission; provisioning and the
+	 * guest's task run proceed asynchronously, and status pushes arrive through
+	 * `applyRlmCloudChildUpdate` exactly like in-process child events.
+	 */
+	private async _startRlmCloudChildRun(options: {
+		prompt: string;
+		sessionName: string | undefined;
+		model: Model<Api>;
+		thinkingLevel: ThinkingLevel | undefined;
+	}): Promise<RlmSpawnHandle> {
+		const spawnCloudChild = this._subagentRuntimeHost?.spawnRlmCloudChild;
+		if (!spawnCloudChild) {
+			throw new Error("cloud execution is not available in this session");
+		}
+		const lease = await spawnCloudChild({
+			prompt: options.prompt,
+			...(options.sessionName ? { sessionName: options.sessionName } : {}),
+			model: `${options.model.provider}/${options.model.id}`,
+			...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
+			rlmDepth: this._rlmDepth + 1,
+		});
+		const admission = lease.admission;
+		const sessionName = admission.name;
+		const run: RlmChildRun = {
+			id: admission.rlm_child_id,
+			prompt: options.prompt,
+			sessionName,
+			sessionDir: admission.session_dir,
+			model: options.model,
+			status: "queued",
+			toolUseCount: 0,
+			settled: false,
+			abort: () => lease.cancel(),
+			publication: createAgentMessageDeferred(),
+			settlement: createAgentMessageDeferred(),
+			deletionReservation: createAgentMessageDeferred(),
+			cloudLease: lease,
+		};
+		this._activeRlmChildRuns.set(run.id, run);
+		this._unsettledRlmChildRuns.add(run);
+		const emitChildUpdate = () => {
+			const child = this._rlmChildSnapshotForRun(run);
+			const serialized = JSON.stringify(child);
+			if (serialized === run.lastEmittedUpdate) return;
+			run.lastEmittedUpdate = serialized;
+			this._emit({ type: "rlm_child_update", child });
+		};
+		run.emitUpdate = emitChildUpdate;
+		emitChildUpdate();
+		// Admission is durable: publication resolves now, never after provisioning.
+		run.publication.resolve();
+		return {
+			rlm_child_id: admission.rlm_child_id,
+			name: sessionName,
+			session_dir: admission.session_dir,
+			model: admission.model,
+		};
+	}
+
+	/**
+	 * Feed one supervisor-pushed cloud-child status update into the parent's
+	 * normal run machinery: status transitions drive `rlm_child_update`
+	 * session events, terminal states resolve settlement, and failures surface
+	 * as the run's error.
+	 */
+	applyRlmCloudChildUpdate(update: RlmCloudChildUpdate): void {
+		const run = this._activeRlmChildRuns.get(update.childId);
+		if (!run || run.settled || run.status === "cancelled") return;
+		if (update.answerPreview !== undefined) run.answerPreview = update.answerPreview;
+		const settleRun = () => {
+			run.activity = undefined;
+			run.settled = true;
+			run.settlement.resolve();
+			run.deletionReservation.resolve();
+			this._unsettledRlmChildRuns.delete(run);
+			this._maybeResumeGoalContinuationAfterRlmWork();
+		};
+		switch (update.status) {
+			case "queued":
+			case "running": {
+				run.status = update.status;
+				run.emitUpdate?.();
+				return;
+			}
+			case "completed": {
+				run.status = "done";
+				run.emitUpdate?.();
+				settleRun();
+				return;
+			}
+			case "error": {
+				run.status = "error";
+				run.error = update.error ?? "Cloud child failed";
+				run.emitUpdate?.();
+				settleRun();
+				return;
+			}
+			case "cancelled": {
+				run.status = "cancelled";
+				run.error = update.error ?? "Cloud child cancelled";
+				run.emitUpdate?.();
+				if (!this._disposed && !this._disposing) {
+					this._deletedRlmChildIds.add(run.id);
+					this._removeRlmSubagentTracking(run.id, run);
+				}
+				settleRun();
+				return;
+			}
+		}
+	}
+
+	/** Delete a cloud child through the existing supervisor delete API. */
+	private async _deleteRlmCloudChild(
+		run: RlmChildRun,
+		subagent: RlmSubagentRegistryEntry,
+	): Promise<RlmDeleteSubagentResult> {
+		if (run.deletionCleanupFailed) {
+			run.deletionCleanupFailed = false;
+			run.deletionFailureNotice = undefined;
+			run.deletionReservation = createAgentMessageDeferred();
+		}
+		run.detachedDeletion = subagent;
+		this._cancelRlmChildRun(run, "Deleted by parent orchestrator");
+		try {
+			await run.cloudLease!.delete();
+		} catch (error) {
+			const cleanupError = error instanceof Error ? error.message : String(error);
+			run.deletionCleanupFailed = true;
+			this._rlmChildCleanupFailures.set(run.id, subagent);
+			run.deletionReservation.resolve();
+			await this._deferRlmTerminalNotice(
+				createRlmChildFailureMessage({
+					childId: run.id,
+					sessionName: run.sessionName,
+					error: `Deletion cleanup failed; retry rlm.delete_subagent("${run.id}") before completion: ${cleanupError}`,
+				}),
+			).catch(() => undefined);
+			throw error;
+		}
+		if (!this._disposed && !this._disposing) {
+			this._deletedRlmChildIds.add(run.id);
+			this._removeRlmSubagentTracking(run.id, run);
+		}
+		run.settled = true;
+		run.settlement.resolve();
+		run.deletionReservation.resolve();
+		this._unsettledRlmChildRuns.delete(run);
+		this._maybeResumeGoalContinuationAfterRlmWork();
+		return { subagent, outcome: "deleted" };
 	}
 
 	async createRlmSession(prompt: string, kwargs: Record<string, unknown> = {}): Promise<RlmCreateSessionResult> {

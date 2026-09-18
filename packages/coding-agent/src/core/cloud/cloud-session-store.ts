@@ -157,6 +157,8 @@ export interface CloudSessionRecord {
 	location?: CloudSessionLocation;
 	/** Remote descendant session ids mirrored into shadow sessions. */
 	remoteSessionIds?: string[];
+	/** Local-parent provenance and task for a spawned cloud child (resident). */
+	spawn?: CloudSessionSpawnInfo;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -164,6 +166,31 @@ export interface CloudSessionRecord {
 /** Resident-session provenance recorded on the durable record. */
 export const CLOUD_SESSION_LOCATIONS = ["converted-root", "spawned-child"] as const;
 export type CloudSessionLocation = (typeof CLOUD_SESSION_LOCATIONS)[number];
+
+/**
+ * Spawned-cloud-child provenance: the local parent that admitted the child,
+ * its ledger edge, and the initial task the sandbox must run. Durable so a
+ * supervisor restart re-projects the roster row and re-attaches the parent's
+ * child updates without the worker.
+ */
+export interface CloudSessionSpawnInfo {
+	/** Local parent session id (durable identity). */
+	parentSessionId: string;
+	/** Canonical local parent session file (ledger edge + family projection). */
+	parentSessionFile: string;
+	/** Parent active-session id of the spawning worker (update routing). */
+	parentActiveSessionId: string;
+	/** RLM depth of the cloud child (parent depth + 1). */
+	depth: number;
+	/** Stable child name requested by the parent. */
+	name: string;
+	/** Initial task prompt, bounded. */
+	prompt: string;
+	/** Resolved model selector "provider/id". */
+	model?: string;
+	/** Thinking level for the guest session. */
+	thinking?: string;
+}
 
 export interface CloudSessionCreateInput {
 	/** Preallocated session identity; allocated by the store when omitted. */
@@ -211,6 +238,7 @@ const RECORD_FIELDS = [
 	"activeSessionId",
 	"location",
 	"remoteSessionIds",
+	"spawn",
 	"createdAt",
 	"updatedAt",
 ] as const;
@@ -284,6 +312,7 @@ export function cloudSessionRecordProblem(value: unknown): string | undefined {
 			? undefined
 			: expectOneOf(value.location, "record.location", CLOUD_SESSION_LOCATIONS),
 		remoteSessionIdsProblem(value.remoteSessionIds, "record.remoteSessionIds"),
+		value.spawn === undefined ? undefined : spawnInfoProblem(value.spawn, "record.spawn"),
 		expectTimestamp(value.createdAt, "record.createdAt"),
 		expectTimestamp(value.updatedAt, "record.updatedAt"),
 	);
@@ -618,6 +647,40 @@ export class CloudSessionStore {
 			}
 			record.location = location;
 			return true;
+		});
+	}
+
+	/**
+	 * Record the spawned-cloud-child provenance and task; set once. The
+	 * supervisor writes it before admission returns, so the ledger edge,
+	 * roster projection, and provisioning retry all survive a restart.
+	 */
+	setSpawn(sessionId: string, spawn: CloudSessionSpawnInfo): CloudSessionRecord {
+		const problem = spawnInfoProblem(spawn, "spawn");
+		if (problem !== undefined) {
+			throw new CloudSessionStoreError("invalid", problem);
+		}
+		return this.mutate(sessionId, (record) => {
+			if (record.spawn === undefined) {
+				record.spawn = { ...spawn };
+				return true;
+			}
+			const same =
+				record.spawn.parentSessionId === spawn.parentSessionId &&
+				record.spawn.parentSessionFile === spawn.parentSessionFile &&
+				record.spawn.parentActiveSessionId === spawn.parentActiveSessionId &&
+				record.spawn.depth === spawn.depth &&
+				record.spawn.name === spawn.name &&
+				record.spawn.prompt === spawn.prompt &&
+				record.spawn.model === spawn.model &&
+				record.spawn.thinking === spawn.thinking;
+			if (!same) {
+				throw new CloudSessionStoreError(
+					"conflict",
+					`cloud session ${sessionId} already holds a different spawn record`,
+				);
+			}
+			return false;
 		});
 	}
 
@@ -1035,6 +1098,37 @@ function isCleanupState(value: unknown): value is CloudCleanupState {
 
 function isResultImportState(value: unknown): value is CloudResultImportState {
 	return typeof value === "string" && (CLOUD_RESULT_IMPORT_STATES as readonly string[]).includes(value);
+}
+
+/** Upper bound on a spawned child's persisted prompt; larger prompts fail admission. */
+export const CLOUD_MAX_SPAWN_PROMPT_CHARS = 200_000;
+
+function spawnInfoProblem(value: unknown, label: string): string | undefined {
+	if (!isRecord(value)) {
+		return `${label} must be an object`;
+	}
+	return firstProblem(
+		expectFields(value, [
+			"parentSessionId",
+			"parentSessionFile",
+			"parentActiveSessionId",
+			"depth",
+			"name",
+			"prompt",
+			"model",
+			"thinking",
+		]),
+		expectString(value.parentSessionId, `${label}.parentSessionId`, CLOUD_MAX_ID_CHARS, 1),
+		expectString(value.parentSessionFile, `${label}.parentSessionFile`, CLOUD_MAX_PATH_CHARS, 1),
+		expectString(value.parentActiveSessionId, `${label}.parentActiveSessionId`, CLOUD_MAX_ID_CHARS, 1),
+		expectInteger(value.depth, `${label}.depth`, 1),
+		expectString(value.name, `${label}.name`, CLOUD_MAX_ID_CHARS, 1),
+		expectString(value.prompt, `${label}.prompt`, CLOUD_MAX_SPAWN_PROMPT_CHARS, 1),
+		value.model === undefined ? undefined : expectString(value.model, `${label}.model`, CLOUD_MAX_ID_CHARS, 1),
+		value.thinking === undefined
+			? undefined
+			: expectString(value.thinking, `${label}.thinking`, CLOUD_MAX_ID_CHARS, 1),
+	);
 }
 
 function remoteSessionIdsProblem(value: unknown, label: string): string | undefined {
