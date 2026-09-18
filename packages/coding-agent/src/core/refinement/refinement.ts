@@ -32,7 +32,7 @@ const DEFAULT_OVERVIEW_CONTENT_LIMIT = 180;
  */
 const HARNESS_DIGEST_FINGERPRINT_VERSION = 1;
 
-export type RefinementKind = "prompt" | "memory" | "skill" | "subagent";
+export type RefinementKind = "prompt" | "memory" | "skill" | "subagent" | "swarm";
 export type RefinementAction = "create" | "update" | "delete";
 export type HarnessScope = "local" | "global";
 
@@ -165,7 +165,7 @@ JSON only with this exact shape:
   "edits": [
     {
       "action": "create|update|delete",
-      "kind": "prompt|memory|skill|subagent",
+      "kind": "prompt|memory|skill|subagent|swarm",
       "id": "stable id for update/delete, optional for create",
       "title": "required for create/update except delete",
       "content": "required for create/update except delete",
@@ -257,6 +257,7 @@ function emptyHarnessState(): HarnessState {
 			memory: {},
 			skill: {},
 			subagent: {},
+			swarm: {},
 		},
 		refinements: [],
 	};
@@ -665,6 +666,10 @@ export function formatHarnessStateForPrompt(
 			lines.push(
 				`${kind}: ${entries.length} (invoke a spec by turning it into a concise task prompt and spawning with \`await rlm.spawn('<task>', name='<worker>')\`; admission returns a child handle, never the answer)`,
 			);
+		} else if (kind === "swarm" && entries.length > 0 && includeIpythonExamples) {
+			lines.push(
+				`${kind}: ${entries.length} (run it with \`await rlm.swarm.run('<id>')\`; watch with \`rlm.swarm.status(run_id)\`, stop with \`rlm.swarm.stop(run_id)\`)`,
+			);
 		} else {
 			lines.push(`${kind}: ${entries.length}`);
 		}
@@ -931,7 +936,7 @@ function validateEdit(edit: RefinementEdit, computedId?: string): string | undef
 	if (!["create", "update", "delete"].includes(edit.action)) {
 		return `unsupported action ${String(edit.action)}`;
 	}
-	if (!["prompt", "memory", "skill", "subagent"].includes(edit.kind)) {
+	if (!["prompt", "memory", "skill", "subagent", "swarm"].includes(edit.kind)) {
 		return `unsupported kind ${String(edit.kind)}`;
 	}
 	if (edit.kind === "prompt" && (edit.id === "base_system_prompt" || computedId === "base_system_prompt")) {
@@ -965,6 +970,14 @@ function validateEdit(edit: RefinementEdit, computedId?: string): string | undef
 		}
 		if (!hasCallable) {
 			return `${edit.action} skill requires callable or call_pattern`;
+		}
+	}
+	if (edit.action !== "delete" && edit.kind === "swarm") {
+		// Structural check only: the kernel validator (rlm.swarm) enforces the full
+		// DAG semantics at write time; do not reimplement it here.
+		const dag = edit.arguments?.dag;
+		if (typeof dag !== "object" || dag === null || Array.isArray(dag)) {
+			return "swarm entry requires a dag object in arguments";
 		}
 	}
 	return undefined;

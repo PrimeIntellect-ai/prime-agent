@@ -194,6 +194,7 @@ import {
 	createRlmChildTerminalNoticeMessage,
 	createSessionSlashCommandMessage,
 	createSessionSlashCommandResultMessage,
+	createSwarmProgressMessage,
 	HARNESS_DIGEST_CUSTOM_TYPE,
 	type HarnessDigestDetails,
 	HEARTBEAT_PROMPT_CUSTOM_TYPE,
@@ -203,6 +204,8 @@ import {
 	type RefinementSource,
 	RLM_CHILD_FAILURE_CUSTOM_TYPE,
 	RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+	SWARM_PROGRESS_NOTICE_CUSTOM_TYPE,
+	SWARM_PROGRESS_PREVIEW_LABEL,
 } from "./messages.js";
 import type { ModelRegistry } from "./model-registry.js";
 import { findExactModelReferenceMatch } from "./model-resolver.js";
@@ -263,6 +266,7 @@ import {
 	createRlmListSubagentsHostHandler,
 	createRlmProgressNoteHostHandler,
 	createRlmRunHostHandler,
+	createSwarmProgressHostHandler,
 	findRlmModelMatches,
 	findUniqueRlmShortFormModelMatch,
 	formatRlmModelUnavailableError,
@@ -932,6 +936,8 @@ function injectedMessagePreviewLabel(message: CustomMessage): string | undefined
 			return HEARTBEAT_PROMPT_PREVIEW_LABEL;
 		case ASYNC_BASH_COMPLETION_CUSTOM_TYPE:
 			return ASYNC_BASH_COMPLETION_PREVIEW_LABEL;
+		case SWARM_PROGRESS_NOTICE_CUSTOM_TYPE:
+			return SWARM_PROGRESS_PREVIEW_LABEL;
 		case GOAL_CONTEXT_CUSTOM_TYPE:
 			return GOAL_CONTEXT_PREVIEW_LABEL;
 		default:
@@ -10530,6 +10536,31 @@ export class AgentSession {
 			),
 			"rlm.progress.note": createRlmProgressNoteHostHandler((message) => this.noteRlmProgress(message)),
 			"rlm.delete_subagent": createRlmDeleteSubagentHostHandler((target) => this.deleteRlmSubagent(target)),
+			"swarm.progress": createSwarmProgressHostHandler(async (details) => {
+				const message = createSwarmProgressMessage(details);
+				const disposeSignal = this._sessionActionCommitDisposeAbortController.signal;
+				while (true) {
+					let admissionCommitted = false;
+					try {
+						await this._promptInjectedMessage(message.content, message, {
+							streamingBehavior: "steer",
+							queueIfBusy: true,
+							resumeIfIdle: true,
+							returnAfterAccepted: true,
+							suppressAutonomousContinuation: true,
+							admissionCommitted: () => {
+								admissionCommitted = true;
+							},
+						});
+						return;
+					} catch (error) {
+						if (admissionCommitted || !(error instanceof SessionInputAdmissionPausedError)) throw error;
+						while (this._sessionInputAdmissionPauses.size > 0 && !disposeSignal.aborted) {
+							await this._waitForSessionActivityChange(disposeSignal);
+						}
+					}
+				}
+			}),
 			"model.info": async () => ({
 				id: this.model?.id ?? null,
 				provider: this.model?.provider ?? null,

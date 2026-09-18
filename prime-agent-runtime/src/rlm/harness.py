@@ -21,12 +21,14 @@ from pathlib import Path
 from uuid import uuid4
 from typing import Any, Literal
 
-HarnessKind = Literal["prompt", "memory", "skill", "subagent"]
+from .swarm import validate_swarm_spec
+
+HarnessKind = Literal["prompt", "memory", "skill", "subagent", "swarm"]
 HarnessScope = Literal["local", "global"]
 
 _DEFAULT_FILE_NAME = "harness_state.json"
 _DEFAULT_HARNESS_DIR_NAME = "harness"
-_KINDS: tuple[HarnessKind, ...] = ("prompt", "memory", "skill", "subagent")
+_KINDS: tuple[HarnessKind, ...] = ("prompt", "memory", "skill", "subagent", "swarm")
 _state_cache: dict[tuple[Path, HarnessScope], "HarnessState"] = {}
 
 
@@ -765,6 +767,68 @@ class HarnessState:
     def delete_subagent(self, id: str, *, global_: bool = False, **kwargs: Any) -> bool:
         return self.delete("subagent", id, global_=global_, **kwargs)
 
+    def create_swarm(
+        self,
+        title: str,
+        content: str,
+        *,
+        id: str | None = None,
+        path: str = "general",
+        dag: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        global_: bool = False,
+        **kwargs: Any,
+    ) -> HarnessEntry:
+        # Write-time dry run: an invalid DAG never reaches the store.
+        errors = validate_swarm_spec(dag)
+        if errors:
+            raise ValueError("; ".join(errors))
+        return self.create(
+            "swarm",
+            title,
+            content,
+            id=id,
+            path=path,
+            arguments={"dag": dag},
+            metadata=metadata,
+            global_=global_,
+            **kwargs,
+        )
+
+    def update_swarm(
+        self,
+        id: str,
+        title: str,
+        content: str,
+        *,
+        path: str | None = None,
+        dag: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        global_: bool = False,
+        **kwargs: Any,
+    ) -> HarnessEntry:
+        # Only validate a DAG when one is supplied; omitting it preserves the
+        # stored arguments (see _upsert) rather than forcing every title/content
+        # update to re-send the full DAG, exactly like update_skill treats reference.
+        if dag is not None:
+            errors = validate_swarm_spec(dag)
+            if errors:
+                raise ValueError("; ".join(errors))
+        return self.update(
+            "swarm",
+            id,
+            title,
+            content,
+            path=path,
+            arguments={"dag": dag} if dag is not None else None,
+            metadata=metadata,
+            global_=global_,
+            **kwargs,
+        )
+
+    def delete_swarm(self, id: str, *, global_: bool = False, **kwargs: Any) -> bool:
+        return self.delete("swarm", id, global_=global_, **kwargs)
+
     def record_refinement(
         self,
         trigger: str,
@@ -824,6 +888,10 @@ class HarnessState:
             "files; children reply with await agent_message.send(message, receiver_role='parent'). Use "
             "await rlm.list_subagents() to recover direct child handles and await agent_message.send(..., "
             "receiver_role='child', receiver_name=handle.name) for follow-ups.",
+            "Swarm entries declare a validated DAG of subagent nodes in arguments['dag']: manage them with "
+            "create_swarm/update_swarm/delete_swarm (create_swarm validates the DAG at write time); run them "
+            "with await rlm.swarm.run(\"<id>\"), watch with rlm.swarm.status(run_id), stop with "
+            "rlm.swarm.stop(run_id), and resume a paused run with rlm.swarm.resume(run_id).",
         ]
         for kind in _KINDS:
             records = self.list(kind)[:max_entries_per_kind]

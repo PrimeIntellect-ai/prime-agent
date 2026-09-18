@@ -125,6 +125,24 @@ interface AsyncBashConsumedRequest {
 }
 
 type AsyncBashConsumedHandler = (request: AsyncBashConsumedRequest) => void | Promise<void>;
+
+export type SwarmProgressKind = "finished" | "failed" | "paused" | "budget_exceeded";
+
+export interface SwarmProgressRequest {
+	runId: string;
+	kind: SwarmProgressKind;
+	node?: string;
+	detail: string;
+}
+
+export type SwarmProgressHandler = (request: SwarmProgressRequest) => void | Promise<void>;
+
+const SWARM_PROGRESS_KINDS: readonly SwarmProgressKind[] = ["finished", "failed", "paused", "budget_exceeded"];
+
+function isSwarmProgressKind(value: unknown): value is SwarmProgressKind {
+	return typeof value === "string" && (SWARM_PROGRESS_KINDS as readonly string[]).includes(value);
+}
+
 export type RlmListSubagentsHandler = () => RlmListSubagentsResult | Promise<RlmListSubagentsResult>;
 export type RlmDeleteSubagentHandler = (target: string) => Promise<RlmDeleteSubagentResult>;
 export type RlmFindModelsHandler = (query: string, limit: number) => RlmFindModelsResult | Promise<RlmFindModelsResult>;
@@ -327,6 +345,39 @@ export function createAsyncBashCompletionHostHandler(handler: AsyncBashCompletio
 			throw new Error("bash.completed exitCode must be an integer");
 		}
 		await handler({ pid, command, exitCode });
+		return {};
+	};
+}
+
+/** Adapt a swarm executor milestone into a validated `swarm.progress` host notification. */
+export function createSwarmProgressHostHandler(handler: SwarmProgressHandler): HostRequestHandler {
+	return async (payload) => {
+		const runId = payload.run_id;
+		if (typeof runId !== "string" || !runId.trim()) {
+			throw new Error("swarm.progress run_id must be a non-empty string");
+		}
+		const kind = payload.kind;
+		if (!isSwarmProgressKind(kind)) {
+			throw new Error(
+				`swarm.progress kind must be one of ${SWARM_PROGRESS_KINDS.join(", ")}, got ${JSON.stringify(kind)}`,
+			);
+		}
+		const detail = payload.detail;
+		if (typeof detail !== "string" || !detail.trim()) {
+			throw new Error("swarm.progress detail must be a non-empty string");
+		}
+		const node = payload.node;
+		if (node !== undefined && typeof node !== "string") {
+			throw new Error("swarm.progress node must be a string when provided");
+		}
+		if (node !== undefined && !node.trim()) {
+			throw new Error("swarm.progress node must be a non-empty string when provided");
+		}
+		const request: SwarmProgressRequest = { runId: runId.trim(), kind, detail };
+		if (typeof node === "string" && node.trim()) {
+			request.node = node.trim();
+		}
+		await handler(request);
 		return {};
 	};
 }

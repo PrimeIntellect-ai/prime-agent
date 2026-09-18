@@ -90,7 +90,7 @@ describe("auxiliary reasoning settings", () => {
 		);
 		const state: HarnessState = {
 			schema: 1,
-			entries: { prompt: {}, memory: {}, skill: {}, subagent: {} },
+			entries: { prompt: {}, memory: {}, skill: {}, subagent: {}, swarm: {} },
 			refinements: [],
 		};
 		const messages = [{ role: "user" as const, content: "Remember the result", timestamp: 1 }];

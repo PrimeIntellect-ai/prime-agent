@@ -5,6 +5,7 @@ import type { CustomMessage } from "./messages.js";
 import {
 	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
 	HEARTBEAT_PROMPT_CUSTOM_TYPE,
+	SWARM_PROGRESS_NOTICE_CUSTOM_TYPE,
 	sanitizeMessageHeaderValue,
 } from "./messages.js";
 import { canonicalSessionPath } from "./session-lease.js";
@@ -438,7 +439,8 @@ export function startsAgentRun(message: AgentMessage): boolean {
 		isAgentSessionMessage(message) ||
 		(message.role === "custom" &&
 			(message.customType === HEARTBEAT_PROMPT_CUSTOM_TYPE ||
-				message.customType === ASYNC_BASH_COMPLETION_CUSTOM_TYPE))
+				message.customType === ASYNC_BASH_COMPLETION_CUSTOM_TYPE ||
+				message.customType === SWARM_PROGRESS_NOTICE_CUSTOM_TYPE))
 	);
 }
 

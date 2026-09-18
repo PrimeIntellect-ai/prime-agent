@@ -19,6 +19,23 @@ PYTHON_REFERENCE = {
     "call_pattern": "await run(...)",
 }
 
+SWARM_DAG = {
+    "run": {"failure_policy": "continue", "max_parallel": 2},
+    "nodes": [
+        {
+            "id": "collect",
+            "subagent": "researcher",
+            "outputs": [{"name": "findings", "type": "text"}],
+        },
+        {
+            "id": "review",
+            "subagent": {"prompt": "Review the findings."},
+            "depends_on": ["collect"],
+            "inputs": [{"name": "draft", "type": "text", "from": "collect.findings"}],
+        },
+    ],
+}
+
 
 class HarnessStateTest(unittest.TestCase):
     def test_crud_for_all_entry_kinds(self) -> None:
@@ -56,6 +73,14 @@ class HarnessStateTest(unittest.TestCase):
                     path="subagent/path",
                     metadata={"kind": "subagent"},
                 ),
+                "swarm": state.create_swarm(
+                    "Swarm",
+                    "Swarm content",
+                    id="swarm_entry",
+                    path="swarm/path",
+                    dag=SWARM_DAG,
+                    metadata={"kind": "swarm"},
+                ),
             }
 
             for kind, entry in created.items():
@@ -73,8 +98,9 @@ class HarnessStateTest(unittest.TestCase):
                 arguments={"target": {"type": "string", "required": True}, "mode": {"type": "string"}},
             )
             state.update_subagent("subagent_entry", "Subagent", "Subagent content updated")
+            state.update_swarm("swarm_entry", "Swarm", "Swarm content updated", dag=SWARM_DAG)
 
-            for kind in ("prompt", "memory", "skill", "subagent"):
+            for kind in ("prompt", "memory", "skill", "subagent", "swarm"):
                 entry_id = f"{kind}_entry"
                 self.assertEqual(state.get(kind, entry_id).version, 2)
                 self.assertIn("updated", state.get(kind, entry_id).content)
@@ -106,6 +132,12 @@ class HarnessStateTest(unittest.TestCase):
                 "Review the proposed patch for regressions and missing tests.",
                 metadata={"max_turns": 3},
             )
+            swarm = state.create_swarm(
+                "PR review sweep",
+                "Sweep review across changed files.",
+                id="pr_sweep",
+                dag=SWARM_DAG,
+            )
             state.create_prompt_note("Refinement cadence", "Refine only after repeated evidence.")
             event = state.record_refinement(
                 "skill failed twice",
@@ -120,6 +152,7 @@ class HarnessStateTest(unittest.TestCase):
             self.assertEqual(reloaded.get("skill", skill.id).version, 1)
             self.assertEqual(reloaded.get("skill", skill.id).arguments["failure_log"]["type"], "string")
             self.assertEqual(reloaded.get("subagent", subagent.id).metadata["max_turns"], 3)
+            self.assertEqual(reloaded.get("swarm", swarm.id).arguments["dag"], SWARM_DAG)
             self.assertEqual(reloaded.refinements[0].id, event.id)
             self.assertIn("Prefer focused patches", reloaded.overview())
             self.assertIn(
@@ -133,6 +166,94 @@ class HarnessStateTest(unittest.TestCase):
             self.assertIn("await rlm.list_subagents()", overview)
             self.assertIn("receiver_role='child'", overview)
             self.assertIn("refinements: 1", reloaded.overview())
+            self.assertIn("swarm", reloaded.overview())
+            self.assertIn("rlm.swarm.run", reloaded.overview())
+            self.assertIn("create_swarm/update_swarm/delete_swarm", reloaded.overview())
+
+    def test_create_swarm_with_invalid_dag_raises_and_does_not_store(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+
+            invalid_dags = [
+                None,
+                "not a dag",
+                {"nodes": []},
+                {"nodes": [{"id": "a", "subagent": "w"}, {"id": "a", "subagent": "w"}]},
+                {"nodes": [{"id": "a", "subagent": "w", "depends_on": ["a"]}]},
+                {
+                    "nodes": [
+                        {"id": "a", "subagent": "w", "outputs": [{"name": "o", "type": "text"}]},
+                        {"id": "b", "subagent": "w", "inputs": [{"name": "i", "type": "json", "from": "a.o"}]},
+                    ]
+                },
+            ]
+            for index, dag in enumerate(invalid_dags):
+                with self.assertRaises(ValueError, msg=f"dag #{index}") as ctx:
+                    state.create_swarm("Broken sweep", "Should never store.", id=f"broken_{index}", dag=dag)
+                self.assertTrue(str(ctx.exception).strip())
+
+            self.assertEqual(state.list("swarm"), [])
+            for index in range(len(invalid_dags)):
+                self.assertIsNone(state.get("swarm", f"broken_{index}"))
+
+            # An invalid dag leaves nothing on disk either.
+            reloaded = HarnessState(state.file_path)
+            self.assertEqual(reloaded.list("swarm"), [])
+
+    def test_create_swarm_with_valid_dag_stores_arguments_dag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+
+            entry = state.create_swarm(
+                "PR review sweep",
+                "Sweep review across changed files.",
+                id="pr_sweep",
+                path="review",
+                dag=SWARM_DAG,
+                metadata={"owner": "kernel"},
+            )
+
+            self.assertEqual(entry.kind, "swarm")
+            self.assertEqual(entry.arguments["dag"], SWARM_DAG)
+            self.assertEqual(state.get("swarm", "pr_sweep").arguments["dag"], SWARM_DAG)
+            self.assertIn(entry, state.list("swarm"))
+
+            reloaded = HarnessState(state.file_path)
+            self.assertEqual(reloaded.get("swarm", "pr_sweep").arguments["dag"], SWARM_DAG)
+
+    def test_update_swarm_without_dag_preserves_stored_dag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            entry = state.create_swarm("PR review sweep", "Sweep review.", id="pr_sweep", dag=SWARM_DAG)
+            stored_at_create = dict(entry.arguments["dag"])
+
+            updated = state.update_swarm("pr_sweep", "PR review sweep", "Sweep review across PRs.")
+
+            self.assertEqual(updated.version, 2)
+            self.assertEqual(state.get("swarm", "pr_sweep").arguments["dag"], SWARM_DAG)
+
+            replacement = {
+                "nodes": [
+                    {"id": "solo", "subagent": "worker", "outputs": [{"name": "report", "type": "text"}]}
+                ]
+            }
+            state.update_swarm("pr_sweep", "PR review sweep", "Sweep review across PRs.", dag=replacement)
+            self.assertEqual(state.get("swarm", "pr_sweep").arguments["dag"], replacement)
+
+            with self.assertRaises(ValueError):
+                state.update_swarm("pr_sweep", "PR review sweep", "Bad dag.", dag={"nodes": []})
+            self.assertEqual(state.get("swarm", "pr_sweep").arguments["dag"], replacement)
+            # The pre-update snapshot was taken before any replacement landed.
+            self.assertEqual(stored_at_create, SWARM_DAG)
+
+    def test_delete_swarm_removes_the_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_swarm("PR review sweep", "Sweep review.", id="pr_sweep", dag=SWARM_DAG)
+
+            self.assertTrue(state.delete_swarm("pr_sweep"))
+            self.assertIsNone(state.get("swarm", "pr_sweep"))
+            self.assertFalse(state.delete_swarm("pr_sweep"))
 
     def test_save_failure_preserves_previous_state_on_disk(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
