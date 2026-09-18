@@ -4,13 +4,13 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { ReplKernelManager } from "../src/core/kernel/index.js";
-import { buildRlmBootstrapCode } from "../src/core/tools/ipython.js";
+import {
+	buildRlmBootstrapCode,
+	PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER,
+	parseUnavailablePythonSkills,
+} from "../src/core/tools/ipython.js";
 
 describe("RLM bootstrap", () => {
-	it("pre-imports asyncio so the prompt's subagent patterns work without a manual import", () => {
-		expect(buildRlmBootstrapCode()).toMatch(/^import asyncio$/m);
-	});
-
 	it("gives subagent registry operations the actionable missing-runtime fallback", () => {
 		const code = buildRlmBootstrapCode();
 		expect(code).toContain('async def find_models(self, query="", limit=8)');
@@ -48,6 +48,19 @@ describe("RLM bootstrap", () => {
 		expect(code).toContain("_PrimeAgentUnavailableSkill");
 		expect(code).toContain("_PRIME_AGENT_SKILL_IMPORT_ERRORS");
 		expect(code).toContain("globals()[_prime_agent_skill_name] = _PrimeAgentUnavailableSkill");
+	});
+
+	it.each([
+		[
+			`${PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER}{"websearch":"No module named 'websearch'"}\n`,
+			{ websearch: "No module named 'websearch'" },
+		],
+		[`noise\n${PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER}{"edit":"boom"}`, { edit: "boom" }],
+		["some unrelated kernel output", undefined],
+		[`${PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER}not json`, undefined],
+		[`${PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER}{}`, undefined],
+	])("parses %j as %j", (stdout, expected) => {
+		expect(parseUnavailablePythonSkills(stdout as string)).toEqual(expected);
 	});
 });
 

@@ -200,6 +200,7 @@ import {
 	HEARTBEAT_PROMPT_PREVIEW_LABEL,
 	IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
 	isSessionSlashCommandMessage,
+	PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE,
 	type RefinementSource,
 	RLM_CHILD_FAILURE_CUSTOM_TYPE,
 	RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
@@ -341,7 +342,7 @@ import { THINKING_LEVELS } from "./thinking-levels.js";
 import { acpMcpToolNames, createAcpMcpToolDefinitions } from "./tools/acp-mcp.js";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
 import { createAllToolDefinitions } from "./tools/index.js";
-import { IpythonKernelProvisioner } from "./tools/ipython.js";
+import { IpythonKernelProvisioner, type UnavailablePythonSkills } from "./tools/ipython.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
 import {
 	addAssistantUsage,
@@ -8331,6 +8332,34 @@ export class AgentSession {
 		).catch(() => {});
 	}
 
+	/**
+	 * Tell the model which pre-imported Python skills failed to import into the
+	 * freshly started kernel, before it spends turns reading their SKILL.md and
+	 * calling them (the placeholder objects only raise on first call).
+	 */
+	private _onPythonSkillsUnavailable(errors: UnavailablePythonSkills): void {
+		const lines = ["[python-skills-unavailable]", ""];
+		lines.push(
+			"These installed Python skill modules failed to import into the Python kernel, so calling them raises an error:",
+		);
+		for (const [name, error] of Object.entries(errors)) {
+			lines.push(`- ${name}: ${error}`);
+		}
+		lines.push(
+			"",
+			"Their shell command forms fail the same way. Fix the import error first (for example install the missing dependency with `uv pip install <pkg>` or reinstall the skill into the kernel venv), or use another approach.",
+		);
+		void this.sendCustomMessage(
+			{
+				customType: PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE,
+				content: lines.join("\n"),
+				display: true,
+				details: { skills: Object.keys(errors) },
+			},
+			{ deliverAs: "nextTurn" },
+		).catch(() => {});
+	}
+
 	setSteeringMode(mode: "all" | "one-at-a-time"): void {
 		this.agent.steeringMode = mode;
 		this.settingsManager.setSteeringMode(mode);
@@ -10371,6 +10400,7 @@ export class AgentSession {
 				snapshotDir: this._ipythonKernelSnapshotDir,
 				readyGate: previousDispose,
 				onRestore: notifyRestore ? (result) => this._onIpythonStateRestored(result) : undefined,
+				onUnavailableSkills: (errors) => this._onPythonSkillsUnavailable(errors),
 			});
 			configuredBaseToolDefinitions = createAllToolDefinitions(this._cwd, {
 				ipython: {
