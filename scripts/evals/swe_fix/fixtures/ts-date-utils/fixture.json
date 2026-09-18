@@ -1,0 +1,9 @@
+{
+  "name": "ts-date-utils",
+  "language": "typescript",
+  "test_command": "npm test",
+  "target_test_command": "node --test --test-name-pattern \"returns 28 for February in a non-leap century year\" test/",
+  "pre_passing_tests": 3,
+  "golden_patch": "golden.patch",
+  "allowed_files": ["src/dates.js"]
+}
