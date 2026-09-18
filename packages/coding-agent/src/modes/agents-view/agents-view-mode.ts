@@ -74,6 +74,8 @@ import {
 	type AgentsViewSelectionKey,
 	buildAgentsViewRows,
 	buildUnifiedSessionIndex,
+	CLOUD_ROW_BADGE,
+	cloudRowBadgeColor,
 	computeRecursiveRollups,
 	createUnattachableChildOpenResult,
 	filterUnifiedSessions,
@@ -2568,9 +2570,15 @@ export class AgentsViewMode implements Component, Focusable {
 		const expand = row.descendantCount > 0 ? (this.expandedSubagentParents.has(row.identity) ? "▾" : "▸") : " ";
 		const badge = formatHeartbeatBadge(row.heartbeat);
 		const heartbeat = badge ? `${theme.fg((row.heartbeat?.activeCount ?? 0) > 0 ? "error" : "dim", badge)} ` : "";
-		const title = `${"  ".repeat(row.depth)}${icon}${expand} ${heartbeat}${styleRowTitle(row)}`;
+		const cloud =
+			row.summary.execution?.location === "cloud"
+				? `${theme.fg(cloudRowBadgeColor(row.summary.execution), CLOUD_ROW_BADGE)} `
+				: "";
+		const title = `${"  ".repeat(row.depth)}${icon}${expand} ${cloud}${heartbeat}${styleRowTitle(row)}`;
 		const status =
-			row.summary.statusLabel !== undefined || row.summary.lastHeardFromAt !== undefined
+			row.summary.statusLabel !== undefined ||
+			row.summary.lastHeardFromAt !== undefined ||
+			row.summary.execution !== undefined
 				? row.statusLabel
 				: undefined;
 		const activity = [status, row.summary.summary].filter(Boolean).join(" · ");

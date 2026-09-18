@@ -264,6 +264,9 @@ export function summaryForUnifiedRecord(record: UnifiedSessionRecord): SessionSu
 			created: record.daemon.created ?? saved.created.toISOString(),
 			modified: record.daemon.modified ?? saved.modified.toISOString(),
 			lastActivityAt: record.daemon.lastActivityAt ?? saved.modified.toISOString(),
+			// A live roster row carries the marker; a saved-only shadow keeps
+			// the daemon-annotated one from the saved catalog.
+			execution: record.daemon.execution ?? saved.execution,
 		};
 	}
 	const saved = record.saved;
@@ -292,6 +295,7 @@ export function summaryForUnifiedRecord(record: UnifiedSessionRecord): SessionSu
 		summary: saved.agentStatus?.summary,
 		taskState: saved.agentStatus?.taskState,
 		usage: saved.usage,
+		...(saved.execution !== undefined ? { execution: saved.execution } : {}),
 	};
 }
 
@@ -1100,9 +1104,57 @@ function getSessionSubtitle(summary: SessionSummary): string {
 	return parts.join("  ");
 }
 
+/** Row badge marking a session that executes in a cloud sandbox. */
+export const CLOUD_ROW_BADGE = "cloud";
+export type CloudRowBadgeColor = "accent" | "dim" | "warning" | "error";
+
+/** Badge color reflecting the row's cloud connectivity at a glance. */
+export function cloudRowBadgeColor(execution: NonNullable<SessionSummary["execution"]>): CloudRowBadgeColor {
+	switch (execution.connectivity) {
+		case "connected":
+			return "accent";
+		case "disconnected":
+			return "warning";
+		case "lost":
+			return "error";
+		case "provisioning":
+		case "reconnecting":
+		case "stopped":
+			return "dim";
+	}
+}
+
+/**
+ * Cloud rows surface their connectivity instead of masquerading as local
+ * sessions: only a connected row behaves like one, and terminal states name
+ * the real outcome ("sandbox released"/"sandbox lost"), never a generic tunnel
+ * failure.
+ */
+export function cloudStatusLabel(execution: SessionSummary["execution"]): string | undefined {
+	if (execution?.location !== "cloud") return undefined;
+	switch (execution.connectivity) {
+		case "connected":
+			return undefined;
+		case "provisioning":
+			return "provisioning";
+		case "reconnecting":
+			return "reconnecting";
+		case "disconnected":
+			return "disconnected";
+		case "stopped":
+			return "sandbox released";
+		case "lost":
+			return "sandbox lost";
+	}
+}
+
 function getSessionStatusLabel(summary: SessionSummary, heartbeat?: UnifiedSessionHeartbeat): string {
 	if (summary.statusLabel !== undefined) {
 		return summary.statusLabel;
+	}
+	const cloud = cloudStatusLabel(summary.execution);
+	if (cloud !== undefined) {
+		return cloud;
 	}
 	if (summary.lastHeardFromAt !== undefined) {
 		return `last heard ${formatAgeLabel(summary.lastHeardFromAt)}`;

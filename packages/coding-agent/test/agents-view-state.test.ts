@@ -6,6 +6,7 @@ import type { AgentSessionRuntimeConfig } from "../src/core/agent-session-config
 import type { ModelRegistry } from "../src/core/model-registry.js";
 import type { SessionInfo } from "../src/core/session-manager.js";
 import type { SettingsManager } from "../src/core/settings-manager.js";
+import type { AgentConnectionSavedSessionInfo } from "../src/modes/agent-connection/types.js";
 import {
 	createAgentsViewListCommand,
 	createAgentsViewReplyHeadline,
@@ -21,7 +22,8 @@ import {
 	resolveAgentsViewSessionUiServices,
 	shouldReconnectAgentsViewDaemon,
 } from "../src/modes/agents-view/agents-view-mode.js";
-import { summaryForUnifiedRecord } from "../src/modes/agents-view/agents-view-state.js";
+import { cloudRowBadgeColor, summaryForUnifiedRecord } from "../src/modes/agents-view/agents-view-state.js";
+import type { SessionExecutionInfo } from "../src/modes/daemon/daemon-session-list.js";
 import {
 	type AgentsViewScopeFrame,
 	aggregateSessionHeartbeats,
@@ -2033,3 +2035,77 @@ function makeUiServices(cwd: string): InteractiveModeUiServices {
 		getThemes: (): Theme[] => [],
 	};
 }
+
+describe("cloud execution markers", () => {
+	test("cloud rows label every connectivity state honestly", () => {
+		const cloudRow = (connectivity: SessionExecutionInfo["connectivity"], overrides: Partial<SessionSummary> = {}) =>
+			buildAgentsViewRows([
+				makeSummary({
+					sessionId: "sess_cloud_1",
+					sessionFile: "/tmp/shadow/sess_cloud_1.jsonl",
+					execution: { location: "cloud", connectivity },
+					...overrides,
+				}),
+			])[0];
+
+		// A connected cloud row behaves like a local one: normal activity labels.
+		expect(cloudRow("connected", { isStreaming: true, activity: "working" }).statusLabel).toBe("thinking");
+		expect(cloudRow("connected", { activity: "idle", taskState: "completed" }).statusLabel).toBe("completed");
+		expect(cloudRow("provisioning").statusLabel).toBe("provisioning");
+		expect(cloudRow("reconnecting").statusLabel).toBe("reconnecting");
+		expect(cloudRow("disconnected").statusLabel).toBe("disconnected");
+		// Terminal states name the real outcome, never a generic tunnel failure.
+		expect(cloudRow("stopped").statusLabel).toBe("sandbox released");
+		expect(cloudRow("lost").statusLabel).toBe("sandbox lost");
+
+		const local = buildAgentsViewRows([makeSummary({ activity: "idle", taskState: "completed" })])[0];
+		expect(local.summary.execution).toBeUndefined();
+		expect(local.statusLabel).toBe("completed");
+	});
+
+	test("colors the row badge by connectivity", () => {
+		expect(cloudRowBadgeColor({ location: "cloud", connectivity: "connected" })).toBe("accent");
+		expect(cloudRowBadgeColor({ location: "cloud", connectivity: "provisioning" })).toBe("dim");
+		expect(cloudRowBadgeColor({ location: "cloud", connectivity: "reconnecting" })).toBe("dim");
+		expect(cloudRowBadgeColor({ location: "cloud", connectivity: "stopped" })).toBe("dim");
+		expect(cloudRowBadgeColor({ location: "cloud", connectivity: "disconnected" })).toBe("warning");
+		expect(cloudRowBadgeColor({ location: "cloud", connectivity: "lost" })).toBe("error");
+	});
+
+	test("saved shadow rows keep the daemon-annotated cloud marker", () => {
+		const saved: AgentConnectionSavedSessionInfo = {
+			path: "/tmp/shadow/sess_cloud_1.jsonl",
+			id: "sess_cloud_1",
+			cwd: "/tmp/project",
+			created: new Date("2026-01-01T00:00:00Z"),
+			modified: new Date("2026-01-01T00:00:00Z"),
+			messageCount: 1,
+			firstMessage: "hello",
+			allMessagesText: "hello",
+			execution: { location: "cloud", connectivity: "stopped" },
+		};
+		const record = {
+			saved,
+			identity: "file:/tmp/shadow/sess_cloud_1.jsonl",
+			identityAliases: [] as string[],
+			section: "inactive" as const,
+			searchableText: "",
+		};
+		const summary = summaryForUnifiedRecord(record);
+		expect(summary.execution).toMatchObject({ location: "cloud", connectivity: "stopped" });
+
+		// A live daemon row wins over the saved annotation.
+		const merged = summaryForUnifiedRecord({
+			...record,
+			daemon: makeSummary({ execution: { location: "cloud", connectivity: "reconnecting" } }),
+		});
+		expect(merged.execution).toMatchObject({ location: "cloud", connectivity: "reconnecting" });
+
+		// Local saved rows stay untouched.
+		const localRecord = {
+			...record,
+			saved: { ...saved, path: "/tmp/plain.jsonl", id: "sess_local_1", execution: undefined },
+		};
+		expect(summaryForUnifiedRecord(localRecord).execution).toBeUndefined();
+	});
+});

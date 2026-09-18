@@ -816,6 +816,62 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
+	it("marks cloud rows with a badge and honest connectivity; local rows stay unmarked", () => {
+		const created = new Date(Date.now() - 60_000).toISOString();
+		const cloudConnected = summary({
+			id: "cloud-live",
+			activeSessionId: "cloud-live",
+			sessionId: "cloud-live-session",
+			sessionFile: "/tmp/shadow/cloud-live.jsonl",
+			sessionName: "cloud-live",
+			created,
+			activity: "working",
+			isStreaming: true,
+			execution: { location: "cloud", connectivity: "connected" },
+		});
+		const cloudLost = summary({
+			id: "cloud-lost",
+			activeSessionId: "cloud-lost",
+			sessionId: "cloud-lost-session",
+			sessionFile: "/tmp/shadow/cloud-lost.jsonl",
+			sessionName: "cloud-lost",
+			created,
+			rosterStatus: "inactive",
+			execution: { location: "cloud", connectivity: "lost" },
+		});
+		const local = summary({
+			id: "local",
+			activeSessionId: "local",
+			sessionId: "local-session",
+			sessionName: "local",
+			created,
+		});
+		const rows = buildAgentsViewRows([cloudConnected, cloudLost, local]);
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		Reflect.set(view, "rows", rows);
+		Reflect.set(view, "selectedIndex", -1);
+		try {
+			const render = (row: AgentsViewRow, width: number) =>
+				stripAnsi(invoke("renderRow", view, row, width, buildCompactAgentsViewLayout(rows, width)) as string);
+			const connectedRow = rows.find((row) => row.summary.sessionId === "cloud-live-session")!;
+			const lostRow = rows.find((row) => row.summary.sessionId === "cloud-lost-session")!;
+			const localRow = rows.find((row) => row.summary.sessionId === "local-session")!;
+			const connectedLine = render(connectedRow, 120);
+			const lostLine = render(lostRow, 120);
+			const localLine = render(localRow, 120);
+			// Badge marks the execution location; the status stays honest and
+			// never reports a generic tunnel failure.
+			expect(connectedLine).toContain("cloud");
+			expect(connectedLine).toContain("thinking");
+			expect(lostLine).toContain("cloud");
+			expect(lostLine).toContain("sandbox lost");
+			expect(localLine).not.toContain("cloud");
+			expect(localLine).not.toContain("sandbox");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
 	it("renders one column header across status groups without repeating subagent hints", () => {
 		const summaries = [
 			summary({

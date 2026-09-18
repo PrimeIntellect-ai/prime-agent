@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AgentConnectionCloudSession } from "../src/modes/agent-connection/index.js";
+import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 
 /**
@@ -270,5 +271,111 @@ describe("InteractiveMode /cloud", () => {
 		await interactiveModePrototype.handleCloudCommand.call(context, "status");
 
 		expect(context.showError).toHaveBeenCalledWith("Cloud session command failed: daemon offline");
+	});
+});
+
+describe("InteractiveMode cloud tray marker", () => {
+	interface TrayContext {
+		rosterBar: { summaries(): SessionSummary[]; dispose(): Promise<void> } | undefined;
+		connectionState:
+			| { sessionId?: string; sessionFile?: string; activeSessionId?: string; messageCount?: number; cwd: string }
+			| undefined;
+		options: Record<string, unknown>;
+		subagentSnapshots: Map<string, unknown>;
+	}
+
+	type TrayInteractiveMode = {
+		getCloudTrayLabel(this: TrayContext): string | undefined;
+		getTrayLocationLabel(this: TrayContext): string | undefined;
+	};
+
+	const trayPrototype = InteractiveMode.prototype as unknown as TrayInteractiveMode;
+
+	function makeTrayContext(options: {
+		execution?: AgentConnectionCloudSession["connectivity"] | "local";
+		sessionFile?: string;
+	}): TrayContext {
+		const summaries: SessionSummary[] = [
+			{
+				id: "cloud-row",
+				activeSessionId: "cloud-row",
+				lifecycle: "live",
+				activity: "idle",
+				isSessionActive: false,
+				sessionId: "sess_cloud_1",
+				sessionFile: options.sessionFile ?? "/tmp/shadow/sess_cloud_1.jsonl",
+				cwd: "/tmp/project",
+				isStreaming: false,
+				isCompacting: false,
+				attachedClients: 1,
+				messageCount: 1,
+				sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+				...(options.execution && options.execution !== "local"
+					? { execution: { location: "cloud" as const, connectivity: options.execution } }
+					: {}),
+			},
+		];
+		// Built on the prototype so nested prototype methods resolve; own
+		// properties below supply the per-test doubles.
+		const context = Object.create(InteractiveMode.prototype) as TrayContext;
+		Object.assign(context, {
+			rosterBar: { summaries: () => summaries, dispose: async () => {} },
+			connectionState: {
+				sessionId: "sess_cloud_1",
+				sessionFile: options.sessionFile ?? "/tmp/shadow/sess_cloud_1.jsonl",
+				activeSessionId: "cloud-row",
+				messageCount: 1,
+				cwd: "/tmp/project",
+			},
+			options: {},
+			subagentSnapshots: new Map(),
+		});
+		return context;
+	}
+
+	it("shows the cloud marker with live connectivity for the current session", () => {
+		expect(trayPrototype.getCloudTrayLabel.call(makeTrayContext({ execution: "connected" }))).toBe("cloud");
+		expect(trayPrototype.getCloudTrayLabel.call(makeTrayContext({ execution: "provisioning" }))).toBe(
+			"cloud provisioning",
+		);
+		expect(trayPrototype.getCloudTrayLabel.call(makeTrayContext({ execution: "reconnecting" }))).toBe(
+			"cloud reconnecting",
+		);
+		expect(trayPrototype.getCloudTrayLabel.call(makeTrayContext({ execution: "disconnected" }))).toBe(
+			"cloud disconnected",
+		);
+		// Terminal states keep the honest wording, never a generic tunnel failure.
+		expect(trayPrototype.getCloudTrayLabel.call(makeTrayContext({ execution: "stopped" }))).toBe(
+			"cloud · sandbox released",
+		);
+		expect(trayPrototype.getCloudTrayLabel.call(makeTrayContext({ execution: "lost" }))).toBe("cloud · sandbox lost");
+	});
+
+	it("renders no cloud marker for local sessions and absent rosters", () => {
+		expect(trayPrototype.getCloudTrayLabel.call(makeTrayContext({ execution: "local" }))).toBeUndefined();
+
+		const noRoster = makeTrayContext({ execution: "connected" });
+		noRoster.rosterBar = undefined;
+		expect(trayPrototype.getCloudTrayLabel.call(noRoster)).toBeUndefined();
+
+		const unlisted = makeTrayContext({ execution: "connected" });
+		unlisted.connectionState = {
+			sessionId: "sess_local_9",
+			sessionFile: "/tmp/plain.jsonl",
+			activeSessionId: "active-9",
+			messageCount: 1,
+			cwd: "/tmp/project",
+		};
+		expect(trayPrototype.getCloudTrayLabel.call(unlisted)).toBeUndefined();
+	});
+
+	it("includes the cloud marker in the current session tray label", () => {
+		const cloud = makeTrayContext({ execution: "reconnecting" });
+		expect(trayPrototype.getTrayLocationLabel.call(cloud)).toContain("cloud reconnecting");
+
+		const local = makeTrayContext({ execution: "local" });
+		const label = trayPrototype.getTrayLocationLabel.call(local);
+		expect(label).toBeDefined();
+		expect(label).not.toContain("cloud");
 	});
 });

@@ -6128,9 +6128,52 @@ export class InteractiveMode {
 		const depthLabel = formatAgentDepthLabel(this.options.sessionDepth, hasChildren);
 		const shortcutsHint = this.getShortcutsTrayHint();
 		const agentsHint = this.getAgentsViewTrayHint();
-		return [agentsHint, depthLabel, modelLabel, shortcutsHint]
+		const cloudLabel = this.getCloudTrayLabel();
+		return [agentsHint, depthLabel, cloudLabel, modelLabel, shortcutsHint]
 			.filter((label): label is string => label !== undefined)
 			.join("  ");
+	}
+
+	/**
+	 * Concise cloud marker for the current session's tray. Local sessions
+	 * render nothing; cloud rows name their live connectivity, and terminal
+	 * states keep the honest wording.
+	 */
+	private getCloudTrayLabel(): string | undefined {
+		const execution = this.getCurrentSessionExecution();
+		if (execution === undefined) return undefined;
+		switch (execution.connectivity) {
+			case "connected":
+				return "cloud";
+			case "provisioning":
+				return "cloud provisioning";
+			case "reconnecting":
+				return "cloud reconnecting";
+			case "disconnected":
+				return "cloud disconnected";
+			case "stopped":
+				return "cloud · sandbox released";
+			case "lost":
+				return "cloud · sandbox lost";
+		}
+	}
+
+	/** The current session's cloud execution marker, read live from the roster. */
+	private getCurrentSessionExecution(): SessionSummary["execution"] {
+		const state = this.connectionState;
+		if (state === undefined) return undefined;
+		const summaries = this.rosterBar?.summaries();
+		if (summaries === undefined) return undefined;
+		const currentFile = state.sessionFile ? path.resolve(state.sessionFile) : undefined;
+		const current = summaries.find(
+			(row) =>
+				row.sessionId === state.sessionId ||
+				(state.activeSessionId !== undefined && row.activeSessionId === state.activeSessionId) ||
+				(currentFile !== undefined &&
+					row.sessionFile !== undefined &&
+					path.resolve(row.sessionFile) === currentFile),
+		);
+		return current?.execution;
 	}
 
 	private getShortcutsTrayHint(): string | undefined {
