@@ -10520,6 +10520,8 @@ export class InteractiveMode {
 					identity: loginIdentity,
 					reviewedScopes: definition?.reviewedScopes,
 					clientRegistration: definition?.clientRegistration,
+					pinnedClientId: definition?.pinnedClientId,
+					pinnedCallbackPort: definition?.pinnedCallbackPort,
 				}),
 			);
 			result = await this.createAuthFlows().runMcpLogin(stagedServerId, loginLabel);
@@ -10636,6 +10638,8 @@ export class InteractiveMode {
 					identity: loginIdentity,
 					reviewedScopes: definition?.reviewedScopes,
 					clientRegistration: definition?.clientRegistration,
+					pinnedClientId: definition?.pinnedClientId,
+					pinnedCallbackPort: definition?.pinnedCallbackPort,
 				}),
 			);
 			unregisterOAuthProvider(mcpCredentialKey(stagedServerId));

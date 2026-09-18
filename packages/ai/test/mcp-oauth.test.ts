@@ -745,6 +745,97 @@ describe.sequential("MCP OAuth provider", () => {
 		expect(fetchMock.mock.calls.map(([input]) => urlOf(input))).not.toContain(meta.token_endpoint);
 	});
 
+	// ---- Pinned pre-registered public client (one-click Slack shape) ----
+
+	it("runs a pinned secret-less client as public against a confidential-only PKCE server and replays the pinned redirect_uri on refresh", async () => {
+		const meta = {
+			...ORIGIN_META,
+			registration_endpoint: undefined,
+			token_endpoint_auth_methods_supported: ["client_secret_post"],
+			code_challenge_methods_supported: ["S256"],
+		};
+		const exchangeUrl = meta.token_endpoint;
+		let exchanges = 0;
+		const fetchMock = vi.fn(async (input: unknown, init?: RequestInit): Promise<Response> => {
+			const missing = absentPrm(input);
+			if (missing) return missing;
+			const url = urlOf(input);
+			if (url === "https://srv.test/.well-known/oauth-authorization-server") return jsonResponse(meta);
+			if (url === exchangeUrl) {
+				exchanges++;
+				const params = new URLSearchParams(String(init?.body));
+				expect(params.get("client_id")).toBe("1601185624273.8899143856786");
+				expect(params.get("client_secret")).toBeNull();
+				expect((init?.headers as Record<string, string>).Authorization).toBeUndefined();
+				expect(params.get("redirect_uri")).toBe("http://localhost:3118/callback");
+				if (exchanges === 1) {
+					expect(params.get("grant_type")).toBe("authorization_code");
+					expect(params.get("code_verifier")).toBeTruthy();
+					return jsonResponse(tokenResponse("slack-access", { refresh_token: "slack-refresh" }));
+				}
+				expect(params.get("grant_type")).toBe("refresh_token");
+				return jsonResponse(tokenResponse("slack-refreshed"));
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		const provider = createMcpOAuthProvider({
+			server: "slack",
+			url: ORIGIN_URL,
+			clientId: "1601185624273.8899143856786",
+			callbackPort: 3118,
+		});
+		const { creds, authUrl } = await loginWithManualCode(provider);
+		expect(new URL(authUrl).searchParams.get("redirect_uri")).toBe("http://localhost:3118/callback");
+		expect(creds).toMatchObject({
+			access: "slack-access",
+			clientId: "1601185624273.8899143856786",
+			clientRegistration: "pre-registered",
+			clientAuthMethod: "none",
+			redirectUri: "http://localhost:3118/callback",
+		});
+		const refreshed = await provider.refreshToken(creds as never);
+		expect(exchanges).toBe(2);
+		expect(refreshed).toMatchObject({
+			access: "slack-refreshed",
+			clientAuthMethod: "none",
+			redirectUri: "http://localhost:3118/callback",
+		});
+	});
+
+	it("fails clearly when the pinned callback port is occupied, without falling back", async () => {
+		const blocker = createServer();
+		const blockerBound = await new Promise<boolean>((resolve) => {
+			blocker.once("error", () => resolve(false));
+			// test-policy: allow fixed-resource -- the pinned port is the tested behavior: the published client registers exactly 3118
+			blocker.listen(3118, "127.0.0.1", () => resolve(true));
+		});
+		try {
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: unknown): Promise<Response> => {
+					const missing = absentPrm(input);
+					if (missing) return missing;
+					const url = urlOf(input);
+					if (url === "https://srv.test/.well-known/oauth-authorization-server")
+						return jsonResponse({ ...ORIGIN_META, registration_endpoint: undefined });
+					throw new Error(`unexpected fetch: ${url}`);
+				}),
+			);
+			await expect(
+				createMcpOAuthProvider({
+					server: "pinned",
+					url: ORIGIN_URL,
+					clientId: "pinned-client",
+					callbackPort: 3118,
+				}).login({ onAuth: () => {}, onPrompt: async () => "" }),
+			).rejects.toThrow("pinned callback port 3118 is in use");
+			// No dynamic-range fallback: a bind on 53700 would proceed to the redirect instead.
+		} finally {
+			if (blockerBound) await new Promise<void>((resolve) => blocker.close(() => resolve()));
+		}
+	});
+
 	it("fails early when an explicitly configured secret is empty", async () => {
 		const fetchMock = vi.fn(async (): Promise<Response> => {
 			throw new Error("unexpected fetch");

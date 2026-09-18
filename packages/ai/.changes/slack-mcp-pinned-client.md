@@ -1,0 +1,1 @@
+- Added one-click Slack MCP: the OAuth engine now runs a catalog-pinned secret-less pre-registered client as a public PKCE S256 client even against confidential-only authorization servers (pinned callback ports bind exactly and their redirect_uri is replayed on refresh), and the shipped MCP catalog pins Slack's published harness client id, classifying it oauth-ready (69 entries).

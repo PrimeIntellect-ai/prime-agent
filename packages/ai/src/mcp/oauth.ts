@@ -90,6 +90,12 @@ export interface McpOAuthConfig {
 	 * in source or the catalog. An explicit empty string fails the flow; only omitted means public.
 	 */
 	clientSecret?: string;
+	/**
+	 * Pinned OAuth callback port (catalog-supplied with a pre-registered client id, e.g. Slack's
+	 * published harness client registers http://localhost:3118/callback). The callback server binds
+	 * EXACTLY this port — a pinned port never falls back to the dynamic callback range.
+	 */
+	callbackPort?: number;
 }
 
 interface McpCredentials extends OAuthCredentials {
@@ -103,6 +109,12 @@ interface McpCredentials extends OAuthCredentials {
 	issuer?: string;
 	/** How `resource` associates with the configured endpoint; required whenever `resource` is set. */
 	audienceMode?: AudienceMode;
+	/**
+	 * Redirect URI the authorization code was issued under (pinned callback ports only):
+	 * replayed verbatim on refresh, because RFC 6749 section 6 requires the refresh
+	 * redirect_uri to match the authorization request's.
+	 */
+	redirectUri?: string;
 	/** Server-issued (DCR) client secret. Config-supplied secrets are never persisted here. */
 	clientSecret?: string;
 	/** RFC 7591 epoch seconds when the DCR client secret expires; 0 means it does not expire. */
@@ -577,7 +589,10 @@ async function registerClient(
 
 type CallbackResult = { code: string; state: string } | null;
 
-async function startCallbackServer(label: string): Promise<{
+async function startCallbackServer(
+	label: string,
+	pinnedPort?: number,
+): Promise<{
 	server: Server;
 	redirectUri: string;
 	cancel: () => void;
@@ -620,36 +635,57 @@ async function startCallbackServer(label: string): Promise<{
 		settle?.({ code, state });
 	};
 
-	// Try each candidate port with a FRESH server (a server that failed to listen
-	// can't be reused), so a leaked/concurrent login can't block us with EADDRINUSE.
-	let lastError: unknown;
-	for (const port of CALLBACK_PORTS) {
+	// Bind one candidate with a FRESH server (a server that failed to listen can't
+	// be reused); the persistent 'error' handler keeps a bind failure from crashing.
+	const bindOnce = (port: number): Promise<Server | undefined> => {
 		const server = createServer(handler);
-		// Persistent handler so a post-bind 'error' is never an unhandled crash.
 		let bindErr: ((err: unknown) => void) | undefined;
 		server.on("error", (err) => bindErr?.(err));
-		try {
-			const bound = await new Promise<boolean>((resolve) => {
-				bindErr = () => resolve(false);
-				server.listen(port, CALLBACK_HOST, () => {
-					bindErr = undefined;
-					resolve(true);
-				});
+		return new Promise<Server | undefined>((resolve) => {
+			bindErr = () => resolve(undefined);
+			server.listen(port, CALLBACK_HOST, () => {
+				bindErr = undefined;
+				resolve(server);
 			});
-			if (bound) {
-				return {
-					server,
-					redirectUri: redirectUriFor(port),
-					cancel: () => settle?.(null),
-					waitForCode: () => waitPromise,
-				};
-			}
-			lastError = `port ${port} in use`;
-			server.close();
-		} catch (err) {
-			lastError = err;
-			server.close();
+		});
+	};
+
+	if (pinnedPort !== undefined) {
+		if (!Number.isInteger(pinnedPort) || pinnedPort < 1 || pinnedPort > 65535) {
+			throw new Error("callbackPort must be an integer between 1 and 65535");
 		}
+		// The pinned port is part of the pre-registered client's redirect-URI contract
+		// (e.g. Slack's published harness client registers http://localhost:3118/callback):
+		// bind EXACTLY it — never silently retarget the redirect to the dynamic range.
+		const server = await bindOnce(pinnedPort);
+		if (!server) {
+			throw new Error(
+				`Could not start the OAuth callback server: pinned callback port ${pinnedPort} is in use. ` +
+					`Close the process using port ${pinnedPort} and retry.`,
+			);
+		}
+		return {
+			server,
+			redirectUri: redirectUriFor(pinnedPort),
+			cancel: () => settle?.(null),
+			waitForCode: () => waitPromise,
+		};
+	}
+
+	// Try each candidate port with a fresh server, so a leaked/concurrent login
+	// can't block us with EADDRINUSE.
+	let lastError: unknown;
+	for (const port of CALLBACK_PORTS) {
+		const server = await bindOnce(port);
+		if (server) {
+			return {
+				server,
+				redirectUri: redirectUriFor(port),
+				cancel: () => settle?.(null),
+				waitForCode: () => waitPromise,
+			};
+		}
+		lastError = `port ${port} in use`;
 	}
 	throw new Error(
 		`Could not start the OAuth callback server: ports ${CALLBACK_PORT_BASE}-${
@@ -752,6 +788,7 @@ function toCredentials(
 	resource: string | undefined,
 	issuer: string | undefined,
 	audienceMode: AudienceMode | undefined,
+	redirectUri: string | undefined,
 	previousRefresh?: string,
 ): McpCredentials {
 	return {
@@ -767,6 +804,7 @@ function toCredentials(
 		resource,
 		issuer,
 		audienceMode,
+		redirectUri,
 		clientRegistration: identity.clientRegistration,
 		clientAuthMethod: identity.authMethod,
 		...(identity.persistSecret && identity.clientSecret
@@ -800,7 +838,7 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 		// `state` must be independent of the PKCE verifier — the verifier is the
 		// secret used at token exchange, while `state` is echoed on the redirect URL.
 		const state = randomState();
-		const cb = await startCallbackServer(label);
+		const cb = await startCallbackServer(label, config.callbackPort);
 		const abort = () => cb.cancel();
 		callbacks.signal?.addEventListener("abort", abort, { once: true });
 		try {
@@ -836,11 +874,22 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 					);
 				}
 			}
-			const authMethod = negotiateAuthMethod(
-				{ client_id: clientId, client_secret: clientSecret, token_endpoint_auth_method: dcrMethod },
-				meta.token_endpoint_auth_methods_supported,
-				label,
-			);
+			// A configured (pre-registered) client id is an explicit vouch for the app's
+			// client type: the AS's advertised token_endpoint_auth_methods list is global
+			// and per-client enforcement is only learnable by attempting the flow (live
+			// evidence: Slack MCP). A secret-less pre-registered id therefore runs as a
+			// PUBLIC client (PKCE S256) even when the AS advertises confidential-only
+			// methods; DCR/CIMD and secret-bearing clients still negotiate.
+			const authMethod =
+				registration === "pre-registered" &&
+				clientSecret === undefined &&
+				meta.code_challenge_methods_supported?.includes("S256") === true
+					? "none"
+					: negotiateAuthMethod(
+							{ client_id: clientId, client_secret: clientSecret, token_endpoint_auth_method: dcrMethod },
+							meta.token_endpoint_auth_methods_supported,
+							label,
+						);
 
 			const authParams = new URLSearchParams({
 				client_id: clientId,
@@ -946,6 +995,9 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 				discovery.resource,
 				discovery.issuer,
 				discovery.audienceMode,
+				// Only a pinned callback port yields a redirect_uri stable enough to
+				// replay on refresh; the dynamic range never persists one.
+				config.callbackPort !== undefined ? cb.redirectUri : undefined,
 			);
 		} finally {
 			callbacks.signal?.removeEventListener("abort", abort);
@@ -1062,16 +1114,35 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 		if (!tokenEndpoint) throw new Error(`No token endpoint stored for ${label}; re-run /mcp login ${config.server}`);
 		const clientId = creds.clientId ?? config.clientId;
 		if (!clientId) throw new Error(`No client id stored for ${label}; re-run /mcp login ${config.server}`);
-		const authMethod = negotiateAuthMethod(
-			{ client_id: clientId, client_secret: clientSecret, token_endpoint_auth_method: creds.clientAuthMethod },
-			discovery.metadata.token_endpoint_auth_methods_supported,
-			label,
-		);
+		const clientRegistration: ClientRegistrationMode =
+			creds.clientRegistration ?? (config.clientId ? "pre-registered" : "dcr");
+		// Mirror of the login rule: a stored PRE-REGISTERED grant with no secret is a
+		// public client by construction, so it refreshes as public instead of failing
+		// closed on a confidential-only advertised method list (live evidence: Slack
+		// MCP — the AS list is global and per-client enforcement is only learnable by
+		// attempting; stored PKCE S256 is re-checked against current metadata).
+		const authMethod =
+			clientRegistration === "pre-registered" &&
+			clientSecret === undefined &&
+			discovery.metadata.code_challenge_methods_supported?.includes("S256") === true
+				? "none"
+				: negotiateAuthMethod(
+						{
+							client_id: clientId,
+							client_secret: clientSecret,
+							token_endpoint_auth_method: creds.clientAuthMethod,
+						},
+						discovery.metadata.token_endpoint_auth_methods_supported,
+						label,
+					);
 		const tokenParams = new URLSearchParams({
 			grant_type: "refresh_token",
 			refresh_token: creds.refresh,
 		});
 		if (creds.resource) tokenParams.set("resource", creds.resource);
+		// A pinned-port grant replays its exact redirect_uri: RFC 6749 section 6
+		// requires it to match the authorization request's.
+		if (creds.redirectUri) tokenParams.set("redirect_uri", creds.redirectUri);
 		const token = await exchangeToken(
 			tokenEndpoint,
 			tokenParams,
@@ -1088,7 +1159,7 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 			{
 				clientId,
 				clientSecret: clientSecret ?? creds.clientSecret,
-				clientRegistration: creds.clientRegistration ?? (config.clientId ? "pre-registered" : "dcr"),
+				clientRegistration,
 				authMethod,
 				secretExpiresAt: creds.clientSecretExpiresAt,
 				// Config-supplied secrets are never persisted; stored DCR secrets are.
@@ -1098,6 +1169,7 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 			creds.resource,
 			creds.issuer,
 			creds.audienceMode,
+			creds.redirectUri,
 			creds.refresh,
 		);
 	}

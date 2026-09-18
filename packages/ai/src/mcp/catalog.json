@@ -13,22 +13,22 @@
 		}
 	],
 	"counts": {
-		"total": 68,
-		"http": 68,
+		"total": 69,
+		"http": 69,
 		"httpTemplate": 0,
 		"sse": 0,
 		"stdio": 0,
-		"ready": 57,
+		"ready": 58,
 		"requiresSetup": 11,
 		"metadataReviewed": 2,
-		"oauthStrategy": 5,
+		"oauthStrategy": 6,
 		"apiKeyStrategy": 10,
 		"mergedFromBothSources": 10,
-		"readinessOauthReady": 57,
+		"readinessOauthReady": 58,
 		"readinessUserSetup": 11,
 		"readinessPrimeRestricted": 0,
 		"readinessUnknown": 0,
-		"metadataAvailable": 66,
+		"metadataAvailable": 67,
 		"metadataUnavailable": 2
 	},
 	"entries": [
@@ -3993,6 +3993,129 @@
 					"url": "https://raw.githubusercontent.com/goshippo/ai/15cbb6364fbcfd465a134f5972da9179436d0787/providers/claude/plugin/.mcp.json"
 				}
 			]
+		},
+		{
+			"server": "slack",
+			"service": "slack",
+			"label": "Slack",
+			"url": "https://mcp.slack.com/mcp",
+			"aliases": [],
+			"publisher": "Slack",
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.slack.com/mcp"
+			},
+			"auth": {
+				"strategy": "oauth",
+				"clientRegistration": "pre-registered",
+				"metadata": {
+					"status": "available",
+					"authorizationServer": "https://mcp.slack.com",
+					"resource": "https://mcp.slack.com",
+					"pkceS256": true,
+					"protectedResourceScopes": [
+						"canvases:read",
+						"canvases:write",
+						"channels:history",
+						"channels:read",
+						"channels:write",
+						"chat:write",
+						"emoji:read",
+						"files:read",
+						"files:write",
+						"groups:history",
+						"groups:read",
+						"groups:write",
+						"im:history",
+						"im:read",
+						"im:write",
+						"lists:read",
+						"lists:write",
+						"mpim:history",
+						"mpim:read",
+						"mpim:write",
+						"reactions:read",
+						"reactions:write",
+						"search:read.files",
+						"search:read.im",
+						"search:read.mpim",
+						"search:read.private",
+						"search:read.public",
+						"search:read.users",
+						"users:read",
+						"users:read.email"
+					],
+					"authorizationServerScopes": [
+						"canvases:read",
+						"canvases:write",
+						"channels:history",
+						"channels:read",
+						"channels:write",
+						"chat:write",
+						"emoji:read",
+						"files:read",
+						"files:write",
+						"groups:history",
+						"groups:read",
+						"groups:write",
+						"im:history",
+						"im:read",
+						"im:write",
+						"lists:read",
+						"lists:write",
+						"mpim:history",
+						"mpim:read",
+						"mpim:write",
+						"reactions:read",
+						"reactions:write",
+						"search:read.files",
+						"search:read.im",
+						"search:read.mpim",
+						"search:read.private",
+						"search:read.public",
+						"search:read.users",
+						"users:read",
+						"users:read.email"
+					],
+					"tokenAuthMethods": [
+						"client_secret_post"
+					],
+					"sourceUrls": [
+						"https://mcp.slack.com/mcp",
+						"https://mcp.slack.com/.well-known/oauth-protected-resource",
+						"https://mcp.slack.com/.well-known/oauth-protected-resource/mcp",
+						"https://mcp.slack.com/.well-known/oauth-authorization-server",
+						"https://mcp.slack.com/.well-known/openid-configuration"
+					],
+					"fetchedAt": "2026-09-12",
+					"note": "connects one-click with Slack's published harness OAuth client (pinned client id from slackapi/slack-mcp-plugin, Slack's own repo, reproduced in Slack's harness docs): a secret-less public client authenticating with PKCE S256 on the pinned callback port 3118, even though the authorization server advertises confidential-only client auth and no dynamic client registration; Slack issues 30-day refresh tokens to PKCE-enabled apps, so periodic re-auth is expected"
+				}
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "claude-plugins-official",
+					"repository": "https://github.com/slackapi/slack-mcp-plugin.git",
+					"commit": "1579a071323da95c9b4a59fb6d510f7336c021e3",
+					"url": "https://raw.githubusercontent.com/slackapi/slack-mcp-plugin/1579a071323da95c9b4a59fb6d510f7336c021e3/.mcp.json"
+				},
+				{
+					"source": "prime",
+					"note": "curated override applied; see mcp-catalog/overrides.json"
+				}
+			],
+			"oauth": {
+				"kind": "oauth",
+				"clientId": "1601185624273.8899143856786",
+				"callbackPort": 3118
+			}
 		},
 		{
 			"server": "sonatype-guide",

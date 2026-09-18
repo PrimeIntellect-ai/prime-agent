@@ -313,6 +313,8 @@ export class McpManager {
 					url: service.transport.url,
 					reviewedScopes: service.reviewedScopes,
 					clientRegistration: service.clientRegistration,
+					pinnedClientId: service.pinnedClientId,
+					pinnedCallbackPort: service.pinnedCallbackPort,
 				}),
 			);
 		}
@@ -360,6 +362,8 @@ export class McpManager {
 					identity: service.legacyBuiltin ? {} : resolveMcpOAuthIdentity(parentConfig),
 					reviewedScopes: service.reviewedScopes,
 					clientRegistration: service.clientRegistration,
+					pinnedClientId: service.pinnedClientId,
+					pinnedCallbackPort: service.pinnedCallbackPort,
 				}),
 			);
 		}

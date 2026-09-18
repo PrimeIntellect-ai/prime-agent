@@ -8,9 +8,9 @@
 		},
 		"claude-plugins-official": {
 			"plugins": 118,
-			"remoteServers": 67,
+			"remoteServers": 68,
 			"stdioServers": 0,
-			"excluded": 85
+			"excluded": 84
 		}
 	},
 	"merged": [
@@ -442,10 +442,6 @@
 			"reason": "final catalog cut (2026-09-15 product decision: the catalog ships one-click DCR or user token/key only): Semgrep is a local stdio adapter (`<plugin root>/scripts/hook claude mcp`)—it runs in the user's local environment against the local toolchain/credential chain, with no one-click DCR and no provider token/api key"
 		},
 		{
-			"key": "claude-plugins-official/slack/slack",
-			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): the Claude-side record of the same Slack endpoint excluded via openai-plugins/slack/slack — Slack requires a Slack-registered app client (no dynamic client registration advertised; confidential-only client auth observed)"
-		},
-		{
 			"key": "claude-plugins-official/sourcegraph/sourcegraph",
 			"reason": "token-only catalog cut (2026-09-16 product decision: the catalog ships one-click DCR connectors and simple paste-an-API-key/token services only — Kevin, live testing: \"things like cockroachdb cloud still need mcp/ 'requires provider credentials supplied as headers'? i told you to remove all that stuff?\"): Sourcegraph is a tenant-instance endpoint (requirement `tenant`, template `${SOURCEGRAPH_ENDPOINT}/.api/mcp` with `Authorization: token ${SOURCEGRAPH_ACCESS_TOKEN}`)—the user must first look up the instance URL and paste it next to the token, so it is not a paste-an-API-key service"
 		},
@@ -523,7 +519,7 @@
 		},
 		{
 			"key": "openai-plugins/slack/slack",
-			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors — dynamic client registration or user-supplied tokens/keys): Slack requires a Slack-registered app client — no dynamic client registration is advertised and the authorization server accepts confidential client auth only, while the upstream config carries branded OAuth client ids Prime must not reuse"
+			"reason": "OpenAI's own registered Slack app client id (11843774967.11905492103734) must never be reused by Prime; the one-click Slack entry ships from the claude-plugins-official snapshot carrying Slack's published harness client id instead (see servers[claude-plugins-official/slack/slack])"
 		},
 		{
 			"key": "openai-plugins/supabase/supabase",
@@ -535,22 +531,22 @@
 		}
 	],
 	"counts": {
-		"total": 68,
-		"http": 68,
+		"total": 69,
+		"http": 69,
 		"httpTemplate": 0,
 		"sse": 0,
 		"stdio": 0,
-		"ready": 57,
+		"ready": 58,
 		"requiresSetup": 11,
 		"metadataReviewed": 2,
-		"oauthStrategy": 5,
+		"oauthStrategy": 6,
 		"apiKeyStrategy": 10,
 		"mergedFromBothSources": 10,
-		"readinessOauthReady": 57,
+		"readinessOauthReady": 58,
 		"readinessUserSetup": 11,
 		"readinessPrimeRestricted": 0,
 		"readinessUnknown": 0,
-		"metadataAvailable": 66,
+		"metadataAvailable": 67,
 		"metadataUnavailable": 2
 	}
 }

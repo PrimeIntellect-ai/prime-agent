@@ -1,6 +1,9 @@
 {
 	"$comment": "Prime-curated adjustments layered on the deterministic import. Keys are '<source>/<plugin>/<server>' identity triples from the pinned fixtures (stdio adapters are keyed '<source>/<plugin>'). This file is review data, never credentials: it can rename ids/labels, group brands, and mark verified/dynamic-registration knowledge, but cannot add OAuth client ids or secrets.",
 	"servers": {
+		"claude-plugins-official/slack/slack": {
+			"metadataNote": "connects one-click with Slack's published harness OAuth client (pinned client id from slackapi/slack-mcp-plugin, Slack's own repo, reproduced in Slack's harness docs): a secret-less public client authenticating with PKCE S256 on the pinned callback port 3118, even though the authorization server advertises confidential-only client auth and no dynamic client registration; Slack issues 30-day refresh tokens to PKCE-enabled apps, so periodic re-auth is expected"
+		},
 		"openai-plugins/linear/linear": {
 			"verification": "metadata-reviewed",
 			"clientRegistration": "dynamic",
@@ -164,11 +167,7 @@
 		},
 		{
 			"key": "openai-plugins/slack/slack",
-			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors \u2014 dynamic client registration or user-supplied tokens/keys): Slack requires a Slack-registered app client \u2014 no dynamic client registration is advertised and the authorization server accepts confidential client auth only, while the upstream config carries branded OAuth client ids Prime must not reuse"
-		},
-		{
-			"key": "claude-plugins-official/slack/slack",
-			"reason": "zero-app catalog cut (2026-09-14 product decision: Prime maintains no provider OAuth apps; the catalog ships only self-serve connectors \u2014 dynamic client registration or user-supplied tokens/keys): the Claude-side record of the same Slack endpoint excluded via openai-plugins/slack/slack \u2014 Slack requires a Slack-registered app client (no dynamic client registration advertised; confidential-only client auth observed)"
+			"reason": "OpenAI's own registered Slack app client id (11843774967.11905492103734) must never be reused by Prime; the one-click Slack entry ships from the claude-plugins-official snapshot carrying Slack's published harness client id instead (see servers[claude-plugins-official/slack/slack])"
 		},
 		{
 			"key": "openai-plugins/gmail/gmail",

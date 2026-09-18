@@ -9,6 +9,7 @@ import {
 	advertisedRegistrationGated,
 	buildCatalog,
 	type ClaudeFixture,
+	evidenceSupportsPinnedClientOauth,
 	evidenceSupportsStandardOauth,
 	evidenceSupportsUserRegisteredOauth,
 	type OpenAiFixture,
@@ -92,8 +93,9 @@ describe("MCP service catalog", () => {
 		registerBuiltinMcpOAuthProviders();
 		expect(getOAuthProvider("mcp:linear")).toBeDefined();
 		expect(getOAuthProvider("mcp:notion")).toBeDefined();
-		// Imported catalog services are not eagerly registered (figma and slack
-		// were cut from the catalog entirely by the 2026-09-14 zero-app decision).
+		// Imported catalog services are not eagerly registered (figma was cut from the catalog
+		// entirely by the 2026-09-14 zero-app decision; slack is a plain imported catalog
+		// service now — the manager registers eligible services, this loop never does).
 		expect(getOAuthProvider("mcp:stripe")).toBeUndefined();
 		expect(getOAuthProvider("mcp:github")).toBeUndefined();
 	});
@@ -150,9 +152,8 @@ describe("MCP service catalog", () => {
 		expect(getServiceCatalogEntry("vanta-aus")?.url).toBe("https://mcp.aus.vanta.com/mcp");
 	});
 
-	it("carries no branded client ids, placeholders, secrets or hosted app ids", () => {
+	it("pins exactly one published client id and carries no secrets or foreign app ids", () => {
 		for (const forbidden of [
-			"1601185624273.8899143856786",
 			"11843774967.11905492103734",
 			"<GMAIL_PUBLIC_CLIENT_ID>",
 			"<GMAIL_CLIENT_SECRET>",
@@ -161,19 +162,21 @@ describe("MCP service catalog", () => {
 		]) {
 			expect(rawCatalogJson).not.toContain(forbidden);
 		}
-		const walk = (value: unknown): void => {
-			if (Array.isArray(value)) {
-				for (const item of value) walk(item);
-				return;
-			}
-			if (value && typeof value === "object") {
-				for (const [key, child] of Object.entries(value)) {
-					expect(["client_id", "clientId", "client_secret"]).not.toContain(key);
-					walk(child);
-				}
-			}
-		};
-		walk(JSON.parse(rawCatalogJson));
+		// No raw upstream id/secret keys anywhere; the ONE clientId key is Slack's
+		// published harness client, pinned on exactly the slack entry.
+		expect(rawCatalogJson).not.toMatch(/"(client_id|client_secret)"/);
+		expect(rawCatalogJson.match(/"clientId"/g)).toHaveLength(1);
+		expect(
+			SERVICE_CATALOG.filter((entry) => entry.oauth?.clientId !== undefined).map((entry) => [
+				entry.server,
+				entry.oauth?.clientId,
+			]),
+		).toEqual([["slack", "1601185624273.8899143856786"]]);
+		expect(getServiceCatalogEntry("slack")?.oauth).toEqual({
+			kind: "oauth",
+			clientId: "1601185624273.8899143856786",
+			callbackPort: 3118,
+		});
 	});
 
 	it("marks known setup blockers honestly and imports no reviewed scope lists", () => {
@@ -303,8 +306,8 @@ describe("MCP service catalog", () => {
 		// classes, with the user-setup class fully pasteable — the sums must stay exact so any drift forces a conscious
 		// update here.
 		const committed = JSON.parse(rawCatalogJson);
-		expect(committed.counts.total).toBe(68);
-		expect(committed.counts.readinessOauthReady).toBe(57);
+		expect(committed.counts.total).toBe(69);
+		expect(committed.counts.readinessOauthReady).toBe(58);
 		expect(committed.counts.readinessUserSetup).toBe(11);
 		expect(committed.counts.readinessPrimeRestricted).toBe(0);
 		expect(committed.counts.readinessUnknown).toBe(0);
@@ -417,11 +420,19 @@ describe("MCP service catalog", () => {
 		expect(() =>
 			validateMcpServiceEntry({ ...good, oauth: { kind: "oauth" }, auth: { ...good.auth, strategy: "api_key" } }),
 		).toThrow(/oauth is only allowed on oauth-strategy/);
-		// Client ids and secrets both fail loudly in catalog data — secrets are
-		// rejected explicitly, never silently dropped.
-		expect(() => validateMcpServiceEntry({ ...good, oauth: { kind: "oauth", clientId: "abc" } })).toThrow(
-			/client ids/,
+		// A pinned published client id is valid catalog data with its pinned callback
+		// port; malformed pinned fields and secrets fail loudly, never silently drop.
+		const pinnedEntry = validateMcpServiceEntry({
+			...good,
+			oauth: { kind: "oauth", clientId: "pinned-client", callbackPort: 3118 },
+		});
+		expect(pinnedEntry.oauth).toEqual({ kind: "oauth", clientId: "pinned-client", callbackPort: 3118 });
+		expect(() => validateMcpServiceEntry({ ...good, oauth: { kind: "oauth", clientId: "" } })).toThrow(
+			/oauth.clientId must be a non-empty string/,
 		);
+		expect(() =>
+			validateMcpServiceEntry({ ...good, oauth: { kind: "oauth", clientId: "pinned-client", callbackPort: 0 } }),
+		).toThrow(/oauth.callbackPort must be an integer/);
 		for (const secretShape of [{ clientSecret: "shh" }, { client_secret: "shh" }]) {
 			expect(() => validateMcpServiceEntry({ ...good, oauth: { kind: "oauth", ...secretShape } })).toThrow(
 				/client secrets/,
@@ -477,7 +488,7 @@ describe("MCP service catalog", () => {
 		// self-serve connectors — dynamic client registration (readiness "oauth-ready") or user-supplied tokens/keys
 		// ("user-setup"). Providers that require a provider-registered client and providers whose self-serve path stayed
 		// honestly unknown are EXCLUDED with a documented per-entry reason, not shipped mislabeled.
-		const providerClient = ["figma", "gmail", "google-calendar", "google-drive", "mongodb-atlas", "slack"];
+		const providerClient = ["figma", "gmail", "google-calendar", "google-drive", "mongodb-atlas"];
 		const unverified = [
 			"adobe-for-creativity",
 			"confidence-docs",
@@ -493,9 +504,10 @@ describe("MCP service catalog", () => {
 		for (const server of [...providerClient, ...unverified]) {
 			expect(getServiceCatalogEntry(server), `${server} must be cut from the catalog`).toBeUndefined();
 		}
-		// Providers merged from both upstreams were cut on BOTH sides, so no ghost entry can re-enter from the other source
-		// — and neither can any alias or label fragment of the cut brands.
-		for (const term of ["figma", "slack", "shopify", "gmail", "mongodb", "synthflow", "hubspot"]) {
+		// Providers merged from both upstreams were cut on BOTH sides, so no ghost entry can re-enter from the
+		// other source — and neither can any alias or label fragment of the cut brands. Slack is the exception
+		// (one-click via its pinned published harness client), so only OpenAI's Slack app stays cut.
+		for (const term of ["figma", "shopify", "gmail", "mongodb", "synthflow", "hubspot"]) {
 			expect(searchServiceCatalog(term)).toEqual([]);
 		}
 		const { report } = buildReport();
@@ -503,8 +515,6 @@ describe("MCP service catalog", () => {
 		for (const key of [
 			"openai-plugins/figma/figma",
 			"claude-plugins-official/figma/figma",
-			"openai-plugins/slack/slack",
-			"claude-plugins-official/slack/slack",
 			"openai-plugins/gmail/gmail",
 			"openai-plugins/google-calendar/google-calendar",
 			"openai-plugins/google-drive/google-drive",
@@ -523,6 +533,11 @@ describe("MCP service catalog", () => {
 			expect(excluded.has(key), `${key} must be a documented exclusion`).toBe(true);
 			expect(excluded.get(key), `${key} must cite the zero-app decision`).toMatch(/zero-app/);
 		}
+		// Slack ships as the ONE pinned published-client entry: OpenAI's own registered Slack app id
+		// stays excluded (a foreign app Prime must never reuse); the claude-side record carrying
+		// Slack's published harness client id is no longer cut.
+		expect(excluded.get("openai-plugins/slack/slack")).toMatch(/must never be reused by Prime/);
+		expect(excluded.has("claude-plugins-official/slack/slack")).toBe(false);
 		// The cut is a shipping decision, not an evidence deletion: the pinned source snapshots still carry the excluded
 		// upstream configs and the committed audit store still holds every excluded endpoint's metadata — including Figma's
 		// live gated-DCR evidence.
@@ -1044,6 +1059,48 @@ describe("MCP service catalog", () => {
 		const mtlsOnly = coherentEvidence(["tls_client_auth", "self_signed_tls_client_auth"]);
 		expect(evidenceSupportsStandardOauth(mtlsOnly)).toBe(false);
 		expect(evidenceSupportsUserRegisteredOauth(mtlsOnly)).toBe(false);
+	});
+
+	it("ships Slack one-click via the pinned published harness client, mirroring the engine carve-out", () => {
+		// 2026-09-17: Slack's own repo publishes a harness client id + callback port, so the entry ships
+		// one-click as a pre-registered secret-less public client. The readiness rule mirrors the engine's
+		// carve-out (oauth.ts): the pinned id vouches for the client type, PKCE S256 is the evidence.
+		const slack = getServiceCatalogEntry("slack");
+		expect(slack?.url).toBe("https://mcp.slack.com/mcp");
+		expect(slack?.auth.strategy).toBe("oauth");
+		expect(slack?.auth.clientRegistration).toBe("pre-registered");
+		expect(slack?.setup).toEqual({ status: "ready", readiness: "oauth-ready" });
+		expect(slack?.auth.metadata?.pkceS256).toBe(true);
+		expect(slack?.auth.metadata?.tokenAuthMethods).toEqual(["client_secret_post"]);
+		expect(slack?.auth.metadata?.note).toMatch(/slackapi\/slack-mcp-plugin/);
+		expect(slack?.auth.metadata?.note).toMatch(/30-day refresh tokens/);
+		// Scopes stay unset (login requests the protected-resource metadata scopes).
+		expect(slack?.auth.reviewedScopes).toBeUndefined();
+		expect(slack?.oauth?.scopes).toBeUndefined();
+		expect(slack?.provenance.map((prov) => prov.source)).toEqual(["claude-plugins-official", "prime"]);
+		// Pinned + advertised PKCE S256 classifies one-click regardless of the auth-method list;
+		// without it the entry does NOT (honest demotion, and the shipping guard fails the import).
+		const inputs = loadInputs();
+		const slackResult = inputs.audit.results.find((result) => result.server === "slack");
+		if (!slackResult?.authorizationServer.evidence) throw new Error("slack audit evidence must stay committed");
+		expect(evidenceSupportsPinnedClientOauth(slackResult)).toBe(true);
+		const noPkce: AuditFile = {
+			...inputs.audit,
+			results: inputs.audit.results.map((result) =>
+				result.server === "slack"
+					? {
+							...result,
+							authorizationServer: {
+								...result.authorizationServer,
+								evidence: { ...result.authorizationServer.evidence, pkceS256: false },
+							},
+						}
+					: result,
+			),
+		};
+		expect(() => buildCatalog(inputs.openAi, inputs.claude, inputs.overrides, noPkce)).toThrow(
+			/entry slack classifies readiness "unknown"/,
+		);
 	});
 
 	it("counts the sources before dedupe and records every exclusion", () => {
