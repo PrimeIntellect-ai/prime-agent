@@ -63,6 +63,7 @@ input.on("line", (line) => {
       process.stdout.write("BROKEN-" + "x".repeat(400) + "\\n");
       return;
     }
+    if (request.code === "corrupt-huge-line") return process.stdout.write("x".repeat(33 * 1024 * 1024));
     if (request.code === "corrupt-idle") {
       process.stdout.write(JSON.stringify({ event: "done", id: request.id, status: "ok" }) + "\\n42\\n");
       return;
@@ -351,6 +352,16 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 			writeFileSync(emitGarbagePath, "1");
 			await expect(queued).resolves.toMatchObject({ status: "ok", stdout: "persisted" });
 			expect(spawnCount(countPath)).toBe(2);
+		} finally {
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
+		}
+	});
+
+	it("repairs after an oversized unterminated protocol line", async () => {
+		const { manager } = newManager();
+		try {
+			await expect(manager.execute("corrupt-huge-line")).rejects.toThrow(/oversized protocol line/);
+			expect((await manager.execute("read")).status).toBe("ok");
 		} finally {
 			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}

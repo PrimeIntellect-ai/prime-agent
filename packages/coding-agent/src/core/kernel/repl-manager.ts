@@ -70,6 +70,10 @@ const REPAIR_STEP_TIMEOUT_MS = 30_000;
 const MAX_HANDLED_HOST_REQUEST_IDS = 1024;
 // Cap for unattributed background output buffered between and during cells.
 const MAX_BACKGROUND_OUTPUT_CHARS = 64 * 1024;
+// Largest legit frame is an attachment display event, base64 capped at
+// MAX_ATTACHMENT_DATA_CHARS; a line that cannot complete within this ceiling is
+// corruption the protocol repair owns, not output worth buffering until OOM.
+const MAX_PROTOCOL_LINE_CHARS = 32 * 1024 * 1024;
 
 const MAX_KERNEL_STDERR_CHARS = 8 * 1024;
 const MAX_KERNEL_STDERR_LOG_BYTES = 5 * 1024 * 1024;
@@ -389,9 +393,18 @@ export class ReplKernelManager {
 	private wireChild(child: ChildProcess): void {
 		const decoder = new StringDecoder("utf8");
 		let buffered = "";
+		// A poisoned child's residue must not grow the buffer again before the
+		// protocol repair kills it.
+		let poisoned = false;
 		child.stdout?.on("data", (buf: Buffer) => {
-			if (this.child !== child) return;
+			if (this.child !== child || poisoned) return;
 			buffered += decoder.write(buf);
+			if (buffered.length > MAX_PROTOCOL_LINE_CHARS) {
+				poisoned = true;
+				buffered = "";
+				this.failProtocolFrame(child, `oversized protocol line: exceeds ${MAX_PROTOCOL_LINE_CHARS} chars`);
+				return;
+			}
 			let newline = buffered.indexOf("\n");
 			while (newline !== -1) {
 				if (this.child !== child) return;

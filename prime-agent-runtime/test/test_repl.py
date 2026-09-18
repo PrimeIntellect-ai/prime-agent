@@ -729,6 +729,21 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(one(follow, "result")["text"], "2")
         self.assertEqual(one(follow, "done")["status"], "ok")
 
+    def test_large_write_ships_bounded_stream_frames(self):
+        events = self.repl.execute("chunk", "import sys\nsys.stdout.write('x' * 300_000)")
+        frames = [e["text"] for e in events if e.get("event") == "stdout"]
+        self.assertEqual("".join(frames), "x" * 300_000)
+        self.assertTrue(all(len(frame) <= 65536 for frame in frames))
+
+    def test_oversized_repr_and_display_payloads_are_capped(self):
+        code = "class C:\n    def __repr__(self):\n        return 'x' * 3_000_000\nC()"
+        events = self.repl.execute("big-repr", code)
+        expected = "x" * 1_048_576 + "\n[... result truncated at 1048576 characters ...]"
+        self.assertEqual(one(events, "result")["text"], expected)
+        events = self.repl.execute("emit-big", "from rlm.repl import emit\nemit({'text/plain': 'x' * 17_000_000})")
+        self.assertEqual(one(events, "error")["ename"], "ValueError")
+        self.assertEqual(one(events, "done")["status"], "error")
+
     def test_bash_integration(self):
         events = self.repl.execute(
             "sh1", "from rlm import bash\nresult = await bash('echo repl-bash')\nresult.output.strip()"

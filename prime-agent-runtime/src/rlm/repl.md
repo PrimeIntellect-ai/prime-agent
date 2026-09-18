@@ -49,12 +49,17 @@ runtime keeps serving. Closing stdin is equivalent to `shutdown`.
   tasks inherit the spawning cell's id (even after that cell finished). `null`
   for user threads, raw fd writes (`os.write`, C extensions, subprocesses),
   and anything else without provable ownership — bytes read from the fd pipes
-  are never attributed to a cell.
+  are never attributed to a cell. A Python-level write ships at most 64 Ki
+  characters per frame; a larger write arrives as multiple events in order.
 - `{"event":"result","id":str,"text":str}` — `repr` of the cell's trailing
   expression when the body ends in an expression whose value is not `None`.
-  The value is also bound to `_` in the namespace.
+  The value is also bound to `_` in the namespace. The text is capped at
+  1,048,576 characters; a longer `repr` is truncated and ends with a trailing
+  truncation marker.
 - `{"event":"display","id":str|null,"data":{mime:payload,...}}` — one dict of
-  MIME type to JSON payload, shipped verbatim from `emit()`. `id` rides task
+  MIME type to JSON payload, shipped verbatim from `emit()`. A payload whose
+  JSON encoding exceeds 16 Mi characters is refused: `emit()` raises
+  `ValueError` in the calling cell. `id` rides task
   context: an asyncio task spawned by a cell keeps that cell's id even after
   the cell finishes; user threads emit `null`.
 - `{"event":"host_request","id":str,"data":{...}}` — one typed request from
