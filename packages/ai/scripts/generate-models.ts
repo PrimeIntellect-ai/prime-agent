@@ -7,6 +7,7 @@ import { getAnthropicCacheCosts } from "../src/cache-pricing.js";
 import { COPILOT_CLIENT_HEADERS } from "../src/copilot-client-version.js";
 import { getOpenRouterReasoningCapabilities } from "../src/openrouter-reasoning.js";
 import {
+	getPrimeInferenceReasoningControls,
 	isPrivatePrimeInferenceModelId,
 	parsePrimeInferenceModelCatalog,
 	type PrimeInferenceCatalogEntry,
@@ -312,7 +313,13 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (model.id.includes("mythos-preview")) {
 		mergeThinkingLevelMap(model, { off: null, max: "max" });
 	}
-	if (model.api === "openai-completions" && model.id.includes("deepseek-v4")) {
+	if (
+		model.api === "openai-completions" &&
+		model.id.includes("deepseek-v4") &&
+		// Prime Inference routes carry route-specific effort maps from the live
+		// catalog or OpenRouter metadata; keep those over the generic family map.
+		!(model.provider === "prime-inference" && model.thinkingLevelMap)
+	) {
 		mergeThinkingLevelMap(model, DEEPSEEK_V4_THINKING_LEVEL_MAP);
 	}
 	const kimiK3Id = model.id.toLowerCase();
@@ -456,12 +463,6 @@ function getPrimeInferenceCompat(modelId: string): OpenAICompletionsCompat {
 			...DEEPSEEK_V4_COMPAT,
 		};
 	}
-	if (id.startsWith("z-ai/glm-")) {
-		return {
-			...PRIME_INFERENCE_COMPAT,
-			...ZAI_THINKING_COMPAT,
-		};
-	}
 
 	return PRIME_INFERENCE_COMPAT;
 }
@@ -583,7 +584,20 @@ function createPrimeInferenceModel(
 		entry.maxTokens ?? override?.maxTokens ?? openRouter?.maxTokens ?? PRIME_INFERENCE_DEFAULT_MAX_TOKENS,
 		contextWindow,
 	);
-	const compat = getPrimeInferenceCompat(entry.id);
+	const compat: OpenAICompletionsCompat = { ...getPrimeInferenceCompat(entry.id) };
+	if (openRouter?.supportsReasoningEffort === false) {
+		compat.supportsReasoningEffort = false;
+		if (!compat.thinkingFormat) compat.thinkingFormat = "openrouter";
+	}
+	const controls = getPrimeInferenceReasoningControls(entry);
+	if (controls) {
+		// The live catalog is authoritative for which reasoning parameters the
+		// route accepts; never emit one it does not declare.
+		compat.supportsReasoningEffort = controls.supportsReasoningEffort;
+		if (controls.thinkingFormat) compat.thinkingFormat = controls.thinkingFormat;
+		else if (compat.thinkingFormat !== "deepseek") delete compat.thinkingFormat;
+	}
+	const thinkingLevelMap = controls?.thinkingLevelMap ?? openRouter?.thinkingLevelMap;
 	return {
 		id: entry.id,
 		...(PRIME_INFERENCE_FEATURED_MODELS.has(entry.id.toLowerCase()) ? { featured: true } : {}),
@@ -592,7 +606,7 @@ function createPrimeInferenceModel(
 		provider: "prime-inference",
 		baseUrl: PRIME_INFERENCE_BASE_URL,
 		reasoning: isPrimeInferenceReasoningModel(entry.id, entry.reasoning ?? openRouter?.reasoning),
-		...(openRouter?.thinkingLevelMap ? { thinkingLevelMap: openRouter.thinkingLevelMap } : {}),
+		...(thinkingLevelMap ? { thinkingLevelMap: { ...thinkingLevelMap } } : {}),
 		input: vision ? ["text", "image"] : ["text"],
 		cost: {
 			input: entry.input,
@@ -601,15 +615,7 @@ function createPrimeInferenceModel(
 		},
 		contextWindow,
 		maxTokens,
-		compat: {
-			...compat,
-			...(openRouter?.supportsReasoningEffort === false
-				? {
-						supportsReasoningEffort: false,
-						...(!compat.thinkingFormat ? { thinkingFormat: "openrouter" as const } : {}),
-					}
-				: {}),
-		},
+		compat,
 	};
 }
 

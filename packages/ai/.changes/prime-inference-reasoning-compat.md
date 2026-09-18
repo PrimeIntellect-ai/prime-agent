@@ -1,0 +1,1 @@
+- Fixed Prime Inference model requests to only send reasoning parameters the live catalog declares, resolving `400 Unsupported parameter(s): enable_thinking` on z-ai/glm models, and made each route's declared reasoning efforts drive the selectable effort levels.

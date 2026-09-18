@@ -1,5 +1,8 @@
 import { describe, expect, test } from "vitest";
-import { parsePrimeInferenceModelCatalog } from "../src/prime-inference-model-catalog.js";
+import {
+	getPrimeInferenceReasoningControls,
+	parsePrimeInferenceModelCatalog,
+} from "../src/prime-inference-model-catalog.js";
 
 function response(...data: unknown[]) {
 	return { object: "list", data };
@@ -97,5 +100,145 @@ describe("Prime Inference model catalog", () => {
 		expect(() => parsePrimeInferenceModelCatalog(response())).toThrow(/empty/);
 		const model = { id: "duplicate", pricing: { input_usd_per_mtok: 1, output_usd_per_mtok: 2 } };
 		expect(() => parsePrimeInferenceModelCatalog(response(model, model))).toThrow(/duplicate/i);
+	});
+
+	test("parses live reasoning parameter declarations", () => {
+		const [model] = parsePrimeInferenceModelCatalog(
+			response({
+				id: "z-ai/glm-5.3",
+				pricing: { input_usd_per_mtok: 1.4, output_usd_per_mtok: 4.4 },
+				specs: {
+					context_window: 1_048_576,
+					max_output_tokens: 131_072,
+					modalities: { input: ["text"], output: ["text"] },
+					supports_reasoning: true,
+				},
+				reasoning: {
+					supported_efforts: ["low", "high", "max"],
+					default_effort: "max",
+					default_enabled: true,
+					mandatory: true,
+				},
+				supported_parameters: [
+					"max_tokens",
+					"temperature",
+					"top_p",
+					"tools",
+					"tool_choice",
+					"reasoning",
+					"reasoning_effort",
+				],
+			}),
+		);
+		expect(model).toEqual({
+			id: "z-ai/glm-5.3",
+			input: 1.4,
+			output: 4.4,
+			contextWindow: 1_048_576,
+			maxTokens: 131_072,
+			vision: false,
+			reasoning: true,
+			supportedParameters: [
+				"max_tokens",
+				"temperature",
+				"top_p",
+				"tools",
+				"tool_choice",
+				"reasoning",
+				"reasoning_effort",
+			],
+			reasoningEfforts: ["low", "high", "max"],
+			reasoningMandatory: true,
+		});
+	});
+
+	test("drops malformed parameter declarations", () => {
+		const [model] = parsePrimeInferenceModelCatalog(
+			response({
+				id: "vendor/model",
+				pricing: { input_usd_per_mtok: 1, output_usd_per_mtok: 2 },
+				supported_parameters: [42, "", "reasoning", "reasoning", null],
+				reasoning: { supported_efforts: [null, "high", "high", ""], mandatory: "yes" },
+			}),
+		);
+		expect(model.supportedParameters).toEqual(["reasoning"]);
+		expect(model.reasoningEfforts).toEqual(["high"]);
+		expect(model.reasoningMandatory).toBeUndefined();
+	});
+});
+
+describe("getPrimeInferenceReasoningControls", () => {
+	test("maps declared efforts and blocks disabling mandatory reasoning", () => {
+		expect(
+			getPrimeInferenceReasoningControls({
+				supportedParameters: ["max_tokens", "tools", "reasoning", "reasoning_effort"],
+				reasoningEfforts: ["low", "high", "max"],
+				reasoningMandatory: true,
+			}),
+		).toEqual({
+			supportsReasoningEffort: true,
+			thinkingLevelMap: {
+				off: null,
+				minimal: null,
+				low: "low",
+				medium: null,
+				high: "high",
+				xhigh: null,
+				max: "max",
+			},
+		});
+	});
+
+	test("maps a declared off effort when the route is not mandatory", () => {
+		const controls = getPrimeInferenceReasoningControls({
+			supportedParameters: ["reasoning", "reasoning_effort"],
+			reasoningEfforts: ["xhigh", "high", "medium", "low", "none"],
+		});
+		expect(controls?.supportsReasoningEffort).toBe(true);
+		expect(controls?.thinkingLevelMap).toEqual({
+			off: "none",
+			minimal: null,
+			low: "low",
+			medium: "medium",
+			high: "high",
+			xhigh: "xhigh",
+			max: null,
+		});
+	});
+
+	test("addresses toggle-only routes through the reasoning object", () => {
+		expect(
+			getPrimeInferenceReasoningControls({
+				supportedParameters: ["max_tokens", "reasoning", "include_reasoning"],
+			}),
+		).toEqual({
+			supportsReasoningEffort: false,
+			thinkingFormat: "openrouter",
+			thinkingLevelMap: { minimal: null, low: null, medium: null, high: "high", xhigh: null, max: null },
+		});
+	});
+
+	test("keeps the enable_thinking toggle only when the route declares it", () => {
+		expect(
+			getPrimeInferenceReasoningControls({
+				supportedParameters: ["max_tokens", "reasoning", "enable_thinking"],
+			}),
+		).toEqual({
+			supportsReasoningEffort: false,
+			thinkingFormat: "zai",
+			thinkingLevelMap: { minimal: null, low: null, medium: null, high: "high", xhigh: null, max: null },
+		});
+	});
+
+	test("emits no reasoning controls for routes without reasoning parameters", () => {
+		expect(
+			getPrimeInferenceReasoningControls({
+				supportedParameters: ["max_tokens", "temperature", "tools", "response_format"],
+			}),
+		).toEqual({ supportsReasoningEffort: false });
+	});
+
+	test("keeps bundled compat when the route reports no parameters", () => {
+		expect(getPrimeInferenceReasoningControls({})).toBeUndefined();
 	});
 });

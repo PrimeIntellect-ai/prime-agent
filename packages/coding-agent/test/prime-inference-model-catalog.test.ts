@@ -42,6 +42,36 @@ const entry = (id: string, overrides: Record<string, unknown> = {}) => ({
 	...overrides,
 });
 
+// Capability data shape the live /models endpoint reports; see
+// parsePrimeInferenceModelCatalog in @earendil-works/pi-ai.
+const effortEntry = (id: string, overrides: Record<string, unknown> = {}) =>
+	entry(id, {
+		reasoning: true,
+		supportedParameters: ["max_tokens", "temperature", "tools", "tool_choice", "reasoning", "reasoning_effort"],
+		reasoningEfforts: ["low", "high", "max"],
+		reasoningMandatory: true,
+		...overrides,
+	});
+
+const toggleEntry = (id: string, overrides: Record<string, unknown> = {}) =>
+	entry(id, {
+		reasoning: true,
+		supportedParameters: ["max_tokens", "reasoning", "include_reasoning"],
+		...overrides,
+	});
+
+const staleZaiTemplate = (id: string): Model<"openai-completions"> => ({
+	...model(id),
+	compat: {
+		supportsStore: false,
+		supportsDeveloperRole: false,
+		supportsReasoningEffort: false,
+		maxTokensField: "max_tokens",
+		supportsStrictMode: false,
+		thinkingFormat: "zai",
+	},
+});
+
 const payloadEntry = (
 	id: string,
 	specs: unknown = {
@@ -126,6 +156,87 @@ describe("Prime Inference model catalog", () => {
 		}
 		expect(isPrivatePrimeInferenceModel(model("public/model"))).toBe(false);
 		expect(isPrivatePrimeInferenceModel(model("vendor/model:deployment", "openrouter"))).toBe(false);
+	});
+
+	test("derives reasoning compat from live parameter declarations over a stale template", () => {
+		const [live] = buildPrimeInferenceModels([staleZaiTemplate("z-ai/glm-5.3")], [effortEntry("z-ai/glm-5.3")], {
+			minimumModels: 0,
+		}) ?? [undefined];
+		expect(live?.reasoning).toBe(true);
+		expect(live?.compat).toEqual({
+			supportsStore: false,
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: true,
+			maxTokensField: "max_tokens",
+			supportsStrictMode: false,
+		});
+		expect(live?.thinkingLevelMap).toEqual({
+			off: null,
+			minimal: null,
+			low: "low",
+			medium: null,
+			high: "high",
+			xhigh: null,
+			max: "max",
+		});
+	});
+
+	test("routes live toggle-only models through the reasoning object over a stale template", () => {
+		const [live] = buildPrimeInferenceModels([staleZaiTemplate("z-ai/glm-5.1")], [toggleEntry("z-ai/glm-5.1")], {
+			minimumModels: 0,
+		}) ?? [undefined];
+		expect(live?.compat).toEqual({
+			supportsStore: false,
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: false,
+			maxTokensField: "max_tokens",
+			supportsStrictMode: false,
+			thinkingFormat: "openrouter",
+		});
+		expect(live?.thinkingLevelMap).toEqual({
+			minimal: null,
+			low: null,
+			medium: null,
+			high: "high",
+			xhigh: null,
+			max: null,
+		});
+	});
+
+	test("keeps the bundled template compat when the live route reports no parameters", () => {
+		const [live] = buildPrimeInferenceModels([staleZaiTemplate("z-ai/glm-5.3")], [entry("z-ai/glm-5.3")], {
+			minimumModels: 0,
+		}) ?? [undefined];
+		expect(live?.compat).toEqual({
+			supportsStore: false,
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: false,
+			maxTokensField: "max_tokens",
+			supportsStrictMode: false,
+			thinkingFormat: "zai",
+		});
+	});
+
+	test("gives new live models the conservative default compat plus declared reasoning controls", () => {
+		const [withControls, withoutControls] = buildPrimeInferenceModels(
+			[],
+			[effortEntry("vendor/new"), entry("vendor/plain")],
+			{ minimumModels: 0 },
+		) ?? [undefined, undefined];
+		expect(withControls?.compat).toEqual({
+			supportsStore: false,
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: true,
+			maxTokensField: "max_tokens",
+			supportsStrictMode: false,
+		});
+		expect(withoutControls?.compat).toEqual({
+			supportsStore: false,
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: false,
+			maxTokensField: "max_tokens",
+			supportsStrictMode: false,
+		});
 	});
 
 	test("replaces only the Prime Inference provider list", () => {

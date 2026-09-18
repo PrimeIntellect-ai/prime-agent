@@ -28,7 +28,7 @@ describe("Prime Inference models", () => {
 				"meta-llama/llama-4-maverick",
 				"minimax/minimax-m3",
 				"moonshotai/kimi-k2.7-code",
-				"nvidia/nemotron-3-super-120b-a12b",
+				"nvidia/nemotron-3-nano-30b-a3b",
 				"openai/gpt-5.4",
 				"openai/gpt-5.5",
 				"qwen/qwen3-coder-next",
@@ -104,10 +104,10 @@ describe("Prime Inference models", () => {
 		expect(gemini.input).toEqual(["text", "image"]);
 		expect(gemini.reasoning).toBe(true);
 
-		const nemotronSuper = getModel("prime-inference", "nvidia/nemotron-3-super-120b-a12b");
-		expect(nemotronSuper.reasoning).toBe(true);
-		expect(nemotronSuper.input).toEqual(["text"]);
-		expect(nemotronSuper.maxTokens).toBeLessThanOrEqual(nemotronSuper.contextWindow);
+		const nemotronNano = getModel("prime-inference", "nvidia/nemotron-3-nano-30b-a3b");
+		expect(nemotronNano.reasoning).toBe(true);
+		expect(nemotronNano.input).toEqual(["text"]);
+		expect(nemotronNano.maxTokens).toBeLessThanOrEqual(nemotronNano.contextWindow);
 
 		const maverick = getModel("prime-inference", "meta-llama/llama-4-maverick");
 		expect(maverick.contextWindow).toBe(1048576);
@@ -167,24 +167,59 @@ describe("Prime Inference models", () => {
 		expect(deepseekV4Flash.reasoning).toBe(true);
 		expect(deepseekV4Flash.compat).toMatchObject({
 			requiresReasoningContentOnAssistantMessages: true,
+			supportsReasoningEffort: true,
 			thinkingFormat: "deepseek",
 		});
+		expect(deepseekV4Flash.thinkingLevelMap).toEqual({
+			minimal: null,
+			low: null,
+			medium: null,
+			high: "high",
+			xhigh: "xhigh",
+			max: null,
+		});
+		// The live catalog declares only the reasoning toggle for GLM 5.1.
 		const glm51 = getModel("prime-inference", "z-ai/glm-5.1");
 		expect(glm51.reasoning).toBe(true);
 		expect(glm51.compat).toMatchObject({
 			supportsReasoningEffort: false,
-			thinkingFormat: "zai",
+			thinkingFormat: "openrouter",
 		});
+		// GLM 5.2 exposes reasoning_effort with high/xhigh efforts.
 		const glm52 = getModel("prime-inference", "z-ai/glm-5.2");
 		expect(glm52.reasoning).toBe(true);
 		expect(glm52.compat).toMatchObject({
-			supportsReasoningEffort: false,
-			thinkingFormat: "zai",
+			supportsReasoningEffort: true,
 		});
+		expect(glm52.compat).not.toHaveProperty("thinkingFormat");
+		expect(getSupportedThinkingLevels(glm52)).toEqual(["off", "high", "xhigh"]);
 		expect(getModel("prime-inference", "qwen/qwen3-coder-next").reasoning).toBe(false);
 		expect(getModel("prime-inference", "x-ai/grok-4.20").reasoning).toBe(true);
 		expect(getModel("prime-inference", "minimax/minimax-m3").reasoning).toBe(true);
 		expect(getModel("prime-inference", "moonshotai/kimi-k2.7-code").reasoning).toBe(true);
+	});
+
+	it("drives GLM 5.3 reasoning controls from the live Prime Inference catalog", () => {
+		const model = getModel("prime-inference", "z-ai/glm-5.3");
+
+		expect(model.reasoning).toBe(true);
+		expect(model.compat).toEqual({
+			supportsStore: false,
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: true,
+			maxTokensField: "max_tokens",
+			supportsStrictMode: false,
+		});
+		expect(model.thinkingLevelMap).toEqual({
+			off: null,
+			minimal: null,
+			low: "low",
+			medium: null,
+			high: "high",
+			xhigh: null,
+			max: "max",
+		});
+		expect(getSupportedThinkingLevels(model)).toEqual(["low", "high", "max"]);
 	});
 
 	it("uses route-specific context windows for Prime Inference Claude routes", () => {
