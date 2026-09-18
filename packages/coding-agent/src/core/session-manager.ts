@@ -1252,9 +1252,63 @@ async function scanSessionLines(filePath: string, state: SessionScanState, size:
 	return undefined;
 }
 
+// Entry headers are serialized before any payload, so a message entry's own
+// type key and its message role both land in the first few hundred bytes.
+const SESSION_LIST_HEADER_PREFIX_MAX_CHARS = 512;
+const SESSION_LIST_MESSAGE_TYPE_HEADER = '"type":"message"';
+const SESSION_LIST_MESSAGE_ROLE_HEADER = '"message":{"role":"';
+const SESSION_LIST_USER_ROLE = 'user"';
+const SESSION_LIST_ASSISTANT_ROLE = 'assistant"';
+
+/**
+ * Return true when a line's serialized header proves the entry is a message
+ * whose role can only contribute its message count.
+ *
+ * Tool results (and extension message roles) carry no usage, model, name, state,
+ * activity timestamp, or search text, yet records commit them verbatim: they are
+ * the largest single share of the bytes a cold catalog scan parses for nothing.
+ * Counting them from the header also spares the oversize branch its preview
+ * scans for multi-megabyte tool results.
+ *
+ * `"` is escaped inside a JSON string, so a header that matches here can only be
+ * structural. Every layout the file writer does not produce — spacing, another
+ * key order, a nested container before the role marker, a role that runs past the
+ * prefix — falls through to the full parse.
+ */
+function isCountOnlyMessageLine(line: string): boolean {
+	// Only the entry header decides this, and the header always fits in the
+	// prefix: bounding the search keeps a file written in another layout
+	// (spacing, a different key order) from paying a full scan per line.
+	const prefix =
+		line.length > SESSION_LIST_HEADER_PREFIX_MAX_CHARS ? line.slice(0, SESSION_LIST_HEADER_PREFIX_MAX_CHARS) : line;
+	const typeIndex = prefix.indexOf(SESSION_LIST_MESSAGE_TYPE_HEADER);
+	if (typeIndex < 0) return false;
+	const roleMarkerIndex = prefix.indexOf(SESSION_LIST_MESSAGE_ROLE_HEADER, typeIndex);
+	if (roleMarkerIndex < 0) return false;
+	// The role marker carries the message object's own brace, so any earlier
+	// container belongs to another object: an entry that nests a payload before
+	// its type key, or one that quotes this header before its own message key.
+	// Either way the role found below is not the entry's message role.
+	const containerIndex = prefix.indexOf("{", 1);
+	if (containerIndex >= 0 && containerIndex < roleMarkerIndex) return false;
+	const roleIndex = roleMarkerIndex + SESSION_LIST_MESSAGE_ROLE_HEADER.length;
+	// A role that reaches past the prefix cannot be compared, so it takes the full parse.
+	if (roleIndex + SESSION_LIST_ASSISTANT_ROLE.length > prefix.length) return false;
+	return (
+		!prefix.startsWith(SESSION_LIST_USER_ROLE, roleIndex) &&
+		!prefix.startsWith(SESSION_LIST_ASSISTANT_ROLE, roleIndex)
+	);
+}
+
 function foldSessionScanLine(acc: SessionScanAccumulator, lineBuffer: Buffer): void {
 	const line = lineBuffer.toString("utf8");
 	if (!line.trim()) return;
+
+	// Guarded on the header so damaged-file detection still sees the first entry parsed.
+	if (acc.header !== undefined && isCountOnlyMessageLine(line)) {
+		acc.messageCount++;
+		return;
+	}
 
 	// Large tool-result entries can be many MB. They do not carry the
 	// session-list metadata we need, and parsing them during every refresh
