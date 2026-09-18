@@ -87,6 +87,19 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 		options: ["--fix   Remove stale sockets and stop idle orphaned services", "--json  Print JSON"],
 	},
 	{
+		path: ["incident"],
+		usage: "incident [--since <time>] [--until <time>] [--session <id>]",
+		summary: "Reconstruct a daemon incident from its logs",
+		description:
+			"Summarizes the daemon logs for a time window into an operator timeline: supervisor and worker events, session anomalies, and recovery actions. Times without a timezone are read as UTC, matching the log; the default window is the last 24 hours.",
+		options: [
+			"--since <time>  Window start (ISO date/time, date, or HH:MM today; default: 24h ago)",
+			"--until <time>  Window end (default: now)",
+			"--session <id>  Only events naming this session id, worker id, or session name (prefix match)",
+		],
+		examples: ['incident --since "2026-09-16T20:02" --until "2026-09-16T20:21"', "incident --session 2339fb7da605"],
+	},
+	{
 		path: ["shutdown"],
 		usage: "shutdown [--force] [--json]",
 		summary: "Stop every agent and background service",

@@ -19,6 +19,13 @@ import { handleDaemonCommand } from "./daemon-command.js";
 import { runPs, runReap, runShutdownAll } from "./daemon-ps.js";
 import { DAEMON_UPDATE_RESTART_COORDINATOR_FLAG } from "./daemon-update-restart.js";
 import { extractHelpCommandPath, rotateGlobalFlagsBeforeCommand } from "./global-flags.js";
+import {
+	type IncidentCommandOptions,
+	type IncidentWindow,
+	parseIncidentOptions,
+	resolveIncidentWindow,
+	runIncident,
+} from "./incident.js";
 
 export interface PublicCommandResult {
 	handled: boolean;
@@ -113,6 +120,8 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 			return runStatus(args.slice(1));
 		case "doctor":
 			return runDoctor(args.slice(1));
+		case "incident":
+			return runIncidentCommand(args.slice(1));
 		case "shutdown":
 			return runShutdown(args.slice(1));
 		case "package":
@@ -256,6 +265,21 @@ async function runDoctor(args: string[]): Promise<PublicCommandResult> {
 	} else {
 		await runPs(options.has("--json"));
 	}
+	return HANDLED;
+}
+
+async function runIncidentCommand(args: string[]): Promise<PublicCommandResult> {
+	let options: IncidentCommandOptions;
+	let window: IncidentWindow;
+	try {
+		options = parseIncidentOptions(args);
+		// Resolve once: re-resolving later can cross UTC midnight and render a
+		// different window than the one that was validated.
+		window = resolveIncidentWindow(options, new Date());
+	} catch (error) {
+		return fail(error instanceof Error ? error.message : String(error), `Run "${APP_NAME} help incident" for usage.`);
+	}
+	await runIncident(options, window);
 	return HANDLED;
 }
 

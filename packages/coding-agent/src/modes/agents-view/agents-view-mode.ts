@@ -13,7 +13,14 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { APP_TITLE, appendRotatingLog, getAgentDir, getClientErrorLogPath, VERSION } from "../../config.js";
+import {
+	APP_TITLE,
+	appendRotatingLog,
+	getAgentDir,
+	getAgentLogPath,
+	getClientErrorLogPath,
+	VERSION,
+} from "../../config.js";
 import type { AgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
 import { KeybindingsManager } from "../../core/keybindings.js";
 import { SessionManager } from "../../core/session-manager.js";
@@ -101,6 +108,14 @@ import {
 	type UnifiedSessionIndex,
 	type UnifiedSessionRecord,
 } from "./agents-view-state.js";
+import {
+	createIncidentNoticeState,
+	dismissIncidentNoticeState,
+	formatIncidentNoticeLine,
+	INCIDENT_NOTICE_POLL_INTERVAL_MS,
+	type IncidentNoticeState,
+	refreshIncidentNoticeState,
+} from "./incident-notices.js";
 import { AgentsViewRosterStore, STALE_ROSTER_DAEMON_MESSAGE } from "./roster-store.js";
 import { matchesSearchText } from "./session-view-search.js";
 
@@ -168,6 +183,10 @@ export type AgentsViewPersistentState = {
 	// re-entry and render the moment they resolve, even if the first view was left early.
 	startupNotices?: StartupNotices;
 	startupNoticesPromise?: Promise<StartupNotices>;
+	// Incident notice state (windowed log entries, log offset, dismissal horizons)
+	// is reused the same way: a dismissed incident must stay dismissed across
+	// re-entry, and the log poll continues from the consumed offset.
+	incidentNoticeState?: IncidentNoticeState;
 	query?: string;
 	rosterClient?: DaemonClient;
 	rosterStore?: AgentsViewRosterStore;
@@ -838,6 +857,7 @@ export class AgentsViewMode implements Component, Focusable {
 	private resolveRun: ((result: AgentsViewRunResult) => void) | undefined;
 	private heartbeatPollTimer: NodeJS.Timeout | undefined;
 	private animationTimer: NodeJS.Timeout | undefined;
+	private incidentNoticeTimer: NodeJS.Timeout | undefined;
 	private ctrlCExitHintExpiresAt = 0;
 	private ctrlCExitHintTimer: ReturnType<typeof setTimeout> | undefined;
 	private deleteConfirmExpiresAt = 0;
@@ -1076,8 +1096,11 @@ export class AgentsViewMode implements Component, Focusable {
 		this.resolveMissingSelectionAnchor();
 		void this.refreshHeartbeats();
 		this.loadStartupNotices();
+		this.refreshIncidentNotices();
 		this.heartbeatPollTimer = setInterval(() => void this.refreshHeartbeats(), HEARTBEAT_POLL_INTERVAL_MS);
 		this.heartbeatPollTimer.unref?.();
+		this.incidentNoticeTimer = setInterval(() => this.refreshIncidentNotices(), INCIDENT_NOTICE_POLL_INTERVAL_MS);
+		this.incidentNoticeTimer.unref?.();
 		this.animationTimer = setInterval(() => {
 			const hasRunning = this.rows.some((row) => row.section === "running");
 			const hasStaleAge = this.rows.some((row) => row.summary.lastHeardFromAt !== undefined);
@@ -1107,6 +1130,23 @@ export class AgentsViewMode implements Component, Focusable {
 				return;
 			}
 			this.handleCtrlC();
+			return;
+		}
+		// Esc (tui.select.cancel) dismisses the incident notice while it is the
+		// only thing to cancel: no armed reply, no autocomplete popup, an empty
+		// search prompt. An armed delete confirmation is the more dangerous state:
+		// Esc cancels it (below) and keeps the notice instead of dismissing the
+		// notice and leaving the delete armed to fire on the next press without
+		// a fresh confirmation. Without a visible notice, Esc keeps its back/exit
+		// meaning.
+		if (
+			this.editor.getText().length === 0 &&
+			!this.replyTarget &&
+			!this.editor.isShowingAutocomplete() &&
+			!this.isDeleteConfirmationVisible() &&
+			this.keybindings.matches(data, "tui.select.cancel") &&
+			this.dismissIncidentNotice()
+		) {
 			return;
 		}
 		if (this.editor.getText().length === 0 && this.keybindings.matches(data, "app.agents.rename")) {
@@ -1185,7 +1225,7 @@ export class AgentsViewMode implements Component, Focusable {
 			return [];
 		}
 		const headerLines = this.splash.render(width);
-		const noticeLines = this.renderStartupNotices(width);
+		const noticeLines = [...this.renderIncidentNotice(width), ...this.renderStartupNotices(width)];
 		if (noticeLines.length > 0) {
 			headerLines.push("", ...noticeLines);
 		}
@@ -1255,6 +1295,44 @@ export class AgentsViewMode implements Component, Focusable {
 		// (e.g. the tmux fix instructions) stay readable instead of truncating.
 		const wrapWidth = Math.max(1, width - 1);
 		return formatted.flatMap((line) => wrapTextWithAnsi(line, wrapWidth).map((wrapped) => ` ${wrapped}`));
+	}
+
+	private incidentNoticeState(): IncidentNoticeState {
+		// Reused across agents-view instances like the startup notices: the
+		// windowed entries, the consumed log offset, and the dismissal horizons
+		// survive leaving and re-entering the view, so a dismissed incident never
+		// comes back and the poll does not re-read consumed bytes.
+		this.persistentState.incidentNoticeState ??= createIncidentNoticeState();
+		return this.persistentState.incidentNoticeState;
+	}
+
+	private refreshIncidentNotices(): void {
+		// Best-effort, like the startup notices: a missing or unreadable log
+		// simply retries a bounded tail on the next poll and never breaks the view.
+		const changed = refreshIncidentNoticeState(this.incidentNoticeState(), getAgentLogPath(), Date.now());
+		if (changed) {
+			this.ui.requestRender();
+		}
+	}
+
+	/** Dismiss the collapsed incident notice; false when none is showing. */
+	private dismissIncidentNotice(): boolean {
+		if (!dismissIncidentNoticeState(this.incidentNoticeState())) {
+			return false;
+		}
+		this.setStatusMessage("Incident notice dismissed");
+		return true;
+	}
+
+	private renderIncidentNotice(width: number): string[] {
+		const notice = this.persistentState.incidentNoticeState?.notice;
+		if (!notice) {
+			return [];
+		}
+		// Same treatment as the startup notices: one-column gutter, wrap instead
+		// of truncating, so the pointer to the incident CLI stays readable.
+		const wrapWidth = Math.max(1, width - 1);
+		return wrapTextWithAnsi(formatIncidentNoticeLine(notice), wrapWidth).map((wrapped) => ` ${wrapped}`);
 	}
 
 	private handleListNavigation(data: string): boolean {
@@ -2564,6 +2642,10 @@ export class AgentsViewMode implements Component, Focusable {
 		if (this.heartbeatPollTimer) {
 			clearInterval(this.heartbeatPollTimer);
 			this.heartbeatPollTimer = undefined;
+		}
+		if (this.incidentNoticeTimer) {
+			clearInterval(this.incidentNoticeTimer);
+			this.incidentNoticeTimer = undefined;
 		}
 		if (this.animationTimer) {
 			clearInterval(this.animationTimer);
