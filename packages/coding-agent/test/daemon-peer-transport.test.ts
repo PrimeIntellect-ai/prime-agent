@@ -7,6 +7,25 @@ import { getProcessStartId } from "../src/core/session-lease.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
 import { AgentRoster, workerRosterEntryFromSummary } from "../src/modes/daemon/agent-roster.js";
 import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
+import { SessionHostCore } from "../src/modes/shared/session-host-core.js";
+
+/** Minimal host callbacks for a SessionHostCore that only serves roster state. */
+function makeStubHostCallbacks(): ConstructorParameters<typeof SessionHostCore>[0] {
+	return {
+		broadcast: () => {},
+		createConnectionState: () => {
+			throw new Error("not used by the auth stub");
+		},
+		sessionReplaced: () => {},
+		shutdown: () => {},
+		createSubagentRuntimeHost: () => undefined,
+		setStateSessionName: async () => {},
+		onStateReleased: () => {},
+		onStateReady: () => {},
+		isSessionClosing: () => false,
+	};
+}
+
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 import type { DaemonWorkerCommand, DaemonWorkerPeerGrant } from "../src/modes/daemon/daemon-worker-protocol.js";
@@ -274,10 +293,14 @@ describe("daemon worker peer transport", () => {
 				supervisorClaims: new Map(),
 				peerClaims: new Map(),
 				peerGrants: new Map(),
+				// The roster machinery lives on SessionHostCore since the
+				// session-host extraction; the prototype's rosterReporter getter
+				// resolves through the core, so the auth path can mark its
+				// snapshot pending exactly as in production.
+				host: new SessionHostCore(makeStubHostCallbacks(), {}),
 				clearSupervisorAvailabilityCheck: vi.fn(),
 				scheduleSupervisorFenceCheck: vi.fn(),
 				scheduleRosterFlush: vi.fn(),
-				rosterReporter: { snapshotPending: false },
 				assertSupervisorClaimCurrent: vi.fn(async () => "fingerprint"),
 			}) as unknown as WorkerInternals;
 		const auth = (workerInstanceId?: string) =>

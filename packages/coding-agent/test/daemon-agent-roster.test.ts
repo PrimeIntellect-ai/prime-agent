@@ -15,6 +15,7 @@ import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js"
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 import type { DaemonWorkerRosterOutbound } from "../src/modes/daemon/daemon-worker-protocol.js";
 import { RlmSpawnLedger } from "../src/modes/daemon/rlm-ledger.js";
+import { SessionHostCore } from "../src/modes/shared/session-host-core.js";
 import * as childProcessModule from "../src/utils/child-process.js";
 
 type RosterDelta = Extract<DaemonWorkerRosterOutbound, { type: "roster_delta" }>;
@@ -47,20 +48,45 @@ interface WorkerReporterFixture {
 function makeWorkerReporter(connected = true): WorkerReporterFixture {
 	const sentDeltas: RosterDelta[] = [];
 	const connection = { connected };
+	// The roster machinery lives on SessionHostCore since the session-host
+	// extraction; the daemon stub wires the same callbacks the constructor
+	// would, so the assertions below still exercise the reporter end to end.
+	const host = new SessionHostCore(
+		{
+			broadcast: () => {},
+			createConnectionState: () => {
+				throw new Error("not used by the reporter fixture");
+			},
+			sessionReplaced: () => {},
+			shutdown: () => {},
+			createSubagentRuntimeHost: () => {
+				throw new Error("not used by the reporter fixture");
+			},
+			setStateSessionName: async () => {},
+			onStateReleased: () => {},
+			onStateReady: () => {},
+			isSessionClosing: () => false,
+		},
+		{
+			roster: {
+				enabled: () => true,
+				isShuttingDown: () => false,
+				log: () => {},
+				scheduledJobs: () => [],
+				hasAuthenticatedSupervisorClient: () => connection.connected,
+				broadcastRosterFrame: (message: DaemonWorkerRosterOutbound) => {
+					if (message.type === "roster_delta") sentDeltas.push(message);
+					return connection.connected;
+				},
+			},
+		},
+	);
 	const daemon = Object.assign(Object.create(AgentDaemon.prototype), {
 		options: { worker: { authenticationToken: "token" } },
-		sessions: new Map<string, ActiveSessionState>(),
+		host,
 		cronStore: { list: () => [], cancelJobsForSession: () => [] },
 		summarizer: { forget: () => {} },
 		acpMcpOwners: new Map(),
-		rosterReporter: {
-			lastComposed: new Map<string, WorkerRosterEntry>(),
-			lastComposedJson: new Map<string, string>(),
-			queuedChildren: new Map<string, WorkerRosterEntry>(),
-			removedAgentIds: new Map<string, string | undefined>(),
-			snapshotPending: false,
-		},
-		rosterFlushScheduled: false,
 		shuttingDown: false,
 		hasAuthenticatedSupervisorClient: () => connection.connected,
 		broadcastRosterFrame: (message: DaemonWorkerRosterOutbound) => {

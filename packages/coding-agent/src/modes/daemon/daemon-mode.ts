@@ -130,24 +130,23 @@ import { initTheme } from "../interactive/theme/theme.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../rpc/jsonl.js";
 import { encodePrivateFrame, PrivateFrameDecoder } from "../session-worker/private-framing.js";
 import {
+	BoundSessionUnavailableError,
+	RuntimeOpenCancelledError,
+	type RuntimeOpenGuard,
+	SessionHostCore,
+	type WorkerRosterReporterState,
+} from "../shared/session-host-core.js";
+import {
 	type ActiveSessionState,
 	AmbiguousActiveSessionError,
 	createActiveSessionId,
 	type DaemonSocketClient,
-	resolveActiveSessionState,
 } from "./active-session-state.js";
-import {
-	passivatedWorkerRosterEntry,
-	type RosterSessionSummary,
-	rosterAgentIdForSummary,
-	type WorkerRosterEntry,
-	workerRosterEntryFromSummary,
-} from "./agent-roster.js";
+import type { WorkerRosterEntry } from "./agent-roster.js";
 import { createCompactAssistantDelta } from "./compact-session-stream.js";
 import { DaemonClient } from "./daemon-client.js";
 import { filterClientEnv, withClientEnv } from "./daemon-client-env.js";
 import { deserializeDaemonError, serializeDaemonError } from "./daemon-errors.js";
-import { bindActiveSessionState } from "./daemon-extension-binding.js";
 import {
 	collectDaemonLaunchEnv,
 	createDaemonEventMeta,
@@ -186,7 +185,6 @@ import {
 	hasLiveSessionWork,
 	inactiveLifecycleForSession,
 	type SessionSummary,
-	scheduledJobRegistrations,
 	summaryForActiveSession,
 } from "./daemon-session-list.js";
 import { DaemonSessionSummarizer } from "./daemon-session-summarizer.js";
@@ -407,7 +405,6 @@ function delay(ms: number): Promise<void> {
 	return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
 
-type RuntimeOpenGuard = () => boolean | Promise<boolean>;
 type SupervisorGenerationClaim = Omit<Extract<DaemonWorkerCommand, { type: "worker_auth" }>, "id" | "type" | "token">;
 
 interface BoundSupervisorGenerationClaim {
@@ -471,9 +468,6 @@ type PassiveRlmSubagent = PassiveRlmRoot & {
 	chain: PassiveRlmSubagentEntry[];
 };
 
-class RuntimeOpenCancelledError extends Error {}
-class BoundSessionUnavailableError extends Error {}
-
 export async function runDaemonMode(options: DaemonModeOptions): Promise<never> {
 	const socketPath = normalizeSocketPath(options.socketPath ?? defaultDaemonSocketPath());
 	const daemon = new AgentDaemon(socketPath, options);
@@ -510,11 +504,10 @@ export class AgentDaemon {
 	private ownsSocketPath = false;
 	private socketIdentity?: DaemonSocketIdentity;
 	private readonly clients = new Set<DaemonSocketClient>();
-	private readonly sessions = new Map<string, ActiveSessionState>();
+	private readonly host: SessionHostCore<PassiveRlmSubagent>;
 	private readonly openingSessions = new Map<string, Promise<ActiveSessionState>>();
 	/** Covers path resolution through publication in openingSessions, before the runtime promise exists. */
 	private readonly reservingSessionOpens = new Map<string, Promise<void>>();
-	private readonly bindingCompletions = new Map<string, Promise<void>>();
 	/**
 	 * Resolved-session-file keyed passivations let wake paths join after closeSessionOnce
 	 * removes the live session. This intentionally complements closingSessions: that map
@@ -555,11 +548,7 @@ export class AgentDaemon {
 	private cloudService?: DirectCloudService;
 	private readonly cronScheduler: AgentCronScheduler;
 	private readonly agentMessageRateLimiter = new AgentSessionMessageRateLimiter();
-	// Sessions inserted into `sessions` but still awaiting extension binding;
-	// visible to host controllers during bind, excluded from targeting.
-	private readonly bindingSessions = new Set<string>();
 	private readonly pendingSessionNames = new Set<string>();
-	private restoreActiveSessionId: string | undefined;
 	private supervisorMonitorTimer?: ReturnType<typeof setTimeout>;
 	private supervisorFenceTimer?: ReturnType<typeof setTimeout>;
 	private supervisorLaunchInProgress = false;
@@ -584,14 +573,6 @@ export class AgentDaemon {
 		},
 	);
 	private readonly recoveryJournal?: WorkerRecoveryJournal;
-	private readonly rosterReporter: WorkerRosterReporterState = {
-		lastComposed: new Map(),
-		lastComposedJson: new Map(),
-		queuedChildren: new Map(),
-		removedAgentIds: new Map(),
-		snapshotPending: false,
-	};
-	private rosterFlushScheduled = false;
 	private rosterHeartbeatTimer?: ReturnType<typeof setInterval>;
 	private rlmSpawnLedgerInstance?: RlmSpawnLedger;
 	/** In-flight admission spawn appends, awaited (and consumed) by createRlmSubagentRuntime. */
@@ -613,7 +594,6 @@ export class AgentDaemon {
 		this.cronStore = options.worker
 			? AgentCronJobStore.forSessionArtifacts()
 			: new AgentCronJobStore(getCronJobsPath(this.agentDir));
-		this.restoreActiveSessionId = options.worker?.restoreActiveSessionId;
 		const recoveryJournalPath = process.env[DAEMON_WORKER_RECOVERY_JOURNAL_ENV];
 		if (options.worker && recoveryJournalPath) {
 			this.recoveryJournal = new WorkerRecoveryJournal(recoveryJournalPath);
@@ -632,6 +612,82 @@ export class AgentDaemon {
 			this.broadcastGlobal({ type: "heartbeats_changed" });
 			this.scheduleRosterFlush();
 		});
+		this.host = new SessionHostCore<PassiveRlmSubagent>(
+			{
+				broadcast: (state, message) => this.broadcastToSession(state, message),
+				createConnectionState: (state) => this.createConnectionState(state),
+				sessionReplaced: (state) => this.refreshReplacedSessionState(state),
+				shutdown: () => {
+					void this.shutdown(0);
+				},
+				createSubagentRuntimeHost: (state) => this.createSubagentRuntimeHost(state),
+				setStateSessionName: (state, name) => this.setStateSessionName(state, name),
+				onStateReleased: (state) => {
+					this.registerCronStoreForState(state);
+					this.rebindCronJobsToState(state);
+				},
+				onStateReady: (state) => {
+					this.summarizer.seed(state);
+					this.recordWorkerRecoveryState(state, "ready");
+				},
+				isSessionClosing: (activeSessionId) => this.closingSessions.has(activeSessionId),
+			},
+			{
+				restoreActiveSessionId: options.worker?.restoreActiveSessionId,
+				roster: {
+					enabled: () => this.options.worker !== undefined,
+					isShuttingDown: () => this.shuttingDown,
+					log: (message) => this.log(message),
+					scheduledJobs: () => this.cronStore.list(),
+					hasAuthenticatedSupervisorClient: () => this.hasAuthenticatedSupervisorClient(),
+					broadcastRosterFrame: (message) => this.broadcastRosterFrame(message),
+				},
+				passive: {
+					findPassiveRlmSubagent: (selector) => this.findPassiveRlmSubagent(selector),
+					hydratePassiveRlmSubagent: (candidate, clientEnv) =>
+						this.hydratePassiveRlmSubagent(candidate, clientEnv),
+					findPassivationBySessionFile: (sessionFile) => this.findPassivationBySessionFile(sessionFile),
+					waitForPassivation: (sessionFile) => this.waitForPassivation(sessionFile),
+				},
+			},
+		);
+	}
+
+	/** The session-host core: live states, bind lifecycle, hydration, roster. */
+	private get sessions(): Map<string, ActiveSessionState> {
+		return this.host.asMap();
+	}
+
+	private hasAuthenticatedSupervisorClient(): boolean {
+		for (const client of this.clients) {
+			if (this.supervisorClaims.has(client) && !client.socket.destroyed) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private get bindingSessions(): Set<string> {
+		return this.host.bindingSet();
+	}
+
+	private get rosterReporter(): WorkerRosterReporterState {
+		return this.host.reporter;
+	}
+	private broadcastRosterFrame(message: DaemonWorkerRosterOutbound): boolean {
+		const payload = Buffer.from(serializeJsonLine(message));
+		let delivered = false;
+		for (const client of this.clients) {
+			if (!this.supervisorClaims.has(client) || client.socket.destroyed) {
+				continue;
+			}
+			// socket.write queues under backpressure, so a queued frame is delivered, never a loss gap.
+			client.socket.write(
+				encodePrivateFrame<DaemonWorkerFrameHeader>({ kind: "outbound", outboundType: message.type }, payload),
+			);
+			delivered = true;
+		}
+		return delivered;
 	}
 
 	private getCloudService(): DirectCloudService {
@@ -1684,79 +1740,15 @@ export class AgentDaemon {
 		onStateBound?: (state: ActiveSessionState) => void,
 		restoreActiveSessionId?: string,
 	): Promise<ActiveSessionState> {
-		const desiredActiveSessionId =
-			runtime.metadata.kind === "top-level" ? this.restoreActiveSessionId : restoreActiveSessionId;
-		if (runtime.metadata.kind === "top-level" && desiredActiveSessionId) {
-			this.restoreActiveSessionId = undefined;
-		}
-		const state: ActiveSessionState = {
-			activeSessionId:
-				desiredActiveSessionId && !this.sessions.has(desiredActiveSessionId)
-					? desiredActiveSessionId
-					: createActiveSessionId(this.sessions),
+		return this.host.addRuntime(
 			runtime,
-			clients: new Set(),
-			pendingAttaches: 0,
-			extensionUiRequests: new Map(),
-			eventGeneration: createActiveSessionId(),
-			lastEventSequence: 0,
+			name,
 			clientEnv,
-		};
-		this.sessions.set(state.activeSessionId, state);
-		this.bindingSessions.add(state.activeSessionId);
-		let completeBinding!: () => void;
-		const bindingCompletion = new Promise<void>((resolveBinding) => {
-			completeBinding = resolveBinding;
-		});
-		this.bindingCompletions.set(state.activeSessionId, bindingCompletion);
-		onStateCreated?.(state);
-		try {
-			if (name) {
-				await this.setStateSessionName(state, name);
-			}
-			await bindActiveSessionState(state, {
-				broadcast: (targetSessionState, message) => this.broadcastToSession(targetSessionState, message),
-				createConnectionState: (targetSessionState) => this.createConnectionState(targetSessionState),
-				sessionReplaced: (targetSessionState) => this.refreshReplacedSessionState(targetSessionState),
-				shutdown: () => {
-					void this.shutdown(0);
-				},
-				subagentRuntimeHost: this.createSubagentRuntimeHost(state),
-			});
-			if (runtimeOpenGuard) {
-				const guardResult = runtimeOpenGuard();
-				if (!(typeof guardResult === "boolean" ? guardResult : await guardResult)) {
-					throw new RuntimeOpenCancelledError();
-				}
-			}
-			onStateBound?.(state);
-			this.scheduleRosterFlush();
-		} catch (error) {
-			state.unsubscribe?.();
-			this.sessions.delete(state.activeSessionId);
-			await runtime.dispose().catch(() => undefined);
-			throw error;
-		} finally {
-			this.bindingSessions.delete(state.activeSessionId);
-			this.bindingCompletions.delete(state.activeSessionId);
-			completeBinding();
-		}
-		this.registerCronStoreForState(state);
-		this.rebindCronJobsToState(state);
-		if (runtime.metadata.kind !== "subagent") {
-			// Mark the session as daemon-resident so a restarted daemon can
-			// restore it. Closes for kill/completed/replaced flip this back to
-			// sleep; clean shutdowns leave it in place on purpose.
-			try {
-				runtime.session.sessionManager.appendSessionState({ status: "active" });
-			} catch {
-				// Marking is best-effort; the session still works unrestored.
-			}
-		}
-		// Restore the last persisted status so it shows before the first sweep.
-		this.summarizer.seed(state);
-		this.recordWorkerRecoveryState(state, "ready");
-		return state;
+			onStateCreated,
+			runtimeOpenGuard,
+			onStateBound,
+			restoreActiveSessionId,
+		);
 	}
 
 	private refreshReplacedSessionState(state: ActiveSessionState): void {
@@ -2534,78 +2526,21 @@ export class AgentDaemon {
 	}
 
 	private findSessionBySessionFile(sessionFile: string | undefined): ActiveSessionState | undefined {
-		if (!sessionFile) {
-			return undefined;
-		}
-		const target = resolve(sessionFile);
-		for (const state of this.sessions.values()) {
-			const file = state.runtime.session.sessionFile;
-			if (file && resolve(file) === target) {
-				return state;
-			}
-		}
-		return undefined;
+		return this.host.findSessionBySessionFile(sessionFile);
 	}
 
 	private getSessionState(id: string): ActiveSessionState {
-		return resolveActiveSessionState(this.sessions, id);
+		return this.host.getSessionState(id);
 	}
 
 	// A bind failure disposes the runtime, so half-bound sessions must not be
 	// targetable by attach, agent messages, or observe.
 	private getBoundSessionState(id: string): ActiveSessionState {
-		const state = this.getSessionState(id);
-		if (this.bindingSessions.has(state.activeSessionId)) {
-			throw new BoundSessionUnavailableError(`Active session ${state.activeSessionId} is still initializing`);
-		}
-		if (this.closingSessions.has(state.activeSessionId)) {
-			throw new BoundSessionUnavailableError(`Active session ${state.activeSessionId} is closing`);
-		}
-		return state;
+		return this.host.getBoundSessionState(id);
 	}
 
 	private async getOrHydrateBoundSessionState(id: string): Promise<ActiveSessionState> {
-		let lookupError: unknown;
-		try {
-			return this.getBoundSessionState(id);
-		} catch (error) {
-			if (error instanceof BoundSessionUnavailableError) {
-				return this.waitForHydratingChild(this.getSessionState(id), id);
-			}
-			if (error instanceof AmbiguousActiveSessionError) {
-				throw error;
-			}
-			lookupError = error;
-		}
-		const passiveSubagent = await this.findPassiveRlmSubagent(id);
-		if (passiveSubagent) {
-			return this.hydratePassiveRlmSubagent(passiveSubagent);
-		}
-		const hydratingChild = [...this.sessions.values()].find(
-			(state) => state.runtime.metadata.kind === "subagent" && state.runtime.metadata.rlmChildId === id,
-		);
-		if (hydratingChild) {
-			return this.waitForHydratingChild(hydratingChild, id);
-		}
-		try {
-			return this.getBoundSessionState(id);
-		} catch (error) {
-			if (error instanceof BoundSessionUnavailableError) {
-				return this.waitForHydratingChild(this.getSessionState(id), id);
-			}
-			if (error instanceof AmbiguousActiveSessionError) throw error;
-			throw lookupError;
-		}
-	}
-
-	private async waitForHydratingChild(state: ActiveSessionState, selector: string): Promise<ActiveSessionState> {
-		const sessionFile = state.runtime.session.sessionFile;
-		if (!sessionFile || !this.findPassivationBySessionFile(sessionFile)) {
-			return this.waitForBoundSession(state);
-		}
-		await this.waitForPassivation(sessionFile);
-		const passive = await this.findPassiveRlmSubagent(sessionFile);
-		return passive ? this.hydratePassiveRlmSubagent(passive) : this.getOrHydrateBoundSessionState(selector);
+		return this.host.getOrHydrateBoundSessionState(id);
 	}
 
 	private createSubagentRuntimeHost(parentState: ActiveSessionState): SubagentRuntimeHost {
@@ -3248,17 +3183,11 @@ export class AgentDaemon {
 	}
 
 	private async waitForBoundSession(state: ActiveSessionState): Promise<ActiveSessionState> {
-		const completion = this.bindingCompletions.get(state.activeSessionId);
-		if (completion) {
-			await completion;
-		}
-		if (this.sessions.get(state.activeSessionId) !== state || this.bindingSessions.has(state.activeSessionId)) {
-			throw new BoundSessionUnavailableError(`Active session ${state.activeSessionId} did not finish initializing`);
-		}
-		if (this.closingSessions.has(state.activeSessionId)) {
-			throw new BoundSessionUnavailableError(`Active session ${state.activeSessionId} is closing`);
-		}
-		return state;
+		return this.host.waitForBoundSession(state);
+	}
+
+	private async waitForHydratingChild(state: ActiveSessionState, selector: string): Promise<ActiveSessionState> {
+		return this.host.waitForHydratingChild(state, selector);
 	}
 
 	private async rehydrateCompletedRlmSubagentOnce(
@@ -7156,234 +7085,35 @@ export class AgentDaemon {
 	}
 
 	private rosterEntryForSessionPath(canonicalPath: string): WorkerRosterEntry | undefined {
-		for (const entry of this.rosterReporter.lastComposed.values()) {
-			if (entry.summary.sessionFile && canonicalSessionPath(entry.summary.sessionFile) === canonicalPath) {
-				return entry;
-			}
-		}
-		return undefined;
+		return this.host.rosterEntryForSessionPath(canonicalPath);
 	}
 
 	private rosterAgentIdForState(state: ActiveSessionState): string {
-		const session = state.runtime.session;
-		const metadata = state.runtime.metadata;
-		if (metadata.kind === "subagent" && metadata.rlmChildId) {
-			return rosterAgentIdForSummary({
-				runtimeKind: "subagent",
-				rlmChildId: metadata.rlmChildId,
-				sessionId: metadata.rlmChildId,
-				parentSessionPath: metadata.parentSessionFile,
-				parentActiveSessionId: metadata.parentActiveSessionId,
-			});
-		}
-		return session.sessionId;
+		return this.host.rosterAgentIdForState(state);
 	}
 
 	private rosterAgentIdForRlmChild(childId: string, parentSessionPath: string | undefined): string {
-		return rosterAgentIdForSummary({
-			runtimeKind: "subagent",
-			rlmChildId: childId,
-			sessionId: childId,
-			parentSessionPath,
-		});
+		return this.host.rosterAgentIdForRlmChild(childId, parentSessionPath);
 	}
 
 	private observeRosterEvent(state: ActiveSessionState, message: DaemonOutbound): void {
-		if (!this.options.worker) return;
-		if (message.type === "session_event") {
-			if (message.event.type === "rlm_child_update") {
-				this.observeRosterChildUpdate(state, message.event.child);
-				return;
-			}
-			if (!ROSTER_SESSION_EVENT_TRIGGERS.has(message.event.type)) return;
-		} else if (
-			message.type !== "session_status" &&
-			message.type !== "session_closed" &&
-			message.type !== "session_replaced"
-		) {
-			return;
-		}
-		this.scheduleRosterFlush();
+		this.host.observeRosterEvent(state, message);
 	}
 
 	private observeRosterChildUpdate(state: ActiveSessionState, child: AgentConnectionRlmChildAgentSnapshot): void {
-		const bound = child.activeSessionId !== undefined || this.hasSessionForRlmChild(state, child.id);
-		const entry = this.queuedChildRosterEntry(state, child);
-		if (!bound && (child.status === "queued" || child.status === "running")) {
-			this.rosterReporter.queuedChildren.set(entry.agentId, entry);
-		} else {
-			this.rosterReporter.queuedChildren.delete(entry.agentId);
-		}
-		this.scheduleRosterFlush();
+		this.host.observeRosterChildUpdate(state, child);
 	}
 
 	private hasSessionForRlmChild(parentState: ActiveSessionState, childId: string): boolean {
-		for (const candidate of this.sessions.values()) {
-			const metadata = candidate.runtime.metadata;
-			if (metadata.rlmChildId === childId && metadata.parentActiveSessionId === parentState.activeSessionId) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	private queuedChildRosterEntry(
-		state: ActiveSessionState,
-		child: AgentConnectionRlmChildAgentSnapshot,
-	): WorkerRosterEntry {
-		const parentSession = state.runtime.session;
-		const summary: RosterSessionSummary = {
-			id: child.id,
-			lifecycle: "live",
-			activity: "idle",
-			isSessionActive: false,
-			runtimeKind: "subagent",
-			rlmDepth: (parentSession.rlmDepth ?? 0) + 1,
-			sessionId: child.id,
-			sessionName: child.sessionName,
-			cwd: parentSession.sessionManager.getCwd(),
-			isStreaming: false,
-			isCompacting: false,
-			attachedClients: 0,
-			messageCount: 0,
-			firstMessage: child.label,
-			parentActiveSessionId: state.activeSessionId,
-			parentSessionId: parentSession.sessionId,
-			parentSessionPath: parentSession.sessionFile,
-			rlmChildId: child.id,
-		};
-		return { agentId: rosterAgentIdForSummary(summary), queuedChild: true, summary };
+		return this.host.hasSessionForRlmChild(parentState, childId);
 	}
 
 	private scheduleRosterFlush(): void {
-		if (!this.options.worker || this.rosterFlushScheduled || this.shuttingDown) return;
-		this.rosterFlushScheduled = true;
-		setImmediate(() => {
-			this.rosterFlushScheduled = false;
-			try {
-				this.flushRoster();
-			} catch (error) {
-				this.log(`could not publish roster delta: ${String(error)}`);
-			}
-		});
+		this.host.scheduleRosterFlush();
 	}
 
 	private flushRoster(): void {
-		const reporter = this.rosterReporter;
-		const entries = new Map<string, WorkerRosterEntry>();
-		const scheduledJobs = this.cronStore.list();
-		for (const summary of buildSessionList([...this.sessions.values()], [], scheduledJobs)) {
-			const entry = workerRosterEntryFromSummary(summary);
-			entries.set(entry.agentId, entry);
-		}
-		for (const [agentId, queued] of reporter.queuedChildren) {
-			if (entries.has(agentId)) {
-				reporter.queuedChildren.delete(agentId);
-				continue;
-			}
-			entries.set(agentId, queued);
-		}
-		// A terminal unbound child run owns no transcript: it is a removal, never a passivated row.
-		// A vanished row whose state lives on under a new sessionId was swapped in place
-		// (new_session/switch/fork): also a removal — plain list never served the old transcript.
-		const composedActiveIds = new Set<string>();
-		for (const entry of entries.values()) {
-			if (entry.summary.activeSessionId !== undefined) composedActiveIds.add(entry.summary.activeSessionId);
-		}
-		for (const [agentId, previous] of reporter.lastComposed) {
-			if (entries.has(agentId)) continue;
-			const swapped =
-				previous.summary.activeSessionId !== undefined && composedActiveIds.has(previous.summary.activeSessionId);
-			if (previous.queuedChild === true || swapped) {
-				reporter.removedAgentIds.set(agentId, previous.summary.sessionId);
-			}
-		}
-		for (const [agentId, targetSessionId] of reporter.removedAgentIds) {
-			const composed = entries.get(agentId);
-			// A new incarnation cancels the stale removal, as does a revived resident top-level row
-			// (switch-back, resume-after-archive); a resident subagent row with the removed sessionId
-			// is the mid-teardown race and stays suppressed.
-			const revived = composed?.summary.activeSessionId !== undefined && composed.summary.runtimeKind !== "subagent";
-			if (composed && (composed.queuedChild === true || composed.summary.sessionId !== targetSessionId || revived)) {
-				reporter.removedAgentIds.delete(agentId);
-				continue;
-			}
-			entries.delete(agentId);
-			reporter.queuedChildren.delete(agentId);
-		}
-		const registrations = scheduledJobRegistrations(scheduledJobs);
-		for (const [agentId, previous] of reporter.lastComposed) {
-			if (!entries.has(agentId) && !reporter.removedAgentIds.has(agentId)) {
-				const file = previous.summary.sessionFile ? resolve(previous.summary.sessionFile) : undefined;
-				entries.set(
-					agentId,
-					passivatedWorkerRosterEntry(previous, {
-						hasRegisteredHeartbeat: file !== undefined && registrations.heartbeatSessionFiles.has(file),
-						hasRegisteredCronJob: file !== undefined && registrations.cronSessionFiles.has(file),
-					}),
-				);
-			}
-		}
-		const changed: WorkerRosterEntry[] = [];
-		const nextJson = new Map<string, string>();
-		for (const entry of entries.values()) {
-			const json = JSON.stringify(entry);
-			nextJson.set(entry.agentId, json);
-			if (reporter.lastComposedJson.get(entry.agentId) !== json) changed.push(entry);
-		}
-		const removedAgentIds = [...reporter.removedAgentIds.keys()];
-		reporter.lastComposed = new Map(entries);
-		reporter.lastComposedJson = nextJson;
-		if (!this.hasAuthenticatedSupervisorClient()) {
-			if (changed.length > 0 || removedAgentIds.length > 0) reporter.snapshotPending = true;
-			return;
-		}
-		if (reporter.snapshotPending) {
-			const delivered = this.broadcastRosterFrame({
-				type: "roster_delta",
-				snapshot: true,
-				entries: [...entries.values()],
-				...(removedAgentIds.length > 0 ? { removedAgentIds } : {}),
-			});
-			if (delivered) {
-				reporter.snapshotPending = false;
-				reporter.removedAgentIds.clear();
-			}
-			return;
-		}
-		if (changed.length === 0 && removedAgentIds.length === 0) return;
-		const delivered = this.broadcastRosterFrame({
-			type: "roster_delta",
-			entries: changed,
-			...(removedAgentIds.length > 0 ? { removedAgentIds } : {}),
-		});
-		if (delivered) reporter.removedAgentIds.clear();
-		else reporter.snapshotPending = true;
-	}
-
-	private hasAuthenticatedSupervisorClient(): boolean {
-		for (const client of this.clients) {
-			if (this.supervisorClaims.has(client) && !client.socket.destroyed) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	private broadcastRosterFrame(message: DaemonWorkerRosterOutbound): boolean {
-		const payload = Buffer.from(serializeJsonLine(message));
-		let delivered = false;
-		for (const client of this.clients) {
-			if (!this.supervisorClaims.has(client) || client.socket.destroyed) {
-				continue;
-			}
-			// socket.write queues under backpressure, so a queued frame is delivered, never a loss gap.
-			client.socket.write(
-				encodePrivateFrame<DaemonWorkerFrameHeader>({ kind: "outbound", outboundType: message.type }, payload),
-			);
-			delivered = true;
-		}
-		return delivered;
+		this.host.flushRoster();
 	}
 
 	private recordWorkerRecoveryState(state: ActiveSessionState, operation: string, busyOverride?: boolean): void {
@@ -7761,32 +7491,6 @@ export class AgentDaemon {
 		process.exit(exitCode);
 	}
 }
-
-interface WorkerRosterReporterState {
-	lastComposed: Map<string, WorkerRosterEntry>;
-	lastComposedJson: Map<string, string>;
-	queuedChildren: Map<string, WorkerRosterEntry>;
-	/** Pending removals: agentId -> removed sessionId; a new incarnation of the id cancels it. */
-	removedAgentIds: Map<string, string | undefined>;
-	snapshotPending: boolean;
-}
-
-const ROSTER_SESSION_EVENT_TRIGGERS = new Set([
-	"turn_start",
-	"turn_end",
-	"bash_start",
-	"bash_end",
-	"compaction_start",
-	"compaction_end",
-	"auto_retry_start",
-	"auto_retry_end",
-	"tool_execution_start",
-	"tool_execution_end",
-	"message_end",
-	"session_action_update",
-	"session_info_changed",
-	"thinking_level_changed",
-]);
 
 /**
  * The transfer id must name the cursor observed at materialization, not the live session cursor:

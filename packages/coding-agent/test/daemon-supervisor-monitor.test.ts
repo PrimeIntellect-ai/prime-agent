@@ -13,6 +13,25 @@ import { CommandRecoveryJournal } from "../src/modes/daemon/command-recovery-jou
 import { DaemonCatalogClient } from "../src/modes/daemon/daemon-catalog-process.js";
 import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
 import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
+import { SessionHostCore } from "../src/modes/shared/session-host-core.js";
+
+/** Minimal host callbacks for a SessionHostCore that only serves roster state. */
+function makeStubHostCallbacks(): ConstructorParameters<typeof SessionHostCore>[0] {
+	return {
+		broadcast: () => {},
+		createConnectionState: () => {
+			throw new Error("not used by the supervisor-monitor stub");
+		},
+		sessionReplaced: () => {},
+		shutdown: () => {},
+		createSubagentRuntimeHost: () => undefined,
+		setStateSessionName: async () => {},
+		onStateReleased: () => {},
+		onStateReady: () => {},
+		isSessionClosing: () => false,
+	};
+}
+
 import {
 	createDaemonCommandEnvelope,
 	DAEMON_UPDATE_RESTART_FORMAT_VERSION,
@@ -489,20 +508,16 @@ describe("daemon worker supervisor monitoring", () => {
 		});
 		let assertionCount = 0;
 		const handleWorkerCommand = vi.fn(async () => undefined);
+		// sessions and rosterReporter resolve through the SessionHostCore seam
+		// since the session-host extraction; a real core keeps the production
+		// getters and the same assertions.
 		const daemon = Object.assign(Object.create(AgentDaemon.prototype), {
 			options: { worker: { authenticationToken: "token" } },
 			supervisorClaims: new Map(),
 			peerClaims: new Map(),
 			clients: new Set(),
-			sessions: new Map(),
+			host: new SessionHostCore(makeStubHostCallbacks(), {}),
 			cronStore: { list: () => [] },
-			rosterReporter: {
-				lastComposed: new Map(),
-				lastComposedJson: new Map(),
-				queuedChildren: new Map(),
-				removedAgentIds: new Map(),
-				snapshotPending: false,
-			},
 			shuttingDown: false,
 			clearSupervisorAvailabilityCheck: vi.fn(),
 			scheduleSupervisorFenceCheck: vi.fn(),
