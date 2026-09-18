@@ -36,7 +36,7 @@ import { createHash, randomUUID } from "node:crypto";
  */
 
 export const CLOUD_PROTOCOL_NAME = "prime-agent.cloud";
-export const CLOUD_PROTOCOL_VERSION = 1;
+export const CLOUD_PROTOCOL_VERSION = 2;
 
 export const CLOUD_MAX_MESSAGE_BYTES = 1_048_576;
 export const CLOUD_MAX_JSON_DEPTH = 64;
@@ -52,12 +52,35 @@ export const CLOUD_MAX_QUEUED_COMMANDS = 64;
 export const CLOUD_MAX_SNAPSHOT_EVENTS = 256;
 export const CLOUD_MAX_TOKEN_CHARS = 256;
 export const CLOUD_MAX_OUTPUT_CHARS = 65_536;
+/** Session-file entries larger than this bound travel as artifact refs, never inline. */
+export const CLOUD_MAX_INLINE_ENTRY_BYTES = 262_144;
+/** Bound on one ephemeral session_event frame's encoded JSON. */
+export const CLOUD_MAX_SESSION_EVENT_BYTES = 131_072;
+/** Bound on one inline session_entry's encoded JSON. */
+export const CLOUD_MAX_ENTRY_JSON_CHARS = 262_144;
+export const CLOUD_MAX_THINKING_CHARS = 64;
+export const CLOUD_MAX_SESSION_NAME_CHARS = 128;
+export const CLOUD_MAX_EXTENSION_RESPONSE_CHARS = 8_192;
+export const CLOUD_MAX_META_CHARS = 4_096;
+export const CLOUD_MAX_PREVIEW_CHARS = 4_096;
+export const CLOUD_MAX_ROSTER_ROWS = 256;
+export const CLOUD_MAX_ARTIFACT_REFS = 32;
+export const CLOUD_MAX_CHILDREN = 512;
 
 export type CloudSessionId = string;
 export type CloudClientId = string;
 export type CloudCommandId = string;
 
-export const CLOUD_CAPABILITIES = ["event_stream", "command_receipts"] as const;
+export const CLOUD_CAPABILITIES = [
+	"event_stream",
+	"command_receipts",
+	"session_entries",
+	"session_events",
+	"roster_stream",
+	"family_messages",
+	"extension_ui",
+	"artifact_refs",
+] as const;
 export type CloudCapability = (typeof CLOUD_CAPABILITIES)[number];
 
 export const CLOUD_SESSION_STATUSES = ["starting", "idle", "busy", "stopping", "stopped", "failed"] as const;
@@ -122,11 +145,54 @@ export function newCloudTaskId(): CloudTaskId {
 	return `task_${randomUUID()}`;
 }
 
-/** M0 steering commands: start a task by a client-chosen taskId, or steer/cancel it by that id. */
+/**
+ * Session operations for a resident guest session (protocol v2). v1's task
+ * verbs (start_task / steer+taskId / cancel_task) are gone: the guest hosts a
+ * real resident session, so every operation maps onto the ordinary agent-loop
+ * semantics. Requests stay digest-checked, journaled, and idempotent by
+ * commandId.
+ */
 export type CloudCommandRequest =
-	| { kind: "start_task"; taskId: CloudTaskId; prompt: string }
-	| { kind: "steer"; taskId: CloudTaskId; text: string }
-	| { kind: "cancel_task"; taskId: CloudTaskId };
+	| {
+			kind: "open_session";
+			cwd: string;
+			model?: string;
+			thinking?: string;
+			seedTranscriptArtifact?: string;
+			prompt?: string;
+	  }
+	| { kind: "prompt"; text: string; queueIfBusy?: boolean }
+	| { kind: "steer"; text: string }
+	| { kind: "follow_up"; text: string }
+	| { kind: "abort" }
+	| { kind: "send_message"; targetRemoteSessionId: string; message: string }
+	| { kind: "set_model"; provider: string; modelId: string }
+	| { kind: "set_thinking_level"; level: string }
+	| { kind: "set_session_name"; name: string }
+	| { kind: "compact"; customInstructions?: string }
+	| { kind: "cancel_child"; childId: string }
+	| { kind: "delete_child"; childId: string }
+	| { kind: "extension_ui_response"; requestId: string; response: unknown }
+	| { kind: "release" };
+
+export const CLOUD_COMMAND_KINDS = [
+	"open_session",
+	"prompt",
+	"steer",
+	"follow_up",
+	"abort",
+	"send_message",
+	"set_model",
+	"set_thinking_level",
+	"set_session_name",
+	"compact",
+	"cancel_child",
+	"delete_child",
+	"extension_ui_response",
+	"release",
+] as const;
+
+export type CloudCommandKind = (typeof CLOUD_COMMAND_KINDS)[number];
 
 export interface CloudCommandReceipt {
 	commandId: CloudCommandId;
@@ -138,6 +204,24 @@ export interface CloudCommandReceipt {
 	/** True when the journal restored this command without a terminal record. */
 	uncertain: boolean;
 	error?: string;
+}
+
+/** One artifact reference for an oversized session entry payload (artifact_refs capability). */
+export interface CloudArtifactRef {
+	/** Guest-local path (or artifact id) the mirror can pull through the gateway. */
+	path: string;
+	sha256: string;
+	bytes: number;
+}
+
+/** One remote descendant row in a roster_delta event. */
+export interface CloudRosterRow {
+	childId: string;
+	parentRemoteId?: string;
+	name?: string;
+	status: "queued" | "running" | "completed" | "failed" | "cancelled";
+	depth: number;
+	preview?: string;
 }
 
 export type CloudEvent =
@@ -152,6 +236,69 @@ export type CloudEvent =
 			stream: "stdout" | "stderr";
 			/** Bounded live output fragment; the guest batches and caps it. */
 			text: string;
+	  }
+	/** Durable mirror of one guest session-file entry (session_entries capability). */
+	| {
+			sequence: number;
+			kind: "session_entry";
+			recordedAt: string;
+			/** Remote session id (the guest's session id), not a CloudSessionId. */
+			sessionId: string;
+			entryId: string;
+			/** Canonical session-file entry JSON; bounded by CLOUD_MAX_INLINE_ENTRY_BYTES. */
+			entry: Record<string, unknown>;
+			/** Artifact refs for payloads stored outside the entry (artifact_refs capability). */
+			artifacts?: CloudArtifactRef[];
+	  }
+	/** Ephemeral live session event frame (session_events capability). */
+	| {
+			sequence: number;
+			kind: "session_event";
+			recordedAt: string;
+			sessionId: string;
+			/** AgentConnectionSessionEvent JSON, bounded by CLOUD_MAX_SESSION_EVENT_BYTES. */
+			event: Record<string, unknown>;
+	  }
+	/** Latest session metadata snapshot (session_events capability). */
+	| {
+			sequence: number;
+			kind: "session_meta";
+			recordedAt: string;
+			sessionId: string;
+			streaming: boolean;
+			runningTools: number;
+			queue: number;
+			recap?: string;
+			taskState?: "needs_input" | "completed";
+			model?: string;
+			connectivityHints?: string[];
+	  }
+	/** Remote descendant roster rows (roster_stream capability). */
+	| {
+			sequence: number;
+			kind: "roster_delta";
+			recordedAt: string;
+			rows: CloudRosterRow[];
+	  }
+	/** One remote child run transition (roster_stream capability). */
+	| {
+			sequence: number;
+			kind: "child_update";
+			recordedAt: string;
+			childId: string;
+			status: "queued" | "running" | "completed" | "failed" | "cancelled";
+			answerPreview?: string;
+			sessionFile?: string;
+			model?: string;
+	  }
+	/** Token totals for one remote session (session_events capability). */
+	| {
+			sequence: number;
+			kind: "usage";
+			recordedAt: string;
+			sessionId: string;
+			totals: { inputTokens: number; outputTokens: number; cachedTokens?: number; requests: number };
+			revision: number;
 	  };
 
 export interface CloudSessionState {
@@ -193,6 +340,8 @@ export interface CloudSnapshot {
 	state: CloudSessionState;
 	/** Bounded tail of events after the client's cursor. */
 	events: readonly CloudEvent[];
+	/** Capabilities this gateway supports; absent means the v1 event stream only. */
+	capabilities?: readonly CloudCapability[];
 }
 
 export interface CloudSubscribe {
@@ -339,25 +488,103 @@ export function cloudRequestProblem(value: unknown): string | undefined {
 	if (!isRecord(value)) {
 		return "request must be a JSON object";
 	}
-	const kindProblem = expectOneOf(value.kind, "request.kind", ["start_task", "steer", "cancel_task"]);
+	const kindProblem = expectOneOf(value.kind, "request.kind", CLOUD_COMMAND_KINDS);
 	if (kindProblem !== undefined) {
 		return kindProblem;
 	}
-	if (value.kind === "start_task") {
-		return firstProblem(
-			expectFields(value, ["kind", "taskId", "prompt"]),
-			cloudIdProblem(value.taskId, "request.taskId"),
-			expectString(value.prompt, "request.prompt", CLOUD_MAX_PROMPT_CHARS, 0),
-		);
+	switch (value.kind) {
+		case "open_session":
+			return firstProblem(
+				expectFields(value, ["kind", "cwd", "model", "thinking", "seedTranscriptArtifact", "prompt"]),
+				expectString(value.cwd, "request.cwd", CLOUD_MAX_PATH_CHARS, 1),
+				optionalString(value.model, "request.model", CLOUD_MAX_MODEL_ID_CHARS),
+				optionalString(value.thinking, "request.thinking", CLOUD_MAX_THINKING_CHARS),
+				optionalString(value.seedTranscriptArtifact, "request.seedTranscriptArtifact", CLOUD_MAX_PATH_CHARS),
+				optionalString(value.prompt, "request.prompt", CLOUD_MAX_PROMPT_CHARS),
+			);
+		case "prompt":
+			return firstProblem(
+				expectFields(value, ["kind", "text", "queueIfBusy"]),
+				expectString(value.text, "request.text", CLOUD_MAX_PROMPT_CHARS, 1),
+				optionalBoolean(value.queueIfBusy, "request.queueIfBusy"),
+			);
+		case "steer":
+		case "follow_up":
+			return firstProblem(
+				expectFields(value, ["kind", "text"]),
+				expectString(value.text, "request.text", CLOUD_MAX_PROMPT_CHARS, 1),
+			);
+		case "abort":
+		case "release":
+			return expectFields(value, ["kind"]);
+		case "send_message":
+			return firstProblem(
+				expectFields(value, ["kind", "targetRemoteSessionId", "message"]),
+				expectString(value.targetRemoteSessionId, "request.targetRemoteSessionId", CLOUD_MAX_ID_CHARS, 1),
+				expectString(value.message, "request.message", CLOUD_MAX_PROMPT_CHARS, 1),
+			);
+		case "set_model":
+			return firstProblem(
+				expectFields(value, ["kind", "provider", "modelId"]),
+				expectString(value.provider, "request.provider", CLOUD_MAX_MODEL_ID_CHARS, 1),
+				expectString(value.modelId, "request.modelId", CLOUD_MAX_MODEL_ID_CHARS, 1),
+			);
+		case "set_thinking_level":
+			return firstProblem(
+				expectFields(value, ["kind", "level"]),
+				expectString(value.level, "request.level", CLOUD_MAX_THINKING_CHARS, 1),
+			);
+		case "set_session_name":
+			return firstProblem(
+				expectFields(value, ["kind", "name"]),
+				expectString(value.name, "request.name", CLOUD_MAX_SESSION_NAME_CHARS, 1),
+			);
+		case "compact":
+			return firstProblem(
+				expectFields(value, ["kind", "customInstructions"]),
+				optionalString(value.customInstructions, "request.customInstructions", CLOUD_MAX_PROMPT_CHARS),
+			);
+		case "cancel_child":
+		case "delete_child":
+			return firstProblem(
+				expectFields(value, ["kind", "childId"]),
+				expectString(value.childId, "request.childId", CLOUD_MAX_ID_CHARS, 1),
+			);
+		case "extension_ui_response": {
+			const base = firstProblem(
+				expectFields(value, ["kind", "requestId", "response"]),
+				expectString(value.requestId, "request.requestId", CLOUD_MAX_ID_CHARS, 1),
+			);
+			if (base !== undefined) return base;
+			if (value.response === undefined) return "request.response is required";
+			try {
+				const encoded = canonicalJson(value.response);
+				if (Buffer.byteLength(encoded, "utf8") > CLOUD_MAX_EXTENSION_RESPONSE_CHARS) {
+					return `request.response exceeds ${CLOUD_MAX_EXTENSION_RESPONSE_CHARS} bytes`;
+				}
+			} catch (error) {
+				const reason = error instanceof Error ? error.message : String(error);
+				return `request.response is not canonical JSON: ${reason}`;
+			}
+			return undefined;
+		}
+		default:
+			return `request.kind must be one of ${CLOUD_COMMAND_KINDS.join(", ")}`;
 	}
-	if (value.kind === "steer") {
-		return firstProblem(
-			expectFields(value, ["kind", "taskId", "text"]),
-			cloudIdProblem(value.taskId, "request.taskId"),
-			expectString(value.text, "request.text", CLOUD_MAX_PROMPT_CHARS, 0),
-		);
+}
+
+/** Maximum encoded bytes of one canonical request payload; enforced alongside digests. */
+export function cloudRequestJsonProblem(request: CloudCommandRequest): string | undefined {
+	try {
+		const encoded = canonicalJson(request);
+		if (Buffer.byteLength(encoded, "utf8") > CLOUD_MAX_REQUEST_JSON_CHARS) {
+			return `request exceeds ${CLOUD_MAX_REQUEST_JSON_CHARS} bytes`;
+		}
+		return undefined;
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		return `request is not canonical JSON: ${reason}`;
 	}
-	return firstProblem(expectFields(value, ["kind", "taskId"]), cloudIdProblem(value.taskId, "request.taskId"));
 }
 
 function cursorProblem(value: unknown, label: string): string | undefined {
@@ -406,6 +633,11 @@ function receiptProblem(value: unknown, label: string): string | undefined {
 	);
 }
 
+/** Runtime validation for one CloudEvent; undefined means the value is valid. */
+export function cloudEventProblem(value: unknown, label = "event"): string | undefined {
+	return eventProblem(value, label);
+}
+
 function eventProblem(value: unknown, label: string): string | undefined {
 	if (!isRecord(value)) {
 		return `${label} must be an object`;
@@ -422,6 +654,12 @@ function eventProblem(value: unknown, label: string): string | undefined {
 		"command_state",
 		"session_status",
 		"output_delta",
+		"session_entry",
+		"session_event",
+		"session_meta",
+		"roster_delta",
+		"child_update",
+		"usage",
 	]);
 	if (kindProblem !== undefined) {
 		return kindProblem;
@@ -440,9 +678,208 @@ function eventProblem(value: unknown, label: string): string | undefined {
 			expectString(value.text, `${label}.text`, CLOUD_MAX_OUTPUT_CHARS, 0),
 		);
 	}
+	if (value.kind === "session_entry") {
+		return sessionEntryProblem(value, label);
+	}
+	if (value.kind === "session_event") {
+		return sessionEventProblem(value, label);
+	}
+	if (value.kind === "session_meta") {
+		return sessionMetaProblem(value, label);
+	}
+	if (value.kind === "roster_delta") {
+		return rosterDeltaProblem(value, label);
+	}
+	if (value.kind === "child_update") {
+		return childUpdateProblem(value, label);
+	}
+	if (value.kind === "usage") {
+		return usageProblem(value, label);
+	}
 	return firstProblem(
 		expectFields(value, ["sequence", "kind", "recordedAt", "receipt"]),
 		receiptProblem(value.receipt, `${label}.receipt`),
+	);
+}
+
+function artifactRefsProblem(value: unknown, label: string): Problem {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value)) return `${label} must be an array`;
+	if (value.length > CLOUD_MAX_ARTIFACT_REFS) {
+		return `${label} must hold at most ${CLOUD_MAX_ARTIFACT_REFS} entries`;
+	}
+	for (let index = 0; index < value.length; index++) {
+		const entry = value[index];
+		if (!isRecord(entry)) return `${label}[${index}] must be an object`;
+		const problem = firstProblem(
+			expectFields(entry, ["path", "sha256", "bytes"]),
+			expectString(entry.path, `${label}[${index}].path`, CLOUD_MAX_PATH_CHARS, 1),
+			expectDigest(entry.sha256, `${label}[${index}].sha256`),
+			expectInteger(entry.bytes, `${label}[${index}].bytes`, 0),
+		);
+		if (problem !== undefined) return problem;
+	}
+	return undefined;
+}
+
+function sessionEntryProblem(value: Record<string, unknown>, label: string): Problem {
+	const base = firstProblem(
+		expectFields(value, ["sequence", "kind", "recordedAt", "sessionId", "entryId", "entry", "artifacts"]),
+		expectString(value.sessionId, `${label}.sessionId`, CLOUD_MAX_ID_CHARS, 1),
+		expectString(value.entryId, `${label}.entryId`, CLOUD_MAX_ID_CHARS, 1),
+		artifactRefsProblem(value.artifacts, `${label}.artifacts`),
+	);
+	if (base !== undefined) return base;
+	if (!isRecord(value.entry)) return `${label}.entry must be a JSON object`;
+	const entry = value.entry;
+	const entryProblem = firstProblem(
+		expectString(entry.type, `${label}.entry.type`, 128, 1),
+		expectString(entry.id, `${label}.entry.id`, CLOUD_MAX_ID_CHARS, 1),
+		entry.parentId === undefined || entry.parentId === null
+			? undefined
+			: expectString(entry.parentId, `${label}.entry.parentId`, CLOUD_MAX_ID_CHARS),
+		expectString(entry.timestamp, `${label}.entry.timestamp`, CLOUD_MAX_TIMESTAMP_CHARS, 1),
+	);
+	if (entryProblem !== undefined) return entryProblem;
+	try {
+		const encoded = canonicalJson(entry);
+		if (Buffer.byteLength(encoded, "utf8") > CLOUD_MAX_ENTRY_JSON_CHARS) {
+			return `${label}.entry exceeds ${CLOUD_MAX_ENTRY_JSON_CHARS} bytes; it must travel as artifact refs`;
+		}
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		return `${label}.entry is not canonical JSON: ${reason}`;
+	}
+	return undefined;
+}
+
+function sessionEventProblem(value: Record<string, unknown>, label: string): Problem {
+	const base = firstProblem(
+		expectFields(value, ["sequence", "kind", "recordedAt", "sessionId", "event"]),
+		expectString(value.sessionId, `${label}.sessionId`, CLOUD_MAX_ID_CHARS, 1),
+	);
+	if (base !== undefined) return base;
+	if (!isRecord(value.event)) return `${label}.event must be a JSON object`;
+	if (typeof value.event.type !== "string" || value.event.type.length < 1) {
+		return `${label}.event.type must be a non-empty string`;
+	}
+	try {
+		const encoded = canonicalJson(value.event);
+		if (Buffer.byteLength(encoded, "utf8") > CLOUD_MAX_SESSION_EVENT_BYTES) {
+			return `${label}.event exceeds ${CLOUD_MAX_SESSION_EVENT_BYTES} bytes`;
+		}
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		return `${label}.event is not canonical JSON: ${reason}`;
+	}
+	return undefined;
+}
+
+function sessionMetaProblem(value: Record<string, unknown>, label: string): Problem {
+	return firstProblem(
+		expectFields(value, [
+			"sequence",
+			"kind",
+			"recordedAt",
+			"sessionId",
+			"streaming",
+			"runningTools",
+			"queue",
+			"recap",
+			"taskState",
+			"model",
+			"connectivityHints",
+		]),
+		expectString(value.sessionId, `${label}.sessionId`, CLOUD_MAX_ID_CHARS, 1),
+		typeof value.streaming === "boolean" ? undefined : `${label}.streaming must be a boolean`,
+		expectInteger(value.runningTools, `${label}.runningTools`, 0),
+		expectInteger(value.queue, `${label}.queue`, 0),
+		optionalString(value.recap, `${label}.recap`, CLOUD_MAX_META_CHARS),
+		value.taskState === undefined
+			? undefined
+			: expectOneOf(value.taskState, `${label}.taskState`, ["needs_input", "completed"]),
+		optionalString(value.model, `${label}.model`, CLOUD_MAX_MODEL_ID_CHARS),
+		connectivityHintsProblem(value.connectivityHints, `${label}.connectivityHints`),
+	);
+}
+
+function connectivityHintsProblem(value: unknown, label: string): Problem {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value)) return `${label} must be an array`;
+	if (value.length > CLOUD_MAX_CAPABILITIES) return `${label} must hold at most ${CLOUD_MAX_CAPABILITIES} entries`;
+	for (let index = 0; index < value.length; index++) {
+		const problem = expectString(value[index], `${label}[${index}]`, CLOUD_MAX_META_CHARS, 1);
+		if (problem !== undefined) return problem;
+	}
+	return undefined;
+}
+
+function rosterRowProblem(value: unknown, label: string): Problem {
+	if (!isRecord(value)) return `${label} must be an object`;
+	return firstProblem(
+		expectFields(value, ["childId", "parentRemoteId", "name", "status", "depth", "preview"]),
+		expectString(value.childId, `${label}.childId`, CLOUD_MAX_ID_CHARS, 1),
+		value.parentRemoteId === undefined
+			? undefined
+			: expectString(value.parentRemoteId, `${label}.parentRemoteId`, CLOUD_MAX_ID_CHARS, 1),
+		optionalString(value.name, `${label}.name`, CLOUD_MAX_SESSION_NAME_CHARS),
+		expectOneOf(value.status, `${label}.status`, ["queued", "running", "completed", "failed", "cancelled"]),
+		expectInteger(value.depth, `${label}.depth`, 0),
+		optionalString(value.preview, `${label}.preview`, CLOUD_MAX_PREVIEW_CHARS),
+	);
+}
+
+function rosterDeltaProblem(value: Record<string, unknown>, label: string): Problem {
+	const base = firstProblem(expectFields(value, ["sequence", "kind", "recordedAt", "rows"]));
+	if (base !== undefined) return base;
+	if (!Array.isArray(value.rows)) return `${label}.rows must be an array`;
+	if (value.rows.length > CLOUD_MAX_ROSTER_ROWS) {
+		return `${label}.rows must hold at most ${CLOUD_MAX_ROSTER_ROWS} entries`;
+	}
+	for (let index = 0; index < value.rows.length; index++) {
+		const problem = rosterRowProblem(value.rows[index], `${label}.rows[${index}]`);
+		if (problem !== undefined) return problem;
+	}
+	return undefined;
+}
+
+function childUpdateProblem(value: Record<string, unknown>, label: string): Problem {
+	return firstProblem(
+		expectFields(value, [
+			"sequence",
+			"kind",
+			"recordedAt",
+			"childId",
+			"status",
+			"answerPreview",
+			"sessionFile",
+			"model",
+		]),
+		expectString(value.childId, `${label}.childId`, CLOUD_MAX_ID_CHARS, 1),
+		expectOneOf(value.status, `${label}.status`, ["queued", "running", "completed", "failed", "cancelled"]),
+		optionalString(value.answerPreview, `${label}.answerPreview`, CLOUD_MAX_PREVIEW_CHARS),
+		optionalString(value.sessionFile, `${label}.sessionFile`, CLOUD_MAX_PATH_CHARS),
+		optionalString(value.model, `${label}.model`, CLOUD_MAX_MODEL_ID_CHARS),
+	);
+}
+
+function usageTotalsProblem(value: unknown, label: string): Problem {
+	if (!isRecord(value)) return `${label} must be an object`;
+	return firstProblem(
+		expectFields(value, ["inputTokens", "outputTokens", "cachedTokens", "requests"]),
+		expectInteger(value.inputTokens, `${label}.inputTokens`, 0),
+		expectInteger(value.outputTokens, `${label}.outputTokens`, 0),
+		value.cachedTokens === undefined ? undefined : expectInteger(value.cachedTokens, `${label}.cachedTokens`, 0),
+		expectInteger(value.requests, `${label}.requests`, 0),
+	);
+}
+
+function usageProblem(value: Record<string, unknown>, label: string): Problem {
+	return firstProblem(
+		expectFields(value, ["sequence", "kind", "recordedAt", "sessionId", "totals", "revision"]),
+		expectString(value.sessionId, `${label}.sessionId`, CLOUD_MAX_ID_CHARS, 1),
+		usageTotalsProblem(value.totals, `${label}.totals`),
+		expectInteger(value.revision, `${label}.revision`, 0),
 	);
 }
 
@@ -543,7 +980,8 @@ function helloProblem(value: Record<string, unknown>): string | undefined {
 
 function snapshotProblem(value: Record<string, unknown>): string | undefined {
 	const base = firstProblem(
-		expectFields(value, ["type", "sessionId", "generation", "cursor", "status", "state", "events"]),
+		expectFields(value, ["type", "sessionId", "generation", "cursor", "status", "state", "events", "capabilities"]),
+		capabilitiesProblem(value.capabilities, "snapshot.capabilities"),
 		cloudIdProblem(value.sessionId, "snapshot.sessionId"),
 		expectInteger(value.generation, "snapshot.generation", 1),
 		expectOneOf(value.status, "snapshot.status", CLOUD_SESSION_STATUSES),
@@ -771,6 +1209,19 @@ function expectOneOf<T extends string>(value: unknown, label: string, allowed: r
 		return `${label} must be one of ${allowed.join(", ")}`;
 	}
 	return undefined;
+}
+
+function optionalString(value: unknown, label: string, maxLength: number): Problem {
+	if (value === undefined) return undefined;
+	if (typeof value !== "string" || value.length < 1 || value.length > maxLength) {
+		return `${label} must be a string of 1-${maxLength} characters when present`;
+	}
+	return undefined;
+}
+
+function optionalBoolean(value: unknown, label: string): Problem {
+	if (value === undefined) return undefined;
+	return typeof value === "boolean" ? undefined : `${label} must be a boolean when present`;
 }
 
 function expectDigest(value: unknown, label: string): Problem {

@@ -167,7 +167,11 @@ describe("CloudTunnelAttachment", () => {
 
 		connection.receive(snapshotWith([statusEvent, outputEvent]));
 		await vi.waitFor(() => expect(callbacks.appendGuestEvent).toHaveBeenCalledTimes(2));
-		expect(callbacks.persistGuestCursor).toHaveBeenCalledWith({ generation: 1, sequence: 2 });
+		expect(callbacks.persistGuestCursor).toHaveBeenCalledWith({
+			sandboxGeneration: 1,
+			eventGeneration: 1,
+			sequence: 2,
+		});
 		expect(callbacks.flushTrace).toHaveBeenCalledTimes(1);
 		// Ack lands only after the flush resolved, then the subscription starts.
 		await vi.waitFor(() => expect(connection.sent.length).toBe(3));
@@ -186,7 +190,9 @@ describe("CloudTunnelAttachment", () => {
 
 	it("deduplicates replayed events and never acks past what it appended", async () => {
 		const transport = new FakeTransport();
-		const callbacks = makeCallbacks({ loadGuestCursor: () => ({ generation: 1, sequence: 2 }) });
+		const callbacks = makeCallbacks({
+			loadGuestCursor: () => ({ sandboxGeneration: 1, eventGeneration: 1, sequence: 2 }),
+		});
 		const attachment = makeAttachment(transport, callbacks);
 		attachment.start();
 		await vi.waitFor(() => expect(transport.connections.length).toBe(1));
@@ -236,7 +242,7 @@ describe("CloudTunnelAttachment", () => {
 		first.receive(snapshotWith([statusEvent]));
 		await vi.waitFor(() => expect(attachment.attached).toBe(true));
 
-		const steerRequest: CloudCommandRequest = { kind: "steer", taskId: "task_s", text: "go" };
+		const steerRequest: CloudCommandRequest = { kind: "steer", text: "go" };
 		const receiptPromise = attachment.submit("cmd_s", steerRequest);
 		await vi.waitFor(() =>
 			expect(first.sent.some((raw) => (JSON.parse(raw) as { type: string }).type === "submit")).toBe(true),
@@ -289,9 +295,9 @@ describe("CloudTunnelAttachment", () => {
 		await vi.waitFor(() => expect(attachment.attached).toBe(true));
 		// A dead bridge: submits are queued, never answered.
 		first.drop();
-		await attachment.submit("cmd_q", { kind: "steer", taskId: "task_q", text: "queued" } as CloudCommandRequest);
+		await attachment.submit("cmd_q", { kind: "steer", text: "queued" } as CloudCommandRequest);
 		await expect(
-			attachment.submit("cmd_q", { kind: "steer", taskId: "task_q", text: "different body" } as CloudCommandRequest),
+			attachment.submit("cmd_q", { kind: "steer", text: "different body" } as CloudCommandRequest),
 		).rejects.toThrow(/different request/);
 		await attachment.stop();
 	});
@@ -307,9 +313,9 @@ describe("CloudTunnelAttachment", () => {
 		await vi.waitFor(() => expect(attachment.attached).toBe(true));
 		// The guest would treat this as a protocol violation and close the
 		// connection; queuing it would wedge the supervisor in a replay loop.
-		await expect(
-			attachment.submit("cmd_bad", { kind: "steer", taskId: "task_bad", text: "x".repeat(65_537) }),
-		).rejects.toThrow(/invalid tunnel command: request.text/);
+		await expect(attachment.submit("cmd_bad", { kind: "steer", text: "x".repeat(65_537) })).rejects.toThrow(
+			/invalid tunnel command: request.text/,
+		);
 		expect(first.sent.some((raw) => (JSON.parse(raw) as { type: string }).type === "submit")).toBe(false);
 		expect(attachment.pendingCount).toBe(0);
 		await attachment.stop();

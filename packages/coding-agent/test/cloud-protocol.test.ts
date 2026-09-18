@@ -15,6 +15,7 @@ import {
 	cloudCursor,
 	cloudIdProblem,
 	cloudRequestDigest,
+	cloudRequestJsonProblem,
 	cloudRequestProblem,
 	cursorAtOrBefore,
 	isCloudDigest,
@@ -26,14 +27,55 @@ import {
 	serializeCloudMessage,
 } from "../src/core/cloud/protocol.js";
 
-const startTaskRequest: CloudCommandRequest = { kind: "start_task", taskId: "task-1", prompt: "hello cloud" };
-const steerRequest: CloudCommandRequest = { kind: "steer", taskId: "task-1", text: "and then verify" };
-const cancelTaskRequest: CloudCommandRequest = { kind: "cancel_task", taskId: "task-1" };
+const promptRequest: CloudCommandRequest = { kind: "prompt", text: "hello cloud", queueIfBusy: true };
+const steerRequest: CloudCommandRequest = { kind: "steer", text: "and then verify" };
+const followUpRequest: CloudCommandRequest = { kind: "follow_up", text: "one more thing" };
+const openSessionRequest: CloudCommandRequest = {
+	kind: "open_session",
+	cwd: "/workspace",
+	model: "openai/gpt-5.5",
+	thinking: "high",
+	prompt: "start",
+};
+const abortRequest: CloudCommandRequest = { kind: "abort" };
+const releaseRequest: CloudCommandRequest = { kind: "release" };
+const sendMessageRequest: CloudCommandRequest = {
+	kind: "send_message",
+	targetRemoteSessionId: "sess-2",
+	message: "ping",
+};
+const setModelRequest: CloudCommandRequest = { kind: "set_model", provider: "openai", modelId: "gpt-5.5" };
+const setThinkingRequest: CloudCommandRequest = { kind: "set_thinking_level", level: "medium" };
+const setNameRequest: CloudCommandRequest = { kind: "set_session_name", name: "cloud-root" };
+const compactRequest: CloudCommandRequest = { kind: "compact", customInstructions: "keep the plan" };
+const cancelChildRequest: CloudCommandRequest = { kind: "cancel_child", childId: "child-1" };
+const deleteChildRequest: CloudCommandRequest = { kind: "delete_child", childId: "child-1" };
+const extensionUiRequest: CloudCommandRequest = {
+	kind: "extension_ui_response",
+	requestId: "req-1",
+	response: { confirmed: true },
+};
+const allV2Requests: CloudCommandRequest[] = [
+	openSessionRequest,
+	promptRequest,
+	steerRequest,
+	followUpRequest,
+	abortRequest,
+	sendMessageRequest,
+	setModelRequest,
+	setThinkingRequest,
+	setNameRequest,
+	compactRequest,
+	cancelChildRequest,
+	deleteChildRequest,
+	extensionUiRequest,
+	releaseRequest,
+];
 
 function receipt(overrides: Partial<CloudCommandReceipt> = {}): CloudCommandReceipt {
 	return {
 		commandId: "cmd-1",
-		digest: cloudRequestDigest(startTaskRequest),
+		digest: cloudRequestDigest(promptRequest),
 		state: "accepted",
 		submittedAt: "2026-09-16T00:00:00.000Z",
 		updatedAt: "2026-09-16T00:00:00.000Z",
@@ -132,25 +174,32 @@ describe("canonicalJson", () => {
 
 describe("cloudRequestDigest", () => {
 	it("is stable across key order", () => {
-		expect(cloudRequestDigest({ kind: "start_task", taskId: "task-1", prompt: "hi" })).toEqual(
-			cloudRequestDigest({ prompt: "hi", taskId: "task-1", kind: "start_task" }),
+		expect(cloudRequestDigest({ kind: "prompt", text: "hi", queueIfBusy: true })).toEqual(
+			cloudRequestDigest({ queueIfBusy: true, text: "hi", kind: "prompt" }),
 		);
 	});
 
 	it("changes with the request", () => {
-		expect(cloudRequestDigest(startTaskRequest)).not.toEqual(
-			cloudRequestDigest({ kind: "start_task", taskId: "task-1", prompt: "hi there" }),
+		expect(cloudRequestDigest(promptRequest)).not.toEqual(
+			cloudRequestDigest({ kind: "prompt", text: "hi there", queueIfBusy: true }),
 		);
-		expect(cloudRequestDigest(startTaskRequest)).not.toEqual(cloudRequestDigest(steerRequest));
-		expect(cloudRequestDigest(startTaskRequest)).not.toEqual(cloudRequestDigest(cancelTaskRequest));
+		expect(cloudRequestDigest(promptRequest)).not.toEqual(cloudRequestDigest(steerRequest));
+		expect(cloudRequestDigest(steerRequest)).not.toEqual(cloudRequestDigest(followUpRequest));
+		expect(cloudRequestDigest(cancelChildRequest)).not.toEqual(cloudRequestDigest(deleteChildRequest));
+	});
+
+	it("is defined for every v2 command kind and differs between them", () => {
+		const digests = allV2Requests.map((request) => cloudRequestDigest(request));
+		for (const digest of digests) {
+			expect(isCloudDigest(digest)).toBe(true);
+		}
+		expect(new Set(digests).size).toBe(allV2Requests.length);
 	});
 
 	it("uses a domain-separated sha256 format", () => {
-		const digest = cloudRequestDigest(startTaskRequest);
+		const digest = cloudRequestDigest(promptRequest);
 		expect(isCloudDigest(digest)).toBe(true);
-		expect(digest).not.toEqual(
-			`sha256:${createHash("sha256").update(canonicalJson(startTaskRequest)).digest("hex")}`,
-		);
+		expect(digest).not.toEqual(`sha256:${createHash("sha256").update(canonicalJson(promptRequest)).digest("hex")}`);
 		expect(isCloudDigest("sha256:zz")).toBe(false);
 		expect(isCloudDigest("md5:0000")).toBe(false);
 	});
@@ -194,8 +243,8 @@ describe("parseCloudMessage and serializeCloudMessage", () => {
 				sessionId: "sess-1",
 				generation: 2,
 				commandId: "cmd-1",
-				request: startTaskRequest,
-				digest: cloudRequestDigest(startTaskRequest),
+				request: promptRequest,
+				digest: cloudRequestDigest(promptRequest),
 			},
 			{ type: "get_command", sessionId: "sess-1", generation: 2, commandId: "cmd-1" },
 			{ type: "get_command", sessionId: "sess-1", generation: 2, claim: true },
@@ -204,7 +253,7 @@ describe("parseCloudMessage and serializeCloudMessage", () => {
 				sessionId: "sess-1",
 				generation: 2,
 				receipt: receipt(),
-				request: canonicalJson(startTaskRequest),
+				request: canonicalJson(promptRequest),
 			},
 			{
 				type: "command",
@@ -229,12 +278,12 @@ describe("parseCloudMessage and serializeCloudMessage", () => {
 			sessionId: "sess-1",
 			generation: 2,
 			commandId: "cmd-1",
-			request: startTaskRequest,
-			digest: cloudRequestDigest(startTaskRequest),
+			request: promptRequest,
+			digest: cloudRequestDigest(promptRequest),
 		};
 		const second = {
-			digest: cloudRequestDigest(startTaskRequest),
-			request: { prompt: "hello cloud", taskId: "task-1", kind: "start_task" },
+			digest: cloudRequestDigest(promptRequest),
+			request: { queueIfBusy: true, text: "hello cloud", kind: "prompt" },
 			commandId: "cmd-1",
 			generation: 2,
 			sessionId: "sess-1",
@@ -256,8 +305,10 @@ describe("parseCloudMessage and serializeCloudMessage", () => {
 		expect(parseCloudMessage({ type: "goodbye" }).ok).toBe(false);
 	});
 
-	it("validates hello frames", () => {
-		expect(problemOf({ ...validHello(), protocolVersion: 2 })).toContain("must equal 1");
+	it("validates hello frames and rejects older protocol versions", () => {
+		expect(problemOf({ ...validHello(), protocolVersion: 1 })).toContain("must equal 2");
+		expect(problemOf({ ...validHello(), protocolVersion: 3 })).toContain("must equal 2");
+		expect(roundTrip(validHello()).type).toBe("hello");
 		expect(problemOf({ ...validHello(), clientId: "" })).toContain("hello.clientId");
 		expect(problemOf({ ...validHello(), extra: true })).toContain("unexpected field");
 		expect(parseCloudMessage({ ...validHello(), capabilities: ["time_travel"] }).ok).toBe(false);
@@ -277,35 +328,85 @@ describe("parseCloudMessage and serializeCloudMessage", () => {
 	it("validates submit request kinds and bounds", () => {
 		const base = { type: "submit", sessionId: "sess-1", generation: 2, commandId: "cmd-1" };
 		const longText = "x".repeat(70_000);
-		expect(
-			parseCloudMessage({ ...base, request: { kind: "start_task", taskId: "task-1", prompt: longText } }).ok,
-		).toBe(false);
-		expect(parseCloudMessage({ ...base, request: { kind: "steer", taskId: "task-1", text: longText } }).ok).toBe(
+		expect(parseCloudMessage({ ...base, request: { kind: "prompt", text: longText } }).ok).toBe(false);
+		expect(parseCloudMessage({ ...base, request: { kind: "steer", text: longText } }).ok).toBe(false);
+		expect(parseCloudMessage({ ...base, request: { kind: "follow_up", text: longText } }).ok).toBe(false);
+		expect(parseCloudMessage({ ...base, request: { kind: "open_session", cwd: "/w", prompt: longText } }).ok).toBe(
 			false,
 		);
-		expect(
-			parseCloudMessage({ ...base, request: { kind: "start_task", taskId: "t".repeat(200), prompt: "hi" } }).ok,
-		).toBe(false);
-		expect(parseCloudMessage({ ...base, request: { kind: "prompt", text: "hi" } }).ok).toBe(false);
-		expect(parseCloudMessage({ ...base, request: { kind: "start_task", taskId: "task-1" }, extra: 1 }).ok).toBe(
-			false,
+		const promptRequest: CloudCommandRequest = { kind: "prompt", text: "hi" };
+		expect(parseCloudMessage({ ...base, request: promptRequest, digest: cloudRequestDigest(promptRequest) }).ok).toBe(
+			true,
 		);
-		expect(problemOf({ ...base, request: { kind: "steer", taskId: "task-1" } })).toContain("request.text");
-		expect(problemOf({ ...base, request: { kind: "cancel_task" } })).toContain("request.taskId");
-		expect(parseCloudMessage({ ...base, commandId: "x".repeat(200), request: startTaskRequest }).ok).toBe(false);
-		expect(parseCloudMessage({ ...base, generation: 0, request: startTaskRequest }).ok).toBe(false);
+		expect(
+			parseCloudMessage({ ...base, request: promptRequest, digest: cloudRequestDigest(promptRequest), extra: 1 }).ok,
+		).toBe(false);
+		expect(problemOf({ ...base, request: { kind: "prompt" } })).toContain("request.text");
+		expect(problemOf({ ...base, request: { kind: "steer" } })).toContain("request.text");
+		expect(problemOf({ ...base, request: { kind: "set_session_name", name: "" } })).toContain("request.name");
+		expect(
+			cloudRequestProblem({ kind: "extension_ui_response", requestId: "r", response: { a: 1 } }),
+		).toBeUndefined();
+		expect(
+			parseCloudMessage({
+				...base,
+				request: {
+					kind: "extension_ui_response",
+					requestId: "r",
+					response: { blob: "x".repeat(9_000) },
+				},
+			}).ok,
+		).toBe(false);
+		expect(parseCloudMessage({ ...base, commandId: "x".repeat(200), request: promptRequest }).ok).toBe(false);
+		expect(parseCloudMessage({ ...base, generation: 0, request: promptRequest }).ok).toBe(false);
+	});
+
+	it("rejects the v1 task command surface with typed problems", () => {
+		const base = { type: "submit", sessionId: "sess-1", generation: 2, commandId: "cmd-1" };
+		expect(problemOf({ ...base, request: { kind: "start_task", taskId: "task-1", prompt: "hi" } })).toContain(
+			"request.kind must be one of",
+		);
+		expect(problemOf({ ...base, request: { kind: "cancel_task", taskId: "task-1" } })).toContain(
+			"request.kind must be one of",
+		);
+		// The v1 steer shape carried a taskId; v2 steer takes text only.
+		expect(problemOf({ ...base, request: { kind: "steer", taskId: "task-1", text: "hi" } })).toContain(
+			"unexpected field: taskId",
+		);
+		expect(cloudRequestProblem({ kind: "start_task", taskId: "t", prompt: "hi" } as unknown as object)).toContain(
+			"request.kind",
+		);
+	});
+
+	it("bounds request payload bytes through canonical encoding", () => {
+		// Field caps keep requests far under the frame bound; the byte check is
+		// defense in depth for every request the journal admits.
+		const maxPrompt: CloudCommandRequest = {
+			kind: "open_session",
+			cwd: "/w",
+			prompt: "x".repeat(65_536),
+		};
+		expect(cloudRequestProblem(maxPrompt)).toBeUndefined();
+		expect(cloudRequestJsonProblem(maxPrompt)).toBeUndefined();
+		expect(
+			cloudRequestJsonProblem({
+				kind: "extension_ui_response",
+				requestId: "r",
+				response: { x: () => 1 },
+			} as unknown as CloudCommandRequest),
+		).toContain("not canonical JSON");
 	});
 
 	it("requires a submit digest that matches the canonical digest of the request", () => {
 		const base = { type: "submit", sessionId: "sess-1", generation: 2, commandId: "cmd-1" };
-		expect(problemOf({ ...base, request: startTaskRequest })).toContain("submit.digest");
-		expect(parseCloudMessage({ ...base, request: startTaskRequest, digest: "nope" }).ok).toBe(false);
-		expect(problemOf({ ...base, request: startTaskRequest, digest: cloudRequestDigest(steerRequest) })).toContain(
+		expect(problemOf({ ...base, request: promptRequest })).toContain("submit.digest");
+		expect(parseCloudMessage({ ...base, request: promptRequest, digest: "nope" }).ok).toBe(false);
+		expect(problemOf({ ...base, request: promptRequest, digest: cloudRequestDigest(steerRequest) })).toContain(
 			"submit.digest must equal the canonical digest of submit.request",
 		);
-		expect(
-			parseCloudMessage({ ...base, request: startTaskRequest, digest: cloudRequestDigest(startTaskRequest) }).ok,
-		).toBe(true);
+		expect(parseCloudMessage({ ...base, request: promptRequest, digest: cloudRequestDigest(promptRequest) }).ok).toBe(
+			true,
+		);
 	});
 
 	it("validates snapshot invariants", () => {
@@ -361,9 +462,7 @@ describe("parseCloudMessage and serializeCloudMessage", () => {
 		expect(parseCloudMessage({ ...base, receipt: { ...receipt(), uncertain: "maybe" } }).ok).toBe(false);
 		expect(parseCloudMessage({ ...base, receipt: receipt(), request: "{oops" }).ok).toBe(false);
 		expect(parseCloudMessage({ ...base, receipt: receipt(), request: '{"kind":"sideways"}' }).ok).toBe(false);
-		expect(parseCloudMessage({ ...base, receipt: receipt(), request: canonicalJson(startTaskRequest) }).ok).toBe(
-			true,
-		);
+		expect(parseCloudMessage({ ...base, receipt: receipt(), request: canonicalJson(promptRequest) }).ok).toBe(true);
 		const withoutGeneration = { ...base } as Partial<Record<string, unknown>>;
 		delete withoutGeneration.generation;
 		expect(problemOf(withoutGeneration)).toContain("command.generation");
@@ -463,11 +562,222 @@ describe("parseCloudMessage and serializeCloudMessage", () => {
 		expect(problemOf(wrap({ ...delta, extra: 1 }))).toContain("unexpected field");
 	});
 
+	it("round-trips the v2 durable and ephemeral event kinds", () => {
+		const sessionEntry = {
+			sequence: 1,
+			kind: "session_entry",
+			recordedAt: "2026-09-16T00:00:00.000Z",
+			sessionId: "sess-remote-1",
+			entryId: "entry-1",
+			entry: {
+				type: "message",
+				id: "entry-1",
+				parentId: null,
+				timestamp: "2026-09-16T00:00:00.000Z",
+				message: { role: "user", content: "hello" },
+			},
+			artifacts: [
+				{ path: "/opt/prime-agent/artifacts/blob.bin", sha256: cloudRequestDigest(promptRequest), bytes: 12 },
+			],
+		};
+		const sessionEvent = {
+			sequence: 2,
+			kind: "session_event",
+			recordedAt: "2026-09-16T00:00:00.000Z",
+			sessionId: "sess-remote-1",
+			event: { type: "message_update", message: { role: "assistant", content: "par" } },
+		};
+		const sessionMeta = {
+			sequence: 3,
+			kind: "session_meta",
+			recordedAt: "2026-09-16T00:00:00.000Z",
+			sessionId: "sess-remote-1",
+			streaming: true,
+			runningTools: 1,
+			queue: 0,
+			recap: "working",
+			taskState: "needs_input",
+			model: "openai/gpt-5.5",
+			connectivityHints: ["tunnel"],
+		};
+		const rosterDelta = {
+			sequence: 4,
+			kind: "roster_delta",
+			recordedAt: "2026-09-16T00:00:00.000Z",
+			rows: [
+				{
+					childId: "child-1",
+					parentRemoteId: "sess-remote-1",
+					name: "worker",
+					status: "running",
+					depth: 1,
+					preview: "crunching",
+				},
+				{ childId: "child-2", parentRemoteId: "child-1", status: "queued", depth: 2 },
+			],
+		};
+		const childUpdate = {
+			sequence: 5,
+			kind: "child_update",
+			recordedAt: "2026-09-16T00:00:00.000Z",
+			childId: "child-1",
+			status: "completed",
+			answerPreview: "done",
+			sessionFile: "/sessions/child-1.jsonl",
+			model: "openai/gpt-5.5",
+		};
+		const usage = {
+			sequence: 6,
+			kind: "usage",
+			recordedAt: "2026-09-16T00:00:00.000Z",
+			sessionId: "sess-remote-1",
+			totals: { inputTokens: 10, outputTokens: 5, cachedTokens: 2, requests: 1 },
+			revision: 3,
+		};
+		const batch: CloudMessage = {
+			type: "events",
+			sessionId: "sess-1",
+			generation: 2,
+			events: [sessionEntry, sessionEvent, sessionMeta, rosterDelta, childUpdate, usage] as CloudEvent[],
+		};
+		expect(roundTrip(batch)).toEqual(batch);
+	});
+
+	it("bounds v2 event payloads", () => {
+		const wrap = (event: unknown): CloudMessage => {
+			return { type: "events", sessionId: "sess-1", generation: 2, events: [event as CloudEvent] };
+		};
+		const entry = {
+			sequence: 1,
+			kind: "session_entry",
+			recordedAt: "2026-09-16T00:00:00.000Z",
+			sessionId: "sess-remote-1",
+			entryId: "entry-1",
+			entry: {
+				type: "message",
+				id: "entry-1",
+				parentId: null,
+				timestamp: "2026-09-16T00:00:00.000Z",
+				message: { role: "user", content: "x".repeat(300_000) },
+			},
+		};
+		expect(problemOf(wrap(entry))).toContain("must travel as artifact refs");
+		expect(problemOf(wrap({ ...entry, entry: "not-an-object" }))).toContain("entry must be a JSON object");
+		expect(problemOf(wrap({ ...entry, entry: { id: "e", timestamp: "t" } }))).toContain("entry.type");
+		expect(problemOf(wrap({ ...entry, entry: { type: "message", timestamp: "t" } }))).toContain("entry.id");
+		expect(problemOf(wrap({ ...entry, entry: { type: "message", id: "e", parentId: 5, timestamp: "t" } }))).toContain(
+			"entry.parentId",
+		);
+		expect(problemOf(wrap({ ...entry, artifacts: [{ path: "/a", sha256: "nope", bytes: 1 }] }))).toContain(
+			"artifacts[0].sha256",
+		);
+
+		const sessionEvent = {
+			sequence: 1,
+			kind: "session_event",
+			recordedAt: "2026-09-16T00:00:00.000Z",
+			sessionId: "sess-remote-1",
+			event: { type: "message_update", partial: "x".repeat(200_000) },
+		};
+		expect(problemOf(wrap(sessionEvent))).toContain("event exceeds");
+		expect(problemOf(wrap({ ...sessionEvent, event: { type: "" } }))).toContain("event.type");
+
+		const meta = {
+			sequence: 1,
+			kind: "session_meta",
+			recordedAt: "2026-09-16T00:00:00.000Z",
+			sessionId: "sess-remote-1",
+			streaming: false,
+			runningTools: 0,
+			queue: 0,
+		};
+		expect(problemOf(wrap({ ...meta, streaming: "yes" }))).toContain("streaming");
+		expect(problemOf(wrap({ ...meta, taskState: "bored" }))).toContain("taskState");
+		expect(problemOf(wrap({ ...meta, connectivityHints: ["ok", 5] }))).toContain("connectivityHints[1]");
+
+		const roster = {
+			sequence: 1,
+			kind: "roster_delta",
+			recordedAt: "2026-09-16T00:00:00.000Z",
+			rows: Array.from({ length: 300 }, (_, index) => ({
+				childId: `child-${index}`,
+				status: "running",
+				depth: 1,
+			})),
+		};
+		expect(problemOf(wrap(roster))).toContain("rows must hold at most");
+		expect(problemOf(wrap({ ...roster, rows: [{ childId: "c", status: "sleeping", depth: 1 }] }))).toContain(
+			"rows[0].status",
+		);
+
+		const childUpdate = {
+			sequence: 1,
+			kind: "child_update",
+			recordedAt: "2026-09-16T00:00:00.000Z",
+			childId: "child-1",
+			status: "running",
+		};
+		expect(problemOf(wrap({ ...childUpdate, status: "paused" }))).toContain("status");
+		expect(problemOf(wrap({ ...childUpdate, answerPreview: "x".repeat(5_000) }))).toContain("answerPreview");
+
+		const usage = {
+			sequence: 1,
+			kind: "usage",
+			recordedAt: "2026-09-16T00:00:00.000Z",
+			sessionId: "sess-remote-1",
+			totals: { inputTokens: 1, outputTokens: 1, requests: 1 },
+			revision: 1,
+		};
+		expect(problemOf(wrap({ ...usage, totals: { inputTokens: -1, outputTokens: 1, requests: 1 } }))).toContain(
+			"totals.inputTokens",
+		);
+		expect(problemOf(wrap({ ...usage, revision: 1.5 }))).toContain("revision");
+	});
+
+	it("grows hello and snapshot capabilities with the v2 feature set", () => {
+		const capabilities = [
+			"event_stream",
+			"command_receipts",
+			"session_entries",
+			"session_events",
+			"roster_stream",
+			"family_messages",
+			"extension_ui",
+			"artifact_refs",
+		] as const;
+		expect(roundTrip({ ...validHello(), capabilities: [...capabilities] })).toEqual({
+			...validHello(),
+			capabilities: [...capabilities],
+		});
+		expect(
+			problemOf({ ...validHello(), capabilities: [...capabilities, "made_up"] as unknown as string[] }),
+		).toContain("capabilities entry");
+		expect(parseCloudMessage({ ...validSnapshot(), capabilities: ["session_entries"] }).ok).toBe(true);
+	});
+
+	it("rejects a v1 hello at the version gate", () => {
+		// A v2 server answers only v2; a v1 client must fail with the typed
+		// version problem, never with a protocol-violation crash.
+		const v1Hello = { ...validHello(), protocolVersion: 1 };
+		const parsed = parseCloudMessage(v1Hello);
+		expect(parsed.ok).toBe(false);
+		if (!parsed.ok) {
+			expect(parsed.error).toContain("hello.protocolVersion must equal 2");
+		}
+	});
+
 	it("exposes request and id runtime validation", () => {
-		expect(cloudRequestProblem(startTaskRequest)).toBeUndefined();
-		expect(cloudRequestProblem(steerRequest)).toBeUndefined();
-		expect(cloudRequestProblem(cancelTaskRequest)).toBeUndefined();
-		expect(cloudRequestProblem({ kind: "start_task" })).toContain("request.taskId");
+		for (const request of allV2Requests) {
+			expect(cloudRequestProblem(request)).toBeUndefined();
+			expect(cloudRequestJsonProblem(request)).toBeUndefined();
+		}
+		expect(cloudRequestProblem({ kind: "prompt" })).toContain("request.text");
+		expect(cloudRequestProblem({ kind: "send_message", targetRemoteSessionId: "", message: "hi" })).toContain(
+			"request.targetRemoteSessionId",
+		);
+		expect(cloudRequestProblem({ kind: "set_model", provider: "openai" })).toContain("request.modelId");
+		expect(cloudRequestProblem({ kind: "compact", customInstructions: 5 })).toContain("request.customInstructions");
+		expect(cloudRequestProblem({ kind: "cancel_child" })).toContain("request.childId");
 		expect(cloudIdProblem("cmd-1")).toBeUndefined();
 		expect(cloudIdProblem("")).toContain("at most");
 	});
@@ -479,6 +789,6 @@ describe("cloud module exports", () => {
 		expect(typeof cloud.parseCloudMessage).toBe("function");
 		expect(typeof cloud.serializeCloudMessage).toBe("function");
 		expect(typeof cloud.CloudCommandJournal).toBe("function");
-		expect(cloud.CLOUD_PROTOCOL_VERSION).toBe(1);
+		expect(cloud.CLOUD_PROTOCOL_VERSION).toBe(2);
 	});
 });

@@ -20,7 +20,11 @@ import { dirname, isAbsolute, join } from "node:path";
 import { spawnHidden, waitForChildProcess } from "../../utils/child-process.js";
 import { findGitPaths } from "../../utils/git.js";
 import { loadPrimeCliConfig } from "../prime-inference-auth.js";
-import { CloudTunnelAttachment, type CloudTunnelAttachmentTarget } from "./bridge/tunnel-attachment.js";
+import {
+	type CloudGuestCursorRecord,
+	CloudTunnelAttachment,
+	type CloudTunnelAttachmentTarget,
+} from "./bridge/tunnel-attachment.js";
 import { CloudTunnelSecretStore } from "./bridge/tunnel-secrets.js";
 import type { CloudTunnelTransport } from "./bridge/tunnel-transport.js";
 import { WsTunnelTransport } from "./bridge/tunnel-transport.js";
@@ -69,7 +73,6 @@ export interface DirectCloudDelegateOptions {
 export interface DirectCloudSteerResult {
 	delegation: DirectCloudDelegationSummary;
 	commandId: string;
-	taskId: string;
 	state: "acknowledged" | "queued";
 }
 
@@ -173,14 +176,14 @@ export function cloudInferenceTeamOverride(env: NodeJS.ProcessEnv = process.env)
 }
 
 /** Durable guest-cursor persistence for tunnel attachments (pre-ack). */
-function saveTunnelGuestCursor(eventsDirectory: string, cursor: { generation: number; sequence: number }): void {
+function saveTunnelGuestCursor(eventsDirectory: string, cursor: CloudGuestCursorRecord): void {
 	const path = join(eventsDirectory, TUNNEL_GUEST_CURSOR_FILE);
 	const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
 	const fd = openSync(temporary, "wx", 0o600);
 	try {
 		writeSync(
 			fd,
-			`${JSON.stringify({ version: 1, ...cursor })}
+			`${JSON.stringify({ version: 2, ...cursor })}
 `,
 		);
 		fsyncSync(fd);
@@ -190,7 +193,7 @@ function saveTunnelGuestCursor(eventsDirectory: string, cursor: { generation: nu
 	renameSync(temporary, path);
 }
 
-function loadTunnelGuestCursor(eventsDirectory: string): { generation: number; sequence: number } | undefined {
+function loadTunnelGuestCursor(eventsDirectory: string): CloudGuestCursorRecord | undefined {
 	const path = join(eventsDirectory, TUNNEL_GUEST_CURSOR_FILE);
 	if (!existsSync(path)) return undefined;
 	if (statSync(path).size > TUNNEL_GUEST_CURSOR_MAX_BYTES) {
@@ -199,20 +202,42 @@ function loadTunnelGuestCursor(eventsDirectory: string): { generation: number; s
 	const value = JSON.parse(readFileSync(path, "utf8")) as Partial<{
 		version: number;
 		generation: number;
+		sandboxGeneration: number;
+		eventGeneration: number;
 		sequence: number;
 	}>;
-	if (
-		value.version !== 1 ||
-		typeof value.generation !== "number" ||
-		!Number.isInteger(value.generation) ||
-		value.generation < 1 ||
-		typeof value.sequence !== "number" ||
-		!Number.isInteger(value.sequence) ||
-		value.sequence < 0
-	) {
-		throw new Error("tunnel guest cursor file is corrupt");
+	const isGeneration = (candidate: unknown): candidate is number =>
+		typeof candidate === "number" && Number.isInteger(candidate) && (candidate as number) >= 1;
+	const isSequence = (candidate: unknown): candidate is number =>
+		typeof candidate === "number" && Number.isInteger(candidate) && (candidate as number) >= 0;
+	if (value.version === 2) {
+		if (
+			!isGeneration(value.sandboxGeneration) ||
+			!isGeneration(value.eventGeneration) ||
+			!isSequence(value.sequence)
+		) {
+			throw new Error("tunnel guest cursor file is corrupt");
+		}
+		return {
+			sandboxGeneration: value.sandboxGeneration,
+			eventGeneration: value.eventGeneration,
+			sequence: value.sequence,
+		};
 	}
-	return { generation: value.generation, sequence: value.sequence };
+	if (value.version === 1) {
+		// v1 recorded one generation (the event epoch, equal to the sandbox
+		// generation until the first trim) and stays loadable: the position
+		// resumes only while the epochs coincide, exactly as v1 did.
+		if (!isGeneration(value.generation) || !isSequence(value.sequence)) {
+			throw new Error("tunnel guest cursor file is corrupt");
+		}
+		return {
+			sandboxGeneration: value.generation,
+			eventGeneration: value.generation,
+			sequence: value.sequence,
+		};
+	}
+	throw new Error("tunnel guest cursor file is corrupt");
 }
 
 /** Adapter from the typed Prime Tunnel REST client to the orchestrator boundary. */
@@ -1048,13 +1073,11 @@ export class DirectCloudService {
 		// guest journal deduplicates instead of running the steer twice.
 		const identity = steerId ?? randomUUID();
 		const commandId = `cmd_${identity}`;
-		const taskId = `task_${identity}`;
-		const outcome = await attachment.submit(commandId, { kind: "steer", taskId, text });
+		const outcome = await attachment.submit(commandId, { kind: "steer", text });
 		const current = this.owned(activeSessionId, sessionId);
 		return {
 			delegation: this.summary(current),
 			commandId,
-			taskId,
 			state: outcome.state === "acknowledged" ? "acknowledged" : "queued",
 		};
 	}

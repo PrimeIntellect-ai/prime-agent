@@ -13,11 +13,19 @@ Prime Agent continues to run locally by default. A user can delegate a session o
 1. Start a local session as usual.
 2. Use `/cloud run <prompt>` (or the `/sandbox` alias) and confirm the transfer and resource grant.
 3. The local daemon durably captures the current Git repository or worktree before it allocates compute.
-4. The daemon creates a VM Sandbox, uploads the fixed task inputs, and starts `prime-agent --print` as a resident command session.
-5. The remote one-shot agent owns inference, tools, Python, subprocesses, and delegated children for that task.
+4. The daemon creates a VM Sandbox, uploads the fixed task inputs, and starts the uploaded bridge as the resident command session; the bridge supervises the resident guest daemon (`prime-agent --mode daemon`).
+5. The remote resident session owns inference, tools, the Python kernel, subprocesses, and recursive children for that task, and mirrors every session-file entry and live event into the durable cloud protocol.
 6. The local daemon monitors completion, retrieves bounded stdout/stderr and a binary Git patch, and keeps the patch for review. It changes the checkout only after `/cloud apply <id>` and a second confirmation.
 
-M0 supports one-shot task delegation, provisioning progress, stop/forfeit, reconnect recovery, background result retrieval while the owning daemon stays online, durable lifecycle traces, changed-path review, and explicit patch apply. It does not attach the TUI to a remote daemon, stream full remote history, or accept live steering. Those features remain in the later bridge milestone.
+M0 supports one-shot task delegation, provisioning progress, stop/forfeit, reconnect recovery, background result retrieval while the owning daemon stays online, durable lifecycle traces, changed-path review, and explicit patch apply. Live steering over a Prime Tunnel remains the opt-in transport (`/cloud run --tunnel`, `/cloud steer`); attaching the TUI to a remote daemon and streaming full remote history are the later milestones.
+
+## The resident guest daemon (cloud protocol v2)
+
+The guest no longer runs one-shot `prime-agent --print` tasks. Each sandbox runs one resident guest daemon process - `runCloudDaemonMode` behind the internal `PRIME_AGENT_INTERNAL_CLOUD_DAEMON=1` env - hosting the cloud root session and every recursive descendant it spawns through the same `createAgentSessionRuntime` + `SessionHostCore` path the local daemon worker uses. There is no second implementation of the agent loop.
+
+- **Bootstrap:** the fixed uploaded bootstrap unpacks the workspace, records the git baseline, and always `exec`s the uploaded bridge. The bridge starts and supervises the guest daemon (bounded restarts), relays WebSocket frames verbatim to the daemon's 0700 unix socket (`PRIME_AGENT_CLOUD_DAEMON_SOCKET`), and owns the terminal results contract (`status.txt`, `stdout.txt`, `stderr.txt`, `changes.patch`, guest credential removal). A Prime Tunnel remains the live steering transport; without one, the sandbox finalizes once the admitted initial prompt settles (the one-shot flow preserved).
+- **Protocol v2 (`prime-agent.cloud` v2):** commands are ordinary session operations - `open_session`, `prompt`, `steer`, `follow_up`, `abort`, `send_message`, `set_model`, `set_thinking_level`, `set_session_name`, `compact`, `cancel_child`, `delete_child`, `extension_ui_response`, `release`. The v1 task verbs (`start_task`, `steer+taskId`, `cancel_task`) are rejected with typed problems, and a v1 hello is rejected at the version gate. Every submit keeps the canonical digest + journal + idempotent commandId semantics; restored uncertain commands are surfaced honestly and never re-executed.
+- **Durable mirror:** the daemon appends every session-file entry as a `session_entry` event (entries above the 256 KiB inline bound travel as artifact refs), streams bounded ephemeral `session_event` frames, publishes `session_meta`, `roster_delta`, `child_update`, and `usage` events, and keeps the answers' text as `output_delta` for the results contract. Events live in the guest's durable outbox (fsync before push, ack-after-import), so a crashed daemon replays to the local cursor on restart without duplicating settled work. Retention is a settled protocol: hello fences on the sandbox generation (one sandbox incarnation), trimming acknowledged history bumps only the event-log generation and a client holding a pre-trim cursor resyncs from a snapshot, and a full log with nothing acknowledged stalls the mirror honestly (reported in the daemon status record) until an acknowledgement frees space.
 
 ## Configuration
 
@@ -45,7 +53,7 @@ Optional overrides:
 |---|---|
 | Provision / terminate compute, sandbox-bound gateway tokens, egress policy, sandbox lifetime | Sandbox platform (generic APIs, existing today) |
 | Session records, identity allocation, generation fencing, admission, cleanup sequencing, result import, trace mirroring | Local daemon (new `core/cloud/` modules) |
-| The one-shot delegated agent loop, inference requests, kernels, tools, descendants, terminal result files | Resident `prime-agent --print` process in the Sandbox (M0) |
+| The delegated agent loop, inference requests, kernels, tools, descendants, terminal result files | Resident guest daemon process in the Sandbox (`modes/cloud/cloud-daemon.ts`), supervised by the uploaded bridge |
 
 Consequences of this choice, stated up front:
 
@@ -267,7 +275,7 @@ flowchart LR
     Edge["Tunnel edge<br/>HTTPS + basic auth"]
     Frpc["frpc<br/>(sandbox, outbound)"]
     GuestBridge["Guest bridge<br/>127.0.0.1 only"]
-    CloudDaemon["Resident tasks<br/>prime-agent --print"]
+    CloudDaemon["Resident guest daemon<br/>prime-agent --mode daemon"]
 
     LocalDaemon -->|"register / delete"| PrimeAPI
     LocalDaemon -->|"wss: hello(authToken) + basic auth"| Edge
@@ -281,28 +289,33 @@ flowchart LR
 
 The bridge is a standalone, dependency-free Node script
 (`core/cloud/bridge/guest-bridge-script.ts`) uploaded by the daemon alongside
-the bootstrap. In tunnel mode the bootstrap sets up the workspace baseline,
-then `exec`s the bridge; the bridge owns the rest of the delegation:
+the bootstrap. The bootstrap always sets up the workspace baseline, then `exec`s
+the bridge; the bridge owns the rest of the delegation as a supervisor and byte
+pump, never a task runner:
 
-- It supervises tasks: the initial prompt task from the uploaded prompt file,
-  then queued `steer` commands as follow-up `prime-agent --print` tasks in the
-  same workspace (real live steering without re-provisioning), and
-  `cancel_task` by signalling the active child. A `/cloud stop` reaches it as
-  SIGTERM through the ordinary VM process signal path.
-- It serves the full session protocol: `hello` (protocol authentication,
-  generation fencing), `snapshot`, `subscribe` with cursor replay and bounded
-  live push (`events` frames), idempotent `submit` with digest verification and
-  a durable command journal, `get_command` receipts, and `ack` trimming.
-- It streams live output as bounded `output_delta` events, batched and capped
-  (64 KiB per event).
-- It writes the same terminal results contract as the plain bootstrap:
-  `stdout.txt`, `stderr.txt`, a baseline-relative `changes.patch`, removal of
-  the guest credential, and `status.txt` last as the commit marker. The
-  gateway download path retrieves them unchanged.
+- It supervises the resident guest daemon: start, bounded restart after a
+  crash, and stop on release. The daemon hosts the real session, so `steer`,
+  `follow_up`, `abort`, and every other v2 operation are ordinary session
+  semantics instead of queued one-shot runs. A `/cloud stop` reaches the bridge
+  as SIGTERM through the ordinary VM process signal path, and it releases the
+  daemon before finalizing.
+- It relays frames verbatim: WebSocket text frames become newline-delimited
+  JSON on the daemon's 0700 unix socket, daemon lines become WebSocket frames.
+  The daemon owns `hello` validation (protocol version, bridge token, sandbox
+  generation fencing), `snapshot`, `subscribe` with cursor replay, idempotent
+  `submit` with digest verification and the durable command journal,
+  `get_command` receipts, and `ack` trimming.
+- It passes the scoped inference credential to the daemon as `PRIME_API_KEY`
+  (never logged), and writes the same terminal results contract as the plain
+  bootstrap: `stdout.txt` (the assistant answer stream), `stderr.txt` (daemon
+  diagnostics), a baseline-relative `changes.patch`, removal of the guest
+  credential, and `status.txt` last as the commit marker. The gateway download
+  path retrieves them unchanged.
 
 This is a real bridge for steering, not a status page: every wire frame it
-accepts is a validated session-protocol message, and `test/cloud-guest-bridge.test.ts`
-executes it end-to-end against a fake agent process over loopback.
+accepts is a session-protocol message, and `test/cloud-guest-bridge.test.ts`
+executes it end-to-end against the real guest daemon (faux provider) over
+loopback.
 
 ### What runs locally
 
@@ -317,7 +330,12 @@ delegation:
   reconnect it re-authenticates, resubscribes from the last durably
   acknowledged cursor, and re-sends unacknowledged commands with the same
   command id and digest (the guest journal deduplicates). Acknowledgement is
-  sent only after the mirrored events are fsynced into the local trace.
+  sent only after the mirrored events are fsynced into the local trace. The
+  attachment tracks the guest EVENT-LOG generation (persisted with the
+  guest cursor) separately from the sandbox generation: when retention trims
+  and bumps it, the attachment resets its sequence position and dedupe
+  base from the resync snapshot and continues mirroring - no
+  snapshot/subscribe ping-pong, and acks always name the current epoch.
 - **Bounded**: tunnel-liveness probes stop the supervisor when the platform
   registration is gone, and the delegation falls back to gateway-only
   monitoring without failing the task.

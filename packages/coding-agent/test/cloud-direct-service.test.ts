@@ -41,8 +41,8 @@ import {
 	type PrimeSandboxClient,
 	PrimeSandboxError,
 } from "../src/core/cloud/prime-sandbox-client.js";
-import { type CloudMessage, cloudRequestDigest } from "../src/core/cloud/protocol.js";
-import { CloudResultStore, cloudResultPatchPaths } from "../src/core/cloud/result-import.js";
+import { type CloudEvent, type CloudMessage, cloudRequestDigest } from "../src/core/cloud/protocol.js";
+import { CloudResultStore } from "../src/core/cloud/result-import.js";
 
 const roots: string[] = [];
 function temp(): string {
@@ -444,7 +444,7 @@ describe("DirectCloudService faux-provider flow", () => {
 		expect(readFileSync(join(repo, "latin.txt")).equals(after)).toBe(true);
 	});
 
-	it("bootstrap records committed and untracked guest changes before publishing terminal status", () => {
+	it("bootstrap hands the workspace to the bridge, which records committed and untracked guest changes", () => {
 		const root = temp();
 		const source = join(root, "source");
 		const workspace = join(root, "workspace");
@@ -459,19 +459,30 @@ describe("DirectCloudService faux-provider flow", () => {
 		writeFileSync(manifest, "{}\n");
 		writeFileSync(prompt, "make changes\n");
 		writeFileSync(auth, "secret\n", { mode: 0o644 });
-		const fakeAgent = join(root, "fake-agent.sh");
+		// A stub bridge standing in for the uploaded one: it makes the guest's
+		// changes, then owns the terminal results contract exactly like the
+		// real bridge's finalize (patch against the baseline, auth removed,
+		// status last).
+		const stubBridge = join(root, "stub-bridge.sh");
 		writeFileSync(
-			fakeAgent,
+			stubBridge,
 			[
 				"#!/usr/bin/env bash",
+				"set -eu",
+				'cd "$PRIME_AGENT_CLOUD_WORKSPACE_DIR"',
 				'git mv base.txt "renamed é.txt"',
-				'printf "changed\\n" > "renamed é.txt"',
-				'printf "new\\n" > new.txt',
+				'printf "changed\n" > "renamed é.txt"',
+				'printf "new\n" > new.txt',
 				"git add -A",
 				'git commit -qm "agent commit"',
+				'printf "untracked\n" > untracked.txt',
+				"git add -N -- untracked.txt || :",
+				'git -c core.quotePath=false diff --binary --no-renames "$PRIME_AGENT_CLOUD_GIT_BASELINE" > "$PRIME_AGENT_CLOUD_RESULTS_DIR/changes.patch" 2>> "$PRIME_AGENT_CLOUD_RESULTS_DIR/stderr.txt" || :',
+				'rm -f "$PRIME_AGENT_CLOUD_AUTH_PATH"',
+				'printf "completed\n" > "$PRIME_AGENT_CLOUD_RESULTS_DIR/status.txt"',
 			].join("\n"),
 		);
-		chmodSync(fakeAgent, 0o755);
+		chmodSync(stubBridge, 0o755);
 		const bootstrap = join(root, "bootstrap.sh");
 		writeFileSync(bootstrap, CLOUD_DELEGATION_BOOTSTRAP_SCRIPT);
 		execFileSync("/bin/bash", [bootstrap], {
@@ -483,15 +494,19 @@ describe("DirectCloudService faux-provider flow", () => {
 				PRIME_AGENT_CLOUD_PROMPT_PATH: prompt,
 				PRIME_AGENT_CLOUD_AUTH_PATH: auth,
 				PRIME_AGENT_CLOUD_RESULTS_DIR: results,
-				PRIME_AGENT_CLOUD_AGENT_BIN: fakeAgent,
+				PRIME_AGENT_CLOUD_AGENT_BIN: "prime-agent",
 				PRIME_AGENT_CLOUD_MODEL: "",
+				PRIME_AGENT_CLOUD_BRIDGE_ENABLED: "1",
+				PRIME_AGENT_CLOUD_BRIDGE_PATH: stubBridge,
+				PRIME_AGENT_CLOUD_NODE_BIN: "bash",
 			},
 		});
+
 		const patch = readFileSync(join(results, "changes.patch"), "utf8");
 		expect(patch).toContain("diff --git a/base.txt b/base.txt");
 		expect(patch).toContain("diff --git a/new.txt b/new.txt");
 		expect(patch).toContain("diff --git a/renamed é.txt b/renamed é.txt");
-		expect(cloudResultPatchPaths(patch)).toEqual(["base.txt", "new.txt", "renamed é.txt"]);
+		expect(patch).toContain("diff --git a/untracked.txt b/untracked.txt");
 		expect(readFileSync(join(results, "status.txt"), "utf8")).toBe("completed\n");
 		expect(existsSync(auth)).toBe(false);
 	});
@@ -534,6 +549,102 @@ describe("DirectCloudService Prime Tunnel bridge", () => {
 	interface TestCall {
 		kind: string;
 		detail?: string;
+	}
+
+	/**
+	 * In-memory bridge that records every client frame, answers hello with an
+	 * empty snapshot, and lets the test push scripted bridge frames.
+	 */
+	class RecordingBridgeTransport implements CloudTunnelTransport {
+		readonly sentFrames: string[] = [];
+		private handler: ((message: string) => void) | undefined;
+		private closeHandler: ((error?: CloudTunnelTransportError) => void) | undefined;
+		private readonly drops: Array<() => void> = [];
+
+		get connectionCount(): number {
+			return this.drops.length;
+		}
+
+		/** Serve one scripted bridge frame to the live connection. */
+		push(message: CloudMessage): void {
+			this.handler?.(JSON.stringify(message));
+		}
+
+		/** Simulate the edge cutting every connection it has seen. */
+		dropAll(): void {
+			for (const drop of this.drops.splice(0)) drop();
+		}
+
+		async connect(): Promise<CloudTunnelConnection> {
+			this.drops.push(() => {
+				this.closeHandler?.(new CloudTunnelTransportError("closed", "simulated drop"));
+			});
+			return {
+				send: (message) => {
+					this.sentFrames.push(message);
+					const parsed = JSON.parse(message) as CloudMessage;
+					if (parsed.type !== "hello") return;
+					this.handler?.(
+						JSON.stringify({
+							type: "snapshot",
+							sessionId: parsed.sessionId,
+							generation: parsed.generation,
+							cursor: { generation: parsed.generation, sequence: 0 },
+							status: "busy",
+							state: { cwd: "/w", modelId: "image-default", queuedCommandIds: [] },
+							events: [],
+						}),
+					);
+				},
+				close: () => {
+					this.closeHandler?.();
+				},
+				onMessage: (handler) => {
+					this.handler = handler;
+				},
+				onClose: (handler) => {
+					this.closeHandler = handler;
+				},
+			};
+		}
+	}
+
+	/** Frames of one wire type, parsed, with their cursor field when present. */
+	function framesOfType(
+		frames: readonly string[],
+		type: string,
+	): Array<{ cursor?: { generation: number; sequence: number } }> {
+		const parsed: Array<{ cursor?: { generation: number; sequence: number } }> = [];
+		for (const frame of frames) {
+			const value = JSON.parse(frame) as {
+				type?: string;
+				cursor?: { generation: number; sequence: number };
+			};
+			if (value.type === type) parsed.push(value);
+		}
+		return parsed;
+	}
+
+	function guestEvent(sequence: number): CloudEvent {
+		return {
+			sequence,
+			kind: "output_delta",
+			recordedAt: "2026-01-01T00:00:00.000Z",
+			taskId: "task_cursor_legacy",
+			stream: "stdout",
+			text: `evt-${sequence}`,
+		};
+	}
+
+	/** The local durable trace: every imported output_delta text, in order. */
+	function tracedTexts(path: string): string[] {
+		if (!existsSync(path)) return [];
+		return readFileSync(path, "utf8")
+			.split("\n")
+			.filter((line) => line.length > 0)
+			.map((line) => JSON.parse(line) as { event?: { kind?: string; text?: string } })
+			.filter((record) => record.event?.kind === "output_delta")
+			.map((record) => record.event?.text ?? "");
 	}
 
 	/** In-memory bridge: answers hello with a snapshot and submit with a receipt. */
@@ -881,7 +992,7 @@ describe("DirectCloudService Prime Tunnel bridge", () => {
 		const first = await service.steer("active-1", started.id, "keep going", "identity-7");
 		const retry = await service.steer("active-1", started.id, "keep going", "identity-7");
 		expect(retry.commandId).toBe(first.commandId);
-		expect(retry.taskId).toBe(first.taskId);
+		expect(retry.state).toBe(first.state);
 		const other = await service.steer("active-1", started.id, "keep going");
 		expect(other.commandId).not.toBe(first.commandId);
 		await service.stop("active-1", started.id, true);
@@ -919,6 +1030,116 @@ describe("DirectCloudService Prime Tunnel bridge", () => {
 		expect(recovered.state).toBe("acknowledged");
 		await service.stop("active-1", "sess_tunnel-8", true);
 	});
+
+	it("resumes a legacy v1 guest cursor file and degrades conservatively on malformed or mismatched data", async () => {
+		const root = temp();
+		const { commonOptions, store } = makeFakes(root, "sandbox-cursor-v1");
+		const transport = new RecordingBridgeTransport();
+		commonOptions.tunnelTransport = transport;
+		const sessionId = "sess_cursor_legacy";
+		const eventsDirectory = join(root, "state", "events", sessionId);
+		const cursorPath = join(eventsDirectory, "tunnel-guest-cursor.json");
+		const tracePath = join(eventsDirectory, "outbox-events.ndjson");
+		// A durable cursor from before the generation split: the legacy single
+		// {generation, sequence} the old attachment persisted, pre-trim.
+		mkdirSync(eventsDirectory, { recursive: true });
+		writeFileSync(cursorPath, `${JSON.stringify({ version: 1, generation: 1, sequence: 3 })}\n`);
+
+		const service = new DirectCloudService(commonOptions);
+		const started = await service.delegate({
+			activeSessionId: "active-1",
+			delegationId: sessionId,
+			cwd: join(root, "repo"),
+			prompt: "work",
+			options: { tunnel: true, timeoutMinutes: 10 },
+		});
+		await vi.waitFor(() => expect(transport.connectionCount).toBe(1), 5_000);
+		// The legacy position resumed exactly: hello and the subscribe after
+		// the snapshot both name sequence 3, not a fresh start.
+		await vi.waitFor(() => expect(framesOfType(transport.sentFrames, "hello")).toHaveLength(1), 5_000);
+		expect(framesOfType(transport.sentFrames, "hello")[0]?.cursor).toEqual({ generation: 1, sequence: 3 });
+		await vi.waitFor(() => expect(framesOfType(transport.sentFrames, "subscribe")).toHaveLength(1), 5_000);
+		expect(framesOfType(transport.sentFrames, "subscribe")[0]?.cursor).toEqual({
+			generation: 1,
+			sequence: 3,
+		});
+		// A bridge that re-serves the whole retained log deduplicates against
+		// the resumed position: only events 4 and 5 import; 1-3 never
+		// re-import, and the ack names the true import tail.
+		transport.push({
+			type: "events",
+			sessionId,
+			generation: 1,
+			events: [guestEvent(1), guestEvent(2), guestEvent(3), guestEvent(4), guestEvent(5)],
+		});
+		await vi.waitFor(() => expect(framesOfType(transport.sentFrames, "ack")).toHaveLength(1), 5_000);
+		expect(framesOfType(transport.sentFrames, "ack")[0]?.cursor).toEqual({ generation: 1, sequence: 5 });
+		expect(tracedTexts(tracePath)).toEqual(["evt-4", "evt-5"]);
+		// The rewrite is durable in the split-generation format.
+		expect(JSON.parse(readFileSync(cursorPath, "utf8"))).toEqual({
+			version: 2,
+			sandboxGeneration: 1,
+			eventGeneration: 1,
+			sequence: 5,
+		});
+
+		// Malformed legacy data degrades conservatively: the reconnect reports
+		// the corruption honestly and assumes no position - no hello at all.
+		writeFileSync(cursorPath, `${JSON.stringify({ version: 1, generation: 0, sequence: 2 })}\n`);
+		const framesBeforeDrop = transport.sentFrames.length;
+		transport.dropAll();
+		await vi.waitFor(
+			() => expect(store.get(sessionId)?.lastError).toContain("tunnel guest cursor file is corrupt"),
+			5_000,
+		);
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect(transport.sentFrames.length).toBe(framesBeforeDrop);
+
+		// Mismatched legacy data (an epoch this sandbox never had) is
+		// discarded by a fresh supervisor: it resumes from zero instead of
+		// trusting the stale position, so the re-served head re-imports.
+		writeFileSync(cursorPath, `${JSON.stringify({ version: 1, generation: 7, sequence: 9 })}\n`);
+		const restartTransport = new RecordingBridgeTransport();
+		commonOptions.tunnelTransport = restartTransport;
+		const restarted = new DirectCloudService(commonOptions);
+		await restarted.list("active-1");
+		await vi.waitFor(() => expect(framesOfType(restartTransport.sentFrames, "hello")).toHaveLength(1), 5_000);
+		expect(framesOfType(restartTransport.sentFrames, "hello")[0]?.cursor).toBeUndefined();
+		await vi.waitFor(() => expect(framesOfType(restartTransport.sentFrames, "subscribe")).toHaveLength(1), 5_000);
+		expect(framesOfType(restartTransport.sentFrames, "subscribe")[0]?.cursor).toEqual({
+			generation: 1,
+			sequence: 0,
+		});
+		// The discarded legacy position was never adopted or persisted: the
+		// file still holds the mismatched legacy content until a real import
+		// rewrites it.
+		expect(JSON.parse(readFileSync(cursorPath, "utf8"))).toEqual({
+			version: 1,
+			generation: 7,
+			sequence: 9,
+		});
+		restartTransport.push({
+			type: "events",
+			sessionId,
+			generation: 1,
+			events: [guestEvent(1), guestEvent(2)],
+		});
+		await vi.waitFor(() => expect(framesOfType(restartTransport.sentFrames, "ack")).toHaveLength(1), 5_000);
+		expect(framesOfType(restartTransport.sentFrames, "ack")[0]?.cursor).toEqual({
+			generation: 1,
+			sequence: 2,
+		});
+		expect(tracedTexts(tracePath)).toEqual(["evt-4", "evt-5", "evt-1", "evt-2"]);
+		// The fresh supervisor persisted its own position in the split format.
+		expect(JSON.parse(readFileSync(cursorPath, "utf8"))).toEqual({
+			version: 2,
+			sandboxGeneration: 1,
+			eventGeneration: 1,
+			sequence: 2,
+		});
+		await service.stop("active-1", started.id, true).catch(() => undefined);
+		await restarted.stop("active-1", started.id, true).catch(() => undefined);
+	}, 30_000);
 
 	it("passes the resolved inference billing team to the guest as PRIME_TEAM_ID", async () => {
 		const root = temp();

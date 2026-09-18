@@ -109,6 +109,7 @@ import {
 	runAcpMode,
 	runAcpModeWithConnection,
 	runAgentsViewMode,
+	runCloudDaemonMode,
 	runDaemonMode,
 	runDaemonSupervisorMode,
 	runPrintMode,
@@ -713,6 +714,13 @@ interface PreparedRuntimeServices {
 	sessionOptions: CreateAgentSessionOptions;
 	cliThinkingFromModel: boolean;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
+}
+
+export const CLOUD_DAEMON_ROLE_ENV = "PRIME_AGENT_INTERNAL_CLOUD_DAEMON";
+
+/** True when this process is the resident guest daemon of a cloud session. */
+export function isCloudDaemonProcess(environment: NodeJS.ProcessEnv = process.env): boolean {
+	return environment[CLOUD_DAEMON_ROLE_ENV] === "1";
 }
 
 export function daemonServerDefaultSessionConfig(config: AgentSessionRuntimeConfig): AgentSessionRuntimeConfig {
@@ -1381,7 +1389,11 @@ export async function main(args: string[], options?: MainOptions) {
 	// --list-models still takes the full path to print and exit.
 	if (appMode === "daemon" && parsed.listModels === undefined) {
 		printTimings();
-		if (isDaemonWorkerProcess()) {
+		if (isCloudDaemonProcess()) {
+			// The resident guest daemon for a cloud session: one hidden internal
+			// mode, started only by the uploaded bridge inside the sandbox.
+			await runCloudDaemonMode({ createRuntime });
+		} else if (isDaemonWorkerProcess()) {
 			await runDaemonMode({
 				socketPath: parsed.daemonSocket,
 				defaultSessionConfig: daemonDefaultSessionConfig,

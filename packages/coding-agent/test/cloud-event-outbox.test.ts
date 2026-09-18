@@ -1,4 +1,14 @@
-import { appendFileSync, chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	appendFileSync,
+	chmodSync,
+	existsSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -94,6 +104,41 @@ describe("DurableCloudEventOutbox", () => {
 		expect(caught(() => outbox.eventsAfter({ generation: 1, sequence: 3 })).code).toBe("invalid-cursor");
 	});
 
+	it("unlinks superseded epoch files after a committed trim and keeps foreign files", () => {
+		const directory = root();
+		const outbox = new DurableCloudEventOutbox({ directory, sessionId: "sess_test" });
+		outbox.append(status("a"));
+		outbox.append(status("b", "busy"));
+		outbox.ack({ generation: 1, sequence: 2 });
+		outbox.trimAcknowledged();
+		// The first committed trim replaces the base file with epoch g2: the
+		// superseded base file is gone, and the log still restores.
+		expect(existsSync(join(directory, "outbox-events.ndjson"))).toBe(false);
+		expect(existsSync(join(directory, "outbox-events.g2.ndjson"))).toBe(true);
+		const restoredOnce = new DurableCloudEventOutbox({ directory, sessionId: "sess_test" });
+		expect(restoredOnce.tailCursor).toEqual({ generation: 2, sequence: 0 });
+
+		// A crashed trim can leave a stale epoch file behind; a foreign file
+		// in the same directory must never be touched.
+		writeFileSync(join(directory, "outbox-events.g7.ndjson"), "stale orphan\n");
+		writeFileSync(join(directory, "unrelated.txt"), "foreign\n");
+
+		restoredOnce.append(status("c"));
+		restoredOnce.append(status("d"));
+		restoredOnce.ack({ generation: 2, sequence: 2 });
+		restoredOnce.trimAcknowledged();
+		// The second committed trim leaves exactly one events file - the
+		// current epoch - plus metadata; the stale epoch and the foreign
+		// files are swept or kept accordingly.
+		expect(existsSync(join(directory, "outbox-events.g2.ndjson"))).toBe(false);
+		expect(existsSync(join(directory, "outbox-events.g7.ndjson"))).toBe(false);
+		expect(existsSync(join(directory, "unrelated.txt"))).toBe(true);
+		const entries = readdirSync(directory).sort();
+		expect(entries).toEqual(["outbox-events.g3.ndjson", "outbox-meta.json", "unrelated.txt"]);
+		const restoredTwice = new DurableCloudEventOutbox({ directory, sessionId: "sess_test" });
+		expect(restoredTwice.tailCursor).toEqual({ generation: 3, sequence: 0 });
+	});
+
 	it("ignores an orphaned next-generation file when compaction did not commit metadata", () => {
 		const directory = root();
 		const outbox = new DurableCloudEventOutbox({ directory, sessionId: "sess_test" });
@@ -113,5 +158,88 @@ describe("DurableCloudEventOutbox", () => {
 		appendFileSync(eventsPath, `${JSON.stringify(line)}\n`);
 		expect(caught(() => new DurableCloudEventOutbox({ directory, sessionId: "sess_test" })).code).toBe("corrupt");
 		chmodSync(eventsPath, 0o600);
+	});
+});
+
+describe("DurableCloudEventOutbox with v2 session events", () => {
+	it("stores every v2 event kind with stable ids and replays them in order", () => {
+		const directory = root();
+		const outbox = new DurableCloudEventOutbox({ directory, sessionId: "sess_test" });
+		const entry = outbox.append({
+			kind: "session_entry",
+			recordedAt: "2026-01-01T00:00:00.000Z",
+			sessionId: "sess-remote-1",
+			entryId: "entry-1",
+			entry: {
+				type: "message",
+				id: "entry-1",
+				parentId: null,
+				timestamp: "2026-01-01T00:00:00.000Z",
+				message: { role: "user", content: "hi" },
+			},
+		});
+		const live = outbox.append({
+			kind: "session_event",
+			recordedAt: "2026-01-01T00:00:01.000Z",
+			sessionId: "sess-remote-1",
+			event: { type: "message_update", message: { role: "assistant", content: "partial" } },
+		});
+		const meta = outbox.append({
+			kind: "session_meta",
+			recordedAt: "2026-01-01T00:00:02.000Z",
+			sessionId: "sess-remote-1",
+			streaming: false,
+			runningTools: 0,
+			queue: 0,
+			recap: "done",
+			taskState: "completed",
+		});
+		const roster = outbox.append({
+			kind: "roster_delta",
+			recordedAt: "2026-01-01T00:00:03.000Z",
+			rows: [{ childId: "child-1", status: "running", depth: 1 }],
+		});
+		const child = outbox.append({
+			kind: "child_update",
+			recordedAt: "2026-01-01T00:00:04.000Z",
+			childId: "child-1",
+			status: "completed",
+			answerPreview: "ok",
+		});
+		const usage = outbox.append({
+			kind: "usage",
+			recordedAt: "2026-01-01T00:00:05.000Z",
+			sessionId: "sess-remote-1",
+			totals: { inputTokens: 1, outputTokens: 2, requests: 1 },
+			revision: 1,
+		});
+		const restored = new DurableCloudEventOutbox({ directory, sessionId: "sess_test" });
+		const replayed = restored.eventsAfter({ generation: 1, sequence: 0 });
+		expect(replayed).toEqual([entry, live, meta, roster, child, usage]);
+		expect(replayed[0]?.eventId).toBe(entry.eventId);
+	});
+
+	it("rejects a session_entry event that exceeds the inline bound", () => {
+		const outbox = new DurableCloudEventOutbox({
+			directory: root(),
+			sessionId: "sess_test",
+			maxEventBytes: 256,
+		});
+		expect(
+			caught(() =>
+				outbox.append({
+					kind: "session_entry",
+					recordedAt: "2026-01-01T00:00:00.000Z",
+					sessionId: "sess-remote-1",
+					entryId: "entry-1",
+					entry: {
+						type: "message",
+						id: "entry-1",
+						timestamp: "t",
+						message: { role: "user", content: "x".repeat(1_000) },
+					},
+				}),
+			).code,
+		).toBe("limit-exceeded");
 	});
 });

@@ -5,8 +5,10 @@ import {
 	fsyncSync,
 	mkdirSync,
 	openSync,
+	readdirSync,
 	readFileSync,
 	renameSync,
+	unlinkSync,
 	writeFileSync,
 	writeSync,
 } from "node:fs";
@@ -59,6 +61,8 @@ const DEFAULT_MAX_RECORDS = 50_000;
 const DEFAULT_MAX_EVENT_BYTES = 1_048_576;
 const META_FILE = "outbox-meta.json";
 const EVENTS_FILE = "outbox-events.ndjson";
+/** Event files this outbox may own on disk; anything else in the directory is foreign. */
+const EVENTS_FILE_PATTERN = /^outbox-events(?:\.g[1-9][0-9]*)?\.ndjson$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -105,7 +109,7 @@ function parseMeta(value: unknown, expectedSessionId: string): OutboxMeta {
 		!Number.isInteger(value.ackedSequence) ||
 		(value.ackedSequence as number) < 0 ||
 		(value.eventsFile !== undefined &&
-			(typeof value.eventsFile !== "string" || !/^outbox-events(?:\.g[1-9][0-9]*)?\.ndjson$/.test(value.eventsFile)))
+			(typeof value.eventsFile !== "string" || !EVENTS_FILE_PATTERN.test(value.eventsFile)))
 	) {
 		throw new CloudEventOutboxError("Cloud event outbox metadata is corrupt", "corrupt");
 	}
@@ -251,7 +255,33 @@ export class DurableCloudEventOutbox {
 		this.meta = { version: 1, sessionId: this.sessionId, generation, ackedSequence: 0, eventsFile };
 		this.persistMeta();
 		this.events = rewritten;
+		this.unlinkSupersededEventFiles(eventsFile);
 		return this.tailCursor;
+	}
+
+	/**
+	 * Remove the event files a committed trim superseded. It runs only after
+	 * the new epoch and its metadata are durable, so a crash before this
+	 * point leaves a harmless orphan that the next committed trim sweeps -
+	 * the metadata always names the live file. Only this outbox's own event
+	 * file names are touched, and failures are ignored: a stale file never
+	 * corrupts the log, and an unlink problem must not crash retention.
+	 */
+	private unlinkSupersededEventFiles(currentFile: string): void {
+		let names: string[];
+		try {
+			names = readdirSync(this.directory);
+		} catch {
+			return;
+		}
+		for (const name of names) {
+			if (name === currentFile || !EVENTS_FILE_PATTERN.test(name)) continue;
+			try {
+				unlinkSync(join(this.directory, name));
+			} catch {
+				// Already gone, or the sweep retries on the next trim.
+			}
+		}
 	}
 
 	private assertCursorGeneration(cursor: CloudCursor): void {

@@ -65,6 +65,7 @@ export {
 	type UnifiedSessionIndex,
 	type UnifiedSessionRecord,
 } from "./agents-view/agents-view-state.js";
+export { type CloudDaemonModeOptions, runCloudDaemonMode } from "./cloud/cloud-daemon.js";
 export {
 	DaemonCapabilityUnavailableError,
 	DaemonClient,

@@ -12,10 +12,10 @@ import {
 	serializeCloudMessage,
 } from "../src/core/cloud/protocol.js";
 
-const startTaskA: CloudCommandRequest = { kind: "start_task", taskId: "task-1", prompt: "hello cloud" };
-const startTaskB: CloudCommandRequest = { kind: "start_task", taskId: "task-2", prompt: "hello again" };
-const steerRequest: CloudCommandRequest = { kind: "steer", taskId: "task-1", text: "step faster" };
-const cancelTaskRequest: CloudCommandRequest = { kind: "cancel_task", taskId: "task-1" };
+const promptA: CloudCommandRequest = { kind: "prompt", text: "hello cloud", queueIfBusy: true };
+const promptB: CloudCommandRequest = { kind: "prompt", text: "hello again" };
+const steerRequest: CloudCommandRequest = { kind: "steer", text: "step faster" };
+const cancelChildRequest: CloudCommandRequest = { kind: "cancel_child", childId: "child-1" };
 
 describe("CloudCommandJournal", () => {
 	const roots: string[] = [];
@@ -41,11 +41,11 @@ describe("CloudCommandJournal", () => {
 	it("admits durably before acknowledging", () => {
 		const path = createPath();
 		const journal = new CloudCommandJournal(path);
-		const admitted = journal.admit("cmd-a", startTaskA);
+		const admitted = journal.admit("cmd-a", promptA);
 		expect(admitted.status).toBe("new");
 		expect(admitted.receipt).toMatchObject({
 			commandId: "cmd-a",
-			digest: cloudRequestDigest(startTaskA),
+			digest: cloudRequestDigest(promptA),
 			state: "accepted",
 			uncertain: false,
 		});
@@ -59,9 +59,9 @@ describe("CloudCommandJournal", () => {
 	it("replays receipts for duplicate submits and never re-admits", () => {
 		const path = createPath();
 		const journal = new CloudCommandJournal(path);
-		journal.admit("cmd-a", startTaskA);
-		expect(journal.admit("cmd-a", startTaskA).status).toBe("duplicate");
-		expect(journal.admit("cmd-a", { prompt: "hello cloud", taskId: "task-1", kind: "start_task" }).status).toBe(
+		journal.admit("cmd-a", promptA);
+		expect(journal.admit("cmd-a", promptA).status).toBe("duplicate");
+		expect(journal.admit("cmd-a", { queueIfBusy: true, text: "hello cloud", kind: "prompt" }).status).toBe(
 			"duplicate",
 		);
 		expect(recordCount(path)).toBe(1);
@@ -70,27 +70,27 @@ describe("CloudCommandJournal", () => {
 	it("rejects a same commandId submit with a different digest", () => {
 		const path = createPath();
 		const journal = new CloudCommandJournal(path);
-		journal.admit("cmd-a", startTaskA);
-		const conflict = journal.admit("cmd-a", startTaskB);
+		journal.admit("cmd-a", promptA);
+		const conflict = journal.admit("cmd-a", promptB);
 		expect(conflict.status).toBe("conflict");
-		expect(conflict.receipt.digest).toEqual(cloudRequestDigest(startTaskA));
+		expect(conflict.receipt.digest).toEqual(cloudRequestDigest(promptA));
 		expect(recordCount(path)).toBe(1);
 
 		const restored = new CloudCommandJournal(path);
-		expect(restored.admit("cmd-a", startTaskB).status).toBe("conflict");
-		expect(restored.admit("cmd-a", startTaskA).status).toBe("duplicate");
-		expect(restored.admit("cmd-a", cancelTaskRequest).status).toBe("conflict");
+		expect(restored.admit("cmd-a", promptB).status).toBe("conflict");
+		expect(restored.admit("cmd-a", promptA).status).toBe("duplicate");
+		expect(restored.admit("cmd-a", cancelChildRequest).status).toBe("conflict");
 	});
 
 	it("claims the oldest dispatchable command and fsyncs running before handing it out", () => {
 		const path = createPath();
 		const journal = new CloudCommandJournal(path);
-		journal.admit("cmd-a", startTaskA);
-		journal.admit("cmd-b", startTaskB);
+		journal.admit("cmd-a", promptA);
+		journal.admit("cmd-b", promptB);
 
 		const claimed = journal.claimNextPending();
 		expect(claimed?.receipt).toMatchObject({ commandId: "cmd-a", state: "running" });
-		expect(JSON.parse(claimed?.request ?? "null")).toEqual(startTaskA);
+		expect(JSON.parse(claimed?.request ?? "null")).toEqual(promptA);
 		// The running transition is durable the moment the claim returns.
 		expect(new CloudCommandJournal(path).getReceipt("cmd-a")?.state).toBe("running");
 
@@ -102,7 +102,7 @@ describe("CloudCommandJournal", () => {
 	it("never replays uncertain work after a crash", () => {
 		const path = createPath();
 		const journal = new CloudCommandJournal(path);
-		journal.admit("cmd-a", startTaskA);
+		journal.admit("cmd-a", promptA);
 		journal.claimNextPending();
 
 		const restored = new CloudCommandJournal(path);
@@ -119,12 +119,12 @@ describe("CloudCommandJournal", () => {
 
 	it("restores accepted commands as pending because a claim fsyncs running first", () => {
 		const path = createPath();
-		new CloudCommandJournal(path).admit("cmd-a", startTaskA);
+		new CloudCommandJournal(path).admit("cmd-a", promptA);
 
 		const restored = new CloudCommandJournal(path);
 		expect(restored.getReceipt("cmd-a")).toMatchObject({ state: "accepted", uncertain: false });
 		expect(restored.listUncertain()).toEqual([]);
-		const duplicate = restored.admit("cmd-a", startTaskA);
+		const duplicate = restored.admit("cmd-a", promptA);
 		expect(duplicate.status).toBe("duplicate");
 		expect(duplicate.receipt.uncertain).toBe(false);
 
@@ -135,13 +135,13 @@ describe("CloudCommandJournal", () => {
 	it("keeps terminal states across restarts and never re-executes them", () => {
 		const path = createPath();
 		const journal = new CloudCommandJournal(path);
-		journal.admit("cmd-a", startTaskA);
+		journal.admit("cmd-a", promptA);
 		journal.claimNextPending();
 		journal.complete("cmd-a");
 		journal.admit("cmd-b", steerRequest);
 		journal.claimNextPending();
 		journal.fail("cmd-b", "model refused");
-		journal.admit("cmd-c", cancelTaskRequest);
+		journal.admit("cmd-c", cancelChildRequest);
 		journal.claimNextPending();
 		journal.cancel("cmd-c");
 
@@ -151,14 +151,14 @@ describe("CloudCommandJournal", () => {
 		expect(restored.getReceipt("cmd-c")).toMatchObject({ state: "cancelled" });
 		expect(restored.listUncertain()).toEqual([]);
 		expect(restored.claimNextPending()).toBeUndefined();
-		expect(restored.admit("cmd-a", startTaskA).receipt.state).toBe("completed");
-		expect(restored.admit("cmd-a", startTaskB).status).toBe("conflict");
+		expect(restored.admit("cmd-a", promptA).receipt.state).toBe("completed");
+		expect(restored.admit("cmd-a", promptB).status).toBe("conflict");
 	});
 
 	it("guards transition misuse", () => {
 		const path = createPath();
 		const journal = new CloudCommandJournal(path);
-		journal.admit("cmd-a", startTaskA);
+		journal.admit("cmd-a", promptA);
 		journal.claimNextPending();
 		journal.complete("cmd-a");
 		expect(() => journal.complete("cmd-a")).toThrow(/terminal state completed/);
@@ -166,17 +166,23 @@ describe("CloudCommandJournal", () => {
 		expect(() => journal.requeue("cmd-a")).toThrow(/is not uncertain/);
 		expect(() => journal.complete("cmd-b")).toThrow(/unknown command/);
 		expect(() => journal.fail("cmd-a", "x".repeat(3000))).toThrow(/failure error/);
-		expect(() => journal.admit("", startTaskA)).toThrow();
+		expect(() => journal.admit("", promptA)).toThrow();
+		expect(() => journal.admit("cmd-x", { kind: "prompt" } as unknown as CloudCommandRequest)).toThrow(
+			/invalid command request/,
+		);
 		expect(() => journal.admit("cmd-x", { kind: "start_task" } as unknown as CloudCommandRequest)).toThrow(
 			/invalid command request/,
 		);
+		expect(() =>
+			journal.admit("cmd-x", { kind: "steer", taskId: "task-1", text: "hi" } as unknown as CloudCommandRequest),
+		).toThrow(/invalid command request/);
 		expect(new CloudCommandJournal(createPath()).claimNextPending()).toBeUndefined();
 	});
 
 	it("ignores repeated running reports and truncated final appends", () => {
 		const path = createPath();
 		const journal = new CloudCommandJournal(path);
-		journal.admit("cmd-a", startTaskA);
+		journal.admit("cmd-a", promptA);
 		journal.claimNextPending();
 		journal.markRunning("cmd-a");
 		expect(recordCount(path)).toBe(2);
@@ -189,8 +195,8 @@ describe("CloudCommandJournal", () => {
 	it("skips malformed and orphaned records", () => {
 		const path = createPath();
 		const journal = new CloudCommandJournal(path);
-		journal.admit("cmd-a", startTaskA);
-		const digest = cloudRequestDigest(startTaskA);
+		journal.admit("cmd-a", promptA);
+		const digest = cloudRequestDigest(promptA);
 		appendFileSync(
 			path,
 			[
@@ -219,14 +225,14 @@ describe("CloudCommandJournal", () => {
 	it("compacts atomically without losing uncertain commands", () => {
 		const path = createPath();
 		const first = new CloudCommandJournal(path, { compactAfterRecords: 4 });
-		first.admit("cmd-a", startTaskA);
+		first.admit("cmd-a", promptA);
 		first.claimNextPending();
 		expect(recordCount(path)).toBe(2);
 
 		// Crash: cmd-a restores as uncertain running.
 		const second = new CloudCommandJournal(path, { compactAfterRecords: 4 });
-		second.admit("cmd-b", startTaskB);
-		second.admit("cmd-c", cancelTaskRequest);
+		second.admit("cmd-b", promptB);
+		second.admit("cmd-c", cancelChildRequest);
 		// The fourth record triggers compaction, which must preserve cmd-a's uncertainty.
 		expect(recordCount(path)).toBe(4);
 
@@ -246,8 +252,8 @@ describe("CloudCommandJournal", () => {
 	it("never drops the record that triggers compaction", () => {
 		const path = createPath();
 		const journal = new CloudCommandJournal(path, { compactAfterRecords: 2 });
-		journal.admit("cmd-a", startTaskA);
-		journal.admit("cmd-b", startTaskB);
+		journal.admit("cmd-a", promptA);
+		journal.admit("cmd-b", promptB);
 		const contents = readFileSync(path, "utf8");
 		expect(contents).toContain('"commandId":"cmd-a"');
 		expect(contents).toContain('"commandId":"cmd-b"');
@@ -267,9 +273,9 @@ describe("CloudCommandJournal", () => {
 	it("skips admit records whose digest does not match their request", () => {
 		const path = createPath();
 		const journal = new CloudCommandJournal(path);
-		journal.admit("cmd-a", startTaskA);
+		journal.admit("cmd-a", promptA);
 		// A digest in valid format, but computed over a different request.
-		const mismatchedDigest = cloudRequestDigest(startTaskB);
+		const mismatchedDigest = cloudRequestDigest(promptB);
 		appendFileSync(
 			path,
 			`${JSON.stringify({
@@ -277,7 +283,7 @@ describe("CloudCommandJournal", () => {
 				type: "admit",
 				commandId: "cmd-b",
 				digest: mismatchedDigest,
-				request: canonicalJson(startTaskA),
+				request: canonicalJson(promptA),
 				recordedAt: "2026-09-16T00:00:00.000Z",
 			})}\n`,
 		);
@@ -285,13 +291,13 @@ describe("CloudCommandJournal", () => {
 		const restored = new CloudCommandJournal(path);
 		expect(restored.getReceipt("cmd-a")).toBeDefined();
 		expect(restored.getReceipt("cmd-b")).toBeUndefined();
-		expect(restored.admit("cmd-b", startTaskA).status).toBe("new");
+		expect(restored.admit("cmd-b", promptA).status).toBe("new");
 	});
 
 	it("exposes journal receipts through protocol command frames", () => {
 		const path = createPath();
 		const journal = new CloudCommandJournal(path);
-		journal.admit("cmd-a", startTaskA);
+		journal.admit("cmd-a", promptA);
 		const claimed = journal.claimNextPending();
 		if (claimed === undefined) {
 			throw new Error("claim missing");
@@ -302,7 +308,7 @@ describe("CloudCommandJournal", () => {
 			sessionId: "sess-1",
 			generation: 2,
 			receipt: claimed.receipt,
-			request: canonicalJson(startTaskA),
+			request: canonicalJson(promptA),
 		};
 		const parsed = parseCloudMessage(serializeCloudMessage(command));
 		expect(parsed.ok).toBe(true);

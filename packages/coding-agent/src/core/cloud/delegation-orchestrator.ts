@@ -67,8 +67,9 @@ import {
  *    a logical task is never duplicated.
  * 4. The bootstrap is a fixed uploaded script plus fixed-name env/argv; no
  *    user text is ever interpolated into a command line. It initializes the
- *    git baseline, runs the configured Prime Agent package/model in the VM
- *    (inference, tools, Python, children), and always writes a terminal
+ *    git baseline and execs the uploaded bridge, which supervises the resident
+ *    guest daemon running the configured Prime Agent package/model in the VM
+ *    (inference, tools, Python, children) and always writes a terminal
  *    status, stdout, stderr, and a binary patch.
  * 5. Results (output and patch) are retrieved before any sandbox delete. The
  *    default stop flow leaves the sandbox in a review state; only an explicit
@@ -96,6 +97,14 @@ export const CLOUD_GUEST_AUTH_PATH = `${CLOUD_GUEST_ROOT}/auth/inference.token`;
 export const CLOUD_GUEST_RESULTS_DIR = `${CLOUD_GUEST_ROOT}/results`;
 export const CLOUD_GUEST_BRIDGE_PATH = `${CLOUD_GUEST_ROOT}/bridge/bridge-server.mjs`;
 export const CLOUD_GUEST_BRIDGE_STATE_DIR = `${CLOUD_GUEST_ROOT}/bridge/state`;
+/** The resident guest daemon's VM-local protocol socket (0700). */
+export const CLOUD_GUEST_DAEMON_SOCKET = `${CLOUD_GUEST_ROOT}/daemon-state/cloud.sock`;
+/** Guest agent state directory (sessions, settings, artifacts). */
+export const CLOUD_GUEST_AGENT_DIR = `${CLOUD_GUEST_ROOT}/agent-state`;
+/** Guest daemon durable state (journal, outbox, session manifest). */
+export const CLOUD_GUEST_DAEMON_STATE_DIR = `${CLOUD_GUEST_ROOT}/daemon-state`;
+/** The guest daemon argv, fixed by the local daemon (never user text). */
+export const CLOUD_GUEST_DAEMON_ARGV_JSON = JSON.stringify(["prime-agent", "--mode", "daemon"]);
 
 /** Fixed-name environment variables carried by the resident process. */
 export const CLOUD_DELEGATION_ENV_KEYS = {
@@ -118,6 +127,11 @@ export const CLOUD_DELEGATION_ENV_KEYS = {
 	bridgeToken: "PRIME_AGENT_CLOUD_BRIDGE_TOKEN",
 	bridgeStateDir: "PRIME_AGENT_CLOUD_BRIDGE_STATE_DIR",
 	bridgeNodeBin: "PRIME_AGENT_CLOUD_NODE_BIN",
+	daemonSocket: "PRIME_AGENT_CLOUD_DAEMON_SOCKET",
+	daemonArgv: "PRIME_AGENT_CLOUD_DAEMON_ARGV_JSON",
+	daemonAgentDir: "PRIME_AGENT_CLOUD_AGENT_DIR",
+	daemonStateDir: "PRIME_AGENT_CLOUD_DAEMON_STATE_DIR",
+	daemonStatusFile: "PRIME_AGENT_CLOUD_DAEMON_STATUS_FILE",
 	frpcBin: "PRIME_AGENT_CLOUD_FRPC_BIN",
 	tunnelId: "PRIME_AGENT_CLOUD_TUNNEL_ID",
 	tunnelFrpServerHost: "PRIME_AGENT_CLOUD_TUNNEL_FRP_SERVER_HOST",
@@ -202,30 +216,12 @@ BASELINE="$(git -C "$WORKSPACE_DIR" rev-parse HEAD 2>> "$RESULTS_DIR/stderr.txt"
 chmod 600 "$AUTH_PATH" 2>> "$RESULTS_DIR/stderr.txt"
 cp "$MANIFEST_PATH" "$RESULTS_DIR/workspace-manifest.json" 2>> "$RESULTS_DIR/stderr.txt"
 
-# Tunnel mode: the uploaded bridge supervises tasks, serves the session
-# protocol on loopback, and owns the terminal results contract from here on.
-if [ -n "\${PRIME_AGENT_CLOUD_BRIDGE_ENABLED:-}" ]; then
-	export PRIME_AGENT_CLOUD_GIT_BASELINE="$BASELINE"
-	exec "\${PRIME_AGENT_CLOUD_NODE_BIN:-node}" "\${PRIME_AGENT_CLOUD_BRIDGE_PATH:?bridge path is required}"
-fi
-
-# Run the configured Prime Agent package/model in the submitted workspace: inference,
-# tools, the Python kernel, and delegated children all execute here.
-cd "$WORKSPACE_DIR"
-if [ -n "$MODEL" ]; then
-	set -- --model "$MODEL"
-else
-	set --
-fi
-PRIME_API_KEY="$(cat "$AUTH_PATH")" "$AGENT_BIN" --print "$@" "$(cat "$PROMPT_PATH")" \\
-	> "$RESULTS_DIR/stdout.txt" 2> "$RESULTS_DIR/stderr.txt"
-AGENT_EXIT="$?"
-if [ "$AGENT_EXIT" -eq 0 ]; then
-	OUTCOME="completed"
-else
-	OUTCOME="failed"
-fi
-exit "$AGENT_EXIT"
+# The uploaded bridge is always the resident process: it supervises the guest
+# daemon (one resident session runtime: inference, tools, the Python kernel,
+# and recursive children all execute in it), serves the session protocol on
+# loopback when a tunnel forwards it, and owns the terminal results contract.
+export PRIME_AGENT_CLOUD_GIT_BASELINE="$BASELINE"
+exec "\${PRIME_AGENT_CLOUD_NODE_BIN:-node}" "\${PRIME_AGENT_CLOUD_BRIDGE_PATH:?bridge path is required}"
 `;
 
 /** Deterministic progress phases, in workflow order. */
@@ -997,7 +993,7 @@ export class CloudDelegationOrchestrator {
 		}
 		try {
 			flow.progress("uploading", "uploading bootstrap, prompt, credential, and workspace");
-			await this.uploadInputs(ready.id, record, request, captured, secrets, tunnelGrant);
+			await this.uploadInputs(ready.id, record, request, captured, secrets);
 			if (this.requireRecord(sessionId).desiredLifecycle === "stopping") {
 				return this.handle(this.requireRecord(sessionId), "uncertain");
 			}
@@ -1204,7 +1200,6 @@ export class CloudDelegationOrchestrator {
 		request: CloudDelegationRequest,
 		captured: CloudDelegationCapturedWorkspace,
 		secrets: string[],
-		tunnelGrant: TunnelGrant | undefined,
 	): Promise<void> {
 		const sessionId = record.sessionId;
 		const auth = await this.guarded("upload_failed", "fetching sandbox gateway credentials", sessionId, secrets, () =>
@@ -1219,7 +1214,7 @@ export class CloudDelegationOrchestrator {
 				captured,
 			}),
 		);
-		const uploads: ReadonlyArray<{ path: string; filename: string; content: Uint8Array }> = [
+		const uploads: Array<{ path: string; filename: string; content: Uint8Array }> = [
 			{
 				path: CLOUD_GUEST_BOOTSTRAP_PATH,
 				filename: "bootstrap.sh",
@@ -1233,17 +1228,14 @@ export class CloudDelegationOrchestrator {
 				content: new TextEncoder().encode(request.inferenceCredential),
 			},
 		];
-		const bridgeUpload =
-			tunnelGrant === undefined
-				? []
-				: [
-						{
-							path: CLOUD_GUEST_BRIDGE_PATH,
-							filename: "bridge-server.mjs",
-							content: new TextEncoder().encode(CLOUD_GUEST_BRIDGE_SCRIPT),
-						},
-					];
-		for (const upload of [...uploads, ...bridgeUpload]) {
+		// The bridge is always uploaded: it is the resident process that
+		// supervises the guest daemon, with or without a tunnel.
+		uploads.push({
+			path: CLOUD_GUEST_BRIDGE_PATH,
+			filename: "bridge-server.mjs",
+			content: new TextEncoder().encode(CLOUD_GUEST_BRIDGE_SCRIPT),
+		});
+		for (const upload of uploads) {
 			await this.guarded("upload_failed", `uploading ${upload.path}`, sessionId, secrets, () =>
 				this.boundaries.platform.uploadFile(
 					sandboxId,
@@ -1271,18 +1263,28 @@ export class CloudDelegationOrchestrator {
 			[CLOUD_DELEGATION_ENV_KEYS.agentBin]: "prime-agent",
 			[CLOUD_DELEGATION_ENV_KEYS.model]: request.model ?? "",
 			[CLOUD_DELEGATION_ENV_KEYS.pkg]: request.packageSpec ?? "",
+			// The bridge is always the resident process and always supervises
+			// the guest daemon; a tunnel only decides whether frpc forwards it.
+			[CLOUD_DELEGATION_ENV_KEYS.bridgeEnabled]: "1",
+			[CLOUD_DELEGATION_ENV_KEYS.bridgePath]: CLOUD_GUEST_BRIDGE_PATH,
+			// Without a tunnel the protocol surface is unreachable from outside the VM,
+			// but the daemon still requires a token: a fresh per-launch secret.
+			[CLOUD_DELEGATION_ENV_KEYS.bridgeToken]: request.tunnel?.bridgeToken ?? `cloud_${randomUUID()}`,
+			[CLOUD_DELEGATION_ENV_KEYS.bridgeStateDir]: CLOUD_GUEST_BRIDGE_STATE_DIR,
+			[CLOUD_DELEGATION_ENV_KEYS.bridgeNodeBin]: "node",
+			[CLOUD_DELEGATION_ENV_KEYS.daemonSocket]: CLOUD_GUEST_DAEMON_SOCKET,
+			[CLOUD_DELEGATION_ENV_KEYS.daemonArgv]: CLOUD_GUEST_DAEMON_ARGV_JSON,
+			[CLOUD_DELEGATION_ENV_KEYS.daemonAgentDir]: CLOUD_GUEST_AGENT_DIR,
+			[CLOUD_DELEGATION_ENV_KEYS.daemonStateDir]: CLOUD_GUEST_DAEMON_STATE_DIR,
+			[CLOUD_DELEGATION_ENV_KEYS.daemonStatusFile]: `${CLOUD_GUEST_DAEMON_STATE_DIR}/daemon-status.json`,
 		};
 		if (request.inferenceTeamId !== undefined) {
 			env[CLOUD_DELEGATION_ENV_KEYS.inferenceTeamId] = request.inferenceTeamId;
 		}
 		if (tunnelGrant !== undefined && request.tunnel !== undefined) {
 			const registration = tunnelGrant.registration;
-			env[CLOUD_DELEGATION_ENV_KEYS.bridgeEnabled] = "1";
-			env[CLOUD_DELEGATION_ENV_KEYS.bridgePath] = CLOUD_GUEST_BRIDGE_PATH;
 			env[CLOUD_DELEGATION_ENV_KEYS.bridgePort] = String(request.tunnel.guestPort);
 			env[CLOUD_DELEGATION_ENV_KEYS.bridgeToken] = request.tunnel.bridgeToken;
-			env[CLOUD_DELEGATION_ENV_KEYS.bridgeStateDir] = CLOUD_GUEST_BRIDGE_STATE_DIR;
-			env[CLOUD_DELEGATION_ENV_KEYS.bridgeNodeBin] = "node";
 			env[CLOUD_DELEGATION_ENV_KEYS.frpcBin] = "frpc";
 			env[CLOUD_DELEGATION_ENV_KEYS.tunnelId] = registration.tunnelId;
 			env[CLOUD_DELEGATION_ENV_KEYS.tunnelFrpServerHost] = registration.frpServerHost;

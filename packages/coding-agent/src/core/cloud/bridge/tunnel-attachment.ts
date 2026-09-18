@@ -3,7 +3,6 @@ import {
 	CLOUD_PROTOCOL_VERSION,
 	type CloudCommandReceipt,
 	type CloudCommandRequest,
-	type CloudCursor,
 	type CloudEvent,
 	type CloudMessage,
 	type CloudSessionId,
@@ -47,6 +46,22 @@ export interface CloudTunnelAttachmentTarget {
 	bridgeToken: string;
 }
 
+/**
+ * Durable guest-mirror position, persisting the two generations separately:
+ * the sandbox generation fences incarnations, the event generation fences
+ * event-log epochs (retention bumps it without a new sandbox). One field
+ * cannot express both: after a trim the epochs differ, and a cursor saved
+ * then must still resume the same sandbox's renumbered log on restart.
+ */
+export interface CloudGuestCursorRecord {
+	/** Sandbox incarnation the position was recorded under. */
+	sandboxGeneration: number;
+	/** Event-log epoch the position names. */
+	eventGeneration: number;
+	/** Last event sequence consumed in that epoch. */
+	sequence: number;
+}
+
 export interface CloudTunnelAttachmentCallbacks {
 	/** Resolve the tunnel target before every connection; undefined releases. */
 	resolveTarget(): CloudTunnelAttachmentTarget | undefined;
@@ -55,9 +70,9 @@ export interface CloudTunnelAttachmentCallbacks {
 	/** Flush the local trace; resolve only after the append is fsynced. */
 	flushTrace(): Promise<void>;
 	/** Persist the guest cursor durably before it is acknowledged. */
-	persistGuestCursor(cursor: CloudCursor): void;
+	persistGuestCursor(cursor: CloudGuestCursorRecord): void;
 	/** Load the durably persisted guest cursor. */
-	loadGuestCursor(): CloudCursor | undefined;
+	loadGuestCursor(): CloudGuestCursorRecord | undefined;
 	/** Record the per-attachment identity on every successful connection. */
 	recordAttachment(attachmentUuid: string): void;
 	/** True while the delegation can still be steered. */
@@ -110,6 +125,15 @@ export class CloudTunnelAttachment {
 	private connectionClosed: (() => void) | undefined;
 	private readonly pending = new Map<string, PendingSubmit>();
 	private guestSequence = 0;
+	/**
+	 * The guest EVENT-LOG generation currently mirrored - distinct from the
+	 * sandbox generation. Retention trims bump it (renumbering sequences from
+	 * one); the sandbox generation never changes within one incarnation. All
+	 * subscribe and ack frames, sequence deduplication, and the persisted
+	 * cursor use this epoch, so a trim resyncs the position instead of
+	 * wedging the attachment.
+	 */
+	private guestGeneration = 0;
 	/** Durable resume point of the current connection, used for subscribe. */
 	private subscribeFromSequence = 0;
 	private subscribed = false;
@@ -301,7 +325,15 @@ export class CloudTunnelAttachment {
 			this.connectionClosed = undefined;
 		});
 		const resumeCursor = this.callbacks.loadGuestCursor();
-		if (resumeCursor !== undefined && resumeCursor.generation === this.generation) {
+		if (resumeCursor !== undefined && resumeCursor.sandboxGeneration === this.generation) {
+			// The saved position names THIS sandbox incarnation's event log,
+			// so the event epoch and sequence resume even after a retention
+			// trim bumped the epoch past the sandbox generation. The epoch is
+			// reconciled on the first snapshot (another trim while detached
+			// resyncs through it), and the retained events never re-import.
+			// A cursor from another incarnation names a log that no longer
+			// exists and is discarded.
+			this.guestGeneration = resumeCursor.eventGeneration;
 			this.guestSequence = Math.max(this.guestSequence, resumeCursor.sequence);
 		}
 		// Subscribe from the durable resume point, never from the snapshot's
@@ -316,7 +348,7 @@ export class CloudTunnelAttachment {
 				clientId: newCloudClientId(),
 				sessionId: this.sessionId,
 				authToken: target.bridgeToken,
-				...(this.guestSequence > 0
+				...(this.guestGeneration === this.generation && this.guestSequence > 0
 					? { cursor: { generation: this.generation, sequence: this.guestSequence } }
 					: {}),
 			}),
@@ -334,7 +366,35 @@ export class CloudTunnelAttachment {
 		const value = parsed.message as CloudMessage;
 		try {
 			if (value.type === "snapshot") {
-				await this.importEvents(value.events);
+				const firstContact = this.guestGeneration === 0;
+				const epochChanged = value.generation !== this.guestGeneration;
+				if (epochChanged && !firstContact) {
+					// Retention trimmed and renumbered: adopt the new epoch and
+					// reset the mirror position before importing, so the
+					// snapshot's events land and later frames dedupe against
+					// the new numbering. The position advances only through
+					// imported events: a bounded snapshot carries just the
+					// first page, so the subscribe drains the remaining pages,
+					// and the persisted cursor reaches the true tail only
+					// after that delivery - never by trusting the cursor of a
+					// page it did not receive.
+					this.guestGeneration = value.generation;
+					this.guestSequence = 0;
+					this.subscribeFromSequence = 0;
+					await this.importEvents(value.events);
+					this.subscribeFromSequence = this.guestSequence;
+					this.persistGuestCursor();
+				} else {
+					// First contact or same epoch: adopt the epoch when new,
+					// but keep the durable resume position for the subscribe -
+					// a bounded snapshot may not carry the whole backlog, and
+					// the replay plus sequence deduplication keeps the mirror
+					// complete.
+					if (epochChanged) {
+						this.guestGeneration = value.generation;
+					}
+					await this.importEvents(value.events);
+				}
 				this.sendSubscribe();
 				// The snapshot confirms authentication: everything not yet
 				// receipted is re-sent now, and the guest journal deduplicates.
@@ -342,6 +402,12 @@ export class CloudTunnelAttachment {
 				return;
 			}
 			if (value.type === "events") {
+				if (value.generation !== this.guestGeneration) {
+					// A trim landed between frames: the batch is already in the
+					// new epoch, so reset the dedupe position before importing.
+					this.guestGeneration = value.generation;
+					this.guestSequence = 0;
+				}
 				await this.importEvents(value.events);
 				return;
 			}
@@ -361,11 +427,12 @@ export class CloudTunnelAttachment {
 
 	private sendSubscribe(): void {
 		if (this.connection === undefined) return;
+		if (this.guestGeneration === 0) return;
 		this.connection.send(
 			JSON.stringify({
 				type: "subscribe",
 				sessionId: this.sessionId,
-				cursor: { generation: this.generation, sequence: this.subscribeFromSequence },
+				cursor: { generation: this.guestGeneration, sequence: this.subscribeFromSequence },
 			}),
 		);
 		this.subscribed = true;
@@ -382,10 +449,24 @@ export class CloudTunnelAttachment {
 		}
 		if (appended === 0) return;
 		this.guestSequence = tail;
-		const cursor: CloudCursor = { generation: this.generation, sequence: tail };
-		this.callbacks.persistGuestCursor(cursor);
+		this.persistGuestCursor();
 		await this.callbacks.flushTrace();
-		this.connection?.send(JSON.stringify({ type: "ack", sessionId: this.sessionId, cursor }));
+		this.connection?.send(
+			JSON.stringify({
+				type: "ack",
+				sessionId: this.sessionId,
+				cursor: { generation: this.guestGeneration, sequence: tail },
+			}),
+		);
+	}
+
+	private persistGuestCursor(): void {
+		if (this.guestGeneration === 0) return;
+		this.callbacks.persistGuestCursor({
+			sandboxGeneration: this.generation,
+			eventGeneration: this.guestGeneration,
+			sequence: this.guestSequence,
+		});
 	}
 }
 
