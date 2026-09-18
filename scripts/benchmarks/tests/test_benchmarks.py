@@ -426,7 +426,7 @@ class PublishingTests(unittest.TestCase):
 
 
 class LifecycleTests(unittest.TestCase):
-    def test_sandbox_creation_does_not_inject_credentials(self):
+    def test_sandbox_creation_does_not_inject_credentials_or_pin_vm(self):
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.dict(os.environ, {"PRIME_SANDBOX_API_KEY": "fake", "PINFERENCE_API_KEY": "must-not-use"}),
@@ -441,6 +441,7 @@ class LifecycleTests(unittest.TestCase):
             request = controller.client.create.call_args.args[0]
             self.assertIsNone(request.secrets)
             self.assertIsNone(request.environment_vars)
+            self.assertNotIn("vm", request.model_fields_set)
 
     def test_invalid_results_get_a_failure_notice_and_missing_results_preserve_pending_trust(self):
         with tempfile.TemporaryDirectory() as directory:
