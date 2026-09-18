@@ -1,0 +1,1 @@
+- Added the swarm DAG capability evaluation harness: three reference swarms (review sweep, N-wide builder, resident watcher) against hand-written baselines, with deterministic replay/ledger checks, verdict rules, and a metrics report; never runs in CI (no token spend).
