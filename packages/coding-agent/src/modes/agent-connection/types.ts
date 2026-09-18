@@ -709,6 +709,51 @@ export interface AgentConnectionCloudProgress {
 	message: string;
 }
 
+/**
+ * One supervisor-owned resident cloud session (`cloud_session_list` and the
+ * lifecycle commands below). Terminal states stay honest: `stopped` means the
+ * sandbox was released, `failed` carries the last error, `lost` means the
+ * sandbox is gone while the local shadow transcript survives.
+ */
+export interface AgentConnectionCloudSession {
+	/** Cloud session id; equals the shadow session's header id. */
+	sessionId: string;
+	/** Supervisor active-session id while the row is live; the attach address. */
+	activeSessionId?: string;
+	/** Canonical local shadow transcript path. */
+	sessionFile?: string;
+	sandboxId?: string;
+	/** Sandbox incarnation; fences stale attachments. */
+	generation: number;
+	connectivity: "provisioning" | "connected" | "reconnecting" | "disconnected" | "stopped" | "lost";
+	status: "provisioning" | "running" | "stopping" | "stopped" | "failed" | "lost";
+	/** Resident provenance; absent on legacy one-shot delegations. */
+	location?: "converted-root" | "spawned-child";
+	/** True when this record is a legacy one-shot delegation, not a resident session. */
+	legacyDelegation?: boolean;
+	sessionName?: string;
+	/** Remote descendant count currently mirrored as roster rows. */
+	remoteSessionCount?: number;
+	lastError?: string;
+	createdAt: string;
+	updatedAt: string;
+}
+
+export interface AgentConnectionCloudSessionCreateOptions {
+	/** Sandbox lifetime cap in minutes; defaults to the daemon's cloud default. */
+	timeoutMinutes?: number;
+}
+
+export interface AgentConnectionCloudSessionStopOptions {
+	/** Release the sandbox without result review when true. */
+	forfeit?: boolean;
+}
+
+export interface AgentConnectionCloudSessionReprovisionOptions {
+	/** Sandbox lifetime cap in minutes for the new incarnation. */
+	timeoutMinutes?: number;
+}
+
 export interface AgentConnection {
 	subscribe(listener: AgentConnectionEventListener): () => void;
 	onBeforeSessionInvalidate(listener: AgentConnectionBeforeSessionInvalidateListener): () => void;
@@ -782,6 +827,28 @@ export interface AgentConnection {
 	cloudDelegationStop?(delegationId: string, forfeit?: boolean): Promise<AgentConnectionCloudDelegationSummary>;
 	cloudDelegationSteer?(delegationId: string, text: string): Promise<AgentConnectionCloudSteerResult>;
 	cloudDelegationApply?(delegationId: string): Promise<AgentConnectionCloudDelegationSummary>;
+	/**
+	 * Resident cloud sessions (`cloud_resident_sessions`). The legacy one-shot
+	 * delegation methods above stay wired for older daemons but are no longer
+	 * part of the primary slash UX.
+	 */
+	supportsCloudResidentSessions?(): boolean;
+	/**
+	 * Convert the bound idle session into a resident cloud session. On success
+	 * the connection rebinds to the live cloud row, so prompts, interrupts,
+	 * model, and thinking flows continue through this connection.
+	 */
+	cloudSessionCreate?(options?: AgentConnectionCloudSessionCreateOptions): Promise<AgentConnectionCloudSession>;
+	cloudSessionList?(): Promise<AgentConnectionCloudSession[]>;
+	cloudSessionStop?(
+		selector: string,
+		options?: AgentConnectionCloudSessionStopOptions,
+	): Promise<AgentConnectionCloudSession>;
+	cloudSessionReprovision?(
+		selector: string,
+		options?: AgentConnectionCloudSessionReprovisionOptions,
+	): Promise<AgentConnectionCloudSession>;
+	cloudSessionImportResult?(selector: string, cwd?: string): Promise<AgentConnectionCloudSession>;
 
 	prompt(message: string, options?: AgentConnectionPromptOptions): Promise<void>;
 	promptAndWait(message: string, options?: AgentConnectionPromptOptions): Promise<void>;

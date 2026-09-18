@@ -62,6 +62,8 @@ class FakeDaemonClient {
 	cloudDelegateDirectFailures = 0;
 	cloudDelegateUncertainFailures = 0;
 	cloudSteerUncertainFailures = 0;
+	cloudSessionUncertainFailures = 0;
+	cloudSessions: Array<Record<string, unknown>> = [];
 	cancelPromptAdmissionStatus: "cancelled" | "owned" | "unknown" = "owned";
 	serverCapabilities = new Set<string>();
 	updateRestartSessions: Array<Record<string, unknown>> = [];
@@ -165,6 +167,80 @@ class FakeDaemonClient {
 							resultApplied: command.type === "cloud_delegation_apply",
 						},
 					},
+				};
+			case "cloud_session_create": {
+				if (this.cloudSessionUncertainFailures > 0) {
+					this.cloudSessionUncertainFailures--;
+					return {
+						type: "response",
+						command: command.type,
+						success: false,
+						error: "The previous command result is uncertain and was not replayed",
+						errorInfo: {
+							code: "command_result_uncertain",
+							clientId: "fake-client",
+							commandId: "cmd-original",
+						},
+					};
+				}
+				const session = {
+					sessionId: `sess_cloud_${command.id ?? "created"}`,
+					activeSessionId: `cloud-active-${command.activeSessionId}`,
+					sessionFile: `/tmp/shadow/sess_cloud_${command.id ?? "created"}.jsonl`,
+					generation: 1,
+					connectivity: "connected",
+					status: "running",
+					location: "converted-root",
+					createdAt: "2026-01-01T00:00:00.000Z",
+					updatedAt: "2026-01-01T00:00:00.000Z",
+					...(command.timeoutMinutes !== undefined ? { timeoutMinutesEcho: command.timeoutMinutes } : {}),
+				};
+				this.cloudSessions = [session, ...this.cloudSessions];
+				return { type: "response", command: command.type, success: true, data: { session } };
+			}
+			case "cloud_session_list":
+				return {
+					type: "response",
+					command: command.type,
+					success: true,
+					data: { sessions: this.cloudSessions },
+				};
+			case "cloud_session_stop":
+			case "cloud_session_reprovision":
+			case "cloud_session_import_result": {
+				const session = this.cloudSessions.find(
+					(entry) =>
+						entry.activeSessionId === command.activeSessionId || entry.sessionId === command.activeSessionId,
+				);
+				if (session === undefined) {
+					return {
+						type: "response",
+						command: command.type,
+						success: false,
+						error: `Unknown cloud session: ${command.activeSessionId}`,
+					};
+				}
+				const updated = {
+					...session,
+					...(command.type === "cloud_session_stop"
+						? { status: "stopped", connectivity: "stopped" }
+						: command.type === "cloud_session_reprovision"
+							? {
+									status: "provisioning",
+									connectivity: "provisioning",
+									generation: Number(session.generation) + 1,
+								}
+							: { status: session.status, connectivity: session.connectivity }),
+				};
+				this.cloudSessions = this.cloudSessions.map((entry) => (entry === session ? updated : entry));
+				return { type: "response", command: command.type, success: true, data: { session: updated } };
+			}
+			case "reattach":
+				return {
+					type: "response",
+					command: command.type,
+					success: true,
+					data: createAttachResult(command.targetActiveSessionId, command.clientId, command.capabilities, 12),
 				};
 			case "cloud_delegation_steer":
 				if (this.cloudSteerUncertainFailures > 0) {
@@ -3881,5 +3957,123 @@ describe("DaemonAgentConnection cloud delegation", () => {
 		expect(retried).toHaveLength(2);
 		expect(typeof retried[0]?.steerId).toBe("string");
 		expect(retried[0]?.steerId).toBe(retried[1]?.steerId);
+	});
+});
+
+describe("DaemonAgentConnection resident cloud sessions", () => {
+	it("gates every cloud session command on the cloud_resident_sessions capability", async () => {
+		const client = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(client), "active-1");
+
+		expect(connection.supportsCloudResidentSessions()).toBe(false);
+		await expect(connection.cloudSessionCreate()).rejects.toThrow(/cloud_resident_sessions/);
+		await expect(connection.cloudSessionList()).rejects.toThrow(/cloud_resident_sessions/);
+		await expect(connection.cloudSessionStop("sess_cloud_1")).rejects.toThrow(/cloud_resident_sessions/);
+		await expect(connection.cloudSessionReprovision("sess_cloud_1")).rejects.toThrow(/cloud_resident_sessions/);
+		await expect(connection.cloudSessionImportResult("sess_cloud_1")).rejects.toThrow(/cloud_resident_sessions/);
+		expect(client.requests).toHaveLength(0);
+
+		client.serverCapabilities.add("cloud_resident_sessions");
+		expect(connection.supportsCloudResidentSessions()).toBe(true);
+	});
+
+	it("converts the bound session and rebinds the connection to the live cloud row", async () => {
+		const client = new FakeDaemonClient();
+		client.serverCapabilities.add("cloud_resident_sessions");
+		const connection = new DaemonAgentConnection(asDaemonClient(client), "active-1");
+		const events: AgentConnectionEvent[] = [];
+		connection.subscribe((event) => {
+			events.push(event);
+		});
+
+		const session = await connection.cloudSessionCreate({ timeoutMinutes: 45 });
+
+		const createCommands = client.requests.filter(
+			(command): command is Extract<DaemonCommand, { type: "cloud_session_create" }> =>
+				command.type === "cloud_session_create",
+		);
+		expect(createCommands).toHaveLength(1);
+		expect(createCommands[0]).toMatchObject({
+			activeSessionId: "active-1",
+			timeoutMinutes: 45,
+		});
+		expect(session.location).toBe("converted-root");
+
+		// The same connection now serves the cloud row: the reattach replaces
+		// the snapshot so normal prompt/interrupt flows keep using it.
+		const reattach = client.requests.find(
+			(command): command is Extract<DaemonCommand, { type: "reattach" }> => command.type === "reattach",
+		);
+		expect(reattach).toMatchObject({
+			activeSessionId: "active-1",
+			targetActiveSessionId: session.activeSessionId,
+		});
+		expect(events.some((event) => event.type === "session_replaced")).toBe(true);
+
+		const listed = await connection.cloudSessionList();
+		expect(listed).toHaveLength(1);
+		expect(listed[0]).toMatchObject({ sessionId: session.sessionId });
+		// The connection is bound to the cloud row after conversion, so later
+		// session-scoped commands address the converted session.
+		expect(
+			client.requests.find(
+				(command): command is Extract<DaemonCommand, { type: "cloud_session_list" }> =>
+					command.type === "cloud_session_list",
+			)?.activeSessionId,
+		).toBe(session.activeSessionId);
+	});
+
+	it("retries an uncertain conversion before rebinding", async () => {
+		const client = new FakeDaemonClient();
+		client.serverCapabilities.add("cloud_resident_sessions");
+		client.cloudSessionUncertainFailures = 1;
+		const connection = new DaemonAgentConnection(asDaemonClient(client), "active-1");
+
+		const session = await connection.cloudSessionCreate();
+
+		const createCommands = client.requests.filter(
+			(command): command is Extract<DaemonCommand, { type: "cloud_session_create" }> =>
+				command.type === "cloud_session_create",
+		);
+		expect(createCommands).toHaveLength(2);
+		expect(new Set(createCommands.map((request) => request.activeSessionId))).toEqual(new Set(["active-1"]));
+		expect(session.status).toBe("running");
+	});
+
+	it("runs stop, reprovision, and import-result against the cloud registry selectors", async () => {
+		const client = new FakeDaemonClient();
+		client.serverCapabilities.add("cloud_resident_sessions");
+		const connection = new DaemonAgentConnection(asDaemonClient(client), "active-1");
+		const created = await connection.cloudSessionCreate();
+
+		const stopped = await connection.cloudSessionStop(created.activeSessionId!, { forfeit: true });
+		expect(stopped).toMatchObject({ status: "stopped", connectivity: "stopped" });
+		expect(
+			client.requests.find(
+				(command): command is Extract<DaemonCommand, { type: "cloud_session_stop" }> =>
+					command.type === "cloud_session_stop",
+			),
+		).toMatchObject({ activeSessionId: created.activeSessionId, forfeit: true });
+
+		const reprovisioned = await connection.cloudSessionReprovision(created.sessionId, { timeoutMinutes: 90 });
+		expect(reprovisioned).toMatchObject({
+			status: "provisioning",
+			generation: Number(created.generation) + 1,
+		});
+		expect(
+			client.requests.find(
+				(command): command is Extract<DaemonCommand, { type: "cloud_session_reprovision" }> =>
+					command.type === "cloud_session_reprovision",
+			),
+		).toMatchObject({ activeSessionId: created.sessionId, timeoutMinutes: 90 });
+
+		const imported = await connection.cloudSessionImportResult(created.sessionId, "/repo");
+		expect(imported.sessionId).toBe(created.sessionId);
+		expect(
+			client.requests.find(
+				(command): command is Extract<DaemonCommand, { type: "cloud_session_import_result" }> =>
+					command.type === "cloud_session_import_result",
+			),
+		).toMatchObject({ activeSessionId: created.sessionId, cwd: "/repo" });
 	});
 });

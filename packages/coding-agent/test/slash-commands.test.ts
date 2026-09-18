@@ -59,17 +59,25 @@ describe("built-in slash commands", () => {
 
 	test("exposes /cloud with /sandbox as a hidden alias", () => {
 		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "cloud")).toMatchObject({
+			description: "Convert this session to a resident cloud session, or manage cloud sessions",
+			argumentHint: "[status|stop <id> [--forfeit]|reprovision <id>|import-result <id>]",
 			takesArgument: true,
 			aliases: ["sandbox"],
 		});
 		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "sandbox")).toBeUndefined();
 		expect(resolveBuiltinSlashCommandName("sandbox")).toBe("cloud");
-		expect(resolveSlashCommand(parseSlashCommand("/sandbox run fix it")!)).toEqual({
+		expect(resolveSlashCommand(parseSlashCommand("/sandbox status")!)).toEqual({
 			name: "cloud",
-			args: "run fix it",
+			args: "status",
 			originalName: "sandbox",
 			isAlias: true,
 		});
+		// The one-shot run/steer verbs left the primary slash surface; the
+		// resident verbs are the only documented subcommands.
+		const cloud = BUILTIN_SLASH_COMMANDS.find((command) => command.name === "cloud")!;
+		expect(cloud.argumentHint).not.toContain("run");
+		expect(cloud.argumentHint).not.toContain("steer");
+		expect(cloud.argumentHint).not.toContain("--tunnel");
 	});
 
 	test("describes /mcp as the MCP Connections menu entry point", () => {

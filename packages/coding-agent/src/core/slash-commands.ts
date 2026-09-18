@@ -188,8 +188,8 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "heartbeats", description: "View and manage all user and agent heartbeats" },
 	{
 		name: "cloud",
-		description: "Run and manage direct Prime Sandbox delegations",
-		argumentHint: "[run [--tunnel] <prompt>|status|stop <id> [--forfeit]|steer <id> <text>|apply <id>]",
+		description: "Convert this session to a resident cloud session, or manage cloud sessions",
+		argumentHint: "[status|stop <id> [--forfeit]|reprovision <id>|import-result <id>]",
 		takesArgument: true,
 	},
 	{

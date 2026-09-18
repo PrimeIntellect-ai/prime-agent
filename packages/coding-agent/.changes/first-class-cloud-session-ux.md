@@ -1,0 +1,2 @@
+- Added `/cloud` resident cloud sessions: in a new session `/cloud` converts it to a sandbox-hosted session and normal prompts, interrupts, model, and thinking keep working through the same connection.
+- Removed `/cloud run` and `/cloud steer` from the slash surface; `/cloud status`, `/cloud stop`, `/cloud reprovision`, and `/cloud import-result` manage the lifecycle and the tunnel is internal.

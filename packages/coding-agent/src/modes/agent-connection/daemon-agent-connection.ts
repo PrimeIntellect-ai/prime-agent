@@ -62,6 +62,10 @@ import type {
 	AgentConnectionCloudDelegateOptions,
 	AgentConnectionCloudDelegationSummary,
 	AgentConnectionCloudProgress,
+	AgentConnectionCloudSession,
+	AgentConnectionCloudSessionCreateOptions,
+	AgentConnectionCloudSessionReprovisionOptions,
+	AgentConnectionCloudSessionStopOptions,
 	AgentConnectionCloudSteerResult,
 	AgentConnectionEvent,
 	AgentConnectionEventListener,
@@ -740,6 +744,112 @@ export class DaemonAgentConnection implements AgentConnection {
 			),
 		);
 		return data.delegation;
+	}
+
+	supportsCloudResidentSessions(): boolean {
+		return this.client.supportsServerCapability("cloud_resident_sessions");
+	}
+
+	/**
+	 * Convert the bound idle session into a resident cloud session and rebind
+	 * this connection to the live cloud row: the attach snapshot replaces the
+	 * connection state and prompts continue through the same connection.
+	 */
+	async cloudSessionCreate(
+		options: AgentConnectionCloudSessionCreateOptions = {},
+	): Promise<AgentConnectionCloudSession> {
+		if (!this.supportsCloudResidentSessions()) {
+			throw new DaemonCapabilityUnavailableError("cloud_session_create", "cloud_resident_sessions");
+		}
+		const sourceActiveSessionId = this.activeSessionId;
+		const data = await this.retryCloudMutation(() =>
+			this.requestData<{ session: AgentConnectionCloudSession }>(
+				{
+					type: "cloud_session_create",
+					activeSessionId: sourceActiveSessionId,
+					...(options.timeoutMinutes !== undefined ? { timeoutMinutes: options.timeoutMinutes } : {}),
+				},
+				DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS,
+			),
+		);
+		const session = data.session;
+		if (session.activeSessionId !== undefined && session.activeSessionId !== sourceActiveSessionId) {
+			await this.reattachSession(sourceActiveSessionId, session.activeSessionId);
+		}
+		return session;
+	}
+
+	async cloudSessionList(): Promise<AgentConnectionCloudSession[]> {
+		if (!this.supportsCloudResidentSessions()) {
+			throw new DaemonCapabilityUnavailableError("cloud_session_list", "cloud_resident_sessions");
+		}
+		const data = await this.retryCloudMutation(() =>
+			this.requestData<{ sessions: AgentConnectionCloudSession[] }>(
+				{
+					type: "cloud_session_list",
+					activeSessionId: this.activeSessionId,
+				},
+				DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS,
+			),
+		);
+		return data.sessions;
+	}
+
+	async cloudSessionStop(
+		selector: string,
+		options: AgentConnectionCloudSessionStopOptions = {},
+	): Promise<AgentConnectionCloudSession> {
+		if (!this.supportsCloudResidentSessions()) {
+			throw new DaemonCapabilityUnavailableError("cloud_session_stop", "cloud_resident_sessions");
+		}
+		const data = await this.retryCloudMutation(() =>
+			this.requestData<{ session: AgentConnectionCloudSession }>(
+				{
+					type: "cloud_session_stop",
+					activeSessionId: selector,
+					...(options.forfeit === true ? { forfeit: true } : {}),
+				},
+				DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS,
+			),
+		);
+		return data.session;
+	}
+
+	async cloudSessionReprovision(
+		selector: string,
+		options: AgentConnectionCloudSessionReprovisionOptions = {},
+	): Promise<AgentConnectionCloudSession> {
+		if (!this.supportsCloudResidentSessions()) {
+			throw new DaemonCapabilityUnavailableError("cloud_session_reprovision", "cloud_resident_sessions");
+		}
+		const data = await this.retryCloudMutation(() =>
+			this.requestData<{ session: AgentConnectionCloudSession }>(
+				{
+					type: "cloud_session_reprovision",
+					activeSessionId: selector,
+					...(options.timeoutMinutes !== undefined ? { timeoutMinutes: options.timeoutMinutes } : {}),
+				},
+				DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS,
+			),
+		);
+		return data.session;
+	}
+
+	async cloudSessionImportResult(selector: string, cwd?: string): Promise<AgentConnectionCloudSession> {
+		if (!this.supportsCloudResidentSessions()) {
+			throw new DaemonCapabilityUnavailableError("cloud_session_import_result", "cloud_resident_sessions");
+		}
+		const data = await this.retryCloudMutation(() =>
+			this.requestData<{ session: AgentConnectionCloudSession }>(
+				{
+					type: "cloud_session_import_result",
+					activeSessionId: selector,
+					...(cwd !== undefined ? { cwd } : {}),
+				},
+				DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS,
+			),
+		);
+		return data.session;
 	}
 
 	async getAvailableModels(): Promise<AgentConnectionModel[]> {

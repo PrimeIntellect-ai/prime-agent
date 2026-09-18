@@ -148,6 +148,7 @@ import { ensureTool, ensureToolWithStatus, formatMissingRipgrepMessage } from ".
 import { checkForNewPiVersion } from "../../utils/version-check.js";
 import type {
 	AgentConnection,
+	AgentConnectionCloudSession,
 	AgentConnectionExtensionUiRequest,
 	AgentConnectionExtensionUiResponse,
 	AgentConnectionHeartbeat,
@@ -9613,187 +9614,294 @@ export class InteractiveMode {
 
 	private async handleCloudCommand(args: string): Promise<void> {
 		const usage =
-			"Usage: /cloud run [--tunnel] <prompt> | /cloud status | /cloud stop [id] [--forfeit] | /cloud steer <id> <text> | /cloud apply <id>";
-		if (!this.agentConnection.supportsCloudSessions?.()) {
-			this.showError("Cloud sandbox delegation requires a newer daemon with the cloud_sessions capability.");
+			"Usage: /cloud  |  /cloud status  |  /cloud stop [id] [--forfeit]  |  /cloud reprovision [id]  |  /cloud import-result [id]";
+		if (this.agentConnection.supportsCloudResidentSessions?.() !== true) {
+			this.showError("Cloud sessions need a daemon with the cloud_resident_sessions capability.");
 			return;
 		}
 		const trimmed = args.trim();
-		if (!trimmed) {
-			this.showStatus(usage);
-			return;
-		}
 		const firstSpace = trimmed.search(/\s/);
 		const verb = firstSpace === -1 ? trimmed : trimmed.slice(0, firstSpace);
 		const rest = firstSpace === -1 ? "" : trimmed.slice(firstSpace).trim();
-		const format = (item: {
-			id: string;
-			status: string;
-			promptPreview: string;
-			tunnel?: { tunnelId: string; url: string; attached: boolean };
-			liveOutput?: string;
-			resultReady: boolean;
-			resultApplied: boolean;
-			changedPaths?: string[];
-			changedPathCount?: number;
-			patchPreview?: string;
-			patchTruncated?: boolean;
-			outputPreview?: string;
-			stderrPreview?: string;
-			error?: string;
-		}): string => {
-			const result = item.resultApplied ? "applied" : item.resultReady ? "ready to apply" : "no result yet";
-			const tunnelSuffix = item.tunnel
-				? `  tunnel ${item.tunnel.attached ? "attached" : "down"} (${item.tunnel.tunnelId})`
-				: "";
-			const lines = [
-				`${item.id}  ${item.status}  ${result}  ${item.promptPreview}${item.error ? `  (${item.error})` : ""}${tunnelSuffix}`,
-			];
-			if (item.changedPaths && item.changedPaths.length > 0) {
-				const suffix = (item.changedPathCount ?? item.changedPaths.length) > item.changedPaths.length ? " …" : "";
-				lines.push(`Changed paths: ${item.changedPaths.join(", ")}${suffix}`);
-			}
-			if (item.outputPreview?.trim()) lines.push(`Output:\n${item.outputPreview.trimEnd()}`);
-			if (item.stderrPreview?.trim()) lines.push(`Stderr:\n${item.stderrPreview.trimEnd()}`);
-			if (item.liveOutput?.trim()) lines.push(`Live output:\n${item.liveOutput.trimEnd()}`);
-			return lines.join("\n");
-		};
-
 		try {
-			if (verb === "status") {
-				if (rest) {
-					this.showError(usage);
-					return;
-				}
-				const items = await this.agentConnection.cloudDelegationsList?.();
-				this.showStatus(items && items.length > 0 ? items.map(format).join("\n") : "No cloud delegations.");
+			if (!trimmed) {
+				await this.handleCloudConvertCommand();
 				return;
 			}
-			if (verb === "stop") {
-				const tokens = rest.split(/\s+/).filter(Boolean);
-				const forfeit = tokens.includes("--forfeit");
-				const ids = tokens.filter((token) => token !== "--forfeit");
-				if (ids.length > 1 || tokens.some((token) => token.startsWith("--") && token !== "--forfeit")) {
-					this.showError(usage);
-					return;
-				}
-				let delegationId: string | undefined = ids[0];
-				if (!delegationId) {
-					const items = (await this.agentConnection.cloudDelegationsList?.()) ?? [];
-					delegationId = [...items]
-						.reverse()
-						.find((candidate) =>
-							["preparing", "provisioning", "running", "retrieving", "stopping"].includes(candidate.status),
-						)?.id;
-					if (!delegationId) {
-						this.showError("No active cloud delegation to stop.");
+			switch (verb) {
+				case "status":
+					if (rest) {
+						this.showError(usage);
 						return;
 					}
-				}
-				const item = await this.agentConnection.cloudDelegationStop?.(delegationId, forfeit);
-				if (item) this.showStatus(format(item));
-				return;
-			}
-			if (verb === "apply") {
-				if (!rest || /\s/.test(rest)) {
-					this.showError(usage);
+					await this.showCloudSessionsStatus();
 					return;
-				}
-				const current = (await this.agentConnection.cloudDelegationsList?.())?.find((item) => item.id === rest);
-				if (!current?.resultReady) {
-					this.showError(`Cloud delegation ${rest} has no result ready to apply.`);
+				case "stop":
+					await this.handleCloudStopCommand(rest);
 					return;
-				}
-				const paths = current.changedPaths?.length ? current.changedPaths.join("\n") : "No file changes";
-				const patch = current.patchPreview
-					? `${current.patchPreview}${current.patchTruncated ? "\n… patch preview truncated" : ""}`
-					: "No patch content";
-				const confirmed = await this.showExtensionConfirm(
-					"Apply cloud result",
-					`${format(current)}\n\nFiles to apply:\n${paths}\n\nPatch preview:\n${patch}\n\nApply this patch to the captured repository?`,
-				);
-				if (!confirmed) {
-					this.showStatus("Cloud result was not applied.");
+				case "reprovision":
+					await this.handleCloudReprovisionCommand(rest);
 					return;
-				}
-				const item = await this.agentConnection.cloudDelegationApply?.(rest);
-				if (item) this.showStatus(format(item));
-				return;
-			}
-			if (verb === "steer") {
-				const firstSpace = rest.search(/\s/);
-				if (firstSpace === -1 || !rest.slice(firstSpace).trim()) {
-					this.showError(usage);
+				case "import-result":
+					await this.handleCloudImportResultCommand(rest);
 					return;
-				}
-				const delegationId = rest.slice(0, firstSpace);
-				const text = rest.slice(firstSpace).trim();
-				if (!this.agentConnection.supportsCloudTunnel?.()) {
-					this.showError("Cloud steering requires a newer daemon with the cloud_tunnel capability.");
+				case "run":
+					this.showError("/cloud run was removed: run /cloud to convert this session, then prompt it directly.");
 					return;
-				}
-				const steered = await this.agentConnection.cloudDelegationSteer?.(delegationId, text);
-				if (steered) {
-					this.showStatus(
-						`Steered ${delegationId}: ${steered.state === "acknowledged" ? "submitted to the running task" : "queued for the next tunnel attachment"}`,
+				case "steer":
+					this.showError(
+						"/cloud steer was removed: prompts and steering work like any session once /cloud converted it.",
 					);
-				}
-				return;
-			}
-			if (verb !== "run") {
-				this.showError(usage);
-				return;
-			}
-			let tunnel = false;
-			let prompt = rest;
-			if (prompt.startsWith("--tunnel")) {
-				const afterFlag = prompt.slice("--tunnel".length);
-				if (afterFlag && !afterFlag.startsWith(" ")) {
+					return;
+				case "apply":
+					this.showError("/cloud apply was renamed: /cloud import-result [id]");
+					return;
+				default:
 					this.showError(usage);
 					return;
-				}
-				tunnel = true;
-				prompt = afterFlag.trim();
-			}
-			if (!prompt) {
-				this.showError(usage);
-				return;
-			}
-			if (tunnel && !this.agentConnection.supportsCloudTunnel?.()) {
-				this.showError("Cloud tunnel steering requires a newer daemon with the cloud_tunnel capability.");
-				return;
-			}
-			const confirmLines = [
-				"Upload the current Git workspace, including tracked files and unignored untracked files.",
-				"Provision 4 vCPUs, 16 GB memory, and 50 GB disk for up to 120 minutes.",
-				"The remote agent can run commands and access the network. Changes return as a patch and are never applied automatically.",
-			];
-			if (tunnel) {
-				confirmLines.push(
-					"Register a Prime Tunnel: the sandbox's loopback bridge is exposed over HTTPS with edge basic auth, and the task can be steered live with /cloud steer while it runs.",
-				);
-			}
-			const confirmed = await this.showExtensionConfirm("Run in a Prime Sandbox", confirmLines.join("\n"));
-			if (!confirmed) {
-				this.showStatus("Cloud delegation cancelled before provisioning.");
-				return;
-			}
-			const item = await this.agentConnection.cloudDelegate?.(
-				prompt,
-				tunnel ? { tunnel: true } : undefined,
-				(progress) => {
-					this.showStatus(
-						`[cloud${progress.delegationId ? ` ${progress.delegationId}` : ""}] ${progress.message}`,
-					);
-				},
-			);
-			if (item) {
-				const formatted = format(item);
-				this.showStatus(item.tunnel?.attached ? `${formatted}\nTunnel: ${item.tunnel.url}` : formatted);
 			}
 		} catch (error) {
-			this.showError(`Cloud delegation failed: ${error instanceof Error ? error.message : String(error)}`);
+			this.showError(`Cloud session command failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
+	}
+
+	/**
+	 * Bare `/cloud`: show the current cloud session's status, or convert the
+	 * current idle local session into a resident cloud session.
+	 */
+	private async handleCloudConvertCommand(): Promise<void> {
+		const sessions = await this.listCloudSessions();
+		const current = this.findCurrentCloudSession(sessions);
+		if (current) {
+			this.showStatus(this.formatCloudSession(current));
+			return;
+		}
+		const confirmed = await this.showExtensionConfirm(
+			"Convert to a cloud session",
+			[
+				"Upload the current Git workspace and run this session in a Prime Sandbox.",
+				"The session keeps its cwd, name, and model; the tunnel is managed internally.",
+				"Prompts, interrupts, /model, and /effort keep working unchanged after conversion.",
+				"/cloud stop retrieves the result and releases the sandbox; /cloud reprovision revives it later.",
+			].join("\n"),
+		);
+		if (!confirmed) {
+			this.showStatus("Cloud conversion cancelled.");
+			return;
+		}
+		const session = await this.agentConnection.cloudSessionCreate?.();
+		if (session === undefined) {
+			this.showError("Cloud sessions are unavailable on this connection.");
+			return;
+		}
+		const title = session.sessionName ?? session.sessionId;
+		this.showStatus(
+			`Session ${title} now runs resident in a Prime Sandbox. Prompts keep working through this session.`,
+		);
+	}
+
+	private async showCloudSessionsStatus(): Promise<void> {
+		const sessions = await this.listCloudSessions();
+		if (sessions.length === 0) {
+			this.showStatus(
+				"No cloud sessions yet: run /cloud in a new session to convert it into a resident cloud session.",
+			);
+			return;
+		}
+		this.showStatus(sessions.map((session) => this.formatCloudSession(session)).join("\n\n"));
+	}
+
+	private async handleCloudStopCommand(rest: string): Promise<void> {
+		const { selector, forfeit, error } = this.parseCloudSelectorArgs(rest, ["--forfeit"]);
+		if (error) {
+			this.showError(error);
+			return;
+		}
+		const sessions = await this.listCloudSessions();
+		const target = selector
+			? this.findCloudSessionBySelector(sessions, selector)
+			: this.findCurrentCloudSession(sessions);
+		if (!target) {
+			this.showError(selector ? `No cloud session matches '${selector}'.` : "No current cloud session to stop.");
+			return;
+		}
+		if (target.legacyDelegation) {
+			this.showError(`Cloud session ${target.sessionId} is a legacy one-shot delegation and cannot be stopped.`);
+			return;
+		}
+		const confirmed = await this.showExtensionConfirm(
+			"Stop cloud session",
+			forfeit
+				? `Release ${this.cloudSessionTitle(target)} without retrieving its result? The sandbox is deleted.`
+				: `Stop ${this.cloudSessionTitle(target)}? The agent drains, its result is retrieved, and the sandbox is released. The session can be reprovisioned later with /cloud reprovision.`,
+		);
+		if (!confirmed) {
+			this.showStatus("Cloud session was not stopped.");
+			return;
+		}
+		const stopped = await this.agentConnection.cloudSessionStop?.(target.activeSessionId ?? target.sessionId, {
+			forfeit: forfeit === true,
+		});
+		if (stopped) {
+			this.showStatus(this.formatCloudSession(stopped));
+		}
+	}
+
+	private async handleCloudReprovisionCommand(rest: string): Promise<void> {
+		const { selector, error } = this.parseCloudSelectorArgs(rest, []);
+		if (error) {
+			this.showError(error);
+			return;
+		}
+		const sessions = await this.listCloudSessions();
+		const target = selector
+			? this.findCloudSessionBySelector(sessions, selector)
+			: this.findCurrentCloudSession(sessions);
+		if (!target) {
+			this.showError(
+				selector ? `No cloud session matches '${selector}'.` : "No current cloud session to reprovision.",
+			);
+			return;
+		}
+		if (target.legacyDelegation) {
+			this.showError(
+				`Cloud session ${target.sessionId} is a legacy one-shot delegation and cannot be reprovisioned.`,
+			);
+			return;
+		}
+		const confirmed = await this.showExtensionConfirm(
+			"Reprovision cloud session",
+			`Provision a fresh sandbox for ${this.cloudSessionTitle(target)} and resume its transcript? Workspace changes from the previous sandbox that were not imported are gone.`,
+		);
+		if (!confirmed) {
+			this.showStatus("Cloud session was not reprovisioned.");
+			return;
+		}
+		const session = await this.agentConnection.cloudSessionReprovision?.(target.activeSessionId ?? target.sessionId);
+		if (session) {
+			this.showStatus(this.formatCloudSession(session));
+		}
+	}
+
+	private async handleCloudImportResultCommand(rest: string): Promise<void> {
+		const { selector, error } = this.parseCloudSelectorArgs(rest, []);
+		if (error) {
+			this.showError(error);
+			return;
+		}
+		const sessions = await this.listCloudSessions();
+		const target = selector
+			? this.findCloudSessionBySelector(sessions, selector)
+			: this.findCurrentCloudSession(sessions);
+		if (!target) {
+			this.showError(
+				selector ? `No cloud session matches '${selector}'.` : "No current cloud session to import a result from.",
+			);
+			return;
+		}
+		const confirmed = await this.showExtensionConfirm(
+			"Import cloud result",
+			`Apply the retrieved result patch of ${this.cloudSessionTitle(target)} to its repository?`,
+		);
+		if (!confirmed) {
+			this.showStatus("Cloud result was not applied.");
+			return;
+		}
+		const session = await this.agentConnection.cloudSessionImportResult?.(target.activeSessionId ?? target.sessionId);
+		if (session) {
+			this.showStatus(this.formatCloudSession(session));
+		}
+	}
+
+	private async listCloudSessions(): Promise<AgentConnectionCloudSession[]> {
+		return (await this.agentConnection.cloudSessionList?.()) ?? [];
+	}
+
+	private findCurrentCloudSession(
+		sessions: readonly AgentConnectionCloudSession[],
+	): AgentConnectionCloudSession | undefined {
+		const state = this.connectionState;
+		const currentFile = state?.sessionFile ? path.resolve(state.sessionFile) : undefined;
+		return sessions.find(
+			(session) =>
+				(state?.activeSessionId !== undefined && session.activeSessionId === state.activeSessionId) ||
+				(session.sessionFile !== undefined &&
+					currentFile !== undefined &&
+					path.resolve(session.sessionFile) === currentFile),
+		);
+	}
+
+	private findCloudSessionBySelector(
+		sessions: readonly AgentConnectionCloudSession[],
+		selector: string,
+	): AgentConnectionCloudSession | undefined {
+		return sessions.find(
+			(session) =>
+				session.sessionId === selector || session.activeSessionId === selector || session.sessionName === selector,
+		);
+	}
+
+	private parseCloudSelectorArgs(
+		rest: string,
+		allowedFlags: readonly string[],
+	): { selector?: string; forfeit?: boolean; error?: string } {
+		const tokens = rest.split(/\s+/).filter(Boolean);
+		const flags = tokens.filter((token) => token.startsWith("--"));
+		const unknownFlag = flags.find((token) => !allowedFlags.includes(token));
+		if (unknownFlag !== undefined) {
+			return { error: `Unknown /cloud option: ${unknownFlag}` };
+		}
+		const ids = tokens.filter((token) => !token.startsWith("--"));
+		if (ids.length > 1) {
+			return {
+				error: "Usage: /cloud stop [id] [--forfeit]  |  /cloud reprovision [id]  |  /cloud import-result [id]",
+			};
+		}
+		return {
+			...(ids[0] !== undefined ? { selector: ids[0] } : {}),
+			...(allowedFlags.includes("--forfeit") && flags.includes("--forfeit") ? { forfeit: true } : {}),
+		};
+	}
+
+	private cloudSessionTitle(session: AgentConnectionCloudSession): string {
+		return session.sessionName ?? session.sessionId;
+	}
+
+	/** Format one cloud session row; terminal states name their real outcome, never a generic tunnel failure. */
+	private formatCloudSession(session: AgentConnectionCloudSession): string {
+		const status = (() => {
+			switch (session.status) {
+				case "stopped":
+					return "stopped · sandbox released";
+				case "failed":
+					return `failed${session.lastError ? ` · ${session.lastError}` : ""}`;
+				case "lost":
+					return "lost · sandbox unavailable, transcript preserved";
+				default:
+					return session.status;
+			}
+		})();
+		const title = this.cloudSessionTitle(session);
+		const connectivity =
+			session.connectivity === "connected" && session.status === "running" ? "connected" : session.connectivity;
+		const lines = [
+			`${title}  ·  ${status}  ·  cloud ${connectivity}` +
+				(session.sandboxId ? `  ·  sandbox ${session.sandboxId}` : "") +
+				`  ·  generation ${session.generation}`,
+		];
+		if (session.legacyDelegation) {
+			lines.push("Legacy one-shot delegation (read-only).");
+		}
+		if (session.sessionFile) {
+			lines.push(`Transcript: ${session.sessionFile}`);
+		}
+		if (session.remoteSessionCount !== undefined && session.remoteSessionCount > 0) {
+			lines.push(`Remote subagents mirrored: ${session.remoteSessionCount}`);
+		}
+		if (session.lastError && session.status !== "failed") {
+			lines.push(`Last error: ${session.lastError}`);
+		}
+		return lines.join("\n");
 	}
 
 	private async handleHeartbeatCommand(text: string): Promise<void> {
