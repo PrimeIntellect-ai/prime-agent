@@ -173,6 +173,7 @@ prime-agent [options] [@files...] [messages...]
 ```bash
 prime-agent agents
 prime-agent list [--all]
+prime-agent sessions [--all] [--json]
 prime-agent attach <agent>
 prime-agent stop <agent>
 prime-agent rename <agent> <name>

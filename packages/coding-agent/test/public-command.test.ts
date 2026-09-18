@@ -122,6 +122,10 @@ describe("public command routing", () => {
 			["daemon", "list", "--all", "--json"],
 		],
 		[
+			["sessions", "--all", "--json"],
+			["daemon", "sessions", "--all", "--json"],
+		],
+		[
 			["stop", "worker", "--daemon-socket", "/tmp/custom-daemon.sock"],
 			["daemon", "kill", "worker", "--daemon-socket", "/tmp/custom-daemon.sock"],
 		],
@@ -332,6 +336,11 @@ describe("public command routing", () => {
 		await expect(handlePublicCommand(["--offline", "install", "pkg"])).resolves.toMatchObject({ handled: true });
 		expect(process.exitCode).toBe(1);
 		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("Unknown command: install"));
+	});
+
+	it("shows sessions usage in command help", async () => {
+		await expect(handlePublicCommand(["help", "sessions"])).resolves.toMatchObject({ handled: true });
+		expect(console.log).toHaveBeenCalledWith(expect.stringContaining("prime-agent sessions [--all] [--json]"));
 	});
 
 	it("separates Prime Agent updates from package updates", async () => {

@@ -507,6 +507,7 @@ Run `prime-agent help` for the command list and `prime-agent help <command>` for
 ```bash
 prime-agent agents                         # Search running, idle, and inactive sessions
 prime-agent list [--all]                   # List active or saved agents
+prime-agent sessions [--all] [--json]     # Show agent status, activity, and usage
 prime-agent attach <agent>                 # Attach the interactive UI
 prime-agent stop <agent>                   # Stop one agent
 prime-agent rename <agent> <name>          # Rename an agent

@@ -18,6 +18,7 @@ import { isLocalPath } from "../utils/paths.js";
 import { isValidThinkingLevel } from "./args.js";
 import { formatSessionListTable } from "./daemon-list-format.js";
 import { runPs, runReap } from "./daemon-ps.js";
+import { formatSessionsTable } from "./sessions-table-format.js";
 
 interface ParsedDaemonClientCommand {
 	command: string;
@@ -30,6 +31,7 @@ const DAEMON_CLIENT_COMMANDS = new Set([
 	"start",
 	"ps",
 	"list",
+	"sessions",
 	"create",
 	"attach",
 	"detach",
@@ -153,6 +155,9 @@ async function runDaemonClientCommand(parsed: ParsedDaemonClientCommand): Promis
 		switch (parsed.command) {
 			case "list":
 				await runList(client, parsed.positionals, parsed.json);
+				return;
+			case "sessions":
+				await runSessions(client, parsed.positionals, parsed.json);
 				return;
 			case "create":
 				await runCreate(client, parsed.positionals, parsed.json);
@@ -775,6 +780,42 @@ function parseListArgs(args: string[]): { all: boolean } {
 			continue;
 		}
 		throw new Error(`Unknown list option: ${arg}`);
+	}
+	return { all };
+}
+
+// The same list RPC as `prime-agent list`, rendered as a one-line-per-agent table.
+async function runSessions(client: DaemonClient, args: string[], json: boolean): Promise<void> {
+	const { all } = parseSessionsArgs(args);
+	const response = await client.request({ type: "list", all });
+	const data = requireSuccess(response);
+	if (json) {
+		printJson(data);
+		return;
+	}
+
+	const sessions = getSessionSummaries(data);
+	if (!sessions) {
+		printJson(data);
+		return;
+	}
+
+	if (sessions.length === 0) {
+		console.log(all ? "No agents." : "No active agents.");
+		return;
+	}
+
+	console.log(formatSessionsTable(sessions));
+}
+
+function parseSessionsArgs(args: string[]): { all: boolean } {
+	let all = false;
+	for (const arg of args) {
+		if (arg === "-a" || arg === "--all") {
+			all = true;
+			continue;
+		}
+		throw new Error(`Unknown sessions option: ${arg}`);
 	}
 	return { all };
 }

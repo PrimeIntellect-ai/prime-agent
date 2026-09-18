@@ -68,7 +68,7 @@ function formatListCell(row: ListRow, column: keyof ListRow, value: string): str
 	}
 }
 
-function formatSessionAge(modified: string | undefined, nowMs: number): string {
+export function formatSessionAge(modified: string | undefined, nowMs: number): string {
 	if (!modified) {
 		return "";
 	}
@@ -103,7 +103,7 @@ function formatModelSelector(model: SessionSummary["model"]): string {
 	return model ? `${model.provider}/${model.id}` : "";
 }
 
-function formatTable<T extends Record<string, string>>(
+export function formatTable<T extends Record<string, string>>(
 	columns: Array<keyof T>,
 	rows: T[],
 	formatCell?: (row: T, column: keyof T, value: string) => string,

@@ -28,6 +28,12 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 		options: ["-a, --all  Include saved agents", "--json      Print JSON"],
 	},
 	{
+		path: ["sessions"],
+		usage: "sessions [--all] [--json]",
+		summary: "Show agent status, activity, and usage",
+		options: ["-a, --all  Include saved agents", "--json      Print JSON"],
+	},
+	{
 		path: ["attach"],
 		usage: "attach <agent>",
 		summary: "Attach the interactive UI to an agent",

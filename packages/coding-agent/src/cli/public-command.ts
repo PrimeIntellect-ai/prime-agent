@@ -82,6 +82,8 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 			return { handled: false, args: args.slice(1), explicitAgentsView: true };
 		case "list":
 			return runInternalAgentCommand("list", args.slice(1));
+		case "sessions":
+			return runInternalAgentCommand("sessions", args.slice(1));
 		case "attach": {
 			const rest = args.slice(1);
 			const agent = rest[0];
