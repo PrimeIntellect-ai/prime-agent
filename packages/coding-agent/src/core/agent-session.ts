@@ -8478,7 +8478,9 @@ export class AgentSession {
 				const result = (await this._extensionRunner.emit({
 					type: "session_before_compact",
 					preparation,
-					branchEntries: pathEntries,
+					// slice: getBranch() returns the live leaf-branch cache, which appends
+					// extend in place, so the awaited handler gets a snapshot.
+					branchEntries: pathEntries.slice(),
 					customInstructions,
 					signal,
 				})) as SessionBeforeCompactResult | undefined;

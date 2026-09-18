@@ -1,0 +1,1 @@
+- Cached the active branch path in the session manager, so per-turn compaction checks and context-usage updates no longer rebuild the whole leaf-to-root path after every assistant message.

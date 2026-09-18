@@ -17,7 +17,7 @@ import type { AgentSession } from "../../src/core/agent-session.js";
 import type { ExtensionFactory } from "../../src/core/extensions/types.js";
 import { convertToLlm } from "../../src/core/messages.js";
 import { getLocalHarnessStateDir, loadHarnessState, saveHarnessState } from "../../src/core/refinement/index.js";
-import { SessionManager } from "../../src/core/session-manager.js";
+import { type SessionEntry, SessionManager } from "../../src/core/session-manager.js";
 import { assistantMsg, userMsg } from "../utilities.js";
 import { createHarness, getMessageText, type Harness, type HarnessOptions } from "./harness.js";
 import { createDeferred } from "./scheduling.js";
@@ -216,6 +216,55 @@ describe("AgentSession compaction", () => {
 		expect(result.summary).toBe("summary from extension");
 		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(1);
 		expect(harness.session.messages[0]?.role).toBe("compactionSummary");
+	});
+
+	it("hands session_before_compact a branch snapshot that later appends do not change", async () => {
+		let capturedBranchEntries: SessionEntry[] | undefined;
+		let capturedLength = -1;
+		let appendedEntryId: string | undefined;
+		let harness: Harness;
+		harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => {
+						// getBranch() serves the live leaf-branch cache, so the event must
+						// carry a snapshot: an append while this handler is awaited must
+						// not show up in the branch the extension received.
+						capturedBranchEntries = event.branchEntries;
+						capturedLength = event.branchEntries.length;
+						appendedEntryId = harness.sessionManager.appendCustomMessageEntry(
+							"branch_snapshot_probe",
+							"appended during compaction",
+							false,
+						);
+						return {
+							compaction: {
+								summary: "summary from extension",
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+								details: { source: "extension" },
+							},
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+
+		await harness.session.prompt("one");
+		await harness.session.prompt("two");
+		await harness.session.compact();
+
+		expect(appendedEntryId).toBeDefined();
+		// The snapshot never grew in place when the append landed...
+		expect(capturedBranchEntries).toHaveLength(capturedLength);
+		expect(capturedBranchEntries?.map((entry) => entry.id)).not.toContain(appendedEntryId);
+		// ...while the live branch did grow: the probe entry and the compaction are on it.
+		const liveBranch = harness.sessionManager.getBranch();
+		expect(liveBranch).not.toBe(capturedBranchEntries);
+		expect(liveBranch.map((entry) => entry.id)).toContain(appendedEntryId);
+		expect(liveBranch.length).toBeGreaterThan(capturedBranchEntries!.length);
 	});
 
 	it("compacts through the model summarizer, persists metadata, emits events, and remains usable", async () => {
