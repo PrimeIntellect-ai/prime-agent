@@ -248,6 +248,34 @@ class FakeDaemonClient {
 						leafId: "user-1",
 					},
 				};
+			case "get_context_tree":
+				return {
+					type: "response",
+					command: command.type,
+					success: true,
+					data: {
+						id: "root",
+						label: "active-1 name",
+						status: "active",
+						ownUsage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						totalUsage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						children: [],
+					},
+				};
 			case "get_tool_definition":
 				return {
 					type: "response",
@@ -603,6 +631,78 @@ class FakeDaemonClient {
 		this.connected = false;
 		this.emitClose(new DaemonSocketClosedError("/tmp/prime-agent.sock", reason));
 	}
+}
+
+/**
+ * Emit the daemon's streamed snapshot for one session: the chunked replacement or
+ * resync frames a switch consumes, optionally preceded by the inline
+ * session_replaced marker and optionally failing instead of completing.
+ */
+function emitChunkedSnapshot(
+	fakeClient: FakeDaemonClient,
+	options: {
+		purpose: "replacement" | "resync";
+		sessionId: string;
+		messages?: AgentMessage[];
+		sequence?: number;
+		inline?: boolean;
+		fail?: string;
+		omitEnd?: boolean;
+		sessionFile?: string;
+	},
+): void {
+	const messages = options.messages ?? [];
+	const sequence = options.sequence ?? 14;
+	const baseState = createConnectionState("active-1", options.sessionId);
+	const state = options.sessionFile === undefined ? baseState : { ...baseState, sessionFile: options.sessionFile };
+	const snapshotId = `${options.purpose}-${options.sessionId}`;
+	if (options.inline) {
+		fakeClient.emitMessage({
+			type: "session_replaced",
+			activeSessionId: "active-1",
+			state,
+			messages: [],
+			snapshotFollows: true,
+		});
+	}
+	const { messages: _omitted, ...snapshot } = createAttachResult("active-1", "client-1", undefined, sequence, {
+		state,
+		messages,
+	}).snapshot;
+	fakeClient.emitMessage({
+		type: "session_snapshot_begin",
+		activeSessionId: "active-1",
+		snapshotId,
+		snapshot,
+		messageCount: messages.length,
+		targetChunkBytes: 512 * 1024,
+		purpose: options.purpose,
+	});
+	if (options.fail) {
+		fakeClient.emitMessage({
+			type: "session_snapshot_failed",
+			activeSessionId: "active-1",
+			snapshotId,
+			error: options.fail,
+		});
+		return;
+	}
+	fakeClient.emitMessage({
+		type: "session_snapshot_chunk",
+		activeSessionId: "active-1",
+		snapshotId,
+		index: 0,
+		messages,
+	});
+	if (options.omitEnd) return;
+	fakeClient.emitMessage({
+		type: "session_snapshot_end",
+		activeSessionId: "active-1",
+		snapshotId,
+		chunkCount: 1,
+		lastEventSequence: sequence,
+		lastEventCursor: { generation: "generation-active-1", sequence },
+	});
 }
 
 function asDaemonClient(client: FakeDaemonClient): DaemonTransportClient {
@@ -2015,46 +2115,16 @@ describe("DaemonAgentConnection", () => {
 			events.push(event);
 		});
 
-		const emitSnapshot = (
-			purpose: "replacement" | "resync",
-			snapshotId: string,
-			sequence: number,
-			sessionId: string,
-		) => {
-			const messages: AgentMessage[] = [{ role: "user", content: purpose, timestamp: sequence }];
-			const full = createAttachResult("active-1", "client-1", undefined, sequence, {
-				state: createConnectionState("active-1", sessionId),
-				messages,
-			});
-			const { messages: _messages, ...snapshot } = full.snapshot;
-			fakeClient.emitMessage({
-				type: "session_snapshot_begin",
-				activeSessionId: "active-1",
-				snapshotId,
-				snapshot,
-				messageCount: messages.length,
-				targetChunkBytes: 512 * 1024,
+		const emitSnapshot = (purpose: "replacement" | "resync", sequence: number, sessionId: string) =>
+			emitChunkedSnapshot(fakeClient, {
 				purpose,
+				sessionId,
+				messages: [{ role: "user", content: purpose, timestamp: sequence }],
+				sequence,
 			});
-			fakeClient.emitMessage({
-				type: "session_snapshot_chunk",
-				activeSessionId: "active-1",
-				snapshotId,
-				index: 0,
-				messages,
-			});
-			fakeClient.emitMessage({
-				type: "session_snapshot_end",
-				activeSessionId: "active-1",
-				snapshotId,
-				chunkCount: 1,
-				lastEventSequence: sequence,
-				lastEventCursor: { generation: "generation-active-1", sequence },
-			});
-		};
 
-		emitSnapshot("resync", "snapshot-resync", 13, "session-current");
-		emitSnapshot("replacement", "snapshot-replacement", 14, "session-next");
+		emitSnapshot("resync", 13, "session-current");
+		emitSnapshot("replacement", 14, "session-next");
 		await vi.waitFor(() => expect(events).toHaveLength(2));
 
 		expect(events).toEqual([
@@ -2164,6 +2234,340 @@ describe("DaemonAgentConnection", () => {
 			await sibling.dispose();
 		},
 	);
+
+	it("#2399: consumes the streamed replacement snapshot on a warm switch without refetching the transcript", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
+			snapshotTimeoutMs: 5_000,
+		});
+		await connection.attach();
+		const replaced = new Promise<AgentConnectionEvent>((resolve) => {
+			connection.subscribe((event) => {
+				if (event.type === "session_replaced") resolve(event);
+			});
+		});
+		const switchedMessages: AgentMessage[] = [{ role: "user", content: "switched prompt", timestamp: 5 }];
+		const request = fakeClient.request.bind(fakeClient);
+		vi.spyOn(fakeClient, "request").mockImplementation(async (command, ...options) => {
+			if (command.type !== "switch_session") return request(command, ...options);
+			fakeClient.requests.push(command);
+			// The daemon writes session_replaced (snapshotFollows) and streams the
+			// chunked replacement snapshot before the switch responds.
+			emitChunkedSnapshot(fakeClient, {
+				purpose: "replacement",
+				sessionId: "session-switched",
+				messages: switchedMessages,
+				inline: true,
+			});
+			return { type: "response", command: command.type, success: true, data: { cancelled: false } };
+		});
+		fakeClient.requests.length = 0;
+
+		const switchedSessionFile = "/tmp/session-switched.jsonl";
+		await expect(connection.switchSession(switchedSessionFile)).resolves.toEqual({ cancelled: false });
+		expect(fakeClient.requests.map((request) => request.type)).toEqual(["switch_session"]);
+		const snapshot = await connection.getInitialSnapshot();
+		expect(snapshot).toMatchObject({ state: { sessionId: "session-switched" }, messages: switchedMessages });
+		// The history crossed the wire once, as the chunked snapshot the warm switch
+		// consumed: neither get_messages nor get_session_context refetched it.
+		expect(fakeClient.requests.map((request) => request.type)).toEqual(["switch_session"]);
+		await expect(replaced).resolves.toMatchObject({ type: "session_replaced", messages: switchedMessages });
+		await connection.dispose();
+	});
+
+	it("#2399: falls back to refetching the transcript when the replacement snapshot stream fails", async () => {
+		const fakeClient = new FakeDaemonClient();
+		fakeClient.connectionStateFactory = (activeSessionId) =>
+			createConnectionState(activeSessionId, "session-switched");
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
+			snapshotTimeoutMs: 5_000,
+		});
+		await connection.attach();
+		const replaced = new Promise<AgentConnectionEvent>((resolve) => {
+			connection.subscribe((event) => {
+				if (event.type === "session_replaced") resolve(event);
+			});
+		});
+		const request = fakeClient.request.bind(fakeClient);
+		vi.spyOn(fakeClient, "request").mockImplementation(async (command, ...options) => {
+			if (command.type !== "switch_session") return request(command, ...options);
+			fakeClient.requests.push(command);
+			emitChunkedSnapshot(fakeClient, {
+				purpose: "replacement",
+				sessionId: "session-switched",
+				inline: true,
+				fail: "replacement snapshot failed",
+			});
+			return { type: "response", command: command.type, success: true, data: { cancelled: false } };
+		});
+		fakeClient.requests.length = 0;
+
+		// The failed stream must not fail the switch: the caller proceeds and the
+		// recovery refetches the transcript.
+		await expect(connection.switchSession("/tmp/session-switched.jsonl")).resolves.toEqual({ cancelled: false });
+		// The recovery emits the replacement event only after the refetch, so the
+		// event is the completion signal for the whole fallback.
+		await expect(replaced).resolves.toMatchObject({
+			type: "session_replaced",
+			state: { sessionId: "session-switched" },
+			messages: [{ role: "user", content: "current prompt", timestamp: 4 }],
+		});
+		expect(fakeClient.requests.map((request) => request.type)).toEqual([
+			"switch_session",
+			"get_connection_state",
+			"get_messages",
+			"get_session_context",
+		]);
+		const snapshot = await connection.getInitialSnapshot();
+		expect(snapshot).toMatchObject({
+			state: { sessionId: "session-switched" },
+			messages: [{ role: "user", content: "current prompt", timestamp: 4 }],
+		});
+		expect(fakeClient.requests.map((request) => request.type)).toEqual([
+			"switch_session",
+			"get_connection_state",
+			"get_messages",
+			"get_session_context",
+		]);
+		await connection.dispose();
+	});
+
+	it("#2399: refetches the switched session when the replacement snapshot never arrives", async () => {
+		const fakeClient = new FakeDaemonClient();
+		fakeClient.connectionStateFactory = (activeSessionId) =>
+			createConnectionState(activeSessionId, "session-switched");
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
+			snapshotTimeoutMs: 10,
+		});
+		await connection.attach();
+		const request = fakeClient.request.bind(fakeClient);
+		vi.spyOn(fakeClient, "request").mockImplementation(async (command, ...options) => {
+			if (command.type !== "switch_session") return request(command, ...options);
+			fakeClient.requests.push(command);
+			// The daemon accepts the switch but never streams a replacement snapshot.
+			return { type: "response", command: command.type, success: true, data: { cancelled: false } };
+		});
+		fakeClient.requests.length = 0;
+
+		// The bounded wait ends without a replacement, so the switch still returns.
+		await expect(connection.switchSession("/tmp/session-switched.jsonl")).resolves.toEqual({ cancelled: false });
+		expect(fakeClient.requests.map((request) => request.type)).toEqual(["switch_session"]);
+		// The stale pre-switch cache must never be served as the switched session.
+		const snapshot = await connection.getInitialSnapshot();
+		expect(snapshot).toMatchObject({
+			state: { sessionId: "session-switched" },
+			messages: [{ role: "user", content: "current prompt", timestamp: 4 }],
+		});
+		expect(fakeClient.requests.map((request) => request.type)).toEqual([
+			"switch_session",
+			"get_connection_state",
+			"get_messages",
+			"get_session_context",
+		]);
+		await connection.dispose();
+	});
+
+	it.each([
+		{
+			// Another client's switch on the same daemon session replaces the session
+			// first, so this client receives a replacement snapshot it never asked for.
+			requested: "/tmp/session-switched.jsonl",
+			applied: "/tmp/session-elsewhere.jsonl",
+			resolved: "/tmp/session-switched.jsonl",
+		},
+		{
+			// The daemon resolves a relative request into another directory, and the
+			// replacement this client receives only shares its file name.
+			requested: "session-x.jsonl",
+			applied: "/tmp/elsewhere/session-x.jsonl",
+			resolved: "/tmp/target/session-x.jsonl",
+		},
+		{
+			// Without the daemon's resolution, a relative request can only be matched by
+			// file name, so it must not be trusted on its own.
+			requested: "session-x.jsonl",
+			applied: "/tmp/elsewhere/session-x.jsonl",
+		},
+	])(
+		"#2432: does not serve a replacement for another session as the switched transcript ($requested)",
+		async (scenario) => {
+			const fakeClient = new FakeDaemonClient();
+			const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
+				snapshotTimeoutMs: 5_000,
+			});
+			await connection.attach();
+			const foreignMessages: AgentMessage[] = [{ role: "user", content: "foreign prompt", timestamp: 6 }];
+			const request = fakeClient.request.bind(fakeClient);
+			vi.spyOn(fakeClient, "request").mockImplementation(async (command, ...options) => {
+				if (command.type !== "switch_session") return request(command, ...options);
+				fakeClient.requests.push(command);
+				emitChunkedSnapshot(fakeClient, {
+					purpose: "replacement",
+					sessionId: "session-elsewhere",
+					sessionFile: scenario.applied,
+					messages: foreignMessages,
+					inline: true,
+				});
+				return {
+					type: "response",
+					command: command.type,
+					success: true,
+					data: { cancelled: false, ...(scenario.resolved ? { sessionFile: scenario.resolved } : {}) },
+				};
+			});
+			fakeClient.requests.length = 0;
+
+			await expect(connection.switchSession(scenario.requested)).resolves.toEqual({ cancelled: false });
+			// The replacement belongs to another session, so the switched transcript is
+			// reloaded rather than served from that snapshot.
+			const snapshot = await connection.getInitialSnapshot();
+			expect(snapshot.messages).toEqual([{ role: "user", content: "current prompt", timestamp: 4 }]);
+			expect(fakeClient.requests.map((request) => request.type)).toEqual([
+				"switch_session",
+				"get_connection_state",
+				"get_messages",
+				"get_session_context",
+			]);
+			await connection.dispose();
+		},
+	);
+
+	it("#2432: ends a switch wait when the reconnect fails instead of relaying the timeout", async () => {
+		const fakeClient = new FakeDaemonClient();
+		fakeClient.connectionStateFactory = (activeSessionId) =>
+			createConnectionState(activeSessionId, "session-switched");
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
+			recoverDaemon: async () => undefined,
+			reconnectTimeoutMs: 300,
+			snapshotTimeoutMs: 5_000,
+		});
+		const closedEvents: AgentConnectionEvent[] = [];
+		connection.subscribe((event) => {
+			if (event.type === "closed") closedEvents.push(event);
+		});
+		await connection.attach();
+		fakeClient.reconnectError = new Error("daemon unavailable");
+		const request = fakeClient.request.bind(fakeClient);
+		vi.spyOn(fakeClient, "request").mockImplementation(async (command, ...options) => {
+			if (command.type !== "switch_session") return request(command, ...options);
+			fakeClient.requests.push(command);
+			// The transport closes before any replacement frame and never comes back.
+			fakeClient.connected = false;
+			fakeClient.emitClose(new Error("socket closed"));
+			return { type: "response", command: command.type, success: true, data: { cancelled: false } };
+		});
+		fakeClient.requests.length = 0;
+
+		const startedAt = Date.now();
+		await expect(connection.switchSession("/tmp/session-switched.jsonl")).resolves.toEqual({ cancelled: false });
+		// The reconnect gave up, so the wait ends with the connection error rather
+		// than after snapshotTimeoutMs.
+		expect(Date.now() - startedAt).toBeLessThan(1_000);
+		expect(closedEvents[0]).toMatchObject({ type: "closed", error: expect.stringContaining("reconnection failed") });
+		await connection.dispose();
+	});
+
+	it("#2432: keeps a switch wait alive when a recoverable close abandons the replacement stream", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
+			recoverDaemon: async () => undefined,
+			snapshotTimeoutMs: 5_000,
+		});
+		await connection.attach();
+		const syncedMessages: AgentMessage[] = [{ role: "user", content: "synced prompt", timestamp: 7 }];
+		// The re-attach lands on the session the switch moved to, and streams it back.
+		fakeClient.attachResultFactory = (command) =>
+			createAttachResult(command.activeSessionId, command.clientId, command.capabilities, 14, {
+				state: createConnectionState(command.activeSessionId, "session-switched"),
+				messages: syncedMessages,
+			});
+		let releaseReattach: () => void = () => {};
+		const reattachGate = new Promise<void>((resolve) => {
+			releaseReattach = resolve;
+		});
+		let holdReattach = false;
+		const request = fakeClient.request.bind(fakeClient);
+		vi.spyOn(fakeClient, "request").mockImplementation(async (command, ...options) => {
+			if (holdReattach && command.type === "attach") await reattachGate;
+			if (command.type !== "switch_session") return request(command, ...options);
+			fakeClient.requests.push(command);
+			// The replacement stream has begun, and the transport closes before its end
+			// frame, so the assembly is abandoned mid-transfer.
+			emitChunkedSnapshot(fakeClient, {
+				purpose: "replacement",
+				sessionId: "session-switched",
+				messages: syncedMessages,
+				omitEnd: true,
+			});
+			await nextMessageLoopTurn();
+			holdReattach = true;
+			fakeClient.connected = false;
+			fakeClient.emitClose(new Error("socket closed"));
+			return { type: "response", command: command.type, success: true, data: { cancelled: false } };
+		});
+		fakeClient.requests.length = 0;
+
+		const switched = connection.switchSession("/tmp/session-switched.jsonl");
+		let settled = false;
+		void switched.then(() => {
+			settled = true;
+		});
+		// The abandoned stream must not settle the switch; only the re-attach can.
+		await nextMessageLoopTurn();
+		await nextMessageLoopTurn();
+		expect(settled).toBe(false);
+
+		releaseReattach();
+		await expect(switched).resolves.toEqual({ cancelled: false });
+		const snapshot = await connection.getInitialSnapshot();
+		expect(snapshot.messages).toEqual(syncedMessages);
+		// The re-attached snapshot serves the transcript, so nothing is refetched.
+		expect(fakeClient.requests.filter((request) => request.type.startsWith("get_"))).toEqual([]);
+		await connection.dispose();
+	});
+
+	it("#2432: ends a switch wait when the transport closes before the replacement begins", async () => {
+		const fakeClient = new FakeDaemonClient();
+		fakeClient.connectionStateFactory = (activeSessionId) =>
+			createConnectionState(activeSessionId, "session-switched");
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
+			snapshotTimeoutMs: 5_000,
+		});
+		await connection.attach();
+		const request = fakeClient.request.bind(fakeClient);
+		vi.spyOn(fakeClient, "request").mockImplementation(async (command, ...options) => {
+			if (command.type !== "switch_session") return request(command, ...options);
+			fakeClient.requests.push(command);
+			// The daemon accepts the switch, then the connection dies before any
+			// replacement frame arrives.
+			fakeClient.connected = false;
+			fakeClient.emitClose(new Error("socket closed"));
+			return { type: "response", command: command.type, success: true, data: { cancelled: false } };
+		});
+		fakeClient.requests.length = 0;
+
+		const startedAt = Date.now();
+		await expect(connection.switchSession("/tmp/session-switched.jsonl")).resolves.toEqual({ cancelled: false });
+		// Nothing can settle the wait once the transport is gone, so it must not
+		// sit out snapshotTimeoutMs before the caller reloads the session.
+		expect(Date.now() - startedAt).toBeLessThan(1_000);
+		await connection.dispose();
+	});
+
+	it("#2399: keeps the cached snapshot fresh across get_context_tree reads", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+		await connection.attach();
+		const snapshot = await connection.getInitialSnapshot();
+		expect(fakeClient.requests.map((request) => request.type)).toEqual(["attach"]);
+		fakeClient.requests.length = 0;
+
+		// get_context_tree is a pure read: it must not invalidate the snapshot.
+		await expect(connection.getContextTree()).resolves.toMatchObject({ id: "root" });
+		await expect(connection.getInitialSnapshot()).resolves.toBe(snapshot);
+		expect(fakeClient.requests.map((request) => request.type)).toEqual(["get_context_tree"]);
+		await connection.dispose();
+	});
 
 	it("keeps attach snapshots usable when the daemon omits duplicate session context", async () => {
 		const fakeClient = new FakeDaemonClient();

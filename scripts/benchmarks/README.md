@@ -60,6 +60,7 @@ and other missing tools. Their setup time and disk usage are outside the install
 - **Installed footprint:** apparent bytes added after first use in the first fresh home, including stock Python,
   runtime, and tool assets; excluding download caches, session history, and logs. Shared system
   dependencies supplied by the base image and the fixture repository are excluded.
+- **Session-switch transcript fetch:** one warm switch into a 48k-entry session through a real daemon over a direct worker link; the value counts how many times the full transcript crosses the wire in the switch window (streamed replacement snapshots, inline replacements, and full-history refetch responses).
 - **Private frame decode:** one 32 MB frame with a snapshot-chunk routing header pushed through `PrivateFrameDecoder` in 8 KiB socket chunks, seconds per complete decode. This is the wire shape of the multi-MB snapshot and response frames on the daemon-worker and peer transport channels.
 - **Idle memory:** summed RSS across the benchmark user's entire process tree after input readiness
   and a one-second settle. Raw results include each process and PSS when Linux permits reading it.

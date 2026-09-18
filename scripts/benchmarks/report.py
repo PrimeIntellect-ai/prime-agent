@@ -109,6 +109,14 @@ RUNTIME_METRICS = (
 )
 TRANSPORT_METRICS = (
     Definition(
+        "switch_fetch",
+        "Full-history transfers per warm session switch",
+        1,
+        "transfers",
+        0.5,
+        0,
+    ),
+    Definition(
         "frame_decode",
         "Private frame decode, 32 MiB in 8 KiB chunks",
         1000,
@@ -414,6 +422,9 @@ def render(report: Report) -> str:
             "Restore runs in a fresh kernel, including pandas imports; kernel startup is excluded.",
             "Kernel RSS covers the isolated Python process; loaded RSS follows the pandas workload.",
             "Transport benches run node against the prepared source build, outside the installed home.",
+            "The switch benchmark drives one warm switch into a 48k-entry session through a real",
+            "daemon and counts full-history crossings: streamed replacement snapshots, inline",
+            "replacements, and full-history refetch responses.",
             "Frame decode times one 32 MiB private frame, snapshot-chunk header, pushed in",
             "8 KiB chunks; the wire shape of multi-MB frames on the daemon-worker channels.",
             "UI trials use a fresh fixture set: 194 top-level sessions including one ~40 MB transcript,",

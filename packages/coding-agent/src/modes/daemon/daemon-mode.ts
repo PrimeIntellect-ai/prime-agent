@@ -5361,7 +5361,12 @@ export class AgentDaemon {
 					cwdOverride: command.cwdOverride,
 				});
 				this.rebindCronJobsToState(state);
-				return success(command.id, "switch_session", result);
+				// A client cannot resolve a relative sessionPath the way this process
+				// does, so the switch reports the file it resolved for the request.
+				return success(command.id, "switch_session", {
+					...result,
+					...(result.cancelled ? {} : { sessionFile: state.runtime.session.sessionFile }),
+				});
 			}
 
 			case "fork": {
