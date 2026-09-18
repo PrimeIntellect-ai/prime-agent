@@ -43,7 +43,7 @@
 		"mime-types": "^3.0.1"
 	},
 	"optionalDependencies": {
-		"koffi": "^2.9.0"
+		"koffi": "^3.2.1"
 	},
 	"devDependencies": {
 		"@xterm/headless": "^6.0.0",
