@@ -647,7 +647,13 @@ export type AgentConnectionEvent =
 	| { type: "session_status"; recap?: string }
 	| { type: "extension_ui_request"; request: AgentConnectionExtensionUiRequest }
 	| { type: "extension_error"; extensionPath: string; event: string; error: string }
-	| { type: "connection_status"; status: "reconnecting" | "connected"; error?: string }
+	| {
+			type: "connection_status";
+			status: "reconnecting" | "connected";
+			error?: string;
+			/** App version of the restarted daemon; set when recovery re-attached to it. */
+			daemonVersion?: string;
+	  }
 	| { type: "heartbeats_changed" }
 	| { type: "closed"; error?: string };
 

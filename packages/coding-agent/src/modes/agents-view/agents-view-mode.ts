@@ -2629,10 +2629,16 @@ export class AgentsViewMode implements Component, Focusable {
 
 	private async reconnectClient(client: DaemonClient, initialError: unknown): Promise<void> {
 		const deadline = Date.now() + (this.options.reconnectTimeoutMs ?? RECONNECT_TIMEOUT_MS);
+		// An update restart owns the daemon relaunch: while its coordinator stops and
+		// restores the daemon, this loop only polls, so it never spawns a competing
+		// daemon from this window's (possibly outdated) binary.
+		const mayRelaunch = !(initialError instanceof Error && getDaemonSocketCloseReason(initialError) === "update");
 		let lastError = initialError;
 		while (!this.stopped && !this.daemonShutdownReceived && client === this.client && Date.now() < deadline) {
 			try {
-				await this.options.recoverDaemon?.();
+				if (mayRelaunch) {
+					await this.options.recoverDaemon?.();
+				}
 				await client.reconnect(1000);
 				if (!this.rosterStore || !(await this.rosterStore.attach(client))) {
 					throw new Error("Daemon lost the agent_roster capability during reconnect");

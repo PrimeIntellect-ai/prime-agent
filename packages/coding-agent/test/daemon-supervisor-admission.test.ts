@@ -653,4 +653,33 @@ describe("daemon supervisor prompt admission ownership", () => {
 		expect(admissionFor(supervisor, owner)).toBeUndefined();
 		expect(forwarded.filter((command) => command.type === "prompt")).toHaveLength(1);
 	});
+
+	it("closes an update-restart shutdown as update and a plain shutdown as shutdown", async () => {
+		const shutdownCalls: Array<{ closingReason?: string; force: boolean }> = [];
+		const supervisor = createHarness({ updateRestartPhase: "prepared" });
+		(supervisor as unknown as Record<string, unknown>).shutdown = (
+			_exitCode: number,
+			_stopWorkers: boolean,
+			_relaunch: boolean,
+			forceWorkers: boolean,
+			closingReason?: string,
+		) => {
+			shutdownCalls.push({ closingReason, force: forceWorkers });
+			// The real method never returns (process.exit); match that without exiting.
+			return new Promise<never>(() => undefined);
+		};
+		const owner = client("shutdown-requester");
+
+		// The coordinator stops a prepared daemon without force; a plain stop stays "shutdown".
+		await supervisor.handleLine(owner, commandLine({ id: "shutdown-1", type: "shutdown" }));
+		await new Promise((resolveImmediate) => setImmediate(resolveImmediate));
+		(supervisor as unknown as { updateRestartPhase: undefined }).updateRestartPhase = undefined;
+		await supervisor.handleLine(owner, commandLine({ id: "shutdown-2", type: "shutdown", force: true }));
+		await new Promise((resolveImmediate) => setImmediate(resolveImmediate));
+
+		expect(shutdownCalls).toEqual([
+			{ closingReason: "update", force: false },
+			{ closingReason: "shutdown", force: true },
+		]);
+	});
 });
