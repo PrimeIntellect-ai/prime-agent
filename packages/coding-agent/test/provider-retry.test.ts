@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
 	completeWithProviderRetry,
 	DEFAULT_PROVIDER_WAIT_POLICY,
+	type ProviderParkDecision,
 	type ProviderWaitPolicy,
 	parseProviderResetMs,
+	providerParkDecision,
 	providerRetryDelay,
 	providerWaitClass,
 	providerWaitDecision,
@@ -75,6 +77,9 @@ const TEST_WAIT_POLICY: ProviderWaitPolicy = {
 	maxDelayMs: 300_000,
 	maxAttempts: 30,
 	maxWaitMs: 900_000,
+	pauseUntilReset: true,
+	maxPauseMs: 86_400_000,
+	maxParks: 8,
 };
 
 describe("providerWaitClass", () => {
@@ -193,7 +198,25 @@ describe("providerWaitDecision", () => {
 			maxDelayMs: 300_000,
 			maxAttempts: 30,
 			maxWaitMs: 900_000,
+			pauseUntilReset: true,
+			maxPauseMs: 86_400_000,
+			maxParks: 8,
 		});
+	});
+});
+
+describe("providerParkDecision", () => {
+	// maxParks 0 disables parking outright, including the first park, and a park
+	// is never guessed without a provider-reported reset.
+	it.each<[number, number | undefined, Partial<ProviderWaitPolicy>, ProviderParkDecision]>([
+		[0, 2 * 3_600_000, {}, { kind: "park", delayMs: 7_230_000 }],
+		[0, 10 * 86_400_000, {}, { kind: "park", delayMs: 86_400_000 }],
+		[0, 3_600_000, { pauseUntilReset: false }, { kind: "none", reason: "disabled" }],
+		[8, 3_600_000, {}, { kind: "none", reason: "park-budget" }],
+		[0, 3_600_000, { maxParks: 0 }, { kind: "none", reason: "park-budget" }],
+		[0, undefined, {}, { kind: "none", reason: "no-reset" }],
+	])("uses %i parks at a reported reset of %s", (parksUsed, resetMs, overrides, expected) => {
+		expect(providerParkDecision(parksUsed, resetMs, { ...TEST_WAIT_POLICY, ...overrides })).toEqual(expected);
 	});
 });
 
