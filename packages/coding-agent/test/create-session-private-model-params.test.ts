@@ -78,7 +78,7 @@ describe("created-session private model request params", () => {
 		expect("enable_thinking" in params).toBe(false);
 	});
 
-	it("keeps enable_thinking for public zai-format Prime Inference models", async () => {
+	it("omits enable_thinking for public Prime Inference z-ai models", async () => {
 		const model = getModels("prime-inference").find(
 			(candidate) => candidate.id === "z-ai/glm-5.3",
 		) as Model<"openai-completions">;
@@ -90,6 +90,6 @@ describe("created-session private model request params", () => {
 		).result();
 
 		const params = mockState.lastParams as { enable_thinking?: boolean };
-		expect(params.enable_thinking).toBe(true);
+		expect("enable_thinking" in params).toBe(false);
 	});
 });
