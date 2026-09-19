@@ -547,7 +547,7 @@ describe("AgentSession queue characterization", () => {
 		expect(harness.sessionManager.getBranch().at(-1)?.id).toBe(followUpEntryId);
 	});
 
-	it.each([
+	it.each<{ name: string; delivered?: string[]; arm: (harness: Harness) => Promise<() => void> }>([
 		{
 			name: "paused",
 			arm: async (harness: Harness) => {
@@ -566,7 +566,18 @@ describe("AgentSession queue characterization", () => {
 				};
 			},
 		},
-	])("waitForIdle parks while queued work is $name", async ({ arm }) => {
+		{
+			name: "suspended after abort and cleared",
+			delivered: [],
+			arm: async (harness: Harness) => {
+				await harness.session.followUp("queued input");
+				harness.session.requestAbort();
+				return () => {
+					expect(harness.session.clearQueue().followUp).toEqual(["queued input"]);
+				};
+			},
+		},
+	])("waitForIdle parks while queued work is $name", async ({ arm, delivered = ["queued input"] }) => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("done")]);
@@ -600,7 +611,7 @@ describe("AgentSession queue characterization", () => {
 			release();
 		}
 		expect(await waiting).toEqual({ ok: true });
-		expect(getUserTexts(harness)).toEqual(["queued input"]);
+		expect(getUserTexts(harness)).toEqual(delivered);
 	});
 
 	it("admits a resumeIfIdle follow-up after abort suspends queued work", async () => {
@@ -678,47 +689,15 @@ describe("AgentSession queue characterization", () => {
 		expect(getUserTexts(harness)).toEqual(userTexts);
 	});
 
-	it("waitForIdle resolves when the queue is cleared while the pump is suspended", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		await harness.session.followUp("cleared while suspended");
-		harness.session.requestAbort();
-		expect(harness.session.getFollowUpMessages()).toEqual(["cleared while suspended"]);
-		const checkpointWaiters = (harness.session as unknown as { _sessionInputCheckpointWaiters: Set<() => void> })
-			._sessionInputCheckpointWaiters;
-		const waitParked = createDeferred();
-		const originalAdd = checkpointWaiters.add.bind(checkpointWaiters);
-		const addWaiter = vi.spyOn(checkpointWaiters, "add").mockImplementation((waiter) => {
-			waitParked.resolve();
-			return originalAdd(waiter);
-		});
-		const waiting = harness.session.waitForIdle().then(
-			() => ({ ok: true as const }),
-			(error: unknown) => ({ ok: false as const, error }),
-		);
-		await waitParked.promise;
-		addWaiter.mockRestore();
-
-		const cleared = harness.session.clearQueue();
-		expect(cleared.followUp).toEqual(["cleared while suspended"]);
-		expect(await waiting).toEqual({ ok: true });
-	});
-
 	it("restores next-turn context from cancelled actions in action order", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		const firstPrompt = agentPromptText("agentmsg_restore_first", "first");
 		const secondPrompt = agentPromptText("agentmsg_restore_second", "second");
 		withStreaming(harness, true);
-		await harness.session.sendCustomMessage(
-			{ customType: "next-turn", content: "context A", display: true, details: {} },
-			{ deliverAs: "nextTurn" },
-		);
+		await parkNextTurn(harness, "context A");
 		await harness.session.queueAgentMessagePrompt(firstPrompt, "followUp");
-		await harness.session.sendCustomMessage(
-			{ customType: "next-turn", content: "context B", display: true, details: {} },
-			{ deliverAs: "nextTurn" },
-		);
+		await parkNextTurn(harness, "context B");
 		await harness.session.queueAgentMessagePrompt(secondPrompt, "followUp");
 
 		expect(harness.session.clearQueue().followUp).toEqual([firstPrompt, secondPrompt]);
@@ -758,10 +737,7 @@ describe("AgentSession queue characterization", () => {
 		]);
 
 		const pause = harness.session.acquireQueuedWorkPause();
-		await harness.session.sendCustomMessage(
-			{ customType: "next-turn", content: "carry this", display: true, details: {} },
-			{ deliverAs: "nextTurn" },
-		);
+		await parkNextTurn(harness, "carry this");
 		await harness.session.queueAgentMessagePrompt(firstPrompt, "followUp");
 		// Both inputs stay in one priority class so the agent message keeps the batch anchor.
 		await harness.session.followUp("surviving", undefined, { priority: "background" });
@@ -1653,6 +1629,13 @@ function readShellResult(harness: Harness, command = shellCompletion.command): P
 	return kernelHandlers(harness)["bash.consumed"]!({ pid: shellCompletion.pid, command }) as Promise<unknown>;
 }
 
+function parkNextTurn(harness: Harness, content: string): Promise<void> {
+	return harness.session.sendCustomMessage(
+		{ customType: "next-turn", content, display: true, details: {} },
+		{ deliverAs: "nextTurn" },
+	);
+}
+
 function shellMessages(harness: Harness): unknown[] {
 	return harness.session.messages.filter(
 		(message) => message.role === "custom" && message.customType === ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
@@ -1904,15 +1887,9 @@ describe("AgentSession queue regressions", () => {
 		expect(harness.session.unfinishedActionCount).toBe(1);
 		expect(harness.session.hasPendingSessionWork).toBe(false);
 		expect(shouldDeferHeartbeatCronJob(heartbeatJob(), harness.session)).toBe(false);
-		await harness.session.sendCustomMessage(
-			{ customType: "next-turn", content: "context A", display: true, details: {} },
-			{ deliverAs: "nextTurn" },
-		);
+		await parkNextTurn(harness, "context A");
 		await harness.session.promptHeartbeat(heartbeatJob(), { streamingBehavior: "followUp" });
-		await harness.session.sendCustomMessage(
-			{ customType: "next-turn", content: "context B", display: true, details: {} },
-			{ deliverAs: "nextTurn" },
-		);
+		await parkNextTurn(harness, "context B");
 		turnGate.resolve();
 		await originalTurn;
 		await harness.session.waitForIdle();
@@ -2088,16 +2065,27 @@ describe("AgentSession queue regressions", () => {
 		expect(harness.eventsOfType("agent_start")).toHaveLength(2);
 		expect(harness.eventsOfType("agent_end")).toHaveLength(2);
 	});
-
-	it("#2068: withdraws a queued shell notice once the kernel reads the result", async () => {
+	it("#2068: re-parks pending next-turn messages a withdrawn notice captured as prefixes", async () => {
 		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = await createWaitingHarness();
 		harnesses.push(harness);
+		let providerSawParkedContext = false;
 		harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
 			fauxAssistantMessage("Finished the original work."),
+			(context) => {
+				providerSawParkedContext = context.messages.some((message) => getMessageText(message) === "carry this");
+				return fauxAssistantMessage("Follow-up turn complete.");
+			},
 		]);
 		await waitForToolStart;
+		// A parked next-turn message waits for the next turn; the queued notice
+		// captures it as a prefix record while it waits in the steering lane.
+		await parkNextTurn(harness, "carry this");
 		await completeShell(harness);
+		const [notice] = harness.session.getSessionActionRecoverySnapshot().actions;
+		const prefixes =
+			notice?.payload.kind === "turn" ? notice.payload.records.filter((record) => record.role === "prefix") : [];
+		expect(prefixes.map((record) => getMessageText(record.message))).toEqual(["carry this"]);
 		expect(harness.session.getSteeringMessages()).toHaveLength(1);
 		// pids are reused across handles, so another command must not withdraw this notice.
 		await readShellResult(harness, "other command");
@@ -2109,12 +2097,17 @@ describe("AgentSession queue regressions", () => {
 		expect(harness.session.getSteeringMessages()).toHaveLength(1);
 		await readShellResult(harness);
 		expect(harness.session.getSteeringMessages()).toEqual([]);
+		// Withdrawing the notice hands its captured prefix records back to the next turn.
+		expect(harness.session.getPendingNextTurnMessageSnapshots().map(getMessageText)).toEqual(["carry this"]);
 
 		releaseToolExecution();
 		await promptPromise;
 		await harness.session.waitForIdle();
 		expect(shellMessages(harness)).toEqual([]);
 		expect(harness.eventsOfType("agent_start")).toHaveLength(1);
+		await harness.session.prompt("next turn");
+		await harness.session.waitForIdle();
+		expect(providerSawParkedContext).toBe(true);
 	});
 
 	it("#2023: keeps extension-origin queued slash-command text out of command dispatch", async () => {

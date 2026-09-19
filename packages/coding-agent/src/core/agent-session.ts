@@ -2182,7 +2182,10 @@ export class AgentSession {
 				const restorable = payload.records
 					.filter(
 						(record): record is DeliveryRecord & { message: CustomMessage } =>
-							(record.role === "next_turn" || (payload.acceptedAgentMessage && record.role === "prefix")) &&
+							// Prefix records are parked next-turn context the action captured
+							// on admission; a cancelled turn hands them back, like the
+							// admission-rejection and dispatch-failure paths already do.
+							(record.role === "next_turn" || record.role === "prefix") &&
 							record.message.role === "custom" &&
 							record.message.customType !== HARNESS_DIGEST_CUSTOM_TYPE &&
 							!record.durable,
