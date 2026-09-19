@@ -34,6 +34,7 @@ interface WorkerReporterFixture {
 		flushRoster(): void;
 		rosterReporter: {
 			lastComposed: Map<string, WorkerRosterEntry>;
+			lastComposedSource: Map<string, SessionSummary>;
 			lastComposedJson: Map<string, string>;
 			queuedChildren: Map<string, WorkerRosterEntry>;
 			removedAgentIds: Map<string, string | undefined>;
@@ -55,6 +56,7 @@ function makeWorkerReporter(connected = true): WorkerReporterFixture {
 		acpMcpOwners: new Map(),
 		rosterReporter: {
 			lastComposed: new Map<string, WorkerRosterEntry>(),
+			lastComposedSource: new Map<string, SessionSummary>(),
 			lastComposedJson: new Map<string, string>(),
 			queuedChildren: new Map<string, WorkerRosterEntry>(),
 			removedAgentIds: new Map<string, string | undefined>(),
@@ -482,6 +484,69 @@ describe("worker roster reporter", () => {
 		});
 		await new Promise((resolveSettle) => setImmediate(resolveSettle));
 		expect(internals.rosterReporter.lastComposed.get(agentId)?.summary.model).toMatchObject({ id: "m2" });
+	});
+
+	it("reuses the composed entry for an unchanged session and recomposes on append", () => {
+		const { daemon, sentDeltas } = makeWorkerReporter();
+		const messages: AgentMessage[] = [];
+		const state = makeState({ activeSessionId: "steady-active", sessionId: "steady-session", messages });
+		daemon.sessions.set(state.activeSessionId, state);
+
+		daemon.flushRoster();
+		expect(sentDeltas).toHaveLength(1);
+		const firstEntry = daemon.rosterReporter.lastComposed.get("steady-session");
+		expect(firstEntry?.summary.messageCount).toBe(0);
+
+		// Nothing changed: no new delta, and the same entry object is reused
+		// instead of being recomposed and re-serialized from the same inputs.
+		daemon.flushRoster();
+		expect(sentDeltas).toHaveLength(1);
+		expect(daemon.rosterReporter.lastComposed.get("steady-session")).toBe(firstEntry);
+
+		// A new message recomposes the row and publishes the updated activity.
+		messages.push({
+			role: "user",
+			content: "next turn",
+			timestamp: Date.parse("2026-05-02T00:00:00.000Z"),
+		} as AgentMessage);
+		daemon.flushRoster();
+		expect(sentDeltas).toHaveLength(2);
+		const secondEntry = daemon.rosterReporter.lastComposed.get("steady-session");
+		expect(secondEntry).not.toBe(firstEntry);
+		expect(secondEntry?.summary).toMatchObject({
+			messageCount: 1,
+			lastActivityAt: "2026-05-02T00:00:00.000Z",
+		});
+
+		// Unchanged again: the recomposed entry is reused across later flushes.
+		daemon.flushRoster();
+		expect(sentDeltas).toHaveLength(2);
+		expect(daemon.rosterReporter.lastComposed.get("steady-session")).toBe(secondEntry);
+	});
+
+	it("republishes busy-state flips that arrive without any append", () => {
+		const { daemon, sentDeltas } = makeWorkerReporter();
+		const state = makeState({ activeSessionId: "busy-active", sessionId: "busy-session", messages: [] });
+		daemon.sessions.set(state.activeSessionId, state);
+
+		daemon.flushRoster();
+		expect(sentDeltas.at(-1)?.entries.some((entry) => entry.summary.isStreaming === false)).toBe(true);
+
+		// turn_start/bash_start/compaction_start schedule flushes with no message
+		// appended: the entry must recompose, not reuse the idle snapshot.
+		const session = state.runtime.session as unknown as { isStreaming: boolean; isSessionActive: boolean };
+		session.isStreaming = true;
+		session.isSessionActive = true;
+		daemon.flushRoster();
+		const delta = sentDeltas.at(-1);
+		expect(delta?.entries).toHaveLength(1);
+		expect(delta?.entries[0]?.summary).toMatchObject({ isStreaming: true, activity: "working" });
+
+		// Back to idle: the row recomposes again even though no append happened.
+		session.isStreaming = false;
+		session.isSessionActive = false;
+		daemon.flushRoster();
+		expect(sentDeltas.at(-1)?.entries[0]?.summary).toMatchObject({ isStreaming: false, activity: "idle" });
 	});
 });
 

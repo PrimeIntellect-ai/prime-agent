@@ -3,6 +3,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { describe, expect, it } from "vitest";
 import type { RlmChildAgentSnapshot } from "../src/core/agent-session.js";
 import type { AgentCronJob } from "../src/core/cron-jobs.js";
+import type { SessionActionSnapshot } from "../src/core/session-action-store.js";
 import type { SessionInfo } from "../src/core/session-manager.js";
 import type { SessionUsageSummary } from "../src/core/usage.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
@@ -10,8 +11,11 @@ import { passivatedWorkerRosterEntry, workerRosterEntryFromSummary } from "../sr
 import {
 	buildRlmChildSnapshots,
 	buildSessionList,
+	latestMessageActivityAt,
+	type MessageActivityMemo,
 	resolveAttachModelFallbackMessage,
 	type SessionSummary,
+	sessionDisplayLabels,
 	summaryForActiveSession,
 } from "../src/modes/daemon/daemon-session-list.js";
 
@@ -500,6 +504,214 @@ describe("summaryForActiveSession recap currency", () => {
 
 		expect(summary.summary).toBe(expected.summary);
 		expect(summary.taskState).toBe(expected.taskState);
+	});
+});
+
+describe("summary compose memoization", () => {
+	const messageAt = (iso: string, content = "hello") =>
+		({ role: "user", content, timestamp: Date.parse(iso) }) as AgentMessage;
+
+	it("returns the same summary object when nothing changed", () => {
+		const state = makeState({ activeSessionId: "steady", messages: [messageAt("2026-05-01T00:00:00.000Z")] });
+		const first = summaryForActiveSession(state);
+		expect(first).toMatchObject({ messageCount: 1, lastActivityAt: "2026-05-01T00:00:00.000Z" });
+		// Roster flushes recompose every session each cycle; an unchanged session
+		// must reuse the previous summary instead of recomposing it.
+		expect(summaryForActiveSession(state)).toBe(first);
+	});
+
+	it("recomposes when a message is appended and folds only the new tail", () => {
+		const messages = [messageAt("2026-05-01T00:00:00.000Z")];
+		const state = makeState({ activeSessionId: "append", messages });
+		const first = summaryForActiveSession(state);
+		messages.push(messageAt("2026-05-02T00:00:00.000Z"));
+		const second = summaryForActiveSession(state);
+		expect(second).not.toBe(first);
+		expect(second).toMatchObject({ messageCount: 2, lastActivityAt: "2026-05-02T00:00:00.000Z" });
+		// A stale appended timestamp must not unseat the existing latest activity.
+		messages.push(messageAt("2026-05-01T12:00:00.000Z"));
+		const third = summaryForActiveSession(state);
+		expect(third).not.toBe(second);
+		expect(third.lastActivityAt).toBe("2026-05-02T00:00:00.000Z");
+	});
+
+	it("recomposes when busy-state bits flip without an append", () => {
+		const state = makeState({ activeSessionId: "busy", messages: [messageAt("2026-05-01T00:00:00.000Z")] });
+		const first = summaryForActiveSession(state);
+		expect(first.isStreaming).toBe(false);
+		(state.runtime.session as unknown as { isStreaming: boolean }).isStreaming = true;
+		(state.runtime.session as unknown as { isSessionActive: boolean }).isSessionActive = true;
+		const second = summaryForActiveSession(state);
+		expect(second).not.toBe(first);
+		expect(second).toMatchObject({ isStreaming: true, activity: "working" });
+	});
+
+	it("recomposes when the summarizer verdict is replaced", () => {
+		const state = makeState({
+			activeSessionId: "verdict",
+			messages: [messageAt("2026-05-01T00:00:00.000Z")],
+		});
+		const first = summaryForActiveSession(state);
+		expect(first.summary).toBeUndefined();
+		(state as unknown as { summaryState?: object }).summaryState = {
+			summary: "Editing the router",
+			taskState: "completed",
+			basedOnMessageCount: 1,
+		};
+		const second = summaryForActiveSession(state);
+		expect(second).not.toBe(first);
+		expect(second).toMatchObject({ summary: "Editing the router", taskState: "completed" });
+	});
+
+	it("recomposes when the visible action snapshot changes", () => {
+		const state = makeState({ activeSessionId: "queued" });
+		const first = summaryForActiveSession(state);
+		expect(first.sessionActions).toMatchObject({ queuedCount: 0 });
+		(
+			state.runtime.session as unknown as {
+				getSessionActionSnapshot: () => SessionActionSnapshot;
+			}
+		).getSessionActionSnapshot = () => ({
+			queuedCount: 1,
+			steering: ["revised plan"],
+			followUps: [],
+		});
+		const second = summaryForActiveSession(state);
+		expect(second).not.toBe(first);
+		expect(second.sessionActions).toMatchObject({ queuedCount: 1, steering: ["revised plan"] });
+	});
+
+	it("recomposes when heartbeat registration flags differ per call site", () => {
+		const state = makeState({ activeSessionId: "flags" });
+		const unflagged = summaryForActiveSession(state);
+		expect(unflagged.hasActiveHeartbeat).toBeUndefined();
+		const flagged = summaryForActiveSession(state, undefined, true);
+		expect(flagged).not.toBe(unflagged);
+		expect(flagged.hasActiveHeartbeat).toBe(true);
+		expect(summaryForActiveSession(state, undefined, true)).toBe(flagged);
+	});
+});
+
+describe("latestMessageActivityAt memo", () => {
+	const messageAt = (iso: string, content = "hello") =>
+		({ role: "user", content, timestamp: Date.parse(iso) }) as AgentMessage;
+
+	function countingArray(messages: AgentMessage[]): { reads: number[]; array: AgentMessage[] } {
+		const reads: number[] = [];
+		const array = new Proxy(messages, {
+			get(target, property, receiver) {
+				if (typeof property === "string" && /^\d+$/.test(property)) reads.push(Number(property));
+				return Reflect.get(target, property, receiver);
+			},
+		});
+		return { reads, array };
+	}
+
+	function freshMemo(): MessageActivityMemo {
+		return { source: undefined, scannedLength: 0, tailRef: undefined, latest: undefined };
+	}
+
+	it("scans the whole array once and then only appended messages", () => {
+		// Twenty messages stand in for a large transcript: the memo must never
+		// re-walk the old prefix once it has scanned it.
+		const messages = Array.from({ length: 20 }, (_, index) =>
+			messageAt(new Date(Date.UTC(2026, 4, 1, 0, 0, index)).toISOString()),
+		);
+		const { reads, array } = countingArray(messages);
+		const memo = freshMemo();
+
+		const latestIso = new Date(Date.UTC(2026, 4, 1, 0, 0, 19)).toISOString();
+		expect(latestMessageActivityAt(array, memo)).toBe(latestIso);
+		expect(reads).toContain(0);
+		expect(memo.scannedLength).toBe(20);
+
+		// Unchanged array: O(1) boundary/tail reads only, no message walk.
+		reads.length = 0;
+		expect(latestMessageActivityAt(array, memo)).toBe(latestIso);
+		expect(reads.length).toBeGreaterThan(0);
+		expect(reads.every((index) => index >= 19)).toBe(true);
+
+		// One append: the boundary check plus the new element, nothing older.
+		messages.push(messageAt("2026-06-01T00:00:00.000Z"));
+		reads.length = 0;
+		expect(latestMessageActivityAt(array, memo)).toBe("2026-06-01T00:00:00.000Z");
+		expect(reads.every((index) => index >= 19)).toBe(true);
+		expect(reads).toContain(20);
+		expect(memo.scannedLength).toBe(21);
+	});
+
+	it("rescans everything after a mid-array insert shifts the boundary", () => {
+		const messages = [messageAt("2026-05-01T00:00:00.000Z"), messageAt("2026-05-04T00:00:00.000Z")];
+		const memo = freshMemo();
+		expect(latestMessageActivityAt(messages, memo)).toBe("2026-05-04T00:00:00.000Z");
+		// Insert before the tail: the pre-error splice path in agent-session.
+		messages.splice(1, 0, messageAt("2026-05-03T00:00:00.000Z"));
+		expect(latestMessageActivityAt(messages, memo)).toBe("2026-05-04T00:00:00.000Z");
+		expect(memo.scannedLength).toBe(3);
+		expect(memo.latest).toBe(Date.parse("2026-05-04T00:00:00.000Z"));
+	});
+
+	it("rescans when the array is replaced or shrinks", () => {
+		const messages = [messageAt("2026-05-01T00:00:00.000Z"), messageAt("2026-05-02T00:00:00.000Z")];
+		const memo = freshMemo();
+		expect(latestMessageActivityAt(messages, memo)).toBe("2026-05-02T00:00:00.000Z");
+		// Compaction and filtering reassign the array; the memo must not trust the old scan.
+		const replacement = [...messages];
+		expect(latestMessageActivityAt(replacement, memo)).toBe("2026-05-02T00:00:00.000Z");
+		replacement.pop();
+		expect(latestMessageActivityAt(replacement, memo)).toBe("2026-05-01T00:00:00.000Z");
+		expect(memo.scannedLength).toBe(1);
+	});
+
+	it("keeps ignoring invalid timestamps on appended messages", () => {
+		const messages = [messageAt("2026-05-01T00:00:00.000Z")];
+		const memo = freshMemo();
+		expect(latestMessageActivityAt(messages, memo)).toBe("2026-05-01T00:00:00.000Z");
+		messages.push({
+			role: "assistant",
+			content: "corrupt",
+			timestamp: 8.64e15 + 1,
+		} as unknown as AgentMessage);
+		expect(latestMessageActivityAt(messages, memo)).toBe("2026-05-01T00:00:00.000Z");
+		expect(memo.scannedLength).toBe(2);
+	});
+
+	it("matches a full rescan on every mutation pattern", () => {
+		const build = (count: number) =>
+			Array.from({ length: count }, (_, index) => messageAt(new Date(2026, 4, 1, 0, 0, index).toISOString()));
+		const messages = build(25);
+		const memo = freshMemo();
+		const fullScan = () => latestMessageActivityAt(messages);
+		for (const mutation of [
+			() => messages.push(messageAt("2026-06-01T00:00:00.000Z")),
+			() => messages.splice(10, 0, messageAt("2026-05-15T00:00:00.000Z")),
+			() => messages.pop(),
+			() => messages.push(messageAt("2026-04-01T00:00:00.000Z")),
+		]) {
+			mutation();
+			expect(latestMessageActivityAt(messages, memo)).toBe(fullScan());
+		}
+	});
+});
+
+describe("sessionDisplayLabels", () => {
+	it("mirrors the summary's session name and first message", () => {
+		const state = makeState({
+			activeSessionId: "labels",
+			messages: [{ role: "user", content: "first prompt" } as AgentMessage],
+		});
+		const labels = sessionDisplayLabels(state);
+		const summary = summaryForActiveSession(state);
+		expect(labels.sessionName).toBe(summary.sessionName);
+		expect(labels.firstMessage).toBe(summary.firstMessage);
+	});
+
+	it("uses the spawn prompt as the subagent title", () => {
+		const state = makeState({
+			activeSessionId: "spawned",
+			metadata: { kind: "subagent", createdAt: 1, prompt: "Audit the   retry\nlogic", rlmChildId: "c1" },
+		});
+		expect(sessionDisplayLabels(state).firstMessage).toBe("Audit the retry logic");
 	});
 });
 

@@ -512,6 +512,7 @@ describe("daemon worker supervisor monitoring", () => {
 			cronStore: { list: () => [] },
 			rosterReporter: {
 				lastComposed: new Map(),
+				lastComposedSource: new Map(),
 				lastComposedJson: new Map(),
 				queuedChildren: new Map(),
 				removedAgentIds: new Map(),
