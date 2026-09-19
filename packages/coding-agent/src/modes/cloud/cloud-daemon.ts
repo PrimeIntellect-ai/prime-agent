@@ -158,12 +158,28 @@ export function parseCloudDaemonEnv(
 
 interface TrackedSession {
 	runtime: AgentSessionRuntime;
+	/** The authoritative session object being mirrored, captured at bind time. */
+	session: AgentSession;
+	/** Durable cursor: entries [0, lastEntryIndex) already landed in the log. */
 	lastEntryIndex: number;
+	/** Identity of the last mirrored entry; rebinds resume strictly after it. */
+	lastEntryId: string | undefined;
 	usageRevision: number;
 	inputTokens: number;
 	outputTokens: number;
 	cachedTokens: number;
 	requests: number;
+}
+
+/**
+ * Durable mirror cursor state for one session id. Kept for every session this
+ * daemon generation ever mirrored (live and replaced), so a rebind or restart
+ * resumes after the last mirrored entry instead of freezing on a stale count
+ * or re-emitting mirrored entries.
+ */
+interface MirrorCursorState {
+	count: number;
+	lastEntryId: string | undefined;
 }
 
 /** One cross-boundary request awaiting a journaled result command. */
@@ -179,6 +195,9 @@ const REMOTE_REQUEST_TIMEOUT_MS = 30_000;
 export class CloudGuestDaemon {
 	private readonly host: SessionHostCore;
 	private readonly tracked = new Map<string, TrackedSession>();
+	/** Durable cursor image per session id (live and replaced sessions alike). */
+	private readonly mirrorCursors = new Map<string, MirrorCursorState>();
+	private mirrorCursorsLoaded = false;
 	private rootState: ActiveSessionState | undefined;
 	private status: CloudSessionStatus = "starting";
 	private metaEmittedAt = 0;
@@ -204,7 +223,7 @@ export class CloudGuestDaemon {
 		this.host = new SessionHostCore({
 			broadcast: (state, message) => this.onSessionOutbound(state, message),
 			createConnectionState: (state) => this.createConnectionState(state),
-			sessionReplaced: () => undefined,
+			sessionReplaced: (state) => this.onSessionReplaced(state),
 			shutdown: () => {
 				void this.release("stopped");
 			},
@@ -341,18 +360,9 @@ export class CloudGuestDaemon {
 		this.rootState = await this.host.addRuntime(runtime, undefined, undefined, (state) => {
 			rootStateRef = state;
 		});
+		// Crash resume rides the same path as any rebind: track resumes from
+		// the persisted entry identity instead of re-emitting the whole session.
 		this.track(runtime);
-		if (sessionFile) {
-			// Crash resume: continue the durable mirror from the persisted
-			// cursor instead of re-emitting the whole session.
-			const sessionId = runtime.session.sessionId;
-			const counts = this.readMirrorCursor();
-			const resumed = counts[sessionId];
-			const tracked = this.tracked.get(sessionId);
-			if (tracked && resumed !== undefined) {
-				tracked.lastEntryIndex = Math.min(resumed, runtime.session.sessionManager.getEntries().length);
-			}
-		}
 		this.setStatus("idle");
 		this.queueMirror();
 	}
@@ -407,19 +417,57 @@ export class CloudGuestDaemon {
 		);
 	}
 
+	/**
+	 * Bind (or rebind) one session's mirror. When the authoritative session
+	 * object for an already-tracked id changes - an in-place runtime swap
+	 * (new/switch/fork) or a fresh runtime over the same session file - the
+	 * cursor resumes strictly after the last mirrored entry identity, so the
+	 * swap neither freezes on the stale object, loses the new object's
+	 * entries, nor re-emits entries that already landed in the log.
+	 */
 	private track(runtime: AgentSessionRuntime): void {
-		const sessionId = runtime.session.sessionId;
-		if (!this.tracked.has(sessionId)) {
-			this.tracked.set(sessionId, {
-				runtime,
-				lastEntryIndex: 0,
-				usageRevision: 0,
-				inputTokens: 0,
-				outputTokens: 0,
-				cachedTokens: 0,
-				requests: 0,
-			});
+		this.ensureMirrorCursorsLoaded();
+		const session = runtime.session;
+		const sessionId = session.sessionId;
+		const existing = this.tracked.get(sessionId);
+		if (existing !== undefined) {
+			if (existing.session === session) return;
+			const cursor = resumeMirrorCursor(session, existing.lastEntryIndex, existing.lastEntryId);
+			existing.runtime = runtime;
+			existing.session = session;
+			existing.lastEntryIndex = cursor.index;
+			existing.lastEntryId = cursor.lastEntryId;
+			this.queueMirror();
+			return;
 		}
+		const durable = this.mirrorCursors.get(sessionId);
+		const cursor = durable
+			? resumeMirrorCursor(session, durable.count, durable.lastEntryId)
+			: { index: 0, lastEntryId: undefined as string | undefined };
+		this.tracked.set(sessionId, {
+			runtime,
+			session,
+			lastEntryIndex: cursor.index,
+			lastEntryId: cursor.lastEntryId,
+			usageRevision: 0,
+			inputTokens: 0,
+			outputTokens: 0,
+			cachedTokens: 0,
+			requests: 0,
+		});
+		this.queueMirror();
+	}
+
+	/**
+	 * A state's runtime replaced its session in place (new/switch/fork):
+	 * rebind the mirror to the new session object immediately. The previous
+	 * binding keeps its captured session object, drains that object's final
+	 * entries on the next pass, and retires; nothing is emitted under the
+	 * wrong session id.
+	 */
+	private onSessionReplaced(state: ActiveSessionState): void {
+		this.track(state.runtime);
+		this.queueMirror();
 	}
 
 	/** Every guest-hosted session (root and descendants) mirrors its entries. */
@@ -682,19 +730,34 @@ export class CloudGuestDaemon {
 
 	private mirrorEntries(): void {
 		let cursorChanged = false;
-		for (const tracked of this.tracked.values()) {
-			const entries = tracked.runtime.session.sessionManager.getEntries();
+		for (const [sessionId, tracked] of this.tracked) {
+			// The captured session object is the mirror's authority: after a
+			// runtime swap it still holds this session's final entries, and a
+			// rebind reads the new object through its own entry.
+			const entries = tracked.session.sessionManager.getEntries();
 			for (let index = tracked.lastEntryIndex; index < entries.length; index++) {
 				const entry = entries[index];
 				if (entry === undefined) continue;
-				const appended = this.emitSessionEntry(tracked.runtime.session.sessionId, entry);
+				const appended = this.emitSessionEntry(sessionId, entry);
 				if (!appended) {
 					// A stalled log never advances the mirror cursor: the entry
 					// re-emits once retention frees space.
 					break;
 				}
 				tracked.lastEntryIndex = index + 1;
+				tracked.lastEntryId = entry.id;
+				this.mirrorCursors.set(sessionId, {
+					count: tracked.lastEntryIndex,
+					lastEntryId: tracked.lastEntryId,
+				});
 				cursorChanged = true;
+			}
+			// A replaced binding retires once its captured object fully
+			// drained: the durable cursor keeps its identity for a later
+			// rebind of the same session id, and the live map only holds
+			// sessions that can still produce entries.
+			if (tracked.session !== tracked.runtime.session && tracked.lastEntryIndex >= entries.length) {
+				this.tracked.delete(sessionId);
 			}
 		}
 		if (this.rootState && !this.released) {
@@ -703,21 +766,22 @@ export class CloudGuestDaemon {
 		}
 		if (cursorChanged) {
 			// The mirror cursor is durable: a restarted daemon resumes from the
-			// last appended entry instead of re-mirroring the whole session and
-			// refilling the log. Written after the appends, so a crash between
-			// the two re-emits at worst (the mirror dedupes), never skips.
+			// last appended entry identity instead of re-mirroring the whole
+			// session and refilling the log. Written after the appends, so a
+			// crash between the two re-emits at worst (the mirror dedupes),
+			// never skips.
 			this.persistMirrorCursor();
 		}
 	}
 
 	private persistMirrorCursor(): void {
 		try {
-			const counts: Record<string, number> = {};
-			for (const [sessionId, tracked] of this.tracked) {
-				counts[sessionId] = tracked.lastEntryIndex;
+			const cursors: Record<string, MirrorCursorState> = {};
+			for (const [sessionId, cursor] of this.mirrorCursors) {
+				cursors[sessionId] = { count: cursor.count, lastEntryId: cursor.lastEntryId };
 			}
 			const path = join(this.mirrorStateDirectory(), "mirror-cursor.json");
-			writeFileSync(`${path}.tmp`, `${JSON.stringify(counts)}\n`, { mode: 0o600 });
+			writeFileSync(`${path}.tmp`, `${JSON.stringify(cursors)}\n`, { mode: 0o600 });
 			renameSync(`${path}.tmp`, path);
 		} catch {
 			// The cursor is an optimization for restarts; a failed write only
@@ -725,20 +789,20 @@ export class CloudGuestDaemon {
 		}
 	}
 
-	private readMirrorCursor(): Record<string, number> {
+	/** Load the durable cursor image once; rebinds and resumes read it in memory. */
+	private ensureMirrorCursorsLoaded(): void {
+		if (this.mirrorCursorsLoaded) return;
+		this.mirrorCursorsLoaded = true;
 		try {
 			const path = join(this.mirrorStateDirectory(), "mirror-cursor.json");
-			if (!existsSync(path)) return {};
+			if (!existsSync(path)) return;
 			const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-			const counts: Record<string, number> = {};
 			for (const [sessionId, value] of Object.entries(parsed)) {
-				if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
-					counts[sessionId] = value;
-				}
+				const cursor = parseMirrorCursorState(value);
+				if (cursor !== undefined) this.mirrorCursors.set(sessionId, cursor);
 			}
-			return counts;
 		} catch {
-			return {};
+			// Corrupt cursor state costs duplicate mirrored entries at worst.
 		}
 	}
 
@@ -1815,6 +1879,40 @@ function failure(error: unknown): CloudProtocolDispatchResult {
 
 function emptySnapshotState(cwd: string): CloudSessionState {
 	return { cwd, modelId: "image-default", queuedCommandIds: [] };
+}
+
+/** Parse one persisted cursor record; malformed state is treated as absent. */
+function parseMirrorCursorState(value: unknown): MirrorCursorState | undefined {
+	if (value === null || typeof value !== "object") return undefined;
+	const record = value as { count?: unknown; lastEntryId?: unknown };
+	if (typeof record.count !== "number" || !Number.isInteger(record.count) || record.count < 0) {
+		return undefined;
+	}
+	const lastEntryId =
+		typeof record.lastEntryId === "string" && record.lastEntryId.length > 0 ? record.lastEntryId : undefined;
+	return { count: record.count, lastEntryId };
+}
+
+/**
+ * Resume the mirror cursor for one session object from the mirrored entry
+ * identity: continue strictly after the last entry that already landed in
+ * the durable log. An identity this object does not hold means a different
+ * transcript: mirror it whole - consumers dedupe by entry id, so this costs
+ * redundant records at worst, never a freeze or a loss. Count-only state
+ * (a cursor that never carried an identity) clamps instead.
+ */
+function resumeMirrorCursor(
+	session: AgentSession,
+	count: number,
+	lastEntryId: string | undefined,
+): { index: number; lastEntryId: string | undefined } {
+	const entries = session.sessionManager.getEntries();
+	if (lastEntryId !== undefined) {
+		const index = entries.findIndex((entry) => entry.id === lastEntryId);
+		return index >= 0 ? { index: index + 1, lastEntryId } : { index: 0, lastEntryId: undefined };
+	}
+	const index = Math.min(count, entries.length);
+	return { index, lastEntryId: entries[index - 1]?.id };
 }
 
 function entryIdentity(entry: SessionEntry): Record<string, unknown> {

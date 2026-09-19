@@ -468,6 +468,149 @@ describe("resident guest daemon (in-process, faux provider)", () => {
 			await daemon.stop();
 		}
 	}, 30_000);
+
+	it("rebinds entry mirroring across runtime session swaps, rebinds, and a restart", async () => {
+		const root = temp();
+		const responsesPath = join(root, "responses.jsonl");
+		process.env.PRIME_AGENT_TEST_FAUX_RESPONSES = responsesPath;
+		delete process.env.PRIME_AGENT_TEST_FAUX_ECHO;
+		const queueTurn = (answer: string) => {
+			const response: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: answer }],
+				api: "faux",
+				provider: "faux",
+				timestamp: Date.now(),
+				usage: {
+					input: 3,
+					output: 5,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 8,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			} as AssistantMessage;
+			writeFileSync(responsesPath, `${JSON.stringify(response)}\n`, { mode: 0o600 });
+		};
+		const submitTurn = async (client: LoopClient, commandId: string, text: string, answer: string) => {
+			queueTurn(answer);
+			client.submit(commandId, { kind: "prompt", text });
+			await client.waitFor(
+				(events) =>
+					events.some((event) => event.kind === "session_entry" && JSON.stringify(event.entry).includes(answer)),
+				20_000,
+			);
+		};
+
+		const { daemon, client } = await startDaemon(root);
+		let restarted: CloudGuestDaemon | undefined;
+		try {
+			const rootRuntime = daemon.rootRuntime;
+			if (!rootRuntime) throw new Error("missing root runtime");
+			const firstSessionId = rootRuntime.session.sessionId;
+			const firstSessionFile = rootRuntime.session.sessionFile;
+			if (!firstSessionFile) throw new Error("missing session file");
+
+			// Turn one on the boot session.
+			await submitTurn(client, "cmd_turn_one", "turn one", "answer one");
+
+			// Swap: the runtime replaces its session in place; the new session
+			// carries a brand-new header id.
+			await rootRuntime.newSession();
+			const swappedSessionId = rootRuntime.session.sessionId;
+			expect(swappedSessionId).not.toBe(firstSessionId);
+
+			// Two turns on the swapped session plus a name entry: the rebind
+			// must keep mirroring every new object (no freeze) and must never
+			// emit one entry twice through the stale binding.
+			await submitTurn(client, "cmd_turn_two", "turn two", "answer two");
+			await submitTurn(client, "cmd_turn_three", "turn three", "answer three");
+			client.submit("cmd_swapped_name", { kind: "set_session_name", name: "swapped session" });
+			await client.waitFor((events) =>
+				events.some(
+					(event) => event.kind === "session_entry" && JSON.stringify(event.entry).includes("swapped session"),
+				),
+			);
+
+			// Rebind: switch back to the original session file. The same session
+			// id returns on a fresh object; the durable cursor must resume by
+			// entry identity instead of re-emitting the whole transcript.
+			await rootRuntime.switchSession(firstSessionFile);
+			expect(rootRuntime.session.sessionId).toBe(firstSessionId);
+			await submitTurn(client, "cmd_turn_four", "turn four", "answer four");
+
+			// Restart: a fresh daemon over the same durable state resumes the
+			// session file and continues the mirror from the persisted cursor.
+			await client.close();
+			await daemon.release("stopped");
+			restarted = await CloudGuestDaemon.start(daemonEnv(root), { createRuntime: createFauxRuntimeFactory });
+			await restarted.openSession({});
+			restarted.startMirrorLoop();
+			expect(restarted.rootSession?.sessionId).toBe(firstSessionId);
+			const second = new LoopClient(daemonEnv(root).socketPath);
+			second.hello();
+			await second.waitForSnapshot();
+			second.subscribe(0);
+			await submitTurn(second, "cmd_turn_five", "turn five", "answer five");
+
+			// Acknowledge the whole log, reconnect from the cursor, and prove
+			// the acknowledged prefix never replays while new work lands past it.
+			const tail = second.events().reduce((max, event) => Math.max(max, event.sequence), 0);
+			second.send({ type: "ack", sessionId: SESSION_ID, cursor: { generation: 1, sequence: tail } });
+			await second.close();
+			const third = new LoopClient(daemonEnv(root).socketPath);
+			third.hello(tail);
+			await third.waitForSnapshot();
+			third.subscribe(tail);
+			await submitTurn(third, "cmd_turn_six", "turn six", "answer six");
+			for (const event of third.events()) {
+				expect(event.sequence).toBeGreaterThan(tail);
+			}
+			await third.close();
+
+			// Every conversation entry mirrored exactly once per (session,
+			// entry) identity, under the session id that owns it.
+			const bySequence = new Map<number, Extract<CloudEvent, { kind: "session_entry" }>>();
+			for (const event of [...client.events(), ...second.events(), ...third.events()]) {
+				if (event.kind === "session_entry") bySequence.set(event.sequence, event);
+			}
+			const mirrored = [...bySequence.values()];
+			const seen = new Set<string>();
+			for (const event of mirrored) {
+				const key = `${event.sessionId}:${event.entryId}`;
+				expect(seen.has(key)).toBe(false);
+				seen.add(key);
+			}
+			const expects: Array<[string, string[]]> = [
+				[
+					firstSessionId,
+					[
+						"turn one",
+						"answer one",
+						"turn four",
+						"answer four",
+						"turn five",
+						"answer five",
+						"turn six",
+						"answer six",
+					],
+				],
+				[swappedSessionId, ["turn two", "answer two", "turn three", "answer three"]],
+			];
+			for (const [sessionId, fragments] of expects) {
+				for (const fragment of fragments) {
+					expect(
+						mirrored.some(
+							(event) => event.sessionId === sessionId && JSON.stringify(event.entry).includes(fragment),
+						),
+					).toBe(true);
+				}
+			}
+		} finally {
+			await restarted?.release("stopped").catch(() => undefined);
+			await daemon.stop().catch(() => undefined);
+		}
+	}, 60_000);
 });
 
 describe("guest daemon protocol hardening (in-process, faux provider)", () => {

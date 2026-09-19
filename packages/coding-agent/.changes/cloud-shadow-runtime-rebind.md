@@ -1,0 +1,1 @@
+- Fixed resident cloud transcript mirroring to rebind when a guest session's runtime object is replaced, so swapped sessions keep mirroring durable entries without freezing, losing, or duplicating them.
