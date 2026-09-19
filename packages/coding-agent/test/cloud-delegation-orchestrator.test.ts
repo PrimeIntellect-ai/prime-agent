@@ -463,6 +463,7 @@ function taskResult(outcome: "completed" | "failed" | "stopped"): CloudDelegatio
 		stdout: "task stdout",
 		stderr: "task stderr",
 		patch: new Uint8Array([1, 2, 3]),
+		changedPaths: [],
 		retrievedAt: new Date().toISOString(),
 	};
 }

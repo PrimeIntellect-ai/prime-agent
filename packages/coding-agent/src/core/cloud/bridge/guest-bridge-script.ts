@@ -29,9 +29,12 @@
  *   frames. The daemon owns hello/version/token/generation validation and
  *   every receipt.
  * - Own the terminal results contract: status.txt, stdout.txt (the assistant
- *   answer stream), stderr.txt (daemon diagnostics), and changes.patch against
- *   the submitted baseline, plus removal of the guest credential, with
- *   status.txt last as the commit marker.
+ *   answer stream), stderr.txt (daemon diagnostics), changes.patch against
+ *   the submitted baseline (binary-safe, exact git diff bytes), and
+ *   changed-paths.txt (the same diff's touched paths), plus removal of the
+ *   guest credential, with status.txt last as the commit marker: any reader
+ *   that observes the terminal status also observes the complete result
+ *   bytes, before the sandbox may be deleted.
  */
 
 export const CLOUD_GUEST_BRIDGE_SCRIPT = String.raw`#!/usr/bin/env node
@@ -70,6 +73,10 @@ const MAX_CLIENTS = 4;
 const DAEMON_START_TIMEOUT_MS = 60000;
 const DAEMON_RESTART_LIMIT = 5;
 const DAEMON_RESTART_DELAY_MS = 1000;
+// Bounds one collected git output (patch or changed-paths list); matches the
+// local side's CLOUD_RESULT_MAX_PATCH_BYTES so the guest never produces a
+// result the importer must reject on size.
+const MAX_GIT_OUTPUT_BYTES = 64 * 1024 * 1024;
 
 function env(name, fallback) {
 	const value = process.env[name];
@@ -98,6 +105,7 @@ const stdoutPath = join(resultsDir, "stdout.txt");
 const stderrPath = join(resultsDir, "stderr.txt");
 const statusPath = join(resultsDir, "status.txt");
 const patchPath = join(resultsDir, "changes.patch");
+const changedPathsPath = join(resultsDir, "changed-paths.txt");
 const bridgeLogPath = join(stateDir, "bridge.log");
 const frpcLogPath = join(stateDir, "frpc.log");
 const frpcConfigPath = join(stateDir, "frpc.toml");
@@ -446,22 +454,25 @@ async function finalize(outcome) {
 		signalProcessGroup(frpcChild, "SIGTERM");
 		frpcChild = null;
 	}
+	// The terminal results contract runs on every terminal flow (completed,
+	// stopped, failed): the patch and the changed-paths list are generated from
+	// the captured baseline BEFORE the terminal status is published, so any
+	// reader that observes status.txt also observes complete result bytes,
+	// and the local side may only delete the sandbox after fetching them.
+	// Both files always exist by then, and the patch keeps its exact bytes:
+	// git diff output is not guaranteed UTF-8 (raw text hunks, raw paths), so
+	// it is collected and written as a raw buffer, never as a string.
 	try {
-		const baseline = env("PRIME_AGENT_CLOUD_GIT_BASELINE", "");
-		if (baseline !== "" && existsSync(join(workspaceDir, ".git"))) {
-			const patch = await gitPatch(baseline);
-			const fd = openSync(patchPath, "w", 0o600);
-			try {
-				writeSync(fd, patch);
-			} finally {
-				closeSync(fd);
-			}
-		} else {
-			const fd = openSync(patchPath, "w", 0o600);
-			closeSync(fd);
-		}
+		await writeGitResults();
 	} catch (error) {
-		log("patch generation failed: " + error.message);
+		log("git results generation failed: " + error.message);
+		try {
+			emptyResult(patchPath);
+			emptyResult(changedPathsPath);
+		} catch {
+			// The status below still lands; the local import fails loudly on
+			// the missing artifacts instead of reporting success.
+		}
 	}
 	try {
 		rmSync(authPath, { force: true });
@@ -506,17 +517,50 @@ function gitAddUntracked() {
 	});
 }
 
-function gitPatch(baseline) {
-	return gitAddUntracked().then(
-		() =>
-			new Promise((resolve) => {
-				execFile(
-					"git",
-					["-C", workspaceDir, "-c", "core.quotePath=false", "diff", "--binary", "--no-renames", baseline],
-					(error, patch) => resolve(error === null ? patch : ""),
-				);
-			}),
-	);
+// One git command's output as raw bytes. execFile's default utf8 decoding
+// would corrupt non-UTF-8 patch bytes (raw hunks, raw paths) into replacement
+// characters, so buffer encoding is load-bearing here, and a failed command
+// resolves to empty bytes: the caller publishes empty files, never missing
+// ones, and the local import cross-checks the pair.
+function gitBytes(args) {
+	return new Promise((resolve) => {
+		execFile("git", ["-C", workspaceDir, ...args], { encoding: "buffer", maxBuffer: MAX_GIT_OUTPUT_BYTES }, (error, output) => {
+			resolve(error === null && Buffer.isBuffer(output) ? output : Buffer.alloc(0));
+		});
+	});
+}
+
+function emptyResult(path) {
+	closeSync(openSync(path, "w", 0o600));
+}
+
+// Whole-file write of exact bytes with mode 0600; partial writes are retried
+// until the buffer is fully drained.
+function writeResult(path, bytes) {
+	const fd = openSync(path, "w", 0o600);
+	try {
+		let offset = 0;
+		while (offset < bytes.byteLength) {
+			offset += writeSync(fd, bytes, offset);
+		}
+	} finally {
+		closeSync(fd);
+	}
+}
+
+// The patch and its changed-paths list come from the same captured baseline
+// with the same index state (untracked files visible via add -N), so the two
+// artifacts describe one identical change set for the local cross-check.
+async function writeGitResults() {
+	const baseline = env("PRIME_AGENT_CLOUD_GIT_BASELINE", "");
+	if (baseline === "" || !existsSync(join(workspaceDir, ".git"))) {
+		emptyResult(patchPath);
+		emptyResult(changedPathsPath);
+		return;
+	}
+	await gitAddUntracked();
+	writeResult(patchPath, await gitBytes(["-c", "core.quotePath=false", "diff", "--binary", "--no-renames", baseline]));
+	writeResult(changedPathsPath, await gitBytes(["-c", "core.quotePath=false", "diff", "--name-only", "--no-renames", baseline]));
 }
 
 // --- WebSocket server --------------------------------------------------------

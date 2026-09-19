@@ -56,7 +56,7 @@ import {
 } from "./prime-sandbox-client.js";
 import { PrimeTunnelClient } from "./prime-tunnel-client.js";
 import type { CloudSessionStatus } from "./protocol.js";
-import { CloudResultStore, decodeCloudResultPatch } from "./result-import.js";
+import { CloudResultStore, decodeCloudChangedPaths, decodeCloudResultPatch } from "./result-import.js";
 import { DurableCloudTraceMirror } from "./trace-mirror.js";
 import { VmProcessClient, VmProcessError, type VmProcessStream } from "./vm-process-client.js";
 import { createWorkspaceSnapshot } from "./workspace-snapshot.js";
@@ -777,16 +777,18 @@ class ConcreteResults implements CloudDelegationResultsClient {
 		if (status !== "completed" && status !== "failed" && status !== "stopped") {
 			throw new Error(`invalid cloud result outcome: ${status}`);
 		}
-		const [stdout, stderr, patch] = await Promise.all([
+		const [stdout, stderr, patch, changedPaths] = await Promise.all([
 			this.platform.downloadFile(sandboxId, `${CLOUD_GUEST_RESULTS_DIR}/stdout.txt`),
 			this.platform.downloadFile(sandboxId, `${CLOUD_GUEST_RESULTS_DIR}/stderr.txt`),
 			this.platform.downloadFile(sandboxId, `${CLOUD_GUEST_RESULTS_DIR}/changes.patch`),
+			this.platform.downloadFile(sandboxId, `${CLOUD_GUEST_RESULTS_DIR}/changed-paths.txt`),
 		]);
 		return {
 			outcome: status,
 			stdout: boundedText(stdout, "cloud stdout", MAX_RESULT_TEXT_BYTES, true),
 			stderr: boundedText(stderr, "cloud stderr", MAX_RESULT_TEXT_BYTES, true),
 			patch,
+			changedPaths: decodeCloudChangedPaths(changedPaths),
 			retrievedAt: new Date().toISOString(),
 		};
 	}
@@ -800,12 +802,22 @@ class ConcreteResults implements CloudDelegationResultsClient {
 		if (request.result.outcome === "failed") {
 			this.sessions.setLastError(request.sessionId, "the cloud agent exited with a failure");
 		}
+		// The guest publishes the patch and the changed-paths list together
+		// before its terminal status. Changed paths without patch bytes are a
+		// broken result contract, never a clean no-change result: failing
+		// here keeps the session out of review instead of reporting success.
+		if (request.result.changedPaths.length > 0 && patch.trim() === "") {
+			throw new Error(
+				`cloud result ${request.sessionId} lists ${request.result.changedPaths.length} changed paths but carries no patch`,
+			);
+		}
 		if (patch.trim() === "") return;
 		if (this.results.get(request.sessionId, "res_output") !== undefined) return;
 		this.results.save({
 			sessionId: request.sessionId,
 			resultId: "res_output",
 			patch,
+			...(request.result.changedPaths.length > 0 ? { changedPaths: request.result.changedPaths } : {}),
 			baselineManifestDigest: record.baseline.manifestDigest,
 		});
 	}

@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import {
 	closeSync,
 	existsSync,
@@ -23,6 +23,7 @@ import {
 	type CloudMessage,
 	cloudRequestDigest,
 } from "../src/core/cloud/protocol.js";
+import { CloudResultStore, decodeCloudChangedPaths, decodeCloudResultPatch } from "../src/core/cloud/result-import.js";
 
 /**
  * End-to-end coverage of the resident guest daemon through a loopback bridge.
@@ -106,7 +107,19 @@ function appendResponse(root: Bridge, text: string): void {
 	});
 }
 
-async function startBridge(options: { prompt?: string } = {}): Promise<Bridge> {
+function git(cwd: string, ...args: string[]): string {
+	return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+async function startBridge(
+	options: {
+		prompt?: string;
+		/** Replaces the resident daemon argv; finalize-only tests stub it out. */
+		daemonArgv?: string[];
+		/** Prepares a pre-existing workspace and returns extra bridge env. */
+		setupWorkspace?: (workspaceDir: string) => Record<string, string>;
+	} = {},
+): Promise<Bridge> {
 	const root = mkdtempSync(join(tmpdir(), "cloud-guest-bridge-test-"));
 	roots.push(root);
 	const workspaceDir = join(root, "workspace");
@@ -114,11 +127,12 @@ async function startBridge(options: { prompt?: string } = {}): Promise<Bridge> {
 	const stateDir = join(root, "state");
 	const daemonStateDir = join(root, "daemon-state");
 	const agentDir = join(root, "agent");
-	mkdirSync(workspaceDir);
+	mkdirSync(workspaceDir, { recursive: true });
 	mkdirSync(resultsDir);
 	mkdirSync(stateDir);
 	mkdirSync(daemonStateDir);
 	mkdirSync(agentDir);
+	const workspaceEnv = options.setupWorkspace?.(workspaceDir) ?? {};
 	const authPath = join(root, "inference.token");
 	const promptPath = join(root, "prompt.txt");
 	const responsesPath = join(root, "responses.jsonl");
@@ -147,10 +161,13 @@ async function startBridge(options: { prompt?: string } = {}): Promise<Bridge> {
 			PRIME_AGENT_CLOUD_DAEMON_SOCKET: join(daemonStateDir, "cloud.sock"),
 			PRIME_AGENT_CLOUD_DAEMON_STATE_DIR: daemonStateDir,
 			PRIME_AGENT_CLOUD_AGENT_DIR: agentDir,
-			PRIME_AGENT_CLOUD_DAEMON_ARGV_JSON: JSON.stringify([process.execPath, tsxPath, fixturePath]),
+			PRIME_AGENT_CLOUD_DAEMON_ARGV_JSON: JSON.stringify(
+				options.daemonArgv ?? [process.execPath, tsxPath, fixturePath],
+			),
 			PRIME_AGENT_TEST_FAUX_RESPONSES: responsesPath,
 			PRIME_AGENT_TEST_FAUX_ECHO: "1",
 			PRIME_API_KEY: "",
+			...workspaceEnv,
 		},
 		stdio: ["ignore", "ignore", "pipe"],
 	});
@@ -583,6 +600,130 @@ describe("guest cloud bridge with the resident guest daemon (end-to-end, faux pr
 			bridge.process.kill("SIGKILL");
 		}
 	}, 120_000);
+
+	// A stub daemon (the supervised process ignores everything): finalize and
+	// the terminal results contract are bridge-owned, so the contract is
+	// exercised without the daemon's startup latency or one-shot races.
+	it("publishes exact patch bytes and changed paths on the stop flow, importing them byte-for-byte", async () => {
+		// The edits cover the byte-safety the contract must preserve: a text
+		// hunk with non-UTF-8 bytes (any lossy string round-trip corrupts the
+		// patch) and a NUL-bearing binary blob (a GIT binary patch section).
+		const baselineText = Buffer.from([0x74, 0x65, 0x78, 0x74, 0xe9, 0x0a]);
+		const editedText = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x2c, 0x20, 0xff, 0x0a]);
+		const editedBlob = Buffer.from([0x00, 0x01, 0x02, 0xff, 0xfe, 0x00, 0x42, 0x00]);
+		const bridge = await startBridge({
+			daemonArgv: [process.execPath, "-e", "setInterval(() => {}, 3600000)"],
+			setupWorkspace: (workspaceDir) => {
+				writeFileSync(join(workspaceDir, "notes.txt"), baselineText);
+				writeFileSync(join(workspaceDir, "data.bin"), Buffer.from([0x00, 0x00, 0x00]));
+				git(workspaceDir, "init", "-q");
+				git(workspaceDir, "config", "user.email", "test@example.com");
+				git(workspaceDir, "config", "user.name", "Test");
+				git(workspaceDir, "add", "-A");
+				git(workspaceDir, "commit", "-qm", "baseline");
+				writeFileSync(join(workspaceDir, "notes.txt"), editedText);
+				writeFileSync(join(workspaceDir, "data.bin"), editedBlob);
+				return { PRIME_AGENT_CLOUD_GIT_BASELINE: git(workspaceDir, "rev-parse", "HEAD") };
+			},
+		});
+		try {
+			// The exact bytes finalize must publish, computed the same way the
+			// bridge computes them while nothing else can touch the tree.
+			const expectedPatch = execFileSync(
+				"git",
+				[
+					"-c",
+					"core.quotePath=false",
+					"diff",
+					"--binary",
+					"--no-renames",
+					git(bridge.workspaceDir, "rev-parse", "HEAD"),
+				],
+				{ cwd: bridge.workspaceDir },
+			);
+			expect(expectedPatch.byteLength).toBeGreaterThan(0);
+			// A strict UTF-8 decode must fail: the raw latin-1 hunk bytes prove
+			// the patch is only byte-exact, never string-exact.
+			expect(() => new TextDecoder("utf-8", { fatal: true }).decode(expectedPatch)).toThrow();
+
+			// Release (stop) the bridge: SIGTERM is the release signal.
+			bridge.process.kill("SIGTERM");
+			const deadline = Date.now() + 30_000;
+			for (;;) {
+				// The terminal status is the commit marker: the instant it is
+				// observable, both artifacts must already be complete on disk.
+				if (existsSync(join(bridge.resultsDir, "status.txt"))) {
+					expect(existsSync(join(bridge.resultsDir, "changes.patch"))).toBe(true);
+					expect(existsSync(join(bridge.resultsDir, "changed-paths.txt"))).toBe(true);
+					break;
+				}
+				if (Date.now() > deadline) throw new Error("status.txt was never published");
+				await new Promise((resolve) => setTimeout(resolve, 20));
+			}
+			expect(readFileSync(join(bridge.resultsDir, "status.txt"), "utf8")).toBe("stopped\n");
+			expect(existsSync(bridge.authPath)).toBe(false);
+
+			const patchBytes = readFileSync(join(bridge.resultsDir, "changes.patch"));
+			expect(patchBytes.equals(expectedPatch)).toBe(true);
+			const changedPaths = decodeCloudChangedPaths(readFileSync(join(bridge.resultsDir, "changed-paths.txt")));
+			expect(changedPaths.slice().sort()).toEqual(["data.bin", "notes.txt"]);
+
+			// Import through the real result store: the exact patch bytes
+			// persist, cross-validate against the changed paths, and apply
+			// byte-for-byte into a clean clone of the captured baseline.
+			const resultStore = new CloudResultStore(join(bridge.root, "result-store"));
+			const saved = resultStore.save({
+				sessionId: SESSION_ID,
+				resultId: "res_output",
+				patch: decodeCloudResultPatch(patchBytes),
+				changedPaths,
+				baselineManifestDigest: `sha256:${"a".repeat(64)}`,
+			});
+			expect(saved.changedPaths).toEqual(["data.bin", "notes.txt"]);
+			const clone = join(bridge.root, "clone");
+			execFileSync("git", ["clone", "-q", "--no-hardlinks", bridge.workspaceDir, clone]);
+			const applied = await resultStore.apply(SESSION_ID, saved.resultId, { cwd: clone });
+			expect(applied.applied).toBe(true);
+			expect(readFileSync(join(clone, "notes.txt")).equals(editedText)).toBe(true);
+			expect(readFileSync(join(clone, "data.bin")).equals(editedBlob)).toBe(true);
+		} finally {
+			bridge.process.kill("SIGKILL");
+		}
+	}, 60_000);
+
+	it("publishes an empty patch and empty changed paths when nothing changed", async () => {
+		const bridge = await startBridge({
+			daemonArgv: [process.execPath, "-e", "setInterval(() => {}, 3600000)"],
+			setupWorkspace: (workspaceDir) => {
+				writeFileSync(join(workspaceDir, "notes.txt"), "unchanged\n");
+				git(workspaceDir, "init", "-q");
+				git(workspaceDir, "config", "user.email", "test@example.com");
+				git(workspaceDir, "config", "user.name", "Test");
+				git(workspaceDir, "add", "-A");
+				git(workspaceDir, "commit", "-qm", "baseline");
+				return { PRIME_AGENT_CLOUD_GIT_BASELINE: git(workspaceDir, "rev-parse", "HEAD") };
+			},
+		});
+		try {
+			bridge.process.kill("SIGTERM");
+			const deadline = Date.now() + 30_000;
+			for (;;) {
+				if (existsSync(join(bridge.resultsDir, "status.txt"))) {
+					expect(existsSync(join(bridge.resultsDir, "changes.patch"))).toBe(true);
+					expect(existsSync(join(bridge.resultsDir, "changed-paths.txt"))).toBe(true);
+					break;
+				}
+				if (Date.now() > deadline) throw new Error("status.txt was never published");
+				await new Promise((resolve) => setTimeout(resolve, 20));
+			}
+			expect(readFileSync(join(bridge.resultsDir, "status.txt"), "utf8")).toBe("stopped\n");
+			expect(existsSync(bridge.authPath)).toBe(false);
+			expect(readFileSync(join(bridge.resultsDir, "changes.patch")).byteLength).toBe(0);
+			expect(decodeCloudChangedPaths(readFileSync(join(bridge.resultsDir, "changed-paths.txt")))).toEqual([]);
+		} finally {
+			bridge.process.kill("SIGKILL");
+		}
+	}, 60_000);
 
 	it("passes the scoped inference credential to the guest daemon without leaking it", async () => {
 		const bridge = await startBridge();

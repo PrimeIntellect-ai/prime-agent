@@ -150,15 +150,15 @@ export const CLOUD_DELEGATION_START_COMMAND: PrimeSandboxStartCommand = {
  * The fixed bootstrap script, uploaded verbatim. Every input reaches it as an
  * uploaded file or a fixed-name environment variable; the orchestrator never
  * interpolates user text into it. It always writes a terminal status, stdout,
- * stderr, and a binary patch under the results directory, through the EXIT
- * trap, whatever the agent's fate.
+ * stderr, a binary patch, and the patch's changed-paths list under the results
+ * directory, through the EXIT trap, whatever the agent's fate.
  */
 export const CLOUD_DELEGATION_BOOTSTRAP_SCRIPT = `#!/usr/bin/env bash
 # Fixed cloud-delegation bootstrap, uploaded verbatim by the local daemon.
 # Inputs arrive only as uploaded files or fixed-name environment variables;
 # the orchestrator never interpolates user text into this script. It always
-# writes a terminal status, stdout, stderr, and a binary patch of the
-# workspace changes under the results directory.
+# writes a terminal status, stdout, stderr, a binary patch of the workspace
+# changes, and the patch's changed-paths list under the results directory.
 set -eu
 
 WORKSPACE_DIR="\${PRIME_AGENT_CLOUD_WORKSPACE_DIR:?workspace dir is required}"
@@ -185,8 +185,10 @@ finish() {
 			git -C "$WORKSPACE_DIR" add -N -- "$path" 2>> "$RESULTS_DIR/stderr.txt" || :
 		done < <(git -C "$WORKSPACE_DIR" ls-files --others --exclude-standard -z)
 		git -C "$WORKSPACE_DIR" -c core.quotePath=false diff --binary --no-renames "$BASELINE" > "$RESULTS_DIR/changes.patch" 2>> "$RESULTS_DIR/stderr.txt" || :
+		git -C "$WORKSPACE_DIR" -c core.quotePath=false diff --name-only --no-renames "$BASELINE" > "$RESULTS_DIR/changed-paths.txt" 2>> "$RESULTS_DIR/stderr.txt" || :
 	else
 		: > "$RESULTS_DIR/changes.patch"
+		: > "$RESULTS_DIR/changed-paths.txt"
 	fi
 	# Remove the guest credential before publishing the terminal result.
 	rm -f "$AUTH_PATH"
@@ -287,8 +289,10 @@ export interface CloudDelegationTaskResult {
 	outcome: CloudDelegationOutcome;
 	stdout: string;
 	stderr: string;
-	/** `git diff --binary` output of the guest tree against the submitted baseline. */
+	/** `git diff --binary --no-renames` output of the guest tree against the submitted baseline. */
 	patch: Uint8Array;
+	/** Repo-relative paths the guest reported as touched against the submitted baseline. */
+	changedPaths: string[];
 	retrievedAt: string;
 }
 

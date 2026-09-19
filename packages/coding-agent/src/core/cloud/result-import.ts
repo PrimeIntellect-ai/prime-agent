@@ -193,6 +193,24 @@ export function decodeCloudResultPatch(bytes: Uint8Array): string {
 	return Buffer.from(bytes).toString(PATCH_BYTE_ENCODING);
 }
 
+/**
+ * Decode the guest's newline-separated changed-paths list. The same latin-1
+ * byte mapping as the patch keeps non-UTF-8 guest path bytes comparable with
+ * patch-derived paths, so the store's cross-validation is byte-exact.
+ */
+export function decodeCloudChangedPaths(bytes: Uint8Array): string[] {
+	if (bytes.byteLength > CLOUD_RESULT_MAX_PATCH_BYTES) {
+		throw new Error(`cloud changed-paths list exceeds ${CLOUD_RESULT_MAX_PATCH_BYTES} bytes`);
+	}
+	const paths = decodeCloudResultPatch(bytes)
+		.split("\n")
+		.filter((path) => path !== "");
+	if (paths.length > CLOUD_RESULT_MAX_PATHS) {
+		throw new Error(`cloud changed-paths list exceeds ${CLOUD_RESULT_MAX_PATHS} entries`);
+	}
+	return paths;
+}
+
 /** SHA-256 digest of the exact patch bytes; recomputed by the store, never taken from the caller. */
 export function cloudResultPatchDigest(patch: string): string {
 	return `sha256:${createHash("sha256").update(encodeCloudResultPatch(patch)).digest("hex")}`;

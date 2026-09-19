@@ -186,6 +186,7 @@ describe("DirectCloudService faux-provider flow", () => {
 							stdout: "done",
 							stderr: "",
 							patch: new TextEncoder().encode(resultPatch),
+							changedPaths: [],
 							retrievedAt: now,
 						}
 					: undefined,
@@ -380,6 +381,7 @@ describe("DirectCloudService faux-provider flow", () => {
 				if (path === `${CLOUD_GUEST_RESULTS_DIR}/stdout.txt`) return new TextEncoder().encode("done\n");
 				if (path === `${CLOUD_GUEST_RESULTS_DIR}/stderr.txt`) return new TextEncoder().encode("");
 				if (path === `${CLOUD_GUEST_RESULTS_DIR}/changes.patch`) return patchBytes;
+				if (path === `${CLOUD_GUEST_RESULTS_DIR}/changed-paths.txt`) return new TextEncoder().encode("latin.txt\n");
 				throw new PrimeSandboxError("sandbox_not_found", `missing file: ${path}`);
 			},
 		} as unknown as PrimeSandboxClient;
@@ -442,6 +444,115 @@ describe("DirectCloudService faux-provider flow", () => {
 		const applied = await service.apply("active-1", started.id, repo);
 		expect(applied).toMatchObject({ status: "completed", resultApplied: true });
 		expect(readFileSync(join(repo, "latin.txt")).equals(after)).toBe(true);
+	});
+
+	it("never reports success when the guest lists changed paths but publishes no patch", async () => {
+		// A broken guest contract (changed-paths.txt present and non-empty,
+		// changes.patch empty) must fail the import loudly: the session never
+		// reaches the review state, and a retried fetch keeps failing.
+		const root = temp();
+		const repo = join(root, "repo");
+		execFileSync("mkdir", ["-p", repo]);
+		git(repo, "init", "-q");
+		git(repo, "config", "user.email", "test@example.com");
+		git(repo, "config", "user.name", "Test");
+		writeFileSync(join(repo, "a.txt"), "old\n");
+		git(repo, "add", "a.txt");
+		git(repo, "commit", "-qm", "initial");
+
+		const stateDirectory = join(root, "state");
+		const now = "2026-01-01T00:00:00.000Z";
+		const sandbox: PrimeSandbox = {
+			id: "sandbox-no-patch",
+			name: "cloud",
+			dockerImage: "example/cloud:1",
+			cpuCores: 4,
+			memoryGb: 16,
+			diskSizeGb: 50,
+			gpuCount: 0,
+			vm: true,
+			status: "RUNNING",
+			timeoutMinutes: 120,
+			labels: [],
+			createdAt: now,
+			updatedAt: now,
+		};
+		let deleteCount = 0;
+		const platform = {
+			createVmSandbox: async () => sandbox,
+			getSandbox: async () => sandbox,
+			deleteSandbox: async () => {
+				deleteCount += 1;
+			},
+			getSandboxAuth: async () => ({
+				sandboxId: sandbox.id,
+				gatewayUrl: "https://gateway.example",
+				userNamespace: "user",
+				jobId: "job",
+				token: "gateway-token",
+				expiresAt: "2099-01-01T00:00:00.000Z",
+			}),
+			uploadFile: async (_sandboxId: string, request: { path: string; content: Uint8Array }) => ({
+				path: request.path,
+				size: request.content.byteLength,
+			}),
+			downloadFile: async (_sandboxId: string, path: string) => {
+				if (path === `${CLOUD_GUEST_RESULTS_DIR}/status.txt`) return new TextEncoder().encode("completed\n");
+				if (path === `${CLOUD_GUEST_RESULTS_DIR}/stdout.txt`) return new TextEncoder().encode("done\n");
+				if (path === `${CLOUD_GUEST_RESULTS_DIR}/stderr.txt`) return new TextEncoder().encode("");
+				if (path === `${CLOUD_GUEST_RESULTS_DIR}/changes.patch`) return new TextEncoder().encode("");
+				if (path === `${CLOUD_GUEST_RESULTS_DIR}/changed-paths.txt`) return new TextEncoder().encode("a.txt\n");
+				throw new PrimeSandboxError("sandbox_not_found", `missing file: ${path}`);
+			},
+		} as unknown as PrimeSandboxClient;
+		const service = new DirectCloudService({
+			stateDirectory,
+			apiKey: "platform-key",
+			inferenceApiKey: "inference-only-key",
+			dockerImage: "example/cloud:1",
+			platform,
+			workspace: {
+				capture: async () => ({
+					baseline: {
+						repoRoot: repo,
+						headCommit: git(repo, "rev-parse", "HEAD"),
+						manifestDigest: `sha256:${"b".repeat(64)}`,
+					},
+					archive: new Uint8Array([1]),
+					manifest: new TextEncoder().encode("{}"),
+					totalSizeBytes: 3,
+					cleanup: () => {},
+				}),
+				upload: async () => {},
+			},
+			process: {
+				start: async (request) => ({ sessionUuid: request.sessionUuid, created: true }),
+				signalStop: async () => {},
+				status: async () => ({ state: "running" as const }),
+			},
+			readiness: { isReady: async () => true },
+			monitorPollIntervalMs: 1,
+		});
+
+		const started = await service.delegate({
+			activeSessionId: "active-1",
+			delegationId: "sess_direct-no-patch",
+			cwd: repo,
+			prompt: "change a.txt",
+		});
+		const deadline = Date.now() + 10_000;
+		while (Date.now() < deadline && !service.store.get(started.id)?.lastError) {
+			await new Promise((resolve) => setTimeout(resolve, 2));
+		}
+		const record = service.store.get(started.id);
+		expect(record?.resultImportState).toBe("pending");
+		expect(record?.lastError).toContain("changed paths");
+		const [summary] = await service.list("active-1");
+		expect(summary.status).not.toBe("completed");
+		expect(summary.resultReady).toBe(false);
+		expect(summary.changedPaths).toBeUndefined();
+		// The broken result is never imported, so the sandbox is kept for review.
+		expect(deleteCount).toBe(0);
 	});
 
 	it("bootstrap hands the workspace to the bridge, which records committed and untracked guest changes", () => {

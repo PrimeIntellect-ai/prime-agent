@@ -1,0 +1,2 @@
+- Fixed resident cloud sessions to publish binary-safe workspace patches and their changed-paths list before the terminal status on every completed, stopped, and failed flow.
+- Changed cloud result import to fail loudly when the guest reports changed paths without a patch, instead of reporting success.
