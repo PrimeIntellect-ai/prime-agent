@@ -165,6 +165,83 @@ describe("resident guest daemon model resolution", () => {
 		}
 	}, 30_000);
 
+	it("recovers a private model after a transient first entitlement outcome", async () => {
+		const root = temp();
+		writePrimeInferenceAuth(join(root, "agent"));
+		// The live incident shape: the first authenticated entitlement fetch
+		// transiently reports no private routes; the identical request
+		// succeeds moments later. The bounded retry must recover the model
+		// instead of failing the open into a guest restart loop.
+		const fetchMock = vi
+			.fn()
+			.mockResolvedValueOnce(new Response(JSON.stringify({ data: [] }), { status: 200 }))
+			.mockImplementation(async () => new Response(JSON.stringify(PRIVATE_MODEL_CATALOG), { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+		const env = guestEnv(root, { model: PRIVATE_MODEL });
+		const daemon = await CloudGuestDaemon.start(env, { createRuntime: createFauxRuntimeFactory });
+		try {
+			await daemon.openSession({});
+			expect(daemon.rootSession?.model).toMatchObject({
+				provider: "prime-inference",
+				id: "internal/glm-5.3-fast",
+			});
+			// One initial refresh plus one bounded retry; never a silent fallback.
+			const entitlementFetches = fetchMock.mock.calls.filter(
+				([, init]) => headerValue(init, "X-Prime-Team-ID") === "engineering-team",
+			);
+			expect(entitlementFetches).toHaveLength(2);
+		} finally {
+			await daemon.stop();
+		}
+	}, 30_000);
+
+	it("bounds entitlement refresh attempts before the honest unknown-model failure", async () => {
+		const root = temp();
+		writePrimeInferenceAuth(join(root, "agent"));
+		const fetchMock = vi.fn(
+			async (_url: string | URL | Request, _init?: RequestInit) =>
+				new Response(JSON.stringify({ data: [] }), { status: 200 }),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+		const env = guestEnv(root, { model: PRIVATE_MODEL });
+		const daemon = await CloudGuestDaemon.start(env, { createRuntime: createFauxRuntimeFactory });
+		try {
+			await expect(daemon.openSession({})).rejects.toThrow("unknown model prime-inference/internal/glm-5.3-fast");
+			// A team with genuinely no private models fails after the small
+			// bounded refresh set — never a loop — and leaves no session manifest.
+			const entitlementFetches = fetchMock.mock.calls.filter(
+				([, init]) => headerValue(init, "X-Prime-Team-ID") === "engineering-team",
+			);
+			expect(entitlementFetches).toHaveLength(3);
+			expect(existsSync(join(env.stateDir, "session-file.json"))).toBe(false);
+		} finally {
+			await daemon.stop();
+		}
+	}, 30_000);
+
+	it("does not retry a non-private model miss", async () => {
+		const root = temp();
+		writePrimeInferenceAuth(join(root, "agent"));
+		const fetchMock = vi.fn(
+			async (_url: string | URL | Request, _init?: RequestInit) =>
+				new Response(JSON.stringify({ data: [] }), { status: 200 }),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+		const env = guestEnv(root, { model: "faux/faux-unknown" });
+		const daemon = await CloudGuestDaemon.start(env, { createRuntime: createFauxRuntimeFactory });
+		try {
+			await expect(daemon.openSession({})).rejects.toThrow("unknown model faux/faux-unknown");
+			// Only the initial refresh runs: an unknown non-private route never
+			// enters the private-entitlement retry loop.
+			const entitlementFetches = fetchMock.mock.calls.filter(
+				([, init]) => headerValue(init, "X-Prime-Team-ID") === "engineering-team",
+			);
+			expect(entitlementFetches).toHaveLength(1);
+		} finally {
+			await daemon.stop();
+		}
+	}, 30_000);
+
 	it("resolves a bundled model without any catalog refresh", async () => {
 		const root = temp();
 		const fetchMock = vi.fn(async () => {

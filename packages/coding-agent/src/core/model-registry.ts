@@ -9,6 +9,7 @@ import {
 	type Api,
 	type AssistantMessageEventStream,
 	type Context,
+	getLogger,
 	getModels,
 	getProviders,
 	type KnownProvider,
@@ -35,6 +36,7 @@ import { PRIME_INFERENCE_PROVIDER_ID } from "./prime-inference-auth.js";
 import {
 	buildPrimeInferenceModels,
 	mergePrimeInferenceModels,
+	PrimeInferenceCatalogRequestError,
 	readCachedPrimeInferenceModels,
 	refreshPrimeInferenceModels,
 } from "./prime-inference-model-catalog.js";
@@ -422,17 +424,26 @@ const PRIVATE_PRIME_AUTHORIZATION_CACHE_FILE = "prime-inference-private-models.j
 const PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS = 5 * 60_000;
 const PRIVATE_PRIME_BACKGROUND_REFRESH_TIMEOUT_MS = 3_000;
 
+/**
+ * The durable private-authorization cache holds only non-empty results: a
+ * transient 401/403/network/parse outcome must never be persisted as an
+ * authoritative "team has no private models" verdict (it once crash-looped
+ * cloud guests that reboot into the empty cache), and an empty result must
+ * never replace a previous non-empty cache.
+ */
 interface PrivatePrimeAuthorizationCache {
 	fingerprint: string;
 	models: Model<"openai-completions">[];
 	refreshedAt: number;
 }
 
+const log = getLogger("coding-agent.model-registry");
+
 function privatePrimeAuthorizationFingerprint(apiKey: string, teamId: string): string {
 	return createHash("sha256").update(apiKey).update("\0").update(teamId).digest("hex");
 }
 
-function isOfflineModeEnabled(): boolean {
+export function isOfflineModeEnabled(): boolean {
 	const value = process.env.PI_OFFLINE;
 	if (!value) return false;
 	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
@@ -830,11 +841,11 @@ export class ModelRegistry {
 					this.reloadModelsAfterCatalogChange();
 				});
 			}
-			await this.refreshPrivatePrimeInferenceAuthorization(
+			await this.refreshPrivatePrimeInferenceAuthorization({
 				previousPrivateModelIds,
 				previousTeamId,
 				previousPrivateModels,
-			);
+			});
 			return this.getAvailable();
 		});
 	}
@@ -851,10 +862,18 @@ export class ModelRegistry {
 	}
 
 	private async refreshPrivatePrimeInferenceAuthorization(
-		previousPrivateModelIds = new Set(this.authorizedPrivatePrimeInferenceModelIds),
-		previousTeamId = this.authorizedPrivatePrimeInferenceTeamId,
-		previousPrivateModels = this.authorizedPrivatePrimeInferenceModels,
+		options: {
+			/** Bypass the fresh-cache short-circuit and fetch entitlements now. */
+			force?: boolean;
+			previousPrivateModelIds?: Set<string>;
+			previousTeamId?: string;
+			previousPrivateModels?: Model<"openai-completions">[];
+		} = {},
 	): Promise<void> {
+		const previousPrivateModelIds =
+			options.previousPrivateModelIds ?? new Set(this.authorizedPrivatePrimeInferenceModelIds);
+		const previousTeamId = options.previousTeamId ?? this.authorizedPrivatePrimeInferenceTeamId;
+		const previousPrivateModels = options.previousPrivateModels ?? this.authorizedPrivatePrimeInferenceModels;
 		const apiKey = await this.authStorage.getApiKey(PRIME_INFERENCE_PROVIDER_ID);
 		const teamHeaders = this.authStorage.getProviderHeaders(PRIME_INFERENCE_PROVIDER_ID);
 		const teamId = teamHeaders?.["X-Prime-Team-ID"];
@@ -882,14 +901,20 @@ export class ModelRegistry {
 
 		const fingerprint = privatePrimeAuthorizationFingerprint(apiKey, teamId);
 		const cached = this.readPrivatePrimeAuthorizationCache();
-		if (cached?.fingerprint === fingerprint) {
+		// Only a non-empty matching cache is authoritative. An empty one can
+		// only come from an older version persisting a transient empty outcome,
+		// so it must not suppress the fresh fetch below (empty results are
+		// never written anymore).
+		const cachedAuthorization =
+			cached !== undefined && cached.models.length > 0 && cached.fingerprint === fingerprint ? cached : undefined;
+		if (cachedAuthorization && !options.force) {
 			// Serve the credential-scoped cache so startup and model lists don't
 			// block on the network. Stale entries refresh in the background.
-			this.authorizedPrivatePrimeInferenceModels = cached.models;
-			this.authorizedPrivatePrimeInferenceModelIds = new Set(cached.models.map((model) => model.id));
+			this.authorizedPrivatePrimeInferenceModels = cachedAuthorization.models;
+			this.authorizedPrivatePrimeInferenceModelIds = new Set(cachedAuthorization.models.map((model) => model.id));
 			this.authorizedPrivatePrimeInferenceTeamId = teamId;
 			this.reloadModelsAfterCatalogChange();
-			const cacheIsFresh = Date.now() - cached.refreshedAt < PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS;
+			const cacheIsFresh = Date.now() - cachedAuthorization.refreshedAt < PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS;
 			if (isOfflineModeEnabled() || cacheIsFresh) return;
 			this.startBackgroundPrivatePrimeAuthorizationRefresh(apiKey, teamHeaders, teamId, fingerprint);
 			return;
@@ -909,8 +934,12 @@ export class ModelRegistry {
 				teamHeaders,
 				new Set((this.livePrimeInferenceModels ?? this.bundledPrimeInferenceModels()).map((model) => model.id)),
 			);
-		} catch {
-			// Fall back to the previous authorization below.
+		} catch (error) {
+			// A rejected request (401/403), network, or parse failure is transient,
+			// never an authoritative empty entitlement: fall back to the previous
+			// authorization below. Diagnostics stay redacted (outcome status,
+			// counts, team presence — never the token or credential fingerprint).
+			this.logPrivatePrimeInferenceRefreshFailure(error, { teamId, forced: options.force === true });
 		}
 		// Leave newer state untouched if the credentials changed while fetching.
 		if ((await this.currentPrivatePrimeAuthorizationFingerprint()) !== fingerprint) {
@@ -921,7 +950,21 @@ export class ModelRegistry {
 			this.authorizedPrivatePrimeInferenceModelIds = new Set(authorizedModels.map((model) => model.id));
 			this.authorizedPrivatePrimeInferenceTeamId = teamId;
 			this.reloadModelsAfterCatalogChange();
-			this.writePrivatePrimeAuthorizationCache({ fingerprint, models: authorizedModels, refreshedAt: Date.now() });
+			// An authoritative empty result is honest in memory but never
+			// durable: only non-empty authorizations are cached, so it can never
+			// replace a previous non-empty cache.
+			if (authorizedModels.length > 0) {
+				this.writePrivatePrimeAuthorizationCache({
+					fingerprint,
+					models: authorizedModels,
+					refreshedAt: Date.now(),
+				});
+			}
+			log.info("private Prime Inference entitlement refresh resolved", {
+				count: authorizedModels.length,
+				teamPresent: true,
+				...(options.force ? { forced: true } : {}),
+			});
 		} else if (teamId === previousTeamId) {
 			this.authorizedPrivatePrimeInferenceModelIds = previousPrivateModelIds;
 			this.authorizedPrivatePrimeInferenceModels = previousPrivateModels;
@@ -966,13 +1009,23 @@ export class ModelRegistry {
 				this.authorizedPrivatePrimeInferenceModelIds = new Set(authorizedModels.map((model) => model.id));
 				this.authorizedPrivatePrimeInferenceTeamId = teamId;
 				this.reloadModelsAfterCatalogChange();
-				this.writePrivatePrimeAuthorizationCache({
-					fingerprint,
-					models: authorizedModels,
-					refreshedAt: Date.now(),
+				if (authorizedModels.length > 0) {
+					this.writePrivatePrimeAuthorizationCache({
+						fingerprint,
+						models: authorizedModels,
+						refreshedAt: Date.now(),
+					});
+				}
+				log.info("private Prime Inference entitlement refresh resolved", {
+					count: authorizedModels.length,
+					teamPresent: true,
+					background: true,
 				});
-			} catch {
-				// Keep the cached authorization.
+			} catch (error) {
+				// Keep the cached authorization: a rejected request, network, or
+				// parse failure is transient, never an authoritative empty
+				// entitlement.
+				this.logPrivatePrimeInferenceRefreshFailure(error, { teamId, forced: false });
 			}
 		};
 		const pending = this.backgroundPrivatePrimeAuthorization?.promise;
@@ -989,6 +1042,27 @@ export class ModelRegistry {
 		const apiKey = await this.authStorage.getApiKey(PRIME_INFERENCE_PROVIDER_ID);
 		const teamId = this.authStorage.getProviderHeaders(PRIME_INFERENCE_PROVIDER_ID)?.["X-Prime-Team-ID"];
 		return apiKey && teamId ? privatePrimeAuthorizationFingerprint(apiKey, teamId) : undefined;
+	}
+
+	/** Redacted diagnostics for a transient entitlement refresh failure: outcome status, team presence, never the token or credential fingerprint. */
+	private logPrivatePrimeInferenceRefreshFailure(
+		error: unknown,
+		details: { teamId: string | undefined; forced: boolean },
+	): void {
+		const fields: Record<string, unknown> = { teamPresent: Boolean(details.teamId) };
+		if (details.forced) {
+			fields.forced = true;
+		}
+		if (error instanceof PrimeInferenceCatalogRequestError) {
+			fields.outcome = "http";
+			fields.status = error.status;
+		} else if (error instanceof SyntaxError) {
+			fields.outcome = "parse";
+		} else {
+			fields.outcome = "network";
+			fields.errorName = error instanceof Error ? error.name : String(error);
+		}
+		log.warn("private Prime Inference entitlement refresh failed; keeping prior authorization", fields);
 	}
 
 	private privatePrimeAuthorizationCachePath(): string | undefined {
@@ -1028,6 +1102,10 @@ export class ModelRegistry {
 	}
 
 	private writePrivatePrimeAuthorizationCache(cache: PrivatePrimeAuthorizationCache): void {
+		// Empty authorizations are never durable: the file would be served as an
+		// authoritative no-private-models verdict, and an empty result must never
+		// replace a previous non-empty cache.
+		if (cache.models.length === 0) return;
 		const cachePath = this.privatePrimeAuthorizationCachePath();
 		if (!cachePath) return;
 		const data = cache.models.map((model) => ({
@@ -1095,8 +1173,10 @@ export class ModelRegistry {
 		);
 	}
 
-	async getExecutableModels(): Promise<Model<Api>[]> {
-		await this.runSerializedEntitlementRefresh(() => this.refreshPrivatePrimeInferenceAuthorization());
+	async getExecutableModels(options?: { forcePrivatePrimeInferenceRefresh?: boolean }): Promise<Model<Api>[]> {
+		await this.runSerializedEntitlementRefresh(() =>
+			this.refreshPrivatePrimeInferenceAuthorization({ force: options?.forcePrivatePrimeInferenceRefresh }),
+		);
 		const availableModels = this.getAvailable();
 		const codexModels = availableModels.filter((model) => model.provider === "openai-codex");
 		if (codexModels.length === 0) {

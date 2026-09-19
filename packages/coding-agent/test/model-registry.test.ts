@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -691,6 +692,123 @@ describe("ModelRegistry", () => {
 			expect(
 				(await restoredRegistry.refreshAvailableModels()).find((model) => model.id === privateRoute.id),
 			).toMatchObject({ name: "Private Deployment", contextWindow: 200_000 });
+		});
+	});
+
+	describe("private Prime Inference authorization cache recovery", () => {
+		const PRIVATE_MODEL_ID = "internal/glm-5.2-fast";
+		const AUTHORIZATION_CACHE_FILE = "prime-inference-private-models.json";
+
+		/** The registry's credential+team cache key (never logged, never a token). */
+		function authorizationFingerprint(key: string, teamId: string): string {
+			return createHash("sha256").update(key).update("\0").update(teamId).digest("hex");
+		}
+
+		function writePrimeAuth(): void {
+			authStorage.set("prime-inference", {
+				type: "api_key",
+				key: "prime-key",
+				primeTeam: { teamId: "research-team", name: "Research" },
+			});
+		}
+
+		function privateCatalogResponse(...ids: string[]): Response {
+			return new Response(JSON.stringify({ data: ids.map((id) => ({ id })) }));
+		}
+
+		function emptyCatalogResponse(): Response {
+			return new Response(JSON.stringify({ data: [] }));
+		}
+
+		/** Entitlement fetches carry the Authorization header; public catalog refreshes do not. */
+		function entitlementFetches(fetchMock: { mock: { calls: unknown[][] } }): unknown[][] {
+			return fetchMock.mock.calls.filter(([, init]) =>
+				new Headers((init as RequestInit)?.headers).has("Authorization"),
+			);
+		}
+
+		test("a preseeded legacy empty cache does not suppress a fresh entitlement fetch", async () => {
+			writePrimeAuth();
+			// The live incident: an older version durably cached {data: []} under
+			// the matching credential+team fingerprint, so every restart served
+			// the empty authorization and the private model stayed unknown.
+			writeFileSync(
+				join(tempDir, AUTHORIZATION_CACHE_FILE),
+				JSON.stringify({
+					fingerprint: authorizationFingerprint("prime-key", "research-team"),
+					data: [],
+					refreshedAt: Date.now(),
+				}),
+			);
+			const fetchMock = vi.fn(async () => privateCatalogResponse(PRIVATE_MODEL_ID));
+			vi.stubGlobal("fetch", fetchMock);
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+
+			const models = await registry.refreshAvailableModels();
+
+			expect(models.some((model) => model.id === PRIVATE_MODEL_ID)).toBe(true);
+			expect(entitlementFetches(fetchMock)).toHaveLength(1);
+			const cached = JSON.parse(readFileSync(join(tempDir, AUTHORIZATION_CACHE_FILE), "utf8")) as {
+				data: unknown[];
+			};
+			expect(cached.data).toHaveLength(1);
+		});
+
+		test("a transient rejected first fetch never caches; a later successful fetch recovers", async () => {
+			writePrimeAuth();
+			let entitlementAttempts = 0;
+			const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+				if (!new Headers(init?.headers).has("Authorization")) return emptyCatalogResponse();
+				entitlementAttempts += 1;
+				return entitlementAttempts === 1
+					? new Response(null, { status: 401 })
+					: privateCatalogResponse(PRIVATE_MODEL_ID);
+			});
+			vi.stubGlobal("fetch", fetchMock);
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const cachePath = join(tempDir, AUTHORIZATION_CACHE_FILE);
+
+			// The transient 401 is not an authoritative empty authorization: no
+			// private models, and nothing durable written for the fingerprint.
+			expect((await registry.refreshAvailableModels()).some((model) => model.id === PRIVATE_MODEL_ID)).toBe(false);
+			expect(existsSync(cachePath)).toBe(false);
+
+			// The identical request succeeding later recovers fully.
+			expect((await registry.refreshAvailableModels()).some((model) => model.id === PRIVATE_MODEL_ID)).toBe(true);
+			const cached = JSON.parse(readFileSync(cachePath, "utf8")) as { data: unknown[] };
+			expect(cached.data).toHaveLength(1);
+			expect(entitlementAttempts).toBe(2);
+		});
+
+		test("an authoritative empty refresh never replaces a non-empty cache", async () => {
+			writePrimeAuth();
+			const initialFetch = vi.fn(async () => privateCatalogResponse(PRIVATE_MODEL_ID));
+			vi.stubGlobal("fetch", initialFetch);
+			const first = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect((await first.refreshAvailableModels()).some((model) => model.id === PRIVATE_MODEL_ID)).toBe(true);
+			const cachePath = join(tempDir, AUTHORIZATION_CACHE_FILE);
+			const nonEmptyCache = readFileSync(cachePath, "utf8");
+
+			// A forced refresh that authoritatively returns empty hides the
+			// models in memory but must leave the non-empty cache on disk.
+			const emptyFetch = vi.fn(async () => emptyCatalogResponse());
+			vi.stubGlobal("fetch", emptyFetch);
+			const second = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect(
+				(await second.getExecutableModels({ forcePrivatePrimeInferenceRefresh: true })).some(
+					(model) => model.id === PRIVATE_MODEL_ID,
+				),
+			).toBe(false);
+			expect(readFileSync(cachePath, "utf8")).toBe(nonEmptyCache);
+
+			// The preserved cache restores the authorization without the network.
+			const offlineFetch = vi.fn(async () => {
+				throw new Error("offline");
+			});
+			vi.stubGlobal("fetch", offlineFetch);
+			const third = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect((await third.refreshAvailableModels()).some((model) => model.id === PRIVATE_MODEL_ID)).toBe(true);
+			expect(entitlementFetches(offlineFetch)).toHaveLength(0);
 		});
 	});
 

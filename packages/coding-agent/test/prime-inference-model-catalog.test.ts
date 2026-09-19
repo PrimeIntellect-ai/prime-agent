@@ -7,6 +7,7 @@ import {
 	buildPrimeInferenceModels,
 	mergePrimeInferenceModels,
 	PRIME_INFERENCE_BASE_URL,
+	PrimeInferenceCatalogRequestError,
 	refreshPrimeInferenceModels,
 } from "../src/core/prime-inference-model-catalog.js";
 import {
@@ -294,13 +295,27 @@ describe("Prime Inference model catalog", () => {
 		expect(models.map(({ id }) => id)).toEqual(["internal/glm-5.2-fast"]);
 	});
 
-	test("treats rejected authenticated requests as no private access", async () => {
+	test("returns an authoritative empty authorization for a 200 catalog without private routes", async () => {
 		const models = await fetchAuthorizedPrivatePrimeInferenceModels(
-			"bad",
+			"secret",
 			{ "X-Prime-Team-ID": "team" },
 			new Set(),
-			vi.fn(async () => new Response(null, { status: 403 })),
+			vi.fn(async () => response(payloadEntry("public/model"))),
 		);
 		expect(models).toEqual([]);
 	});
+
+	test.each([401, 403] as const)(
+		"surfaces rejected authenticated requests as transient failures instead of empty access",
+		async (status) => {
+			const failure = await fetchAuthorizedPrivatePrimeInferenceModels(
+				"bad",
+				{ "X-Prime-Team-ID": "team" },
+				new Set(),
+				vi.fn(async () => new Response(null, { status })),
+			).catch((error: unknown) => error);
+			expect(failure).toBeInstanceOf(PrimeInferenceCatalogRequestError);
+			expect((failure as PrimeInferenceCatalogRequestError).status).toBe(status);
+		},
+	);
 });

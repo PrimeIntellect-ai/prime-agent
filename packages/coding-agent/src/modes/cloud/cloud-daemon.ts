@@ -48,7 +48,8 @@ import {
 	type CloudSessionState,
 	type CloudSessionStatus,
 } from "../../core/cloud/protocol.js";
-import type { ModelRegistry } from "../../core/model-registry.js";
+import { isOfflineModeEnabled, type ModelRegistry } from "../../core/model-registry.js";
+import { isPrivatePrimeInferenceModel } from "../../core/prime-inference-models.js";
 import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../../core/rlm-runtime.js";
 import { type SessionEntry, SessionManager } from "../../core/session-manager.js";
 import { SettingsManager } from "../../core/settings-manager.js";
@@ -1869,12 +1870,28 @@ function normalizeChildStatus(status: string | undefined): CloudRosterRow["statu
 }
 
 /**
+ * Bounded backoff between fresh private-entitlement refreshes in the guest
+ * model-miss path: a transient first-fetch failure gets a few seconds to
+ * clear before the model is declared unknown. The next guest restart re-
+ * fetches fresh anyway (an empty authorization cache is never served as
+ * authoritative), so the bound stays small.
+ */
+const GUEST_PRIVATE_MODEL_REFRESH_RETRY_DELAYS_MS = [500, 1_500] as const;
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
  * Resolve a guest model by exact provider/id. Bundled and models.json models
  * resolve from the loaded registry without any network; only a miss runs
  * the authenticated refresh first, because a fresh guest learns private Prime
  * Inference routes solely from its team's refreshed entitlement catalog.
- * Refresh failures degrade to the miss: unknown stays an honest error, never
- * a silent fallback to an unconfigured session.
+ * A private-route miss gets a small bounded set of forced fresh refreshes
+ * with backoff (a transient 401/403/network/parse outcome must not surface
+ * as an unknown model while the entitlement exists); bundled/offline routes
+ * never retry. Exhausting the bound degrades to the miss: unknown stays an
+ * honest error, never a silent fallback to an unconfigured session.
  */
 async function resolveGuestModel(
 	modelRegistry: ModelRegistry,
@@ -1884,7 +1901,23 @@ async function resolveGuestModel(
 	const direct = modelRegistry.find(provider, modelId);
 	if (direct !== undefined) return direct;
 	await modelRegistry.getExecutableModels().catch(() => undefined);
-	return modelRegistry.find(provider, modelId);
+	const refreshed = modelRegistry.find(provider, modelId);
+	if (refreshed !== undefined) return refreshed;
+	if (!isPrivatePrimeInferenceModel({ provider, id: modelId }) || isOfflineModeEnabled()) {
+		return undefined;
+	}
+	for (const delayMs of GUEST_PRIVATE_MODEL_REFRESH_RETRY_DELAYS_MS) {
+		await sleep(delayMs);
+		await modelRegistry.getExecutableModels({ forcePrivatePrimeInferenceRefresh: true }).catch(() => undefined);
+		const resolved = modelRegistry.find(provider, modelId);
+		if (resolved !== undefined) return resolved;
+	}
+	getLogger("cloud-daemon").warn("guest model resolution exhausted bounded private entitlement refreshes", {
+		provider,
+		modelId,
+		attempts: GUEST_PRIVATE_MODEL_REFRESH_RETRY_DELAYS_MS.length + 1,
+	});
+	return undefined;
 }
 
 async function createRuntimeWithModel(

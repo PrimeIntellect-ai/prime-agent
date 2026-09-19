@@ -1,0 +1,1 @@
+- Fixed cloud guests crash-looping on unknown private Prime Inference models after a transient entitlement fetch: empty private authorization results are never cached as authoritative, an empty legacy cache no longer suppresses a fresh fetch, and the guest runs a small bounded retry with backoff before failing honestly.
