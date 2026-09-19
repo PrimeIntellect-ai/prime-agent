@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { getLogger } from "@earendil-works/pi-ai";
+import { type Api, getLogger, type Model } from "@earendil-works/pi-ai";
 import {
 	AGENT_MESSAGE_SOURCE,
 	type AgentFamilyCatalogEntry,
@@ -48,6 +48,7 @@ import {
 	type CloudSessionState,
 	type CloudSessionStatus,
 } from "../../core/cloud/protocol.js";
+import type { ModelRegistry } from "../../core/model-registry.js";
 import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../../core/rlm-runtime.js";
 import { type SessionEntry, SessionManager } from "../../core/session-manager.js";
 import { SettingsManager } from "../../core/settings-manager.js";
@@ -352,6 +353,32 @@ export class CloudGuestDaemon {
 		}
 		this.setStatus("idle");
 		this.queueMirror();
+	}
+
+	/**
+	 * Apply an open_session model selection to the resident session. The boot
+	 * open only knows the model env, so a resident session inherits the exact
+	 * selected provider/model here; a matching current model is a no-op (the
+	 * duplicate open stays idempotent for journal replays and retries).
+	 */
+	private async applyResidentOpenModel(model: string): Promise<CloudProtocolDispatchResult> {
+		const state = this.rootState;
+		if (!state) return failed("no open session");
+		const [provider, ...rest] = model.split("/");
+		const modelId = rest.join("/");
+		if (!provider || !modelId) return failed(`invalid model ${model}`);
+		const session = state.runtime.session;
+		if (session.model?.provider === provider && session.model.id === modelId) {
+			return completed();
+		}
+		const resolved = await resolveGuestModel(state.runtime.services.modelRegistry, provider, modelId);
+		if (!resolved) return failed(`unknown model ${provider}/${modelId}`);
+		try {
+			await session.setModel(resolved);
+		} catch (error) {
+			return failure(error);
+		}
+		return completed();
 	}
 
 	/** The session file this cloud session id already owns, if any (crash resume). */
@@ -924,11 +951,20 @@ export class CloudGuestDaemon {
 	): Promise<CloudProtocolDispatchResult> {
 		if (this.rootState) {
 			// Idempotent open: an already-resident session honors a duplicate
-			// open_session's prompt instead of silently dropping it. The
-			// bridge-spawned daemon opened its session before the first
-			// open_session arrived, so the family context lands here.
+			// open_session's selection and prompt instead of silently dropping
+			// them. The bridge-spawned daemon opens its session from the
+			// model env alone, so the family context and the selected
+			// model/thinking land here.
 			if (request.family !== undefined) {
 				this.family = request.family;
+			}
+			if (request.model !== undefined && request.model.length > 0) {
+				const applied = await this.applyResidentOpenModel(request.model);
+				if (applied.state !== "completed") return applied;
+			}
+			if (request.thinking !== undefined && request.thinking.length > 0) {
+				const applied = await this.dispatchSetThinking(request.thinking);
+				if (applied.state !== "completed") return applied;
 			}
 			if (request.prompt !== undefined && request.prompt.length > 0) {
 				return this.dispatchPrompt(request.prompt, false);
@@ -1190,8 +1226,7 @@ export class CloudGuestDaemon {
 	private async dispatchSetModel(provider: string, modelId: string): Promise<CloudProtocolDispatchResult> {
 		const state = this.rootState;
 		if (!state) return failed("no open session");
-		const registry = state.runtime.services.modelRegistry;
-		const model = registry.find(provider, modelId);
+		const model = await resolveGuestModel(state.runtime.services.modelRegistry, provider, modelId);
 		if (!model) return failed(`unknown model ${provider}/${modelId}`);
 		try {
 			await state.runtime.session.setModel(model);
@@ -1833,6 +1868,25 @@ function normalizeChildStatus(status: string | undefined): CloudRosterRow["statu
 	}
 }
 
+/**
+ * Resolve a guest model by exact provider/id. Bundled and models.json models
+ * resolve from the loaded registry without any network; only a miss runs
+ * the authenticated refresh first, because a fresh guest learns private Prime
+ * Inference routes solely from its team's refreshed entitlement catalog.
+ * Refresh failures degrade to the miss: unknown stays an honest error, never
+ * a silent fallback to an unconfigured session.
+ */
+async function resolveGuestModel(
+	modelRegistry: ModelRegistry,
+	provider: string,
+	modelId: string,
+): Promise<Model<Api> | undefined> {
+	const direct = modelRegistry.find(provider, modelId);
+	if (direct !== undefined) return direct;
+	await modelRegistry.getExecutableModels().catch(() => undefined);
+	return modelRegistry.find(provider, modelId);
+}
+
 async function createRuntimeWithModel(
 	factory: CreateAgentSessionRuntimeFactory,
 	options: Parameters<CreateAgentSessionRuntimeFactory>[0],
@@ -1844,7 +1898,7 @@ async function createRuntimeWithModel(
 		const [provider, ...rest] = model.split("/");
 		const modelId = rest.join("/");
 		if (provider && modelId) {
-			const resolved = result.services.modelRegistry.find(provider, modelId);
+			const resolved = await resolveGuestModel(result.services.modelRegistry, provider, modelId);
 			if (!resolved) {
 				// A requested model that cannot resolve is an honest failure,
 				// never a silent fallback to an unconfigured session.
