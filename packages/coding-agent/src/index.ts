@@ -140,6 +140,14 @@ export {
 } from "./core/extensions/index.js";
 // Footer data provider (git branch + extension statuses - data not otherwise available to extensions)
 export type { ReadonlyFooterDataProvider } from "./core/footer-data-provider.js";
+export {
+	filterSkillsInSystemPrompt,
+	JevClient,
+	type JevClientOptions,
+	type JevSelection,
+	type JevSkill,
+	selectSkillWithJev,
+} from "./core/jev.js";
 export { convertToLlm } from "./core/messages.js";
 export { ModelRegistry } from "./core/model-registry.js";
 export type {

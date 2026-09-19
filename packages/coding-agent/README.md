@@ -400,6 +400,8 @@ The default export can also be `async`. Preme Agent waits for async extension fa
 
 Place in `~/.supreme/agent/extensions/`, `.supreme/agent/extensions/`, or a [Preme Agent package](#preme-agent-packages) to share with others. See [docs/extensions.md](docs/extensions.md) and [examples/extensions/](examples/extensions/).
 
+For optional LocalJev skill selection, see [docs/jev-skill-selection.md](docs/jev-skill-selection.md).
+
 ### Themes
 
 Built-in: `dark`, `light`. Themes hot-reload: modify the active theme file and Preme Agent immediately applies changes.
