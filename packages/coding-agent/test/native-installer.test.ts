@@ -24,6 +24,34 @@ import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
 import { NATIVE_PLATFORMS } from "../src/utils/native-installation.js";
 import { archiveNativePlatform, hostNativePlatform } from "./installer-platform.js";
 
+/**
+ * This fixture publishes a real release feed but cannot mint a real cosign signature for it - only
+ * the release workflow's OIDC identity can. Replace ONLY the signature step: the digest is still
+ * read from the feed's own `SHA256SUMS` with the production parser, so everything downstream
+ * (manifest cross-check, PRIME_AGENT_EXPECTED_SHA256, install.sh) is exercised unchanged.
+ *
+ * The signature step itself is covered by release-signature.test.ts (real Sigstore fixtures) and by
+ * native-update-signature.test.ts (production pinning, fail-closed).
+ */
+vi.mock("../src/utils/release-signature.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../src/utils/release-signature.js")>();
+	return {
+		...actual,
+		fetchVerifiedReleaseArtifactDigest: async (options: { baseUrl: string; version: string; file: string }) => {
+			const response = await fetch(`${options.baseUrl}/releases/v${options.version}/SHA256SUMS`);
+			if (!response.ok) throw new actual.ReleaseSignatureError("no SHA256SUMS in the fixture feed");
+			const digest = actual.parseChecksums(new Uint8Array(await response.arrayBuffer())).get(options.file);
+			if (!digest) throw new actual.ReleaseSignatureError(`fixture feed does not cover ${options.file}`);
+			return {
+				digest,
+				signerIdentity:
+					"https://github.com/PrimeIntellect-ai/prime-agent/.github/workflows/build-binaries.yml@refs/heads/main",
+				signerRef: "refs/heads/main",
+			};
+		},
+	};
+});
+
 const installer = resolve(__dirname, "../../../install.sh");
 const assets = [
 	"package.json",
@@ -57,6 +85,9 @@ let base: string;
 let certificate: string;
 const originalDispatcher = getGlobalDispatcher();
 let fixtureDispatcher: Agent;
+
+/** Placeholder bundle bytes: present in the feed, never verified because cosign is off PATH. */
+const FIXTURE_BUNDLE = '{"fixture":"not a real sigstore bundle"}\n';
 
 function publish(
 	version: string,
@@ -103,6 +134,10 @@ exit 1
 	const digest = createHash("sha256").update(bytes).digest("hex");
 	feed.set(`/releases/v${version}/${filename}`, bytes);
 	feed.set(`/releases/v${version}/SHA256SUMS`, Buffer.from(`${digest}  ${filename}\n`));
+	// The fixture cannot mint a real cosign bundle (only the release workflow's OIDC identity can).
+	// The installer refuses an inventory whose bundle is MISSING, and verifies the bundle only when
+	// cosign is on PATH; these tests keep cosign off PATH except where they install a fake one.
+	feed.set(`/releases/v${version}/SHA256SUMS.sigstore.json`, Buffer.from(FIXTURE_BUNDLE));
 	feed.set(
 		version.includes("-beta") ? "/beta.json" : "/latest.json",
 		Buffer.from(
@@ -121,6 +156,7 @@ function publishNodePackage(version: string) {
 	const digest = createHash("sha256").update(bytes).digest("hex");
 	feed.set(`/releases/v${version}/${filename}`, bytes);
 	feed.set(`/releases/v${version}/SHA256SUMS`, Buffer.from(`${digest}  ${filename}\n`));
+	feed.set(`/releases/v${version}/SHA256SUMS.sigstore.json`, Buffer.from(FIXTURE_BUNDLE));
 }
 
 async function install(version: string, extra: NodeJS.ProcessEnv = {}, entrypoint = installer) {
@@ -1010,6 +1046,32 @@ exec /bin/${operation} "$@"
 		expect(execFileSync(command(), ["--version"], { encoding: "utf8" })).toBe("1.0.1\n");
 	});
 
+	it("rolls back a retained release whose recorded install source is legacy http, but never downloads from it", async () => {
+		publish("1.0.0");
+		publish("1.0.1");
+		expect((await install("1.0.0")).code).toBe(0);
+		const previous = readlinkSync(command());
+		expect((await install("1.0.1")).code).toBe(0);
+		const current = readlinkSync(command());
+		// Older installers recorded the plain-http origin they were pointed at.
+		for (const dir of releaseDirectories())
+			writeFileSync(join(dir, ".install-source"), "http://legacy.example/prime-agent");
+
+		await expect(
+			getNativeUpdatePlan({ force: true, rollback: false, executable: realpathSync(command()) }),
+		).rejects.toThrow("The recorded install source (.install-source) must use https, got http://.");
+		expect(readlinkSync(command())).toBe(current);
+
+		const plan = await getNativeUpdatePlan({ force: false, rollback: true, executable: realpathSync(command()) });
+		expect(plan.targetVersion).toBe("1.0.0");
+		expect(plan.verifiedSignerIdentity).toBeUndefined();
+		const rollback = await run(plan.command!.command, plan.command!.args);
+		expect(rollback.code, rollback.output).toBe(0);
+		expect(readlinkSync(command())).toBe(previous);
+		expect(execFileSync(command(), ["--version"], { encoding: "utf8" })).toBe("1.0.0\n");
+		expect(insecureRequestCount).toBe(0);
+	});
+
 	it("refuses ambiguous activation recovery without changing either launcher", async () => {
 		for (const version of ["1.0.0", "1.0.1", "1.0.2"]) publish(version);
 		const lsof = createLsofShim();
@@ -1094,6 +1156,74 @@ exec /bin/${operation} "$@"
 		expect(readFileSync(join(lock, "pid"), "utf8")).toBe(`${process.pid}\n`);
 	});
 
+	describe("release inventory signature", () => {
+		function fakeCosign(mode: "pass" | "fail"): string {
+			const dir = mkdtempSync(join(root, "cosign-"));
+			const record = join(dir, "args.txt");
+			writeFileSync(
+				join(dir, "cosign"),
+				`#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(record)}\n${mode === "pass" ? "exit 0" : "echo 'Error: none of the expected identities matched' >&2; exit 1"}\n`,
+				{ mode: 0o755 },
+			);
+			return dir;
+		}
+
+		it("verifies the inventory with cosign when it is available, pinning the release workflow identity", async () => {
+			publish("1.0.0");
+			const shim = fakeCosign("pass");
+			const result = await install("1.0.0", { PATH: `${shim}:/usr/bin:/bin` });
+			expect(result.code, result.output).toBe(0);
+			expect(result.output).not.toContain("cosign was not found");
+			const args = readFileSync(join(shim, "args.txt"), "utf8").split("\n");
+			expect(args[0]).toBe("verify-blob");
+			expect(args).toContain("--certificate-oidc-issuer");
+			expect(args).toContain("https://token.actions.githubusercontent.com");
+			expect(args).toContain("--certificate-identity-regexp");
+			const identity = args[args.indexOf("--certificate-identity-regexp") + 1];
+			expect(identity).toContain("PrimeIntellect-ai/prime-agent");
+			expect(identity).toContain("build-binaries");
+			expect(identity).toContain("refs/(heads/main|tags/v");
+			expect(args.at(-2)).toMatch(/SHA256SUMS$/);
+		});
+
+		it("refuses to install when cosign rejects the inventory signature", async () => {
+			publish("1.0.0");
+			const shim = fakeCosign("fail");
+			const result = await install("1.0.0", { PATH: `${shim}:/usr/bin:/bin` });
+			expect(result.code).not.toBe(0);
+			expect(result.output).toContain("not signed by the Prime Agent release workflow");
+			expect(existsSync(join(home, "data/prime-agent/bin/prime-agent"))).toBe(false);
+		});
+
+		it("refuses a missing signature bundle when cosign is available, and falls back without it", async () => {
+			publish("1.0.0");
+			feed.delete("/releases/v1.0.0/SHA256SUMS.sigstore.json");
+
+			// cosign present: the bundle is required, so a release without one is refused.
+			const shim = fakeCosign("pass");
+			const strict = await install("1.0.0", { PATH: `${shim}:/usr/bin:/bin` });
+			expect(strict.code).not.toBe(0);
+			expect(strict.output).toContain("release signature (SHA256SUMS.sigstore.json) could not be downloaded");
+
+			// cosign absent: the bundle cannot be verified anyway, so historical releases without one
+			// install through the documented TLS-and-checksum fallback.
+			const relaxed = await install("1.0.0");
+			expect(relaxed.code, relaxed.output).toBe(0);
+			expect(relaxed.output).toContain("cosign was not found");
+		});
+
+		it("without cosign it says so, and refuses when a signature is required", async () => {
+			publish("1.0.0");
+			const relaxed = await install("1.0.0");
+			expect(relaxed.code, relaxed.output).toBe(0);
+			expect(relaxed.output).toContain("cosign was not found, so the release signature was not verified");
+
+			const strict = await install("1.0.0", { PRIME_AGENT_REQUIRE_SIGNATURE: "1" });
+			expect(strict.code).not.toBe(0);
+			expect(strict.output).toContain("cosign is required to verify the release signature");
+		});
+	});
+
 	it("releases its installation lock after a terminal hangup", async () => {
 		const harness = join(root, "hangup.sh");
 		writeFileSync(
@@ -1157,17 +1287,58 @@ exec /bin/${operation} "$@"
 		expect(existsSync(join(home, "data/prime-agent"))).toBe(false);
 	});
 
+	/**
+	 * End-to-end against a REAL compiled binary, with the real verifier running inside it. Skipped
+	 * unless the release workflow provides the artifacts. Environment contract (set by
+	 * .github/workflows/standalone-binaries.yml; every path is absolute):
+	 *
+	 *   PRIME_AGENT_TEST_ARCHIVE
+	 *     prime-agent-<version>-<platform>.tar.gz, compiled with
+	 *     `scripts/build-binary.mjs --test-signer-json <file>` so the binary pins the workflow's own
+	 *     signer. `SHA256SUMS` MUST sit next to it and be the exact bytes that were signed.
+	 *   PRIME_AGENT_TEST_SIGNATURE_BUNDLE
+	 *     `cosign sign-blob --bundle` output over that SHA256SUMS. Served as
+	 *     /releases/v<version>/SHA256SUMS.sigstore.json.
+	 *   PRIME_AGENT_TEST_NEXT_ARCHIVE
+	 *     prime-agent-99.0.0-<platform>.tar.gz: the same compiled binary re-archived with
+	 *     package.json's version rewritten to 99.0.0 (the follow-up release the test updates to).
+	 *     Its own `SHA256SUMS` MUST sit next to it and be the exact bytes that were signed.
+	 *   PRIME_AGENT_TEST_NEXT_SIGNATURE_BUNDLE
+	 *     cosign bundle over the 99.0.0 SHA256SUMS. Served as /releases/v99.0.0/SHA256SUMS.sigstore.json.
+	 *
+	 * The identity that signed both bundles must be the one compiled into the binary; the test cannot
+	 * sign anything itself. When PRIME_AGENT_TEST_ARCHIVE is unset the test is skipped. When it is set,
+	 * the other three variables are REQUIRED: a partially configured run fails instead of silently
+	 * skipping the signature checks it exists to exercise.
+	 */
 	// The installer downloads the archive for the platform it selects, so an archive
 	// built for another platform (a baseline or musl cross-build) cannot be installed here.
 	it.skipIf(!testArchive || archiveNativePlatform(testArchive) !== platform)(
 		"installs, updates, and rolls back actual compiled releases without Node",
 		async () => {
 			const archive = testArchive!;
+			const required = [
+				"PRIME_AGENT_TEST_SIGNATURE_BUNDLE",
+				"PRIME_AGENT_TEST_NEXT_ARCHIVE",
+				"PRIME_AGENT_TEST_NEXT_SIGNATURE_BUNDLE",
+			] as const;
+			const missing = required.filter((name) => !process.env[name]);
+			if (missing.length > 0)
+				throw new Error(
+					`PRIME_AGENT_TEST_ARCHIVE is set but ${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} not. The compiled updater fails closed without the signature bundles.`,
+				);
+			const bundle = readFileSync(process.env.PRIME_AGENT_TEST_SIGNATURE_BUNDLE!);
+			const nextArchive = process.env.PRIME_AGENT_TEST_NEXT_ARCHIVE!;
+			const nextBundle = readFileSync(process.env.PRIME_AGENT_TEST_NEXT_SIGNATURE_BUNDLE!);
 			const name = basename(archive);
 			const version = name.slice("prime-agent-".length, -`-${platform}.tar.gz`.length);
+			const nextFile = basename(nextArchive);
+			expect(nextFile).toBe(`prime-agent-99.0.0-${platform}.tar.gz`);
 			const manifestPath = /-beta(?:\.|$)/.test(version) ? "/beta.json" : "/latest.json";
+			const marker = "(test signer override)";
 			feed.set(`/releases/v${version}/${name}`, readFileSync(archive));
 			feed.set(`/releases/v${version}/SHA256SUMS`, readFileSync(join(dirname(archive), "SHA256SUMS")));
+			feed.set(`/releases/v${version}/SHA256SUMS.sigstore.json`, bundle);
 			const result = await install(version);
 			expect(result.code, result.output).toBe(0);
 			expect(
@@ -1188,28 +1359,32 @@ exec /bin/${operation} "$@"
 			const reinstalled = await run(command(), ["update", "--force"]);
 			expect(reinstalled.code, reinstalled.output).toBe(0);
 			expect(reinstalled.output).not.toContain("Warning:");
+			// The binary verified the bundle itself, against the compiled-in test signer, and says so.
+			expect(reinstalled.output).toContain(`checksums verified: signed by`);
+			expect(reinstalled.output).toContain(marker);
 			expect(readlinkSync(command())).not.toBe(originalTarget);
 			expect(readlinkSync(command())).toMatch(/\.[A-Za-z0-9]{6}\/prime-agent$/);
 			const repaired = await run(command(), ["update"]);
 			expect(repaired.code, repaired.output).toBe(0);
 			expect(repaired.output).toContain("already up to date");
 			const previous = readlinkSync(command());
-			const source = mkdtempSync(join(root, "real-release-"));
-			execFileSync("tar", ["-xzf", archive, "-C", source]);
-			const metadata = JSON.parse(readFileSync(join(source, "package.json"), "utf8")) as { version: string };
-			metadata.version = "99.0.0";
-			writeFileSync(join(source, "package.json"), JSON.stringify(metadata));
-			const nextFile = `prime-agent-99.0.0-${platform}.tar.gz`;
-			const nextArchive = join(root, nextFile);
-			execFileSync("tar", ["-czf", nextArchive, "-C", source, "."]);
+			// The follow-up release is the pre-signed 99.0.0 archive; its SHA256SUMS is exactly what was signed.
 			const bytes = readFileSync(nextArchive);
 			const sha256 = createHash("sha256").update(bytes).digest("hex");
 			feed.set(`/releases/v99.0.0/${nextFile}`, bytes);
-			feed.set("/releases/v99.0.0/SHA256SUMS", Buffer.from(`${sha256}  ${nextFile}\n`));
+			feed.set("/releases/v99.0.0/SHA256SUMS", readFileSync(join(dirname(nextArchive), "SHA256SUMS")));
 			const nextManifest = Buffer.from(
 				JSON.stringify({ version: "v99.0.0", binaries: [{ platform, file: nextFile, sha256 }] }),
 			);
 			feed.set(manifestPath, nextManifest);
+			// Fail closed, positively: with the bundle MISSING the compiled updater refuses the release.
+			const unsigned = await run(command(), ["update"]);
+			expect(unsigned.code, unsigned.output).not.toBe(0);
+			expect(unsigned.output).toMatch(/SHA256SUMS\.sigstore\.json/);
+			expect(unsigned.output).not.toContain("to v99.0.0");
+			expect(readlinkSync(command())).toBe(previous);
+			expect((await run(command(), ["--version"])).output).toBe(`${version}\n`);
+			feed.set("/releases/v99.0.0/SHA256SUMS.sigstore.json", nextBundle);
 			mkdirSync(join(home, "agent"), { recursive: true });
 			writeFileSync(join(home, "agent/auth.json"), "{}\n");
 			writeFileSync(
@@ -1236,6 +1411,7 @@ exec /bin/${operation} "$@"
 			const updated = await run(command(), ["update"]);
 			expect(updated.code, updated.output).toBe(0);
 			expect(updated.output).toContain("to v99.0.0");
+			expect(updated.output).toContain(marker);
 			expect(updated.output).not.toContain("Warning:");
 			expect((await run(command(), ["--version"])).output).toBe("99.0.0\n");
 			expect(await daemonExecutable()).toBe(realpathSync(command()));
@@ -1250,6 +1426,7 @@ exec /bin/${operation} "$@"
 			const restored = await run(command(), ["update", "--rollback"], { PI_OFFLINE: "1" });
 			expect(restored.code, restored.output).toBe(0);
 			expect(restored.output).not.toContain("Warning:");
+			expect(restored.output).not.toContain("signed by");
 			expect(readlinkSync(command())).toBe(previous);
 			expect(await daemonExecutable()).toBe(realpathSync(command()));
 			expect((await run(command(), ["--version"])).output).toBe(`${version}\n`);

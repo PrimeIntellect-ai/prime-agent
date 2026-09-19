@@ -1,17 +1,53 @@
 name: Release Prime Agent
 
+# Job graph (no job holds both a credential and repository code):
+#
+#   context -> standalone -> build -> validate-macos -> assemble -> sign
+#     assemble+sign -> github-release (DRAFT: no tag is created for a draft;
+#                      refuses an existing v* tag at another commit; records
+#                      every asset digest GitHub stored)
+#       -> publish-r2 (no checkout; verifies against the GitHub digests,
+#                      writes ONLY the immutable releases/v<ver>/ objects,
+#                      refuses to overwrite, reads back. Moves NO pointer.)
+#         -> verify (clean runner; downloads the immutable prefix from the
+#                    public URL; cosign identity pinned to this workflow on
+#                    the default branch; digests; runs --version)
+#           -> finalize-release (re-checks the tag and the draft assets,
+#                    undrafts -> the v<ver> tag appears, proves tag == BUILD_REF,
+#                    and as its LAST step advances stable/latest.json/install.sh)
+#             -> publish-npm (from pack-npm, an unprivileged build job that
+#                    needs verify) / tap-bump - both inert until a repository
+#                    variable enables them
+#     assemble -> publish-beta-r2 -> github-release-beta (beta prefix only)
+#
+# Until finalize-release runs, nothing a user follows (the stable/latest.json
+# pointers, install.sh, the GitHub release, the tag) refers to the new version;
+# only the content-addressed releases/v<ver>/ objects exist, and verify has to
+# accept them before anything points at them.
+#
+# Tag pushes deliberately do NOT release; the release job creates the tag.
+# scripts/resolve-release-context.mjs decides whether a production publish may run
+# unattended (merged, human-approved, version-bumping pull request) or has to go
+# through the `release-manual` environment.
+#
+# Environments this workflow expects (see scripts/check-release-workflow.mjs for
+# the invariants CI enforces):
+#   release-r2      R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_BUCKET / R2_ENDPOINT_URL
+#   release-manual  the same four secrets, plus required reviewers
+#   nightly-r2      NIGHTLY_R2_* - a beta-scoped token that cannot write
+#                   stable, latest.json, install.sh or install-beta.sh
+#   release-npm     no secret; OIDC trusted publishing
+#   release-homebrew HOMEBREW_TAP_TOKEN
 on:
   pull_request:
     branches: [main]
   push:
     branches:
       - main
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Production release tag to create or update (e.g., v0.0.1)'
+        description: 'Break-glass release tag (e.g., v0.0.1). Must match package.json. Needs a reviewer.'
         required: true
         type: string
 
@@ -20,13 +56,15 @@ concurrency:
   cancel-in-progress: false
   queue: max
 
-permissions:
-  contents: read
+# No workflow-wide token. Every job declares the minimum it needs.
+permissions: {}
 
 jobs:
   trust:
     name: Contributor trust
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       allowed: ${{ github.event_name != 'pull_request' || steps.vouch.outputs.vouched == 'true' }}
     steps:
@@ -40,18 +78,22 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  release-context:
+  context:
+    name: Release context
     needs: trust
     if: needs.trust.outputs.allowed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read
     outputs:
       beta_version: ${{ steps.context.outputs.beta_version }}
       build_ref: ${{ steps.context.outputs.build_ref }}
       production_version: ${{ steps.context.outputs.production_version }}
       publish_beta: ${{ steps.context.outputs.publish_beta }}
       publish_production: ${{ steps.context.outputs.publish_production }}
+      publish_environment: ${{ steps.context.outputs.publish_environment }}
+      requires_approval: ${{ steps.context.outputs.requires_approval }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -66,99 +108,59 @@ jobs:
           BEFORE_SHA: ${{ github.event.before || '' }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_SHA_VALUE: ${{ github.sha }}
           INPUT_RELEASE_TAG: ${{ github.event.inputs.release_tag || '' }}
           REF_NAME: ${{ github.ref_name }}
           REF_TYPE: ${{ github.ref_type }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           RUN_NUMBER: ${{ github.run_number }}
+        run: node scripts/resolve-release-context.mjs
+
+      - name: Summarize the release decision
+        env:
+          PRODUCTION_VERSION: ${{ steps.context.outputs.production_version }}
+          PUBLISH_ENVIRONMENT: ${{ steps.context.outputs.publish_environment }}
+          PUBLISH_PRODUCTION: ${{ steps.context.outputs.publish_production }}
+          REQUIRES_APPROVAL: ${{ steps.context.outputs.requires_approval }}
+          APPROVAL_REASON: ${{ steps.context.outputs.approval_reason }}
         run: |
-          beta_version=
-          build_ref=
-          production_version=
-          publish_beta=false
-          publish_production=false
-
-          if [ "$EVENT_NAME" = pull_request ]; then
-            # Exercise both real packer paths without release credentials or publication.
-            production_version=$(node -p "require('./package.json').version")
-            build_ref="$GITHUB_SHA_VALUE"
-            beta_version="${production_version}-beta.${RUN_NUMBER}.${RUN_ATTEMPT}.${GITHUB_SHA_VALUE::7}"
-            publish_beta=true
-            publish_production=true
-          elif [ "$EVENT_NAME" = workflow_dispatch ]; then
-            if [ "$REF_NAME" != "$DEFAULT_BRANCH" ]; then
-              echo "Manual releases must run from the default branch (${DEFAULT_BRANCH}), not ${REF_NAME}." >&2
-              exit 1
-            fi
-            production_version="${INPUT_RELEASE_TAG#v}"
-            build_ref="$GITHUB_SHA_VALUE"
-            publish_production=true
-          elif [ "$REF_TYPE" = tag ]; then
-            production_version="${REF_NAME#v}"
-            build_ref="$REF_NAME"
-            publish_production=true
-          else
-            production_version=$(node -p "require('./package.json').version")
-            build_ref="$GITHUB_SHA_VALUE"
-            beta_version="${production_version}-beta.${RUN_NUMBER}.${RUN_ATTEMPT}.${GITHUB_SHA_VALUE::7}"
-            publish_beta=true
-
-            previous_version=
-            if [ -n "$BEFORE_SHA" ] && ! printf '%s\n' "$BEFORE_SHA" | grep -Eq '^0+$' && git cat-file -e "${BEFORE_SHA}:package.json"; then
-              git show "${BEFORE_SHA}:package.json" > /tmp/previous-package.json
-              previous_version=$(node -p "require('/tmp/previous-package.json').version")
-            fi
-
-            if [ -z "$previous_version" ] || [ "$production_version" != "$previous_version" ]; then
-              if git show-ref --verify --quiet "refs/tags/v${production_version}"; then
-                tagged_commit=$(git rev-list -n 1 "v${production_version}")
-                if [ "$tagged_commit" != "$GITHUB_SHA_VALUE" ]; then
-                  echo "Production v${production_version} already points to ${tagged_commit}, not ${GITHUB_SHA_VALUE}." >&2
-                  exit 1
-                fi
-                echo "Retrying production v${production_version} for ${GITHUB_SHA_VALUE}."
-              fi
-              publish_production=true
-            elif ! git show-ref --verify --quiet "refs/tags/v${production_version}"; then
-              echo "Production v${production_version} has no tag; retrying the failed release."
-              publish_production=true
-            else
-              echo "Package version is unchanged at ${production_version}; only beta will advance."
-            fi
-          fi
-
-          if [ "$publish_production" = true ] && ! printf '%s\n' "$production_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "Production version must be plain semver like 0.0.1: ${production_version}" >&2
-            exit 1
-          fi
-
-          echo "beta_version=$beta_version" >> "$GITHUB_OUTPUT"
-          echo "build_ref=$build_ref" >> "$GITHUB_OUTPUT"
-          echo "production_version=$production_version" >> "$GITHUB_OUTPUT"
-          echo "publish_beta=$publish_beta" >> "$GITHUB_OUTPUT"
-          echo "publish_production=$publish_production" >> "$GITHUB_OUTPUT"
-          echo "Build ref: $build_ref"
-          echo "Production: $publish_production ${production_version:+v${production_version}}"
-          echo "Beta: $publish_beta ${beta_version:+v${beta_version}}"
+          {
+            echo "### Release decision"
+            echo
+            echo "- production: \`${PUBLISH_PRODUCTION}\` v${PRODUCTION_VERSION}"
+            echo "- requires approval: \`${REQUIRES_APPROVAL}\`"
+            echo "- environment: \`${PUBLISH_ENVIRONMENT}\`"
+            echo "- reason: ${APPROVAL_REASON}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   standalone:
-    needs: release-context
+    name: Standalone binaries
+    needs: context
+    # id-token:write is passed through so the called workflow can cosign a
+    # TEST-ONLY SHA256SUMS for its end-to-end updater test. The identity it
+    # mints is standalone-binaries.yml@<ref> - the called workflow path - which
+    # the updater's pin (build-binaries.yml on main / v* tags) rejects, so it is
+    # not a release credential. See the header of standalone-binaries.yml.
+    permissions:
+      contents: read
+      id-token: write
     uses: ./.github/workflows/standalone-binaries.yml
     with:
-      build_ref: ${{ needs.release-context.outputs.build_ref }}
+      build_ref: ${{ needs.context.outputs.build_ref }}
 
   build:
+    name: Pack release
     runs-on: ubuntu-latest
-    needs: [release-context, standalone]
+    needs: [context, standalone]
     permissions:
       contents: read
     env:
-      BETA_VERSION: ${{ needs.release-context.outputs.beta_version }}
-      BUILD_REF: ${{ needs.release-context.outputs.build_ref }}
-      PRODUCTION_VERSION: ${{ needs.release-context.outputs.production_version }}
-      PUBLISH_BETA: ${{ needs.release-context.outputs.publish_beta }}
-      PUBLISH_PRODUCTION: ${{ needs.release-context.outputs.publish_production }}
+      BETA_VERSION: ${{ needs.context.outputs.beta_version }}
+      BUILD_REF: ${{ needs.context.outputs.build_ref }}
+      PRODUCTION_VERSION: ${{ needs.context.outputs.production_version }}
+      PUBLISH_BETA: ${{ needs.context.outputs.publish_beta }}
+      PUBLISH_PRODUCTION: ${{ needs.context.outputs.publish_production }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -174,7 +176,23 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
-        run: npm ci
+        # Dependency install scripts do not run on a machine that produces release
+        # bytes. `npm rebuild esbuild` is the entire allowlist: its install script
+        # checks that the @esbuild/<target> binary matches the JS package and
+        # installs the native bin shim used by scripts/bundle.mjs and
+        # scripts/check-browser-smoke.mjs.
+        # Deliberately NOT rebuilt (verified 2026-09-15 by running this exact
+        # install plus `npm run build` and `npm run check`):
+        #   koffi       - Windows-only, dynamically required, `--external` in the
+        #                 bun build; its prebuilt binaries ship in the package.
+        #   canvas      - dev-only, used by packages/ai/scripts/generate-test-image.ts,
+        #                 never by the compiled build.
+        #   fsevents    - optional macOS watcher, unused by `vitest --run`.
+        #   @google/genai - `preinstall` is an echo; `prepare` only runs for git deps.
+        #   protobufjs  - `postinstall` is a no-op for dependency installs.
+        run: |
+          npm ci --ignore-scripts
+          npm rebuild esbuild
 
       - name: Build
         run: npm run build
@@ -226,7 +244,7 @@ jobs:
 
       - name: Smoke test installer with npm 12
         run: |
-          npm install --global npm@12.0.2
+          npm install --global --ignore-scripts npm@12.0.2
           npm --version | grep -Eq '^12\.'
 
           SMOKE_VERSION=0.0.0-installer-smoke
@@ -255,6 +273,7 @@ jobs:
           export NPM_CONFIG_PREFIX="$SMOKE_ROOT/npm-prefix"
           PATH="$NPM_CONFIG_PREFIX/bin:$PATH" \
             PRIME_AGENT_ALLOW_INSECURE_HTTP_FOR_TESTS=1 \
+            PRIME_AGENT_SKIP_SIGNATURE_FOR_TESTS=1 \
             PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL=0 \
             PRIME_AGENT_INSTALL_METHOD=node \
             PRIME_AGENT_INSTALLER_PLAIN=1 \
@@ -279,9 +298,11 @@ jobs:
 
   validate-macos:
     name: Final release (${{ matrix.platform }})
-    needs: [release-context, build]
+    needs: [context, build]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -291,9 +312,9 @@ jobs:
           - platform: darwin-x64
             runner: macos-15-intel
     env:
-      BUILD_REF: ${{ needs.release-context.outputs.build_ref }}
-      PUBLISH_PRODUCTION: ${{ needs.release-context.outputs.publish_production }}
-      PUBLISH_BETA: ${{ needs.release-context.outputs.publish_beta }}
+      BUILD_REF: ${{ needs.context.outputs.build_ref }}
+      PUBLISH_PRODUCTION: ${{ needs.context.outputs.publish_production }}
+      PUBLISH_BETA: ${{ needs.context.outputs.publish_beta }}
     steps:
       - name: Checkout validation source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -314,7 +335,9 @@ jobs:
 
       - name: Install validation dependencies
         working-directory: source
-        run: npm ci
+        run: |
+          npm ci --ignore-scripts
+          npm rebuild esbuild
 
       - name: Download exact final production artifacts
         if: env.PUBLISH_PRODUCTION == 'true'
@@ -354,7 +377,10 @@ jobs:
               "$RUNNER_TEMP/macos-validation/$channel-$TARGET_PLATFORM.json"
             export PRIME_AGENT_TEST_ARCHIVE=$(find "$artifacts" -maxdepth 1 -name "*-$TARGET_PLATFORM.tar.gz")
             test -n "$PRIME_AGENT_TEST_ARCHIVE"
-            (cd packages/coding-agent && npx tsx ../../node_modules/vitest/dist/cli.js --run test/compiled-artifact.test.ts test/native-installer.test.ts)
+            # The final binary pins the production signer and nothing here can sign
+            # as it, so the signed end-to-end updater test (native-installer.test.ts)
+            # runs in the standalone job against a test-signer build instead.
+            (cd packages/coding-agent && npx --ignore-scripts tsx ../../node_modules/vitest/dist/cli.js --run test/compiled-artifact.test.ts)
           done
 
       - name: Upload native validation receipts
@@ -364,30 +390,33 @@ jobs:
           path: ${{ runner.temp }}/macos-validation/*.json
           if-no-files-found: error
 
-  publish:
-    if: github.event_name != 'pull_request'
+  assemble:
+    name: Assemble release
+    needs: [context, build, validate-macos]
     runs-on: ubuntu-latest
-    needs: [release-context, build, validate-macos]
     permissions:
-      contents: write
+      contents: read
     env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      AWS_DEFAULT_REGION: auto
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      BETA_VERSION: ${{ needs.release-context.outputs.beta_version }}
-      BUILD_REF: ${{ needs.release-context.outputs.build_ref }}
-      PRODUCTION_VERSION: ${{ needs.release-context.outputs.production_version }}
-      PUBLISH_BETA: ${{ needs.release-context.outputs.publish_beta }}
-      PUBLISH_PRODUCTION: ${{ needs.release-context.outputs.publish_production }}
-      R2_BUCKET: ${{ secrets.R2_BUCKET }}
-      R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
-      R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+      BETA_VERSION: ${{ needs.context.outputs.beta_version }}
+      BUILD_REF: ${{ needs.context.outputs.build_ref }}
+      PRODUCTION_VERSION: ${{ needs.context.outputs.production_version }}
+      PUBLISH_BETA: ${{ needs.context.outputs.publish_beta }}
+      PUBLISH_PRODUCTION: ${{ needs.context.outputs.publish_production }}
+      R2_PUBLIC_BASE_URL: ${{ github.event_name == 'pull_request' && 'https://example.invalid/prime-agent-validation' || vars.R2_PUBLIC_BASE_URL }}
     steps:
+      # This job holds no credentials. It is the last job that runs repository
+      # code against the release artifacts, so the publishing jobs never have to.
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ env.BUILD_REF }}
           persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
 
       - name: Download production artifacts
         if: env.PUBLISH_PRODUCTION == 'true'
@@ -419,160 +448,945 @@ jobs:
             node scripts/verify-macos-validation-receipts.mjs release-artifacts/beta macos-validation beta
           fi
 
-      - name: Prepare installer
+      - name: Render the installer into the production artifact set
+        if: env.PUBLISH_PRODUCTION == 'true'
         run: |
-          INSTALL_BASE_URL="${R2_PUBLIC_BASE_URL%/}"
-          export INSTALL_BASE_URL
-          test -n "$INSTALL_BASE_URL"
-
-          node - <<'NODE'
-          const fs = require("node:fs");
-          const baseUrl = process.env.INSTALL_BASE_URL;
-          if (!baseUrl) throw new Error("INSTALL_BASE_URL is required");
-          const installer = fs.readFileSync("install.sh", "utf8");
-          const renderInstaller = (channel) => installer
-            .replaceAll("__PRIME_AGENT_DOWNLOAD_BASE_URL__", baseUrl)
-            .replaceAll("__PRIME_AGENT_DEFAULT_RELEASE_CHANNEL__", channel);
-          fs.writeFileSync("/tmp/prime-agent-install.sh", renderInstaller("stable"));
-          fs.writeFileSync("/tmp/prime-agent-install-beta.sh", renderInstaller("beta"));
-          NODE
+          test -n "$R2_PUBLIC_BASE_URL"
+          node scripts/render-installer.mjs \
+            --installer install.sh \
+            --base-url "$R2_PUBLIC_BASE_URL" \
+            --out-dir release-artifacts/production \
+            --sums release-artifacts/production/SHA256SUMS
 
       - name: Extract production release notes
         if: env.PUBLISH_PRODUCTION == 'true'
         run: |
-          awk "/^## \[${PRODUCTION_VERSION}\]/{flag=1; next} /^## \[/{flag=0} flag" packages/coding-agent/CHANGELOG.md > /tmp/release-notes.md
-          if [ ! -s /tmp/release-notes.md ]; then
-            echo "Release v${PRODUCTION_VERSION}" > /tmp/release-notes.md
+          mkdir -p release-notes
+          awk "/^## \[${PRODUCTION_VERSION}\]/{flag=1; next} /^## \[/{flag=0} flag" packages/coding-agent/CHANGELOG.md > release-notes/RELEASE_NOTES.md
+          if [ ! -s release-notes/RELEASE_NOTES.md ]; then
+            echo "Release v${PRODUCTION_VERSION}" > release-notes/RELEASE_NOTES.md
           fi
 
-      - name: Publish production channel to R2
+      - name: Re-verify the assembled artifact set
+        run: |
+          if [ "$PUBLISH_PRODUCTION" = true ]; then
+            (cd release-artifacts/production && sha256sum --check SHA256SUMS)
+            test -f release-artifacts/production/stable
+            test -f release-artifacts/production/latest.json
+            test -f release-artifacts/production/install.sh
+            test -f release-artifacts/production/install-beta.sh
+            test -f "release-artifacts/production/prime-agent-${PRODUCTION_VERSION}.tgz"
+          fi
+          if [ "$PUBLISH_BETA" = true ]; then
+            (cd release-artifacts/beta && sha256sum --check SHA256SUMS)
+            test -f release-artifacts/beta/beta
+            test -f release-artifacts/beta/beta.json
+            # The beta channel never ships a bootstrap installer; only the
+            # approved production path may rewrite install.sh.
+            ! ls release-artifacts/beta | grep -qE '^(install(-beta)?\.sh|stable|latest\.json)$'
+          fi
+
+      - name: Upload assembled production artifacts
+        if: env.PUBLISH_PRODUCTION == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-final-production
+          path: release-artifacts/production/*
+          if-no-files-found: error
+
+      - name: Upload assembled beta artifacts
+        if: env.PUBLISH_BETA == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-final-beta
+          path: release-artifacts/beta/*
+          if-no-files-found: error
+
+      - name: Upload release notes
+        if: env.PUBLISH_PRODUCTION == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-notes
+          path: release-notes/RELEASE_NOTES.md
+          if-no-files-found: error
+
+  sign:
+    name: Sign release
+    needs: [context, assemble]
+    # Runs for the production release AND for the beta: a compiled beta install verifies its
+    # SHA256SUMS.sigstore.json with the same pinned identity (this workflow file at
+    # refs/heads/<default branch>), so an unsigned beta would make every nightly
+    # `prime-agent update` fail closed.
+    if: github.event_name != 'pull_request' && (needs.context.outputs.publish_production == 'true' || needs.context.outputs.publish_beta == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    env:
+      PUBLISH_BETA: ${{ needs.context.outputs.publish_beta }}
+      PUBLISH_PRODUCTION: ${{ needs.context.outputs.publish_production }}
+    steps:
+      - name: Download assembled production artifacts
+        if: env.PUBLISH_PRODUCTION == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-final-production
+          path: artifacts
+
+      - name: Download assembled beta artifacts
+        if: env.PUBLISH_BETA == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-final-beta
+          path: beta-artifacts
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+
+      - name: Sign SHA256SUMS with a keyless cosign signature
         if: env.PUBLISH_PRODUCTION == 'true'
         run: |
-          PRODUCTION_DIR=release-artifacts/production
-          RELEASE_PREFIX="releases/v${PRODUCTION_VERSION}"
-          TARBALL="$PRODUCTION_DIR/prime-agent-${PRODUCTION_VERSION}.tgz"
+          set -euo pipefail
+          mkdir -p signatures
+          (cd artifacts && sha256sum --check SHA256SUMS)
+          cosign sign-blob --yes \
+            --bundle signatures/SHA256SUMS.sigstore.json \
+            artifacts/SHA256SUMS
+          cosign verify-blob \
+            --bundle signatures/SHA256SUMS.sigstore.json \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/build-binaries.yml@${GITHUB_REF}" \
+            artifacts/SHA256SUMS
 
-          test -f "$TARBALL"
-          test -f "$PRODUCTION_DIR/SHA256SUMS"
-          test -f "$PRODUCTION_DIR/stable"
-          test -f "$PRODUCTION_DIR/latest.json"
-          test -n "$R2_BUCKET"
-          test -n "$R2_ENDPOINT_URL"
+      - name: Sign the beta SHA256SUMS with a keyless cosign signature
+        if: env.PUBLISH_BETA == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p beta-signatures
+          (cd beta-artifacts && sha256sum --check SHA256SUMS)
+          cosign sign-blob --yes \
+            --bundle beta-signatures/SHA256SUMS.sigstore.json \
+            beta-artifacts/SHA256SUMS
+          cosign verify-blob \
+            --bundle beta-signatures/SHA256SUMS.sigstore.json \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/build-binaries.yml@${GITHUB_REF}" \
+            beta-artifacts/SHA256SUMS
 
-          (cd "$PRODUCTION_DIR" && sha256sum --check SHA256SUMS)
-          for artifact in "$PRODUCTION_DIR"/*.tgz "$PRODUCTION_DIR"/*.tar.gz; do
-            aws s3 cp "$artifact" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$artifact")" \
-              --endpoint-url "$R2_ENDPOINT_URL" \
-              --content-type application/gzip \
-              --cache-control 'public, max-age=31536000, immutable'
-          done
-
-          aws s3 cp "$PRODUCTION_DIR/SHA256SUMS" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/SHA256SUMS" \
-            --endpoint-url "$R2_ENDPOINT_URL" \
-            --content-type text/plain \
-            --cache-control 'public, max-age=31536000, immutable'
-
-          aws s3 cp "$PRODUCTION_DIR/latest.json" "s3://${R2_BUCKET}/latest.json" \
-            --endpoint-url "$R2_ENDPOINT_URL" \
-            --content-type application/json \
-            --cache-control no-cache
-
-          aws s3 cp "$PRODUCTION_DIR/stable" "s3://${R2_BUCKET}/stable" \
-            --endpoint-url "$R2_ENDPOINT_URL" \
-            --content-type text/plain \
-            --cache-control no-cache
-
-          aws s3 cp /tmp/prime-agent-install.sh "s3://${R2_BUCKET}/install.sh" \
-            --endpoint-url "$R2_ENDPOINT_URL" \
-            --content-type text/x-shellscript \
-            --cache-control no-cache
-
-          aws s3 cp /tmp/prime-agent-install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
-            --endpoint-url "$R2_ENDPOINT_URL" \
-            --content-type text/x-shellscript \
-            --cache-control no-cache
-
-      - name: Create production GitHub release
+      - name: Generate an SBOM per archive
         if: env.PUBLISH_PRODUCTION == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          RELEASE_TAG="v${PRODUCTION_VERSION}"
-          PRODUCTION_DIR=release-artifacts/production
-          target_args=()
-          if [ "$BUILD_REF" != "$RELEASE_TAG" ]; then
-            target_args=(--target "$BUILD_REF")
-          fi
-
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" "$PRODUCTION_DIR"/* --clobber
-          else
-            gh release create "$RELEASE_TAG" \
-              --title "$RELEASE_TAG" \
-              "${target_args[@]}" \
-              --notes-file /tmp/release-notes.md \
-              "$PRODUCTION_DIR"/*
-          fi
-
-      - name: Publish immutable beta artifacts to R2
-        if: env.PUBLISH_BETA == 'true'
-        run: |
-          BETA_DIR=release-artifacts/beta
-          RELEASE_PREFIX="releases/v${BETA_VERSION}"
-          TARBALL="$BETA_DIR/prime-agent-${BETA_VERSION}.tgz"
-
-          test -f "$TARBALL"
-          test -f "$BETA_DIR/SHA256SUMS"
-          test -f "$BETA_DIR/beta"
-          test -f "$BETA_DIR/beta.json"
-          test -n "$R2_BUCKET"
-          test -n "$R2_ENDPOINT_URL"
-
-          (cd "$BETA_DIR" && sha256sum --check SHA256SUMS)
-          for artifact in "$BETA_DIR"/*.tgz "$BETA_DIR"/*.tar.gz; do
-            aws s3 cp "$artifact" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$artifact")" \
-              --endpoint-url "$R2_ENDPOINT_URL" \
-              --content-type application/gzip \
-              --cache-control 'public, max-age=31536000, immutable'
+          set -euo pipefail
+          for archive in artifacts/*.tar.gz artifacts/*.tgz; do
+            test -f "$archive" || continue
+            name=$(basename "$archive")
+            syft scan "file:${archive}" -o spdx-json="signatures/${name}.sbom.spdx.json"
           done
+          ls -1 signatures
 
-          aws s3 cp "$BETA_DIR/SHA256SUMS" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/SHA256SUMS" \
-            --endpoint-url "$R2_ENDPOINT_URL" \
-            --content-type text/plain \
-            --cache-control 'public, max-age=31536000, immutable'
+      - name: Attest build provenance
+        if: env.PUBLISH_PRODUCTION == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            artifacts/*.tar.gz
+            artifacts/*.tgz
+            artifacts/SHA256SUMS
+            artifacts/install.sh
 
-      - name: Advance beta release
+      - name: Attest beta build provenance
         if: env.PUBLISH_BETA == 'true'
-        env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            beta-artifacts/*.tar.gz
+            beta-artifacts/*.tgz
+            beta-artifacts/SHA256SUMS
+
+      - name: Upload signatures
+        if: env.PUBLISH_PRODUCTION == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-signatures
+          path: signatures/*
+          if-no-files-found: error
+
+      - name: Upload beta signatures
+        if: env.PUBLISH_BETA == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-beta-signatures
+          path: beta-signatures/SHA256SUMS.sigstore.json
+          if-no-files-found: error
+
+
+  github-release:
+    name: Draft GitHub release
+    needs: [context, assemble, sign]
+    if: github.event_name != 'pull_request' && needs.context.outputs.publish_production == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      BUILD_REF: ${{ needs.context.outputs.build_ref }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PRODUCTION_VERSION: ${{ needs.context.outputs.production_version }}
+    steps:
+      # No checkout: this job publishes artifacts, it does not run repository code.
+      - name: Download assembled production artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-final-production
+          path: artifacts
+
+      - name: Download signatures
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-signatures
+          path: artifacts
+
+      - name: Download release notes
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-notes
+          path: notes
+
+      - name: Refuse an existing tag at another commit
         run: |
-          latest_main_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${DEFAULT_BRANCH}" --jq .sha)
-          if [ "$latest_main_sha" != "$BUILD_REF" ]; then
-            echo "A newer main commit exists; keeping its beta pointers in place."
+          set -euo pipefail
+          TAG="v${PRODUCTION_VERSION}"
+          [[ "$BUILD_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "BUILD_REF is not a full commit SHA: $BUILD_REF" >&2; exit 1; }
+          # Prints the commit an existing tag points at (annotated tags are peeled),
+          # nothing when the tag does not exist, and fails on any other API error.
+          # Every check returns explicitly: `set -e` does not reach into a $(...)
+          # subshell, and this function is called from one.
+          resolve_tag_commit() {
+            local tag="$1" ref type sha
+            if ! ref=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" 2>/tmp/ref-error); then
+              if grep -q 'HTTP 404' /tmp/ref-error; then return 0; fi
+              cat /tmp/ref-error >&2
+              return 1
+            fi
+            if [ "$(jq -r .ref <<<"$ref")" != "refs/tags/${tag}" ]; then
+              echo "Unexpected ref answer for ${tag}: ${ref}" >&2
+              return 1
+            fi
+            type=$(jq -r .object.type <<<"$ref") || return 1
+            sha=$(jq -r .object.sha <<<"$ref") || return 1
+            if [ "$type" = tag ]; then
+              sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${sha}" --jq .object.sha) || return 1
+            fi
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Tag ${tag} resolved to a non-SHA: ${sha}" >&2; return 1; }
+            printf '%s\n' "$sha"
+          }
+          tagged=$(resolve_tag_commit "$TAG")
+          if [ -n "$tagged" ] && [ "$tagged" != "$BUILD_REF" ]; then
+            # `gh release create --target` never moves an existing tag, so the
+            # assets built from BUILD_REF would be published under a tag that
+            # points somewhere else. Refuse.
+            echo "Tag ${TAG} already points at ${tagged}, not ${BUILD_REF}; refusing to publish." >&2
+            exit 1
+          fi
+          echo "Tag ${TAG}: ${tagged:-absent}"
+
+      - name: Create or refresh the draft release
+        # A DRAFT does not create the git tag. The REST API creates
+        # refs/tags/<tag_name> from target_commitish only when the release is
+        # published (draft=false); `gh release create --draft` is that same POST
+        # with draft=true followed by the asset uploads. The tag therefore first
+        # exists in finalize-release, which proves it points at BUILD_REF.
+        # (docs.github.com/rest/releases/releases#create-a-release; GitHub staff
+        # in github.com/orgs/community/discussions/24690: "when creating a draft
+        # release the git tag is not being created".)
+        run: |
+          set -euo pipefail
+          TAG="v${PRODUCTION_VERSION}"
+          if gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null | grep -qx false; then
+            # A re-run after finalize-release published this release must finish, not
+            # refuse: the channel pointers may still name the previous version. Never
+            # modify the published release: its assets become the authoritative bytes
+            # for this re-run. Keyless sigstore bundles and SBOMs are not byte-stable,
+            # so a re-sign would never match the immutable R2 set, and publishing-r2
+            # would refuse the overwrite. The digest-recording step below re-proves
+            # the downloaded bytes against the digests GitHub recorded.
+            echo "Release $TAG is already published; reusing its assets so the re-run can finish."
+            gh release download "$TAG" --dir artifacts --clobber
             exit 0
           fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --draft --target "$BUILD_REF" --notes-file notes/RELEASE_NOTES.md --title "$TAG"
+            gh release upload "$TAG" artifacts/* --clobber
+          else
+            gh release create "$TAG" \
+              --draft \
+              --title "$TAG" \
+              --target "$BUILD_REF" \
+              --notes-file notes/RELEASE_NOTES.md \
+              artifacts/*
+          fi
+          # The draft must still be a draft and must target BUILD_REF.
+          gh release view "$TAG" --json isDraft,targetCommitish > /tmp/release.json
+          test "$(jq -r .isDraft /tmp/release.json)" = true
+          test "$(jq -r .targetCommitish /tmp/release.json)" = "$BUILD_REF"
+          # Creating the draft must not have created the tag; if it did, the tag
+          # has to point at BUILD_REF.
+          # Prints the commit an existing tag points at (annotated tags are peeled),
+          # nothing when the tag does not exist, and fails on any other API error.
+          # Every check returns explicitly: `set -e` does not reach into a $(...)
+          # subshell, and this function is called from one.
+          resolve_tag_commit() {
+            local tag="$1" ref type sha
+            if ! ref=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" 2>/tmp/ref-error); then
+              if grep -q 'HTTP 404' /tmp/ref-error; then return 0; fi
+              cat /tmp/ref-error >&2
+              return 1
+            fi
+            if [ "$(jq -r .ref <<<"$ref")" != "refs/tags/${tag}" ]; then
+              echo "Unexpected ref answer for ${tag}: ${ref}" >&2
+              return 1
+            fi
+            type=$(jq -r .object.type <<<"$ref") || return 1
+            sha=$(jq -r .object.sha <<<"$ref") || return 1
+            if [ "$type" = tag ]; then
+              sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${sha}" --jq .object.sha) || return 1
+            fi
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Tag ${tag} resolved to a non-SHA: ${sha}" >&2; return 1; }
+            printf '%s\n' "$sha"
+          }
+          tagged=$(resolve_tag_commit "$TAG")
+          if [ -n "$tagged" ] && [ "$tagged" != "$BUILD_REF" ]; then
+            echo "Tag ${TAG} points at ${tagged}, not ${BUILD_REF}, after drafting the release." >&2
+            exit 1
+          fi
 
-          BETA_DIR=release-artifacts/beta
-          aws s3 cp "$BETA_DIR/beta.json" "s3://${R2_BUCKET}/beta.json" \
+      - name: Record the digest GitHub stored for every asset
+        run: |
+          set -euo pipefail
+          TAG="v${PRODUCTION_VERSION}"
+          release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"${TAG}\") | .id" | head -n 1)
+          test -n "$release_id"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets" --paginate \
+            --jq '[.[] | {name: .name, size: .size, digest: .digest}]' > github-assets.json
+          missing=$(jq -r '[.[] | select(.digest == null or .digest == "")] | length' github-assets.json)
+          if [ "$missing" != 0 ]; then
+            echo "GitHub did not record a digest for $missing asset(s); refusing to publish." >&2
+            jq . github-assets.json >&2
+            exit 1
+          fi
+          # The digests GitHub recorded must equal the bytes this run produced.
+          failed=0
+          while IFS=$'\t' read -r name digest; do
+            test -f "artifacts/$name" || { echo "Unexpected release asset: $name" >&2; failed=1; continue; }
+            local_digest="sha256:$(sha256sum "artifacts/$name" | cut -d' ' -f1)"
+            if [ "$local_digest" != "$digest" ]; then
+              echo "Digest mismatch for $name: github=$digest local=$local_digest" >&2
+              failed=1
+            fi
+          done < <(jq -r '.[] | [.name, .digest] | @tsv' github-assets.json)
+          for file in artifacts/*; do
+            name=$(basename "$file")
+            jq -e --arg name "$name" 'any(.[]; .name == $name)' github-assets.json >/dev/null \
+              || { echo "Asset $name was not uploaded to the release" >&2; failed=1; }
+          done
+          test "$failed" = 0
+          jq . github-assets.json
+
+      - name: Upload the GitHub asset digest manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: github-asset-digests
+          path: github-assets.json
+          if-no-files-found: error
+
+  publish-r2:
+    name: Publish to R2
+    needs: [context, github-release]
+    if: github.event_name != 'pull_request' && needs.context.outputs.publish_production == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ needs.context.outputs.publish_environment }}
+    permissions: {}
+    env:
+      PRODUCTION_VERSION: ${{ needs.context.outputs.production_version }}
+    steps:
+      # No checkout, no dependency install, no repository code. The credential
+      # only exists in the env of the single step that talks to R2. This job
+      # writes the content-addressed releases/v<ver>/ objects and nothing else:
+      # the channel pointers (stable, latest.json, install.sh, install-beta.sh)
+      # move in finalize-release, after verify has accepted these objects.
+      - name: Download assembled production artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-final-production
+          path: artifacts
+
+      - name: Download signatures
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-signatures
+          path: artifacts
+
+      - name: Download the GitHub asset digest manifest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: github-asset-digests
+          path: manifest
+
+      - name: Verify every artifact against the digest GitHub recorded
+        run: |
+          set -euo pipefail
+          test -s manifest/github-assets.json
+          count=0
+          while IFS=$'\t' read -r name digest; do
+            test -f "artifacts/$name"
+            local_digest="sha256:$(sha256sum "artifacts/$name" | cut -d' ' -f1)"
+            test "$local_digest" = "$digest"
+            count=$((count + 1))
+          done < <(jq -r '.[] | [.name, .digest] | @tsv' manifest/github-assets.json)
+          test "$count" -gt 0
+          for file in artifacts/*; do
+            name=$(basename "$file")
+            jq -e --arg name "$name" 'any(.[]; .name == $name)' manifest/github-assets.json >/dev/null
+          done
+          echo "Verified $count artifacts against the GitHub release digests."
+
+      - name: Upload immutable release objects
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_DEFAULT_REGION: auto
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+        run: |
+          set -euo pipefail
+          test -n "$R2_BUCKET"
+          test -n "$R2_ENDPOINT_URL"
+          prefix="releases/v${PRODUCTION_VERSION}"
+
+          content_type() {
+            case "$1" in
+              *.tar.gz|*.tgz) echo application/gzip ;;
+              *.json) echo application/json ;;
+              *.sh) echo text/x-shellscript ;;
+              *) echo text/plain ;;
+            esac
+          }
+
+          for file in artifacts/*; do
+            name=$(basename "$file")
+            case "$name" in
+              stable|latest.json) continue ;;  # channel pointers are not immutable
+            esac
+            key="${prefix}/${name}"
+            local_digest=$(sha256sum "$file" | cut -d' ' -f1)
+            # A failed head-object is not proof that the key is absent: a revoked
+            # token, a wrong endpoint or a network error fail too. Only an explicit
+            # 404 from the service allows the upload; anything else stops the release
+            # rather than upload over an object this job could not see. The release
+            # checker asserts this exact shape.
+            head_status=0
+            aws s3api head-object --bucket "$R2_BUCKET" --key "$key" \
+              --endpoint-url "$R2_ENDPOINT_URL" >/tmp/head.json 2>/tmp/head.err || head_status=$?
+            if [ "$head_status" -eq 0 ]; then
+              aws s3 cp "s3://${R2_BUCKET}/${key}" /tmp/existing.bin --endpoint-url "$R2_ENDPOINT_URL" --quiet
+              existing_digest=$(sha256sum /tmp/existing.bin | cut -d' ' -f1)
+              rm -f /tmp/existing.bin
+              if [ "$existing_digest" != "$local_digest" ]; then
+                echo "Refusing to overwrite ${key}: stored ${existing_digest}, release ${local_digest}" >&2
+                exit 1
+              fi
+              echo "unchanged ${key}"
+              continue
+            elif [ "$head_status" -eq 254 ] && grep -qE '^An error occurred \((404|NotFound|NoSuchKey)\) when calling the HeadObject operation' /tmp/head.err; then
+              echo "absent ${key}"
+            else
+              echo "aws s3api head-object failed for ${key} (exit ${head_status}); refusing to guess whether it exists:" >&2
+              cat /tmp/head.err >&2
+              exit 1
+            fi
+            # The destination is spelled out in full: the release checker only
+            # allows releases/v<version>/<name> here, with <name> the basename of
+            # the artifacts/* loop variable, so no other key can be written.
+            aws s3 cp "$file" "s3://${R2_BUCKET}/releases/v${PRODUCTION_VERSION}/${name}" \
+              --endpoint-url "$R2_ENDPOINT_URL" \
+              --content-type "$(content_type "$name")" \
+              --cache-control 'public, max-age=31536000, immutable' \
+              --quiet
+            aws s3 cp "s3://${R2_BUCKET}/${key}" /tmp/readback.bin --endpoint-url "$R2_ENDPOINT_URL" --quiet
+            readback_digest=$(sha256sum /tmp/readback.bin | cut -d' ' -f1)
+            rm -f /tmp/readback.bin
+            if [ "$readback_digest" != "$local_digest" ]; then
+              echo "Read-back mismatch for ${key}: stored ${readback_digest}, expected ${local_digest}" >&2
+              exit 1
+            fi
+            echo "published ${key}"
+          done
+
+  verify:
+    name: Verify the immutable release objects
+    needs: [context, publish-r2]
+    if: github.event_name != 'pull_request' && needs.context.outputs.publish_production == 'true'
+    runs-on: ubuntu-latest
+    permissions: {}
+    env:
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      PRODUCTION_VERSION: ${{ needs.context.outputs.production_version }}
+      R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+    steps:
+      # A clean runner, no repository checkout, no artifacts from this run: this
+      # job only sees what a user will see. It runs BEFORE finalize-release, so
+      # it reads the content-addressed releases/v<ver>/ prefix directly; no
+      # pointer, release or tag refers to this version yet, and none will unless
+      # this job passes.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Download the immutable release objects from the public URL
+        run: |
+          set -euo pipefail
+          test -n "$R2_PUBLIC_BASE_URL"
+          base="${R2_PUBLIC_BASE_URL%/}/releases/v${PRODUCTION_VERSION}"
+          mkdir -p download
+          cd download
+          for name in SHA256SUMS SHA256SUMS.sigstore.json install.sh "prime-agent-${PRODUCTION_VERSION}-linux-x64.tar.gz"; do
+            curl --proto '=https' --proto-redir '=https' -fsSL --retry 5 --retry-delay 5 \
+              -o "$name" "${base}/${name}"
+          done
+          ls -l
+
+      - name: Verify the cosign signature over SHA256SUMS
+        working-directory: download
+        run: |
+          set -euo pipefail
+          cosign verify-blob \
+            --bundle SHA256SUMS.sigstore.json \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/build-binaries.yml@refs/heads/${DEFAULT_BRANCH}" \
+            SHA256SUMS
+
+      - name: Verify the digests and run the published binary
+        working-directory: download
+        run: |
+          set -euo pipefail
+          archive="prime-agent-${PRODUCTION_VERSION}-linux-x64.tar.gz"
+          grep -E "  (${archive}|install\.sh)$" SHA256SUMS > expected.sums
+          test "$(wc -l < expected.sums)" -eq 2
+          sha256sum --check expected.sums
+          mkdir -p extracted
+          tar -xzf "$archive" -C extracted
+          chmod +x extracted/prime-agent
+          extracted/prime-agent --version | tee version.txt
+          grep -q "$PRODUCTION_VERSION" version.txt
+
+  finalize-release:
+    name: Publish the release and advance the channel
+    needs: [context, verify]
+    if: github.event_name != 'pull_request' && needs.context.outputs.publish_production == 'true'
+    runs-on: ubuntu-latest
+    # The same protected environment as publish-r2: a manual release is approved
+    # once for the immutable upload and once more for making it public.
+    environment:
+      name: ${{ needs.context.outputs.publish_environment }}
+    permissions:
+      contents: write
+    env:
+      BUILD_REF: ${{ needs.context.outputs.build_ref }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PRODUCTION_VERSION: ${{ needs.context.outputs.production_version }}
+    steps:
+      # No checkout, no dependency install, no repository code. This is the only
+      # job that makes the version reachable: it undrafts the GitHub release
+      # (which creates the tag), proves the tag points at BUILD_REF, and only
+      # then moves stable / latest.json / install.sh. The R2 credential exists in
+      # the env of that last step alone.
+      - name: Download assembled production artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-final-production
+          path: artifacts
+
+      - name: Download signatures
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-signatures
+          path: artifacts
+
+      - name: Download the GitHub asset digest manifest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: github-asset-digests
+          path: manifest
+
+      - name: Verify every artifact against the digest GitHub recorded
+        run: |
+          set -euo pipefail
+          test -s manifest/github-assets.json
+          count=0
+          while IFS=$'\t' read -r name digest; do
+            test -f "artifacts/$name"
+            local_digest="sha256:$(sha256sum "artifacts/$name" | cut -d' ' -f1)"
+            test "$local_digest" = "$digest"
+            count=$((count + 1))
+          done < <(jq -r '.[] | [.name, .digest] | @tsv' manifest/github-assets.json)
+          test "$count" -gt 0
+          for file in artifacts/*; do
+            name=$(basename "$file")
+            jq -e --arg name "$name" 'any(.[]; .name == $name)' manifest/github-assets.json >/dev/null
+          done
+          for pointer in latest.json stable install.sh install-beta.sh; do
+            test -f "artifacts/${pointer}"
+          done
+          echo "Verified $count artifacts against the GitHub release digests."
+
+      - name: Refuse an existing tag at another commit and re-check the draft
+        run: |
+          set -euo pipefail
+          TAG="v${PRODUCTION_VERSION}"
+          [[ "$BUILD_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "BUILD_REF is not a full commit SHA: $BUILD_REF" >&2; exit 1; }
+          # Prints the commit an existing tag points at (annotated tags are peeled),
+          # nothing when the tag does not exist, and fails on any other API error.
+          # Every check returns explicitly: `set -e` does not reach into a $(...)
+          # subshell, and this function is called from one.
+          resolve_tag_commit() {
+            local tag="$1" ref type sha
+            if ! ref=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" 2>/tmp/ref-error); then
+              if grep -q 'HTTP 404' /tmp/ref-error; then return 0; fi
+              cat /tmp/ref-error >&2
+              return 1
+            fi
+            if [ "$(jq -r .ref <<<"$ref")" != "refs/tags/${tag}" ]; then
+              echo "Unexpected ref answer for ${tag}: ${ref}" >&2
+              return 1
+            fi
+            type=$(jq -r .object.type <<<"$ref") || return 1
+            sha=$(jq -r .object.sha <<<"$ref") || return 1
+            if [ "$type" = tag ]; then
+              sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${sha}" --jq .object.sha) || return 1
+            fi
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Tag ${tag} resolved to a non-SHA: ${sha}" >&2; return 1; }
+            printf '%s\n' "$sha"
+          }
+          tagged=$(resolve_tag_commit "$TAG")
+          if [ -n "$tagged" ] && [ "$tagged" != "$BUILD_REF" ]; then
+            echo "Tag ${TAG} already points at ${tagged}, not ${BUILD_REF}; refusing to publish." >&2
+            exit 1
+          fi
+          # The release must still be aimed at BUILD_REF and its assets must still be
+          # exactly the bytes whose digests github-release recorded. A re-run after
+          # this job already published the release finds isDraft=false: that is the
+          # recovery case the re-check must let finish, because the channel pointers
+          # may still name the previous version. The tag pre-check above already
+          # proved the published tag points at BUILD_REF (or is absent, in which
+          # case the publish step below recreates it), and the asset comparison
+          # below still refuses any change, so only the pointer move remains.
+          # Publishing an older version after a newer one is already live would
+          # roll the channel back; a stale re-run must not do that. Only a strictly
+          # newer published version blocks this finalize: the previous version being
+          # live is the normal case, and an empty published set is a first release.
+          # `gh api --paginate` applies --jq per page, so the version stream is
+          # compared in one jq slurp after it.
+          newer=$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+            --jq '.[] | select(.draft == false) | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) | .tag_name | sub("^v"; "") | tojson' \
+            | jq -sr --arg current "${PRODUCTION_VERSION}" \
+              'map(split(".") | map(tonumber)) as $all | [$all[] | select(. > ($current | split(".") | map(tonumber)))] | if length == 0 then "" else (max | join(".")) end')
+          if [ -n "$newer" ]; then
+            echo "Newer release v${newer} is already published; refusing to move the channel to v${PRODUCTION_VERSION}." >&2
+            exit 1
+          fi
+          gh release view "$TAG" --json isDraft,targetCommitish > /tmp/release.json
+          test "$(jq -r .targetCommitish /tmp/release.json)" = "$BUILD_REF"
+          if [ "$(jq -r .isDraft /tmp/release.json)" != true ]; then
+            echo "Release ${TAG} is already published (tag ${tagged:-absent}); finishing the channel pointers."
+          fi
+          release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"${TAG}\") | .id" | head -n 1)
+          test -n "$release_id"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets" --paginate \
+            --jq '[.[] | {name: .name, digest: .digest}] | sort_by(.name)' > /tmp/current-assets.json
+          jq '[.[] | {name: .name, digest: .digest}] | sort_by(.name)' manifest/github-assets.json > /tmp/recorded-assets.json
+          if ! cmp -s /tmp/current-assets.json /tmp/recorded-assets.json; then
+            echo "The draft release assets no longer match the digests recorded by github-release:" >&2
+            diff /tmp/recorded-assets.json /tmp/current-assets.json >&2 || true
+            exit 1
+          fi
+          echo "Release ${TAG} targets ${BUILD_REF}; tag ${tagged:-absent}; $(jq length /tmp/current-assets.json) assets unchanged."
+
+      - name: Publish the release and prove the tag points at BUILD_REF
+        run: |
+          set -euo pipefail
+          TAG="v${PRODUCTION_VERSION}"
+          # Prints the commit an existing tag points at (annotated tags are peeled),
+          # nothing when the tag does not exist, and fails on any other API error.
+          # Every check returns explicitly: `set -e` does not reach into a $(...)
+          # subshell, and this function is called from one.
+          resolve_tag_commit() {
+            local tag="$1" ref type sha
+            if ! ref=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" 2>/tmp/ref-error); then
+              if grep -q 'HTTP 404' /tmp/ref-error; then return 0; fi
+              cat /tmp/ref-error >&2
+              return 1
+            fi
+            if [ "$(jq -r .ref <<<"$ref")" != "refs/tags/${tag}" ]; then
+              echo "Unexpected ref answer for ${tag}: ${ref}" >&2
+              return 1
+            fi
+            type=$(jq -r .object.type <<<"$ref") || return 1
+            sha=$(jq -r .object.sha <<<"$ref") || return 1
+            if [ "$type" = tag ]; then
+              sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${sha}" --jq .object.sha) || return 1
+            fi
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Tag ${tag} resolved to a non-SHA: ${sha}" >&2; return 1; }
+            printf '%s\n' "$sha"
+          }
+          # Publishing the draft is what creates the tag, from the release target.
+          gh release edit "$TAG" --draft=false --latest
+          # Create it explicitly if GitHub did not, so the tag can never be missing.
+          if [ -z "$(resolve_tag_commit "$TAG")" ]; then
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${TAG}" \
+              -f sha="$BUILD_REF" >/dev/null
+          fi
+          tagged=$(resolve_tag_commit "$TAG")
+          if [ "$tagged" != "$BUILD_REF" ]; then
+            echo "Tag ${TAG} points at ${tagged:-nothing}, not ${BUILD_REF}." >&2
+            exit 1
+          fi
+          test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = false
+          echo "Published ${TAG} -> ${tagged}"
+
+      - name: Advance the production channel pointers
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_DEFAULT_REGION: auto
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+        run: |
+          set -euo pipefail
+          test -n "$R2_BUCKET"
+          test -n "$R2_ENDPOINT_URL"
+          # Every destination below is spelled out in full. The release checker
+          # allows exactly these four keys, in this step only, and refuses any
+          # key built from a variable, so nothing else in the workflow can move
+          # a channel pointer.
+          verify_pointer() {
+            local file="$1" key="$2" expected actual
+            expected=$(sha256sum "$file" | cut -d' ' -f1)
+            aws s3 cp "s3://${R2_BUCKET}/${key}" /tmp/pointer.bin --endpoint-url "$R2_ENDPOINT_URL" --quiet
+            actual=$(sha256sum /tmp/pointer.bin | cut -d' ' -f1)
+            rm -f /tmp/pointer.bin
+            test "$actual" = "$expected"
+            echo "pointer ${key}"
+          }
+
+          aws s3 cp artifacts/latest.json "s3://${R2_BUCKET}/latest.json" \
+            --endpoint-url "$R2_ENDPOINT_URL" --content-type application/json --cache-control no-cache --quiet
+          verify_pointer artifacts/latest.json latest.json
+          aws s3 cp artifacts/stable "s3://${R2_BUCKET}/stable" \
+            --endpoint-url "$R2_ENDPOINT_URL" --content-type text/plain --cache-control no-cache --quiet
+          verify_pointer artifacts/stable stable
+          aws s3 cp artifacts/install.sh "s3://${R2_BUCKET}/install.sh" \
+            --endpoint-url "$R2_ENDPOINT_URL" --content-type text/x-shellscript --cache-control no-cache --quiet
+          verify_pointer artifacts/install.sh install.sh
+          aws s3 cp artifacts/install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
+            --endpoint-url "$R2_ENDPOINT_URL" --content-type text/x-shellscript --cache-control no-cache --quiet
+          verify_pointer artifacts/install-beta.sh install-beta.sh
+
+  publish-beta-r2:
+    name: Publish beta to R2
+    needs: [context, assemble, sign]
+    if: github.event_name != 'pull_request' && needs.context.outputs.publish_beta == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: nightly-r2
+    permissions:
+      contents: read
+    env:
+      BETA_VERSION: ${{ needs.context.outputs.beta_version }}
+      BUILD_REF: ${{ needs.context.outputs.build_ref }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      # The nightly credential is a different R2 token from the production one and
+      # is scoped to releases/ and the beta pointers. This job never writes
+      # stable, latest.json, install.sh or install-beta.sh, and there is no step
+      # here that could. No checkout, no repository code: the beta artifacts and
+      # the signature bundle the sign job produced are all it touches.
+      - name: Download assembled beta artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-final-beta
+          path: artifacts
+
+      - name: Download beta signatures
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-beta-signatures
+          path: artifacts
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Refuse anything that is not a beta artifact
+        run: |
+          set -euo pipefail
+          (cd artifacts && sha256sum --check SHA256SUMS)
+          for file in artifacts/*; do
+            name=$(basename "$file")
+            case "$name" in
+              install.sh|install-beta.sh|stable|latest.json)
+                echo "The beta channel must never publish ${name}." >&2
+                exit 1
+                ;;
+            esac
+          done
+          test -f "artifacts/prime-agent-${BETA_VERSION}.tgz"
+          test -f artifacts/beta
+          test -f artifacts/beta.json
+          test -s artifacts/SHA256SUMS.sigstore.json
+
+      - name: Verify the beta signature bundle against the pinned release identity
+        # The same identity a compiled beta install pins: this workflow file, at the
+        # default branch, from GitHub's OIDC issuer. A bundle from any other ref or
+        # workflow stops the publication here, before the credential is used.
+        run: |
+          set -euo pipefail
+          cosign verify-blob \
+            --bundle artifacts/SHA256SUMS.sigstore.json \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/build-binaries.yml@refs/heads/${DEFAULT_BRANCH}" \
+            artifacts/SHA256SUMS
+
+      - name: Upload immutable beta objects
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.NIGHTLY_R2_ACCESS_KEY_ID }}
+          AWS_DEFAULT_REGION: auto
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.NIGHTLY_R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.NIGHTLY_R2_BUCKET }}
+          R2_ENDPOINT_URL: ${{ secrets.NIGHTLY_R2_ENDPOINT_URL }}
+        run: |
+          set -euo pipefail
+          test -n "$R2_BUCKET"
+          test -n "$R2_ENDPOINT_URL"
+          prefix="releases/v${BETA_VERSION}"
+          for file in artifacts/*; do
+            name=$(basename "$file")
+            case "$name" in
+              beta|beta.json) continue ;;
+            esac
+            key="${prefix}/${name}"
+            local_digest=$(sha256sum "$file" | cut -d' ' -f1)
+            # Same guard as publish-r2: only an explicit 404 means "absent"; any other
+            # head-object failure stops the job instead of uploading blind.
+            head_status=0
+            aws s3api head-object --bucket "$R2_BUCKET" --key "$key" \
+              --endpoint-url "$R2_ENDPOINT_URL" >/tmp/head.json 2>/tmp/head.err || head_status=$?
+            if [ "$head_status" -eq 0 ]; then
+              # The same beta version reuses its immutable prefix on a re-run: objects this
+              # workflow itself already published must let the run finish. Only bytes that differ
+              # from this build are refused.
+              aws s3 cp "s3://${R2_BUCKET}/${key}" /tmp/existing.bin --endpoint-url "$R2_ENDPOINT_URL" --quiet
+              existing_digest=$(sha256sum /tmp/existing.bin | cut -d' ' -f1)
+              rm -f /tmp/existing.bin
+              if [ "$existing_digest" != "$local_digest" ]; then
+                echo "Refusing to overwrite ${key}: stored ${existing_digest}, build ${local_digest}" >&2
+                exit 1
+              fi
+              echo "unchanged ${key}"
+              continue
+            elif [ "$head_status" -eq 254 ] && grep -qE '^An error occurred \((404|NotFound|NoSuchKey)\) when calling the HeadObject operation' /tmp/head.err; then
+              echo "absent ${key}"
+            else
+              echo "aws s3api head-object failed for ${key} (exit ${head_status}); refusing to guess whether it exists:" >&2
+              cat /tmp/head.err >&2
+              exit 1
+            fi
+            case "$name" in
+              *.tar.gz|*.tgz) type=application/gzip ;;
+              *.json) type=application/json ;;
+              *) type=text/plain ;;
+            esac
+            # Spelled out in full for the release checker: only releases/v<beta
+            # version>/<name> may be written here, <name> being the basename of
+            # the artifacts/* loop variable.
+            aws s3 cp "$file" "s3://${R2_BUCKET}/releases/v${BETA_VERSION}/${name}" \
+              --endpoint-url "$R2_ENDPOINT_URL" \
+              --content-type "$type" \
+              --cache-control 'public, max-age=31536000, immutable' \
+              --quiet
+            aws s3 cp "s3://${R2_BUCKET}/${key}" /tmp/readback.bin --endpoint-url "$R2_ENDPOINT_URL" --quiet
+            test "$(sha256sum /tmp/readback.bin | cut -d' ' -f1)" = "$local_digest"
+            rm -f /tmp/readback.bin
+            echo "published ${key}"
+          done
+
+      - name: Check that this is still the head of the default branch
+        id: head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          latest_main_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${DEFAULT_BRANCH}" --jq .sha)
+          if [ "$latest_main_sha" != "$BUILD_REF" ]; then
+            echo "A newer ${DEFAULT_BRANCH} commit exists; keeping its beta pointers in place."
+            echo "is_head=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_head=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Advance the beta pointers
+        if: steps.head.outputs.is_head == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.NIGHTLY_R2_ACCESS_KEY_ID }}
+          AWS_DEFAULT_REGION: auto
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.NIGHTLY_R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.NIGHTLY_R2_BUCKET }}
+          R2_ENDPOINT_URL: ${{ secrets.NIGHTLY_R2_ENDPOINT_URL }}
+        run: |
+          set -euo pipefail
+          aws s3 cp artifacts/beta.json "s3://${R2_BUCKET}/beta.json" \
             --endpoint-url "$R2_ENDPOINT_URL" \
             --content-type application/json \
-            --cache-control no-cache
-
-          aws s3 cp "$BETA_DIR/beta" "s3://${R2_BUCKET}/beta" \
+            --cache-control no-cache \
+            --quiet
+          aws s3 cp artifacts/beta "s3://${R2_BUCKET}/beta" \
             --endpoint-url "$R2_ENDPOINT_URL" \
             --content-type text/plain \
-            --cache-control no-cache
+            --cache-control no-cache \
+            --quiet
+          echo "Beta pointers advanced to v${BETA_VERSION}."
 
-          aws s3 cp /tmp/prime-agent-install.sh "s3://${R2_BUCKET}/install.sh" \
-            --endpoint-url "$R2_ENDPOINT_URL" \
-            --content-type text/x-shellscript \
-            --cache-control no-cache
+  github-release-beta:
+    name: Refresh the beta prerelease
+    needs: [context, publish-beta-r2]
+    if: github.event_name != 'pull_request' && needs.context.outputs.publish_beta == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      BETA_VERSION: ${{ needs.context.outputs.beta_version }}
+      BUILD_REF: ${{ needs.context.outputs.build_ref }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Download assembled beta artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-final-beta
+          path: artifacts
 
-          aws s3 cp /tmp/prime-agent-install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
-            --endpoint-url "$R2_ENDPOINT_URL" \
-            --content-type text/x-shellscript \
-            --cache-control no-cache
+      - name: Move the beta prerelease
+        run: |
+          set -euo pipefail
+          latest_main_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${DEFAULT_BRANCH}" --jq .sha)
+          if [ "$latest_main_sha" != "$BUILD_REF" ]; then
+            echo "A newer ${DEFAULT_BRANCH} commit exists; leaving the beta release alone."
+            exit 0
+          fi
 
           printf 'Automated beta build from `%s` (`%s`).\n' "$DEFAULT_BRANCH" "$BUILD_REF" > /tmp/beta-release-notes.md
 
@@ -603,5 +1417,236 @@ jobs:
               --prerelease
           fi
 
-          gh release upload beta "$BETA_DIR"/* --clobber
-          echo "Beta installer: ${R2_PUBLIC_BASE_URL%/}/install-beta.sh"
+          gh release upload beta artifacts/* --clobber
+
+  pack-npm:
+    name: Pack npm packages
+    needs: [context, verify]
+    # Unprivileged: repository code runs here, no credential does. Inert until
+    # NPM_PUBLISH_ENABLED is set, like publish-npm.
+    if: >-
+      github.event_name != 'pull_request'
+      && needs.context.outputs.publish_production == 'true'
+      && vars.NPM_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      BUILD_REF: ${{ needs.context.outputs.build_ref }}
+      PRODUCTION_VERSION: ${{ needs.context.outputs.production_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.BUILD_REF }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        # Same allowlist as the build job: no install scripts except esbuild's.
+        run: |
+          npm ci --ignore-scripts
+          npm rebuild esbuild
+
+      - name: Build
+        # pack-npm-packages.mjs stages each package's dist/, which a fresh checkout
+        # does not have.
+        run: npm run build
+
+      - name: Download assembled production artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-final-production
+          path: release-artifacts/production
+
+      - name: Build the npm package set
+        run: |
+          set -euo pipefail
+          # --archives re-hashes every release archive against latest.json before unpacking it, so
+          # the registry artifacts and the R2 artifacts assert the same bytes.
+          node scripts/pack-npm-packages.mjs \
+            --version "$PRODUCTION_VERSION" \
+            --archives release-artifacts/production \
+            --receipts release-artifacts/production/latest.json \
+            --out-dir npm-packages
+          test -s npm-packages/manifest.json
+          ls -l npm-packages/artifacts
+
+      - name: Upload the npm package set
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: npm-packages
+          path: |
+            npm-packages/artifacts/*.tgz
+            npm-packages/manifest.json
+          if-no-files-found: error
+
+  publish-npm:
+    name: Publish to npm
+    needs: [context, pack-npm, finalize-release]
+    # Inert until Kevin sets the NPM_PUBLISH_ENABLED variable, the npm org and the
+    # per-package trusted publishers exist. No NPM_TOKEN: publishing is OIDC only.
+    if: >-
+      github.event_name != 'pull_request'
+      && needs.context.outputs.publish_production == 'true'
+      && vars.NPM_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: release-npm
+    permissions:
+      id-token: write
+    steps:
+      # No checkout, no dependency install, no repository code: the OIDC token
+      # that npm trusts only ever meets the tarballs pack-npm staged.
+      - name: Download the npm package set
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: npm-packages
+          path: npm-packages
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # Node 24 ships npm >= 11.5.1, which trusted publishing requires.
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Publish every package with provenance
+        run: |
+          set -euo pipefail
+          test -s npm-packages/manifest.json
+          # manifest.json records the dependency-safe publish order: platform binaries, then
+          # libraries, then the front door and its mirror last. Every tarball is re-hashed
+          # against the manifest before it is published.
+          names=()
+          while IFS= read -r name; do names+=("$name"); done < <(jq -r '.publishOrder[]' npm-packages/manifest.json)
+          test "${#names[@]}" -gt 0
+          for name in "${names[@]}"; do
+            tarball=$(jq -r --arg name "$name" '.packages[] | select(.name == $name) | .tarball // empty' npm-packages/manifest.json)
+            expected=$(jq -r --arg name "$name" '.packages[] | select(.name == $name) | .sha256 // empty' npm-packages/manifest.json)
+            test -n "$tarball" || { echo "No tarball staged for ${name}" >&2; exit 1; }
+            test -n "$expected" || { echo "No sha256 recorded for ${name}" >&2; exit 1; }
+            path="npm-packages/artifacts/${tarball}"
+            test -f "$path"
+            actual=$(sha256sum "$path" | cut -d' ' -f1)
+            test "$actual" = "$expected" || { echo "Digest mismatch for ${tarball}" >&2; exit 1; }
+            npm publish "$path" --provenance --access public --ignore-scripts
+          done
+
+  tap-bump:
+    name: Bump the Homebrew tap formula
+    needs: [context, finalize-release]
+    # Inert until the tap repository exists and HOMEBREW_TAP_REPO is set.
+    if: >-
+      github.event_name != 'pull_request'
+      && needs.context.outputs.publish_production == 'true'
+      && vars.HOMEBREW_TAP_REPO != ''
+    runs-on: ubuntu-latest
+    environment:
+      name: release-homebrew
+    permissions: {}
+    env:
+      PRODUCTION_VERSION: ${{ needs.context.outputs.production_version }}
+      TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO }}
+    steps:
+      - name: Download assembled production artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-final-production
+          path: artifacts
+
+      - name: Open or refresh the formula bump pull request
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$TAP_REPO"
+          branch="prime-agent-${PRODUCTION_VERSION}"
+          workdir="$RUNNER_TEMP/tap"
+          mkdir "$workdir"
+          gh repo clone "https://github.com/${TAP_REPO}" "$workdir" -- --depth 1
+          # The clone's HEAD is the tap's default branch. Nothing below may push
+          # to it: the only push names the bump branch on both sides of the refspec.
+          default_branch=$(git -C "$workdir" symbolic-ref --short HEAD)
+          test -n "$default_branch"
+          test "$default_branch" != "$branch"
+          # A rerun finds the branch a previous run pushed. The push below is
+          # leased on exactly the commit seen here, so a concurrent writer makes
+          # the push fail instead of being overwritten; an empty lease means the
+          # branch must not exist yet.
+          lease=$(git -C "$workdir" ls-remote --heads origin "refs/heads/${branch}" | cut -f1)
+          git -C "$workdir" switch -c "$branch"
+          formula="$workdir/Formula/prime-agent.rb"
+          test -f "$formula"
+          version_pattern='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+          [[ "$PRODUCTION_VERSION" =~ $version_pattern ]] \
+            || { echo "PRODUCTION_VERSION is not a version: $PRODUCTION_VERSION" >&2; exit 1; }
+          # The formula is rewritten line by line with bash parameter expansion
+          # alone: no stream editor (its e, w and r commands run programs and
+          # write files), no interpreter and no heredoc in a job that holds the
+          # tap token. Every value that reaches the formula is validated first.
+          # The release checker allows no other tool here.
+          digest_for() {
+            local platform="$1" digest
+            digest=$(grep -E "  prime-agent-${PRODUCTION_VERSION}-${platform}\.tar\.gz$" artifacts/SHA256SUMS | cut -d' ' -f1)
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || { echo "No digest for ${platform} in SHA256SUMS" >&2; return 1; }
+            printf '%s\n' "$digest"
+          }
+          rewritten="$RUNNER_TEMP/prime-agent.rb"
+          : > "$rewritten"
+          previous=""
+          digests=0
+          while IFS= read -r line || [ -n "$line" ]; do
+            # The line after the `# <platform>` comment carries that platform's sha256.
+            for platform in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
+              if [[ "$previous" == *"# ${platform}" ]] && [[ "$line" == *'sha256 "'*'"'* ]]; then
+                digest=$(digest_for "$platform")
+                rest="${line#*sha256 \"}"
+                rest="${rest#*\"}"
+                line="${line%%sha256 \"*}sha256 \"${digest}\"${rest}"
+                digests=$((digests + 1))
+              fi
+            done
+            if [[ "$line" == *'version "'*'"'* ]]; then
+              rest="${line#*version \"}"
+              rest="${rest#*\"}"
+              line="${line%%version \"*}version \"${PRODUCTION_VERSION}\"${rest}"
+            fi
+            if [[ "$line" == *'/releases/v'[0-9]*'/'* ]]; then
+              rest="${line#*/releases/v}"
+              rest="${rest#*/}"
+              line="${line%%/releases/v*}/releases/v${PRODUCTION_VERSION}/${rest}"
+            fi
+            printf '%s\n' "$line" >> "$rewritten"
+            previous="$line"
+          done < "$formula"
+          test "$digests" -eq 4 || { echo "Formula carries $digests of the 4 platform sha256 entries" >&2; exit 1; }
+          grep -qE "^[[:space:]]*version \"${PRODUCTION_VERSION//./\\.}\"" "$rewritten" \
+            || { echo "Formula version was not rewritten" >&2; exit 1; }
+          test "$(grep -c '/releases/v' "$rewritten")" = "$(grep -cF "/releases/v${PRODUCTION_VERSION}/" "$rewritten")" \
+            || { echo "Formula still names another release prefix" >&2; exit 1; }
+          mv "$rewritten" "$formula"
+          if git -C "$workdir" diff --quiet; then
+            echo "Formula already describes prime-agent ${PRODUCTION_VERSION}; nothing to push."
+            exit 0
+          fi
+          git -C "$workdir" -c user.name='prime-agent-release' -c user.email='release@primeintellect.ai' \
+            commit -am "prime-agent ${PRODUCTION_VERSION}"
+          git -C "$workdir" push origin "refs/heads/${branch}:refs/heads/${branch}" \
+            --force-with-lease="refs/heads/${branch}:${lease}"
+          title="prime-agent ${PRODUCTION_VERSION}"
+          body="Automated formula bump for prime-agent v${PRODUCTION_VERSION}."
+          existing=$(gh pr list --repo "$TAP_REPO" --head "$branch" --base "$default_branch" --state open \
+            --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            # The bump branch names the pull request: gh pr edit accepts a head branch.
+            gh pr edit "$branch" --repo "$TAP_REPO" --title "$title" --body "$body"
+            echo "Refreshed pull request #${existing} on ${TAP_REPO} from ${branch}."
+          else
+            gh pr create --repo "$TAP_REPO" --head "$branch" --base "$default_branch" \
+              --title "$title" --body "$body"
+          fi

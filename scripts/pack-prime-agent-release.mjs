@@ -15,6 +15,7 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { assembleBinaryArchives } from "./assemble-release-archives.mjs";
+import { rewriteInternalDependencies, tarballDependencySpec } from "./lib/internal-dependencies.mjs";
 import { manifestV1Platforms } from "./release-platforms.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -164,18 +165,6 @@ function npmTarballName(packageName, version) {
 	return `${packageName.replace(/^@/, "").replace("/", "-")}-${version}.tgz`;
 }
 
-function releaseTarballUrl(baseUrl, version, tarballFile) {
-	return `${baseUrl}/releases/v${version}/${tarballFile}`;
-}
-
-function rewriteInternalDependencies(dependencies, internalPackageUrls) {
-	if (!dependencies) return undefined;
-	const rewritten = {};
-	for (const [name, range] of Object.entries(dependencies)) {
-		rewritten[name] = internalPackageUrls.get(name) || range;
-	}
-	return rewritten;
-}
 
 function releaseScripts(sourceScripts) {
 	if (!sourceScripts?.postinstall) return undefined;
@@ -311,7 +300,9 @@ function main() {
 		if (releasePackage.packageDir === "coding-agent") continue;
 		const sourcePackageName = sourcePackageNames.get(releasePackage.packageDir);
 		const artifactFile = artifactFiles.get(releasePackage.packageDir);
-		internalPackageUrls.set(sourcePackageName, releaseTarballUrl(args.baseUrl, releaseVersion, artifactFile));
+		// R2 channel only: these tarballs exist in the bucket, not on the registry. The registry
+		// channel (scripts/pack-npm-packages.mjs) uses semver ranges instead.
+		internalPackageUrls.set(sourcePackageName, tarballDependencySpec(args.baseUrl, releaseVersion, artifactFile));
 	}
 
 	const stagingRoot = join(args.outDir, "packages");

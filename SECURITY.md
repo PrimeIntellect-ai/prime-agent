@@ -16,6 +16,15 @@ Include the following when possible:
 
 Do not include real API keys, tokens, personal data, or credentials in the report. Use redacted or disposable test values.
 
+## Verifying a Release
+
+Release archives are published with a `SHA256SUMS` inventory and a keyless cosign signature over that
+inventory (`SHA256SUMS.sigstore.json`), signed by this repository's release workflow. `prime-agent
+update` verifies that signature before installing anything and fails closed if it does not match.
+
+To check a download yourself, and for the full release trust model, see
+[Release Security](packages/coding-agent/docs/release-security.md).
+
 ## Behavioral release evaluation
 
 The `pre-release` label enables a trusted behavioral evaluation before release. Exact base
@@ -27,6 +36,7 @@ from restoring approval after the label is removed. Both statuses are revoked wh
 revision changes, and repository rules must require both with strict up-to-date enforcement. See
 [`scripts/evals/short_swe/README.md`](scripts/evals/short_swe/README.md)
 for the full boundary.
+
 
 ## What to Expect
 

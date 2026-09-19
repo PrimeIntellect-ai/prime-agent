@@ -1,3 +1,4 @@
+import { parseDownloadBaseUrl } from "./download-url.js";
 import { isNativePlatform } from "./native-installation.js";
 import { getPiUserAgent } from "./pi-user-agent.js";
 
@@ -95,11 +96,14 @@ export function isNewerPackageVersion(candidateVersion: string, currentVersion: 
 	return candidateVersion.trim() !== currentVersion.trim();
 }
 
+/**
+ * The download origin. An override is validated like every other download base URL (https only, no
+ * credentials, no query or fragment) so a broken or hostile value fails here instead of producing
+ * malformed URLs downstream.
+ */
 function getPrimeAgentDownloadBaseUrl(): string {
-	return (process.env.PRIME_AGENT_DOWNLOAD_BASE_URL?.trim() || DEFAULT_PRIME_AGENT_DOWNLOAD_BASE_URL).replace(
-		/\/+$/,
-		"",
-	);
+	const override = process.env.PRIME_AGENT_DOWNLOAD_BASE_URL?.trim();
+	return parseDownloadBaseUrl(override || DEFAULT_PRIME_AGENT_DOWNLOAD_BASE_URL, "PRIME_AGENT_DOWNLOAD_BASE_URL");
 }
 
 function normalizeReleaseVersion(version: string): string {
@@ -154,14 +158,31 @@ function getReleaseManifestPath(currentVersion: string, channel?: UpdateChannel)
 		: STABLE_VERSION_MANIFEST_PATH;
 }
 
+/**
+ * Resolve a manifest-provided release location. An absolute https URL is used as published
+ * (release feeds may name a tarball on their own distribution host); it is still refused when it
+ * carries credentials, a query, or a fragment, or is protocol-relative. A relative path is joined
+ * with the URL API and must stay inside the download origin's prefix.
+ */
 function resolveReleaseUrl(baseUrl: string, pathOrUrl: string): string | undefined {
 	const trimmed = pathOrUrl.trim();
 	if (!trimmed) return undefined;
+	if (trimmed.startsWith("//")) return undefined; // protocol-relative: scheme depends on context
+	const base = new URL(`${baseUrl}/`);
+	let resolved: URL;
 	try {
-		return new URL(trimmed).toString();
+		resolved = new URL(trimmed, base);
 	} catch {
-		return `${baseUrl}/${trimmed.replace(/^\/+/, "")}`;
+		return undefined;
 	}
+	if (resolved.protocol !== "https:") return undefined;
+	if (resolved.search || resolved.hash || resolved.username || resolved.password) return undefined;
+	if (trimmed.includes("://") && !/^https:/.test(trimmed)) return undefined;
+	if (!trimmed.includes("://")) {
+		// A relative location may not escape the origin or the configured prefix.
+		if (resolved.origin !== base.origin || !resolved.pathname.startsWith(base.pathname)) return undefined;
+	}
+	return resolved.toString();
 }
 
 export async function getLatestPiRelease(
@@ -170,8 +191,9 @@ export async function getLatestPiRelease(
 ): Promise<LatestPiRelease | undefined> {
 	if (process.env.PI_SKIP_VERSION_CHECK || process.env.PI_OFFLINE) return undefined;
 
-	const baseUrl = options.baseUrl?.replace(/\/+$/, "") ?? getPrimeAgentDownloadBaseUrl();
-	const response = await fetch(`${baseUrl}/${getReleaseManifestPath(currentVersion, options.channel)}`, {
+	const baseUrl = options.baseUrl ? parseDownloadBaseUrl(options.baseUrl) : getPrimeAgentDownloadBaseUrl();
+	const manifestUrl = new URL(getReleaseManifestPath(currentVersion, options.channel), `${baseUrl}/`);
+	const response = await fetch(manifestUrl.toString(), {
 		headers: {
 			"User-Agent": getPiUserAgent(currentVersion),
 			accept: "application/json",

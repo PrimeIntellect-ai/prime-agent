@@ -60,6 +60,8 @@ async function install(
 			PRIME_AGENT_INSTALL_METHOD: method,
 			PRIME_AGENT_DOWNLOAD_BASE_URL: base,
 			PRIME_AGENT_ALLOW_INSECURE_HTTP_FOR_TESTS: "1",
+			// This fixture cannot mint a real cosign bundle; the installer's TEST MODE skip applies.
+			PRIME_AGENT_SKIP_SIGNATURE_FOR_TESTS: "1",
 			PRIME_AGENT_INSTALLER_NONINTERACTIVE: "1",
 			PRIME_AGENT_INSTALLER_PLAIN: "1",
 			PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL: "0",

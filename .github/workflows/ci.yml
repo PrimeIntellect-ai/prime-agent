@@ -67,6 +67,12 @@ jobs:
       - name: Check
         run: npm run check
 
+      - name: Check the release pipeline invariants
+        run: node scripts/check-release-workflow.mjs
+
+      - name: Test the release scripts
+        run: node --test "scripts/test/*.test.mjs"
+
   test:
     name: Test (${{ matrix.name }})
     needs: trust
@@ -168,6 +174,12 @@ jobs:
   standalone:
     needs: trust
     if: needs.trust.outputs.allowed == 'true'
+    # id-token:write lets the called workflow cosign a TEST-ONLY SHA256SUMS for
+    # its end-to-end updater test; the identity it mints is standalone-binaries.yml,
+    # which the updater's production pin rejects. Nothing else is passed through.
+    permissions:
+      contents: read
+      id-token: write
     uses: ./.github/workflows/standalone-binaries.yml
 
   build-check-test:
