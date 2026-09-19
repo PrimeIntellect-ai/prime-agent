@@ -468,6 +468,7 @@ export class CloudSessionRegistry {
 		/** Pre-allocated cloud session id (tests, future spawn admission); random by default. */
 		sessionId?: string;
 		sessionName?: string;
+		/** Canonical resolved-model selector `provider/modelId`; the guest splits it at the first slash. */
 		model?: string;
 		thinking?: string;
 		timeoutMinutes?: number;
@@ -496,6 +497,9 @@ export class CloudSessionRegistry {
 		if (record === undefined) throw new Error(`Cloud session record is missing: ${sessionId}`);
 		this.store.setShadowSession(sessionId, shadowFile);
 		this.store.setLocation(sessionId, "converted-root");
+		// The canonical selector is durable: reprovision re-opens the same
+		// model on a fresh sandbox instead of falling back to the image default.
+		if (input.model) this.store.setModel(sessionId, input.model);
 		record = this.store.get(sessionId)!;
 		const session = this.registerResidentSession(record);
 		this.writeRootShadow(session, record);
@@ -868,6 +872,10 @@ export class CloudSessionRegistry {
 		}
 		const session = this.sessions.get(record.sessionId);
 		const cwd = record.baseline?.repoRoot ?? this.shadowCwd(record);
+		// The persisted canonical selector survives the generation bump:
+		// the fresh sandbox boots and opens with the same provider/modelId
+		// (already canonical; never re-prefixed).
+		const model = record.spawn?.model ?? record.model;
 		let rootShadow: ShadowSessionWriter | undefined;
 		if (session !== undefined) {
 			rootShadow = session.shadows.get(record.sessionId);
@@ -898,6 +906,7 @@ export class CloudSessionRegistry {
 			options: {
 				resident: true,
 				tunnel: true,
+				...(model ? { model } : {}),
 				timeoutMinutes: timeoutMinutes ?? this.options.timeoutMinutes ?? 120,
 				...(this.options.bridgeToken ? { bridgeToken: this.options.bridgeToken } : {}),
 			},
@@ -914,6 +923,7 @@ export class CloudSessionRegistry {
 				{
 					kind: "open_session",
 					cwd,
+					...(model ? { model } : {}),
 					...(spawn
 						? {
 								family: {

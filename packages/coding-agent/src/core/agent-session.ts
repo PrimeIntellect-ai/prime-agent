@@ -92,6 +92,7 @@ import {
 	setAutonomousEnabled,
 } from "./autonomous.js";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
+import { canonicalCloudModelSelector } from "./cloud/protocol.js";
 import {
 	COMPACT_SKILL_NAME,
 	type CompactionResult,
@@ -11311,7 +11312,7 @@ export class AgentSession {
 		const lease = await spawnCloudChild({
 			prompt: options.prompt,
 			...(options.sessionName ? { sessionName: options.sessionName } : {}),
-			model: `${options.model.provider}/${options.model.id}`,
+			model: canonicalCloudModelSelector(options.model),
 			...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
 			rlmDepth: this._rlmDepth + 1,
 		});

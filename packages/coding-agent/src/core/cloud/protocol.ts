@@ -166,6 +166,29 @@ export function newCloudTaskId(): CloudTaskId {
  * semantics. Requests stay digest-checked, journaled, and idempotent by
  * commandId.
  */
+
+/**
+ * Canonical resolved-model selector for the resident cloud surface:
+ * `provider/modelId`. The model id may itself contain slashes (e.g. the
+ * selector `prime-inference/internal/glm-5.3-fast` addresses the provider
+ * `prime-inference` and the model id `internal/glm-5.3-fast`), and providers
+ * and model ids without slashes stay intact (`mistral/zai-glm-5-2`).
+ */
+export function canonicalCloudModelSelector(model: { provider: string; id: string }): string {
+	return `${model.provider}/${model.id}`;
+}
+
+/**
+ * Split a canonical `provider/modelId` selector at the first slash, so a model
+ * id that itself contains slashes is preserved exactly. A selector missing
+ * either half is invalid and returns undefined.
+ */
+export function splitCloudModelSelector(selector: string): { provider: string; modelId: string } | undefined {
+	const slash = selector.indexOf("/");
+	if (slash <= 0 || slash >= selector.length - 1) return undefined;
+	return { provider: selector.slice(0, slash), modelId: selector.slice(slash + 1) };
+}
+
 /** Cross-boundary family context for a spawned cloud child, passed at open. */
 export interface CloudFamilyInfo {
 	/** The cloud child's depth under its LOCAL parent (guest-relative root is 0). */
@@ -191,6 +214,7 @@ export type CloudCommandRequest =
 	| {
 			kind: "open_session";
 			cwd: string;
+			/** Canonical resolved-model selector `provider/modelId` (split at the first slash). */
 			model?: string;
 			thinking?: string;
 			seedTranscriptArtifact?: string;

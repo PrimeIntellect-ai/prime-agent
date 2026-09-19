@@ -232,6 +232,41 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, 
 };
 
 /**
+ * The faux factory plus extra registered providers/models, so guest
+ * model-selector tests can exercise slash-bearing and slash-free model ids
+ * (e.g. a bundled-style `z-ai/glm` id) without any network or catalog refresh.
+ * The faux provider keeps its own model; registering a provider replaces that
+ * provider's model list only.
+ */
+export function createFauxRuntimeFactoryWithModels(
+	providers: Array<{ provider: string; apiKey?: string; models: Array<{ id: string; name?: string }> }>,
+): CreateAgentSessionRuntimeFactory {
+	return async (options) => {
+		const runtime = await createRuntime(options);
+		for (const config of providers) {
+			const apiKey = config.apiKey ?? "faux-key";
+			runtime.services.modelRegistry.registerProvider(config.provider, {
+				baseUrl: "http://localhost:0",
+				apiKey,
+				api: fauxApi,
+				models: config.models.map((model) => ({
+					id: model.id,
+					name: model.name ?? model.id,
+					api: fauxApi,
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128_000,
+					maxTokens: 16_384,
+				})),
+			});
+			runtime.services.authStorage.setRuntimeApiKey(config.provider, apiKey);
+		}
+		return runtime;
+	};
+}
+
+/**
  * The fixture runs as the guest daemon only when the bridge spawned it; the
  * in-process guest-daemon test imports the same factory instead.
  */

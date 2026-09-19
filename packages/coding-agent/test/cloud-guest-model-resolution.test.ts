@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudGuestDaemon, parseCloudDaemonEnv } from "../src/modes/cloud/cloud-daemon.js";
-import { createFauxRuntimeFactory } from "./fixtures/cloud-guest-daemon-fixture.js";
+import { createFauxRuntimeFactory, createFauxRuntimeFactoryWithModels } from "./fixtures/cloud-guest-daemon-fixture.js";
 
 /**
  * Guest model-resolution regressions: a private Prime Inference route that
@@ -253,6 +253,44 @@ describe("resident guest daemon model resolution", () => {
 		try {
 			await daemon.openSession({});
 			expect(daemon.rootSession?.model).toMatchObject({ provider: "faux", id: "faux-1" });
+			expect(fetchMock).not.toHaveBeenCalled();
+		} finally {
+			await daemon.stop();
+		}
+	}, 30_000);
+
+	it("applies canonical selectors with slash-bearing and slash-free model ids exactly", async () => {
+		const root = temp();
+		const fetchMock = vi.fn(async () => {
+			throw new Error("registered model resolution must not fetch");
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		const env = guestEnv(root);
+		const daemon = await CloudGuestDaemon.start(env, {
+			createRuntime: createFauxRuntimeFactoryWithModels([
+				{ provider: "openrouter", models: [{ id: "z-ai/glm-4.5", name: "Z.ai: GLM 4.5" }] },
+				{ provider: "mistral", models: [{ id: "zai-glm-5-2", name: "GLM-5.2" }] },
+			]),
+		});
+		try {
+			await daemon.openSession({});
+			// A bundled-style `z-ai/glm` id survives the first-slash split as the
+			// full model id under its provider.
+			const zai = await daemon.dispatch(
+				{ kind: "open_session", cwd: env.workspaceDir, model: "openrouter/z-ai/glm-4.5" },
+				`cmd_open_zai_${SESSION_ID}`,
+			);
+			expect(zai.state).toBe("completed");
+			expect(daemon.rootSession?.model?.provider).toBe("openrouter");
+			expect(daemon.rootSession?.model?.id).toBe("z-ai/glm-4.5");
+			// A provider and model id without slashes stay intact.
+			const simple = await daemon.dispatch(
+				{ kind: "open_session", cwd: env.workspaceDir, model: "mistral/zai-glm-5-2" },
+				`cmd_open_simple_${SESSION_ID}`,
+			);
+			expect(simple.state).toBe("completed");
+			expect(daemon.rootSession?.model?.provider).toBe("mistral");
+			expect(daemon.rootSession?.model?.id).toBe("zai-glm-5-2");
 			expect(fetchMock).not.toHaveBeenCalled();
 		} finally {
 			await daemon.stop();

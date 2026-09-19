@@ -30,7 +30,7 @@ import {
 	mergeAgentSessionRuntimeConfig,
 } from "../../core/agent-session-config.js";
 import { isDirectCloudConfigured } from "../../core/cloud/direct-cloud-service.js";
-import type { CloudFamilyRow } from "../../core/cloud/protocol.js";
+import { type CloudFamilyRow, canonicalCloudModelSelector } from "../../core/cloud/protocol.js";
 import {
 	type AgentCronJob,
 	AgentCronJobStore,
@@ -2030,9 +2030,12 @@ export class DaemonSupervisor {
 					);
 				}
 				const session = await registry.convertSession({
+					// The registry and guest exchange canonical `provider/modelId`
+					// selectors; a raw model id would be split at the first slash
+					// and address the wrong provider (e.g. `internal/glm-5.3-fast`).
 					cwd: summary.cwd,
 					...(summary.sessionName ? { sessionName: summary.sessionName } : {}),
-					...(summary.model ? { model: summary.model.id } : {}),
+					...(summary.model ? { model: canonicalCloudModelSelector(summary.model) } : {}),
 					...(command.timeoutMinutes ? { timeoutMinutes: command.timeoutMinutes } : {}),
 				});
 				return success(command.id, command.type, { session });

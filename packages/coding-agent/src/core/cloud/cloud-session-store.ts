@@ -155,6 +155,12 @@ export interface CloudSessionRecord {
 	activeSessionId?: string;
 	/** Resident provenance; absent on legacy one-shot delegations. */
 	location?: CloudSessionLocation;
+	/**
+	 * Canonical resolved-model selector `provider/modelId` for the resident
+	 * session (converted roots); absent when the session has no model and on
+	 * spawned children, whose model lives in `spawn.model`.
+	 */
+	model?: string;
 	/** Remote descendant session ids mirrored into shadow sessions. */
 	remoteSessionIds?: string[];
 	/** Local-parent provenance and task for a spawned cloud child (resident). */
@@ -237,6 +243,7 @@ const RECORD_FIELDS = [
 	"shadowSessionFile",
 	"activeSessionId",
 	"location",
+	"model",
 	"remoteSessionIds",
 	"spawn",
 	"createdAt",
@@ -311,6 +318,7 @@ export function cloudSessionRecordProblem(value: unknown): string | undefined {
 		value.location === undefined
 			? undefined
 			: expectOneOf(value.location, "record.location", CLOUD_SESSION_LOCATIONS),
+		value.model === undefined ? undefined : expectString(value.model, "record.model", CLOUD_MAX_ID_CHARS, 1),
 		remoteSessionIdsProblem(value.remoteSessionIds, "record.remoteSessionIds"),
 		value.spawn === undefined ? undefined : spawnInfoProblem(value.spawn, "record.spawn"),
 		expectTimestamp(value.createdAt, "record.createdAt"),
@@ -646,6 +654,32 @@ export class CloudSessionStore {
 				);
 			}
 			record.location = location;
+			return true;
+		});
+	}
+
+	/**
+	 * Record the canonical resolved-model selector (`provider/modelId`) for a
+	 * converted root; set once, so reprovision re-opens the same model across
+	 * sandbox generations instead of silently falling back to the image
+	 * default. Spawned children keep their model in the spawn record.
+	 */
+	setModel(sessionId: string, model: string): CloudSessionRecord {
+		const problem = expectString(model, "model", CLOUD_MAX_ID_CHARS, 1);
+		if (problem !== undefined) {
+			throw new CloudSessionStoreError("invalid", problem);
+		}
+		return this.mutate(sessionId, (record) => {
+			if (record.model === model) {
+				return false;
+			}
+			if (record.model !== undefined) {
+				throw new CloudSessionStoreError(
+					"conflict",
+					`cloud session ${sessionId} already holds model ${record.model}`,
+				);
+			}
+			record.model = model;
 			return true;
 		});
 	}

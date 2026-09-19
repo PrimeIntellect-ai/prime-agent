@@ -47,6 +47,7 @@ import {
 	type CloudRosterRow,
 	type CloudSessionState,
 	type CloudSessionStatus,
+	splitCloudModelSelector,
 } from "../../core/cloud/protocol.js";
 import { isOfflineModeEnabled, type ModelRegistry } from "../../core/model-registry.js";
 import { isPrivatePrimeInferenceModel } from "../../core/prime-inference-models.js";
@@ -365,9 +366,9 @@ export class CloudGuestDaemon {
 	private async applyResidentOpenModel(model: string): Promise<CloudProtocolDispatchResult> {
 		const state = this.rootState;
 		if (!state) return failed("no open session");
-		const [provider, ...rest] = model.split("/");
-		const modelId = rest.join("/");
-		if (!provider || !modelId) return failed(`invalid model ${model}`);
+		const selector = splitCloudModelSelector(model);
+		if (!selector) return failed(`invalid model ${model}`);
+		const { provider, modelId } = selector;
 		const session = state.runtime.session;
 		if (session.model?.provider === provider && session.model.id === modelId) {
 			return completed();
@@ -1928,9 +1929,9 @@ async function createRuntimeWithModel(
 ): Promise<AgentSessionRuntime> {
 	const result = await createAgentSessionRuntime(factory, options);
 	if (model !== undefined && model.length > 0) {
-		const [provider, ...rest] = model.split("/");
-		const modelId = rest.join("/");
-		if (provider && modelId) {
+		const selector = splitCloudModelSelector(model);
+		if (selector) {
+			const { provider, modelId } = selector;
 			const resolved = await resolveGuestModel(result.services.modelRegistry, provider, modelId);
 			if (!resolved) {
 				// A requested model that cannot resolve is an honest failure,

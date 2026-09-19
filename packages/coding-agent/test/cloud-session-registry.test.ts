@@ -1,9 +1,10 @@
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
 	CloudTunnelConnection,
 	CloudTunnelTransport,
@@ -25,6 +26,7 @@ import {
 	CloudSessionRegistry,
 	type CloudSessionRegistryCallbacks,
 } from "../src/modes/daemon/cloud-session-registry.js";
+import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 import { createFauxRuntimeFactory } from "./fixtures/cloud-guest-daemon-fixture.js";
 
 /**
@@ -119,9 +121,14 @@ interface RegistryHarness {
 	sessionDir: string;
 	stateDirectory: string;
 	store: CloudSessionStore;
+	/** Frames the supervisor side sent to the guest (submit requests, open_session payloads). */
+	transport: SocketTunnelTransport;
+	/** Every fake VM-process start, newest last; env carries the guest boot model. */
+	vmStarts: Array<{ sessionUuid: string; env: Record<string, string> }>;
 }
 
-function daemonEnv(root: string, generation: number, sessionId: string) {
+function daemonEnv(root: string, generation: number, sessionId: string, stateDir?: string) {
+	const resolvedStateDir = stateDir ?? join(root, "guest-daemon-state");
 	return parseCloudDaemonEnv(
 		{
 			PRIME_AGENT_CLOUD_DAEMON_SOCKET: join(root, "guest.sock"),
@@ -132,14 +139,14 @@ function daemonEnv(root: string, generation: number, sessionId: string) {
 			PRIME_AGENT_CLOUD_BRIDGE_TOKEN: BRIDGE_TOKEN,
 			PRIME_AGENT_CLOUD_PROMPT_PATH: join(root, "prompt.txt"),
 			PRIME_AGENT_CLOUD_MODEL: "",
-			PRIME_AGENT_CLOUD_DAEMON_STATE_DIR: join(root, "guest-daemon-state"),
+			PRIME_AGENT_CLOUD_DAEMON_STATE_DIR: resolvedStateDir,
 		},
-		{ stateDir: join(root, "guest-daemon-state") },
+		{ stateDir: resolvedStateDir },
 	);
 }
 
-async function startGuestDaemon(root: string, generation: number, sessionId: string) {
-	const daemon = await CloudGuestDaemon.start(daemonEnv(root, generation, sessionId), {
+async function startGuestDaemon(root: string, generation: number, sessionId: string, stateDir?: string) {
+	const daemon = await CloudGuestDaemon.start(daemonEnv(root, generation, sessionId, stateDir), {
 		createRuntime: createFauxRuntimeFactory,
 	});
 	daemon.startMirrorLoop();
@@ -206,10 +213,12 @@ function buildRegistry(
 		upload: async () => undefined,
 	};
 	const runningProcesses = options.runningProcesses ?? new Map<string, "running" | "exited">();
+	const vmStarts: RegistryHarness["vmStarts"] = [];
 	const processClient: CloudDelegationVmProcessClient = {
 		start: async (request) => {
 			const created = !runningProcesses.has(request.sessionUuid);
 			runningProcesses.set(request.sessionUuid, "running");
+			vmStarts.push({ sessionUuid: request.sessionUuid, env: { ...request.env } });
 			return { sessionUuid: request.sessionUuid, created };
 		},
 		signalStop: async (sessionUuid) => {
@@ -340,6 +349,8 @@ function buildRegistry(
 		sessionDir,
 		stateDirectory,
 		store,
+		transport,
+		vmStarts,
 	};
 }
 
@@ -845,7 +856,231 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 			await daemonOne.stop().catch(() => undefined);
 		}
 	}, 90_000);
+
+	it("preserves the canonical provider-qualified model from supervisor create through the record and guest open, across reprovision", async () => {
+		const root = temp();
+		seedPrimeInferenceGuestAuth(root);
+		// The public catalog background refresh may fetch unauthenticated and
+		// best-effort; the private route itself must resolve from the seeded
+		// entitlement cache, never an authenticated network call.
+		const fetchMock = vi.fn(
+			async (_url: string | URL | Request, _init?: RequestInit) =>
+				new Response(JSON.stringify({ data: [] }), { status: 200 }),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+		const harness = buildRegistry(root, join(root, "guest.sock"));
+		// The real supervisor command path drives the real registry.
+		const supervisor = supervisorForRegistry(harness.registry, {
+			...localSummaryFixture(root),
+			model: modelFixture("prime-inference", "internal/glm-5.3-fast"),
+		});
+		let daemonOne: Awaited<ReturnType<typeof startGuestDaemon>> | undefined;
+		let daemonTwo: Awaited<ReturnType<typeof startGuestDaemon>> | undefined;
+		try {
+			const created = (await supervisor.handleCommand(makeDaemonClient(), {
+				id: "cmd-create-model",
+				type: "cloud_session_create",
+				activeSessionId: "active-local",
+			})) as { success?: boolean; data?: { session?: { sessionId?: string; connectivity?: string } } };
+			expect(created.success).toBe(true);
+			const sessionId = created.data?.session?.sessionId;
+			expect(sessionId).toBeDefined();
+
+			// The registry record persists the exact canonical selector.
+			const record = harness.store.get(sessionId!)!;
+			expect(record.model).toBe("prime-inference/internal/glm-5.3-fast");
+
+			// The sandbox boot env carries the exact selector: the guest
+			// splits it at the first slash into the provider `prime-inference`
+			// and the model id `internal/glm-5.3-fast`.
+			expect(harness.vmStarts.at(-1)?.env.PRIME_AGENT_CLOUD_MODEL).toBe("prime-inference/internal/glm-5.3-fast");
+
+			// The registry allocated the session id before any compute, exactly
+			// like the sandbox env is set in production; the guest boots under
+			// that id, the attachment connects, and the queued open_session
+			// delivers the canonical selector.
+			daemonOne = await startGuestDaemon(root, 1, sessionId!);
+			await waitFor(
+				() =>
+					openSessionSubmits(harness.transport).length === 1 &&
+					daemonOne?.rootSession?.model?.id === "internal/glm-5.3-fast",
+				30_000,
+				"guest open applies the canonical model",
+			);
+			expect(openSessionSubmits(harness.transport)[0].model).toBe("prime-inference/internal/glm-5.3-fast");
+			expect(daemonOne?.rootSession?.model).toMatchObject({
+				provider: "prime-inference",
+				id: "internal/glm-5.3-fast",
+			});
+
+			// Stop: the guest daemon goes away with the sandbox.
+			await harness.registry.stopSession(sessionId!, false);
+			await daemonOne?.stop();
+
+			// A fresh incarnation must re-open the same canonical model, never
+			// a re-prefixed selector or the sandbox image default. The fresh
+			// sandbox carries fresh guest state, exactly like a new VM.
+			daemonTwo = await startGuestDaemon(root, 2, sessionId!, join(root, "guest-daemon-state-two"));
+			const reprovisioned = (await supervisor.handleCommand(makeDaemonClient(), {
+				id: "cmd-reprovision-model",
+				type: "cloud_session_reprovision",
+				activeSessionId: sessionId!,
+			})) as { success?: boolean; data?: { session?: { generation?: number } } };
+			expect(reprovisioned.success).toBe(true);
+			expect(reprovisioned.data?.session?.generation).toBe(2);
+			expect(harness.vmStarts.at(-1)?.env.PRIME_AGENT_CLOUD_MODEL).toBe("prime-inference/internal/glm-5.3-fast");
+			await waitFor(
+				() =>
+					openSessionSubmits(harness.transport).length === 2 &&
+					daemonTwo?.rootSession?.model?.id === "internal/glm-5.3-fast",
+				30_000,
+				"reprovisioned guest re-applies the canonical model",
+			);
+			expect(openSessionSubmits(harness.transport)[1].model).toBe("prime-inference/internal/glm-5.3-fast");
+			expect(daemonTwo?.rootSession?.model).toMatchObject({
+				provider: "prime-inference",
+				id: "internal/glm-5.3-fast",
+			});
+			// The regenerated durable record still holds the canonical selector.
+			expect(harness.store.get(sessionId!)?.model).toBe("prime-inference/internal/glm-5.3-fast");
+			// Every model resolution was cache-served: no authenticated
+			// entitlement fetch ever fired.
+			const entitlementFetches = fetchMock.mock.calls.filter(([, init]) =>
+				new Headers(init?.headers).has("Authorization"),
+			);
+			expect(entitlementFetches).toHaveLength(0);
+		} finally {
+			vi.unstubAllGlobals();
+			await harness.registry.dispose().catch(() => undefined);
+			await daemonOne?.stop().catch(() => undefined);
+			await daemonTwo?.stop().catch(() => undefined);
+		}
+	}, 120_000);
 });
+
+/**
+ * Stored Prime Inference credential plus a fresh private-entitlement cache
+ * entry for `internal/glm-5.3-fast`, so the guest resolves the private route
+ * from the cache exactly like a sandbox that already refreshed its team
+ * entitlements - no network, no paid tokens.
+ */
+function seedPrimeInferenceGuestAuth(root: string): void {
+	const agentDir = join(root, "guest-agent");
+	mkdirSync(agentDir, { recursive: true });
+	writeFileSync(
+		join(agentDir, "auth.json"),
+		`${JSON.stringify(
+			{
+				"prime-inference": {
+					type: "api_key",
+					key: "prime-key",
+					primeTeam: { teamId: "engineering-team", name: "Prime Engineering" },
+				},
+			},
+			null,
+			2,
+		)}\n`,
+		{ mode: 0o600 },
+	);
+	// The registry caches authorized private routes per credential+team
+	// fingerprint next to models.json (never the token, never re-derivable).
+	const fingerprint = createHash("sha256").update("prime-key").update("\0").update("engineering-team").digest("hex");
+	writeFileSync(
+		join(agentDir, "prime-inference-private-models.json"),
+		`${JSON.stringify({
+			fingerprint,
+			data: [
+				{
+					id: "internal/glm-5.3-fast",
+					display_name: "GLM 5.3 Fast",
+					pricing: {
+						input_usd_per_mtok: 0,
+						output_usd_per_mtok: 0,
+						cache_read_usd_per_mtok: 0,
+						cache_write_usd_per_mtok: 0,
+					},
+					specs: {
+						context_window: 400_000,
+						max_output_tokens: 131_072,
+						modalities: { input: ["text"], output: ["text"] },
+						supports_reasoning: true,
+					},
+				},
+			],
+			refreshedAt: Date.now(),
+		})}\n`,
+		{ mode: 0o600 },
+	);
+}
+
+/** A resolvable model for the summary the supervisor conversion serializes. */
+function modelFixture(provider: string, id: string): Model<Api> {
+	return {
+		id,
+		name: id,
+		api: "openai-completions",
+		provider,
+		baseUrl: "http://localhost:0",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
+		maxTokens: 16_384,
+	} as Model<Api>;
+}
+
+/** An idle local session summary: convertible, with no messages yet. */
+function localSummaryFixture(root: string): Record<string, unknown> {
+	return {
+		id: "active-local",
+		lifecycle: "live",
+		activity: "idle",
+		isSessionActive: false,
+		activeSessionId: "active-local",
+		sessionId: "durable-local-owner",
+		cwd: root,
+		isStreaming: false,
+		isCompacting: false,
+		attachedClients: 1,
+		messageCount: 0,
+		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+	};
+}
+
+/** Minimal supervisor client for handleCommand on the real prototype. */
+function makeDaemonClient(): { id: string; socket: { destroyed: boolean }; capabilities: Set<string> } {
+	return { id: "client-model-serialization", socket: { destroyed: false }, capabilities: new Set() };
+}
+
+/** Structural view of the supervisor seams the conversion path drives. */
+interface SupervisorStub {
+	handleCommand: (client: unknown, command: unknown) => Promise<unknown>;
+	cloud: () => CloudSessionRegistry | undefined;
+	findWorkerForClient: (client: unknown, selector: string) => Promise<unknown>;
+	write: (client: unknown, message: unknown) => boolean;
+	log: (message: string) => void;
+	clients: Set<unknown>;
+}
+
+/** The real supervisor command path over the real registry; only the worker lookup is stubbed. */
+function supervisorForRegistry(registry: CloudSessionRegistry, summary: Record<string, unknown>): SupervisorStub {
+	const supervisor = Object.create(DaemonSupervisor.prototype) as unknown as SupervisorStub;
+	const properties = supervisor as unknown as Record<string, unknown>;
+	properties.cloud = () => registry;
+	properties.findWorkerForClient = vi.fn(async () => ({ worker: {}, summary }));
+	properties.write = vi.fn(() => true);
+	properties.log = () => undefined;
+	properties.clients = new Set([makeDaemonClient()]);
+	return supervisor;
+}
+
+/** Every open_session request the supervisor side submitted to the guest. */
+function openSessionSubmits(transport: SocketTunnelTransport): Array<{ model?: string }> {
+	return transport.sentFrames
+		.map((frame) => JSON.parse(frame) as { type?: string; request?: { kind?: string; model?: string } })
+		.filter((frame) => frame.type === "submit" && frame.request?.kind === "open_session")
+		.map((frame) => frame.request!);
+}
 
 /** Submit one prompt + ack batches directly over the guest socket (the gap source). */
 async function driveGuestTurnDirect(

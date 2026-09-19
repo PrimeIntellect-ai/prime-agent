@@ -1,0 +1,1 @@
+- Fixed cloud session conversion sending the raw model id to the sandbox; the selected model now travels as a canonical `provider/modelId` selector and reprovision re-opens the same model instead of the sandbox image default.
