@@ -303,6 +303,10 @@ function buildRegistry(
 		pushChildUpdate: (update) => {
 			childUpdates.push(update);
 		},
+		cloudFamilyRows: () => [],
+		deliverCloudAgentMessage: async () => {
+			throw new Error("no cloud message delivery expected in this suite");
+		},
 		attachedClientCount: () => 0,
 	};
 	const rosterDeletes: string[] = [];
@@ -888,7 +892,7 @@ async function driveGuestTurnDirect(
 	socket.write(
 		`${JSON.stringify({
 			type: "hello",
-			protocolVersion: 2,
+			protocolVersion: 3,
 			generation: 1,
 			clientId: "gap_driver",
 			sessionId,

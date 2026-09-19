@@ -17,6 +17,7 @@ import {
 import {
 	type AgentFamilyCatalogEntry,
 	type AgentSessionMessageAgentSummary,
+	type AgentSessionMessageReceipt,
 	assertAgentFamilyReach,
 	assertAgentSessionNameAvailable,
 	formatAgentSessionNameUnavailable,
@@ -29,6 +30,7 @@ import {
 	mergeAgentSessionRuntimeConfig,
 } from "../../core/agent-session-config.js";
 import { isDirectCloudConfigured } from "../../core/cloud/direct-cloud-service.js";
+import type { CloudFamilyRow } from "../../core/cloud/protocol.js";
 import {
 	type AgentCronJob,
 	AgentCronJobStore,
@@ -916,6 +918,10 @@ export class DaemonSupervisor {
 			if (adoptionFailed) {
 				throw adoptionFailure;
 			}
+			// Surviving parent runs reattach with their adopted workers: the
+			// reconstructed cloud spawn trackers replay each child's current
+			// status (or terminal result) so no run hangs on a lost push.
+			this.cloud()?.replaySpawnTaskStatuses();
 			for (const worker of this.workers.values()) {
 				this.scheduleOwnedWorkerCleanup(worker);
 			}
@@ -2192,6 +2198,16 @@ export class DaemonSupervisor {
 						const root = this.roster().byActiveSessionId(worker.descriptor.rootActiveSessionId);
 						return root ? [this.agentPeerSummary(sessionSummaryFromRosterEntry(root))] : [];
 					});
+				// Revision 32: resident cloud rows (roots and remote
+				// descendants) are peers with full family edges, so local
+				// kernels see them in agent_message/observe/list_subagents
+				// rosters. The worker-side nuclear-family policy filters.
+				const registry = this.cloud();
+				if (registry !== undefined) {
+					for (const summary of registry.liveSummaries()) {
+						peers.push(this.agentPeerSummary(summary));
+					}
+				}
 				return success(command.id, command.type, { peers });
 			}
 			case "get_direct_worker_transport": {
@@ -2793,7 +2809,7 @@ export class DaemonSupervisor {
 					);
 				}
 				const registry = this.requireCloudRegistry();
-				return await registry.handleSessionCommand(command, targetCloudTarget);
+				return await registry.handleSessionCommand(command, targetCloudTarget, undefined, sourceSummary);
 			}
 			let target: WorkerMatch;
 			try {
@@ -4611,7 +4627,145 @@ export class DaemonSupervisor {
 			attachedClientCount: (activeSessionId) =>
 				[...this.clients].filter((client) => client.attachedActiveSessionIds.has(activeSessionId)).length,
 			pushChildUpdate: (update) => this.pushCloudChildUpdate(update),
+			cloudFamilyRows: (target) => this.cloudFamilyRowsFor(target),
+			deliverCloudAgentMessage: (input) => this.deliverCloudAgentMessage(input),
 		};
+	}
+
+	/**
+	 * The supervisor's cross-boundary family rows for one cloud row: itself,
+	 * its parent, and its siblings, read from the supervisor roster (local
+	 * workers and cloud shadows share it). Absolute depths; parent linkage by
+	 * session id and session file, exactly like the local family catalog.
+	 */
+	private cloudFamilyRowsFor(target: CloudSessionTarget): CloudFamilyRow[] {
+		const rows: CloudFamilyRow[] = [];
+		const selfSummary = target.summary;
+		const selfRow: CloudFamilyRow = {
+			id: selfSummary.sessionId,
+			...(selfSummary.sessionName ? { name: selfSummary.sessionName } : {}),
+			depth: selfSummary.rlmDepth ?? 0,
+			status: selfSummary.rosterStatus ?? classifySessionRosterStatus(selfSummary),
+			...(selfSummary.parentSessionId ? { parentSessionId: selfSummary.parentSessionId } : {}),
+			...(selfSummary.parentSessionPath
+				? { parentSessionPath: canonicalSessionPath(selfSummary.parentSessionPath) }
+				: {}),
+			...(selfSummary.sessionFile ? { sessionPath: canonicalSessionPath(selfSummary.sessionFile) } : {}),
+		};
+		rows.push(selfRow);
+		const parentPath = selfSummary.parentSessionPath
+			? canonicalSessionPath(selfSummary.parentSessionPath)
+			: undefined;
+		const spawn = !target.descendant && target.record.location === "spawned-child" ? target.record.spawn : undefined;
+		if (parentPath === undefined && spawn !== undefined) {
+			// The durable spawn record still links the child to its local
+			// parent even when the roster row predates the parent's summary.
+			rows.push({
+				id: spawn.parentSessionId,
+				depth: spawn.depth - 1,
+				status: "running",
+				sessionPath: canonicalSessionPath(spawn.parentSessionFile),
+			});
+			return rows;
+		}
+		if (parentPath === undefined) return rows;
+		const parentEntry = this.roster().bySessionFile(parentPath);
+		const parentSummary = parentEntry ? sessionSummaryFromRosterEntry(parentEntry) : undefined;
+		const parentSessionPath = parentSummary?.sessionFile ?? spawn?.parentSessionFile;
+		rows.push({
+			id: parentSummary?.sessionId ?? spawn?.parentSessionId ?? basename(parentPath),
+			...(parentSummary?.sessionName ? { name: parentSummary.sessionName } : {}),
+			depth: selfRow.depth - 1,
+			status: parentSummary ? (parentSummary.rosterStatus ?? classifySessionRosterStatus(parentSummary)) : "running",
+			...(parentSessionPath !== undefined ? { sessionPath: canonicalSessionPath(parentSessionPath) } : {}),
+		});
+		// Siblings: same parent file, same depth, any runtime kind.
+		const selfDepth = selfRow.depth;
+		for (const entry of this.roster().values()) {
+			const summary = sessionSummaryFromRosterEntry(entry);
+			if (summary.sessionId === selfSummary.sessionId) continue;
+			if ((summary.rlmDepth ?? (summary.parentSessionPath ? 1 : 0)) !== selfDepth) continue;
+			const siblingParent = summary.parentSessionPath ? canonicalSessionPath(summary.parentSessionPath) : undefined;
+			if (siblingParent !== parentPath) continue;
+			rows.push({
+				id: summary.sessionId,
+				...(summary.sessionName ? { name: summary.sessionName } : {}),
+				depth: selfDepth,
+				status: summary.rosterStatus ?? classifySessionRosterStatus(summary),
+				...(summary.parentSessionId ? { parentSessionId: summary.parentSessionId } : {}),
+				...(siblingParent ? { parentSessionPath: siblingParent } : {}),
+				...(summary.sessionFile ? { sessionPath: canonicalSessionPath(summary.sessionFile) } : {}),
+			});
+		}
+		return rows;
+	}
+
+	/**
+	 * Deliver one agent message from a cloud row (root or descendant) into a
+	 * reachable target: another cloud row or a local worker session. The
+	 * nuclear-family reach assert runs here; the receipt comes back only
+	 * after the target admitted the message.
+	 */
+	private async deliverCloudAgentMessage(input: {
+		source: CloudSessionTarget;
+		targetSelector: string;
+		message: string;
+	}): Promise<AgentSessionMessageReceipt> {
+		const sourceSummary = input.source.summary;
+		const cloudTarget = this.cloud()?.resolveActive(input.targetSelector);
+		if (cloudTarget !== undefined) {
+			assertAgentFamilyReach(this.familyCatalogEntry(sourceSummary), this.familyCatalogEntry(cloudTarget.summary));
+			const registry = this.requireCloudRegistry();
+			const response = await registry.handleSessionCommand(
+				{
+					type: "send_message",
+					targetActiveSessionId: input.targetSelector,
+					message: input.message,
+					fromActiveSessionId: sourceSummary.activeSessionId ?? sourceSummary.id,
+					agentOrigin: true,
+				},
+				cloudTarget,
+				undefined,
+				sourceSummary,
+			);
+			if (!response.success) {
+				throw new Error(response.error);
+			}
+			const receipt = (response.data ?? {}) as AgentSessionMessageReceipt;
+			if (typeof receipt.id !== "string" || typeof receipt.deliveryStatus !== "string") {
+				throw new Error("Cloud peer returned an invalid agent-message receipt");
+			}
+			return receipt;
+		}
+		const target = await this.findWorker(input.targetSelector);
+		assertAgentFamilyReach(this.familyCatalogEntry(sourceSummary), this.familyCatalogEntry(target.summary));
+		const targetActiveSessionId = target.summary.activeSessionId ?? target.summary.id;
+		if ((sourceSummary.activeSessionId ?? sourceSummary.id) === targetActiveSessionId) {
+			throw new Error("Agent messaging cannot target the sending session");
+		}
+		const targetClient = this.requireAvailableWorkerClient(target.worker);
+		const response = await targetClient.requestWorker(
+			{
+				type: "worker_deliver_message",
+				targetActiveSessionId,
+				message: input.message,
+				sender: {
+					activeSessionId: sourceSummary.activeSessionId ?? sourceSummary.id,
+					sessionId: sourceSummary.sessionId,
+					...(sourceSummary.sessionName ? { sessionName: sourceSummary.sessionName } : {}),
+					runtimeKind: sourceSummary.runtimeKind ?? "top-level",
+				},
+			},
+			WORKER_REQUEST_TIMEOUT_MS,
+		);
+		if (!response.success) {
+			throw new Error(response.error);
+		}
+		const receipt = (response.data ?? {}) as AgentSessionMessageReceipt;
+		if (typeof receipt.id !== "string" || typeof receipt.deliveryStatus !== "string") {
+			throw new Error("Session worker returned an invalid agent-message receipt");
+		}
+		return receipt;
 	}
 
 	/**
@@ -5285,6 +5439,15 @@ export class DaemonSupervisor {
 			...(summary.rlmDepth !== undefined ? { rlmDepth: summary.rlmDepth } : {}),
 			status: summary.rosterStatus ?? classifySessionRosterStatus(summary),
 			...(summary.rlmChildId ? { rlmChildId: summary.rlmChildId } : {}),
+			// Revision 32 optional observe-plane fields: local worker roots
+			// keep them absent (the observer reads live state); cloud rows
+			// carry them so observe and the roster render from shadows.
+			...(summary.messageCount !== undefined ? { messageCount: summary.messageCount } : {}),
+			...(summary.sessionActions ? { queuedCount: summary.sessionActions.queuedCount } : {}),
+			...(summary.attachedClients !== undefined ? { attachedClients: summary.attachedClients } : {}),
+			...(summary.isSessionActive !== undefined ? { isSessionActive: summary.isSessionActive } : {}),
+			...(summary.isCompacting !== undefined ? { isCompacting: summary.isCompacting } : {}),
+			...(summary.firstMessage ? { firstMessage: summary.firstMessage } : {}),
 		};
 	}
 

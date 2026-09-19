@@ -3335,9 +3335,68 @@ export class AgentDaemon {
 			});
 			residentIds.add(passive.info.id);
 		}
+		// Supervisor peers include resident cloud rows (revision 32): the
+		// reachable ones surface in observe with the same nuclear-family
+		// policy, rendered from the peer summary the roster published.
+		for (const peer of await this.listSupervisorAgentPeers()) {
+			if (residentIds.has(peer.activeSessionId)) continue;
+			try {
+				assertAgentFamilyReach(this.agentFamilyEntry(currentState), this.peerFamilyEntry(peer));
+			} catch (error) {
+				if (error instanceof Error && error.message === AGENT_FAMILY_REACH_ERROR) continue;
+				throw error;
+			}
+			agents.push(this.observeSummaryFromPeer(peer));
+			residentIds.add(peer.activeSessionId);
+		}
 		return {
 			current: this.createAgentObserveSummary(currentState, currentState),
 			agents,
+		};
+	}
+
+	/** A family catalog entry for one supervisor peer (shared edges). */
+	private peerFamilyEntry(peer: AgentSessionMessageAgentSummary): AgentFamilyCatalogEntry {
+		const depth = peer.rlmDepth ?? (peer.parentSessionPath ? 1 : 0);
+		return {
+			id: peer.sessionId,
+			...(peer.sessionName ? { name: peer.sessionName } : {}),
+			depth,
+			status: peer.status ?? "idle",
+			...(depth > 0 && peer.parentSessionId ? { parentSessionId: peer.parentSessionId } : {}),
+			...(depth > 0 && peer.parentSessionPath
+				? { parentSessionPath: canonicalSessionPath(peer.parentSessionPath) }
+				: {}),
+			...(peer.sessionPath ? { sessionPath: canonicalSessionPath(peer.sessionPath) } : {}),
+		};
+	}
+
+	/** One observe summary from a supervisor peer row (e.g. a cloud shadow). */
+	private observeSummaryFromPeer(peer: AgentSessionMessageAgentSummary): AgentObserveAgentSummary {
+		return {
+			activeSessionId: peer.activeSessionId,
+			sessionId: peer.sessionId,
+			...(peer.sessionName ? { sessionName: peer.sessionName } : {}),
+			...(peer.runtimeKind ? { runtimeKind: peer.runtimeKind } : {}),
+			cwd: peer.cwd,
+			status: peer.isStreaming
+				? "model"
+				: peer.isCompacting
+					? "compacting"
+					: peer.isSessionActive === true || peer.status === "running"
+						? "busy"
+						: "idle",
+			isCurrent: false,
+			isStreaming: peer.isStreaming,
+			isCompacting: peer.isCompacting ?? false,
+			attachedClients: peer.attachedClients ?? 0,
+			messageCount: peer.messageCount ?? 0,
+			queuedCount: peer.queuedCount ?? 0,
+			isSessionActive: peer.isSessionActive ?? false,
+			...(peer.parentActiveSessionId ? { parentActiveSessionId: peer.parentActiveSessionId } : {}),
+			...(peer.parentSessionId ? { parentSessionId: peer.parentSessionId } : {}),
+			...(peer.rlmChildId ? { rlmChildId: peer.rlmChildId } : {}),
+			...(peer.firstMessage ? { firstMessage: peer.firstMessage } : {}),
 		};
 	}
 

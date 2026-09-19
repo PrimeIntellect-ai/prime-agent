@@ -16,6 +16,11 @@ const promptA: CloudCommandRequest = { kind: "prompt", text: "hello cloud", queu
 const promptB: CloudCommandRequest = { kind: "prompt", text: "hello again" };
 const steerRequest: CloudCommandRequest = { kind: "steer", text: "step faster" };
 const cancelChildRequest: CloudCommandRequest = { kind: "cancel_child", childId: "child-1" };
+const sendMessageRequest: CloudCommandRequest = {
+	kind: "send_message",
+	targetRemoteSessionId: "sess-remote-1",
+	message: "note for the descendant",
+};
 
 describe("CloudCommandJournal", () => {
 	const roots: string[] = [];
@@ -54,6 +59,26 @@ describe("CloudCommandJournal", () => {
 		expect(readFileSync(path, "utf8")).toContain('"type":"admit"');
 		const restored = new CloudCommandJournal(path);
 		expect(restored.getReceipt("cmd-a")).toMatchObject({ commandId: "cmd-a", state: "accepted" });
+	});
+
+	it("persists terminal result payloads across reloads and compaction", () => {
+		const path = createPath();
+		const journal = new CloudCommandJournal(path, { compactAfterRecords: 3 });
+		const result = JSON.stringify({ deliveryStatus: "delivered", messageId: "agentmsg_1" });
+		journal.admit("cmd-msg", sendMessageRequest);
+		journal.complete("cmd-msg", result);
+		// The result rides the terminal receipt and survives a reload.
+		expect(journal.getReceipt("cmd-msg")).toMatchObject({ state: "completed", result });
+		const reloaded = new CloudCommandJournal(path);
+		expect(reloaded.getReceipt("cmd-msg")).toMatchObject({ state: "completed", result });
+		// Compaction folds the terminal result back into the journal.
+		journal.admit("cmd-b", promptA);
+		journal.admit("cmd-c", promptB);
+		journal.complete("cmd-b");
+		const compacted = new CloudCommandJournal(path);
+		expect(compacted.getReceipt("cmd-msg")).toMatchObject({ state: "completed", result });
+		// A result over the bound never enters the journal.
+		expect(() => journal.complete("cmd-c", "x".repeat(3_000))).toThrow("at most");
 	});
 
 	it("replays receipts for duplicate submits and never re-admits", () => {

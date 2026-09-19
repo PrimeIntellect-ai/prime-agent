@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import { writeFileAtomicSync } from "../../utils/atomic-file.js";
 import {
 	CLOUD_MAX_ERROR_CHARS,
+	CLOUD_MAX_RECEIPT_RESULT_CHARS,
 	type CloudCommandId,
 	type CloudCommandReceipt,
 	type CloudCommandRequest,
@@ -34,6 +35,8 @@ interface TransitionRecord {
 	/** Written by compaction so an uncertain command restores as uncertain. */
 	uncertain?: true;
 	error?: string;
+	/** Terminal result payload (v3), e.g. a message delivery status. */
+	result?: string;
 	recordedAt: string;
 }
 
@@ -48,6 +51,7 @@ interface JournalEntry {
 	state: CloudCommandState;
 	uncertain: boolean;
 	error?: string;
+	result?: string;
 }
 
 export interface CloudCommandJournalOptions {
@@ -158,8 +162,14 @@ export class CloudCommandJournal {
 		this.transitionTo(this.requireEntry(commandId), "running");
 	}
 
-	complete(commandId: CloudCommandId): void {
-		this.transitionTo(this.requireEntry(commandId), "completed");
+	complete(commandId: CloudCommandId, result?: string): void {
+		if (
+			result !== undefined &&
+			(typeof result !== "string" || result.length < 1 || result.length > CLOUD_MAX_RECEIPT_RESULT_CHARS)
+		) {
+			throw new Error(`result must be a string of at most ${CLOUD_MAX_RECEIPT_RESULT_CHARS} characters`);
+		}
+		this.transitionTo(this.requireEntry(commandId), "completed", undefined, result);
 	}
 
 	fail(commandId: CloudCommandId, error?: string): void {
@@ -214,7 +224,7 @@ export class CloudCommandJournal {
 		return receipts;
 	}
 
-	private transitionTo(entry: JournalEntry, next: CloudCommandState, error?: string): void {
+	private transitionTo(entry: JournalEntry, next: CloudCommandState, error?: string, result?: string): void {
 		if (isTerminalCloudCommandState(entry.state)) {
 			throw new Error(`command ${entry.commandId} already reached terminal state ${entry.state}`);
 		}
@@ -231,11 +241,13 @@ export class CloudCommandJournal {
 			commandId: entry.commandId,
 			state: next,
 			...(error === undefined ? {} : { error }),
+			...(result === undefined ? {} : { result }),
 			recordedAt,
 		});
 		entry.state = next;
 		entry.updatedAt = recordedAt;
 		entry.error = error;
+		entry.result = result;
 		// Both requeue (accepted) and terminal transitions settle uncertainty.
 		entry.uncertain = false;
 		this.maybeCompact();
@@ -370,10 +382,18 @@ export class CloudCommandJournal {
 		if (entry === undefined) {
 			return;
 		}
+		const result = record.result;
+		if (
+			result !== undefined &&
+			(typeof result !== "string" || result.length < 1 || result.length > CLOUD_MAX_RECEIPT_RESULT_CHARS)
+		) {
+			return;
+		}
 		entry.state = state;
 		entry.updatedAt = recordedAt;
 		entry.uncertain = record.uncertain === true;
 		entry.error = error;
+		entry.result = result;
 	}
 
 	private append(record: CloudJournalRecord): void {
@@ -410,7 +430,7 @@ export class CloudCommandJournal {
 				request: entry.request,
 				recordedAt: entry.submittedAt,
 			});
-			if (entry.state !== "accepted" || entry.uncertain || entry.error !== undefined) {
+			if (entry.state !== "accepted" || entry.uncertain || entry.error !== undefined || entry.result !== undefined) {
 				records.push({
 					version: 1,
 					type: "transition",
@@ -418,6 +438,7 @@ export class CloudCommandJournal {
 					state: entry.state,
 					...(entry.uncertain ? { uncertain: true } : {}),
 					...(entry.error === undefined ? {} : { error: entry.error }),
+					...(entry.result === undefined ? {} : { result: entry.result }),
 					recordedAt: entry.updatedAt,
 				});
 			}
@@ -441,6 +462,7 @@ function receiptOf(entry: JournalEntry): CloudCommandReceipt {
 		updatedAt: entry.updatedAt,
 		uncertain: entry.uncertain,
 		...(entry.error === undefined ? {} : { error: entry.error }),
+		...(entry.result === undefined ? {} : { result: entry.result }),
 	};
 }
 

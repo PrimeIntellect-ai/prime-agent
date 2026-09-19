@@ -77,8 +77,12 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 28 publishes the last recorded model on saved-session rows.
 // Revision 29 adds capability-gated direct cloud sandbox delegation commands and progress.
 // Revision 30 adds the capability-gated cloud tunnel opt-in and steer command.
-export const DAEMON_SCHEMA_REVISION = 31;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-31-2c940b5d3b03";
+// Revision 31 adds the capability-gated resident cloud session surface (cloud_session_*).
+// Revision 32 lists resident cloud rows as agent peers with optional
+// observe-plane fields, so local kernels see cloud descendants in
+// agent_message/agent_observe/rlm.list_subagents rosters.
+export const DAEMON_SCHEMA_REVISION = 32;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-32-96d8789652";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;

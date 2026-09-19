@@ -769,7 +769,7 @@ const server = http.createServer((request, response) => {
 		const body = JSON.stringify({
 			ok: true,
 			protocol: PROTOCOL_NAME,
-			protocolVersion: 2,
+			protocolVersion: 3,
 			sessionId,
 			generation,
 			status: sessionStatus,

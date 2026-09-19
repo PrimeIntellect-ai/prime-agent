@@ -301,13 +301,13 @@ describe("parseCloudMessage and serializeCloudMessage", () => {
 		expect(parseCloudMessage(42).ok).toBe(false);
 		expect(parseCloudMessage(null).ok).toBe(false);
 		expect(parseCloudMessage([]).ok).toBe(false);
-		expect(parseCloudMessage({ protocolVersion: 1 }).ok).toBe(false);
+		expect(parseCloudMessage({ protocolVersion: 2 }).ok).toBe(false);
 		expect(parseCloudMessage({ type: "goodbye" }).ok).toBe(false);
 	});
 
 	it("validates hello frames and rejects older protocol versions", () => {
-		expect(problemOf({ ...validHello(), protocolVersion: 1 })).toContain("must equal 2");
-		expect(problemOf({ ...validHello(), protocolVersion: 3 })).toContain("must equal 2");
+		expect(problemOf({ ...validHello(), protocolVersion: 2 })).toContain("must equal 3");
+		expect(problemOf({ ...validHello(), protocolVersion: 4 })).toContain("must equal 3");
 		expect(roundTrip(validHello()).type).toBe("hello");
 		expect(problemOf({ ...validHello(), clientId: "" })).toContain("hello.clientId");
 		expect(problemOf({ ...validHello(), extra: true })).toContain("unexpected field");
@@ -643,6 +643,156 @@ describe("parseCloudMessage and serializeCloudMessage", () => {
 		expect(roundTrip(batch)).toEqual(batch);
 	});
 
+	it("round-trips and validates the v3 cross-boundary family events and commands", () => {
+		// Guest -> local: the family roster and agent-message requests.
+		const familyRequest = {
+			sequence: 1,
+			kind: "family_roster_request",
+			recordedAt: "2026-09-18T00:00:00.000Z",
+			requestId: "famreq_1",
+			fromRemoteSessionId: "sess-kid-1",
+		};
+		const messageRequest = {
+			sequence: 2,
+			kind: "agent_message_request",
+			recordedAt: "2026-09-18T00:00:00.000Z",
+			requestId: "msgreq_1",
+			fromRemoteSessionId: "sess-kid-1",
+			targetSelector: "parent-session",
+			message: "reply to the local parent",
+		};
+		const requestBatch: CloudMessage = {
+			type: "events",
+			sessionId: "sess-1",
+			generation: 2,
+			events: [familyRequest, messageRequest] as CloudEvent[],
+		};
+		expect(roundTrip(requestBatch)).toEqual(requestBatch);
+		const wrapEvent = (event: unknown): CloudMessage => ({
+			type: "events",
+			sessionId: "sess-1",
+			generation: 2,
+			events: [event as CloudEvent],
+		});
+		expect(problemOf(wrapEvent({ ...familyRequest, requestId: "" }))).toContain(
+			"events[0].requestId must be a string of 1-128",
+		);
+		expect(problemOf(wrapEvent({ ...messageRequest, targetSelector: "" }))).toContain("targetSelector");
+		expect(problemOf(wrapEvent({ ...messageRequest, message: "" }))).toContain("message");
+		expect(problemOf(wrapEvent({ ...familyRequest, extra: 1 }))).toContain("unexpected field");
+
+		// Local -> guest: the journaled result commands.
+		const rosterResult: CloudCommandRequest = {
+			kind: "family_roster_result",
+			requestId: "famreq_1",
+			entries: [
+				{
+					id: "sess-kid-1",
+					name: "kid-1",
+					depth: 1,
+					status: "running",
+					parentSessionId: "parent-session",
+					parentSessionPath: "/sessions/parent.jsonl",
+					sessionPath: "/sessions/sess-kid-1.jsonl",
+				},
+				{ id: "parent-session", depth: 0, status: "running", sessionPath: "/sessions/parent.jsonl" },
+			],
+		};
+		const messageResult: CloudCommandRequest = {
+			kind: "agent_message_result",
+			requestId: "msgreq_1",
+			ok: true,
+			receipt: {
+				id: "agentmsg_1",
+				source: "agent_message",
+				target: { activeSessionId: "parent-active", sessionId: "parent-session" },
+				message: "reply to the local parent",
+				deliveryStatus: "delivered",
+				deliveredAt: "2026-09-18T00:00:00.000Z",
+				deliveryMode: "steer",
+			},
+		};
+		expect(cloudRequestProblem(rosterResult)).toBeUndefined();
+		expect(cloudRequestProblem(messageResult)).toBeUndefined();
+		expect(cloudRequestProblem({ kind: "family_roster_result", requestId: "f", entries: "nope" })).toContain(
+			"entries must be an array",
+		);
+		expect(
+			cloudRequestProblem({
+				kind: "family_roster_result",
+				requestId: "f",
+				entries: [{ id: "x", depth: 0, status: "busy" }],
+			}),
+		).toContain("status");
+		expect(
+			cloudRequestProblem({ kind: "agent_message_result", requestId: "m", ok: true, receipt: undefined }),
+		).toContain("receipt is required");
+		expect(
+			cloudRequestProblem({ kind: "agent_message_result", requestId: "m", ok: false, error: "nope" }),
+		).toBeUndefined();
+		expect(
+			cloudRequestProblem({
+				kind: "agent_message_result",
+				requestId: "m",
+				ok: true,
+				receipt: { blob: "x".repeat(3_000) },
+			}),
+		).toContain("receipt exceeds");
+
+		// v3 optional addressing fields on the existing surface.
+		const addressedPrompt: CloudCommandRequest = {
+			kind: "prompt",
+			text: "work in the descendant",
+			queueIfBusy: true,
+			targetSessionId: "sess-descendant-1",
+		};
+		expect(cloudRequestProblem(addressedPrompt)).toBeUndefined();
+		expect(cloudRequestProblem({ kind: "prompt", text: "hi", targetSessionId: "" })).toContain("targetSessionId");
+		const paritySend: CloudCommandRequest = {
+			kind: "send_message",
+			targetRemoteSessionId: "sess-descendant-1",
+			message: "note",
+			messageId: "agentmsg_2",
+			from: { activeSessionId: "cloud-active-1", sessionId: "sess-kid-1", runtimeKind: "subagent" },
+			fromRelationship: "parent",
+		};
+		expect(cloudRequestProblem(paritySend)).toBeUndefined();
+		expect(cloudRequestProblem({ ...paritySend, fromRelationship: "boss" })).toContain("fromRelationship");
+		expect(cloudRequestProblem({ ...paritySend, from: { runtimeKind: "robot" } })).toContain("runtimeKind");
+		const uiResponse: CloudCommandRequest = {
+			kind: "extension_ui_response",
+			requestId: "ui-req-1",
+			response: { value: "yes" },
+			targetSessionId: "sess-descendant-1",
+		};
+		expect(cloudRequestProblem(uiResponse)).toBeUndefined();
+		const openWithFamily: CloudCommandRequest = {
+			kind: "open_session",
+			cwd: "/repo",
+			family: {
+				depth: 1,
+				parentSessionId: "parent-session",
+				parentSessionFile: "/sessions/parent.jsonl",
+				parentName: "local-parent",
+			},
+		};
+		expect(cloudRequestProblem(openWithFamily)).toBeUndefined();
+		expect(
+			cloudRequestProblem({
+				kind: "open_session",
+				cwd: "/repo",
+				family: { depth: 0, parentSessionId: "p", parentSessionFile: "/p.jsonl" },
+			}),
+		).toContain("family.depth");
+
+		// Terminal receipts may carry the bounded result payload.
+		const commandBase = { type: "command", sessionId: "sess-1", generation: 2 };
+		expect(
+			parseCloudMessage({ ...commandBase, receipt: { ...receipt(), result: '{"deliveryStatus":"delivered"}' } }).ok,
+		).toBe(true);
+		expect(problemOf({ ...commandBase, receipt: { ...receipt(), result: "x".repeat(3_000) } })).toContain("result");
+	});
+
 	it("bounds v2 event payloads", () => {
 		const wrap = (event: unknown): CloudMessage => {
 			return { type: "events", sessionId: "sess-1", generation: 2, events: [event as CloudEvent] };
@@ -762,7 +912,7 @@ describe("parseCloudMessage and serializeCloudMessage", () => {
 		const parsed = parseCloudMessage(v1Hello);
 		expect(parsed.ok).toBe(false);
 		if (!parsed.ok) {
-			expect(parsed.error).toContain("hello.protocolVersion must equal 2");
+			expect(parsed.error).toContain("hello.protocolVersion must equal 3");
 		}
 	});
 
@@ -789,6 +939,6 @@ describe("cloud module exports", () => {
 		expect(typeof cloud.parseCloudMessage).toBe("function");
 		expect(typeof cloud.serializeCloudMessage).toBe("function");
 		expect(typeof cloud.CloudCommandJournal).toBe("function");
-		expect(cloud.CLOUD_PROTOCOL_VERSION).toBe(2);
+		expect(cloud.CLOUD_PROTOCOL_VERSION).toBe(3);
 	});
 });

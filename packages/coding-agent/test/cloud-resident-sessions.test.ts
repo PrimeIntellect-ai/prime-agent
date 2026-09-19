@@ -25,11 +25,13 @@ function isSessionSummaryLike(value: unknown): boolean {
 }
 
 /**
- * Wire compatibility for the resident cloud session surface (schema revision
- * 31): every addition is capability-gated, the legacy one-shot commands keep
- * their original gates for in-flight daemons, and both directions degrade
- * additively (a new client refuses the commands on an old daemon; an old
- * client never sees a new command or a required new field).
+ * Wire compatibility for the resident cloud session surface (schema revisions
+ * 31-32): every command addition is capability-gated, the legacy one-shot
+ * commands keep their original gates for in-flight daemons, and both
+ * directions degrade additively (a new client refuses the commands on an old
+ * daemon; an old client never sees a new command or a required new field).
+ * Revision 32's peer additions are optional response fields, so an old client
+ * ignores them and a new client tolerates their absence.
  */
 
 const RESIDENT_COMMAND_TYPES = [
@@ -55,13 +57,51 @@ function hello(options: { schemaRevision?: number; serverCapabilities?: readonly
 	};
 }
 
-describe("resident cloud session wire compatibility (schema revision 31)", () => {
-	it("publishes revision 31 with the cloud_resident_sessions capability", () => {
-		expect(DAEMON_SCHEMA_REVISION).toBe(31);
-		expect(DAEMON_SCHEMA_ID).toContain("protocol-7-schema-31");
+describe("resident cloud session wire compatibility (schema revisions 31-32)", () => {
+	it("publishes revision 32 with the cloud_resident_sessions capability", () => {
+		expect(DAEMON_SCHEMA_REVISION).toBe(32);
+		expect(DAEMON_SCHEMA_ID).toContain("protocol-7-schema-32");
 		expect(DAEMON_PROTOCOL_VERSION).toBe(7);
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("cloud_resident_sessions");
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("cloud_sessions");
+	});
+
+	it("lists cloud rows as agent peers with optional observe fields (revision 32, additive)", () => {
+		// An old client reading a revision-32 peer list simply sees extra
+		// optional fields; a new client tolerates their absence on old rows.
+		const revision32Peer = {
+			activeSessionId: "cloud-active-1",
+			sessionId: "sess_cloud_kid",
+			runtimeKind: "subagent" as const,
+			cwd: "/repo",
+			isStreaming: false,
+			unfinishedActionCount: 0,
+			rlmDepth: 1,
+			status: "running" as const,
+			parentActiveSessionId: "parent-active",
+			parentSessionId: "parent-session",
+			parentSessionPath: "/sessions/parent.jsonl",
+			sessionPath: "/sessions/sess_cloud_kid.jsonl",
+			rlmChildId: "sess_cloud_kid",
+			messageCount: 3,
+			queuedCount: 0,
+			attachedClients: 1,
+			isSessionActive: false,
+			isCompacting: false,
+			firstMessage: "[task from parent]",
+		};
+		expect(revision32Peer.messageCount).toBe(3);
+		const revision31Peer = {
+			activeSessionId: "local-root",
+			sessionId: "sess_local",
+			runtimeKind: "top-level" as const,
+			cwd: "/repo",
+			isStreaming: false,
+			unfinishedActionCount: 0,
+		};
+		expect((revision31Peer as { messageCount?: number }).messageCount).toBeUndefined();
+		// The peer command's gate predates the additions; they are optional.
+		expect(DAEMON_COMMAND_COMPATIBILITY.list_agent_peers).toEqual({ minProtocol: 7, minSchemaRevision: 23 });
 	});
 
 	it("capability- and schema-gates every cloud_session_* command at revision 31", () => {

@@ -3,6 +3,18 @@ import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
+	AGENT_MESSAGE_SOURCE,
+	type AgentFamilyRelationship,
+	type AgentSessionMessageDeliveryStatus,
+	type AgentSessionMessageEndpoint,
+	type AgentSessionMessagePayload,
+	type AgentSessionMessageReceipt,
+	agentFamilyRelationship,
+	createAgentSessionMessageId,
+	createAgentSessionMessageReceipt,
+	normalizeAgentSessionMessage,
+} from "../../core/agent-messages.js";
+import {
 	type CloudGuestCursorRecord,
 	CloudTunnelAttachment,
 	type CloudTunnelAttachmentTarget,
@@ -23,6 +35,7 @@ import {
 	type CloudCommandReceipt,
 	type CloudCommandRequest,
 	type CloudEvent,
+	type CloudFamilyRow,
 	type CloudRosterRow,
 	type CloudSessionStatus,
 	isTerminalCloudCommandState,
@@ -106,6 +119,23 @@ export interface CloudSessionRegistryCallbacks {
 	}): void;
 	/** Fan one live session event out to the clients attached to the cloud row. */
 	writeSessionEvent(activeSessionId: string, event: AgentConnectionSessionEvent, meta: DaemonEventMeta): boolean;
+	/**
+	 * The cross-boundary family rows (self, local parent, siblings) for one
+	 * cloud row, from the supervisor's roster; the guest merges them into its
+	 * kernel roster for role-addressed sends.
+	 */
+	cloudFamilyRows(target: CloudSessionTarget): CloudFamilyRow[];
+	/**
+	 * Deliver one agent message FROM a cloud row (cloud root or descendant)
+	 * into a reachable local/cloud target. The implementation asserts family
+	 * reach and resolves the target; the returned receipt lands only after
+	 * the target admitted the message.
+	 */
+	deliverCloudAgentMessage(input: {
+		source: CloudSessionTarget;
+		targetSelector: string;
+		message: string;
+	}): Promise<AgentSessionMessageReceipt>;
 	/** Push a session status (recap) frame to attached clients. */
 	writeSessionStatus(activeSessionId: string, recap: string | undefined): void;
 	/** Push the cloud_session_update lifecycle/connectivity event to every client. */
@@ -223,6 +253,8 @@ interface CloudResidentSession {
 	usage: { inputTokens: number; outputTokens: number; requests: number };
 	/** Spawned-child task tracker; present only for `location === "spawned-child"`. */
 	spawnTask?: CloudSpawnTaskTracker;
+	/** Processed cross-boundary request ids (replay dedupe), bounded. */
+	processedRemoteRequests: Set<string>;
 }
 
 /** Where a spawned cloud child's initial task stands, pushed to the parent. */
@@ -246,6 +278,8 @@ const ATTACHMENT_WAIT_TIMEOUT_MS = 60_000;
 const ATTACHMENT_WAIT_POLL_MS = 50;
 const RECEIPT_WAIT_TIMEOUT_MS = 15_000;
 const RECEIPT_WAIT_POLL_MS = 25;
+/** Bound on remembered cross-boundary request ids (replay dedupe). */
+const MAX_REMEMBERED_REMOTE_REQUESTS = 256;
 
 /** Typed error thrown when a client tries to open a cloud shadow locally. */
 export class CloudShadowSessionError extends Error {
@@ -348,14 +382,32 @@ export class CloudSessionRegistry {
 			return this.targetForIndexed(indexEntry);
 		}
 		const session = this.sessions.get(selector);
-		if (session === undefined || !this.isRowLive(session)) return undefined;
-		return {
-			record: this.currentRecord(session),
-			remoteSessionId: session.record.sessionId,
-			activeSessionId: session.activeSessionId,
-			descendant: false,
-			summary: this.rootSummary(session),
-		};
+		if (session !== undefined && this.isRowLive(session)) {
+			return {
+				record: this.currentRecord(session),
+				remoteSessionId: session.record.sessionId,
+				activeSessionId: session.activeSessionId,
+				descendant: false,
+				summary: this.rootSummary(session),
+			};
+		}
+		// A remote descendant is also addressed by its (shadow) session id:
+		// the local family catalog and roster rows carry that id.
+		for (const candidate of this.sessions.values()) {
+			if (!this.isRowLive(candidate)) continue;
+			const child = this.childForRemote(candidate, selector);
+			if (child === undefined) continue;
+			const summary = this.childSummary(candidate, child);
+			if (summary === undefined) continue;
+			return {
+				record: this.currentRecord(candidate),
+				remoteSessionId: selector,
+				activeSessionId: child.activeSessionId,
+				descendant: true,
+				summary,
+			};
+		}
+		return undefined;
 	}
 
 	private targetForIndexed(indexEntry: {
@@ -639,6 +691,14 @@ export class CloudSessionRegistry {
 					...(spawn.model ? { model: spawn.model } : {}),
 					...(spawn.thinking ? { thinking: spawn.thinking } : {}),
 					...(alreadyAdmitted ? {} : { prompt: `[task from parent]\n\n${spawn.prompt}` }),
+					// The guest links itself to its LOCAL parent with this
+					// durable context, so role-addressed replies and rosters
+					// work even before the first family-roster fetch.
+					family: {
+						depth: spawn.depth,
+						parentSessionId: spawn.parentSessionId,
+						parentSessionFile: spawn.parentSessionFile,
+					},
 				},
 				true,
 			);
@@ -847,7 +907,25 @@ export class CloudSessionRegistry {
 		if (rootShadow !== undefined) nextSession.shadows.set(fresh.sessionId, rootShadow);
 		else this.writeRootShadow(nextSession, fresh);
 		try {
-			await this.submitResident(nextSession, `open_${randomUUID()}`, { kind: "open_session", cwd });
+			const spawn = fresh.location === "spawned-child" ? fresh.spawn : undefined;
+			await this.submitResident(
+				nextSession,
+				`open_${randomUUID()}`,
+				{
+					kind: "open_session",
+					cwd,
+					...(spawn
+						? {
+								family: {
+									depth: spawn.depth,
+									parentSessionId: spawn.parentSessionId,
+									parentSessionFile: spawn.parentSessionFile,
+								},
+							}
+						: {}),
+				},
+				true,
+			);
 			nextSession.opened = true;
 		} catch (error) {
 			this.store.setLastError(
@@ -900,15 +978,18 @@ export class CloudSessionRegistry {
 	/**
 	 * Translate one session-plane daemon command into the cloud surface. A
 	 * submission or dispatch failure becomes a typed failure response (the
-	 * caller's journal records it; the client sees an honest error).
+	 * caller's journal records it; the client sees an honest error). The
+	 * optional source summary (the local sender) shapes the agent-message
+	 * payload and receipt on the guest side.
 	 */
 	async handleSessionCommand(
 		command: DaemonCommand,
 		target: CloudSessionTarget,
 		admission?: CloudPromptAdmissionHooks,
+		source?: SessionSummary,
 	): Promise<DaemonResponse> {
 		try {
-			return await this.translateSessionCommand(command, target, admission);
+			return await this.translateSessionCommand(command, target, admission, source);
 		} catch (error) {
 			if (error instanceof PromptAdmissionCancelledError) throw error;
 			return failure(command.id, command.type, error instanceof Error ? error.message : String(error));
@@ -919,6 +1000,7 @@ export class CloudSessionRegistry {
 		command: DaemonCommand,
 		target: CloudSessionTarget,
 		admission?: CloudPromptAdmissionHooks,
+		source?: SessionSummary,
 	): Promise<DaemonResponse> {
 		const session = this.sessions.get(target.record.sessionId);
 		if (session === undefined) {
@@ -947,16 +1029,16 @@ export class CloudSessionRegistry {
 			return failure(
 				command.id,
 				command.type,
-				`Remote descendant rows accept messages, not direct ${command.type}; prompt the cloud session instead`,
+				`Remote descendant rows accept prompts, messages, and ui responses, not ${command.type}`,
 			);
 		}
 		switch (command.type) {
 			case "prompt":
 			case "prompt_and_wait": {
-				const failed = await this.submitPrompt(session, command, admission);
+				const failed = await this.submitPrompt(session, command, admission, target);
 				if (failed !== undefined) return failed;
 				if (command.type === "prompt_and_wait") {
-					await this.waitForIdle(session, false);
+					await this.waitForIdle(session, false, target);
 				}
 				return success(command.id, command.type);
 			}
@@ -1033,12 +1115,13 @@ export class CloudSessionRegistry {
 						`Unknown cloud message target: ${command.targetActiveSessionId}`,
 					);
 				}
-				await this.submitResident(session, `msg_${command.id ?? randomUUID()}`, {
-					kind: "send_message",
+				const receipt = await this.submitCloudAgentMessage(session, {
 					targetRemoteSessionId: remoteSessionId,
 					message: command.message,
+					source,
+					target,
 				});
-				return success(command.id, command.type);
+				return success(command.id, command.type, receipt);
 			}
 			case "cancel_rlm_child":
 				await this.requireConnected(session, "cancel child");
@@ -1066,11 +1149,18 @@ export class CloudSessionRegistry {
 				return success(command.id, command.type);
 			case "extension_ui_response":
 				await this.requireConnected(session, "answer extension ui");
-				await this.submitResident(session, `ui_${command.id ?? randomUUID()}`, {
-					kind: "extension_ui_response",
-					requestId: command.requestId,
-					response: command.response,
-				});
+				await this.submitResident(
+					session,
+					`ui_${command.id ?? randomUUID()}`,
+					{
+						kind: "extension_ui_response",
+						requestId: command.requestId,
+						response: command.response,
+						// The pending request may belong to a remote descendant.
+						targetSessionId: target.remoteSessionId,
+					},
+					true,
+				);
 				return success(command.id, command.type);
 			case "get_state":
 				return success(command.id, command.type, this.connectionState(session, target));
@@ -1095,10 +1185,10 @@ export class CloudSessionRegistry {
 			case "get_rlm_children":
 				return success(command.id, command.type, { children: this.childSnapshots(session) });
 			case "wait_for_idle":
-				await this.waitForIdle(session, false);
+				await this.waitForIdle(session, false, target);
 				return success(command.id, command.type);
 			case "wait_for_headless_completion":
-				await this.waitForIdle(session, true);
+				await this.waitForIdle(session, true, target);
 				return success(command.id, command.type);
 			default:
 				return failure(
@@ -1111,7 +1201,10 @@ export class CloudSessionRegistry {
 
 	private descendantCommandAllowed(command: DaemonCommand): boolean {
 		switch (command.type) {
+			case "prompt":
+			case "prompt_and_wait":
 			case "send_message":
+			case "extension_ui_response":
 			case "get_state":
 			case "get_messages":
 			case "get_session_header":
@@ -1189,7 +1282,36 @@ export class CloudSessionRegistry {
 				this.ensureDescendantShadow(session, remoteSessionId);
 			}
 			this.publishRosterRows(session);
+			// Reconstruct the tracker's current state from the durable shadow
+			// and replay it into the surviving local parent run: the parent's
+			// RlmChildRun outlives the supervisor restart, and its state must
+			// not silently hang until the next natural transition.
+			this.replaySpawnTaskStatus(session);
 		}
+	}
+
+	/**
+	 * Replay every live spawned child's current status into its local parent
+	 * (supervisor restart path). Terminal answers replay as terminal results;
+	 * in-flight work replays as running; unadmitted work replays as queued.
+	 */
+	replaySpawnTaskStatuses(): void {
+		for (const session of this.sessions.values()) {
+			if (session.spawnTask === undefined) continue;
+			this.replaySpawnTaskStatus(session);
+		}
+	}
+
+	private replaySpawnTaskStatus(session: CloudResidentSession): void {
+		const task = session.spawnTask;
+		if (task === undefined || task.terminal) return;
+		if (this.shadowAnswerPreview(session) !== undefined) {
+			// The durable shadow already holds the child's answer: the
+			// terminal result replays now (sticky once).
+			this.pushSpawnTaskUpdate(session, "completed");
+			return;
+		}
+		this.pushSpawnTaskUpdate(session, this.spawnTaskAlreadyAdmitted(session) ? "running" : "queued");
 	}
 
 	/** Stop every attachment and close shadows; used on supervisor shutdown. */
@@ -1239,6 +1361,7 @@ export class CloudSessionRegistry {
 			eventSequence: 0,
 			opened: false,
 			usage: { inputTokens: 0, outputTokens: 0, requests: 0 },
+			processedRemoteRequests: new Set(),
 		};
 		session.attachment = this.createAttachment(session);
 		this.sessions.set(record.sessionId, session);
@@ -1428,6 +1551,12 @@ export class CloudSessionRegistry {
 			case "child_update":
 				this.applyChildUpdate(session, event);
 				return;
+			case "family_roster_request":
+				this.handleFamilyRosterRequest(session, event);
+				return;
+			case "agent_message_request":
+				void this.handleAgentMessageRequest(session, event);
+				return;
 			case "usage":
 				session.usage = {
 					inputTokens: event.totals.inputTokens,
@@ -1449,6 +1578,111 @@ export class CloudSessionRegistry {
 				return;
 			default:
 				return;
+		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// Internals: cross-boundary family requests (guest -> local)
+	// ---------------------------------------------------------------------------
+
+	/** True once a request id has been processed; records it otherwise. */
+	private markRemoteRequestProcessed(session: CloudResidentSession, requestId: string): boolean {
+		if (session.processedRemoteRequests.has(requestId)) return true;
+		session.processedRemoteRequests.add(requestId);
+		if (session.processedRemoteRequests.size > MAX_REMEMBERED_REMOTE_REQUESTS) {
+			const oldest = session.processedRemoteRequests.values().next().value;
+			if (oldest !== undefined) session.processedRemoteRequests.delete(oldest);
+		}
+		return false;
+	}
+
+	/**
+	 * Answer one guest family-roster request with the supervisor's rows for
+	 * the requesting session (self, parent, siblings). Idempotent on replay:
+	 * a duplicate id re-submits the same journaled result command, which the
+	 * guest journal dedupes.
+	 */
+	private handleFamilyRosterRequest(
+		session: CloudResidentSession,
+		event: Extract<CloudEvent, { kind: "family_roster_request" }>,
+	): void {
+		if (this.markRemoteRequestProcessed(session, event.requestId)) return;
+		const rows: CloudFamilyRow[] = [];
+		try {
+			const target = this.resolveActive(event.fromRemoteSessionId);
+			if (target !== undefined) {
+				rows.push(...this.callbacks.cloudFamilyRows(target));
+			}
+		} catch (error) {
+			this.callbacks.log(
+				`cloud family roster build failed for ${session.sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		void this.submitResident(
+			session,
+			`fam_${event.requestId}`,
+			{
+				kind: "family_roster_result",
+				requestId: event.requestId,
+				entries: rows,
+			},
+			true,
+		).catch((error: unknown) => {
+			this.callbacks.log(
+				`cloud family roster result failed for ${session.sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		});
+	}
+
+	/**
+	 * Deliver one guest agent message into the local family and return the
+	 * receipt through a journaled result command. The supervisor-side
+	 * delivery asserts nuclear-family reach; the receipt only lands after
+	 * the target admitted the message.
+	 */
+	private async handleAgentMessageRequest(
+		session: CloudResidentSession,
+		event: Extract<CloudEvent, { kind: "agent_message_request" }>,
+	): Promise<void> {
+		if (this.markRemoteRequestProcessed(session, event.requestId)) return;
+		try {
+			const source = this.resolveActive(event.fromRemoteSessionId);
+			if (source === undefined) {
+				throw new Error(`Unknown cloud message source: ${event.fromRemoteSessionId}`);
+			}
+			const receipt = await this.callbacks.deliverCloudAgentMessage({
+				source,
+				targetSelector: event.targetSelector,
+				message: event.message,
+			});
+			await this.submitResident(
+				session,
+				`msgres_${event.requestId}`,
+				{
+					kind: "agent_message_result",
+					requestId: event.requestId,
+					ok: true,
+					receipt: JSON.parse(JSON.stringify(receipt)) as Record<string, unknown>,
+				},
+				true,
+			);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			await this.submitResident(
+				session,
+				`msgres_${event.requestId}`,
+				{
+					kind: "agent_message_result",
+					requestId: event.requestId,
+					ok: false,
+					error: message.slice(0, 2000),
+				},
+				true,
+			).catch((submitError: unknown) => {
+				this.callbacks.log(
+					`cloud agent message result failed for ${session.sessionId}: ${submitError instanceof Error ? submitError.message : String(submitError)}`,
+				);
+			});
 		}
 	}
 
@@ -1752,6 +1986,7 @@ export class CloudSessionRegistry {
 		session: CloudResidentSession,
 		command: Extract<DaemonCommand, { type: "prompt" | "prompt_and_wait" }>,
 		admission: CloudPromptAdmissionHooks | undefined,
+		target: CloudSessionTarget,
 	): Promise<DaemonResponse | undefined> {
 		try {
 			if (admission?.isCancelled()) {
@@ -1762,11 +1997,13 @@ export class CloudSessionRegistry {
 				kind: "prompt",
 				text: command.message,
 				queueIfBusy: true,
+				// A descendant row's prompt routes into that remote session.
+				...(target.descendant ? { targetSessionId: target.remoteSessionId } : {}),
 			});
 			if (admission?.isCancelled()) {
 				return failure(command.id, command.type, "Prompt admission was cancelled");
 			}
-			if (outcome === "acknowledged") {
+			if (outcome.state === "acknowledged") {
 				admission?.markOwned();
 			}
 			return undefined;
@@ -1782,17 +2019,19 @@ export class CloudSessionRegistry {
 	 * Submit one cloud command. For short-lived commands (`waitForTerminal`)
 	 * the response waits for the receipt's terminal state, so an unknown
 	 * model or child fails honestly; long-running commands (prompts, abort)
-	 * report admission, exactly like the local daemon's contract.
+	 * report admission, exactly like the local daemon's contract. The
+	 * returned outcome carries the terminal receipt (with its optional
+	 * `result` payload) when one was observed.
 	 */
 	private async submitResident(
 		session: CloudResidentSession,
 		commandId: string,
 		request: CloudCommandRequest,
 		waitForTerminal = false,
-	): Promise<"acknowledged" | "queued"> {
+	): Promise<CloudSubmitOutcome> {
 		const outcome = await session.attachment.submit(commandId, request);
 		if (outcome.state === "queued") {
-			return "queued";
+			return { state: "queued" };
 		}
 		let receipt = outcome.receipt;
 		if (receipt.state === "failed") {
@@ -1812,7 +2051,77 @@ export class CloudSessionRegistry {
 				throw new Error(receipt.error ?? `cloud command ${request.kind} failed`);
 			}
 		}
-		return "acknowledged";
+		return { state: "acknowledged", receipt };
+	}
+
+	/**
+	 * Submit one cross-boundary agent message and return the sender's receipt.
+	 * The receipt is built only after the guest's terminal dispatch result:
+	 * `acceptAgentMessagePrompt` resolves at admission (delivered or queued),
+	 * so the response never claims delivery before the guest admitted it.
+	 */
+	private async submitCloudAgentMessage(
+		session: CloudResidentSession,
+		input: {
+			targetRemoteSessionId: string;
+			message: string;
+			source?: SessionSummary;
+			target: CloudSessionTarget;
+		},
+	): Promise<AgentSessionMessageReceipt> {
+		const message = normalizeAgentSessionMessage(input.message);
+		const messageId = createAgentSessionMessageId();
+		const fromEndpoint = messageEndpointFor(input.source);
+		const targetEndpoint: AgentSessionMessageEndpoint = {
+			activeSessionId: input.target.activeSessionId,
+			sessionId: input.target.remoteSessionId,
+			...(input.target.summary.sessionName ? { sessionName: input.target.summary.sessionName } : {}),
+			...(input.target.summary.runtimeKind ? { runtimeKind: input.target.summary.runtimeKind } : {}),
+		};
+		const fromRelationship = agentRelationshipBetweenSummaries(input.source, input.target.summary);
+		const outcome = await this.submitResident(
+			session,
+			`msg_${messageId}`,
+			{
+				kind: "send_message",
+				targetRemoteSessionId: input.targetRemoteSessionId,
+				message,
+				messageId,
+				...(fromEndpoint ? { from: fromEndpoint } : {}),
+				...(fromRelationship ? { fromRelationship } : {}),
+			},
+			true,
+		);
+		const payload: AgentSessionMessagePayload = {
+			id: messageId,
+			source: AGENT_MESSAGE_SOURCE,
+			message,
+			...(fromEndpoint ? { from: fromEndpoint } : {}),
+			...(fromRelationship ? { fromRelationship } : {}),
+			target: targetEndpoint,
+		};
+		if (outcome.state === "queued") {
+			// Durably held by the guest journal: delivery is pending, not lost.
+			return createAgentSessionMessageReceipt(payload, "queued");
+		}
+		let deliveryStatus: AgentSessionMessageDeliveryStatus = "delivered";
+		let receiptId = messageId;
+		try {
+			const parsed =
+				outcome.receipt.result === undefined
+					? undefined
+					: (JSON.parse(outcome.receipt.result) as { deliveryStatus?: unknown; messageId?: unknown });
+			if (parsed?.deliveryStatus === "queued") deliveryStatus = "queued";
+			if (typeof parsed?.messageId === "string") receiptId = parsed.messageId;
+		} catch {
+			// An unparsable result keeps the honest default.
+		}
+		const receipt = createAgentSessionMessageReceipt(payload, deliveryStatus);
+		// The guest's custom entry carries the guest-chosen id when it made one.
+		if (receiptId !== messageId) {
+			return { ...receipt, id: receiptId };
+		}
+		return receipt;
 	}
 
 	private async requireConnected(session: CloudResidentSession, action: string): Promise<void> {
@@ -1821,14 +2130,22 @@ export class CloudSessionRegistry {
 		}
 	}
 
-	private async waitForIdle(session: CloudResidentSession, waitForChildren: boolean): Promise<void> {
+	private async waitForIdle(
+		session: CloudResidentSession,
+		waitForChildren: boolean,
+		target?: CloudSessionTarget,
+	): Promise<void> {
+		const primaryRemote = target?.remoteSessionId ?? session.record.sessionId;
+		// A descendant target settles with its own subtree: the whole guest
+		// tree must quiet, exactly like the local child-wait contract.
+		const includeChildren = waitForChildren || target?.descendant === true;
 		const deadline = Date.now() + IDLE_WAIT_TIMEOUT_MS;
 		while (Date.now() < deadline && !this.disposed) {
-			const meta = session.metaBySession.get(session.record.sessionId);
+			const meta = session.metaBySession.get(primaryRemote);
 			const streaming = meta?.streaming ?? false;
 			const runningTools = meta?.runningTools ?? 0;
 			const queue = meta?.queue ?? 0;
-			const childrenBusy = waitForChildren
+			const childrenBusy = includeChildren
 				? [...session.children.values()].some((child) => child.status === "running" || child.status === "queued")
 				: false;
 			if (!streaming && runningTools === 0 && queue === 0 && !childrenBusy) return;
@@ -2299,4 +2616,44 @@ function basenameSessionId(sessionFile: string): string | undefined {
 	if (!base.endsWith(".jsonl")) return undefined;
 	const sessionId = base.slice(0, -6);
 	return sessionId.length > 0 ? sessionId : undefined;
+}
+
+/** The outcome of one cloud command submission (terminal receipt when known). */
+type CloudSubmitOutcome = { state: "queued" } | { state: "acknowledged"; receipt: CloudCommandReceipt };
+
+/** The message endpoint for one session summary, when it identifies an agent. */
+function messageEndpointFor(summary: SessionSummary | undefined): AgentSessionMessageEndpoint | undefined {
+	if (summary === undefined) return undefined;
+	return {
+		activeSessionId: summary.activeSessionId ?? summary.id,
+		sessionId: summary.sessionId,
+		...(summary.sessionName !== undefined ? { sessionName: summary.sessionName } : {}),
+		...(summary.runtimeKind !== undefined ? { runtimeKind: summary.runtimeKind } : {}),
+	};
+}
+
+/**
+ * The sender's relationship to the receiver, from the receiver's point of
+ * view, derived from the summaries' parent edges. Best effort: cross-worker
+ * sends carry no relationship today, exactly like the local precedent.
+ */
+function agentRelationshipBetweenSummaries(
+	source: SessionSummary | undefined,
+	target: SessionSummary,
+): AgentFamilyRelationship | undefined {
+	if (source === undefined) return undefined;
+	const entryFor = (summary: SessionSummary) => ({
+		id: summary.sessionId,
+		...(summary.sessionName ? { name: summary.sessionName } : {}),
+		depth: summary.rlmDepth ?? (summary.parentSessionPath ? 1 : 0),
+		status: (summary.rosterStatus ?? "idle") as "running" | "idle" | "inactive",
+		...(summary.rlmDepth !== undefined && summary.rlmDepth > 0 && summary.parentSessionId
+			? { parentSessionId: summary.parentSessionId }
+			: {}),
+		...(summary.rlmDepth !== undefined && summary.rlmDepth > 0 && summary.parentSessionPath
+			? { parentSessionPath: summary.parentSessionPath }
+			: {}),
+		...(summary.sessionFile ? { sessionPath: summary.sessionFile } : {}),
+	});
+	return agentFamilyRelationship(entryFor(target), entryFor(source));
 }

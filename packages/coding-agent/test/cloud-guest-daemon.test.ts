@@ -86,7 +86,7 @@ class LoopClient {
 	hello(cursor?: number): void {
 		this.send({
 			type: "hello",
-			protocolVersion: 2,
+			protocolVersion: 3,
 			generation: 1,
 			clientId: "client_loop",
 			sessionId: SESSION_ID,
@@ -515,7 +515,7 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 			// server must decode the complete line, not a replacement pair.
 			const hello = JSON.stringify({
 				type: "hello",
-				protocolVersion: 2,
+				protocolVersion: 3,
 				generation: 1,
 				clientId: "client-éop",
 				sessionId: `${SESSION_ID}-éop→session-ün`,
@@ -543,7 +543,7 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 			const client2 = new LoopClient((server as unknown as { socketPath: string }).socketPath);
 			const hello2 = JSON.stringify({
 				type: "hello",
-				protocolVersion: 2,
+				protocolVersion: 3,
 				generation: 1,
 				clientId: "client-éop",
 				sessionId: SESSION_ID,

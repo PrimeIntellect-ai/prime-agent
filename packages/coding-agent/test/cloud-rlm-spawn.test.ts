@@ -324,6 +324,10 @@ function buildRegistry(
 		pushChildUpdate: (update) => {
 			childUpdates.push(update);
 		},
+		cloudFamilyRows: () => [],
+		deliverCloudAgentMessage: async () => {
+			throw new Error("no cloud message delivery expected in this suite");
+		},
 		attachedClientCount: () => 0,
 	};
 	const registry = new CloudSessionRegistry({

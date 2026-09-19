@@ -169,7 +169,7 @@ const fauxModel: Model<string> = {
 	maxTokens: 16_384,
 } as Model<string>;
 
-const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager }) => {
+const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionOptions }) => {
 	const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
 	const services = await createAgentSessionServices({
 		cwd,
@@ -207,6 +207,9 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, 
 		initialState: { model: fauxModel, systemPrompt: "You are a test assistant.", tools: [] },
 		convertToLlm,
 	});
+	// The guest daemon passes host-level session options (subagent depth,
+	// agent-message/observe controllers) exactly like the production factory;
+	// honor them so guest descendants behave as hosted states.
 	const session = new AgentSession({
 		agent,
 		sessionManager,
@@ -214,8 +217,9 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, 
 		cwd,
 		modelRegistry: services.modelRegistry,
 		resourceLoader: services.resourceLoader,
-		rlmDepth: 0,
-	});
+		rlmDepth: sessionOptions?.rlmDepth ?? 0,
+		...(sessionOptions as Record<string, never>),
+	} as never);
 	return {
 		session,
 		services,

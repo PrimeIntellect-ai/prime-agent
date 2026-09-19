@@ -314,6 +314,12 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 	}
 
 	async createRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): Promise<RlmSubagentRuntime> {
+		// A host-owned session routes every spawn through its host, so a
+		// direct runtime call and the session's own spawn path create the
+		// same hosted child (bound state, controllers, event routing).
+		if (this.subagentRuntimeHost !== undefined) {
+			return await this.subagentRuntimeHost.createRlmSubagentRuntime(options);
+		}
 		const sessionManager = SessionManager.create(options.parentSession.sessionManager.getCwd(), options.sessionDir);
 		if (options.parentSession.sessionFile) {
 			sessionManager.newSession({

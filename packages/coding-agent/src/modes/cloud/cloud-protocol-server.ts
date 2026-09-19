@@ -47,6 +47,11 @@ import {
 export interface CloudProtocolDispatchResult {
 	state: "completed" | "failed" | "cancelled";
 	error?: string;
+	/**
+	 * Terminal result payload (canonical JSON string) persisted on the
+	 * receipt, e.g. the delivery status of a cross-boundary agent message.
+	 */
+	result?: string;
 }
 
 export interface CloudProtocolServerCallbacks {
@@ -718,7 +723,7 @@ export class CloudProtocolServer {
 		let receipt: CloudCommandReceipt | undefined;
 		try {
 			if (outcome.state === "completed") {
-				this.journal.complete(commandId);
+				this.journal.complete(commandId, outcome.result);
 			} else if (outcome.state === "failed") {
 				this.journal.fail(commandId, outcome.error ?? "command failed");
 			} else {

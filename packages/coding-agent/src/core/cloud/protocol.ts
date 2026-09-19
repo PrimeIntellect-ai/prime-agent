@@ -36,7 +36,15 @@ import { createHash, randomUUID } from "node:crypto";
  */
 
 export const CLOUD_PROTOCOL_NAME = "prime-agent.cloud";
-export const CLOUD_PROTOCOL_VERSION = 2;
+// Version 3 adds the cross-boundary family surface: `family_roster_request` /
+// `agent_message_request` events (guest -> local), `family_roster_result` /
+// `agent_message_result` commands (local -> guest), optional addressing fields
+// on `prompt` / `send_message` / `extension_ui_response`, and an optional
+// terminal `result` payload on command receipts. Hello still requires an
+// exact version match, so a mixed-version pair refuses attachment instead of
+// half-interoperating; the guest bridge is uploaded lockstep with the local
+// build, so only a transiently stale sandbox ever sees the refusal.
+export const CLOUD_PROTOCOL_VERSION = 3;
 
 export const CLOUD_MAX_MESSAGE_BYTES = 1_048_576;
 export const CLOUD_MAX_JSON_DEPTH = 64;
@@ -66,6 +74,12 @@ export const CLOUD_MAX_PREVIEW_CHARS = 4_096;
 export const CLOUD_MAX_ROSTER_ROWS = 256;
 export const CLOUD_MAX_ARTIFACT_REFS = 32;
 export const CLOUD_MAX_CHILDREN = 512;
+/** Bound on one remote-family roster batch (family_roster_result / roster requests). */
+export const CLOUD_MAX_FAMILY_ROWS = 64;
+/** Bound on the terminal receipt `result` payload (canonical JSON string). */
+export const CLOUD_MAX_RECEIPT_RESULT_CHARS = 2048;
+/** Bound on an agent-message request id and a remote target selector. */
+export const CLOUD_MAX_SELECTOR_CHARS = 128;
 
 export type CloudSessionId = string;
 export type CloudClientId = string;
@@ -152,6 +166,27 @@ export function newCloudTaskId(): CloudTaskId {
  * semantics. Requests stay digest-checked, journaled, and idempotent by
  * commandId.
  */
+/** Cross-boundary family context for a spawned cloud child, passed at open. */
+export interface CloudFamilyInfo {
+	/** The cloud child's depth under its LOCAL parent (guest-relative root is 0). */
+	depth: number;
+	/** Durable local parent session id. */
+	parentSessionId: string;
+	/** Canonical local parent session file (family catalog linkage). */
+	parentSessionFile: string;
+	parentName?: string;
+}
+
+/** The sender endpoint carried on a cross-boundary agent message. */
+export interface CloudAgentMessageSender {
+	activeSessionId?: string;
+	sessionId?: string;
+	sessionName?: string;
+	runtimeKind?: "top-level" | "subagent";
+}
+
+export type CloudFamilyRelationship = "parent" | "sibling" | "child";
+
 export type CloudCommandRequest =
 	| {
 			kind: "open_session";
@@ -160,20 +195,50 @@ export type CloudCommandRequest =
 			thinking?: string;
 			seedTranscriptArtifact?: string;
 			prompt?: string;
+			/** v3: family context for a spawned child (absolute depth + local parent). */
+			family?: CloudFamilyInfo;
 	  }
-	| { kind: "prompt"; text: string; queueIfBusy?: boolean }
+	/** v3: `targetSessionId` addresses one remote descendant session. */
+	| { kind: "prompt"; text: string; queueIfBusy?: boolean; targetSessionId?: string }
 	| { kind: "steer"; text: string }
 	| { kind: "follow_up"; text: string }
 	| { kind: "abort" }
-	| { kind: "send_message"; targetRemoteSessionId: string; message: string }
+	| {
+			kind: "send_message";
+			targetRemoteSessionId: string;
+			message: string;
+			/** v3: the sender-chosen message id, mirrored into the guest's custom entry. */
+			messageId?: string;
+			/** v3: sender endpoint for the guest's agent-message custom entry. */
+			from?: CloudAgentMessageSender;
+			/** v3: relationship from the receiver's point of view. */
+			fromRelationship?: CloudFamilyRelationship;
+	  }
 	| { kind: "set_model"; provider: string; modelId: string }
 	| { kind: "set_thinking_level"; level: string }
 	| { kind: "set_session_name"; name: string }
 	| { kind: "compact"; customInstructions?: string }
 	| { kind: "cancel_child"; childId: string }
 	| { kind: "delete_child"; childId: string }
-	| { kind: "extension_ui_response"; requestId: string; response: unknown }
-	| { kind: "release" };
+	| {
+			kind: "extension_ui_response";
+			requestId: string;
+			response: unknown;
+			/** v3: the remote session that owns the pending request. */
+			targetSessionId?: string;
+	  }
+	| { kind: "release" }
+	/** v3: answer to a guest `family_roster_request`. */
+	| { kind: "family_roster_result"; requestId: string; entries: CloudFamilyRow[] }
+	/** v3: answer to a guest `agent_message_request` (receipt after admission). */
+	| {
+			kind: "agent_message_result";
+			requestId: string;
+			ok: boolean;
+			/** Canonical `AgentSessionMessageReceipt` JSON when ok. */
+			receipt?: Record<string, unknown>;
+			error?: string;
+	  };
 
 export const CLOUD_COMMAND_KINDS = [
 	"open_session",
@@ -190,6 +255,8 @@ export const CLOUD_COMMAND_KINDS = [
 	"delete_child",
 	"extension_ui_response",
 	"release",
+	"family_roster_result",
+	"agent_message_result",
 ] as const;
 
 export type CloudCommandKind = (typeof CLOUD_COMMAND_KINDS)[number];
@@ -204,6 +271,12 @@ export interface CloudCommandReceipt {
 	/** True when the journal restored this command without a terminal record. */
 	uncertain: boolean;
 	error?: string;
+	/**
+	 * v3: terminal result payload (canonical JSON string), e.g. the delivery
+	 * status of a cross-boundary agent message. Absent on pre-v3 records and
+	 * on commands that produce no payload.
+	 */
+	result?: string;
 }
 
 /** One artifact reference for an oversized session entry payload (artifact_refs capability). */
@@ -222,6 +295,24 @@ export interface CloudRosterRow {
 	status: "queued" | "running" | "completed" | "failed" | "cancelled";
 	depth: number;
 	preview?: string;
+}
+
+/**
+ * One cross-boundary family row (v3): a cloud row's own entry, its parent, or
+ * a sibling, as the local supervisor sees it. Depths are absolute (spawn depth
+ * shifted); parent linkage uses the same session-id/session-path edges the
+ * local family catalog builds on.
+ */
+export interface CloudFamilyRow {
+	/** Session id (cloud session id, remote session id, or local session id). */
+	id: string;
+	name?: string;
+	depth: number;
+	status: "running" | "idle" | "inactive";
+	parentSessionId?: string;
+	parentSessionPath?: string;
+	/** Canonical session file (local sessions and cloud shadows). */
+	sessionPath?: string;
 }
 
 export type CloudEvent =
@@ -299,6 +390,26 @@ export type CloudEvent =
 			sessionId: string;
 			totals: { inputTokens: number; outputTokens: number; cachedTokens?: number; requests: number };
 			revision: number;
+	  }
+	/** v3: the guest asks for its cross-boundary family rows (family_messages). */
+	| {
+			sequence: number;
+			kind: "family_roster_request";
+			recordedAt: string;
+			requestId: string;
+			/** The requesting remote session id (cloud root or descendant). */
+			fromRemoteSessionId: string;
+	  }
+	/** v3: a guest session sends one agent message across the boundary (family_messages). */
+	| {
+			sequence: number;
+			kind: "agent_message_request";
+			recordedAt: string;
+			requestId: string;
+			fromRemoteSessionId: string;
+			/** Target selector: session id, active session id, or session name. */
+			targetSelector: string;
+			message: string;
 	  };
 
 export interface CloudSessionState {
@@ -495,18 +606,20 @@ export function cloudRequestProblem(value: unknown): string | undefined {
 	switch (value.kind) {
 		case "open_session":
 			return firstProblem(
-				expectFields(value, ["kind", "cwd", "model", "thinking", "seedTranscriptArtifact", "prompt"]),
+				expectFields(value, ["kind", "cwd", "model", "thinking", "seedTranscriptArtifact", "prompt", "family"]),
 				expectString(value.cwd, "request.cwd", CLOUD_MAX_PATH_CHARS, 1),
 				optionalString(value.model, "request.model", CLOUD_MAX_MODEL_ID_CHARS),
 				optionalString(value.thinking, "request.thinking", CLOUD_MAX_THINKING_CHARS),
 				optionalString(value.seedTranscriptArtifact, "request.seedTranscriptArtifact", CLOUD_MAX_PATH_CHARS),
 				optionalString(value.prompt, "request.prompt", CLOUD_MAX_PROMPT_CHARS),
+				familyInfoProblem(value.family, "request.family"),
 			);
 		case "prompt":
 			return firstProblem(
-				expectFields(value, ["kind", "text", "queueIfBusy"]),
+				expectFields(value, ["kind", "text", "queueIfBusy", "targetSessionId"]),
 				expectString(value.text, "request.text", CLOUD_MAX_PROMPT_CHARS, 1),
 				optionalBoolean(value.queueIfBusy, "request.queueIfBusy"),
+				optionalString(value.targetSessionId, "request.targetSessionId", CLOUD_MAX_ID_CHARS),
 			);
 		case "steer":
 		case "follow_up":
@@ -519,9 +632,14 @@ export function cloudRequestProblem(value: unknown): string | undefined {
 			return expectFields(value, ["kind"]);
 		case "send_message":
 			return firstProblem(
-				expectFields(value, ["kind", "targetRemoteSessionId", "message"]),
+				expectFields(value, ["kind", "targetRemoteSessionId", "message", "messageId", "from", "fromRelationship"]),
 				expectString(value.targetRemoteSessionId, "request.targetRemoteSessionId", CLOUD_MAX_ID_CHARS, 1),
 				expectString(value.message, "request.message", CLOUD_MAX_PROMPT_CHARS, 1),
+				optionalString(value.messageId, "request.messageId", CLOUD_MAX_ID_CHARS),
+				agentMessageSenderProblem(value.from, "request.from"),
+				value.fromRelationship === undefined
+					? undefined
+					: expectOneOf(value.fromRelationship, "request.fromRelationship", ["parent", "sibling", "child"]),
 			);
 		case "set_model":
 			return firstProblem(
@@ -552,8 +670,9 @@ export function cloudRequestProblem(value: unknown): string | undefined {
 			);
 		case "extension_ui_response": {
 			const base = firstProblem(
-				expectFields(value, ["kind", "requestId", "response"]),
+				expectFields(value, ["kind", "requestId", "response", "targetSessionId"]),
 				expectString(value.requestId, "request.requestId", CLOUD_MAX_ID_CHARS, 1),
+				optionalString(value.targetSessionId, "request.targetSessionId", CLOUD_MAX_ID_CHARS),
 			);
 			if (base !== undefined) return base;
 			if (value.response === undefined) return "request.response is required";
@@ -568,9 +687,100 @@ export function cloudRequestProblem(value: unknown): string | undefined {
 			}
 			return undefined;
 		}
+		case "family_roster_result": {
+			const base = firstProblem(
+				expectFields(value, ["kind", "requestId", "entries"]),
+				expectString(value.requestId, "request.requestId", CLOUD_MAX_ID_CHARS, 1),
+			);
+			if (base !== undefined) return base;
+			return familyRowsProblem(value.entries, "request.entries");
+		}
+		case "agent_message_result": {
+			const base = firstProblem(
+				expectFields(value, ["kind", "requestId", "ok", "receipt", "error"]),
+				expectString(value.requestId, "request.requestId", CLOUD_MAX_ID_CHARS, 1),
+				typeof value.ok === "boolean" ? undefined : "request.ok must be a boolean",
+				optionalString(value.error, "request.error", CLOUD_MAX_ERROR_CHARS),
+			);
+			if (base !== undefined) return base;
+			if (value.ok === true && value.receipt === undefined) {
+				return "request.receipt is required when ok is true";
+			}
+			if (value.ok === false && value.receipt !== undefined) {
+				return "request.receipt must be omitted when ok is false";
+			}
+			if (value.receipt === undefined) return undefined;
+			if (!isRecord(value.receipt)) return "request.receipt must be a JSON object";
+			try {
+				const encoded = canonicalJson(value.receipt);
+				if (Buffer.byteLength(encoded, "utf8") > CLOUD_MAX_RECEIPT_RESULT_CHARS) {
+					return `request.receipt exceeds ${CLOUD_MAX_RECEIPT_RESULT_CHARS} bytes`;
+				}
+			} catch (error) {
+				const reason = error instanceof Error ? error.message : String(error);
+				return `request.receipt is not canonical JSON: ${reason}`;
+			}
+			return undefined;
+		}
 		default:
 			return `request.kind must be one of ${CLOUD_COMMAND_KINDS.join(", ")}`;
 	}
+}
+
+/** Validation for the optional open_session family context. */
+function familyInfoProblem(value: unknown, label: string): Problem {
+	if (value === undefined) return undefined;
+	if (!isRecord(value)) return `${label} must be an object`;
+	const depthProblem =
+		typeof value.depth === "number" && Number.isInteger(value.depth) && value.depth >= 1
+			? undefined
+			: `${label}.depth must be an integer of at least 1`;
+	return firstProblem(
+		expectFields(value, ["depth", "parentSessionId", "parentSessionFile", "parentName"]),
+		depthProblem,
+		expectString(value.parentSessionId, `${label}.parentSessionId`, CLOUD_MAX_ID_CHARS, 1),
+		expectString(value.parentSessionFile, `${label}.parentSessionFile`, CLOUD_MAX_PATH_CHARS, 1),
+		optionalString(value.parentName, `${label}.parentName`, CLOUD_MAX_SESSION_NAME_CHARS),
+	);
+}
+
+/** Validation for the optional send_message sender endpoint. */
+function agentMessageSenderProblem(value: unknown, label: string): Problem {
+	if (value === undefined) return undefined;
+	if (!isRecord(value)) return `${label} must be an object`;
+	return firstProblem(
+		expectFields(value, ["activeSessionId", "sessionId", "sessionName", "runtimeKind"]),
+		optionalString(value.activeSessionId, `${label}.activeSessionId`, CLOUD_MAX_ID_CHARS),
+		optionalString(value.sessionId, `${label}.sessionId`, CLOUD_MAX_ID_CHARS),
+		optionalString(value.sessionName, `${label}.sessionName`, CLOUD_MAX_SESSION_NAME_CHARS),
+		value.runtimeKind === undefined
+			? undefined
+			: expectOneOf(value.runtimeKind, `${label}.runtimeKind`, ["top-level", "subagent"]),
+	);
+}
+
+/** Validation for a cross-boundary family row batch. */
+function familyRowsProblem(value: unknown, label: string): Problem {
+	if (!Array.isArray(value)) return `${label} must be an array`;
+	if (value.length > CLOUD_MAX_FAMILY_ROWS) {
+		return `${label} must hold at most ${CLOUD_MAX_FAMILY_ROWS} entries`;
+	}
+	for (let index = 0; index < value.length; index++) {
+		const row = value[index];
+		if (!isRecord(row)) return `${label}[${index}] must be an object`;
+		const problem = firstProblem(
+			expectFields(row, ["id", "name", "depth", "status", "parentSessionId", "parentSessionPath", "sessionPath"]),
+			expectString(row.id, `${label}[${index}].id`, CLOUD_MAX_ID_CHARS, 1),
+			expectInteger(row.depth, `${label}[${index}].depth`, 0),
+			expectOneOf(row.status, `${label}[${index}].status`, ["running", "idle", "inactive"]),
+			optionalString(row.name, `${label}[${index}].name`, CLOUD_MAX_SESSION_NAME_CHARS),
+			optionalString(row.parentSessionId, `${label}[${index}].parentSessionId`, CLOUD_MAX_ID_CHARS),
+			optionalString(row.parentSessionPath, `${label}[${index}].parentSessionPath`, CLOUD_MAX_PATH_CHARS),
+			optionalString(row.sessionPath, `${label}[${index}].sessionPath`, CLOUD_MAX_PATH_CHARS),
+		);
+		if (problem !== undefined) return problem;
+	}
+	return undefined;
 }
 
 /** Maximum encoded bytes of one canonical request payload; enforced alongside digests. */
@@ -622,7 +832,7 @@ function receiptProblem(value: unknown, label: string): string | undefined {
 		return `${label} must be an object`;
 	}
 	return firstProblem(
-		expectFields(value, ["commandId", "digest", "state", "submittedAt", "updatedAt", "uncertain", "error"]),
+		expectFields(value, ["commandId", "digest", "state", "submittedAt", "updatedAt", "uncertain", "error", "result"]),
 		cloudIdProblem(value.commandId, `${label}.commandId`),
 		expectDigest(value.digest, `${label}.digest`),
 		expectOneOf(value.state, `${label}.state`, CLOUD_COMMAND_STATES),
@@ -630,6 +840,7 @@ function receiptProblem(value: unknown, label: string): string | undefined {
 		expectString(value.updatedAt, `${label}.updatedAt`, CLOUD_MAX_TIMESTAMP_CHARS),
 		typeof value.uncertain === "boolean" ? undefined : `${label}.uncertain must be a boolean`,
 		value.error === undefined ? undefined : expectString(value.error, `${label}.error`, CLOUD_MAX_ERROR_CHARS),
+		optionalString(value.result, `${label}.result`, CLOUD_MAX_RECEIPT_RESULT_CHARS),
 	);
 }
 
@@ -660,6 +871,8 @@ function eventProblem(value: unknown, label: string): string | undefined {
 		"roster_delta",
 		"child_update",
 		"usage",
+		"family_roster_request",
+		"agent_message_request",
 	]);
 	if (kindProblem !== undefined) {
 		return kindProblem;
@@ -695,6 +908,30 @@ function eventProblem(value: unknown, label: string): string | undefined {
 	}
 	if (value.kind === "usage") {
 		return usageProblem(value, label);
+	}
+	if (value.kind === "family_roster_request") {
+		return firstProblem(
+			expectFields(value, ["sequence", "kind", "recordedAt", "requestId", "fromRemoteSessionId"]),
+			expectString(value.requestId, `${label}.requestId`, CLOUD_MAX_ID_CHARS, 1),
+			expectString(value.fromRemoteSessionId, `${label}.fromRemoteSessionId`, CLOUD_MAX_ID_CHARS, 1),
+		);
+	}
+	if (value.kind === "agent_message_request") {
+		return firstProblem(
+			expectFields(value, [
+				"sequence",
+				"kind",
+				"recordedAt",
+				"requestId",
+				"fromRemoteSessionId",
+				"targetSelector",
+				"message",
+			]),
+			expectString(value.requestId, `${label}.requestId`, CLOUD_MAX_ID_CHARS, 1),
+			expectString(value.fromRemoteSessionId, `${label}.fromRemoteSessionId`, CLOUD_MAX_ID_CHARS, 1),
+			expectString(value.targetSelector, `${label}.targetSelector`, CLOUD_MAX_SELECTOR_CHARS, 1),
+			expectString(value.message, `${label}.message`, CLOUD_MAX_PROMPT_CHARS, 1),
+		);
 	}
 	return firstProblem(
 		expectFields(value, ["sequence", "kind", "recordedAt", "receipt"]),

@@ -67,6 +67,17 @@ export interface AgentSessionMessageAgentSummary extends AgentSessionMessageEndp
 	rlmDepth?: number;
 	status?: AgentFamilyStatus;
 	rlmChildRegistryStatus?: "running" | "completed" | "deleted";
+	/**
+	 * Schema revision 32: optional observe-plane fields carried on supervisor
+	 * peers (resident cloud rows). Absent on local worker roots, which the
+	 * observer reads from live state.
+	 */
+	messageCount?: number;
+	queuedCount?: number;
+	attachedClients?: number;
+	isSessionActive?: boolean;
+	isCompacting?: boolean;
+	firstMessage?: string;
 }
 
 export interface AgentSessionMessageListResult {
