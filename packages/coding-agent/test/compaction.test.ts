@@ -301,6 +301,47 @@ describe("prepareCompaction with previous compaction", () => {
 	});
 });
 
+describe("prepareCompaction recency anchor", () => {
+	// A long user message crosses the tiny keep-recent budget, so the cut
+	// lands on it: a deterministic user-message cut with no split turn.
+	const longUserText = `user tail ${"x".repeat(400)}`;
+	const anchoredPreparation = (previousSummary: string, tailTexts: string[]) => {
+		const u2 = createMessageEntry(createUserMessage("user msg 2"));
+		const entries = [
+			createMessageEntry(createUserMessage("user msg 1")),
+			createMessageEntry(createAssistantMessage("assistant msg 1", createMockUsage(5000, 1000))),
+			u2,
+			createMessageEntry(createAssistantMessage("assistant msg 2", createMockUsage(6000, 2000))),
+			createCompactionEntry(previousSummary, u2.id),
+			createMessageEntry(createUserMessage(longUserText)),
+			...tailTexts.map((text) => createMessageEntry(createAssistantMessage(text, createMockUsage(7000, 3000)))),
+		];
+		return prepareCompaction(entries, { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 10 });
+	};
+
+	it.each([
+		{
+			name: "anchors to the newest kept-tail assistant text, skipping empty ones",
+			previousSummary: "First summary",
+			tailTexts: ["", "older kept text", "newest kept text"],
+			anchor: "newest kept text",
+			keptSummary: "First summary",
+		},
+		{
+			name: "drops the previous summary entirely when it contained only file blocks",
+			previousSummary: "<read-files>\nold/a.ts\n</read-files>\n\n<modified-files>\nold/b.ts\n</modified-files>",
+			tailTexts: [],
+			anchor: undefined,
+			keptSummary: undefined,
+		},
+	])("$name", ({ previousSummary, tailTexts, anchor, keptSummary }) => {
+		const preparation = anchoredPreparation(previousSummary, tailTexts);
+		expect(preparation).toBeDefined();
+		expect(preparation!.recentStateAnchor).toBe(anchor);
+		expect(preparation!.previousSummary).toBe(keptSummary);
+	});
+});
+
 // ============================================================================
 // Integration tests with real session data
 // ============================================================================
