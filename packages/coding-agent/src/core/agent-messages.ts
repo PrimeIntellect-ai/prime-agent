@@ -111,6 +111,13 @@ export interface AgentSessionNameScope {
 export interface AgentSessionNameAvailabilityInput extends AgentSessionNameScope {
 	name: string;
 	ignoreSessionId?: string;
+	/**
+	 * Session ids of children whose delete receipt already returned. The daemon
+	 * catalog keeps listing such a child until its detached unwind removes the
+	 * runtime, so the caller passes every freed id it still holds and a same-name
+	 * respawn is admitted at the receipt instead of at the unwind.
+	 */
+	ignoreSessionIds?: string[];
 }
 
 export interface AgentSessionMessagePayload {
@@ -205,9 +212,11 @@ export function assertAgentSessionNameAvailable(
 	catalog: readonly AgentFamilyCatalogEntry[],
 	input: AgentSessionNameAvailabilityInput,
 ): void {
+	const freedSessionIds = input.ignoreSessionIds?.length ? new Set(input.ignoreSessionIds) : undefined;
 	const conflict = catalog.some(
 		(entry) =>
 			entry.id !== input.ignoreSessionId &&
+			!freedSessionIds?.has(entry.id) &&
 			entry.name === input.name &&
 			entry.depth === input.depth &&
 			sameAgentSessionNameParent(entry, input, catalog),
