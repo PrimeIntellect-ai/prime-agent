@@ -11,6 +11,7 @@ import {
 	writeFileSync,
 	writeSync,
 } from "node:fs";
+import { open as openFileHandle } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { canonicalSessionPath } from "../session-lease.js";
 import {
@@ -104,6 +105,47 @@ interface ShadowHeadInfo {
 export const CLOUD_SHADOW_HEAD_CUSTOM_TYPE = "prime-agent.cloud-session";
 /** Marker entry written when a shadow continues under a new sandbox generation. */
 export const CLOUD_SHADOW_GENERATION_CUSTOM_TYPE = "prime-agent.cloud-generation";
+
+/** Read bound for the shadow-marker probe: the marker sits directly under the header. */
+const CLOUD_SHADOW_MARKER_PROBE_BYTES = 64 * 1024;
+
+/**
+ * True when the session file is a cloud shadow transcript. Reads only the file
+ * head (the cloud-session marker is the entry directly under the header), so
+ * callers can classify one child session without scanning the whole mirror.
+ * An unreadable or non-shadow file reports false.
+ */
+export async function isCloudShadowSessionFile(sessionFile: string): Promise<boolean> {
+	let handle: Awaited<ReturnType<typeof openFileHandle>>;
+	try {
+		handle = await openFileHandle(sessionFile, "r");
+	} catch {
+		return false;
+	}
+	try {
+		const buffer = Buffer.alloc(CLOUD_SHADOW_MARKER_PROBE_BYTES);
+		const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, 0);
+		let rest = buffer.subarray(0, bytesRead).toString("utf8");
+		for (;;) {
+			const newline = rest.indexOf("\n");
+			if (newline === -1) break;
+			const line = rest.slice(0, newline);
+			rest = rest.slice(newline + 1);
+			if (!line) continue;
+			let entry: unknown;
+			try {
+				entry = JSON.parse(line);
+			} catch {
+				return false;
+			}
+			const marker = entry as { type?: string; customType?: string };
+			if (marker.type === "custom" && marker.customType === CLOUD_SHADOW_HEAD_CUSTOM_TYPE) return true;
+		}
+		return false;
+	} finally {
+		await handle.close();
+	}
+}
 
 export class ShadowSessionWriter {
 	readonly sessionFile: string;

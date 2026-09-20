@@ -1,0 +1,2 @@
+- Retained completed cloud RLM children (`rlm(..., target="cloud")`) until an explicit `rlm.delete_subagent`: they keep appearing in `rlm.list_subagents()`, `agent_observe`, and the child roster after their task settles and after daemon recovery, and messages or deletes route to their supervisor cloud row by name, child id, session id, or active session id instead of a locally hydrated shadow.
+- Added the kernel alias `await rlm.spawn(prompt, name=..., target="cloud")` with behavior and handle identical to `await rlm(...)`/`rlm.run(...)`.

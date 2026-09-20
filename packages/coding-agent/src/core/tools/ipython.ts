@@ -50,6 +50,9 @@ except Exception as _prime_agent_rlm_error:
         async def run(self, prompt, **kwargs):
             self._raise_missing()
 
+        async def spawn(self, prompt, **kwargs):
+            self._raise_missing()
+
         async def find_models(self, query="", limit=8):
             self._raise_missing()
 

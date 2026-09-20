@@ -73,6 +73,7 @@ import {
 	createAgentSessionRuntime,
 } from "../../core/agent-session-runtime.js";
 import { isDirectCloudConfigured } from "../../core/cloud/direct-cloud-service.js";
+import { isCloudShadowSessionFile } from "../../core/cloud/shadow-session-writer.js";
 import {
 	type AgentCronJob,
 	AgentCronJobStore,
@@ -435,6 +436,8 @@ interface PassiveRlmSubagentEntry {
 	model?: { provider: string; modelId: string };
 	status: "running" | "completed" | "deleted";
 	createdAt: number;
+	/** Cloud child id when the transcript is a supervisor-owned cloud shadow. */
+	cloudSessionId?: string;
 }
 
 /** Spread-ready optional metadata fields shared by display files and legacy registry entries. */
@@ -1309,6 +1312,19 @@ export class AgentDaemon {
 			parentSessionId: parent.sessionId,
 			parentSessionFile: parent.sessionFile,
 		};
+		// A cloud child's transcript is a supervisor-owned shadow sitting in the
+		// shared sessions dir: no per-child display file exists, and a shared-dir
+		// display lookup would collide across cloud children. The ledger edge
+		// plus the shadow are the durable retention record.
+		if (await isCloudShadowSessionFile(edge.child)) {
+			let createdAt = 0;
+			try {
+				createdAt = (await stat(edge.child)).birthtimeMs || 0;
+			} catch {
+				// The stat is display-grade; a failed read keeps the epoch default.
+			}
+			return { ...base, rlmDepth: edge.depth, status: "completed", createdAt, cloudSessionId: edge.childId };
+		}
 		// The ledger stores realpath-canonical paths, the rest of the daemon
 		// keys maps by resolve(): present the paths the writer recorded (the
 		// metadata file is validated to describe this same child) so passive
@@ -2586,6 +2602,30 @@ export class AgentDaemon {
 						: undefined;
 				const childSessionFile =
 					persisted?.sessionFile ?? state?.runtime.session.sessionFile ?? legacyFallback?.sessionFile;
+				if (persisted?.cloudSessionId) {
+					// A cloud child's physical lifecycle is supervisor-owned: the
+					// delete routes to the cloud row (sandbox stop, ledger edge,
+					// roster row) instead of the local runtime path. A locally
+					// hydrated shadow is read-only mirror state and closes here
+					// without writing the shared sessions-dir display file.
+					try {
+						if (state) {
+							await this.closeSession(state, "killed", false, true, undefined, { kernelSnapshot: false });
+						} else {
+							await session?.disposeAsync({ kernelSnapshot: false });
+						}
+					} finally {
+						await this.requestSupervisorDaemon(
+							{
+								type: "delete_rlm_subagent",
+								activeSessionId: persisted.cloudSessionId,
+								childId,
+							},
+							60_000,
+						);
+					}
+					return;
+				}
 				// Persist the deletion boundary before tearing down the runtime.
 				await this.recordRlmSubagentDeletion(parentState, childId);
 				const staleSession = state && session && state.runtime.session !== session ? session : undefined;
@@ -6122,6 +6162,29 @@ export class AgentDaemon {
 		return agentFamilyRelationship(this.agentFamilyEntry(targetState), this.agentFamilyEntry(fromState));
 	}
 
+	/**
+	 * Resolve one live supervisor cloud child row by its stable selectors:
+	 * session name, rlm child id, cloud session id, or the row's active session
+	 * id. Only subagent rows match, so local roots keep their own wake path.
+	 */
+	private async resolveSupervisorCloudChildTarget(
+		selector: string,
+	): Promise<AgentSessionMessageAgentSummary | undefined> {
+		if (!this.options.worker) return undefined;
+		const matches = (await this.listSupervisorAgentPeers()).filter(
+			(peer) =>
+				peer.runtimeKind === "subagent" &&
+				(peer.activeSessionId === selector ||
+					peer.rlmChildId === selector ||
+					peer.sessionId === selector ||
+					peer.sessionName === selector),
+		);
+		if (matches.length > 1) {
+			throw new Error(`Session selector "${selector}" is ambiguous`);
+		}
+		return matches[0];
+	}
+
 	private async sendAgentSessionMessage(options: {
 		targetSelector: string;
 		message: string;
@@ -6136,6 +6199,23 @@ export class AgentDaemon {
 		}
 		const targetSelector = assertDirectAgentMessageTarget(options.targetSelector);
 		const message = normalizeAgentSessionMessage(options.message, DEFAULT_AGENT_MESSAGE_MAX_CHARS);
+		// A first-class cloud child is addressed through its supervisor row,
+		// never through a locally hydrated shadow: the row carries the stable
+		// selectors (name, rlm child id, cloud session id, active session id),
+		// the supervisor enforces family reach, and the receipt lands only
+		// after the guest admits the message.
+		if (options.origin === "agent" && options.fromState && this.options.worker) {
+			const cloudPeer = await this.resolveSupervisorCloudChildTarget(targetSelector);
+			if (cloudPeer) {
+				return this.sendRemoteAgentSessionMessage(options.fromState, cloudPeer.activeSessionId, message);
+			}
+			const passiveCloud = await this.findPassiveRlmSubagent(targetSelector);
+			if (passiveCloud?.entry.cloudSessionId) {
+				throw new Error(
+					`Cloud RLM child "${targetSelector}" has no live supervisor row; retry once the cloud session is reachable, or delete the child`,
+				);
+			}
+		}
 		let targetState: ActiveSessionState;
 		try {
 			targetState = this.getBoundSessionState(targetSelector);

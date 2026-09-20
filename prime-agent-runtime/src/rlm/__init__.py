@@ -130,6 +130,16 @@ async def run(prompt: str, **kwargs: Any) -> RLMSpawnHandle:
     return _spawn_handle_from_payload(payload)
 
 
+async def spawn(prompt: str, **kwargs: Any) -> RLMSpawnHandle:
+    """Alias of :func:`run`: spawn a child and return once its task is admitted.
+
+    ``rlm.spawn(prompt, ...)`` behaves identically to ``rlm(prompt, ...)`` and
+    ``rlm.run(prompt, ...)`` and returns the same frozen handle.
+    ``target="cloud"`` admits a first-class cloud child.
+    """
+    return await run(prompt, **kwargs)
+
+
 def _model_from_payload(payload: Any) -> RLMModel:
     if not isinstance(payload, dict):
         raise RuntimeError("rlm.find_models returned an invalid model entry")
@@ -292,6 +302,9 @@ class _RLMCallable:
     async def run(self, prompt: str, **kwargs: Any) -> RLMSpawnHandle:
         return await run(prompt, **kwargs)
 
+    async def spawn(self, prompt: str, **kwargs: Any) -> RLMSpawnHandle:
+        return await spawn(prompt, **kwargs)
+
     async def create_session(
         self,
         prompt: str,
@@ -351,6 +364,7 @@ __all__ = [
     "list_subagents",
     "rlm",
     "run",
+    "spawn",
 ]
 
 # Lazily re-export the MCP base class. Kept lazy so `import rlm` never requires

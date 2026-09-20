@@ -94,6 +94,45 @@ class RlmSubagentRegistryTest(unittest.TestCase):
         self.assertEqual(result.name, "api-reviewer")
         self.assertEqual(result.model, "deepseek/deepseek-v4-flash")
 
+    def test_spawn_alias_sends_the_same_host_request_and_handle_as_run(self) -> None:
+        handle_payload = {
+            "rlm_child_id": "sub-a1b2c3d4",
+            "name": "cloud-kid",
+            "session_dir": "/tmp/parent/sub-a1b2c3d4",
+            "model": "faux/faux-1",
+        }
+        host_request = AsyncMock(return_value=handle_payload)
+
+        with patch.object(rlm_module, "host_request", host_request):
+            for caller in (rlm_module.spawn, rlm_module.rlm.spawn, rlm_module.run, rlm_module.rlm):
+                result = asyncio.run(caller("check the API", name="cloud-kid", target="cloud"))
+
+                host_request.assert_awaited_once_with(
+                    "rlm.run",
+                    {
+                        "prompt": "check the API",
+                        "kwargs": {"name": "cloud-kid", "target": "cloud"},
+                    },
+                )
+                self.assertEqual(
+                    result,
+                    rlm_module.RLMSpawnHandle(
+                        rlm_child_id="sub-a1b2c3d4",
+                        name="cloud-kid",
+                        session_dir=Path("/tmp/parent/sub-a1b2c3d4"),
+                        model="faux/faux-1",
+                    ),
+                )
+                host_request.reset_mock()
+
+        self.assertIn("spawn", rlm_module.__all__)
+
+    def test_spawn_alias_rejects_non_string_prompts(self) -> None:
+        with self.assertRaisesRegex(TypeError, "prompt must be str"):
+            asyncio.run(rlm_module.spawn(123))
+        with self.assertRaisesRegex(TypeError, "prompt must be str"):
+            asyncio.run(rlm_module.rlm.spawn(123))
+
     def test_finds_authenticated_models_through_host(self) -> None:
         host_request = AsyncMock(
             return_value={

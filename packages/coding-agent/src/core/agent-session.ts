@@ -10020,7 +10020,14 @@ export class AgentSession {
 					agent.parentActiveSessionId === parentActiveSessionId &&
 					agent.rlmChildId
 				) {
-					daemonChildren.set(agent.rlmChildId, agent);
+					// A retained row (ledger reconstruction, carrying sessionDir
+					// and registry status) outranks a live peer row without them:
+					// the peer would otherwise suppress a retained cloud child
+					// and empty list_subagents after parent recovery.
+					const known = daemonChildren.get(agent.rlmChildId);
+					if (!known || (agent.sessionDir && !known.sessionDir)) {
+						daemonChildren.set(agent.rlmChildId, agent);
+					}
 				}
 			}
 		}
@@ -10473,6 +10480,9 @@ export class AgentSession {
 		return {
 			id: run.id,
 			parentId: this._rlmParentNodeId,
+			// A cloud run carries its supervisor row address directly; local
+			// children get theirs stamped by the daemon once a runtime binds.
+			...(run.cloudLease ? { activeSessionId: run.cloudLease.admission.cloud_active_session_id } : {}),
 			sessionName: child?.sessionName ?? run.sessionName,
 			model: `${model.provider}/${model.id}`,
 			label: rlmChildLabel(run.prompt),
@@ -10524,6 +10534,10 @@ export class AgentSession {
 	}
 
 	private _isUnboundTerminalRlmChildRun(run: RlmChildRun): boolean {
+		// A cloud child has no local runtime: its run IS the retained
+		// representation. A completed cloud run stays listed until an explicit
+		// delete removes it, exactly like a completed local retained subagent.
+		if (run.cloudLease !== undefined) return false;
 		if (run.session !== undefined || this._rlmChildSessions.has(run.id)) return false;
 		return run.status === "done" || run.status === "error" || run.status === "cancelled";
 	}

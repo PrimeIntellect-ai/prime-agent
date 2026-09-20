@@ -137,6 +137,8 @@ interface RegistryHarness {
 			agentId: string;
 			summary: {
 				activeSessionId?: string;
+				sessionId?: string;
+				sessionName?: string;
 				sessionFile?: string;
 				parentSessionPath?: string;
 				parentSessionId?: string;
@@ -508,6 +510,32 @@ describe("CloudSessionRegistry.spawnChild (fake transport, real guest daemon)", 
 			);
 			const completed = harness.childUpdates.find((update) => update.status === "completed")!;
 			expect(completed.answerPreview).toContain("cloud child finished answer");
+
+			// Completion retains the roster row with every stable selector
+			// (name, rlm child id, cloud session id, active session id): the
+			// parent's agent_message addressing and list surfaces survive
+			// settlement instead of the row vanishing with the live task.
+			const retainedRow = rowForActiveSession()!.summary;
+			expect(retainedRow).toMatchObject({
+				activeSessionId: admission.active_session_id,
+				sessionId: guestSessionId,
+				sessionName: "cloud-kid",
+				rlmChildId: guestSessionId,
+				runtimeKind: "subagent",
+				parentActiveSessionId: PARENT.activeSessionId,
+				parentSessionPath: PARENT.sessionFile,
+			});
+			// The queued label clears once the task settles.
+			expect(retainedRow.statusLabel).toBeUndefined();
+			expect(harness.registry.liveSummaries()).toContainEqual(
+				expect.objectContaining({
+					activeSessionId: admission.active_session_id,
+					sessionId: guestSessionId,
+					sessionName: "cloud-kid",
+					rlmChildId: guestSessionId,
+					rlmDepth: 1,
+				}),
+			);
 
 			// The shadow mirrors the guest transcript with the task prompt.
 			const shadow = parseSessionEntries(readFileSync(record.shadowSessionFile!, "utf8"));
@@ -886,6 +914,115 @@ describe("AgentSession cloud spawn branch (rlm(..., target='cloud'))", () => {
 		// The abort path routes cancellation through the lease before the delete.
 		expect(cancels.length).toBeGreaterThanOrEqual(0);
 		expect(internal._activeRlmChildRuns.has("sess_stub_3")).toBe(false);
+	});
+
+	it("retains a completed cloud child in rosters and lists until explicit delete", async () => {
+		const { lease, deletes } = stubLease({ rlm_child_id: "sess_stub_4", name: "retained-kid" });
+		const root = createSession(lease);
+		(root as unknown as { setScopedModels(models: unknown[]): void }).setScopedModels([]);
+		await root.runRlmChild("cloud research task", { target: "cloud", name: "retained-kid" });
+		root.applyRlmCloudChildUpdate({ childId: "sess_stub_4", status: "running" });
+		root.applyRlmCloudChildUpdate({
+			childId: "sess_stub_4",
+			status: "completed",
+			answerPreview: "the retained cloud answer",
+		});
+		const internal = root as unknown as InspectableCloudRunSession;
+		const settledRun = internal._activeRlmChildRuns.get("sess_stub_4")!;
+		await settledRun.settlement.promise;
+
+		// The completed cloud run stays retained exactly like a completed
+		// local retained subagent: snapshots keep showing it with its cloud
+		// row address, and the daemon can stamp no further active id.
+		expect(root.getRlmChildSnapshots()).toEqual([
+			expect.objectContaining({
+				id: "sess_stub_4",
+				sessionName: "retained-kid",
+				status: "done",
+				answerPreview: "the retained cloud answer",
+				activeSessionId: "cloud-active-stub",
+				sessionDir: "/sessions",
+			}),
+		]);
+		const listed = await root.listRlmSubagents();
+		expect(listed.subagents).toEqual([
+			expect.objectContaining({
+				rlm_child_id: "sess_stub_4",
+				session_name: "retained-kid",
+				session_dir: "/sessions",
+				status: "completed",
+			}),
+		]);
+
+		// Explicit delete is the only removal path: the lease deletes the
+		// remote child and every surface drops the retained run.
+		const result = await root.deleteRlmSubagent("retained-kid");
+		expect(result.outcome).toBe("deleted");
+		expect(deletes.length).toBe(1);
+		expect(root.getRlmChildSnapshots()).toEqual([]);
+		expect((await root.listRlmSubagents()).subagents).toEqual([]);
+	});
+
+	it("lists and deletes a recovered cloud child after parent recovery, preferring the reconstruction row", async () => {
+		const hostDeletes: Array<{ childId: string; session: unknown }> = [];
+		const host: SubagentRuntimeHost = {
+			createRlmSubagentRuntime: async () => {
+				throw new Error("local runtime must not be created for a cloud child");
+			},
+			deleteRlmSubagentRuntime: async (childId, session) => {
+				hostDeletes.push({ childId, session });
+			},
+		};
+		const root = createSession(undefined);
+		(root as unknown as { _subagentRuntimeHost?: SubagentRuntimeHost })._subagentRuntimeHost = host;
+		// A rehydrated parent has no in-memory run; the daemon roster carries
+		// both the ledger-reconstructed row (sessionDir + registry status) and
+		// the live supervisor peer row (no sessionDir). The reconstruction row
+		// must win so the completed cloud child stays listed and deletable.
+		(root as unknown as { _agentMessageController?: unknown })._agentMessageController = {
+			listAgents: async () => ({
+				current: { activeSessionId: "parent-active-1", sessionId: "parent-session", sessionName: "parent" },
+				agents: [
+					{
+						activeSessionId: "sess_stub_5",
+						sessionId: "sess_stub_5",
+						sessionName: "recovered-kid",
+						runtimeKind: "subagent",
+						parentActiveSessionId: "parent-active-1",
+						rlmChildId: "sess_stub_5",
+						sessionDir: "/sessions",
+						rlmChildRegistryStatus: "completed",
+						cwd: "/repo",
+						status: "inactive",
+					},
+					{
+						activeSessionId: "cloud-active-stub-5",
+						sessionId: "sess_stub_5",
+						sessionName: "recovered-kid",
+						runtimeKind: "subagent",
+						parentActiveSessionId: "parent-active-1",
+						rlmChildId: "sess_stub_5",
+						cwd: "/repo",
+						status: "idle",
+					},
+				],
+			}),
+		};
+		const listed = await root.listRlmSubagents();
+		expect(listed.subagents).toEqual([
+			expect.objectContaining({
+				rlm_child_id: "sess_stub_5",
+				active_session_id: "sess_stub_5",
+				session_name: "recovered-kid",
+				session_dir: "/sessions",
+				status: "completed",
+			}),
+		]);
+
+		const deleted = await root.deleteRlmSubagent("recovered-kid");
+		expect(deleted.subagent.rlm_child_id).toBe("sess_stub_5");
+		expect(hostDeletes).toEqual([{ childId: "sess_stub_5", session: undefined }]);
+		expect((await root.listRlmSubagents()).subagents).toEqual([]);
 	});
 });
 

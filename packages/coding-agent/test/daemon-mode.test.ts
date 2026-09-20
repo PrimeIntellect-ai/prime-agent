@@ -8,6 +8,7 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	renameSync,
 	rmSync,
 	statSync,
@@ -33,6 +34,7 @@ import type { AgentObserveController } from "../src/core/agent-observe.js";
 import type { CreateAgentSessionRuntimeFactory } from "../src/core/agent-session-runtime.js";
 import { installAgentTraceUpload } from "../src/core/agent-traces.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
+import { ShadowSessionWriter } from "../src/core/cloud/shadow-session-writer.js";
 import { type AgentCronJob, AgentCronJobStore } from "../src/core/cron-jobs.js";
 import { PRIME_AGENT_TRACES_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import {
@@ -2246,6 +2248,203 @@ describe("daemon mode helpers", () => {
 			}),
 		).rejects.toThrow("Unknown active session: deleted-child");
 		expect(sendRemoteAgentSessionMessage).toHaveBeenCalledWith(source, "deleted-child", "continue");
+	});
+
+	it("retains a completed cloud child through ledger reconstruction: listed, messaged, and deleted through the supervisor", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-cloud-retention-"));
+		const previousSupervisorSocket = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+		process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = join(tempDir, "supervisor.sock");
+		try {
+			const sessionsDir = join(tempDir, "sessions");
+			const parentManager = SessionManager.create(tempDir, sessionsDir);
+			parentManager.newSession();
+			parentManager.appendSessionInfo("parent");
+			parentManager.flushNow();
+			const parentFile = parentManager.getSessionFile();
+			if (!parentFile) throw new Error("Missing parent session file");
+			// A completed cloud child's durable retention: the real cloud shadow
+			// transcript under its ledger edge.
+			const cloudKid = "sess_cloud_retained_1";
+			const shadowFile = join(sessionsDir, `${cloudKid}.jsonl`);
+			ShadowSessionWriter.openOrCreate({
+				sessionFile: shadowFile,
+				sessionId: cloudKid,
+				cwd: tempDir,
+				cloudSessionId: cloudKid,
+				generation: 1,
+			});
+			const createRuntime = vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => ({
+				session: {
+					...makeRuntimeSession(options.sessionManager),
+					isSessionActive: false,
+					isStreaming: false,
+					isCompacting: false,
+					isRetrying: false,
+					hasAcceptedPromptInFlight: false,
+					hasRunningRlmChildren: () => false,
+					getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
+					state: { pendingToolCalls: new Set(), streamingMessage: undefined },
+					thinkingLevel: "off",
+				} as unknown as Awaited<ReturnType<CreateAgentSessionRuntimeFactory>>["session"],
+				extensionsResult: { extensions: [], errors: [], runtime: {} } as unknown as Awaited<
+					ReturnType<CreateAgentSessionRuntimeFactory>
+				>["extensionsResult"],
+				services: { cwd: options.cwd, agentDir: options.agentDir } as Awaited<
+					ReturnType<CreateAgentSessionRuntimeFactory>
+				>["services"],
+				diagnostics: [],
+			}));
+			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: sessionsDir },
+				createRuntime,
+				worker: { authenticationToken: "worker-token" },
+			});
+			const internals = daemon as unknown as {
+				sessions: Map<string, ActiveSessionState>;
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				createSubagentRuntimeHost(parentState: ActiveSessionState): SubagentRuntimeHost;
+				listPassiveRlmSubagents(): Promise<
+					Array<{
+						entry: {
+							childId: string;
+							sessionDir: string;
+							status: string;
+							cloudSessionId?: string;
+						};
+						info: { id: string };
+					}>
+				>;
+				createAgentMessageController(
+					getCurrentState: () => ActiveSessionState | undefined,
+				): AgentSessionMessageController;
+				resolveSupervisorCloudChildTarget(selector: string): Promise<unknown>;
+				listSupervisorAgentPeers(): Promise<
+					Array<{
+						activeSessionId: string;
+						sessionId: string;
+						sessionName: string;
+						runtimeKind: string;
+						rlmChildId: string;
+					}>
+				>;
+				sendRemoteAgentSessionMessage(
+					fromState: ActiveSessionState,
+					targetSelector: string,
+					message: string,
+				): Promise<unknown>;
+				requestSupervisorDaemon(command: DaemonCommand, timeoutMs?: number): Promise<unknown>;
+				sendAgentSessionMessage(options: {
+					targetSelector: string;
+					message: string;
+					fromState: ActiveSessionState;
+					origin: "agent";
+				}): Promise<unknown>;
+			};
+			const parentState = await internals.createRuntime({ type: "create", sessionPath: parentFile });
+			const ledger = new RlmSpawnLedger(tempDir, sessionsDir);
+			await ledger.appendSpawn({
+				childId: cloudKid,
+				parent: parentFile,
+				child: shadowFile,
+				depth: 1,
+				name: "cloud-kid",
+			});
+
+			// Ledger reconstruction after worker recycling: the cloud shadow
+			// walks as a completed child carrying its cloud session id, and
+			// no shared display file is written into the sessions dir. The
+			// ledger stores realpath-canonical child paths.
+			const realSessionsDir = realpathSync(sessionsDir);
+			const passive = (await internals.listPassiveRlmSubagents()).find(
+				(candidate) => candidate.entry.childId === cloudKid,
+			);
+			expect(passive).toMatchObject({
+				entry: {
+					childId: cloudKid,
+					sessionDir: realSessionsDir,
+					status: "completed",
+					cloudSessionId: cloudKid,
+				},
+				info: { id: cloudKid },
+			});
+			const listed = (await internals.createAgentMessageController(() => parentState).listAgents()).agents.find(
+				(agent) => agent.rlmChildId === cloudKid,
+			);
+			expect(listed).toMatchObject({
+				runtimeKind: "subagent",
+				parentActiveSessionId: parentState.activeSessionId,
+				sessionName: "cloud-kid",
+				sessionDir: realSessionsDir,
+				rlmChildRegistryStatus: "completed",
+			});
+			expect(existsSync(join(sessionsDir, "rlm-subagent.json"))).toBe(false);
+
+			// Messaging every stable selector routes to the live supervisor row
+			// with an admission-gated receipt, never through a locally hydrated
+			// shadow: no child runtime is created and no ghost session registers.
+			const peerRow = {
+				activeSessionId: "cloud-active-kid-1",
+				sessionId: cloudKid,
+				sessionName: "cloud-kid",
+				runtimeKind: "subagent",
+				rlmChildId: cloudKid,
+			};
+			internals.listSupervisorAgentPeers = async () => [peerRow];
+			const sendRemoteAgentSessionMessage = vi.fn(async () => ({ deliveryStatus: "delivered" }));
+			internals.sendRemoteAgentSessionMessage = sendRemoteAgentSessionMessage;
+			const sessionsBefore = internals.sessions.size;
+			for (const selector of ["cloud-kid", cloudKid, "cloud-active-kid-1"]) {
+				sendRemoteAgentSessionMessage.mockClear();
+				await expect(
+					internals.sendAgentSessionMessage({
+						targetSelector: selector,
+						message: "follow up",
+						fromState: parentState,
+						origin: "agent",
+					}),
+				).resolves.toMatchObject({ deliveryStatus: "delivered" });
+				expect(sendRemoteAgentSessionMessage).toHaveBeenCalledWith(parentState, "cloud-active-kid-1", "follow up");
+			}
+			expect(createRuntime).toHaveBeenCalledTimes(1);
+			expect(internals.sessions.size).toBe(sessionsBefore);
+
+			// A dead row (stopped sandbox) refuses honestly instead of waking a
+			// local worker over the supervisor-owned shadow transcript.
+			internals.listSupervisorAgentPeers = async () => [];
+			sendRemoteAgentSessionMessage.mockClear();
+			await expect(
+				internals.sendAgentSessionMessage({
+					targetSelector: "cloud-kid",
+					message: "follow up",
+					fromState: parentState,
+					origin: "agent",
+				}),
+			).rejects.toThrow("has no live supervisor row");
+			expect(sendRemoteAgentSessionMessage).not.toHaveBeenCalled();
+			expect(createRuntime).toHaveBeenCalledTimes(1);
+
+			// Explicit delete after recycling routes to the supervisor's cloud
+			// row delete (sandbox stop, ledger edge, roster row) instead of the
+			// local display/registry path.
+			const requestSupervisorDaemon = vi.fn(async () => ({}));
+			internals.requestSupervisorDaemon = requestSupervisorDaemon;
+			await internals.createSubagentRuntimeHost(parentState).deleteRlmSubagentRuntime(cloudKid, undefined);
+			expect(requestSupervisorDaemon).toHaveBeenCalledWith(
+				{
+					type: "delete_rlm_subagent",
+					activeSessionId: cloudKid,
+					childId: cloudKid,
+				},
+				60_000,
+			);
+			// The supervisor delete owns the ledger edge; the worker never
+			// writes a shared display tombstone for a cloud child.
+			expect(existsSync(join(sessionsDir, "rlm-subagent.json"))).toBe(false);
+		} finally {
+			if (previousSupervisorSocket === undefined) delete process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+			else process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = previousSupervisorSocket;
+			rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("rejects invalid nonresident agent messages before remote fallback", async () => {
