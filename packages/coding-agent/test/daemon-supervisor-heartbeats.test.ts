@@ -8,6 +8,7 @@ import {
 	DaemonSupervisor,
 	HEARTBEAT_LIST_FORWARD_TIMEOUT_MS,
 	HEARTBEAT_LIST_LAUNCH_WAIT_MS,
+	WORKER_HEARTBEAT_SNAPSHOT_MAX_AGE_MS,
 } from "../src/modes/daemon/daemon-supervisor.js";
 
 interface SupervisorHarness {
@@ -37,7 +38,22 @@ function createSupervisorHarness(): SupervisorHarness {
 	}) as unknown as SupervisorHarness;
 }
 
-function worker(lifecycle: "starting" | "ready" | "recovering" | "failed", connected = true) {
+async function flushAsyncWork(): Promise<void> {
+	await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function worker(
+	lifecycle: "starting" | "ready" | "recovering" | "failed",
+	connected = true,
+): {
+	descriptor: { lifecycle: "starting" | "ready" | "recovering" | "failed" };
+	client?: {};
+	heartbeatSnapshot?: Array<{ job: { id: string } }>;
+	heartbeatSnapshotStale?: boolean;
+	heartbeatSnapshotAt?: number;
+	heartbeatSnapshotRefresh?: Promise<void>;
+	heartbeatSnapshotRefreshQueued?: boolean;
+} {
 	return {
 		descriptor: { lifecycle },
 		...(connected ? { client: {} } : {}),
@@ -235,7 +251,10 @@ describe("daemon supervisor heartbeat aggregation", () => {
 			success: true,
 			data: { heartbeats: [{ job: { id: "heartbeat-1" } }, { job: { id: "heartbeat-2" } }] },
 		});
-		expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(3);
+		// The second list serves both workers from their cached snapshots: the
+		// recovering worker keeps its last complete one, and the healthy worker
+		// is not re-forwarded per request.
+		expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(2);
 	});
 
 	it("returns a worker failure instead of a partial catalog", async () => {
@@ -351,5 +370,142 @@ describe("daemon supervisor heartbeat aggregation", () => {
 			expect.objectContaining({ type: "heartbeat_manage", jobId: "heartbeat-1" }),
 		);
 		expect(target.heartbeatSnapshot).toEqual([]);
+	});
+
+	it("does not fan out to workers on repeated lists", async () => {
+		const supervisor = createSupervisorHarness();
+		const first = worker("ready");
+		const second = worker("ready");
+		supervisor.workers.set("first", first);
+		supervisor.workers.set("second", second);
+		supervisor.forwardToWorker = vi.fn(async (target, command) =>
+			success(command.id, command.type, {
+				heartbeats: [{ job: { id: target === first ? "heartbeat-1" : "heartbeat-2" } }],
+			}),
+		);
+
+		const firstList = await supervisor.handleCommand({} as DaemonSocketClient, {
+			id: "list-1",
+			type: "heartbeats_list",
+		});
+		expect(firstList).toMatchObject({
+			success: true,
+			data: { heartbeats: [{ job: { id: "heartbeat-1" } }, { job: { id: "heartbeat-2" } }] },
+		});
+		expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(2);
+
+		for (const id of ["list-2", "list-3"]) {
+			const repeat = await supervisor.handleCommand({} as DaemonSocketClient, { id, type: "heartbeats_list" });
+			expect(repeat).toMatchObject({
+				success: true,
+				data: { heartbeats: [{ job: { id: "heartbeat-1" } }, { job: { id: "heartbeat-2" } }] },
+			});
+		}
+		// One forward per worker populated its snapshot; repeated lists served from the cache.
+		expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(2);
+	});
+
+	it("refreshes only the worker that reported heartbeats_changed", async () => {
+		const supervisor = createSupervisorHarness();
+		const first = worker("ready");
+		const second = worker("ready");
+		supervisor.workers.set("first", first);
+		supervisor.workers.set("second", second);
+		let secondHeartbeatId = "heartbeat-2";
+		supervisor.forwardToWorker = vi.fn(async (target, command) =>
+			success(command.id, command.type, {
+				heartbeats: [{ job: { id: target === first ? "heartbeat-1" : secondHeartbeatId } }],
+			}),
+		);
+
+		await supervisor.handleCommand({} as DaemonSocketClient, { id: "list-1", type: "heartbeats_list" });
+		expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(2);
+
+		secondHeartbeatId = "heartbeat-2-updated";
+		supervisor.handleWorkerFrame(second, {
+			header: { kind: "outbound", outboundType: "heartbeats_changed" },
+			payload: Buffer.alloc(0),
+		});
+		await flushAsyncWork();
+
+		// Only the reporting worker was re-forwarded, once.
+		expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(3);
+		expect(supervisor.forwardToWorker).toHaveBeenLastCalledWith(
+			second,
+			expect.objectContaining({ type: "heartbeats_list" }),
+			5000,
+		);
+
+		const updated = await supervisor.handleCommand({} as DaemonSocketClient, {
+			id: "list-2",
+			type: "heartbeats_list",
+		});
+		expect(updated).toMatchObject({
+			success: true,
+			data: {
+				heartbeats: [{ job: { id: "heartbeat-1" } }, { job: { id: "heartbeat-2-updated" } }],
+			},
+		});
+		expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(3);
+	});
+
+	it("coalesces a burst of heartbeats_changed frames into one refresh pass", async () => {
+		const supervisor = createSupervisorHarness();
+		const target = worker("ready");
+		supervisor.workers.set("target", target);
+		supervisor.forwardToWorker = vi.fn(async (_worker, command) =>
+			success(command.id, command.type, { heartbeats: [{ job: { id: "heartbeat-1" } }] }),
+		);
+
+		await supervisor.handleCommand({} as DaemonSocketClient, { id: "list-1", type: "heartbeats_list" });
+		expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(1);
+
+		for (let frame = 0; frame < 3; frame++) {
+			supervisor.handleWorkerFrame(target, {
+				header: { kind: "outbound", outboundType: "heartbeats_changed" },
+				payload: Buffer.alloc(0),
+			});
+		}
+		await flushAsyncWork();
+
+		// Three frames in one burst collapse into the in-flight refresh plus at
+		// most one trailing pass, not one forward per frame: one populate
+		// forward plus two burst forwards.
+		expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(3);
+		expect(target.heartbeatSnapshotStale).toBe(false);
+	});
+
+	it("refreshes an aged worker snapshot in the background while serving it", async () => {
+		vi.useFakeTimers();
+		try {
+			const supervisor = createSupervisorHarness();
+			const target = worker("ready");
+			supervisor.workers.set("target", target);
+			let heartbeatId = "heartbeat-1";
+			supervisor.forwardToWorker = vi.fn(async (_worker, command) =>
+				success(command.id, command.type, { heartbeats: [{ job: { id: heartbeatId } }] }),
+			);
+
+			await supervisor.handleCommand({} as DaemonSocketClient, { id: "list-1", type: "heartbeats_list" });
+			expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(1);
+
+			// A missed frame cannot pin stale data forever: past the age bound the
+			// next list serves the cached rows and refreshes in the background.
+			heartbeatId = "heartbeat-1-updated";
+			await vi.advanceTimersByTimeAsync(WORKER_HEARTBEAT_SNAPSHOT_MAX_AGE_MS);
+			const served = await supervisor.handleCommand({} as DaemonSocketClient, {
+				id: "list-2",
+				type: "heartbeats_list",
+			});
+			expect(served).toMatchObject({
+				success: true,
+				data: { heartbeats: [{ job: { id: "heartbeat-1" } }] },
+			});
+			await vi.advanceTimersByTimeAsync(0);
+			expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(2);
+			expect(target.heartbeatSnapshot).toEqual([{ job: { id: "heartbeat-1-updated" } }]);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

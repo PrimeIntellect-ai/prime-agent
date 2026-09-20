@@ -1,0 +1,1 @@
+- Stopped fanning supervisor heartbeat lists and scheduled-job wake recomputes out to every worker and client: worker heartbeat snapshots now refresh per reporting worker, the wake timer arms from a cached aggregate, and heartbeats_changed pushes only reach clients that track heartbeats.

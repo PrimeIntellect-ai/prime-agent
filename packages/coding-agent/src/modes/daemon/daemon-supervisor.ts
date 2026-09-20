@@ -212,6 +212,11 @@ export const HEARTBEAT_LIST_FORWARD_TIMEOUT_MS = 25_000;
 // (stale-while-revalidate) so external artifact writes converge without ever
 // blocking a catalog response behind a fresh saved-session disk scan.
 const PASSIVE_SCHEDULED_JOBS_REFRESH_MS = 5_000;
+// A live worker's cached heartbeat snapshot older than this refreshes in the
+// background on the next list (stale-while-revalidate): heartbeats_changed
+// frames are the primary freshness signal, so an age bound only exists to
+// keep a missed frame from pinning stale data forever.
+export const WORKER_HEARTBEAT_SNAPSHOT_MAX_AGE_MS = 60_000;
 const INPUT_PAUSE_CLEANUP_TIMEOUT_MS = 5_000;
 const UPDATE_RESTART_MUTATION_DRAIN_TIMEOUT_MS = 80_000;
 const UPDATE_RESTART_WORKER_REQUEST_TIMEOUT_MS = 90_000;
@@ -367,6 +372,11 @@ interface ResidentWorker {
 	client?: DaemonWorkerClient;
 	heartbeatSnapshot?: AgentConnectionHeartbeat[];
 	heartbeatSnapshotStale?: boolean;
+	heartbeatSnapshotAt?: number;
+	/** In-flight targeted heartbeat-snapshot refresh; frames and lists join it. */
+	heartbeatSnapshotRefresh?: Promise<void>;
+	/** A heartbeats_changed frame arrived mid-refresh: refresh once more before settling. */
+	heartbeatSnapshotRefreshQueued?: boolean;
 	summaries: Map<string, SessionSummary>;
 	snapshotCache: Map<string, DaemonAttachResult>;
 	transcriptCaches: Map<string, SnapshotTranscriptCache>;
@@ -1077,6 +1087,92 @@ export class DaemonSupervisor {
 		this.claimPassiveScheduledJobsEpoch();
 		this.passiveScheduledJobs = undefined;
 		this.passiveScheduledJobsScan = undefined;
+	}
+
+	/**
+	 * Serving source for a fleet-wide heartbeats_list: the supervisor keeps each
+	 * live worker's last complete heartbeat snapshot and refreshes ONE worker at
+	 * a time when it reports heartbeats_changed, so repeated lists no longer fan
+	 * out to every worker. A fresh snapshot serves immediately (an aged one
+	 * refreshes in the background); a missing or frame-marked snapshot forwards
+	 * to that worker only. Workers that cannot answer keep today's
+	 * snapshot-or-state-error semantics: a list fails rather than serving a
+	 * partial catalog.
+	 */
+	private async workerHeartbeatsForList(
+		worker: ResidentWorker,
+		command: Extract<DaemonCommand, { type: "heartbeats_list" }>,
+	): Promise<{ heartbeats?: AgentConnectionHeartbeat[]; response?: DaemonResponse }> {
+		if (worker.client && worker.descriptor.lifecycle === "ready") {
+			if (worker.heartbeatSnapshot !== undefined && worker.heartbeatSnapshotStale !== true) {
+				this.maybeRefreshAgedWorkerHeartbeatSnapshot(worker);
+				return { heartbeats: worker.heartbeatSnapshot };
+			}
+			try {
+				await this.refreshWorkerHeartbeatSnapshot(worker);
+			} catch (error: unknown) {
+				return { response: failure(command.id, command.type, error, serializeDaemonError(error)) };
+			}
+			if (worker.heartbeatSnapshot !== undefined && worker.heartbeatSnapshotStale !== true) {
+				return { heartbeats: worker.heartbeatSnapshot };
+			}
+		}
+		if (worker.heartbeatSnapshot !== undefined && worker.heartbeatSnapshotStale !== true) {
+			return { heartbeats: worker.heartbeatSnapshot };
+		}
+		const state = worker.descriptor.lifecycle === "ready" ? "disconnected" : worker.descriptor.lifecycle;
+		const error = new Error(`Cannot list heartbeats while session worker is ${state}`);
+		return { response: failure(command.id, command.type, error, serializeDaemonError(error)) };
+	}
+
+	/**
+	 * Targeted, coalesced snapshot refresh for one worker: frames and lists join
+	 * the in-flight refresh, and a frame that arrives mid-refresh queues exactly
+	 * one trailing pass. Forward failures surface to a waiting list and leave
+	 * the stale snapshot untouched for background retries.
+	 */
+	private refreshWorkerHeartbeatSnapshot(worker: ResidentWorker): Promise<void> {
+		const inFlight = worker.heartbeatSnapshotRefresh;
+		if (inFlight) {
+			worker.heartbeatSnapshotRefreshQueued = true;
+			return inFlight;
+		}
+		const refresh = this.runWorkerHeartbeatSnapshotRefresh(worker);
+		const wrapper = refresh.finally(() => {
+			if (worker.heartbeatSnapshotRefresh === wrapper) {
+				worker.heartbeatSnapshotRefresh = undefined;
+			}
+		});
+		worker.heartbeatSnapshotRefresh = wrapper;
+		return wrapper;
+	}
+
+	private async runWorkerHeartbeatSnapshotRefresh(worker: ResidentWorker): Promise<void> {
+		while (true) {
+			worker.heartbeatSnapshotRefreshQueued = false;
+			if (worker.client && worker.descriptor.lifecycle === "ready") {
+				const response = await this.forwardToWorker(worker, { type: "heartbeats_list" }, 5000).catch(
+					(error: unknown) => failure(undefined, "heartbeats_list", error, serializeDaemonError(error)),
+				);
+				if (response.success) {
+					worker.heartbeatSnapshot = heartbeatsFromResponse(response);
+					worker.heartbeatSnapshotStale = false;
+					worker.heartbeatSnapshotAt = Date.now();
+				} else {
+					this.log(`Could not list heartbeats from a worker: ${response.error}`);
+					throw new Error(String(response.error));
+				}
+			}
+			if (!worker.heartbeatSnapshotRefreshQueued) return;
+		}
+	}
+
+	/** Stale-while-revalidate for served worker snapshots: a missed frame cannot pin stale data forever. */
+	private maybeRefreshAgedWorkerHeartbeatSnapshot(worker: ResidentWorker): void {
+		if (worker.heartbeatSnapshotRefresh || Date.now() - (worker.heartbeatSnapshotAt ?? 0) < WORKER_HEARTBEAT_SNAPSHOT_MAX_AGE_MS) {
+			return;
+		}
+		void this.refreshWorkerHeartbeatSnapshot(worker).catch(() => undefined);
 	}
 
 	/** The uncached disk scan; all statuses load so one row set serves every caller's filter. */
@@ -2487,32 +2583,7 @@ export class DaemonSupervisor {
 				);
 				const heartbeats = new Map<string, AgentConnectionHeartbeat>();
 				const snapshots: Array<{ heartbeats?: AgentConnectionHeartbeat[]; response?: DaemonResponse }> =
-					await Promise.all(
-						workers.map(async (worker) => {
-							if (worker.client && worker.descriptor.lifecycle === "ready") {
-								const response = await this.forwardToWorker(worker, command, 5000).catch((error: unknown) =>
-									failure(command.id, command.type, error, serializeDaemonError(error)),
-								);
-								if (response.success) {
-									const snapshot = heartbeatsFromResponse(response);
-									worker.heartbeatSnapshot = snapshot;
-									worker.heartbeatSnapshotStale = false;
-									return { heartbeats: snapshot };
-								}
-								this.log(`Could not list heartbeats from a worker: ${response.error}`);
-								if (worker.heartbeatSnapshot === undefined || worker.heartbeatSnapshotStale === true) {
-									return { response };
-								}
-							}
-							if (worker.heartbeatSnapshot !== undefined && worker.heartbeatSnapshotStale !== true) {
-								return { heartbeats: worker.heartbeatSnapshot };
-							}
-							const state =
-								worker.descriptor.lifecycle === "ready" ? "disconnected" : worker.descriptor.lifecycle;
-							const error = new Error(`Cannot list heartbeats while session worker is ${state}`);
-							return { response: failure(command.id, command.type, error, serializeDaemonError(error)) };
-						}),
-					);
+					await Promise.all(workers.map((worker) => this.workerHeartbeatsForList(worker, command)));
 				const failed = snapshots.find((snapshot) => snapshot.response)?.response;
 				if (failed) {
 					return failed;
@@ -5796,6 +5867,9 @@ export class DaemonSupervisor {
 		}
 		if (outboundType === "heartbeats_changed") {
 			worker.heartbeatSnapshotStale = true;
+			// The reporting worker's snapshot refreshes on its own: a fleet-wide
+			// list serves the other workers from their cached snapshots.
+			void this.refreshWorkerHeartbeatSnapshot(worker).catch(() => undefined);
 			this.broadcastHeartbeatsChanged();
 			return;
 		}
