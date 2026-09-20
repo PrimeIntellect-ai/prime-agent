@@ -2630,6 +2630,20 @@ describe("DaemonAgentConnection", () => {
 			resumeCursor: { generation: "generation-new", sequence: 1 },
 		});
 	});
+
+	it("advertises the heartbeat_catalog capability on attach only when it tracks heartbeats", async () => {
+		const attach = async (tracksHeartbeats?: boolean) => {
+			const client = new FakeDaemonClient();
+			const connection = await DaemonAgentConnection.attach(asDaemonClient(client), "active-1", {
+				closeClientOnDispose: true,
+				tracksHeartbeats,
+			});
+			await connection.dispose();
+			return client.requests.find((request) => request.type === "attach") as { capabilities?: string[] };
+		};
+		expect((await attach(true)).capabilities).toContain("heartbeat_catalog");
+		expect((await attach()).capabilities).not.toContain("heartbeat_catalog");
+	});
 });
 
 const DEFERRAL_EVENT_BASE_SEQUENCE = 13;

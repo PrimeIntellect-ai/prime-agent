@@ -10,6 +10,7 @@ import {
 	DaemonSupervisor,
 	HEARTBEAT_LIST_FORWARD_TIMEOUT_MS,
 	HEARTBEAT_LIST_LAUNCH_WAIT_MS,
+	HEARTBEATS_CHANGED_COALESCE_MS,
 	WORKER_HEARTBEAT_SNAPSHOT_MAX_AGE_MS,
 } from "../src/modes/daemon/daemon-supervisor.js";
 
@@ -21,10 +22,12 @@ interface PassiveScheduledJobRow {
 
 interface SupervisorHarness {
 	workers: Map<string, unknown>;
+	clients: Set<{ socket: { destroyed: boolean; write: ReturnType<typeof vi.fn> }; tracksHeartbeats?: boolean }>;
 	openingWorkers: Map<string, Promise<unknown>>;
 	catalogOpeningWorkers: Map<string, Promise<unknown>>;
 	passiveScheduledJobs?: { rows: PassiveScheduledJobRow[]; scannedAt: number };
 	findWorkerForClient(client: DaemonSocketClient, selector: string): Promise<{ worker: unknown }>;
+	attachClient(client: unknown, command: unknown): Promise<unknown>;
 	forwardToWorker(worker: unknown, command: DaemonCommand, timeoutMs?: number): Promise<DaemonResponse>;
 	handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<DaemonResponse | undefined>;
 	handleWorkerFrame(worker: unknown, frame: unknown): void;
@@ -769,5 +772,121 @@ describe("daemon supervisor passive scheduled-jobs snapshot", () => {
 		// A restart on the same worker object must not serve the previous
 		// incarnation's snapshot as fresh for the age bound.
 		expect(restarted.heartbeatSnapshotStale).toBe(true);
+	});
+});
+
+describe("daemon supervisor heartbeats_changed delivery", () => {
+	function socketClient(): {
+		socket: { destroyed: boolean; write: ReturnType<typeof vi.fn> };
+		tracksHeartbeats?: boolean;
+	} {
+		return { socket: { destroyed: false, write: vi.fn(() => true) } };
+	}
+
+	function heartbeatsChangedWrites(client: { socket: { write: ReturnType<typeof vi.fn> } }): string[] {
+		return client.socket.write.mock.calls
+			.map((args) => String(args[0]))
+			.filter((line) => line.includes('"type":"heartbeats_changed"'));
+	}
+
+	it("marks clients as tracking on scheduled-job commands", async () => {
+		const supervisor = createSupervisorHarness();
+		const tracked = socketClient();
+		const other = socketClient();
+
+		await supervisor.handleCommand(tracked as never, { id: "list-1", type: "heartbeats_list" });
+		await supervisor.handleCommand(tracked as never, { id: "cron-1", type: "cron_list" });
+
+		expect(tracked.tracksHeartbeats).toBe(true);
+		expect(other.tracksHeartbeats).toBeUndefined();
+	});
+
+	it("delivers heartbeats_changed only to clients that track heartbeats", async () => {
+		vi.useFakeTimers();
+		try {
+			const supervisor = createSupervisorHarness();
+			const tracked = socketClient();
+			const other = socketClient();
+			supervisor.clients.add(tracked);
+			supervisor.clients.add(other);
+			await supervisor.handleCommand(tracked as never, { id: "list-1", type: "heartbeats_list" });
+			const target = worker("ready");
+			supervisor.workers.set("target", target);
+
+			supervisor.handleWorkerFrame(target, {
+				header: { kind: "outbound", outboundType: "heartbeats_changed" },
+				payload: Buffer.alloc(0),
+			});
+			await vi.advanceTimersByTimeAsync(HEARTBEATS_CHANGED_COALESCE_MS);
+
+			expect(heartbeatsChangedWrites(tracked)).toHaveLength(1);
+			expect(heartbeatsChangedWrites(other)).toHaveLength(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("coalesces a burst of mutations into one broadcast", async () => {
+		vi.useFakeTimers();
+		try {
+			const supervisor = createSupervisorHarness();
+			const tracked = socketClient();
+			supervisor.clients.add(tracked);
+			await supervisor.handleCommand(tracked as never, { id: "list-1", type: "heartbeats_list" });
+			const target = worker("ready");
+			supervisor.workers.set("target", target);
+
+			for (let frame = 0; frame < 3; frame++) {
+				supervisor.handleWorkerFrame(target, {
+					header: { kind: "outbound", outboundType: "heartbeats_changed" },
+					payload: Buffer.alloc(0),
+				});
+			}
+			await vi.advanceTimersByTimeAsync(HEARTBEATS_CHANGED_COALESCE_MS);
+
+			// Three frames in the window collapse into one push, not one per frame.
+			expect(heartbeatsChangedWrites(tracked)).toHaveLength(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("marks clients that attach with the heartbeat_catalog capability and pushes to them", async () => {
+		vi.useFakeTimers();
+		try {
+			const supervisor = createSupervisorHarness();
+			// The ACP adapter attaches with the capability and never issues a
+			// scheduled-job command; the attach itself must opt it in.
+			supervisor.attachClient = vi.fn(async () => ({ result: { activeSessionId: "active-1" } })) as never;
+			const acp = socketClient();
+			const plain = socketClient();
+			await supervisor.handleCommand(acp as never, {
+				id: "attach-1",
+				type: "attach",
+				activeSessionId: "active-1",
+				capabilities: ["attach_snapshot", "event_sequence", "heartbeat_catalog"],
+			});
+			await supervisor.handleCommand(plain as never, {
+				id: "attach-2",
+				type: "attach",
+				activeSessionId: "active-1",
+				capabilities: ["attach_snapshot", "event_sequence"],
+			});
+			expect(acp.tracksHeartbeats).toBe(true);
+			expect(plain.tracksHeartbeats).toBeUndefined();
+
+			const target = worker("ready");
+			supervisor.workers.set("target", target);
+			supervisor.handleWorkerFrame(target, {
+				header: { kind: "outbound", outboundType: "heartbeats_changed" },
+				payload: Buffer.alloc(0),
+			});
+			await vi.advanceTimersByTimeAsync(HEARTBEATS_CHANGED_COALESCE_MS);
+
+			expect(heartbeatsChangedWrites(acp)).toHaveLength(1);
+			expect(heartbeatsChangedWrites(plain)).toHaveLength(0);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

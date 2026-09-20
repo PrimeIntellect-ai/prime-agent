@@ -217,6 +217,9 @@ const PASSIVE_SCHEDULED_JOBS_REFRESH_MS = 5_000;
 // frames are the primary freshness signal, so an age bound only exists to
 // keep a missed frame from pinning stale data forever.
 export const WORKER_HEARTBEAT_SNAPSHOT_MAX_AGE_MS = 60_000;
+// Mutation bursts (session opens recovering artifacts, worker boots, storms of
+// frames) collapse into one trailing heartbeats_changed write per client.
+export const HEARTBEATS_CHANGED_COALESCE_MS = 100;
 const INPUT_PAUSE_CLEANUP_TIMEOUT_MS = 5_000;
 const UPDATE_RESTART_MUTATION_DRAIN_TIMEOUT_MS = 80_000;
 const UPDATE_RESTART_WORKER_REQUEST_TIMEOUT_MS = 90_000;
@@ -364,6 +367,18 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"retry_worker",
 	"restart",
 	"shutdown",
+]);
+// Commands that prove a client tracks the scheduled-jobs catalog. Such clients
+// are the only recipients of heartbeats_changed pushes.
+const HEARTBEAT_TRACKING_COMMANDS: ReadonlySet<string> = new Set([
+	"cron_list",
+	"cron_add",
+	"cron_cancel",
+	"heartbeats_list",
+	"heartbeat_get",
+	"heartbeat_set",
+	"heartbeat_update",
+	"heartbeat_manage",
 ]);
 
 interface ResidentWorker {
@@ -796,6 +811,7 @@ export class DaemonSupervisor {
 	private idleEvictionTimer?: ReturnType<typeof setTimeout>;
 	private idleEvictionSweep?: Promise<void>;
 	private idleEvictionFence?: Promise<void>;
+	private heartbeatsChangedBroadcastTimer?: ReturnType<typeof setTimeout>;
 	private scheduledWakeTimer?: ReturnType<typeof setTimeout>;
 	private scheduledWakeRecompute?: Promise<void>;
 	private scheduledWakeRecomputeQueued = false;
@@ -2294,6 +2310,11 @@ export class DaemonSupervisor {
 		command: DaemonCommand,
 		cancellationAdmission?: SupervisorPromptAdmission,
 	): Promise<DaemonResponse | undefined> {
+		if (HEARTBEAT_TRACKING_COMMANDS.has(command.type)) {
+			// Scheduled-job clients consume heartbeats_changed pushes; everyone
+			// else (one-shot prompts, pure viewers) never hears them.
+			client.tracksHeartbeats = true;
+		}
 		switch (command.type) {
 			case "cancel_prompt_admission": {
 				const admission =
@@ -2390,6 +2411,12 @@ export class DaemonSupervisor {
 				return success(command.id, "create", this.publicSummary(worker, sessionSummaryFromRosterEntry(root)));
 			}
 			case "attach": {
+				// A client that declares the heartbeat_catalog capability opts into
+				// heartbeats_changed pushes: the ACP adapter attaches without ever
+				// issuing a scheduled-job command, but still acts on the frame.
+				if (command.capabilities?.includes("heartbeat_catalog")) {
+					client.tracksHeartbeats = true;
+				}
 				const attached = await this.attachClient(client, command);
 				if (client.capabilities.has("chunked_snapshot")) {
 					const transcript = attached.transcript;
@@ -2420,6 +2447,11 @@ export class DaemonSupervisor {
 				return success(command.id, "attach", attached.result);
 			}
 			case "reattach": {
+				// Same opt-in as attach: a reconnecting client keeps its push
+				// subscription without re-issuing a scheduled-job command.
+				if (command.capabilities?.includes("heartbeat_catalog")) {
+					client.tracksHeartbeats = true;
+				}
 				const target = await this.findWorkerForClient(client, command.targetActiveSessionId);
 				const targetActiveSessionId = target.summary.activeSessionId ?? target.summary.id;
 				if (targetActiveSessionId === command.activeSessionId) {
@@ -7321,9 +7353,36 @@ export class DaemonSupervisor {
 		this.notifyHeartbeatsChanged();
 	}
 
+	/**
+	 * heartbeats_changed is advisory: agents-view re-lists on a 15s interval as
+	 * well, and interactive mode refreshes its catalog on demand, so per
+	 * mutation no client needs a push. Deliver one trailing write per burst
+	 * window, and only to clients that have actually used a scheduled-job
+	 * command — one-shot prompt clients and passive viewers never hear one.
+	 */
 	private notifyHeartbeatsChanged(): void {
-		for (const client of this.clients) {
-			this.write(client, { type: "heartbeats_changed" });
+		if (this.shuttingDown || this.heartbeatsChangedBroadcastTimer) return;
+		this.heartbeatsChangedBroadcastTimer = setTimeout(() => {
+			this.heartbeatsChangedBroadcastTimer = undefined;
+			if (this.shuttingDown) return;
+			// A detached timer callback must never crash the supervisor: the
+			// push is advisory, so a delivery failure only logs.
+			try {
+				for (const client of this.clients) {
+					if (client.tracksHeartbeats !== true) continue;
+					this.write(client, { type: "heartbeats_changed" });
+				}
+			} catch (error) {
+				this.log(`Could not deliver heartbeats_changed: ${String(error)}`);
+			}
+		}, HEARTBEATS_CHANGED_COALESCE_MS);
+		this.heartbeatsChangedBroadcastTimer.unref?.();
+	}
+
+	private clearHeartbeatsChangedBroadcast(): void {
+		if (this.heartbeatsChangedBroadcastTimer) {
+			clearTimeout(this.heartbeatsChangedBroadcastTimer);
+			this.heartbeatsChangedBroadcastTimer = undefined;
 		}
 	}
 
@@ -7417,6 +7476,7 @@ export class DaemonSupervisor {
 	private async cleanupSupervisorResourcesOnce(): Promise<void> {
 		this.shuttingDown = true;
 		this.clearIdleEvictionTimer();
+		this.clearHeartbeatsChangedBroadcast();
 		this.clearScheduledWakeTimer();
 		this.clearRosterWatchdogTimer();
 		await this.idleEvictionSweep?.catch(() => undefined);
@@ -7519,6 +7579,7 @@ export class DaemonSupervisor {
 		}
 		this.shuttingDown = true;
 		this.clearIdleEvictionTimer();
+		this.clearHeartbeatsChangedBroadcast();
 		this.clearScheduledWakeTimer();
 		this.clearRosterWatchdogTimer();
 		await this.idleEvictionSweep?.catch(() => undefined);

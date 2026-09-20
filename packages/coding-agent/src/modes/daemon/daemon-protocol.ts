@@ -94,7 +94,11 @@ export type DaemonClientCapability =
 	| "extension_ui"
 	| "slim_attach"
 	| "chunked_snapshot"
-	| "client_owned_sessions";
+	| "client_owned_sessions"
+	// Client declaration, not a command gate: attaching with it opts the client
+	// into heartbeats_changed pushes (the ACP adapter attaches without ever
+	// issuing a scheduled-job command).
+	| "heartbeat_catalog";
 export type DaemonPromptAdmissionCancellationStatus = "cancelled" | "owned" | "unknown";
 export interface DaemonPromptAdmissionCancellationResult {
 	status: DaemonPromptAdmissionCancellationStatus;
@@ -150,12 +154,12 @@ export const DAEMON_SUPPORTED_CLIENT_CAPABILITIES: readonly DaemonClientCapabili
 	"slim_attach",
 	"chunked_snapshot",
 	"client_owned_sessions",
+	"heartbeat_catalog",
 ];
 
 export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability[] = [
 	...DAEMON_SUPPORTED_CLIENT_CAPABILITIES,
 	"delete_rlm_subagent",
-	"heartbeat_catalog",
 	"heartbeat_management",
 	"model_catalog",
 	"side_question_transcript",
