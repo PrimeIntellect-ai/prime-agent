@@ -1677,7 +1677,6 @@ describe("daemon worker supervisor monitoring", () => {
 			persistWorkerStopTombstone: vi.fn(),
 			deleteWorkerDescriptor,
 			broadcastHeartbeatsChanged: vi.fn(),
-			onWorkerResidencyGained: vi.fn(),
 			findWorkerForClient: vi.fn(async () => ({
 				worker,
 				summary: worker.summaries.get("root-active"),
@@ -2299,7 +2298,6 @@ describe("daemon worker supervisor monitoring", () => {
 			recoverWorker,
 			persistWorker,
 			broadcastHeartbeatsChanged: vi.fn(),
-			onWorkerResidencyGained: vi.fn(),
 			log: vi.fn(),
 		}) as {
 			adoptOrRecoverWorker(worker: AdoptionWorker): Promise<void>;
@@ -2429,7 +2427,6 @@ describe("daemon worker supervisor monitoring", () => {
 			launchWorker: vi.fn(async () => worker),
 			persistWorker: vi.fn(),
 			broadcastHeartbeatsChanged: vi.fn(),
-			onWorkerResidencyGained: vi.fn(),
 			deferWorkerRecovery: vi.fn(),
 			log: vi.fn(),
 			assertRecoveryAllowed: vi.fn(async () => {}),
@@ -2880,7 +2877,6 @@ describe("daemon worker supervisor monitoring", () => {
 			}),
 			deleteWorkerDescriptor: vi.fn(),
 			broadcastHeartbeatsChanged: vi.fn(),
-			onWorkerResidencyGained: vi.fn(),
 			log: vi.fn(),
 			reportCleanupFailure: vi.fn(),
 		}) as unknown as {
@@ -2939,7 +2935,6 @@ describe("daemon worker supervisor monitoring", () => {
 			}),
 			deleteWorkerDescriptor: vi.fn(),
 			broadcastHeartbeatsChanged: vi.fn(),
-			onWorkerResidencyGained: vi.fn(),
 			log: vi.fn(),
 			reportCleanupFailure: vi.fn(),
 		}) as unknown as {
@@ -2991,7 +2986,6 @@ describe("daemon worker supervisor monitoring", () => {
 			persistWorkerStopTombstone: vi.fn(),
 			scheduleWorkerStopFinalization: vi.fn(),
 			broadcastHeartbeatsChanged: vi.fn(),
-			onWorkerResidencyGained: vi.fn(),
 		}) as unknown as {
 			stopWorker(target: object, removeDescriptor: boolean, force?: boolean): Promise<void>;
 			scheduleWorkerStopFinalization: ReturnType<typeof vi.fn>;

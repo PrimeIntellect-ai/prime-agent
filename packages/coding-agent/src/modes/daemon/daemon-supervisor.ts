@@ -2793,7 +2793,7 @@ export class DaemonSupervisor {
 							passive.info.id,
 							getSessionArtifactPathForFile(resolve(passive.info.path), passive.info.id),
 						);
-						const heartbeat = store.manageHeartbeat(command.activeSessionId, command.jobId, command.action);
+						const heartbeat = await store.manageHeartbeat(command.activeSessionId, command.jobId, command.action);
 						if (heartbeat) {
 							this.onPassiveScheduledJobMutated(heartbeat);
 							return success(command.id, "heartbeat_manage", { heartbeat });
@@ -2863,7 +2863,7 @@ export class DaemonSupervisor {
 						passive.info.id,
 						getSessionArtifactPathForFile(resolve(passive.info.path), passive.info.id),
 					);
-					const job = store.cancel(command.jobId);
+					const job = await store.cancel(command.jobId);
 					if (job) {
 						this.onPassiveScheduledJobMutated(job);
 						return success(command.id, "cron_cancel", { job });
@@ -7231,7 +7231,7 @@ export class DaemonSupervisor {
 		if (worker.descriptor.rootSessionId) {
 			const cronStore = AgentCronJobStore.forSessionArtifacts();
 			cronStore.registerSessionArtifact(worker.descriptor.rootSessionId, context.artifactDir);
-			cronStore.cancelJobsForSession({
+			await cronStore.cancelJobsForSession({
 				sessionId: worker.descriptor.rootSessionId,
 				sessionFile: context.sessionFile,
 			});
@@ -7283,7 +7283,17 @@ export class DaemonSupervisor {
 		// Re-checked in the same synchronous turn as the walk: a promotion committed during the family read keeps its schedules.
 		if (stillWanted && !stillWanted()) return;
 		for (const { sessionFile } of sessions) {
-			store.cancelJobsForSession({ sessionFile });
+			// Each cancel yields on a lock, so a promotion can commit between
+			// cancels; re-check the intent and the member's coverage before
+			// every cancel so a stale intent never kills schedules a live
+			// worker now owns.
+			if (stillWanted && !stillWanted()) return;
+			try {
+				if (this.findWorkerBySessionFile(sessionFile, exclude)) return;
+			} catch {
+				return;
+			}
+			await store.cancelJobsForSession({ sessionFile });
 		}
 	}
 

@@ -33,7 +33,7 @@ interface SupervisorHarness {
 	handleWorkerFrame(worker: unknown, frame: unknown): void;
 	rlmSpawnLedger(): { family: (filename?: string) => Promise<SessionInfo[]> };
 	scheduleScheduledSessionWakeRecompute(): void;
-	onWorkerResidencyGained(): void;
+	onWorkerResidencyGained(worker: object): void;
 }
 
 const tempDirs: string[] = [];
@@ -67,13 +67,17 @@ function sessionInfoFor(path: string, id: string): SessionInfo {
 	};
 }
 
-function heartbeatIds(response: unknown): string[] {
-	const rows = (response as { data?: { heartbeats?: Array<{ job: { id: string } }> } })?.data?.heartbeats;
-	return (rows ?? []).map((heartbeat) => heartbeat.job.id);
+function passiveRow(sessionFile: string, id: string): PassiveScheduledJobRow {
+	return { rootSessionFile: sessionFile, job: { id, status: "active" }, info: sessionInfoFor(sessionFile, id) };
 }
 
+const HEARTBEATS_CHANGED_FRAME = {
+	header: { kind: "outbound" as const, outboundType: "heartbeats_changed" as const },
+	payload: Buffer.alloc(0),
+};
+
 async function flushAsyncWork(): Promise<void> {
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await new Promise((resolve) => setImmediate(resolve));
 }
 
 function worker(
@@ -84,9 +88,6 @@ function worker(
 	client?: object;
 	heartbeatSnapshot?: Array<{ job: { id: string } }>;
 	heartbeatSnapshotStale?: boolean;
-	heartbeatSnapshotAt?: number;
-	heartbeatSnapshotRefresh?: Promise<void>;
-	heartbeatSnapshotRefreshQueued?: boolean;
 } {
 	return {
 		descriptor: { lifecycle },
@@ -312,31 +313,6 @@ describe("daemon supervisor heartbeat aggregation", () => {
 		expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(2);
 	});
 
-	it("does not fall back to a snapshot after the worker reports heartbeat changes", async () => {
-		const supervisor = createSupervisorHarness();
-		const target = {
-			...worker("ready"),
-			heartbeatSnapshot: [{ job: { id: "heartbeat-1" } }],
-			heartbeatSnapshotStale: false,
-		};
-		supervisor.workers.set("target", target);
-		supervisor.forwardToWorker = vi.fn(async (_worker, command) =>
-			failure(command.id, command.type, "worker unavailable"),
-		);
-
-		supervisor.handleWorkerFrame(target, {
-			header: { kind: "outbound", outboundType: "heartbeats_changed" },
-			payload: Buffer.alloc(0),
-		});
-		const response = await supervisor.handleCommand({} as DaemonSocketClient, {
-			id: "list-stale",
-			type: "heartbeats_list",
-		});
-
-		expect(target.heartbeatSnapshotStale).toBe(true);
-		expect(response).toMatchObject({ success: false, error: "worker unavailable" });
-	});
-
 	it("fails rather than returning a partial catalog without a cached snapshot", async () => {
 		const supervisor = createSupervisorHarness();
 		supervisor.workers.set("ready", worker("ready"));
@@ -406,138 +382,59 @@ describe("daemon supervisor heartbeat aggregation", () => {
 		expect(target.heartbeatSnapshot).toEqual([]);
 	});
 
-	it("does not fan out to workers on repeated lists", async () => {
-		const supervisor = createSupervisorHarness();
-		const first = worker("ready");
-		const second = worker("ready");
-		supervisor.workers.set("first", first);
-		supervisor.workers.set("second", second);
-		supervisor.forwardToWorker = vi.fn(async (target, command) =>
-			success(command.id, command.type, {
-				heartbeats: [{ job: { id: target === first ? "heartbeat-1" : "heartbeat-2" } }],
-			}),
-		);
-
-		const firstList = await supervisor.handleCommand({} as DaemonSocketClient, {
-			id: "list-1",
-			type: "heartbeats_list",
-		});
-		expect(firstList).toMatchObject({
-			success: true,
-			data: { heartbeats: [{ job: { id: "heartbeat-1" } }, { job: { id: "heartbeat-2" } }] },
-		});
-		expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(2);
-
-		for (const id of ["list-2", "list-3"]) {
-			const repeat = await supervisor.handleCommand({} as DaemonSocketClient, { id, type: "heartbeats_list" });
-			expect(repeat).toMatchObject({
-				success: true,
-				data: { heartbeats: [{ job: { id: "heartbeat-1" } }, { job: { id: "heartbeat-2" } }] },
-			});
-		}
-		// One forward per worker populated its snapshot; repeated lists served from the cache.
-		expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(2);
-	});
-
-	it("refreshes only the worker that reported heartbeats_changed", async () => {
-		const supervisor = createSupervisorHarness();
-		const first = worker("ready");
-		const second = worker("ready");
-		supervisor.workers.set("first", first);
-		supervisor.workers.set("second", second);
-		let secondHeartbeatId = "heartbeat-2";
-		supervisor.forwardToWorker = vi.fn(async (target, command) =>
-			success(command.id, command.type, {
-				heartbeats: [{ job: { id: target === first ? "heartbeat-1" : secondHeartbeatId } }],
-			}),
-		);
-
-		await supervisor.handleCommand({} as DaemonSocketClient, { id: "list-1", type: "heartbeats_list" });
-		expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(2);
-
-		secondHeartbeatId = "heartbeat-2-updated";
-		supervisor.handleWorkerFrame(second, {
-			header: { kind: "outbound", outboundType: "heartbeats_changed" },
-			payload: Buffer.alloc(0),
-		});
-		await flushAsyncWork();
-
-		// Only the reporting worker was re-forwarded, once.
-		expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(3);
-		expect(supervisor.forwardToWorker).toHaveBeenLastCalledWith(
-			second,
-			expect.objectContaining({ type: "heartbeats_list" }),
-			5000,
-		);
-
-		const updated = await supervisor.handleCommand({} as DaemonSocketClient, {
-			id: "list-2",
-			type: "heartbeats_list",
-		});
-		expect(updated).toMatchObject({
-			success: true,
-			data: {
-				heartbeats: [{ job: { id: "heartbeat-1" } }, { job: { id: "heartbeat-2-updated" } }],
-			},
-		});
-		expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(3);
-	});
-
-	it("coalesces a burst of heartbeats_changed frames into one refresh pass", async () => {
-		const supervisor = createSupervisorHarness();
-		const target = worker("ready");
-		supervisor.workers.set("target", target);
-		supervisor.forwardToWorker = vi.fn(async (_worker, command) =>
-			success(command.id, command.type, { heartbeats: [{ job: { id: "heartbeat-1" } }] }),
-		);
-
-		await supervisor.handleCommand({} as DaemonSocketClient, { id: "list-1", type: "heartbeats_list" });
-		expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(1);
-
-		for (let frame = 0; frame < 3; frame++) {
-			supervisor.handleWorkerFrame(target, {
-				header: { kind: "outbound", outboundType: "heartbeats_changed" },
-				payload: Buffer.alloc(0),
-			});
-		}
-		await flushAsyncWork();
-
-		// Three frames in one burst collapse into the in-flight refresh plus at
-		// most one trailing pass, not one forward per frame: one populate
-		// forward plus two burst forwards.
-		expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(3);
-		expect(target.heartbeatSnapshotStale).toBe(false);
-	});
-
-	it("refreshes an aged worker snapshot in the background while serving it", async () => {
+	it("refreshes only the reporting worker, coalesces frames, ages out, and never serves a stale snapshot", async () => {
 		vi.useFakeTimers();
 		try {
 			const supervisor = createSupervisorHarness();
-			const target = worker("ready");
-			supervisor.workers.set("target", target);
-			let heartbeatId = "heartbeat-1";
-			supervisor.forwardToWorker = vi.fn(async (_worker, command) =>
-				success(command.id, command.type, { heartbeats: [{ job: { id: heartbeatId } }] }),
+			const first = worker("ready");
+			const second = worker("ready");
+			supervisor.workers.set("first", first);
+			supervisor.workers.set("second", second);
+			let firstHeartbeatId = "heartbeat-1";
+			let secondHeartbeatId = "heartbeat-2";
+			supervisor.forwardToWorker = vi.fn(async (target, command) =>
+				success(command.id, command.type, {
+					heartbeats: [{ job: { id: target === first ? firstHeartbeatId : secondHeartbeatId } }],
+				}),
 			);
+			const family = vi.spyOn(supervisor.rlmSpawnLedger(), "family");
+			const list = (id: string) =>
+				supervisor.handleCommand({} as DaemonSocketClient, { id, type: "heartbeats_list" });
 
-			await supervisor.handleCommand({} as DaemonSocketClient, { id: "list-1", type: "heartbeats_list" });
-			expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(1);
-
-			// A missed frame cannot pin stale data forever: past the age bound the
-			// next list serves the cached rows and refreshes in the background.
-			heartbeatId = "heartbeat-1-updated";
-			await vi.advanceTimersByTimeAsync(WORKER_HEARTBEAT_SNAPSHOT_MAX_AGE_MS);
-			const served = await supervisor.handleCommand({} as DaemonSocketClient, {
-				id: "list-2",
-				type: "heartbeats_list",
-			});
-			expect(served).toMatchObject({
-				success: true,
-				data: { heartbeats: [{ job: { id: "heartbeat-1" } }] },
-			});
-			await vi.advanceTimersByTimeAsync(0);
+			// One forward per worker populates the snapshots; repeated lists serve them.
+			await list("list-1");
+			await list("list-2");
 			expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(2);
-			expect(target.heartbeatSnapshot).toEqual([{ job: { id: "heartbeat-1-updated" } }]);
+
+			secondHeartbeatId = "heartbeat-2-updated";
+			for (let frame = 0; frame < 3; frame++) {
+				supervisor.handleWorkerFrame(second, HEARTBEATS_CHANGED_FRAME);
+			}
+			await vi.advanceTimersByTimeAsync(0);
+			expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(4);
+			expect(family).toHaveBeenCalledTimes(1);
+
+			const updated = (await list("list-3")) as { data?: { heartbeats?: Array<{ job: { id: string } }> } };
+			expect(updated.data?.heartbeats?.map((heartbeat) => heartbeat.job.id)).toEqual([
+				"heartbeat-1",
+				"heartbeat-2-updated",
+			]);
+
+			firstHeartbeatId = "heartbeat-1-updated";
+			await vi.advanceTimersByTimeAsync(WORKER_HEARTBEAT_SNAPSHOT_MAX_AGE_MS);
+			const served = (await list("list-4")) as { data?: { heartbeats?: Array<{ job: { id: string } }> } };
+			expect(served.data?.heartbeats?.[0]?.job.id).toBe("heartbeat-1");
+			await vi.advanceTimersByTimeAsync(0);
+			expect(first.heartbeatSnapshot).toEqual([{ job: { id: "heartbeat-1-updated" } }]);
+
+			supervisor.forwardToWorker = vi.fn(async (_worker, command) =>
+				failure(command.id, command.type, "worker unavailable"),
+			);
+			supervisor.handleWorkerFrame(second, HEARTBEATS_CHANGED_FRAME);
+			await vi.advanceTimersByTimeAsync(0);
+			const failedRefresh = await list("list-5");
+			expect(second.heartbeatSnapshotStale).toBe(true);
+			expect(failedRefresh).toMatchObject({ success: false, error: "worker unavailable" });
 		} finally {
 			vi.useRealTimers();
 		}
@@ -545,29 +442,57 @@ describe("daemon supervisor heartbeat aggregation", () => {
 });
 
 describe("daemon supervisor passive scheduled-jobs snapshot", () => {
-	it("arms the wake timer from the cached snapshot without a disk scan", async () => {
+	it("keeps the passive snapshot honest across residency gains without disk scans", async () => {
 		const supervisor = createSupervisorHarness();
 		const family = vi.spyOn(supervisor.rlmSpawnLedger(), "family");
-		supervisor.passiveScheduledJobs = {
-			scannedAt: Date.now(),
-			rows: [
-				{
-					rootSessionFile: join("tmp", "root.jsonl"),
-					job: { id: "job-1", status: "active", nextRunAt: new Date(Date.now() + 3_600_000).toISOString() },
-					info: sessionInfoFor(join("tmp", "root.jsonl"), "session-1"),
-				},
-			],
+		const scan = vi.spyOn(
+			supervisor as unknown as { scanPassiveScheduledJobs: () => Promise<unknown[]> },
+			"scanPassiveScheduledJobs",
+		);
+		const coverableSession = join("tmp", "coverable.jsonl");
+		const freshSession = join("tmp", "fresh.jsonl");
+		const covering = {
+			descriptor: {
+				workerId: "worker-1",
+				lifecycle: "ready",
+				sessionFile: coverableSession,
+				createCommand: { sessionPath: coverableSession },
+			},
+		} as never;
+		supervisor.workers.set("worker-1", covering);
+		const restarted = {
+			...worker("ready"),
+			heartbeatSnapshot: [{ job: { id: "heartbeat-1" } }],
+			heartbeatSnapshotStale: false,
 		};
 
+		supervisor.passiveScheduledJobs = {
+			scannedAt: Date.now(),
+			rows: [passiveRow(coverableSession, "job-1")],
+		};
 		supervisor.scheduleScheduledSessionWakeRecompute();
 		await flushAsyncWork();
-		expect(family).not.toHaveBeenCalled();
+		expect(scan).not.toHaveBeenCalled();
 
-		// Without a snapshot the same recompute still scans fresh.
-		supervisor.passiveScheduledJobs = undefined;
-		supervisor.scheduleScheduledSessionWakeRecompute();
+		supervisor.onWorkerResidencyGained(restarted as never);
+		expect(restarted.heartbeatSnapshotStale).toBe(true);
+		let releaseFamily: (() => void) | undefined;
+		family.mockImplementationOnce(() => new Promise((resolve) => (releaseFamily = () => resolve([]))));
+		supervisor.onWorkerResidencyGained(covering);
+		supervisor.passiveScheduledJobs = {
+			scannedAt: Date.now(),
+			rows: [passiveRow(freshSession, "job-2")],
+		};
+		releaseFamily!();
 		await flushAsyncWork();
-		expect(family).toHaveBeenCalledTimes(1);
+		const rows = supervisor.passiveScheduledJobs?.rows ?? [];
+		expect(rows.map((row) => [row.rootSessionFile, row.job.id])).toEqual([[freshSession, "job-2"]]);
+
+		family.mockRejectedValueOnce(new Error("ledger read failed")).mockResolvedValueOnce([]);
+		supervisor.onWorkerResidencyGained(covering);
+		await flushAsyncWork();
+		expect(scan).toHaveBeenCalledTimes(1);
+		expect(supervisor.passiveScheduledJobs?.rows).toEqual([]);
 	});
 
 	it("daemon-owned manage patches the snapshot row instead of rescanning", async () => {
@@ -579,7 +504,7 @@ describe("daemon supervisor passive scheduled-jobs snapshot", () => {
 		manager.flushNow();
 		const store = AgentCronJobStore.forSessionArtifacts();
 		store.registerSessionArtifact(manager.getSessionId(), manager.getSessionArtifactDir()!);
-		const job = store.createHeartbeat({
+		const job = await store.createHeartbeat({
 			activeSessionId: manager.getSessionId(),
 			sessionId: manager.getSessionId(),
 			sessionFile: manager.getSessionFile()!,
@@ -589,13 +514,8 @@ describe("daemon supervisor passive scheduled-jobs snapshot", () => {
 		});
 		const family = vi.spyOn(supervisor.rlmSpawnLedger(), "family");
 
-		const initial = await supervisor.handleCommand({} as DaemonSocketClient, {
-			id: "list-1",
-			type: "heartbeats_list",
-		});
-		expect(heartbeatIds(initial)).toEqual([job.id]);
+		await supervisor.handleCommand({} as DaemonSocketClient, { id: "list-1", type: "heartbeats_list" });
 		expect(family).toHaveBeenCalledTimes(1);
-
 		const managed = await supervisor.handleCommand({} as DaemonSocketClient, {
 			id: "manage-1",
 			type: "heartbeat_manage",
@@ -605,173 +525,14 @@ describe("daemon supervisor passive scheduled-jobs snapshot", () => {
 		});
 		expect(managed).toMatchObject({ success: true, data: { heartbeat: { id: job.id, status: "paused" } } });
 
-		// The paused row serves from the patched snapshot; no second scan.
 		const paused = await supervisor.handleCommand({} as DaemonSocketClient, {
 			id: "list-2",
 			type: "heartbeats_list",
 		});
-		expect(heartbeatIds(paused)).toEqual([job.id]);
-		expect((paused as { data?: { heartbeats?: Array<{ job: { status: string } }> } }).data?.heartbeats).toMatchObject(
-			[{ job: { status: "paused" } }],
-		);
+		expect(
+			(paused as { data?: { heartbeats?: Array<{ job: { id: string; status: string } }> } }).data?.heartbeats,
+		).toMatchObject([{ job: { id: job.id, status: "paused" } }]);
 		expect(family).toHaveBeenCalledTimes(1);
-	});
-
-	it("drops snapshot rows covered by a newly resident worker without a disk scan", async () => {
-		const supervisor = createSupervisorHarness();
-		vi.spyOn(supervisor.rlmSpawnLedger(), "family").mockResolvedValue([]);
-		const scan = vi.spyOn(
-			supervisor as unknown as { scanPassiveScheduledJobs: () => Promise<unknown[]> },
-			"scanPassiveScheduledJobs",
-		);
-		const sessionFile = join("tmp", "root.jsonl");
-		supervisor.passiveScheduledJobs = {
-			scannedAt: Date.now(),
-			rows: [
-				{
-					rootSessionFile: sessionFile,
-					job: { id: "job-1", status: "active" },
-					info: sessionInfoFor(sessionFile, "session-1"),
-				},
-			],
-		};
-		const covering = {
-			descriptor: {
-				workerId: "worker-1",
-				lifecycle: "ready",
-				sessionFile,
-				createCommand: { sessionPath: sessionFile },
-			},
-		} as never;
-		supervisor.workers.set("worker-1", covering);
-
-		supervisor.onWorkerResidencyGained(covering);
-		await flushAsyncWork();
-
-		expect(supervisor.passiveScheduledJobs?.rows).toEqual([]);
-		expect(scan).not.toHaveBeenCalled();
-	});
-
-	it("does not rescan the passive catalog when a worker reports heartbeats_changed", async () => {
-		const supervisor = createSupervisorHarness();
-		const family = vi.spyOn(supervisor.rlmSpawnLedger(), "family");
-		supervisor.passiveScheduledJobs = {
-			scannedAt: Date.now(),
-			rows: [],
-		};
-		const target = worker("ready");
-		supervisor.workers.set("target", target);
-
-		supervisor.handleWorkerFrame(target, {
-			header: { kind: "outbound", outboundType: "heartbeats_changed" },
-			payload: Buffer.alloc(0),
-		});
-		await flushAsyncWork();
-
-		// A live worker's tree is never passive: the frame triggers only the
-		// targeted snapshot refresh, not a fleet scan.
-		expect(family).not.toHaveBeenCalled();
-		expect(supervisor.passiveScheduledJobs?.rows).toEqual([]);
-	});
-
-	it("derives the residency drop from the current snapshot, not a pre-await copy", async () => {
-		const supervisor = createSupervisorHarness();
-		const coverableSession = join("tmp", "coverable.jsonl");
-		const freshSession = join("tmp", "fresh.jsonl");
-		let releaseFamily: (() => void) | undefined;
-		const family = vi
-			.spyOn(supervisor.rlmSpawnLedger(), "family")
-			.mockImplementationOnce(() => new Promise((resolve) => (releaseFamily = () => resolve([]))));
-		supervisor.passiveScheduledJobs = {
-			scannedAt: Date.now(),
-			rows: [
-				{
-					rootSessionFile: coverableSession,
-					job: { id: "job-1", status: "active" },
-					info: sessionInfoFor(coverableSession, "session-1"),
-				},
-			],
-		};
-		const covering = {
-			descriptor: {
-				workerId: "worker-1",
-				lifecycle: "ready",
-				sessionFile: coverableSession,
-				createCommand: { sessionPath: coverableSession },
-			},
-		} as never;
-		supervisor.workers.set("worker-1", covering);
-
-		// The drop pass reads the ledger first; while it awaits, the snapshot
-		// changes underneath it (a daemon-owned patch or a post-stop rescan).
-		supervisor.onWorkerResidencyGained(covering);
-		supervisor.passiveScheduledJobs = {
-			scannedAt: Date.now(),
-			rows: [
-				{
-					rootSessionFile: freshSession,
-					job: { id: "job-2", status: "active" },
-					info: sessionInfoFor(freshSession, "session-2"),
-				},
-			],
-		};
-		releaseFamily!();
-		await flushAsyncWork();
-
-		// The drop must not revert to its pre-await copy: the current rows are
-		// what gets re-derived (the fresh uncovered row survives; the covered
-		// pre-await row stays gone).
-		expect(supervisor.passiveScheduledJobs?.rows).toEqual([
-			{
-				rootSessionFile: freshSession,
-				job: { id: "job-2", status: "active" },
-				info: sessionInfoFor(freshSession, "session-2"),
-			},
-		]);
-		expect(family).toHaveBeenCalledTimes(1);
-	});
-
-	it("forces a fresh scan when the residency drop fails", async () => {
-		const supervisor = createSupervisorHarness();
-		const family = vi
-			.spyOn(supervisor.rlmSpawnLedger(), "family")
-			.mockRejectedValueOnce(new Error("ledger read failed"))
-			.mockResolvedValueOnce([]);
-		supervisor.passiveScheduledJobs = {
-			scannedAt: Date.now(),
-			rows: [
-				{
-					rootSessionFile: join("tmp", "root.jsonl"),
-					job: { id: "job-1", status: "active" },
-					info: sessionInfoFor(join("tmp", "root.jsonl"), "session-1"),
-				},
-			],
-		};
-		const covering = { descriptor: { workerId: "worker-1", lifecycle: "ready" } } as never;
-		supervisor.workers.set("worker-1", covering);
-
-		supervisor.onWorkerResidencyGained(covering);
-		await flushAsyncWork();
-
-		// The failed drop invalidates and the recompute it arms rescans fresh:
-		// covered rows cannot linger in the snapshot pinning the wake timer.
-		expect(family).toHaveBeenCalledTimes(2);
-		expect(supervisor.passiveScheduledJobs?.rows).toEqual([]);
-	});
-
-	it("marks the previous incarnation's heartbeat snapshot stale on a ready transition", async () => {
-		const supervisor = createSupervisorHarness();
-		const restarted = {
-			...worker("ready"),
-			heartbeatSnapshot: [{ job: { id: "heartbeat-1" } }],
-			heartbeatSnapshotStale: false,
-		};
-
-		supervisor.onWorkerResidencyGained(restarted as never);
-
-		// A restart on the same worker object must not serve the previous
-		// incarnation's snapshot as fresh for the age bound.
-		expect(restarted.heartbeatSnapshotStale).toBe(true);
 	});
 });
 
@@ -779,29 +540,20 @@ describe("daemon supervisor heartbeats_changed delivery", () => {
 	function socketClient(): {
 		socket: { destroyed: boolean; write: ReturnType<typeof vi.fn> };
 		tracksHeartbeats?: boolean;
+		capabilities?: Set<string>;
 	} {
-		return { socket: { destroyed: false, write: vi.fn(() => true) } };
+		return {
+			socket: { destroyed: false, write: vi.fn(() => true) },
+			capabilities: new Set(["attach_snapshot", "event_sequence"]),
+		};
 	}
 
-	function heartbeatsChangedWrites(client: { socket: { write: ReturnType<typeof vi.fn> } }): string[] {
-		return client.socket.write.mock.calls
-			.map((args) => String(args[0]))
-			.filter((line) => line.includes('"type":"heartbeats_changed"'));
+	function heartbeatsChangedWrites(client: { socket: { write: ReturnType<typeof vi.fn> } }): number {
+		return client.socket.write.mock.calls.filter((args) => String(args[0]).includes('"type":"heartbeats_changed"'))
+			.length;
 	}
 
-	it("marks clients as tracking on scheduled-job commands", async () => {
-		const supervisor = createSupervisorHarness();
-		const tracked = socketClient();
-		const other = socketClient();
-
-		await supervisor.handleCommand(tracked as never, { id: "list-1", type: "heartbeats_list" });
-		await supervisor.handleCommand(tracked as never, { id: "cron-1", type: "cron_list" });
-
-		expect(tracked.tracksHeartbeats).toBe(true);
-		expect(other.tracksHeartbeats).toBeUndefined();
-	});
-
-	it("delivers heartbeats_changed only to clients that track heartbeats", async () => {
+	it("delivers one coalesced push only to clients that track heartbeats", async () => {
 		vi.useFakeTimers();
 		try {
 			const supervisor = createSupervisorHarness();
@@ -810,42 +562,18 @@ describe("daemon supervisor heartbeats_changed delivery", () => {
 			supervisor.clients.add(tracked);
 			supervisor.clients.add(other);
 			await supervisor.handleCommand(tracked as never, { id: "list-1", type: "heartbeats_list" });
+			expect(tracked.tracksHeartbeats).toBe(true);
+			expect(other.tracksHeartbeats).toBeUndefined();
 			const target = worker("ready");
 			supervisor.workers.set("target", target);
-
-			supervisor.handleWorkerFrame(target, {
-				header: { kind: "outbound", outboundType: "heartbeats_changed" },
-				payload: Buffer.alloc(0),
-			});
-			await vi.advanceTimersByTimeAsync(HEARTBEATS_CHANGED_COALESCE_MS);
-
-			expect(heartbeatsChangedWrites(tracked)).toHaveLength(1);
-			expect(heartbeatsChangedWrites(other)).toHaveLength(0);
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-
-	it("coalesces a burst of mutations into one broadcast", async () => {
-		vi.useFakeTimers();
-		try {
-			const supervisor = createSupervisorHarness();
-			const tracked = socketClient();
-			supervisor.clients.add(tracked);
-			await supervisor.handleCommand(tracked as never, { id: "list-1", type: "heartbeats_list" });
-			const target = worker("ready");
-			supervisor.workers.set("target", target);
-
-			for (let frame = 0; frame < 3; frame++) {
-				supervisor.handleWorkerFrame(target, {
-					header: { kind: "outbound", outboundType: "heartbeats_changed" },
-					payload: Buffer.alloc(0),
-				});
-			}
-			await vi.advanceTimersByTimeAsync(HEARTBEATS_CHANGED_COALESCE_MS);
 
 			// Three frames in the window collapse into one push, not one per frame.
-			expect(heartbeatsChangedWrites(tracked)).toHaveLength(1);
+			for (let frame = 0; frame < 3; frame++) {
+				supervisor.handleWorkerFrame(target, HEARTBEATS_CHANGED_FRAME);
+			}
+			await vi.advanceTimersByTimeAsync(HEARTBEATS_CHANGED_COALESCE_MS);
+			expect(heartbeatsChangedWrites(tracked)).toBe(1);
+			expect(heartbeatsChangedWrites(other)).toBe(0);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -855,11 +583,11 @@ describe("daemon supervisor heartbeats_changed delivery", () => {
 		vi.useFakeTimers();
 		try {
 			const supervisor = createSupervisorHarness();
-			// The ACP adapter attaches with the capability and never issues a
-			// scheduled-job command; the attach itself must opt it in.
 			supervisor.attachClient = vi.fn(async () => ({ result: { activeSessionId: "active-1" } })) as never;
 			const acp = socketClient();
 			const plain = socketClient();
+			supervisor.clients.add(acp);
+			supervisor.clients.add(plain);
 			await supervisor.handleCommand(acp as never, {
 				id: "attach-1",
 				type: "attach",
@@ -877,14 +605,10 @@ describe("daemon supervisor heartbeats_changed delivery", () => {
 
 			const target = worker("ready");
 			supervisor.workers.set("target", target);
-			supervisor.handleWorkerFrame(target, {
-				header: { kind: "outbound", outboundType: "heartbeats_changed" },
-				payload: Buffer.alloc(0),
-			});
+			supervisor.handleWorkerFrame(target, HEARTBEATS_CHANGED_FRAME);
 			await vi.advanceTimersByTimeAsync(HEARTBEATS_CHANGED_COALESCE_MS);
-
-			expect(heartbeatsChangedWrites(acp)).toHaveLength(1);
-			expect(heartbeatsChangedWrites(plain)).toHaveLength(0);
+			expect(heartbeatsChangedWrites(acp)).toBe(1);
+			expect(heartbeatsChangedWrites(plain)).toBe(0);
 		} finally {
 			vi.useRealTimers();
 		}

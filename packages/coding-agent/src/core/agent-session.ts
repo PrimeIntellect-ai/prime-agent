@@ -3818,7 +3818,10 @@ export class AgentSession {
 	 * These heartbeats are internal to this active session and never read or
 	 * mutate the user-level /heartbeat.
 	 */
-	handleRlmHeartbeatHostRequest(type: string, payload: Record<string, unknown> = {}): Record<string, unknown> {
+	async handleRlmHeartbeatHostRequest(
+		type: string,
+		payload: Record<string, unknown> = {},
+	): Promise<Record<string, unknown>> {
 		const controller = this._rlmHeartbeatController;
 		if (!controller) {
 			throw new Error("RLM heartbeat skill is not available in this session");
@@ -3845,7 +3848,7 @@ export class AgentSession {
 				const deliveryMode = normalizeHeartbeatDeliveryMode(payload.delivery_mode ?? payload.deliveryMode);
 				return {
 					heartbeat: rlmHeartbeatHostResponse(
-						controller.createRlmHeartbeat({
+						await controller.createRlmHeartbeat({
 							instruction: payload.instruction,
 							interval: payload.interval,
 							label: payload.label,
@@ -3881,7 +3884,7 @@ export class AgentSession {
 				) {
 					throw new Error("rlm_heartbeat.update requires at least one field to update");
 				}
-				const heartbeat = controller.updateRlmHeartbeat({
+				const heartbeat = await controller.updateRlmHeartbeat({
 					id: payload.id,
 					instruction: payload.instruction,
 					interval: payload.interval,
@@ -3897,7 +3900,7 @@ export class AgentSession {
 				if (typeof payload.id !== "string") {
 					throw new Error("rlm_heartbeat.delete id must be a string");
 				}
-				const heartbeat = controller.deleteRlmHeartbeat(payload.id);
+				const heartbeat = await controller.deleteRlmHeartbeat(payload.id);
 				return {
 					heartbeat: heartbeat ? rlmHeartbeatHostResponse(heartbeat) : null,
 				};

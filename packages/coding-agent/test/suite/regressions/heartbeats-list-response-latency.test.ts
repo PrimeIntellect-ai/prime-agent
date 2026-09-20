@@ -44,14 +44,16 @@ describe("heartbeats_list response latency", () => {
 		manager.flushNow();
 		const store = AgentCronJobStore.forSessionArtifacts();
 		store.registerSessionArtifact(manager.getSessionId(), manager.getSessionArtifactDir()!);
-		const job = store.createHeartbeat({
-			activeSessionId: manager.getSessionId(),
-			sessionId: manager.getSessionId(),
-			sessionFile: manager.getSessionFile()!,
-			cwd: directory,
-			scheduleText: "every 1h",
-			prompt: "continue",
-		}).id;
+		const job = (
+			await store.createHeartbeat({
+				activeSessionId: manager.getSessionId(),
+				sessionId: manager.getSessionId(),
+				sessionFile: manager.getSessionFile()!,
+				cwd: directory,
+				scheduleText: "every 1h",
+				prompt: "continue",
+			})
+		).id;
 		const family = vi.spyOn(supervisor.rlmSpawnLedger(), "family");
 		const responses = await Promise.all(["1", "2", "3", "4", "5"].map((id) => listHeartbeats(supervisor, id)));
 		expect(responses.map(heartbeatIds)).toEqual([[job], [job], [job], [job], [job]]); // one scan served five lists
@@ -73,10 +75,10 @@ describe("heartbeats_list response latency", () => {
 			releaseScan.resolve();
 			await siblings;
 		}
-		store.manageHeartbeat(manager.getSessionId(), job, "pause");
+		await store.manageHeartbeat(manager.getSessionId(), job, "pause");
 		supervisor.broadcastHeartbeatsChanged();
 		expect(heartbeatIds(await listHeartbeats(supervisor, "7"))).toEqual([job]); // broadcast dropped the snapshot
-		store.manageHeartbeat(manager.getSessionId(), job, "stop");
+		await store.manageHeartbeat(manager.getSessionId(), job, "stop");
 		supervisor.broadcastHeartbeatsChanged();
 		expect(heartbeatIds(await listHeartbeats(supervisor, "8"))).toEqual([]);
 	});

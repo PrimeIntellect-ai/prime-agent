@@ -136,13 +136,14 @@ describe("proper-lockfile compromise boundaries", () => {
 		expect(existsSync(join(root, "agent", "settings.json"))).toBe(false);
 	});
 
-	it("does not mutate scheduled jobs after a lock compromise", () => {
-		lockState.compromiseSync = true;
+	it("does not mutate scheduled jobs after a lock compromise", async () => {
+		// The cron store now takes its lock through proper-lockfile's async lock().
+		lockState.compromiseAsync = true;
 		const root = tempDir("pa-lock-cron-");
 		const artifactDir = join(root, "artifact");
 		const store = AgentCronJobStore.forSessionArtifacts();
 		store.registerSessionArtifact("session-1", artifactDir);
-		expect(() => store.recoverSessionArtifact("session-1")).toThrow(/Cron jobs lock compromised/);
+		await expect(store.recoverSessionArtifact("session-1")).rejects.toThrow(/Cron jobs lock compromised/);
 		expect(existsSync(join(artifactDir, "scheduled-jobs.json"))).toBe(false);
 	});
 });
