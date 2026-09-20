@@ -1,0 +1,1 @@
+- Fixed extension loader failing to resolve `@earendil-works/pi-ai/mcp` and `@earendil-works/pi-ai/bedrock-provider` subpath imports via jiti.
