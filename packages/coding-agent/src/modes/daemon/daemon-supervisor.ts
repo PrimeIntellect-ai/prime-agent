@@ -2923,6 +2923,15 @@ export class DaemonSupervisor {
 				`Command ${command.type} is not supported on a cloud session; it runs in the session's sandbox`,
 			);
 		}
+		if (
+			command.type === "delete_rlm_subagent" &&
+			this.cloud()?.releasedRecordForSelector(command.activeSessionId) !== undefined
+		) {
+			// The row is already released and no longer resolves as live: a
+			// repeated delete is an idempotent no-op with the worker's
+			// not_found contract instead of an unknown-session routing error.
+			return success(command.id, command.type, { deleted: false });
+		}
 		const admission =
 			(command.type === "prompt" || command.type === "prompt_and_wait") && command.admissionId
 				? this.getPromptAdmission(client, command.activeSessionId, command.admissionId)

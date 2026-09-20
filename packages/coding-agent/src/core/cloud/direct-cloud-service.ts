@@ -1068,6 +1068,9 @@ export class DirectCloudService {
 	/** Forfeit a resident session by cloud session id: release without review. */
 	async forfeitResidentSession(sessionId: string): Promise<CloudSessionRecord> {
 		return await this.withOperationLock(sessionId, async () => {
+			// The platform tunnel and its secrets must never outlive the
+			// sandbox: release them before the forfeit deletes it.
+			await this.releaseTunnel(this.requireSessionRecord(sessionId));
 			await this.orchestrator().forfeit(sessionId);
 			return this.requireSessionRecord(sessionId);
 		});

@@ -1,0 +1,1 @@
+- Fixed deleting a cloud RLM child: the supervisor answers the parent worker's delete contract (`deleted`) instead of an invalid response, a repeated delete is an idempotent no-op, and the forfeited sandbox's Prime Tunnel registration and tunnel secrets are released before the delete reports success.

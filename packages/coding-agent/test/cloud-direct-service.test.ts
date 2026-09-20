@@ -1032,6 +1032,39 @@ describe("DirectCloudService Prime Tunnel bridge", () => {
 		expect(existsSync(join(root, "state", "tunnel-secrets", `${started.id}.json`))).toBe(false);
 	});
 
+	it("forfeit releases the platform tunnel and secrets before the sandbox delete, and stays idempotent on repeats", async () => {
+		const root = temp();
+		const { deletedTunnels, tunnelRegistration, commonOptions, store } = makeFakes(root, "sandbox-forfeit-1");
+		const service = new DirectCloudService(commonOptions);
+		const started = await service.delegate({
+			activeSessionId: "",
+			parentSessionId: undefined,
+			delegationId: "sess_forfeit-1",
+			cwd: join(root, "repo"),
+			prompt: "",
+			options: { resident: true, timeoutMinutes: 10 },
+		});
+		const forfeited = await service.forfeitResidentSession(started.id);
+		// Nothing platform-side outlives the forfeited sandbox: the tunnel
+		// registration is deleted, its release is persisted, and the secrets
+		// are gone before the forfeit reports success.
+		expect(deletedTunnels).toEqual([tunnelRegistration.tunnelId]);
+		expect(forfeited).toMatchObject({
+			observedLifecycle: "deleted",
+			cleanupState: "released",
+			tunnelState: "released",
+		});
+		expect(existsSync(join(root, "state", "tunnel-secrets", `${started.id}.json`))).toBe(false);
+		expect(store.get(started.id)?.tunnelState).toBe("released");
+		// Idempotent: a repeated forfeit neither throws nor re-deletes.
+		await expect(service.forfeitResidentSession(started.id)).resolves.toMatchObject({
+			observedLifecycle: "deleted",
+			cleanupState: "released",
+			tunnelState: "released",
+		});
+		expect(deletedTunnels).toEqual([tunnelRegistration.tunnelId]);
+	}, 10_000);
+
 	it("steers over a live tunnel and fails clearly without one", async () => {
 		const root = temp();
 		const { commonOptions } = makeFakes(root, "sandbox-tunnel-3");

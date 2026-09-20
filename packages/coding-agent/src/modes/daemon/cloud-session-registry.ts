@@ -842,6 +842,28 @@ export class CloudSessionRegistry {
 		return this.store.get(selector);
 	}
 
+	/**
+	 * A released resident record the selector still addresses. Live rows
+	 * resolve to undefined and take the normal command path; a released
+	 * spawned child (its row no longer resolves) answers a repeated delete
+	 * idempotently instead of a routing failure.
+	 */
+	releasedRecordForSelector(selector: string): CloudSessionRecord | undefined {
+		if (this.resolveActive(selector) !== undefined) return undefined;
+		// The record is keyed by cloud session id; the selector may also be
+		// the row's active-session id, so match through list() (store.get
+		// rejects non-session-id keys outright).
+		const record = this.store
+			.list()
+			.find((candidate) => candidate.activeSessionId === selector || candidate.sessionId === selector);
+		if (record === undefined || !isResidentCloudSessionRecord(record)) return undefined;
+		return record.observedLifecycle === "stopped" ||
+			record.observedLifecycle === "deleted" ||
+			record.observedLifecycle === "lost"
+			? record
+			: undefined;
+	}
+
 	/** Stop one cloud session: drain, retrieve the result, release the sandbox. */
 	async stopSession(selector: string, forfeit = false): Promise<DaemonCloudSessionInfo> {
 		const record = this.requireRecordForSelector(selector);
@@ -1027,10 +1049,10 @@ export class CloudSessionRegistry {
 							? "Cancelled by parent orchestrator"
 							: `Cancelled by parent orchestrator (${command.childId})`,
 					);
-					return success(command.id, command.type);
+					return success(command.id, command.type, { cancelled: true });
 				case "delete_rlm_subagent":
 					await this.deleteSpawnedChild(session);
-					return success(command.id, command.type);
+					return success(command.id, command.type, { deleted: true });
 				default:
 					break;
 			}

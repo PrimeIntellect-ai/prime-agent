@@ -29,11 +29,19 @@ import type { RlmCloudChildLease, SubagentRuntimeHost } from "../src/core/rlm-ru
 import { parseSessionEntries, SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { CloudGuestDaemon, parseCloudDaemonEnv } from "../src/modes/cloud/cloud-daemon.js";
+import type { DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
 import {
 	CloudSessionRegistry,
 	type CloudSessionRegistryCallbacks,
 	type RlmCloudSpawnAdmission,
 } from "../src/modes/daemon/cloud-session-registry.js";
+import {
+	createDaemonCommandEnvelope,
+	type DaemonCommand,
+	type DaemonOutbound,
+} from "../src/modes/daemon/daemon-protocol.js";
+import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
+import { MutationDrainLatch } from "../src/modes/daemon/mutation-drain-latch.js";
 import { createFauxRuntimeFactory } from "./fixtures/cloud-guest-daemon-fixture.js";
 import { createTestResourceLoader } from "./utilities.js";
 
@@ -640,6 +648,103 @@ describe("CloudSessionRegistry.spawnChild (fake transport, real guest daemon)", 
 			);
 			await waitFor(() => deletedRow() === undefined, 20_000, "row removed");
 			expect(harness.store.get("sess_cloud_kid_4")!.observedLifecycle).toBe("deleted");
+		} finally {
+			await harness.registry.dispose().catch(() => undefined);
+		}
+	}, 60_000);
+
+	it("deletes through the real supervisor gate: worker response contract, tunnel cleanup, idempotent repeat", async () => {
+		const root = temp();
+		const harness = buildRegistry(root);
+		// Constructor-bypass supervisor with the REAL handleLine gate and
+		// real cloud routing (resolveActive -> handleCloudSessionCommand ->
+		// registry): only the supervisor's own service seams are stubbed.
+		const writes: DaemonOutbound[] = [];
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			ready: Promise.resolve(),
+			ownership: { assertCurrent: async () => undefined },
+			workers: new Map(),
+			clients: new Set(),
+			protocolClientIds: new WeakMap(),
+			pendingSessionNames: new Set<string>(),
+			mutationDrain: new MutationDrainLatch(),
+			commandJournal: {
+				lookup: () => undefined,
+				begin: () => ({ status: "new" as const }),
+				recordResult: () => undefined,
+				acknowledge: () => undefined,
+			},
+			cancelOwnedWorkerCleanup: () => undefined,
+			cloud: () => harness.registry,
+			write: (_client: DaemonSocketClient, message: DaemonOutbound) => {
+				writes.push(message);
+				return true;
+			},
+			log: () => undefined,
+		}) as unknown as {
+			handleLine(client: DaemonSocketClient, line: string): Promise<void>;
+		};
+		const client = {
+			id: "delete-gate-client",
+			socket: { destroyed: false },
+			attachedActiveSessionIds: new Set<string>(),
+			detachInput: () => undefined,
+			supportsExtensionUi: false,
+			capabilities: new Set<string>(),
+		} as DaemonSocketClient;
+		try {
+			const admission = await harness.registry.spawnChild({
+				...spawnInput({ parent: { ...PARENT, cwd: root } }),
+				sessionId: "sess_cloud_kid_gate",
+				name: "delete-through-gate",
+			});
+			const deletedRow = () =>
+				[...harness.rosterWrites.values()].find(
+					(candidate) => candidate.summary.activeSessionId === admission.active_session_id,
+				);
+			await waitFor(() => deletedRow() !== undefined, 10_000, "spawned child roster row");
+			const secretsFile = join(root, "cloud", "tunnel-secrets", "sess_cloud_kid_gate.json");
+
+			const sendDelete = async (id: string) => {
+				const command = {
+					id,
+					type: "delete_rlm_subagent",
+					activeSessionId: admission.active_session_id,
+					childId: admission.rlm_child_id,
+				} satisfies DaemonCommand;
+				await supervisor.handleLine(
+					client,
+					JSON.stringify(createDaemonCommandEnvelope(command, command.id, client.id)),
+				);
+			};
+			await sendDelete("delete-gate-1");
+			// The response must satisfy the worker-mode client contract for
+			// delete_rlm_subagent (data: { deleted }): a data-less success is
+			// an "invalid delete_rlm_subagent response" on the parent worker.
+			expect(writes[0]).toMatchObject({
+				id: "delete-gate-1",
+				command: "delete_rlm_subagent",
+				success: true,
+				data: { deleted: true },
+			});
+			await waitFor(() => deletedRow() === undefined, 20_000, "row removed");
+			const record = harness.store.get("sess_cloud_kid_gate")!;
+			expect(record.observedLifecycle).toBe("deleted");
+			// The forfeited sandbox leak is closed: the platform tunnel is
+			// released (persisted) and its secrets are gone.
+			expect(record.tunnelState).toBe("released");
+			expect(record.cleanupState).toBe("released");
+			expect(existsSync(secretsFile)).toBe(false);
+
+			// The row no longer resolves as live: a repeated delete answers
+			// the worker's not_found contract instead of a routing failure.
+			await sendDelete("delete-gate-2");
+			expect(writes[1]).toMatchObject({
+				id: "delete-gate-2",
+				command: "delete_rlm_subagent",
+				success: true,
+				data: { deleted: false },
+			});
 		} finally {
 			await harness.registry.dispose().catch(() => undefined);
 		}
