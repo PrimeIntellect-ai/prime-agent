@@ -82,7 +82,7 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // observe-plane fields, so local kernels see cloud descendants in
 // agent_message/agent_observe/rlm.list_subagents rosters.
 export const DAEMON_SCHEMA_REVISION = 32;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-32-96d8789652";
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-32-311319dc5a0b";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
