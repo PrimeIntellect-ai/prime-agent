@@ -387,10 +387,10 @@ export function getKernelVenvDir(): string {
 }
 
 function getXdgKernelVenvDir(): string {
-	const dataHome = process.env.XDG_DATA_HOME
-		? path.resolve(expandHome(process.env.XDG_DATA_HOME))
-		: path.join(os.homedir(), ".local", "share");
-	return path.join(dataHome, "prime", "agent", "kernel-venv");
+    const dataHome = process.env.XDG_DATA_HOME?.trim()
+        ? path.resolve(expandHome(process.env.XDG_DATA_HOME.trim()))
+        : path.join(os.homedir(), ".local", "share");
+    return path.join(dataHome, "prime", "agent", "kernel-venv");
 }
 
 async function resolveWritableKernelVenvDir(): Promise<string> {

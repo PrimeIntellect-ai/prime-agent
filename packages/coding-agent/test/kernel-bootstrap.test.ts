@@ -9,6 +9,7 @@ import {
 	DEFAULT_RLM_EXTRA_IMPORT_NAMES,
 	DEFAULT_RLM_EXTRA_UV_ARGS,
 	ensureKernelPython,
+	getXdgKernelVenvDir
 	type KernelPythonSkill,
 	kernelVenvPython,
 	resolveRuntimeIdentity,
@@ -559,4 +560,20 @@ describe("kernel bootstrap", () => {
 		expect(kernelVenvPython(venv, "win32")).toBe(join(venv, "Scripts", "python.exe"));
 		expect(kernelVenvPython(venv, "linux")).toBe(join(venv, "bin", "python"));
 	});
+    it("ignores whitespace-only XDG_DATA_HOME", () => {
+    process.env.XDG_DATA_HOME = "   ";
+
+    expect(getXdgKernelVenvDir()).toBe(
+        join(tempDir, ".local", "share", "prime", "agent", "kernel-venv"),
+    );
 });
+
+    it("trims XDG_DATA_HOME before resolving it", () => {
+    process.env.XDG_DATA_HOME = `  ${join(tempDir, "data")}  `;
+
+    expect(getXdgKernelVenvDir()).toBe(
+        join(tempDir, "data", "prime", "agent", "kernel-venv"),
+    );
+});
+});
+
