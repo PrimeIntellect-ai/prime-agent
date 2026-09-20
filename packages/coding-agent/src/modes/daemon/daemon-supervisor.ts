@@ -271,6 +271,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"cloud_session_stop",
 	"cloud_session_reprovision",
 	"cloud_session_import_result",
+	"cloud_spawn_child",
 	"create",
 	"attach",
 	"reattach",

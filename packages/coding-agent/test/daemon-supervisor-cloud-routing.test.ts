@@ -2,10 +2,17 @@ import type { Socket } from "node:net";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import type { DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
-import type { CloudSessionRegistry } from "../src/modes/daemon/cloud-session-registry.js";
-import type { DaemonCommand, DaemonOutbound } from "../src/modes/daemon/daemon-protocol.js";
+import type { CloudSessionRegistry, RlmCloudSpawnAdmission } from "../src/modes/daemon/cloud-session-registry.js";
+import {
+	createDaemonCommandEnvelope,
+	DAEMON_COMMAND_COMPATIBILITY,
+	type DaemonCommand,
+	type DaemonOutbound,
+	meetsDaemonCommandCompatibility,
+} from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
+import { MutationDrainLatch } from "../src/modes/daemon/mutation-drain-latch.js";
 
 /**
  * Legacy one-shot delegation routing through the supervisor-owned registry:
@@ -313,5 +320,167 @@ describe("supervisor resident conversion model serialization", () => {
 		expect(convertSession).toHaveBeenCalledTimes(1);
 		const input = convertSession.mock.calls[0][0] as { model?: string };
 		expect("model" in input).toBe(false);
+	});
+});
+
+/**
+ * Gate regression for first-class cloud RLM children: `cloud_spawn_child` is
+ * declared in the daemon protocol (control-plane, capability-gated on
+ * `cloud_resident_sessions`) and implemented in the supervisor's
+ * `handleCommand`, but the supervisor's command allowlist once omitted it —
+ * the gate answered "Unknown daemon command: cloud_spawn_child" before the
+ * case could run, so every `rlm(..., target="cloud")` spawn failed.
+ *
+ * The harness drives the REAL `handleLine` gate (parse → allowlist → journal →
+ * mutation drain → `handleCommand` → registry case); only the registry,
+ * worker-lookup, and name-availability seams are stubbed.
+ */
+
+interface SpawnGateSupervisor {
+	handleLine(client: DaemonSocketClient, line: string): Promise<void>;
+	cloud: () => CloudSessionRegistry | undefined;
+	findWorkerForClient: (client: DaemonSocketClient, selector: string) => Promise<unknown>;
+	assertSupervisorSessionNameAvailable: (target: unknown, name: string) => Promise<void>;
+	write: (client: DaemonSocketClient, message: DaemonOutbound) => boolean;
+	log: (message: string) => void;
+}
+
+function spawnParentSummary(): SessionSummary {
+	return {
+		...summaryFixture(),
+		sessionFile: "/sessions/durable-cloud-owner.jsonl",
+		rlmDepth: 0,
+	};
+}
+
+function spawnAdmissionFixture(): RlmCloudSpawnAdmission {
+	return {
+		rlm_child_id: "sess_cloud_spawned",
+		name: "cloud-kid",
+		session_dir: "/sessions/sess_cloud_spawned",
+		model: "faux/faux-1",
+		cloud_session_id: "sess_cloud_spawned",
+		active_session_id: "cloud-active-spawned",
+	};
+}
+
+function spawnGateSupervisor(options: {
+	spawnChild: (input: unknown) => Promise<RlmCloudSpawnAdmission>;
+	writes: DaemonOutbound[];
+}) {
+	const spawnChild = vi.fn(options.spawnChild);
+	const registry = { spawnChild } as unknown as CloudSessionRegistry;
+	const assertNameAvailable = vi.fn(async () => undefined);
+	const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+		ready: Promise.resolve(),
+		ownership: { assertCurrent: vi.fn(async () => undefined) },
+		workers: new Map(),
+		clients: new Set([makeClient()]),
+		protocolClientIds: new WeakMap(),
+		pendingSessionNames: new Set<string>(),
+		mutationDrain: new MutationDrainLatch(),
+		commandJournal: {
+			lookup: vi.fn(() => undefined),
+			begin: vi.fn(() => ({ status: "new" as const })),
+			recordResult: vi.fn(),
+			acknowledge: vi.fn(),
+		},
+		cancelOwnedWorkerCleanup: vi.fn(),
+		findWorkerForClient: vi.fn(async () => ({ worker: {} as never, summary: spawnParentSummary() })),
+		assertSupervisorSessionNameAvailable: assertNameAvailable,
+		cloud: () => registry,
+		write: vi.fn((client: DaemonSocketClient, message: DaemonOutbound) => {
+			void client;
+			options.writes.push(message);
+			return true;
+		}),
+		log: () => undefined,
+	}) as unknown as SpawnGateSupervisor;
+	return { supervisor, spawnChild, assertNameAvailable };
+}
+
+describe("supervisor cloud_spawn_child command gate", () => {
+	it("admits cloud_spawn_child through the real gate and reaches the registry-backed handler", async () => {
+		const admission = spawnAdmissionFixture();
+		const writes: DaemonOutbound[] = [];
+		const { supervisor, spawnChild } = spawnGateSupervisor({ spawnChild: async () => admission, writes });
+		const client = makeClient();
+		const command = {
+			id: "spawn-1",
+			type: "cloud_spawn_child",
+			parentActiveSessionId: "active-cloud",
+			prompt: "investigate the cloud spawn gate",
+			name: "cloud-kid",
+			model: "faux/faux-1",
+		} satisfies DaemonCommand;
+
+		await supervisor.handleLine(client, JSON.stringify(createDaemonCommandEnvelope(command, command.id, client.id)));
+
+		// The command passed the supervisor's allowlist and ran the handler
+		// case against the registry seam (parent address, depth, and options).
+		expect(spawnChild).toHaveBeenCalledWith(
+			expect.objectContaining({
+				parent: expect.objectContaining({
+					sessionId: "durable-cloud-owner",
+					sessionFile: "/sessions/durable-cloud-owner.jsonl",
+					activeSessionId: "active-cloud",
+					depth: 0,
+					cwd: "/repo/cloud",
+				}),
+				prompt: "investigate the cloud spawn gate",
+				name: "cloud-kid",
+				model: "faux/faux-1",
+			}),
+		);
+		expect(writes).toEqual([
+			expect.objectContaining({
+				id: "spawn-1",
+				command: "cloud_spawn_child",
+				success: true,
+				data: { admission },
+			}),
+		]);
+	});
+
+	it("answers with the handler's domain error for an empty prompt, not the gate rejection", async () => {
+		const writes: DaemonOutbound[] = [];
+		const { supervisor, spawnChild } = spawnGateSupervisor({
+			spawnChild: async () => spawnAdmissionFixture(),
+			writes,
+		});
+		const client = makeClient();
+		const command = {
+			id: "spawn-2",
+			type: "cloud_spawn_child",
+			parentActiveSessionId: "active-cloud",
+			prompt: "   ",
+		} satisfies DaemonCommand;
+
+		await supervisor.handleLine(client, JSON.stringify(createDaemonCommandEnvelope(command, command.id, client.id)));
+
+		expect(spawnChild).not.toHaveBeenCalled();
+		expect(writes).toEqual([
+			expect.objectContaining({
+				id: "spawn-2",
+				command: "cloud_spawn_child",
+				success: false,
+				error: "cloud_spawn_child prompt must not be empty",
+			}),
+		]);
+	});
+
+	it("keeps the command capability-gated so an old daemon never receives it", () => {
+		// Admitting the command at the supervisor boundary does not weaken the
+		// negotiated wire contract: a daemon that does not advertise
+		// cloud_resident_sessions (schema revision 31) still refuses it, so a
+		// new client surfaces DaemonCapabilityUnavailableError before sending.
+		const compatibility = DAEMON_COMMAND_COMPATIBILITY.cloud_spawn_child;
+		expect(compatibility).toEqual({ minProtocol: 7, minSchemaRevision: 31, capability: "cloud_resident_sessions" });
+		const oldDaemonHello = {
+			protocol: { name: "prime-agent.daemon" as const, version: 7 },
+			schemaRevision: 30,
+			serverCapabilities: ["cloud_sessions", "cloud_tunnel"] as const,
+		};
+		expect(meetsDaemonCommandCompatibility(oldDaemonHello, compatibility)).toBe(false);
 	});
 });

@@ -110,6 +110,12 @@ describe("daemon worker request progress", () => {
 			"cloud_delegations_list",
 			"cloud_delegation_stop",
 			"cloud_delegation_apply",
+			"cloud_session_create",
+			"cloud_session_list",
+			"cloud_session_stop",
+			"cloud_session_reprovision",
+			"cloud_session_import_result",
+			"cloud_spawn_child",
 		]) {
 			expect(isDaemonSupervisorCommandType(type)).toBe(true);
 		}

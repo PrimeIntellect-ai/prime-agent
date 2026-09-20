@@ -1,0 +1,1 @@
+- Fixed `rlm(..., target="cloud")` spawns failing with `Unknown daemon command: cloud_spawn_child`: the supervisor command gate now admits the command so it reaches the registry-backed handler, and the `cloud_resident_sessions` capability gate still refuses it on old daemons.
