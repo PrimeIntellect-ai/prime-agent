@@ -195,6 +195,10 @@ const REMOTE_REQUEST_TIMEOUT_MS = 30_000;
 export class CloudGuestDaemon {
 	private readonly host: SessionHostCore;
 	private readonly tracked = new Map<string, TrackedSession>();
+	/** Replaced session objects whose final entries still owe one durable pass. */
+	private readonly drainingSessions: TrackedSession[] = [];
+	/** In-flight root-session creation: one resident session per daemon. */
+	private openSessionInFlight: Promise<void> | undefined;
 	/** Durable cursor image per session id (live and replaced sessions alike). */
 	private readonly mirrorCursors = new Map<string, MirrorCursorState>();
 	private mirrorCursorsLoaded = false;
@@ -325,6 +329,29 @@ export class CloudGuestDaemon {
 		family?: CloudFamilyInfo;
 	}): Promise<void> {
 		if (this.rootState) return;
+		if (this.openSessionInFlight !== undefined) {
+			// Per-daemon serialization: the boot open and a dispatched
+			// open_session may race, but only one root session may ever
+			// exist. A second runtime under the same cloud session id
+			// re-emits the whole transcript through the mirror every pass.
+			await this.openSessionInFlight;
+			return;
+		}
+		const created = this.createRootSession(input);
+		this.openSessionInFlight = created;
+		try {
+			await created;
+		} finally {
+			this.openSessionInFlight = undefined;
+		}
+	}
+
+	private async createRootSession(input: {
+		cwd?: string;
+		model?: string;
+		thinking?: string;
+		family?: CloudFamilyInfo;
+	}): Promise<void> {
 		this.family = input.family;
 		const sessionDir = join(this.env.stateDir, "sessions");
 		mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
@@ -418,12 +445,12 @@ export class CloudGuestDaemon {
 	}
 
 	/**
-	 * Bind (or rebind) one session's mirror. When the authoritative session
-	 * object for an already-tracked id changes - an in-place runtime swap
-	 * (new/switch/fork) or a fresh runtime over the same session file - the
-	 * cursor resumes strictly after the last mirrored entry identity, so the
-	 * swap neither freezes on the stale object, loses the new object's
-	 * entries, nor re-emits entries that already landed in the log.
+	 * Bind (or rebind) one session's mirror. Binding is serialized per
+	 * session id: the tracked session object is the mirror's only authority,
+	 * a rebind happens exactly once per object change, and an unknown
+	 * runtime claiming the same id never steals a live binding. A duplicate
+	 * session object can therefore never oscillate the cursor between two
+	 * transcripts and re-emit one of them on every pass.
 	 */
 	private track(runtime: AgentSessionRuntime): void {
 		this.ensureMirrorCursorsLoaded();
@@ -431,13 +458,23 @@ export class CloudGuestDaemon {
 		const sessionId = session.sessionId;
 		const existing = this.tracked.get(sessionId);
 		if (existing !== undefined) {
-			if (existing.session === session) return;
-			const cursor = resumeMirrorCursor(session, existing.lastEntryIndex, existing.lastEntryId);
-			existing.runtime = runtime;
-			existing.session = session;
-			existing.lastEntryIndex = cursor.index;
-			existing.lastEntryId = cursor.lastEntryId;
-			this.queueMirror();
+			if (existing.session === session) {
+				// The binding's object is unchanged; the runtime hosting it
+				// may have been rebuilt around it.
+				existing.runtime = runtime;
+				return;
+			}
+			if (existing.runtime !== runtime) {
+				// A different runtime claims this session id (a duplicate
+				// open or a foreign restore). The live binding keeps its
+				// captured object: stealing it on every pass is what turns
+				// an absent identity into an unbounded re-emit loop.
+				return;
+			}
+			// The binding's own runtime replaced its session object in
+			// place (new/switch/fork): reconcile the successor's cursor once
+			// and retire the captured object with a final drain.
+			this.rebindTrackedSession(existing, runtime, session);
 			return;
 		}
 		const durable = this.mirrorCursors.get(sessionId);
@@ -459,8 +496,44 @@ export class CloudGuestDaemon {
 	}
 
 	/**
+	 * Rebind a replaced session object. The successor's cursor reconciles
+	 * against the durable entry identity exactly once: the same transcript
+	 * resumes strictly after the last mirrored entry, and a different
+	 * transcript (fresh header ids under the same session id) mirrors whole
+	 * from zero. The replaced object keeps its own binding until its final
+	 * entries drain, so no entry is lost and none is emitted twice.
+	 */
+	private rebindTrackedSession(existing: TrackedSession, runtime: AgentSessionRuntime, session: AgentSession): void {
+		const sessionId = session.sessionId;
+		const entries = session.sessionManager.getEntries();
+		const resumedAt =
+			existing.lastEntryId === undefined ? -1 : entries.findIndex((entry) => entry.id === existing.lastEntryId);
+		if (resumedAt < 0) {
+			// A different transcript: the captured object's unmirrored tail
+			// drains exactly once under the same session id, before the
+			// successor's own entries.
+			this.drainingSessions.push(existing);
+		}
+		// The same transcript: the successor's resume index already covers
+		// the captured object's unmirrored tail, so the old binding is
+		// subsumed instead of draining (its entries would duplicate).
+		this.tracked.set(sessionId, {
+			runtime,
+			session,
+			lastEntryIndex: resumedAt >= 0 ? resumedAt + 1 : 0,
+			lastEntryId: resumedAt >= 0 ? existing.lastEntryId : undefined,
+			usageRevision: existing.usageRevision,
+			inputTokens: existing.inputTokens,
+			outputTokens: existing.outputTokens,
+			cachedTokens: existing.cachedTokens,
+			requests: existing.requests,
+		});
+		this.queueMirror();
+	}
+
+	/**
 	 * A state's runtime replaced its session in place (new/switch/fork):
-	 * rebind the mirror to the new session object immediately. The previous
+	 * rebind the mirror to the new session object once. The previous
 	 * binding keeps its captured session object, drains that object's final
 	 * entries on the next pass, and retires; nothing is emitted under the
 	 * wrong session id.
@@ -728,34 +801,65 @@ export class CloudGuestDaemon {
 		this.updateStatus();
 	}
 
+	/**
+	 * Emit one binding's unmirrored entries. The cursor advances only after
+	 * the durable append landed: a stalled log leaves the binding exactly
+	 * where it was, so the entry re-emits once retention frees space and
+	 * never before.
+	 */
+	private emitTrackedEntries(sessionId: string, binding: TrackedSession, entries: SessionEntry[]): boolean {
+		let appended = false;
+		for (let index = binding.lastEntryIndex; index < entries.length; index++) {
+			const entry = entries[index];
+			if (entry === undefined) continue;
+			const landed = this.emitSessionEntry(sessionId, entry);
+			if (!landed) {
+				break;
+			}
+			binding.lastEntryIndex = index + 1;
+			binding.lastEntryId = entry.id;
+			this.mirrorCursors.set(sessionId, {
+				count: binding.lastEntryIndex,
+				lastEntryId: binding.lastEntryId,
+			});
+			appended = true;
+		}
+		return appended;
+	}
+
 	private mirrorEntries(): void {
 		let cursorChanged = false;
+		// Replaced objects drain first and retire once: their captured
+		// transcripts' final entries land exactly once under their session
+		// id, before the successor's own entries. A stalled log keeps an
+		// undrained binding for the next pass.
+		if (this.drainingSessions.length > 0) {
+			const stillDraining: TrackedSession[] = [];
+			for (const binding of this.drainingSessions) {
+				const entries = binding.session.sessionManager.getEntries();
+				if (this.emitTrackedEntries(binding.session.sessionId, binding, entries)) {
+					cursorChanged = true;
+				}
+				if (binding.lastEntryIndex < entries.length) {
+					stillDraining.push(binding);
+				}
+			}
+			this.drainingSessions.length = 0;
+			this.drainingSessions.push(...stillDraining);
+		}
 		for (const [sessionId, tracked] of this.tracked) {
 			// The captured session object is the mirror's authority: after a
 			// runtime swap it still holds this session's final entries, and a
 			// rebind reads the new object through its own entry.
 			const entries = tracked.session.sessionManager.getEntries();
-			for (let index = tracked.lastEntryIndex; index < entries.length; index++) {
-				const entry = entries[index];
-				if (entry === undefined) continue;
-				const appended = this.emitSessionEntry(sessionId, entry);
-				if (!appended) {
-					// A stalled log never advances the mirror cursor: the entry
-					// re-emits once retention frees space.
-					break;
-				}
-				tracked.lastEntryIndex = index + 1;
-				tracked.lastEntryId = entry.id;
-				this.mirrorCursors.set(sessionId, {
-					count: tracked.lastEntryIndex,
-					lastEntryId: tracked.lastEntryId,
-				});
+			if (this.emitTrackedEntries(sessionId, tracked, entries)) {
 				cursorChanged = true;
 			}
-			// A replaced binding retires once its captured object fully
-			// drained: the durable cursor keeps its identity for a later
-			// rebind of the same session id, and the live map only holds
-			// sessions that can still produce entries.
+			// A runtime that moved to another session retires its old
+			// binding once the captured object fully drained: the durable
+			// cursor keeps its identity for a later rebind of the same
+			// session id, and the live map only holds sessions that can
+			// still produce entries.
 			if (tracked.session !== tracked.runtime.session && tracked.lastEntryIndex >= entries.length) {
 				this.tracked.delete(sessionId);
 			}
@@ -1015,37 +1119,37 @@ export class CloudGuestDaemon {
 	private async dispatchOpenSession(
 		request: Extract<CloudCommandRequest, { kind: "open_session" }>,
 	): Promise<CloudProtocolDispatchResult> {
-		if (this.rootState) {
-			// Idempotent open: an already-resident session honors a duplicate
-			// open_session's selection and prompt instead of silently dropping
-			// them. The bridge-spawned daemon opens its session from the
-			// model env alone, so the family context and the selected
-			// model/thinking land here.
-			if (request.family !== undefined) {
-				this.family = request.family;
+		if (!this.rootState) {
+			// Serialized with the boot open: openSession single-flights the
+			// root session, so a resident open that arrives while the boot
+			// open is still creating the runtime waits for that session
+			// instead of racing a second one into existence under the same
+			// session id.
+			try {
+				await this.openSession({
+					cwd: request.cwd,
+					model: request.model,
+					thinking: request.thinking,
+					family: request.family,
+				});
+			} catch (error) {
+				return failure(error);
 			}
-			if (request.model !== undefined && request.model.length > 0) {
-				const applied = await this.applyResidentOpenModel(request.model);
-				if (applied.state !== "completed") return applied;
-			}
-			if (request.thinking !== undefined && request.thinking.length > 0) {
-				const applied = await this.dispatchSetThinking(request.thinking);
-				if (applied.state !== "completed") return applied;
-			}
-			if (request.prompt !== undefined && request.prompt.length > 0) {
-				return this.dispatchPrompt(request.prompt, false);
-			}
-			return completed();
 		}
-		try {
-			await this.openSession({
-				cwd: request.cwd,
-				model: request.model,
-				thinking: request.thinking,
-				family: request.family,
-			});
-		} catch (error) {
-			return failure(error);
+		// The resident session now exists - created here or by the racing
+		// boot open. A duplicate open honors this request's selection and
+		// prompt instead of silently dropping them; a matching current
+		// model is a no-op, so retries and journal replays stay idempotent.
+		if (request.family !== undefined) {
+			this.family = request.family;
+		}
+		if (request.model !== undefined && request.model.length > 0) {
+			const applied = await this.applyResidentOpenModel(request.model);
+			if (applied.state !== "completed") return applied;
+		}
+		if (request.thinking !== undefined && request.thinking.length > 0) {
+			const applied = await this.dispatchSetThinking(request.thinking);
+			if (applied.state !== "completed") return applied;
 		}
 		if (request.prompt !== undefined && request.prompt.length > 0) {
 			return this.dispatchPrompt(request.prompt, false);
@@ -1897,8 +2001,10 @@ function parseMirrorCursorState(value: unknown): MirrorCursorState | undefined {
  * Resume the mirror cursor for one session object from the mirrored entry
  * identity: continue strictly after the last entry that already landed in
  * the durable log. An identity this object does not hold means a different
- * transcript: mirror it whole - consumers dedupe by entry id, so this costs
- * redundant records at worst, never a freeze or a loss. Count-only state
+ * transcript under the same session id (fresh header ids): reconcile to
+ * zero so the new transcript mirrors whole. The reconciliation runs only
+ * when a binding first attaches to that object - track() anchors the
+ * binding, so the reset never repeats on later passes. Count-only state
  * (a cursor that never carried an identity) clamps instead.
  */
 function resumeMirrorCursor(

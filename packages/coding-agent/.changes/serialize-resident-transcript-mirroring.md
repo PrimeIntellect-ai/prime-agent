@@ -1,0 +1,1 @@
+- Fixed the resident cloud guest daemon re-emitting session entries without bound after a duplicate open or session rebind: mirroring is now serialized per daemon and per session, and every session entry lands in the durable log exactly once.

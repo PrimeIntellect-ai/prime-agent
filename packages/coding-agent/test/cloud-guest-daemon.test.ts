@@ -611,6 +611,212 @@ describe("resident guest daemon (in-process, faux provider)", () => {
 			await daemon.stop().catch(() => undefined);
 		}
 	}, 60_000);
+
+	it("serializes transcript mirroring: duplicate opens, swaps, storm passes, and restarts stay exactly once", async () => {
+		const root = temp();
+		const responsesPath = join(root, "responses.jsonl");
+		process.env.PRIME_AGENT_TEST_FAUX_RESPONSES = responsesPath;
+		delete process.env.PRIME_AGENT_TEST_FAUX_ECHO;
+		const queueTurn = (answer: string) => {
+			const response: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: answer }],
+				api: "faux",
+				provider: "faux",
+				timestamp: Date.now(),
+				usage: {
+					input: 3,
+					output: 5,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 8,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			} as AssistantMessage;
+			writeFileSync(responsesPath, `${JSON.stringify(response)}\n`, { mode: 0o600 });
+		};
+		const submitTurn = async (client: LoopClient, commandId: string, text: string, answer: string) => {
+			queueTurn(answer);
+			client.submit(commandId, { kind: "prompt", text });
+			await client.waitFor(
+				(events) =>
+					events.some((event) => event.kind === "session_entry" && JSON.stringify(event.entry).includes(answer)),
+				20_000,
+			);
+		};
+
+		const stateDir = join(root, "daemon-state");
+		const readMirrorCursor = (): Record<string, { count: number; lastEntryId?: string }> => {
+			const path = join(stateDir, `${SESSION_ID}.g1`, "mirror-cursor.json");
+			if (!existsSync(path)) return {};
+			return JSON.parse(readFileSync(path, "utf8")) as Record<string, { count: number; lastEntryId?: string }>;
+		};
+		/** Count durable session_entry appends per (sessionId, entryId). */
+		const mirroredEntryCounts = (): Map<string, number> => {
+			const path = join(stateDir, `${SESSION_ID}.g1`, "event-outbox", "outbox-events.ndjson");
+			const counts = new Map<string, number>();
+			if (!existsSync(path)) return counts;
+			for (const line of readFileSync(path, "utf8").split("\n")) {
+				if (line.trim().length === 0) continue;
+				const envelope = JSON.parse(line) as {
+					event: { kind: string; sessionId?: string; entryId?: string };
+				};
+				const event = envelope.event;
+				if (event.kind !== "session_entry") continue;
+				const key = `${event.sessionId}:${event.entryId}`;
+				counts.set(key, (counts.get(key) ?? 0) + 1);
+			}
+			return counts;
+		};
+		const expectExactlyOnce = (): number => {
+			const counts = mirroredEntryCounts();
+			const duplicated = [...counts.entries()].filter(([, times]) => times !== 1);
+			expect(
+				duplicated.slice(0, 5),
+				`every (sessionId, entryId) must mirror exactly once (${duplicated.length} duplicated of ${counts.size})`,
+			).toEqual([]);
+			return counts.size;
+		};
+		/** The persisted cursor per session id never regresses between samples. */
+		const cursorSamples: Array<Record<string, { count: number; lastEntryId?: string }>> = [];
+		const sampleCursor = (): void => {
+			const current = readMirrorCursor();
+			const previous = cursorSamples.at(-1);
+			if (previous !== undefined) {
+				for (const [sessionId, before] of Object.entries(previous)) {
+					const after = current[sessionId];
+					if (after !== undefined) {
+						expect(after.count, `mirror cursor for ${sessionId} must not regress`).toBeGreaterThanOrEqual(
+							before.count,
+						);
+					}
+				}
+			}
+			cursorSamples.push(current);
+		};
+
+		const env = daemonEnv(root);
+		// Live guest parity: the bridge never sets the session-lease env, so
+		// the guest's duplicate-open guard is the daemon itself, not a lease.
+		const leaseEnv = process.env.PRIME_AGENT_INTERNAL_SESSION_LEASES;
+		delete process.env.PRIME_AGENT_INTERNAL_SESSION_LEASES;
+		const daemon = await CloudGuestDaemon.start(env, { createRuntime: createFauxRuntimeFactory });
+		let restarted: CloudGuestDaemon | undefined;
+		let client: LoopClient | undefined;
+		let second: LoopClient | undefined;
+		try {
+			// The production trigger: the daemon's boot open and the
+			// supervisor's resident open_session arrive together. Exactly one
+			// session may exist per daemon - a second runtime under the same
+			// session id re-emits the transcript on every mirror pass.
+			await Promise.all([daemon.openSession({}), daemon.openSession({})]);
+			daemon.startMirrorLoop();
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			daemon.mirrorNow();
+			daemon.mirrorNow();
+			const distinct = expectExactlyOnce();
+			expect(distinct).toBeGreaterThan(0);
+
+			const rootRuntime = daemon.rootRuntime;
+			if (!rootRuntime) throw new Error("missing root runtime");
+			const firstSessionId = rootRuntime.session.sessionId;
+
+			client = new LoopClient(env.socketPath);
+			client.hello();
+			await client.waitForSnapshot();
+			client.subscribe(0);
+			sampleCursor();
+
+			await submitTurn(client, "cmd_storm_turn_one", "storm turn one", "storm answer one");
+			expectExactlyOnce();
+			sampleCursor();
+			const firstEntries = rootRuntime.session.sessionManager.getEntries();
+
+			// Runtime object swap: the live runtime replaces its session with
+			// a fresh file (brand-new header entry ids) while mirrors fire.
+			await rootRuntime.newSession();
+			const swappedSessionId = rootRuntime.session.sessionId;
+			expect(swappedSessionId).not.toBe(firstSessionId);
+			await submitTurn(client, "cmd_storm_turn_two", "storm turn two", "storm answer two");
+			expectExactlyOnce();
+			sampleCursor();
+
+			// Storm: thousands of concurrent event-triggered and timer mirror
+			// passes. Every (sessionId, entryId) still appends exactly once
+			// and the outbox stays bounded by the real transcript.
+			for (let chunk = 0; chunk < 20; chunk++) {
+				for (let i = 0; i < 100; i++) {
+					daemon.queueMirror();
+					daemon.mirrorNow();
+				}
+				await new Promise((resolve) => setTimeout(resolve, 5));
+			}
+			const stormDistinct = expectExactlyOnce();
+			expect(stormDistinct).toBeLessThan(500);
+
+			// The durable cursor reached each session's tail and holds its identity.
+			const cursor = readMirrorCursor();
+			const firstCursor = cursor[firstSessionId];
+			if (!firstCursor) throw new Error("missing first cursor");
+			expect(firstCursor.count).toBe(firstEntries.length);
+			expect(firstCursor.lastEntryId).toBe(firstEntries.at(-1)?.id);
+			const swappedCursor = cursor[swappedSessionId];
+			if (!swappedCursor) throw new Error("missing swapped cursor");
+			const swappedEntries = rootRuntime.session.sessionManager.getEntries();
+			expect(swappedCursor.count).toBe(swappedEntries.length);
+			expect(swappedCursor.lastEntryId).toBe(swappedEntries.at(-1)?.id);
+
+			// Later prompt entries keep mirroring exactly once.
+			await submitTurn(client, "cmd_storm_turn_three", "storm turn three", "storm answer three");
+			expectExactlyOnce();
+			sampleCursor();
+
+			// Restart from the persisted cursor: a fresh daemon generation
+			// resumes the same session file and never re-emits its history.
+			await client.close();
+			await daemon.release("stopped");
+			restarted = await CloudGuestDaemon.start(env, { createRuntime: createFauxRuntimeFactory });
+			await restarted.openSession({});
+			restarted.startMirrorLoop();
+			if (!restarted.rootSession) throw new Error("missing restarted root session");
+			expect(restarted.rootSession.sessionId).toBe(swappedSessionId);
+			second = new LoopClient(env.socketPath);
+			second.hello();
+			await second.waitForSnapshot();
+			second.subscribe(0);
+			await new Promise((resolve) => setTimeout(resolve, 200));
+			expectExactlyOnce();
+			await submitTurn(second, "cmd_storm_turn_four", "storm turn four", "storm answer four");
+			expectExactlyOnce();
+			sampleCursor();
+
+			// Second swap on the restarted daemon stays exactly once too.
+			const restartedRuntime = restarted.rootRuntime;
+			if (!restartedRuntime) throw new Error("missing restarted runtime");
+			await restartedRuntime.newSession();
+			const thirdSessionId = restartedRuntime.session.sessionId;
+			expect(thirdSessionId).not.toBe(swappedSessionId);
+			await submitTurn(second, "cmd_storm_turn_five", "storm turn five", "storm answer five");
+			expectExactlyOnce();
+			const finalCursor = readMirrorCursor();
+			const thirdCursor = finalCursor[thirdSessionId];
+			if (!thirdCursor) throw new Error("missing third cursor");
+			const thirdEntries = restartedRuntime.session.sessionManager.getEntries();
+			expect(thirdCursor.count).toBe(thirdEntries.length);
+			expect(thirdCursor.lastEntryId).toBe(thirdEntries.at(-1)?.id);
+			sampleCursor();
+		} finally {
+			if (leaseEnv === undefined) {
+				delete process.env.PRIME_AGENT_INTERNAL_SESSION_LEASES;
+			} else {
+				process.env.PRIME_AGENT_INTERNAL_SESSION_LEASES = leaseEnv;
+			}
+			await second?.close().catch(() => undefined);
+			await client?.close().catch(() => undefined);
+			await restarted?.release("stopped").catch(() => undefined);
+			await daemon.release("stopped").catch(() => undefined);
+		}
+	}, 60_000);
 });
 
 describe("guest daemon protocol hardening (in-process, faux provider)", () => {
