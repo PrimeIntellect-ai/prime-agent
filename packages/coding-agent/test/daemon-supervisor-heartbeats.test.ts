@@ -2,6 +2,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AgentCronJobStore } from "../src/core/cron-jobs.js";
+import { type SessionInfo, SessionManager } from "../src/core/session-manager.js";
 import type { DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
 import { type DaemonCommand, type DaemonResponse, failure, success } from "../src/modes/daemon/daemon-protocol.js";
 import {
@@ -11,14 +13,24 @@ import {
 	WORKER_HEARTBEAT_SNAPSHOT_MAX_AGE_MS,
 } from "../src/modes/daemon/daemon-supervisor.js";
 
+interface PassiveScheduledJobRow {
+	rootSessionFile: string;
+	job: { id: string; status: string; nextRunAt?: string };
+	info: SessionInfo;
+}
+
 interface SupervisorHarness {
 	workers: Map<string, unknown>;
 	openingWorkers: Map<string, Promise<unknown>>;
 	catalogOpeningWorkers: Map<string, Promise<unknown>>;
+	passiveScheduledJobs?: { rows: PassiveScheduledJobRow[]; scannedAt: number };
 	findWorkerForClient(client: DaemonSocketClient, selector: string): Promise<{ worker: unknown }>;
 	forwardToWorker(worker: unknown, command: DaemonCommand, timeoutMs?: number): Promise<DaemonResponse>;
 	handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<DaemonResponse | undefined>;
 	handleWorkerFrame(worker: unknown, frame: unknown): void;
+	rlmSpawnLedger(): { family: (filename?: string) => Promise<SessionInfo[]> };
+	scheduleScheduledSessionWakeRecompute(): void;
+	onWorkerResidencyGained(): void;
 }
 
 const tempDirs: string[] = [];
@@ -29,13 +41,32 @@ afterEach(() => {
 	}
 });
 
-function createSupervisorHarness(): SupervisorHarness {
-	const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-heartbeats-"));
-	tempDirs.push(directory);
-	return new DaemonSupervisor(join(directory, "daemon.sock"), {
-		defaultSessionConfig: { agentDir: directory, cwd: directory },
-		descriptorDir: join(directory, "workers"),
+function createSupervisorHarness(directory?: string): SupervisorHarness {
+	const agentDir = directory ?? mkdtempSync(join(tmpdir(), "prime-supervisor-heartbeats-"));
+	if (directory === undefined) tempDirs.push(agentDir);
+	return new DaemonSupervisor(join(agentDir, "daemon.sock"), {
+		defaultSessionConfig: { agentDir, cwd: agentDir },
+		descriptorDir: join(agentDir, "workers"),
 	}) as unknown as SupervisorHarness;
+}
+
+function sessionInfoFor(path: string, id: string): SessionInfo {
+	return {
+		path,
+		id,
+		cwd: path,
+		rlmDepth: 0,
+		created: new Date(),
+		modified: new Date(),
+		messageCount: 0,
+		firstMessage: "",
+		allMessagesText: "",
+	};
+}
+
+function heartbeatIds(response: unknown): string[] {
+	const rows = (response as { data?: { heartbeats?: Array<{ job: { id: string } }> } })?.data?.heartbeats;
+	return (rows ?? []).map((heartbeat) => heartbeat.job.id);
 }
 
 async function flushAsyncWork(): Promise<void> {
@@ -47,7 +78,7 @@ function worker(
 	connected = true,
 ): {
 	descriptor: { lifecycle: "starting" | "ready" | "recovering" | "failed" };
-	client?: {};
+	client?: object;
 	heartbeatSnapshot?: Array<{ job: { id: string } }>;
 	heartbeatSnapshotStale?: boolean;
 	heartbeatSnapshotAt?: number;
@@ -507,5 +538,236 @@ describe("daemon supervisor heartbeat aggregation", () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+});
+
+describe("daemon supervisor passive scheduled-jobs snapshot", () => {
+	it("arms the wake timer from the cached snapshot without a disk scan", async () => {
+		const supervisor = createSupervisorHarness();
+		const family = vi.spyOn(supervisor.rlmSpawnLedger(), "family");
+		supervisor.passiveScheduledJobs = {
+			scannedAt: Date.now(),
+			rows: [
+				{
+					rootSessionFile: join("tmp", "root.jsonl"),
+					job: { id: "job-1", status: "active", nextRunAt: new Date(Date.now() + 3_600_000).toISOString() },
+					info: sessionInfoFor(join("tmp", "root.jsonl"), "session-1"),
+				},
+			],
+		};
+
+		supervisor.scheduleScheduledSessionWakeRecompute();
+		await flushAsyncWork();
+		expect(family).not.toHaveBeenCalled();
+
+		// Without a snapshot the same recompute still scans fresh.
+		supervisor.passiveScheduledJobs = undefined;
+		supervisor.scheduleScheduledSessionWakeRecompute();
+		await flushAsyncWork();
+		expect(family).toHaveBeenCalledTimes(1);
+	});
+
+	it("daemon-owned manage patches the snapshot row instead of rescanning", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-passive-"));
+		tempDirs.push(directory);
+		const supervisor = createSupervisorHarness(directory);
+		const manager = SessionManager.create(directory, join(directory, "sessions"));
+		manager.newSession();
+		manager.flushNow();
+		const store = AgentCronJobStore.forSessionArtifacts();
+		store.registerSessionArtifact(manager.getSessionId(), manager.getSessionArtifactDir()!);
+		const job = store.createHeartbeat({
+			activeSessionId: manager.getSessionId(),
+			sessionId: manager.getSessionId(),
+			sessionFile: manager.getSessionFile()!,
+			cwd: directory,
+			scheduleText: "every 1h",
+			prompt: "continue",
+		});
+		const family = vi.spyOn(supervisor.rlmSpawnLedger(), "family");
+
+		const initial = await supervisor.handleCommand({} as DaemonSocketClient, {
+			id: "list-1",
+			type: "heartbeats_list",
+		});
+		expect(heartbeatIds(initial)).toEqual([job.id]);
+		expect(family).toHaveBeenCalledTimes(1);
+
+		const managed = await supervisor.handleCommand({} as DaemonSocketClient, {
+			id: "manage-1",
+			type: "heartbeat_manage",
+			activeSessionId: manager.getSessionId(),
+			jobId: job.id,
+			action: "pause",
+		});
+		expect(managed).toMatchObject({ success: true, data: { heartbeat: { id: job.id, status: "paused" } } });
+
+		// The paused row serves from the patched snapshot; no second scan.
+		const paused = await supervisor.handleCommand({} as DaemonSocketClient, {
+			id: "list-2",
+			type: "heartbeats_list",
+		});
+		expect(heartbeatIds(paused)).toEqual([job.id]);
+		expect((paused as { data?: { heartbeats?: Array<{ job: { status: string } }> } }).data?.heartbeats).toMatchObject(
+			[{ job: { status: "paused" } }],
+		);
+		expect(family).toHaveBeenCalledTimes(1);
+	});
+
+	it("drops snapshot rows covered by a newly resident worker without a disk scan", async () => {
+		const supervisor = createSupervisorHarness();
+		vi.spyOn(supervisor.rlmSpawnLedger(), "family").mockResolvedValue([]);
+		const scan = vi.spyOn(
+			supervisor as unknown as { scanPassiveScheduledJobs: () => Promise<unknown[]> },
+			"scanPassiveScheduledJobs",
+		);
+		const sessionFile = join("tmp", "root.jsonl");
+		supervisor.passiveScheduledJobs = {
+			scannedAt: Date.now(),
+			rows: [
+				{
+					rootSessionFile: sessionFile,
+					job: { id: "job-1", status: "active" },
+					info: sessionInfoFor(sessionFile, "session-1"),
+				},
+			],
+		};
+		const covering = {
+			descriptor: {
+				workerId: "worker-1",
+				lifecycle: "ready",
+				sessionFile,
+				createCommand: { sessionPath: sessionFile },
+			},
+		} as never;
+		supervisor.workers.set("worker-1", covering);
+
+		supervisor.onWorkerResidencyGained(covering);
+		await flushAsyncWork();
+
+		expect(supervisor.passiveScheduledJobs?.rows).toEqual([]);
+		expect(scan).not.toHaveBeenCalled();
+	});
+
+	it("does not rescan the passive catalog when a worker reports heartbeats_changed", async () => {
+		const supervisor = createSupervisorHarness();
+		const family = vi.spyOn(supervisor.rlmSpawnLedger(), "family");
+		supervisor.passiveScheduledJobs = {
+			scannedAt: Date.now(),
+			rows: [],
+		};
+		const target = worker("ready");
+		supervisor.workers.set("target", target);
+
+		supervisor.handleWorkerFrame(target, {
+			header: { kind: "outbound", outboundType: "heartbeats_changed" },
+			payload: Buffer.alloc(0),
+		});
+		await flushAsyncWork();
+
+		// A live worker's tree is never passive: the frame triggers only the
+		// targeted snapshot refresh, not a fleet scan.
+		expect(family).not.toHaveBeenCalled();
+		expect(supervisor.passiveScheduledJobs?.rows).toEqual([]);
+	});
+
+	it("derives the residency drop from the current snapshot, not a pre-await copy", async () => {
+		const supervisor = createSupervisorHarness();
+		const coverableSession = join("tmp", "coverable.jsonl");
+		const freshSession = join("tmp", "fresh.jsonl");
+		let releaseFamily: (() => void) | undefined;
+		const family = vi
+			.spyOn(supervisor.rlmSpawnLedger(), "family")
+			.mockImplementationOnce(() => new Promise((resolve) => (releaseFamily = () => resolve([]))));
+		supervisor.passiveScheduledJobs = {
+			scannedAt: Date.now(),
+			rows: [
+				{
+					rootSessionFile: coverableSession,
+					job: { id: "job-1", status: "active" },
+					info: sessionInfoFor(coverableSession, "session-1"),
+				},
+			],
+		};
+		const covering = {
+			descriptor: {
+				workerId: "worker-1",
+				lifecycle: "ready",
+				sessionFile: coverableSession,
+				createCommand: { sessionPath: coverableSession },
+			},
+		} as never;
+		supervisor.workers.set("worker-1", covering);
+
+		// The drop pass reads the ledger first; while it awaits, the snapshot
+		// changes underneath it (a daemon-owned patch or a post-stop rescan).
+		supervisor.onWorkerResidencyGained(covering);
+		supervisor.passiveScheduledJobs = {
+			scannedAt: Date.now(),
+			rows: [
+				{
+					rootSessionFile: freshSession,
+					job: { id: "job-2", status: "active" },
+					info: sessionInfoFor(freshSession, "session-2"),
+				},
+			],
+		};
+		releaseFamily!();
+		await flushAsyncWork();
+
+		// The drop must not revert to its pre-await copy: the current rows are
+		// what gets re-derived (the fresh uncovered row survives; the covered
+		// pre-await row stays gone).
+		expect(supervisor.passiveScheduledJobs?.rows).toEqual([
+			{
+				rootSessionFile: freshSession,
+				job: { id: "job-2", status: "active" },
+				info: sessionInfoFor(freshSession, "session-2"),
+			},
+		]);
+		expect(family).toHaveBeenCalledTimes(1);
+	});
+
+	it("forces a fresh scan when the residency drop fails", async () => {
+		const supervisor = createSupervisorHarness();
+		const family = vi
+			.spyOn(supervisor.rlmSpawnLedger(), "family")
+			.mockRejectedValueOnce(new Error("ledger read failed"))
+			.mockResolvedValueOnce([]);
+		supervisor.passiveScheduledJobs = {
+			scannedAt: Date.now(),
+			rows: [
+				{
+					rootSessionFile: join("tmp", "root.jsonl"),
+					job: { id: "job-1", status: "active" },
+					info: sessionInfoFor(join("tmp", "root.jsonl"), "session-1"),
+				},
+			],
+		};
+		const covering = { descriptor: { workerId: "worker-1", lifecycle: "ready" } } as never;
+		supervisor.workers.set("worker-1", covering);
+
+		supervisor.onWorkerResidencyGained(covering);
+		await flushAsyncWork();
+
+		// The failed drop invalidates and the recompute it arms rescans fresh:
+		// covered rows cannot linger in the snapshot pinning the wake timer.
+		expect(family).toHaveBeenCalledTimes(2);
+		expect(supervisor.passiveScheduledJobs?.rows).toEqual([]);
+	});
+
+	it("marks the previous incarnation's heartbeat snapshot stale on a ready transition", async () => {
+		const supervisor = createSupervisorHarness();
+		const restarted = {
+			...worker("ready"),
+			heartbeatSnapshot: [{ job: { id: "heartbeat-1" } }],
+			heartbeatSnapshotStale: false,
+		};
+
+		supervisor.onWorkerResidencyGained(restarted as never);
+
+		// A restart on the same worker object must not serve the previous
+		// incarnation's snapshot as fresh for the age bound.
+		expect(restarted.heartbeatSnapshotStale).toBe(true);
 	});
 });

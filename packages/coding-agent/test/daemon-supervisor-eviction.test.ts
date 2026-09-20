@@ -58,6 +58,8 @@ interface SupervisorInternals {
 	log: ReturnType<typeof vi.fn>;
 	scheduledWakeTimer?: ReturnType<typeof setTimeout>;
 	scheduledWakeRecompute?: Promise<void>;
+	onWorkerResidencyGained(worker: object): void;
+	broadcastHeartbeatsChanged(): void;
 	scheduleIdleEvictionSweep(): void;
 	runIdleEvictionSweep(now?: number): Promise<void>;
 	recomputeScheduledSessionWake(): Promise<void>;
@@ -83,6 +85,10 @@ const tempDirs: string[] = [];
 afterEach(() => {
 	for (const directory of tempDirs.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
+
+async function settleAsyncWork(): Promise<void> {
+	await new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 function makeSummary(id: string, now: number, overrides: Partial<SessionSummary> = {}): SessionSummary {
 	return {
@@ -883,15 +889,23 @@ describe("daemon supervisor scheduled-session wake", () => {
 		await supervisor.recomputeScheduledSessionWake();
 		expect(supervisor.scheduledWakeTimer).toBeDefined();
 
+		// A worker covering the root drops the snapshot's covered rows in
+		// memory: the residency event, not a fresh scan, converges the timer.
 		const resident = makeWorker("resident", []);
 		resident.descriptor.sessionFile = sessionFile;
 		supervisor.workers.set("resident", resident);
-		await supervisor.recomputeScheduledSessionWake();
+		supervisor.onWorkerResidencyGained(resident);
+		await settleAsyncWork();
+		await supervisor.scheduledWakeRecompute;
 		expect(supervisor.scheduledWakeTimer).toBeUndefined();
 		supervisor.workers.delete("resident");
 
+		// The store mutations below are external writes the supervisor did not
+		// perform: each is signaled with the invalidating broadcast, and the
+		// recompute it arms enumerates fresh.
 		store.pauseHeartbeat("stale-active");
-		await supervisor.recomputeScheduledSessionWake();
+		supervisor.broadcastHeartbeatsChanged();
+		await supervisor.scheduledWakeRecompute;
 		expect(supervisor.scheduledWakeTimer).toBeUndefined();
 		await supervisor.wakeDueScheduledSessions(armedAt + 60 * 60_000);
 		expect(supervisor.createOrReuseWorker).not.toHaveBeenCalled();
@@ -899,11 +913,13 @@ describe("daemon supervisor scheduled-session wake", () => {
 		await supervisor.scheduledWakeRecompute;
 
 		store.resumeHeartbeat("stale-active");
-		await supervisor.recomputeScheduledSessionWake();
+		supervisor.broadcastHeartbeatsChanged();
+		await supervisor.scheduledWakeRecompute;
 		expect(supervisor.scheduledWakeTimer).toBeDefined();
 
 		store.cancel(job.id);
-		await supervisor.recomputeScheduledSessionWake();
+		supervisor.broadcastHeartbeatsChanged();
+		await supervisor.scheduledWakeRecompute;
 		expect(supervisor.scheduledWakeTimer).toBeUndefined();
 	});
 
