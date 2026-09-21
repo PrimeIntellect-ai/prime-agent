@@ -440,7 +440,7 @@ describe("ModelRegistry", () => {
 
 	describe("modelOverrides (per-model customization)", () => {
 		const sonnetId = "anthropic/claude-sonnet-4";
-		const opusId = "anthropic/claude-opus-4";
+		const opusId = "anthropic/claude-opus-4.5";
 
 		function withOverrides(modelOverrides: Record<string, unknown>, providerFields: Record<string, unknown> = {}) {
 			writeRawModelsJson({ openrouter: { ...providerFields, modelOverrides } });
