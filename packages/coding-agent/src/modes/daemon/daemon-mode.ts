@@ -190,6 +190,7 @@ import {
 	inactiveLifecycleForSession,
 	type SessionSummary,
 	scheduledJobRegistrations,
+	sessionDisplayLabels,
 	summaryForActiveSession,
 } from "./daemon-session-list.js";
 import { DaemonSessionSummarizer } from "./daemon-session-summarizer.js";
@@ -615,6 +616,7 @@ export class AgentDaemon {
 	private readonly recoveryJournal?: WorkerRecoveryJournal;
 	private readonly rosterReporter: WorkerRosterReporterState = {
 		lastComposed: new Map(),
+		lastComposedSource: new Map(),
 		lastComposedJson: new Map(),
 		queuedChildren: new Map(),
 		removedAgentIds: new Map(),
@@ -2326,11 +2328,13 @@ export class AgentDaemon {
 			.filter((job) => isHeartbeatCronJob(job) && (job.status === "active" || job.status === "paused"))
 			.map((job) => {
 				const state = this.sessions.get(job.activeSessionId);
-				const summary = state ? summaryForActiveSession(state) : undefined;
+				// Only the session's display labels are needed; a full summary compose
+				// would re-walk the transcript once per heartbeat job on every poll.
+				const labels = state ? sessionDisplayLabels(state) : undefined;
 				return {
 					job,
-					...(summary?.sessionName ? { sessionName: summary.sessionName } : {}),
-					...(summary?.firstMessage ? { firstMessage: summary.firstMessage } : {}),
+					...(labels?.sessionName ? { sessionName: labels.sessionName } : {}),
+					...(labels?.firstMessage ? { firstMessage: labels.firstMessage } : {}),
 				};
 			});
 	}
@@ -7364,10 +7368,23 @@ export class AgentDaemon {
 	private flushRoster(): void {
 		const reporter = this.rosterReporter;
 		const entries = new Map<string, WorkerRosterEntry>();
+		// Summary objects are memoized per session: an unchanged session composes
+		// to the same summary reference, so its roster entry and serialization can
+		// be reused instead of re-composed and re-stringified on every flush.
+		const composedSources = new Map<string, SessionSummary>();
 		const scheduledJobs = this.cronStore.list();
 		for (const summary of buildSessionList([...this.sessions.values()], [], scheduledJobs)) {
-			const entry = workerRosterEntryFromSummary(summary);
-			entries.set(entry.agentId, entry);
+			const agentId = rosterAgentIdForSummary(summary);
+			if (reporter.lastComposedSource.get(agentId) === summary) {
+				const entry = reporter.lastComposed.get(agentId);
+				if (entry) {
+					entries.set(agentId, entry);
+					composedSources.set(agentId, summary);
+					continue;
+				}
+			}
+			entries.set(agentId, workerRosterEntryFromSummary(summary));
+			composedSources.set(agentId, summary);
 		}
 		for (const [agentId, queued] of reporter.queuedChildren) {
 			if (entries.has(agentId)) {
@@ -7420,12 +7437,18 @@ export class AgentDaemon {
 		const changed: WorkerRosterEntry[] = [];
 		const nextJson = new Map<string, string>();
 		for (const entry of entries.values()) {
-			const json = JSON.stringify(entry);
+			// An entry reused from the last flush is unchanged by construction:
+			// skip its serialization and keep the previous json for the delta compare.
+			const json =
+				reporter.lastComposed.get(entry.agentId) === entry
+					? (reporter.lastComposedJson.get(entry.agentId) ?? JSON.stringify(entry))
+					: JSON.stringify(entry);
 			nextJson.set(entry.agentId, json);
 			if (reporter.lastComposedJson.get(entry.agentId) !== json) changed.push(entry);
 		}
 		const removedAgentIds = [...reporter.removedAgentIds.keys()];
 		reporter.lastComposed = new Map(entries);
+		reporter.lastComposedSource = composedSources;
 		reporter.lastComposedJson = nextJson;
 		if (!this.hasAuthenticatedSupervisorClient()) {
 			if (changed.length > 0 || removedAgentIds.length > 0) reporter.snapshotPending = true;
@@ -7913,6 +7936,8 @@ export class AgentDaemon {
 
 interface WorkerRosterReporterState {
 	lastComposed: Map<string, WorkerRosterEntry>;
+	/** Summary each lastComposed entry was composed from; an unchanged session reuses its entry. */
+	lastComposedSource: Map<string, SessionSummary>;
 	lastComposedJson: Map<string, string>;
 	queuedChildren: Map<string, WorkerRosterEntry>;
 	/** Pending removals: agentId -> removed sessionId; a new incarnation of the id cancels it. */
