@@ -32,6 +32,7 @@ interface WorkerReporterFixture {
 	daemon: {
 		sessions: Map<string, ActiveSessionState>;
 		observeRosterEvent(state: ActiveSessionState, message: unknown): void;
+		scheduleRosterFlush(state?: ActiveSessionState): void;
 		flushRoster(): void;
 		rosterReporter: {
 			lastComposed: Map<string, WorkerRosterEntry>;
@@ -587,6 +588,14 @@ describe("worker roster reporter", () => {
 		daemon.observeRosterEvent(quiet, statusFor(quiet));
 		vi.advanceTimersByTime(300);
 		expect(quietSummary()).toBe(true);
+
+		// A lifecycle (stateless) flush inside the window breaks through the pending trailing
+		// flush: the supervisor answers `list` from the published roster, so it must not lag.
+		(loud.runtime.session as unknown as { isStreaming: boolean }).isStreaming = false;
+		daemon.observeRosterEvent(loud, statusFor(loud));
+		daemon.scheduleRosterFlush();
+		vi.advanceTimersByTime(0);
+		expect(sentDeltas).toHaveLength(4);
 	});
 });
 

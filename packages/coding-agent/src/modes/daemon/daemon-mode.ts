@@ -7360,8 +7360,11 @@ export class AgentDaemon {
 	}
 
 	// Session-scoped triggers (roster events, child updates) mark only their
-	// session dirty; every other caller mutates state that can affect any
-	// session, so those schedule a full recompose.
+	// session dirty and coalesce into the flush window; every other caller
+	// mutates state that can affect any session, so those schedule a full
+	// recompose on the next tick: the supervisor answers `list` from the
+	// published roster, so a hydrated or closed session must be visible there
+	// before the command's response reaches the client.
 	private scheduleRosterFlush(state?: ActiveSessionState): void {
 		if (!this.options.worker || this.shuttingDown) return;
 		if (state === undefined) {
@@ -7369,8 +7372,17 @@ export class AgentDaemon {
 		} else {
 			this.rosterDirtyAgentIds.add(this.rosterAgentIdForState(state));
 		}
-		if (this.rosterFlushScheduled || this.rosterFlushTimer !== undefined) return;
-		if (this.rosterLastFlushAt === undefined || Date.now() - this.rosterLastFlushAt >= ROSTER_FLUSH_MIN_INTERVAL_MS) {
+		if (this.rosterFlushScheduled) return;
+		if (
+			state === undefined ||
+			this.rosterLastFlushAt === undefined ||
+			Date.now() - this.rosterLastFlushAt >= ROSTER_FLUSH_MIN_INTERVAL_MS
+		) {
+			// A full flush subsumes a pending trailing flush: it consumes its dirty marks.
+			if (this.rosterFlushTimer !== undefined) {
+				clearTimeout(this.rosterFlushTimer);
+				this.rosterFlushTimer = undefined;
+			}
 			this.rosterFlushScheduled = true;
 			setImmediate(() => {
 				this.rosterFlushScheduled = false;
@@ -7378,6 +7390,7 @@ export class AgentDaemon {
 			});
 			return;
 		}
+		if (this.rosterFlushTimer !== undefined) return;
 		this.rosterFlushTimer = setTimeout(
 			() => {
 				this.rosterFlushTimer = undefined;
