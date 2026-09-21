@@ -4242,7 +4242,7 @@ describe("daemon worker supervisor monitoring", () => {
 			],
 			orphan: { pid: 987_654, processStartId: "reused-process" },
 		});
-		const markInterrupted = vi.fn().mockRejectedValueOnce(new Error("session file is gone")); // one notice is refused
+		const markInterrupted = vi.fn().mockRejectedValueOnce(new Error("session file is gone"));
 		const kill = vi.spyOn(process, "kill").mockReturnValue(true);
 		const { supervisor } = recoverySupervisor(worker, { markInterrupted });
 
