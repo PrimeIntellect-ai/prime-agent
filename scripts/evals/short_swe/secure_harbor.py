@@ -28,7 +28,11 @@ class SecureVerifiedMixin:
 
     async def stage_verifier(self, runtime: Runtime) -> None:
         await super().stage_verifier(runtime)
-        raw = await runtime.read("/tmp/prime-agent.patch", max_bytes=MAX_PATCH_BYTES)
+        raw = await runtime.read("/tmp/prime-agent.patch", max_bytes=MAX_PATCH_BYTES + 1)
+        if isinstance(raw, bytes) and len(raw) > MAX_PATCH_BYTES:
+            raise RuntimeError(
+                "candidate patch exceeds the filtering cap; refusing to apply an unfiltered tail"
+            )
         if not raw:
             return
         filtered = filter_test_control(raw)
