@@ -1,65 +1,68 @@
 import { execFileSync } from "node:child_process";
-import {
-	chmodSync,
-	existsSync,
-	mkdirSync,
-	mkdtempSync,
-	readFileSync,
-	rmSync,
-	statSync,
-	symlinkSync,
-	writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
 	type CloudTunnelConnection,
 	type CloudTunnelTransport,
 	CloudTunnelTransportError,
 } from "../src/core/cloud/bridge/tunnel-transport.js";
-import { CloudSessionStore } from "../src/core/cloud/cloud-session-store.js";
 import {
 	CLOUD_DELEGATION_BOOTSTRAP_SCRIPT,
 	CLOUD_GUEST_RESULTS_DIR,
 	type CloudDelegationResultsClient,
-	type CloudDelegationTunnelClient,
-	type CloudDelegationVmProcessClient,
-	type CloudDelegationWorkspaceTransfer,
 } from "../src/core/cloud/delegation-orchestrator.js";
 import {
 	cloudInferenceKeyFilePath,
 	cloudInferenceTeamOverride,
 	cloudTeamOverride,
+	type DirectCloudDelegateOptions,
 	DirectCloudService,
-	type DirectCloudServiceOptions,
 	isDirectCloudConfigured,
 	resolveCloudInferenceCredential,
 } from "../src/core/cloud/direct-cloud-service.js";
 import {
-	type PrimeSandbox,
 	type PrimeSandboxClient,
 	PrimeSandboxError,
+	type PrimeSandboxVmCreateRequest,
 } from "../src/core/cloud/prime-sandbox-client.js";
 import { type CloudEvent, type CloudMessage, cloudRequestDigest } from "../src/core/cloud/protocol.js";
-import { CloudResultStore } from "../src/core/cloud/result-import.js";
+import { cloudTemp, type RecordingDelegationStack, recordingDelegationStack } from "./cloud-support.js";
 
-const roots: string[] = [];
-function temp(): string {
-	const value = mkdtempSync(join(tmpdir(), "direct-cloud-service-test-"));
-	roots.push(value);
-	return value;
+/**
+ * Drains the event loop until the observable settles: every source-side async
+ * chain and 1ms monitor tick completes across turns, never a wall clock.
+ */
+async function until(predicate: () => boolean): Promise<void> {
+	for (;;) {
+		if (predicate()) return;
+		await new Promise((resolve) => setImmediate(resolve));
+	}
 }
+
 function git(cwd: string, ...args: string[]): string {
 	return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 }
-afterEach(() => {
-	for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true });
-});
 
+/** Platform downloads for a guest's terminal results files. */
+function guestResultsDownload(
+	files: Record<string, Uint8Array>,
+): (sandboxId: string, path: string) => Promise<Uint8Array> {
+	const guestFiles: Record<string, Uint8Array> = {
+		[`${CLOUD_GUEST_RESULTS_DIR}/status.txt`]: new TextEncoder().encode("completed\n"),
+		[`${CLOUD_GUEST_RESULTS_DIR}/stdout.txt`]: new TextEncoder().encode("done\n"),
+		[`${CLOUD_GUEST_RESULTS_DIR}/stderr.txt`]: new TextEncoder().encode(""),
+		...files,
+	};
+	return async (_sandboxId, path) => {
+		const content = guestFiles[path];
+		if (content === undefined) throw new PrimeSandboxError("sandbox_not_found", `missing file: ${path}`);
+		return content;
+	};
+}
 describe("DirectCloudService configuration", () => {
 	it("requires both a pinned image and a guest-scoped inference credential", () => {
-		const emptyHome = mkdtempSync(join(tmpdir(), "cloud-config-home-"));
+		const emptyHome = cloudTemp("cloud-config-home-");
 		expect(isDirectCloudConfigured({}, emptyHome)).toBe(false);
 		expect(isDirectCloudConfigured({ PRIME_AGENT_CLOUD_IMAGE: "image" }, emptyHome)).toBe(false);
 		expect(
@@ -68,13 +71,12 @@ describe("DirectCloudService configuration", () => {
 				PRIME_AGENT_CLOUD_INFERENCE_API_KEY: "guest-key",
 			}),
 		).toBe(true);
-		rmSync(emptyHome, { recursive: true, force: true });
 	});
 });
 
 describe("DirectCloudService faux-provider flow", () => {
 	it("provisions, survives service reconstruction, retrieves, and applies only explicitly", async () => {
-		const root = temp();
+		const root = cloudTemp("direct-cloud-service-test-");
 		const repo = join(root, "repo");
 		execFileSync("mkdir", ["-p", repo]);
 		git(repo, "init", "-q");
@@ -85,87 +87,36 @@ describe("DirectCloudService faux-provider flow", () => {
 		git(repo, "commit", "-qm", "initial");
 
 		const stateDirectory = join(root, "state");
-		const store = new CloudSessionStore(join(stateDirectory, "sessions"));
-		const resultStore = new CloudResultStore(join(stateDirectory, "results"));
 		const now = "2026-01-01T00:00:00.000Z";
-		const sandbox: PrimeSandbox = {
-			id: "sandbox-1",
-			name: "cloud",
-			dockerImage: "example/cloud:1",
-			cpuCores: 4,
-			memoryGb: 16,
-			diskSizeGb: 50,
-			gpuCount: 0,
-			vm: true,
-			status: "RUNNING",
-			timeoutMinutes: 120,
-			labels: [],
-			createdAt: now,
-			updatedAt: now,
-		};
-		const uploads: string[] = [];
-		let deleteCount = 0;
+		const fakes = recordingDelegationStack(root, {
+			sandboxId: "sandbox-1",
+			baseline: { repoRoot: repo, headCommit: git(repo, "rev-parse", "HEAD") },
+			startFailureMessage: "simulated worker crash before process start",
+		});
+		const { calls, uploads, store, resultStore, commonOptions: common } = fakes;
+		const deleteCount = () => calls.filter((call) => call.kind === "delete-sandbox").length;
+		// The sandbox can also vanish under the service: deleteSandbox flips
+		// availability and getSandbox then reports the platform's not-found
+		// error exactly like a sandbox deleted out of band.
 		let sandboxAvailable = true;
-		const platform = {
-			createVmSandbox: async () => {
+		// Wrap the RECORDING platform (which tracks call kinds) with the
+		// availability flip; delegating to the recording wrapper keeps
+		// deleteCount()/kinds assertions intact.
+		fakes.commonOptions.platform = {
+			...fakes.platform,
+			createVmSandbox: async (request: PrimeSandboxVmCreateRequest) => {
 				sandboxAvailable = true;
-				return sandbox;
+				return await fakes.platform.createVmSandbox(request);
 			},
 			getSandbox: async () => {
 				if (!sandboxAvailable) throw new PrimeSandboxError("sandbox_not_found", "missing sandbox");
-				return sandbox;
+				return fakes.stack.sandbox;
 			},
-			deleteSandbox: async () => {
-				deleteCount += 1;
+			deleteSandbox: async (sandboxId: string) => {
 				sandboxAvailable = false;
-			},
-			getSandboxAuth: async () => ({
-				sandboxId: sandbox.id,
-				gatewayUrl: "https://gateway.example",
-				userNamespace: "user",
-				jobId: "job",
-				token: "gateway-token",
-				expiresAt: "2099-01-01T00:00:00.000Z",
-			}),
-			uploadFile: async (_sandboxId: string, request: { path: string; content: Uint8Array }) => {
-				uploads.push(request.path);
-				return { path: request.path, size: request.content.byteLength };
+				await fakes.platform.deleteSandbox(sandboxId);
 			},
 		} as unknown as PrimeSandboxClient;
-		const workspace: CloudDelegationWorkspaceTransfer = {
-			capture: async () => ({
-				baseline: {
-					repoRoot: repo,
-					headCommit: git(repo, "rev-parse", "HEAD"),
-					manifestDigest: `sha256:${"a".repeat(64)}`,
-				},
-				archive: new Uint8Array([1]),
-				manifest: new TextEncoder().encode("{}"),
-				totalSizeBytes: 3,
-				cleanup: () => {},
-			}),
-			upload: async (request) => {
-				uploads.push(request.archivePath, request.manifestPath);
-			},
-		};
-		const runningProcesses = new Set<string>();
-		let failNextStart = false;
-		const processClient: CloudDelegationVmProcessClient = {
-			start: async (request) => {
-				if (failNextStart) {
-					failNextStart = false;
-					throw new Error("simulated worker crash before process start");
-				}
-				const created = !runningProcesses.has(request.sessionUuid);
-				runningProcesses.add(request.sessionUuid);
-				return { sessionUuid: request.sessionUuid, created };
-			},
-			signalStop: async (sessionUuid) => {
-				runningProcesses.delete(sessionUuid);
-			},
-			status: async (sessionUuid) =>
-				runningProcesses.has(sessionUuid) ? { state: "running" } : { state: "unknown" },
-		};
 		let resultReady = false;
 		const patch = [
 			"diff --git a/a.txt b/a.txt",
@@ -203,20 +154,7 @@ describe("DirectCloudService faux-provider flow", () => {
 				});
 			},
 		};
-		const common: DirectCloudServiceOptions = {
-			stateDirectory,
-			apiKey: "platform-key",
-			inferenceApiKey: "inference-only-key",
-			dockerImage: "example/cloud:1",
-			platform,
-			store,
-			resultStore,
-			workspace,
-			process: processClient,
-			results,
-			readiness: { isReady: async () => true },
-			monitorPollIntervalMs: 1,
-		};
+		fakes.commonOptions.results = results;
 		const service = new DirectCloudService(common);
 		const started = await service.delegate({
 			activeSessionId: "active-1",
@@ -233,9 +171,7 @@ describe("DirectCloudService faux-provider flow", () => {
 		expect(readFileSync(join(repo, "a.txt"), "utf8")).toBe("old\n");
 
 		resultReady = true;
-		while (store.get(started.id)?.resultImportState === "pending") {
-			await new Promise((resolve) => setTimeout(resolve, 2));
-		}
+		await until(() => store.get(started.id)?.resultImportState !== "pending");
 		const reconstructed = new DirectCloudService(common);
 		const [completed] = await reconstructed.list("active-1");
 		expect(completed).toMatchObject({
@@ -263,11 +199,11 @@ describe("DirectCloudService faux-provider flow", () => {
 		const applied = await reconstructed.apply("active-1", started.id, repo);
 		expect(applied).toMatchObject({ status: "completed", resultApplied: true, outputPreview: "done" });
 		expect(readFileSync(join(repo, "a.txt"), "utf8")).toBe("new\n");
-		expect(deleteCount).toBe(1);
+		expect(deleteCount()).toBe(1);
 		expect(store.get(started.id)).toMatchObject({ observedLifecycle: "deleted", cleanupState: "released" });
 		const appliedAgain = await reconstructed.apply("active-1", started.id, repo);
 		expect(appliedAgain.resultApplied).toBe(true);
-		expect(deleteCount).toBe(1);
+		expect(deleteCount()).toBe(1);
 
 		resultPatch = "";
 		const noChange = await reconstructed.delegate({
@@ -284,7 +220,7 @@ describe("DirectCloudService faux-provider flow", () => {
 		});
 		const noChangeApplied = await reconstructed.apply("active-1", noChange.id, repo);
 		expect(noChangeApplied).toMatchObject({ status: "completed", resultApplied: true });
-		expect(deleteCount).toBe(2);
+		expect(deleteCount()).toBe(2);
 
 		resultOutcome = "failed";
 		const failedNoChange = await reconstructed.delegate({
@@ -298,7 +234,7 @@ describe("DirectCloudService faux-provider flow", () => {
 
 		resultReady = false;
 		resultOutcome = "completed";
-		failNextStart = true;
+		fakes.startFailures.count = 1;
 		await expect(
 			reconstructed.delegate({
 				activeSessionId: "active-1",
@@ -323,7 +259,7 @@ describe("DirectCloudService faux-provider flow", () => {
 		// git diff emits raw file bytes in text hunks, so a delegation that
 		// touches a non-UTF-8 file produces a patch a strict UTF-8 decode
 		// rejects; the concrete service must still import and apply it exactly.
-		const root = temp();
+		const root = cloudTemp("direct-cloud-service-test-");
 		const repo = join(root, "repo");
 		mkdirSync(repo, { recursive: true });
 		git(repo, "init", "-q");
@@ -343,76 +279,16 @@ describe("DirectCloudService faux-provider flow", () => {
 		});
 		expect(() => new TextDecoder("utf-8", { fatal: true }).decode(patchBytes)).toThrow();
 
-		const stateDirectory = join(root, "state");
-		const now = "2026-01-01T00:00:00.000Z";
-		const sandbox: PrimeSandbox = {
-			id: "sandbox-latin",
-			name: "cloud",
-			dockerImage: "example/cloud:1",
-			cpuCores: 4,
-			memoryGb: 16,
-			diskSizeGb: 50,
-			gpuCount: 0,
-			vm: true,
-			status: "RUNNING",
-			timeoutMinutes: 120,
-			labels: [],
-			createdAt: now,
-			updatedAt: now,
-		};
-		const platform = {
-			createVmSandbox: async () => sandbox,
-			getSandbox: async () => sandbox,
-			deleteSandbox: async () => {},
-			getSandboxAuth: async () => ({
-				sandboxId: sandbox.id,
-				gatewayUrl: "https://gateway.example",
-				userNamespace: "user",
-				jobId: "job",
-				token: "gateway-token",
-				expiresAt: "2099-01-01T00:00:00.000Z",
+		const fakes = recordingDelegationStack(root, {
+			sandboxId: "sandbox-latin",
+			baseline: { repoRoot: repo, headCommit: git(repo, "rev-parse", "HEAD") },
+			downloadFile: guestResultsDownload({
+				[`${CLOUD_GUEST_RESULTS_DIR}/changes.patch`]: patchBytes,
+				[`${CLOUD_GUEST_RESULTS_DIR}/changed-paths.txt`]: new TextEncoder().encode("latin.txt\n"),
 			}),
-			uploadFile: async (_sandboxId: string, request: { path: string; content: Uint8Array }) => ({
-				path: request.path,
-				size: request.content.byteLength,
-			}),
-			downloadFile: async (_sandboxId: string, path: string) => {
-				if (path === `${CLOUD_GUEST_RESULTS_DIR}/status.txt`) return new TextEncoder().encode("completed\n");
-				if (path === `${CLOUD_GUEST_RESULTS_DIR}/stdout.txt`) return new TextEncoder().encode("done\n");
-				if (path === `${CLOUD_GUEST_RESULTS_DIR}/stderr.txt`) return new TextEncoder().encode("");
-				if (path === `${CLOUD_GUEST_RESULTS_DIR}/changes.patch`) return patchBytes;
-				if (path === `${CLOUD_GUEST_RESULTS_DIR}/changed-paths.txt`) return new TextEncoder().encode("latin.txt\n");
-				throw new PrimeSandboxError("sandbox_not_found", `missing file: ${path}`);
-			},
-		} as unknown as PrimeSandboxClient;
-		const service = new DirectCloudService({
-			stateDirectory,
-			apiKey: "platform-key",
-			inferenceApiKey: "inference-only-key",
-			dockerImage: "example/cloud:1",
-			platform,
-			workspace: {
-				capture: async () => ({
-					baseline: {
-						repoRoot: repo,
-						headCommit: git(repo, "rev-parse", "HEAD"),
-						manifestDigest: `sha256:${"b".repeat(64)}`,
-					},
-					archive: new Uint8Array([1]),
-					manifest: new TextEncoder().encode("{}"),
-					totalSizeBytes: 3,
-					cleanup: () => {},
-				}),
-				upload: async () => {},
-			},
-			process: {
-				start: async (request) => ({ sessionUuid: request.sessionUuid, created: true }),
-				signalStop: async () => {},
-				status: async () => ({ state: "running" as const }),
-			},
-			readiness: { isReady: async () => true },
-			monitorPollIntervalMs: 1,
+			results: "guest-files",
 		});
+		const service = new DirectCloudService(fakes.commonOptions);
 
 		const started = await service.delegate({
 			activeSessionId: "active-1",
@@ -421,13 +297,7 @@ describe("DirectCloudService faux-provider flow", () => {
 			prompt: "edit latin.txt",
 		});
 		expect(started.status).toBe("running");
-		for (
-			let attempt = 0;
-			attempt < 500 && service.store.get(started.id)?.resultImportState === "pending";
-			attempt++
-		) {
-			await new Promise((resolve) => setTimeout(resolve, 2));
-		}
+		await until(() => service.store.get(started.id)?.resultImportState !== "pending");
 		expect(service.store.get(started.id)?.resultImportState).toBe("available");
 
 		const [summary] = await service.list("active-1");
@@ -450,7 +320,7 @@ describe("DirectCloudService faux-provider flow", () => {
 		// A broken guest contract (changed-paths.txt present and non-empty,
 		// changes.patch empty) must fail the import loudly: the session never
 		// reaches the review state, and a retried fetch keeps failing.
-		const root = temp();
+		const root = cloudTemp("direct-cloud-service-test-");
 		const repo = join(root, "repo");
 		execFileSync("mkdir", ["-p", repo]);
 		git(repo, "init", "-q");
@@ -460,79 +330,16 @@ describe("DirectCloudService faux-provider flow", () => {
 		git(repo, "add", "a.txt");
 		git(repo, "commit", "-qm", "initial");
 
-		const stateDirectory = join(root, "state");
-		const now = "2026-01-01T00:00:00.000Z";
-		const sandbox: PrimeSandbox = {
-			id: "sandbox-no-patch",
-			name: "cloud",
-			dockerImage: "example/cloud:1",
-			cpuCores: 4,
-			memoryGb: 16,
-			diskSizeGb: 50,
-			gpuCount: 0,
-			vm: true,
-			status: "RUNNING",
-			timeoutMinutes: 120,
-			labels: [],
-			createdAt: now,
-			updatedAt: now,
-		};
-		let deleteCount = 0;
-		const platform = {
-			createVmSandbox: async () => sandbox,
-			getSandbox: async () => sandbox,
-			deleteSandbox: async () => {
-				deleteCount += 1;
-			},
-			getSandboxAuth: async () => ({
-				sandboxId: sandbox.id,
-				gatewayUrl: "https://gateway.example",
-				userNamespace: "user",
-				jobId: "job",
-				token: "gateway-token",
-				expiresAt: "2099-01-01T00:00:00.000Z",
+		const fakes = recordingDelegationStack(root, {
+			sandboxId: "sandbox-no-patch",
+			baseline: { repoRoot: repo, headCommit: git(repo, "rev-parse", "HEAD") },
+			downloadFile: guestResultsDownload({
+				[`${CLOUD_GUEST_RESULTS_DIR}/changes.patch`]: new TextEncoder().encode(""),
+				[`${CLOUD_GUEST_RESULTS_DIR}/changed-paths.txt`]: new TextEncoder().encode("a.txt\n"),
 			}),
-			uploadFile: async (_sandboxId: string, request: { path: string; content: Uint8Array }) => ({
-				path: request.path,
-				size: request.content.byteLength,
-			}),
-			downloadFile: async (_sandboxId: string, path: string) => {
-				if (path === `${CLOUD_GUEST_RESULTS_DIR}/status.txt`) return new TextEncoder().encode("completed\n");
-				if (path === `${CLOUD_GUEST_RESULTS_DIR}/stdout.txt`) return new TextEncoder().encode("done\n");
-				if (path === `${CLOUD_GUEST_RESULTS_DIR}/stderr.txt`) return new TextEncoder().encode("");
-				if (path === `${CLOUD_GUEST_RESULTS_DIR}/changes.patch`) return new TextEncoder().encode("");
-				if (path === `${CLOUD_GUEST_RESULTS_DIR}/changed-paths.txt`) return new TextEncoder().encode("a.txt\n");
-				throw new PrimeSandboxError("sandbox_not_found", `missing file: ${path}`);
-			},
-		} as unknown as PrimeSandboxClient;
-		const service = new DirectCloudService({
-			stateDirectory,
-			apiKey: "platform-key",
-			inferenceApiKey: "inference-only-key",
-			dockerImage: "example/cloud:1",
-			platform,
-			workspace: {
-				capture: async () => ({
-					baseline: {
-						repoRoot: repo,
-						headCommit: git(repo, "rev-parse", "HEAD"),
-						manifestDigest: `sha256:${"b".repeat(64)}`,
-					},
-					archive: new Uint8Array([1]),
-					manifest: new TextEncoder().encode("{}"),
-					totalSizeBytes: 3,
-					cleanup: () => {},
-				}),
-				upload: async () => {},
-			},
-			process: {
-				start: async (request) => ({ sessionUuid: request.sessionUuid, created: true }),
-				signalStop: async () => {},
-				status: async () => ({ state: "running" as const }),
-			},
-			readiness: { isReady: async () => true },
-			monitorPollIntervalMs: 1,
+			results: "guest-files",
 		});
+		const service = new DirectCloudService(fakes.commonOptions);
 
 		const started = await service.delegate({
 			activeSessionId: "active-1",
@@ -540,10 +347,7 @@ describe("DirectCloudService faux-provider flow", () => {
 			cwd: repo,
 			prompt: "change a.txt",
 		});
-		const deadline = Date.now() + 10_000;
-		while (Date.now() < deadline && !service.store.get(started.id)?.lastError) {
-			await new Promise((resolve) => setTimeout(resolve, 2));
-		}
+		await until(() => service.store.get(started.id)?.lastError !== undefined);
 		const record = service.store.get(started.id);
 		expect(record?.resultImportState).toBe("pending");
 		expect(record?.lastError).toContain("changed paths");
@@ -552,11 +356,11 @@ describe("DirectCloudService faux-provider flow", () => {
 		expect(summary.resultReady).toBe(false);
 		expect(summary.changedPaths).toBeUndefined();
 		// The broken result is never imported, so the sandbox is kept for review.
-		expect(deleteCount).toBe(0);
+		expect(fakes.calls.filter((call) => call.kind === "delete-sandbox")).toHaveLength(0);
 	});
 
 	it("bootstrap hands the workspace to the bridge, which records committed and untracked guest changes", () => {
-		const root = temp();
+		const root = cloudTemp("direct-cloud-service-test-");
 		const source = join(root, "source");
 		const workspace = join(root, "workspace");
 		const results = join(root, "results");
@@ -623,7 +427,7 @@ describe("DirectCloudService faux-provider flow", () => {
 	});
 
 	it("bootstrap fails closed during setup and removes the guest credential", () => {
-		const root = temp();
+		const root = cloudTemp("direct-cloud-service-test-");
 		const workspace = join(root, "workspace");
 		const results = join(root, "results");
 		const archive = join(root, "invalid.tar");
@@ -657,16 +461,12 @@ describe("DirectCloudService faux-provider flow", () => {
 });
 
 describe("DirectCloudService Prime Tunnel bridge", () => {
-	interface TestCall {
-		kind: string;
-		detail?: string;
-	}
-
 	/**
-	 * In-memory bridge that records every client frame, answers hello with an
-	 * empty snapshot, and lets the test push scripted bridge frames.
+	 * In-memory bridge: records every client frame, answers hello with a
+	 * snapshot and submit with a receipt, and lets the test push scripted
+	 * frames or cut the edge.
 	 */
-	class RecordingBridgeTransport implements CloudTunnelTransport {
+	class ScriptedBridgeTransport implements CloudTunnelTransport {
 		readonly sentFrames: string[] = [];
 		private handler: ((message: string) => void) | undefined;
 		private closeHandler: ((error?: CloudTunnelTransportError) => void) | undefined;
@@ -694,9 +494,8 @@ describe("DirectCloudService Prime Tunnel bridge", () => {
 				send: (message) => {
 					this.sentFrames.push(message);
 					const parsed = JSON.parse(message) as CloudMessage;
-					if (parsed.type !== "hello") return;
-					this.handler?.(
-						JSON.stringify({
+					if (parsed.type === "hello") {
+						this.push({
 							type: "snapshot",
 							sessionId: parsed.sessionId,
 							generation: parsed.generation,
@@ -704,8 +503,23 @@ describe("DirectCloudService Prime Tunnel bridge", () => {
 							status: "busy",
 							state: { cwd: "/w", modelId: "image-default", queuedCommandIds: [] },
 							events: [],
-						}),
-					);
+						});
+					}
+					if (parsed.type === "submit") {
+						this.push({
+							type: "command",
+							sessionId: parsed.sessionId,
+							generation: parsed.generation,
+							receipt: {
+								commandId: parsed.commandId,
+								digest: cloudRequestDigest(parsed.request),
+								state: "accepted",
+								submittedAt: "2026-01-01T00:00:00.000Z",
+								updatedAt: "2026-01-01T00:00:00.000Z",
+								uncertain: false,
+							},
+						});
+					}
 				},
 				close: () => {
 					this.closeHandler?.();
@@ -758,230 +572,34 @@ describe("DirectCloudService Prime Tunnel bridge", () => {
 			.map((record) => record.event?.text ?? "");
 	}
 
-	/** In-memory bridge: answers hello with a snapshot and submit with a receipt. */
-	class ScriptedBridgeTransport implements CloudTunnelTransport {
-		private handler: ((message: string) => void) | undefined;
-		private closeHandler: ((error?: CloudTunnelTransportError) => void) | undefined;
-		private readonly drops: Array<() => void> = [];
-
-		private reply(message: CloudMessage): void {
-			this.handler?.(JSON.stringify(message));
-		}
-
-		get connectionCount(): number {
-			return this.drops.length;
-		}
-
-		/** Simulate the edge cutting every connection it has seen. */
-		dropAll(): void {
-			for (const drop of this.drops.splice(0)) drop();
-		}
-
-		async connect(): Promise<CloudTunnelConnection> {
-			this.drops.push(() => {
-				this.closeHandler?.(new CloudTunnelTransportError("closed", "simulated drop"));
-			});
-			return {
-				send: (message) => {
-					const parsed = JSON.parse(message) as CloudMessage;
-					if (parsed.type === "hello") {
-						this.reply({
-							type: "snapshot",
-							sessionId: parsed.sessionId,
-							generation: parsed.generation,
-							cursor: { generation: parsed.generation, sequence: 0 },
-							status: "busy",
-							state: { cwd: "/w", modelId: "image-default", queuedCommandIds: [] },
-							events: [],
-						});
-					}
-					if (parsed.type === "submit") {
-						this.reply({
-							type: "command",
-							sessionId: parsed.sessionId,
-							generation: parsed.generation,
-							receipt: {
-								commandId: parsed.commandId,
-								digest: cloudRequestDigest(parsed.request),
-								state: "accepted",
-								submittedAt: "2026-01-01T00:00:00.000Z",
-								updatedAt: "2026-01-01T00:00:00.000Z",
-								uncertain: false,
-							},
-						});
-					}
-				},
-				close: () => {
-					this.closeHandler?.();
-				},
-				onMessage: (handler) => {
-					this.handler = handler;
-				},
-				onClose: (handler) => {
-					this.closeHandler = handler;
-				},
-			};
-		}
-	}
-
-	function makeFakes(root: string, sandboxId: string) {
-		const calls: TestCall[] = [];
-		const uploads: string[] = [];
-		const stateDirectory = join(root, "state");
-		const store = new CloudSessionStore(join(stateDirectory, "sessions"));
-		const resultStore = new CloudResultStore(join(stateDirectory, "results"));
-		const now = "2026-01-01T00:00:00.000Z";
-		const sandbox: PrimeSandbox = {
-			id: sandboxId,
-			name: "cloud",
-			dockerImage: "example/cloud:1",
-			cpuCores: 4,
-			memoryGb: 16,
-			diskSizeGb: 50,
-			gpuCount: 0,
-			vm: true,
-			status: "RUNNING",
-			timeoutMinutes: 120,
-			labels: [],
-			createdAt: now,
-			updatedAt: now,
-		};
-		const platform = {
-			createVmSandbox: async () => {
-				calls.push({ kind: "create" });
-				return sandbox;
-			},
-			getSandbox: async () => sandbox,
-			deleteSandbox: async () => {
-				calls.push({ kind: "delete-sandbox" });
-			},
-			getSandboxAuth: async () => ({
-				sandboxId,
-				gatewayUrl: "https://gateway.example",
-				userNamespace: "user",
-				jobId: "job",
-				token: "gateway-token",
-				expiresAt: "2099-01-01T00:00:00.000Z",
-			}),
-			uploadFile: async (_sandboxId: string, request: { path: string; content: Uint8Array }) => {
-				uploads.push(request.path);
-				return { path: request.path, size: request.content.byteLength };
-			},
-		} as unknown as PrimeSandboxClient;
-		const workspace: CloudDelegationWorkspaceTransfer = {
-			capture: async () => ({
-				baseline: {
-					repoRoot: join(root, "repo"),
-					headCommit: null,
-					manifestDigest: `sha256:${"a".repeat(64)}`,
-				},
-				archive: new Uint8Array([1]),
-				manifest: new TextEncoder().encode("{}"),
-				totalSizeBytes: 3,
-				cleanup: () => {},
-			}),
-			upload: async (request) => {
-				uploads.push(request.archivePath, request.manifestPath);
-			},
-		};
-		const startEnvs: Array<Record<string, string>> = [];
-		const runningProcesses = new Set<string>();
-		const startFailures = { count: 0 };
-		const processClient: CloudDelegationVmProcessClient = {
-			start: async (request) => {
-				if (startFailures.count > 0) {
-					startFailures.count--;
-					throw new Error("simulated resident-process crash");
-				}
-				calls.push({ kind: "start" });
-				startEnvs.push(request.env);
-				const created = !runningProcesses.has(request.sessionUuid);
-				runningProcesses.add(request.sessionUuid);
-				return { sessionUuid: request.sessionUuid, created };
-			},
-			signalStop: async (sessionUuid) => {
-				runningProcesses.delete(sessionUuid);
-			},
-			status: async (sessionUuid) =>
-				runningProcesses.has(sessionUuid) ? { state: "running" } : { state: "unknown" },
-		};
-		const results: CloudDelegationResultsClient = {
-			fetch: async () => undefined,
-			save: async () => {},
-		};
-		const tunnelRegistration = {
-			tunnelId: "tun_test1",
-			url: "https://tun-test1.tunnels.example.com",
-			hostname: "tun-test1.tunnels.example.com",
-			httpUser: "prime-agent",
-			httpPassword: "edge-password-0123456789",
-			expiresAt: "2099-01-01T00:00:00.000Z",
-			frpServerHost: "frps.example.com",
-			frpServerPort: 7000,
-			frpToken: "frp-token",
-			bindingSecret: "binding-secret",
-		};
-		const deletedTunnels: string[] = [];
-		const tunnels: CloudDelegationTunnelClient = {
-			register: async (request) => {
-				calls.push({ kind: "register-tunnel", detail: request.teamId });
-				return tunnelRegistration;
-			},
-			delete: async (tunnelId) => {
-				deletedTunnels.push(tunnelId);
-			},
-			get: async (tunnelId) =>
-				tunnelId === tunnelRegistration.tunnelId
-					? {
-							tunnelId,
-							url: tunnelRegistration.url,
-							hostname: tunnelRegistration.hostname,
-							httpUser: tunnelRegistration.httpUser,
-							expiresAt: tunnelRegistration.expiresAt,
-						}
-					: undefined,
-		};
-		return {
-			calls,
-			uploads,
-			startEnvs,
-			startFailures,
-			deletedTunnels,
-			tunnelRegistration,
-			commonOptions: {
-				stateDirectory,
-				apiKey: "platform-key",
-				inferenceApiKey: "inference-only-key",
-				dockerImage: "example/cloud:1",
-				platform,
-				store,
-				resultStore,
-				workspace,
-				process: processClient,
-				results,
-				readiness: { isReady: async () => true },
-				tunnels,
-				monitorPollIntervalMs: 1,
-			} as DirectCloudServiceOptions,
-			store,
-		};
+	/**
+	 * The tunnel-suite workhorse: delegate one "work" prompt into the sandbox
+	 * repo over the recording stack.
+	 */
+	async function delegateWork(
+		fakes: RecordingDelegationStack,
+		service: DirectCloudService,
+		sessionId: string,
+		options: DirectCloudDelegateOptions = { tunnel: true, timeoutMinutes: 10 },
+	) {
+		return await service.delegate({
+			activeSessionId: "active-1",
+			delegationId: sessionId,
+			cwd: join(fakes.root, "repo"),
+			prompt: "work",
+			options,
+		});
 	}
 
 	it("registers the tunnel before start, keeps secrets out of the record, and never passes the platform key into the guest", async () => {
-		const root = temp();
-		const { calls, uploads, startEnvs, tunnelRegistration, commonOptions, store } = makeFakes(
-			root,
-			"sandbox-tunnel-1",
-		);
-		commonOptions.tunnelTransport = new ScriptedBridgeTransport();
-		const service = new DirectCloudService(commonOptions);
-		const started = await service.delegate({
-			activeSessionId: "active-1",
-			delegationId: "sess_tunnel-1",
-			cwd: join(root, "repo"),
-			prompt: "work",
-			options: { tunnel: true, timeoutMinutes: 10 },
+		const root = cloudTemp("direct-cloud-service-test-");
+		const fakes = recordingDelegationStack(root, {
+			sandboxId: "sandbox-tunnel-1",
+			tunnelTransport: new ScriptedBridgeTransport(),
 		});
+		const { calls, uploads, startEnvs, tunnelRegistration, store } = fakes;
+		const service = new DirectCloudService(fakes.commonOptions);
+		const started = await delegateWork(fakes, service, "sess_tunnel-1");
 		expect(started.status).toBe("running");
 		expect(started.tunnel).toMatchObject({
 			tunnelId: tunnelRegistration.tunnelId,
@@ -1014,17 +632,14 @@ describe("DirectCloudService Prime Tunnel bridge", () => {
 	});
 
 	it("releases the tunnel with sandbox cleanup", async () => {
-		const root = temp();
-		const { deletedTunnels, tunnelRegistration, commonOptions, store } = makeFakes(root, "sandbox-tunnel-2");
-		commonOptions.tunnelTransport = new ScriptedBridgeTransport();
-		const service = new DirectCloudService(commonOptions);
-		const started = await service.delegate({
-			activeSessionId: "active-1",
-			delegationId: "sess_tunnel-2",
-			cwd: join(root, "repo"),
-			prompt: "work",
-			options: { tunnel: true, timeoutMinutes: 10 },
+		const root = cloudTemp("direct-cloud-service-test-");
+		const fakes = recordingDelegationStack(root, {
+			sandboxId: "sandbox-tunnel-2",
+			tunnelTransport: new ScriptedBridgeTransport(),
 		});
+		const { deletedTunnels, tunnelRegistration, store } = fakes;
+		const service = new DirectCloudService(fakes.commonOptions);
+		const started = await delegateWork(fakes, service, "sess_tunnel-2");
 		await service.stop("active-1", started.id, true);
 		expect(deletedTunnels).toEqual([tunnelRegistration.tunnelId]);
 		const record = store.get(started.id);
@@ -1033,9 +648,10 @@ describe("DirectCloudService Prime Tunnel bridge", () => {
 	});
 
 	it("forfeit releases the platform tunnel and secrets before the sandbox delete, and stays idempotent on repeats", async () => {
-		const root = temp();
-		const { deletedTunnels, tunnelRegistration, commonOptions, store } = makeFakes(root, "sandbox-forfeit-1");
-		const service = new DirectCloudService(commonOptions);
+		const root = cloudTemp("direct-cloud-service-test-");
+		const fakes = recordingDelegationStack(root, { sandboxId: "sandbox-forfeit-1" });
+		const { deletedTunnels, tunnelRegistration, store } = fakes;
+		const service = new DirectCloudService(fakes.commonOptions);
 		const started = await service.delegate({
 			activeSessionId: "",
 			parentSessionId: undefined,
@@ -1063,29 +679,19 @@ describe("DirectCloudService Prime Tunnel bridge", () => {
 			tunnelState: "released",
 		});
 		expect(deletedTunnels).toEqual([tunnelRegistration.tunnelId]);
-	}, 10_000);
+	});
 
 	it("steers over a live tunnel and fails clearly without one", async () => {
-		const root = temp();
-		const { commonOptions } = makeFakes(root, "sandbox-tunnel-3");
-		commonOptions.tunnelTransport = new ScriptedBridgeTransport();
-		const service = new DirectCloudService(commonOptions);
-		const started = await service.delegate({
-			activeSessionId: "active-1",
-			delegationId: "sess_tunnel-3",
-			cwd: join(root, "repo"),
-			prompt: "work",
-			options: { timeoutMinutes: 10 },
+		const root = cloudTemp("direct-cloud-service-test-");
+		const fakes = recordingDelegationStack(root, {
+			sandboxId: "sandbox-tunnel-3",
+			tunnelTransport: new ScriptedBridgeTransport(),
 		});
+		const service = new DirectCloudService(fakes.commonOptions);
+		const started = await delegateWork(fakes, service, "sess_tunnel-3", { timeoutMinutes: 10 });
 		await expect(service.steer("active-1", started.id, "more")).rejects.toThrow(/--tunnel/);
 
-		const steered = await service.delegate({
-			activeSessionId: "active-1",
-			delegationId: "sess_tunnel-4",
-			cwd: join(root, "repo"),
-			prompt: "work",
-			options: { tunnel: true, timeoutMinutes: 10 },
-		});
+		const steered = await delegateWork(fakes, service, "sess_tunnel-4");
 		const result = await service.steer("active-1", steered.id, "go deeper");
 		expect(result.state).toBe("acknowledged");
 		expect(result.delegation.id).toBe(steered.id);
@@ -1093,43 +699,36 @@ describe("DirectCloudService Prime Tunnel bridge", () => {
 	});
 
 	it("releases the tunnel registration when the attachment can no longer resolve its target", async () => {
-		const root = temp();
-		const { commonOptions, deletedTunnels, store, tunnelRegistration } = makeFakes(root, "sandbox-tunnel-6");
+		const root = cloudTemp("direct-cloud-service-test-");
 		const transport = new ScriptedBridgeTransport();
-		commonOptions.tunnelTransport = transport;
-		const service = new DirectCloudService(commonOptions);
-		const started = await service.delegate({
-			activeSessionId: "active-1",
-			delegationId: "sess_tunnel-6",
-			cwd: join(root, "repo"),
-			prompt: "work",
-			options: { tunnel: true, timeoutMinutes: 10 },
+		const fakes = recordingDelegationStack(root, {
+			sandboxId: "sandbox-tunnel-6",
+			tunnelTransport: transport,
 		});
-		await vi.waitFor(() => expect(transport.connectionCount).toBe(1));
+		const { deletedTunnels, store, tunnelRegistration } = fakes;
+		const service = new DirectCloudService(fakes.commonOptions);
+		const started = await delegateWork(fakes, service, "sess_tunnel-6");
+		await until(() => transport.connectionCount === 1);
+		expect(transport.connectionCount).toBe(1);
 		// The durable secrets vanish while the registration still exists: the
 		// attachment goes terminal and must delete the platform registration
 		// instead of marking the tunnel released while it stays registered.
 		rmSync(join(root, "state", "tunnel-secrets", `${started.id}.json`));
 		transport.dropAll();
-		await vi.waitFor(() => {
-			expect(deletedTunnels).toEqual([tunnelRegistration.tunnelId]);
-			expect(store.get(started.id)?.tunnelState).toBe("released");
-		});
+		await until(() => deletedTunnels.includes(tunnelRegistration.tunnelId));
+		expect(deletedTunnels).toEqual([tunnelRegistration.tunnelId]);
+		expect(store.get(started.id)?.tunnelState).toBe("released");
 		await expect(service.steer("active-1", started.id, "never")).rejects.toThrow(/no live tunnel bridge/);
-	}, 10_000);
+	});
 
 	it("maps a caller steer identity to stable command and task ids", async () => {
-		const root = temp();
-		const { commonOptions } = makeFakes(root, "sandbox-tunnel-7");
-		commonOptions.tunnelTransport = new ScriptedBridgeTransport();
-		const service = new DirectCloudService(commonOptions);
-		const started = await service.delegate({
-			activeSessionId: "active-1",
-			delegationId: "sess_tunnel-7",
-			cwd: join(root, "repo"),
-			prompt: "work",
-			options: { tunnel: true, timeoutMinutes: 10 },
+		const root = cloudTemp("direct-cloud-service-test-");
+		const fakes = recordingDelegationStack(root, {
+			sandboxId: "sandbox-tunnel-7",
+			tunnelTransport: new ScriptedBridgeTransport(),
 		});
+		const service = new DirectCloudService(fakes.commonOptions);
+		const started = await delegateWork(fakes, service, "sess_tunnel-7");
 		// A retried daemon command carries the same identity: the derived
 		// command id and request digest must match so the guest journal
 		// deduplicates the steer instead of running it twice.
@@ -1143,23 +742,18 @@ describe("DirectCloudService Prime Tunnel bridge", () => {
 	});
 
 	it("resumes a crashed tunnel delegation with the persisted tunnel opt-in", async () => {
-		const root = temp();
-		const { commonOptions, startEnvs, startFailures, deletedTunnels } = makeFakes(root, "sandbox-tunnel-8");
-		commonOptions.tunnelTransport = new ScriptedBridgeTransport();
-		const service = new DirectCloudService(commonOptions);
+		const root = cloudTemp("direct-cloud-service-test-");
+		const fakes = recordingDelegationStack(root, {
+			sandboxId: "sandbox-tunnel-8",
+			tunnelTransport: new ScriptedBridgeTransport(),
+		});
+		const { startEnvs, startFailures, deletedTunnels } = fakes;
+		const service = new DirectCloudService(fakes.commonOptions);
 		// The resident process dies on the first launch: the delegation call
 		// fails, but the record stays in the provisioning state a daemon crash
 		// would leave behind.
 		startFailures.count = 1;
-		await expect(
-			service.delegate({
-				activeSessionId: "active-1",
-				delegationId: "sess_tunnel-8",
-				cwd: join(root, "repo"),
-				prompt: "work",
-				options: { tunnel: true, timeoutMinutes: 10 },
-			}),
-		).rejects.toThrow(/simulated resident-process crash/);
+		await expect(delegateWork(fakes, service, "sess_tunnel-8")).rejects.toThrow(/simulated resident-process crash/);
 		expect(deletedTunnels.length).toBeGreaterThan(0);
 
 		// Recovery through list() re-enters the launch with the persisted
@@ -1176,10 +770,13 @@ describe("DirectCloudService Prime Tunnel bridge", () => {
 	});
 
 	it("resumes a legacy v1 guest cursor file and degrades conservatively on malformed or mismatched data", async () => {
-		const root = temp();
-		const { commonOptions, store } = makeFakes(root, "sandbox-cursor-v1");
-		const transport = new RecordingBridgeTransport();
-		commonOptions.tunnelTransport = transport;
+		const root = cloudTemp("direct-cloud-service-test-");
+		const transport = new ScriptedBridgeTransport();
+		const fakes = recordingDelegationStack(root, {
+			sandboxId: "sandbox-cursor-v1",
+			tunnelTransport: transport,
+		});
+		const { store } = fakes;
 		const sessionId = "sess_cursor_legacy";
 		const eventsDirectory = join(root, "state", "events", sessionId);
 		const cursorPath = join(eventsDirectory, "tunnel-guest-cursor.json");
@@ -1187,22 +784,23 @@ describe("DirectCloudService Prime Tunnel bridge", () => {
 		// A durable cursor from before the generation split: the legacy single
 		// {generation, sequence} the old attachment persisted, pre-trim.
 		mkdirSync(eventsDirectory, { recursive: true });
-		writeFileSync(cursorPath, `${JSON.stringify({ version: 1, generation: 1, sequence: 3 })}\n`);
+		writeFileSync(
+			cursorPath,
+			`${JSON.stringify({ version: 1, generation: 1, sequence: 3 })}
+`,
+		);
 
-		const service = new DirectCloudService(commonOptions);
-		const started = await service.delegate({
-			activeSessionId: "active-1",
-			delegationId: sessionId,
-			cwd: join(root, "repo"),
-			prompt: "work",
-			options: { tunnel: true, timeoutMinutes: 10 },
-		});
-		await vi.waitFor(() => expect(transport.connectionCount).toBe(1), 5_000);
+		const service = new DirectCloudService(fakes.commonOptions);
+		const started = await delegateWork(fakes, service, sessionId);
+		await until(() => transport.connectionCount === 1);
+		expect(transport.connectionCount).toBe(1);
 		// The legacy position resumed exactly: hello and the subscribe after
 		// the snapshot both name sequence 3, not a fresh start.
-		await vi.waitFor(() => expect(framesOfType(transport.sentFrames, "hello")).toHaveLength(1), 5_000);
+		await until(() => framesOfType(transport.sentFrames, "hello").length === 1);
+		expect(framesOfType(transport.sentFrames, "hello")).toHaveLength(1);
 		expect(framesOfType(transport.sentFrames, "hello")[0]?.cursor).toEqual({ generation: 1, sequence: 3 });
-		await vi.waitFor(() => expect(framesOfType(transport.sentFrames, "subscribe")).toHaveLength(1), 5_000);
+		await until(() => framesOfType(transport.sentFrames, "subscribe").length === 1);
+		expect(framesOfType(transport.sentFrames, "subscribe")).toHaveLength(1);
 		expect(framesOfType(transport.sentFrames, "subscribe")[0]?.cursor).toEqual({
 			generation: 1,
 			sequence: 3,
@@ -1216,7 +814,8 @@ describe("DirectCloudService Prime Tunnel bridge", () => {
 			generation: 1,
 			events: [guestEvent(1), guestEvent(2), guestEvent(3), guestEvent(4), guestEvent(5)],
 		});
-		await vi.waitFor(() => expect(framesOfType(transport.sentFrames, "ack")).toHaveLength(1), 5_000);
+		await until(() => framesOfType(transport.sentFrames, "ack").length === 1);
+		expect(framesOfType(transport.sentFrames, "ack")).toHaveLength(1);
 		expect(framesOfType(transport.sentFrames, "ack")[0]?.cursor).toEqual({ generation: 1, sequence: 5 });
 		expect(tracedTexts(tracePath)).toEqual(["evt-4", "evt-5"]);
 		// The rewrite is durable in the split-generation format.
@@ -1232,24 +831,28 @@ describe("DirectCloudService Prime Tunnel bridge", () => {
 		writeFileSync(cursorPath, `${JSON.stringify({ version: 1, generation: 0, sequence: 2 })}\n`);
 		const framesBeforeDrop = transport.sentFrames.length;
 		transport.dropAll();
-		await vi.waitFor(
-			() => expect(store.get(sessionId)?.lastError).toContain("tunnel guest cursor file is corrupt"),
-			5_000,
-		);
-		await new Promise((resolve) => setTimeout(resolve, 300));
+		await until(() => store.get(sessionId)?.lastError?.includes("tunnel guest cursor file is corrupt") === true);
+		expect(store.get(sessionId)?.lastError).toContain("tunnel guest cursor file is corrupt");
+		// The attachment is terminal: a bounded turn drain proves the loop
+		// sends nothing further instead of racing a reconnect.
+		for (let turn = 0; turn < 5; turn++) {
+			await new Promise((resolve) => setImmediate(resolve));
+		}
 		expect(transport.sentFrames.length).toBe(framesBeforeDrop);
 
 		// Mismatched legacy data (an epoch this sandbox never had) is
 		// discarded by a fresh supervisor: it resumes from zero instead of
 		// trusting the stale position, so the re-served head re-imports.
 		writeFileSync(cursorPath, `${JSON.stringify({ version: 1, generation: 7, sequence: 9 })}\n`);
-		const restartTransport = new RecordingBridgeTransport();
-		commonOptions.tunnelTransport = restartTransport;
-		const restarted = new DirectCloudService(commonOptions);
+		const restartTransport = new ScriptedBridgeTransport();
+		fakes.commonOptions.tunnelTransport = restartTransport;
+		const restarted = new DirectCloudService(fakes.commonOptions);
 		await restarted.list("active-1");
-		await vi.waitFor(() => expect(framesOfType(restartTransport.sentFrames, "hello")).toHaveLength(1), 5_000);
+		await until(() => framesOfType(restartTransport.sentFrames, "hello").length === 1);
+		expect(framesOfType(restartTransport.sentFrames, "hello")).toHaveLength(1);
 		expect(framesOfType(restartTransport.sentFrames, "hello")[0]?.cursor).toBeUndefined();
-		await vi.waitFor(() => expect(framesOfType(restartTransport.sentFrames, "subscribe")).toHaveLength(1), 5_000);
+		await until(() => framesOfType(restartTransport.sentFrames, "subscribe").length === 1);
+		expect(framesOfType(restartTransport.sentFrames, "subscribe")).toHaveLength(1);
 		expect(framesOfType(restartTransport.sentFrames, "subscribe")[0]?.cursor).toEqual({
 			generation: 1,
 			sequence: 0,
@@ -1268,7 +871,8 @@ describe("DirectCloudService Prime Tunnel bridge", () => {
 			generation: 1,
 			events: [guestEvent(1), guestEvent(2)],
 		});
-		await vi.waitFor(() => expect(framesOfType(restartTransport.sentFrames, "ack")).toHaveLength(1), 5_000);
+		await until(() => framesOfType(restartTransport.sentFrames, "ack").length === 1);
+		expect(framesOfType(restartTransport.sentFrames, "ack")).toHaveLength(1);
 		expect(framesOfType(restartTransport.sentFrames, "ack")[0]?.cursor).toEqual({
 			generation: 1,
 			sequence: 2,
@@ -1283,36 +887,24 @@ describe("DirectCloudService Prime Tunnel bridge", () => {
 		});
 		await service.stop("active-1", started.id, true).catch(() => undefined);
 		await restarted.stop("active-1", started.id, true).catch(() => undefined);
-	}, 30_000);
+	});
 
 	it("passes the resolved inference billing team to the guest as PRIME_TEAM_ID", async () => {
-		const root = temp();
-		const { commonOptions, startEnvs } = makeFakes(root, "sandbox-team-1");
-		commonOptions.teamId = "team_compute";
-		const service = new DirectCloudService(commonOptions);
-		await service.delegate({
-			activeSessionId: "active-1",
-			delegationId: "sess_team-guest-1",
-			cwd: join(root, "repo"),
-			prompt: "work",
-			options: { timeoutMinutes: 10 },
-		});
+		const root = cloudTemp("direct-cloud-service-test-");
+		const fakes = recordingDelegationStack(root, { sandboxId: "sandbox-team-1", teamId: "team_compute" });
+		const { startEnvs } = fakes;
+		const service = new DirectCloudService(fakes.commonOptions);
+		await delegateWork(fakes, service, "sess_team-guest-1", { timeoutMinutes: 10 });
 		// Without a dedicated override the guest bills the delegation team.
 		expect(startEnvs[0]?.PRIME_TEAM_ID).toBe("team_compute");
 
 		process.env.PRIME_AGENT_CLOUD_INFERENCE_TEAM_ID = "team_inference_only";
 		try {
-			const root2 = temp();
-			const { commonOptions: options2, startEnvs: envs2 } = makeFakes(root2, "sandbox-team-2");
-			options2.teamId = "team_compute";
-			const service2 = new DirectCloudService(options2);
-			await service2.delegate({
-				activeSessionId: "active-1",
-				delegationId: "sess_team-guest-2",
-				cwd: join(root2, "repo"),
-				prompt: "work",
-				options: { timeoutMinutes: 10 },
-			});
+			const root2 = cloudTemp("direct-cloud-service-test-");
+			const fakes2 = recordingDelegationStack(root2, { sandboxId: "sandbox-team-2", teamId: "team_compute" });
+			const { startEnvs: envs2 } = fakes2;
+			const service2 = new DirectCloudService(fakes2.commonOptions);
+			await delegateWork(fakes2, service2, "sess_team-guest-2", { timeoutMinutes: 10 });
 			expect(envs2[0]?.PRIME_TEAM_ID).toBe("team_inference_only");
 		} finally {
 			delete process.env.PRIME_AGENT_CLOUD_INFERENCE_TEAM_ID;
@@ -1323,20 +915,17 @@ describe("DirectCloudService Prime Tunnel bridge", () => {
 	});
 
 	it("resolves the cloud team override without touching the global CLI team", async () => {
-		const root = temp();
-		const { calls, commonOptions } = makeFakes(root, "sandbox-tunnel-5");
-		commonOptions.teamId = "team_options";
-		commonOptions.tunnelTransport = new ScriptedBridgeTransport();
+		const root = cloudTemp("direct-cloud-service-test-");
+		const fakes = recordingDelegationStack(root, {
+			sandboxId: "sandbox-tunnel-5",
+			teamId: "team_options",
+			tunnelTransport: new ScriptedBridgeTransport(),
+		});
+		const { calls } = fakes;
 		process.env.PRIME_AGENT_CLOUD_TEAM_ID = "team_env";
 		try {
-			const service = new DirectCloudService(commonOptions);
-			await service.delegate({
-				activeSessionId: "active-1",
-				delegationId: "sess_tunnel-5",
-				cwd: join(root, "repo"),
-				prompt: "work",
-				options: { tunnel: true, timeoutMinutes: 10 },
-			});
+			const service = new DirectCloudService(fakes.commonOptions);
+			await delegateWork(fakes, service, "sess_tunnel-5");
 			expect(calls.find((call) => call.kind === "register-tunnel")?.detail).toBe("team_options");
 			expect(cloudTeamOverride({ PRIME_AGENT_CLOUD_TEAM_ID: "team_env" })).toBe("team_env");
 			expect(cloudTeamOverride({})).toBeUndefined();
@@ -1347,18 +936,12 @@ describe("DirectCloudService Prime Tunnel bridge", () => {
 });
 
 describe("cloud inference credential resolution", () => {
-	const roots: string[] = [];
-	function temp(): string {
-		const value = mkdtempSync(join(tmpdir(), "cloud-key-file-test-"));
-		roots.push(value);
-		return value;
+	function keyFileTemp(): string {
+		return cloudTemp("cloud-key-file-test-");
 	}
-	afterEach(() => {
-		for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true });
-	});
 
 	it("prefers the explicit env override and reports precise problems for insecure key files", () => {
-		const home = temp();
+		const home = keyFileTemp();
 		const keyFile = cloudInferenceKeyFilePath({}, home);
 		mkdirSync(dirname(keyFile), { recursive: true });
 		writeFileSync(keyFile, "file-key-0123456789abcdef\n", { mode: 0o600 });
@@ -1382,11 +965,11 @@ describe("cloud inference credential resolution", () => {
 		).toContain("absolute");
 		writeFileSync(keyFile, "multi\nline\n", { mode: 0o600 });
 		expect(resolveCloudInferenceCredential({}, home)?.problem).toContain("single-line");
-		expect(resolveCloudInferenceCredential({}, temp())?.problem).toContain("no cloud inference credential");
+		expect(resolveCloudInferenceCredential({}, keyFileTemp())?.problem).toContain("no cloud inference credential");
 	});
 
 	it("gates the cloud capability on the image plus either credential source", () => {
-		const home = temp();
+		const home = keyFileTemp();
 		const keyFile = join(home, ".config", "prime-agent-cloud", "inference-api-key");
 		mkdirSync(dirname(keyFile), { recursive: true });
 		expect(isDirectCloudConfigured({ PRIME_AGENT_CLOUD_IMAGE: "image" }, home)).toBe(false);

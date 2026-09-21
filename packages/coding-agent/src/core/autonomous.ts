@@ -14,6 +14,13 @@ export interface AgentAutonomousConfig {
 	timeoutMs?: number;
 	continuationPrompt?: string;
 	gates?: AgentAutonomousGateConfig;
+	/**
+	 * While subagents run, timer-driven continuations are held (child messages
+	 * and exit notices are the real wake-up signals). This window allows one
+	 * keep-alive continuation of continuous subagent activity so the parent
+	 * can still check for hung children. `0` disables the keep-alive valve.
+	 */
+	subagentKeepAliveMs?: number;
 }
 
 export interface AgentAutonomousGateConfig {
@@ -35,17 +42,19 @@ export interface AgentAutonomousStatus {
 	turnsUsed: number;
 	tokensUsed: number;
 	startedAt?: number;
-	limits: Required<Omit<AgentAutonomousConfig, "enabled" | "continuationPrompt" | "gates">>;
+	limits: Required<Omit<AgentAutonomousConfig, "enabled" | "continuationPrompt" | "gates" | "subagentKeepAliveMs">>;
 	gates: Required<AgentAutonomousGateConfig>;
 	gateAttempts: Record<string, number>;
 	lastGateFailure?: AgentAutonomousGateFailure;
+	/** Configured subagent keep-alive window; 0 disables the keep-alive valve. */
+	subagentKeepAliveMs?: number;
 }
 
 export const DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT =
 	"No human input is available in autonomous mode. Continue working until the host evaluator, verifier, or configured autonomous limits stop the run. If you were asking the user a question, make a reasonable assumption and verify it. If you believe you are blocked, prove it with host-observable evidence, preserve that evidence, and keep looking for safe progress while budget remains. Do not end the session yourself; the verifier/evaluator decides completion when configured gates pass.";
 
 export const DEFAULT_AUTONOMOUS_LIMITS: Required<
-	Omit<AgentAutonomousConfig, "enabled" | "continuationPrompt" | "gates">
+	Omit<AgentAutonomousConfig, "enabled" | "continuationPrompt" | "gates" | "subagentKeepAliveMs">
 > = {
 	maxContinuations: 3,
 	maxTurns: 12,
@@ -59,6 +68,33 @@ export const DEFAULT_AUTONOMOUS_GATES: Required<AgentAutonomousGateConfig> = {
 	timeoutMs: 5 * 60 * 1000,
 };
 
+/**
+ * Default subagent keep-alive window: while subagents run, one continuation
+ * per 25 minutes of continuous activity still fires so the parent can check
+ * for hung or stopped children instead of sleeping until they finish. Kept
+ * strictly below the default wall-clock budget (30 minutes) so the valve
+ * fires before the run's timeout caps it; keep custom windows below any
+ * configured --timeout-ms for the same reason.
+ */
+export const DEFAULT_AUTONOMOUS_SUBAGENT_KEEP_ALIVE_MS = 25 * 60 * 1000;
+
+/**
+ * Largest keep-alive window `setTimeout` accepts: Node clamps larger delays
+ * to 1 ms, which would turn a huge window into a keep-alive storm.
+ */
+export const MAX_SUBAGENT_KEEP_ALIVE_MS = 2_147_483_647;
+
+/**
+ * JSON-safe sentinel meaning "no cap". Limit checks compare usage against the
+ * configured value, so this stays finite and serializes to JSON while no
+ * realistic run can ever reach it.
+ */
+export const UNLIMITED_AUTONOMOUS_LIMIT = Number.MAX_SAFE_INTEGER;
+
+export function isUnlimitedAutonomousLimit(value: number): boolean {
+	return value >= UNLIMITED_AUTONOMOUS_LIMIT;
+}
+
 const MAX_GATE_OUTPUT_CHARS = 6000;
 const MAX_CHILD_PROCESS_OUTPUT_CHARS = 1024 * 1024;
 
@@ -68,12 +104,14 @@ export interface AutonomousRuntimeState {
 	turnsUsed: number;
 	tokensUsed: number;
 	startedAt?: number;
-	limits: Required<Omit<AgentAutonomousConfig, "enabled" | "continuationPrompt" | "gates">>;
+	limits: Required<Omit<AgentAutonomousConfig, "enabled" | "continuationPrompt" | "gates" | "subagentKeepAliveMs">>;
 	continuationPrompt: string;
 	gates: Required<AgentAutonomousGateConfig>;
 	gateAttempts: Record<string, number>;
 	lastGateFailure?: GateFailure;
 	lastGateFailureSnapshot?: GitWorktreeSnapshot;
+	/** Configured subagent keep-alive window; 0 disables the keep-alive valve. */
+	subagentKeepAliveMs: number;
 }
 
 export type AutonomousLimitReason = "maxContinuations" | "maxTurns" | "maxTokens" | "timeoutMs";
@@ -102,10 +140,24 @@ interface AutonomousOperationOptions {
 
 type GateFailure = AgentAutonomousGateFailure;
 
+export type AutonomousLimitDefaults = Pick<
+	AgentAutonomousConfig,
+	"maxContinuations" | "maxTurns" | "maxTokens" | "timeoutMs"
+>;
+
 export function createAutonomousRuntimeState(
 	config?: AgentAutonomousConfig,
-	_options: { cwd?: string } = {},
+	options: { cwd?: string; defaultLimits?: AutonomousLimitDefaults } = {},
 ): AutonomousRuntimeState {
+	// Settings-derived defaults sit between the built-in limits and the explicit
+	// config: explicit CLI/slash flags win, then persisted settings, then the
+	// built-in defaults.
+	const defaults: Required<AutonomousLimitDefaults> = {
+		maxContinuations: options.defaultLimits?.maxContinuations ?? DEFAULT_AUTONOMOUS_LIMITS.maxContinuations,
+		maxTurns: options.defaultLimits?.maxTurns ?? DEFAULT_AUTONOMOUS_LIMITS.maxTurns,
+		maxTokens: options.defaultLimits?.maxTokens ?? DEFAULT_AUTONOMOUS_LIMITS.maxTokens,
+		timeoutMs: options.defaultLimits?.timeoutMs ?? DEFAULT_AUTONOMOUS_LIMITS.timeoutMs,
+	};
 	const enabled = config?.enabled === true;
 	return {
 		enabled,
@@ -114,10 +166,10 @@ export function createAutonomousRuntimeState(
 		tokensUsed: 0,
 		startedAt: enabled ? Date.now() : undefined,
 		limits: {
-			maxContinuations: normalizeLimit(config?.maxContinuations, DEFAULT_AUTONOMOUS_LIMITS.maxContinuations),
-			maxTurns: normalizeLimit(config?.maxTurns, DEFAULT_AUTONOMOUS_LIMITS.maxTurns),
-			maxTokens: normalizeLimit(config?.maxTokens, DEFAULT_AUTONOMOUS_LIMITS.maxTokens),
-			timeoutMs: normalizeLimit(config?.timeoutMs, DEFAULT_AUTONOMOUS_LIMITS.timeoutMs),
+			maxContinuations: normalizeLimit(config?.maxContinuations, defaults.maxContinuations),
+			maxTurns: normalizeLimit(config?.maxTurns, defaults.maxTurns),
+			maxTokens: normalizeLimit(config?.maxTokens, defaults.maxTokens),
+			timeoutMs: normalizeLimit(config?.timeoutMs, defaults.timeoutMs),
 		},
 		continuationPrompt: config?.continuationPrompt?.trim() || DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT,
 		gates: {
@@ -128,7 +180,19 @@ export function createAutonomousRuntimeState(
 		gateAttempts: {},
 		lastGateFailure: undefined,
 		lastGateFailureSnapshot: undefined,
+		subagentKeepAliveMs: normalizeSubagentKeepAliveMs(config?.subagentKeepAliveMs),
 	};
+}
+
+/**
+ * `undefined` (and invalid values) fall back to the default window; an
+ * explicit `0` disables the subagent keep-alive valve entirely.
+ */
+function normalizeSubagentKeepAliveMs(value: number | undefined): number {
+	if (value === 0) {
+		return 0;
+	}
+	return Math.min(normalizeLimit(value, DEFAULT_AUTONOMOUS_SUBAGENT_KEEP_ALIVE_MS), MAX_SUBAGENT_KEEP_ALIVE_MS);
 }
 
 export function setAutonomousEnabled(
@@ -153,6 +217,34 @@ export function setAutonomousEnabled(
 	}
 }
 
+/**
+ * Apply user-provided budget and gate options to a live runtime state.
+ * Only fields present in `config` change; unspecified fields keep the state's
+ * current values, which come from the session/CLI configuration or defaults.
+ */
+export function setAutonomousLimits(state: AutonomousRuntimeState, config?: AgentAutonomousConfig): void {
+	if (!config) {
+		return;
+	}
+	state.limits.maxContinuations = normalizeLimit(config.maxContinuations, state.limits.maxContinuations);
+	state.limits.maxTurns = normalizeLimit(config.maxTurns, state.limits.maxTurns);
+	state.limits.maxTokens = normalizeLimit(config.maxTokens, state.limits.maxTokens);
+	state.limits.timeoutMs = normalizeLimit(config.timeoutMs, state.limits.timeoutMs);
+	if (config.continuationPrompt?.trim()) {
+		state.continuationPrompt = config.continuationPrompt.trim();
+	}
+	if (config.gates) {
+		if (config.gates.commands !== undefined) {
+			state.gates.commands = [...config.gates.commands];
+		}
+		state.gates.maxRetries = normalizeLimit(config.gates.maxRetries, state.gates.maxRetries);
+		state.gates.timeoutMs = normalizeLimit(config.gates.timeoutMs, state.gates.timeoutMs);
+	}
+	if (config.subagentKeepAliveMs !== undefined) {
+		state.subagentKeepAliveMs = normalizeSubagentKeepAliveMs(config.subagentKeepAliveMs);
+	}
+}
+
 export function autonomousStatus(state: AutonomousRuntimeState): AgentAutonomousStatus {
 	return {
 		enabled: state.enabled,
@@ -164,6 +256,7 @@ export function autonomousStatus(state: AutonomousRuntimeState): AgentAutonomous
 		gates: { ...state.gates, commands: [...state.gates.commands] },
 		gateAttempts: { ...state.gateAttempts },
 		lastGateFailure: state.lastGateFailure ? { ...state.lastGateFailure } : undefined,
+		subagentKeepAliveMs: state.subagentKeepAliveMs,
 	};
 }
 
@@ -208,18 +301,89 @@ export async function nextAutonomousContinuation(
 		return undefined;
 	}
 	state.continuationsUsed++;
+	const gateFailureText = decision.reason === "gate_failed" ? buildGateFailureContinuation(state, now) : undefined;
+	return {
+		role: "user",
+		content: [
+			{
+				type: "text",
+				text: gateFailureText ?? `[autonomous-continuation]\n\n${state.continuationPrompt}`,
+			},
+		],
+		timestamp: now,
+	};
+}
+
+/**
+ * Build the continuation message for a held autonomous continuation that is
+ * now being delivered (subagents settled, or the keep-alive window elapsed).
+ * Budget accounting is the caller's job so a failed admission can roll it
+ * back, mirroring how goal continuations account at delivery.
+ */
+export function createAutonomousContinuationMessage(
+	state: AutonomousRuntimeState,
+	timestamp = Date.now(),
+): UserMessage {
+	return {
+		role: "user",
+		content: [
+			{
+				type: "text",
+				text: `[autonomous-continuation]\n\n${state.continuationPrompt}`,
+			},
+		],
+		timestamp,
+	};
+}
+
+/**
+ * Build the gate-failure continuation message for a resume whose quality
+ * gates failed, mirroring the hook's gate-failure continuation text.
+ */
+export function createAutonomousGateFailureContinuationMessage(
+	state: AutonomousRuntimeState,
+	timestamp = Date.now(),
+): UserMessage | undefined {
+	const failure = state.lastGateFailure;
+	if (!failure) {
+		return undefined;
+	}
+	return {
+		role: "user",
+		content: [
+			{
+				type: "text",
+				text: buildAutonomousGateFailureContinuation(failure, state.gates.maxRetries, timestamp),
+			},
+		],
+		timestamp,
+	};
+}
+
+/**
+ * Keep-alive continuation delivered while subagents are still active: the
+ * parent gets a bounded chance to inspect and unblock hung children (for
+ * example, SIGTTIN-stopped processes) instead of sleeping until they finish.
+ */
+export function createAutonomousSubagentKeepAliveMessage(
+	state: AutonomousRuntimeState,
+	timestamp = Date.now(),
+): UserMessage {
+	const minutes = Math.max(1, Math.round(state.subagentKeepAliveMs / 60_000));
 	return {
 		role: "user",
 		content: [
 			{
 				type: "text",
 				text:
-					decision.reason === "gate_failed"
-						? (buildGateFailureContinuation(state, now) ?? state.continuationPrompt)
-						: state.continuationPrompt,
+					`[autonomous-continuation: subagent-keep-alive]\n\n` +
+					`Subagents have been running for at least ${minutes} minute${minutes === 1 ? "" : "s"} ` +
+					`without a reply or exit being delivered. Check their status (for example agent_observe, ` +
+					`rlm.list_subagents, or process inspection) and cancel or unblock any that are hung; ` +
+					`then continue working.`,
 			},
 		],
-		timestamp: now,
+		timestamp,
 	};
 }
 
@@ -352,6 +516,7 @@ export function buildAutonomousGateFailureContinuation(
 	timestamp = Date.now(),
 ): string {
 	return (
+		`[autonomous-continuation: gate-failed]\n\n` +
 		`Autonomous quality gate failed (attempt ${failure.attempt}/${maxRetries}): \`${failure.command}\` ${failure.exitText}.\n` +
 		(failure.output ? `\nOutput:\n${failure.output}\n` : "\n") +
 		`\nContinue working. Fix the failure, then produce terminal evidence. Timestamp: ${new Date(timestamp).toISOString()}.`

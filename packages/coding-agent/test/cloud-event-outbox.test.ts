@@ -1,25 +1,9 @@
-import {
-	appendFileSync,
-	chmodSync,
-	existsSync,
-	mkdtempSync,
-	readdirSync,
-	readFileSync,
-	rmSync,
-	statSync,
-	writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { appendFileSync, chmodSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { CloudEventOutboxError, DurableCloudEventOutbox } from "../src/core/cloud/event-outbox.js";
+import { cloudTemp } from "./cloud-support.js";
 
-const roots: string[] = [];
-function root(): string {
-	const value = mkdtempSync(join(tmpdir(), "cloud-outbox-test-"));
-	roots.push(value);
-	return value;
-}
 function status(recordedAt: string, value: "idle" | "busy" = "idle") {
 	return { kind: "session_status" as const, recordedAt, status: value };
 }
@@ -33,13 +17,9 @@ function caught(work: () => unknown): CloudEventOutboxError {
 	throw new Error("expected operation to fail");
 }
 
-afterEach(() => {
-	for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true });
-});
-
 describe("DurableCloudEventOutbox", () => {
 	it("fsyncs durable ordered events with stable ids and restores them", () => {
-		const directory = root();
+		const directory = cloudTemp("cloud-outbox-test-");
 		const outbox = new DurableCloudEventOutbox({ directory, sessionId: "sess_test" });
 		const first = outbox.append(status("2026-01-01T00:00:00.000Z"));
 		const second = outbox.append(status("2026-01-01T00:00:01.000Z", "busy"));
@@ -53,7 +33,7 @@ describe("DurableCloudEventOutbox", () => {
 	});
 
 	it("persists acknowledgements and rejects backward or beyond-tail movement", () => {
-		const directory = root();
+		const directory = cloudTemp("cloud-outbox-test-");
 		const outbox = new DurableCloudEventOutbox({ directory, sessionId: "sess_test" });
 		outbox.append(status("a"));
 		outbox.append(status("b"));
@@ -64,7 +44,7 @@ describe("DurableCloudEventOutbox", () => {
 	});
 
 	it("atomically compacts only acknowledged events and fences the old generation", () => {
-		const directory = root();
+		const directory = cloudTemp("cloud-outbox-test-");
 		const outbox = new DurableCloudEventOutbox({ directory, sessionId: "sess_test" });
 		outbox.append(status("a"));
 		outbox.append(status("b", "busy"));
@@ -80,7 +60,7 @@ describe("DurableCloudEventOutbox", () => {
 	});
 
 	it("recovers a truncated final write but rejects a corrupt complete record", () => {
-		const directory = root();
+		const directory = cloudTemp("cloud-outbox-test-");
 		const outbox = new DurableCloudEventOutbox({ directory, sessionId: "sess_test" });
 		const first = outbox.append(status("a"));
 		appendFileSync(join(directory, "outbox-events.ndjson"), '{"eventId":"partial');
@@ -92,7 +72,7 @@ describe("DurableCloudEventOutbox", () => {
 
 	it("bounds record count, payload bytes, read limits, and cursor positions", () => {
 		const outbox = new DurableCloudEventOutbox({
-			directory: root(),
+			directory: cloudTemp("cloud-outbox-test-"),
 			sessionId: "sess_test",
 			maxRecords: 2,
 			maxEventBytes: 90,
@@ -105,7 +85,7 @@ describe("DurableCloudEventOutbox", () => {
 	});
 
 	it("unlinks superseded epoch files after a committed trim and keeps foreign files", () => {
-		const directory = root();
+		const directory = cloudTemp("cloud-outbox-test-");
 		const outbox = new DurableCloudEventOutbox({ directory, sessionId: "sess_test" });
 		outbox.append(status("a"));
 		outbox.append(status("b", "busy"));
@@ -140,7 +120,7 @@ describe("DurableCloudEventOutbox", () => {
 	});
 
 	it("ignores an orphaned next-generation file when compaction did not commit metadata", () => {
-		const directory = root();
+		const directory = cloudTemp("cloud-outbox-test-");
 		const outbox = new DurableCloudEventOutbox({ directory, sessionId: "sess_test" });
 		outbox.append(status("a"));
 		writeFileSync(join(directory, "outbox-events.g2.ndjson"), "orphaned partial generation\n");
@@ -149,7 +129,7 @@ describe("DurableCloudEventOutbox", () => {
 	});
 
 	it("detects metadata and record tampering", () => {
-		const directory = root();
+		const directory = cloudTemp("cloud-outbox-test-");
 		const outbox = new DurableCloudEventOutbox({ directory, sessionId: "sess_test" });
 		outbox.append(status("a"));
 		const eventsPath = join(directory, "outbox-events.ndjson");
@@ -163,7 +143,7 @@ describe("DurableCloudEventOutbox", () => {
 
 describe("DurableCloudEventOutbox with v2 session events", () => {
 	it("stores every v2 event kind with stable ids and replays them in order", () => {
-		const directory = root();
+		const directory = cloudTemp("cloud-outbox-test-");
 		const outbox = new DurableCloudEventOutbox({ directory, sessionId: "sess_test" });
 		const entry = outbox.append({
 			kind: "session_entry",
@@ -221,7 +201,7 @@ describe("DurableCloudEventOutbox with v2 session events", () => {
 
 	it("rejects a session_entry event that exceeds the inline bound", () => {
 		const outbox = new DurableCloudEventOutbox({
-			directory: root(),
+			directory: cloudTemp("cloud-outbox-test-"),
 			sessionId: "sess_test",
 			maxEventBytes: 256,
 		});

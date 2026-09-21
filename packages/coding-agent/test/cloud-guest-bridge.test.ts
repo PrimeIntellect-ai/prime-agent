@@ -7,6 +7,7 @@ import {
 	openSync,
 	readFileSync,
 	rmSync,
+	watch,
 	writeFileSync,
 	writeSync,
 } from "node:fs";
@@ -111,6 +112,33 @@ function git(cwd: string, ...args: string[]): string {
 	return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 }
 
+/**
+ * Wait for a file through directory watch events: the artifact's arrival is
+ * the only signal, never a clock. The double check covers the race between
+ * the initial probe and arming the watcher.
+ */
+function waitForFile(dir: string, fileName: string, isReady: (path: string) => boolean = () => true): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const path = join(dir, fileName);
+		const ready = () => existsSync(path) && isReady(path);
+		if (ready()) return resolve();
+		const watcher = watch(dir, () => {
+			if (ready()) {
+				watcher.close();
+				resolve();
+			}
+		});
+		if (ready()) {
+			watcher.close();
+			return resolve();
+		}
+		watcher.on("error", (error) => {
+			watcher.close();
+			reject(error);
+		});
+	});
+}
+
 async function startBridge(
 	options: {
 		prompt?: string;
@@ -176,18 +204,40 @@ async function startBridge(
 	const stderr: string[] = [];
 	bridgeProcess.stderr?.on("data", (chunk: string) => stderr.push(chunk));
 	const portPath = join(stateDir, "port");
-	const deadline = Date.now() + 15_000;
-	let port = 0;
-	for (;;) {
-		if (existsSync(portPath)) {
-			const text = readFileSync(portPath, "utf8").trim();
-			port = Number(text);
-			if (Number.isInteger(port) && port >= 1) break;
+	// The port file's arrival is the deterministic ready signal; an early
+	// bridge exit is the deterministic failure signal. Neither needs a clock.
+	const portPromise = new Promise<number>((resolve, reject) => {
+		const readPort = () => {
+			if (!existsSync(portPath)) return undefined;
+			const port = Number(readFileSync(portPath, "utf8").trim());
+			return Number.isInteger(port) && port >= 1 ? port : undefined;
+		};
+		const port = readPort();
+		if (port !== undefined) return resolve(port);
+		const watcher = watch(stateDir, () => {
+			const next = readPort();
+			if (next !== undefined) {
+				watcher.close();
+				resolve(next);
+			}
+		});
+		const settled = readPort();
+		if (settled !== undefined) {
+			watcher.close();
+			return resolve(settled);
 		}
-		if (bridgeProcess.exitCode !== null) throw new Error(`bridge exited early: ${stderr.join("")}`);
-		if (Date.now() > deadline) throw new Error(`bridge port file is invalid: ${String(port)}`);
-		await new Promise((resolve) => setTimeout(resolve, 10));
-	}
+		watcher.on("error", (error) => {
+			watcher.close();
+			reject(error);
+		});
+		bridgeProcess.once("exit", () => {
+			if (readPort() === undefined) {
+				watcher.close();
+				reject(new Error(`bridge exited early: ${stderr.join("")}`));
+			}
+		});
+	});
+	const port = await portPromise;
 	const bridge: Bridge = {
 		process: bridgeProcess,
 		root,
@@ -209,38 +259,42 @@ const transport = new WsTunnelTransport({ connectTimeoutMs: 5_000 });
 interface Client {
 	connection: CloudTunnelConnection;
 	messages: CloudMessage[];
+	/** Event-driven wait: the predicate re-runs on every landed message, never on a clock. */
+	waitFor(predicate: (message: CloudMessage) => boolean): Promise<void>;
 	close: () => Promise<void>;
 }
 
 async function connect(bridge: Bridge): Promise<Client> {
 	const connection = await transport.connect(`http://127.0.0.1:${String(bridge.port)}`, {});
 	const messages: CloudMessage[] = [];
+	const waiters = new Set<() => void>();
+	const notify = () => {
+		const pending = [...waiters];
+		waiters.clear();
+		for (const resolve of pending) resolve();
+	};
 	connection.onMessage((message) => {
 		messages.push(JSON.parse(message) as CloudMessage);
+		notify();
 	});
 	return {
 		connection,
 		messages,
+		waitFor: async (predicate: (message: CloudMessage) => boolean) => {
+			for (;;) {
+				if (messages.some(predicate)) return;
+				await new Promise<void>((resolve) => waiters.add(resolve));
+			}
+		},
 		close: () =>
 			new Promise<void>((resolve) => {
-				connection.onClose(() => resolve());
+				connection.onClose(() => {
+					notify();
+					resolve();
+				});
 				connection.close("test done");
-				setTimeout(resolve, 2_000);
 			}),
 	};
-}
-
-async function waitFor(
-	messages: CloudMessage[],
-	predicate: (message: CloudMessage) => boolean,
-	timeoutMs = 20_000,
-): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	for (;;) {
-		if (messages.some(predicate)) return;
-		if (Date.now() > deadline) throw new Error("timed out waiting for a protocol message");
-		await new Promise((resolve) => setTimeout(resolve, 15));
-	}
 }
 
 function eventsOf(messages: CloudMessage[]): CloudEvent[] {
@@ -290,23 +344,16 @@ async function submit(
 	);
 }
 
-async function awaitClosed(client: Client, timeoutMs = 10_000): Promise<void> {
-	await new Promise<void>((resolve, reject) => {
-		const timer = setTimeout(() => reject(new Error("client was not closed")), timeoutMs);
-		client.connection.onClose(() => {
-			clearTimeout(timer);
-			resolve();
-		});
+async function awaitClosed(client: Client): Promise<void> {
+	// The close event is the only signal; a hang surfaces through the runner's
+	// default test timeout.
+	await new Promise<void>((resolve) => {
+		client.connection.onClose(() => resolve());
 	});
 }
 
-async function awaitDaemonReady(bridge: Bridge, timeoutMs = 30_000): Promise<void> {
-	const socketPath = join(bridge.daemonStateDir, "cloud.sock");
-	const deadline = Date.now() + timeoutMs;
-	while (!existsSync(socketPath)) {
-		if (Date.now() > deadline) throw new Error("guest daemon socket never appeared");
-		await new Promise((resolve) => setTimeout(resolve, 50));
-	}
+async function awaitDaemonReady(bridge: Bridge): Promise<void> {
+	await waitForFile(bridge.daemonStateDir, "cloud.sock");
 }
 
 function daemonPid(bridge: Bridge): number | undefined {
@@ -318,7 +365,7 @@ function daemonPid(bridge: Bridge): number | undefined {
 
 async function submitAndWait(client: Client, commandId: string, request: CloudCommandRequest): Promise<void> {
 	await submit(client.connection, commandId, request);
-	await waitFor(client.messages, (message) => message.type === "command" && message.receipt.commandId === commandId);
+	await client.waitFor((message) => message.type === "command" && message.receipt.commandId === commandId);
 }
 
 describe("guest cloud bridge with the resident guest daemon (end-to-end, faux provider, loopback)", () => {
@@ -344,7 +391,7 @@ describe("guest cloud bridge with the resident guest daemon (end-to-end, faux pr
 			const client = await connect(bridge);
 			sendHello(client.connection);
 			const snapshot = await (async () => {
-				await waitFor(client.messages, (message) => message.type === "snapshot");
+				await client.waitFor((message) => message.type === "snapshot");
 				return client.messages.find(
 					(message): message is Extract<CloudMessage, { type: "snapshot" }> => message.type === "snapshot",
 				);
@@ -359,8 +406,7 @@ describe("guest cloud bridge with the resident guest daemon (end-to-end, faux pr
 			await submitAndWait(client, "cmd_open", { kind: "open_session", cwd: bridge.workspaceDir });
 			appendResponse(bridge, "first answer");
 			await submit(client.connection, "cmd_prompt_1", { kind: "prompt", text: "first prompt" });
-			await waitFor(
-				client.messages,
+			await client.waitFor(
 				(message) =>
 					message.type === "events" &&
 					message.events.some(
@@ -369,28 +415,22 @@ describe("guest cloud bridge with the resident guest daemon (end-to-end, faux pr
 							event.entryId !== undefined &&
 							(event.entry as { type?: string }).type === "message",
 					),
-				25_000,
 			);
-			await waitFor(
-				client.messages,
+			await client.waitFor(
 				(message) =>
 					message.type === "events" &&
 					message.events.some((event) => event.kind === "output_delta" && event.text.includes("first answer")),
-				25_000,
 			);
 
 			appendResponse(bridge, "second answer");
 			await submit(client.connection, "cmd_prompt_2", { kind: "prompt", text: "second prompt" });
-			await waitFor(
-				client.messages,
+			await client.waitFor(
 				(message) =>
 					message.type === "events" &&
 					message.events.some((event) => event.kind === "output_delta" && event.text.includes("second answer")),
-				25_000,
 			);
 			// The durable mirror lags the live stream by at most one tick.
-			await waitFor(
-				client.messages,
+			await client.waitFor(
 				(message) =>
 					message.type === "events" &&
 					message.events.some(
@@ -398,7 +438,6 @@ describe("guest cloud bridge with the resident guest daemon (end-to-end, faux pr
 							event.kind === "session_entry" &&
 							JSON.stringify((event.entry as { message?: unknown }).message ?? null).includes("second prompt"),
 					),
-				25_000,
 			);
 
 			const entries = eventsOf(client.messages).filter((event) => event.kind === "session_entry") as Array<
@@ -417,12 +456,10 @@ describe("guest cloud bridge with the resident guest daemon (end-to-end, faux pr
 			expect(sessions.size).toBe(1);
 
 			// Meta frames track the session, and status transitions stream live.
-			await waitFor(
-				client.messages,
+			await client.waitFor(
 				(message) => message.type === "events" && message.events.some((event) => event.kind === "session_meta"),
 			);
-			await waitFor(
-				client.messages,
+			await client.waitFor(
 				(message) =>
 					message.type === "events" &&
 					message.events.some((event) => event.kind === "session_status" && event.status === "idle"),
@@ -433,24 +470,22 @@ describe("guest cloud bridge with the resident guest daemon (end-to-end, faux pr
 		} finally {
 			bridge.process.kill("SIGKILL");
 		}
-	}, 120_000);
+	});
 
 	it("reconnects with cursor replay, idempotent resubmits, and honest receipt states", async () => {
 		const bridge = await startBridge();
 		try {
 			const first = await connect(bridge);
 			sendHello(first.connection);
-			await waitFor(first.messages, (message) => message.type === "snapshot");
+			await first.waitFor((message) => message.type === "snapshot");
 			sendSubscribe(first.connection, 0);
 			await submitAndWait(first, "cmd_open", { kind: "open_session", cwd: bridge.workspaceDir });
 			appendResponse(bridge, "steered answer");
 			await submit(first.connection, "cmd_steer", { kind: "steer", text: "steer this" });
-			await waitFor(
-				first.messages,
+			await first.waitFor(
 				(message) =>
 					message.type === "events" &&
 					message.events.some((event) => event.kind === "output_delta" && event.text.includes("steered answer")),
-				25_000,
 			);
 			const seen = eventsOf(first.messages);
 			const tail = seen.reduce((max, event) => Math.max(max, event.sequence), 0);
@@ -462,14 +497,11 @@ describe("guest cloud bridge with the resident guest daemon (end-to-end, faux pr
 			// Reconnect from the acked cursor: replay continues, no gaps, no duplicates.
 			const second = await connect(bridge);
 			sendHello(second.connection, { cursor: tail });
-			await waitFor(second.messages, (message) => message.type === "snapshot");
+			await second.waitFor((message) => message.type === "snapshot");
 			sendSubscribe(second.connection, tail);
 			// A duplicate submit replays the retained receipt and never re-executes.
 			await submit(second.connection, "cmd_steer", { kind: "steer", text: "steer this" });
-			await waitFor(
-				second.messages,
-				(message) => message.type === "command" && message.receipt.commandId === "cmd_steer",
-			);
+			await second.waitFor((message) => message.type === "command" && message.receipt.commandId === "cmd_steer");
 			const receipts = eventsOf(second.messages)
 				.filter((event) => event.kind === "command_state" && event.receipt.commandId === "cmd_steer")
 				.map((event) => (event as { receipt: { state: string } }).receipt.state);
@@ -482,8 +514,7 @@ describe("guest cloud bridge with the resident guest daemon (end-to-end, faux pr
 			await submitAndWait(second, "cmd_abort", { kind: "abort" });
 			// Abort bypasses the dispatch queue: its receipt settles as a
 			// command_state event while the interrupted work winds down.
-			await waitFor(
-				second.messages,
+			await second.waitFor(
 				(message) =>
 					message.type === "events" &&
 					message.events.some(
@@ -492,30 +523,27 @@ describe("guest cloud bridge with the resident guest daemon (end-to-end, faux pr
 							event.receipt.commandId === "cmd_abort" &&
 							event.receipt.state === "completed",
 					),
-				20_000,
 			);
 			await second.close();
 		} finally {
 			bridge.process.kill("SIGKILL");
 		}
-	}, 120_000);
+	});
 
 	it("restarts a crashed guest daemon, replays from the durable log, and never re-executes uncertain work", async () => {
 		const bridge = await startBridge();
 		try {
 			const client = await connect(bridge);
 			sendHello(client.connection);
-			await waitFor(client.messages, (message) => message.type === "snapshot");
+			await client.waitFor((message) => message.type === "snapshot");
 			sendSubscribe(client.connection, 0);
 			await submitAndWait(client, "cmd_open", { kind: "open_session", cwd: bridge.workspaceDir });
 			appendResponse(bridge, "pre-crash answer");
 			await submit(client.connection, "cmd_prompt_pre", { kind: "prompt", text: "before the crash" });
-			await waitFor(
-				client.messages,
+			await client.waitFor(
 				(message) =>
 					message.type === "events" &&
 					message.events.some((event) => event.kind === "output_delta" && event.text.includes("pre-crash answer")),
-				25_000,
 			);
 			const pid = daemonPid(bridge);
 			expect(pid).toBeGreaterThan(0);
@@ -524,24 +552,37 @@ describe("guest cloud bridge with the resident guest daemon (end-to-end, faux pr
 			// journal + outbox recover the session and the mirrored entries.
 			process.kill(pid as number, "SIGKILL");
 			await client.close();
-			const restartedAt = Date.now();
-			let newPid = pid;
-			for (;;) {
-				await new Promise((resolve) => setTimeout(resolve, 100));
-				newPid = daemonPid(bridge);
-				if (newPid !== undefined && newPid !== pid) break;
-				if (Date.now() - restartedAt > 30_000) throw new Error("the bridge did not restart the daemon");
-			}
+			// The bridge's restart writes a new daemon pid: the file change is
+			// the deterministic signal that the replacement came up.
+			await new Promise<void>((resolve, reject) => {
+				const restarted = () => {
+					const next = daemonPid(bridge);
+					return next !== undefined && next !== pid;
+				};
+				if (restarted()) return resolve();
+				const watcher = watch(bridge.stateDir, () => {
+					if (restarted()) {
+						watcher.close();
+						resolve();
+					}
+				});
+				if (restarted()) {
+					watcher.close();
+					return resolve();
+				}
+				watcher.on("error", (error) => {
+					watcher.close();
+					reject(error);
+				});
+			});
 
 			const resumed = await connect(bridge);
 			sendHello(resumed.connection, { cursor: 0 });
-			await waitFor(resumed.messages, (message) => message.type === "snapshot");
+			await resumed.waitFor((message) => message.type === "snapshot");
 			sendSubscribe(resumed.connection, 0);
 			// The durable log replays through the restarted daemon.
-			await waitFor(
-				resumed.messages,
+			await resumed.waitFor(
 				(message) => message.type === "events" && message.events.some((event) => event.kind === "session_entry"),
-				20_000,
 			);
 			const replayed = eventsOf(resumed.messages);
 			const entries = replayed.filter((event) => event.kind === "session_entry") as Array<
@@ -561,29 +602,25 @@ describe("guest cloud bridge with the resident guest daemon (end-to-end, faux pr
 			// A new prompt works on the restarted daemon (persistent conversation).
 			appendResponse(bridge, "post-crash answer");
 			await submit(resumed.connection, "cmd_prompt_post", { kind: "prompt", text: "after the crash" });
-			await waitFor(
-				resumed.messages,
+			await resumed.waitFor(
 				(message) =>
 					message.type === "events" &&
 					message.events.some(
 						(event) => event.kind === "output_delta" && event.text.includes("post-crash answer"),
 					),
-				30_000,
 			);
 			await resumed.close();
 		} finally {
 			bridge.process.kill("SIGKILL");
 		}
-	}, 150_000);
+	});
 
 	it("finalizes the gateway results contract for the one-shot flow (no tunnel)", async () => {
 		const bridge = await startBridge({ prompt: "run the one-shot task" });
 		try {
-			const deadline = Date.now() + 60_000;
-			while (!existsSync(join(bridge.resultsDir, "status.txt"))) {
-				if (Date.now() > deadline) throw new Error("status.txt was never published");
-				await new Promise((resolve) => setTimeout(resolve, 50));
-			}
+			// The bridge writes status.txt as its terminal commit marker: the
+			// file's arrival is the deterministic completion signal.
+			await waitForFile(bridge.resultsDir, "status.txt");
 			expect(readFileSync(join(bridge.resultsDir, "status.txt"), "utf8").trim()).toBe("completed");
 			const stdout = readFileSync(join(bridge.resultsDir, "stdout.txt"), "utf8");
 			expect(stdout).toContain("faux-ack");
@@ -599,7 +636,7 @@ describe("guest cloud bridge with the resident guest daemon (end-to-end, faux pr
 		} finally {
 			bridge.process.kill("SIGKILL");
 		}
-	}, 120_000);
+	});
 
 	// A stub daemon (the supervised process ignores everything): finalize and
 	// the terminal results contract are bridge-owned, so the contract is
@@ -648,18 +685,11 @@ describe("guest cloud bridge with the resident guest daemon (end-to-end, faux pr
 
 			// Release (stop) the bridge: SIGTERM is the release signal.
 			bridge.process.kill("SIGTERM");
-			const deadline = Date.now() + 30_000;
-			for (;;) {
-				// The terminal status is the commit marker: the instant it is
-				// observable, both artifacts must already be complete on disk.
-				if (existsSync(join(bridge.resultsDir, "status.txt"))) {
-					expect(existsSync(join(bridge.resultsDir, "changes.patch"))).toBe(true);
-					expect(existsSync(join(bridge.resultsDir, "changed-paths.txt"))).toBe(true);
-					break;
-				}
-				if (Date.now() > deadline) throw new Error("status.txt was never published");
-				await new Promise((resolve) => setTimeout(resolve, 20));
-			}
+			// The terminal status is the commit marker: the instant it is
+			// observable, both artifacts must already be complete on disk.
+			await waitForFile(bridge.resultsDir, "status.txt");
+			expect(existsSync(join(bridge.resultsDir, "changes.patch"))).toBe(true);
+			expect(existsSync(join(bridge.resultsDir, "changed-paths.txt"))).toBe(true);
 			expect(readFileSync(join(bridge.resultsDir, "status.txt"), "utf8")).toBe("stopped\n");
 			expect(existsSync(bridge.authPath)).toBe(false);
 
@@ -689,7 +719,7 @@ describe("guest cloud bridge with the resident guest daemon (end-to-end, faux pr
 		} finally {
 			bridge.process.kill("SIGKILL");
 		}
-	}, 60_000);
+	});
 
 	it("publishes an empty patch and empty changed paths when nothing changed", async () => {
 		const bridge = await startBridge({
@@ -706,16 +736,9 @@ describe("guest cloud bridge with the resident guest daemon (end-to-end, faux pr
 		});
 		try {
 			bridge.process.kill("SIGTERM");
-			const deadline = Date.now() + 30_000;
-			for (;;) {
-				if (existsSync(join(bridge.resultsDir, "status.txt"))) {
-					expect(existsSync(join(bridge.resultsDir, "changes.patch"))).toBe(true);
-					expect(existsSync(join(bridge.resultsDir, "changed-paths.txt"))).toBe(true);
-					break;
-				}
-				if (Date.now() > deadline) throw new Error("status.txt was never published");
-				await new Promise((resolve) => setTimeout(resolve, 20));
-			}
+			await waitForFile(bridge.resultsDir, "status.txt");
+			expect(existsSync(join(bridge.resultsDir, "changes.patch"))).toBe(true);
+			expect(existsSync(join(bridge.resultsDir, "changed-paths.txt"))).toBe(true);
 			expect(readFileSync(join(bridge.resultsDir, "status.txt"), "utf8")).toBe("stopped\n");
 			expect(existsSync(bridge.authPath)).toBe(false);
 			expect(readFileSync(join(bridge.resultsDir, "changes.patch")).byteLength).toBe(0);
@@ -723,19 +746,14 @@ describe("guest cloud bridge with the resident guest daemon (end-to-end, faux pr
 		} finally {
 			bridge.process.kill("SIGKILL");
 		}
-	}, 60_000);
+	});
 
 	it("passes the scoped inference credential to the guest daemon without leaking it", async () => {
 		const bridge = await startBridge();
 		try {
 			await awaitDaemonReady(bridge);
 			const credentialPath = join(bridge.agentDir, "credential-seen.json");
-			const deadline = Date.now() + 20_000;
-			for (;;) {
-				if (existsSync(credentialPath)) break;
-				if (Date.now() > deadline) throw new Error("the guest daemon never reported its credential env");
-				await new Promise((resolve) => setTimeout(resolve, 50));
-			}
+			await waitForFile(bridge.agentDir, "credential-seen.json");
 			const seen = JSON.parse(readFileSync(credentialPath, "utf8")) as { apiKey: string | null };
 			expect(seen.apiKey).toBe("guest-inference-key");
 			// The bridge log carries supervision lines only, never the secret.
@@ -747,14 +765,14 @@ describe("guest cloud bridge with the resident guest daemon (end-to-end, faux pr
 		} finally {
 			bridge.process.kill("SIGKILL");
 		}
-	}, 60_000);
+	});
 
 	it("rejects oversized and malformed submits at the protocol bound", async () => {
 		const bridge = await startBridge();
 		try {
 			const client = await connect(bridge);
 			sendHello(client.connection);
-			await waitFor(client.messages, (message) => message.type === "snapshot");
+			await client.waitFor((message) => message.type === "snapshot");
 			// A request over the prompt bound never reaches the journal.
 			client.connection.send(
 				JSON.stringify({
@@ -770,5 +788,5 @@ describe("guest cloud bridge with the resident guest daemon (end-to-end, faux pr
 		} finally {
 			bridge.process.kill("SIGKILL");
 		}
-	}, 60_000);
+	});
 });

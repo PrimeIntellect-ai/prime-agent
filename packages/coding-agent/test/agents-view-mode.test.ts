@@ -1,4 +1,3 @@
-import { getModel } from "@earendil-works/pi-ai";
 import { setKeybindings } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -11,19 +10,24 @@ import {
 	AgentsViewMode,
 	type AgentsViewPersistentState,
 	buildCompactAgentsViewLayout,
-	combineAgentsViewStartupNotices,
 	createInitialAgentsViewPersistentState,
 	runAgentsViewMode,
+	waitThroughDaemonUpdateRestart,
 } from "../src/modes/agents-view/agents-view-mode.js";
+import * as agentsViewState from "../src/modes/agents-view/agents-view-state.js";
 import {
 	type AgentsViewRow,
 	buildAgentsViewRows,
-	reconcileUnifiedSessions,
 	resolveAgentsViewLeftResult,
+	type UnifiedSessionRecord,
 } from "../src/modes/agents-view/agents-view-state.js";
+import { DaemonSessionRecoveringError, DaemonUpdateRestartingError } from "../src/modes/daemon/daemon-errors.js";
+import { DaemonControlPlaneTransportError } from "../src/modes/daemon/daemon-routed-client.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
+import * as savedSessionCatalog from "../src/modes/daemon/saved-session-catalog.js";
 import type { InteractiveModeUiServices } from "../src/modes/interactive/interactive-mode-services.js";
-import { stopThemeWatcher, theme } from "../src/modes/interactive/theme/theme.js";
+import { initTheme, stopThemeWatcher } from "../src/modes/interactive/theme/theme.js";
+import { WORKING_ICON_INTERVAL_MS } from "../src/modes/interactive/theme/working-icon.js";
 
 const modeMocks = vi.hoisted(() => ({
 	interactiveRun: vi.fn<() => Promise<never>>(),
@@ -38,14 +42,17 @@ vi.mock("../src/config.js", async (importOriginal) => {
 	return { ...actual, appendRotatingLog: vi.fn() };
 });
 
-vi.mock("../src/modes/daemon/daemon-client.js", () => ({
-	DaemonClient: class {
-		connect = vi.fn(async () => undefined);
-		close = vi.fn();
-		request = modeMocks.clientRequest;
-	},
-	getDaemonSocketCloseReason: vi.fn(),
-}));
+vi.mock("../src/modes/daemon/daemon-client.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../src/modes/daemon/daemon-client.js")>();
+	return {
+		...actual,
+		DaemonClient: class {
+			connect = vi.fn(async () => undefined);
+			close = vi.fn();
+			request = modeMocks.clientRequest;
+		},
+	};
+});
 
 vi.mock("../src/modes/agent-connection/daemon-agent-connection.js", () => ({
 	DaemonAgentConnection: Object.assign(function DaemonAgentConnection() {}, {
@@ -89,6 +96,95 @@ function invoke(method: string, self: object, ...args: unknown[]): unknown {
 	return member.call(self, ...args);
 }
 
+function savedSession(id: string): AgentConnectionSavedSessionInfo {
+	return {
+		id,
+		path: `/tmp/${id}.jsonl`,
+		cwd: "/tmp",
+		created: new Date(0),
+		modified: new Date(0),
+		messageCount: 1,
+		firstMessage: id,
+		allMessagesText: id,
+	};
+}
+
+function deferredSavedCatalog() {
+	let resolve!: (sessions: AgentConnectionSavedSessionInfo[]) => void;
+	let reject!: (error: Error) => void;
+	let onSession: ((session: AgentConnectionSavedSessionInfo) => void) | undefined;
+	const promise = new Promise<AgentConnectionSavedSessionInfo[]>((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	vi.spyOn(savedSessionCatalog, "listDaemonSavedSessions").mockImplementationOnce(
+		async (_client, _context, _scope, callbacks) => {
+			onSession = callbacks?.onSession;
+			return promise;
+		},
+	);
+	return {
+		resolve,
+		reject,
+		emit(session: AgentConnectionSavedSessionInfo): void {
+			if (!onSession) throw new Error("Saved catalog refresh has not started");
+			onSession(session);
+		},
+	};
+}
+
+function catalogHarness(saved: AgentConnectionSavedSessionInfo[] = [], live: SessionSummary[] = []) {
+	const persistentState: AgentsViewPersistentState = {
+		savedSessions: saved,
+		lastSuccessfulSavedSessions: saved,
+		savedCatalogLoaded: true,
+	};
+	const self = {
+		persistentState,
+		lastListedSummaries: live,
+		savedSessions: saved,
+		lastSuccessfulSavedSessions: saved,
+		heartbeats: [],
+		rows: [] as AgentsViewRow[],
+		selectedIndex: 0,
+		savedCatalogGeneration: 0,
+		heartbeatCatalogGeneration: 0,
+		savedCatalogReady: true,
+		savedCatalogRefreshPending: false,
+		savedCatalogReconcileTimer: undefined as ReturnType<typeof setTimeout> | undefined,
+		stopped: false,
+		inactiveAgentIdentities: new Set<string>(),
+		expandedSubagentParents: new Set<string>(),
+		programShownParents: new Set<string>(),
+		editor: { getText: vi.fn(() => "") },
+		ui: { requestRender: vi.fn(), stop: vi.fn() },
+		requireClient: () => ({}),
+		getSavedSessionCatalogContext: () => ({ cwd: "/tmp" }),
+		withPendingDeleteSession: (sessions: SessionSummary[]) => sessions,
+		getFilteredRecords(): UnifiedSessionRecord[] {
+			return invoke("getFilteredRecords", self) as UnifiedSessionRecord[];
+		},
+		reconcileCatalogs: vi.fn((): void => {
+			invoke("reconcileCatalogs", self);
+		}),
+		rebuildRows: vi.fn((): void => {
+			invoke("rebuildRows", self);
+		}),
+		rearmSavedSearchFetch(): void {
+			invoke("rearmSavedSearchFetch", self);
+		},
+		armSavedSearchFetch: vi.fn(),
+		applyPendingAncestorExpansion: vi.fn(),
+		restoreSelection: vi.fn(),
+		syncSelectedRowState: vi.fn(),
+		resolveMissingSelectionAnchor: vi.fn(),
+		clearCtrlCExitHint: vi.fn(),
+		clearDeleteConfirmation: vi.fn(),
+		setStatusMessage: vi.fn(),
+	};
+	return self;
+}
+
 const settingsManager = {
 	getTheme: () => "dark",
 	getShowHardwareCursor: () => false,
@@ -100,31 +196,6 @@ const settingsManager = {
 describe("AgentsViewMode", () => {
 	beforeAll(() => setKeybindings(new KeybindingsManager()));
 	beforeEach(() => vi.clearAllMocks());
-
-	it("keeps the selection chosen by row rebuilding when the query changes", () => {
-		const self = {
-			editor: { getText: () => "matching query" },
-			persistentState: { query: "" },
-			savedSearchFetchStarted: true,
-			// Searching claims the visible row even while a remembered anchor is
-			// still waiting for its catalog row: user intent supersedes restore.
-			selectionAnchorPending: true,
-			selectedIndex: 4,
-			rebuildRows: vi.fn(),
-			syncSelectedRowState: vi.fn(),
-			ui: { requestRender: vi.fn() },
-			armSavedSearchFetch(): void {
-				invoke("armSavedSearchFetch", self);
-			},
-		};
-
-		invoke("queryChanged", self);
-
-		expect(self.persistentState.query).toBe("matching query");
-		expect(self.rebuildRows).toHaveBeenCalledOnce();
-		expect(self.selectedIndex).toBe(4);
-		expect(self.syncSelectedRowState).toHaveBeenCalledOnce();
-	});
 
 	it("keeps the queried selection when a remembered session arrives later", () => {
 		const remembered = summary({
@@ -168,34 +239,48 @@ describe("AgentsViewMode", () => {
 		expect(self.refreshSavedSessions).toHaveBeenCalledOnce();
 		expect(self.savedSearchFetchStarted).toBe(true);
 	});
-
-	it("stops instead of deleting when an idle row's subtree still works", async () => {
-		const request = vi.fn(async () => ({ success: true as const, data: { cancelled: true } }));
+	// [name, row state, daemon delete capability, cancel result, warning]
+	// A subagent row is only ever stopped, never deleted, while its subtree still works.
+	it.each([
+		[
+			"an idle row whose subtree still works",
+			{ kind: "subagent", section: "idle", runningSubagentCount: 1, summary: summary({ id: "crew-parent" }) },
+			true,
+			true,
+			undefined,
+		],
+		["a subagent that started running during confirmation", { section: "running" }, true, true, undefined],
+		[
+			"a daemon that cannot delete subagents",
+			{ section: "inactive", runningSubagentCount: 0, summary: summary() },
+			false,
+			false,
+			"The daemon cannot delete subagents; it was left unchanged",
+		],
+	] as const)("stops instead of deleting for %s", async (_name, row, supportsDelete, cancelled, warning) => {
+		const request = vi.fn(async () => ({ success: true as const, data: { cancelled } }));
 		const self = {
-			requireClient: () => ({ request, supportsServerCapability: () => true }),
+			requireClient: () => ({ request, supportsServerCapability: () => supportsDelete }),
 			setStatusMessage: vi.fn(),
 			refreshSessions: vi.fn(async () => true),
-		};
-		const idleWithBusyCrew = {
-			kind: "subagent",
-			section: "idle",
-			runningSubagentCount: 1,
-			summary: summary({ id: "crew-parent", activeSessionId: "crew-parent", sessionId: "crew-parent-session" }),
 		};
 
 		await invoke(
 			"killSubagent",
 			self,
-			{ identity: "child-row", rootActiveSessionId: "root-active", childId: "crew-parent-child" },
-			idleWithBusyCrew,
+			{ identity: "child-row", rootActiveSessionId: "root-active", childId: "passive-child" },
+			row,
 		);
 
 		expect(request).toHaveBeenCalledWith({
 			type: "cancel_rlm_child",
 			activeSessionId: "root-active",
-			childId: "crew-parent-child",
+			childId: "passive-child",
 		});
 		expect(request).not.toHaveBeenCalledWith(expect.objectContaining({ type: "delete_rlm_subagent" }));
+		if (warning) {
+			expect(self.setStatusMessage).toHaveBeenCalledWith(warning, { render: false, tone: "warning" });
+		}
 	});
 
 	it("re-resolves subagent state before choosing stop or delete intent", async () => {
@@ -274,97 +359,6 @@ describe("AgentsViewMode", () => {
 		expect(self.setStatusMessage).toHaveBeenCalledWith("Subagent deleted", { render: false });
 	});
 
-	it("uses cancel when an inactive subagent starts running during confirmation", async () => {
-		const request = vi.fn(async () => ({ success: true as const, data: { cancelled: true } }));
-		const self = {
-			requireClient: () => ({ request, supportsServerCapability: () => true }),
-			setStatusMessage: vi.fn(),
-			refreshSessions: vi.fn(async () => true),
-		};
-		await invoke(
-			"killSubagent",
-			self,
-			{ identity: "child-row", rootActiveSessionId: "root-active", childId: "passive-child" },
-			{ section: "running" },
-		);
-		expect(request).toHaveBeenCalledWith({
-			type: "cancel_rlm_child",
-			activeSessionId: "root-active",
-			childId: "passive-child",
-		});
-		expect(request).not.toHaveBeenCalledWith(expect.objectContaining({ type: "delete_rlm_subagent" }));
-	});
-
-	it("falls back to cancel-only when subagent deletion is unsupported", async () => {
-		const request = vi.fn(async () => ({ success: true as const, data: { cancelled: false } }));
-		const self = {
-			requireClient: () => ({ request, supportsServerCapability: () => false }),
-			setStatusMessage: vi.fn(),
-			refreshSessions: vi.fn(async () => true),
-		};
-		await invoke(
-			"killSubagent",
-			self,
-			{ identity: "child-row", rootActiveSessionId: "root-active", childId: "passive-child" },
-			{ section: "inactive", runningSubagentCount: 0, summary: summary() },
-		);
-		expect(request).toHaveBeenCalledWith({
-			type: "cancel_rlm_child",
-			activeSessionId: "root-active",
-			childId: "passive-child",
-		});
-		expect(self.setStatusMessage).toHaveBeenCalledWith("The daemon cannot delete subagents; it was left unchanged", {
-			render: false,
-			tone: "warning",
-		});
-	});
-
-	it("checks telemetry policy before replying from an opted-out agents view", async () => {
-		const client = { close: vi.fn() };
-		const connectDedicatedClient = vi.fn(async () => client);
-		const self = {
-			options: {
-				config: { telemetryDisabled: true },
-				recoverDaemon: vi.fn(async () => undefined),
-				reconnectTimeoutMs: 1234,
-			},
-			connectDedicatedClient,
-		};
-
-		await invoke("sendPrompt", self, "active-1", "private prompt", "followUp");
-
-		expect(connectDedicatedClient).toHaveBeenCalledOnce();
-		expect(DaemonAgentConnection.attach).toHaveBeenCalledWith(client, "active-1", {
-			closeClientOnDispose: true,
-			supportsExtensionUi: false,
-			recoverDaemon: self.options.recoverDaemon,
-			reconnectTimeoutMs: 1234,
-			telemetryDisabled: true,
-		});
-		expect(modeMocks.connectionPrompt).toHaveBeenCalledWith("private prompt", {
-			streamingBehavior: "followUp",
-		});
-		expect(modeMocks.dispose).toHaveBeenCalledOnce();
-	});
-
-	it("keeps direct agents-view replies when telemetry is enabled", async () => {
-		const request = vi.fn(async () => ({ success: true as const, data: undefined }));
-		const self = {
-			options: { config: {} },
-			requireClient: () => ({ request }),
-		};
-
-		await invoke("sendPrompt", self, "active-1", "private prompt", "steer");
-
-		expect(request).toHaveBeenCalledWith({
-			type: "prompt",
-			activeSessionId: "active-1",
-			message: "private prompt",
-			streamingBehavior: "steer",
-		});
-		expect(DaemonAgentConnection.attach).not.toHaveBeenCalled();
-	});
-
 	it("uses the opened session as the crash-path back target", async () => {
 		const opened = summary({ sessionName: "opened" });
 		const previous = summary({ id: "previous", activeSessionId: "previous", sessionId: "previous" });
@@ -401,88 +395,66 @@ describe("AgentsViewMode", () => {
 		runView.mockRestore();
 	});
 
-	it("invalidates the persisted scope root after popping a scope frame", async () => {
-		const parent = summary({ id: "parent", activeSessionId: "parent", sessionId: "parent" });
-		const child = summary({ id: "child", activeSessionId: "child", sessionId: "child" });
-		const runView = vi
-			.spyOn(AgentsViewMode.prototype, "run")
-			.mockImplementationOnce(function (this: AgentsViewMode) {
-				const state = (this as unknown as { persistentState: AgentsViewPersistentState }).persistentState;
-				state.scopeFrames = [
-					{ scope: { sessionId: parent.sessionId, activeSessionId: parent.activeSessionId } },
-					{ scope: { sessionId: child.sessionId, activeSessionId: child.activeSessionId } },
-				];
-				state.scopeRootSummary = child;
-				return Promise.resolve({
-					type: "scope_back",
-					selection: child,
-					expandedAncestorSessionIds: [],
-					hasChildren: false,
+	// A frame change in either direction must invalidate the persisted scope root so the
+	// next mount re-resolves it from the live catalog.
+	it.each([
+		["popping", "scope_back", 2, 1],
+		["pushing", "open", 1, 2],
+	] as const)(
+		"invalidates the persisted scope root after %s a scope frame",
+		async (_direction, resultType, initialFrames, expectedFrames) => {
+			const parent = summary({ id: "parent", activeSessionId: "parent", sessionId: "parent" });
+			const child = summary({ id: "child", activeSessionId: "child", sessionId: "child" });
+			const frameOf = (session: SessionSummary) => ({
+				scope: { sessionId: session.sessionId, activeSessionId: session.activeSessionId },
+			});
+			const stateOf = (view: AgentsViewMode) =>
+				(view as unknown as { persistentState: AgentsViewPersistentState }).persistentState;
+			const runView = vi
+				.spyOn(AgentsViewMode.prototype, "run")
+				.mockImplementationOnce(function (this: AgentsViewMode) {
+					const state = stateOf(this);
+					state.scopeFrames = initialFrames === 2 ? [frameOf(parent), frameOf(child)] : [frameOf(parent)];
+					state.scopeRootSummary = initialFrames === 2 ? child : parent;
+					return Promise.resolve(
+						resultType === "scope_back"
+							? {
+									type: "scope_back" as const,
+									selection: child,
+									expandedAncestorSessionIds: [],
+									hasChildren: false,
+								}
+							: { type: "open" as const, summary: child },
+					);
+				})
+				.mockImplementationOnce(function (this: AgentsViewMode) {
+					const state = stateOf(this);
+					expect(state.scopeFrames).toHaveLength(expectedFrames);
+					expect(state.scopeRootSummary).toBeUndefined();
+					return Promise.resolve({ type: "exit" as const });
 				});
-			})
-			.mockImplementationOnce(function (this: AgentsViewMode) {
-				const state = (this as unknown as { persistentState: AgentsViewPersistentState }).persistentState;
-				expect(state.scopeFrames).toHaveLength(1);
-				expect(state.scopeRootSummary).toBeUndefined();
-				return Promise.resolve({ type: "exit" });
+			if (resultType === "open") {
+				modeMocks.interactiveRun.mockResolvedValueOnce({
+					type: "scoped_agents_view",
+					source: {
+						activeSessionId: child.activeSessionId,
+						sessionFile: child.sessionFile,
+						sessionId: child.sessionId,
+						sessionName: child.sessionName,
+						cwd: child.cwd,
+					},
+				} as never);
+			}
+
+			await runAgentsViewMode({
+				socketPath: "/tmp/fake-daemon.sock",
+				config: { cwd: "/tmp" } as never,
+				uiServices: createUiServices(),
 			});
 
-		await runAgentsViewMode({
-			config: { cwd: "/tmp" } as never,
-			uiServices: {
-				settingsManager: settingsManager as never,
-				modelRegistry: {} as never,
-				getInitialCwd: () => "/tmp",
-				getInitialSessionName: () => undefined,
-				getThemes: () => [],
-			},
-		});
-
-		runView.mockRestore();
-	});
-
-	it("invalidates the persisted scope root after pushing a scope frame", async () => {
-		const parent = summary({ id: "parent", activeSessionId: "parent", sessionId: "parent" });
-		const child = summary({ id: "child", activeSessionId: "child", sessionId: "child" });
-		const runView = vi
-			.spyOn(AgentsViewMode.prototype, "run")
-			.mockImplementationOnce(function (this: AgentsViewMode) {
-				const state = (this as unknown as { persistentState: AgentsViewPersistentState }).persistentState;
-				state.scopeFrames = [{ scope: { sessionId: parent.sessionId, activeSessionId: parent.activeSessionId } }];
-				state.scopeRootSummary = parent;
-				return Promise.resolve({ type: "open", summary: child });
-			})
-			.mockImplementationOnce(function (this: AgentsViewMode) {
-				const state = (this as unknown as { persistentState: AgentsViewPersistentState }).persistentState;
-				expect(state.scopeFrames).toHaveLength(2);
-				expect(state.scopeRootSummary).toBeUndefined();
-				return Promise.resolve({ type: "exit" });
-			});
-		modeMocks.interactiveRun.mockResolvedValueOnce({
-			type: "scoped_agents_view",
-			source: {
-				activeSessionId: child.activeSessionId,
-				sessionFile: child.sessionFile,
-				sessionId: child.sessionId,
-				sessionName: child.sessionName,
-				cwd: child.cwd,
-			},
-		} as never);
-
-		await runAgentsViewMode({
-			socketPath: "/tmp/fake-daemon.sock",
-			config: { cwd: "/tmp" } as never,
-			uiServices: {
-				settingsManager: settingsManager as never,
-				modelRegistry: {} as never,
-				getInitialCwd: () => "/tmp",
-				getInitialSessionName: () => undefined,
-				getThemes: () => [],
-			},
-		});
-
-		runView.mockRestore();
-	});
+			runView.mockRestore();
+		},
+	);
 
 	it("does not discard scope while the saved-session refresh is in flight", async () => {
 		let finishRefresh: ((value: { success: true; data: { sessions: unknown[] } }) => void) | undefined;
@@ -631,191 +603,6 @@ describe("AgentsViewMode", () => {
 			stopThemeWatcher();
 		}
 	});
-
-	it("keeps subagent expansion across the active-to-persisted identity flip", () => {
-		const rowsOf = (self: Record<string, unknown>) => Reflect.get(self, "rows") as AgentsViewRow[];
-		const buildView = (expand: boolean) => {
-			const parent = summary({
-				id: "root-active",
-				activeSessionId: "root-active",
-				sessionId: "root-session",
-				sessionFile: undefined,
-				runtimeKind: "top-level",
-			});
-			const child = summary({
-				id: "child-active",
-				activeSessionId: "child-active",
-				sessionId: "child-session",
-				sessionFile: undefined,
-				runtimeKind: "subagent",
-				parentSessionId: "root-session",
-				parentActiveSessionId: "root-active",
-			});
-			const expandedSubagentParents = new Set<string>();
-			const self: Record<string, unknown> = {
-				persistentState: {},
-				lastListedSummaries: [parent, child],
-				savedSessions: [],
-				heartbeats: [],
-				inactiveAgentIdentities: new Set(),
-				pendingDeleteAgent: undefined,
-				savedCatalogReady: true,
-				expandedSubagentParents,
-				programShownParents: new Set(),
-				editor: { getText: () => "" },
-				getFilteredRecords: () => Reflect.get(self, "scopedRecords"),
-				applyPendingAncestorExpansion: vi.fn(),
-				restoreSelection: vi.fn(),
-				ui: { requestRender: vi.fn() },
-				setStatusMessage: vi.fn(),
-				withPendingDeleteSession: (sessions: SessionSummary[]) => sessions,
-			};
-			invoke("reconcileCatalogs", self);
-			if (expand) {
-				const parentRow = rowsOf(self).find(
-					(row) => row.kind === "agent" && row.summary.sessionId === "root-session",
-				);
-				expect(parentRow?.identity).toBe("session:root-session");
-				expandedSubagentParents.add(parentRow!.identity);
-				invoke("reconcileCatalogs", self);
-				expect(rowsOf(self).some((row) => row.kind === "subagent")).toBe(true);
-			}
-			// The runtime flushes the session file; the record identity flips to file:.
-			self.lastListedSummaries = [{ ...parent, sessionFile: "/tmp/root.jsonl" }, child];
-			invoke("reconcileCatalogs", self);
-			return { self, expandedSubagentParents };
-		};
-
-		const expandedView = buildView(true);
-		const expandedRows = rowsOf(expandedView.self);
-		expect(
-			expandedRows.find((row) => row.kind === "agent" && row.summary.sessionId === "root-session")?.identity,
-		).toBe("file:/tmp/root.jsonl");
-		expect(expandedRows.some((row) => row.kind === "subagent-summary")).toBe(false);
-		expect(expandedRows.some((row) => row.kind === "subagent" && row.summary.sessionId === "child-session")).toBe(
-			true,
-		);
-		expect([...expandedView.expandedSubagentParents]).toEqual(["file:/tmp/root.jsonl"]);
-
-		const collapsedView = buildView(false);
-		const collapsedRows = rowsOf(collapsedView.self);
-		expect(collapsedRows.some((row) => row.kind === "subagent-summary" && row.expanded)).toBe(false);
-		expect(collapsedRows.some((row) => row.kind === "subagent")).toBe(false);
-		expect(collapsedView.expandedSubagentParents.size).toBe(0);
-	});
-
-	it("toggles subagent list expansion from the parent row", () => {
-		const expandedSubagentParents = new Set(["root-row"]);
-		const programShownParents = new Set(["root-row"]);
-		const persistentState: AgentsViewPersistentState = {
-			expandedSubagentParents,
-			programShownParents,
-		};
-		const self: Record<string, unknown> = {
-			persistentState,
-			expandedSubagentParents,
-			programShownParents,
-			rebuildRows: vi.fn(),
-			syncSelectedRowState: vi.fn(),
-			ui: { requestRender: vi.fn() },
-		};
-		const summaryRow = { kind: "agent", identity: "root-row", expanded: true };
-
-		invoke("toggleSubagentList", self, summaryRow);
-		expect(expandedSubagentParents.size).toBe(0);
-		// Collapsing the list hides its revealed program too.
-		expect(programShownParents.size).toBe(0);
-		expect(self.rebuildRows).toHaveBeenCalledTimes(1);
-
-		invoke("toggleSubagentList", self, { ...summaryRow, expanded: false });
-		expect(expandedSubagentParents).toEqual(new Set(["root-row"]));
-		expect(programShownParents.size).toBe(0);
-		expect(self.rebuildRows).toHaveBeenCalledTimes(2);
-	});
-
-	it("renders roster recovery and stale-worker status labels", () => {
-		const rows = buildAgentsViewRows([
-			summary({ id: "recovering", sessionId: "recovering", statusLabel: "recovering" }),
-			summary({
-				id: "stale",
-				sessionId: "stale",
-				lastHeardFromAt: new Date(Date.now() - 60_000).toISOString(),
-			}),
-		]);
-		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
-		Reflect.set(view, "rows", rows);
-
-		try {
-			expect(invoke("renderRow", view, rows[0], 160)).toContain("recovering");
-			expect(invoke("renderRow", view, rows[1], 160)).toContain("last heard");
-		} finally {
-			stopThemeWatcher();
-		}
-	});
-
-	it("shows each session model and aligned total cost including collapsed descendants", () => {
-		const created = new Date(Date.now() - 120_000).toISOString();
-		const parent = summary({
-			id: "spender",
-			activeSessionId: "spender",
-			sessionId: "spender-session",
-			sessionName: "spender",
-			model: { ...getModel("openai", "gpt-4o"), id: "gpt-5.6-sol" },
-			created,
-			summary: "Analyzing runtime composition",
-			usage: { inputTokens: 12437, outputTokens: 1234, cost: 0.42 },
-		});
-		const child = summary({
-			id: "child",
-			activeSessionId: "child",
-			sessionId: "child-session",
-			sessionFile: "/tmp/child.jsonl",
-			runtimeKind: "subagent",
-			parentActiveSessionId: "spender",
-			model: { ...getModel("openai", "gpt-4o"), provider: "prime-inference", id: "glm-5.2-fast" },
-			created,
-			usage: { inputTokens: 500, outputTokens: 50, cost: 0.68 },
-		});
-		const inactive = summary({
-			id: "saved",
-			activeSessionId: undefined,
-			sessionId: "saved-session",
-			sessionFile: "/tmp/saved.jsonl",
-			rosterStatus: "inactive",
-			created,
-			model: { ...getModel("openai", "gpt-4o"), provider: "prime-inference", id: "glm-5.2-fast" },
-			usage: { inputTokens: 900, outputTokens: 80, cost: 123.45 },
-		});
-		const rows = buildAgentsViewRows([parent, child, inactive]);
-		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
-		Reflect.set(view, "rows", rows);
-		Reflect.set(view, "selectedIndex", -1);
-		try {
-			const parentRow = rows.find((row) => row.summary.sessionId === parent.sessionId)!;
-			const savedRow = rows.find((row) => row.summary.sessionId === inactive.sessionId)!;
-			const render = (row: AgentsViewRow, width: number) =>
-				stripAnsi(invoke("renderRow", view, row, width, buildCompactAgentsViewLayout(rows, width)) as string);
-			const parentLine = render(parentRow, 120);
-			const savedLine = render(savedRow, 120);
-			expect(parentLine).toContain("gpt-5.6-sol");
-			expect(savedLine).toContain("glm-5.2-fast");
-			expect(parentLine).toContain("$1.10");
-			expect(parentLine).not.toContain("$0.42");
-			expect(parentLine).not.toMatch(/[↑↓]/);
-			expect(parentLine).toMatch(/2m\s*$/);
-			expect(parentLine.indexOf("$1.10") + "$1.10".length).toBe(savedLine.indexOf("$123.45") + "$123.45".length);
-			for (const width of [60, 80]) {
-				const narrow = render(parentRow, width);
-				expect(narrow).toContain("gpt-5.6-sol");
-				expect(narrow).toContain("$1.10");
-				expect(narrow).toMatch(/2m\s*$/);
-				expect(narrow.length).toBeLessThanOrEqual(width);
-			}
-		} finally {
-			stopThemeWatcher();
-		}
-	});
-
 	it("marks cloud rows with a badge and honest connectivity; local rows stay unmarked", () => {
 		const created = new Date(Date.now() - 60_000).toISOString();
 		const cloudConnected = summary({
@@ -871,292 +658,6 @@ describe("AgentsViewMode", () => {
 			stopThemeWatcher();
 		}
 	});
-
-	it("renders one column header across status groups without repeating subagent hints", () => {
-		const summaries = [
-			summary({
-				id: "busy",
-				activeSessionId: "busy",
-				sessionId: "busy-session",
-				sessionName: "busy",
-				activity: "working",
-				isStreaming: true,
-			}),
-			summary({
-				id: "idle",
-				activeSessionId: "idle",
-				sessionId: "idle-session",
-				sessionName: "idle",
-				sessionFile: "/tmp/idle.jsonl",
-			}),
-			summary({
-				id: "child",
-				sessionId: "child-session",
-				sessionFile: "/tmp/child.jsonl",
-				runtimeKind: "subagent",
-				parentActiveSessionId: "busy",
-			}),
-		];
-		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
-		try {
-			Reflect.set(view, "lastListedSummaries", summaries);
-			invoke("reconcileCatalogs", view);
-			Reflect.set(view, "selectedIndex", -1);
-			Reflect.set(view, "ui", { terminal: { rows: 60 }, requestRender: () => {} });
-			const rendered = invoke("renderSessionRows", view, 120, 40) as string[];
-			const lines = rendered.map(stripAnsi);
-			expect(lines.filter((line) => /Model/.test(line) && /Age/i.test(line))).toHaveLength(1);
-			expect(lines.some((line) => line.startsWith("Running"))).toBe(true);
-			expect(lines.some((line) => line.startsWith("Idle"))).toBe(true);
-			expect(lines.join("\n")).not.toMatch(/show program|#sub|\$agent|↑in|↓out/);
-			const rows = Reflect.get(view, "rows") as AgentsViewRow[];
-			expect(rows.filter((row) => row.kind === "subagent-summary")).toHaveLength(0);
-			for (const line of rendered) {
-				expect(invoke("finalizeRenderedLine", view, line, 120)).not.toContain("\x1b[48");
-			}
-		} finally {
-			stopThemeWatcher();
-		}
-	});
-
-	it("always renders inactive sessions; search is the only filter", () => {
-		const live = summary({ sessionName: "live" });
-		const saved = summary({
-			id: "saved",
-			activeSessionId: undefined,
-			sessionId: "saved-session",
-			sessionName: "archive-match",
-			sessionFile: "/tmp/saved.jsonl",
-			rosterStatus: "inactive",
-			lifecycle: "archived",
-		});
-		// The stale pre-removal collapse flag must be ignored.
-		const persistentState = { savedCatalogLoaded: true, inactiveExpanded: false } as AgentsViewPersistentState;
-		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, persistentState);
-		const rows = () => Reflect.get(view, "rows") as AgentsViewRow[];
-		const showsSaved = () => rows().some((row) => row.summary.sessionId === saved.sessionId);
-		try {
-			Reflect.set(view, "lastListedSummaries", [live]);
-			Reflect.set(view, "savedSessions", [
-				{
-					path: saved.sessionFile!,
-					id: saved.sessionId,
-					cwd: saved.cwd,
-					name: saved.sessionName,
-					created: new Date(),
-					modified: new Date(),
-					messageCount: 1,
-					firstMessage: "archive-match",
-					allMessagesText: "archive-match",
-				},
-			]);
-			invoke("reconcileCatalogs", view);
-			expect(showsSaved()).toBe(true);
-			// The removed Alt+I chord must not hide anything.
-			view.handleInput("\x1bi");
-			expect(showsSaved()).toBe(true);
-			invoke("setSearchQuery", view, "no-such-session");
-			expect(showsSaved()).toBe(false);
-		} finally {
-			stopThemeWatcher();
-		}
-	});
-
-	it("opens a parent with Enter and reveals its spawn program only on request", () => {
-		const parent = summary({ sessionName: "parent" });
-		const child = summary({
-			id: "child",
-			activeSessionId: "child",
-			sessionId: "child-session",
-			sessionFile: "/tmp/child.jsonl",
-			runtimeKind: "subagent",
-			parentActiveSessionId: parent.activeSessionId,
-			spawnCode: 'await rlm("Inspect the code")',
-		});
-		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
-		const rows = () => Reflect.get(view, "rows") as AgentsViewRow[];
-		try {
-			Reflect.set(view, "lastListedSummaries", [parent, child]);
-			invoke("reconcileCatalogs", view);
-			expect(rows().map((row) => row.kind)).toEqual(["agent"]);
-			const finish = vi.fn();
-			Reflect.set(view, "finish", finish);
-			invoke("openSelected", view);
-			expect(finish).toHaveBeenCalledWith(
-				expect.objectContaining({
-					type: "open",
-					summary: expect.objectContaining({ sessionId: parent.sessionId }),
-				}),
-			);
-			invoke("cycleProgramForSelected", view);
-			expect(rows().some((row) => row.kind === "subagent-code" && row.code === child.spawnCode)).toBe(true);
-			expect(rows().some((row) => row.kind === "subagent" && row.summary.sessionId === child.sessionId)).toBe(true);
-			expect(rows().some((row) => row.kind === "subagent-summary")).toBe(false);
-			invoke("cycleProgramForSelected", view);
-			expect(rows().some((row) => row.kind === "subagent-code")).toBe(false);
-		} finally {
-			stopThemeWatcher();
-		}
-	});
-
-	it("keeps a selection at the end of the list visible when the leading ellipsis is shown", () => {
-		const summaries = Array.from({ length: 12 }, (_, index) =>
-			summary({
-				id: `saved-${index}`,
-				activeSessionId: undefined,
-				sessionId: `saved-${index}-session`,
-				sessionName: `saved-${index}`,
-				sessionFile: `/tmp/saved-${index}.jsonl`,
-				rosterStatus: "inactive" as const,
-				created: `2026-01-${String(index + 1).padStart(2, "0")}T00:00:00Z`,
-			}),
-		);
-		const rows = buildAgentsViewRows(summaries);
-		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
-
-		try {
-			Reflect.set(view, "rows", rows);
-			Reflect.set(view, "selectedIndex", rows.length - 1);
-			Reflect.set(view, "ui", { terminal: { rows: 13 }, requestRender: () => {} });
-			const lines = (invoke("renderSessionRows", view, 120, 4) as string[]).map(stripAnsi);
-			expect(lines[1]).toContain("...");
-			expect(lines).toHaveLength(4);
-			const lastTitle = rows.at(-1)!.title;
-			expect(lines.some((line) => line.includes(lastTitle))).toBe(true);
-		} finally {
-			stopThemeWatcher();
-		}
-	});
-
-	it("reveals usage details through actions and closes them before searching", () => {
-		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
-		try {
-			Reflect.set(view, "lastListedSummaries", [
-				summary({ sessionName: "parent", usage: { inputTokens: 1234, outputTokens: 56, cost: 1.23 } }),
-			]);
-			invoke("reconcileCatalogs", view);
-			view.handleInput("?");
-			const actions = (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi).join("\n");
-			expect(actions).toContain("1234 in");
-			expect(actions).toContain("$1.23");
-			view.handleInput("p");
-			expect(Reflect.get(view, "showActions")).toBe(false);
-			const rows = (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi).join("\n");
-			expect(rows).toContain("parent");
-			expect(rows).not.toContain("1234 in");
-		} finally {
-			stopThemeWatcher();
-		}
-	});
-
-	it("shows running-subagent counts only while collapsed and work remains", () => {
-		const parent = summary({ sessionName: "parent" });
-		const child = summary({
-			id: "child",
-			activeSessionId: "child",
-			sessionId: "child-session",
-			sessionFile: "/tmp/child.jsonl",
-			runtimeKind: "subagent",
-			parentActiveSessionId: parent.activeSessionId,
-			activity: "working",
-			isStreaming: true,
-		});
-		const secondChild = {
-			...child,
-			id: "child-2",
-			activeSessionId: "child-2",
-			sessionId: "child-session-2",
-			sessionFile: "/tmp/child-2.jsonl",
-		};
-		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
-		const rows = () => Reflect.get(view, "rows") as AgentsViewRow[];
-		const lines = () => (invoke("renderSessionRows", view, 120, 20) as string[]).map(stripAnsi);
-		try {
-			Reflect.set(view, "lastListedSummaries", [parent, child, secondChild]);
-			invoke("reconcileCatalogs", view);
-			expect(rows()).toHaveLength(1);
-			expect(invoke("renderRow", view, rows()[0], 120)).toContain("▸");
-			const collapsed = lines();
-			const parentIndex = collapsed.findIndex((line) => line.includes("parent"));
-			expect(collapsed[parentIndex + 1]).toBe("  2 subagents running");
-			invoke("moveSelection", view, 1);
-			expect(Reflect.get(view, "selectedIndex")).toBe(0);
-			view.handleInput("\x1b[1;3C");
-			expect(rows().map((row) => row.kind)).toEqual(["agent", "subagent", "subagent"]);
-			expect(lines().join("\n")).not.toContain("subagents running");
-			expect(invoke("renderRow", view, rows()[0], 120)).toContain("▾");
-			view.handleInput("\x1b[1;3C");
-			expect(rows()).toHaveLength(1);
-			expect(lines()).toContain("  2 subagents running");
-			const idleChild = { ...child, activity: "idle", isStreaming: false };
-			Reflect.set(view, "lastListedSummaries", [parent, idleChild, secondChild]);
-			invoke("reconcileCatalogs", view);
-			expect(lines()).toContain("  1 subagent running");
-			Reflect.set(view, "lastListedSummaries", [
-				parent,
-				idleChild,
-				{ ...secondChild, activity: "idle", isStreaming: false },
-			]);
-			invoke("reconcileCatalogs", view);
-			expect(lines().join("\n")).not.toMatch(/subagents? running/);
-		} finally {
-			stopThemeWatcher();
-		}
-	});
-
-	it("dims a paused-only heartbeat badge and keeps active badges in the error color", () => {
-		const job = (status: "active" | "paused") => ({
-			job: {
-				id: `${status}-job`,
-				status,
-				activeSessionId: "scope-active",
-				sessionId: "scope-session",
-				sessionFile: "/tmp/scope.jsonl",
-				cwd: "/tmp",
-				prompt: "tick",
-				schedule: { kind: "interval" as const, expression: "5m" },
-				createdAt: "2026-01-01T00:00:00Z",
-				updatedAt: "2026-01-01T00:00:00Z",
-				runCount: 0,
-			},
-		});
-		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
-
-		try {
-			const [pausedRow] = buildAgentsViewRows(reconcileUnifiedSessions([summary()], [], [job("paused")]));
-			Reflect.set(view, "rows", [pausedRow]);
-			const pausedLine = invoke("renderRow", view, pausedRow, 160) as string;
-			expect(pausedLine).toContain(theme.fg("dim", "♥ 1"));
-			expect(pausedRow).toMatchObject({ section: "idle" });
-
-			const [activeRow] = buildAgentsViewRows(reconcileUnifiedSessions([summary()], [], [job("active")]));
-			Reflect.set(view, "rows", [activeRow]);
-			const activeLine = invoke("renderRow", view, activeRow, 160) as string;
-			expect(activeLine).toContain(theme.fg("error", "♥ 1"));
-		} finally {
-			stopThemeWatcher();
-		}
-	});
-
-	it("warns about the armed heartbeat in the delete confirmation", () => {
-		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
-		Reflect.set(view, "deleteConfirmExpiresAt", Date.now() + 10_000);
-		const confirmLine = (row: AgentsViewRow): string => {
-			Reflect.set(view, "rows", [row]);
-			Reflect.set(view, "pendingDeleteAgent", { identity: row.identity, summary: row.summary, stopped: false });
-			return stripAnsi(invoke("renderRow", view, row, 160) as string);
-		};
-
-		try {
-			const [armedRow] = buildAgentsViewRows([summary({ hasActiveHeartbeat: true })]);
-			expect(confirmLine(armedRow!)).toContain("has an armed heartbeat — ");
-			const [plainRow] = buildAgentsViewRows([summary()]);
-			expect(confirmLine(plainRow!)).not.toContain("armed heartbeat");
-			expect(confirmLine(plainRow!)).toContain("again to remove");
-		} finally {
-			stopThemeWatcher();
-		}
-	});
 });
 
 function createUiServices(): InteractiveModeUiServices {
@@ -1174,18 +675,6 @@ afterEach(() => {
 });
 
 describe("AgentsViewMode persistent catalog state", () => {
-	it("treats only a previously loaded saved catalog as settled on mount", () => {
-		const fresh = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
-		const loaded = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
-
-		try {
-			expect(Reflect.get(fresh, "savedCatalogReady")).toBe(false);
-			expect(Reflect.get(loaded, "savedCatalogReady")).toBe(true);
-		} finally {
-			stopThemeWatcher();
-		}
-	});
-
 	it("applies an initial handoff scope from the first pushed roster refresh", async () => {
 		const root = summary();
 		const scope = { sessionId: root.sessionId, activeSessionId: root.activeSessionId };
@@ -1383,53 +872,840 @@ describe("AgentsViewMode persistent catalog state", () => {
 	});
 });
 
-describe("agents view startup notices", () => {
-	it("combines the open fallback and cwd fallback without dropping either notice", () => {
-		expect(combineAgentsViewStartupNotices("Child unavailable", "Original directory is missing")).toBe(
-			"Child unavailable · Original directory is missing",
-		);
-		expect(combineAgentsViewStartupNotices("Child unavailable", undefined)).toBe("Child unavailable");
-		expect(combineAgentsViewStartupNotices(undefined, "Original directory is missing")).toBe(
-			"Original directory is missing",
-		);
+describe("AgentsViewMode catalog performance", () => {
+	beforeEach(() => vi.useFakeTimers());
+	afterEach(() => vi.useRealTimers());
+
+	it("coalesces bursts without copying snapshots per item and flushes during a continuous stream", async () => {
+		const previous = [savedSession("previous")];
+		const self = catalogHarness(previous);
+		const catalog = deferredSavedCatalog();
+		const refresh = invoke("refreshSavedSessions", self) as Promise<boolean>;
+		const first = savedSession("first");
+		const updatedFirst = { ...first, path: "/tmp/./first.jsonl", name: "updated first" };
+		const second = savedSession("second");
+		const third = savedSession("third");
+		catalog.emit(first);
+		const firstTimer = self.savedCatalogReconcileTimer;
+		await vi.advanceTimersByTimeAsync(25);
+		catalog.emit(updatedFirst);
+		catalog.emit(second);
+		await vi.advanceTimersByTimeAsync(25);
+		catalog.emit(third);
+		await vi.advanceTimersByTimeAsync(24);
+
+		expect(self.savedSessions).toBe(previous);
+		expect(self.persistentState.savedSessions).toBe(previous);
+		expect(self.savedCatalogReconcileTimer).toBe(firstTimer);
+		expect(self.reconcileCatalogs).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(1);
+
+		await vi.advanceTimersByTimeAsync(1);
+		expect(self.reconcileCatalogs).toHaveBeenCalledOnce();
+		expect(self.savedSessions).toEqual([previous[0], updatedFirst, second, third]);
+		expect(self.persistentState.savedSessions).toBe(self.savedSessions);
+		expect(self.rows.map((row) => row.summary.sessionId).sort()).toEqual(["first", "previous", "second", "third"]);
+		expect(self.rows.find((row) => row.summary.sessionId === "first")?.title).toBe("updated first");
+		expect(self.savedCatalogReady).toBe(false);
+		expect(self.savedCatalogRefreshPending).toBe(true);
+		expect(self.lastSuccessfulSavedSessions).toBe(previous);
+		expect(self.persistentState.lastSuccessfulSavedSessions).toBe(previous);
+		expect(self.savedCatalogReconcileTimer).toBeUndefined();
+
+		const firstSnapshot = self.savedSessions;
+		const fourth = savedSession("fourth");
+		const fifth = savedSession("fifth");
+		catalog.emit(fourth);
+		await vi.advanceTimersByTimeAsync(50);
+		catalog.emit(fifth);
+		await vi.advanceTimersByTimeAsync(24);
+		expect(self.savedSessions).toBe(firstSnapshot);
+		expect(self.persistentState.savedSessions).toBe(firstSnapshot);
+		expect(self.reconcileCatalogs).toHaveBeenCalledOnce();
+		await vi.advanceTimersByTimeAsync(1);
+		expect(self.reconcileCatalogs).toHaveBeenCalledTimes(2);
+		expect(self.savedSessions).toEqual([...firstSnapshot, fourth, fifth]);
+		expect(self.rows).toHaveLength(6);
+		expect(self.savedCatalogRefreshPending).toBe(true);
+
+		catalog.resolve([updatedFirst, second, third, fourth, fifth]);
+		await expect(refresh).resolves.toBe(true);
 	});
 
-	it("persists the combined open and cwd fallback notices after returning to agents view", async () => {
-		const root = summary({
-			activeSessionId: undefined,
-			cwd: "/definitely/not/a/real/dir/for/this/test",
-			lifecycle: "archived",
-			sessionFile: "/tmp/root.jsonl",
+	it("publishes the final canonical catalog immediately and cancels its pending batch", async () => {
+		const self = catalogHarness([savedSession("previous")]);
+		const catalog = deferredSavedCatalog();
+		const refresh = invoke("refreshSavedSessions", self) as Promise<boolean>;
+		catalog.emit(savedSession("partial"));
+		const final = [savedSession("canonical")];
+		catalog.resolve(final);
+		await expect(refresh).resolves.toBe(true);
+
+		expect(self.savedSessions).toBe(final);
+		expect(self.lastSuccessfulSavedSessions).toBe(final);
+		expect(self.persistentState.savedSessions).toBe(final);
+		expect(self.persistentState.lastSuccessfulSavedSessions).toBe(final);
+		expect(self.persistentState.savedCatalogLoaded).toBe(true);
+		expect(self.savedCatalogReady).toBe(true);
+		expect(self.savedCatalogRefreshPending).toBe(false);
+		expect(self.rows.map((row) => row.summary.sessionId)).toEqual(["canonical"]);
+		expect(self.resolveMissingSelectionAnchor).toHaveBeenCalledOnce();
+		expect(self.savedCatalogReconcileTimer).toBeUndefined();
+		expect(vi.getTimerCount()).toBe(0);
+		await vi.advanceTimersByTimeAsync(150);
+		expect(self.savedSessions).toBe(final);
+		expect(self.reconcileCatalogs).toHaveBeenCalledOnce();
+	});
+
+	it.each([false, true])("restores the last successful catalog after failure (batch flushed: %s)", async (flushed) => {
+		const previous = [savedSession("previous")];
+		const self = catalogHarness(previous);
+		const catalog = deferredSavedCatalog();
+		const refresh = invoke("refreshSavedSessions", self) as Promise<boolean>;
+		catalog.emit(savedSession("partial"));
+		if (flushed) {
+			await vi.advanceTimersByTimeAsync(75);
+			expect(self.rows.map((row) => row.summary.sessionId).sort()).toEqual(["partial", "previous"]);
+			catalog.emit(savedSession("pending"));
+		}
+		catalog.reject(new Error("scan failed"));
+		await expect(refresh).resolves.toBe(false);
+
+		expect(self.savedSessions).toBe(previous);
+		expect(self.persistentState.savedSessions).toBe(previous);
+		expect(self.lastSuccessfulSavedSessions).toBe(previous);
+		expect(self.persistentState.lastSuccessfulSavedSessions).toBe(previous);
+		expect(self.rows.map((row) => row.summary.sessionId)).toEqual(["previous"]);
+		expect(self.savedCatalogReady).toBe(true);
+		expect(self.savedCatalogRefreshPending).toBe(false);
+		expect(self.setStatusMessage).toHaveBeenCalledWith("Failed to load saved sessions: scan failed");
+		expect(self.savedCatalogReconcileTimer).toBeUndefined();
+		expect(vi.getTimerCount()).toBe(0);
+		await vi.advanceTimersByTimeAsync(150);
+		expect(self.savedSessions).toBe(previous);
+		expect(self.reconcileCatalogs).toHaveBeenCalledTimes(flushed ? 2 : 1);
+	});
+
+	it.each(["success", "failure"])("fences a superseded scan's timer, callback, and terminal %s", async (outcome) => {
+		const previous = [savedSession("previous")];
+		const self = catalogHarness(previous);
+		const older = deferredSavedCatalog();
+		const newer = deferredSavedCatalog();
+		const oldRefresh = invoke("refreshSavedSessions", self) as Promise<boolean>;
+		older.emit(savedSession("old-partial"));
+		await vi.advanceTimersByTimeAsync(25);
+		const newRefresh = invoke("refreshSavedSessions", self) as Promise<boolean>;
+		expect(self.savedCatalogGeneration).toBe(2);
+		expect(self.persistentState.savedCatalogGeneration).toBe(2);
+		expect(self.savedCatalogReconcileTimer).toBeUndefined();
+		expect(vi.getTimerCount()).toBe(0);
+		older.emit(savedSession("old-late"));
+		expect(vi.getTimerCount()).toBe(0);
+		const replacement = savedSession("new-partial");
+		newer.emit(replacement);
+		const newTimer = self.savedCatalogReconcileTimer;
+		if (outcome === "success") older.resolve([savedSession("old-final")]);
+		else older.reject(new Error("old scan failed"));
+		await expect(oldRefresh).resolves.toBe(false);
+		expect(self.savedCatalogReconcileTimer).toBe(newTimer);
+		expect(self.savedCatalogRefreshPending).toBe(true);
+		expect(self.savedCatalogReady).toBe(false);
+		expect(self.resolveMissingSelectionAnchor).not.toHaveBeenCalled();
+		expect(self.setStatusMessage).not.toHaveBeenCalled();
+
+		await vi.advanceTimersByTimeAsync(50);
+		expect(self.savedSessions).toBe(previous);
+		expect(self.reconcileCatalogs).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(25);
+		expect(self.savedSessions).toEqual([...previous, replacement]);
+		expect(self.rows.map((row) => row.summary.sessionId).sort()).toEqual(["new-partial", "previous"]);
+		expect(self.reconcileCatalogs).toHaveBeenCalledOnce();
+		const final = [savedSession("new-final")];
+		newer.resolve(final);
+		await expect(newRefresh).resolves.toBe(true);
+		await vi.advanceTimersByTimeAsync(150);
+		expect(self.savedSessions).toBe(final);
+		expect(self.persistentState.savedSessions).toBe(final);
+		expect(self.reconcileCatalogs).toHaveBeenCalledTimes(2);
+	});
+
+	it.each(["success", "failure"])("finish cancels pending batches and ignores late catalog %s", async (outcome) => {
+		const previous = [savedSession("previous")];
+		const self = catalogHarness(previous);
+		const catalog = deferredSavedCatalog();
+		const refresh = invoke("refreshSavedSessions", self) as Promise<boolean>;
+		catalog.emit(savedSession("partial"));
+		expect(vi.getTimerCount()).toBe(1);
+		invoke("finish", self, { type: "exit" });
+		expect(self.stopped).toBe(true);
+		expect(self.savedCatalogReconcileTimer).toBeUndefined();
+		expect(vi.getTimerCount()).toBe(0);
+		catalog.emit(savedSession("late"));
+		if (outcome === "success") catalog.resolve([savedSession("final")]);
+		else catalog.reject(new Error("late failure"));
+		await expect(refresh).resolves.toBe(false);
+		await vi.advanceTimersByTimeAsync(150);
+
+		expect(self.savedSessions).toBe(previous);
+		expect(self.persistentState.savedSessions).toBe(previous);
+		expect(self.lastSuccessfulSavedSessions).toBe(previous);
+		expect(self.reconcileCatalogs).not.toHaveBeenCalled();
+		expect(self.ui.requestRender).not.toHaveBeenCalled();
+		expect(self.resolveMissingSelectionAnchor).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("ticks stale ages and working icons without rebuilding rows or rendering an unchanged idle list", async () => {
+		initTheme("dark");
+		vi.setSystemTime(new Date("2026-01-01T00:00:10Z"));
+		const rows = buildAgentsViewRows([summary({ lastHeardFromAt: "2026-01-01T00:00:00Z" })]);
+		const self = {
+			rows,
+			selectedIndex: -1,
+			workingIconFrame: 0,
+			savedCatalogGeneration: 0,
+			heartbeatCatalogGeneration: 0,
+			persistentState: {
+				rosterClient: { isConnected: true, onMessage: vi.fn(() => vi.fn()) },
+				rosterStore: {
+					attach: vi.fn(async () => true),
+					onUpdate: vi.fn(() => vi.fn()),
+					summaries: () => [],
+				},
+			},
+			ui: {
+				addChild: vi.fn(),
+				setFocus: vi.fn(),
+				start: vi.fn(),
+				enterFullscreen: vi.fn(),
+				requestRender: vi.fn(),
+				invalidate: vi.fn(),
+				stop: vi.fn(),
+			},
+			subscribeToClientClose: vi.fn(),
+			applySessionList: vi.fn(),
+			armSavedSearchFetch: vi.fn(),
+			resolveMissingSelectionAnchor: vi.fn(),
+			refreshHeartbeats: vi.fn(async () => true),
+			loadStartupNotices: vi.fn(),
+			rebuildRows: vi.fn(),
+			clearCtrlCExitHint: vi.fn(),
+			clearDeleteConfirmation: vi.fn(),
+			setStatusMessage: vi.fn(),
+			isPendingDeleteRow: () => false,
+			isPendingKillSubagentRow: () => false,
+			getRowIcon(section: AgentsViewRow["section"]): string {
+				return invoke("getRowIcon", self, section) as string;
+			},
+			formatRowIcon(section: AgentsViewRow["section"], icon: string): string {
+				return invoke("formatRowIcon", self, section, icon) as string;
+			},
+		};
+		const render = (row = self.rows[0]!) => stripAnsi(invoke("renderRow", self, row, 160) as string);
+		const run = invoke("run", self) as Promise<unknown>;
+		try {
+			await vi.advanceTimersByTimeAsync(0);
+			expect(self.ui.start).toHaveBeenCalledOnce();
+			expect(render()).toContain("last heard 10s ago");
+			self.ui.requestRender.mockClear();
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(self.ui.requestRender).toHaveBeenCalledTimes(1000 / WORKING_ICON_INTERVAL_MS);
+			expect(self.rebuildRows).not.toHaveBeenCalled();
+			expect(self.rows).toBe(rows);
+			expect(rows[0]?.statusLabel).toBe("last heard 10s ago");
+			expect(render()).toContain("last heard 11s ago");
+			expect(self.workingIconFrame).toBe(0);
+
+			self.rows = buildAgentsViewRows([summary({ activity: "working", isStreaming: true })]);
+			self.ui.requestRender.mockClear();
+			await vi.advanceTimersByTimeAsync(WORKING_ICON_INTERVAL_MS);
+			expect(self.workingIconFrame).toBe(1);
+			expect(self.ui.requestRender).toHaveBeenCalledOnce();
+			expect(render()).toContain("◈");
+			expect(render()).not.toContain("thinking");
+
+			self.rows = buildAgentsViewRows([summary()]);
+			self.ui.requestRender.mockClear();
+			await vi.advanceTimersByTimeAsync(WORKING_ICON_INTERVAL_MS);
+			expect(self.workingIconFrame).toBe(1);
+			expect(self.ui.requestRender).not.toHaveBeenCalled();
+			expect(self.rebuildRows).not.toHaveBeenCalled();
+
+			const recovering = buildAgentsViewRows([
+				summary({ statusLabel: "recovering", lastHeardFromAt: "2026-01-01T00:00:00Z" }),
+			])[0]!;
+			recovering.heartbeat = { activeCount: 1 };
+			const failed = buildAgentsViewRows([summary({ statusLabel: "failed" })])[0]!;
+			const statusLabel = vi.spyOn(agentsViewState, "getSessionStatusLabel");
+			expect(render(recovering)).toContain("recovering");
+			expect(render(recovering)).not.toContain("last heard");
+			expect(render(failed)).toContain("failed");
+			expect(render()).not.toContain("needs input");
+			expect(statusLabel).toHaveBeenCalledTimes(2);
+			expect(statusLabel).toHaveBeenCalledWith(recovering.summary, recovering.heartbeat);
+		} finally {
+			invoke("finish", self, { type: "exit" });
+			await run;
+		}
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("reuses the catalog index and recursive totals across searches until reconciliation", () => {
+		const parent = summary({ sessionName: "parent", usage: { inputTokens: 0, outputTokens: 0, cost: 1 } });
+		const child = summary({
+			id: "child",
+			activeSessionId: "child",
+			sessionId: "child",
+			sessionFile: "/tmp/child.jsonl",
+			sessionName: "child",
+			runtimeKind: "subagent",
+			parentActiveSessionId: parent.activeSessionId,
+			usage: { inputTokens: 0, outputTokens: 0, cost: 2 },
 		});
+		const grandchild = summary({
+			id: "grandchild",
+			activeSessionId: "grandchild",
+			sessionId: "grandchild",
+			sessionFile: "/tmp/grandchild.jsonl",
+			sessionName: "grandchild",
+			runtimeKind: "subagent",
+			parentActiveSessionId: child.activeSessionId,
+			usage: { inputTokens: 0, outputTokens: 0, cost: 4 },
+		});
+		const self = catalogHarness([], [parent, child, grandchild]);
+		const computeRollups = vi.spyOn(agentsViewState, "computeRecursiveRollups");
+		const buildIndex = vi.spyOn(agentsViewState, "buildUnifiedSessionIndex");
+		const filterEmpty = vi.spyOn(agentsViewState, "filterEmptyAgentsViewSessions");
+		const filterSearch = vi.spyOn(agentsViewState, "filterUnifiedSessions");
+		const buildRows = vi.spyOn(agentsViewState, "buildAgentsViewRows");
+		self.reconcileCatalogs();
+		const index = Reflect.get(self, "unifiedIndex");
+		const rollups = Reflect.get(self, "recursiveRollups");
+		expect(rollups).toBeInstanceOf(Map);
+		const parentRow = () => self.rows.find((row) => row.summary.sessionId === parent.sessionId);
+		expect(parentRow()).toMatchObject({ recursiveCost: 7, descendantCount: 2 });
+
+		for (const query of ["parent", "grandchild", "no match", ""]) {
+			self.editor.getText.mockReturnValue(query);
+			invoke("queryChanged", self);
+			expect(Reflect.get(self, "unifiedIndex")).toBe(index);
+			expect(Reflect.get(self, "recursiveRollups")).toBe(rollups);
+			if (query === "no match") expect(self.rows).toEqual([]);
+			else expect(parentRow()).toMatchObject({ recursiveCost: 7, descendantCount: 2 });
+		}
+		expect(computeRollups).toHaveBeenCalledOnce();
+		expect(buildIndex).toHaveBeenCalledOnce();
+		expect(filterEmpty).toHaveBeenCalledTimes(5);
+		expect(filterSearch).toHaveBeenCalledTimes(3);
+		for (const call of [...filterEmpty.mock.calls, ...filterSearch.mock.calls]) expect(call[2]).toBe(index);
+		for (const call of buildRows.mock.calls) expect(call[4]).toBe(rollups);
+
+		self.lastListedSummaries = [
+			parent,
+			child,
+			{ ...grandchild, usage: { inputTokens: 0, outputTokens: 0, cost: 10 } },
+			{ ...child, id: "new", activeSessionId: "new", sessionId: "new", sessionFile: "/tmp/new.jsonl" },
+		];
+		self.reconcileCatalogs();
+		expect(Reflect.get(self, "unifiedIndex")).not.toBe(index);
+		expect(Reflect.get(self, "recursiveRollups")).not.toBe(rollups);
+		expect(computeRollups).toHaveBeenCalledTimes(2);
+		expect(buildIndex).toHaveBeenCalledTimes(2);
+		expect(parentRow()).toMatchObject({ recursiveCost: 15, descendantCount: 3 });
+		self.editor.getText.mockReturnValue("parent");
+		invoke("queryChanged", self);
+		expect(parentRow()).toMatchObject({ recursiveCost: 15, descendantCount: 3 });
+		expect(computeRollups).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe("agents view reply delivery on inactive sessions", () => {
+	function replySummary(overrides: Partial<SessionSummary>): SessionSummary {
+		return {
+			id: "saved-1",
+			lifecycle: "archived",
+			activity: "idle",
+			sessionId: "saved-1",
+			cwd: process.cwd(),
+			isStreaming: false,
+			isCompacting: false,
+			attachedClients: 0,
+			messageCount: 3,
+			sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+			...overrides,
+			isSessionActive: overrides.isSessionActive ?? false,
+		};
+	}
+
+	function editorWithText(initial: string) {
+		let text = initial;
+		return {
+			getText: () => text,
+			setText: vi.fn((next: string) => {
+				text = next;
+			}),
+		};
+	}
+
+	const savedSummary = replySummary({
+		sessionFile: "/tmp/sessions/saved-1.jsonl",
+		cwd: process.cwd(),
+		summary: "Persisted recap text",
+		firstMessage: "opener",
+	});
+
+	it("arms a saved reply from its persisted recap and lets ctrl+c disarm it", async () => {
+		const requestRender = vi.fn();
+		const handleCtrlC = vi.fn();
+		const self: Record<string, unknown> = {
+			rows: [
+				{ kind: "agent", selectable: true, identity: "file:/tmp/sessions/saved-1.jsonl", summary: savedSummary },
+			],
+			selectedIndex: 0,
+			pendingDeleteAgent: undefined,
+			replyTarget: undefined,
+			renameTarget: undefined,
+			setReplyTarget: vi.fn((target: unknown) => {
+				self.replyTarget = target;
+			}),
+			ui: { requestRender },
+			clearStickyStatusMessage: vi.fn(),
+			keybindings: { matches: (_data: string, action: string) => action === "app.clear" },
+			handleCtrlC,
+		};
+
+		await invoke("toggleReplyTarget", self);
+		expect(self.replyTarget).toEqual({ key: "saved-1", summary: savedSummary });
+		expect(self.replyLastAssistantText).toBe("Persisted recap text");
+		expect(requestRender).toHaveBeenCalledOnce();
+
+		invoke("handleInput", self, "\x03");
+		expect(self.replyTarget).toBeUndefined();
+		expect(handleCtrlC).not.toHaveBeenCalled();
+	});
+
+	it("keeps the cwd-fallback notice visible after the reply is sent", async () => {
+		const savedWithMissingCwd = { ...savedSummary, cwd: "/definitely/not/a/real/dir/for/this/test" };
+		const request = vi.fn(async () => ({
+			success: true,
+			data: { ...savedWithMissingCwd, lifecycle: "live", activeSessionId: "active-9" },
+		}));
+		const setStatusMessage = vi.fn();
+		const self: Record<string, unknown> = {
+			options: { config: { cwd: process.cwd() } },
+			requireClient: () => ({ request }),
+			findSummaryByActiveSessionId: () => undefined,
+			inactiveAgentIdentities: new Set(["file:/tmp/sessions/saved-1.jsonl"]),
+			setStatusMessage,
+			selectSummary: vi.fn(),
+			sendPrompt: vi.fn(async () => {}),
+		};
+
+		await invoke("sendReply", self, { key: "saved-1", summary: savedWithMissingCwd }, "wake up");
+
+		expect(setStatusMessage).toHaveBeenLastCalledWith(expect.stringContaining("Original directory is missing"), {
+			sticky: true,
+		});
+	});
+
+	it("submits alt+enter as a follow-up only for an armed non-empty reply", () => {
+		const submit = vi.fn(async () => {});
+		invoke("handleReplyFollowUp", { replyTarget: undefined, editor: { getExpandedText: () => "text" }, submit });
+		invoke("handleReplyFollowUp", {
+			replyTarget: { key: "active-1", summary: savedSummary },
+			editor: { getExpandedText: () => "   " },
+			submit,
+		});
+		expect(submit).not.toHaveBeenCalled();
+
+		invoke("handleReplyFollowUp", {
+			replyTarget: { key: "active-1", summary: savedSummary },
+			editor: { getExpandedText: () => "expanded paste body" },
+			submit,
+		});
+		expect(submit).toHaveBeenCalledWith("expanded paste body", "followUp");
+	});
+
+	// [the view finishes mid-create, the requests the dedicated connection carries]
+	it.each([
+		["opens it", false, ["create"]],
+		["kills a session created after the view already finished", true, ["create", "kill"]],
+	] as const)(
+		"creates a new daemon session over a dedicated connection and %s",
+		async (_name, stopsDuringCreate, requestTypes) => {
+			const created = replySummary({ id: "active-new", activeSessionId: "active-new", lifecycle: "live" });
+			const requests: { type: string }[] = [];
+			const close = vi.fn();
+			const self: Record<string, unknown> = {
+				creatingNewSession: false,
+				stopped: false,
+				options: { config: {} },
+				connectDedicatedClient: vi.fn(async () => ({
+					close,
+					request: vi.fn(async (command: { type: string }) => {
+						requests.push(command);
+						// The view finishes while create is in flight.
+						if (stopsDuringCreate) self.stopped = true;
+						return { success: true, data: created };
+					}),
+				})),
+				setStatusMessage: vi.fn(),
+				selectSummary: vi.fn(),
+				finish: vi.fn(),
+			};
+
+			const result = await invoke("createNewSession", self);
+
+			expect(requests.map((r) => r.type)).toEqual(requestTypes);
+			if (stopsDuringCreate) {
+				expect(self.finish).not.toHaveBeenCalled();
+				expect(self.selectSummary).not.toHaveBeenCalled();
+			} else {
+				expect(result).toBe(true);
+				expect(self.selectSummary).toHaveBeenCalledWith(created);
+				expect(self.finish).toHaveBeenCalledWith({ type: "open", summary: created });
+				expect(close).toHaveBeenCalledOnce();
+				expect(self.creatingNewSession).toBe(false);
+			}
+		},
+	);
+
+	it("resumes a saved session before delivering the reply", async () => {
+		const request = vi.fn(async (command: { type: string }) => {
+			if (command.type === "create") {
+				return {
+					success: true,
+					data: { ...savedSummary, lifecycle: "live", activeSessionId: "active-9", isStreaming: true },
+				};
+			}
+			return { success: true, data: {} };
+		});
+		const target = { key: "saved-1", summary: savedSummary };
+		const self: Record<string, unknown> = {
+			options: { config: { cwd: process.cwd() } },
+			requireClient: () => ({ request }),
+			replyTarget: target,
+			// Stale pre-resume rows do not know the resumed session; scheduling must
+			// come from the resume response instead.
+			findSummaryByActiveSessionId: () => undefined,
+			inactiveAgentIdentities: new Set(["file:/tmp/sessions/saved-1.jsonl"]),
+			setStatusMessage: vi.fn(),
+			setReplyTarget: vi.fn(),
+			refreshSessions: vi.fn(async () => true),
+			selectSummary: vi.fn(),
+			sendPrompt: vi.fn(async () => {}),
+		};
+
+		await invoke("sendReply", self, target, "wake up");
+
+		expect(request).toHaveBeenCalledWith(
+			expect.objectContaining({ type: "create", sessionPath: savedSummary.sessionFile }),
+		);
+		expect(self.sendPrompt).toHaveBeenCalledWith("active-9", "wake up", "steer");
+		expect(self.selectSummary).toHaveBeenCalledWith(expect.objectContaining({ activeSessionId: "active-9" }));
+		expect(self.inactiveAgentIdentities).not.toContain("file:/tmp/sessions/saved-1.jsonl");
+		expect(self.setReplyTarget).not.toHaveBeenCalled();
+	});
+
+	it("does not select a resumed session after its reply target is cancelled", async () => {
+		let finishResume: ((result: { success: true; data: SessionSummary }) => void) | undefined;
+		let signalResumeStarted!: () => void;
+		const resumeStarted = new Promise<void>((resolve) => {
+			signalResumeStarted = resolve;
+		});
+		const request = vi.fn(
+			() =>
+				new Promise<{ success: true; data: SessionSummary }>((resolve) => {
+					finishResume = resolve;
+					signalResumeStarted();
+				}),
+		);
+		const target = { key: "saved-1", summary: savedSummary };
+		const selection = { activeSessionId: "active-2" };
+		const selectSummary = vi.fn((next: SessionSummary) => {
+			selection.activeSessionId = next.activeSessionId ?? next.id;
+		});
+		const sendPrompt = vi.fn(async () => {});
+		const self: Record<string, unknown> = {
+			options: { config: { cwd: process.cwd() } },
+			requireClient: () => ({ request }),
+			findSummaryByActiveSessionId: () => undefined,
+			inactiveAgentIdentities: new Set(["file:/tmp/sessions/saved-1.jsonl"]),
+			replyTarget: target,
+			setStatusMessage: vi.fn(),
+			selectSummary,
+			sendPrompt,
+		};
+
+		const reply = invoke("sendReply", self, target, "wake up") as Promise<boolean>;
+		await resumeStarted;
+		expect(request).toHaveBeenCalledOnce();
+		self.replyTarget = undefined;
+		finishResume?.({
+			success: true,
+			data: { ...savedSummary, lifecycle: "live", activeSessionId: "active-9" },
+		});
+
+		await expect(reply).resolves.toBe(true);
+		expect(selectSummary).not.toHaveBeenCalled();
+		expect(selection.activeSessionId).toBe("active-2");
+		expect(sendPrompt).toHaveBeenCalledWith("active-9", "wake up", undefined);
+		expect(self.inactiveAgentIdentities).not.toContain("file:/tmp/sessions/saved-1.jsonl");
+	});
+
+	// [re-armed target survives, text entered mid-send survives]
+	it.each([
+		["preserves a replacement composer when an older reply succeeds", true],
+		["preserves new text entered while the same reply succeeds", false],
+	] as const)("%s", async (_name, rearmed) => {
+		const editor = editorWithText("old reply");
+		const oldTarget = { key: "saved-1", summary: savedSummary };
+		const newTarget = {
+			key: "active-2",
+			summary: replySummary({ id: "active-2", activeSessionId: "active-2", lifecycle: "live" }),
+		};
+		const self: Record<string, unknown> = {
+			replyTarget: oldTarget,
+			options: {},
+			editor,
+			setReplyTarget: vi.fn(),
+			refreshSessions: vi.fn(async () => true),
+			sendReply: vi.fn(async () => {
+				if (rearmed) self.replyTarget = newTarget;
+				editor.setText("next reply");
+				return true;
+			}),
+		};
+
+		await invoke("submit", self, "old reply");
+
+		expect(self.replyTarget).toBe(rearmed ? newTarget : oldTarget);
+		expect(editor.getText()).toBe("next reply");
+		expect(self.setReplyTarget).not.toHaveBeenCalled();
+		if (rearmed) expect(self.refreshSessions).toHaveBeenCalledWith();
+	});
+
+	it.each([
+		{ name: "resume failure", failure: "resume", remainsInactive: true },
+		{ name: "send failure", failure: "send", remainsInactive: false },
+		{
+			name: "replacement text entered during send failure",
+			failure: "send",
+			replacement: "replacement",
+			remainsInactive: false,
+		},
+	] as const)("handles $name", async ({ failure, replacement, remainsInactive }) => {
+		const editor = editorWithText("wake up");
+		const target = { key: "saved-1", summary: savedSummary };
+		const inactiveAgentIdentities = new Set(["file:/tmp/sessions/saved-1.jsonl"]);
+		const request = vi.fn(async () => {
+			if (failure === "resume") throw new Error("resume failed");
+			return {
+				success: true,
+				data: { ...savedSummary, lifecycle: "live", activeSessionId: "active-9" },
+			};
+		});
+		const sendPrompt = vi.fn(async () => {
+			if (replacement) editor.setText(replacement);
+			throw new Error("send failed");
+		});
+		const self: Record<string, unknown> = {
+			options: { config: { cwd: process.cwd() } },
+			requireClient: () => ({ request }),
+			findSummaryByActiveSessionId: () => undefined,
+			inactiveAgentIdentities,
+			replyTarget: target,
+			editor,
+			setStatusMessage: vi.fn(),
+			setReplyTarget: vi.fn(),
+			refreshSessions: vi.fn(async () => true),
+			selectSummary: vi.fn(),
+			sendPrompt,
+			sendReply: (replyTarget: unknown, text: string) => invoke("sendReply", self, replyTarget, text),
+		};
+
+		await invoke("submit", self, "wake up");
+
+		expect(request).toHaveBeenCalledOnce();
+		expect(request).toHaveBeenCalledWith(
+			expect.objectContaining({ type: "create", sessionPath: savedSummary.sessionFile }),
+		);
+		expect(sendPrompt).toHaveBeenCalledTimes(failure === "resume" ? 0 : 1);
+		expect(self.selectSummary).toHaveBeenCalledTimes(failure === "resume" ? 0 : 1);
+		expect(self.setStatusMessage).toHaveBeenLastCalledWith(`Failed to send reply: ${failure} failed`);
+		expect(self.replyTarget).toBe(target);
+		expect(self.setReplyTarget).not.toHaveBeenCalled();
+		expect(editor.setText).toHaveBeenNthCalledWith(1, "");
+		expect(editor.getText()).toBe(replacement ?? "wake up");
+		expect(inactiveAgentIdentities.has("file:/tmp/sessions/saved-1.jsonl")).toBe(remainsInactive);
+		expect(self.refreshSessions).toHaveBeenCalledTimes(remainsInactive ? 0 : 1);
+		if (!remainsInactive) {
+			expect(self.refreshSessions).toHaveBeenCalledWith();
+		}
+	});
+
+	it("resumes the current saved row when an armed live target becomes inactive", async () => {
+		const capturedLive = replySummary({
+			activeSessionId: "active-dead",
+			lifecycle: "live",
+			sessionFile: savedSummary.sessionFile,
+		});
+		const currentSaved = { ...savedSummary, activeSessionId: undefined };
+		const request = vi.fn(async () => ({
+			success: true,
+			data: { ...currentSaved, lifecycle: "live", activeSessionId: "active-new" },
+		}));
+		const self: Record<string, unknown> = {
+			options: { config: { cwd: process.cwd() } },
+			requireClient: () => ({ request }),
+			unifiedRecords: [
+				{
+					daemon: currentSaved,
+					identity: "file:/tmp/sessions/saved-1.jsonl",
+					identityAliases: ["file:/tmp/sessions/saved-1.jsonl"],
+					section: "inactive",
+					searchableText: "",
+				},
+			],
+			findSummaryByActiveSessionId: () => undefined,
+			inactiveAgentIdentities: new Set<string>(),
+			replyTarget: undefined,
+			setStatusMessage: vi.fn(),
+			selectSummary: vi.fn(),
+			sendPrompt: vi.fn(async () => {}),
+		};
+
+		await invoke("sendReply", self, { key: "active-dead", summary: capturedLive }, "wake up");
+
+		expect(request).toHaveBeenCalledWith(
+			expect.objectContaining({ type: "create", sessionPath: savedSummary.sessionFile }),
+		);
+		expect(self.sendPrompt).toHaveBeenCalledWith("active-new", "wake up", undefined);
+		expect(self.sendPrompt).not.toHaveBeenCalledWith("active-dead", expect.anything(), expect.anything());
+	});
+
+	it("replies to live sessions without resuming, steering or queueing per delivery", async () => {
+		let liveSummary = replySummary({ activeSessionId: "active-1", lifecycle: "live" });
+		const request = vi.fn();
+		const self: Record<string, unknown> = {
+			options: { config: {} },
+			requireClient: () => ({ request }),
+			findSummaryByActiveSessionId: () => liveSummary,
+			setStatusMessage: vi.fn(),
+			selectSummary: vi.fn(),
+			sendPrompt: vi.fn(async () => {}),
+		};
+		const target = () => ({ key: "active-1", summary: liveSummary });
+
+		await invoke("sendReply", self, target(), "hello");
+		expect(self.sendPrompt).toHaveBeenCalledWith("active-1", "hello", undefined);
+
+		liveSummary = replySummary({ activeSessionId: "active-1", lifecycle: "live", isStreaming: true });
+		await invoke("sendReply", self, target(), "change course");
+		expect(self.sendPrompt).toHaveBeenCalledWith("active-1", "change course", "steer");
+
+		await invoke("sendReply", self, target(), "later please", "followUp");
+		expect(self.sendPrompt).toHaveBeenCalledWith("active-1", "later please", "followUp");
+
+		expect(request).not.toHaveBeenCalled();
+		expect(self.selectSummary).not.toHaveBeenCalled();
+	});
+
+	it("does not disarm a composer that was re-armed during the command", async () => {
+		const live = replySummary({ activeSessionId: "active-1", lifecycle: "live" });
+		const originalTarget = { key: "active-1", summary: live };
+		const newTarget = { key: "active-2", summary: replySummary({ activeSessionId: "active-2" }) };
+		const setReplyTarget = vi.fn();
+		const self: Record<string, unknown> = {
+			requireClient: () => ({
+				request: vi.fn(async () => {
+					// The user re-arms against a different agent mid-RPC.
+					self.replyTarget = newTarget;
+					return { success: true, data: {} };
+				}),
+			}),
+			editor: editorWithText(""),
+			setStatusMessage: vi.fn(),
+			setReplyTarget,
+			replyTarget: originalTarget,
+			refreshSessions: vi.fn(async () => true),
+		};
+
+		await invoke("runAgentsViewCommand", self, { name: "kill", args: "" }, live);
+
+		expect(setReplyTarget).not.toHaveBeenCalled();
+	});
+
+	it("re-resolves the armed target before dispatching a view command", async () => {
+		const stale = replySummary({ sessionFile: "/tmp/sessions/saved-1.jsonl" });
+		const liveNow = replySummary({
+			sessionFile: "/tmp/sessions/saved-1.jsonl",
+			activeSessionId: "active-9",
+			lifecycle: "live",
+		});
+		const runAgentsViewCommand = vi.fn(async () => true);
+		const self: Record<string, unknown> = {
+			replyTarget: { key: "saved-1", summary: stale },
+			options: {},
+			unifiedRecords: [
+				{
+					daemon: liveNow,
+					identity: "file:/tmp/sessions/saved-1.jsonl",
+					identityAliases: ["file:/tmp/sessions/saved-1.jsonl"],
+					section: "idle",
+					searchableText: "",
+				},
+			],
+			findSummaryByActiveSessionId: () => undefined,
+			editor: editorWithText(""),
+			runAgentsViewCommand,
+		};
+
+		await invoke("submit", self, "/kill");
+
+		expect(runAgentsViewCommand).toHaveBeenCalledWith(
+			{ name: "kill", args: "" },
+			expect.objectContaining({ activeSessionId: "active-9" }),
+		);
+	});
+});
+
+describe("agents view open during a daemon update restart", () => {
+	beforeEach(() => vi.clearAllMocks());
+
+	it.each([
+		[
+			"waits through the update restart and surfaces the wait notice",
+			true,
+			"Waited for the Prime Agent daemon update restart to finish",
+		],
+		[
+			"surfaces a permanent create failure unmasked by the wait",
+			false,
+			"Failed to open agent: File not found: /tmp/scope.jsonl",
+		],
+	] as const)("%s", async (_name, reachesSession, expectedMessage) => {
+		const saved = summary({ activeSessionId: undefined, lifecycle: "archived" });
 		let runs = 0;
 		vi.spyOn(AgentsViewMode.prototype, "run").mockImplementation(async function (this: AgentsViewMode) {
 			runs += 1;
-			if (runs === 1) {
-				return {
-					type: "open",
-					summary: root,
-					hasChildren: false,
-					statusMessage: "Child unavailable",
-				};
-			}
-			expect(Reflect.get(this, "persistentState")).toMatchObject({
-				statusMessage: `Child unavailable · Original directory is missing (${root.cwd}); opened in ${process.cwd()} instead.`,
-			});
+			if (runs === 1) return { type: "open", summary: saved, hasChildren: false };
+			expect(String(Reflect.get(this, "persistentState").statusMessage)).toContain(expectedMessage);
 			return { type: "exit" };
 		});
-		modeMocks.clientRequest.mockResolvedValue({
-			type: "response",
-			command: "create",
-			success: true,
-			data: { ...root, cwd: process.cwd(), activeSessionId: "resumed-active", lifecycle: "live" },
-		});
+		modeMocks.clientRequest
+			.mockResolvedValueOnce({
+				success: false,
+				error: "Daemon is preparing an update restart",
+			})
+			.mockResolvedValueOnce(
+				reachesSession
+					? { success: true, data: { ...saved, activeSessionId: "resumed-after-update", lifecycle: "live" } }
+					: { success: false, error: "File not found: /tmp/scope.jsonl" },
+			);
 		modeMocks.interactiveRun.mockResolvedValue({
 			type: "agents_view",
-			source: {
-				activeSessionId: "resumed-active",
-				sessionId: root.sessionId,
-				cwd: process.cwd(),
-			},
+			source: { activeSessionId: "resumed-after-update", sessionId: saved.sessionId, cwd: saved.cwd },
 		} as never);
 
 		await runAgentsViewMode({
@@ -1438,6 +1714,74 @@ describe("agents view startup notices", () => {
 			uiServices: createUiServices(),
 		});
 
+		expect(modeMocks.clientRequest).toHaveBeenCalledTimes(2);
+		expect(modeMocks.interactiveRun).toHaveBeenCalledTimes(reachesSession ? 1 : 0);
 		expect(runs).toBe(2);
+	});
+});
+
+describe("waitThroughDaemonUpdateRestart", () => {
+	const updateRestartDeadline =
+		/The Prime Agent daemon did not finish its update restart within \d+ seconds\. Try opening this agent again once the update finishes\. Last error: Daemon is preparing an update restart/;
+
+	// Post-arm transient shapes only; arming is pinned at the loop/deadline layers.
+	it("retries every restart-transient failure and reports that it waited", async () => {
+		const transientFailures = [
+			() => new Error("Failed to connect to the Prime Agent daemon: connect ENOENT"),
+			() => Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
+			() => new Error("Connection to the Prime Agent daemon closed."),
+			() => new Error('Timed out after 30000ms waiting for the Prime Agent daemon response to "create".'),
+			() => new DaemonControlPlaneTransportError(new Error("Connection to the Prime Agent daemon closed.")),
+			() => new Error("Unknown active session: update-restart-session"),
+			() => new DaemonSessionRecoveringError("update-restart-session"),
+		];
+		let attempts = 0;
+		const outcome = await waitThroughDaemonUpdateRestart(
+			async () => {
+				attempts += 1;
+				if (attempts === 1) throw new DaemonUpdateRestartingError();
+				const failure = transientFailures[attempts - 2];
+				if (failure) throw failure();
+				return "opened";
+			},
+			{ waitMs: 5_000, retryMs: 1 },
+		);
+		expect(outcome).toEqual({ result: "opened", waitedForUpdateRestart: true });
+	});
+
+	it("propagates a non-update failure before any update-restart signal", async () => {
+		let attempts = 0;
+		await expect(
+			waitThroughDaemonUpdateRestart(async () => {
+				attempts += 1;
+				throw new Error("spawn EMFILE");
+			}),
+		).rejects.toThrow("spawn EMFILE");
+		expect(attempts).toBe(1);
+	});
+
+	// The deadline races every attempt so an in-flight create cannot hold the open past the budget.
+	it("fails at the deadline even when an in-flight attempt would block past it", async () => {
+		vi.useFakeTimers();
+		const inFlight = new Promise<string>(() => {});
+		let attempts = 0;
+		try {
+			const opening = waitThroughDaemonUpdateRestart(
+				async () => {
+					attempts += 1;
+					if (attempts === 1) throw new DaemonUpdateRestartingError();
+					return inFlight;
+				},
+				{ waitMs: 60, retryMs: 5 },
+			).then(
+				() => "unexpectedly opened",
+				(error: Error) => error.message,
+			);
+			await vi.advanceTimersByTimeAsync(60);
+			expect(await opening).toMatch(updateRestartDeadline);
+			expect(attempts).toBe(2);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

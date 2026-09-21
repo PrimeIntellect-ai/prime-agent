@@ -86,10 +86,10 @@ interface BuiltinSlashCommandAlias {
 
 const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "settings", description: "Open settings menu" },
-	{ name: "model", description: "Select model (opens selector UI)", argumentHint: "[search]", takesArgument: true },
+	{ name: "model", description: "Select model (opens selector UI)", argumentHint: "[search]" },
 	{ name: "effort", description: "Select reasoning/thinking level (opens selector UI)", argumentHint: "[level]" },
 	{ name: "fast", description: "Toggle OpenAI Fast mode" },
-	{ name: "scoped-models", description: "Enable/disable models for Ctrl+P cycling" },
+	{ name: "scoped-models", description: "Enable/disable models for Alt+M cycling" },
 	{
 		name: "export",
 		description: "Export session (HTML default, or specify path: .html/.jsonl)",
@@ -129,7 +129,13 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{
 		name: "update",
 		description: `Update ${APP_NAME} and installed packages`,
-		argumentHint: "[source|--self|--extensions]",
+		argumentHint: "[source|--self|--extensions|--nightly|--stable]",
+		takesArgument: true,
+	},
+	{
+		name: "nightly",
+		description: `Switch ${APP_NAME} updates to the nightly channel (unreleased builds, may be broken)`,
+		argumentHint: "[on|off|status]",
 		takesArgument: true,
 	},
 	{ name: "hotkeys", description: "Show all keyboard shortcuts" },
@@ -140,8 +146,14 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "logout", description: "Remove provider authentication" },
 	{
 		name: "mcp",
-		description: "Open MCP Connections or manage MCP integrations",
+		description: "Browse external services or manage MCP integrations",
 		argumentHint: "[add|list|get|remove|login|logout]",
+		takesArgument: true,
+	},
+	{
+		name: "plugins",
+		description: "Browse and connect external services",
+		argumentHint: "[search]",
 		takesArgument: true,
 	},
 	{
@@ -167,8 +179,9 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	},
 	{
 		name: "autonomous",
-		description: "Set or view autonomous mode",
-		argumentHint: "[status|on|off]",
+		description: "Set or view autonomous mode with an optional budget",
+		argumentHint:
+			"[status|off|on [--max-continuations <n>] [--max-turns <n>] [--max-tokens <n>] [--timeout-ms <n>] [--gate <command>]]",
 		takesArgument: true,
 	},
 	{
@@ -202,6 +215,12 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{
 		name: "fullscreen",
 		description: "Toggle fullscreen (alternate screen) rendering with scrollable transcript",
+		argumentHint: "[on|off]",
+		takesArgument: true,
+	},
+	{
+		name: "speed",
+		description: "Toggle footer readout of model output tok/sec (latest response and session average)",
 		argumentHint: "[on|off]",
 		takesArgument: true,
 	},
@@ -285,4 +304,45 @@ export function parseSessionSlashCommand(text: string): SessionSlashCommand | un
 	const command = BUILTIN_SLASH_COMMAND_BY_NAME.get(name);
 	if (command?.execution !== "session" || !isSessionSlashCommandName(name)) return undefined;
 	return { name, args: parsed.args, text };
+}
+
+/**
+ * Closest command-name suggestion for an unrecognized slash command, or
+ * undefined when nothing is near enough. Shared by the CLI's unknown-
+ * command notice and the session's typo guard.
+ */
+export function findSlashCommandSuggestion(input: string, candidates: readonly string[]): string | undefined {
+	let closest: { candidate: string; distance: number } | undefined;
+	for (const candidate of candidates) {
+		const distance = slashCommandEditDistance(input, candidate);
+		if (!closest || distance < closest.distance) {
+			closest = { candidate, distance };
+		}
+	}
+	// Very short tokens match only on a single-character typo: two-character
+	// tolerance on a three-character token lets unrelated path-like words
+	// (tmp vs mcp) masquerade as command typos.
+	const threshold = input.length <= 3 ? 1 : Math.max(2, Math.floor(input.length / 3));
+	if (!closest || closest.distance > threshold) {
+		return undefined;
+	}
+	return closest.candidate;
+}
+
+function slashCommandEditDistance(left: string, right: string): number {
+	const previous = new Array<number>(right.length + 1);
+	const current = new Array<number>(right.length + 1);
+	for (let j = 0; j <= right.length; j++) previous[j] = j;
+	for (let i = 1; i <= left.length; i++) {
+		current[0] = i;
+		for (let j = 1; j <= right.length; j++) {
+			current[j] = Math.min(
+				previous[j] + 1,
+				current[j - 1] + 1,
+				previous[j - 1] + (left[i - 1] === right[j - 1] ? 0 : 1),
+			);
+		}
+		for (let j = 0; j <= right.length; j++) previous[j] = current[j];
+	}
+	return previous[right.length];
 }

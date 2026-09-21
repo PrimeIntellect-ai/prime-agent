@@ -154,6 +154,9 @@ export class DaemonWorkerClient {
 	request(
 		command: DaemonCommandBody,
 		timeoutMs = 30_000,
+		// Recovery/replay options stay with the supervisor transport; a direct
+		// request fails fast instead of replaying. The response hook and the
+		// forwarded progress listener (cloud delegate progress) do ride through.
 		options: DaemonClientRequestOptions = {},
 	): Promise<DaemonResponse> {
 		return this.requestWire(command, timeoutMs, options);
@@ -219,7 +222,19 @@ export class DaemonWorkerClient {
 					new DaemonWorkerProbeTimeoutError(`Timed out waiting for daemon worker response to ${command.type}`),
 				);
 			}, timeoutMs);
-			this.pending.set(id, { resolve, reject, timeout, onProgress: options.onProgress });
+			this.pending.set(id, {
+				resolve: (response) => {
+					try {
+						options.onResponse?.(response);
+						resolve(response);
+					} catch (error) {
+						reject(error);
+					}
+				},
+				reject,
+				timeout,
+				...(options.onProgress ? { onProgress: options.onProgress } : {}),
+			});
 		});
 		try {
 			await this.channel.send(

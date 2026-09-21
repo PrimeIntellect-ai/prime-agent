@@ -23,7 +23,7 @@ flowchart TD
 When the model delegates work:
 
 ```python
-handle = await rlm("inspect the API", name="api-reviewer")
+handle = await rlm.spawn("inspect the API", name="api-reviewer")
 print(handle.rlm_child_id, handle.name, handle.session_dir, handle.model)
 ```
 
@@ -42,7 +42,7 @@ sequenceDiagram
     participant P as Model provider
 
     M->>H: Python tool call
-    H->>K: execute await rlm("inspect the API")
+    H->>K: execute await rlm.spawn("inspect the API", name="api-reviewer")
     K->>H: host_request · rlm.run
     H->>H: check depth and resolve model
     H->>H: admit child task and update registry
@@ -66,8 +66,8 @@ sequenceDiagram
 | `src/core/kernel/repl-manager.ts` | Runtime process, stdio protocol, execution, host-request dispatch, interrupt, and shutdown. |
 | `src/core/tools/ipython.ts` | Agent tool wrapper, lazy kernel provisioning, namespace bootstrap, and output shaping. |
 | `src/core/agent-session.ts` | RLM policy, child creation, registry, usage attribution, cancellation, and goal handlers. |
-| `src/core/rlm-runtime.ts` | Typed request/spawn-handle validation for `rlm.run`, model discovery, list, and delete. |
-| `prime-agent-runtime/src/rlm/` | Python shim, handle types, callable `rlm`, and session-backed harness state. |
+| `src/core/rlm-runtime.ts` | Typed request/spawn-handle validation for `rlm.spawn`, model discovery, list, and delete. |
+| `prime-agent-runtime/src/rlm/` | Python shim, handle types, the `rlm` namespace object, and session-backed harness state. |
 
 The Python side does not call providers or implement an agent loop.
 
@@ -103,7 +103,7 @@ Calls to `ReplKernelManager.execute()` are serialized. One kernel has one shared
 A running cell can await task admission:
 
 ```python
-handle = await rlm("subtask")
+handle = await rlm.spawn("subtask", name="worker")
 ```
 
 The runtime ships the call to the host as a `host_request` event and keeps its event loop free while awaiting the reply. The host dispatches the typed request and answers with a `host_reply` request carrying the same id, so a cell can block on admission without stalling other runtime work. Child answers do not use this response path; they arrive later through explicit `agent_message` replies or files.
@@ -114,7 +114,7 @@ The runtime ships the call to the host as a `host_request` event and keeps its e
 
 ```python
 rlm
-run(prompt: str, **kwargs)
+spawn(prompt: str, *, name: str, model: str | None = None, thinking: str | None = None)
 find_models(query: str = "", limit: int = 8)
 list_subagents()
 delete_subagent(selector)
@@ -124,18 +124,12 @@ RLMModel
 RLMSubagent
 ```
 
-The kernel bootstrap places the callable `rlm` object in the user namespace, so these are equivalent:
-
-```python
-await rlm("subtask")
-await rlm.run("subtask")
-```
+The kernel bootstrap places the `rlm` object in the user namespace, so a cell calls `await rlm.spawn("subtask", name="worker")`. The `rlm` object itself is not callable, and the old `rlm.run` attribute is gone; both raise an error naming `rlm.spawn`.
 
 `RLMSpawnHandle` contains `rlm_child_id`, `name`, `session_dir`, and `model`. It confirms admission only and never contains the child's answer.
 
-Supported `rlm.run` options are:
+`name` is required. The other `rlm.spawn` options are:
 
-- `name`: a unique readable child session name;
 - `model`: an exact `provider/model` selector from `rlm.find_models()`; and
 - `thinking`: an explicit child reasoning level; must be valid for the resolved child model, defaults to the parent level (clamped to the child model).
 
@@ -161,9 +155,9 @@ Children receive incremented `RLM_DEPTH`, the inherited maximum depth, and their
 Each direct call admits an independent child and returns its handle immediately:
 
 ```python
-api_review = await rlm("review the API", name="api-reviewer")
-test_review = await rlm("review the tests", name="test-reviewer")
-audit = await rlm("slow independent audit", name="audit-reviewer")
+api_review = await rlm.spawn("review the API", name="api-reviewer")
+test_review = await rlm.spawn("review the tests", name="test-reviewer")
+audit = await rlm.spawn("slow independent audit", name="audit-reviewer")
 ```
 
 End the turn instead of waiting for completion. Children send requested answers with `await agent_message.send(message, receiver_role="parent")`, and replies arrive as ordinary agent messages over later turns. A child may instead write results to files for the parent to read. The host runs each admitted child as an independent `AgentSession`; daemon-backed children can be retained as independently addressable session workers.
@@ -243,7 +237,7 @@ Provider credentials are resolved by the TypeScript host. The bounded model cata
 | Failure | Behavior |
 |---|---|
 | Managed runtime is missing | Kernel bootstrap rebuilds it; a custom `PRIME_AGENT_KERNEL_PYTHON` without a current `prime-agent-runtime` is rejected at kernel startup. |
-| Depth limit reached | The host rejects the `rlm.run` request; the error reply raises in Python. |
+| Depth limit reached | The host rejects the spawn request; the error reply raises in Python. |
 | Unsupported options | Host rejects the request. |
 | Requested model unavailable | Spawn fails instead of substituting another model. |
 | Host connection closed | Pending `host_request` calls fail with `RuntimeError` so awaiting cells unblock. |

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
 	CloudTunnelAttachmentCallbacks,
 	CloudTunnelAttachmentTarget,
@@ -148,15 +148,25 @@ const outputEvent: CloudEvent = {
 };
 
 describe("CloudTunnelAttachment", () => {
+	// Fake clocks: every reconnect backoff and submit deadline is advanced
+	// deterministically instead of waited out.
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
 	it("authenticates, subscribes, mirrors events, and acks strictly after the local flush", async () => {
 		const transport = new FakeTransport();
 		const callbacks = makeCallbacks();
 		const attachment = makeAttachment(transport, callbacks);
 		attachment.start();
-		await vi.waitFor(() => expect(transport.connections.length).toBe(1));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(transport.connections.length).toBe(1);
 		const connection = transport.connections[0] as FakeConnection;
 		// The hello carries the bridge token and the durable resume cursor.
-		await vi.waitFor(() => expect(connection.sent.length).toBe(1));
+		expect(connection.sent.length).toBe(1);
 		const hello = JSON.parse(connection.sent[0] as string) as { type: string; authToken?: string };
 		expect(hello.type).toBe("hello");
 		expect(hello.authToken).toBe(target.bridgeToken);
@@ -166,7 +176,8 @@ describe("CloudTunnelAttachment", () => {
 		);
 
 		connection.receive(snapshotWith([statusEvent, outputEvent]));
-		await vi.waitFor(() => expect(callbacks.appendGuestEvent).toHaveBeenCalledTimes(2));
+		await vi.advanceTimersByTimeAsync(1);
+		expect(callbacks.appendGuestEvent).toHaveBeenCalledTimes(2);
 		expect(callbacks.persistGuestCursor).toHaveBeenCalledWith({
 			sandboxGeneration: 1,
 			eventGeneration: 1,
@@ -174,7 +185,7 @@ describe("CloudTunnelAttachment", () => {
 		});
 		expect(callbacks.flushTrace).toHaveBeenCalledTimes(1);
 		// Ack lands only after the flush resolved, then the subscription starts.
-		await vi.waitFor(() => expect(connection.sent.length).toBe(3));
+		expect(connection.sent.length).toBe(3);
 		const ack = JSON.parse(connection.sent[1] as string) as { type: string; cursor?: { sequence: number } };
 		const subscribe = JSON.parse(connection.sent[2] as string) as { type: string; cursor?: { sequence: number } };
 		expect(ack.type).toBe("ack");
@@ -195,7 +206,8 @@ describe("CloudTunnelAttachment", () => {
 		});
 		const attachment = makeAttachment(transport, callbacks);
 		attachment.start();
-		await vi.waitFor(() => expect(transport.connections.length).toBe(1));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(transport.connections.length).toBe(1);
 		const connection = transport.connections[0] as FakeConnection;
 		connection.receive(snapshotWith([statusEvent, outputEvent]));
 		connection.receive({
@@ -204,7 +216,7 @@ describe("CloudTunnelAttachment", () => {
 			generation: 1,
 			events: [statusEvent, outputEvent],
 		});
-		await new Promise((resolve) => setTimeout(resolve, 50));
+		await vi.advanceTimersByTimeAsync(1);
 		// Everything at or below the resume cursor is a no-op.
 		expect(callbacks.appendGuestEvent).not.toHaveBeenCalled();
 		expect(callbacks.flushTrace).not.toHaveBeenCalled();
@@ -217,14 +229,13 @@ describe("CloudTunnelAttachment", () => {
 			status: "idle",
 		};
 		connection.receive({ type: "events", sessionId: "sess_att_1", generation: 1, events: [next] });
-		await vi.waitFor(() => expect(callbacks.appendGuestEvent).toHaveBeenCalledTimes(1));
-		await vi.waitFor(() =>
-			expect(
-				connection.sent.some(
-					(raw) => (JSON.parse(raw) as { type: string; cursor?: { sequence: number } }).type === "ack",
-				),
-			).toBe(true),
-		);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(callbacks.appendGuestEvent).toHaveBeenCalledTimes(1);
+		expect(
+			connection.sent.some(
+				(raw) => (JSON.parse(raw) as { type: string; cursor?: { sequence: number } }).type === "ack",
+			),
+		).toBe(true);
 		const ack = JSON.parse(
 			connection.sent.find((raw) => (JSON.parse(raw) as { type: string }).type === "ack") as string,
 		) as { cursor: { sequence: number } };
@@ -237,29 +248,30 @@ describe("CloudTunnelAttachment", () => {
 		const callbacks = makeCallbacks();
 		const attachment = makeAttachment(transport, callbacks);
 		attachment.start();
-		await vi.waitFor(() => expect(transport.connections.length).toBe(1));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(transport.connections.length).toBe(1);
 		const first = transport.connections[0] as FakeConnection;
 		first.receive(snapshotWith([statusEvent]));
-		await vi.waitFor(() => expect(attachment.attached).toBe(true));
+		await vi.advanceTimersByTimeAsync(1);
+		expect(attachment.attached).toBe(true);
 
 		const steerRequest: CloudCommandRequest = { kind: "steer", text: "go" };
 		const receiptPromise = attachment.submit("cmd_s", steerRequest);
-		await vi.waitFor(() =>
-			expect(first.sent.some((raw) => (JSON.parse(raw) as { type: string }).type === "submit")).toBe(true),
-		);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(first.sent.some((raw) => (JSON.parse(raw) as { type: string }).type === "submit")).toBe(true);
 		// The receipt never arrives; the connection drops instead.
 		first.drop();
-		await vi.waitFor(() => expect(transport.connections.length).toBe(2));
+		// The reconnect backoff is capped at maxReconnectDelayMs with jitter;
+		// advancing past it deterministically produces the second connection.
+		await vi.advanceTimersByTimeAsync(25);
+		expect(transport.connections.length).toBe(2);
 		const second = transport.connections[1] as FakeConnection;
 		// The new connection resubmits the same identity once its snapshot
 		// confirms authentication; the guest journal deduplicates.
-		await vi.waitFor(() =>
-			expect(second.sent.some((raw) => (JSON.parse(raw) as { type: string }).type === "hello")).toBe(true),
-		);
+		expect(second.sent.some((raw) => (JSON.parse(raw) as { type: string }).type === "hello")).toBe(true);
 		second.receive(snapshotWith([]));
-		await vi.waitFor(() =>
-			expect(second.sent.some((raw) => (JSON.parse(raw) as { type: string }).type === "submit")).toBe(true),
-		);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(second.sent.some((raw) => (JSON.parse(raw) as { type: string }).type === "submit")).toBe(true);
 		const resubmitted = JSON.parse(
 			second.sent.find((raw) => (JSON.parse(raw) as { type: string }).type === "submit") as string,
 		) as { commandId: string; request: unknown; digest: string };
@@ -289,13 +301,18 @@ describe("CloudTunnelAttachment", () => {
 		const callbacks = makeCallbacks();
 		const attachment = makeAttachment(transport, callbacks);
 		attachment.start();
-		await vi.waitFor(() => expect(transport.connections.length).toBe(1));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(transport.connections.length).toBe(1);
 		const first = transport.connections[0] as FakeConnection;
 		first.receive(snapshotWith([statusEvent]));
-		await vi.waitFor(() => expect(attachment.attached).toBe(true));
-		// A dead bridge: submits are queued, never answered.
+		await vi.advanceTimersByTimeAsync(1);
+		expect(attachment.attached).toBe(true);
+		// A dead bridge: submits are queued, never answered. The queued
+		// outcome comes from the submit deadline timer, advanced deterministically.
 		first.drop();
-		await attachment.submit("cmd_q", { kind: "steer", text: "queued" } as CloudCommandRequest);
+		const queuedOutcome = attachment.submit("cmd_q", { kind: "steer", text: "queued" } as CloudCommandRequest);
+		await vi.advanceTimersByTimeAsync(501);
+		await expect(queuedOutcome).resolves.toMatchObject({ state: "queued" });
 		await expect(
 			attachment.submit("cmd_q", { kind: "steer", text: "different body" } as CloudCommandRequest),
 		).rejects.toThrow(/different request/);
@@ -307,10 +324,12 @@ describe("CloudTunnelAttachment", () => {
 		const callbacks = makeCallbacks();
 		const attachment = makeAttachment(transport, callbacks);
 		attachment.start();
-		await vi.waitFor(() => expect(transport.connections.length).toBe(1));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(transport.connections.length).toBe(1);
 		const first = transport.connections[0] as FakeConnection;
 		first.receive(snapshotWith([statusEvent]));
-		await vi.waitFor(() => expect(attachment.attached).toBe(true));
+		await vi.advanceTimersByTimeAsync(1);
+		expect(attachment.attached).toBe(true);
 		// The guest would treat this as a protocol violation and close the
 		// connection; queuing it would wedge the supervisor in a replay loop.
 		await expect(attachment.submit("cmd_bad", { kind: "steer", text: "x".repeat(65_537) })).rejects.toThrow(
@@ -324,11 +343,18 @@ describe("CloudTunnelAttachment", () => {
 	it("falls back cleanly when the tunnel registration disappears", async () => {
 		const transport = new FakeTransport();
 		transport.failuresBeforeSuccess = 10;
-		const callbacks = makeCallbacks({ checkTunnelAlive: vi.fn(async () => false) });
+		const onTerminal = vi.fn();
+		const callbacks = makeCallbacks({ checkTunnelAlive: vi.fn(async () => false), onTerminal });
 		const attachment = makeAttachment(transport, callbacks);
 		attachment.start();
-		await vi.waitFor(() => expect(callbacks.onTerminal).toHaveBeenCalled());
-		expect(callbacks.onTerminal).toHaveBeenCalledWith(expect.stringContaining("registration is gone"));
+		// The reconnect loop only advances on fake-clock ticks; the bounded
+		// walk fails the transport twice per liveness probe until the probe
+		// reports the registration gone.
+		for (let tick = 0; tick < 20 && onTerminal.mock.calls.length === 0; tick++) {
+			await vi.advanceTimersByTimeAsync(50);
+		}
+		expect(onTerminal).toHaveBeenCalled();
+		expect(onTerminal).toHaveBeenCalledWith(expect.stringContaining("registration is gone"));
 		expect(attachment.pendingCount).toBe(0);
 		await attachment.stop();
 	});
@@ -341,11 +367,13 @@ describe("CloudTunnelAttachment", () => {
 		});
 		const attachment = makeAttachment(transport, callbacks);
 		attachment.start();
-		await vi.waitFor(() => expect(transport.connections.length).toBe(1));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(transport.connections.length).toBe(1);
 		live = false;
 		(transport.connections[0] as FakeConnection).drop();
 		// With no live session and no target the loop exits without onTerminal spam.
 		await attachment.stop();
+		await vi.advanceTimersByTimeAsync(30);
 		expect(transport.connections.length).toBe(1);
 	});
 });

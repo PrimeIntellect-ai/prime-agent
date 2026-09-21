@@ -67,6 +67,8 @@ export interface GenerateBranchSummaryOptions {
 	apiKey: string;
 	/** Request headers for the model */
 	headers?: Record<string, string>;
+	/** Owning conversation identity for provider routing and caching. */
+	sessionId?: string;
 	/** Abort signal for cancellation */
 	signal: AbortSignal;
 	/** Optional custom instructions for summarization */
@@ -259,6 +261,7 @@ export async function generateBranchSummary(
 		model,
 		apiKey,
 		headers,
+		sessionId,
 		signal,
 		customInstructions,
 		replaceInstructions,
@@ -299,7 +302,7 @@ export async function generateBranchSummary(
 			completeSimple(
 				model,
 				{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-				{ apiKey, headers, signal, maxTokens: 2048 },
+				{ apiKey, headers, sessionId, signal, maxTokens: 2048 },
 			),
 		{ policy: retry, signal },
 	);

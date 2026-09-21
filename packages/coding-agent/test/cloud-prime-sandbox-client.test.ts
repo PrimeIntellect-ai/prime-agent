@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
 	MAX_EXEC_TIMEOUT_SECONDS,
 	MAX_TRANSFER_BYTES,
@@ -8,54 +8,27 @@ import {
 	PrimeSandboxError,
 	type PrimeSandboxVmCreateRequest,
 } from "../src/core/cloud/prime-sandbox-client.js";
+import {
+	expectErrorOf,
+	type FetchMock,
+	type FetchResponder,
+	fetchRecorder,
+	formOf,
+	headerOf,
+	jsonBodyOf,
+	jsonResponse,
+} from "./cloud-prime-api-fakes.js";
 
 const API_KEY = "prime-api-key-123";
 const BASE_URL = "https://prime-api.example.com";
 const GATEWAY_URL = "https://sandbox-gw.example.com";
 const SANDBOX_ID = "sb-123.abc_def";
 
-type FetchMock = ReturnType<typeof vi.fn>;
+const expectError = (promise: Promise<unknown>) => expectErrorOf(promise, PrimeSandboxError);
 
-function jsonResponse(body: unknown, status = 200): Response {
-	return new Response(JSON.stringify(body), {
-		status,
-		headers: { "Content-Type": "application/json" },
-	});
-}
-
-function getUrl(input: string | URL | Request): string {
-	if (typeof input === "string") return input;
-	if (input instanceof URL) return input.toString();
-	return input.url;
-}
-
-function getAuthorization(init?: RequestInit): string | undefined {
-	const headers = init?.headers;
-	if (!headers || Array.isArray(headers)) return undefined;
-	if (headers instanceof Headers) return headers.get("Authorization") ?? undefined;
-	const record = headers as Record<string, string | undefined>;
-	return record.Authorization ?? record.authorization;
-}
-
-function getJsonBody(init?: RequestInit): Record<string, unknown> {
-	if (typeof init?.body !== "string") {
-		throw new Error(`Expected string request body, got ${typeof init?.body}`);
-	}
-	return JSON.parse(init.body) as Record<string, unknown>;
-}
-
-function getForm(init?: RequestInit): FormData {
-	if (!(init?.body instanceof FormData)) {
-		throw new Error("Expected FormData request body");
-	}
-	return init.body;
-}
-
-function makeFetch(responder: (url: string, init?: RequestInit) => Response | Promise<Response>): FetchMock {
-	return vi.fn(
-		async (input: string | URL | Request, init?: RequestInit): Promise<Response> => responder(getUrl(input), init),
-	);
-}
+const transientFailure = (): Response => {
+	throw new Error("transient network failure");
+};
 
 function makeClient(fetchMock: FetchMock, options: Record<string, unknown> = {}): PrimeSandboxClient {
 	return new PrimeSandboxClient({
@@ -64,6 +37,21 @@ function makeClient(fetchMock: FetchMock, options: Record<string, unknown> = {})
 		fetchFn: fetchMock as unknown as typeof fetch,
 		...options,
 	});
+}
+
+/** A client over a recorded fetch that answers from the responder list (the last repeats). */
+function clientOver(responders: FetchResponder[], options: Record<string, unknown> = {}) {
+	const { mock, calls } = fetchRecorder(responders);
+	return { client: makeClient(mock, options), mock, calls };
+}
+
+function constructorFault(build: () => unknown): PrimeSandboxError | undefined {
+	try {
+		build();
+	} catch (candidate) {
+		return candidate as PrimeSandboxError;
+	}
+	return undefined;
 }
 
 /** The authoritative GET/create wire shape: camelCase with memoryGB/diskSizeGB. */
@@ -145,35 +133,15 @@ function invalidCreate(overrides: Record<string, unknown>): PrimeSandboxVmCreate
 	return { ...createRequest(), ...overrides } as PrimeSandboxVmCreateRequest;
 }
 
-async function expectError(promise: Promise<unknown>): Promise<PrimeSandboxError> {
-	try {
-		await promise;
-	} catch (caught) {
-		expect(caught).toBeInstanceOf(PrimeSandboxError);
-		return caught as PrimeSandboxError;
-	}
-	throw new Error("Expected the call to fail");
-}
-
 describe("PrimeSandboxClient construction", () => {
-	it("requires a non-empty api key", () => {
-		let caught: PrimeSandboxError | undefined;
-		try {
-			new PrimeSandboxClient({ apiKey: "", baseUrl: BASE_URL });
-		} catch (candidate) {
-			caught = candidate as PrimeSandboxError;
-		}
-		expect(caught).toBeInstanceOf(PrimeSandboxError);
-		expect(caught?.code).toBe("invalid_request");
-	});
-
-	it("rejects a zero request timeout", () => {
-		let caught: PrimeSandboxError | undefined;
-		try {
-			new PrimeSandboxClient({ apiKey: API_KEY, baseUrl: BASE_URL, requestTimeoutMs: 0 });
-		} catch (candidate) {
-			caught = candidate as PrimeSandboxError;
-		}
+	it.each([
+		["requires a non-empty api key", () => new PrimeSandboxClient({ apiKey: "", baseUrl: BASE_URL })],
+		[
+			"rejects a zero request timeout",
+			() => new PrimeSandboxClient({ apiKey: API_KEY, baseUrl: BASE_URL, requestTimeoutMs: 0 }),
+		],
+	])("%s", (_label, build) => {
+		const caught = constructorFault(build);
 		expect(caught).toBeInstanceOf(PrimeSandboxError);
 		expect(caught?.code).toBe("invalid_request");
 	});
@@ -187,12 +155,7 @@ describe("PrimeSandboxClient construction", () => {
 			"https://prime-api.example.com/base#frag",
 			"not a url",
 		]) {
-			let caught: PrimeSandboxError | undefined;
-			try {
-				new PrimeSandboxClient({ apiKey: API_KEY, baseUrl });
-			} catch (candidate) {
-				caught = candidate as PrimeSandboxError;
-			}
+			const caught = constructorFault(() => new PrimeSandboxClient({ apiKey: API_KEY, baseUrl }));
 			expect(caught, `expected ${baseUrl} to be rejected`).toBeInstanceOf(PrimeSandboxError);
 			expect(caught?.code).toBe("invalid_request");
 		}
@@ -201,22 +164,14 @@ describe("PrimeSandboxClient construction", () => {
 	it("allows plain http only for loopback hosts when allowInsecureLocalhost is set", () => {
 		const loopbackBases = ["http://localhost:9000", "http://127.0.0.1:9000", "http://[::1]:9000"];
 		for (const baseUrl of loopbackBases) {
-			let withoutFlag: PrimeSandboxError | undefined;
-			try {
-				new PrimeSandboxClient({ apiKey: API_KEY, baseUrl });
-			} catch (candidate) {
-				withoutFlag = candidate as PrimeSandboxError;
-			}
+			const withoutFlag = constructorFault(() => new PrimeSandboxClient({ apiKey: API_KEY, baseUrl }));
 			expect(withoutFlag, `expected ${baseUrl} to require the flag`).toBeInstanceOf(PrimeSandboxError);
 			expect(withoutFlag?.code).toBe("invalid_request");
 			expect(() => new PrimeSandboxClient({ apiKey: API_KEY, baseUrl, allowInsecureLocalhost: true })).not.toThrow();
 		}
-		let remoteWithFlag: PrimeSandboxError | undefined;
-		try {
-			new PrimeSandboxClient({ apiKey: API_KEY, baseUrl: "http://example.com", allowInsecureLocalhost: true });
-		} catch (candidate) {
-			remoteWithFlag = candidate as PrimeSandboxError;
-		}
+		const remoteWithFlag = constructorFault(
+			() => new PrimeSandboxClient({ apiKey: API_KEY, baseUrl: "http://example.com", allowInsecureLocalhost: true }),
+		);
 		expect(remoteWithFlag).toBeInstanceOf(PrimeSandboxError);
 		expect(remoteWithFlag?.code).toBe("invalid_request");
 	});
@@ -228,24 +183,21 @@ describe("PrimeSandboxClient construction", () => {
 			"https://prime-api.example.com/api/v1",
 			"https://prime-api.example.com/api/v1/",
 		]) {
-			const fetchMock = makeFetch(() => jsonResponse(sandboxBody()));
+			const { mock, calls } = fetchRecorder([() => jsonResponse(sandboxBody())]);
 			const client = new PrimeSandboxClient({
 				apiKey: API_KEY,
 				baseUrl,
-				fetchFn: fetchMock as unknown as typeof fetch,
+				fetchFn: mock as unknown as typeof fetch,
 			});
 			await client.createVmSandbox(createRequest());
-			expect(getUrl(fetchMock.mock.calls[0]![0]), `base ${baseUrl}`).toBe(
-				"https://prime-api.example.com/api/v1/sandbox",
-			);
+			expect(calls[0].url, `base ${baseUrl}`).toBe("https://prime-api.example.com/api/v1/sandbox");
 		}
 	});
 });
 
 describe("createVmSandbox", () => {
 	it("posts a snake_case VM create body to /api/v1/sandbox with bearer auth", async () => {
-		const fetchMock = makeFetch(() => jsonResponse(sandboxBody()));
-		const client = makeClient(fetchMock, { teamId: "team-1" });
+		const { client, calls } = clientOver([() => jsonResponse(sandboxBody())], { teamId: "team-1" });
 		const sandbox = await client.createVmSandbox({
 			...createRequest(),
 			startCommand: { executable: "/usr/bin/sleep", args: ["infinity"] },
@@ -258,11 +210,10 @@ describe("createVmSandbox", () => {
 		expect(sandbox.diskSizeGb).toBe(20);
 		expect(sandbox.vm).toBe(true);
 		expect(sandbox.status).toBe("RUNNING");
-		expect(fetchMock).toHaveBeenCalledTimes(1);
-		const [input, init] = fetchMock.mock.calls[0]!;
-		expect(getUrl(input)).toBe(`${BASE_URL}/api/v1/sandbox`);
-		expect(getAuthorization(init)).toBe(`Bearer ${API_KEY}`);
-		const body = getJsonBody(init);
+		expect(calls.length).toBe(1);
+		expect(calls[0].url).toBe(`${BASE_URL}/api/v1/sandbox`);
+		expect(headerOf(calls[0].init).Authorization).toBe(`Bearer ${API_KEY}`);
+		const body = jsonBodyOf(calls[0].init);
 		expect(body).toMatchObject({
 			name: "worker-host",
 			docker_image: "ubuntu:24.04",
@@ -285,59 +236,44 @@ describe("createVmSandbox", () => {
 	});
 
 	it("reuses one idempotency key across transient-failure retries", async () => {
-		let calls = 0;
-		const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit): Promise<Response> => {
-			calls++;
-			if (calls <= 2) throw new Error("transient network failure");
-			return jsonResponse(sandboxBody());
-		});
-		const client = makeClient(fetchMock);
+		const { client, calls } = clientOver([transientFailure, transientFailure, () => jsonResponse(sandboxBody())]);
 		const sandbox = await client.createVmSandbox({ ...createRequest(), idempotencyKey: "key-42" });
 		expect(sandbox.id).toBe(SANDBOX_ID);
-		expect(calls).toBe(PRIME_SANDBOX_CREATE_MAX_ATTEMPTS);
-		const keys = fetchMock.mock.calls.map((call) => getJsonBody(call[1]).idempotency_key);
-		expect(keys).toEqual(["key-42", "key-42", "key-42"]);
+		expect(calls.length).toBe(PRIME_SANDBOX_CREATE_MAX_ATTEMPTS);
+		expect(calls.map((call) => jsonBodyOf(call.init).idempotency_key)).toEqual(["key-42", "key-42", "key-42"]);
 	});
 
 	it("accepts a max-length idempotency key and sends it verbatim", async () => {
-		const fetchMock = makeFetch(() => jsonResponse(sandboxBody()));
-		const client = makeClient(fetchMock);
+		const { client, calls } = clientOver([() => jsonResponse(sandboxBody())]);
 		const key = "k".repeat(128);
 		await client.createVmSandbox({ ...createRequest(), idempotencyKey: key });
-		const body = getJsonBody(fetchMock.mock.calls[0]![1]);
-		expect(body.idempotency_key).toBe(key);
+		expect(jsonBodyOf(calls[0].init).idempotency_key).toBe(key);
 	});
 
 	it("gives up after the retry budget and surfaces the last transient error", async () => {
-		const fetchMock = vi.fn(async (): Promise<Response> => {
-			throw new Error("transient network failure");
-		});
-		const client = makeClient(fetchMock);
+		const { client, calls } = clientOver([transientFailure]);
 		const error = await expectError(client.createVmSandbox(createRequest()));
 		expect(error.code).toBe("network");
-		expect(fetchMock).toHaveBeenCalledTimes(PRIME_SANDBOX_CREATE_MAX_ATTEMPTS);
+		expect(calls.length).toBe(PRIME_SANDBOX_CREATE_MAX_ATTEMPTS);
 	});
 
 	it("does not retry HTTP failures", async () => {
-		const fetchMock = makeFetch(() => jsonResponse({ detail: "quota exceeded" }, 402));
-		const client = makeClient(fetchMock);
+		const { client, calls } = clientOver([() => jsonResponse({ detail: "quota exceeded" }, 402)]);
 		const error = await expectError(client.createVmSandbox(createRequest()));
 		expect(error.code).toBe("http");
 		expect(error.status).toBe(402);
-		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(calls.length).toBe(1);
 	});
 
 	it("times out without hanging when the fetch ignores the abort signal", async () => {
-		const fetchMock = vi.fn(async (): Promise<Response> => new Promise<Response>(() => {}));
-		const client = makeClient(fetchMock, { requestTimeoutMs: 25 });
+		const { client, calls } = clientOver([() => new Promise<Response>(() => {})], { requestTimeoutMs: 25 });
 		const error = await expectError(client.createVmSandbox(createRequest()));
 		expect(error.code).toBe("timeout");
-		expect(fetchMock.mock.calls.length).toBe(PRIME_SANDBOX_CREATE_MAX_ATTEMPTS);
+		expect(calls.length).toBe(PRIME_SANDBOX_CREATE_MAX_ATTEMPTS);
 	});
 
 	it("rejects invalid create requests before fetching", async () => {
-		const fetchMock = makeFetch(() => jsonResponse(sandboxBody()));
-		const client = makeClient(fetchMock);
+		const { client, calls } = clientOver([() => jsonResponse(sandboxBody())]);
 		const cases: PrimeSandboxVmCreateRequest[] = [
 			invalidCreate({ name: "" }),
 			invalidCreate({ name: "x".repeat(101) }),
@@ -357,15 +293,9 @@ describe("createVmSandbox", () => {
 			invalidCreate({ idleTimeoutMinutes: 0 }),
 			invalidCreate({ idleTimeoutMinutes: 121 }),
 			invalidCreate({ startCommand: { executable: "", args: [] } }),
-			invalidCreate({
-				startCommand: { executable: "/bin/sh", args: ["-c", 42] as unknown as string[] },
-			}),
-			invalidCreate({
-				startCommand: { executable: "/bin/sh\0", args: [] },
-			}),
-			invalidCreate({
-				startCommand: { executable: "/bin/sh", args: ["a\0b"] },
-			}),
+			invalidCreate({ startCommand: { executable: "/bin/sh", args: ["-c", 42] as unknown as string[] } }),
+			invalidCreate({ startCommand: { executable: "/bin/sh\0", args: [] } }),
+			invalidCreate({ startCommand: { executable: "/bin/sh", args: ["a\0b"] } }),
 			invalidCreate({ region: "us" }),
 			invalidCreate({ labels: [""] }),
 			invalidCreate({ labels: ["a".repeat(257)] }),
@@ -383,9 +313,7 @@ describe("createVmSandbox", () => {
 			invalidCreate({ networkAllowlist: ["::1"] }),
 			invalidCreate({ networkAllowlist: ["10.0.0.0/33"] }),
 			invalidCreate({ networkAllowlist: ["a..com"] }),
-			invalidCreate({
-				networkAllowlist: Array.from({ length: 257 }, () => "a.com"),
-			}),
+			invalidCreate({ networkAllowlist: Array.from({ length: 257 }, () => "a.com") }),
 			invalidCreate({ idempotencyKey: "" }),
 			invalidCreate({ idempotencyKey: "-leading-dash" }),
 			invalidCreate({ idempotencyKey: "a b" }),
@@ -397,31 +325,28 @@ describe("createVmSandbox", () => {
 			const error = await expectError(client.createVmSandbox(request));
 			expect(error.code, `expected invalid_request for ${JSON.stringify(request)}`).toBe("invalid_request");
 		}
-		expect(fetchMock).not.toHaveBeenCalled();
+		expect(calls.length).toBe(0);
 	});
 
 	it("accepts the documented egress entry grammar and sends it as snake_case", async () => {
-		const fetchMock = makeFetch(() => jsonResponse(sandboxBody()));
-		const client = makeClient(fetchMock);
+		const { client, calls } = clientOver([() => jsonResponse(sandboxBody())]);
 		await client.createVmSandbox({
 			...createRequest(),
 			networkAllowlist: ["api.pinference.ai", "*.example.com", "1.2.3.4", "10.0.0.0/8"],
 		});
-		const body = getJsonBody(fetchMock.mock.calls[0]![1]);
+		const body = jsonBodyOf(calls[0].init);
 		expect(body.network_allowlist).toEqual(["api.pinference.ai", "*.example.com", "1.2.3.4", "10.0.0.0/8"]);
 		expect("network_denylist" in body).toBe(false);
 	});
 
 	it("allows an empty allowlist (deny all) and an empty denylist (allow all)", async () => {
-		const allowNone = makeFetch(() => jsonResponse(sandboxBody()));
-		await makeClient(allowNone).createVmSandbox({ ...createRequest(), networkAllowlist: [] });
-		const allowBody = getJsonBody(allowNone.mock.calls[0]![1]);
-		expect(allowBody.network_allowlist).toEqual([]);
+		const allowNone = clientOver([() => jsonResponse(sandboxBody())]);
+		await allowNone.client.createVmSandbox({ ...createRequest(), networkAllowlist: [] });
+		expect(jsonBodyOf(allowNone.calls[0].init).network_allowlist).toEqual([]);
 
-		const denyNone = makeFetch(() => jsonResponse(sandboxBody()));
-		await makeClient(denyNone).createVmSandbox({ ...createRequest(), networkDenylist: [] });
-		const denyBody = getJsonBody(denyNone.mock.calls[0]![1]);
-		expect(denyBody.network_denylist).toEqual([]);
+		const denyNone = clientOver([() => jsonResponse(sandboxBody())]);
+		await denyNone.client.createVmSandbox({ ...createRequest(), networkDenylist: [] });
+		expect(jsonBodyOf(denyNone.calls[0].init).network_denylist).toEqual([]);
 	});
 
 	it("rejects malformed 2xx create responses, including wrong memory/disk aliases", async () => {
@@ -444,8 +369,7 @@ describe("createVmSandbox", () => {
 			{ ...sandboxBody(), network_denylist: [42] },
 		];
 		for (const body of cases) {
-			const fetchMock = makeFetch(() => jsonResponse(body));
-			const client = makeClient(fetchMock);
+			const { client } = clientOver([() => jsonResponse(body)]);
 			const error = await expectError(client.createVmSandbox(createRequest()));
 			expect(error.code, `expected invalid_response for ${JSON.stringify(body)}`).toBe("invalid_response");
 		}
@@ -454,15 +378,13 @@ describe("createVmSandbox", () => {
 
 describe("getSandbox", () => {
 	it("fetches a sandbox by id from /api/v1/sandbox/{id} and parses egress fields", async () => {
-		const fetchMock = makeFetch(() =>
-			jsonResponse(sandboxBody({ status: "PAUSED", network_allowlist: ["api.pinference.ai"] })),
-		);
-		const client = makeClient(fetchMock);
+		const { client, calls } = clientOver([
+			() => jsonResponse(sandboxBody({ status: "PAUSED", network_allowlist: ["api.pinference.ai"] })),
+		]);
 		const sandbox = await client.getSandbox(SANDBOX_ID);
-		expect(fetchMock).toHaveBeenCalledTimes(1);
-		const [input, init] = fetchMock.mock.calls[0]!;
-		expect(getUrl(input)).toBe(`${BASE_URL}/api/v1/sandbox/${encodeURIComponent(SANDBOX_ID)}`);
-		expect(getAuthorization(init)).toBe(`Bearer ${API_KEY}`);
+		expect(calls.length).toBe(1);
+		expect(calls[0].url).toBe(`${BASE_URL}/api/v1/sandbox/${encodeURIComponent(SANDBOX_ID)}`);
+		expect(headerOf(calls[0].init).Authorization).toBe(`Bearer ${API_KEY}`);
 		expect(sandbox.status).toBe("PAUSED");
 		// Egress lists are snake_case on the wire and camelCase on the model.
 		expect(sandbox.networkAllowlist).toEqual(["api.pinference.ai"]);
@@ -471,36 +393,31 @@ describe("getSandbox", () => {
 	});
 
 	it("rejects unsafe sandbox ids before fetching", async () => {
-		const fetchMock = makeFetch(() => jsonResponse(sandboxBody()));
-		const client = makeClient(fetchMock);
+		const { client, calls } = clientOver([() => jsonResponse(sandboxBody())]);
 		for (const id of ["../sandbox", "a b", "", "a/b"]) {
 			const error = await expectError(client.getSandbox(id));
 			expect(error.code).toBe("invalid_request");
 		}
-		expect(fetchMock).not.toHaveBeenCalled();
+		expect(calls.length).toBe(0);
 	});
 });
 
 describe("deleteSandbox", () => {
 	it("deletes a sandbox at /api/v1/sandbox/{id}", async () => {
-		const fetchMock = makeFetch(() => jsonResponse({ deleted: true }));
-		const client = makeClient(fetchMock);
+		const { client, calls } = clientOver([() => jsonResponse({ deleted: true })]);
 		await client.deleteSandbox(SANDBOX_ID);
-		const [input, init] = fetchMock.mock.calls[0]!;
-		expect(getUrl(input)).toBe(`${BASE_URL}/api/v1/sandbox/${encodeURIComponent(SANDBOX_ID)}`);
-		expect(init?.method).toBe("DELETE");
-		expect(getAuthorization(init)).toBe(`Bearer ${API_KEY}`);
+		expect(calls[0].url).toBe(`${BASE_URL}/api/v1/sandbox/${encodeURIComponent(SANDBOX_ID)}`);
+		expect(calls[0].init?.method).toBe("DELETE");
+		expect(headerOf(calls[0].init).Authorization).toBe(`Bearer ${API_KEY}`);
 	});
 
 	it("treats an already-missing sandbox as an idempotent delete", async () => {
-		const fetchMock = makeFetch(() => jsonResponse({ error: "missing" }, 404));
-		const client = makeClient(fetchMock);
+		const { client } = clientOver([() => jsonResponse({ error: "missing" }, 404)]);
 		await expect(client.deleteSandbox(SANDBOX_ID)).resolves.toBeUndefined();
 	});
 
 	it("rejects non-object delete responses", async () => {
-		const fetchMock = makeFetch(() => jsonResponse("deleted"));
-		const client = makeClient(fetchMock);
+		const { client } = clientOver([() => jsonResponse("deleted")]);
 		const error = await expectError(client.deleteSandbox(SANDBOX_ID));
 		expect(error.code).toBe("invalid_response");
 	});
@@ -508,13 +425,11 @@ describe("deleteSandbox", () => {
 
 describe("getSandboxAuth", () => {
 	it("posts to /api/v1/sandbox/{id}/auth and parses the gateway credentials", async () => {
-		const fetchMock = makeFetch(() => jsonResponse(authBody()));
-		const client = makeClient(fetchMock);
+		const { client, calls } = clientOver([() => jsonResponse(authBody())]);
 		const result = await client.getSandboxAuth(SANDBOX_ID);
-		const [input, init] = fetchMock.mock.calls[0]!;
-		expect(getUrl(input)).toBe(`${BASE_URL}/api/v1/sandbox/${encodeURIComponent(SANDBOX_ID)}/auth`);
-		expect(init?.method).toBe("POST");
-		expect(getAuthorization(init)).toBe(`Bearer ${API_KEY}`);
+		expect(calls[0].url).toBe(`${BASE_URL}/api/v1/sandbox/${encodeURIComponent(SANDBOX_ID)}/auth`);
+		expect(calls[0].init?.method).toBe("POST");
+		expect(headerOf(calls[0].init).Authorization).toBe(`Bearer ${API_KEY}`);
 		expect(result).toEqual({
 			sandboxId: SANDBOX_ID,
 			gatewayUrl: GATEWAY_URL,
@@ -526,21 +441,21 @@ describe("getSandboxAuth", () => {
 	});
 
 	it("rejects non-https gateway URLs except loopback with the explicit flag", async () => {
-		const fetchMock = makeFetch(() => jsonResponse(authBody({ gateway_url: "http://sandbox-gw.example.com" })));
-		const error = await expectError(makeClient(fetchMock).getSandboxAuth(SANDBOX_ID));
+		const remote = fetchRecorder([() => jsonResponse(authBody({ gateway_url: "http://sandbox-gw.example.com" }))]);
+		const error = await expectError(makeClient(remote.mock).getSandboxAuth(SANDBOX_ID));
 		expect(error.code).toBe("invalid_response");
 
-		const loopback = makeFetch(() => jsonResponse(authBody({ gateway_url: "http://[::1]:9393" })));
-		const allowed = await makeClient(loopback, { allowInsecureLocalhost: true }).getSandboxAuth(SANDBOX_ID);
+		const loopback = fetchRecorder([() => jsonResponse(authBody({ gateway_url: "http://[::1]:9393" }))]);
+		const allowed = await makeClient(loopback.mock, { allowInsecureLocalhost: true }).getSandboxAuth(SANDBOX_ID);
 		expect(allowed.gatewayUrl).toBe("http://[::1]:9393");
-		const denied = await expectError(makeClient(loopback).getSandboxAuth(SANDBOX_ID));
+		const denied = await expectError(makeClient(loopback.mock).getSandboxAuth(SANDBOX_ID));
 		expect(denied.code).toBe("invalid_response");
 	});
 
 	it("rejects gateway URLs with query parts and unsafe namespace segments", async () => {
 		for (const overrides of [{ gateway_url: "https://gw.example.com?x=1" }, { user_ns: "a/b" }, { job_id: "b c" }]) {
-			const fetchMock = makeFetch(() => jsonResponse(authBody(overrides)));
-			const error = await expectError(makeClient(fetchMock).getSandboxAuth(SANDBOX_ID));
+			const { client } = clientOver([() => jsonResponse(authBody(overrides))]);
+			const error = await expectError(client.getSandboxAuth(SANDBOX_ID));
 			expect(error.code).toBe("invalid_response");
 		}
 	});
@@ -549,22 +464,20 @@ describe("getSandboxAuth", () => {
 		const body = authBody();
 		const { token, ...withoutToken } = body;
 		void token;
-		const fetchMock = makeFetch(() => jsonResponse(withoutToken));
-		const error = await expectError(makeClient(fetchMock).getSandboxAuth(SANDBOX_ID));
+		const { client } = clientOver([() => jsonResponse(withoutToken)]);
+		const error = await expectError(client.getSandboxAuth(SANDBOX_ID));
 		expect(error.code).toBe("invalid_response");
 	});
 });
 
 describe("execContainerCommand", () => {
 	it("fetches auth then posts a snake_case exec body to the gateway", async () => {
-		const calls: string[] = [];
-		const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit): Promise<Response> => {
-			const url = getUrl(input);
-			calls.push(url);
-			if (url.endsWith("/auth")) return jsonResponse(authBody());
-			return jsonResponse({ stdout: "ok", stderr: "", exit_code: 0 });
-		});
-		const client = makeClient(fetchMock);
+		const { client, calls } = clientOver([
+			(record) =>
+				record.url.endsWith("/auth")
+					? jsonResponse(authBody())
+					: jsonResponse({ stdout: "ok", stderr: "", exit_code: 0 }),
+		]);
 		const result = await client.execContainerCommand(SANDBOX_ID, {
 			command: "uname -a",
 			workingDir: "/workspace",
@@ -572,13 +485,13 @@ describe("execContainerCommand", () => {
 			timeoutSeconds: 60,
 		});
 		expect(result).toEqual({ stdout: "ok", stderr: "", exitCode: 0 });
-		expect(calls).toEqual([
+		expect(calls.map((call) => call.url)).toEqual([
 			`${BASE_URL}/api/v1/sandbox/${encodeURIComponent(SANDBOX_ID)}/auth`,
 			`${GATEWAY_URL}/ns_user1/job_abc/exec`,
 		]);
-		const execInit = fetchMock.mock.calls[1]![1];
-		expect(getAuthorization(execInit)).toBe("Bearer gateway-token-xyz");
-		expect(getJsonBody(execInit)).toMatchObject({
+		const execInit = calls[1].init;
+		expect(headerOf(execInit).Authorization).toBe("Bearer gateway-token-xyz");
+		expect(jsonBodyOf(execInit)).toMatchObject({
 			command: "uname -a",
 			sandbox_id: SANDBOX_ID,
 			working_dir: "/workspace",
@@ -588,18 +501,16 @@ describe("execContainerCommand", () => {
 	});
 
 	it("defaults the exec timeout to 300 seconds and supports run-as user", async () => {
-		const fetchMock = makeFetch(() => jsonResponse({ stdout: "", stderr: "warn", exit_code: 2 }));
-		const client = makeClient(fetchMock);
+		const { client, calls } = clientOver([() => jsonResponse({ stdout: "", stderr: "warn", exit_code: 2 })]);
 		const result = await client.execContainerCommand(SANDBOX_ID, { command: "ls", user: "nobody" }, { auth: auth() });
 		expect(result.exitCode).toBe(2);
-		const body = getJsonBody(fetchMock.mock.calls[0]![1]);
+		const body = jsonBodyOf(calls[0].init);
 		expect(body.timeout).toBe(300);
 		expect(body.user).toBe("nobody");
 	});
 
 	it("rejects auth that belongs to another sandbox and invalid commands", async () => {
-		const fetchMock = makeFetch(() => jsonResponse({ stdout: "", stderr: "", exit_code: 0 }));
-		const client = makeClient(fetchMock);
+		const { client, calls } = clientOver([() => jsonResponse({ stdout: "", stderr: "", exit_code: 0 })]);
 		const otherSandboxAuth = { ...auth(), sandboxId: "sb-other" };
 		const mismatch = await expectError(
 			client.execContainerCommand(SANDBOX_ID, { command: "ls" }, { auth: otherSandboxAuth }),
@@ -616,7 +527,7 @@ describe("execContainerCommand", () => {
 			const error = await expectError(client.execContainerCommand(SANDBOX_ID, request, { auth: auth() }));
 			expect(error.code, `expected invalid_request for ${JSON.stringify(request)}`).toBe("invalid_request");
 		}
-		expect(fetchMock).not.toHaveBeenCalled();
+		expect(calls.length).toBe(0);
 	});
 
 	it("maps gateway 408, 409, and 502 sandbox_not_found to typed error codes", async () => {
@@ -628,10 +539,8 @@ describe("execContainerCommand", () => {
 			{ status: 500, body: { detail: "boom" }, code: "http" },
 		];
 		for (const { status, body, code } of cases) {
-			const fetchMock = makeFetch(() => jsonResponse(body, status));
-			const error = await expectError(
-				makeClient(fetchMock).execContainerCommand(SANDBOX_ID, { command: "ls" }, { auth: auth() }),
-			);
+			const { client } = clientOver([() => jsonResponse(body, status)]);
+			const error = await expectError(client.execContainerCommand(SANDBOX_ID, { command: "ls" }, { auth: auth() }));
 			expect(error.code, `HTTP ${status} should map to ${code}`).toBe(code);
 			expect(error.status).toBe(status);
 		}
@@ -639,10 +548,8 @@ describe("execContainerCommand", () => {
 
 	it("rejects malformed exec responses", async () => {
 		for (const body of [{ stdout: "x" }, { stdout: "x", stderr: "", exit_code: "0" }]) {
-			const fetchMock = makeFetch(() => jsonResponse(body));
-			const error = await expectError(
-				makeClient(fetchMock).execContainerCommand(SANDBOX_ID, { command: "ls" }, { auth: auth() }),
-			);
+			const { client } = clientOver([() => jsonResponse(body)]);
+			const error = await expectError(client.execContainerCommand(SANDBOX_ID, { command: "ls" }, { auth: auth() }));
 			expect(error.code).toBe("invalid_response");
 		}
 	});
@@ -650,10 +557,9 @@ describe("execContainerCommand", () => {
 
 describe("uploadFile", () => {
 	it("uploads multipart bytes with path and sandbox_id params", async () => {
-		const fetchMock = makeFetch(() =>
-			jsonResponse({ success: true, path: "/tmp/x.tar", size: 4, timestamp: "2026-09-16T00:00:00Z" }),
-		);
-		const client = makeClient(fetchMock);
+		const { client, calls } = clientOver([
+			() => jsonResponse({ success: true, path: "/tmp/x.tar", size: 4, timestamp: "2026-09-16T00:00:00Z" }),
+		]);
 		const content = new Uint8Array([1, 2, 3, 4]);
 		const result = await client.uploadFile(
 			SANDBOX_ID,
@@ -661,13 +567,12 @@ describe("uploadFile", () => {
 			{ auth: auth() },
 		);
 		expect(result).toEqual({ success: true, path: "/tmp/x.tar", size: 4, timestamp: "2026-09-16T00:00:00Z" });
-		const [input, init] = fetchMock.mock.calls[0]!;
-		const url = new URL(getUrl(input));
+		const url = new URL(calls[0].url);
 		expect(`${url.origin}${url.pathname}`).toBe(`${GATEWAY_URL}/ns_user1/job_abc/upload`);
 		expect(url.searchParams.get("path")).toBe("/tmp/x.tar");
 		expect(url.searchParams.get("sandbox_id")).toBe(SANDBOX_ID);
-		expect(getAuthorization(init)).toBe("Bearer gateway-token-xyz");
-		const form = getForm(init);
+		expect(headerOf(calls[0].init).Authorization).toBe("Bearer gateway-token-xyz");
+		const form = formOf(calls[0].init);
 		const file = form.get("file");
 		expect(file).toBeInstanceOf(File);
 		expect((file as File).name).toBe("x.tar");
@@ -675,23 +580,21 @@ describe("uploadFile", () => {
 	});
 
 	it("rejects oversized content before fetching", async () => {
-		const fetchMock = makeFetch(() =>
-			jsonResponse({ success: true, path: "/x", size: 1, timestamp: "2026-09-16T00:00:00Z" }),
-		);
-		const client = makeClient(fetchMock);
+		const { client, calls } = clientOver([
+			() => jsonResponse({ success: true, path: "/x", size: 1, timestamp: "2026-09-16T00:00:00Z" }),
+		]);
 		const huge = new Uint8Array(MAX_TRANSFER_BYTES + 1);
 		const error = await expectError(
 			client.uploadFile(SANDBOX_ID, { path: "/x", filename: "x", content: huge }, { auth: auth() }),
 		);
 		expect(error.code).toBe("too_large");
-		expect(fetchMock).not.toHaveBeenCalled();
+		expect(calls.length).toBe(0);
 	});
 
 	it("rejects invalid filenames, paths, and failure responses", async () => {
-		const fetchMock = makeFetch(() =>
-			jsonResponse({ success: true, path: "/x", size: 1, timestamp: "2026-09-16T00:00:00Z" }),
-		);
-		const client = makeClient(fetchMock);
+		const { client, calls } = clientOver([
+			() => jsonResponse({ success: true, path: "/x", size: 1, timestamp: "2026-09-16T00:00:00Z" }),
+		]);
 		for (const request of [
 			{ path: "", filename: "x", content: new Uint8Array(1) },
 			{ path: "/x", filename: "a/b", content: new Uint8Array(1) },
@@ -704,13 +607,13 @@ describe("uploadFile", () => {
 			);
 			expect(error.code).toBe("invalid_request");
 		}
-		expect(fetchMock).not.toHaveBeenCalled();
+		expect(calls.length).toBe(0);
 
-		const failure = makeFetch(() =>
-			jsonResponse({ success: false, path: "/x", size: 1, timestamp: "2026-09-16T00:00:00Z" }),
-		);
+		const failure = clientOver([
+			() => jsonResponse({ success: false, path: "/x", size: 1, timestamp: "2026-09-16T00:00:00Z" }),
+		]);
 		const reported = await expectError(
-			makeClient(failure).uploadFile(
+			failure.client.uploadFile(
 				SANDBOX_ID,
 				{ path: "/x", filename: "x", content: new Uint8Array(1) },
 				{ auth: auth() },
@@ -718,9 +621,11 @@ describe("uploadFile", () => {
 		);
 		expect(reported.code).toBe("invalid_response");
 
-		const malformed = makeFetch(() => jsonResponse({ success: true, path: "/x", timestamp: "2026-09-16T00:00:00Z" }));
+		const malformed = clientOver([
+			() => jsonResponse({ success: true, path: "/x", timestamp: "2026-09-16T00:00:00Z" }),
+		]);
 		const missingSize = await expectError(
-			makeClient(malformed).uploadFile(
+			malformed.client.uploadFile(
 				SANDBOX_ID,
 				{ path: "/x", filename: "x", content: new Uint8Array(1) },
 				{ auth: auth() },
@@ -733,16 +638,14 @@ describe("uploadFile", () => {
 describe("downloadFile", () => {
 	it("downloads raw bytes from the gateway with path and sandbox_id params", async () => {
 		const bytes = new Uint8Array([9, 8, 7, 6]);
-		const fetchMock = makeFetch(() => new Response(bytes));
-		const client = makeClient(fetchMock);
+		const { client, calls } = clientOver([() => new Response(bytes)]);
 		const result = await client.downloadFile(SANDBOX_ID, "/out/result.tar", { auth: auth() });
 		expect(result).toEqual(bytes);
-		const [input, init] = fetchMock.mock.calls[0]!;
-		const url = new URL(getUrl(input));
+		const url = new URL(calls[0].url);
 		expect(`${url.origin}${url.pathname}`).toBe(`${GATEWAY_URL}/ns_user1/job_abc/download`);
 		expect(url.searchParams.get("path")).toBe("/out/result.tar");
 		expect(url.searchParams.get("sandbox_id")).toBe(SANDBOX_ID);
-		expect(getAuthorization(init)).toBe("Bearer gateway-token-xyz");
+		expect(headerOf(calls[0].init).Authorization).toBe("Bearer gateway-token-xyz");
 	});
 
 	it("falls back to arrayBuffer when the response has no body stream", async () => {
@@ -754,8 +657,8 @@ describe("downloadFile", () => {
 			body: null,
 			arrayBuffer: async () => bytes.slice().buffer,
 		} as unknown as Response;
-		const fetchMock = makeFetch(() => bodyless);
-		const result = await makeClient(fetchMock).downloadFile(SANDBOX_ID, "/x", { auth: auth() });
+		const { client } = clientOver([() => bodyless]);
+		const result = await client.downloadFile(SANDBOX_ID, "/x", { auth: auth() });
 		expect(result).toEqual(bytes);
 	});
 
@@ -769,14 +672,14 @@ describe("downloadFile", () => {
 				throw new Error("must not be read");
 			},
 		} as unknown as Response;
-		const fetchMock = makeFetch(() => oversized);
-		const error = await expectError(makeClient(fetchMock).downloadFile(SANDBOX_ID, "/x", { auth: auth() }));
+		const { client } = clientOver([() => oversized]);
+		const error = await expectError(client.downloadFile(SANDBOX_ID, "/x", { auth: auth() }));
 		expect(error.code).toBe("too_large");
 	});
 
 	it("maps a 502 sandbox_not_found download to the typed code", async () => {
-		const fetchMock = makeFetch(() => jsonResponse({ error: "sandbox_not_found" }, 502));
-		const error = await expectError(makeClient(fetchMock).downloadFile(SANDBOX_ID, "/x", { auth: auth() }));
+		const { client } = clientOver([() => jsonResponse({ error: "sandbox_not_found" }, 502)]);
+		const error = await expectError(client.downloadFile(SANDBOX_ID, "/x", { auth: auth() }));
 		expect(error.code).toBe("sandbox_not_found");
 		expect(error.status).toBe(502);
 	});
@@ -785,11 +688,10 @@ describe("downloadFile", () => {
 describe("waitForRunning", () => {
 	it("polls until RUNNING and injects the sleep between polls", async () => {
 		const statuses = ["PENDING", "PROVISIONING", "RUNNING"];
-		const fetchMock = vi.fn(
-			async (): Promise<Response> => jsonResponse(sandboxBody({ status: statuses.shift() ?? "RUNNING" })),
-		);
 		const sleeps: number[] = [];
-		const client = makeClient(fetchMock);
+		const { client, calls } = clientOver([
+			() => jsonResponse(sandboxBody({ status: statuses.shift() ?? "RUNNING" })),
+		]);
 		const sandbox = await client.waitForRunning(SANDBOX_ID, {
 			timeoutMs: 60_000,
 			pollIntervalMs: 1_000,
@@ -798,16 +700,14 @@ describe("waitForRunning", () => {
 			},
 		});
 		expect(sandbox.status).toBe("RUNNING");
-		expect(fetchMock).toHaveBeenCalledTimes(3);
+		expect(calls.length).toBe(3);
 		expect(sleeps).toEqual([1_000, 1_000]);
 	});
 
 	it("treats PAUSED as non-terminal and keeps polling", async () => {
 		const statuses = ["PAUSED", "RUNNING"];
-		const fetchMock = vi.fn(
-			async (): Promise<Response> => jsonResponse(sandboxBody({ status: statuses.shift() ?? "RUNNING" })),
-		);
-		const sandbox = await makeClient(fetchMock).waitForRunning(SANDBOX_ID, {
+		const { client } = clientOver([() => jsonResponse(sandboxBody({ status: statuses.shift() ?? "RUNNING" }))]);
+		const sandbox = await client.waitForRunning(SANDBOX_ID, {
 			timeoutMs: 60_000,
 			pollIntervalMs: 1,
 			sleepFn: async () => {},
@@ -816,11 +716,11 @@ describe("waitForRunning", () => {
 	});
 
 	it("fails fast on terminal statuses with redacted details", async () => {
-		const fetchMock = makeFetch(() =>
-			jsonResponse(sandboxBody({ status: "ERROR", errorType: "OOM", errorMessage: `died near ${API_KEY}` })),
-		);
+		const { client } = clientOver([
+			() => jsonResponse(sandboxBody({ status: "ERROR", errorType: "OOM", errorMessage: `died near ${API_KEY}` })),
+		]);
 		const error = await expectError(
-			makeClient(fetchMock).waitForRunning(SANDBOX_ID, {
+			client.waitForRunning(SANDBOX_ID, {
 				timeoutMs: 60_000,
 				pollIntervalMs: 1,
 				sleepFn: async () => {},
@@ -832,9 +732,9 @@ describe("waitForRunning", () => {
 	});
 
 	it("reports a timeout when the budget is exhausted first", async () => {
-		const fetchMock = makeFetch(() => jsonResponse(sandboxBody({ status: "PENDING" })));
+		const { client } = clientOver([() => jsonResponse(sandboxBody({ status: "PENDING" }))]);
 		const error = await expectError(
-			makeClient(fetchMock).waitForRunning(SANDBOX_ID, {
+			client.waitForRunning(SANDBOX_ID, {
 				timeoutMs: 40,
 				pollIntervalMs: 1,
 				sleepFn: async () => {},
@@ -845,43 +745,40 @@ describe("waitForRunning", () => {
 	});
 
 	it("rejects invalid wait options", async () => {
-		const fetchMock = makeFetch(() => jsonResponse(sandboxBody()));
-		const client = makeClient(fetchMock);
+		const { client, calls } = clientOver([() => jsonResponse(sandboxBody())]);
 		const zeroBudget = await expectError(client.waitForRunning(SANDBOX_ID, { timeoutMs: 0, pollIntervalMs: 1 }));
 		expect(zeroBudget.code).toBe("invalid_request");
 		const badInterval = await expectError(client.waitForRunning(SANDBOX_ID, { timeoutMs: 100, pollIntervalMs: 0 }));
 		expect(badInterval.code).toBe("invalid_request");
-		expect(fetchMock).not.toHaveBeenCalled();
+		expect(calls.length).toBe(0);
 	});
 });
 
 describe("secret redaction and bounded reads", () => {
 	it("redacts the api key from HTTP error details", async () => {
-		const fetchMock = makeFetch(() => jsonResponse({ detail: `upstream rejected ${API_KEY} for this key` }, 500));
-		const error = await expectError(makeClient(fetchMock).getSandbox(SANDBOX_ID));
+		const { client } = clientOver([() => jsonResponse({ detail: `upstream rejected ${API_KEY} for this key` }, 500)]);
+		const error = await expectError(client.getSandbox(SANDBOX_ID));
 		expect(error.code).toBe("http");
 		expect(error.details).not.toContain(API_KEY);
 		expect(error.details).toContain("[redacted]");
 	});
 
 	it("redacts the gateway token from upload error details", async () => {
-		const fetchMock = makeFetch(() => jsonResponse({ detail: "token gateway-token-xyz leaked" }, 500));
+		const { client } = clientOver([() => jsonResponse({ detail: "token gateway-token-xyz leaked" }, 500)]);
 		const error = await expectError(
-			makeClient(fetchMock).uploadFile(
-				SANDBOX_ID,
-				{ path: "/x", filename: "x", content: new Uint8Array(1) },
-				{ auth: auth() },
-			),
+			client.uploadFile(SANDBOX_ID, { path: "/x", filename: "x", content: new Uint8Array(1) }, { auth: auth() }),
 		);
 		expect(error.details).not.toContain("gateway-token-xyz");
 		expect(error.details).toContain("[redacted]");
 	});
 
 	it("redacts secrets from network failure messages", async () => {
-		const fetchMock = vi.fn(async (): Promise<Response> => {
-			throw new Error(`connection reset while using ${API_KEY}`);
-		});
-		const error = await expectError(makeClient(fetchMock).getSandbox(SANDBOX_ID));
+		const { client } = clientOver([
+			(): Response => {
+				throw new Error(`connection reset while using ${API_KEY}`);
+			},
+		]);
+		const error = await expectError(client.getSandbox(SANDBOX_ID));
 		expect(error.code).toBe("network");
 		expect(error.message).not.toContain(API_KEY);
 		expect(error.message).toContain("[redacted]");
@@ -889,16 +786,16 @@ describe("secret redaction and bounded reads", () => {
 
 	it("bounds error-body previews regardless of body size", async () => {
 		const huge = `z`.repeat(512 * 1024);
-		const fetchMock = makeFetch(() => jsonResponse({ detail: huge }, 500));
-		const error = await expectError(makeClient(fetchMock).getSandbox(SANDBOX_ID));
+		const { client } = clientOver([() => jsonResponse({ detail: huge }, 500)]);
+		const error = await expectError(client.getSandbox(SANDBOX_ID));
 		expect(error.details).toBeDefined();
 		expect((error.details ?? "").length).toBeLessThanOrEqual(520);
 	});
 
 	it("rejects JSON bodies over the bounded read cap without parsing them fully", async () => {
 		const oversized = `{"detail":"${"x".repeat(33 * 1024 * 1024)}"}`;
-		const fetchMock = makeFetch(() => new Response(oversized, { status: 200 }));
-		const error = await expectError(makeClient(fetchMock).getSandbox(SANDBOX_ID));
+		const { client } = clientOver([() => new Response(oversized, { status: 200 })]);
+		const error = await expectError(client.getSandbox(SANDBOX_ID));
 		expect(error.code).toBe("too_large");
 	});
 });

@@ -311,8 +311,10 @@ describe("transferWorkspaceSnapshot", () => {
 				inFlight += 1;
 				peak = Math.max(peak, inFlight);
 				try {
+					// One loop turn of remote latency keeps the bounded uploads
+					// in flight so the concurrency ceiling is observable.
 					await new Promise<void>((resolve) => {
-						setTimeout(resolve, 5);
+						setImmediate(resolve);
 					});
 					return await remote.upload.uploadFile(request);
 				} finally {

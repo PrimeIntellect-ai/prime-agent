@@ -8,8 +8,6 @@ import { ModelRegistry } from "../src/core/model-registry.js";
 import { DefaultResourceLoader } from "../src/core/resource-loader.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
-import type { Skill } from "../src/core/skills.js";
-import { createSyntheticSourceInfo } from "../src/core/source-info.js";
 
 describe("DefaultResourceLoader", () => {
 	let tempDir: string;
@@ -36,74 +34,7 @@ describe("DefaultResourceLoader", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	describe("reload", () => {
-		it("should initialize with empty results before reload", () => {
-			const loader = new DefaultResourceLoader({ cwd, agentDir });
-
-			expect(loader.getExtensions().extensions).toEqual([]);
-			expect(loader.getSkills().skills).toEqual([]);
-			expect(loader.getPrompts().prompts).toEqual([]);
-			expect(loader.getThemes().themes).toEqual([]);
-		});
-
-		it("should discover skills from agentDir", async () => {
-			const skillsDir = join(agentDir, "skills");
-			mkdirSync(skillsDir, { recursive: true });
-			writeFileSync(
-				join(skillsDir, "test-skill.md"),
-				`---
-name: test-skill
-description: A test skill
----
-Skill content here.`,
-			);
-
-			const loader = new DefaultResourceLoader({ cwd, agentDir });
-			await loader.reload();
-
-			const { skills } = loader.getSkills();
-			expect(skills.some((s) => s.name === "test-skill")).toBe(true);
-		});
-
-		it("should ignore extra markdown files in auto-discovered skill dirs", async () => {
-			const skillDir = join(agentDir, "skills", "pi-skills", "browser-tools");
-			mkdirSync(skillDir, { recursive: true });
-			writeFileSync(
-				join(skillDir, "SKILL.md"),
-				`---
-name: browser-tools
-description: Browser tools
----
-Skill content here.`,
-			);
-			writeFileSync(join(skillDir, "EFFICIENCY.md"), "No frontmatter here");
-
-			const loader = new DefaultResourceLoader({ cwd, agentDir });
-			await loader.reload();
-
-			const { skills, diagnostics } = loader.getSkills();
-			expect(skills.some((s) => s.name === "browser-tools")).toBe(true);
-			expect(diagnostics.some((d) => d.path?.endsWith("EFFICIENCY.md"))).toBe(false);
-		});
-
-		it("should discover prompts from agentDir", async () => {
-			const promptsDir = join(agentDir, "prompts");
-			mkdirSync(promptsDir, { recursive: true });
-			writeFileSync(
-				join(promptsDir, "test-prompt.md"),
-				`---
-description: A test prompt
----
-Prompt content.`,
-			);
-
-			const loader = new DefaultResourceLoader({ cwd, agentDir });
-			await loader.reload();
-
-			const { prompts } = loader.getPrompts();
-			expect(prompts.some((p) => p.name === "test-prompt")).toBe(true);
-		});
-
+	describe("resource precedence", () => {
 		it("should prefer project resources over user on name collisions", async () => {
 			const userPromptsDir = join(agentDir, "prompts");
 			const projectPromptsDir = join(cwd, ".prime", "agent", "prompts");
@@ -194,6 +125,31 @@ Project skill`,
 			expect(extensionsResult.extensions[0].path).toBe(join(cwd, ".prime", "agent", "extensions", "shared.ts"));
 		});
 
+		it("should let a project skill override the bundled websearch skill", async () => {
+			const projectSkillDir = join(cwd, ".prime", "agent", "skills", "websearch");
+			mkdirSync(projectSkillDir, { recursive: true });
+			writeFileSync(
+				join(projectSkillDir, "SKILL.md"),
+				`---
+name: websearch
+description: Project-specific web search override.
+---
+Project override.`,
+			);
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			await loader.reload();
+
+			const { skills, diagnostics } = loader.getSkills();
+			const websearch = skills.find((s) => s.name === "websearch");
+			expect(websearch).toBeDefined();
+			expect(websearch?.filePath).toBe(join(projectSkillDir, "SKILL.md"));
+			expect(websearch?.kind).toBe("markdown");
+			expect(diagnostics.some((d) => d.type === "collision" && d.collision?.name === "websearch")).toBe(true);
+		});
+	});
+
+	describe("extension conflict detection", () => {
 		it("should keep both extensions loaded when command names collide", async () => {
 			const userExtDir = join(agentDir, "extensions");
 			const projectExtDir = join(cwd, ".prime", "agent", "extensions");
@@ -260,344 +216,6 @@ Project skill`,
 			]);
 		});
 
-		it("should honor overrides for auto-discovered resources", async () => {
-			const settingsManager = SettingsManager.inMemory();
-			settingsManager.setExtensionPaths(["-extensions/disabled.ts"]);
-			settingsManager.setSkillPaths(["-skills/skip-skill"]);
-			settingsManager.setPromptTemplatePaths(["-prompts/skip.md"]);
-			settingsManager.setThemePaths(["-themes/skip.json"]);
-
-			const extensionsDir = join(agentDir, "extensions");
-			mkdirSync(extensionsDir, { recursive: true });
-			writeFileSync(join(extensionsDir, "disabled.ts"), "export default function() {}");
-
-			const skillDir = join(agentDir, "skills", "skip-skill");
-			mkdirSync(skillDir, { recursive: true });
-			writeFileSync(
-				join(skillDir, "SKILL.md"),
-				`---
-name: skip-skill
-description: Skip me
----
-Content`,
-			);
-
-			const promptsDir = join(agentDir, "prompts");
-			mkdirSync(promptsDir, { recursive: true });
-			writeFileSync(join(promptsDir, "skip.md"), "Skip prompt");
-
-			const themesDir = join(agentDir, "themes");
-			mkdirSync(themesDir, { recursive: true });
-			writeFileSync(join(themesDir, "skip.json"), "{}");
-
-			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
-			await loader.reload();
-
-			const { extensions } = loader.getExtensions();
-			const { skills } = loader.getSkills();
-			const { prompts } = loader.getPrompts();
-			const { themes } = loader.getThemes();
-
-			expect(extensions.some((e) => e.path.endsWith("disabled.ts"))).toBe(false);
-			expect(skills.some((s) => s.name === "skip-skill")).toBe(false);
-			expect(prompts.some((p) => p.name === "skip")).toBe(false);
-			expect(themes.some((t) => t.sourcePath?.endsWith("skip.json"))).toBe(false);
-		});
-
-		it("should discover AGENTS.md context files", async () => {
-			writeFileSync(join(cwd, "AGENTS.md"), "# Project Guidelines\n\nBe helpful.");
-
-			const loader = new DefaultResourceLoader({ cwd, agentDir });
-			await loader.reload();
-
-			const { agentsFiles } = loader.getAgentsFiles();
-			expect(agentsFiles.some((f) => f.path.includes("AGENTS.md"))).toBe(true);
-		});
-
-		it("should skip AGENTS.md and CLAUDE.md discovery when noContextFiles is true", async () => {
-			writeFileSync(join(cwd, "AGENTS.md"), "# Project Guidelines\n\nBe helpful.");
-			writeFileSync(join(cwd, "CLAUDE.md"), "# Claude Guidelines\n\nBe helpful.");
-
-			const loader = new DefaultResourceLoader({ cwd, agentDir, noContextFiles: true });
-			await loader.reload();
-
-			const { agentsFiles } = loader.getAgentsFiles();
-			expect(agentsFiles).toEqual([]);
-		});
-
-		it("should discover SYSTEM.md from cwd/.pi", async () => {
-			const piDir = join(cwd, ".prime", "agent");
-			mkdirSync(piDir, { recursive: true });
-			writeFileSync(join(piDir, "SYSTEM.md"), "You are a helpful assistant.");
-
-			const loader = new DefaultResourceLoader({ cwd, agentDir });
-			await loader.reload();
-
-			expect(loader.getSystemPrompt()).toBe("You are a helpful assistant.");
-		});
-
-		it("should discover APPEND_SYSTEM.md", async () => {
-			const piDir = join(cwd, ".prime", "agent");
-			mkdirSync(piDir, { recursive: true });
-			writeFileSync(join(piDir, "APPEND_SYSTEM.md"), "Additional instructions.");
-
-			const loader = new DefaultResourceLoader({ cwd, agentDir });
-			await loader.reload();
-
-			expect(loader.getAppendSystemPrompt()).toContain("Additional instructions.");
-		});
-	});
-
-	describe("extendResources", () => {
-		it("should load skills and prompts with extension metadata", async () => {
-			const extraSkillDir = join(tempDir, "extra-skills", "extra-skill");
-			mkdirSync(extraSkillDir, { recursive: true });
-			const skillPath = join(extraSkillDir, "SKILL.md");
-			writeFileSync(
-				skillPath,
-				`---
-name: extra-skill
-description: Extra skill
----
-Extra content`,
-			);
-
-			const extraPromptDir = join(tempDir, "extra-prompts");
-			mkdirSync(extraPromptDir, { recursive: true });
-			const promptPath = join(extraPromptDir, "extra.md");
-			writeFileSync(
-				promptPath,
-				`---
-description: Extra prompt
----
-Extra prompt content`,
-			);
-
-			const loader = new DefaultResourceLoader({ cwd, agentDir });
-			await loader.reload();
-
-			loader.extendResources({
-				skillPaths: [
-					{
-						path: extraSkillDir,
-						metadata: {
-							source: "extension:extra",
-							scope: "temporary",
-							origin: "top-level",
-							baseDir: extraSkillDir,
-						},
-					},
-				],
-				promptPaths: [
-					{
-						path: promptPath,
-						metadata: {
-							source: "extension:extra",
-							scope: "temporary",
-							origin: "top-level",
-							baseDir: extraPromptDir,
-						},
-					},
-				],
-			});
-
-			const { skills } = loader.getSkills();
-			const loadedSkill = skills.find((skill) => skill.name === "extra-skill");
-			expect(loadedSkill).toBeDefined();
-			expect(loadedSkill?.sourceInfo?.source).toBe("extension:extra");
-			expect(loadedSkill?.sourceInfo?.path).toBe(skillPath);
-
-			const { prompts } = loader.getPrompts();
-			const loadedPrompt = prompts.find((prompt) => prompt.name === "extra");
-			expect(loadedPrompt).toBeDefined();
-			expect(loadedPrompt?.sourceInfo?.source).toBe("extension:extra");
-			expect(loadedPrompt?.sourceInfo?.path).toBe(promptPath);
-		});
-	});
-
-	describe("noSkills option", () => {
-		it("should skip skill discovery when noSkills is true", async () => {
-			const skillsDir = join(agentDir, "skills");
-			mkdirSync(skillsDir, { recursive: true });
-			writeFileSync(
-				join(skillsDir, "test-skill.md"),
-				`---
-name: test-skill
-description: A test skill
----
-Content`,
-			);
-
-			const loader = new DefaultResourceLoader({ cwd, agentDir, noSkills: true });
-			await loader.reload();
-
-			const { skills } = loader.getSkills();
-			expect(skills).toEqual([]);
-		});
-
-		it("should still load additional skill paths when noSkills is true", async () => {
-			const customSkillDir = join(tempDir, "custom-skills");
-			mkdirSync(customSkillDir, { recursive: true });
-			writeFileSync(
-				join(customSkillDir, "custom.md"),
-				`---
-name: custom
-description: Custom skill
----
-Content`,
-			);
-
-			const loader = new DefaultResourceLoader({
-				cwd,
-				agentDir,
-				noSkills: true,
-				additionalSkillPaths: [customSkillDir],
-			});
-			await loader.reload();
-
-			const { skills } = loader.getSkills();
-			expect(skills.some((s) => s.name === "custom")).toBe(true);
-		});
-	});
-
-	describe("bundled skills", () => {
-		it("should load the bundled websearch skill by default", async () => {
-			const loader = new DefaultResourceLoader({ cwd, agentDir });
-			await loader.reload();
-
-			const { skills } = loader.getSkills();
-			const websearch = skills.find((s) => s.name === "websearch");
-			expect(websearch).toBeDefined();
-			expect(websearch?.description).toContain("/login");
-			expect(websearch?.description).toContain("MCP Connections");
-			expect(websearch?.description).toContain("Serper (web search)");
-			expect(websearch?.kind).toBe("python");
-			if (websearch?.kind === "python") {
-				expect(websearch.python.importName).toBe("websearch");
-				expect(websearch.python.pyprojectPath.endsWith("pyproject.toml")).toBe(true);
-			}
-		});
-
-		it("should not emit a SERPER_API_KEY warning when the key is unset", async () => {
-			const loader = new DefaultResourceLoader({ cwd, agentDir });
-			await loader.reload();
-
-			const { diagnostics } = loader.getSkills();
-			expect(diagnostics.some((d) => d.type === "warning" && d.message.includes("SERPER_API_KEY"))).toBe(false);
-		});
-
-		it("should not load the bundled websearch skill when disabled in settings", async () => {
-			const settingsManager = SettingsManager.inMemory({ bundledSkills: { websearch: false } });
-			const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
-			await loader.reload();
-
-			const { skills, diagnostics } = loader.getSkills();
-			expect(skills.some((s) => s.name === "websearch")).toBe(false);
-			expect(diagnostics.some((d) => d.type === "warning" && d.message.includes("SERPER_API_KEY is not set"))).toBe(
-				false,
-			);
-		});
-
-		it("should not load bundled skills when noSkills is true", async () => {
-			const loader = new DefaultResourceLoader({ cwd, agentDir, noSkills: true });
-			await loader.reload();
-
-			const { skills } = loader.getSkills();
-			expect(skills.some((s) => s.name === "websearch")).toBe(false);
-		});
-
-		it("should let a project skill override the bundled websearch skill", async () => {
-			const projectSkillDir = join(cwd, ".prime", "agent", "skills", "websearch");
-			mkdirSync(projectSkillDir, { recursive: true });
-			writeFileSync(
-				join(projectSkillDir, "SKILL.md"),
-				`---
-name: websearch
-description: Project-specific web search override.
----
-Project override.`,
-			);
-
-			const loader = new DefaultResourceLoader({ cwd, agentDir });
-			await loader.reload();
-
-			const { skills, diagnostics } = loader.getSkills();
-			const websearch = skills.find((s) => s.name === "websearch");
-			expect(websearch).toBeDefined();
-			expect(websearch?.filePath).toBe(join(projectSkillDir, "SKILL.md"));
-			expect(websearch?.kind).toBe("markdown");
-			expect(diagnostics.some((d) => d.type === "collision" && d.collision?.name === "websearch")).toBe(true);
-			expect(diagnostics.some((d) => d.type === "warning" && d.message.includes("SERPER_API_KEY is not set"))).toBe(
-				false,
-			);
-		});
-
-		it("should let an explicit --skill path override the bundled websearch skill", async () => {
-			const customSkillDir = join(tempDir, "custom-websearch", "websearch");
-			mkdirSync(customSkillDir, { recursive: true });
-			writeFileSync(
-				join(customSkillDir, "SKILL.md"),
-				`---
-name: websearch
-description: Explicit web search override.
----
-Explicit override.`,
-			);
-
-			const loader = new DefaultResourceLoader({
-				cwd,
-				agentDir,
-				additionalSkillPaths: [customSkillDir],
-			});
-			await loader.reload();
-
-			const { skills } = loader.getSkills();
-			const websearch = skills.find((s) => s.name === "websearch");
-			expect(websearch).toBeDefined();
-			expect(websearch?.filePath).toBe(join(customSkillDir, "SKILL.md"));
-			expect(websearch?.kind).toBe("markdown");
-		});
-	});
-
-	describe("override functions", () => {
-		it("should apply skillsOverride", async () => {
-			const injectedSkill: Skill = {
-				name: "injected",
-				description: "Injected skill",
-				filePath: "/fake/path",
-				baseDir: "/fake",
-				sourceInfo: createSyntheticSourceInfo("/fake/path", { source: "custom" }),
-				disableModelInvocation: false,
-				kind: "markdown",
-			};
-			const loader = new DefaultResourceLoader({
-				cwd,
-				agentDir,
-				skillsOverride: () => ({
-					skills: [injectedSkill],
-					diagnostics: [],
-				}),
-			});
-			await loader.reload();
-
-			const { skills } = loader.getSkills();
-			expect(skills).toHaveLength(1);
-			expect(skills[0].name).toBe("injected");
-		});
-
-		it("should apply systemPromptOverride", async () => {
-			const loader = new DefaultResourceLoader({
-				cwd,
-				agentDir,
-				systemPromptOverride: () => "Custom system prompt",
-			});
-			await loader.reload();
-
-			expect(loader.getSystemPrompt()).toBe("Custom system prompt");
-		});
-	});
-
-	describe("extension conflict detection", () => {
 		it("should detect tool conflicts between extensions", async () => {
 			const ext1Dir = join(agentDir, "extensions", "ext1");
 			const ext2Dir = join(agentDir, "extensions", "ext2");
@@ -708,6 +326,95 @@ export default function(pi: ExtensionAPI) {
 			expect(runner.getCommand("deploy:1")?.description).toBe("explicit command");
 			expect(runner.getCommand("deploy:2")?.description).toBe("global command");
 			expect(runner.getToolDefinition("duplicate-tool")?.description).toBe("explicit tool");
+		});
+	});
+});
+
+describe("settings reload regressions", () => {
+	let tempDir: string;
+	let agentDir: string;
+
+	beforeEach(() => {
+		tempDir = join(tmpdir(), `rl-settings-reload-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		agentDir = join(tempDir, "agent");
+		mkdirSync(join(agentDir, "prompts"), { recursive: true });
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	function inMemoryLoaderSettings() {
+		return SettingsManager.inMemory({
+			defaultThinkingLevel: "high",
+			images: { autoResize: false },
+			compaction: { enabled: false },
+		});
+	}
+
+	it("#2753: applies updated top-level prompt settings on reload after startup", async () => {
+		writeFileSync(join(agentDir, "prompts", "test.md"), "Echo test prompt\n");
+		const settingsManager = SettingsManager.create(tempDir, agentDir);
+		const loader = new DefaultResourceLoader({
+			cwd: tempDir,
+			agentDir,
+			settingsManager,
+			noExtensions: true,
+			noSkills: true,
+			noThemes: true,
+		});
+		await loader.reload();
+		expect(loader.getPrompts().prompts.map((prompt) => prompt.name)).toContain("test");
+
+		writeFileSync(join(agentDir, "settings.json"), `${JSON.stringify({ prompts: ["-prompts/test.md"] }, null, 2)}\n`);
+		await loader.reload();
+
+		expect(settingsManager.getGlobalSettings().prompts).toEqual(["-prompts/test.md"]);
+		expect(loader.getPrompts().prompts.map((prompt) => prompt.name)).not.toContain("test");
+	});
+
+	it.each([
+		{
+			name: "a direct settings reload",
+			reload: async (settingsManager: SettingsManager) => {
+				await settingsManager.reload();
+			},
+		},
+		{
+			name: "a resource loader reload",
+			reload: async (settingsManager: SettingsManager, cwd: string, dir: string) => {
+				await new DefaultResourceLoader({
+					cwd,
+					agentDir: dir,
+					settingsManager,
+					noExtensions: true,
+					noSkills: true,
+					noPromptTemplates: true,
+					noThemes: true,
+					noContextFiles: true,
+				}).reload();
+			},
+		},
+		{
+			name: "an unrelated setter, flush, and reload",
+			reload: async (settingsManager: SettingsManager) => {
+				settingsManager.setTheme("dark");
+				await settingsManager.flush();
+				await settingsManager.reload();
+			},
+		},
+	])("#3616: in-memory settings survive $name", async ({ reload }) => {
+		const settingsManager = inMemoryLoaderSettings();
+
+		await reload(settingsManager, tempDir, agentDir);
+
+		expect(settingsManager.getDefaultThinkingLevel()).toBe("high");
+		expect(settingsManager.getImageAutoResize()).toBe(false);
+		expect(settingsManager.getCompactionEnabled()).toBe(false);
+		expect(settingsManager.getGlobalSettings()).toMatchObject({
+			defaultThinkingLevel: "high",
+			images: { autoResize: false },
+			compaction: { enabled: false },
 		});
 	});
 });

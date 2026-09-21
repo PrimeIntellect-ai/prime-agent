@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudGuestDaemon, parseCloudDaemonEnv } from "../src/modes/cloud/cloud-daemon.js";
+import { cloudTemp } from "./cloud-support.js";
 import { createFauxRuntimeFactory, createFauxRuntimeFactoryWithModels } from "./fixtures/cloud-guest-daemon-fixture.js";
 
 /**
@@ -13,18 +13,10 @@ import { createFauxRuntimeFactory, createFauxRuntimeFactoryWithModels } from "./
  * without any network refresh.
  */
 
-const roots: string[] = [];
-function temp(): string {
-	const root = mkdtempSync(join(tmpdir(), "cloud-guest-model-resolution-"));
-	roots.push(root);
-	return root;
-}
-
 afterEach(async () => {
 	vi.unstubAllGlobals();
 	// Let a queued mirror pass settle before the temp state disappears.
 	await new Promise((resolve) => setImmediate(resolve));
-	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 5 });
 });
 
 const SESSION_ID = "sess_model_resolution_test";
@@ -99,7 +91,7 @@ const PRIVATE_MODEL_CATALOG = {
 
 describe("resident guest daemon model resolution", () => {
 	it("opens with a private model supplied only by the refreshed Prime Inference catalog", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-model-resolution-");
 		writePrimeInferenceAuth(join(root, "agent"));
 		const fetchMock = vi.fn(
 			async (_url: string | URL | Request, _init?: RequestInit) =>
@@ -145,10 +137,10 @@ describe("resident guest daemon model resolution", () => {
 		} finally {
 			await daemon.stop();
 		}
-	}, 30_000);
+	});
 
 	it("fails an open whose private model the refreshed catalog does not authorize", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-model-resolution-");
 		writePrimeInferenceAuth(join(root, "agent"));
 		const fetchMock = vi.fn(async () => new Response(JSON.stringify({ data: [] }), { status: 200 }));
 		vi.stubGlobal("fetch", fetchMock);
@@ -163,10 +155,10 @@ describe("resident guest daemon model resolution", () => {
 		} finally {
 			await daemon.stop();
 		}
-	}, 30_000);
+	});
 
 	it("recovers a private model after a transient first entitlement outcome", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-model-resolution-");
 		writePrimeInferenceAuth(join(root, "agent"));
 		// The live incident shape: the first authenticated entitlement fetch
 		// transiently reports no private routes; the identical request
@@ -193,10 +185,10 @@ describe("resident guest daemon model resolution", () => {
 		} finally {
 			await daemon.stop();
 		}
-	}, 30_000);
+	});
 
 	it("bounds entitlement refresh attempts before the honest unknown-model failure", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-model-resolution-");
 		writePrimeInferenceAuth(join(root, "agent"));
 		const fetchMock = vi.fn(
 			async (_url: string | URL | Request, _init?: RequestInit) =>
@@ -217,10 +209,10 @@ describe("resident guest daemon model resolution", () => {
 		} finally {
 			await daemon.stop();
 		}
-	}, 30_000);
+	});
 
 	it("does not retry a non-private model miss", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-model-resolution-");
 		writePrimeInferenceAuth(join(root, "agent"));
 		const fetchMock = vi.fn(
 			async (_url: string | URL | Request, _init?: RequestInit) =>
@@ -240,10 +232,10 @@ describe("resident guest daemon model resolution", () => {
 		} finally {
 			await daemon.stop();
 		}
-	}, 30_000);
+	});
 
 	it("resolves a bundled model without any catalog refresh", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-model-resolution-");
 		const fetchMock = vi.fn(async () => {
 			throw new Error("bundled model resolution must not fetch");
 		});
@@ -257,10 +249,10 @@ describe("resident guest daemon model resolution", () => {
 		} finally {
 			await daemon.stop();
 		}
-	}, 30_000);
+	});
 
 	it("applies canonical selectors with slash-bearing and slash-free model ids exactly", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-model-resolution-");
 		const fetchMock = vi.fn(async () => {
 			throw new Error("registered model resolution must not fetch");
 		});
@@ -295,5 +287,5 @@ describe("resident guest daemon model resolution", () => {
 		} finally {
 			await daemon.stop();
 		}
-	}, 30_000);
+	});
 });

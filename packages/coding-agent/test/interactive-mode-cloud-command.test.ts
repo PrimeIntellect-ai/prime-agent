@@ -329,6 +329,9 @@ describe("InteractiveMode cloud tray marker", () => {
 			},
 			options: {},
 			subagentSnapshots: new Map(),
+			// Minimal surface for the inline-picker check the tray path performs.
+			ui: { hasOverlay: () => false },
+			editorContainer: { children: [] },
 		});
 		return context;
 	}

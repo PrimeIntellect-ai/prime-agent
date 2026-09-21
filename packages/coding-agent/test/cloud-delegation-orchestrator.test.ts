@@ -13,80 +13,33 @@ import type {
 import {
 	CLOUD_DELEGATION_BOOTSTRAP_SCRIPT,
 	CLOUD_DELEGATION_START_COMMAND,
-	CLOUD_GUEST_ARCHIVE_PATH,
 	CLOUD_GUEST_AUTH_PATH,
 	CLOUD_GUEST_BOOTSTRAP_PATH,
-	CLOUD_GUEST_MANIFEST_PATH,
 	CLOUD_GUEST_PROMPT_PATH,
-	type CloudDelegationCapturedWorkspace,
 	CloudDelegationError,
 	type CloudDelegationErrorCode,
 	CloudDelegationOrchestrator,
 	type CloudDelegationOrchestratorOptions,
-	type CloudDelegationPlatformClient,
 	type CloudDelegationProgress,
-	type CloudDelegationReadiness,
 	type CloudDelegationRecordStore,
 	type CloudDelegationRequest,
-	type CloudDelegationResultsClient,
 	type CloudDelegationSandboxSpec,
 	type CloudDelegationTaskResult,
-	type CloudDelegationVmProcessClient,
-	type CloudDelegationVmProcessStartRequest,
-	type CloudDelegationVmProcessState,
-	type CloudDelegationWorkspaceTransfer,
 	cloudDelegationPhaseOf,
 } from "../src/core/cloud/delegation-orchestrator.js";
-import {
-	MAX_TRANSFER_BYTES,
-	type PrimeSandbox,
-	type PrimeSandboxAuth,
-	type PrimeSandboxStatus,
-	type PrimeSandboxUploadRequest,
-	type PrimeSandboxUploadResult,
-	type PrimeSandboxVmCreateRequest,
-} from "../src/core/cloud/prime-sandbox-client.js";
+import { MAX_TRANSFER_BYTES, type PrimeSandboxStatus } from "../src/core/cloud/prime-sandbox-client.js";
 import { CLOUD_MAX_PROMPT_CHARS } from "../src/core/cloud/protocol.js";
+import {
+	RecordingReadiness,
+	RecordingResultsClient,
+	RecordingSandboxPlatform,
+	RecordingVmProcess,
+	RecordingWorkspaceTransfer,
+} from "./cloud-support.js";
 
 const GATEWAY_TOKEN = "gtw-secret-token-1234";
 const CREDENTIAL = "sk-cloud-inference-secret";
 const PROMPT = "fix the failing test";
-
-function fakeSandbox(id: string, status: PrimeSandboxStatus = "RUNNING"): PrimeSandbox {
-	const now = new Date().toISOString();
-	return {
-		id,
-		name: `sbx-${id}`,
-		dockerImage: "image",
-		startCommand: null,
-		cpuCores: 4,
-		memoryGb: 8,
-		diskSizeGb: 40,
-		gpuCount: 0,
-		gpuType: null,
-		vm: true,
-		networkAllowlist: null,
-		networkDenylist: null,
-		status,
-		timeoutMinutes: 60,
-		idleTimeoutMinutes: null,
-		terminationReason: null,
-		labels: [],
-		createdAt: now,
-		updatedAt: now,
-		startedAt: null,
-		terminatedAt: null,
-		exitCode: null,
-		errorType: null,
-		errorMessage: null,
-		userId: null,
-		teamId: null,
-		kubernetesJobId: null,
-		region: null,
-		registryCredentialsId: null,
-		pendingImageBuildId: null,
-	};
-}
 
 /** In-memory record store with the real store's set-once and monotonic rules. */
 class FakeRecordStore implements CloudDelegationRecordStore {
@@ -216,212 +169,14 @@ class FakeRecordStore implements CloudDelegationRecordStore {
 	}
 }
 
-class FakePlatform implements CloudDelegationPlatformClient {
-	readonly createKeys: (string | undefined)[] = [];
-	readonly uploads = new Map<string, Uint8Array>();
-	readonly deleted: string[] = [];
-	sandboxCount = 0;
-	failCreate?: Error;
-	failUpload?: Error;
-	private readonly byId = new Map<string, PrimeSandbox>();
-	private readonly byKey = new Map<string, PrimeSandbox>();
-	private nextId = 0;
-
-	constructor(private readonly calls: string[]) {}
-
-	createVmSandbox(request: PrimeSandboxVmCreateRequest): Promise<PrimeSandbox> {
-		this.calls.push("platform.createVmSandbox");
-		this.createKeys.push(request.idempotencyKey);
-		if (this.failCreate !== undefined) {
-			const error = this.failCreate;
-			this.failCreate = undefined;
-			return Promise.reject(error);
-		}
-		const key = request.idempotencyKey ?? `auto-${this.nextId}`;
-		const existing = this.byKey.get(key);
-		if (existing !== undefined) {
-			this.calls.push("platform.createVmSandbox.idempotent-reuse");
-			return Promise.resolve(existing);
-		}
-		const sandbox = fakeSandbox(`sbx-${this.nextId++}`);
-		this.sandboxCount += 1;
-		this.byId.set(sandbox.id, sandbox);
-		this.byKey.set(key, sandbox);
-		return Promise.resolve(sandbox);
-	}
-
-	getSandbox(sandboxId: string): Promise<PrimeSandbox> {
-		this.calls.push("platform.getSandbox");
-		const sandbox = this.byId.get(sandboxId);
-		return Promise.resolve(sandbox ?? fakeSandbox(sandboxId, "TERMINATED"));
-	}
-
-	deleteSandbox(sandboxId: string): Promise<void> {
-		this.calls.push("platform.deleteSandbox");
-		this.deleted.push(sandboxId);
-		return Promise.resolve();
-	}
-
-	getSandboxAuth(sandboxId: string): Promise<PrimeSandboxAuth> {
-		this.calls.push("platform.getSandboxAuth");
-		return Promise.resolve({
-			sandboxId,
-			gatewayUrl: "https://gateway.example.com",
-			userNamespace: "ns",
-			jobId: sandboxId,
-			token: GATEWAY_TOKEN,
-			expiresAt: new Date(Date.now() + 60_000).toISOString(),
-		});
-	}
-
-	uploadFile(_sandboxId: string, request: PrimeSandboxUploadRequest): Promise<PrimeSandboxUploadResult> {
-		this.calls.push(`platform.uploadFile ${request.path}`);
-		if (this.failUpload !== undefined) {
-			const error = this.failUpload;
-			this.failUpload = undefined;
-			return Promise.reject(error);
-		}
-		this.uploads.set(request.path, request.content);
-		return Promise.resolve({
-			success: true,
-			path: request.path,
-			size: request.content.byteLength,
-			timestamp: new Date().toISOString(),
-		});
-	}
-}
-
-class FakeVmProcess implements CloudDelegationVmProcessClient {
-	readonly starts: CloudDelegationVmProcessStartRequest[] = [];
-	signalCount = 0;
-	ignoreSignal = false;
-	onSignal?: () => void;
-	failStart?: Error;
-	private state: CloudDelegationVmProcessState = { state: "unknown" };
-	private readonly startedUuids = new Set<string>();
-
-	constructor(private readonly calls: string[]) {}
-
-	setState(state: CloudDelegationVmProcessState): void {
-		this.state = state;
-	}
-
-	start(request: CloudDelegationVmProcessStartRequest): Promise<{ sessionUuid: string; created: boolean }> {
-		this.calls.push("process.start");
-		this.starts.push(request);
-		if (this.failStart !== undefined) {
-			const error = this.failStart;
-			this.failStart = undefined;
-			return Promise.reject(error);
-		}
-		const created = !this.startedUuids.has(request.sessionUuid);
-		this.startedUuids.add(request.sessionUuid);
-		if (created) {
-			this.state = { state: "running" };
-		}
-		return Promise.resolve({ sessionUuid: request.sessionUuid, created });
-	}
-
-	signalStop(_sessionUuid: string): Promise<void> {
-		this.calls.push("process.signalStop");
-		this.signalCount += 1;
-		if (!this.ignoreSignal) this.state = { state: "exited", exitCode: 0 };
-		this.onSignal?.();
-		return Promise.resolve();
-	}
-
-	status(_sessionUuid: string): Promise<CloudDelegationVmProcessState> {
-		this.calls.push("process.status");
-		return Promise.resolve(this.state);
-	}
-}
-
-class FakeWorkspace implements CloudDelegationWorkspaceTransfer {
-	captureCount = 0;
-	failCapture?: Error;
-	manifestDigest = `sha256:${"a".repeat(64)}`;
-	totalSizeBytes = 128;
-
-	constructor(private readonly calls: string[]) {}
-
-	capture(request: { cwd: string }): Promise<CloudDelegationCapturedWorkspace> {
-		this.calls.push("workspace.capture");
-		this.captureCount += 1;
-		if (this.failCapture !== undefined) {
-			const error = this.failCapture;
-			this.failCapture = undefined;
-			return Promise.reject(error);
-		}
-		return Promise.resolve({
-			baseline: { repoRoot: request.cwd, headCommit: null, manifestDigest: this.manifestDigest },
-			archive: new TextEncoder().encode("workspace-archive-bytes"),
-			manifest: new TextEncoder().encode("{}"),
-			totalSizeBytes: this.totalSizeBytes,
-			cleanup: () => {
-				this.calls.push("workspace.cleanup");
-			},
-		});
-	}
-
-	upload(request: {
-		sandboxId: string;
-		archivePath: string;
-		manifestPath: string;
-		captured: CloudDelegationCapturedWorkspace;
-	}): Promise<void> {
-		this.calls.push("workspace.upload");
-		expect(request.archivePath).toBe(CLOUD_GUEST_ARCHIVE_PATH);
-		expect(request.manifestPath).toBe(CLOUD_GUEST_MANIFEST_PATH);
-		return Promise.resolve();
-	}
-}
-
-class FakeResults implements CloudDelegationResultsClient {
-	readonly saved: CloudDelegationTaskResult[] = [];
-	result?: CloudDelegationTaskResult;
-	enabled = true;
-	failFetch?: Error;
-
-	constructor(private readonly calls: string[]) {}
-
-	fetch(_sandboxId: string): Promise<CloudDelegationTaskResult | undefined> {
-		this.calls.push("results.fetch");
-		if (this.failFetch !== undefined) {
-			const error = this.failFetch;
-			this.failFetch = undefined;
-			return Promise.reject(error);
-		}
-		return Promise.resolve(this.enabled ? this.result : undefined);
-	}
-
-	save(request: { sessionId: string; result: CloudDelegationTaskResult }): Promise<void> {
-		this.calls.push("results.save");
-		this.saved.push(request.result);
-		return Promise.resolve();
-	}
-}
-
-class FakeReadiness implements CloudDelegationReadiness {
-	ready = true;
-	gate?: Promise<void>;
-
-	constructor(private readonly calls: string[]) {}
-
-	async isReady(_sandbox: PrimeSandbox): Promise<boolean> {
-		this.calls.push("readiness.isReady");
-		await this.gate;
-		return this.ready;
-	}
-}
-
 function harness(options?: { orchestrator?: Partial<CloudDelegationOrchestratorOptions> }) {
 	const calls: string[] = [];
 	const store = new FakeRecordStore(calls);
-	const platform = new FakePlatform(calls);
-	const process = new FakeVmProcess(calls);
-	const workspace = new FakeWorkspace(calls);
-	const results = new FakeResults(calls);
-	const readiness = new FakeReadiness(calls);
+	const platform = new RecordingSandboxPlatform(calls, { gatewayToken: GATEWAY_TOKEN });
+	const process = new RecordingVmProcess(calls);
+	const workspace = new RecordingWorkspaceTransfer(calls);
+	const results = new RecordingResultsClient(calls);
+	const readiness = new RecordingReadiness(calls);
 	const progress: CloudDelegationProgress[] = [];
 	const orchestrator = new CloudDelegationOrchestrator(
 		{ store, platform, process, workspace, results, readiness },
@@ -589,23 +344,41 @@ describe("CloudDelegationOrchestrator", () => {
 	});
 
 	it("validates prompt, deadline, and workspace size before any boundary work", async () => {
-		const h = harness();
-		await expectFailure(
-			() => h.orchestrator.delegate(delegationRequest({ prompt: "x".repeat(CLOUD_MAX_PROMPT_CHARS + 1) })),
-			"invalid_request",
-		);
-		await expectFailure(
-			() => h.orchestrator.delegate(delegationRequest({ sandbox: sandboxSpec({ timeoutMinutes: 5 }) })),
-			"invalid_request",
-		);
-		expect(h.workspace.captureCount).toBe(0);
-		expect(h.store.records.size).toBe(0);
-
-		const h2 = harness();
-		h2.workspace.totalSizeBytes = MAX_TRANSFER_BYTES + 1;
-		await expectFailure(() => h2.orchestrator.delegate(delegationRequest()), "too_large");
-		expect(platformCalls(h2.calls)).toEqual([]);
-		expect(h2.store.records.size).toBe(0);
+		const cases: Array<{
+			name: string;
+			code: CloudDelegationErrorCode;
+			captures: number;
+			request: CloudDelegationRequest;
+			totalSizeBytes?: number;
+		}> = [
+			{
+				name: "oversized prompt",
+				code: "invalid_request",
+				captures: 0,
+				request: delegationRequest({ prompt: "x".repeat(CLOUD_MAX_PROMPT_CHARS + 1) }),
+			},
+			{
+				name: "short deadline",
+				code: "invalid_request",
+				captures: 0,
+				request: delegationRequest({ sandbox: sandboxSpec({ timeoutMinutes: 5 }) }),
+			},
+			{
+				name: "oversized workspace",
+				code: "too_large",
+				captures: 1,
+				request: delegationRequest(),
+				totalSizeBytes: MAX_TRANSFER_BYTES + 1,
+			},
+		];
+		for (const { name, code, captures, request, totalSizeBytes } of cases) {
+			const h = harness();
+			if (totalSizeBytes !== undefined) h.workspace.totalSizeBytes = totalSizeBytes;
+			await expectFailure(() => h.orchestrator.delegate(request), code);
+			expect(platformCalls(h.calls), name).toEqual([]);
+			expect(h.workspace.captureCount, name).toBe(captures);
+			expect(h.store.records.size, name).toBe(0);
+		}
 	});
 
 	it("recovers from an upload failure without a second sandbox or process", async () => {

@@ -1,32 +1,14 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createConnection } from "node:net";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	type AgentFamilyCatalogEntry,
 	type AgentSessionMessageReceipt,
 	assertAgentFamilyReach,
 } from "../src/core/agent-messages.js";
-import type {
-	CloudTunnelConnection,
-	CloudTunnelTransport,
-	CloudTunnelTransportError,
-} from "../src/core/cloud/bridge/tunnel-transport.js";
-import { CloudSessionStore } from "../src/core/cloud/cloud-session-store.js";
-import type {
-	CloudDelegationResultsClient,
-	CloudDelegationTunnelClient,
-	CloudDelegationVmProcessClient,
-	CloudDelegationWorkspaceTransfer,
-} from "../src/core/cloud/delegation-orchestrator.js";
-import { DirectCloudService, type DirectCloudServiceOptions } from "../src/core/cloud/direct-cloud-service.js";
+import type { CloudSessionStore } from "../src/core/cloud/cloud-session-store.js";
 import type { CloudFamilyRow } from "../src/core/cloud/protocol.js";
-import { CloudResultStore } from "../src/core/cloud/result-import.js";
 import { parseSessionEntries } from "../src/core/session-manager.js";
-import { CloudGuestDaemon, parseCloudDaemonEnv } from "../src/modes/cloud/cloud-daemon.js";
 import { AgentRoster } from "../src/modes/daemon/agent-roster.js";
 import {
 	CloudSessionRegistry,
@@ -36,7 +18,14 @@ import {
 } from "../src/modes/daemon/cloud-session-registry.js";
 import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
-import { createFauxRuntimeFactory } from "./fixtures/cloud-guest-daemon-fixture.js";
+import {
+	CLOUD_TEST_BRIDGE_TOKEN,
+	cloudTemp,
+	fakeCloudService,
+	queueFauxResponse,
+	RecordingTunnelTransport,
+	startGuestDaemon,
+} from "./cloud-support.js";
 
 /**
  * Fake-transport e2e for the final first-class cloud session parity slice:
@@ -54,71 +43,14 @@ import { createFauxRuntimeFactory } from "./fixtures/cloud-guest-daemon-fixture.
  *   responses route back to the owning remote session.
  */
 
-const roots: string[] = [];
-function temp(): string {
-	const value = mkdtempSync(join(tmpdir(), "cloud-family-parity-"));
-	roots.push(value);
-	return value;
-}
-
-afterEach(() => {
-	for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true, maxRetries: 5 });
-});
-
-async function waitFor(predicate: () => boolean, timeoutMs = 20_000, what = "condition"): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
+/**
+ * Drains the event loop until the observable settles: guest mirrors, registry
+ * replays, and socket frames all complete across turns, never a clock.
+ */
+async function waitFor(predicate: () => boolean): Promise<void> {
 	for (;;) {
 		if (predicate()) return;
-		if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-		await sleep(20);
-	}
-}
-
-const BRIDGE_TOKEN = "t".repeat(64);
-
-/**
- * A real socket connection to one guest daemon, framed as a tunnel transport.
- * Per-connection state stays inside connect(): one registry drives several
- * attachments (one per cloud session) through the same transport instance.
- */
-class SocketTunnelTransport implements CloudTunnelTransport {
-	async connect(socketPath: string): Promise<CloudTunnelConnection> {
-		const socket = createConnection(socketPath);
-		socket.setNoDelay(true);
-		await new Promise<void>((resolve, reject) => {
-			socket.once("connect", () => resolve());
-			socket.once("error", (error) => reject(error));
-		});
-		let messageHandler: ((message: string) => void) | undefined;
-		let closeHandler: ((error?: CloudTunnelTransportError) => void) | undefined;
-		let buffer = "";
-		const earlyLines: string[] = [];
-		socket.on("data", (chunk: Buffer) => {
-			buffer += chunk.toString("utf8");
-			for (;;) {
-				const newline = buffer.indexOf("\n");
-				if (newline < 0) break;
-				const line = buffer.slice(0, newline);
-				buffer = buffer.slice(newline + 1);
-				if (line.length === 0) continue;
-				if (messageHandler !== undefined) messageHandler(line);
-				else earlyLines.push(line);
-			}
-		});
-		socket.on("close", () => closeHandler?.());
-		return {
-			send: (message: string) => {
-				socket.write(`${message}\n`);
-			},
-			close: () => socket.destroy(),
-			onMessage: (handler) => {
-				messageHandler = handler;
-				for (const line of earlyLines.splice(0)) handler(line);
-			},
-			onClose: (handler) => {
-				closeHandler = handler;
-			},
-		};
+		await new Promise((resolve) => setImmediate(resolve));
 	}
 }
 
@@ -133,59 +65,6 @@ const LOCAL_PARENT = {
 	sessionName: "local-parent",
 	depth: 0,
 };
-
-function queueFauxResponse(root: string, text: string): void {
-	const responsesPath = join(root, "responses.jsonl");
-	process.env.PRIME_AGENT_TEST_FAUX_RESPONSES = responsesPath;
-	delete process.env.PRIME_AGENT_TEST_FAUX_ECHO;
-	const response: AssistantMessage = {
-		role: "assistant",
-		content: [{ type: "text", text }],
-		api: "faux",
-		provider: "faux",
-		timestamp: Date.now(),
-		usage: {
-			input: 3,
-			output: 5,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 8,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-	} as AssistantMessage;
-	const existing = existsSync(responsesPath) ? readFileSync(responsesPath, "utf8") : "";
-	writeFileSync(responsesPath, `${existing}${JSON.stringify(response)}\n`, { mode: 0o600 });
-}
-
-function daemonEnv(root: string, generation: number, sessionId: string, socketPath: string) {
-	return parseCloudDaemonEnv(
-		{
-			PRIME_AGENT_CLOUD_DAEMON_SOCKET: socketPath,
-			PRIME_AGENT_CLOUD_SESSION_ID: sessionId,
-			PRIME_AGENT_CLOUD_GENERATION: String(generation),
-			PRIME_AGENT_CLOUD_WORKSPACE_DIR: join(root, "workspace"),
-			PRIME_AGENT_CLOUD_AGENT_DIR: join(root, "guest-agent"),
-			PRIME_AGENT_CLOUD_BRIDGE_TOKEN: BRIDGE_TOKEN,
-			PRIME_AGENT_CLOUD_PROMPT_PATH: join(root, "prompt.txt"),
-			PRIME_AGENT_CLOUD_MODEL: "",
-			PRIME_AGENT_CLOUD_DAEMON_STATE_DIR: join(root, "guest-daemon-state"),
-		},
-		{ stateDir: join(root, "guest-daemon-state") },
-	);
-}
-
-async function startGuestDaemon(
-	root: string,
-	generation: number,
-	sessionId: string,
-	socketPath: string,
-): Promise<CloudGuestDaemon> {
-	const daemon = await CloudGuestDaemon.start(daemonEnv(root, generation, sessionId, socketPath), {
-		createRuntime: createFauxRuntimeFactory,
-	});
-	daemon.startMirrorLoop();
-	return daemon;
-}
 
 interface LocalDeliveryRecord {
 	source: CloudSessionTarget;
@@ -239,119 +118,11 @@ function buildFamilyRegistry(
 	guestSockets: Map<string, string>,
 	options: { store?: CloudSessionStore } = {},
 ): FamilyHarness {
-	const stateDirectory = join(root, "cloud");
-	const sessionDir = join(root, "sessions");
-	const store = options.store ?? new CloudSessionStore(join(stateDirectory, "sessions"));
-	const resultStore = new CloudResultStore(join(stateDirectory, "results"));
-	const now = "2026-01-01T00:00:00.000Z";
-	const sandbox = {
-		id: "sandbox-family-1",
-		name: "cloud",
-		dockerImage: "example/cloud:1",
-		cpuCores: 4,
-		memoryGb: 16,
-		diskSizeGb: 50,
-		gpuCount: 0,
-		vm: true,
-		status: "RUNNING",
-		timeoutMinutes: 120,
-		labels: [],
-		createdAt: now,
-		updatedAt: now,
-	};
-	const platform = {
-		createVmSandbox: async () => sandbox,
-		getSandbox: async () => sandbox,
-		deleteSandbox: async () => undefined,
-		getSandboxAuth: async () => ({
-			sandboxId: sandbox.id,
-			gatewayUrl: "https://gateway.example",
-			userNamespace: "user",
-			jobId: "job",
-			token: "gateway-token",
-			expiresAt: "2099-01-01T00:00:00.000Z",
-		}),
-		uploadFile: async (_sandboxId: string, request: { path: string; content: Uint8Array }) => ({
-			path: request.path,
-			size: request.content.byteLength,
-		}),
-		downloadFile: async () => {
-			throw new Error("no artifacts expected in this suite");
-		},
-	} as unknown as DirectCloudServiceOptions["platform"];
-	const workspace: CloudDelegationWorkspaceTransfer = {
-		capture: async () => ({
-			baseline: {
-				repoRoot: root,
-				headCommit: null,
-				manifestDigest: `sha256:${"b".repeat(64)}`,
-			},
-			archive: new Uint8Array([1]),
-			manifest: new TextEncoder().encode("{}"),
-			totalSizeBytes: 3,
-			cleanup: () => {},
-		}),
-		upload: async () => undefined,
-	};
-	const runningProcesses = new Map<string, "running" | "exited">();
-	const process: CloudDelegationVmProcessClient = {
-		start: async (request) => {
-			const created = !runningProcesses.has(request.sessionUuid);
-			runningProcesses.set(request.sessionUuid, "running");
-			return { sessionUuid: request.sessionUuid, created };
-		},
-		signalStop: async (sessionUuid) => {
-			runningProcesses.set(sessionUuid, "exited");
-		},
-		status: async (sessionUuid) => {
-			const state = runningProcesses.get(sessionUuid);
-			if (state === "running") return { state: "running" };
-			if (state === "exited") return { state: "exited", exitCode: 0 };
-			return { state: "unknown" };
-		},
-	};
-	const results: CloudDelegationResultsClient = {
-		fetch: async () => undefined,
-		save: async () => undefined,
-	};
-	const tunnels: CloudDelegationTunnelClient = {
-		register: async (request) => ({
-			tunnelId: `tunnel-${request.sessionId}`,
-			url: guestSockets.get(request.sessionId) ?? join(root, "guest.sock"),
-			hostname: "tunnel.example",
-			httpUser: "prime-agent",
-			httpPassword: "edge-password-0123456789",
-			expiresAt: "2099-01-01T00:00:00.000Z",
-			frpServerHost: "frp.example",
-			frpServerPort: 7000,
-			frpToken: "frp-token",
-			bindingSecret: "binding-secret",
-		}),
-		delete: async () => undefined,
-		get: async (tunnelId) => ({
-			tunnelId,
-			url: join(root, "guest.sock"),
-			hostname: "tunnel.example",
-			httpUser: "u",
-			expiresAt: "2099-01-01T00:00:00.000Z",
-		}),
-	};
-	const service = new DirectCloudService({
-		stateDirectory,
-		apiKey: "platform-key",
-		inferenceApiKey: "inference-only-key",
-		dockerImage: "example/cloud:1",
-		store,
-		resultStore,
-		platform,
-		workspace,
-		process,
-		results,
-		readiness: { isReady: async () => true },
-		tunnels,
-		recordFilter: () => true,
+	const { service, store } = fakeCloudService(root, {
+		sandboxId: "sandbox-family-1",
+		store: options.store,
+		guestSocketUrl: (sessionId) => guestSockets.get(sessionId) ?? join(root, "guest.sock"),
 	});
-
 	const childUpdates: FamilyHarness["childUpdates"] = [];
 	const sessionEvents: FamilyHarness["sessionEvents"] = [];
 	const localDeliveries: LocalDeliveryRecord[] = [];
@@ -456,13 +227,13 @@ function buildFamilyRegistry(
 		attachedClientCount: () => 0,
 	};
 	const registry = new CloudSessionRegistry({
-		stateDirectory,
-		sessionDir,
+		stateDirectory: join(root, "cloud"),
+		sessionDir: join(root, "sessions"),
 		cwd: root,
 		callbacks,
 		service,
-		transport: new SocketTunnelTransport(),
-		bridgeToken: BRIDGE_TOKEN,
+		transport: new RecordingTunnelTransport(),
+		bridgeToken: CLOUD_TEST_BRIDGE_TOKEN,
 		reconnectDelayMs: 50,
 		submitWaitMs: 5_000,
 		artifactResolver: {
@@ -505,10 +276,8 @@ async function spawnKid(
 		name,
 		sessionId,
 	});
-	await waitFor(
-		() => harness.childUpdates.some((update) => update.childId === sessionId && update.status === "running"),
-		30_000,
-		`${sessionId} running push`,
+	await waitFor(() =>
+		harness.childUpdates.some((update) => update.childId === sessionId && update.status === "running"),
 	);
 	return admission;
 }
@@ -519,12 +288,12 @@ async function spawnKid(
 
 describe("cloud family parity (fake transport, real guest daemons)", () => {
 	it("delivers local->cloud agent messages with admission-gated receipts and payload parity", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-family-parity-");
 		const kidId = "sess_family_kid_a";
 		queueFauxResponse(root, "kid a finished");
 		// The admitted agent message also wakes the idle guest for a turn.
 		queueFauxResponse(root, "kid a message turn answer");
-		const daemon = await startGuestDaemon(root, 1, kidId, join(root, "kid-a.sock"));
+		const daemon = await startGuestDaemon(root, 1, kidId, undefined, join(root, "kid-a.sock"));
 		const guestSockets = new Map([[kidId, join(root, "kid-a.sock")]]);
 		const harness = buildFamilyRegistry(root, guestSockets);
 		try {
@@ -569,30 +338,27 @@ describe("cloud family parity (fake transport, real guest daemons)", () => {
 			expect(details?.from?.sessionId).toBe(LOCAL_PARENT.sessionId);
 			expect(details?.fromRelationship).toBe("parent");
 			// The shadow mirrors the same structured entry.
-			await waitFor(
-				() =>
-					parseSessionEntries(readFileSync(harness.store.get(kidId)!.shadowSessionFile!, "utf8")).some((entry) =>
-						JSON.stringify(entry).includes("ping from the local parent"),
-					),
-				20_000,
-				"mirrored agent message",
+			await waitFor(() =>
+				parseSessionEntries(readFileSync(harness.store.get(kidId)!.shadowSessionFile!, "utf8")).some((entry) =>
+					JSON.stringify(entry).includes("ping from the local parent"),
+				),
 			);
 		} finally {
 			await harness.registry.dispose().catch(() => undefined);
 			await daemon.stop().catch(() => undefined);
 		}
-	}, 60_000);
+	});
 
 	it("routes descendant prompt, attach, and messages into the remote descendant session", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-family-parity-");
 		const kidId = "sess_family_kid_b";
 		queueFauxResponse(root, "kid b finished");
-		const daemon = await startGuestDaemon(root, 1, kidId, join(root, "kid-b.sock"));
+		const daemon = await startGuestDaemon(root, 1, kidId, undefined, join(root, "kid-b.sock"));
 		const guestSockets = new Map([[kidId, join(root, "kid-b.sock")]]);
 		const harness = buildFamilyRegistry(root, guestSockets);
 		try {
 			const admission = await spawnKid(harness, root, kidId, "kid-b");
-			await waitFor(() => daemon.rootRuntime !== undefined, 20_000, "guest root runtime");
+			await waitFor(() => daemon.rootRuntime !== undefined);
 			const runtime = daemon.rootRuntime!;
 			const session = daemon.rootSession!;
 			const child = await runtime.createRlmSubagentRuntime({
@@ -614,16 +380,12 @@ describe("cloud family parity (fake transport, real guest daemons)", () => {
 				rlmParentNodeId: "guest-kid-b1",
 			});
 			expect(child.session.sessionName).toBe("guestkidb");
-			await waitFor(
-				() => harness.registry.liveSummaries().some((summary) => summary.rlmChildId === "guest-kid-b1"),
-				20_000,
-				"descendant roster row",
-			);
+			await waitFor(() => harness.registry.liveSummaries().some((summary) => summary.rlmChildId === "guest-kid-b1"));
 			const descendantSummary = harness.registry
 				.liveSummaries()
 				.find((summary) => summary.rlmChildId === "guest-kid-b1")!;
 			expect(descendantSummary.execution).toMatchObject({ location: "cloud" });
-			await waitFor(() => existsSync(descendantSummary.sessionFile!), 20_000, "descendant shadow");
+			await waitFor(() => existsSync(descendantSummary.sessionFile!));
 
 			// The descendant is addressable by active id AND remote session id.
 			const byActive = harness.registry.resolveActive(descendantSummary.activeSessionId!)!;
@@ -648,21 +410,15 @@ describe("cloud family parity (fake transport, real guest daemons)", () => {
 				byActive,
 			);
 			expect(prompted.success).toBe(true);
-			await waitFor(
-				() =>
-					parseSessionEntries(readFileSync(descendantSummary.sessionFile!, "utf8")).some((entry) =>
-						JSON.stringify(entry).includes("work inside the descendant"),
-					),
-				20_000,
-				"descendant prompt mirrored",
+			await waitFor(() =>
+				parseSessionEntries(readFileSync(descendantSummary.sessionFile!, "utf8")).some((entry) =>
+					JSON.stringify(entry).includes("work inside the descendant"),
+				),
 			);
-			await waitFor(
-				() =>
-					parseSessionEntries(readFileSync(descendantSummary.sessionFile!, "utf8")).some((entry) =>
-						JSON.stringify(entry).includes("descendant prompt answer"),
-					),
-				20_000,
-				"descendant answer mirrored",
+			await waitFor(() =>
+				parseSessionEntries(readFileSync(descendantSummary.sessionFile!, "utf8")).some((entry) =>
+					JSON.stringify(entry).includes("descendant prompt answer"),
+				),
 			);
 			// The attach snapshot now serves the descendant's transcript.
 			const attachAfter = harness.registry.attachSnapshot(byActive);
@@ -694,15 +450,12 @@ describe("cloud family parity (fake transport, real guest daemons)", () => {
 			expect(descendantReceipt.target).toMatchObject({ sessionId: byActive.remoteSessionId });
 			const descendantState = daemon.stateForRemoteSessionId(byActive.remoteSessionId);
 			expect(descendantState).toBeDefined();
-			await waitFor(
-				() =>
-					descendantState!.runtime.session.messages.some(
-						(message) =>
-							message.role === "custom" &&
-							JSON.stringify((message as { details?: unknown }).details).includes("note for the descendant"),
-					),
-				10_000,
-				"descendant message",
+			await waitFor(() =>
+				descendantState!.runtime.session.messages.some(
+					(message) =>
+						message.role === "custom" &&
+						JSON.stringify((message as { details?: unknown }).details).includes("note for the descendant"),
+				),
 			);
 			const deliveredNote = descendantState!.runtime.session.messages.find(
 				(message) =>
@@ -715,18 +468,18 @@ describe("cloud family parity (fake transport, real guest daemons)", () => {
 			await harness.registry.dispose().catch(() => undefined);
 			await daemon.stop().catch(() => undefined);
 		}
-	}, 90_000);
+	});
 
 	it("serves the guest family roster and relays cloud->local and cloud->cloud sends over the durable path", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-family-parity-");
 		const kidA = "sess_family_kid_c1";
 		const kidB = "sess_family_kid_c2";
 		queueFauxResponse(root, "kid a initial answer");
 		queueFauxResponse(root, "kid b initial answer");
 		// The sibling message wakes kid B for one more turn.
 		queueFauxResponse(root, "kid b sibling turn answer");
-		const daemonA = await startGuestDaemon(root, 1, kidA, join(root, "kid-c1.sock"));
-		const daemonB = await startGuestDaemon(root, 1, kidB, join(root, "kid-c2.sock"));
+		const daemonA = await startGuestDaemon(root, 1, kidA, undefined, join(root, "kid-c1.sock"));
+		const daemonB = await startGuestDaemon(root, 1, kidB, undefined, join(root, "kid-c2.sock"));
 		const guestSockets = new Map([
 			[kidA, join(root, "kid-c1.sock")],
 			[kidB, join(root, "kid-c2.sock")],
@@ -738,16 +491,25 @@ describe("cloud family parity (fake transport, real guest daemons)", () => {
 			expect(admissionA.rlm_child_id).toBe(kidA);
 			expect(admissionB.rlm_child_id).toBe(kidB);
 
-			// The guest kernel asks its family roster: parent + cloud sibling.
-			const roster = (await daemonA.rootSession!.handleAgentMessageHostRequest("agent_message.list_agents")) as {
-				current: { id: string; depth: number };
-				entries: Array<{ relationship: string; id: string; name: string; depth: number }>;
+			// The guest kernel asks its family roster through the observe plane:
+			// parent + cloud sibling with live facts for resident rows.
+			const roster = (await daemonA.rootSession!.handleAgentObserveHostRequest("agent_observe.list")) as {
+				current: { sessionId: string };
+				agents: Array<{
+					relationship?: string;
+					sessionId: string;
+					sessionName?: string;
+					rlmDepth?: number;
+				}>;
 			};
-			expect(roster.current).toMatchObject({ id: kidA, depth: 1 });
-			const parentEntry = roster.entries.find((entry) => entry.relationship === "parent");
-			expect(parentEntry).toMatchObject({ id: LOCAL_PARENT.sessionId, name: LOCAL_PARENT.sessionName, depth: 0 });
-			const siblingEntry = roster.entries.find((entry) => entry.id === kidB);
-			expect(siblingEntry).toMatchObject({ relationship: "sibling", name: "kid-c2", depth: 1 });
+			expect(roster.current).toMatchObject({ sessionId: kidA });
+			const parentEntry = roster.agents.find((entry) => entry.relationship === "parent");
+			expect(parentEntry).toMatchObject({
+				sessionId: LOCAL_PARENT.sessionId,
+				sessionName: LOCAL_PARENT.sessionName,
+			});
+			const siblingEntry = roster.agents.find((entry) => entry.sessionId === kidB);
+			expect(siblingEntry).toMatchObject({ relationship: "sibling", sessionName: "kid-c2" });
 
 			// cloud -> local: the guest kernel send rides the durable path and
 			// resolves with the receipt the supervisor-side delivery produced.
@@ -771,17 +533,12 @@ describe("cloud family parity (fake transport, real guest daemons)", () => {
 			})) as AgentSessionMessageReceipt;
 			expect(cloudSend.deliveryStatus).toBe("delivered");
 			expect(cloudSend.target).toMatchObject({ sessionId: kidB });
-			await waitFor(
-				() =>
-					daemonB.rootSession!.messages.some(
-						(message) =>
-							message.role === "custom" &&
-							JSON.stringify((message as { details?: unknown }).details).includes(
-								"hey sibling, share your notes",
-							),
-					),
-				20_000,
-				"sibling message in kid b",
+			await waitFor(() =>
+				daemonB.rootSession!.messages.some(
+					(message) =>
+						message.role === "custom" &&
+						JSON.stringify((message as { details?: unknown }).details).includes("hey sibling, share your notes"),
+				),
 			);
 			const deliveredToB = daemonB.rootSession!.messages.find(
 				(message) =>
@@ -813,33 +570,29 @@ describe("cloud family parity (fake transport, real guest daemons)", () => {
 				rlmMaxDepth: 4,
 				rlmParentNodeId: "guest-kid-c1-child",
 			});
-			const rosterWithChild = (await daemonA.rootSession!.handleAgentMessageHostRequest(
-				"agent_message.list_agents",
-			)) as { entries: Array<{ relationship: string; id: string; depth: number }> };
-			const childEntry = rosterWithChild.entries.find((entry) => entry.relationship === "child");
+			const rosterWithChild = (await daemonA.rootSession!.handleAgentObserveHostRequest("agent_observe.list")) as {
+				agents: Array<{ relationship?: string; sessionId: string; parentActiveSessionId?: string }>;
+			};
+			const childEntry = rosterWithChild.agents.find((entry) => entry.relationship === "child");
 			expect(childEntry).toBeDefined();
-			expect(childEntry!.depth).toBe(2);
+			expect(childEntry!.parentActiveSessionId).toBe(daemonA.rootStateRef!.activeSessionId);
 		} finally {
 			await harness.registry.dispose().catch(() => undefined);
 			await daemonA.stop().catch(() => undefined);
 			await daemonB.stop().catch(() => undefined);
 		}
-	}, 120_000);
+	});
 
 	it("replays current child status and terminal results into the surviving parent run after a supervisor restart", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-family-parity-");
 		const kidId = "sess_family_kid_d";
 		queueFauxResponse(root, "kid d terminal answer");
-		const daemon = await startGuestDaemon(root, 1, kidId, join(root, "kid-d.sock"));
+		const daemon = await startGuestDaemon(root, 1, kidId, undefined, join(root, "kid-d.sock"));
 		const guestSockets = new Map([[kidId, join(root, "kid-d.sock")]]);
 		const harness = buildFamilyRegistry(root, guestSockets);
 		try {
 			await spawnKid(harness, root, kidId, "kid-d");
-			await waitFor(
-				() => harness.childUpdates.some((update) => update.status === "completed"),
-				40_000,
-				"initial completion",
-			);
+			await waitFor(() => harness.childUpdates.some((update) => update.status === "completed"));
 			const shadowFile = harness.store.get(kidId)!.shadowSessionFile!;
 			const taskPrompts = () =>
 				parseSessionEntries(readFileSync(shadowFile, "utf8")).filter((entry) =>
@@ -853,18 +606,19 @@ describe("cloud family parity (fake transport, real guest daemons)", () => {
 			const second = buildFamilyRegistry(root, guestSockets2, { store: harness.store });
 			try {
 				await second.registry.recover();
-				await waitFor(
-					() => second.childUpdates.some((update) => update.childId === kidId && update.status === "completed"),
-					20_000,
-					"restart replay push",
+				await waitFor(() =>
+					second.childUpdates.some((update) => update.childId === kidId && update.status === "completed"),
 				);
 				const replay = second.childUpdates.find(
 					(update) => update.childId === kidId && update.status === "completed",
 				)!;
 				expect(replay.answerPreview).toContain("kid d terminal answer");
 				expect(replay.parentActiveSessionId).toBe(LOCAL_PARENT.activeSessionId);
-				// The terminal replay is sticky: no phantom running pushes.
-				await sleep(1_500);
+				// The terminal replay is sticky: a bounded turn drain proves no
+				// phantom running pushes arrive after the replay settles.
+				for (let turn = 0; turn < 10; turn++) {
+					await new Promise((resolve) => setImmediate(resolve));
+				}
 				expect(second.childUpdates.some((update) => update.childId === kidId && update.status === "running")).toBe(
 					false,
 				);
@@ -876,15 +630,15 @@ describe("cloud family parity (fake transport, real guest daemons)", () => {
 		} finally {
 			await daemon.stop().catch(() => undefined);
 		}
-	}, 90_000);
+	});
 
 	it("replays the current (non-terminal) status of an in-flight child after a restart", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-family-parity-");
 		const kidId = "sess_family_kid_e";
 		// No queued response: the guest's initial turn stays in flight.
 		delete process.env.PRIME_AGENT_TEST_FAUX_RESPONSES;
 		process.env.PRIME_AGENT_TEST_FAUX_ECHO = "1";
-		const daemon = await startGuestDaemon(root, 1, kidId, join(root, "kid-e.sock"));
+		const daemon = await startGuestDaemon(root, 1, kidId, undefined, join(root, "kid-e.sock"));
 		const guestSockets = new Map([[kidId, join(root, "kid-e.sock")]]);
 		const harness = buildFamilyRegistry(root, guestSockets);
 		try {
@@ -892,13 +646,10 @@ describe("cloud family parity (fake transport, real guest daemons)", () => {
 			// The admitted task prompt is durable in the shadow before the
 			// restart, so the replay reads honest state.
 			const shadowFile = harness.store.get(kidId)!.shadowSessionFile!;
-			await waitFor(
-				() =>
-					parseSessionEntries(readFileSync(shadowFile, "utf8")).some((entry) =>
-						JSON.stringify(entry).includes("[task from parent]"),
-					),
-				20_000,
-				"admitted task prompt mirrored",
+			await waitFor(() =>
+				parseSessionEntries(readFileSync(shadowFile, "utf8")).some((entry) =>
+					JSON.stringify(entry).includes("[task from parent]"),
+				),
 			);
 			await harness.registry.dispose();
 			const second = buildFamilyRegistry(root, new Map([[kidId, join(root, "kid-e.sock")]]), {
@@ -906,11 +657,7 @@ describe("cloud family parity (fake transport, real guest daemons)", () => {
 			});
 			try {
 				await second.registry.recover();
-				await waitFor(
-					() => second.childUpdates.some((update) => update.childId === kidId),
-					20_000,
-					"restart status replay",
-				);
+				await waitFor(() => second.childUpdates.some((update) => update.childId === kidId));
 				const replay = second.childUpdates.find((update) => update.childId === kidId)!;
 				// The durable shadow holds the admitted task prompt: the
 				// honest replay is running (or already terminal), never queued.
@@ -921,13 +668,13 @@ describe("cloud family parity (fake transport, real guest daemons)", () => {
 		} finally {
 			await daemon.stop().catch(() => undefined);
 		}
-	}, 90_000);
+	});
 
 	it("relays extension ui requests from cloud rows and routes responses to the owning remote session", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-family-parity-");
 		const kidId = "sess_family_kid_f";
 		queueFauxResponse(root, "kid f answer");
-		const daemon = await startGuestDaemon(root, 1, kidId, join(root, "kid-f.sock"));
+		const daemon = await startGuestDaemon(root, 1, kidId, undefined, join(root, "kid-f.sock"));
 		const guestSockets = new Map([[kidId, join(root, "kid-f.sock")]]);
 		const harness = buildFamilyRegistry(root, guestSockets);
 		try {
@@ -953,15 +700,11 @@ describe("cloud family parity (fake transport, real guest daemons)", () => {
 				rlmParentNodeId: "guest-kid-f1",
 			});
 			void child;
-			await waitFor(
-				() => harness.registry.liveSummaries().some((summary) => summary.rlmChildId === "guest-kid-f1"),
-				20_000,
-				"descendant roster row",
-			);
+			await waitFor(() => harness.registry.liveSummaries().some((summary) => summary.rlmChildId === "guest-kid-f1"));
 			const descendantSummary = harness.registry
 				.liveSummaries()
 				.find((summary) => summary.rlmChildId === "guest-kid-f1")!;
-			await waitFor(() => existsSync(descendantSummary.sessionFile!), 20_000, "descendant shadow");
+			await waitFor(() => existsSync(descendantSummary.sessionFile!));
 
 			// Request direction: the guest's session_event wire carries the
 			// request; the registry relays it under the descendant row address.
@@ -975,15 +718,12 @@ describe("cloud family parity (fake transport, real guest daemons)", () => {
 				} as never,
 			});
 			expect(appended).toBeDefined();
-			await waitFor(
-				() =>
-					harness.sessionEvents.some(
-						(recorded) =>
-							recorded.activeSessionId === descendantSummary.activeSessionId &&
-							recorded.type === "extension_ui_request",
-					),
-				20_000,
-				"relayed extension ui request",
+			await waitFor(() =>
+				harness.sessionEvents.some(
+					(recorded) =>
+						recorded.activeSessionId === descendantSummary.activeSessionId &&
+						recorded.type === "extension_ui_request",
+				),
 			);
 
 			// Response direction: the command carries the owning remote
@@ -1015,7 +755,7 @@ describe("cloud family parity (fake transport, real guest daemons)", () => {
 			await harness.registry.dispose().catch(() => undefined);
 			await daemon.stop().catch(() => undefined);
 		}
-	}, 90_000);
+	});
 });
 
 // ---------------------------------------------------------------------------

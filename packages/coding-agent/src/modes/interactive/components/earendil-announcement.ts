@@ -29,7 +29,7 @@ export class EarendilAnnouncementComponent extends Container {
 		super();
 
 		this.addChild(new DynamicBorder((text) => theme.fg("accent", text)));
-		this.addChild(new Text(theme.bold(theme.fg("accent", "pi has joined Earendil")), 1, 0));
+		this.addChild(new Text(theme.fg("accent", "pi has joined Earendil"), 1, 0));
 		this.addChild(new Spacer(1));
 		this.addChild(new Text(theme.fg("muted", "Read the blog post:"), 1, 0));
 		this.addChild(new Text(theme.fg("mdLink", BLOG_URL), 1, 0));

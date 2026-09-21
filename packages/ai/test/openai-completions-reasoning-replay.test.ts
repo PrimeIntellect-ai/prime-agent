@@ -145,6 +145,35 @@ describe("openai-completions reasoning replay", () => {
 		expect(assistant.reasoning_content as string).not.toContain("\ud800");
 	});
 
+	it.each([
+		{
+			name: "thinking plus text",
+			content: [
+				{ type: "thinking", thinking: "internal reasoning" },
+				{ type: "text", text: "visible answer" },
+			] as AssistantMessage["content"],
+			expected: [
+				{ type: "text", text: "internal reasoning" },
+				{ type: "text", text: "visible answer" },
+			],
+		},
+		{
+			name: "thinking only",
+			content: [{ type: "thinking", thinking: "internal reasoning" }] as AssistantMessage["content"],
+			expected: [{ type: "text", text: "internal reasoning" }],
+		},
+	])(
+		"serializes $name as assistant text parts when the provider requires thinking-as-text",
+		({ content, expected }) => {
+			const messages = convertMessages(buildModel(), buildContext(content), {
+				...compat,
+				requiresThinkingAsText: true,
+			});
+
+			expect(messages[1]).toEqual({ role: "assistant", content: expected });
+		},
+	);
+
 	it("replays signed thinking alongside a tool call", () => {
 		const messages = convertMessages(
 			buildModel(),

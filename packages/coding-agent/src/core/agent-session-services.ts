@@ -32,6 +32,8 @@ export interface CreateAgentSessionServicesOptions {
 	authStorage?: AuthStorage;
 	settingsManager?: SettingsManager;
 	modelRegistry?: ModelRegistry;
+	/** Pre-built MCP manager (tests inject stub probes and stores). */
+	mcpManager?: McpManager;
 	extensionFlagValues?: Map<string, boolean | string>;
 	resourceLoaderOptions?: Omit<DefaultResourceLoaderOptions, "cwd" | "agentDir" | "settingsManager">;
 	/**
@@ -42,6 +44,12 @@ export interface CreateAgentSessionServicesOptions {
 	 */
 	noBuiltinHerdrReporter?: boolean;
 	telemetryDisabled?: true;
+	/**
+	 * Hold the telemetry disclosure back on a first interactive launch, where it
+	 * would land on the onboarding screen. Onboarding marks itself shown, so the
+	 * notice appears on the next launch; sessions that never onboard disclose now.
+	 */
+	deferTelemetryNoticeForOnboarding?: boolean;
 }
 
 export interface AgentSessionCreationOptions {
@@ -147,18 +155,23 @@ export async function createAgentSessionServices(
 ): Promise<AgentSessionServices> {
 	const cwd = options.cwd;
 	const agentDir = options.agentDir ?? getAgentDir();
-	const authStorage = options.authStorage ?? AuthStorage.create(join(agentDir, "auth.json"));
+	const authStorage =
+		options.authStorage ??
+		AuthStorage.create(options.agentDir === undefined ? undefined : join(agentDir, "auth.json"));
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
 	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, join(agentDir, "models.json"));
 
 	// MCP integrations: registers OAuth providers and gates the built-in
 	// integration skills by whether the user is logged in (enable-by-login).
-	const mcpManager = new McpManager({
-		authStorage,
-		getUserServers: () => settingsManager.getGlobalMcpServers(),
-	});
+	const mcpManager =
+		options.mcpManager ??
+		new McpManager({
+			authStorage,
+			getUserServers: () => settingsManager.getGlobalMcpServers(),
+			getCatalogSources: () => settingsManager.getMcpCatalogSources(),
+		});
 	// refresh() resets the OAuth registry to built-ins; re-add user MCP providers too.
-	modelRegistry.setOnOAuthProvidersReset(() => mcpManager.registerUserProviders());
+	modelRegistry.setOnOAuthProvidersReset(() => mcpManager.registerAllProviders());
 
 	const userExtensionFactories = options.resourceLoaderOptions?.extensionFactories ?? [];
 	// The built-in Herdr reporter defers to Herdr's own file-based integration
@@ -186,6 +199,10 @@ export async function createAgentSessionServices(
 	if (
 		!options.telemetryDisabled &&
 		isTelemetryEnabled(settingsManager) &&
+		// A first interactive launch belongs to onboarding, where the notice would
+		// land on the welcome screen; it surfaces on the next launch once
+		// onboarding marks itself shown. Sessions that never onboard disclose now.
+		(settingsManager.getOnboardingShown() || !options.deferTelemetryNoticeForOnboarding) &&
 		!settingsManager.getTelemetryNoticeShown()
 	) {
 		diagnostics.push({

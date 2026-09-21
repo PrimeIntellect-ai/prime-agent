@@ -1,4 +1,5 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
+import { findEnvKeys, getEnvApiKey } from "../src/env-api-keys.js";
 import {
 	getPrimeInferenceReasoningControls,
 	parsePrimeInferenceModelCatalog,
@@ -240,5 +241,33 @@ describe("getPrimeInferenceReasoningControls", () => {
 
 	test("keeps bundled compat when the route reports no parameters", () => {
 		expect(getPrimeInferenceReasoningControls({})).toBeUndefined();
+	});
+});
+
+// Folded in from prime-inference-models.test.ts: the catalog/config assertions there churned on
+// every catalog refresh; only API-key resolution is a real contract.
+describe("Prime Inference API key resolution", () => {
+	const originalPrimeApiKey = process.env.PRIME_API_KEY;
+
+	afterEach(() => {
+		if (originalPrimeApiKey === undefined) {
+			delete process.env.PRIME_API_KEY;
+		} else {
+			process.env.PRIME_API_KEY = originalPrimeApiKey;
+		}
+	});
+
+	test("resolves PRIME_API_KEY from the environment", () => {
+		process.env.PRIME_API_KEY = "test-prime-key";
+
+		expect(findEnvKeys("prime-inference")).toEqual(["PRIME_API_KEY"]);
+		expect(getEnvApiKey("prime-inference")).toBe("test-prime-key");
+	});
+
+	test("requires an explicit Prime Inference API key", () => {
+		delete process.env.PRIME_API_KEY;
+
+		expect(findEnvKeys("prime-inference")).toBeUndefined();
+		expect(getEnvApiKey("prime-inference")).toBeUndefined();
 	});
 });

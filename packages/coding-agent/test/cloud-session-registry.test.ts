@@ -1,15 +1,8 @@
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { createConnection, type Socket } from "node:net";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { createConnection } from "node:net";
 import { basename, dirname, join } from "node:path";
-import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import type {
-	CloudTunnelConnection,
-	CloudTunnelTransport,
-	CloudTunnelTransportError,
-} from "../src/core/cloud/bridge/tunnel-transport.js";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import { describe, expect, it, vi } from "vitest";
 import { CloudSessionStore } from "../src/core/cloud/cloud-session-store.js";
 import type {
 	CloudDelegationResultsClient,
@@ -21,13 +14,19 @@ import { DirectCloudService, type DirectCloudServiceOptions } from "../src/core/
 import type { CloudEvent } from "../src/core/cloud/protocol.js";
 import { CloudResultStore } from "../src/core/cloud/result-import.js";
 import { type CustomEntry, parseSessionEntries } from "../src/core/session-manager.js";
-import { CloudGuestDaemon, parseCloudDaemonEnv } from "../src/modes/cloud/cloud-daemon.js";
 import {
 	CloudSessionRegistry,
 	type CloudSessionRegistryCallbacks,
 } from "../src/modes/daemon/cloud-session-registry.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
-import { createFauxRuntimeFactory } from "./fixtures/cloud-guest-daemon-fixture.js";
+import {
+	CLOUD_TEST_BRIDGE_TOKEN,
+	cloudTemp,
+	queueFauxResponse,
+	RecordingTunnelTransport,
+	seedPrimeInferenceGuestAuth,
+	startGuestDaemon,
+} from "./cloud-support.js";
 
 /**
  * Strict fake-transport e2e for the supervisor-owned cloud session registry:
@@ -39,66 +38,9 @@ import { createFauxRuntimeFactory } from "./fixtures/cloud-guest-daemon-fixture.
  * state across registry instances.
  */
 
-const roots: string[] = [];
-function temp(): string {
-	const value = mkdtempSync(join(tmpdir(), "cloud-session-registry-test-"));
-	roots.push(value);
-	return value;
-}
-
-afterEach(() => {
-	for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true, maxRetries: 5 });
-});
-
-const BRIDGE_TOKEN = "t".repeat(64);
 const GUEST_SESSION_ID_FOR_DAEMON = "daemon-session-id";
 
 /** A real socket connection to the guest daemon, framed as a tunnel transport. */
-class SocketTunnelTransport implements CloudTunnelTransport {
-	readonly sentFrames: string[] = [];
-	private socket: Socket | undefined;
-	private messageHandler: ((message: string) => void) | undefined;
-	private closeHandler: ((error?: CloudTunnelTransportError) => void) | undefined;
-	private buffer = "";
-	private earlyLines: string[] = [];
-
-	async connect(socketPath: string): Promise<CloudTunnelConnection> {
-		await new Promise<void>((resolve, reject) => {
-			this.socket = createConnection(socketPath);
-			this.socket.setNoDelay(true);
-			this.socket.once("connect", () => resolve());
-			this.socket.once("error", (error) => reject(error));
-		});
-		this.socket!.on("data", (chunk: Buffer) => {
-			this.buffer += chunk.toString("utf8");
-			for (;;) {
-				const newline = this.buffer.indexOf("\n");
-				if (newline < 0) break;
-				const line = this.buffer.slice(0, newline);
-				this.buffer = this.buffer.slice(newline + 1);
-				if (line.length === 0) continue;
-				if (this.messageHandler !== undefined) this.messageHandler(line);
-				else this.earlyLines.push(line);
-			}
-		});
-		this.socket!.on("close", () => this.closeHandler?.());
-		return {
-			send: (message: string) => {
-				this.sentFrames.push(message);
-				this.socket?.write(`${message}\n`);
-			},
-			close: () => this.socket?.destroy(),
-			onMessage: (handler) => {
-				this.messageHandler = handler;
-				for (const line of this.earlyLines.splice(0)) handler(line);
-			},
-			onClose: (handler) => {
-				this.closeHandler = handler;
-			},
-		};
-	}
-}
-
 interface RegistryHarness {
 	registry: CloudSessionRegistry;
 	rosterWrites: Map<
@@ -122,35 +64,9 @@ interface RegistryHarness {
 	stateDirectory: string;
 	store: CloudSessionStore;
 	/** Frames the supervisor side sent to the guest (submit requests, open_session payloads). */
-	transport: SocketTunnelTransport;
+	transport: RecordingTunnelTransport;
 	/** Every fake VM-process start, newest last; env carries the guest boot model. */
 	vmStarts: Array<{ sessionUuid: string; env: Record<string, string> }>;
-}
-
-function daemonEnv(root: string, generation: number, sessionId: string, stateDir?: string) {
-	const resolvedStateDir = stateDir ?? join(root, "guest-daemon-state");
-	return parseCloudDaemonEnv(
-		{
-			PRIME_AGENT_CLOUD_DAEMON_SOCKET: join(root, "guest.sock"),
-			PRIME_AGENT_CLOUD_SESSION_ID: sessionId,
-			PRIME_AGENT_CLOUD_GENERATION: String(generation),
-			PRIME_AGENT_CLOUD_WORKSPACE_DIR: join(root, "workspace"),
-			PRIME_AGENT_CLOUD_AGENT_DIR: join(root, "guest-agent"),
-			PRIME_AGENT_CLOUD_BRIDGE_TOKEN: BRIDGE_TOKEN,
-			PRIME_AGENT_CLOUD_PROMPT_PATH: join(root, "prompt.txt"),
-			PRIME_AGENT_CLOUD_MODEL: "",
-			PRIME_AGENT_CLOUD_DAEMON_STATE_DIR: resolvedStateDir,
-		},
-		{ stateDir: resolvedStateDir },
-	);
-}
-
-async function startGuestDaemon(root: string, generation: number, sessionId: string, stateDir?: string) {
-	const daemon = await CloudGuestDaemon.start(daemonEnv(root, generation, sessionId, stateDir), {
-		createRuntime: createFauxRuntimeFactory,
-	});
-	daemon.startMirrorLoop();
-	return daemon;
 }
 
 function buildRegistry(
@@ -319,7 +235,7 @@ function buildRegistry(
 		attachedClientCount: () => 0,
 	};
 	const rosterDeletes: string[] = [];
-	const transport = new SocketTunnelTransport();
+	const transport = new RecordingTunnelTransport();
 	const registry = new CloudSessionRegistry({
 		stateDirectory,
 		sessionDir,
@@ -327,7 +243,7 @@ function buildRegistry(
 		callbacks,
 		service,
 		transport,
-		bridgeToken: BRIDGE_TOKEN,
+		bridgeToken: CLOUD_TEST_BRIDGE_TOKEN,
 		reconnectDelayMs: 50,
 		submitWaitMs: 5_000,
 		artifactResolver: {
@@ -354,41 +270,20 @@ function buildRegistry(
 	};
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 20_000, what = "condition"): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
+/**
+ * Drains the event loop until the observable settles: registry attachments,
+ * mirror ticks, and socket frames all complete across turns, never a clock.
+ */
+async function waitFor(predicate: () => boolean): Promise<void> {
 	for (;;) {
 		if (predicate()) return;
-		if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-		await new Promise((resolve) => setTimeout(resolve, 20));
+		await new Promise((resolve) => setImmediate(resolve));
 	}
-}
-
-function queueFauxResponse(root: string, text: string): void {
-	const responsesPath = join(root, "responses.jsonl");
-	process.env.PRIME_AGENT_TEST_FAUX_RESPONSES = responsesPath;
-	delete process.env.PRIME_AGENT_TEST_FAUX_ECHO;
-	const response: AssistantMessage = {
-		role: "assistant",
-		content: [{ type: "text", text }],
-		api: "faux",
-		provider: "faux",
-		timestamp: Date.now(),
-		usage: {
-			input: 3,
-			output: 5,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 8,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-	} as AssistantMessage;
-	const existing = existsSync(responsesPath) ? readFileSync(responsesPath, "utf8") : "";
-	writeFileSync(responsesPath, `${existing}${JSON.stringify(response)}\n`, { mode: 0o600 });
 }
 
 describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 	it("converts an idle session, mirrors prompt entries into a durable shadow before ack, and serves attach from the shadow", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-session-registry-test-");
 		const guestSessionId = `sess_${GUEST_SESSION_ID_FOR_DAEMON}`;
 		const daemon = await startGuestDaemon(root, 1, guestSessionId);
 		const harness = buildRegistry(root, join(root, "guest.sock"));
@@ -412,10 +307,8 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 			expect(shadowEntries[0]).toMatchObject({ type: "session", id: info.sessionId });
 
 			// The roster row carries the cloud execution marker.
-			await waitFor(
-				() => [...harness.rosterWrites.values()].some((row) => row.summary.execution?.location === "cloud"),
-				10_000,
-				"cloud roster row",
+			await waitFor(() =>
+				[...harness.rosterWrites.values()].some((row) => row.summary.execution?.location === "cloud"),
 			);
 			const rootRow = harness.rosterWrites.get(info.sessionId);
 			expect(rootRow).toBeDefined();
@@ -432,13 +325,10 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 
 			// The guest's session entries mirror into the shadow, durably,
 			// before the registry acknowledges the batch.
-			await waitFor(
-				() =>
-					parseSessionEntries(readFileSync(record.shadowSessionFile!, "utf8")).some(
-						(entry) => entry.type === "message" && JSON.stringify(entry).includes("cloud registry answer"),
-					),
-				20_000,
-				"mirrored assistant answer",
+			await waitFor(() =>
+				parseSessionEntries(readFileSync(record.shadowSessionFile!, "utf8")).some(
+					(entry) => entry.type === "message" && JSON.stringify(entry).includes("cloud registry answer"),
+				),
 			);
 			const mirrored = parseSessionEntries(readFileSync(record.shadowSessionFile!, "utf8"));
 			const ids = mirrored.map((entry) => (entry.type === "session" ? "header" : entry.id));
@@ -454,19 +344,15 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 			expect(attach.summary.execution).toMatchObject({ location: "cloud" });
 			expect(attach.children).toEqual([]);
 			// Live session events reached the supervisor fan-out.
-			await waitFor(
-				() => harness.sessionEvents.some((event) => event.type === "message_start"),
-				20_000,
-				"live session events",
-			);
+			await waitFor(() => harness.sessionEvents.some((event) => event.type === "message_start"));
 		} finally {
 			await harness.registry.dispose().catch(() => undefined);
 			await daemon.stop().catch(() => undefined);
 		}
-	}, 60_000);
+	});
 
 	it("projects remote descendants as child shadows with parent edges and roster rows, and removes them on delete", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-session-registry-test-");
 		const guestSessionId = `sess_${GUEST_SESSION_ID_FOR_DAEMON}_child`;
 		const daemon = await startGuestDaemon(root, 1, guestSessionId);
 		const harness = buildRegistry(root, join(root, "guest.sock"));
@@ -479,7 +365,7 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 				{ type: "prompt", activeSessionId: record.activeSessionId!, message: "spawn nothing yet" },
 				target,
 			);
-			await waitFor(() => harness.registry.resolveActive(record.activeSessionId!) !== undefined, 10_000, "row live");
+			await waitFor(() => harness.registry.resolveActive(record.activeSessionId!) !== undefined);
 
 			// A real recursive child through the guest's runtime host.
 			const runtime = daemon.rootRuntime!;
@@ -505,27 +391,20 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 			expect(child.session.sessionName).toBe("cloudkid");
 
 			// roster_delta announces the child; child_update carries its session file.
-			await waitFor(
-				() => harness.registry.liveSummaries().some((summary) => summary.rlmChildId === "child-reg-1"),
-				20_000,
-				"child roster row",
-			);
+			await waitFor(() => harness.registry.liveSummaries().some((summary) => summary.rlmChildId === "child-reg-1"));
 			const childSummary = harness.registry.liveSummaries().find((summary) => summary.rlmChildId === "child-reg-1")!;
 			expect(childSummary.execution).toMatchObject({ location: "cloud" });
 			expect(childSummary.runtimeKind).toBe("subagent");
 			expect(childSummary.parentSessionPath).toBe(record.shadowSessionFile);
 			// The child's shadow mirrors its session entries.
-			await waitFor(() => existsSync(childSummary.sessionFile!), 20_000, "child shadow file");
+			await waitFor(() => existsSync(childSummary.sessionFile!));
 			const childShadowEntries = parseSessionEntries(readFileSync(childSummary.sessionFile!, "utf8"));
 			expect(childShadowEntries[0]).toMatchObject({ type: "session", rlmDepth: 1 });
 			// The ledger edge records the local parent-child relationship.
-			await waitFor(
-				() =>
-					harness.ledgerEdges.some(
-						(edge) => edge.childId === "child-reg-1" && basename(edge.parent) === `${info.sessionId}.jsonl`,
-					),
-				20_000,
-				"ledger edge",
+			await waitFor(() =>
+				harness.ledgerEdges.some(
+					(edge) => edge.childId === "child-reg-1" && basename(edge.parent) === `${info.sessionId}.jsonl`,
+				),
 			);
 			const edge = harness.ledgerEdges.find((edge) => edge.childId === "child-reg-1")!;
 			expect(basename(edge.child)).not.toBe(basename(edge.parent));
@@ -539,26 +418,20 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 					descendant: false,
 				},
 			);
-			await waitFor(
-				() => !harness.registry.liveSummaries().some((summary) => summary.rlmChildId === "child-reg-1"),
-				20_000,
-				"child row removed",
-			);
+			await waitFor(() => !harness.registry.liveSummaries().some((summary) => summary.rlmChildId === "child-reg-1"));
 			await waitFor(
 				() =>
 					harness.rosterDeletes.length > 0 &&
 					harness.ledgerDeletes.some((entry) => entry.childId === "child-reg-1"),
-				20_000,
-				"child ledger delete",
 			);
 		} finally {
 			await harness.registry.dispose().catch(() => undefined);
 			await daemon.stop().catch(() => undefined);
 		}
-	}, 60_000);
+	});
 
 	it("recovers rows and reconnects after a supervisor restart, filling the gap without duplicates", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-session-registry-test-");
 		const guestSessionId = `sess_${GUEST_SESSION_ID_FOR_DAEMON}_restart`;
 		const daemon = await startGuestDaemon(root, 1, guestSessionId);
 		const guestSocket = join(root, "guest.sock");
@@ -574,13 +447,10 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 				{ type: "prompt", activeSessionId: record.activeSessionId!, message: "before the restart" },
 				target,
 			);
-			await waitFor(
-				() =>
-					parseSessionEntries(readFileSync(record.shadowSessionFile!, "utf8")).some((entry) =>
-						JSON.stringify(entry).includes("before the restart"),
-					),
-				20_000,
-				"pre-restart mirror",
+			await waitFor(() =>
+				parseSessionEntries(readFileSync(record.shadowSessionFile!, "utf8")).some((entry) =>
+					JSON.stringify(entry).includes("before the restart"),
+				),
 			);
 			const beforeCount = parseSessionEntries(readFileSync(record.shadowSessionFile!, "utf8")).length;
 
@@ -592,21 +462,14 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 
 			const second = buildRegistry(root, guestSocket, { store: harness.store, runningProcesses });
 			await second.registry.recover();
-			await waitFor(
-				() => second.registry.resolveActive(record.activeSessionId!) !== undefined,
-				20_000,
-				"recovered row",
-			);
+			await waitFor(() => second.registry.resolveActive(record.activeSessionId!) !== undefined);
 			// The row address is durable: the same activeSessionId resolves.
 			expect(second.registry.resolveActive(record.activeSessionId!)).toBeDefined();
 			// Gap fill: the shadow catches up and never duplicates a line.
-			await waitFor(
-				() =>
-					parseSessionEntries(readFileSync(record.shadowSessionFile!, "utf8")).some((entry) =>
-						JSON.stringify(entry).includes("during the restart gap"),
-					),
-				20_000,
-				"gap fill",
+			await waitFor(() =>
+				parseSessionEntries(readFileSync(record.shadowSessionFile!, "utf8")).some((entry) =>
+					JSON.stringify(entry).includes("during the restart gap"),
+				),
 			);
 			const after = parseSessionEntries(readFileSync(record.shadowSessionFile!, "utf8"));
 			expect(after.length).toBeGreaterThan(beforeCount);
@@ -618,10 +481,10 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 		} finally {
 			await daemon.stop().catch(() => undefined);
 		}
-	}, 60_000);
+	});
 
 	it("keeps a stopped session locally readable and marks the record stopped", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-session-registry-test-");
 		const guestSessionId = `sess_${GUEST_SESSION_ID_FOR_DAEMON}_stop`;
 		const daemon = await startGuestDaemon(root, 1, guestSessionId);
 		const harness = buildRegistry(root, join(root, "guest.sock"));
@@ -634,13 +497,10 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 				{ type: "prompt", activeSessionId: record.activeSessionId!, message: "final turn" },
 				target,
 			);
-			await waitFor(
-				() =>
-					parseSessionEntries(readFileSync(record.shadowSessionFile!, "utf8")).some((entry) =>
-						JSON.stringify(entry).includes("final answer"),
-					),
-				20_000,
-				"final mirror",
+			await waitFor(() =>
+				parseSessionEntries(readFileSync(record.shadowSessionFile!, "utf8")).some((entry) =>
+					JSON.stringify(entry).includes("final answer"),
+				),
 			);
 			const stopped = await harness.registry.stopSession(info.sessionId, false);
 			expect(stopped.status).toBe("stopped");
@@ -661,12 +521,12 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 			await harness.registry.dispose().catch(() => undefined);
 			await daemon.stop().catch(() => undefined);
 		}
-	}, 60_000);
+	});
 });
 
 describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 	it("translates the normal session command surface onto cloud commands", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-session-registry-test-");
 		const guestSessionId = "sess_translate_me";
 		const daemon = await startGuestDaemon(root, 1, guestSessionId);
 		const harness = buildRegistry(root, join(root, "guest.sock"));
@@ -674,11 +534,7 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 			const info = await harness.registry.convertSession({ cwd: root, sessionId: guestSessionId });
 			const record = harness.store.get(info.sessionId)!;
 			const target = harness.registry.resolveActive(record.activeSessionId!)!;
-			await waitFor(
-				() => harness.registry.resolveActive(record.activeSessionId!)!.summary.execution !== undefined,
-				10_000,
-				"target ready",
-			);
+			await waitFor(() => harness.registry.resolveActive(record.activeSessionId!)!.summary.execution !== undefined);
 
 			// Name changes mirror as session_info entries into the shadow.
 			// Steer and follow-up each drive one faux inference turn.
@@ -689,13 +545,10 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 				target,
 			);
 			expect(renamed.success).toBe(true);
-			await waitFor(
-				() =>
-					parseSessionEntries(readFileSync(record.shadowSessionFile!, "utf8")).some(
-						(entry) => entry.type === "session_info" && entry.name === "cloud-registry-suite",
-					),
-				20_000,
-				"mirrored session name",
+			await waitFor(() =>
+				parseSessionEntries(readFileSync(record.shadowSessionFile!, "utf8")).some(
+					(entry) => entry.type === "session_info" && entry.name === "cloud-registry-suite",
+				),
 			);
 
 			// steer / follow_up ride the same durable command surface.
@@ -755,10 +608,10 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 			await harness.registry.dispose().catch(() => undefined);
 			await daemon.stop().catch(() => undefined);
 		}
-	}, 60_000);
+	});
 
 	it("answers a cancelled prompt admission honestly and never admits twice", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-session-registry-test-");
 		const guestSessionId = "sess_admission_cancel";
 		const daemon = await startGuestDaemon(root, 1, guestSessionId);
 		const harness = buildRegistry(root, join(root, "guest.sock"));
@@ -779,10 +632,10 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 			await harness.registry.dispose().catch(() => undefined);
 			await daemon.stop().catch(() => undefined);
 		}
-	}, 60_000);
+	});
 
 	it("reprovisions a stopped session: same session id, new generation, shadow keeps its history", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-session-registry-test-");
 		const guestSessionId = "sess_reprovision_me";
 		const daemonOne = await startGuestDaemon(root, 1, guestSessionId);
 		const runningProcesses = new Map<string, "running" | "exited">();
@@ -800,13 +653,10 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 				{ type: "prompt", activeSessionId: record.activeSessionId!, message: "one turn before" },
 				target,
 			);
-			await waitFor(
-				() =>
-					parseSessionEntries(readFileSync(record.shadowSessionFile!, "utf8")).some((entry) =>
-						JSON.stringify(entry).includes("before reprovision"),
-					),
-				20_000,
-				"pre-reprovision mirror",
+			await waitFor(() =>
+				parseSessionEntries(readFileSync(record.shadowSessionFile!, "utf8")).some((entry) =>
+					JSON.stringify(entry).includes("before reprovision"),
+				),
 			);
 			const beforeEntries = parseSessionEntries(readFileSync(record.shadowSessionFile!, "utf8"));
 
@@ -828,10 +678,8 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 				const after = harness.store.get(info.sessionId)!;
 				expect(after.observedLifecycle).toBe("running");
 				// The roster row returns under the same durable session id.
-				await waitFor(
-					() => harness.registry.liveSummaries().some((summary) => summary.sessionId === info.sessionId),
-					20_000,
-					"reprovisioned roster row",
+				await waitFor(() =>
+					harness.registry.liveSummaries().some((summary) => summary.sessionId === info.sessionId),
 				);
 				// The shadow kept its history and records the generation boundary.
 				const entries = parseSessionEntries(readFileSync(after.shadowSessionFile!, "utf8"));
@@ -846,19 +694,21 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 				await harness.registry.dispose();
 			} finally {
 				await daemonTwo.stop().catch(() => undefined);
-				// Let the guest's final mirror tick drain before teardown
-				// removes its durable state.
-				await new Promise((resolve) => setTimeout(resolve, 100));
+				// A bounded turn drain lets the guest's final in-flight mirror
+				// settles land before teardown removes its durable state.
+				for (let turn = 0; turn < 10; turn++) {
+					await new Promise((resolve) => setImmediate(resolve));
+				}
 			}
 			void reprovisioned;
 		} finally {
 			await harness.registry.dispose().catch(() => undefined);
 			await daemonOne.stop().catch(() => undefined);
 		}
-	}, 90_000);
+	});
 
 	it("preserves the canonical provider-qualified model from supervisor create through the record and guest open, across reprovision", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-session-registry-test-");
 		seedPrimeInferenceGuestAuth(root);
 		// The public catalog background refresh may fetch unauthenticated and
 		// best-effort; the private route itself must resolve from the seeded
@@ -904,8 +754,6 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 				() =>
 					openSessionSubmits(harness.transport).length === 1 &&
 					daemonOne?.rootSession?.model?.id === "internal/glm-5.3-fast",
-				30_000,
-				"guest open applies the canonical model",
 			);
 			expect(openSessionSubmits(harness.transport)[0].model).toBe("prime-inference/internal/glm-5.3-fast");
 			expect(daemonOne?.rootSession?.model).toMatchObject({
@@ -933,8 +781,6 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 				() =>
 					openSessionSubmits(harness.transport).length === 2 &&
 					daemonTwo?.rootSession?.model?.id === "internal/glm-5.3-fast",
-				30_000,
-				"reprovisioned guest re-applies the canonical model",
 			);
 			expect(openSessionSubmits(harness.transport)[1].model).toBe("prime-inference/internal/glm-5.3-fast");
 			expect(daemonTwo?.rootSession?.model).toMatchObject({
@@ -955,63 +801,8 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 			await daemonOne?.stop().catch(() => undefined);
 			await daemonTwo?.stop().catch(() => undefined);
 		}
-	}, 120_000);
+	});
 });
-
-/**
- * Stored Prime Inference credential plus a fresh private-entitlement cache
- * entry for `internal/glm-5.3-fast`, so the guest resolves the private route
- * from the cache exactly like a sandbox that already refreshed its team
- * entitlements - no network, no paid tokens.
- */
-function seedPrimeInferenceGuestAuth(root: string): void {
-	const agentDir = join(root, "guest-agent");
-	mkdirSync(agentDir, { recursive: true });
-	writeFileSync(
-		join(agentDir, "auth.json"),
-		`${JSON.stringify(
-			{
-				"prime-inference": {
-					type: "api_key",
-					key: "prime-key",
-					primeTeam: { teamId: "engineering-team", name: "Prime Engineering" },
-				},
-			},
-			null,
-			2,
-		)}\n`,
-		{ mode: 0o600 },
-	);
-	// The registry caches authorized private routes per credential+team
-	// fingerprint next to models.json (never the token, never re-derivable).
-	const fingerprint = createHash("sha256").update("prime-key").update("\0").update("engineering-team").digest("hex");
-	writeFileSync(
-		join(agentDir, "prime-inference-private-models.json"),
-		`${JSON.stringify({
-			fingerprint,
-			data: [
-				{
-					id: "internal/glm-5.3-fast",
-					display_name: "GLM 5.3 Fast",
-					pricing: {
-						input_usd_per_mtok: 0,
-						output_usd_per_mtok: 0,
-						cache_read_usd_per_mtok: 0,
-						cache_write_usd_per_mtok: 0,
-					},
-					specs: {
-						context_window: 400_000,
-						max_output_tokens: 131_072,
-						modalities: { input: ["text"], output: ["text"] },
-						supports_reasoning: true,
-					},
-				},
-			],
-			refreshedAt: Date.now(),
-		})}\n`,
-		{ mode: 0o600 },
-	);
-}
 
 /** A resolvable model for the summary the supervisor conversion serializes. */
 function modelFixture(provider: string, id: string): Model<Api> {
@@ -1075,7 +866,7 @@ function supervisorForRegistry(registry: CloudSessionRegistry, summary: Record<s
 }
 
 /** Every open_session request the supervisor side submitted to the guest. */
-function openSessionSubmits(transport: SocketTunnelTransport): Array<{ model?: string }> {
+function openSessionSubmits(transport: RecordingTunnelTransport): Array<{ model?: string }> {
 	return transport.sentFrames
 		.map((frame) => JSON.parse(frame) as { type?: string; request?: { kind?: string; model?: string } })
 		.filter((frame) => frame.type === "submit" && frame.request?.kind === "open_session")
@@ -1131,28 +922,43 @@ async function driveGuestTurnDirect(
 			generation: 1,
 			clientId: "gap_driver",
 			sessionId,
-			authToken: BRIDGE_TOKEN,
+			authToken: CLOUD_TEST_BRIDGE_TOKEN,
 		})}\n`,
 	);
+	// Subscribe immediately: the tail-resumed snapshot replays from zero, so
+	// frames arrive on data events. Live pushes then carry the command
+	// receipt and the mirrored session entry - data-driven, never a clock.
+	socket.write(`${JSON.stringify({ type: "subscribe", sessionId, cursor: { generation: 1, sequence: 0 } })}\n`);
+	await waitFor(() => frames.length > 0);
 	const request = { kind: "prompt", text: `say: ${text}` } as const;
+	const commandId = `gap_${text.replace(/\s+/g, "_")}`;
 	socket.write(
 		`${JSON.stringify({
 			type: "submit",
 			sessionId,
 			generation: 1,
-			commandId: `gap_${text.replace(/\s+/g, "_")}`,
+			commandId,
 			request,
 			digest: cloudRequestDigest(request),
 		})}\n`,
 	);
-	const deadline = Date.now() + 20_000;
-	while (Date.now() < deadline) {
-		await new Promise((resolve) => setTimeout(resolve, 50));
-		if (frames.some((event) => event.kind === "session_entry" && JSON.stringify(event.entry).includes(text))) {
-			break;
-		}
+	// The subscribed push stream carries the prompt's terminal state, then the
+	// mirror's session entry for it; both arrive as socket data events.
+	await waitFor(() =>
+		frames.some(
+			(event) =>
+				event.kind === "command_state" &&
+				(event.receipt as { commandId?: string }).commandId === commandId &&
+				(event.receipt as { state?: string }).state === "completed",
+		),
+	);
+	await waitFor(() =>
+		frames.some((event) => event.kind === "session_entry" && JSON.stringify(event.entry).includes(text)),
+	);
+	// A bounded turn drain lets the acks flush before the socket is torn down.
+	for (let turn = 0; turn < 10; turn++) {
+		await new Promise((resolve) => setImmediate(resolve));
 	}
-	await new Promise((resolve) => setTimeout(resolve, 300));
 	socket.destroy();
 	await closed;
 }

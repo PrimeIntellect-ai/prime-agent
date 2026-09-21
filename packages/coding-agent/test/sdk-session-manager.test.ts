@@ -1,10 +1,14 @@
-import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getModel } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createExtensionRuntime } from "../src/core/extensions/loader.js";
+import type { ResourceLoader } from "../src/core/resource-loader.js";
 import { createAgentSession } from "../src/core/sdk.js";
 import { SessionManager } from "../src/core/session-manager.js";
+import type { Skill } from "../src/core/skills.js";
+import { createSyntheticSourceInfo } from "../src/core/source-info.js";
 
 describe("createAgentSession session manager defaults", () => {
 	let tempDir: string;
@@ -92,4 +96,65 @@ describe("createAgentSession session manager defaults", () => {
 
 		session.dispose();
 	}, 120_000);
+
+	describe("createAgentSession skills option wiring", () => {
+		const stubLoader = (skills: Skill[]): ResourceLoader => ({
+			getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
+			getSkills: () => ({ skills, diagnostics: [] }),
+			getPrompts: () => ({ prompts: [], diagnostics: [] }),
+			getThemes: () => ({ themes: [], diagnostics: [] }),
+			getAgentsFiles: () => ({ agentsFiles: [] }),
+			getSystemPrompt: () => undefined,
+			getAppendSystemPrompt: () => [],
+			extendResources: () => {},
+			reload: async () => {},
+		});
+
+		it("discovers skills from agentDir by default", async () => {
+			const skillDir = join(agentDir, "skills", "test-skill");
+			mkdirSync(skillDir, { recursive: true });
+			writeFileSync(
+				join(skillDir, "SKILL.md"),
+				"---\nname: test-skill\ndescription: A test skill for SDK tests.\n---\n\n# Test Skill\n",
+			);
+
+			const { session } = await createAgentSession({
+				cwd: agentDir,
+				agentDir,
+				sessionManager: SessionManager.inMemory(),
+			});
+
+			expect(session.resourceLoader.getSkills().skills.some((s) => s.name === "test-skill")).toBe(true);
+			session.dispose();
+		});
+
+		it.each([
+			["no skills (--no-skills)", [] as Skill[]],
+			[
+				"skills supplied by the loader",
+				[
+					{
+						name: "custom-skill",
+						description: "A custom skill",
+						filePath: "/fake/path/SKILL.md",
+						baseDir: "/fake/path",
+						sourceInfo: createSyntheticSourceInfo("/fake/path/SKILL.md", { source: "sdk" }),
+						disableModelInvocation: false,
+						kind: "markdown" as const,
+					},
+				] as Skill[],
+			],
+		])("passes through an explicit resource loader with %s", async (_label, skills) => {
+			const { session } = await createAgentSession({
+				cwd: agentDir,
+				agentDir,
+				sessionManager: SessionManager.inMemory(),
+				resourceLoader: stubLoader(skills),
+			});
+
+			expect(session.resourceLoader.getSkills().skills).toEqual(skills);
+			expect(session.resourceLoader.getSkills().diagnostics).toEqual([]);
+			session.dispose();
+		});
+	});
 });

@@ -145,7 +145,7 @@ export interface ExtensionUIContext {
 	 */
 	setWorkingIndicator(options?: WorkingIndicatorOptions): void;
 
-	/** Set the label shown for hidden thinking blocks. Call with no argument to restore default. */
+	/** @deprecated No effect: thinking is displayed without a heading. Retained for existing extension/daemon callers. */
 	setHiddenThinkingLabel(label?: string): void;
 
 	/** Set a widget to display above or below the editor. Accepts string array or component factory. */
@@ -308,6 +308,18 @@ export interface ExtensionContext {
 	compact(options?: CompactOptions): void;
 	/** Get the current effective system prompt. */
 	getSystemPrompt(): string;
+	/**
+	 * Schedule a callback on a host-owned timer. Unlike the global `setTimeout`, thrown
+	 * errors are reported through the extension error boundary instead of crashing the
+	 * process, and pending timers are cancelled when the extension host unloads.
+	 */
+	setTimeout(callback: () => void | Promise<void>, ms: number): ReturnType<typeof setTimeout>;
+	/** Cancel a timer created with `ctx.setTimeout`. Accepts undefined like the global `clearTimeout`. */
+	clearTimeout(handle: ReturnType<typeof setTimeout> | undefined): void;
+	/** Schedule a repeating callback on a host-owned timer. Same guarantees as `ctx.setTimeout`. */
+	setInterval(callback: () => void | Promise<void>, ms: number): ReturnType<typeof setInterval>;
+	/** Cancel a timer created with `ctx.setInterval`. Accepts undefined like the global `clearInterval`. */
+	clearInterval(handle: ReturnType<typeof setInterval> | undefined): void;
 }
 
 /**

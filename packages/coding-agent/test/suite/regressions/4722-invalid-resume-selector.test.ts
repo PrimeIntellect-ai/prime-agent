@@ -1,5 +1,4 @@
 import { join } from "node:path";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseArgs } from "../../../src/cli/args.js";
 import {
@@ -11,7 +10,15 @@ import { SessionManager } from "../../../src/core/session-manager.js";
 import { createSessionManager } from "../../../src/main.js";
 import { createHarness, type Harness } from "../harness.js";
 
-describe("ENG-4722 invalid resume selectors", () => {
+const SAVED_ID = "019e71ec-e08a-75a9-b573-aaaaaaaaaaaa";
+
+function createSavedSession(cwd: string, sessionDir: string, sessionId: string): void {
+	const session = SessionManager.create(cwd, sessionDir);
+	session.newSession({ id: sessionId });
+	session.appendSessionState({ status: "archived" });
+}
+
+describe("ENG-4722 resume selector matching", () => {
 	let harness: Harness | undefined;
 
 	afterEach(() => {
@@ -19,74 +26,52 @@ describe("ENG-4722 invalid resume selectors", () => {
 		harness = undefined;
 	});
 
-	it("rejects a mistyped session ID with the closest saved ID", async () => {
-		harness = await createHarness({ persistSession: true });
-		harness.setResponses([fauxAssistantMessage("saved")]);
-		await harness.session.prompt("persist this session");
-
-		const sessionId = harness.session.sessionId;
-		const lastCharacter = sessionId.at(-1)!;
-		const mistypedId = `${sessionId.slice(0, -1)}${lastCharacter === "0" ? "1" : "0"}`;
-		const parsed = parseArgs(["--resume", mistypedId, "do not submit this"]);
+	it.each([
+		{
+			name: "an exact normalized id beats prefix and suffix matches",
+			saved: ["abcd", "abcd1", "1abcd"],
+			selector: "AB-CD",
+			resolved: "abcd",
+		},
+		{
+			name: "the normalized suffix shown by the session list resolves",
+			saved: [SAVED_ID],
+			selector: "aaaaaaaaaaaa",
+			resolved: SAVED_ID,
+		},
+		{
+			name: "an ambiguous prefix is rejected",
+			saved: ["11111111-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "11111111-bbbb-bbbb-bbbb-bbbbbbbbbbbb"],
+			selector: "11111111",
+			error: { name: SessionSelectorAmbiguousError.name, selector: "11111111" },
+		},
+		{
+			name: "a mistyped id is rejected with the closest saved id",
+			saved: [SAVED_ID],
+			selector: `${SAVED_ID.slice(0, -1)}b`,
+			error: {
+				name: SessionSelectorNotFoundError.name,
+				selector: `${SAVED_ID.slice(0, -1)}b`,
+				suggestion: SAVED_ID,
+			},
+		},
+	])("$name", async ({ saved, selector, resolved, error }) => {
+		harness = await createHarness();
 		const sessionDir = join(harness.tempDir, "sessions");
+		for (const id of saved) createSavedSession(harness.tempDir, sessionDir, id);
+		const parsed = parseArgs(["--resume", selector, "do not submit this"]);
 
-		await expect(createSessionManager(parsed, harness.tempDir, sessionDir)).rejects.toMatchObject({
-			name: SessionSelectorNotFoundError.name,
-			selector: mistypedId,
-			suggestion: sessionId,
-		});
-		expect(parsed.resume).toBe(mistypedId);
+		const resolving = createSessionManager(parsed, harness.tempDir, sessionDir);
+
+		if (error) await expect(resolving).rejects.toMatchObject(error);
+		else expect((await resolving).getSessionId()).toBe(resolved);
+		// A rejected selector must not leak its trailing words into the first prompt.
 		expect(parsed.messages).toEqual(["do not submit this"]);
 	});
 
-	it("does not suggest tied or low-confidence session IDs", () => {
+	it("does not suggest tied or low-confidence session ids", () => {
 		expect(findClosestSessionId("abcx", [{ id: "abca1111" }, { id: "abcb2222" }])).toBeUndefined();
 		expect(findClosestSessionId("wxyz1234", [{ id: "abcdef0123456789" }])).toBeUndefined();
 		expect(findClosestSessionId("abcd", [])).toBeUndefined();
 	});
-
-	it("rejects an ambiguous saved session prefix", async () => {
-		harness = await createHarness();
-		const sessionDir = join(harness.tempDir, "sessions");
-		createSavedSession(harness.tempDir, sessionDir, "11111111-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
-		createSavedSession(harness.tempDir, sessionDir, "11111111-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
-		const parsed = parseArgs(["--resume", "11111111", "do not submit this"]);
-
-		await expect(createSessionManager(parsed, harness.tempDir, sessionDir)).rejects.toMatchObject({
-			name: SessionSelectorAmbiguousError.name,
-			selector: "11111111",
-		});
-		expect(parsed.messages).toEqual(["do not submit this"]);
-	});
-
-	it("accepts the normalized suffix displayed by the session list", async () => {
-		harness = await createHarness();
-		const sessionDir = join(harness.tempDir, "sessions");
-		const sessionId = "019e71ec-e08a-75a9-b573-aaaaaaaaaaaa";
-		createSavedSession(harness.tempDir, sessionDir, sessionId);
-		const parsed = parseArgs(["--resume", "aaaaaaaaaaaa"]);
-
-		const sessionManager = await createSessionManager(parsed, harness.tempDir, sessionDir);
-
-		expect(sessionManager.getSessionId()).toBe(sessionId);
-	});
-
-	it("prefers an exact normalized ID over prefix and suffix matches", async () => {
-		harness = await createHarness();
-		const sessionDir = join(harness.tempDir, "sessions");
-		createSavedSession(harness.tempDir, sessionDir, "abcd");
-		createSavedSession(harness.tempDir, sessionDir, "abcd1");
-		createSavedSession(harness.tempDir, sessionDir, "1abcd");
-		const parsed = parseArgs(["--resume", "AB-CD"]);
-
-		const sessionManager = await createSessionManager(parsed, harness.tempDir, sessionDir);
-
-		expect(sessionManager.getSessionId()).toBe("abcd");
-	});
 });
-
-function createSavedSession(cwd: string, sessionDir: string, sessionId: string): void {
-	const session = SessionManager.create(cwd, sessionDir);
-	session.newSession({ id: sessionId });
-	session.appendSessionState({ status: "archived" });
-}

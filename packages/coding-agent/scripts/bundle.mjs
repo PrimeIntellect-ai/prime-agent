@@ -13,7 +13,7 @@
  */
 import { chmodSync, readFileSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
@@ -31,22 +31,43 @@ try {
 
 rmSync(outdir, { recursive: true, force: true });
 
-await build({
-	entryPoints: [join(packageDir, "dist", "cli.js")],
+const result = await build({
+	entryPoints: {
+		cli: join(packageDir, "dist", "cli.js"),
+		// The Node-only lazy loader uses a variable import that esbuild cannot discover.
+		"amazon-bedrock": join(packageDir, "dist", "node", "amazon-bedrock.js"),
+	},
 	outdir,
 	bundle: true,
+	metafile: true,
 	splitting: true,
 	format: "esm",
 	platform: "node",
 	// Native or interop-sensitive packages stay external; they resolve from
 	// node_modules at runtime (and are loaded via createRequire/lazily anyway).
-	external: ["koffi", "undici", "@silvia-odwyer/photon-node", "@mariozechner/clipboard"],
+	external: [
+		"koffi",
+		"undici",
+		"@silvia-odwyer/photon-node",
+		"@mariozechner/clipboard",
+		// Preserve Node's CommonJS interop for the AWS SDK's lazy transport imports.
+		"@earendil-works/pi-ai/bedrock-provider",
+	],
 	define: { __PI_BUNDLED__: "true", __PI_BUILD_ID__: JSON.stringify(buildId) },
 	banner: {
 		js: "import { createRequire as __piBundleCreateRequire } from 'node:module'; const require = __piBundleCreateRequire(import.meta.url);",
 	},
 	logLevel: "warning",
 });
+
+const bedrockOutput = Object.entries(result.metafile.outputs).find(
+	([path]) => resolve(path) === join(outdir, "amazon-bedrock.js"),
+)?.[1];
+for (const name of ["streamBedrock", "streamSimpleBedrock"]) {
+	if (!bedrockOutput?.exports.includes(name)) {
+		throw new Error(`Bedrock bundle is missing the ${name} export`);
+	}
+}
 
 chmodSync(join(outdir, "cli.js"), 0o755);
 console.log("bundled dist/cli.js -> dist/bundle/");

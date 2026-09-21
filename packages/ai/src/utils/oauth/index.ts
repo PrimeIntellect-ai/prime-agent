@@ -16,18 +16,20 @@ export {
 	refreshGitHubCopilotToken,
 } from "./github-copilot.js";
 export { loginOpenAICodex, openaiCodexOAuthProvider, refreshOpenAICodexToken } from "./openai-codex.js";
-
 export * from "./types.js";
+export { getXaiSubscriptionModel, loginXai, refreshXaiToken, xaiOAuthProvider } from "./xai.js";
 
 import { anthropicOAuthProvider } from "./anthropic.js";
 import { githubCopilotOAuthProvider } from "./github-copilot.js";
 import { openaiCodexOAuthProvider } from "./openai-codex.js";
 import type { OAuthCredentials, OAuthProviderId, OAuthProviderInfo, OAuthProviderInterface } from "./types.js";
+import { xaiOAuthProvider } from "./xai.js";
 
 const BUILT_IN_OAUTH_PROVIDERS: OAuthProviderInterface[] = [
 	anthropicOAuthProvider,
 	githubCopilotOAuthProvider,
 	openaiCodexOAuthProvider,
+	xaiOAuthProvider,
 ];
 
 const oauthProviderRegistry = new Map<string, OAuthProviderInterface>(

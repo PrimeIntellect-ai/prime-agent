@@ -1,0 +1,1 @@
+- Fixed duplicated rows and scroll counters in the MCP service picker: multi-line catalog descriptions are flattened so a rendered line is always exactly one terminal line.
