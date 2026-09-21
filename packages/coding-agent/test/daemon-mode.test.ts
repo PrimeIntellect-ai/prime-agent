@@ -824,15 +824,18 @@ describe("daemon mode helpers", () => {
 							? 2
 							: 1
 						: 0,
-					isStreaming: false,
+					isStreaming: state.activeSessionId === "sibling",
 					isCompacting: false,
 					isBashRunning: false,
 					isRetrying: false,
-					isSessionActive: false,
+					isSessionActive: state.activeSessionId === "sibling",
 					hasAcceptedPromptInFlight: false,
 					unfinishedActionCount: 0,
 					messages: [],
-					state: { pendingToolCalls: new Set(), streamingMessage: undefined },
+					state: {
+						pendingToolCalls: new Set(state.activeSessionId === "sibling" ? ["call-1"] : []),
+						streamingMessage: undefined,
+					},
 					hasRunningRlmChildren: () => false,
 					getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
 				},
@@ -850,10 +853,12 @@ describe("daemon mode helpers", () => {
 
 		const observed = await observe.listAgents();
 		expect(observed.current.activeSessionId).toBe("child");
-		expect(observed.agents.map((agent) => [agent.relationship, agent.activeSessionId])).toEqual([
-			["parent", "root"],
-			["sibling", "sibling"],
-			["child", "grandchild"],
+		expect(
+			observed.agents.map((agent) => [agent.relationship, agent.activeSessionId, agent.status, agent.activity]),
+		).toEqual([
+			["parent", "root", "idle", "idle"],
+			["sibling", "sibling", "running", "tool"],
+			["child", "grandchild", "idle", "idle"],
 		]);
 		await expect(observe.getAgent("cousin")).rejects.toThrow(
 			"Agent reach is limited to parent, siblings, and children",
