@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import stripAnsi from "strip-ansi";
@@ -485,6 +485,9 @@ describe("runIncident over a fixture agent dir", () => {
 				"[2026-09-10T20:23:29.521Z] supervisor: Recovered worker 5b1d3aeb91ee without replaying uncertain operations: tool_execution_start, agent_end",
 			].join("\n"),
 		);
+		const decoyDir = join(agentDir, "logs", "daemon.sock.deadbeef.log");
+		mkdirSync(decoyDir);
+		utimesSync(decoyDir, new Date(Date.now() + 60_000), new Date(Date.now() + 60_000));
 		await runIncident({ since: "2026-09-10T20:00", until: "2026-09-10T20:30" });
 		const text = stripAnsi(logs.join("\n"));
 		expect(text).toContain("daemon.sock.98ed5cb2.log");

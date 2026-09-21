@@ -1219,7 +1219,14 @@ function newestDaemonLogPath(logsDir: string): string | undefined {
 		}
 		const path = join(logsDir, name);
 		try {
-			candidates.push({ path, mtimeMs: statSync(path).mtimeMs });
+			const stat = statSync(path);
+			// A directory or other non-file matching the log pattern would be
+			// picked as the fallback and then yield no entries (readFileSync
+			// fails on it), hiding older valid daemon logs.
+			if (!stat.isFile()) {
+				continue;
+			}
+			candidates.push({ path, mtimeMs: stat.mtimeMs });
 		} catch {
 			// Lost a race with log rotation or permissions; skip the candidate.
 		}
