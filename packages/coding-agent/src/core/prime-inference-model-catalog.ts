@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { existsSync, readFileSync } from "node:fs";
 import {
 	type Api,
+	getPrimeInferenceReasoningControls,
 	isPrivatePrimeInferenceModelId,
 	type Model,
 	type OpenAICompletionsCompat,
@@ -20,8 +21,8 @@ const pendingRefreshes = new Map<string, Promise<Model<"openai-completions">[] |
 const DEFAULT_COMPAT: OpenAICompletionsCompat = {
 	supportsStore: false,
 	supportsDeveloperRole: false,
-	// The endpoint does not yet describe reasoning controls. Do not send an
-	// unconfirmed reasoning_effort parameter for models without a bundled template.
+	// Routes that do not describe their reasoning controls get no unconfirmed
+	// reasoning_effort parameter; live supported_parameters drive the override.
 	supportsReasoningEffort: false,
 	maxTokensField: "max_tokens",
 	supportsStrictMode: false,
@@ -49,6 +50,15 @@ export function buildPrimeInferenceModels(
 		const contextWindow = entry.contextWindow ?? template?.contextWindow ?? 0;
 		const maxTokens = Math.min(entry.maxTokens ?? template?.maxTokens ?? 0, contextWindow);
 		const compat = structuredClone(template?.compat ?? DEFAULT_COMPAT);
+		const controls = getPrimeInferenceReasoningControls(entry);
+		if (controls) {
+			// The live catalog is authoritative for which reasoning parameters the
+			// route accepts; never emit one it does not declare.
+			compat.supportsReasoningEffort = controls.supportsReasoningEffort;
+			if (controls.thinkingFormat) compat.thinkingFormat = controls.thinkingFormat;
+			else delete compat.thinkingFormat;
+		}
+		const thinkingLevelMap = controls?.thinkingLevelMap ?? template?.thinkingLevelMap;
 		// Anthropic models cache with explicit breakpoints, not automatic
 		// server-side prefix caching; cacheControlFormat makes the provider add
 		// anthropic-style cache_control markers for these entries. The catalog
@@ -64,7 +74,7 @@ export function buildPrimeInferenceModels(
 			provider: "prime-inference",
 			baseUrl: PRIME_INFERENCE_BASE_URL,
 			reasoning: entry.reasoning ?? template?.reasoning ?? false,
-			...(template?.thinkingLevelMap ? { thinkingLevelMap: { ...template.thinkingLevelMap } } : {}),
+			...(thinkingLevelMap ? { thinkingLevelMap: { ...thinkingLevelMap } } : {}),
 			input: (entry.vision ?? template?.input.includes("image")) ? ["text", "image"] : ["text"],
 			cost: { input: entry.input, output: entry.output, ...cacheCosts(entry, template) },
 			contextWindow,

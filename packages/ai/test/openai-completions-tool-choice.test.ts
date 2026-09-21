@@ -1145,23 +1145,40 @@ describe("openai-completions tool_choice", () => {
 		expect((payload as { reasoning_effort?: unknown }).reasoning_effort).toBe("none");
 	});
 
-	it("sends no thinking parameter to Prime Inference GLM routes but keeps the z.ai toggle", async () => {
-		const context = { messages: [{ role: "user" as const, content: "Hi", timestamp: Date.now() }] };
-		const payloads = new Map<string, Record<string, unknown>>();
-		for (const model of [getModel("prime-inference", "z-ai/glm-5.3")!, getModel("zai", "glm-5.3")!]) {
-			await streamSimple(model, context, {
+	// Gateway-verified GLM shapes (2026-09-21): glm-5.3 declares reasoning_effort
+	// (low/high/max, mandatory), glm-4.7 only the reasoning object.
+	async function captureReasoningParams(model: Model<"openai-completions">, level: "off" | "high" | "medium") {
+		let payload: Record<string, unknown> | undefined;
+		await streamSimple(
+			model,
+			{ messages: [{ role: "user" as const, content: "Hi", timestamp: Date.now() }] },
+			{
 				apiKey: "test",
-				reasoning: "high",
+				reasoning: level,
 				onPayload: (params: unknown) => {
-					payloads.set(model.id, params as Record<string, unknown>);
+					payload = params as Record<string, unknown>;
 				},
-			}).result();
-		}
-		const prime = payloads.get("z-ai/glm-5.3");
-		expect(prime?.enable_thinking).toBeUndefined();
-		expect(prime?.reasoning_effort).toBeUndefined();
-		expect(prime?.reasoning).toBeUndefined();
-		expect(payloads.get("glm-5.3")?.enable_thinking).toBe(true);
+			},
+		).result();
+		return payload;
+	}
+
+	it.each([
+		{ id: "z-ai/glm-5.3", level: "high", expected: { reasoning_effort: "high" } },
+		{ id: "z-ai/glm-5.3", level: "medium", expected: { reasoning_effort: "high" } },
+		{ id: "z-ai/glm-4.7", level: "high", expected: { reasoning: { enabled: true } } },
+		{ id: "z-ai/glm-4.7", level: "off", expected: { reasoning: { enabled: false } } },
+	] as const)("sends only declared reasoning parameters to $id on $level", async ({ id, level, expected }) => {
+		const payload = await captureReasoningParams(getModel("prime-inference", id)!, level);
+		expect(payload).toMatchObject(expected);
+		expect(payload?.enable_thinking).toBeUndefined();
+		expect(payload?.reasoning_effort).toBe(expected.reasoning_effort);
+		expect((payload as { reasoning?: unknown } | undefined)?.reasoning).toEqual(expected.reasoning);
+	});
+
+	it("keeps the z.ai coding-plan toggle on enable_thinking", async () => {
+		const payload = await captureReasoningParams(getModel("zai", "glm-5.3")!, "high");
+		expect(payload?.enable_thinking).toBe(true);
 	});
 
 	it("serializes explicit off only for models that allow disabling reasoning", async () => {

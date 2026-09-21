@@ -7,6 +7,7 @@ import { getAnthropicCacheCosts } from "../src/cache-pricing.js";
 import { COPILOT_CLIENT_HEADERS } from "../src/copilot-client-version.js";
 import { getOpenRouterReasoningCapabilities } from "../src/openrouter-reasoning.js";
 import {
+	getPrimeInferenceReasoningControls,
 	isPrivatePrimeInferenceModelId,
 	parsePrimeInferenceModelCatalog,
 	type PrimeInferenceCatalogEntry,
@@ -111,13 +112,6 @@ const DEEPSEEK_V4_COMPAT: OpenAICompletionsCompat = {
 const ZAI_THINKING_COMPAT: OpenAICompletionsCompat = {
 	supportsReasoningEffort: false,
 	thinkingFormat: "zai",
-};
-
-// Prime Inference rejects `enable_thinking` on GLM routes with a 400 on every
-// request. The routes think by default, so send no thinking parameter (and no
-// reasoning_effort, whose support is unverified).
-const PRIME_INFERENCE_ZAI_COMPAT: OpenAICompletionsCompat = {
-	supportsReasoningEffort: false,
 };
 
 const PRIME_INFERENCE_BASE_URL = "https://api.pinference.ai/api/v1";
@@ -262,6 +256,10 @@ function isGemma4Model(modelId: string): boolean {
 }
 
 function applyThinkingLevelMetadata(model: Model<any>): void {
+	// Prime Inference thinking levels come from the live route catalog (or
+	// OpenRouter for routes that report no parameters); family heuristics would
+	// override route-verified values with unverified guesses.
+	if (model.provider === "prime-inference") return;
 	if (
 		(model.api === "openai-responses" || model.api === "azure-openai-responses") &&
 		model.id.startsWith("gpt-5")
@@ -455,22 +453,14 @@ function isPrimeInferenceReasoningModel(modelId: string, catalogReasoning?: bool
 	);
 }
 
-function isPrimeInferenceZaiModelId(modelId: string): boolean {
-	return modelId.toLowerCase().startsWith("z-ai/glm-");
-}
-
 function getPrimeInferenceCompat(modelId: string): OpenAICompletionsCompat {
+	// Family fallbacks for routes that do not declare supported_parameters;
+	// live catalog controls override these in createPrimeInferenceModel.
 	const id = modelId.toLowerCase();
 	if (id.includes("deepseek-v4")) {
 		return {
 			...PRIME_INFERENCE_COMPAT,
 			...DEEPSEEK_V4_COMPAT,
-		};
-	}
-	if (isPrimeInferenceZaiModelId(id)) {
-		return {
-			...PRIME_INFERENCE_COMPAT,
-			...PRIME_INFERENCE_ZAI_COMPAT,
 		};
 	}
 
@@ -594,7 +584,21 @@ function createPrimeInferenceModel(
 		entry.maxTokens ?? override?.maxTokens ?? openRouter?.maxTokens ?? PRIME_INFERENCE_DEFAULT_MAX_TOKENS,
 		contextWindow,
 	);
-	const compat = getPrimeInferenceCompat(entry.id);
+	const compat: OpenAICompletionsCompat = { ...getPrimeInferenceCompat(entry.id) };
+	const controls = getPrimeInferenceReasoningControls(entry);
+	if (controls) {
+		// The live catalog is authoritative for which reasoning parameters the
+		// route accepts; never emit one it does not declare.
+		compat.supportsReasoningEffort = controls.supportsReasoningEffort;
+		if (controls.thinkingFormat) compat.thinkingFormat = controls.thinkingFormat;
+		else delete compat.thinkingFormat;
+	} else if (openRouter?.supportsReasoningEffort === false) {
+		// No live declarations: fall back to OpenRouter metadata, whose `reasoning`
+		// object shape the gateway also accepts (live-verified 2026-09-21).
+		compat.supportsReasoningEffort = false;
+		if (!compat.thinkingFormat) compat.thinkingFormat = "openrouter";
+	}
+	const thinkingLevelMap = controls?.thinkingLevelMap ?? openRouter?.thinkingLevelMap;
 	return {
 		id: entry.id,
 		...(PRIME_INFERENCE_FEATURED_MODELS.has(entry.id.toLowerCase()) ? { featured: true } : {}),
@@ -603,7 +607,7 @@ function createPrimeInferenceModel(
 		provider: "prime-inference",
 		baseUrl: PRIME_INFERENCE_BASE_URL,
 		reasoning: isPrimeInferenceReasoningModel(entry.id, entry.reasoning ?? openRouter?.reasoning),
-		...(openRouter?.thinkingLevelMap ? { thinkingLevelMap: openRouter.thinkingLevelMap } : {}),
+		...(thinkingLevelMap ? { thinkingLevelMap: { ...thinkingLevelMap } } : {}),
 		input: vision ? ["text", "image"] : ["text"],
 		cost: {
 			input: entry.input,
@@ -612,19 +616,7 @@ function createPrimeInferenceModel(
 		},
 		contextWindow,
 		maxTokens,
-		compat: {
-			...compat,
-			...(openRouter?.supportsReasoningEffort === false
-				? {
-						supportsReasoningEffort: false,
-						// GLM routes must not receive any thinking parameter; the
-						// `reasoning` object is not verified against the gateway.
-						...(!compat.thinkingFormat && !isPrimeInferenceZaiModelId(entry.id)
-							? { thinkingFormat: "openrouter" as const }
-							: {}),
-					}
-				: {}),
-		},
+		compat,
 	};
 }
 

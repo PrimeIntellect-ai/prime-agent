@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, test } from "vitest";
 import { findEnvKeys, getEnvApiKey } from "../src/env-api-keys.js";
-import { parsePrimeInferenceModelCatalog } from "../src/prime-inference-model-catalog.js";
+import {
+	getPrimeInferenceReasoningControls,
+	parsePrimeInferenceModelCatalog,
+} from "../src/prime-inference-model-catalog.js";
 
 function response(...data: unknown[]) {
 	return { object: "list", data };
@@ -99,8 +102,72 @@ describe("Prime Inference model catalog", () => {
 		const model = { id: "duplicate", pricing: { input_usd_per_mtok: 1, output_usd_per_mtok: 2 } };
 		expect(() => parsePrimeInferenceModelCatalog(response(model, model))).toThrow(/duplicate/i);
 	});
+
+	test("parses and sanitizes live reasoning declarations", () => {
+		const [model] = parsePrimeInferenceModelCatalog(
+			response({
+				id: "z-ai/glm-5.3",
+				pricing: { input_usd_per_mtok: 1.4, output_usd_per_mtok: 4.4 },
+				supported_parameters: ["max_tokens", "reasoning", "reasoning_effort", 42, null],
+				reasoning: { supported_efforts: ["low", "high", "max", "high", null], mandatory: true },
+			}),
+		);
+		expect(model.supportedParameters).toEqual(["max_tokens", "reasoning", "reasoning_effort"]);
+		expect(model.reasoningEfforts).toEqual(["low", "high", "max"]);
+		expect(model.reasoningMandatory).toBe(true);
+	});
 });
 
+// Maps live /models reasoning metadata onto request controls. Gateway-verified
+// 2026-09-21: undeclared efforts 400; "none" disables non-mandatory routes.
+describe("getPrimeInferenceReasoningControls", () => {
+	test("maps declared route shapes onto reasoning controls", () => {
+		expect(
+			getPrimeInferenceReasoningControls({
+				supportedParameters: ["reasoning", "reasoning_effort"],
+				reasoningEfforts: ["low", "high", "max"],
+				reasoningMandatory: true,
+			}),
+		).toEqual({
+			supportsReasoningEffort: true,
+			thinkingLevelMap: {
+				off: null,
+				minimal: null,
+				low: "low",
+				medium: null,
+				high: "high",
+				xhigh: null,
+				max: "max",
+			},
+		});
+		expect(
+			getPrimeInferenceReasoningControls({
+				supportedParameters: ["reasoning", "reasoning_effort"],
+				reasoningEfforts: ["xhigh", "high"],
+			}),
+		).toEqual({
+			supportsReasoningEffort: true,
+			thinkingLevelMap: {
+				off: "none",
+				minimal: null,
+				low: null,
+				medium: null,
+				high: "high",
+				xhigh: "xhigh",
+				max: null,
+			},
+		});
+		expect(getPrimeInferenceReasoningControls({ supportedParameters: ["reasoning"] })).toEqual({
+			supportsReasoningEffort: false,
+			thinkingFormat: "openrouter",
+			thinkingLevelMap: { minimal: null, low: null, medium: null, high: "high", xhigh: null, max: null },
+		});
+		expect(getPrimeInferenceReasoningControls({ supportedParameters: ["max_tokens", "temperature"] })).toEqual({
+			supportsReasoningEffort: false,
+		});
+		expect(getPrimeInferenceReasoningControls({})).toBeUndefined();
+	});
+});
 // Folded in from prime-inference-models.test.ts: the catalog/config assertions there churned on
 // every catalog refresh; only API-key resolution is a real contract.
 describe("Prime Inference API key resolution", () => {
