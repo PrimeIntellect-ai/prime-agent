@@ -651,8 +651,7 @@ function extraUvArgsMatch(a: string[] | undefined, b: string[] | undefined): boo
 	return a.every((v, i) => v === b[i]);
 }
 
-// The marker records skills in install order, the caller list in normalized
-// path order, so compare by key instead of by index.
+// The marker lists skills in install order and the caller in path order, so compare by key, not index.
 function pythonSkillsMatch(a: BootstrapPythonSkill[] | undefined, b: readonly BootstrapPythonSkill[]): boolean {
 	const recorded = new Map((a ?? []).map((skill) => [pythonSkillKey(skill), skill]));
 	return (
