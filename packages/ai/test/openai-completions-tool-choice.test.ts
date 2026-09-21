@@ -1266,6 +1266,7 @@ describe("openai-completions tools payload", () => {
 	afterEach(() => {
 		delete process.env.CLOUDFLARE_ACCOUNT_ID;
 		delete process.env.CLOUDFLARE_GATEWAY_ID;
+		delete process.env.PRIME_TEAM_ID;
 	});
 
 	it.each([
@@ -1369,6 +1370,12 @@ describe("openai-completions tools payload", () => {
 		const clientOptions = mockState.lastClientOptions as { defaultHeaders?: Record<string, unknown> };
 		expect(clientOptions.defaultHeaders?.Authorization).toBe("Bearer upstream-token");
 		expect(clientOptions.defaultHeaders?.["cf-aig-authorization"]).toBe("Bearer cf-token");
+	});
+	it("adds no Prime Inference team header the caller did not pass", async () => {
+		process.env.PRIME_TEAM_ID = "cli-profile-team";
+		const context = { messages: [{ role: "user" as const, content: "hi", timestamp: 1 }] };
+		await streamSimple(getModel("prime-inference", "openai/gpt-5")!, context, { apiKey: "k" }).result();
+		expect(mockState.lastClientOptions).not.toHaveProperty(["defaultHeaders", "X-Prime-Team-ID"]);
 	});
 });
 
