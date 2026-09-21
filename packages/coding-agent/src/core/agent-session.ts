@@ -13622,8 +13622,8 @@ export class AgentSession {
 	 * waitForUsage.maxParks unbounded otherwise, because the park count would
 	 * start over at 1 each time. Parks recorded before the branch's last resume
 	 * entry are spent, and a park whose wake time has passed is restored without
-	 * a timer: its durable job owns the wake and the park count still bounds the
-	 * episode.
+	 * a timer when its durable job still owns the wake; with no job the
+	 * in-process timer wakes it at once.
 	 */
 	private _restoreQuotaPark(): void {
 		const branch = this.sessionManager.getBranch();
@@ -13655,15 +13655,19 @@ export class AgentSession {
 					jobId,
 				});
 			}
-			// A wake already due belongs to the durable job (the daemon delivers it,
+			// A wake already due belongs to its durable job (the daemon delivers it,
 			// or the next turn settles it): keep the park so its count still bounds
-			// the episode, and arm no timer that would race that delivery.
+			// the episode, and arm no timer that would race that delivery. With no
+			// job left (a one-shot cannot be rebuilt in the past) the in-process
+			// timer wakes the park at once.
 			const pastDue = resumeAtMs <= Date.now();
 			this._quotaPark = {
 				parkCount: entry.data.parkCount,
 				resumeAtMs,
 				...(jobId !== undefined ? { jobId } : {}),
-				...(pastDue ? { waking: true } : { timer: this._scheduleQuotaResumeTimer(resumeAtMs) }),
+				...(pastDue && jobId !== undefined
+					? { waking: true }
+					: { timer: this._scheduleQuotaResumeTimer(resumeAtMs) }),
 			};
 			return;
 		}

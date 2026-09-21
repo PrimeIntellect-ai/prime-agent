@@ -1100,8 +1100,15 @@ describe("AgentSession retry and event characterization", () => {
 		harnesses.push(restarted);
 		expect(restarted.session.isQuotaParked).toBe(true);
 
-		await wakeQuotaProbe(harness)();
-		expect(harness.session.isQuotaParked).toBe(false);
+		// Past the wake time the rebuild cannot schedule a one-shot job: the in-process timer wakes the park at once.
+		const resumed = assistantTurns(harness);
+		await harness.session.navigateTree(lastUserEntryId(harness));
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(quotaPark(restarted)!.resumeAtMs + 1);
+		await harness.session.navigateTree(parkedLeaf);
+		await resumed().finally(() => vi.useRealTimers());
+		expect([harness.session.isQuotaParked, harness.faux.state.callCount]).toEqual([false, 2]);
+		expect(quotaEntries(harness, "provider_quota_resume")[0]?.outcome).toBe("wake");
 	});
 
 	it("preserves an active goal across a quota park and resumes its continuation", async () => {
