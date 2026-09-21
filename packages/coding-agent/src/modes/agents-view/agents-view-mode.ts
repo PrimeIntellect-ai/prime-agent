@@ -35,6 +35,7 @@ import {
 	type DaemonClosingReason,
 	type DaemonCommand,
 	type DaemonResponse,
+	isSessionSummary,
 	isUnknownDaemonCommandError,
 } from "../daemon/daemon-protocol.js";
 import { DaemonControlPlaneTransportError } from "../daemon/daemon-routed-client.js";
@@ -3109,10 +3110,6 @@ function expectSessionSummary(value: unknown): SessionSummary {
 		throw new Error("Daemon returned an invalid session summary");
 	}
 	return value;
-}
-
-function isSessionSummary(value: unknown): value is SessionSummary {
-	return isRecord(value) && typeof value.id === "string" && typeof value.sessionId === "string";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

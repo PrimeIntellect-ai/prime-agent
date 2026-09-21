@@ -1270,6 +1270,26 @@ export function isDaemonCommandEnvelope(value: unknown): value is DaemonCommandE
 	);
 }
 
+export function isSessionSummary(value: unknown): value is SessionSummary {
+	if (!value || typeof value !== "object") {
+		return false;
+	}
+	const candidate = value as { id?: unknown; sessionId?: unknown; cwd?: unknown };
+	return (
+		typeof candidate.id === "string" && typeof candidate.sessionId === "string" && typeof candidate.cwd === "string"
+	);
+}
+
+export function isDaemonResponse(value: unknown): value is DaemonResponse {
+	if (!value || typeof value !== "object") {
+		return false;
+	}
+	const candidate = value as { type?: unknown; success?: unknown; command?: unknown };
+	return (
+		candidate.type === "response" && typeof candidate.success === "boolean" && typeof candidate.command === "string"
+	);
+}
+
 /**
  * Best-effort id salvage for rejected command lines, so parse failures reach
  * the sender as correlatable responses instead of client-side timeouts.

@@ -106,6 +106,7 @@ import {
 	failure,
 	isDaemonCommandEnvelope,
 	isDaemonMutatingCommand,
+	isSessionSummary,
 	salvageDaemonCommandId,
 	success,
 	UPDATE_RESTART_DRAIN_COMMANDS,
@@ -573,16 +574,6 @@ function withoutSupervisorCreateFields(command: DaemonCreateCommand): DaemonCrea
 
 function responseWithId(response: DaemonResponse, id: string | undefined): DaemonResponse {
 	return { ...response, id };
-}
-
-function isSessionSummary(value: unknown): value is SessionSummary {
-	if (!value || typeof value !== "object") {
-		return false;
-	}
-	const candidate = value as { id?: unknown; sessionId?: unknown; cwd?: unknown };
-	return (
-		typeof candidate.id === "string" && typeof candidate.sessionId === "string" && typeof candidate.cwd === "string"
-	);
 }
 
 function isDaemonWorkerDescriptor(value: unknown, socketPath: string): value is DaemonWorkerDescriptor {

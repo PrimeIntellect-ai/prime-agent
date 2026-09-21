@@ -6,13 +6,14 @@ import {
 	type DaemonClientRequestOptions,
 	DaemonSocketClosedError,
 } from "./daemon-client.js";
-import type {
-	DaemonClosingReason,
-	DaemonCommand,
-	DaemonOutbound,
-	DaemonPeerTransportTicket,
-	DaemonResponse,
-	DaemonServerCapability,
+import {
+	type DaemonClosingReason,
+	type DaemonCommand,
+	type DaemonOutbound,
+	type DaemonPeerTransportTicket,
+	type DaemonResponse,
+	type DaemonServerCapability,
+	isDaemonResponse,
 } from "./daemon-protocol.js";
 import {
 	type DaemonPeerCommand,
@@ -356,14 +357,4 @@ export class DaemonWorkerClient {
 			listener(error);
 		}
 	}
-}
-
-function isDaemonResponse(value: unknown): value is DaemonResponse {
-	if (!value || typeof value !== "object") {
-		return false;
-	}
-	const candidate = value as { type?: unknown; command?: unknown; success?: unknown };
-	return (
-		candidate.type === "response" && typeof candidate.command === "string" && typeof candidate.success === "boolean"
-	);
 }

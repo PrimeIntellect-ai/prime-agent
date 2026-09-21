@@ -18,6 +18,7 @@ import {
 	type DaemonServerCapability,
 	getDaemonCommandCompatibilities,
 	isDaemonMutatingCommand,
+	isDaemonResponse,
 	meetsDaemonCommandCompatibility,
 } from "./daemon-protocol.js";
 import type { DaemonWorkerCommand, DaemonWorkerCommandBody } from "./daemon-worker-protocol.js";
@@ -663,16 +664,6 @@ function isDaemonHello(value: unknown): value is DaemonHello {
 	}
 	const candidate = value as { type?: unknown; protocol?: unknown };
 	return candidate.type === "daemon_hello" && typeof candidate.protocol === "object" && candidate.protocol !== null;
-}
-
-function isDaemonResponse(value: unknown): value is DaemonResponse {
-	if (!value || typeof value !== "object") {
-		return false;
-	}
-	const candidate = value as { type?: unknown; success?: unknown; command?: unknown };
-	return (
-		candidate.type === "response" && typeof candidate.success === "boolean" && typeof candidate.command === "string"
-	);
 }
 
 function isDaemonRequestProgress(value: unknown): value is DaemonRequestProgress {
