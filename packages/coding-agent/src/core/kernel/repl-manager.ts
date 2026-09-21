@@ -70,6 +70,10 @@ const REPAIR_STEP_TIMEOUT_MS = 30_000;
 const MAX_HANDLED_HOST_REQUEST_IDS = 1024;
 // Cap for unattributed background output buffered between and during cells.
 const MAX_BACKGROUND_OUTPUT_CHARS = 64 * 1024;
+// Largest legit frame is an attachment display event, base64 capped at
+// MAX_ATTACHMENT_DATA_CHARS; a line that cannot complete within this ceiling is
+// corruption the protocol repair owns, not output worth buffering until OOM.
+const MAX_PROTOCOL_LINE_CHARS = 32 * 1024 * 1024;
 
 const MAX_KERNEL_STDERR_CHARS = 8 * 1024;
 const MAX_KERNEL_STDERR_LOG_BYTES = 5 * 1024 * 1024;
@@ -172,6 +176,7 @@ export class ReplKernelManager {
 		| "env"
 		| "sessionId"
 		| "hostHandlers"
+		| "onBackgroundWorkSettled"
 		| "pythonSkills"
 		| "snapshot"
 		| "bootstrapCode"
@@ -230,6 +235,7 @@ export class ReplKernelManager {
 			env: options.env,
 			sessionId: options.sessionId,
 			hostHandlers: options.hostHandlers,
+			onBackgroundWorkSettled: options.onBackgroundWorkSettled,
 			pythonSkills: options.pythonSkills,
 			snapshot: options.snapshot,
 			bootstrapCode: options.bootstrapCode,
@@ -389,9 +395,18 @@ export class ReplKernelManager {
 	private wireChild(child: ChildProcess): void {
 		const decoder = new StringDecoder("utf8");
 		let buffered = "";
+		// A poisoned child's residue must not grow the buffer again before the
+		// protocol repair kills it.
+		let poisoned = false;
 		child.stdout?.on("data", (buf: Buffer) => {
-			if (this.child !== child) return;
+			if (this.child !== child || poisoned) return;
 			buffered += decoder.write(buf);
+			if (buffered.length > MAX_PROTOCOL_LINE_CHARS) {
+				poisoned = true;
+				buffered = "";
+				this.failProtocolFrame(child, `oversized protocol line: exceeds ${MAX_PROTOCOL_LINE_CHARS} chars`);
+				return;
+			}
 			let newline = buffered.indexOf("\n");
 			while (newline !== -1) {
 				if (this.child !== child) return;
@@ -805,6 +820,17 @@ export class ReplKernelManager {
 					}
 				} else if (this.backgroundBashHandles.get(activity.id) === activity.pid) {
 					this.backgroundBashHandles.delete(activity.id);
+					if (this.backgroundBashHandles.size === 0) {
+						// The last live handle settled: the completion notice for it
+						// is already admitted, so owed continuations may resume. A
+						// host callback failure must not break the event path.
+						try {
+							this.options.onBackgroundWorkSettled?.();
+						} catch (error) {
+							// The settlement already happened on the map.
+							this.appendKernelDiagnostic(`background work settled callback failed: ${errorMessage(error)}`);
+						}
+					}
 				}
 			}
 			return;
@@ -851,6 +877,9 @@ export class ReplKernelManager {
 						execution.stdout = execution.stdout.slice(0, execution.maxChars);
 						execution.stdoutTruncated = true;
 					}
+				} else if (text.length > 0) {
+					// The buffer filled exactly on an earlier frame; the dropped remainder still counts as truncation.
+					execution.stdoutTruncated = true;
 				}
 			} else {
 				if (execution.stderr.length < execution.maxChars) {
@@ -859,6 +888,8 @@ export class ReplKernelManager {
 						execution.stderr = execution.stderr.slice(0, execution.maxChars);
 						execution.stderrTruncated = true;
 					}
+				} else if (text.length > 0) {
+					execution.stderrTruncated = true;
 				}
 			}
 			execution.opts.onStream?.(text, type);
@@ -1328,7 +1359,18 @@ export class ReplKernelManager {
 		this.clearSnapshotTimer();
 		this.lateSentAgentMessageHandlers.clear();
 		this.pendingDoneWaiters.clear();
-		this.backgroundBashHandles.clear();
+		// Teardown kills the handles with the kernel, so owed continuations
+		// waiting on them must hear the settlement once before it is lost. A
+		// host callback failure must not abort the kernel teardown.
+		if (this.backgroundBashHandles.size > 0) {
+			this.backgroundBashHandles.clear();
+			try {
+				this.options.onBackgroundWorkSettled?.();
+			} catch (error) {
+				// The settlement already happened on the map; teardown continues.
+				this.appendKernelDiagnostic(`background work settled callback failed: ${errorMessage(error)}`);
+			}
+		}
 		// Stale pre-teardown background output must not surface after a restart.
 		this.pendingBackgroundOutput = "";
 		this.pendingBackgroundOutputTruncated = false;
