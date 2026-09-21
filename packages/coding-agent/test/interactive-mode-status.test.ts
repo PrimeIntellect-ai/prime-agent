@@ -1,7 +1,7 @@
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
-import { beforeAll, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { emptyGoalState } from "../src/core/goals.js";
@@ -233,6 +233,8 @@ describe("InteractiveMode.renderSessionContext", () => {
 
 describe("InteractiveMode connection events", () => {
 	type ConnectionEventListener = (event: any) => Promise<void> | void;
+
+	afterEach(() => vi.useRealTimers());
 
 	function createSubscribeHarness(overrides: Record<string, any> = {}): {
 		fakeThis: Record<string, any>;
@@ -555,44 +557,40 @@ describe("InteractiveMode connection events", () => {
 
 	test("throttles session_status top bar refreshes to one per second; direct refreshes reset the window", async () => {
 		vi.useFakeTimers();
-		try {
-			const { fakeThis, emit } = createSubscribeHarness({
-				patchConnectionState: vi.fn(),
-				renderRecap: vi.fn(),
-				isInitialized: true,
-				footer: { invalidate: vi.fn() },
-				activityTracker: { handleEvent: vi.fn() },
-				updateWorkingLoaderMessage: vi.fn(),
-				updateTerminalTitle: vi.fn(),
-			});
-			Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
-			const getContextTree = vi.fn(async () => ({ totalUsage: { cost: { total: 5 } } }));
-			fakeThis.agentConnection.getContextTree = getContextTree;
+		const { fakeThis, emit } = createSubscribeHarness({
+			patchConnectionState: vi.fn(),
+			renderRecap: vi.fn(),
+			isInitialized: true,
+			footer: { invalidate: vi.fn() },
+			activityTracker: { handleEvent: vi.fn() },
+			updateWorkingLoaderMessage: vi.fn(),
+			updateTerminalTitle: vi.fn(),
+		});
+		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+		const getContextTree = vi.fn(async () => ({ totalUsage: { cost: { total: 5 } } }));
+		fakeThis.agentConnection.getContextTree = getContextTree;
 
-			await emit({ type: "session_status", recap: "working" });
-			expect(getContextTree).toHaveBeenCalledOnce();
-			await emit({ type: "session_status", recap: "still working" });
-			expect(getContextTree).toHaveBeenCalledOnce();
-			// session_info_changed routes the same throttled refresh through handleEvent's switch.
-			const handleEvent = (
-				InteractiveMode.prototype as unknown as {
-					handleEvent(this: unknown, event: unknown): Promise<void>;
-				}
-			).handleEvent;
-			await handleEvent.call(fakeThis, { type: "session_info_changed" });
-			expect(getContextTree).toHaveBeenCalledOnce();
-			vi.advanceTimersByTime(1_100);
-			await emit({ type: "session_status", recap: "done" });
-			expect(getContextTree).toHaveBeenCalledTimes(2);
-			(InteractiveMode.prototype as unknown as { refreshTopBarCost(this: unknown): void }).refreshTopBarCost.call(
-				fakeThis,
-			);
-			expect(getContextTree).toHaveBeenCalledTimes(3);
-			await emit({ type: "session_status", recap: "again" });
-			expect(getContextTree).toHaveBeenCalledTimes(3);
-		} finally {
-			vi.useRealTimers();
-		}
+		await emit({ type: "session_status", recap: "working" });
+		expect(getContextTree).toHaveBeenCalledOnce();
+		await emit({ type: "session_status", recap: "still working" });
+		expect(getContextTree).toHaveBeenCalledOnce();
+		// session_info_changed routes the same throttled refresh through handleEvent's switch.
+		const handleEvent = (
+			InteractiveMode.prototype as unknown as {
+				handleEvent(this: unknown, event: unknown): Promise<void>;
+			}
+		).handleEvent;
+		await handleEvent.call(fakeThis, { type: "session_info_changed" });
+		expect(getContextTree).toHaveBeenCalledOnce();
+		vi.advanceTimersByTime(1_100);
+		await emit({ type: "session_status", recap: "done" });
+		expect(getContextTree).toHaveBeenCalledTimes(2);
+		(InteractiveMode.prototype as unknown as { refreshTopBarCost(this: unknown): void }).refreshTopBarCost.call(
+			fakeThis,
+		);
+		expect(getContextTree).toHaveBeenCalledTimes(3);
+		await emit({ type: "session_status", recap: "again" });
+		expect(getContextTree).toHaveBeenCalledTimes(3);
 	});
 });
 

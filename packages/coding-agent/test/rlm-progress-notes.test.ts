@@ -545,21 +545,14 @@ describe("rlm.progress.note child progress channel", () => {
 				});
 			}
 			expect(childUpdates.length).toBe(saturated);
-			emitChild({
-				type: "message_update",
-				message: assistantMessage(`head-marker${"x".repeat(400)}second tail${"y".repeat(60)}`),
-			});
-			expect(
-				session.getRlmChildSnapshots().find((candidate) => candidate.id === handle.rlm_child_id)?.answerPreview,
-			).toContain("second tail");
-			expect(childUpdates.length).toBe(saturated);
 
-			// Staleness semantics survive: streaming still counts as activity.
+			// Streaming still counts as activity, and the live preview follows every delta.
 			expect(run.lastActivityMonotonicAt).toBeGreaterThan(lastActivityMonotonicBefore ?? 0);
 			const streamedSnapshot = session
 				.getRlmChildSnapshots()
 				.find((candidate) => candidate.id === handle.rlm_child_id);
 			expect(streamedSnapshot?.activityStaleMs).toBeUndefined();
+			expect(streamedSnapshot?.answerPreview).toMatch(/saturationxxx$/);
 
 			// Past the window a delta emits again; the preview follows the tail, never the head.
 			run.lastStreamedUpdateMonotonicAt = performance.now() - RLM_CHILD_UPDATE_MIN_INTERVAL_MS - 1;

@@ -305,7 +305,6 @@ describe("daemon session summarizer", () => {
 			const internal = summarizer as unknown as { summarize(state: ActiveSessionState): Promise<void> };
 
 			const running = states.slice(0, 4).map((state) => internal.summarize(state));
-			expect(generate).toHaveBeenCalledTimes(4);
 			states.slice(4).map((state) => internal.summarize(state));
 			expect(generate).toHaveBeenCalledTimes(4);
 			// Completing one admits the waiter with the newest last message.

@@ -22,6 +22,7 @@ type RosterDelta = Extract<DaemonWorkerRosterOutbound, { type: "roster_delta" }>
 const tempDirs: string[] = [];
 
 afterEach(() => {
+	vi.useRealTimers();
 	for (const directory of tempDirs.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
@@ -422,77 +423,70 @@ describe("worker roster reporter", () => {
 
 	it("flushes cron and model changes that have no session-event carrier", async () => {
 		vi.useFakeTimers();
-		try {
-			const directory = mkdtempSync(join(tmpdir(), "prime-roster-cron-flush-"));
-			tempDirs.push(directory);
-			const daemon = new AgentDaemon(join(directory, "worker.sock"), {
-				defaultSessionConfig: { agentDir: directory, cwd: directory },
-				worker: { authenticationToken: "token" },
-				createRuntime: async () => {
-					throw new Error("unexpected runtime creation");
-				},
-			} as never);
-			const state = makeState({
-				activeSessionId: "root-active",
-				sessionFile: join(directory, "sessions", "root.jsonl"),
-			});
-			Object.assign(state.runtime, { cwd: directory });
-			const internals = daemon as unknown as {
-				sessions: Map<string, ActiveSessionState>;
-				cronStore: { registerSessionArtifact(sessionId: string, artifactDir: string): boolean };
-				handleCommand(
-					client: object,
-					command: object,
-				): Promise<{ success: boolean; data?: { job?: { id: string } } }>;
-				rosterReporter: { lastComposed: Map<string, WorkerRosterEntry> };
-			};
-			internals.cronStore.registerSessionArtifact("session-root-active", join(directory, "sessions", "root"));
-			internals.sessions.set(state.activeSessionId, state);
-			const client = { id: "client", attachedActiveSessionIds: new Set<string>() };
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-cron-flush-"));
+		tempDirs.push(directory);
+		const daemon = new AgentDaemon(join(directory, "worker.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			worker: { authenticationToken: "token" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		} as never);
+		const state = makeState({
+			activeSessionId: "root-active",
+			sessionFile: join(directory, "sessions", "root.jsonl"),
+		});
+		Object.assign(state.runtime, { cwd: directory });
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			cronStore: { registerSessionArtifact(sessionId: string, artifactDir: string): boolean };
+			handleCommand(client: object, command: object): Promise<{ success: boolean; data?: { job?: { id: string } } }>;
+			rosterReporter: { lastComposed: Map<string, WorkerRosterEntry> };
+		};
+		internals.cronStore.registerSessionArtifact("session-root-active", join(directory, "sessions", "root"));
+		internals.sessions.set(state.activeSessionId, state);
+		const client = { id: "client", attachedActiveSessionIds: new Set<string>() };
 
-			const added = await internals.handleCommand(client, {
-				id: "cron-1",
-				type: "cron_add",
-				activeSessionId: "root-active",
-				schedule: "every 1h",
-				prompt: "check status",
-			});
-			expect(added.success).toBe(true);
-			await vi.advanceTimersByTimeAsync(300);
-			const agentId = "session-root-active";
-			expect(internals.rosterReporter.lastComposed.get(agentId)?.summary.hasRegisteredCronJob).toBe(true);
+		const added = await internals.handleCommand(client, {
+			id: "cron-1",
+			type: "cron_add",
+			activeSessionId: "root-active",
+			schedule: "every 1h",
+			prompt: "check status",
+		});
+		expect(added.success).toBe(true);
+		await vi.advanceTimersByTimeAsync(300);
+		const agentId = "session-root-active";
+		expect(internals.rosterReporter.lastComposed.get(agentId)?.summary.hasRegisteredCronJob).toBe(true);
 
-			const jobId = added.data?.job?.id;
-			if (!jobId) throw new Error("cron_add returned no job id");
-			await internals.handleCommand(client, {
-				id: "cron-2",
-				type: "cron_cancel",
-				activeSessionId: "root-active",
-				jobId,
-			});
-			await vi.advanceTimersByTimeAsync(300);
-			expect(internals.rosterReporter.lastComposed.get(agentId)?.summary.hasRegisteredCronJob).toBeUndefined();
+		const jobId = added.data?.job?.id;
+		if (!jobId) throw new Error("cron_add returned no job id");
+		await internals.handleCommand(client, {
+			id: "cron-2",
+			type: "cron_cancel",
+			activeSessionId: "root-active",
+			jobId,
+		});
+		await vi.advanceTimersByTimeAsync(300);
+		expect(internals.rosterReporter.lastComposed.get(agentId)?.summary.hasRegisteredCronJob).toBeUndefined();
 
-			// set_model has no session-event carrier either; its explicit flush publishes the new model.
-			const session = state.runtime.session as unknown as Record<string, unknown>;
-			session.modelRegistry = {
-				refreshAvailableModels: async () => [{ provider: "prov", id: "m2" }],
-			};
-			session.setModel = async (model: unknown) => {
-				session.model = model;
-			};
-			await internals.handleCommand(client, {
-				id: "model-1",
-				type: "set_model",
-				activeSessionId: "root-active",
-				provider: "prov",
-				modelId: "m2",
-			});
-			await vi.advanceTimersByTimeAsync(300);
-			expect(internals.rosterReporter.lastComposed.get(agentId)?.summary.model).toMatchObject({ id: "m2" });
-		} finally {
-			vi.useRealTimers();
-		}
+		// set_model has no session-event carrier either; its explicit flush publishes the new model.
+		const session = state.runtime.session as unknown as Record<string, unknown>;
+		session.modelRegistry = {
+			refreshAvailableModels: async () => [{ provider: "prov", id: "m2" }],
+		};
+		session.setModel = async (model: unknown) => {
+			session.model = model;
+		};
+		await internals.handleCommand(client, {
+			id: "model-1",
+			type: "set_model",
+			activeSessionId: "root-active",
+			provider: "prov",
+			modelId: "m2",
+		});
+		await vi.advanceTimersByTimeAsync(300);
+		expect(internals.rosterReporter.lastComposed.get(agentId)?.summary.model).toMatchObject({ id: "m2" });
 	});
 
 	it("reuses the composed entry for an unchanged session and recomposes on append", () => {
@@ -560,47 +554,39 @@ describe("worker roster reporter", () => {
 
 	it("coalesces flush triggers into a 250ms window and scopes them to the dirty session", () => {
 		vi.useFakeTimers();
-		try {
-			const { daemon, sentDeltas } = makeWorkerReporter();
-			const quiet = makeState({ activeSessionId: "quiet-active" });
-			const loud = makeState({ activeSessionId: "loud-active" });
-			daemon.sessions.set(quiet.activeSessionId, quiet).set(loud.activeSessionId, loud);
-			const statusFor = (state: ActiveSessionState) => ({
-				type: "session_status",
-				activeSessionId: state.activeSessionId,
-			});
-			const quietSummary = () => daemon.rosterReporter.lastComposed.get("session-quiet-active")?.summary.isStreaming;
+		const { daemon, sentDeltas } = makeWorkerReporter();
+		const quiet = makeState({ activeSessionId: "quiet-active" });
+		const loud = makeState({ activeSessionId: "loud-active" });
+		daemon.sessions.set(quiet.activeSessionId, quiet).set(loud.activeSessionId, loud);
+		const statusFor = (state: ActiveSessionState) => ({
+			type: "session_status",
+			activeSessionId: state.activeSessionId,
+		});
+		const quietSummary = () => daemon.rosterReporter.lastComposed.get("session-quiet-active")?.summary.isStreaming;
 
-			daemon.observeRosterEvent(loud, statusFor(loud));
-			vi.advanceTimersByTime(0);
-			expect(sentDeltas).toHaveLength(1);
-			// The burst coalesces: nothing flushes mid-window; a flush-per-trigger schedule would.
-			(loud.runtime.session as unknown as { isStreaming: boolean }).isStreaming = true;
-			daemon.observeRosterEvent(loud, statusFor(loud));
-			vi.advanceTimersByTime(100);
-			expect(sentDeltas).toHaveLength(1);
-			vi.advanceTimersByTime(150);
-			expect(sentDeltas).toHaveLength(2);
-			expect(
-				sentDeltas.at(-1)?.entries.find((entry) => entry.summary.sessionName === "name-loud-active")?.summary
-					.isStreaming,
-			).toBe(true);
+		daemon.observeRosterEvent(loud, statusFor(loud));
+		vi.advanceTimersByTime(0);
+		expect(sentDeltas).toHaveLength(1);
+		// The burst coalesces: nothing flushes mid-window; a flush-per-trigger schedule would.
+		(loud.runtime.session as unknown as { isStreaming: boolean }).isStreaming = true;
+		daemon.observeRosterEvent(loud, statusFor(loud));
+		vi.advanceTimersByTime(100);
+		expect(sentDeltas).toHaveLength(1);
+		vi.advanceTimersByTime(150);
+		expect(sentDeltas).toHaveLength(2);
+		expect(
+			sentDeltas.at(-1)?.entries.find((entry) => entry.summary.sessionName === "name-loud-active")?.summary
+				.isStreaming,
+		).toBe(true);
 
-			// quiet flips busy with no roster event of its own: loud-only triggers must not republish it.
-			(quiet.runtime.session as unknown as { isStreaming: boolean }).isStreaming = true;
-			daemon.observeRosterEvent(loud, statusFor(loud));
-			vi.advanceTimersByTime(300);
-			expect(quietSummary()).toBe(false);
-			daemon.observeRosterEvent(quiet, statusFor(quiet));
-			vi.advanceTimersByTime(300);
-			expect(quietSummary()).toBe(true);
-			(quiet.runtime.session as unknown as { isStreaming: boolean }).isStreaming = false;
-			(daemon as unknown as { scheduleRosterFlush(): void }).scheduleRosterFlush();
-			vi.advanceTimersByTime(300);
-			expect(quietSummary()).toBe(false);
-		} finally {
-			vi.useRealTimers();
-		}
+		// quiet flips busy with no roster event of its own: loud-only triggers must not republish it.
+		(quiet.runtime.session as unknown as { isStreaming: boolean }).isStreaming = true;
+		daemon.observeRosterEvent(loud, statusFor(loud));
+		vi.advanceTimersByTime(300);
+		expect(quietSummary()).toBe(false);
+		daemon.observeRosterEvent(quiet, statusFor(quiet));
+		vi.advanceTimersByTime(300);
+		expect(quietSummary()).toBe(true);
 	});
 });
 
