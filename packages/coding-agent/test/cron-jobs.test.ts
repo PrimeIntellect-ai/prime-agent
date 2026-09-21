@@ -326,6 +326,58 @@ describe("AgentCronJobStore", () => {
 		]);
 	});
 
+	it("skips file-less legacy jobs and keeps them in the legacy store", () => {
+		const root = makeTempDir(tempDirs);
+		const legacyPath = join(root, "cron-jobs.json");
+		const legacy = new AgentCronJobStore(legacyPath);
+		const migrated = legacy.create({
+			activeSessionId: "active-1",
+			sessionId: "session-1",
+			sessionFile: join(root, "sessions", "session-1.jsonl"),
+			cwd: root,
+			scheduleText: "in 1h",
+			prompt: "migrates normally",
+			now: start,
+		});
+		const fileless = legacy.createRlmHeartbeat({
+			activeSessionId: "active-2",
+			sessionId: "session-2",
+			sessionFile: "",
+			cwd: root,
+			scheduleText: "every 30s",
+			prompt: "belongs to another runtime",
+			now: start,
+		});
+
+		expect(migrateLegacyCronJobsToSessionArtifacts(legacyPath)).toBe(1);
+		expect(existsSync(legacyPath)).toBe(true);
+		const remaining = new AgentCronJobStore(legacyPath);
+		expect(remaining.list()).toEqual([expect.objectContaining({ id: fileless.id, status: "active" })]);
+		const artifacts = AgentCronJobStore.forSessionArtifacts();
+		artifacts.registerSessionArtifact("session-1", join(root, "session-artifacts", "session-1"));
+		expect(artifacts.list().map((job) => job.id)).toEqual([migrated.id]);
+	});
+
+	it("keeps every legacy job in place when all of them are file-less", () => {
+		const root = makeTempDir(tempDirs);
+		const legacyPath = join(root, "cron-jobs.json");
+		const legacy = new AgentCronJobStore(legacyPath);
+		const fileless = legacy.createRlmHeartbeat({
+			activeSessionId: "active-1",
+			sessionId: "session-1",
+			sessionFile: "",
+			cwd: root,
+			scheduleText: "every 30s",
+			prompt: "belongs to another runtime",
+			now: start,
+		});
+
+		expect(migrateLegacyCronJobsToSessionArtifacts(legacyPath)).toBe(0);
+		expect(existsSync(legacyPath)).toBe(true);
+		const remaining = new AgentCronJobStore(legacyPath);
+		expect(remaining.list()).toEqual([expect.objectContaining({ id: fileless.id, status: "active" })]);
+	});
+
 	it("keeps overdue jobs eligible for the scheduler after restart", () => {
 		const store = new AgentCronJobStore(makeStorePath(tempDirs));
 		store.create({

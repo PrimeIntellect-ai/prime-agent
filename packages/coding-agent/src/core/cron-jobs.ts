@@ -904,8 +904,20 @@ export function migrateLegacyCronJobsToSessionArtifacts(
 	if (jobs.length === 0) {
 		return 0;
 	}
-	const jobsByArtifact = new Map<string, AgentCronJob[]>();
+	// Jobs with a blank sessionFile belong to file-less sessions from other
+	// runtimes and cannot be mapped to a session artifacts directory; leave
+	// them in the legacy store untouched for their owning runtime.
+	const migratable: AgentCronJob[] = [];
+	const skipped: AgentCronJob[] = [];
 	for (const job of jobs) {
+		if (job.sessionFile.trim() === "") {
+			skipped.push(job);
+		} else {
+			migratable.push(job);
+		}
+	}
+	const jobsByArtifact = new Map<string, AgentCronJob[]>();
+	for (const job of migratable) {
 		const artifactPath = join(
 			getSessionArtifactPathForFile(resolve(job.sessionFile), job.sessionId),
 			SESSION_SCHEDULED_JOBS_FILENAME,
@@ -917,8 +929,12 @@ export function migrateLegacyCronJobsToSessionArtifacts(
 	for (const [artifactPath, artifactJobs] of jobsByArtifact) {
 		writeJobsFile(artifactPath, artifactJobs, true);
 	}
+	if (skipped.length > 0) {
+		writeJobsState(filePath, { jobs: skipped, dispatches: legacyState.dispatches });
+		return migratable.length;
+	}
 	renameSync(filePath, `${filePath}.migrated-${Date.now()}`);
-	return jobs.length;
+	return migratable.length;
 }
 
 export class AgentCronScheduler {

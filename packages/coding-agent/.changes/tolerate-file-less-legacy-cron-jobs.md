@@ -1,0 +1,1 @@
+- Fixed a daemon startup crash when legacy scheduled jobs carry a blank session file path: file-less jobs are now left in the legacy store for their owning runtime instead of failing the migration.
