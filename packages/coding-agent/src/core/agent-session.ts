@@ -1337,10 +1337,12 @@ function tailRlmAnswerPreview(message: AssistantMessage): string {
 	for (let index = message.content.length - 1; index >= 0 && collected < RLM_ANSWER_PREVIEW_TAIL_CHARS; index -= 1) {
 		const block = message.content[index];
 		if (block.type !== "text") continue;
-		tail.unshift(block.text);
-		collected += block.text.length;
+		// Only the suffix that still fits: a single growing text block is O(length).
+		const remaining = RLM_ANSWER_PREVIEW_TAIL_CHARS - collected;
+		tail.unshift(block.text.slice(-remaining));
+		collected += Math.min(block.text.length, remaining);
 	}
-	return compactRlmText(tail.join("").slice(-RLM_ANSWER_PREVIEW_TAIL_CHARS));
+	return compactRlmText(tail.join(""));
 }
 
 function waitForPromiseOrAbort<T>(
