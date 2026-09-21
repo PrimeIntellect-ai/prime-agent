@@ -1065,6 +1065,120 @@ describe("DirectCloudService Prime Tunnel bridge", () => {
 		expect(deletedTunnels).toEqual([tunnelRegistration.tunnelId]);
 	}, 10_000);
 
+	it("retries transient 503 workspace uploads on the same sandbox and succeeds (503, 503, success)", async () => {
+		const root = temp();
+		const fakes = makeFakes(root, "sandbox-upload-1");
+		const original: CloudDelegationWorkspaceTransfer = fakes.commonOptions.workspace!;
+		let uploadCalls = 0;
+		fakes.commonOptions.workspace = {
+			...original,
+			upload: async (request) => {
+				uploadCalls++;
+				if (uploadCalls <= 2) {
+					throw new PrimeSandboxError("http", "workspace upload failed with HTTP 503", { status: 503 });
+				}
+				return original.upload(request);
+			},
+		};
+		fakes.commonOptions.workspaceUploadRetry = { backoffMs: () => 0 };
+		const service = new DirectCloudService(fakes.commonOptions);
+		const started = await service.delegate({
+			activeSessionId: "",
+			parentSessionId: undefined,
+			delegationId: "sess_upload_retry",
+			cwd: join(root, "repo"),
+			prompt: "",
+			options: { resident: true, timeoutMinutes: 10 },
+		});
+		expect(started.status).toBe("running");
+		// One sandbox allocation covers the whole retried launch, and the
+		// registered tunnel stays live for the running session.
+		expect(fakes.calls.filter((call) => call.kind === "create")).toHaveLength(1);
+		expect(fakes.calls.filter((call) => call.kind === "delete-sandbox")).toHaveLength(0);
+		expect(fakes.deletedTunnels).toEqual([]);
+		expect(fakes.store.get(started.id)?.tunnelState).toBe("registered");
+		expect(fakes.calls.filter((call) => call.kind === "start")).toHaveLength(1);
+	}, 10_000);
+
+	it("releases the sandbox, tunnel, and secrets after persistent 503 uploads and marks the record terminal", async () => {
+		const root = temp();
+		const fakes = makeFakes(root, "sandbox-upload-2");
+		fakes.commonOptions.workspace = {
+			...fakes.commonOptions.workspace!,
+			upload: async () => {
+				throw new PrimeSandboxError("http", "workspace upload failed with HTTP 503", { status: 503 });
+			},
+		};
+		fakes.commonOptions.workspaceUploadRetry = { backoffMs: () => 0 };
+		const service = new DirectCloudService(fakes.commonOptions);
+		const sessionId = "sess_upload_503";
+		await expect(
+			service.delegate({
+				activeSessionId: "",
+				parentSessionId: undefined,
+				delegationId: sessionId,
+				cwd: join(root, "repo"),
+				prompt: "",
+				options: { resident: true, timeoutMinutes: 10 },
+			}),
+		).rejects.toThrow(/503/);
+		// The retry is bounded (4 attempts) and never allocates a second sandbox.
+		expect(fakes.calls.filter((call) => call.kind === "create")).toHaveLength(1);
+		// Nothing leaks: the sandbox and the tunnel registration are released,
+		// the tunnel secrets are gone, and the record is terminal.
+		expect(fakes.calls.filter((call) => call.kind === "delete-sandbox")).toHaveLength(1);
+		expect(fakes.deletedTunnels).toEqual([fakes.tunnelRegistration.tunnelId]);
+		expect(existsSync(join(root, "state", "tunnel-secrets", `${sessionId}.json`))).toBe(false);
+		const record = fakes.store.get(sessionId)!;
+		expect(record).toMatchObject({
+			cleanupState: "released",
+			observedLifecycle: "deleted",
+			desiredLifecycle: "deleted",
+			tunnelState: "released",
+		});
+		expect(record.lastError).toContain("503");
+	}, 10_000);
+
+	it("does not retry a 4xx workspace upload failure and releases the provision", async () => {
+		const root = temp();
+		const fakes = makeFakes(root, "sandbox-upload-3");
+		let uploadCalls = 0;
+		fakes.commonOptions.workspace = {
+			...fakes.commonOptions.workspace!,
+			upload: async () => {
+				uploadCalls++;
+				throw new PrimeSandboxError("http", "workspace upload rejected with HTTP 403", { status: 403 });
+			},
+		};
+		fakes.commonOptions.workspaceUploadRetry = { backoffMs: () => 0 };
+		const service = new DirectCloudService(fakes.commonOptions);
+		const sessionId = "sess_upload_403";
+		await expect(
+			service.delegate({
+				activeSessionId: "",
+				parentSessionId: undefined,
+				delegationId: sessionId,
+				cwd: join(root, "repo"),
+				prompt: "",
+				options: { resident: true, timeoutMinutes: 10 },
+			}),
+		).rejects.toThrow(/403/);
+		// Not transient: exactly one attempt, then the full rollback.
+		expect(uploadCalls).toBe(1);
+		expect(fakes.calls.filter((call) => call.kind === "create")).toHaveLength(1);
+		expect(fakes.calls.filter((call) => call.kind === "delete-sandbox")).toHaveLength(1);
+		expect(fakes.deletedTunnels).toEqual([fakes.tunnelRegistration.tunnelId]);
+		expect(existsSync(join(root, "state", "tunnel-secrets", `${sessionId}.json`))).toBe(false);
+		const record = fakes.store.get(sessionId)!;
+		expect(record).toMatchObject({
+			cleanupState: "released",
+			observedLifecycle: "deleted",
+			desiredLifecycle: "deleted",
+			tunnelState: "released",
+		});
+		expect(record.lastError).toContain("403");
+	}, 10_000);
+
 	it("steers over a live tunnel and fails clearly without one", async () => {
 		const root = temp();
 		const { commonOptions } = makeFakes(root, "sandbox-tunnel-3");

@@ -46,6 +46,7 @@ import {
 	type CloudDelegationVmProcessStartRequest,
 	type CloudDelegationVmProcessState,
 	type CloudDelegationWorkspaceTransfer,
+	type CloudWorkspaceUploadRetryPolicy,
 } from "./delegation-orchestrator.js";
 import { type CloudOutboxEvent, DurableCloudEventOutbox } from "./event-outbox.js";
 import {
@@ -145,6 +146,8 @@ export interface DirectCloudServiceOptions {
 	tunnelSecrets?: CloudTunnelSecretStore;
 	/** WebSocket transport for tunnel attachments; defaults to the real client. */
 	tunnelTransport?: CloudTunnelTransport;
+	/** Bounded retry for idempotent workspace uploads on transient platform failures. */
+	workspaceUploadRetry?: CloudWorkspaceUploadRetryPolicy;
 	monitorPollIntervalMs?: number;
 	/** Called before a cloud event acknowledgement advances. It must persist durably. */
 	traceSink?: (activeSessionId: string, cloudSessionId: string, event: CloudOutboxEvent) => void | Promise<void>;
@@ -960,6 +963,7 @@ export class DirectCloudService {
 	private readonly inferenceTeamId: string | undefined;
 	private readonly tunnels: CloudDelegationTunnelClient | undefined;
 	private readonly tunnelSecrets: CloudTunnelSecretStore;
+	private readonly workspaceUploadRetry: CloudWorkspaceUploadRetryPolicy | undefined;
 	private readonly tunnelTransport: CloudTunnelTransport;
 	private readonly recordFilter: (record: CloudSessionRecord) => boolean;
 	private readonly attachments = new Map<string, CloudTunnelAttachment>();
@@ -999,6 +1003,7 @@ export class DirectCloudService {
 		this.tunnelSecrets =
 			options.tunnelSecrets ?? new CloudTunnelSecretStore(join(options.stateDirectory, "tunnel-secrets"));
 		this.tunnelTransport = options.tunnelTransport ?? new WsTunnelTransport();
+		this.workspaceUploadRetry = options.workspaceUploadRetry;
 		this.tunnels =
 			options.tunnels ??
 			new ConcreteTunnels(
@@ -1717,7 +1722,10 @@ export class DirectCloudService {
 				...(this.tunnels === undefined ? {} : { tunnel: this.tunnels }),
 				tunnelSecrets: this.tunnelSecrets,
 			},
-			{ onProgress },
+			{
+				onProgress,
+				...(this.workspaceUploadRetry === undefined ? {} : { workspaceUploadRetry: this.workspaceUploadRetry }),
+			},
 		);
 	}
 

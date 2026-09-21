@@ -15,6 +15,7 @@ import {
 	MAX_TRANSFER_BYTES,
 	type PrimeSandbox,
 	type PrimeSandboxAuth,
+	PrimeSandboxError,
 	type PrimeSandboxGatewayOptions,
 	type PrimeSandboxStartCommand,
 	type PrimeSandboxStatus,
@@ -562,6 +563,19 @@ export interface CloudDelegationOrchestratorOptions {
 	sleepFn?: (ms: number) => Promise<void>;
 	/** Progress sink; phases are emitted in deterministic workflow order. */
 	onProgress?: (progress: CloudDelegationProgress) => void;
+	/** Bounded retry for idempotent workspace uploads on transient platform failures. */
+	workspaceUploadRetry?: CloudWorkspaceUploadRetryPolicy;
+}
+
+/** Bounded retry for the idempotent workspace-archive upload. */
+export interface CloudWorkspaceUploadRetryPolicy {
+	/** Total attempts including the first; default 4. */
+	maxAttempts?: number;
+	/**
+	 * Backoff in milliseconds before retry N (1-based); defaults to a bounded
+	 * exponential curve. Injectable so tests can zero it out.
+	 */
+	backoffMs?: (attempt: number) => number;
 }
 
 /** Result of a delegate/stop/forfeit call. */
@@ -585,6 +599,44 @@ interface TunnelGrant {
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/** Default total attempt budget for transient retries of the workspace upload. */
+const CLOUD_WORKSPACE_UPLOAD_MAX_ATTEMPTS = 4;
+/** HTTP statuses whose failure is safe to retry for an idempotent upload. */
+const TRANSIENT_UPLOAD_STATUSES: ReadonlySet<number> = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+function defaultWorkspaceUploadBackoffMs(attempt: number): number {
+	return Math.min(4_000, 250 * 2 ** (attempt - 1));
+}
+
+/**
+ * Transient workspace-upload failures only: network errors and gateway
+ * 408/425/429/5xx responses. Auth, validation, conflict, and
+ * sandbox-not-found failures surface immediately; a retry cannot help them.
+ */
+function isTransientUploadFailure(error: unknown): boolean {
+	if (!(error instanceof PrimeSandboxError)) return false;
+	if (error.code === "network") return true;
+	if (error.code === "sandbox_not_found") return false;
+	return error.status !== undefined && TRANSIENT_UPLOAD_STATUSES.has(error.status);
+}
+
+/** A sandbox that no longer exists platform-side; deleting it again succeeds. */
+function isSandboxGone(error: unknown): boolean {
+	return (
+		error instanceof PrimeSandboxError &&
+		(error.code === "sandbox_not_found" || (error.code === "http" && error.status === 404))
+	);
+}
+
+/** Errors whose failed provision was already rolled back durably. */
+const rolledBackProvisions = new WeakSet<object>();
+function markProvisionRolledBack(error: unknown): void {
+	if (typeof error === "object" && error !== null) rolledBackProvisions.add(error);
+}
+function isProvisionRolledBack(error: unknown): boolean {
+	return typeof error === "object" && error !== null && rolledBackProvisions.has(error);
 }
 
 function sameBaseline(a: CloudSessionBaseline, b: CloudSessionBaseline): boolean {
@@ -639,6 +691,8 @@ export class CloudDelegationOrchestrator {
 	private readonly maxTimeoutMinutes: number;
 	private readonly sleepFn: (ms: number) => Promise<void>;
 	private readonly onProgress: ((progress: CloudDelegationProgress) => void) | undefined;
+	private readonly uploadMaxAttempts: number;
+	private readonly uploadBackoffMs: (attempt: number) => number;
 
 	constructor(boundaries: CloudDelegationBoundaries, options: CloudDelegationOrchestratorOptions = {}) {
 		this.boundaries = boundaries;
@@ -674,6 +728,11 @@ export class CloudDelegationOrchestrator {
 		}
 		this.sleepFn = options.sleepFn ?? defaultSleep;
 		this.onProgress = options.onProgress;
+		this.uploadMaxAttempts = requirePositiveInteger(
+			options.workspaceUploadRetry?.maxAttempts ?? CLOUD_WORKSPACE_UPLOAD_MAX_ATTEMPTS,
+			"workspaceUploadRetry.maxAttempts",
+		);
+		this.uploadBackoffMs = options.workspaceUploadRetry?.backoffMs ?? defaultWorkspaceUploadBackoffMs;
 	}
 
 	/**
@@ -1010,8 +1069,11 @@ export class CloudDelegationOrchestrator {
 			flow.progress("starting", "starting the resident process");
 			await this.startResident(record, request, ready.id, secrets, tunnelGrant);
 		} catch (error) {
-			// A registered tunnel must not outlive a failed launch.
-			if (tunnelGrant !== undefined) await this.releaseTunnel(record.sessionId, tunnelGrant.registration, secrets);
+			// A registered tunnel must not outlive a failed launch; an upload
+			// failure already rolled the whole provision back.
+			if (tunnelGrant !== undefined && !isProvisionRolledBack(error)) {
+				await this.releaseTunnel(record.sessionId, tunnelGrant.registration, secrets);
+			}
 			throw error;
 		}
 		this.boundaries.store.setObservedLifecycle(sessionId, "running");
@@ -1216,14 +1278,22 @@ export class CloudDelegationOrchestrator {
 			this.boundaries.platform.getSandboxAuth(sandboxId),
 		);
 		secrets.push(auth.token);
-		await this.guarded("upload_failed", "uploading the workspace archive", sessionId, secrets, () =>
-			this.boundaries.workspace.upload({
-				sandboxId,
-				archivePath: CLOUD_GUEST_ARCHIVE_PATH,
-				manifestPath: CLOUD_GUEST_MANIFEST_PATH,
-				captured,
-			}),
-		);
+		try {
+			await this.guarded("upload_failed", "uploading the workspace archive", sessionId, secrets, () =>
+				this.retryTransientUpload(() =>
+					this.boundaries.workspace.upload({
+						sandboxId,
+						archivePath: CLOUD_GUEST_ARCHIVE_PATH,
+						manifestPath: CLOUD_GUEST_MANIFEST_PATH,
+						captured,
+					}),
+				),
+			);
+		} catch (error) {
+			// The provisioned sandbox must not outlive a failed upload: release
+			// everything durably, then surface the original error.
+			throw await this.rollbackFailedProvision(sessionId, sandboxId, secrets, error);
+		}
 		const uploads: Array<{ path: string; filename: string; content: Uint8Array }> = [
 			{
 				path: CLOUD_GUEST_BOOTSTRAP_PATH,
@@ -1254,6 +1324,83 @@ export class CloudDelegationOrchestrator {
 				),
 			);
 		}
+	}
+
+	/**
+	 * Retry an idempotent upload on transient failures only (network or
+	 * 408/425/429/5xx gateway responses); auth, validation, and conflict
+	 * failures surface on the first attempt. The sandbox is never reallocated.
+	 */
+	private async retryTransientUpload<T>(call: () => Promise<T>): Promise<T> {
+		for (let attempt = 1; ; attempt++) {
+			try {
+				return await call();
+			} catch (error) {
+				if (attempt >= this.uploadMaxAttempts || !isTransientUploadFailure(error)) throw error;
+				await this.sleepFn(this.uploadBackoffMs(attempt));
+			}
+		}
+	}
+
+	/**
+	 * Roll a failed upload back so nothing leaks: mark the launch failed
+	 * durably, release the tunnel registration and its secrets, delete the
+	 * sandbox, then rethrow the original error (annotated when cleanup itself
+	 * failed). Every step checks current state first, so a retried cleanup
+	 * converges instead of double-releasing.
+	 */
+	private async rollbackFailedProvision(
+		sessionId: string,
+		sandboxId: string,
+		secrets: readonly string[],
+		error: unknown,
+	): Promise<never> {
+		const problems: string[] = [];
+		try {
+			const current = this.requireRecord(sessionId);
+			if (current.tunnel !== undefined && current.tunnelState !== "released") {
+				try {
+					if (this.boundaries.tunnel !== undefined) {
+						await this.boundaries.tunnel.delete(current.tunnel.tunnelId);
+					}
+				} catch (tunnelError) {
+					problems.push(`tunnel release failed: ${errorMessage(tunnelError)}`);
+				}
+				try {
+					this.boundaries.store.setTunnelState(sessionId, "released");
+				} catch {
+					// Already released is the common case on a cleanup retry.
+				}
+			}
+			this.boundaries.tunnelSecrets?.delete(sessionId);
+			if (current.cleanupState !== "released") {
+				this.boundaries.store.setCleanupState(sessionId, "releasing");
+			}
+			try {
+				await this.boundaries.platform.deleteSandbox(sandboxId);
+			} catch (deleteError) {
+				if (!isSandboxGone(deleteError)) {
+					problems.push(`sandbox release failed: ${errorMessage(deleteError)}`);
+				}
+			}
+			if (problems.length === 0) {
+				this.boundaries.store.setCleanupState(sessionId, "released");
+				this.boundaries.store.setObservedLifecycle(sessionId, "deleted");
+				this.boundaries.store.setDesiredLifecycle(sessionId, "deleted");
+			}
+		} catch (stateError) {
+			problems.push(`cleanup persistence failed: ${errorMessage(stateError)}`);
+		}
+		const original = errorMessage(error);
+		const message = this.redactMessage(
+			problems.length === 0 ? original : `${original}; cleanup after the failed upload: ${problems.join("; ")}`,
+			secrets,
+		);
+		this.safeSetLastError(sessionId, message);
+		const surfaced =
+			problems.length === 0 ? error : new CloudDelegationError("upload_failed", message, { cause: error });
+		markProvisionRolledBack(surfaced);
+		throw surfaced;
 	}
 
 	private buildProcessEnv(

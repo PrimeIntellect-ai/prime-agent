@@ -1,0 +1,1 @@
+- Fixed `/cloud` leaking its sandbox when the workspace archive upload fails: transient gateway responses (408/425/429/5xx) and network errors now retry on the same sandbox, and a persistent or non-transient failure releases the sandbox, the Prime Tunnel registration, and its secrets, marking the record terminal before the error surfaces.
