@@ -889,3 +889,36 @@ class TestFilterTestControl:
         mixed = self._diff("src/lib.py", "src/lib.py") + self._diff("s.py", "tests/conftest.py")
         result = filter_test_control(mixed)
         assert "src/lib.py" in result and "conftest" not in result
+
+    def test_traditional_section_riding_kept_section_dropped(self) -> None:
+        """git apply parses traditional ---/+++ sections after a kept git-header section.
+
+        They must route through TEST_CONTROL on their own paths, not ride the
+        preceding section's attribution.
+        """
+        from scripts.evals.short_swe.verified_verifier import filter_test_control
+
+        patch = (
+            self._diff("src/keep.py", "src/keep.py")
+            + "--- a/testing/test_helpers.py\n"
+            + "+++ b/testing/test_helpers.py\n"
+            + "@@ -1,1 +1,1 @@\n"
+            + "-old\n"
+            + "+new\n"
+        )
+        result = filter_test_control(patch)
+        assert "keep.py" in result and "new" not in result
+
+    def test_traditional_section_kept_when_source_path(self) -> None:
+        from scripts.evals.short_swe.verified_verifier import filter_test_control
+
+        patch = (
+            self._diff("src/keep.py", "src/keep.py")
+            + "--- a/src/trad.py\n"
+            + "+++ b/src/trad.py\n"
+            + "@@ -1,1 +1,1 @@\n"
+            + "-old\n"
+            + "+new\n"
+        )
+        result = filter_test_control(patch)
+        assert "keep.py" in result and "new" in result

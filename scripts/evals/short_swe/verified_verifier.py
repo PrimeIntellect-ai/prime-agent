@@ -71,7 +71,7 @@ MAX_PATCH_BYTES = 16 * 1024 * 1024
 # in the verifier sandbox because the pinned test metadata is the contract.
 TEST_CONTROL = re.compile(
     r"^(?:[^/]+/)*"
-    r"(?:tests(?:/.*)?|conftest\.py|\.?pytest\.ini|tox\.ini|pyproject\.toml|setup\.cfg|"
+    r"(?:tests(?:/.*)?|testing(?:/.*)?|conftest\.py|\.?pytest\.ini|tox\.ini|pyproject\.toml|setup\.cfg|"
     r"test_[^/]*\.py|[^/]*_test\.py)$"
 )
 
@@ -127,11 +127,31 @@ def filter_test_control(raw: bytes | str) -> str:
     saw_header = False
     for line in patch.splitlines(keepends=True):
         if line.startswith("diff --git "):
+            if not saw_header and current:
+                # Content before the first header is traditional-diff preamble:
+                # git apply can still apply it, so it cannot bypass the filter.
+                raise RuntimeError(
+                    "candidate patch has content before the first diff --git header; refusing to filter",
+                )
             if current and not (TEST_CONTROL.fullmatch(a_path) or TEST_CONTROL.fullmatch(b_path)):
                 kept.extend(current)
             current = [line]
             a_path, b_path = _patch_paths(line)
             saw_header = True
+        elif line.startswith("--- ") and current:
+            # Traditional-diff header inside a section: git apply parses it as a
+            # new file patch after the preceding section, so it cannot ride along
+            # a kept section's attribution. Route it through TEST_CONTROL on its
+            # own a/b paths; a test-control traditional section is dropped.
+            if current and not (TEST_CONTROL.fullmatch(a_path) or TEST_CONTROL.fullmatch(b_path)):
+                kept.extend(current)
+            current = [line]
+            a_path = line[4:].strip().split("\t")[0]
+            a_path = a_path[2:] if a_path.startswith("a/") else a_path
+            b_path = ""
+        elif b_path == "" and line.startswith("+++ ") and current:
+            b_path = line[4:].strip().split("\t")[0]
+            b_path = b_path[2:] if b_path.startswith("b/") else b_path
         else:
             current.append(line)
     if current and not (TEST_CONTROL.fullmatch(a_path) or TEST_CONTROL.fullmatch(b_path)):
