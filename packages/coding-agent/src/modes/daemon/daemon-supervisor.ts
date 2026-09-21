@@ -2385,9 +2385,14 @@ export class DaemonSupervisor {
 			case "restart":
 				setImmediate(() => void this.shutdown(0, false, true, false, "update"));
 				return success(command.id, command.type);
-			case "shutdown":
-				setImmediate(() => void this.shutdown(0, true, false, command.force === true, "shutdown"));
+			case "shutdown": {
+				// An update-restart coordinator stops a prepared daemon with this command;
+				// attached windows need the "update" reason to recover instead of dying.
+				// Capture the reason now: a later phase change must not rewrite it.
+				const closingReason: DaemonClosingReason = this.updateRestartPhase === "prepared" ? "update" : "shutdown";
+				setImmediate(() => void this.shutdown(0, true, false, command.force === true, closingReason));
 				return success(command.id, "shutdown");
+			}
 			case "prepare_update_restart": {
 				const manifest = await this.prepareUpdateRestart();
 				return success(command.id, "prepare_update_restart", manifest);

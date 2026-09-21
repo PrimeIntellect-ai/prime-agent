@@ -298,6 +298,22 @@ describe("harness refinement", () => {
 		seed?: RefinementKind;
 	};
 	const skillFieldsFor = (kind: RefinementKind) => (kind === "skill" ? skillContract : {});
+	// Raw (unnormalized) edit shapes for apply-time validation; overrides carry the violation.
+	const editWith = (
+		action: RefinementAction,
+		kind: RefinementKind,
+		id: string,
+		overrides: Record<string, unknown> = {},
+	): RefinementProposal["edits"][number] =>
+		({
+			action,
+			kind,
+			id,
+			title: "t",
+			content: "c",
+			...skillFieldsFor(kind),
+			...overrides,
+		}) as RefinementProposal["edits"][number];
 	it.each<InvalidCase>([
 		...kinds.map(
 			(kind): InvalidCase => ({
@@ -387,6 +403,48 @@ describe("harness refinement", () => {
 			label: "a create whose title derives the base system prompt id",
 			edit: { action: "create", kind: "prompt", title: "Base System Prompt", content: "c" },
 			error: "base system prompt",
+		},
+		{
+			label: "a create with list content",
+			edit: editWith("create", "memory", "list_content", { content: ["one string"] }),
+			error: "create requires title and content to be non-empty strings",
+		},
+		{
+			label: "a create with list title",
+			edit: editWith("create", "prompt", "list_title", { title: ["t"] }),
+			error: "create requires title and content to be non-empty strings",
+		},
+		{
+			label: "an update restoring list content",
+			seed: "memory",
+			edit: editWith("update", "memory", "memory_entry", { content: ["one string"] }),
+			error: "update requires title and content to be non-empty strings",
+		},
+		{
+			label: "a create with a numeric id",
+			edit: editWith("create", "memory", "numeric_id", { id: 7 }),
+			error: "create requires id to be a non-empty string when provided",
+		},
+		{
+			label: "a skill with a list reference",
+			edit: editWith("create", "skill", "list_reference", { reference: ["bad"] }),
+			error: "create requires reference to be an object when provided",
+		},
+		{
+			label: "a create with a numeric path",
+			edit: editWith("create", "memory", "bad_path", { path: 7 }),
+			error: "create requires path to be a non-empty string when provided",
+		},
+		{
+			label: "a skill with list arguments",
+			edit: editWith("create", "skill", "list_arguments", { arguments: ["a"] }),
+			error: "create requires arguments to be an object when provided",
+		},
+		{
+			label: "an update with list metadata",
+			seed: "memory",
+			edit: editWith("update", "memory", "memory_entry", { metadata: ["m"] }),
+			error: "update requires metadata to be an object when provided",
 		},
 	])("rejects $label without mutating state", ({ seed, edit, error }) => {
 		const state = loadHarnessState(makeTempDir());
