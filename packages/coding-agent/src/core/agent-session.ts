@@ -1279,30 +1279,44 @@ export function rlmChildLabel(prompt: string): string {
 }
 
 /**
+ * Every RlmChildStableSnapshot key. `satisfies Record<keyof ..., true>` fails to
+ * compile when a key is missing or extra, so a field added to the snapshot without
+ * a compare entry is a type error, not a silently suppressed rlm_child_update.
+ */
+const RLM_CHILD_STABLE_SNAPSHOT_KEYS = Object.keys({
+	id: true,
+	parentId: true,
+	activeSessionId: true,
+	sessionName: true,
+	model: true,
+	label: true,
+	status: true,
+	durationMs: true,
+	answerPreview: true,
+	toolUseCount: true,
+	tokenCount: true,
+	recap: true,
+	sessionDir: true,
+	activity: true,
+	repliedSinceTask: true,
+	progressNote: true,
+	error: true,
+} satisfies Record<keyof RlmChildStableSnapshot, true>) as (keyof RlmChildStableSnapshot)[];
+
+/**
  * Field-level equality over RlmChildStableSnapshot. Every field is a primitive
- * except activity ({kind, toolName?}), so this decides exactly what a
- * JSON.stringify compare of the two snapshots would, without serializing.
+ * except activity ({kind, toolName?}), which is compared by value: the run
+ * assigns a fresh activity object on every streamed delta.
  */
 function rlmChildStableFieldsEqual(a: RlmChildStableSnapshot, b: RlmChildStableSnapshot): boolean {
-	return (
-		a.id === b.id &&
-		a.parentId === b.parentId &&
-		a.sessionName === b.sessionName &&
-		a.model === b.model &&
-		a.label === b.label &&
-		a.status === b.status &&
-		a.durationMs === b.durationMs &&
-		a.answerPreview === b.answerPreview &&
-		a.toolUseCount === b.toolUseCount &&
-		a.tokenCount === b.tokenCount &&
-		a.recap === b.recap &&
-		a.sessionDir === b.sessionDir &&
-		a.activity?.kind === b.activity?.kind &&
-		a.activity?.toolName === b.activity?.toolName &&
-		a.repliedSinceTask === b.repliedSinceTask &&
-		a.progressNote === b.progressNote &&
-		a.error === b.error
-	);
+	for (const key of RLM_CHILD_STABLE_SNAPSHOT_KEYS) {
+		if (key === "activity") {
+			if (a.activity?.kind !== b.activity?.kind || a.activity?.toolName !== b.activity?.toolName) return false;
+		} else if (a[key] !== b[key]) {
+			return false;
+		}
+	}
+	return true;
 }
 
 /**
@@ -11589,10 +11603,7 @@ export class AgentSession {
 		};
 	}
 
-	private _rlmChildSnapshotForRun(
-		run: RlmChildRun,
-		child = run.session ?? this._rlmChildSessions.get(run.id)?.session,
-	): RlmChildAgentSnapshot {
+	private _rlmChildStableSnapshotForRun(run: RlmChildRun, child: AgentSession | undefined): RlmChildStableSnapshot {
 		const model = child?.model ?? run.model;
 		return {
 			id: run.id,
@@ -11610,9 +11621,18 @@ export class AgentSession {
 			activity: run.activity,
 			repliedSinceTask: child?._repliedToParentSinceTask,
 			progressNote: run.progressNotes.at(-1),
+			error: run.error,
+		};
+	}
+
+	private _rlmChildSnapshotForRun(
+		run: RlmChildRun,
+		child = run.session ?? this._rlmChildSessions.get(run.id)?.session,
+	): RlmChildAgentSnapshot {
+		return {
+			...this._rlmChildStableSnapshotForRun(run, child),
 			lastActivityAt: run.lastActivityAt,
 			activityStaleMs: rlmActivityStaleMs(run.status, run.activity, run.lastActivityAt, run.lastActivityMonotonicAt),
-			error: run.error,
 		};
 	}
 
@@ -12123,28 +12143,11 @@ export class AgentSession {
 			// each — and only a detected change builds the fresh snapshot, which
 			// carries both clock fields.
 			const child = run.session ?? this._rlmChildSessions.get(run.id)?.session;
-			const model = child?.model ?? run.model;
-			const next: RlmChildStableSnapshot = {
-				id: run.id,
-				parentId: this._rlmParentNodeId,
-				sessionName: child?.sessionName ?? run.sessionName,
-				model: `${model.provider}/${model.id}`,
-				label: run.label,
-				status: run.status,
-				durationMs: run.durationMs,
-				answerPreview: run.answerPreview,
-				toolUseCount: run.toolUseCount > 0 ? run.toolUseCount : undefined,
-				tokenCount: child?._contextTokensForCurrentMessages(),
-				recap: child?.getCurrentRecap(),
-				sessionDir: run.sessionDir,
-				activity: run.activity,
-				repliedSinceTask: child?._repliedToParentSinceTask,
-				progressNote: run.progressNotes.at(-1),
-				error: run.error,
-			};
+			const next = this._rlmChildStableSnapshotForRun(run, child);
 			if (run.lastEmittedUpdate && rlmChildStableFieldsEqual(run.lastEmittedUpdate, next)) return;
+			// next holds run.activity by reference; safe because activity objects are replaced, never mutated.
 			run.lastEmittedUpdate = next;
-			this._emit({ type: "rlm_child_update", child: this._rlmChildSnapshotForRun(run) });
+			this._emit({ type: "rlm_child_update", child: this._rlmChildSnapshotForRun(run, child) });
 		};
 		run.emitUpdate = emitChildUpdate;
 		emitChildUpdate();
