@@ -908,6 +908,78 @@ function getPayloadWorkingIndicatorOptions(
 	};
 }
 
+export interface DaemonReconnectBanner {
+	message: string;
+	tone: "dim" | "warning";
+}
+
+/**
+ * One-line banner for a recovered daemon connection. When the restarted daemon
+ * is NEWER than this window's binary, say so instead of pretending the window
+ * is updated; the user restarts the window to pick up the new version. An
+ * older or unorderable daemon version is reported without the advice (restarting
+ * this window would pick up nothing).
+ */
+export function formatDaemonReconnectBanner(
+	daemonVersion: string | undefined,
+	clientVersion: string,
+): DaemonReconnectBanner {
+	if (!daemonVersion) {
+		return { message: "Daemon reconnected", tone: "dim" };
+	}
+	if (daemonVersion === clientVersion) {
+		return { message: `Daemon restarted (v${daemonVersion}) - reconnected`, tone: "dim" };
+	}
+	if (isDaemonVersionNewer(daemonVersion, clientVersion)) {
+		return {
+			message: `Daemon restarted (v${daemonVersion}), this window still runs v${clientVersion} - restart the window to pick up the update.`,
+			tone: "warning",
+		};
+	}
+	return { message: `Daemon restarted (v${daemonVersion}), this window runs v${clientVersion}.`, tone: "dim" };
+}
+
+/**
+ * Numeric version-prefix comparison ("0.9.5-beta.7" orders by 0.9.5); unparseable segments
+ * end the comparison. A numeric-equal release outranks the same version's prereleases.
+ */
+function isDaemonVersionNewer(daemonVersion: string, clientVersion: string): boolean {
+	const daemon = parseNumericVersionPrefix(daemonVersion);
+	const client = parseNumericVersionPrefix(clientVersion);
+	for (let index = 0; index < Math.max(daemon.length, client.length); index++) {
+		const difference = (daemon[index] ?? 0) - (client[index] ?? 0);
+		if (difference !== 0) {
+			return difference > 0;
+		}
+	}
+	// Semver orders a release ahead of its own prereleases ("1.2.3" > "1.2.3-beta.1"),
+	// so a numeric-equal daemon without a prerelease suffix outranks a client with one.
+	return !hasPrereleaseSuffix(daemonVersion) && hasPrereleaseSuffix(clientVersion);
+}
+
+/** The dot- and dash-separated segments of a version: "1.2.3-beta.1" -> ["1", "2", "3", "beta", "1"]. */
+function splitVersionSegments(value: string): string[] {
+	return value.split(/[.-]/);
+}
+
+/** The leading numeric segments of a version string; the first unparseable segment ends the prefix. */
+function parseNumericVersionPrefix(value: string): number[] {
+	const segments: number[] = [];
+	for (const segment of splitVersionSegments(value)) {
+		const parsed = Number(segment);
+		if (!Number.isFinite(parsed)) break;
+		segments.push(parsed);
+	}
+	return segments;
+}
+
+/** Whether a version string continues past its numeric prefix with a prerelease suffix. */
+function hasPrereleaseSuffix(version: string): boolean {
+	const segments = splitVersionSegments(version);
+	const prefixLength = parseNumericVersionPrefix(version).length;
+	return prefixLength > 0 && prefixLength < segments.length;
+}
+
 export function updateArgsIncludeSelf(args: readonly string[]): boolean {
 	let selfFlag = false;
 	let extensionsOnlyFlag = false;
@@ -1152,6 +1224,10 @@ export class InteractiveMode {
 	// wraps the active footer so custom-footer swaps reflect in both layouts
 	private footerSlot: Container;
 	private fullscreenEnabled = false;
+	// /speed state: display flag plus per-session output tok/sec tracking (see recordSpeedSample).
+	private speedDisplayEnabled = false;
+	// Accumulated output-token/duration totals; allocated on the first recorded sample.
+	private speedStats: { tokens: number; durationMs: number; samples: number } | undefined;
 	private editorContainer: Container;
 	private footer: FooterComponent;
 	private footerDataProvider: FooterDataProvider;
@@ -3305,6 +3381,10 @@ export class InteractiveMode {
 	private async rebindCurrentSession(): Promise<void> {
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
+		// Sessions are independent: a rebind (new/resume/switch) restarts tok/sec stats
+		// and clears the readout left over from the previous session.
+		this.speedStats = undefined;
+		this.footer?.setSpeedText?.(undefined);
 		void this.rosterBar?.dispose();
 		this.rosterBar = undefined;
 		if (this.localSessionHost) {
@@ -4809,8 +4889,15 @@ export class InteractiveMode {
 			this.ui.requestRender();
 
 			const model = this.getCurrentModel();
-			if (model && !model.input.includes("image")) {
-				this.showStatus("Current model does not support images; the attachment will be omitted.");
+			if (
+				model &&
+				!model.input.includes("image") &&
+				!this.settingsManager.getImageModel() &&
+				!this.settingsManager.getBlockImages()
+			) {
+				this.showStatus(
+					"Current model does not support images; set imageModel in settings.json or the turn will fail with setup guidance.",
+				);
 			}
 		} catch {
 			// Silently ignore clipboard errors (may not have permission, etc.)
@@ -4863,15 +4950,11 @@ export class InteractiveMode {
 	 * dequeue) brings it back. Marker presence in the sent text is the single
 	 * source of truth.
 	 *
-	 * Resolved against the current model: if it has no image input, attachments
-	 * are dropped here (matching the paste-time hint) rather than sent and
-	 * downgraded downstream.
+	 * Attachments always reach the session: a text-only session model is either
+	 * routed to settings.imageModel at dispatch or the turn fails there with an
+	 * actionable setup error, so nothing is silently downgraded downstream.
 	 */
 	private collectImagesFor(text: string): ImageContent[] | undefined {
-		const model = this.getCurrentModel();
-		if (model && !model.input.includes("image")) {
-			return undefined;
-		}
 		const images = collectMarkedImages(this.pastedImages, text);
 		return images.length > 0 ? images : undefined;
 	}
@@ -5424,6 +5507,17 @@ export class InteractiveMode {
 					this.setFullscreenMode(enable);
 					return;
 				}
+				if (commandName === "speed") {
+					this.editor.setText("");
+					const arg = commandArgs?.trim().toLowerCase();
+					if (arg && arg !== "on" && arg !== "off") {
+						this.showError("Usage: /speed [on|off]");
+						return;
+					}
+					const enable = arg === "on" ? true : arg === "off" ? false : !this.speedDisplayEnabled;
+					this.setSpeedDisplay(enable);
+					return;
+				}
 				if (commandName === "debug") {
 					if (commandArgs) {
 						this.editor.setText(text);
@@ -5705,10 +5799,12 @@ export class InteractiveMode {
 				} else if (event.type === "extension_ui_request") {
 					await this.handleConnectionExtensionUiRequest(event.request);
 				} else if (event.type === "connection_status") {
-					this.showStatus(
-						event.status === "connected" ? "Daemon reconnected" : "Daemon connection lost; reconnecting…",
-						event.status === "reconnecting" ? "warning" : "dim",
-					);
+					if (event.status === "connected") {
+						const banner = formatDaemonReconnectBanner(event.daemonVersion, VERSION);
+						this.showStatus(banner.message, banner.tone);
+					} else {
+						this.showStatus("Daemon connection lost; reconnecting…", "warning");
+					}
 					if (event.status === "connected") {
 						await this.refreshHeartbeatCatalog();
 					}
@@ -6127,6 +6223,7 @@ export class InteractiveMode {
 							component.setArgsComplete();
 						}
 					}
+					this.recordSpeedSample(event.message);
 					this.streamingComponent = undefined;
 					this.streamingMessage = undefined;
 					this.footer.invalidate();
@@ -7914,6 +8011,56 @@ export class InteractiveMode {
 				? `Fullscreen rendering on — wheel/pageUp scroll, ${followKey} follows output`
 				: "Fullscreen rendering off",
 		);
+	}
+
+	/** /speed on/off: toggles the footer tok/sec readout for this session. */
+	private setSpeedDisplay(enabled: boolean): void {
+		this.speedDisplayEnabled = enabled;
+		if (!enabled) {
+			this.resetSpeedStats();
+		}
+		this.footer.setSpeedEnabled(enabled);
+		this.showStatus(
+			enabled
+				? "Speed display on — footer shows output tok/s per model response and a session average"
+				: "Speed display off",
+		);
+		this.ui.requestRender();
+	}
+
+	/** Clears per-session tok/sec stats and the footer readout; keeps the display flag. */
+	private resetSpeedStats(): void {
+		this.speedStats = undefined;
+		this.footer.setSpeedText(undefined);
+	}
+
+	/**
+	 * Updates the footer tok/sec readout from a completed assistant message:
+	 * output tokens over the wall-clock span from the message timestamp (set at
+	 * provider stream start) to this message_end arrival. Timestamps keep the span
+	 * true even when buffered session events replay back-to-back on attach.
+	 * Aborted/failed responses and samples without a finite positive span or token
+	 * count are skipped: some providers only fill usage at stream end, and extension
+	 * message replacements may strip fields, so they never produce a bogus rate.
+	 */
+	private recordSpeedSample(message: AssistantMessage): void {
+		if (!this.speedDisplayEnabled || message.stopReason === "aborted" || message.stopReason === "error") {
+			return;
+		}
+		const durationMs = Date.now() - Number(message.timestamp);
+		const outputTokens = Number(message.usage?.output ?? 0);
+		if (!(durationMs > 0) || !(outputTokens > 0)) {
+			return;
+		}
+		this.speedStats ??= { tokens: 0, durationMs: 0, samples: 0 };
+		this.speedStats.tokens += outputTokens;
+		this.speedStats.durationMs += durationMs;
+		this.speedStats.samples++;
+		const formatRate = (tokensPerSecond: number): string =>
+			tokensPerSecond >= 100 ? tokensPerSecond.toFixed(0) : tokensPerSecond.toFixed(1);
+		const last = formatRate(outputTokens / (durationMs / 1000));
+		const average = formatRate(this.speedStats.tokens / (this.speedStats.durationMs / 1000));
+		this.footer.setSpeedText(this.speedStats.samples > 1 ? `${last} tok/s · avg ${average}` : `${last} tok/s`);
 	}
 
 	private toggleToolOutputExpansion(): void {
