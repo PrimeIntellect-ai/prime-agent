@@ -1,3 +1,4 @@
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import chalk from "chalk";
 import stripAnsi from "strip-ansi";
 import type { SessionUsageSummary } from "../core/usage.js";
@@ -6,10 +7,11 @@ import { formatSessionDisplayId } from "../modes/daemon/daemon-session-id.js";
 import type { SessionSummary } from "../modes/daemon/daemon-session-list.js";
 import { formatSessionAge, formatTable } from "./daemon-list-format.js";
 
-// Cap for free-text cells (recaps, diagnostics) so one long line never stretches the row.
+// Display-width cap for free-text cells (recaps, error text) so one long line
+// never stretches the row; wide glyphs count as their terminal columns.
 const MAX_CELL_CHARS = 60;
 
-// Controls that stripAnsi misses and compactCellText would not compact away.
+// C0/C1 controls that stripAnsi misses and whitespace compaction cannot remove.
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000E-\u001F\u007F-\u009F]/g;
 
 type SessionsRow = {
@@ -34,6 +36,12 @@ export function formatSessionsTable(sessions: readonly SessionSummary[], nowMs =
 		usage: formatUsageCell(summary.usage),
 	}));
 	return formatTable(["name", "status", "activity", "last heard", "error", "usage"], rows, formatSessionsCell);
+}
+
+// Names are user-provided; the display-id fallback is not. Both share the
+// free-text sanitizer.
+function sessionNameCell(summary: SessionSummary): string {
+	return compactCellText(summary.sessionName ?? formatSessionDisplayId(summary.id));
 }
 
 // Failures first, then recovering/running, then idle, then everything else.
@@ -63,10 +71,13 @@ function sessionsStatusLabel(summary: SessionSummary): string {
 }
 
 // Mirrors the agents-view status label branch by branch, minus statusLabel and
-// lastHeardFromAt (they get their own columns here). Two deliberate wording
-// drops: the heartbeat mark is just "heartbeat" (no countdown; the TUI has a
-// live next-run timer, this table does not), and the final idle fallback is
-// empty instead of "needs input" (the status column already says idle).
+// lastHeardFromAt (they get their own columns here). Deliberate drops: the
+// heartbeat mark is just "heartbeat" (no countdown; the TUI has a live
+// next-run timer, this table does not), the final idle fallback is empty
+// instead of "needs input" (the status column already says idle), and the
+// agents view's action-label/queued-count branches are skipped — the
+// supervisor `list` RPC serves roster rows whose sessionActions are an empty
+// snapshot (see RosterSessionSummary), so those branches could never fire.
 function sessionActivityDetail(summary: SessionSummary): string {
 	if (summary.statusLabel === undefined && summary.workerState !== undefined && summary.workerState !== "ready") {
 		return summary.workerState;
@@ -82,12 +93,6 @@ function sessionActivityDetail(summary: SessionSummary): string {
 	}
 	if (summary.isBashRunning === true) {
 		return "running bash";
-	}
-	if (summary.sessionActions.active) {
-		return summary.sessionActions.active.label ?? summary.sessionActions.active.kind.replaceAll("_", " ");
-	}
-	if (summary.sessionActions.queuedCount > 0) {
-		return `${summary.sessionActions.queuedCount} queued`;
 	}
 	if (summary.lifecycle === "archived") {
 		return "archived";
@@ -113,14 +118,10 @@ function sessionActivityCell(summary: SessionSummary): string {
 	return [detail, recap].filter((part) => part.length > 0).join(" · ");
 }
 
+// The supervisor `list` RPC serves roster rows, which omit summary.diagnostics
+// (see RosterSessionSummary in agent-roster.ts), so this cell can only show the
+// worker failure mark and the model fallback notice the roster actually carries.
 function sessionErrorCell(summary: SessionSummary): string {
-	const diagnostics = summary.diagnostics ?? [];
-	for (let index = diagnostics.length - 1; index >= 0; index--) {
-		const diagnostic = diagnostics[index];
-		if (diagnostic?.type === "error") {
-			return compactCellText(diagnostic.message);
-		}
-	}
 	if (summary.statusLabel === "failed" || summary.workerState === "failed") {
 		return "worker failed";
 	}
@@ -147,22 +148,15 @@ function formatTokenCount(tokens: number): string {
 	return `${(tokens / 1_000_000_000).toFixed(1)}b`;
 }
 
-// Names are user-provided: strip ANSI escapes and control characters, then
-// compact whitespace, so the cell can never add table lines or move the cursor.
-function sessionNameCell(summary: SessionSummary): string {
-	const raw = summary.sessionName ?? formatSessionDisplayId(summary.id);
-	return compactCellText(stripAnsi(raw).replace(CONTROL_CHARACTERS, ""));
-}
-
+// All free-text cells (names, recaps, error notices) share one sanitizer: strip
+// ANSI escapes and control characters, then compact whitespace, so no cell can
+// clear the screen, move the cursor, restyle later columns, or add table lines.
 function compactCellText(value: string | undefined): string {
-	return value?.replaceAll(/\s+/g, " ").trim() ?? "";
+	return (value === undefined ? "" : stripAnsi(value).replace(CONTROL_CHARACTERS, "")).replaceAll(/\s+/g, " ").trim();
 }
 
 function truncateCell(value: string, maxChars = MAX_CELL_CHARS): string {
-	if (value.length <= maxChars) {
-		return value;
-	}
-	return `${value.slice(0, maxChars - 1).trimEnd()}…`;
+	return truncateToWidth(value, maxChars, "…");
 }
 
 function formatSessionsCell(row: SessionsRow, column: keyof SessionsRow, value: string): string {

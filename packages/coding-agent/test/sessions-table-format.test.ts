@@ -9,17 +9,6 @@ const STALE_AT = "2026-05-29T11:50:00.000Z";
 const LONG_ID = "019e71ec-e08a-75a9-b573-fc10e9f8380f";
 const SPEND: SessionSummary["usage"] = { inputTokens: 1234, outputTokens: 567, cost: 0.4234 };
 const FLEET_SPEND: SessionSummary["usage"] = { inputTokens: 1_626_400_000, outputTokens: 2_100_000, cost: 382.85 };
-const DIAGNOSTICS: SessionSummary["diagnostics"] = [
-	{ type: "warning", message: "skill path missing" },
-	{ type: "error", message: "older extension error" },
-	{ type: "error", message: "bad extension config" },
-];
-
-function withActiveAction(active: SessionSummary["sessionActions"]["active"]): SessionSummary["sessionActions"] {
-	return { queuedCount: 0, steering: [], followUps: [], active };
-}
-const RUN_ACTIONS = withActiveAction({ kind: "session_command", phase: "running", label: "send to worker" });
-const PREP_ACTIONS = withActiveAction({ kind: "session_command", phase: "preparing" });
 
 // Base summary: a resident idle session last modified two hours before NOW_MS.
 const BASE: SessionSummary = {
@@ -56,7 +45,8 @@ function expectTable(sessions: SessionSummary[], expectedRows: string[][]): void
 const UNSORTED = [
 	makeSummary({ sessionName: "plain-saved", activeSessionId: undefined, rosterStatus: "inactive" }),
 	makeSummary({ sessionName: "worker", activity: "working", isStreaming: true }),
-	makeSummary({ sessionName: "crashed", workerState: "failed" }),
+	// The diagnostics entry is never served by the supervisor list RPC; the row must keep showing the worker mark.
+	makeSummary({ sessionName: "crashed", workerState: "failed", diagnostics: [{ type: "error", message: "x" }] }),
 	makeSummary({ sessionName: "sleeper", taskState: "completed" }),
 	makeSummary({ sessionName: "restarting", workerState: "recovering" }),
 ];
@@ -80,16 +70,15 @@ describe("formatSessionsTable", () => {
 		["recovering label", { statusLabel: "recovering" }, row("s", "recovering", "")],
 		["failed label", { statusLabel: "failed" }, row("s", "failed", "", "2h", "worker failed")],
 		[
-			"prefers the latest error diagnostic over the worker mark and the model notice",
-			{ workerState: "failed", modelFallbackMessage: "none", diagnostics: DIAGNOSTICS },
-			row("s", "idle", "failed", "2h", "bad extension config"),
+			"sanitized model notice",
+			{ modelFallbackMessage: "boom\u0007\u001B[31m!\u001B[39m" },
+			row("s", "idle", "", "2h", "boom!"),
 		],
-		["model notice", { modelFallbackMessage: "no model" }, row("s", "idle", "", "2h", "no model")],
 		["staleness", { activity: "working", lastHeardFromAt: STALE_AT }, row("s", "running", "classifying", "10m")],
 		["usage compact", { usage: SPEND }, row("s", "idle", "", "2h", "", "1.2k/567 $0.42")],
 		[
-			"appends the recap to the activity detail and truncates long cells",
-			{ activity: "working", isStreaming: true, isRunningTools: true, summary: "a".repeat(100) },
+			"sanitizes and truncates the recap appended to the activity detail",
+			{ activity: "working", isStreaming: true, isRunningTools: true, summary: `\u0007${"a".repeat(100)}` },
 			["s", "running", `running tools · ${"a".repeat(43)}…`, "2h", "", ""],
 		],
 		["usage fleet scale", { usage: FLEET_SPEND }, row("s", "idle", "", "2h", "", "1.6b/2.1m $382.85")],
@@ -99,9 +88,7 @@ describe("formatSessionsTable", () => {
 		["ansi in name", { sessionName: "\u001B[31mansi\u001B[39m agent" }, row("ansi agent", "idle", "")],
 		["control chars in name", { sessionName: "beep\u0007 agent" }, row("beep agent", "idle", "")],
 		["heartbeat", { hasActiveHeartbeat: true }, row("s", "idle", "heartbeat")],
-		["action label", { activity: "working", sessionActions: RUN_ACTIONS }, row("s", "running", "send to worker")],
-		["kind label", { activity: "working", sessionActions: PREP_ACTIONS }, row("s", "running", "session command")],
-		["queued actions", { sessionActions: { ...BASE.sessionActions, queuedCount: 2 } }, row("s", "idle", "2 queued")],
+		["ignores queued actions", { sessionActions: { ...BASE.sessionActions, queuedCount: 2 } }, row("s", "idle", "")],
 		["starting worker", { activity: "working", workerState: "starting" }, row("s", "running", "starting")],
 		["stopping worker", { workerState: "stopping" }, row("s", "idle", "stopping")],
 		["replied subagent", { runtimeKind: "subagent", repliedSinceTask: true }, row("s", "idle", "replied")],
@@ -111,5 +98,16 @@ describe("formatSessionsTable", () => {
 
 	it("sorts failures first, then recovering workers, then running, then idle, then the rest", () => {
 		expectTable(UNSORTED, EXPECTED_SORT);
+	});
+
+	it("measures wide-glyph cells by display width", () => {
+		const sessions = [
+			makeSummary({ sessionName: "中文" }),
+			makeSummary({ sessionName: "hello", summary: "🚀".repeat(40) }),
+		];
+		const lines = stripAnsi(formatSessionsTable(sessions)).split("\n");
+		// UTF-16 padding would misalign the CJK name; the recap cap counts display columns, pair-safe.
+		expect(lines[1]!.startsWith("中文   idle")).toBe(true);
+		expect(lines[2]!.includes(`${"🚀".repeat(29)}…`)).toBe(true);
 	});
 });
