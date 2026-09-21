@@ -178,6 +178,18 @@ describe("extensions discovery", () => {
 		if (error) expect(result.errors[0].error).toContain(error);
 	});
 
+	it("skips extensions excluded by the ignore files of the extensions directory", async () => {
+		write("kept.ts");
+		write("skipped.ts");
+		write("ignored-package/index.ts");
+		write(".gitignore", "skipped.ts\nignored-package/\n");
+
+		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+
+		expect(result.errors).toHaveLength(0);
+		expect(result.extensions.map((extension) => path.relative(extensionsDir, extension.path))).toEqual(["kept.ts"]);
+	});
+
 	it("loads explicitly configured paths outside the extensions directory", async () => {
 		const customPath = path.join(tempDir, "custom-location", "my-ext.ts");
 		fs.mkdirSync(path.dirname(customPath), { recursive: true });
