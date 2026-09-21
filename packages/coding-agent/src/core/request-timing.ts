@@ -28,7 +28,7 @@ const log = getLogger("coding-agent.request-timing");
 const REQUEST_TIMING_ENV = "PI_REQUEST_TIMING";
 
 /** Whether request timing is on. Evaluated per request so the flag can change without a restart. */
-export type RequestTimingEnabled = () => boolean;
+type RequestTimingEnabled = () => boolean;
 
 /** Truthy follows the PI_OFFLINE/PI_TIMING convention: 1/true/yes. */
 function truthyEnvFlag(value: string | undefined): boolean {
