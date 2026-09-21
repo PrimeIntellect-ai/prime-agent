@@ -5,16 +5,16 @@ import json
 import os
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT))
 
-from scripts.evals.short_swe import (  # noqa: E402
+from scripts.evals.short_swe import (
     builder,
     ci,
     cleanup,
@@ -37,17 +37,24 @@ def test_workflow_gates_and_revokes_durable_release_status() -> None:
     assert "invalidate-on-pr-change:" in workflow
     assert "invalidate-on-base-change:" in workflow
     assert "Base advanced; reapply pre-release" in workflow
-    assert "request.head_sha === pull.head.sha && request.base_sha === pull.base.sha" in workflow
+    assert (
+        "request.head_sha === pull.head.sha && request.base_sha === pull.base.sha"
+        in workflow
+    )
     assert "strict_required_status_checks_policy === true" in workflow
     assert "Behavioral Eval / pre-release approval" in workflow
     assert "[...requiredContexts].every" in workflow
     assert "const strictContexts = new Set(" in workflow
     assert ".filter(rule => rule.type === 'required_status_checks'" in workflow
     assert ".flatMap(rule => rule.parameters.required_status_checks.map" in workflow
-    assert "contains(github.event.pull_request.labels.*.name, 'pre-release')" in workflow
+    assert (
+        "contains(github.event.pull_request.labels.*.name, 'pre-release')" in workflow
+    )
     assert "const rules = await github.paginate(" in workflow
     assert "GET /repos/{owner}/{repo}/rules/branches/{branch}" in workflow
-    assert workflow.index("Mark the requested head pending") < workflow.index("Check out trusted evaluator")
+    assert workflow.index("Mark the requested head pending") < workflow.index(
+        "Check out trusted evaluator"
+    )
     assert "Behavioral Eval / pre-release" in workflow
     assert "statuses: write" in workflow
     assert "prime-agent-behavioral-skip-{0}" in workflow
@@ -68,8 +75,13 @@ def test_manifest_is_the_fixed_pinned_suite() -> None:
     assert root_concurrency <= 32
     assert manifest["backup_model"] == "internal/deepseek-v4.1-flash"
     tasksets = {item["id"]: item["tasks"] for item in manifest["tasksets"]}
-    verified_repositories = {task.rsplit("-", 1)[0] for task in tasksets["swebench-verified"]}
-    pro_repositories = {task.removeprefix("instance_").split("-", 1)[0] for task in tasksets["swebench-pro"]}
+    verified_repositories = {
+        task.rsplit("-", 1)[0] for task in tasksets["swebench-verified"]
+    }
+    pro_repositories = {
+        task.removeprefix("instance_").split("-", 1)[0]
+        for task in tasksets["swebench-pro"]
+    }
     assert len(verified_repositories) == 12
     assert len(pro_repositories) == 8
 
@@ -82,7 +94,10 @@ def test_seaborn_parser_ignores_standalone_status_words() -> None:
         "PASS_TO_PASS": json.dumps(["tests/test_old.py::test_still_works"]),
     }
     log = "FAILED\nPASSED\nPASSED tests/test_fix.py::test_fixed\nPASSED tests/test_old.py::test_still_works\n"
-    assert offline_swebench_grader.grade(config, log)[config["instance_id"]]["resolved"] is True
+    assert (
+        offline_swebench_grader.grade(config, log)[config["instance_id"]]["resolved"]
+        is True
+    )
     with pytest.raises(ValueError, match="missing 2 expected"):
         offline_swebench_grader.grade(config, "FAILED\nPASSED\n")
 
@@ -115,11 +130,15 @@ def test_offline_verified_grader_requires_all_expected_tests() -> None:
         offline_swebench_grader.grade(config, "pytest failed before collecting tests")
 
 
-def test_patch_collection_uses_trusted_base_and_keeps_all_git_states(tmp_path: Path) -> None:
+def test_patch_collection_uses_trusted_base_and_keeps_all_git_states(
+    tmp_path: Path,
+) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=repo, check=True
+    )
     subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
     subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True)
     for name in ("committed.txt", "staged.txt", "deleted.txt"):
@@ -127,7 +146,9 @@ def test_patch_collection_uses_trusted_base_and_keeps_all_git_states(tmp_path: P
     (repo / "binary.bin").write_bytes(b"base\x00")
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
-    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    base = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+    ).strip()
 
     (repo / "committed.txt").write_text("committed\n")
     subprocess.run(["git", "add", "committed.txt"], cwd=repo, check=True)
@@ -156,7 +177,9 @@ def test_patch_collection_uses_trusted_base_and_keeps_all_git_states(tmp_path: P
     assert (clone / "untracked.txt").read_text() == "untracked\n"
 
 
-def test_patch_collection_overrides_candidate_diff_prefix_config(tmp_path: Path) -> None:
+def test_patch_collection_overrides_candidate_diff_prefix_config(
+    tmp_path: Path,
+) -> None:
     """A candidate that rewrites its repo's diff prefix config must not escape the filter.
 
     git config diff.srcPrefix/diff.dstPrefix (or diff.mnemonicPrefix) in the solver
@@ -167,7 +190,9 @@ def test_patch_collection_overrides_candidate_diff_prefix_config(tmp_path: Path)
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=repo, check=True
+    )
     subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
     subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True)
     (repo / "src.py").write_text("x = 1\n")
@@ -176,7 +201,9 @@ def test_patch_collection_overrides_candidate_diff_prefix_config(tmp_path: Path)
     (tests / "test_x.py").write_text("def test_x():\n    assert 1 == 1\n")
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
-    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    base = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+    ).strip()
 
     # Candidate tampers with the test and rewrites the diff prefixes it will be
     # collected with.
@@ -184,7 +211,9 @@ def test_patch_collection_overrides_candidate_diff_prefix_config(tmp_path: Path)
     (repo / "src.py").write_text("x = 2\n")
     subprocess.run(["git", "config", "diff.srcPrefix", "i/"], cwd=repo, check=True)
     subprocess.run(["git", "config", "diff.dstPrefix", "j/"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "diff.mnemonicPrefix", "true"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "config", "diff.mnemonicPrefix", "true"], cwd=repo, check=True
+    )
     subprocess.run(["git", "config", "diff.noprefix", "true"], cwd=repo, check=True)
 
     task = tmp_path / "task/tests"
@@ -265,13 +294,18 @@ def labeled_event() -> dict:
         "pull_request": {
             "number": 2306,
             "state": "open",
-            "base": {"sha": "b" * 40, "repo": {"full_name": "PrimeIntellect-ai/prime-agent"}},
+            "base": {
+                "sha": "b" * 40,
+                "repo": {"full_name": "PrimeIntellect-ai/prime-agent"},
+            },
             "head": {"sha": "c" * 40, "repo": {"full_name": "contributor/prime-agent"}},
         },
     }
 
 
-def test_task_runtime_credentials_are_removed_before_sandbox_creation(tmp_path: Path) -> None:
+def test_task_runtime_credentials_are_removed_before_sandbox_creation(
+    tmp_path: Path,
+) -> None:
     harbor = tmp_path / "verifiers/v1/tasksets/harbor/taskset.py"
     harbor.parent.mkdir(parents=True)
     harbor.write_text(
@@ -284,14 +318,22 @@ def test_task_runtime_credentials_are_removed_before_sandbox_creation(tmp_path: 
     task.data = SimpleNamespace(
         env={
             name: "secret"
-            for name in ("PRIME_API_KEY", "PRIME_SANDBOX_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "HF_TOKEN")
+            for name in (
+                "PRIME_API_KEY",
+                "PRIME_SANDBOX_API_KEY",
+                "GITHUB_TOKEN",
+                "GH_TOKEN",
+                "HF_TOKEN",
+            )
         }
         | {"SAFE": "value"}
     )
     assert task.runtime_env() == {"SAFE": "value"}
 
 
-def test_ci_resolves_only_exact_label(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ci_resolves_only_exact_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     event = tmp_path / "event.json"
     event.write_text(json.dumps(labeled_event()))
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
@@ -311,7 +353,9 @@ def test_ci_resolves_only_exact_label(tmp_path: Path, monkeypatch: pytest.Monkey
 
 
 def fake_trace(*, ok: bool = True, timeout: bool = False):
-    usage = SimpleNamespace(prompt_tokens=11, cached_input_tokens=7, completion_tokens=5)
+    usage = SimpleNamespace(
+        prompt_tokens=11, cached_input_tokens=7, completion_tokens=5
+    )
     phases = {
         name: SimpleNamespace(start=1.0, end=2.0, duration=1.0)
         for name in ("boot", "setup", "agent", "finalize", "scoring")
@@ -346,32 +390,50 @@ def fake_trace(*, ok: bool = True, timeout: bool = False):
 
 def test_terminal_5xx_tolerates_retried_rate_limits() -> None:
     outage = SimpleNamespace(type="ProviderError", status_code=503, message="")
-    rate_limit = SimpleNamespace(type="ProviderError", status_code=429, message="rate limited")
+    rate_limit = SimpleNamespace(
+        type="ProviderError", status_code=429, message="rate limited"
+    )
     trace = fake_trace(ok=False, timeout=True)
     trace.rewards = {}
     trace.reward = 0.0
     trace.errors = [outage]
     trace.calls = [
-        SimpleNamespace(error=rate_limit, node=0, usage=None, model="internal/glm-5.3-fast"),
-        SimpleNamespace(error=outage, node=0, usage=None, model="internal/glm-5.3-fast"),
+        SimpleNamespace(
+            error=rate_limit, node=0, usage=None, model="internal/glm-5.3-fast"
+        ),
+        SimpleNamespace(
+            error=outage, node=0, usage=None, model="internal/glm-5.3-fast"
+        ),
     ]
-    record = evaluate.trace_record(SimpleNamespace(traces=[trace], errors=[], ok=False), "suite")
+    record = evaluate.trace_record(
+        SimpleNamespace(traces=[trace], errors=[], ok=False), "suite"
+    )
     assert record["model_failure"] is True
-    trace.calls[0].error = SimpleNamespace(type="ProviderError", status_code=400, message="context limit")
+    trace.calls[0].error = SimpleNamespace(
+        type="ProviderError", status_code=400, message="context limit"
+    )
     with pytest.raises(ValueError, match="complete trace or model outcome"):
-        evaluate.trace_record(SimpleNamespace(traces=[trace], errors=[], ok=False), "suite")
+        evaluate.trace_record(
+            SimpleNamespace(traces=[trace], errors=[], ok=False), "suite"
+        )
 
 
 def test_non_finite_aggregate_reward_fails() -> None:
     trace = fake_trace()
-    trace.rewards = {"reward": SimpleNamespace(score=1.0, weight=1.0, value=float("inf"))}
+    trace.rewards = {
+        "reward": SimpleNamespace(score=1.0, weight=1.0, value=float("inf"))
+    }
     trace.reward = float("inf")
     with pytest.raises(ValueError, match="aggregate reward"):
-        evaluate.trace_record(SimpleNamespace(traces=[trace], errors=[], ok=True), "suite")
+        evaluate.trace_record(
+            SimpleNamespace(traces=[trace], errors=[], ok=True), "suite"
+        )
 
 
 def test_trace_record_uses_native_usage_buckets() -> None:
-    record = evaluate.trace_record(SimpleNamespace(traces=[fake_trace()], errors=[], ok=True), "suite")
+    record = evaluate.trace_record(
+        SimpleNamespace(traces=[fake_trace()], errors=[], ok=True), "suite"
+    )
     assert record["resolved"] is True
     assert record["uncached_input_tokens"] == 11
     assert record["cached_input_tokens"] == 7
@@ -379,7 +441,9 @@ def test_trace_record_uses_native_usage_buckets() -> None:
     assert record["e2e_seconds"] == 5
     trace = fake_trace()
     trace.info = {"isolated_verifier_seconds": 3.5}
-    record = evaluate.trace_record(SimpleNamespace(traces=[trace], errors=[], ok=True), "suite")
+    record = evaluate.trace_record(
+        SimpleNamespace(traces=[trace], errors=[], ok=True), "suite"
+    )
     assert record["e2e_seconds"] == 8.5
 
 
@@ -388,72 +452,101 @@ def test_scored_model_timeout_is_an_outcome_but_incomplete_trace_fails() -> None
     timeout.rewards = {}
     timeout.reward = 0.0
     timeout.calls[0].error = None
-    record = evaluate.trace_record(SimpleNamespace(traces=[timeout], errors=[], ok=False), "suite")
+    record = evaluate.trace_record(
+        SimpleNamespace(traces=[timeout], errors=[], ok=False), "suite"
+    )
     assert record["resolved"] is False
     scored_failure = fake_trace(ok=False, timeout=True)
     scored_failure.calls[0].error = None
     with pytest.raises(ValueError, match="complete trace or model outcome"):
-        evaluate.trace_record(SimpleNamespace(traces=[scored_failure], errors=[], ok=False), "suite")
+        evaluate.trace_record(
+            SimpleNamespace(traces=[scored_failure], errors=[], ok=False), "suite"
+        )
     scored_failure.rewards["partial"] = None
     with pytest.raises(ValueError, match="complete trace or model outcome"):
-        evaluate.trace_record(SimpleNamespace(traces=[scored_failure], errors=[], ok=False), "suite")
+        evaluate.trace_record(
+            SimpleNamespace(traces=[scored_failure], errors=[], ok=False), "suite"
+        )
     provider_failure = fake_trace(ok=False, timeout=True)
     provider_failure.rewards = {}
     provider_failure.reward = 0.0
     provider_failure.errors = []
-    provider_error = SimpleNamespace(type="ProviderError", status_code=400, message="context limit")
+    provider_error = SimpleNamespace(
+        type="ProviderError", status_code=400, message="context limit"
+    )
     provider_failure.calls[0].error = provider_error
     provider_failure.errors = [provider_error]
     assert (
-        evaluate.trace_record(SimpleNamespace(traces=[provider_failure], errors=[], ok=False), "suite")[
-            "resolved"
-        ]
+        evaluate.trace_record(
+            SimpleNamespace(traces=[provider_failure], errors=[], ok=False), "suite"
+        )["resolved"]
         is False
     )
     transient_provider_failure = fake_trace(ok=False, timeout=True)
     transient_provider_failure.rewards = {}
-    transient_error = SimpleNamespace(type="ProviderError", status_code=429, message="rate limit")
+    transient_error = SimpleNamespace(
+        type="ProviderError", status_code=429, message="rate limit"
+    )
     transient_provider_failure.calls[0].error = transient_error
     transient_provider_failure.errors = [transient_error]
     with pytest.raises(ValueError, match="complete trace or model outcome"):
         evaluate.trace_record(
-            SimpleNamespace(traces=[transient_provider_failure], errors=[], ok=False), "suite"
+            SimpleNamespace(traces=[transient_provider_failure], errors=[], ok=False),
+            "suite",
         )
     mixed_failure = fake_trace(ok=False, timeout=True)
     mixed_failure.rewards = {}
     mixed_failure.calls[0].error = None
     mixed_failure.errors.insert(0, transient_error)
     with pytest.raises(ValueError, match="complete trace or model outcome"):
-        evaluate.trace_record(SimpleNamespace(traces=[mixed_failure], errors=[], ok=False), "suite")
+        evaluate.trace_record(
+            SimpleNamespace(traces=[mixed_failure], errors=[], ok=False), "suite"
+        )
     contaminated_timeout = fake_trace(ok=False, timeout=True)
     contaminated_timeout.rewards = {}
     contaminated_timeout.calls[0].error = transient_error
     with pytest.raises(ValueError, match="complete trace or model outcome"):
-        evaluate.trace_record(SimpleNamespace(traces=[contaminated_timeout], errors=[], ok=False), "suite")
+        evaluate.trace_record(
+            SimpleNamespace(traces=[contaminated_timeout], errors=[], ok=False), "suite"
+        )
     credential_failure = fake_trace(ok=False, timeout=True)
     credential_failure.rewards = {}
-    credential_error = SimpleNamespace(type="ProviderError", status_code=401, message="unauthorized")
+    credential_error = SimpleNamespace(
+        type="ProviderError", status_code=401, message="unauthorized"
+    )
     credential_failure.calls[0].error = credential_error
     credential_failure.errors = [credential_error]
     with pytest.raises(ValueError, match="complete trace or model outcome"):
-        evaluate.trace_record(SimpleNamespace(traces=[credential_failure], errors=[], ok=False), "suite")
+        evaluate.trace_record(
+            SimpleNamespace(traces=[credential_failure], errors=[], ok=False), "suite"
+        )
     unrelated_terminal = fake_trace(ok=False, timeout=True)
     unrelated_terminal.rewards = {}
     unrelated_terminal.calls[0].error = provider_error
-    unrelated_terminal.errors = [SimpleNamespace(type="SandboxError", status_code=None, message="lost")]
+    unrelated_terminal.errors = [
+        SimpleNamespace(type="SandboxError", status_code=None, message="lost")
+    ]
     with pytest.raises(ValueError, match="complete trace or model outcome"):
-        evaluate.trace_record(SimpleNamespace(traces=[unrelated_terminal], errors=[], ok=False), "suite")
+        evaluate.trace_record(
+            SimpleNamespace(traces=[unrelated_terminal], errors=[], ok=False), "suite"
+        )
     infrastructure = fake_trace(ok=False)
     infrastructure.rewards = {}
     infrastructure.reward = 0.0
-    infrastructure.errors = [SimpleNamespace(type="HarnessError", message="sandbox unavailable")]
+    infrastructure.errors = [
+        SimpleNamespace(type="HarnessError", message="sandbox unavailable")
+    ]
     with pytest.raises(ValueError, match="complete trace or model outcome"):
-        evaluate.trace_record(SimpleNamespace(traces=[infrastructure], errors=[], ok=False), "suite")
+        evaluate.trace_record(
+            SimpleNamespace(traces=[infrastructure], errors=[], ok=False), "suite"
+        )
     incomplete = fake_trace()
     incomplete.is_completed = False
     incomplete.ok = False
     with pytest.raises(ValueError, match="complete trace or model outcome"):
-        evaluate.trace_record(SimpleNamespace(traces=[incomplete], errors=[], ok=False), "suite")
+        evaluate.trace_record(
+            SimpleNamespace(traces=[incomplete], errors=[], ok=False), "suite"
+        )
 
 
 def test_model_failure_without_reported_usage_records_zero_tokens() -> None:
@@ -461,13 +554,21 @@ def test_model_failure_without_reported_usage_records_zero_tokens() -> None:
     failure.rewards = {}
     failure.reward = 0.0
     failure.usage = None
-    provider_error = SimpleNamespace(type="ProviderError", status_code=503, message="connection reset")
+    provider_error = SimpleNamespace(
+        type="ProviderError", status_code=503, message="connection reset"
+    )
     failure.calls[0].error = provider_error
     failure.calls[0].usage = None
     failure.errors = [provider_error]
-    record = evaluate.trace_record(SimpleNamespace(traces=[failure], errors=[], ok=False), "suite")
+    record = evaluate.trace_record(
+        SimpleNamespace(traces=[failure], errors=[], ok=False), "suite"
+    )
     assert record["model_failure"] is True
-    assert (record["uncached_input_tokens"], record["cached_input_tokens"], record["output_tokens"]) == (
+    assert (
+        record["uncached_input_tokens"],
+        record["cached_input_tokens"],
+        record["output_tokens"],
+    ) == (
         0,
         0,
         0,
@@ -476,14 +577,18 @@ def test_model_failure_without_reported_usage_records_zero_tokens() -> None:
     scored.usage = None
     scored.calls[0].usage = None
     with pytest.raises(ValueError, match="incomplete provider usage"):
-        evaluate.trace_record(SimpleNamespace(traces=[scored], errors=[], ok=True), "suite")
+        evaluate.trace_record(
+            SimpleNamespace(traces=[scored], errors=[], ok=True), "suite"
+        )
 
 
 @pytest.mark.parametrize(
     ("start", "end"),
     ((float("nan"), 2.0), (1.0, float("inf")), (3.0, 2.0), (0.0, 2.0)),
 )
-def test_trace_timing_rejects_nonfinite_reversed_or_partial_spans(start: float, end: float) -> None:
+def test_trace_timing_rejects_nonfinite_reversed_or_partial_spans(
+    start: float, end: float
+) -> None:
     trace = fake_trace()
     trace.timing.agent.start = start
     trace.timing.agent.end = end
@@ -547,14 +652,19 @@ def request() -> dict:
     }
 
 
-def paired(base_resolved: int = 10, head_resolved: int = 10, head_multiplier: int = 1) -> dict:
+def paired(
+    base_resolved: int = 10, head_resolved: int = 10, head_multiplier: int = 1
+) -> dict:
     return {
         "schema_version": 1,
         "request": request(),
         "model": "internal/glm-5.3-fast",
         "started_at": 1.0,
         "finished_at": 2.0,
-        "sides": {"base": tasks(base_resolved), "head": tasks(head_resolved, head_multiplier)},
+        "sides": {
+            "base": tasks(base_resolved),
+            "head": tasks(head_resolved, head_multiplier),
+        },
     }
 
 
@@ -594,10 +704,14 @@ def test_report_fails_drastic_quality_or_efficiency_regression() -> None:
     efficiency = paired(base_resolved=10, head_resolved=10, head_multiplier=2)
     markdown, verdict = report.render(efficiency, request())
     assert verdict == "fail"
-    assert "Cumulative task time reached 2.00x base without more resolutions." in markdown
+    assert (
+        "Cumulative task time reached 2.00x base without more resolutions." in markdown
+    )
 
 
-def _baseline_v2(harness: str, label: str, resolved: int = 0, measured: bool = False) -> dict:
+def _baseline_v2(
+    harness: str, label: str, resolved: int = 0, measured: bool = False
+) -> dict:
     return {
         "harness": harness,
         "label": label,
@@ -649,7 +763,9 @@ def _baselines_doc(measured_harness: str | None = None) -> dict:
 def test_harness_baselines_file_holds_the_pinned_schema() -> None:
     document = json.loads((EVAL_ROOT / "harness-baselines.json").read_text())
     assert document["schema_version"] == 2
-    assert set(b["harness"] for b in document["baselines"]) == set(report.HARNESS_LABELS)
+    assert set(b["harness"] for b in document["baselines"]) == set(
+        report.HARNESS_LABELS
+    )
     for entry in document["baselines"]:
         assert set(entry["tasksets"]) == set(report.TASKSET_SIZES)
     validated = report.validate_baselines(document)
@@ -850,7 +966,10 @@ class TestFilterTestControl:
         assert filter_test_control(patch) == filter_test_control(patch.encode())
 
     def test_headerless_rejected_and_oversize_capped(self) -> None:
-        from scripts.evals.short_swe.verified_verifier import MAX_PATCH_BYTES, filter_test_control
+        from scripts.evals.short_swe.verified_verifier import (
+            MAX_PATCH_BYTES,
+            filter_test_control,
+        )
 
         with pytest.raises(RuntimeError, match="no diff --git header"):
             filter_test_control("--- a/x\n+++ b/x\n@@ -1 +1 @@\n+x\n")
@@ -886,7 +1005,9 @@ class TestFilterTestControl:
         from scripts.evals.short_swe.verified_verifier import filter_test_control
 
         assert filter_test_control(b"") == ""
-        mixed = self._diff("src/lib.py", "src/lib.py") + self._diff("s.py", "tests/conftest.py")
+        mixed = self._diff("src/lib.py", "src/lib.py") + self._diff(
+            "s.py", "tests/conftest.py"
+        )
         result = filter_test_control(mixed)
         assert "src/lib.py" in result and "conftest" not in result
 
