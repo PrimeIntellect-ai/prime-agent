@@ -468,24 +468,30 @@ export class DaemonSessionSummarizer {
 		}
 	}
 
-	/** Admit the most recently active waiting session (latest message timestamp, id order breaks ties). */
+	/**
+	 * Admit the most recently active waiting sessions (latest message timestamp,
+	 * id order breaks ties) while slots are free. summarize() claims its slot
+	 * before its first await, so a waiter that returns early without one leaves
+	 * inFlight unchanged and the loop admits the next waiter instead.
+	 */
 	private admitNextWaitingSession(): void {
-		if (this.inFlight.size >= MAX_CONCURRENT_SUMMARY_GENERATIONS) return;
-		let next: ActiveSessionState | undefined;
-		let nextActivityAt = -1;
-		for (const candidate of this.waitingForSlot.values()) {
-			const activityAt = candidate.runtime.session.messages.at(-1)?.timestamp ?? 0;
-			if (
-				activityAt > nextActivityAt ||
-				(activityAt === nextActivityAt && (next === undefined || candidate.activeSessionId > next.activeSessionId))
-			) {
-				next = candidate;
-				nextActivityAt = activityAt;
+		while (this.inFlight.size < MAX_CONCURRENT_SUMMARY_GENERATIONS && this.waitingForSlot.size > 0) {
+			let next: ActiveSessionState | undefined;
+			let nextActivityAt = -1;
+			for (const candidate of this.waitingForSlot.values()) {
+				const activityAt = candidate.runtime.session.messages.at(-1)?.timestamp ?? 0;
+				if (
+					activityAt > nextActivityAt ||
+					(activityAt === nextActivityAt && (next === undefined || candidate.activeSessionId > next.activeSessionId))
+				) {
+					next = candidate;
+					nextActivityAt = activityAt;
+				}
 			}
+			if (next === undefined) return;
+			this.waitingForSlot.delete(next.activeSessionId);
+			void this.summarize(next);
 		}
-		if (next === undefined) return;
-		this.waitingForSlot.delete(next.activeSessionId);
-		void this.summarize(next);
 	}
 
 	/**

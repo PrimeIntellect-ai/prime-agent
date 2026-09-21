@@ -1328,7 +1328,8 @@ function readAssistantText(message: AssistantMessage): string {
 // per token delta, so rejoining (and re-collapsing) the whole message costs
 // O(length) per delta, O(length²) per streamed child message. The window keeps
 // each delta O(window); the preview shows the latest output, not the head.
-const RLM_ANSWER_PREVIEW_TAIL_CHARS = 200;
+// Equal to compactRlmText's cap, so compaction never cuts the newest characters.
+const RLM_ANSWER_PREVIEW_TAIL_CHARS = 160;
 
 function tailRlmAnswerPreview(message: AssistantMessage): string {
 	const tail: string[] = [];

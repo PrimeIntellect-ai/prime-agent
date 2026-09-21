@@ -563,7 +563,7 @@ describe("rlm.progress.note child progress channel", () => {
 			const changed = childUpdates.length;
 			emitChild({ type: "message_update", message: assistantMessage(`head-marker${"x".repeat(400)}changed tail${"y".repeat(60)}`) });
 			await waitFor(() => childUpdates.length > changed);
-			expect(childUpdates.at(-1)?.preview).toContain("changed tail");
+			expect(childUpdates.at(-1)?.preview).toMatch(/changed taily{60}$/);
 			expect(childUpdates.at(-1)?.preview).not.toContain("head-marker");
 
 			const beforeTool = childUpdates.length;
