@@ -390,17 +390,17 @@ export class DaemonAgentConnection implements AgentConnection {
 		// An authoritative shutdown/update reason outranks the surviving direct link.
 		const closeReason = getDaemonSocketCloseReason(error);
 		if (closeReason === "shutdown") {
-			// A transport loss abandons in-flight snapshot streams; the recovery
-			// re-attaches and re-syncs, and a switch waiting on a replacement must
-			// not treat the abandoned stream as a failed replacement.
-			this.abortSnapshotTransfers(error);
 			if (this.updateRestartPending) {
 				// An update-restart recovery already owns the transport; this close joins it.
+				// The recovery re-attaches and re-syncs, so in-flight snapshot streams stay
+				// alive for the re-sync to satisfy.
 				void this.reconnectAfterUpdate();
 				return;
 			}
 			if (this.shutdownReconnectFailed) {
+				// Terminal: nothing will re-sync, so abandoned snapshot streams reject their waiters.
 				this.terminalCloseEmitted = true;
+				this.abortSnapshotTransfers(error);
 				void this.emit({ type: "closed", error: this.formatDaemonSessionClosedError("shutdown") });
 				return;
 			}
