@@ -31,7 +31,7 @@ function makeSummary(overrides: Partial<SessionSummary> = {}): SessionSummary {
 	return { ...BASE, ...overrides, isSessionActive: (overrides.activity ?? BASE.activity) === "working" };
 }
 
-function row(name: string, status: string, activity: string, lastHeard = "2h", error = "", usage = ""): string[] {
+function row(name: string, status: string, activity: string, lastHeard = "", error = "", usage = ""): string[] {
 	return [name, status, activity, lastHeard, error, usage];
 }
 
@@ -51,7 +51,7 @@ const UNSORTED = [
 	makeSummary({ sessionName: "restarting", workerState: "recovering" }),
 ];
 const EXPECTED_SORT = [
-	row("crashed", "idle", "failed", "2h", "worker failed"),
+	row("crashed", "idle", "failed", "", "worker failed"),
 	row("restarting", "idle", "recovering"),
 	row("worker", "running", "thinking"),
 	row("sleeper", "idle", "completed"),
@@ -68,20 +68,20 @@ describe("formatSessionsTable", () => {
 		["saved status", { activeSessionId: undefined, rosterStatus: "inactive" }, row("s", "inactive", "")],
 		["queued label", { activity: "working", statusLabel: "queued" }, row("s", "queued", "classifying")],
 		["recovering label", { statusLabel: "recovering" }, row("s", "recovering", "")],
-		["failed label", { statusLabel: "failed" }, row("s", "failed", "", "2h", "worker failed")],
+		["failed label", { statusLabel: "failed" }, row("s", "failed", "", "", "worker failed")],
 		[
 			"sanitized model notice",
 			{ modelFallbackMessage: "boom\u0007\u001B[31m!\u001B[39m" },
-			row("s", "idle", "", "2h", "boom!"),
+			row("s", "idle", "", "", "boom!"),
 		],
 		["staleness", { activity: "working", lastHeardFromAt: STALE_AT }, row("s", "running", "classifying", "10m")],
-		["usage compact", { usage: SPEND }, row("s", "idle", "", "2h", "", "1.2k/567 $0.42")],
+		["usage compact", { usage: SPEND }, row("s", "idle", "", "", "", "1.2k/567 $0.42")],
 		[
 			"sanitizes and truncates the recap appended to the activity detail",
 			{ activity: "working", isStreaming: true, isRunningTools: true, summary: `\u0007${"a".repeat(100)}` },
-			["s", "running", `running tools · ${"a".repeat(43)}…`, "2h", "", ""],
+			["s", "running", `running tools · ${"a".repeat(43)}…`, "", "", ""],
 		],
-		["usage fleet scale", { usage: FLEET_SPEND }, row("s", "idle", "", "2h", "", "1.6b/2.1m $382.85")],
+		["usage fleet scale", { usage: FLEET_SPEND }, row("s", "idle", "", "", "", "1.6b/2.1m $382.85")],
 		["archived rows", { lifecycle: "archived", rosterStatus: "inactive" }, row("s", "inactive", "archived")],
 		["display id fallback", { id: LONG_ID, sessionName: undefined }, row("fc10e9f8380f", "idle", "")],
 		["newline in name", { sessionName: "sneaky\nagent" }, row("sneaky agent", "idle", "")],

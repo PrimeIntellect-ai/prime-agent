@@ -31,7 +31,12 @@ export function formatSessionsTable(sessions: readonly SessionSummary[], nowMs =
 		name: sessionNameCell(summary),
 		status: sessionsStatusLabel(summary),
 		activity: truncateCell(sessionActivityCell(summary)),
-		"last heard": formatSessionAge(summary.lastHeardFromAt ?? summary.modified, nowMs),
+		// lastHeardFromAt is the supervisor's staleness mark, served only when a
+		// worker's roster frames go stale (sweepRosterStaleness); healthy workers
+		// carry no heard-from timestamp, so the cell stays empty rather than
+		// mislabeling the session-file mtime as a heard-from time (the agents view
+		// keys the same label on the mark's presence).
+		"last heard": formatSessionAge(summary.lastHeardFromAt, nowMs),
 		error: truncateCell(sessionErrorCell(summary)),
 		usage: formatUsageCell(summary.usage),
 	}));
