@@ -8,7 +8,14 @@ import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli
 import { getPackageDir, isBunBinary } from "../../config.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { deleteSessionFile } from "../../core/session-file-actions.js";
-import { readSessionInfo, type SessionInfo, SessionManager } from "../../core/session-manager.js";
+import {
+	appendCustomMessageToExistingFile,
+	appendSessionInfoToExistingFile,
+	appendSessionStateToExistingFile,
+	readSessionInfo,
+	type SessionInfo,
+	SessionManager,
+} from "../../core/session-manager.js";
 import { spawnHidden } from "../../utils/child-process.js";
 
 export const DAEMON_CATALOG_ROLE_ENV = "PRIME_AGENT_INTERNAL_DAEMON_CATALOG";
@@ -194,7 +201,7 @@ async function handleCatalogRequest(request: CatalogRequest): Promise<void> {
 				throw new Error(`No session found matching '${request.selector}'`);
 			}
 			case "rename":
-				SessionManager.open(request.sessionPath).appendSessionInfo(request.name.trim());
+				appendSessionInfoToExistingFile(request.sessionPath, request.name.trim());
 				sendCatalogMessage({ type: "response", id: request.id, success: true });
 				return;
 			case "delete":
@@ -217,7 +224,7 @@ async function handleCatalogRequest(request: CatalogRequest): Promise<void> {
 					return;
 				}
 				if (session.state?.status !== "archived") {
-					SessionManager.open(request.sessionPath).appendSessionState({ status: "archived" });
+					appendSessionStateToExistingFile(request.sessionPath, { status: "archived" });
 				}
 				sendCatalogMessage({
 					type: "response",
@@ -228,7 +235,8 @@ async function handleCatalogRequest(request: CatalogRequest): Promise<void> {
 				return;
 			}
 			case "mark_interrupted":
-				SessionManager.open(request.sessionPath).appendCustomMessageEntry(
+				appendCustomMessageToExistingFile(
+					request.sessionPath,
 					"prime-agent.worker_recovery",
 					"<prime_agent_worker_interrupted>\nThe isolated session worker stopped during in-flight work. The saved transcript was recovered, but uncertain model, tool, bash, or child-agent work was not replayed. Inspect external side effects before continuing.\n</prime_agent_worker_interrupted>",
 					false,

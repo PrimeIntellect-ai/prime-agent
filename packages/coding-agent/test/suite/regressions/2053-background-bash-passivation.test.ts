@@ -58,6 +58,7 @@ describeRuntime("#2053 background kernel bash residency", () => {
 	async function start(
 		beforeCompletion?: () => Promise<void>,
 		withConfiguredAuth = true,
+		settled?: () => void,
 	): Promise<{ session: AgentSession; kernel: ReplKernelManager }> {
 		harness = await createHarness({ tools: [], rlmDepth: 1, withConfiguredAuth });
 		const session = harness.session;
@@ -73,6 +74,7 @@ describeRuntime("#2053 background kernel bash residency", () => {
 			cwd: harness.tempDir,
 			env: { PYTHONPATH: resolve(runtimeDir, "src") },
 			hostHandlers,
+			...(settled ? { onBackgroundWorkSettled: settled } : {}),
 		});
 		const provisioner = new IpythonKernelProvisioner(harness.tempDir);
 		vi.spyOn(provisioner, "manager", "get").mockReturnValue(manager);
@@ -123,7 +125,8 @@ describeRuntime("#2053 background kernel bash residency", () => {
 	});
 
 	it("keeps concurrent handles resident until the final completion and clears on kernel teardown", async () => {
-		const { session, kernel } = await start();
+		const settled = vi.fn();
+		const { session, kernel } = await start(undefined, true, settled);
 		await kernel.execute("from rlm import bash\nfirst = bash('sleep 600')\nsecond = bash('sleep 600')");
 		expect(passivationAllowed(session)).toBe(false);
 		harness!.setResponses([fauxAssistantMessage("First command finished.")]);
@@ -133,6 +136,7 @@ describeRuntime("#2053 background kernel bash residency", () => {
 		expect(passivationAllowed(session)).toBe(false);
 
 		await kernel.kill();
+		expect(settled).toHaveBeenCalledTimes(1);
 		expect(passivationAllowed(session)).toBe(true);
 		expect(
 			session.messages.filter(
@@ -271,7 +275,8 @@ describeRuntime("#2053 background kernel bash residency", () => {
 
 describe("kernel bash activity validation", () => {
 	it("ignores unrelated display data and rejects malformed or mismatched releases", async () => {
-		const kernel = new ReplKernelManager({});
+		const settled = vi.fn();
+		const kernel = new ReplKernelManager({ onBackgroundWorkSettled: settled });
 		const deliver = (data: Record<string, unknown>) =>
 			(kernel as unknown as { handleEvent(event: Record<string, unknown>): void }).handleEvent({
 				event: "display",
@@ -281,6 +286,7 @@ describe("kernel bash activity validation", () => {
 		const activity = { id: "a".repeat(32), pid: 42, active: true };
 		deliver({ [BASH_ACTIVITY_DISPLAY_MIME]: activity });
 		expect(kernel.hasBackgroundWork).toBe(true);
+		expect(settled).not.toHaveBeenCalled();
 		for (const invalid of [
 			{ ...activity, pid: 0, active: false },
 			{ ...activity, pid: -1, active: false },
@@ -297,6 +303,8 @@ describe("kernel bash activity validation", () => {
 		expect(kernel.hasBackgroundWork).toBe(true);
 		deliver({ [BASH_ACTIVITY_DISPLAY_MIME]: { ...activity, active: false } });
 		expect(kernel.hasBackgroundWork).toBe(false);
+		expect(settled).toHaveBeenCalledTimes(1);
 		await kernel.shutdown();
+		expect(settled).toHaveBeenCalledTimes(1);
 	});
 });
