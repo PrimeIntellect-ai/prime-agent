@@ -42,8 +42,8 @@ _STREAM_FRAME_TEXT_CAP = 64 * 1024
 # bounds a pathological repr or exception text in transit.
 _RESULT_TEXT_CAP = 1_048_576
 _RESULT_TRUNCATION_MARKER = f"\n[... result truncated at {_RESULT_TEXT_CAP} characters ...]"
-# Oversized display payloads fail the cell instead of wedging host memory.
-_DISPLAY_PAYLOAD_CAP = 16 * 1024 * 1024
+# Oversized display and host_request payloads fail the cell instead of wedging host memory.
+_PAYLOAD_CAP = 16 * 1024 * 1024
 
 # Names the session bootstrap re-creates on every start; never snapshotted.
 _ALWAYS_SKIP = {"rlm", "mcp", "bash", "asyncio", "In", "Out", "get_ipython", "exit", "quit", "open"}
@@ -98,6 +98,19 @@ def _send(event: dict[str, Any]) -> None:
             pass
 
 
+def _check_payload(event: str, data: dict[str, Any]) -> None:
+    """Fail the calling cell when a `data` payload would not fit one protocol frame.
+
+    Strict-dumps validation: default allow_nan=True would let NaN/Infinity
+    serialize as non-JSON text and tear the host's protocol framing (a
+    non-serializable value already raises in _send before any bytes are
+    written, so NaN is the only corruption vector). The encoded length
+    enforces the frame cap; _send re-serializes.
+    """
+    if len(json.dumps(data, allow_nan=False)) > _PAYLOAD_CAP:
+        raise ValueError(f"{event} payload exceeds the {_PAYLOAD_CAP}-character frame cap")
+
+
 def emit(data: dict[str, Any]) -> None:
     """Ship one display event carrying a dict of MIME type -> JSON payload.
 
@@ -105,14 +118,7 @@ def emit(data: dict[str, Any]) -> None:
     """
     if not isinstance(data, dict) or not data or not all(isinstance(k, str) for k in data):
         raise TypeError("emit() requires a non-empty dict keyed by MIME type strings")
-    # Strict-dumps validation: default allow_nan=True would let NaN/Infinity
-    # serialize as non-JSON text and tear the host's protocol framing (a
-    # non-serializable value already raises in _send before any bytes are
-    # written, so NaN is the only corruption vector). The encoded length
-    # enforces the display frame cap; _send re-serializes.
-    encoded = json.dumps(data, allow_nan=False)
-    if len(encoded) > _DISPLAY_PAYLOAD_CAP:
-        raise ValueError(f"display payload exceeds the {_DISPLAY_PAYLOAD_CAP}-character frame cap")
+    _check_payload("display", data)
     _send({"event": "display", "id": _current_cell.get(), "data": data})
 
 
@@ -145,6 +151,7 @@ async def host_request(data: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("repl runtime is not serving")
     if _host_closed:
         raise RuntimeError("host connection closed; host_request cannot be answered")
+    _check_payload("host_request", data)
     rid = uuid.uuid4().hex
     future: asyncio.Future[dict[str, Any]] = _loop.create_future()
     _pending_host[rid] = future

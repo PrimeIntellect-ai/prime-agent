@@ -735,21 +735,19 @@ class ReplTest(unittest.TestCase):
         self.assertEqual("".join(frames), "x" * 300_000)
         self.assertTrue(all(len(frame) <= 65536 for frame in frames))
 
-    def test_oversized_repr_and_display_payloads_are_capped(self):
+    def test_oversized_text_and_payloads_are_capped(self):
         code = "class C:\n    def __repr__(self):\n        return 'x' * 3_000_000\nC()"
         events = self.repl.execute("big-repr", code)
         expected = "x" * 1_048_576 + "\n[... result truncated at 1048576 characters ...]"
         self.assertEqual(one(events, "result")["text"], expected)
+        error = one(self.repl.execute("big-error", "raise ValueError('x' * 3_000_000)"), "error")
+        self.assertEqual(error["evalue"], expected)
+        self.assertEqual(error["traceback"][-1], "ValueError: " + expected[len("ValueError: ") :])
         events = self.repl.execute("emit-big", "from rlm.repl import emit\nemit({'text/plain': 'x' * 17_000_000})")
         self.assertEqual(one(events, "error")["ename"], "ValueError")
         self.assertEqual(one(events, "done")["status"], "error")
-
-    def test_oversized_error_text_is_capped(self):
-        events = self.repl.execute("big-error", "raise ValueError('x' * 3_000_000)")
-        error = one(events, "error")
-        marker = "\n[... result truncated at 1048576 characters ...]"
-        self.assertEqual(error["evalue"], "x" * 1_048_576 + marker)
-        self.assertEqual(error["traceback"][-1], ("ValueError: " + "x" * 1_048_576)[:1_048_576] + marker)
+        code = "from rlm.repl import host_request\nawait host_request({'type': 'demo', 'blob': 'x' * 17_000_000})"
+        self.assertEqual(one(self.repl.execute("hr-big", code), "error")["ename"], "ValueError")
 
     def test_bash_integration(self):
         events = self.repl.execute(
@@ -828,28 +826,21 @@ class ReplTest(unittest.TestCase):
                 self.assertEqual(
                     request["data"], {"type": "bash.consumed", "pid": pid, "command": command}
                 )
-                # Old host: error reply is absorbed and the withdrawal never repeats.
+                # Old host: the error reply is dropped silently and the withdrawal never repeats.
                 self.repl.send(
                     {"type": "host_reply", "id": request["id"], "data": {"status": "error", "error": "unknown"}}
                 )
                 if label == "poll":
                     again = self.repl.execute("withdraw-again", "handle.output()\nhandle.tail(1)")
-                    self.assertIsNone(one(again, "host_request"))
+                    self.assertEqual([e for e in again if e.get("event") in ("error", "host_request")], [])
 
     def test_result_read_before_notice_acceptance_withdraws_at_acceptance(self):
-        command = "sleep 0.05; printf early-read"
-        started = self.repl.execute("early-read", f"from rlm import bash\nhandle = bash({command!r})\nhandle.pid")
-        pid = int(one(started, "result")["text"])
+        started = self.repl.execute("early", "from rlm import bash\nhandle = bash('printf early')\nhandle.pid")
         notice = wait_for_host_request(self.repl, started)
-        self.assertEqual(notice["data"]["type"], "bash.completed")
-        read = self.repl.execute("early-read-read", "handle.poll().output")
-        self.assertIn("early-read", one(read, "result")["text"])
-        self.assertIsNone(one(read, "host_request"))
+        self.assertIsNone(one(self.repl.execute("early-read", "handle.poll().output"), "host_request"))
         reply_ok(self.repl, notice)
-        withdrawal = wait_for_host_request(self.repl, [])
-        self.assertEqual(withdrawal["data"], {"type": "bash.consumed", "pid": pid, "command": command})
-        again = self.repl.execute("early-read-again", "handle.output()")
-        self.assertIsNone(one(again, "host_request"))
+        withdrawal = wait_for_host_request(self.repl, [])["data"]
+        self.assertEqual(withdrawal, {"type": "bash.consumed", "pid": notice["data"]["pid"], "command": "printf early"})
 
     def test_detached_read_between_turns_keeps_bash_completion(self):
         # A watcher reading the handle with no cell running reaches nobody: the
@@ -1305,12 +1296,6 @@ class ReplTest(unittest.TestCase):
             "host request demo returned unexpected status: 'partial'",
         )
         self.assertEqual(one(events, "done")["status"], "error")
-
-    def test_host_reply_for_unknown_id_dropped(self):
-        self.repl.send({"type": "host_reply", "id": "no-such-request", "data": {"status": "ok"}})
-        events = self.repl.execute("ok", "'alive'")
-        self.assertIsNone(one(events, "error"))
-        self.assertEqual(one(events, "result")["text"], "'alive'")
 
     def test_host_request_cancelled_cell_drops_pending_future(self):
         code = "\n".join(

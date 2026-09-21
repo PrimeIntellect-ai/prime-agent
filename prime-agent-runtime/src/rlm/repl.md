@@ -65,7 +65,9 @@ runtime keeps serving. Closing stdin is equivalent to `shutdown`.
   the cell finishes; user threads emit `null`.
 - `{"event":"host_request","id":str,"data":{...}}` — one typed request from
   runtime code to the host; the host answers with a `host_reply` request
-  carrying the same id.
+  carrying the same id. `data` is subject to the same encoding cap as a
+  `display` payload: `host_request()` raises `ValueError` in the calling cell
+  instead of sending an oversized request.
 - `{"event":"error","id":str|null,"ename":str,"evalue":str,"traceback":[str,...]}`
   — `evalue` and each `traceback` entry are capped like `result` text (same
   cap, same trailing marker).
