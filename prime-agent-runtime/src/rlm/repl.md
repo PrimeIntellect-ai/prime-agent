@@ -67,6 +67,8 @@ runtime keeps serving. Closing stdin is equivalent to `shutdown`.
   runtime code to the host; the host answers with a `host_reply` request
   carrying the same id.
 - `{"event":"error","id":str|null,"ename":str,"evalue":str,"traceback":[str,...]}`
+  — `evalue` and each `traceback` entry are capped like `result` text (same
+  cap, same trailing marker).
 - `{"event":"done","id":str,"status":"ok"|"error"}` — exactly one per id'd
   request, always after all of that request's other events. A snapshot `done`
   adds `saved`, `skipped`, `pruned`, `bytes`; a restore `done` adds `restored`,

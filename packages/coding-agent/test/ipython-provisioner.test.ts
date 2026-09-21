@@ -11,7 +11,11 @@ import {
 	type KernelClient,
 	ReplKernelManager,
 } from "../src/core/kernel/index.js";
-import { createIpythonToolDefinition, IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
+import {
+	createIpythonToolDefinition,
+	IpythonKernelProvisioner,
+	PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER,
+} from "../src/core/tools/ipython.js";
 
 let tempDir = "";
 
@@ -67,7 +71,7 @@ function createBusyKernelContext(
 
 function writeFakeReplRuntime(
 	markerPath: string,
-	options: { gatedExecute?: { startedPath: string; gatePath: string } } = {},
+	options: { gatedExecute?: { startedPath: string; gatePath: string }; bootstrapStdout?: string } = {},
 ): string {
 	const python = join(tempDir, "python-repl");
 	const refuse = `emit({ event: "error", id: request.id, ename: "RuntimeError", evalue: "bootstrap refused", traceback: [] });
@@ -79,7 +83,10 @@ function writeFakeReplRuntime(
 			clearInterval(gate);
 			${refuse}
 		}, 10);`
-		: refuse;
+		: options.bootstrapStdout === undefined
+			? refuse
+			: `emit({ event: "stdout", id: request.id, text: ${JSON.stringify(options.bootstrapStdout)} });
+		emit({ event: "done", id: request.id, status: "ok" });`;
 	writeFileSync(
 		python,
 		`#!/usr/bin/env node
@@ -140,6 +147,20 @@ describe("IpythonKernelProvisioner", () => {
 			// before the failure surfaced, so a replacement provisioner gated on this
 			// one cannot race the still-flushing kernel over the same snapshot files.
 			expect(existsSync(marker)).toBe(true);
+		} finally {
+			await provisioner.dispose();
+		}
+	});
+
+	it("reports skills the bootstrap could not import", async () => {
+		const python = writeFakeReplRuntime(join(tempDir, "snapshot-flushed"), {
+			bootstrapStdout: `${PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER}{"websearch":"No module named 'websearch'"}\n`,
+		});
+		const onUnavailableSkills = vi.fn();
+		const provisioner = new IpythonKernelProvisioner(tempDir, { python, onUnavailableSkills });
+		try {
+			await provisioner.ensure();
+			expect(onUnavailableSkills.mock.calls).toEqual([[{ websearch: "No module named 'websearch'" }]]);
 		} finally {
 			await provisioner.dispose();
 		}

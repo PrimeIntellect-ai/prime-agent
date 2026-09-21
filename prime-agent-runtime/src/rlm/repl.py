@@ -39,7 +39,7 @@ DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES = 16 * 1024 * 1024
 # 64 KiB pump chunks.
 _STREAM_FRAME_TEXT_CAP = 64 * 1024
 # The host truncates results at a smaller per-execution maxChars, so this only
-# bounds a pathological repr in transit.
+# bounds a pathological repr or exception text in transit.
 _RESULT_TEXT_CAP = 1_048_576
 _RESULT_TRUNCATION_MARKER = f"\n[... result truncated at {_RESULT_TEXT_CAP} characters ...]"
 # Oversized display payloads fail the cell instead of wedging host memory.
@@ -503,6 +503,12 @@ def _safe_str(exc: BaseException) -> str:
         return "<exception str() failed>"
 
 
+def _cap_text(text: str) -> str:
+    if len(text) > _RESULT_TEXT_CAP:
+        return text[:_RESULT_TEXT_CAP] + _RESULT_TRUNCATION_MARKER
+    return text
+
+
 def _error_event(cell_id: str, exc: BaseException) -> dict[str, Any]:
     # No cell frame (e.g. SyntaxError): exception-only keeps filename, source, and caret.
     te = traceback.TracebackException.from_exception(exc)
@@ -516,8 +522,8 @@ def _error_event(cell_id: str, exc: BaseException) -> dict[str, Any]:
         "event": "error",
         "id": cell_id,
         "ename": type(exc).__name__,
-        "evalue": _safe_str(exc),
-        "traceback": lines,
+        "evalue": _cap_text(_safe_str(exc)),
+        "traceback": [_cap_text(line) for line in lines],
     }
 
 
@@ -616,8 +622,8 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
                     result_text = repr(value)
                 except BaseException as exc:  # noqa: BLE001 - a broken __repr__ is a cell error
                     status, error = "error", _error_event(cell_id, exc)
-            if result_text is not None and len(result_text) > _RESULT_TEXT_CAP:
-                result_text = result_text[:_RESULT_TEXT_CAP] + _RESULT_TRUNCATION_MARKER
+            if result_text is not None:
+                result_text = _cap_text(result_text)
             _drain_output()
         finally:
             # Close the interrupt window before the protocol sends so a
