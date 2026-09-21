@@ -103,7 +103,7 @@ def _check_payload(event: str, data: dict[str, Any]) -> None:
 
     Strict-dumps validation: default allow_nan=True would let NaN/Infinity
     serialize as non-JSON text and tear the host's protocol framing (a
-    non-serializable value already raises in _send before any bytes are
+    non-serializable value raises TypeError here before any bytes are
     written, so NaN is the only corruption vector). The encoded length
     enforces the frame cap; _send re-serializes.
     """
