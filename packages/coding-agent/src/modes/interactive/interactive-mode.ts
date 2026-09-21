@@ -9011,7 +9011,7 @@ export class InteractiveMode {
 			this.editorContainer.addChild(menu);
 			focus();
 			this.ui.requestRender();
-			refreshModels(initialModelSearch !== undefined);
+			refreshModels(true);
 		});
 	}
 
