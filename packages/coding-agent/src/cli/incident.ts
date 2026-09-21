@@ -80,10 +80,10 @@ const ERROR_BURST_WINDOW_MS = 10 * 60 * 1000;
 /**
  * A stall is repeated command timeouts close together, like the burst window
  * above; timeouts further apart than this never merge into one stall, whatever
- * the report window is. Exported for the agents-view notice, which anchors its
- * dismissal horizon on the same density bound.
+ * the report window is. The agents-view dismissal horizon derives from the
+ * same bound via latestIncidentStallTimeoutBySubject.
  */
-export const TIMEOUT_STALL_WINDOW_MS = 30 * 60 * 1000;
+const TIMEOUT_STALL_WINDOW_MS = 30 * 60 * 1000;
 const SUMMARY_TRUNCATION = 120;
 const RECOVERY_BREAKDOWN_LIMIT = 4;
 const WORKER_SOCKET_PATTERN = /^(?:prime-agent-)?worker-[0-9a-f]+-([0-9a-f]{12})(?:\.sock)?$/;
