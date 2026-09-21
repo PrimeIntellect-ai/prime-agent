@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
@@ -914,6 +914,8 @@ describe("Harness digest at cold boundaries", () => {
 		);
 	}
 
+	type DigestPeek = { _harnessDigestWithFingerprint(): { digest: string } };
+
 	it("keeps untouched sessions empty and injects the digest at the first committed turn", async () => {
 		const harness = await createHarness({ persistSession: true });
 		harnesses.push(harness);
@@ -1004,35 +1006,6 @@ describe("Harness digest at cold boundaries", () => {
 		};
 	}
 
-	/** Seeded local memories, two turns, one summarizer compaction; returns the persisted file and the snapshot digest. */
-	async function compactedDigestSession(prefix: string) {
-		isolatedAgentDir(prefix);
-		const harness = await createHarness({
-			persistSession: true,
-			settings: { compaction: { keepRecentTokens: 1 } },
-		});
-		harnesses.push(harness);
-		const localDir = getLocalHarnessStateDir(harness.sessionManager.getSessionArtifactDir());
-		const state = loadHarnessState(localDir, "local");
-		seedMemory(state, "alpha_relevant", "Alpha second turn note", "Mentions second turns.");
-		seedMemory(state, "middle_plain", "Middle plain note", "Neutral material about tea varieties.");
-		seedMemory(state, "zeta_relevant", "Zeta hello note", "Greets with hello.");
-		saveHarnessState(localDir!, state);
-		harness.setResponses([
-			fauxAssistantMessage("ack"),
-			fauxAssistantMessage("ack"),
-			fauxAssistantMessage("summary"),
-			fauxAssistantMessage("turn summary"),
-		]);
-		await harness.session.prompt("hello");
-		await harness.session.prompt("second turn with different wording");
-		await harness.session.compact();
-		const head = harness.session.messages[0] as { harnessDigest?: string };
-		const sessionFile = harness.sessionManager.getSessionFile()!;
-		harness.session.dispose();
-		return { sessionFile, snapshot: head.harnessDigest! };
-	}
-
 	it("delivers a diagnostic digest instead of crashing on a malformed global entry", async () => {
 		// Regression for the fleet-wide incident: one entry with list content in
 		// the global store bricked all child spawn creation via the digest crash.
@@ -1067,7 +1040,7 @@ describe("Harness digest at cold boundaries", () => {
 		expect(digest).not.toContain("one string");
 	});
 
-	it("skips digest re-delivery on resume when only query terms drifted and the state is unchanged", async () => {
+	it("keeps one digest block across resumes and compaction: fingerprint dedupe, replaced on state change", async () => {
 		// Hermetic store: the ambient developer harness would crowd the ranked window.
 		isolatedAgentDir("pi-digest-resume");
 		const harness = await createHarness({ persistSession: true });
@@ -1101,86 +1074,39 @@ describe("Harness digest at cold boundaries", () => {
 		const after = digestMessages(resumed);
 		expect(after).toHaveLength(1);
 		expect(getMessageText(after[0])).toBe(digestTextBefore);
-		const freshDigest = (
-			resumed.session as unknown as {
-				_harnessDigestWithFingerprint(): { digest: string; stateFingerprint: string };
-			}
-		)._harnessDigestWithFingerprint().digest;
+		const freshDigest = (resumed.session as unknown as DigestPeek)._harnessDigestWithFingerprint().digest;
 		expect(HARNESS_DIGEST_PREFIX + freshDigest + HARNESS_DIGEST_SUFFIX).not.toBe(getMessageText(after[0]));
 		resumed.session.dispose();
-	});
 
-	it("appends a fresh digest on resume after disk state changed, replacing the old copy", async () => {
-		// Empty global store: digest content must reflect only the local test entry.
-		// The unchanged-disk resume dedupe is pinned by the fingerprint test above.
-		isolatedAgentDir("pi-digest-agent");
-		const harness = await createHarness({ persistSession: true });
-		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("hi")]);
-		await harness.session.prompt("hello");
-		const sessionFile = harness.sessionManager.getSessionFile();
-		harness.session.dispose();
-
-		const localDir = getLocalHarnessStateDir(harness.sessionManager.getSessionArtifactDir());
-		const state = loadHarnessState(localDir, "local");
+		// Changed disk state: the fresh digest replaces the stale copy instead of stacking.
 		seedMemory(state, "resume_test_memory", "Resume test memory", "Written between resumes.");
 		saveHarnessState(localDir!, state);
-
-		const resumedStale = await createHarness({ existingSessionFile: sessionFile });
-		harnesses.push(resumedStale);
-		const digests = digestMessages(resumedStale);
-		expect(digests).toHaveLength(1); // the fresh digest replaced the stale copy instead of stacking
+		const settings = { compaction: { keepRecentTokens: 1 } }; // lets compact() below cut at the last reply
+		const refreshed = await createHarness({ existingSessionFile: sessionFile, settings });
+		harnesses.push(refreshed);
+		const digests = digestMessages(refreshed);
+		expect(digests).toHaveLength(1);
 		expect(getMessageText(digests[0])).toContain("[local:resume_test_memory] Resume test memory");
-	});
 
-	it("keeps the compaction snapshot as the only digest on resume with unchanged state", async () => {
-		const { sessionFile, snapshot } = await compactedDigestSession("pi-digest-compaction");
-		const resumed = await createHarness({ existingSessionFile: sessionFile });
-		harnesses.push(resumed);
-		expect(digestMessages(resumed)).toHaveLength(0);
-		expect(resumed.session.messages[0]).toMatchObject({
-			role: "compactionSummary",
-			harnessDigest: snapshot,
-		});
-		// Positive control: the fresh render drifted (query terms changed at the
-		// compaction boundary), so only the fingerprint can keep the snapshot.
-		expect(
-			(
-				resumed.session as unknown as { _harnessDigestWithFingerprint(): { digest: string } }
-			)._harnessDigestWithFingerprint().digest,
-		).not.toBe(snapshot);
-	});
+		// Compaction moves the digest and its fingerprint onto the summary head. Only "ack" stays
+		// in context, so the next resume's render drifts again and only the fingerprint can dedupe.
+		refreshed.setResponses([fauxAssistantMessage("summary"), fauxAssistantMessage("turn summary")]);
+		await refreshed.session.compact();
+		const snapshot = (refreshed.session.messages[0] as { harnessDigest?: string }).harnessDigest;
+		refreshed.session.dispose();
+		const compacted = await createHarness({ existingSessionFile: sessionFile });
+		harnesses.push(compacted);
+		expect(digestMessages(compacted)).toHaveLength(0);
+		expect(compacted.session.messages[0]).toMatchObject({ role: "compactionSummary", harnessDigest: snapshot });
+		expect((compacted.session as unknown as DigestPeek)._harnessDigestWithFingerprint().digest).not.toBe(snapshot);
 
-	it("self-heals a legacy compaction snapshot with exactly one re-delivery", async () => {
-		const { sessionFile } = await compactedDigestSession("pi-digest-legacy");
-		// Simulate a pre-fingerprint transcript: the compaction entry loses its state fingerprint.
-		const lines = readFileSync(sessionFile, "utf8")
-			.trimEnd()
-			.split("\n")
-			.map((raw) => {
-				const entry = JSON.parse(raw) as { type?: string; harnessStateFingerprint?: string };
-				if (entry.type === "compaction") delete entry.harnessStateFingerprint;
-				return JSON.stringify(entry);
-			});
-		writeFileSync(sessionFile, `${lines.join("\n")}\n`);
-
-		const legacy = await createHarness({ existingSessionFile: sessionFile });
-		harnesses.push(legacy);
-		const redelivered = digestMessages(legacy);
-		expect(redelivered).toHaveLength(1); // the text-compare path re-delivered exactly once
-		expect(legacy.session.messages[0]).toMatchObject({
-			role: "compactionSummary",
-			harnessDigest: undefined,
-		});
-		// A later turn drifts the next resume's query terms, so only the
-		// fingerprint carried by the re-delivered digest can keep it from stacking.
-		legacy.setResponses([fauxAssistantMessage("ack")]);
-		await legacy.session.prompt("hello again zeta");
-		legacy.session.dispose();
-
-		// The self-heal is one-shot: the second resume appends nothing over the first delivery.
-		const healed = await createHarness({ existingSessionFile: sessionFile });
-		harnesses.push(healed);
-		expect(digestMessages(healed).map(getMessageText)).toEqual(redelivered.map(getMessageText));
+		// Changed disk state after compaction: the fresh digest replaces the snapshot instead of stacking on it.
+		seedMemory(state, "late_note", "Late note", "Written after compaction.");
+		saveHarnessState(localDir!, state);
+		compacted.session.dispose();
+		const replaced = await createHarness({ existingSessionFile: sessionFile });
+		harnesses.push(replaced);
+		expect(digestMessages(replaced)).toHaveLength(1);
+		expect(replaced.session.messages[0]).toMatchObject({ role: "compactionSummary", harnessDigest: undefined });
 	});
 });

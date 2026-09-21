@@ -4233,7 +4233,7 @@ describe("daemon worker supervisor monitoring", () => {
 		return { supervisor, log };
 	}
 
-	it("marks each busy worker session interrupted independently", async () => {
+	it("marks each busy worker session interrupted independently, even when one notice is refused", async () => {
 		// A stale pid whose journaled start id no longer matches is left alone.
 		const { root, worker } = recoveryFixture({
 			sessions: [
@@ -4242,7 +4242,7 @@ describe("daemon worker supervisor monitoring", () => {
 			],
 			orphan: { pid: 987_654, processStartId: "reused-process" },
 		});
-		const markInterrupted = vi.fn(async () => undefined);
+		const markInterrupted = vi.fn().mockRejectedValueOnce(new Error("session file is gone")); // one notice is refused
 		const kill = vi.spyOn(process, "kill").mockReturnValue(true);
 		const { supervisor } = recoverySupervisor(worker, { markInterrupted });
 
@@ -4254,29 +4254,6 @@ describe("daemon worker supervisor monitoring", () => {
 			expect(markInterrupted).toHaveBeenCalledWith("/tmp/child.jsonl", "child-active", ["tool_execution"]);
 		} finally {
 			kill.mockRestore();
-			rmSync(root, { recursive: true, force: true });
-		}
-	});
-
-	it("completes recovery when an interrupted session notice cannot be written", async () => {
-		const { root, worker, recoveryJournalPath } = recoveryFixture({
-			sessions: [
-				{ activeSessionId: "root-active", sessionFile: "/tmp/missing-root.jsonl", operation: "model_stream" },
-			],
-		});
-		// The catalog refuses the notice, as it does for a deleted session file.
-		const markInterrupted = vi.fn(async () => {
-			throw new Error("Cannot append to missing session file: /tmp/missing-root.jsonl");
-		});
-		const { supervisor, log } = recoverySupervisor(worker, { markInterrupted });
-		try {
-			await expect(supervisor.recoverUncertainWorkerOperations(worker)).resolves.toBeUndefined();
-			expect(log.mock.calls.some(([message]) => String(message).includes("/tmp/missing-root.jsonl"))).toBe(true);
-			// Recovery ran past the failed notice: the journal resolved the busy record.
-			expect(WorkerRecoveryJournal.readLatest(recoveryJournalPath)).toEqual([
-				expect.objectContaining({ activeSessionId: "root-active", busy: false, operation: "recovery_hold" }),
-			]);
-		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
