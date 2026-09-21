@@ -190,7 +190,7 @@ class RequestTiming {
 		});
 	}
 
-	/** Serialized request body size, measured after request-sent so its cost is not charged to the client phase. */
+	/** Serialized request body size, measured before request-sent so its cost lands in the client-side phase. */
 	recordRequestBytes(requestBytes: number | undefined): void {
 		this.requestBytes = requestBytes;
 	}
@@ -348,10 +348,11 @@ export function instrumentStreamFn(enabled: RequestTimingEnabled, streamFn: Stre
 				...options,
 				onPayload: async (payload, payloadModel) => {
 					const next = await options?.onPayload?.(payload, payloadModel);
-					timing.markRequestSent();
-					// Measured after request-sent so the serialization cost stays out of
-					// the client-side build delta; first-byte and summary carry the size.
+					// Measured before request-sent: the provider awaits this hook before it
+					// opens the HTTP request, so the serialization cost belongs to the
+					// client-side build delta, not to request-sent -> first-byte.
 					timing.recordRequestBytes(measureRequestBytes(next ?? payload));
+					timing.markRequestSent();
 					return next;
 				},
 				onResponse: async (response, responseModel) => {
