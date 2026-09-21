@@ -549,9 +549,7 @@ export async function generateSummary(
 	if (previousSummary) {
 		promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
 	}
-	if (recentStateAnchor) {
-		promptText += `<recent-state-anchor>\nNewest assistant message that stays retained below the summary. The conversation to summarize is older than this anchor; the retained messages below are authoritative, so treat this anchor, not the conversation above, as the current state.\n\n${recentStateAnchor}\n</recent-state-anchor>\n\n`;
-	}
+	promptText += recentStateAnchorBlock(recentStateAnchor);
 	promptText += basePrompt;
 
 	const summarizationMessages = [
@@ -717,6 +715,17 @@ function extractRecentStateAnchor(entries: SessionEntry[], keptStart: number, ke
 	}
 	return undefined;
 }
+/**
+ * The `<recent-state-anchor>` block `generateSummary` appends when the kept
+ * tail has assistant text. The window estimator reuses it so its mirror of
+ * the wire request stays exact.
+ */
+function recentStateAnchorBlock(recentStateAnchor?: string): string {
+	return recentStateAnchor
+		? `<recent-state-anchor>\nNewest assistant message that stays retained below the summary. The conversation to summarize is older than this anchor; the retained messages below are authoritative, so treat this anchor, not the conversation above, as the current state.\n\n${recentStateAnchor}\n</recent-state-anchor>\n\n`
+		: "";
+}
+
 const TURN_PREFIX_SUMMARIZATION_PROMPT = `This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.
 
 Summarize the prefix to provide context for the retained suffix:
@@ -905,7 +914,8 @@ async function generateTurnPrefixSummary(
  * `compact` builds from this preparation, using the chars/4 heuristic this
  * module already uses for pre-LLM token math. Mirrors the exact request
  * bodies: `generateSummary` sends the serialized conversation (plus the
- * previous summary on iterative updates) and asks for floor(0.8 * reserve)
+ * previous summary on iterative updates, plus the recency anchor when the
+ * kept tail has assistant text) and asks for floor(0.8 * reserve)
  * completion tokens, while a split turn's prefix summary serializes its own
  * slice with the tighter floor(0.5 * reserve) budget; both carry
  * SUMMARIZATION_SYSTEM_PROMPT as the system prompt, so its size counts too.
@@ -913,7 +923,8 @@ async function generateTurnPrefixSummary(
  * issue, not the average. 0 means no summary request is applicable.
  */
 export function estimateSummaryRequestTokens(preparation: CompactionPreparation, customInstructions?: string): number {
-	const { messagesToSummarize, turnPrefixMessages, isSplitTurn, previousSummary, settings } = preparation;
+	const { messagesToSummarize, turnPrefixMessages, isSplitTurn, previousSummary, recentStateAnchor, settings } =
+		preparation;
 	const systemPromptTokens = Math.ceil(SUMMARIZATION_SYSTEM_PROMPT.length / 4);
 	let required = 0;
 	// compact() issues the history slice for every compaction except a split
@@ -926,6 +937,9 @@ export function estimateSummaryRequestTokens(preparation: CompactionPreparation,
 		if (previousSummary) {
 			promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
 		}
+		// compact() passes the recency anchor to every history summary call, so
+		// the anchor block the wire request carries must size the estimate too.
+		promptText += recentStateAnchorBlock(recentStateAnchor);
 		promptText += buildSummarizationPrompt(customInstructions, previousSummary);
 		required = Math.max(
 			required,

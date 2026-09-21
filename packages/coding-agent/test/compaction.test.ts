@@ -7,6 +7,7 @@ import {
 	type CompactionSettings,
 	DEFAULT_COMPACTION_SETTINGS,
 	estimateContextTokens,
+	estimateSummaryRequestTokens,
 	findCutPoint,
 	prepareCompaction,
 	shouldCompact,
@@ -339,6 +340,12 @@ describe("prepareCompaction recency anchor", () => {
 		expect(preparation).toBeDefined();
 		expect(preparation!.recentStateAnchor).toBe(anchor);
 		expect(preparation!.previousSummary).toBe(keptSummary);
+	});
+	it("sizes the history request estimate with the recency anchor", () => {
+		const preparation = anchoredPreparation("First summary", ["newest kept text"]);
+		expect(estimateSummaryRequestTokens(preparation!)).toBeGreaterThan(
+			estimateSummaryRequestTokens({ ...preparation!, recentStateAnchor: undefined }),
+		);
 	});
 });
 
