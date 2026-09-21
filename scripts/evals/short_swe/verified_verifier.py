@@ -122,7 +122,10 @@ def _strip_diff_prefix(path: str) -> str:
 
 
 def _hunk_expected_lines(header: str) -> int | None:
-    m = re.search(r"@@ .* \+(\d+)(?:,(\d+))? @@", header)
+    # Anchored to the real header shape (-N[,M] then +N[,M] then @@): a greedy
+    # pattern could capture a fake "+N,M @@" from arbitrary function-context
+    # text, inflating the count and keeping in_hunk true past the real hunk end.
+    m = re.search(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", header)
     if not m:
         return None
     return 1 if m.group(2) is None else int(m.group(2))

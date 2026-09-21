@@ -925,6 +925,22 @@ class TestFilterTestControl:
         # The +++ header line is kept too: git apply needs it.
         assert "+++ b/src/trad.py" in result
 
+    def test_fake_count_in_hunk_context_cannot_inflate_hunk_lines(self) -> None:
+        from scripts.evals.short_swe.verified_verifier import filter_test_control
+
+        patch = (
+            "diff --git a/src/keep.py b/src/keep.py\n"
+            "@@ -1,1 +1,1 @@ ctx +9,9 @@ tail\n"
+            "+x\n"
+            "--- a/testing/test_helpers.py\n"
+            "+++ b/testing/test_helpers.py\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-old\n"
+            "+new\n"
+        )
+        result = filter_test_control(patch)
+        assert "keep.py" in result and "new" not in result
+
     def test_hunk_removed_line_three_dash_test_path_is_content(self) -> None:
         from scripts.evals.short_swe.verified_verifier import filter_test_control
 
