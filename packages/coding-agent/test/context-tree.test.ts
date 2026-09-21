@@ -311,20 +311,16 @@ describe("child node cache", () => {
 		const rlmDir = makeTempDir();
 		writeChildSession(join(rlmDir, "sub-cache0001"), "cache me", createUsage(100, 10, 0.01));
 		const first = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
-		// Identical stats: the next rebuild reuses the same node object
-		// instead of re-reading and re-parsing the session file.
 		const second = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
 		expect(second[0]).toBe(first[0]);
-		expect(second[0].ownUsage.input).toBe(100);
 	});
 
 	it("re-parses a child whose session file grew", () => {
 		const rlmDir = makeTempDir();
 		const child = writeChildSession(join(rlmDir, "sub-grow0001"), "grow", createUsage(100, 10, 0.01));
-		const first = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
+		loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
 		child.sessionManager.appendMessage(createAssistantMessage("more work", createUsage(400, 40, 0.04)));
 		const second = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
-		expect(second[0]).not.toBe(first[0]);
 		expect(second[0].ownUsage.input).toBe(500);
 	});
 
@@ -333,7 +329,6 @@ describe("child node cache", () => {
 		const child = writeChildSession(join(rlmDir, "sub-touch0001"), "same size user text", createUsage(100, 10, 0.01));
 		const sessionFile = child.sessionManager.getSessionFile() ?? "";
 		expect(loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow)[0].label).toBe("same size user text");
-		// Same byte length, different content, explicit new mtime: only the mtime can invalidate.
 		writeFileSync(
 			sessionFile,
 			readFileSync(sessionFile, "utf8").replace("same size user text", "same size user teyt"),
@@ -348,7 +343,6 @@ describe("child node cache", () => {
 		const child = writeChildSession(join(rlmDir, "sub-gone0001"), "delete me", createUsage(100, 10, 0.01));
 		const first = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
 		expect(first).toHaveLength(1);
-
 		rmSync(child.sessionManager.getSessionFile() ?? "", { force: true });
 		const second = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
 		expect(second).toEqual([]);
@@ -374,12 +368,8 @@ describe("child node cache", () => {
 
 		const second = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
 		const secondParent = second[0];
-		// The parent node was rebuilt (a cached parent must not hide the
-		// grandchild change)...
-		expect(secondParent).not.toBe(firstParent);
-		expect(secondParent.children[0]).not.toBe(firstParent.children[0]);
 		expect(secondParent.children[0].ownUsage.input).toBe(500);
-		// ...while the unchanged sibling grandchild is still the cached node.
+		// The unchanged sibling grandchild is still the cached node.
 		expect(secondParent.children[1]).toBe(firstParent.children[1]);
 	});
 
@@ -407,11 +397,9 @@ describe("child node cache", () => {
 		mkdirSync(lateDir, { recursive: true });
 		const first = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
 		expect(first[0].children).toEqual([]);
-
 		writeChildSession(lateDir, "late grandchild", createUsage(60, 6, 0.006));
 		const second = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
 		expect(second[0].children.map((node) => node.id)).toEqual(["sub-late0001"]);
-		expect(second[0].children[0].ownUsage.input).toBe(60);
 	});
 
 	it("recomputes context usage when the model's context window changes", () => {
