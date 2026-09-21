@@ -772,7 +772,7 @@ describe("daemon supervisor passive subagent topology", () => {
 			descriptorDir: join(directory, "workers"),
 		}) as unknown as SupervisorInternals;
 		const client = new DaemonClient(socketPath);
-		vi.spyOn(DaemonCatalogClient.prototype, "start").mockResolvedValue();
+		const catalogStart = vi.spyOn(DaemonCatalogClient.prototype, "start").mockResolvedValue();
 
 		const passive = summary({
 			id: "passive-session",
@@ -805,11 +805,14 @@ describe("daemon supervisor passive subagent topology", () => {
 
 		try {
 			await supervisor.start();
+			expect(catalogStart).not.toHaveBeenCalled();
 			supervisor.workers.set("first", first);
 			supervisor.workers.set("second", second);
 			supervisor.workers.set("disconnected", disconnected);
 			seedSupervisorRoster(supervisor, first, second, disconnected);
 			await client.connect();
+			await client.request({ type: "list_saved_sessions", cwd: directory, scope: "all" });
+			expect(catalogStart).toHaveBeenCalledTimes(1);
 
 			await expect(
 				client.request({ type: "list_agent_peers", workerToken: "invalid-token" }),

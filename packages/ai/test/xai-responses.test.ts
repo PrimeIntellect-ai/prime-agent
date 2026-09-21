@@ -92,6 +92,7 @@ describe("xAI subscription Responses", () => {
 			["grok-4.3", "low", "low"],
 			["grok-4.5", "xhigh", "high"],
 			["grok-4.6", "xhigh", "xhigh"],
+			["grok-4.7", "xhigh", "xhigh"],
 			["grok-4.20-0309-reasoning", "high", undefined],
 			["grok-4.20-0309-non-reasoning", "high", undefined],
 			["grok-build-0.1", "high", undefined],
@@ -113,6 +114,12 @@ describe("xAI subscription Responses", () => {
 			expect(body.include).toEqual(source.reasoning ? ["reasoning.encrypted_content"] : undefined);
 		}
 		expect(getSupportedThinkingLevels(getXaiSubscriptionModel(getModel("xai", "grok-4.6"))!)).toEqual([
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+		]);
+		expect(getSupportedThinkingLevels(getXaiSubscriptionModel(getModel("xai", "grok-4.7"))!)).toEqual([
 			"low",
 			"medium",
 			"high",
