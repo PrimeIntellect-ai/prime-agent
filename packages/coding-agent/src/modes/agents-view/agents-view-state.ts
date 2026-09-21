@@ -112,8 +112,8 @@ export function shouldShowAgentsViewSession(summary: SessionSummary, manuallyIna
 	return summary.lifecycle === "live";
 }
 
-// TODO(unify: #2055): replace with the shared user-content rule once it lands;
-// session summaries only carry message counts today.
+// Emptiness is judged from the wire summary, which carries message counts only.
+// SessionManager.hasUserContent() needs session entries the view never receives.
 export function isEmptyAgentsViewSession(summary: SessionSummary): boolean {
 	return summary.messageCount === 0;
 }
