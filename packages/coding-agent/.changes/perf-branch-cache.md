@@ -1,0 +1,2 @@
+- Cached the active branch path in the session manager, so per-turn compaction checks and context-usage updates no longer rebuild the whole leaf-to-root path after every assistant message.
+- `SessionManager.getBranch()` now returns the live shared branch array (public API): repeated reads return the same array object and straight-line appends extend it in place. Callers must treat it as read-only and take `.slice()` for a snapshot; `session_before_compact` already passes a snapshot.
