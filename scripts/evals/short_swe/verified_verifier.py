@@ -109,6 +109,22 @@ def _patch_paths(header: str) -> tuple[str, str]:
     return a_path, b_path
 
 
+def _unquote_path(raw: str) -> str:
+    """Strip surrounding quotes from a traditional ---/+++ path token."""
+    raw = raw.strip().split("\t")[0]
+    if raw.startswith('"') and raw.endswith('"'):
+        return raw[1:-1]
+    return raw
+
+
+def _strip_diff_prefix(path: str) -> str:
+    return path[2:] if len(path) > 2 and path[1] == "/" and path[0] in "ab" else path
+
+
+def _in_traditional_section(current: list[str]) -> bool:
+    return bool(current) and current[0].startswith("--- ")
+
+
 def filter_test_control(raw: bytes | str) -> str:
     """Drop hunks that modify test-control paths from a unified diff.
 
@@ -125,6 +141,8 @@ def filter_test_control(raw: bytes | str) -> str:
     a_path = ""
     b_path = ""
     saw_header = False
+    in_hunk = False
+    section_had_headers = False
     for line in patch.splitlines(keepends=True):
         if line.startswith("diff --git "):
             if not saw_header and current:
@@ -138,21 +156,33 @@ def filter_test_control(raw: bytes | str) -> str:
             current = [line]
             a_path, b_path = _patch_paths(line)
             saw_header = True
-        elif line.startswith("--- ") and current:
-            # Traditional-diff header inside a section: git apply parses it as a
-            # new file patch after the preceding section, so it cannot ride along
-            # a kept section's attribution. Route it through TEST_CONTROL on its
+            in_hunk = False
+            section_had_headers = False
+        elif line.startswith("--- ") and current and _strip_diff_prefix(_unquote_path(line[4:])) not in (
+            a_path,
+            b_path,
+        ):
+            # Traditional-diff header between hunks: git apply parses it as a new
+            # file patch after the preceding section, so it cannot ride along a
+            # kept section's attribution. Route it through TEST_CONTROL on its
             # own a/b paths; a test-control traditional section is dropped.
             if current and not (TEST_CONTROL.fullmatch(a_path) or TEST_CONTROL.fullmatch(b_path)):
                 kept.extend(current)
             current = [line]
-            a_path = line[4:].strip().split("\t")[0]
-            a_path = a_path[2:] if a_path.startswith("a/") else a_path
+            a_path = _strip_diff_prefix(_unquote_path(line[4:]))
             b_path = ""
-        elif b_path == "" and line.startswith("+++ ") and current:
-            b_path = line[4:].strip().split("\t")[0]
-            b_path = b_path[2:] if b_path.startswith("b/") else b_path
+            in_hunk = False
+            section_had_headers = True
+        elif b_path == "" and line.startswith("+++ ") and current and _in_traditional_section(current):
+            current.append(line)
+            b_path = _strip_diff_prefix(_unquote_path(line[4:]))
         else:
+            if line.startswith("@@"):
+                in_hunk = True
+            elif in_hunk and line.startswith("diff --git "):
+                in_hunk = False
+            elif line.startswith("--- ") or line.startswith("+++ "):
+                section_had_headers = True
             current.append(line)
     if current and not (TEST_CONTROL.fullmatch(a_path) or TEST_CONTROL.fullmatch(b_path)):
         kept.extend(current)

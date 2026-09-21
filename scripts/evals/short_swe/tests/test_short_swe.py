@@ -922,3 +922,30 @@ class TestFilterTestControl:
         )
         result = filter_test_control(patch)
         assert "keep.py" in result and "new" in result
+        # The +++ header line is kept too: git apply needs it.
+        assert "+++ b/src/trad.py" in result
+
+    def test_hunk_body_dashdash_is_content(self) -> None:
+        from scripts.evals.short_swe.verified_verifier import filter_test_control
+
+        patch = (
+            "diff --git a/src/keep.py b/src/keep.py\n"
+            "@@ -1,3 +1,2 @@\n"
+            "---- a/tricky.py\n"
+            "+plus\n"
+        )
+        result = filter_test_control(patch)
+        assert "---- a/tricky.py" in result and "plus" in result
+
+    def test_quoted_traditional_path_test_control(self) -> None:
+        from scripts.evals.short_swe.verified_verifier import filter_test_control
+
+        patch = (
+            self._diff("src/keep.py", "src/keep.py")
+            + '--- "a/tests/weird name.py"\n'
+            + '+++ "b/tests/weird name.py"\n'
+            + "@@ -1 +1 @@\n"
+            + "+x\n"
+        )
+        result = filter_test_control(patch)
+        assert "keep.py" in result and "weird" not in result
