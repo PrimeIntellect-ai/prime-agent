@@ -9,6 +9,7 @@ import {
 	AgentContinueError,
 	type AgentEvent,
 	type AgentMessage,
+	type AgentModelOverride,
 	type AgentState,
 	type AgentTool,
 	type GetContinuationMessagesContext,
@@ -171,6 +172,7 @@ import {
 	validateGoalBudget,
 	validateGoalObjective,
 } from "./goals.js";
+import { resolveImageModelOverride } from "./image-model-routing.js";
 import type { HostRequestHandlers, KernelSentAgentMessage } from "./kernel/index.js";
 import { type RestoreResult, snapshotPathIn } from "./kernel/state-snapshot.js";
 import type { AcpMcpServerConfig } from "./mcp/acp-mcp-types.js";
@@ -841,6 +843,15 @@ function normalizeMessageContent(content: string | (TextContent | ImageContent)[
 	return { text, ...(images.length > 0 ? { images } : {}) };
 }
 
+/**
+ * Whether a delivered message attaches image content. Used to route
+ * image-carrying turns off session models without image input.
+ */
+function messageCarriesImages(message: QueuedAgentMessage | AgentMessage): boolean {
+	const content = (message as { content?: unknown }).content;
+	return Array.isArray(content) && content.some((part: { type?: string }) => part?.type === "image");
+}
+
 function queuedAgentMessagePreview(action: QueuedSessionAction): string {
 	const payload = action.payload;
 	if (payload.kind === "session_command") return payload.text;
@@ -1430,9 +1441,10 @@ export class AgentSession {
 	private _autonomousState: AutonomousRuntimeState;
 	private _autonomousContinuationSuppressionDepth = 0;
 	private _autonomousContinuationSuppressedMessages = new WeakSet<AgentMessage>();
-	// Held autonomous continuation owed while descendant work runs; mirrors
-	// _goalContinuationAwaitsRlmWork. Child replies and exit notices are the
-	// real wake-up signals, so timer-driven continuations pause instead of
+	// Held autonomous continuation owed while descendant or background bash
+	// work runs; mirrors _goalContinuationAwaitsRlmWork. Child replies, exit
+	// notices, and background bash completion follow-ups are the real
+	// wake-up signals, so timer-driven continuations pause instead of
 	// re-prompting a waiting parent (and pause without consuming budget).
 	private _autonomousContinuationAwaitsRlmWork = false;
 	private _autonomousSubagentKeepAliveTimer: ReturnType<typeof setTimeout> | undefined = undefined;
@@ -1472,6 +1484,8 @@ export class AgentSession {
 				primary: Model<any>;
 				thinkingLevel: ThinkingLevel;
 				serviceTier: ServiceTier;
+				/** Image-model routing active when the backup took over; restored on return. */
+				routedOverride?: AgentModelOverride;
 		  }
 		| undefined = undefined;
 	private _agentMessageClearEpoch = 0;
@@ -2182,7 +2196,10 @@ export class AgentSession {
 				const restorable = payload.records
 					.filter(
 						(record): record is DeliveryRecord & { message: CustomMessage } =>
-							(record.role === "next_turn" || (payload.acceptedAgentMessage && record.role === "prefix")) &&
+							// Prefix records are parked next-turn context the action captured
+							// on admission; a cancelled turn hands them back, like the
+							// admission-rejection and dispatch-failure paths already do.
+							(record.role === "next_turn" || record.role === "prefix") &&
 							record.message.role === "custom" &&
 							record.message.customType !== HARNESS_DIGEST_CUSTOM_TYPE &&
 							!record.durable,
@@ -2514,6 +2531,87 @@ export class AgentSession {
 	}
 
 	/**
+	 * Routing decision for a dispatched turn batch: when any delivered message
+	 * attaches images and the session model has no image input, serve the turn
+	 * on the user-configured imageModel (settings.imageModel) instead.
+	 *
+	 * The override is stored on the agent, so retries and post-compaction
+	 * continuations of the routed turn keep serving it; the next dispatch
+	 * re-evaluates it, so later image-free turns return to the session model.
+	 * A missing session model is reported by _validateCanStartAgentRun.
+	 */
+	private _imageModelOverrideForTurns(
+		turns: SessionAction<PreparedTurnPayload>[],
+		extraMessages: AgentMessage[] = [],
+	): AgentModelOverride | undefined {
+		const sessionModel = this.model;
+		if (!sessionModel) return undefined;
+		const carriesImages =
+			extraMessages.some((message) => messageCarriesImages(message)) ||
+			turns.some((action) => action.payload.records.some((record) => messageCarriesImages(record.message)));
+		if (!carriesImages) return undefined;
+		return resolveImageModelOverride({
+			sessionModel,
+			thinkingLevel: this.thinkingLevel,
+			serviceTier: this.serviceTier,
+			imageModelReference: this.settingsManager.getImageModel(),
+			availableModels: this._modelRegistry.getAvailable(),
+			hasConfiguredAuth: (model) => this._modelRegistry.hasConfiguredAuth(model),
+			blockImages: this.settingsManager.getBlockImages(),
+		});
+	}
+
+	/**
+	 * Model serving the current run: the routed image model while a routed
+	 * turn (or its retries/continuations) is active, the session model
+	 * otherwise. Compaction decisions compare context against the model that
+	 * actually serves the requests, so a routed run uses the routed model's
+	 * context window and accepts its assistant messages as its own.
+	 */
+	private _runModel(): Model<any> | undefined {
+		return this.agent.modelOverride?.model ?? this.model;
+	}
+
+	/**
+	 * Whether a dispatched turn is still in flight: streaming, retrying with
+	 * backoff, compacting before a continuation, an overflow recovery or
+	 * provider wait still settling, or a post-compaction continuation that
+	 * has been scheduled but not yet dispatched. Model selection during any
+	 * of these must not tear down a routed run's override, or the run's
+	 * retries, continuations, and failure attribution would leave the
+	 * image-capable model mid-turn.
+	 */
+	private get _hasActiveTurnLifecycle(): boolean {
+		return (
+			this.isStreaming ||
+			this.isRetrying ||
+			this.isCompacting ||
+			this._postCompactionContinuationScheduled ||
+			// Covers the whole submission-to-settled window: preflight (before the
+			// action enqueues), the queued turn, and any in-flight run - without
+			// latching on stale overflow-recovery state.
+			this._promptSubmissionInFlight ||
+			this._hasPendingOrRunningTurnAction
+		);
+	}
+
+	private get _hasPendingOrRunningTurnAction(): boolean {
+		return this._actionStore.unfinishedActions().some((action) => action.payload.kind === "turn");
+	}
+
+	/**
+	 * An explicit selection wins over image-model routing still lingering from
+	 * the last dispatched turn, but not over the model already serving an
+	 * active run. Cycling or switching mid-stream keeps the routed override
+	 * until the turn settles; the next dispatch re-evaluates the routing
+	 * against the new selection.
+	 */
+	private _clearModelOverrideWhenIdle(): void {
+		if (this._hasActiveTurnLifecycle) return;
+		this.agent.modelOverride = undefined;
+	}
+
+	/**
 	 * Goals are pursued through the kernel goal skill, so the only tool the
 	 * model needs is ipython. Force-activate it (including into a live
 	 * continuation context) so the model can always reach `goal.complete()`.
@@ -2542,7 +2640,14 @@ export class AgentSession {
 
 	private _maybeResumeGoalContinuationAfterRlmWork(): void {
 		if (!this._goalContinuationAwaitsRlmWork) return;
-		if (this._disposed || this._disposing || this._hasUnsettledRlmQuiescenceWork()) return;
+		if (
+			this._disposed ||
+			this._disposing ||
+			this._hasUnsettledRlmQuiescenceWork() ||
+			this._hasLiveBackgroundBashHandles()
+		) {
+			return;
+		}
 		if (this._goalState.status !== "active" || !this._goalState.objective) {
 			this._goalContinuationAwaitsRlmWork = false;
 			return;
@@ -2576,12 +2681,13 @@ export class AgentSession {
 	}
 
 	/**
-	 * Hold the timer-driven autonomous continuation while descendant work is
-	 * unsettled, mirroring the goal gate: delegating and ending the turn is
-	 * correct behavior, and child replies and exit notices are the real
-	 * wake-up signals. The owed continuation is delivered when descendants
-	 * settle without consuming the continuation budget while it waits. An
-	 * active goal holds its own continuation, so the held continuation is
+	 * Hold the timer-driven autonomous continuation while descendant or
+	 * background bash work is unsettled, mirroring the goal gate: delegating
+	 * and ending the turn is correct behavior, and child replies, exit
+	 * notices, and background bash completion follow-ups are the real
+	 * wake-up signals. The owed continuation is delivered when the pending
+	 * work settles without consuming the continuation budget while it waits.
+	 * An active goal holds its own continuation, so the held continuation is
 	 * not double-queued behind it.
 	 */
 	private _holdAutonomousContinuationForRlmWork(message: AssistantMessage): boolean {
@@ -2595,7 +2701,7 @@ export class AgentSession {
 			// The run is over: hold nothing so the hook can apply the limit.
 			return false;
 		}
-		if (!this._hasUnsettledRlmQuiescenceWork()) {
+		if (!this._hasUnsettledRlmQuiescenceWork() && !this._hasLiveBackgroundBashHandles()) {
 			return false;
 		}
 		// An active goal's own continuation gate owns the wake-up discipline;
@@ -2614,10 +2720,27 @@ export class AgentSession {
 		return this._goalState.status === "active" && !!this._goalState.objective;
 	}
 
+	/**
+	 * True while the session's kernel still runs background bash() handles.
+	 * The kernel's bash-activity tracking (the same state that powers the
+	 * bash-done completion follow-ups) is the liveness surface, so a live
+	 * handle's completion notice is the wake-up a held continuation waits for.
+	 */
+	private _hasLiveBackgroundBashHandles(): boolean {
+		return this._ipythonKernelProvisioner?.manager?.hasBackgroundWork === true;
+	}
+
 	/** Deliver the owed continuation once descendant work settles. */
 	private _maybeResumeAutonomousContinuationAfterRlmWork(): void {
 		if (!this._autonomousContinuationAwaitsRlmWork) return;
-		if (this._disposed || this._disposing || this._hasUnsettledRlmQuiescenceWork()) return;
+		if (
+			this._disposed ||
+			this._disposing ||
+			this._hasUnsettledRlmQuiescenceWork() ||
+			this._hasLiveBackgroundBashHandles()
+		) {
+			return;
+		}
 		if (!this._autonomousState.enabled || this._goalOwnsContinuationWakeup()) {
 			this._clearAutonomousContinuationAwait();
 			return;
@@ -2767,9 +2890,9 @@ export class AgentSession {
 	private _fireAutonomousSubagentKeepAlive(): void {
 		if (!this._autonomousContinuationAwaitsRlmWork) return;
 		if (this._disposed || this._disposing) return;
-		if (!this._hasUnsettledRlmQuiescenceWork()) {
-			// Descendants settled while the keep-alive was pending; the normal
-			// resume path owns delivery.
+		if (!this._hasUnsettledRlmQuiescenceWork() && !this._hasLiveBackgroundBashHandles()) {
+			// Descendants and background handles settled while the keep-alive
+			// was pending; the normal resume path owns delivery.
 			this._maybeResumeAutonomousContinuationAfterRlmWork();
 			return;
 		}
@@ -2780,6 +2903,14 @@ export class AgentSession {
 		// Keep the deferral while admission is paused or the pump is suspended
 		// (post-abort); the pause release and resumeQueuedWork retry.
 		if (this._sessionInputAdmissionPauses.size > 0 || this._sessionInputPumpSuspended) {
+			this._armAutonomousSubagentKeepAlive();
+			return;
+		}
+		if (!this._hasUnsettledRlmQuiescenceWork()) {
+			// Only background bash handles are pending: their completion
+			// follow-ups are the wake-up, so keep the deferral without waking
+			// the parent with a subagent keep-alive and poll again after
+			// another window.
 			this._armAutonomousSubagentKeepAlive();
 			return;
 		}
@@ -3461,7 +3592,7 @@ export class AgentSession {
 		const settings = this.settingsManager.getCompactionSettings();
 		if (!settings.enabled) return false;
 
-		const contextWindow = this.model?.contextWindow ?? 0;
+		const contextWindow = this._runModel()?.contextWindow ?? 0;
 		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
 		const compactionTimestamp = compactionEntry ? new Date(compactionEntry.timestamp).getTime() : undefined;
 		if (compactionTimestamp !== undefined && context.message.timestamp <= compactionTimestamp) {
@@ -4017,9 +4148,10 @@ export class AgentSession {
 		if (signal?.aborted || this._goalState.status !== "active" || !this._goalState.objective) {
 			return [];
 		}
-		// Delegating and ending the turn is correct behavior; hold the continuation
-		// until descendants settle instead of re-prompting a waiting parent.
-		if (this._hasUnsettledRlmQuiescenceWork()) {
+		// Delegating and ending the turn is correct behavior; hold the
+		// continuation until descendants settle or the background bash
+		// handles finish instead of re-prompting a waiting parent.
+		if (this._hasUnsettledRlmQuiescenceWork() || this._hasLiveBackgroundBashHandles()) {
 			this._goalContinuationAwaitsRlmWork = true;
 			return [];
 		}
@@ -5648,7 +5780,21 @@ export class AgentSession {
 		}
 	}
 
+	private _promptSubmissionInFlight = false;
+
 	private async _prompt(text: string, options?: InternalPromptOptions): Promise<void> {
+		// Synchronous preflight guard: from submission until the prompt promise
+		// settles, a model switch must not tear down a routed turn's override
+		// (the routing decision for this turn's images may already be made).
+		this._promptSubmissionInFlight = true;
+		try {
+			return await this._promptInner(text, options);
+		} finally {
+			this._promptSubmissionInFlight = false;
+		}
+	}
+
+	private async _promptInner(text: string, options?: InternalPromptOptions): Promise<void> {
 		const resumeSuspendedInput = options?.resumeIfIdle !== false;
 		if (!this.isStreaming) {
 			if (resumeSuspendedInput) this._resumeSessionInputAdmission();
@@ -6837,6 +6983,12 @@ export class AgentSession {
 					if (this._isSessionInputHandoffDeferred(epoch)) {
 						throw new DeferredSessionInputError("Session input paused before preflight");
 					}
+					// Re-evaluate image routing for this batch before any pre-commit read of
+					// the serving model: pre-turn compaction must not follow the previous
+					// turn's override. Retries and post-compaction continuations of a routed
+					// turn re-read the override, so they keep serving it; the next dispatch
+					// overwrites it with its fresh decision.
+					this.agent.modelOverride = this._imageModelOverrideForTurns(activeTurns());
 				},
 				prepare: async () => {
 					if (executionPolicy.nextTurnContextTiming === "preparation") {
@@ -6934,6 +7086,10 @@ export class AgentSession {
 					for (const action of turns) transitionSessionAction(action, { state: "committing" });
 					this._notifySessionInputCheckpointChange();
 					this._emitQueueUpdate();
+					// Re-evaluate image routing for the exact message set being sent:
+					// before_agent_start injections land after the earlier per-turn
+					// decision and may carry images the session model cannot serve.
+					this.agent.modelOverride = this._imageModelOverrideForTurns(turns, preparedMessages);
 					return turns.some((action) => action.suppressAutonomousContinuation)
 						? this._runWithAutonomousContinuationSuppressed(() => this.agent.prompt(preparedMessages))
 						: this.agent.prompt(preparedMessages);
@@ -8027,6 +8183,7 @@ export class AgentSession {
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
 		const serviceTier = this._getServiceTierForModelSwitch();
 		this.agent.state.model = model;
+		this._clearModelOverrideWhenIdle();
 		this.sessionManager.appendModelChange(model.provider, model.id);
 		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
 
@@ -8094,6 +8251,7 @@ export class AgentSession {
 		const serviceTier = this._getServiceTierForModelSwitch();
 
 		this.agent.state.model = next.model;
+		this._clearModelOverrideWhenIdle();
 		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
 		this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
 
@@ -8133,6 +8291,7 @@ export class AgentSession {
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
 		const serviceTier = this._getServiceTierForModelSwitch();
 		this.agent.state.model = nextModel;
+		this._clearModelOverrideWhenIdle();
 		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
 		this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
 
@@ -9733,14 +9892,18 @@ export class AgentSession {
 		}
 
 		const settings = this.settingsManager.getCompactionSettings();
-		const contextWindow = this.model?.contextWindow ?? 0;
+		const runModel = this._runModel();
+		const contextWindow = runModel?.contextWindow ?? 0;
 
 		// Skip overflow check if the message came from a different model.
 		// This handles the case where user switched from a smaller-context model (e.g. opus)
 		// to a larger-context model (e.g. codex) - the overflow error from the old model
-		// shouldn't trigger compaction for the new model.
+		// shouldn't trigger compaction for the new model. A routed image-model turn keeps
+		// its override, so its overflow errors recover like the session model's own.
 		const sameModel =
-			this.model && assistantMessage.provider === this.model.provider && assistantMessage.model === this.model.id;
+			runModel !== undefined &&
+			assistantMessage.provider === runModel.provider &&
+			assistantMessage.model === runModel.id;
 
 		// Skip overflow/threshold checks if this assistant message is older than the
 		// latest compaction boundary. This prevents a stale pre-compaction usage/error
@@ -10389,6 +10552,10 @@ export class AgentSession {
 				snapshotDir: this._ipythonKernelSnapshotDir,
 				readyGate: previousDispose,
 				onRestore: notifyRestore ? (result) => this._onIpythonStateRestored(result) : undefined,
+				onBackgroundWorkSettled: () => {
+					this._maybeResumeGoalContinuationAfterRlmWork();
+					this._maybeResumeAutonomousContinuationAfterRlmWork();
+				},
 			});
 			configuredBaseToolDefinitions = createAllToolDefinitions(this._cwd, {
 				ipython: {
@@ -12528,7 +12695,7 @@ export class AgentSession {
 	private _isRetryableError(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error" || !message.errorMessage) return false;
 
-		const contextWindow = this.model?.contextWindow ?? 0;
+		const contextWindow = this._runModel()?.contextWindow ?? 0;
 		if (isContextOverflow(message, contextWindow)) return false;
 
 		if (this._isFauxProviderQueueExhausted(message)) {
@@ -12674,10 +12841,13 @@ export class AgentSession {
 
 		// User-defined backup model (settings.providerBackupModel, default none):
 		// route the failed turn to the backup instead of waiting while the
-		// primary is quota-blocked or its provider is unavailable.
+		// primary is quota-blocked or its provider is unavailable. The guard
+		// compares against the model serving the run, so a backup equal to a
+		// routed turn's image model is recognized as the duplicate it is instead
+		// of reporting a no-op backup switch with a zero-delay retry.
 		if (waitClass !== "permanent") {
 			const backupModel = this._resolveBackupModel();
-			if (backupModel && !modelsAreEqual(this.model, backupModel)) {
+			if (backupModel && !modelsAreEqual(this._runModel(), backupModel)) {
 				return this._handleBackupModelRetry(message, options, backupModel);
 			}
 		}
@@ -12832,13 +13002,19 @@ export class AgentSession {
 	/**
 	 * Resolve the user-configured backup model reference against the available
 	 * models. Unknown or unauthenticated references resolve to undefined: the
-	 * wait loop runs instead, and never surprises the user with a switch.
+	 * wait loop runs instead, and never surprises the user with a switch. A
+	 * run routed for images also rejects a text-only backup the same way: the
+	 * retry then stays on the routed model instead of serving the turn's
+	 * images to a model that would silently downgrade them to placeholders.
 	 */
 	private _resolveBackupModel(): Model<any> | undefined {
 		const reference = this.settingsManager.getProviderBackupModel();
 		if (!reference) return undefined;
 		const backupModel = findExactModelReferenceMatch(reference, this._modelRegistry.getAvailable());
 		if (!backupModel || !this._modelRegistry.hasConfiguredAuth(backupModel)) {
+			return undefined;
+		}
+		if (this.agent.modelOverride && !backupModel.input.includes("image")) {
 			return undefined;
 		}
 		return backupModel;
@@ -12858,11 +13034,22 @@ export class AgentSession {
 		const previousModel = this.agent.state.model;
 		const previousThinkingLevel = this.agent.state.thinkingLevel;
 		const previousServiceTier = this.agent.state.serviceTier;
+		// A routed image-model turn keeps serving on the override, so the backup
+		// must take the override too or the retry would silently return to the
+		// routed model while reporting the backup.
+		const routedOverride = this.agent.modelOverride;
 		this.agent.state.model = backupModel;
 		// Clamp per-request fields to what the backup supports; all of them are
 		// restored when the turn returns to the primary.
 		this.agent.state.thinkingLevel = clampThinkingLevel(backupModel, previousThinkingLevel) as ThinkingLevel;
 		this._clampServiceTierForModel();
+		if (routedOverride) {
+			this.agent.modelOverride = {
+				model: backupModel,
+				thinkingLevel: this.agent.state.thinkingLevel,
+				serviceTier: this.agent.state.serviceTier,
+			};
+		}
 		// Session-log the switch so primary->backup->primary transitions stay debuggable.
 		this.sessionManager.appendModelChange(backupModel.provider, backupModel.id);
 		this._backupModel = {
@@ -12870,6 +13057,7 @@ export class AgentSession {
 			primary: previousModel,
 			thinkingLevel: previousThinkingLevel,
 			serviceTier: previousServiceTier,
+			routedOverride,
 		};
 		this._retryAttempt++;
 		this._providerWait = undefined;
@@ -12956,6 +13144,7 @@ export class AgentSession {
 		if (!backup || !modelsAreEqual(this.model, backup.backup)) return undefined;
 		this.agent.state.model = backup.primary;
 		this.agent.state.thinkingLevel = backup.thinkingLevel;
+		this.agent.modelOverride = backup.routedOverride;
 		// Restore the saved effective tier: reclamping from the current state
 		// would keep the tier the backup clamped it to.
 		this._clampServiceTierForModel(backup.serviceTier);
