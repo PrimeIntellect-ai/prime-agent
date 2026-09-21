@@ -1,10 +1,21 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	utimesSync,
+	writeFileSync,
+} from "node:fs";
+import type * as FsPromisesModule from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	DEFAULT_RLM_EXTRA_IMPORT_NAMES,
 	DEFAULT_RLM_EXTRA_UV_ARGS,
@@ -13,6 +24,21 @@ import {
 	kernelVenvPython,
 	resolveRuntimeIdentity,
 } from "../src/core/kernel/bootstrap.js";
+
+const renameFault = vi.hoisted(() => ({ remaining: 0 }));
+vi.mock("node:fs/promises", async (importOriginal) => {
+	const actual = await importOriginal<typeof FsPromisesModule>();
+	return {
+		...actual,
+		rename: async (from: Parameters<typeof actual.rename>[0], to: Parameters<typeof actual.rename>[1]) => {
+			if (renameFault.remaining > 0) {
+				renameFault.remaining -= 1;
+				throw Object.assign(new Error("EBUSY: marker held open"), { code: "EBUSY" });
+			}
+			return actual.rename(from, to);
+		},
+	};
+});
 
 const tsxPath = resolve(__dirname, "../../../node_modules/tsx/dist/cli.mjs");
 const kernelSyncChildPath = resolve(__dirname, "helpers/kernel-sync-child.ts");
@@ -193,6 +219,7 @@ describe("kernel bootstrap", () => {
 	});
 
 	afterEach(() => {
+		renameFault.remaining = 0;
 		process.env = originalEnv;
 		if (tempDir) {
 			rmSync(tempDir, { recursive: true, force: true });
@@ -305,6 +332,59 @@ describe("kernel bootstrap", () => {
 		await expect(ensureKernelPython({ pythonSkills: [pythonSkill] })).resolves.toBe(join(venv, "bin", "python"));
 
 		expect(readFileSync(logPath, "utf8")).toBe(syncedLog);
+	});
+
+	it("takes the zero-cost ready path when the marker lists a dependency before its dependent", async () => {
+		const logPath = installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "bin", "python");
+		const markerPath = join(venv, ".bootstrap-version");
+		const dependencySkill = createPythonSkill("agent-b");
+		const dependentSkill = createPythonSkillWithDependency("agent-a", "agent-b");
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv, [dependencySkill, dependentSkill]);
+		const past = new Date(2000, 0, 1);
+		utimesSync(markerPath, past, past);
+		const markerMtime = statSync(markerPath).mtimeMs;
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+
+		await expect(ensureKernelPython({ pythonSkills: [dependentSkill] })).resolves.toBe(python);
+
+		expect(existsSync(logPath)).toBe(false);
+		expect(statSync(markerPath).mtimeMs).toBe(markerMtime);
+	});
+
+	it.each([
+		{ name: "retries a marker swap that fails twice", failures: 2, error: undefined },
+		{
+			name: "gives up after three failed marker swaps and keeps the previous marker",
+			failures: 3,
+			error: /Failed to set up the Python kernel runtime/,
+		},
+	])("$name", async ({ failures, error }) => {
+		installFakeUv();
+		const venv = join(tempDir, "kernel-venv");
+		const python = join(venv, "bin", "python");
+		const pythonSkill = createPythonSkill();
+		mkdirSync(join(venv, "bin"), { recursive: true });
+		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+		writeBootstrapVersion(venv);
+		process.env.PRIME_AGENT_KERNEL_VENV = venv;
+		renameFault.remaining = failures;
+
+		const result = ensureKernelPython({ pythonSkills: [pythonSkill] });
+		if (error) {
+			await expect(result).rejects.toThrow(error);
+		} else {
+			await expect(result).resolves.toBe(python);
+		}
+
+		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
+		expect(version.pythonSkills.map((skill: { importName: string }) => skill.importName)).toEqual(
+			error ? [] : [pythonSkill.importName],
+		);
+		expect(existsSync(join(venv, ".bootstrap-version.tmp"))).toBe(false);
 	});
 
 	it("writes the base marker before the first install and keeps a failed skill out of the record", async () => {
