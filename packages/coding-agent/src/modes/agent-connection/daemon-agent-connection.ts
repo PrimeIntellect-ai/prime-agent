@@ -143,6 +143,8 @@ interface ReplacementSnapshotExpectation {
 	reject: (error: Error) => void;
 	/** Session file the switch asked for; other sessions' replacements must not satisfy it. */
 	targetSessionFile?: string;
+	/** Set when a newer switch displaced this wait: its cleanup must not invalidate the newer switch's snapshot. */
+	superseded?: boolean;
 }
 
 /**
@@ -1615,7 +1617,9 @@ export class DaemonAgentConnection implements AgentConnection {
 				return result;
 			}
 			await this.awaitReplacementSnapshot(expectation);
-			this.verifySwitchedSessionFile(sessionPath, result.sessionFile);
+			// A superseded switch's request cannot verify the newer switch's
+			// snapshot; the newer switch verifies the session it applied.
+			if (!expectation.superseded) this.verifySwitchedSessionFile(sessionPath, result.sessionFile);
 			return { cancelled: false };
 		} catch (error) {
 			this.failReplacementSnapshot(expectation, "Session switch failed");
@@ -2596,7 +2600,10 @@ export class DaemonAgentConnection implements AgentConnection {
 	 */
 	private expectReplacementSnapshot(targetSessionFile?: string): ReplacementSnapshotExpectation {
 		// Rapid consecutive switches: the latest expectation wins and a stale
-		// one must never resolve the newer wait.
+		// one must never resolve the newer wait. Mark the stale wait superseded
+		// so its late cleanup cannot mark the newer switch's snapshot stale.
+		const stale = this.pendingReplacementSnapshot;
+		if (stale) stale.superseded = true;
 		this.failReplacementSnapshot(undefined, "Session switch superseded by a newer switch");
 		let resolveExpectation!: () => void;
 		let rejectExpectation!: (error: Error) => void;
@@ -2681,7 +2688,9 @@ export class DaemonAgentConnection implements AgentConnection {
 			// pre-switch snapshot must not stay fresh or the next
 			// getInitialSnapshot would serve the previous session's transcript.
 			// Invalidate it so the fetch fallback reloads the switched session.
-			this.latestSnapshotIsFresh = false;
+			// A superseded wait is the exception: the newer switch's applied
+			// snapshot owns the cache now, and this call must not mark it stale.
+			if (!expectation.superseded) this.latestSnapshotIsFresh = false;
 		} finally {
 			clearTimeout(timer);
 			this.failReplacementSnapshot(expectation, "Session switch wait ended");

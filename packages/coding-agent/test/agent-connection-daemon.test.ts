@@ -2517,6 +2517,64 @@ describe("DaemonAgentConnection", () => {
 		},
 	);
 
+	it("#2432: keeps the newer switch's snapshot fresh when a superseded switch settles late", async () => {
+		const fakeClient = new FakeDaemonClient();
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
+			snapshotTimeoutMs: 5_000,
+		});
+		await connection.attach();
+		const newerMessages: AgentMessage[] = [{ role: "user", content: "newer prompt", timestamp: 9 }];
+		let releaseOlder: (response: DaemonResponse) => void = () => {};
+		const olderResponse = new Promise<DaemonResponse>((resolve) => {
+			releaseOlder = resolve;
+		});
+		const request = fakeClient.request.bind(fakeClient);
+		vi.spyOn(fakeClient, "request").mockImplementation(async (command, ...options) => {
+			if (command.type !== "switch_session") return request(command, ...options);
+			fakeClient.requests.push(command);
+			if (command.sessionPath === "/tmp/session-older.jsonl") {
+				// The older switch's response lands only after the newer switch finished.
+				return olderResponse;
+			}
+			emitChunkedSnapshot(fakeClient, {
+				purpose: "replacement",
+				sessionId: "session-newer",
+				sessionFile: "/tmp/session-newer.jsonl",
+				messages: newerMessages,
+				inline: true,
+			});
+			return {
+				type: "response",
+				command: command.type,
+				success: true,
+				data: { cancelled: false, sessionFile: "/tmp/session-newer.jsonl" },
+			};
+		});
+		fakeClient.requests.length = 0;
+
+		const switchedOlder = connection.switchSession("/tmp/session-older.jsonl");
+		const switchedNewer = connection.switchSession("/tmp/session-newer.jsonl");
+		await expect(switchedNewer).resolves.toEqual({ cancelled: false });
+		releaseOlder({
+			type: "response",
+			command: "switch_session",
+			success: true,
+			data: { cancelled: false, sessionFile: "/tmp/session-older.jsonl" },
+		});
+		await expect(switchedOlder).resolves.toEqual({ cancelled: false });
+
+		const snapshot = await connection.getInitialSnapshot();
+		expect(snapshot).toMatchObject({
+			state: { sessionId: "session-newer" },
+			messages: newerMessages,
+		});
+		// The newer switch's streamed snapshot served the history once: the
+		// superseded switch's late cleanup must not mark it stale and force a
+		// full transcript refetch after the rapid session change.
+		expect(fakeClient.requests.map((request) => request.type)).toEqual(["switch_session", "switch_session"]);
+		await connection.dispose();
+	});
+
 	it("#2432: ends a switch wait when the reconnect fails instead of relaying the timeout", async () => {
 		const fakeClient = new FakeDaemonClient();
 		fakeClient.connectionStateFactory = (activeSessionId) =>
