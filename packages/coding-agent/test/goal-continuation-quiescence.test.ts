@@ -9,6 +9,7 @@ type Harness = {
 	_sessionInputAdmissionPauses: Set<symbol>;
 	_sessionInputPumpSuspended: boolean;
 	_hasUnsettledRlmQuiescenceWork: () => boolean;
+	_hasLiveBackgroundBashHandles: () => boolean;
 	_stopGoalContinuationForTerminalMessage: () => boolean;
 	_ensureGoalRuntimeActive: () => void;
 	_setGoalState: (goal: unknown) => void;
@@ -33,6 +34,7 @@ function harness(overrides: Partial<Harness> = {}): Harness {
 		_sessionInputAdmissionPauses: new Set(),
 		_sessionInputPumpSuspended: false,
 		_hasUnsettledRlmQuiescenceWork: () => false,
+		_hasLiveBackgroundBashHandles: () => false,
 		_stopGoalContinuationForTerminalMessage: () => false,
 		_ensureGoalRuntimeActive: () => {},
 		_setGoalState: function (this: Harness, goal: unknown) {
@@ -65,6 +67,15 @@ describe("goal continuation vs unsettled subagent work", () => {
 		expect(mode._goalState.continuationsUsed).toBe(1);
 	});
 
+	it("defers the continuation while a background bash handle runs and keeps the deferral on resume", async () => {
+		const mode = harness({ _hasLiveBackgroundBashHandles: () => true });
+		await expect(getGoalContinuation.call(mode, context)).resolves.toEqual([]);
+		expect(mode._goalContinuationAwaitsRlmWork).toBe(true);
+		expect(mode._goalState.continuationsUsed).toBe(0);
+		maybeResume.call(mode);
+		expect(mode._admitSessionInput).not.toHaveBeenCalled();
+		expect(mode._goalContinuationAwaitsRlmWork).toBe(true);
+	});
 	it("resumes a deferred continuation exactly once, unqueued, idle-waking, and counted", () => {
 		const mode = harness({ _goalContinuationAwaitsRlmWork: true });
 		maybeResume.call(mode);
