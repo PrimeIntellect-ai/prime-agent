@@ -1353,12 +1353,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 			}
 		}
 
-		// Process Kimi For Coding models. models.dev renamed the section from
-		// kimi-for-coding to kimi-code-plan-global (kimi-code-plan-cn is the
-		// domestic plan and is not served by the api.kimi.com provider entry).
-		const kimiSource = data["kimi-code-plan-global"] ?? data["kimi-for-coding"];
-		if (kimiSource?.models) {
-			const kimiModels = kimiSource.models as Record<string, ModelsDevModel>;
+		// Process Kimi For Coding models
+		if (data["kimi-for-coding"]?.models) {
+			const kimiModels = data["kimi-for-coding"].models as Record<string, ModelsDevModel>;
 			const hasCanonicalModel = Object.prototype.hasOwnProperty.call(kimiModels, "kimi-for-coding");
 
 			const kimiAliases = new Set(["k2p5", "k2p6"]);
@@ -2053,6 +2050,72 @@ async function generateModels() {
 			contextWindow: 32768,
 			maxTokens: 8192,
 		});
+	}
+
+	// Pin the shipped Kimi For Coding rows. models.dev split the retired
+	// kimi-for-coding section into kimi-code-plan-global (api.kimi.ai) and
+	// kimi-code-plan-cn, both re-registered as OpenAI-compatible deployments
+	// that do not match this provider's verified Anthropic-messages surface on
+	// api.kimi.com/coding. Keep the existing rows until the provider is
+	// migrated to one of the new deployments with verified request shapes.
+	const kimiCodingModels: Model<"anthropic-messages">[] = [
+		{
+			id: "k3",
+			name: "Kimi K3",
+			api: "anthropic-messages",
+			provider: "kimi-coding",
+			baseUrl: "https://api.kimi.com/coding",
+			headers: { ...KIMI_STATIC_HEADERS },
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1048576,
+			maxTokens: 131072,
+		},
+		{
+			id: "k3-256k",
+			name: "Kimi K3-256K",
+			api: "anthropic-messages",
+			provider: "kimi-coding",
+			baseUrl: "https://api.kimi.com/coding",
+			headers: { ...KIMI_STATIC_HEADERS },
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262144,
+			maxTokens: 131072,
+		},
+		{
+			id: "kimi-for-coding",
+			name: "Kimi K2.7 Code",
+			api: "anthropic-messages",
+			provider: "kimi-coding",
+			baseUrl: "https://api.kimi.com/coding",
+			headers: { ...KIMI_STATIC_HEADERS },
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262144,
+			maxTokens: 32768,
+		},
+		{
+			id: "kimi-for-coding-highspeed",
+			name: "Kimi For Coding HighSpeed",
+			api: "anthropic-messages",
+			provider: "kimi-coding",
+			baseUrl: "https://api.kimi.com/coding",
+			headers: { ...KIMI_STATIC_HEADERS },
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262144,
+			maxTokens: 32768,
+		},
+	];
+	for (const kimiModel of kimiCodingModels) {
+		if (!allModels.some((m) => m.provider === "kimi-coding" && m.id === kimiModel.id)) {
+			allModels.push(kimiModel);
+		}
 	}
 
 	// Add missing Mistral Medium 3.5 model until models.dev includes it
