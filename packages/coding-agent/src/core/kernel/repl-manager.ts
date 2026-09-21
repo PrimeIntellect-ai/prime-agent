@@ -877,6 +877,9 @@ export class ReplKernelManager {
 						execution.stdout = execution.stdout.slice(0, execution.maxChars);
 						execution.stdoutTruncated = true;
 					}
+				} else if (text.length > 0) {
+					// The buffer filled exactly on an earlier frame; the dropped remainder still counts as truncation.
+					execution.stdoutTruncated = true;
 				}
 			} else {
 				if (execution.stderr.length < execution.maxChars) {
@@ -885,6 +888,8 @@ export class ReplKernelManager {
 						execution.stderr = execution.stderr.slice(0, execution.maxChars);
 						execution.stderrTruncated = true;
 					}
+				} else if (text.length > 0) {
+					execution.stderrTruncated = true;
 				}
 			}
 			execution.opts.onStream?.(text, type);
