@@ -26,7 +26,9 @@ import {
 	CloudSessionRegistry,
 	type CloudSessionRegistryCallbacks,
 } from "../src/modes/daemon/cloud-session-registry.js";
+import { createDaemonCommandEnvelope, type DaemonCommand } from "../src/modes/daemon/daemon-protocol.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
+import { MutationDrainLatch } from "../src/modes/daemon/mutation-drain-latch.js";
 import { createFauxRuntimeFactory } from "./fixtures/cloud-guest-daemon-fixture.js";
 
 /**
@@ -156,7 +158,14 @@ async function startGuestDaemon(root: string, generation: number, sessionId: str
 function buildRegistry(
 	root: string,
 	guestSocketPath: string,
-	options: { store?: CloudSessionStore; runningProcesses?: Map<string, "running" | "exited"> } = {},
+	options: {
+		store?: CloudSessionStore;
+		runningProcesses?: Map<string, "running" | "exited">;
+		/** Supervisor-side model resolver; makes cloud state carry model objects. */
+		resolveModel?: (model: { provider?: string; modelId: string }) => Model<Api> | undefined;
+		/** Overrides the writeSessionEvent callback (fan-out wiring in e2e). */
+		writeSessionEvent?: CloudSessionRegistryCallbacks["writeSessionEvent"];
+	} = {},
 ): RegistryHarness {
 	const stateDirectory = join(root, "cloud");
 	const sessionDir = join(root, "sessions");
@@ -301,10 +310,12 @@ function buildRegistry(
 		deleteLedgerChild: async (input) => {
 			ledgerDeletes.push(input);
 		},
-		writeSessionEvent: (activeSessionId, event) => {
-			sessionEvents.push({ activeSessionId, type: (event as { type: string }).type });
-			return true;
-		},
+		writeSessionEvent: options.writeSessionEvent
+			? (activeSessionId, event, meta) => options.writeSessionEvent!(activeSessionId, event, meta)
+			: (activeSessionId, event) => {
+					sessionEvents.push({ activeSessionId, type: (event as { type: string }).type });
+					return true;
+				},
 		writeSessionStatus: () => undefined,
 		broadcastCloudSessionUpdate: (record) => {
 			updates.push({ sessionId: record.sessionId, connectivity: record.connectivity });
@@ -330,6 +341,7 @@ function buildRegistry(
 		bridgeToken: BRIDGE_TOKEN,
 		reconnectDelayMs: 50,
 		submitWaitMs: 5_000,
+		...(options.resolveModel === undefined ? {} : { resolveModel: options.resolveModel }),
 		artifactResolver: {
 			fetch: async () => {
 				throw new Error("no artifacts expected in this suite");
@@ -459,6 +471,225 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 				20_000,
 				"live session events",
 			);
+		} finally {
+			await harness.registry.dispose().catch(() => undefined);
+			await daemon.stop().catch(() => undefined);
+		}
+	}, 60_000);
+
+	it("serves the full TUI bootstrap for a converted session: catalog, resources, state with model, streamed replies, and reattach", async () => {
+		const root = temp();
+		const guestSessionId = `sess_${GUEST_SESSION_ID_FOR_DAEMON}_bootstrap`;
+		const fauxModel: Model<Api> = {
+			id: "faux-1",
+			name: "Faux Model",
+			api: "faux",
+			provider: "faux",
+			baseUrl: "http://localhost:0",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_384,
+		} as Model<Api>;
+		const resolveModel = (model: { provider?: string; modelId: string }): Model<Api> | undefined =>
+			model.provider === "faux" && model.modelId === "faux-1" ? fauxModel : undefined;
+		const daemon = await startGuestDaemon(root, 1, guestSessionId);
+		// The registry's event callback fans out through the supervisor's real
+		// writeCloudSessionEvent once the stub exists (the production wiring).
+		let eventFanout: CloudSessionRegistryCallbacks["writeSessionEvent"] | undefined;
+		const harness = buildRegistry(root, join(root, "guest.sock"), {
+			resolveModel,
+			writeSessionEvent: (activeSessionId, event, meta) => eventFanout?.(activeSessionId, event, meta) ?? false,
+		});
+		// The supervisor's model-catalog seam, as the daemon would own it.
+		const catalogStub = {
+			find: (provider: string, modelId: string) =>
+				provider === "faux" && modelId === "faux-1" ? fauxModel : undefined,
+			refreshModelCatalog: async () => ({ models: [fauxModel], configuredProviders: ["faux"] }),
+			refreshAvailableModels: async () => [fauxModel],
+		};
+		type GateFrame = {
+			id?: string;
+			type?: string;
+			command?: string;
+			success?: boolean;
+			data?: Record<string, unknown>;
+			activeSessionId?: string;
+			event?: { type?: string };
+			snapshot?: { state?: { model?: { provider: string; id: string } }; messages?: Array<{ role: string }> };
+		};
+		const writes: GateFrame[] = [];
+		const client = {
+			id: "bootstrap-client",
+			socket: { destroyed: false },
+			attachedActiveSessionIds: new Set<string>(),
+			detachInput: () => undefined,
+			supportsExtensionUi: false,
+			capabilities: new Set<string>(),
+		};
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			ready: Promise.resolve(),
+			ownership: { assertCurrent: vi.fn(async () => undefined) },
+			workers: new Map(),
+			clients: new Set([client]),
+			protocolClientIds: new WeakMap(),
+			pendingSessionNames: new Set<string>(),
+			mutationDrain: new MutationDrainLatch(),
+			commandJournal: {
+				lookup: vi.fn(() => undefined),
+				begin: vi.fn(() => ({ status: "new" as const })),
+				recordResult: vi.fn(),
+				acknowledge: vi.fn(),
+			},
+			cancelOwnedWorkerCleanup: vi.fn(),
+			cloud: () => harness.registry,
+			modelCatalog: () => catalogStub,
+			write: vi.fn((_client: unknown, message: GateFrame) => {
+				writes.push(message);
+				return true;
+			}),
+			log: () => undefined,
+		}) as unknown as { handleLine(client: unknown, line: string): Promise<void> };
+		eventFanout = (activeSessionId, event, meta) =>
+			(
+				supervisor as unknown as {
+					writeCloudSessionEvent(activeSessionId: string, event: unknown, meta: unknown): boolean;
+				}
+			).writeCloudSessionEvent(activeSessionId, event, meta);
+		let commandCounter = 0;
+		const send = async (command: Omit<DaemonCommand, "id">) => {
+			const id = `bootstrap-${++commandCounter}`;
+			await supervisor.handleLine(
+				client,
+				JSON.stringify(createDaemonCommandEnvelope({ ...command, id } as DaemonCommand, id, client.id)),
+			);
+			return writes.find((frame) => frame.id === id && frame.type === "response");
+		};
+		try {
+			// Conversion records the canonical selector the guest opens with.
+			const info = await harness.registry.convertSession({
+				cwd: root,
+				sessionId: guestSessionId,
+				model: "faux/faux-1",
+			});
+			const record = harness.store.get(info.sessionId)!;
+			await waitFor(
+				() => [...harness.rosterWrites.values()].some((row) => row.summary.execution?.location === "cloud"),
+				10_000,
+				"cloud roster row",
+			);
+
+			// The attach bootstrap reads every answer success: the daemon
+			// catalog serves model reads, and the local resource surface is
+			// empty for a sandbox-resident session.
+			const catalog = await send({
+				type: "get_model_catalog",
+				activeSessionId: record.activeSessionId!,
+			} as never);
+			expect(catalog).toMatchObject({ command: "get_model_catalog", success: true });
+			expect(catalog?.data).toMatchObject({ configuredProviders: ["faux"] });
+			const available = await send({
+				type: "get_available_models",
+				activeSessionId: record.activeSessionId!,
+			} as never);
+			expect(available?.data).toMatchObject({ models: [expect.objectContaining({ provider: "faux" })] });
+			const resources = await send({
+				type: "get_resource_snapshot",
+				activeSessionId: record.activeSessionId!,
+			} as never);
+			expect(resources?.data).toMatchObject({
+				contextFiles: [],
+				skills: [],
+				prompts: [],
+				extensions: [],
+				themes: [],
+				diagnostics: { skills: [], prompts: [], extensions: [], themes: [] },
+			});
+			const commands = await send({
+				type: "get_commands",
+				activeSessionId: record.activeSessionId!,
+			} as never);
+			expect(commands?.data).toEqual({ commands: [] });
+
+			// State carries the resolved current model and its thinking levels
+			// so the prompt bar renders model and thinking.
+			for (const type of ["get_state", "get_connection_state"] as const) {
+				const state = await send({ type, activeSessionId: record.activeSessionId! } as never);
+				expect(state).toMatchObject({ command: type, success: true });
+				expect(state?.data?.model).toMatchObject({ provider: "faux", id: "faux-1" });
+				expect((state?.data?.availableThinkingLevels as string[]).length).toBeGreaterThan(0);
+			}
+
+			// Enter the row: attach serves the shadow snapshot and marks the
+			// client as the event subscriber for the cloud row.
+			const attach = await send({ type: "attach", activeSessionId: record.activeSessionId! } as never);
+			expect(attach).toMatchObject({ command: "attach", success: true });
+			expect(writes.some((frame) => frame.type === "session_attached")).toBe(true);
+
+			// A prompt round-trips through the guest: the reply mirrors into
+			// the shadow AND streams to the attached client as session events.
+			queueFauxResponse(root, "bootstrap parity answer");
+			const prompt = await send({
+				type: "prompt",
+				activeSessionId: record.activeSessionId!,
+				message: "run the bootstrap parity check",
+			} as never);
+			expect(prompt).toMatchObject({ command: "prompt", success: true });
+			await waitFor(
+				() =>
+					parseSessionEntries(readFileSync(record.shadowSessionFile!, "utf8")).some(
+						(entry) => entry.type === "message" && JSON.stringify(entry).includes("bootstrap parity answer"),
+					),
+				20_000,
+				"mirrored assistant answer",
+			);
+			await waitFor(
+				() =>
+					writes.some(
+						(frame) =>
+							frame.type === "session_event" &&
+							frame.activeSessionId === record.activeSessionId &&
+							frame.event?.type === "message_end",
+					),
+				20_000,
+				"streamed assistant reply",
+			);
+			// The roster row now carries the current model and cumulative usage.
+			await waitFor(
+				() => {
+					const candidate = [...harness.rosterWrites.values()].find(
+						(entry) => entry.summary.execution?.location === "cloud",
+					);
+					const summary = candidate?.summary as unknown as { usage?: { inputTokens: number } } | undefined;
+					return summary?.usage !== undefined;
+				},
+				20_000,
+				"roster row model and usage",
+			);
+			const row = [...harness.rosterWrites.values()].find(
+				(candidate) => candidate.summary.execution?.location === "cloud",
+			);
+			expect(row).toBeDefined();
+			const rowSummary = row!.summary as unknown as {
+				model?: { provider: string; id: string };
+				usage?: { inputTokens: number; outputTokens: number };
+			};
+			expect(rowSummary.model).toMatchObject({ provider: "faux", id: "faux-1" });
+			expect(rowSummary.usage).toMatchObject({ inputTokens: 3, outputTokens: 5 });
+
+			// Leave to the agents view and re-enter: reattach replays the
+			// full conversation with the same model in state.
+			const reattach = await send({ type: "attach", activeSessionId: record.activeSessionId! } as never);
+			expect(reattach).toMatchObject({ command: "attach", success: true });
+			const attachedFrames = writes.filter((frame) => frame.type === "session_attached");
+			const latestSnapshot = attachedFrames.at(-1)?.snapshot;
+			expect(latestSnapshot?.state?.model).toMatchObject({ provider: "faux", id: "faux-1" });
+			expect(
+				latestSnapshot?.messages?.some(
+					(message) => message.role === "assistant" && JSON.stringify(message).includes("bootstrap parity answer"),
+				),
+			).toBe(true);
 		} finally {
 			await harness.registry.dispose().catch(() => undefined);
 			await daemon.stop().catch(() => undefined);

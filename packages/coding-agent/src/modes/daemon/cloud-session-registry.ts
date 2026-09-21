@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { type Api, getSupportedThinkingLevels, type Model } from "@earendil-works/pi-ai";
 import {
 	AGENT_MESSAGE_SOURCE,
 	type AgentFamilyRelationship,
@@ -166,6 +167,12 @@ export interface CloudSessionRegistryOptions {
 	reconnectDelayMs?: number;
 	/** Attachment submit wait before reporting a command as queued. */
 	submitWaitMs?: number;
+	/**
+	 * Resolve a cloud session's current model against the daemon's model
+	 * catalog; supplied by the supervisor so cloud state carries the same
+	 * authoritative model objects a local session reports.
+	 */
+	resolveModel?: (model: { provider?: string; modelId: string }) => Model<Api> | undefined;
 }
 
 /** One addressable cloud row: the root session or a remote descendant. */
@@ -307,6 +314,7 @@ export function isCloudSessionCommand(command: DaemonCommand): boolean {
 		case "delete_rlm_subagent":
 		case "extension_ui_response":
 		case "get_state":
+		case "get_connection_state":
 		case "get_messages":
 		case "get_session_header":
 		case "get_session_tree":
@@ -1195,6 +1203,7 @@ export class CloudSessionRegistry {
 				);
 				return success(command.id, command.type);
 			case "get_state":
+			case "get_connection_state":
 				return success(command.id, command.type, this.connectionState(session, target));
 			case "get_messages":
 				return success(command.id, command.type, {
@@ -1595,6 +1604,8 @@ export class CloudSessionRegistry {
 					outputTokens: event.totals.outputTokens,
 					requests: event.totals.requests,
 				};
+				// Cumulative usage is roster-visible; the row refreshes with it.
+				this.publishRosterRows(session);
 				return;
 			case "session_status":
 				this.observeSpawnedChildSettle(session, event.status);
@@ -2250,6 +2261,7 @@ export class CloudSessionRegistry {
 		const spawn = record.location === "spawned-child" ? record.spawn : undefined;
 		const taskStatus = session.spawnTask;
 		const spawnRunning = taskStatus !== undefined && !taskStatus.terminal;
+		const model = this.resolveSessionModel(session, record.sessionId);
 		return {
 			id: session.activeSessionId,
 			lifecycle: messages.length > 0 || session.opened ? "live" : "draft",
@@ -2257,6 +2269,7 @@ export class CloudSessionRegistry {
 			isSessionActive: busy,
 			activeSessionId: session.activeSessionId,
 			sessionId: record.sessionId,
+			...(model !== undefined ? { model } : {}),
 			...(record.shadowSessionFile ? { sessionFile: record.shadowSessionFile } : {}),
 			sessionName: spawn?.name ?? this.shadowSessionName(session, record.sessionId),
 			cwd: shadow?.header.cwd ?? this.shadowCwd(record),
@@ -2361,16 +2374,52 @@ export class CloudSessionRegistry {
 		return snapshots;
 	}
 
+	/**
+	 * The session's current model identity: mirrored session entries first
+	 * (authoritative model-change history), then the guest's latest metadata,
+	 * then the durable canonical selector recorded at conversion/spawn.
+	 */
+	private cloudModelIdentity(
+		session: CloudResidentSession,
+		remoteSessionId: string,
+	): { provider: string; modelId: string } | undefined {
+		const shadow = session.shadows.get(remoteSessionId);
+		// Mirrored model-change entries win, but a degenerate entry (empty
+		// model id) is not authoritative: fall through to the durable selector.
+		const fromEntries = shadow !== undefined ? this.entriesContext(shadow)?.model : undefined;
+		if (fromEntries !== null && fromEntries !== undefined && fromEntries.modelId) return fromEntries;
+		const record = this.currentRecord(session);
+		// The guest's live metadata reports the bare model id; the durable
+		// record carries the canonical provider-qualified selector. Either
+		// splits at its first slash; a bare id falls through to the next source.
+		const recordModel = record.location === "spawned-child" ? record.spawn?.model : record.model;
+		for (const selector of [session.metaBySession.get(remoteSessionId)?.model, recordModel]) {
+			if (selector === undefined || selector.trim() === "") continue;
+			const separator = selector.indexOf("/");
+			if (separator <= 0) continue;
+			return { provider: selector.slice(0, separator), modelId: selector.slice(separator + 1) };
+		}
+		return undefined;
+	}
+
+	/** Resolve the current model against the daemon catalog, when known. */
+	private resolveSessionModel(session: CloudResidentSession, remoteSessionId: string): Model<Api> | undefined {
+		const identity = this.cloudModelIdentity(session, remoteSessionId);
+		return identity === undefined ? undefined : this.options.resolveModel?.(identity);
+	}
+
 	private connectionState(session: CloudResidentSession, target: CloudSessionTarget): AgentConnectionState {
 		const shadow = session.shadows.get(target.remoteSessionId);
 		const context = shadow !== undefined ? this.entriesContext(shadow) : undefined;
 		const meta = session.metaBySession.get(target.remoteSessionId);
 		const record = this.currentRecord(session);
+		const model = this.resolveSessionModel(session, target.remoteSessionId);
 		return {
 			activeSessionId: target.activeSessionId,
 			cwd: shadow?.header.cwd ?? this.shadowCwd(record),
+			...(model !== undefined ? { model } : {}),
 			thinkingLevel: (context?.thinkingLevel ?? "off") as ThinkingLevel,
-			availableThinkingLevels: [],
+			availableThinkingLevels: model !== undefined ? (getSupportedThinkingLevels(model) as ThinkingLevel[]) : [],
 			isStreaming: meta?.streaming ?? false,
 			isCompacting: false,
 			isBashRunning: false,
@@ -2433,12 +2482,13 @@ export class CloudSessionRegistry {
 	private shadowContext(session: CloudResidentSession, remoteSessionId: string): AgentConnectionSessionContext {
 		const shadow = session.shadows.get(remoteSessionId);
 		const context = shadow !== undefined ? this.entriesContext(shadow) : undefined;
-		const meta = session.metaBySession.get(remoteSessionId);
 		return {
 			messages: context?.messages ?? [],
 			thinkingLevel: (context?.thinkingLevel ?? "off") as string,
 			serviceTier: (context?.serviceTier ?? "default") as AgentConnectionSessionContext["serviceTier"],
-			model: context?.model ?? (meta?.model !== undefined ? { provider: "cloud", modelId: meta.model } : null),
+			// Mirrored entries carry the authoritative provider/modelId pair;
+			// the durable selector splits canonically at the first slash.
+			model: context?.model ?? this.cloudModelIdentity(session, remoteSessionId) ?? null,
 		};
 	}
 

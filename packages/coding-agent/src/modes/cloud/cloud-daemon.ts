@@ -722,7 +722,17 @@ export class CloudGuestDaemon {
 
 	private onAssistantMessage(
 		state: ActiveSessionState,
-		message: { content?: unknown; usage?: { inputTokens?: number; outputTokens?: number; cachedTokens?: number } },
+		message: {
+			content?: unknown;
+			usage?: {
+				inputTokens?: number;
+				input?: number;
+				outputTokens?: number;
+				output?: number;
+				cachedTokens?: number;
+				cacheRead?: number;
+			};
+		},
 	): void {
 		// The results contract: stdout carries the assistant's answer text,
 		// batched to the v1 output_delta event the bridge streams into
@@ -744,9 +754,11 @@ export class CloudGuestDaemon {
 		if (usage !== undefined) {
 			const tracked = this.tracked.get(state.runtime.session.sessionId);
 			if (tracked) {
-				tracked.inputTokens += usage.inputTokens ?? 0;
-				tracked.outputTokens += usage.outputTokens ?? 0;
-				tracked.cachedTokens += usage.cachedTokens ?? 0;
+				// The assistant message usage carries input/output/cacheRead;
+				// tolerate the inputTokens/outputTokens spellings too.
+				tracked.inputTokens += usage.inputTokens ?? usage.input ?? 0;
+				tracked.outputTokens += usage.outputTokens ?? usage.output ?? 0;
+				tracked.cachedTokens += usage.cachedTokens ?? usage.cacheRead ?? 0;
 				tracked.requests += 1;
 				tracked.usageRevision += 1;
 				this.protocol.appendEvent({

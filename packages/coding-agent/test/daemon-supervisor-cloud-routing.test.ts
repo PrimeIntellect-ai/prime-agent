@@ -484,3 +484,128 @@ describe("supervisor cloud_spawn_child command gate", () => {
 		expect(meetsDaemonCommandCompatibility(oldDaemonHello, compatibility)).toBe(false);
 	});
 });
+
+/**
+ * Bootstrap-read parity for cloud rows: the daemon catalog and local resource
+ * surface answer authoritatively at the supervisor instead of failing as
+ * unsupported guest commands (the abort that broke the TUI attach).
+ */
+describe("supervisor cloud bootstrap read parity", () => {
+	const catalogModel = {
+		id: "faux-1",
+		name: "Faux Model",
+		api: "faux",
+		provider: "faux",
+		baseUrl: "http://localhost:0",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
+		maxTokens: 16_384,
+	} as unknown as Model<Api>;
+	const catalogStub = {
+		find: (provider: string, modelId: string) =>
+			provider === "faux" && modelId === "faux-1" ? catalogModel : undefined,
+		refreshModelCatalog: async () => ({ models: [catalogModel], configuredProviders: ["faux"] }),
+		refreshAvailableModels: async () => [catalogModel],
+	};
+	const cloudStub = {
+		resolveActive: () => ({ record: { sessionId: "sess_cloud_boot" }, remoteSessionId: "sess_cloud_boot" }),
+		handleSessionCommand: async (command: DaemonCommand) => ({
+			id: command.id,
+			type: "response",
+			command: command.type,
+			success: true,
+			data: { served: "registry" },
+		}),
+	};
+
+	function bootstrapRoutingSupervisor(): {
+		handleCommand(client: unknown, command: DaemonCommand): Promise<DaemonOutbound | undefined>;
+	} {
+		return Object.assign(Object.create(DaemonSupervisor.prototype), {
+			cloud: () => cloudStub,
+			modelCatalog: () => catalogStub,
+			log: () => undefined,
+		}) as never;
+	}
+
+	it("serves get_model_catalog and get_available_models from the supervisor catalog", async () => {
+		const supervisor = bootstrapRoutingSupervisor();
+		const catalog = await supervisor.handleCommand(makeClient(), {
+			id: "boot-catalog",
+			type: "get_model_catalog",
+			activeSessionId: "active-cloud",
+		});
+		expect(catalog).toMatchObject({
+			command: "get_model_catalog",
+			success: true,
+			data: { models: [expect.objectContaining({ provider: "faux" })], configuredProviders: ["faux"] },
+		});
+		const available = await supervisor.handleCommand(makeClient(), {
+			id: "boot-available",
+			type: "get_available_models",
+			activeSessionId: "active-cloud",
+		});
+		expect(available).toMatchObject({
+			command: "get_available_models",
+			success: true,
+			data: { models: [expect.objectContaining({ provider: "faux" })] },
+		});
+	});
+
+	it("serves the empty local resource surface and command list for a cloud row", async () => {
+		const supervisor = bootstrapRoutingSupervisor();
+		const resources = await supervisor.handleCommand(makeClient(), {
+			id: "boot-resources",
+			type: "get_resource_snapshot",
+			activeSessionId: "active-cloud",
+		});
+		expect(resources).toMatchObject({
+			command: "get_resource_snapshot",
+			success: true,
+			data: {
+				contextFiles: [],
+				skills: [],
+				prompts: [],
+				extensions: [],
+				themes: [],
+				diagnostics: { skills: [], prompts: [], extensions: [], themes: [] },
+			},
+		});
+		const commands = await supervisor.handleCommand(makeClient(), {
+			id: "boot-commands",
+			type: "get_commands",
+			activeSessionId: "active-cloud",
+		});
+		expect(commands).toMatchObject({ command: "get_commands", success: true, data: { commands: [] } });
+	});
+
+	it("routes get_connection_state to the registry command surface", async () => {
+		const supervisor = bootstrapRoutingSupervisor();
+		const state = await supervisor.handleCommand(makeClient(), {
+			id: "boot-connection-state",
+			type: "get_connection_state",
+			activeSessionId: "active-cloud",
+		});
+		expect(state).toMatchObject({
+			command: "get_connection_state",
+			success: true,
+			data: { served: "registry" },
+		});
+	});
+
+	it("still refuses genuinely unsupported guest commands", async () => {
+		const supervisor = bootstrapRoutingSupervisor();
+		const refused = await supervisor.handleCommand(makeClient(), {
+			id: "boot-unsupported",
+			type: "get_context_tree",
+			activeSessionId: "active-cloud",
+		});
+		expect(refused).toMatchObject({
+			command: "get_context_tree",
+			success: false,
+			error: expect.stringContaining("is not supported on a cloud session"),
+		});
+	});
+});

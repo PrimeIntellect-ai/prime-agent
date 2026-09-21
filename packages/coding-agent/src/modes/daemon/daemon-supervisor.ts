@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } f
 import { createServer, type Server, type Socket } from "node:net";
 import { basename, dirname, join, resolve } from "node:path";
 import { Writable } from "node:stream";
-import { getLogger } from "@earendil-works/pi-ai";
+import { type Api, getLogger, type Model } from "@earendil-works/pi-ai";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import {
 	appendRotatingLog,
@@ -29,6 +29,7 @@ import {
 	durableAgentSessionRuntimeConfig,
 	mergeAgentSessionRuntimeConfig,
 } from "../../core/agent-session-config.js";
+import { AuthStorage } from "../../core/auth-storage.js";
 import { isDirectCloudConfigured } from "../../core/cloud/direct-cloud-service.js";
 import { type CloudFamilyRow, canonicalCloudModelSelector } from "../../core/cloud/protocol.js";
 import {
@@ -38,6 +39,7 @@ import {
 	migrateLegacyCronJobsToSessionArtifacts,
 	SESSION_SCHEDULED_JOBS_FILENAME,
 } from "../../core/cron-jobs.js";
+import { ModelRegistry } from "../../core/model-registry.js";
 import {
 	clearOrphanProcessJournal,
 	killOrphanProcess,
@@ -67,7 +69,11 @@ import {
 	signalProcessGroupOrProcess,
 	spawnHidden,
 } from "../../utils/child-process.js";
-import type { AgentConnectionHeartbeat, AgentConnectionSessionEvent } from "../agent-connection/types.js";
+import type {
+	AgentConnectionHeartbeat,
+	AgentConnectionResourceSnapshot,
+	AgentConnectionSessionEvent,
+} from "../agent-connection/types.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../rpc/jsonl.js";
 import type { PrivateFrame } from "../session-worker/private-framing.js";
 import { createActiveSessionId, type DaemonSocketClient } from "./active-session-state.js";
@@ -252,6 +258,19 @@ const SCHEDULED_WAKE_MAX_TIMEOUT_MS = 2_147_483_647;
 const SCHEDULED_WAKE_CLIENT_ID = "scheduled-wake";
 const SUPERVISOR_CONFIG_FILE_NAME = "supervisor-config";
 const WORKER_STARTUP_GATE_FD = 3;
+
+/**
+ * A cloud row's local resource surface: its skills, prompts, extensions, and
+ * themes live inside the sandbox, so the local snapshot reports none.
+ */
+const EMPTY_CLOUD_RESOURCE_SNAPSHOT: AgentConnectionResourceSnapshot = {
+	contextFiles: [],
+	skills: [],
+	prompts: [],
+	extensions: [],
+	themes: [],
+	diagnostics: { skills: [], prompts: [], extensions: [], themes: [] },
+};
 
 const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"ack_result",
@@ -807,6 +826,7 @@ export class DaemonSupervisor {
 	private rosterWatchdogTimer?: ReturnType<typeof setInterval>;
 	/** Supervisor-owned cloud session registry; undefined when cloud is unconfigured. */
 	private cloudRegistry?: CloudSessionRegistry;
+	private cloudModelCatalog?: ModelRegistry;
 	private rlmSpawnLedgerInstance?: RlmSpawnLedger;
 	private idleEvictionTimer?: ReturnType<typeof setTimeout>;
 	private idleEvictionSweep?: Promise<void>;
@@ -2892,6 +2912,27 @@ export class DaemonSupervisor {
 		// a cloud active session id never falls into worker addressing.
 		const cloudTarget = this.cloud()?.resolveActive(command.activeSessionId);
 		if (cloudTarget !== undefined) {
+			// Bootstrap reads that describe the daemon and the local UI surface,
+			// not guest state: they answer authoritatively here instead of
+			// failing as unsupported guest commands.
+			if (command.type === "get_model_catalog" || command.type === "get_available_models") {
+				const catalog = this.modelCatalog();
+				return success(
+					command.id,
+					command.type,
+					command.type === "get_model_catalog"
+						? await catalog.refreshModelCatalog()
+						: { models: await catalog.refreshAvailableModels() },
+				);
+			}
+			if (command.type === "get_resource_snapshot") {
+				// A cloud session's resources live in its sandbox; the local
+				// surface honestly reports none for this row.
+				return success(command.id, command.type, EMPTY_CLOUD_RESOURCE_SNAPSHOT);
+			}
+			if (command.type === "get_commands") {
+				return success(command.id, command.type, { commands: [] });
+			}
 			if (isCloudSessionCommand(command)) {
 				return await this.handleCloudSessionCommand(client, command, cloudTarget);
 			}
@@ -4598,8 +4639,22 @@ export class DaemonSupervisor {
 				getDefaultSessionDir(this.defaultSessionConfig.cwd ?? process.cwd()),
 			cwd: this.defaultSessionConfig.cwd ?? process.cwd(),
 			callbacks: this.cloudRegistryCallbacks(),
+			// Cloud rows report the same authoritative model objects a local
+			// session does: the supervisor's catalog resolves them.
+			resolveModel: (model) => this.resolveCloudModel(model),
 		});
 		return this.cloudRegistry;
+	}
+
+	/** The supervisor's model catalog; answers cloud bootstrap reads. */
+	private modelCatalog(): ModelRegistry {
+		this.cloudModelCatalog ??= ModelRegistry.create(AuthStorage.create());
+		return this.cloudModelCatalog;
+	}
+
+	/** Resolve a cloud session's current model from the daemon's catalog. */
+	private resolveCloudModel(model: { provider?: string; modelId: string }): Model<Api> | undefined {
+		return this.modelCatalog().find(model.provider ?? "", model.modelId);
 	}
 
 	/** The registry or a typed error; used by the capability-gated command surface. */
