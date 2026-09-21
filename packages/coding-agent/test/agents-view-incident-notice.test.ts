@@ -264,4 +264,16 @@ describe("agents view incident notices", () => {
 		expect(refreshIncidentNoticeState(state, logPath, base)).toBe(true);
 		expect(state.notice).toMatchObject({ kind: "timeout-burst", timeMs: base - 5 * 60_000 });
 	});
+
+	it("keeps a dismissed timeout-burst hidden when a later timeout is isolated", () => {
+		useTempAgentDir();
+		const base = Date.now();
+		writeAgentLog([commandTimeoutLine(base, 60), commandTimeoutLine(base, 59)]);
+		const state = createIncidentNoticeState();
+		const logPath = getAgentLogPath();
+		expect(refreshIncidentNoticeState(state, logPath, base)).toBe(true);
+		expect(dismissIncidentNoticeState(state)).toBe(true);
+		appendAgentLog([commandTimeoutLine(base, 5)]);
+		expect(refreshIncidentNoticeState(state, logPath, base)).toBe(false);
+	});
 });

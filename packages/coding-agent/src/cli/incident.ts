@@ -77,6 +77,13 @@ const STALL_GAP_MS = 10 * 60 * 1000;
 const ERROR_BURST_THRESHOLD = 3;
 /** A burst is several warnings/errors close together; isolated failures far apart are not one incident. */
 const ERROR_BURST_WINDOW_MS = 10 * 60 * 1000;
+/**
+ * A stall is repeated command timeouts close together, like the burst window
+ * above; timeouts further apart than this never merge into one stall, whatever
+ * the report window is. Exported for the agents-view notice, which anchors its
+ * dismissal horizon on the same density bound.
+ */
+export const TIMEOUT_STALL_WINDOW_MS = 30 * 60 * 1000;
 const SUMMARY_TRUNCATION = 120;
 const RECOVERY_BREAKDOWN_LIMIT = 4;
 const WORKER_SOCKET_PATTERN = /^(?:prime-agent-)?worker-[0-9a-f]+-([0-9a-f]{12})(?:\.sock)?$/;
@@ -851,6 +858,29 @@ function maxSeverity(events: readonly IncidentEvent[]): IncidentSeverity {
 	return severity;
 }
 
+/**
+ * The densest run of time-sorted events within windowMs of each other,
+ * returned as the run's start index and length. Shared by the stall and burst
+ * scans: only events close together form one incident, so isolated events far
+ * apart never merge, whatever the report window is.
+ */
+function densestWindowRun(items: readonly IncidentEvent[], windowMs: number): { start: number; count: number } {
+	let bestStart = 0;
+	let bestCount = 0;
+	let start = 0;
+	for (let end = 0; end < items.length; end++) {
+		while (items[end]!.timeMs - items[start]!.timeMs > windowMs) {
+			start++;
+		}
+		const count = end - start + 1;
+		if (count > bestCount) {
+			bestCount = count;
+			bestStart = start;
+		}
+	}
+	return { start: bestStart, count: bestCount };
+}
+
 /** Compute stall, error-burst, and event-gap anomaly lines from classified events. */
 export function computeIncidentAnomalies(events: readonly IncidentEvent[]): IncidentEvent[] {
 	const bySubject = new Map<string, IncidentEvent[]>();
@@ -872,33 +902,27 @@ export function computeIncidentAnomalies(events: readonly IncidentEvent[]): Inci
 		group.sort((a, b) => a.timeMs - b.timeMs);
 		const timeouts = group.filter((incident) => incident.eventClass === "timeout");
 		if (timeouts.length >= 2) {
-			const span = timeouts[timeouts.length - 1]!.timeMs - timeouts[0]!.timeMs;
-			push(
-				timeouts[0]!.timeMs,
-				"error",
-				subject,
-				`${subject}: ${timeouts.length} command timeouts over ${formatIncidentDuration(span)}`,
-			);
+			// Only timeouts within TIMEOUT_STALL_WINDOW_MS of each other form a
+			// stall; two isolated timeouts hours apart in a long window are not one.
+			const run = densestWindowRun(timeouts, TIMEOUT_STALL_WINDOW_MS);
+			if (run.count >= 2) {
+				const cluster = timeouts.slice(run.start, run.start + run.count);
+				const span = cluster[cluster.length - 1]!.timeMs - cluster[0]!.timeMs;
+				push(
+					cluster[0]!.timeMs,
+					"error",
+					subject,
+					`${subject}: ${cluster.length} command timeouts over ${formatIncidentDuration(span)}`,
+				);
+			}
 		}
 		const burst = group.filter((incident) => BURST_CLASSES.has(incident.eventClass));
 		if (burst.length >= ERROR_BURST_THRESHOLD) {
 			// Only events within ERROR_BURST_WINDOW_MS of each other form a burst;
 			// three isolated warnings days apart in a long window are not one.
-			let bestStart = 0;
-			let bestCount = 0;
-			let start = 0;
-			for (let end = 0; end < burst.length; end++) {
-				while (burst[end]!.timeMs - burst[start]!.timeMs > ERROR_BURST_WINDOW_MS) {
-					start++;
-				}
-				const count = end - start + 1;
-				if (count > bestCount) {
-					bestCount = count;
-					bestStart = start;
-				}
-			}
-			if (bestCount >= ERROR_BURST_THRESHOLD) {
-				const cluster = burst.slice(bestStart, bestStart + bestCount);
+			const run = densestWindowRun(burst, ERROR_BURST_WINDOW_MS);
+			if (run.count >= ERROR_BURST_THRESHOLD) {
+				const cluster = burst.slice(run.start, run.start + run.count);
 				const span = cluster[cluster.length - 1]!.timeMs - cluster[0]!.timeMs;
 				push(
 					cluster[0]!.timeMs,

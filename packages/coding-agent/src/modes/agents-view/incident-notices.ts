@@ -7,6 +7,7 @@ import {
 	type IncidentLogEntry,
 	type IncidentSeverity,
 	parseIncidentLogLine,
+	TIMEOUT_STALL_WINDOW_MS,
 } from "../../cli/incident.js";
 import { theme } from "../interactive/theme/theme.js";
 
@@ -131,11 +132,12 @@ function createNotice(
  * restarts (a supervisor-start whose subject already started within the
  * window, i.e. the supervisor was replaced). A first-ever supervisor start is
  * routine and never produces a notice. A timeout-burst notice carries the
- * LATEST timeout of its subject — the classifier anchors the anomaly at the
- * first timeout — so dismissing it records a horizon that only covers the
- * burst as dismissed: a later timeout extends the burst past the horizon and
- * re-surfaces the notice, instead of it staying hidden until the first
- * timeout ages out of the window.
+ * LATEST stall-forming timeout of its subject — the classifier anchors the
+ * anomaly at the first timeout — so dismissing it records a horizon that only
+ * covers the burst as dismissed: a later timeout extending the burst past the
+ * horizon re-surfaces the notice, instead of it staying hidden until the first
+ * timeout ages out of the window; an isolated stray timeout hours later forms
+ * no stall and never re-opens it.
  */
 export function deriveIncidentNotices(entries: readonly IncidentLogEntry[], nowMs: number): IncidentNotice[] {
 	const sinceMs = nowMs - INCIDENT_NOTICE_WINDOW_MS;
@@ -160,28 +162,33 @@ export function deriveIncidentNotices(entries: readonly IncidentLogEntry[], nowM
 			);
 		}
 	}
-	// Latest timeout per subject, built in one pass: the classifier anchors each
-	// timeout-burst anomaly at the burst's FIRST timeout, but the notice must
-	// anchor at the LATEST one so dismissal advances with a growing burst (a
-	// later timeout re-surfaces the notice past the horizon instead of it
-	// staying hidden until the first timeout ages out). One pass keeps the
+	// Latest stall-forming timeout per subject, built in one pass: the
+	// classifier anchors each timeout-burst anomaly at the burst's FIRST
+	// timeout, but the notice must anchor at the LATEST one so dismissal
+	// advances with a growing burst (a later timeout in the burst re-surfaces
+	// the notice past the horizon instead of it staying hidden until the first
+	// timeout ages out). A timeout forms a stall only when the subject's
+	// previous timeout is within TIMEOUT_STALL_WINDOW_MS — the classifier's own
+	// density bound — so an isolated stray timeout hours later never moves the
+	// anchor and never re-opens a dismissed notice. One pass keeps the
 	// derivation linear in the windowed entries — a per-anomaly rescan would go
 	// quadratic against the bounded 20,000-entry window on every poll.
-	const latestTimeoutBySubject = new Map<string, number>();
+	const latestStallTimeoutBySubject = new Map<string, number>();
+	const previousTimeoutBySubject = new Map<string, number>();
 	for (const event of events) {
 		if (event.eventClass !== "timeout") {
 			continue;
 		}
-		const previous = latestTimeoutBySubject.get(event.subject);
-		latestTimeoutBySubject.set(
-			event.subject,
-			previous === undefined ? event.timeMs : Math.max(previous, event.timeMs),
-		);
+		const previous = previousTimeoutBySubject.get(event.subject);
+		if (previous !== undefined && event.timeMs - previous <= TIMEOUT_STALL_WINDOW_MS) {
+			latestStallTimeoutBySubject.set(event.subject, event.timeMs);
+		}
+		previousTimeoutBySubject.set(event.subject, event.timeMs);
 	}
 	for (const anomaly of computeIncidentAnomalies(events)) {
 		if (anomaly.summary.includes("command timeouts")) {
 			// The anomaly summary already reads "<subject>: N command timeouts over X".
-			const latestTimeoutMs = latestTimeoutBySubject.get(anomaly.subject) ?? anomaly.timeMs;
+			const latestTimeoutMs = latestStallTimeoutBySubject.get(anomaly.subject) ?? anomaly.timeMs;
 			notices.push(
 				createNotice("timeout-burst", anomaly.severity, anomaly.subject, latestTimeoutMs, anomaly.summary),
 			);

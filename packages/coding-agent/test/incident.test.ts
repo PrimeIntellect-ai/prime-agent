@@ -648,6 +648,18 @@ describe("worker pid attribution and anomalies", () => {
 		expect(anomalies.some((item) => item.summary.includes("warnings/errors"))).toBe(false);
 	});
 
+	it("does not report isolated timeouts hours apart as one stall", () => {
+		const timeoutMsg =
+			"Supervisor command attach failed: Error: Timed out waiting for daemon worker response to attach";
+		const entries = [
+			entry(supervisorLine("2026-09-10T20:00:00.000Z", timeoutMsg)),
+			entry(supervisorLine("2026-09-12T20:00:00.000Z", timeoutMsg)),
+		];
+		const events = collectIncidentEvents(entries, collectWorkerPidMap(entries));
+		const anomalies = computeIncidentAnomalies(events);
+		expect(anomalies.some((item) => item.summary.includes("command timeouts"))).toBe(false);
+	});
+
 	it("attributes provider failures to the worker owning the pid at that time", () => {
 		const workerA = "/tmp/prime-agent-501/worker-98ed5cb228d2-aaaaaaaaaaaa.sock";
 		const workerB = "/tmp/prime-agent-501/worker-98ed5cb228d2-bbbbbbbbbbbb.sock";
