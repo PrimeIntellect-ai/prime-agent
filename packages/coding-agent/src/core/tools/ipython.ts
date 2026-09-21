@@ -166,10 +166,15 @@ for _prime_agent_skill_name in ${JSON.stringify(importNames)}:
             _prime_agent_importlib.import_module(_prime_agent_skill_name)
         )
     except Exception as _prime_agent_skill_error:
-        _PRIME_AGENT_SKILL_IMPORT_ERRORS[_prime_agent_skill_name] = str(_prime_agent_skill_error)
+        # An exception with an empty message would otherwise be dropped by the
+        # host-side parser; fall back to the exception type name.
+        _prime_agent_skill_error_text = (
+            str(_prime_agent_skill_error) or type(_prime_agent_skill_error).__name__
+        )
+        _PRIME_AGENT_SKILL_IMPORT_ERRORS[_prime_agent_skill_name] = _prime_agent_skill_error_text
         globals()[_prime_agent_skill_name] = _PrimeAgentUnavailableSkill(
             _prime_agent_skill_name,
-            str(_prime_agent_skill_error),
+            _prime_agent_skill_error_text,
         )
 
 if _PRIME_AGENT_SKILL_IMPORT_ERRORS:
