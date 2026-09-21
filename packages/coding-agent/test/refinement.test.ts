@@ -64,7 +64,7 @@ function makeTempDir(): string {
 	return tempDir;
 }
 
-const kinds = ["prompt", "memory", "skill", "subagent"] as const satisfies readonly RefinementKind[];
+const kinds = ["prompt", "memory", "skill", "subagent", "swarm"] as const satisfies readonly RefinementKind[];
 const skillReference = {
 	type: "python",
 	import: "agent_skills.example",
@@ -74,6 +74,21 @@ const skillReference = {
 const skillContract = {
 	reference: skillReference,
 	arguments: { input: { type: "string", required: true, description: "Task input" } },
+};
+const swarmDag = {
+	nodes: [
+		{
+			id: "collect",
+			subagent: "researcher",
+			outputs: [{ name: "findings", type: "text" }],
+		},
+		{
+			id: "review",
+			subagent: { prompt: "Review the findings." },
+			depends_on: ["collect"],
+			inputs: [{ name: "draft", type: "text", from: "collect.findings" }],
+		},
+	],
 };
 
 function proposal(summary: string, edits: RefinementProposal["edits"]): RefinementProposal {
@@ -131,7 +146,7 @@ function seedEntry(state: HarnessState, kind: RefinementKind, id = `${kind}_entr
 				title: `${kind} title`,
 				content: `${kind} content`,
 				path: `${kind}/path`,
-				...(kind === "skill" ? skillContract : {}),
+				...(kind === "skill" ? skillContract : kind === "swarm" ? { arguments: { dag: swarmDag } } : {}),
 				metadata: { seeded: true },
 			},
 		]),
@@ -205,7 +220,7 @@ describe("harness refinement", () => {
 	it.each(kinds)("applies the create/update/delete lifecycle for %s entries", (kind) => {
 		const state = loadHarnessState(makeTempDir());
 		const id = `${kind}_entry`;
-		const skillFields = kind === "skill" ? skillContract : {};
+		const skillFields = kind === "skill" ? skillContract : kind === "swarm" ? { arguments: { dag: swarmDag } } : {};
 		const apply = (edits: RefinementProposal["edits"], refinementId: string) =>
 			applyRefinementProposal(state, proposal(`${refinementId} ${kind}`, edits), { id: refinementId });
 
@@ -272,6 +287,101 @@ describe("harness refinement", () => {
 		expect(state.refinements.at(-1)?.changes).toEqual([`delete ${kind}:${id}`]);
 	});
 
+	it("requires a dag object in arguments for swarm creates and updates", () => {
+		const state = loadHarnessState(makeTempDir());
+
+		const missingDag = applyRefinementProposal(
+			state,
+			proposal("Create swarm without a dag", [
+				{
+					action: "create",
+					kind: "swarm",
+					id: "swarm_entry",
+					title: "Swarm title",
+					content: "Swarm content",
+				},
+			]),
+			{ id: "refine_swarm_missing_dag" },
+		);
+
+		expect(missingDag.appliedEdits[0]).toMatchObject({
+			applied: false,
+			error: "swarm entry requires a dag object in arguments",
+		});
+		expect(state.entries.swarm.swarm_entry).toBeUndefined();
+		expect(state.refinements.at(-1)?.changes).toEqual([]);
+
+		const nonObjectDag = applyRefinementProposal(
+			state,
+			proposal("Create swarm with a non-object dag", [
+				{
+					action: "create",
+					kind: "swarm",
+					id: "swarm_entry",
+					title: "Swarm title",
+					content: "Swarm content",
+					arguments: { dag: ["not", "an", "object"] },
+				},
+			]),
+			{ id: "refine_swarm_non_object_dag" },
+		);
+
+		expect(nonObjectDag.appliedEdits[0]).toMatchObject({
+			applied: false,
+			error: "swarm entry requires a dag object in arguments",
+		});
+
+		const created = applyRefinementProposal(
+			state,
+			proposal("Create swarm with a dag", [
+				{
+					action: "create",
+					kind: "swarm",
+					id: "swarm_entry",
+					title: "Swarm title",
+					content: "Swarm content",
+					path: "swarm/created",
+					arguments: { dag: swarmDag },
+					metadata: { kind: "swarm" },
+				},
+			]),
+			{ id: "refine_swarm_valid" },
+		);
+
+		expect(created.appliedEdits[0].applied).toBe(true);
+		expect(state.entries.swarm.swarm_entry.arguments).toEqual({ dag: swarmDag });
+
+		const updateWithoutDag = applyRefinementProposal(
+			state,
+			proposal("Update swarm without a dag", [
+				{
+					action: "update",
+					kind: "swarm",
+					id: "swarm_entry",
+					title: "Swarm title updated",
+					content: "Swarm content updated",
+				},
+			]),
+			{ id: "refine_swarm_update_missing_dag" },
+		);
+
+		expect(updateWithoutDag.appliedEdits[0]).toMatchObject({
+			applied: false,
+			error: "swarm entry requires a dag object in arguments",
+		});
+		expect(state.entries.swarm.swarm_entry.title).toBe("Swarm title");
+	});
+
+	it("renders the swarm invoke contract in the harness digest", () => {
+		const state = loadHarnessState(makeTempDir());
+		seedEntry(state, "swarm", "sweep");
+
+		const digest = formatHarnessStateForPrompt(state);
+
+		expect(digest).toContain("swarm: 1");
+		expect(digest).toContain("await rlm.swarm.run('<id>')");
+	});
+
 	it("creates ids from titles and uses default path and metadata when omitted", () => {
 		const state = loadHarnessState(makeTempDir());
 
@@ -297,7 +407,8 @@ describe("harness refinement", () => {
 		error: string;
 		seed?: RefinementKind;
 	};
-	const skillFieldsFor = (kind: RefinementKind) => (kind === "skill" ? skillContract : {});
+	const skillFieldsFor = (kind: RefinementKind) =>
+		kind === "skill" ? skillContract : kind === "swarm" ? { arguments: { dag: swarmDag } } : {};
 	it.each<InvalidCase>([
 		...kinds.map(
 			(kind): InvalidCase => ({
@@ -477,7 +588,7 @@ describe("harness refinement", () => {
 
 			const state = loadHarnessState(dir);
 
-			expect(state.entries).toEqual({ prompt: {}, memory: {}, skill: {}, subagent: {} });
+			expect(state.entries).toEqual({ prompt: {}, memory: {}, skill: {}, subagent: {}, swarm: {} });
 			expect(state.refinements).toEqual([]);
 			applyRefinementProposal(
 				state,

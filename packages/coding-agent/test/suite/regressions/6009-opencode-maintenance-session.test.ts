@@ -233,7 +233,7 @@ describe.each(["opencode", "opencode-go"])("ENG-6009 %s maintenance identity", (
 		responseText = JSON.stringify(proposal);
 		const state: HarnessState = {
 			schema: 1,
-			entries: { prompt: {}, memory: {}, skill: {}, subagent: {} },
+			entries: { prompt: {}, memory: {}, skill: {}, subagent: {}, swarm: {} },
 			refinements: [],
 		};
 		const headers: Record<string, string> = { "X-Fixture": "retained" };
