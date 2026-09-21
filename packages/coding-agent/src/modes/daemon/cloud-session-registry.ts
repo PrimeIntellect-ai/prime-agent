@@ -217,6 +217,14 @@ export interface CloudAttachSnapshot {
 	lastEventSequence: number;
 }
 
+/** Mirrored cumulative token totals for one remote session (usage events). */
+interface CloudSessionUsageTotals {
+	inputTokens: number;
+	outputTokens: number;
+	cachedTokens: number;
+	requests: number;
+}
+
 interface CloudSessionMeta {
 	sessionId: string;
 	streaming: boolean;
@@ -257,7 +265,8 @@ interface CloudResidentSession {
 	eventRing: Array<{ sessionId: string; event: AgentConnectionSessionEvent }>;
 	eventSequence: number;
 	opened: boolean;
-	usage: { inputTokens: number; outputTokens: number; requests: number };
+	/** Cumulative mirrored usage per remote session id (root and descendants). */
+	usageBySession: Map<string, CloudSessionUsageTotals>;
 	/** Spawned-child task tracker; present only for `location === "spawned-child"`. */
 	spawnTask?: CloudSpawnTaskTracker;
 	/** Processed cross-boundary request ids (replay dedupe), bounded. */
@@ -315,6 +324,9 @@ export function isCloudSessionCommand(command: DaemonCommand): boolean {
 		case "extension_ui_response":
 		case "get_state":
 		case "get_connection_state":
+		case "get_session_stats":
+		case "get_user_messages_for_forking":
+		case "get_last_assistant_text":
 		case "get_messages":
 		case "get_session_header":
 		case "get_session_tree":
@@ -1205,6 +1217,12 @@ export class CloudSessionRegistry {
 			case "get_state":
 			case "get_connection_state":
 				return success(command.id, command.type, this.connectionState(session, target));
+			case "get_session_stats":
+				return success(command.id, command.type, this.sessionStats(session, target));
+			case "get_user_messages_for_forking":
+				return success(command.id, command.type, { messages: this.userMessagesForForking(session, target) });
+			case "get_last_assistant_text":
+				return success(command.id, command.type, { text: this.lastAssistantText(session, target) });
 			case "get_messages":
 				return success(command.id, command.type, {
 					messages: this.shadowContext(session, target.remoteSessionId).messages,
@@ -1247,6 +1265,9 @@ export class CloudSessionRegistry {
 			case "send_message":
 			case "extension_ui_response":
 			case "get_state":
+			case "get_session_stats":
+			case "get_user_messages_for_forking":
+			case "get_last_assistant_text":
 			case "get_messages":
 			case "get_session_header":
 			case "get_session_tree":
@@ -1401,7 +1422,7 @@ export class CloudSessionRegistry {
 			eventRing: [],
 			eventSequence: 0,
 			opened: false,
-			usage: { inputTokens: 0, outputTokens: 0, requests: 0 },
+			usageBySession: new Map(),
 			processedRemoteRequests: new Set(),
 		};
 		session.attachment = this.createAttachment(session);
@@ -1570,6 +1591,7 @@ export class CloudSessionRegistry {
 				this.relaySessionEvent(session, event.sessionId, event.event as AgentConnectionSessionEvent);
 				return;
 			case "session_meta": {
+				const previousStreaming = session.metaBySession.get(event.sessionId)?.streaming ?? false;
 				session.metaBySession.set(event.sessionId, {
 					sessionId: event.sessionId,
 					streaming: event.streaming,
@@ -1584,6 +1606,17 @@ export class CloudSessionRegistry {
 				this.observeSpawnedChildWork(session, event.sessionId, event.streaming);
 				this.publishRosterRows(session);
 				this.callbacks.writeSessionStatus(session.activeSessionId, event.recap);
+				// `agent_end` mirrors can be dropped at the wire bound (the
+				// event carries a run's whole message payload), so the meta
+				// flip is the one reliable "not streaming" signal: push a
+				// client state update whenever it changes, and the prompt
+				// spinner can never stick on a dropped agent_end.
+				if (previousStreaming !== event.streaming) {
+					this.relaySessionEvent(session, event.sessionId, {
+						type: "streaming_state",
+						streaming: event.streaming,
+					});
+				}
 				return;
 			}
 			case "roster_delta":
@@ -1598,15 +1631,19 @@ export class CloudSessionRegistry {
 			case "agent_message_request":
 				void this.handleAgentMessageRequest(session, event);
 				return;
-			case "usage":
-				session.usage = {
+			case "usage": {
+				// Totals are per remote session id, so descendants never
+				// clobber the root's cumulative numbers.
+				session.usageBySession.set(event.sessionId, {
 					inputTokens: event.totals.inputTokens,
 					outputTokens: event.totals.outputTokens,
+					cachedTokens: event.totals.cachedTokens ?? 0,
 					requests: event.totals.requests,
-				};
+				});
 				// Cumulative usage is roster-visible; the row refreshes with it.
 				this.publishRosterRows(session);
 				return;
+			}
 			case "session_status":
 				this.observeSpawnedChildSettle(session, event.status);
 				this.publishRosterRows(session);
@@ -2252,9 +2289,10 @@ export class CloudSessionRegistry {
 		const info = shadow !== undefined ? statSummary(shadow.sessionFile) : undefined;
 		const connected = session.connectivity === "connected";
 		const busy = connected && ((meta?.streaming ?? false) || (meta?.runningTools ?? 0) > 0);
+		const totals = session.usageBySession.get(record.sessionId);
 		const usage: SessionUsageSummary | undefined =
-			session.usage.inputTokens > 0 || session.usage.outputTokens > 0
-				? { inputTokens: session.usage.inputTokens, outputTokens: session.usage.outputTokens, cost: 0 }
+			totals !== undefined && (totals.inputTokens > 0 || totals.outputTokens > 0)
+				? { inputTokens: totals.inputTokens, outputTokens: totals.outputTokens, cost: 0 }
 				: undefined;
 		// A spawned child projects as a subagent row under its LOCAL parent:
 		// real parent edges (ledger + family reach) with the cloud execution marker.
@@ -2414,6 +2452,7 @@ export class CloudSessionRegistry {
 		const meta = session.metaBySession.get(target.remoteSessionId);
 		const record = this.currentRecord(session);
 		const model = this.resolveSessionModel(session, target.remoteSessionId);
+		const { tokens, contextWindow, percent } = this.contextUsage(session, target.remoteSessionId, model);
 		return {
 			activeSessionId: target.activeSessionId,
 			cwd: shadow?.header.cwd ?? this.shadowCwd(record),
@@ -2438,12 +2477,89 @@ export class CloudSessionRegistry {
 			goal: emptyGoalState(),
 			scopedModels: [],
 			activeToolNames: [],
-			contextUsage: {
-				tokens: null,
-				contextWindow: 0,
-				percent: null,
-			} as AgentConnectionState["contextUsage"],
+			contextUsage: { tokens, contextWindow, percent },
 		};
+	}
+
+	/**
+	 * Honest context usage for a cloud row: the guest's cumulative token
+	 * totals against the resolved model's context window. The exact live
+	 * context lives in the sandbox; before the first mirrored usage the value
+	 * stays unknown (null) exactly like a local session right after compaction.
+	 */
+	private contextUsage(
+		session: CloudResidentSession,
+		remoteSessionId: string,
+		model: Model<Api> | undefined,
+	): { tokens: number | null; contextWindow: number; percent: number | null } {
+		const contextWindow = model?.contextWindow ?? 0;
+		const totals = session.usageBySession.get(remoteSessionId);
+		if (contextWindow <= 0 || totals === undefined) {
+			return { tokens: null, contextWindow, percent: null };
+		}
+		const tokens = totals.inputTokens + totals.outputTokens;
+		if (tokens <= 0) {
+			return { tokens: null, contextWindow, percent: null };
+		}
+		return { tokens, contextWindow, percent: (tokens / contextWindow) * 100 };
+	}
+
+	/** Session stats computed from the shadow transcript and mirrored usage. */
+	private sessionStats(session: CloudResidentSession, target: CloudSessionTarget) {
+		const shadow = session.shadows.get(target.remoteSessionId);
+		const messages = this.shadowContext(session, target.remoteSessionId).messages;
+		const totals = session.usageBySession.get(target.remoteSessionId);
+		const model = this.resolveSessionModel(session, target.remoteSessionId);
+		let toolCalls = 0;
+		for (const message of messages) {
+			if (message.role !== "assistant") continue;
+			toolCalls += message.content.filter((block) => block.type === "toolCall").length;
+		}
+		const input = totals?.inputTokens ?? 0;
+		const output = totals?.outputTokens ?? 0;
+		const cacheRead = totals?.cachedTokens ?? 0;
+		const { tokens, contextWindow, percent } = this.contextUsage(session, target.remoteSessionId, model);
+		return {
+			sessionFile: shadow?.sessionFile,
+			sessionId: target.remoteSessionId,
+			userMessages: messages.filter((message) => message.role === "user").length,
+			assistantMessages: messages.filter((message) => message.role === "assistant").length,
+			toolCalls,
+			toolResults: messages.filter((message) => message.role === "toolResult").length,
+			totalMessages: messages.length,
+			tokens: { input, output, cacheRead, cacheWrite: 0, total: input + output + cacheRead },
+			// Cloud cost is not mirrored; the row reports no cost rather than a guess.
+			cost: 0,
+			contextUsage: { tokens, contextWindow, percent },
+		};
+	}
+
+	/** User messages with their entry ids, from the mirrored shadow entries. */
+	private userMessagesForForking(
+		session: CloudResidentSession,
+		target: CloudSessionTarget,
+	): Array<{ entryId: string; text: string }> {
+		const shadow = session.shadows.get(target.remoteSessionId);
+		const result: Array<{ entryId: string; text: string }> = [];
+		if (shadow === undefined) return result;
+		for (const entry of this.sessionEntries(shadow)) {
+			if (entry.type !== "message" || entry.message.role !== "user") continue;
+			const text = readMessageText(entry.message.content).trim();
+			if (text) result.push({ entryId: entry.id, text });
+		}
+		return result;
+	}
+
+	/** Text of the last assistant answer in the shadow, for /copy parity. */
+	private lastAssistantText(session: CloudResidentSession, target: CloudSessionTarget): string | undefined {
+		const messages = this.shadowContext(session, target.remoteSessionId).messages;
+		for (let index = messages.length - 1; index >= 0; index--) {
+			const message = messages[index];
+			if (message?.role !== "assistant") continue;
+			const text = readMessageText(message.content).trim();
+			if (text) return text;
+		}
+		return undefined;
 	}
 
 	private sessionHeader(session: CloudResidentSession, target: CloudSessionTarget): AgentConnectionSessionHeader {

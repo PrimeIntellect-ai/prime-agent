@@ -598,6 +598,11 @@ export type AgentConnectionSessionEvent =
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
 	| { type: "auth_stale"; provider: string; sourceTokens?: readonly AuthSourceToken[] }
 	| { type: "rlm_child_update"; child: AgentConnectionRlmChildAgentSnapshot }
+	| {
+			/** Mirrored streaming-state flip (cloud rows): the reliable not-streaming signal. */
+			type: "streaming_state";
+			streaming: boolean;
+	  }
 	| { type: "recap_update"; recap: string | undefined }
 	| { type: "goal_update"; goal: GoalState }
 	| { type: "bash_start"; command: string; excludeFromContext: boolean; transient?: boolean; runId?: string }

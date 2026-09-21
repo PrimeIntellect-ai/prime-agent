@@ -595,6 +595,55 @@ describe("supervisor cloud bootstrap read parity", () => {
 		});
 	});
 
+	it("routes the shadow-served reads to the registry command surface", async () => {
+		const supervisor = bootstrapRoutingSupervisor();
+		for (const [id, type] of [
+			["boot-stats", "get_session_stats"],
+			["boot-forking", "get_user_messages_for_forking"],
+			["boot-copy", "get_last_assistant_text"],
+		] as const) {
+			const response = await supervisor.handleCommand(makeClient(), {
+				id,
+				type,
+				activeSessionId: "active-cloud",
+			} as never);
+			expect(response).toMatchObject({
+				command: type,
+				success: true,
+				data: { served: "registry" },
+			});
+		}
+	});
+
+	it("serves builtin tool definitions from the runtime registry and unknown tools as undefined", async () => {
+		const supervisor = bootstrapRoutingSupervisor();
+		const builtin = await supervisor.handleCommand(makeClient(), {
+			id: "boot-tool-builtin",
+			type: "get_tool_definition",
+			activeSessionId: "active-cloud",
+			name: "ipython",
+		});
+		expect(builtin).toMatchObject({
+			command: "get_tool_definition",
+			success: true,
+			data: {
+				toolDefinition: {
+					name: "ipython",
+					label: "ipython",
+					description: expect.stringContaining("persistent Python REPL"),
+				},
+			},
+		});
+		const unknown = await supervisor.handleCommand(makeClient(), {
+			id: "boot-tool-unknown",
+			type: "get_tool_definition",
+			activeSessionId: "active-cloud",
+			name: "extension_tool",
+		});
+		expect(unknown).toMatchObject({ command: "get_tool_definition", success: true });
+		expect((unknown as { data?: { toolDefinition?: unknown } }).data?.toolDefinition).toBeUndefined();
+	});
+
 	it("still refuses genuinely unsupported guest commands", async () => {
 		const supervisor = bootstrapRoutingSupervisor();
 		const refused = await supervisor.handleCommand(makeClient(), {

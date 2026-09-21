@@ -39,6 +39,7 @@ import {
 	migrateLegacyCronJobsToSessionArtifacts,
 	SESSION_SCHEDULED_JOBS_FILENAME,
 } from "../../core/cron-jobs.js";
+import type { ToolDefinition } from "../../core/extensions/index.js";
 import { ModelRegistry } from "../../core/model-registry.js";
 import {
 	clearOrphanProcessJournal,
@@ -62,6 +63,7 @@ import {
 } from "../../core/session-manager.js";
 import { looksLikeSessionPath } from "../../core/session-resolver.js";
 import { SettingsManager } from "../../core/settings-manager.js";
+import { createAllToolDefinitions } from "../../core/tools/index.js";
 import { writeFileAtomicSync } from "../../utils/atomic-file.js";
 import {
 	isProcessAlive,
@@ -69,10 +71,12 @@ import {
 	signalProcessGroupOrProcess,
 	spawnHidden,
 } from "../../utils/child-process.js";
+import { createAgentConnectionToolDefinition } from "../agent-connection/tool-definition.js";
 import type {
 	AgentConnectionHeartbeat,
 	AgentConnectionResourceSnapshot,
 	AgentConnectionSessionEvent,
+	AgentConnectionToolDefinition,
 } from "../agent-connection/types.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../rpc/jsonl.js";
 import type { PrivateFrame } from "../session-worker/private-framing.js";
@@ -258,6 +262,23 @@ const SCHEDULED_WAKE_MAX_TIMEOUT_MS = 2_147_483_647;
 const SCHEDULED_WAKE_CLIENT_ID = "scheduled-wake";
 const SUPERVISOR_CONFIG_FILE_NAME = "supervisor-config";
 const WORKER_STARTUP_GATE_FD = 3;
+
+/**
+ * Builtin tool definitions for cloud rows: the same registry the runtime
+ * builds, so a rendered tool renders identically for a local and a cloud
+ * session. The definition's wire shape does not depend on the cwd, so one
+ * map serves every row. Extension/MCP tools live in the sandbox and resolve
+ * to no definition (undefined), exactly like an unknown tool locally.
+ */
+let cloudBuiltinToolDefinitionCache: Map<string, ToolDefinition> | undefined;
+
+function cloudBuiltinToolDefinition(name: string): AgentConnectionToolDefinition | undefined {
+	cloudBuiltinToolDefinitionCache ??= new Map(
+		Object.entries(createAllToolDefinitions(process.cwd()) as Record<string, ToolDefinition>),
+	);
+	const definition = cloudBuiltinToolDefinitionCache.get(name);
+	return definition === undefined ? undefined : createAgentConnectionToolDefinition(definition);
+}
 
 /**
  * A cloud row's local resource surface: its skills, prompts, extensions, and
@@ -2932,6 +2953,11 @@ export class DaemonSupervisor {
 			}
 			if (command.type === "get_commands") {
 				return success(command.id, command.type, { commands: [] });
+			}
+			if (command.type === "get_tool_definition") {
+				return success(command.id, command.type, {
+					toolDefinition: cloudBuiltinToolDefinition(command.name),
+				});
 			}
 			if (isCloudSessionCommand(command)) {
 				return await this.handleCloudSessionCommand(client, command, cloudTarget);

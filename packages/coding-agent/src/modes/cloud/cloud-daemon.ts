@@ -666,6 +666,15 @@ export class CloudGuestDaemon {
 			// carries the payload.
 		}
 		switch (event.type) {
+			case "agent_start": {
+				// The mirror loop samples `isStreaming` on ticks; a turn can
+				// start and finish between two ticks (or entirely in
+				// microtasks), so the turn boundary emits the streaming meta
+				// directly. The settled not-streaming meta still lands on the
+				// next mirror pass, once the run has fully finished.
+				this.emitMetaIfChanged(true);
+				break;
+			}
 			case "message_end": {
 				const message = (
 					event as {

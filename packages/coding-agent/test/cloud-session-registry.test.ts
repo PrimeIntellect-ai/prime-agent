@@ -612,6 +612,33 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 			} as never);
 			expect(commands?.data).toEqual({ commands: [] });
 
+			// Rendered tools resolve without a guest round-trip: the builtin
+			// definition is identical to the runtime's registry, and extension
+			// tools resolve to no definition instead of an error.
+			const builtinTool = await send({
+				type: "get_tool_definition",
+				activeSessionId: record.activeSessionId!,
+				name: "ipython",
+			} as never);
+			expect(builtinTool).toMatchObject({
+				command: "get_tool_definition",
+				success: true,
+				data: {
+					toolDefinition: {
+						name: "ipython",
+						label: "ipython",
+						description: expect.stringContaining("persistent Python REPL"),
+					},
+				},
+			});
+			const unknownTool = await send({
+				type: "get_tool_definition",
+				activeSessionId: record.activeSessionId!,
+				name: "extension_tool",
+			} as never);
+			expect(unknownTool).toMatchObject({ command: "get_tool_definition", success: true });
+			expect((unknownTool as { data?: { toolDefinition?: unknown } }).data?.toolDefinition).toBeUndefined();
+
 			// State carries the resolved current model and its thinking levels
 			// so the prompt bar renders model and thinking.
 			for (const type of ["get_state", "get_connection_state"] as const) {
@@ -655,6 +682,47 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 				20_000,
 				"streamed assistant reply",
 			);
+			// The full turn's lifecycle reaches the attached client: the
+			// loader spins up on agent_start and lands on agent_end.
+			expect(
+				writes.some(
+					(frame) =>
+						frame.type === "session_event" &&
+						frame.activeSessionId === record.activeSessionId &&
+						frame.event?.type === "agent_start",
+				),
+			).toBe(true);
+			await waitFor(
+				() =>
+					writes.some(
+						(frame) =>
+							frame.type === "session_event" &&
+							frame.activeSessionId === record.activeSessionId &&
+							frame.event?.type === "agent_end",
+					),
+				20_000,
+				"agent_end relay",
+			);
+			// The meta flip pushed its own client state update, both directions.
+			await waitFor(
+				() =>
+					writes.some(
+						(frame) =>
+							frame.type === "session_event" &&
+							frame.activeSessionId === record.activeSessionId &&
+							frame.event?.type === "streaming_state" &&
+							(frame.event as { streaming?: boolean }).streaming === false,
+					),
+				20_000,
+				"streaming flip push",
+			);
+			// The turn ended: state reports isStreaming false, so the prompt
+			// spinner cannot stick.
+			const settledState = await send({
+				type: "get_connection_state",
+				activeSessionId: record.activeSessionId!,
+			} as never);
+			expect(settledState?.data).toMatchObject({ isStreaming: false });
 			// The roster row now carries the current model and cumulative usage.
 			await waitFor(
 				() => {
@@ -677,6 +745,47 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 			};
 			expect(rowSummary.model).toMatchObject({ provider: "faux", id: "faux-1" });
 			expect(rowSummary.usage).toMatchObject({ inputTokens: 3, outputTokens: 5 });
+
+			// The prompt bar's context tray carries honest usage: the mirrored
+			// cumulative totals against the model's context window.
+			const contextState = await send({
+				type: "get_connection_state",
+				activeSessionId: record.activeSessionId!,
+			} as never);
+			expect(contextState?.data?.contextUsage).toEqual({
+				tokens: 8,
+				contextWindow: 128_000,
+				percent: (8 / 128_000) * 100,
+			});
+
+			// Shadow-served reads answer for cloud rows: stats, forking
+			// lists, and the last answer, all without a guest round-trip.
+			const stats = await send({
+				type: "get_session_stats",
+				activeSessionId: record.activeSessionId!,
+			} as never);
+			expect(stats?.data).toMatchObject({
+				userMessages: 1,
+				assistantMessages: 1,
+				// user + assistant + the injected harness-digest custom message
+				totalMessages: 3,
+				tokens: { input: 3, output: 5, cacheRead: 0, total: 8 },
+				cost: 0,
+				contextUsage: { tokens: 8, contextWindow: 128_000 },
+			});
+			const forking = await send({
+				type: "get_user_messages_for_forking",
+				activeSessionId: record.activeSessionId!,
+			} as never);
+			expect((forking?.data?.messages as Array<{ entryId: string; text: string }>).length).toBe(1);
+			expect((forking?.data?.messages as Array<{ text: string }>)[0]?.text).toContain(
+				"run the bootstrap parity check",
+			);
+			const lastAnswer = await send({
+				type: "get_last_assistant_text",
+				activeSessionId: record.activeSessionId!,
+			} as never);
+			expect(lastAnswer?.data?.text).toBe("bootstrap parity answer");
 
 			// Leave to the agents view and re-enter: reattach replays the
 			// full conversation with the same model in state.

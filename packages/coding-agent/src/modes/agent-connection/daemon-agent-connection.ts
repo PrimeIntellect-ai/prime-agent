@@ -3,7 +3,6 @@ import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core"
 import type { ImageContent, ServiceTier, Transport } from "@earendil-works/pi-ai";
 import { appendRotatingLog, getAgentLogPath, getDaemonLogPath } from "../../config.js";
 import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
-import type { AgentSessionEvent } from "../../core/agent-session.js";
 import type { AgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
 import type { BashResult } from "../../core/bash-executor.js";
@@ -92,6 +91,7 @@ import type {
 	AgentConnectionSavedSessionScope,
 	AgentConnectionScopedModel,
 	AgentConnectionSessionContext,
+	AgentConnectionSessionEvent,
 	AgentConnectionSessionHeader,
 	AgentConnectionSessionInputPause,
 	AgentConnectionSessionListCallbacks,
@@ -2444,7 +2444,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		this.latestSnapshot = { ...this.latestSnapshot, children: updatedChildren };
 	}
 
-	private observeStreamingMessage(event: AgentSessionEvent): void {
+	private observeStreamingMessage(event: AgentConnectionSessionEvent): void {
 		if (!this.latestSnapshot) {
 			return;
 		}

@@ -2723,6 +2723,11 @@ export class InteractiveMode {
 			case "agent_end":
 				this.patchConnectionState({ isStreaming: false, activeToolNames: [] });
 				break;
+			case "streaming_state":
+				// Cloud rows: the mirrored meta flip is the reliable not-streaming
+				// signal (a dropped oversized agent_end mirror cannot stick the spinner).
+				this.patchConnectionState({ isStreaming: event.streaming });
+				break;
 			case "session_action_update":
 				this.patchConnectionState({ sessionActions: event.actions });
 				this.refreshQueueSelectionFromState();
@@ -5485,6 +5490,13 @@ export class InteractiveMode {
 					this.startWorkingLoader();
 				}
 				this.ui.requestRender();
+				break;
+
+			case "streaming_state":
+				// Cloud rows: a dropped oversized agent_end mirror never lands,
+				// so the meta flip is the reliable not-streaming signal. The
+				// loader reconciles from the patched connection state.
+				this.syncWorkingLoader();
 				break;
 
 			case "session_action_update": {

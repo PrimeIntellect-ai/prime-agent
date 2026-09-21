@@ -4,10 +4,10 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import chalk from "chalk";
 import { expandTildePath } from "../config.js";
-import type { AgentSessionEvent } from "../core/agent-session.js";
 import type { AgentSessionRuntimeConfig } from "../core/agent-session-config.js";
 import { type AgentCronJob, formatAgentCronJob } from "../core/cron-jobs.js";
 import { looksLikeSessionPath } from "../core/session-resolver.js";
+import type { AgentConnectionSessionEvent } from "../modes/agent-connection/types.js";
 import { DaemonClient, type DaemonClientMessageListener } from "../modes/daemon/daemon-client.js";
 import type { DaemonOutbound, DaemonResponse } from "../modes/daemon/daemon-protocol.js";
 import { matchesSessionIdSuffix } from "../modes/daemon/daemon-session-id.js";
@@ -1412,7 +1412,7 @@ class DaemonAttachTerminal {
 		}
 	}
 
-	private handleSessionEvent(event: AgentSessionEvent): void {
+	private handleSessionEvent(event: AgentConnectionSessionEvent): void {
 		switch (event.type) {
 			case "agent_start":
 				this.isStreaming = true;
