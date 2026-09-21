@@ -1,0 +1,3 @@
+- Added Grok 4.7 to the xAI, Grok subscription, OpenRouter, Vercel AI Gateway, and OpenCode Zen and Go model catalogs, with verified low through xhigh reasoning efforts on the subscription route.
+- Refreshed the generated model catalog from live provider catalogs, picking up upstream model additions, repricing, and retirements.
+- Kept the Kimi Coding Plan catalog after models.dev renamed its section to kimi-code-plan-global.

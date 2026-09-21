@@ -1353,9 +1353,12 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 			}
 		}
 
-		// Process Kimi For Coding models
-		if (data["kimi-for-coding"]?.models) {
-			const kimiModels = data["kimi-for-coding"].models as Record<string, ModelsDevModel>;
+		// Process Kimi For Coding models. models.dev renamed the section from
+		// kimi-for-coding to kimi-code-plan-global (kimi-code-plan-cn is the
+		// domestic plan and is not served by the api.kimi.com provider entry).
+		const kimiSource = data["kimi-code-plan-global"] ?? data["kimi-for-coding"];
+		if (kimiSource?.models) {
+			const kimiModels = kimiSource.models as Record<string, ModelsDevModel>;
 			const hasCanonicalModel = Object.prototype.hasOwnProperty.call(kimiModels, "kimi-for-coding");
 
 			const kimiAliases = new Set(["k2p5", "k2p6"]);
@@ -2050,6 +2053,13 @@ async function generateModels() {
 			contextWindow: 32768,
 			maxTokens: 8192,
 		});
+	}
+
+	// Add missing OpenCode Grok 4.7 until models.dev includes it. OpenCode Zen
+	// already serves it; clone the grok-4.6 row (same limits and pricing).
+	const opencodeGrok46 = allModels.find((m) => m.provider === "opencode" && m.id === "grok-4.6");
+	if (opencodeGrok46 && !allModels.some((m) => m.provider === "opencode" && m.id === "grok-4.7")) {
+		allModels.push({ ...opencodeGrok46, id: "grok-4.7", name: "Grok 4.7" });
 	}
 
 	// Add missing Mistral Medium 3.5 model until models.dev includes it
