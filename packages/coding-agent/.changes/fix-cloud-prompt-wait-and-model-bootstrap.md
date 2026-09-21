@@ -1,0 +1,2 @@
+- Fixed cloud `prompt_and_wait` returning before the submitted turn started: the wait now observes the turn start (guest streaming or a durable answer) before settling, and fails honestly when a turn never starts.
+- Fixed cloud session bootstrap reads missing the model on first attach: the supervisor now refreshes its model catalog once for private models instead of reporting no model until the next read.

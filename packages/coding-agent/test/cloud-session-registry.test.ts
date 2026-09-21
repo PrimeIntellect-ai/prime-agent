@@ -165,6 +165,8 @@ function buildRegistry(
 		resolveModel?: (model: { provider?: string; modelId: string }) => Model<Api> | undefined;
 		/** Overrides the writeSessionEvent callback (fan-out wiring in e2e). */
 		writeSessionEvent?: CloudSessionRegistryCallbacks["writeSessionEvent"];
+		/** Lowers the turn-start window for honest-failure tests. */
+		turnStartTimeoutMs?: number;
 	} = {},
 ): RegistryHarness {
 	const stateDirectory = join(root, "cloud");
@@ -341,6 +343,7 @@ function buildRegistry(
 		bridgeToken: BRIDGE_TOKEN,
 		reconnectDelayMs: 50,
 		submitWaitMs: 5_000,
+		...(options.turnStartTimeoutMs === undefined ? {} : { turnStartTimeoutMs: options.turnStartTimeoutMs }),
 		...(options.resolveModel === undefined ? {} : { resolveModel: options.resolveModel }),
 		artifactResolver: {
 			fetch: async () => {
@@ -1005,6 +1008,38 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 });
 
 describe("CloudSessionRegistry command translation (v2 attachment)", () => {
+	it("fails prompt_and_wait honestly when the submitted turn never starts", async () => {
+		const root = temp();
+		const guestSessionId = "sess_wait_for_turn";
+		const daemon = await startGuestDaemon(root, 1, guestSessionId);
+		const harness = buildRegistry(root, join(root, "guest.sock"), { turnStartTimeoutMs: 1_500 });
+		try {
+			const info = await harness.registry.convertSession({ cwd: root, sessionId: guestSessionId });
+			const record = harness.store.get(info.sessionId)!;
+			const target = harness.registry.resolveActive(record.activeSessionId!)!;
+			await waitFor(
+				() => harness.registry.resolveActive(record.activeSessionId!)!.summary.execution !== undefined,
+				10_000,
+				"target ready",
+			);
+
+			// The guest stops serving before the prompt is submitted, so the
+			// turn can never start. prompt_and_wait must fail honestly instead
+			// of settling on the not-yet-started idle state.
+			await daemon.stop();
+			queueFauxResponse(root, "never delivered");
+			const settled = await harness.registry.handleSessionCommand(
+				{ type: "prompt_and_wait", activeSessionId: record.activeSessionId!, message: "never runs" },
+				target,
+			);
+			expect(settled.success).toBe(false);
+			expect(String((settled as { error?: unknown }).error)).toContain("did not start the submitted turn");
+		} finally {
+			await harness.registry.dispose();
+			await daemon.stop().catch(() => undefined);
+		}
+	}, 60_000);
+
 	it("translates the normal session command surface onto cloud commands", async () => {
 		const root = temp();
 		const guestSessionId = "sess_translate_me";

@@ -161,6 +161,8 @@ export interface CloudSessionRegistryOptions {
 	artifactResolver?: ShadowArtifactResolver;
 	/** Sandbox lifetime default in minutes. */
 	timeoutMinutes?: number;
+	/** Bounded window for a submitted prompt to observably start; tests lower it. */
+	turnStartTimeoutMs?: number;
 	/** Tunnel bridge token override (tests pin the guest's expected token). */
 	bridgeToken?: string;
 	/** Tunnel attachment reconnect floor; small in tests. */
@@ -290,6 +292,8 @@ const RING_MAX_BYTES = 1024 * 1024;
 const CLOUD_MAX_MIRRORED_CHILDREN = 512;
 const IDLE_WAIT_TIMEOUT_MS = 15 * 60_000;
 const IDLE_WAIT_POLL_MS = 50;
+/** Bounded window for a submitted prompt to observably start on the guest. */
+const TURN_START_TIMEOUT_MS = 120_000;
 const ATTACHMENT_WAIT_TIMEOUT_MS = 60_000;
 const ATTACHMENT_WAIT_POLL_MS = 50;
 const RECEIPT_WAIT_TIMEOUT_MS = 15_000;
@@ -1087,9 +1091,11 @@ export class CloudSessionRegistry {
 		switch (command.type) {
 			case "prompt":
 			case "prompt_and_wait": {
+				const answersBefore = this.countShadowAssistantMessages(session, target);
 				const failed = await this.submitPrompt(session, command, admission, target);
 				if (failed !== undefined) return failed;
 				if (command.type === "prompt_and_wait") {
+					await this.waitForTurnStart(session, target, answersBefore);
 					await this.waitForIdle(session, false, target);
 				}
 				return success(command.id, command.type);
@@ -2208,6 +2214,36 @@ export class CloudSessionRegistry {
 		if (!session.attachment.attached) {
 			throw new Error(`Cloud session is not connected; cannot ${action} until the tunnel reconnects`);
 		}
+	}
+
+	/** Count the durable assistant answers in a target's shadow transcript. */
+	private countShadowAssistantMessages(session: CloudResidentSession, target: CloudSessionTarget): number {
+		return this.shadowContext(session, target.remoteSessionId).messages.filter(
+			(message) => message.role === "assistant",
+		).length;
+	}
+
+	/**
+	 * A submitted prompt takes a moment to reach the guest; idle alone is not
+	 * proof the turn ran. Wait until the turn observably starts (the guest
+	 * reports streaming) or its answer lands in the shadow transcript, then
+	 * let waitForIdle settle it. A turn that finished between polls is
+	 * covered by the answer count, so no start is required.
+	 */
+	private async waitForTurnStart(
+		session: CloudResidentSession,
+		target: CloudSessionTarget,
+		answersBefore: number,
+	): Promise<void> {
+		const primaryRemote = target.remoteSessionId;
+		const deadline = Date.now() + (this.options.turnStartTimeoutMs ?? TURN_START_TIMEOUT_MS);
+		while (Date.now() < deadline && !this.disposed) {
+			const meta = session.metaBySession.get(primaryRemote);
+			if (meta?.streaming === true) return;
+			if (this.countShadowAssistantMessages(session, target) > answersBefore) return;
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, IDLE_WAIT_POLL_MS));
+		}
+		throw new Error("Cloud session did not start the submitted turn before the wait timeout");
 	}
 
 	private async waitForIdle(

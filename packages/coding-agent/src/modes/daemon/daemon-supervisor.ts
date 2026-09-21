@@ -848,6 +848,8 @@ export class DaemonSupervisor {
 	/** Supervisor-owned cloud session registry; undefined when cloud is unconfigured. */
 	private cloudRegistry?: CloudSessionRegistry;
 	private cloudModelCatalog?: ModelRegistry;
+	/** Guards the one in-flight private-model catalog refresh for cloud rows. */
+	private cloudModelCatalogRefreshed = false;
 	private rlmSpawnLedgerInstance?: RlmSpawnLedger;
 	private idleEvictionTimer?: ReturnType<typeof setTimeout>;
 	private idleEvictionSweep?: Promise<void>;
@@ -4680,7 +4682,24 @@ export class DaemonSupervisor {
 
 	/** Resolve a cloud session's current model from the daemon's catalog. */
 	private resolveCloudModel(model: { provider?: string; modelId: string }): Model<Api> | undefined {
-		return this.modelCatalog().find(model.provider ?? "", model.modelId);
+		const catalog = this.modelCatalog();
+		const found = catalog.find(model.provider ?? "", model.modelId);
+		if (found !== undefined) {
+			return found;
+		}
+		// Private models are absent from the bundled catalog until an
+		// authenticated refresh. Kick the refresh off once; the registry
+		// republishes rows after it lands and later reads resolve the model.
+		if (!this.cloudModelCatalogRefreshed) {
+			this.cloudModelCatalogRefreshed = true;
+			void catalog
+				.refreshModelCatalog()
+				.catch(() => {})
+				.finally(() => {
+					this.cloudModelCatalogRefreshed = false;
+				});
+		}
+		return undefined;
 	}
 
 	/** The registry or a typed error; used by the capability-gated command surface. */
