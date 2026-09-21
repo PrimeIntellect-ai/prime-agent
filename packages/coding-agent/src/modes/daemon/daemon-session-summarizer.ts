@@ -482,7 +482,8 @@ export class DaemonSessionSummarizer {
 				const activityAt = candidate.runtime.session.messages.at(-1)?.timestamp ?? 0;
 				if (
 					activityAt > nextActivityAt ||
-					(activityAt === nextActivityAt && (next === undefined || candidate.activeSessionId > next.activeSessionId))
+					(activityAt === nextActivityAt &&
+						(next === undefined || candidate.activeSessionId > next.activeSessionId))
 				) {
 					next = candidate;
 					nextActivityAt = activityAt;

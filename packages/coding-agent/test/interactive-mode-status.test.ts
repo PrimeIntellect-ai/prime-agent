@@ -574,15 +574,19 @@ describe("InteractiveMode connection events", () => {
 			await emit({ type: "session_status", recap: "still working" });
 			expect(getContextTree).toHaveBeenCalledOnce();
 			// session_info_changed routes the same throttled refresh through handleEvent's switch.
-			const handleEvent = (InteractiveMode.prototype as unknown as {
-				handleEvent(this: unknown, event: unknown): Promise<void>;
-			}).handleEvent;
+			const handleEvent = (
+				InteractiveMode.prototype as unknown as {
+					handleEvent(this: unknown, event: unknown): Promise<void>;
+				}
+			).handleEvent;
 			await handleEvent.call(fakeThis, { type: "session_info_changed" });
 			expect(getContextTree).toHaveBeenCalledOnce();
 			vi.advanceTimersByTime(1_100);
 			await emit({ type: "session_status", recap: "done" });
 			expect(getContextTree).toHaveBeenCalledTimes(2);
-			(InteractiveMode.prototype as unknown as { refreshTopBarCost(this: unknown): void }).refreshTopBarCost.call(fakeThis);
+			(InteractiveMode.prototype as unknown as { refreshTopBarCost(this: unknown): void }).refreshTopBarCost.call(
+				fakeThis,
+			);
 			expect(getContextTree).toHaveBeenCalledTimes(3);
 			await emit({ type: "session_status", recap: "again" });
 			expect(getContextTree).toHaveBeenCalledTimes(3);

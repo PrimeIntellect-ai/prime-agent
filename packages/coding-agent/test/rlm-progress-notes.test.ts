@@ -545,7 +545,10 @@ describe("rlm.progress.note child progress channel", () => {
 				});
 			}
 			expect(childUpdates.length).toBe(saturated);
-			emitChild({ type: "message_update", message: assistantMessage(`head-marker${"x".repeat(400)}second tail${"y".repeat(60)}`) });
+			emitChild({
+				type: "message_update",
+				message: assistantMessage(`head-marker${"x".repeat(400)}second tail${"y".repeat(60)}`),
+			});
 			expect(
 				session.getRlmChildSnapshots().find((candidate) => candidate.id === handle.rlm_child_id)?.answerPreview,
 			).toContain("second tail");
@@ -561,7 +564,10 @@ describe("rlm.progress.note child progress channel", () => {
 			// Past the window a delta emits again; the preview follows the tail, never the head.
 			run.lastStreamedUpdateMonotonicAt = performance.now() - RLM_CHILD_UPDATE_MIN_INTERVAL_MS - 1;
 			const changed = childUpdates.length;
-			emitChild({ type: "message_update", message: assistantMessage(`head-marker${"x".repeat(400)}changed tail${"y".repeat(60)}`) });
+			emitChild({
+				type: "message_update",
+				message: assistantMessage(`head-marker${"x".repeat(400)}changed tail${"y".repeat(60)}`),
+			});
 			await waitFor(() => childUpdates.length > changed);
 			expect(childUpdates.at(-1)?.preview).toMatch(/changed taily{60}$/);
 			expect(childUpdates.at(-1)?.preview).not.toContain("head-marker");

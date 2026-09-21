@@ -440,7 +440,10 @@ describe("worker roster reporter", () => {
 			const internals = daemon as unknown as {
 				sessions: Map<string, ActiveSessionState>;
 				cronStore: { registerSessionArtifact(sessionId: string, artifactDir: string): boolean };
-				handleCommand(client: object, command: object): Promise<{ success: boolean; data?: { job?: { id: string } } }>;
+				handleCommand(
+					client: object,
+					command: object,
+				): Promise<{ success: boolean; data?: { job?: { id: string } } }>;
 				rosterReporter: { lastComposed: Map<string, WorkerRosterEntry> };
 			};
 			internals.cronStore.registerSessionArtifact("session-root-active", join(directory, "sessions", "root"));
@@ -566,8 +569,7 @@ describe("worker roster reporter", () => {
 				type: "session_status",
 				activeSessionId: state.activeSessionId,
 			});
-			const quietSummary = () =>
-				daemon.rosterReporter.lastComposed.get("session-quiet-active")?.summary.isStreaming;
+			const quietSummary = () => daemon.rosterReporter.lastComposed.get("session-quiet-active")?.summary.isStreaming;
 
 			daemon.observeRosterEvent(loud, statusFor(loud));
 			vi.advanceTimersByTime(0);
@@ -579,7 +581,10 @@ describe("worker roster reporter", () => {
 			expect(sentDeltas).toHaveLength(1);
 			vi.advanceTimersByTime(150);
 			expect(sentDeltas).toHaveLength(2);
-			expect(sentDeltas.at(-1)?.entries.find((entry) => entry.summary.sessionName === "name-loud-active")?.summary.isStreaming).toBe(true);
+			expect(
+				sentDeltas.at(-1)?.entries.find((entry) => entry.summary.sessionName === "name-loud-active")?.summary
+					.isStreaming,
+			).toBe(true);
 
 			// quiet flips busy with no roster event of its own: loud-only triggers must not republish it.
 			(quiet.runtime.session as unknown as { isStreaming: boolean }).isStreaming = true;
