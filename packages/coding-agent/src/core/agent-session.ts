@@ -398,7 +398,7 @@ export interface RlmChildAgentSnapshot {
  * RlmChildAgentSnapshot minus its two clock-derived fields: the observable
  * state rlm_child_update events dedup on.
  */
-export type RlmChildStableSnapshot = Omit<RlmChildAgentSnapshot, "lastActivityAt" | "activityStaleMs">;
+type RlmChildStableSnapshot = Omit<RlmChildAgentSnapshot, "lastActivityAt" | "activityStaleMs">;
 
 export type CompactionReason = "manual" | "threshold" | "overflow" | "requested";
 
