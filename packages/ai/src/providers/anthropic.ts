@@ -756,9 +756,10 @@ function isAlwaysOnAdaptiveThinkingModel(modelId: string): boolean {
 }
 
 /**
- * Check if a model supports adaptive thinking (Opus 4.6+, Sonnet 4.6)
+ * Check if a model supports adaptive thinking (Opus 4.6+, Sonnet 4.6). Exported
+ * for catalog generation, which must not re-derive the id list.
  */
-function supportsAdaptiveThinking(modelId: string): boolean {
+export function supportsAdaptiveThinking(modelId: string): boolean {
 	// Adaptive-thinking model IDs (with or without date suffix).
 	return (
 		modelId.includes("opus-4-6") ||
