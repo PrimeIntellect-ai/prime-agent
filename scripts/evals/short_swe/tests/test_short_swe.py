@@ -925,6 +925,19 @@ class TestFilterTestControl:
         # The +++ header line is kept too: git apply needs it.
         assert "+++ b/src/trad.py" in result
 
+    def test_hunk_removed_line_three_dash_test_path_is_content(self) -> None:
+        from scripts.evals.short_swe.verified_verifier import filter_test_control
+
+        patch = (
+            "diff --git a/src/keep.py b/src/keep.py\n"
+            "@@ -1,3 +1,2 @@\n"
+            " old\n"
+            "--- a/tests/foo.py\n"
+            "+new\n"
+        )
+        result = filter_test_control(patch)
+        assert "--- a/tests/foo.py" in result and "new" in result
+
     def test_hunk_body_dashdash_is_content(self) -> None:
         from scripts.evals.short_swe.verified_verifier import filter_test_control
 

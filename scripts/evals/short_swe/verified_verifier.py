@@ -121,6 +121,13 @@ def _strip_diff_prefix(path: str) -> str:
     return path[2:] if len(path) > 2 and path[1] == "/" and path[0] in "ab" else path
 
 
+def _hunk_expected_lines(header: str) -> int | None:
+    m = re.search(r"@@ .* \+(\d+)(?:,(\d+))? @@", header)
+    if not m:
+        return None
+    return 1 if m.group(2) is None else int(m.group(2))
+
+
 def _in_traditional_section(current: list[str]) -> bool:
     return bool(current) and current[0].startswith("--- ")
 
@@ -142,7 +149,12 @@ def filter_test_control(raw: bytes | str) -> str:
     b_path = ""
     saw_header = False
     in_hunk = False
+    hunk_lines_left: int | None = None
     for line in patch.splitlines(keepends=True):
+        if in_hunk and hunk_lines_left is not None and hunk_lines_left <= 0:
+            # The previous hunk's line count is exhausted; a --- here is a new
+            # traditional file header (git apply treats it as such), not hunk content.
+            in_hunk = False
         if line.startswith("diff --git "):
             if not saw_header and current:
                 # Content before the first header is traditional-diff preamble:
@@ -156,9 +168,12 @@ def filter_test_control(raw: bytes | str) -> str:
             a_path, b_path = _patch_paths(line)
             saw_header = True
             in_hunk = False
-        elif line.startswith("--- ") and current and _strip_diff_prefix(_unquote_path(line[4:])) not in (
-            a_path,
-            b_path,
+            hunk_lines_left = None
+        elif (
+            line.startswith("--- ")
+            and current
+            and not in_hunk
+            and _strip_diff_prefix(_unquote_path(line[4:])) not in (a_path, b_path)
         ):
             # Traditional-diff header between hunks: git apply parses it as a new
             # file patch after the preceding section, so it cannot ride along a
@@ -170,14 +185,16 @@ def filter_test_control(raw: bytes | str) -> str:
             a_path = _strip_diff_prefix(_unquote_path(line[4:]))
             b_path = ""
             in_hunk = False
+            hunk_lines_left = None
         elif b_path == "" and line.startswith("+++ ") and current and _in_traditional_section(current):
             current.append(line)
             b_path = _strip_diff_prefix(_unquote_path(line[4:]))
         else:
             if line.startswith("@@"):
                 in_hunk = True
-            elif in_hunk and line.startswith("diff --git "):
-                in_hunk = False
+                hunk_lines_left = _hunk_expected_lines(line)
+            elif in_hunk and hunk_lines_left is not None and not line.startswith("\\"):
+                hunk_lines_left -= 1
             current.append(line)
     if current and not (TEST_CONTROL.fullmatch(a_path) or TEST_CONTROL.fullmatch(b_path)):
         kept.extend(current)
