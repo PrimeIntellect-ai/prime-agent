@@ -129,6 +129,19 @@ describe("SessionManager leaf branch cache", () => {
 		expectChainMatches(session, [firstId, secondId]);
 	});
 
+	it("serves the reloaded entries after the same instance reopens its file", () => {
+		const session = persistedSession();
+		const firstId = session.appendMessage(userMsg("one"));
+		const secondId = session.appendMessage(assistantMsg("two")); // assistant append flushes the file to disk
+		const held = session.getBranch();
+		session.setSessionFile(session.getSessionFile()!); // same path, same leaf id, fresh entry objects
+		expect(session.getBranch()).not.toBe(held);
+		expectChainMatches(session, [firstId, secondId]); // the served objects are the reloaded ones
+		const thirdId = session.appendMessage(userMsg("three"));
+		expectChainMatches(session, [firstId, secondId, thirdId]);
+		expect(held).toHaveLength(2); // the pre-reload array is dead: appends must not grow it
+	});
+
 	it("never leaves a rolled-back append in a branch array a caller already holds", () => {
 		const session = persistedSession();
 		const firstId = session.appendMessage(userMsg("one"));

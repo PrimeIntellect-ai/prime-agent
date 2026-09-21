@@ -16,7 +16,13 @@ vi.mock("node:fs", async (importOriginal) => {
 	return { ...actual, appendFileSync: fsMocks.appendFileSync, readFileSync: fsMocks.readFileSync };
 });
 
-import { appendCustomMessageToExistingFile, appendSessionInfoToExistingFile } from "../../src/core/session-manager.js";
+import { ENV_AGENT_DIR } from "../../src/config.js";
+import {
+	appendCustomMessageToExistingFile,
+	appendSessionInfoToExistingFile,
+	SessionManager,
+} from "../../src/core/session-manager.js";
+import { DaemonCatalogClient } from "../../src/modes/daemon/daemon-catalog-process.js";
 
 const tempDirs: string[] = [];
 
@@ -74,6 +80,10 @@ function resetIo(): void {
 
 function rawFile(file: string): Buffer {
 	return fsMocks.readFileSync(file) as unknown as Buffer;
+}
+
+function lastLine(file: string): Record<string, unknown> {
+	return JSON.parse(rawFile(file).toString("utf8").trimEnd().split("\n").at(-1)!);
 }
 
 /** The bytes appended to `file` since `before`, parsed as JSON. */
@@ -144,5 +154,69 @@ describe("append metadata to an existing session file", () => {
 		expect(() => appendSessionInfoToExistingFile(invalid, "Renamed")).toThrow(/no valid session header/);
 		expect(fsMocks.appendFileSync).not.toHaveBeenCalled(); // nothing created, appended, or rewritten
 		expect(rawFile(invalid).toString("utf8")).toBe(contents);
+	});
+
+	it.each([
+		["a chained transcript", (dir: string) => sessionLines(dir, { entries: 3 })],
+		[
+			"a trailing label entry",
+			(dir: string) => [
+				...sessionLines(dir, { entries: 2 }),
+				JSON.stringify({
+					type: "label",
+					id: "l1",
+					parentId: "e1",
+					timestamp: "2026-01-01T00:00:02.000Z",
+					targetId: "e0",
+					label: "pin",
+				}),
+			],
+		],
+		["blank trailing lines", (dir: string) => [...sessionLines(dir, { entries: 3 }), "", ""]],
+	])("chains the appended entry to the leaf a full open computes for %s", (_name, lines) => {
+		const dir = tempDir();
+		const file = writeSession(dir, "leaf.jsonl", lines(dir));
+		const expectedLeaf = SessionManager.open(file).getLeafId(); // the authoritative leaf rule (_buildIndex)
+		const before = rawFile(file);
+		resetIo();
+		appendSessionInfoToExistingFile(file, "Renamed");
+		expect(fsMocks.readFileSync).not.toHaveBeenCalled(); // positive control: the fast path placed it, not the fallback
+		expect(appended(before, file).parentId).toBe(expectedLeaf);
+	});
+});
+
+describe("daemon catalog metadata commands", () => {
+	it("appends rename, archive and interruption metadata through the fast path", async () => {
+		// The forked catalog process serves the commands: on this assistant-less
+		// fixture, a full-open fallback would drop the interruption notice.
+		const dir = tempDir();
+		const file = writeSession(dir, "catalog.jsonl", sessionLines(dir, { entries: 4 }));
+		const previousAgentDir = process.env[ENV_AGENT_DIR];
+		process.env[ENV_AGENT_DIR] = tempDir("pa-catalog-metadata-");
+		const client = new DaemonCatalogClient(() => {});
+		try {
+			await client.start();
+			await client.rename(file, "  Catalog Renamed  ");
+			const renamed = lastLine(file);
+			expect(renamed).toMatchObject({ type: "session_info", name: "Catalog Renamed", parentId: "e3" });
+
+			expect(await client.archive(file, "fixture-session")).toBe(true);
+			const archived = lastLine(file);
+			expect(archived).toMatchObject({ type: "session_state", state: { status: "archived" }, parentId: renamed.id });
+
+			await client.markInterrupted(file, "active-1", ["model_stream"]);
+			expect(lastLine(file)).toMatchObject({
+				type: "custom_message",
+				customType: "prime-agent.worker_recovery",
+				parentId: archived.id,
+			});
+
+			// The rename refusal propagates cleanly instead of ghost-creating the missing file.
+			await expect(client.rename(join(dir, "missing.jsonl"), "Nope")).rejects.toThrow(/missing session file/);
+		} finally {
+			await client.stop();
+			if (previousAgentDir === undefined) delete process.env[ENV_AGENT_DIR];
+			else process.env[ENV_AGENT_DIR] = previousAgentDir;
+		}
 	});
 });

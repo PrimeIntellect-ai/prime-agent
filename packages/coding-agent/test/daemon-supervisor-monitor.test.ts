@@ -4258,6 +4258,29 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
+	it("completes recovery when an interrupted session notice cannot be written", async () => {
+		const { root, worker, recoveryJournalPath } = recoveryFixture({
+			sessions: [
+				{ activeSessionId: "root-active", sessionFile: "/tmp/missing-root.jsonl", operation: "model_stream" },
+			],
+		});
+		// The catalog refuses the notice, as it does for a deleted session file.
+		const markInterrupted = vi.fn(async () => {
+			throw new Error("Cannot append to missing session file: /tmp/missing-root.jsonl");
+		});
+		const { supervisor, log } = recoverySupervisor(worker, { markInterrupted });
+		try {
+			await expect(supervisor.recoverUncertainWorkerOperations(worker)).resolves.toBeUndefined();
+			expect(log.mock.calls.some(([message]) => String(message).includes("/tmp/missing-root.jsonl"))).toBe(true);
+			// Recovery ran past the failed notice: the journal resolved the busy record.
+			expect(WorkerRecoveryJournal.readLatest(recoveryJournalPath)).toEqual([
+				expect.objectContaining({ activeSessionId: "root-active", busy: false, operation: "recovery_hold" }),
+			]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it.each([
 		{ name: "identity-bearing", hasProcessIdentity: true, retained: true },
 		{ name: "PID-only", hasProcessIdentity: false, retained: false },

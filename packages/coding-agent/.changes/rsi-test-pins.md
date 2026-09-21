@@ -1,0 +1,1 @@
+- Added regression tests for harness-digest dedupe across compaction, the session branch cache on same-instance reload, daemon catalog metadata appends, worker-recovery notice tolerance, and damaged-session detection.
