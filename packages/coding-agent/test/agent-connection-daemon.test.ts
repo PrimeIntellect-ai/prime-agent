@@ -1482,7 +1482,7 @@ describe("DaemonAgentConnection", () => {
 		// read the relayed close as "killed"; a direct worker link closes as "shutdown".
 		["announced daemon shutdown", (fakeClient: FakeDaemonClient) => announceClose("shutdown", fakeClient)],
 		["announced supervisor shutdown", (fakeClient: FakeDaemonClient) => announceClose("killed", fakeClient)],
-	])("recovers a %s by reconnecting to the restarted daemon", async (_closeKind, triggerClose) => {
+	])("recovers a %s by reconnecting, then a bare session stop is terminal", async (_closeKind, triggerClose) => {
 		const fakeClient = new FakeDaemonClient();
 		fakeClient.hello = { ...fakeClient.hello!, appVersion: "test-daemon-version" };
 		// The restarted daemon lists the same session under a new active id.
@@ -1502,6 +1502,9 @@ describe("DaemonAgentConnection", () => {
 		await expect(connected).resolves.toMatchObject({ daemonVersion: "test-daemon-version" });
 		expect(events.filter((event) => event.type === "closed")).toEqual([]);
 		expect(events.filter((event) => event.type === "session_resynced").length).toBeGreaterThan(0);
+		// The re-attach cleared the daemon_closing notice: a later bare stop of the recovered session is terminal again.
+		fakeClient.emitMessage({ type: "session_closed", activeSessionId: "restored", reason: "killed" });
+		expect(events.filter((event) => event.type === "closed")).toHaveLength(1);
 		await connection.dispose();
 	});
 

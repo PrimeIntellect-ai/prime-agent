@@ -1047,6 +1047,16 @@ describe("AgentSession retry and event characterization", () => {
 		await promptParked(harness, "do the work");
 		const sessionFile = harness.session.sessionFile!;
 
+		// A restart past the wake time keeps the park count and leaves the wake to the durable job: no timer.
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(quotaPark(harness)!.resumeAtMs + 1);
+		const late = await createHarness({ existingSessionFile: sessionFile, settings }).finally(() =>
+			vi.useRealTimers(),
+		);
+		harnesses.push(late);
+		expect(quotaPark(late)).toMatchObject({ parkCount: 1, jobId: quotaPark(harness)?.jobId, waking: true });
+		expect(quotaPark(late)).not.toHaveProperty("timer");
+
 		// A restart rebuilds the park, and the wake still bounds the episode.
 		const restarted = await createHarness({ existingSessionFile: sessionFile, settings });
 		harnesses.push(restarted);
