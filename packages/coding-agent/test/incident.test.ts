@@ -632,32 +632,31 @@ describe("worker pid attribution and anomalies", () => {
 		expect(text).toContain("command attach failed: timed out waiting for worker response (x4, until 09-10 20:21:00)");
 	});
 
-	it("does not report isolated failures days apart as one burst", () => {
-		const base = {
-			component: "coding-agent.daemon-supervisor",
-			socketPath: "/tmp/prime-agent-501/daemon.sock",
-			msg: "Supervisor command send_message failed: Error: Unknown active session: aabbccddeeff",
-		};
-		const entries = [
-			entry(agentLogLine({ ...base, ts: "2026-09-10T20:00:00.000Z" })),
-			entry(agentLogLine({ ...base, ts: "2026-09-12T20:00:00.000Z" })),
-			entry(agentLogLine({ ...base, ts: "2026-09-14T20:00:00.000Z" })),
+	it("does not report isolated failures days apart as one burst or stall", () => {
+		const burstMsg = "Supervisor command send_message failed: Error: Unknown active session: aabbccddeeff";
+		const stallMsg =
+			"Supervisor command attach failed: Error: Timed out waiting for daemon worker response to attach";
+		const cases = [
+			["2026-09-10T20:00:00.000Z", burstMsg],
+			["2026-09-12T20:00:00.000Z", burstMsg],
+			["2026-09-14T20:00:00.000Z", burstMsg],
+			["2026-09-10T20:00:00.000Z", stallMsg],
+			["2026-09-12T20:00:00.000Z", stallMsg],
 		];
+		const entries = cases.map(([ts, msg]) => entry(supervisorLine(ts, msg)));
 		const events = collectIncidentEvents(entries, collectWorkerPidMap(entries));
 		const anomalies = computeIncidentAnomalies(events);
 		expect(anomalies.some((item) => item.summary.includes("warnings/errors"))).toBe(false);
+		expect(anomalies.some((item) => item.summary.includes("command timeouts"))).toBe(false);
 	});
 
-	it("does not report isolated timeouts hours apart as one stall", () => {
-		const timeoutMsg =
-			"Supervisor command attach failed: Error: Timed out waiting for daemon worker response to attach";
-		const entries = [
-			entry(supervisorLine("2026-09-10T20:00:00.000Z", timeoutMsg)),
-			entry(supervisorLine("2026-09-12T20:00:00.000Z", timeoutMsg)),
-		];
-		const events = collectIncidentEvents(entries, collectWorkerPidMap(entries));
-		const anomalies = computeIncidentAnomalies(events);
-		expect(anomalies.some((item) => item.summary.includes("command timeouts"))).toBe(false);
+	it("keeps a same-component worker restart within two seconds", () => {
+		const socketPath = "/tmp/prime-agent-501/worker-98ed5cb228d2-5b1d3aeb91ee.sock";
+		const text = reportFor([
+			workerStartLine("2026-09-10T20:00:00.000Z", socketPath, 100),
+			workerStartLine("2026-09-10T20:00:01.000Z", socketPath, 200),
+		]);
+		expect(text).toContain("worker 5b1d3aeb91ee started (x2, until 09-10 20:00:01)");
 	});
 
 	it("attributes provider failures to the worker owning the pid at that time", () => {

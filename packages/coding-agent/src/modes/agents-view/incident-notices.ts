@@ -6,8 +6,8 @@ import {
 	computeIncidentAnomalies,
 	type IncidentLogEntry,
 	type IncidentSeverity,
+	latestIncidentStallTimeoutBySubject,
 	parseIncidentLogLine,
-	TIMEOUT_STALL_WINDOW_MS,
 } from "../../cli/incident.js";
 import { theme } from "../interactive/theme/theme.js";
 
@@ -132,12 +132,13 @@ function createNotice(
  * restarts (a supervisor-start whose subject already started within the
  * window, i.e. the supervisor was replaced). A first-ever supervisor start is
  * routine and never produces a notice. A timeout-burst notice carries the
- * LATEST stall-forming timeout of its subject — the classifier anchors the
- * anomaly at the first timeout — so dismissing it records a horizon that only
- * covers the burst as dismissed: a later timeout extending the burst past the
- * horizon re-surfaces the notice, instead of it staying hidden until the first
- * timeout ages out of the window; an isolated stray timeout hours later forms
- * no stall and never re-opens it.
+ * latest timeout of the stall cluster its anomaly describes — the classifier
+ * anchors the anomaly at the cluster's first timeout — so dismissing it
+ * records a horizon that only covers that burst as dismissed: a later timeout
+ * extending the burst past the horizon re-surfaces the notice, instead of it
+ * staying hidden until the first timeout ages out of the window; an isolated
+ * stray timeout, or a separate later stall, never moves the anchor and never
+ * re-opens it.
  */
 export function deriveIncidentNotices(entries: readonly IncidentLogEntry[], nowMs: number): IncidentNotice[] {
 	const sinceMs = nowMs - INCIDENT_NOTICE_WINDOW_MS;
@@ -162,29 +163,14 @@ export function deriveIncidentNotices(entries: readonly IncidentLogEntry[], nowM
 			);
 		}
 	}
-	// Latest stall-forming timeout per subject, built in one pass: the
-	// classifier anchors each timeout-burst anomaly at the burst's FIRST
-	// timeout, but the notice must anchor at the LATEST one so dismissal
-	// advances with a growing burst (a later timeout in the burst re-surfaces
-	// the notice past the horizon instead of it staying hidden until the first
-	// timeout ages out). A timeout forms a stall only when the subject's
-	// previous timeout is within TIMEOUT_STALL_WINDOW_MS — the classifier's own
-	// density bound — so an isolated stray timeout hours later never moves the
-	// anchor and never re-opens a dismissed notice. One pass keeps the
-	// derivation linear in the windowed entries — a per-anomaly rescan would go
-	// quadratic against the bounded 20,000-entry window on every poll.
-	const latestStallTimeoutBySubject = new Map<string, number>();
-	const previousTimeoutBySubject = new Map<string, number>();
-	for (const event of events) {
-		if (event.eventClass !== "timeout") {
-			continue;
-		}
-		const previous = previousTimeoutBySubject.get(event.subject);
-		if (previous !== undefined && event.timeMs - previous <= TIMEOUT_STALL_WINDOW_MS) {
-			latestStallTimeoutBySubject.set(event.subject, event.timeMs);
-		}
-		previousTimeoutBySubject.set(event.subject, event.timeMs);
-	}
+	// Latest timeout of each subject's stall cluster — the same incident the
+	// classifier's per-subject "N command timeouts over X" anomaly describes —
+	// so a notice and its dismissal horizon always refer to one incident:
+	// dismissal advances with a growing burst (a later timeout in the cluster
+	// re-surfaces the notice past the horizon instead of it staying hidden
+	// until the first timeout ages out), while a separate later stall or an
+	// isolated stray timeout never moves the anchor.
+	const latestStallTimeoutBySubject = latestIncidentStallTimeoutBySubject(events);
 	for (const anomaly of computeIncidentAnomalies(events)) {
 		if (anomaly.summary.includes("command timeouts")) {
 			// The anomaly summary already reads "<subject>: N command timeouts over X".
@@ -280,13 +266,16 @@ interface IncidentLogChunk {
  * dropping would silently lose for the lifetime of the state). Otherwise read
  * only appended bytes (every read stays bounded). A trailing partial line is
  * held back (the offset stops at its newline), so a mid-write line parses only
- * once complete, on a later poll. A missing or unreadable file returns
- * undefined; offsets beyond the file size are never re-processed.
+ * once complete, on a later poll — unless includeFinalPartialLine is set for a
+ * frozen file (the rotated .old), which no later poll can complete; its final
+ * line is returned as-is. A missing or unreadable file returns undefined;
+ * offsets beyond the file size are never re-processed.
  */
 function readIncidentLogLines(
 	logPath: string,
 	previousOffset: number | undefined,
 	previousFileId: string | undefined,
+	includeFinalPartialLine = false,
 ): IncidentLogChunk | undefined {
 	let fd: number;
 	try {
@@ -334,7 +323,11 @@ function readIncidentLogLines(
 			}
 		}
 		let end = bytesRead;
-		if (end > 0 && buffer[end - 1] !== NEWLINE_BYTE) {
+		// A frozen file (the rotated .old) never gets the completing write, so
+		// with includeFinalPartialLine its final line is returned as-is: a torn
+		// line parses to undefined and drops harmlessly, while a complete
+		// record missing only its newline must not be lost.
+		if (!includeFinalPartialLine && end > 0 && buffer[end - 1] !== NEWLINE_BYTE) {
 			// Hold back the partially-written final line until it completes.
 			const lastNewline = buffer.subarray(0, bytesRead).lastIndexOf(NEWLINE_BYTE);
 			if (lastNewline < lineStart) {
@@ -423,7 +416,9 @@ export function refreshIncidentNoticeState(state: IncidentNoticeState, logPath: 
 		// Mirror the CLI's [agent.jsonl.old, agent.jsonl] source order (merge sorts
 		// by time anyway), tailing .old with the same bounded tail as the main log.
 		if (firstRead) {
-			const rotated = readIncidentLogLines(`${logPath}.old`, undefined, undefined);
+			// The rotated .old is frozen: include its final line even without a
+			// trailing newline — no later poll will ever complete it.
+			const rotated = readIncidentLogLines(`${logPath}.old`, undefined, undefined, true);
 			if (rotated !== undefined) {
 				parsed = parseWindowedLines(rotated.lines);
 			}

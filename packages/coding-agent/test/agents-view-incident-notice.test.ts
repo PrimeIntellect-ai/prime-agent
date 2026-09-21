@@ -139,23 +139,27 @@ beforeEach(() => {
 });
 
 describe("incident notice derivation", () => {
-	it("anchors each subject's timeout burst at that subject's own latest timeout", () => {
+	it("anchors each subject's timeout burst at its own cluster's latest timeout", () => {
 		const base = Date.now();
-		// Two daemon sockets, each with its own timeout burst: the per-subject
-		// latest-timeout lookup must never leak one subject's timeout into the
-		// other subject's notice.
+		// Several daemon sockets, each with its own stall: the per-subject
+		// cluster lookup must never leak or mis-anchor across subjects.
 		const otherSocket = "/tmp/prime-agent-501/daemon-other.sock";
+		const spacedSocket = "/tmp/prime-agent-501/daemon-spaced.sock";
+		const spacedTimeouts = [200, 190, 180, 30, 29].map((minutes) => commandTimeoutLine(base, minutes, spacedSocket));
 		const entries = fixtureEntries([
 			commandTimeoutLine(base, 30, DAEMON_SOCKET),
 			commandTimeoutLine(base, 25, otherSocket),
 			commandTimeoutLine(base, 20, DAEMON_SOCKET),
 			commandTimeoutLine(base, 5, otherSocket),
+			...spacedTimeouts,
 		]);
 		const bursts = deriveIncidentNotices(entries, base).filter((notice) => notice.kind === "timeout-burst");
-		expect(bursts).toHaveLength(2);
+		expect(bursts).toHaveLength(3);
 		const bySubject = new Map(bursts.map((notice) => [notice.subject, notice]));
 		expect(bySubject.get(DAEMON_SOCKET)?.timeMs).toBe(base - 20 * 60_000);
 		expect(bySubject.get(otherSocket)?.timeMs).toBe(base - 5 * 60_000);
+		expect(bySubject.get(spacedSocket)?.text).toContain("3 command timeouts over 20m");
+		expect(bySubject.get(spacedSocket)?.timeMs).toBe(base - 180 * 60_000);
 	});
 
 	it("derives an update-restart only from repeated successful supervisor starts", () => {
@@ -275,5 +279,14 @@ describe("agents view incident notices", () => {
 		expect(dismissIncidentNoticeState(state)).toBe(true);
 		appendAgentLog([commandTimeoutLine(base, 5)]);
 		expect(refreshIncidentNoticeState(state, logPath, base)).toBe(false);
+	});
+
+	it("surfaces a crash at the end of agent.jsonl.old without a trailing newline", () => {
+		useTempAgentDir();
+		writeFileSync(`${getAgentLogPath()}.old`, workerCrashLine(Date.now(), "5b1d3aeb91ee", 120));
+		writeAgentLog([]);
+		const state = createIncidentNoticeState();
+		refreshIncidentNoticeState(state, getAgentLogPath(), Date.now());
+		expect(state.notice).toMatchObject({ kind: "worker-crash" });
 	});
 });

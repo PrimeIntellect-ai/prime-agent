@@ -808,22 +808,29 @@ export function classifyIncidentEntry(entry: IncidentLogEntry, workerPids: Worke
  */
 export function collectIncidentEvents(entries: readonly IncidentLogEntry[], workerPids: WorkerPidMap): IncidentEvent[] {
 	const events: IncidentEvent[] = [];
-	const lastSeen = new Map<string, number>();
+	const lastSeen = new Map<string, { timeMs: number; component: string }>();
 	for (const entry of entries) {
 		const incident = classifyIncidentEntry(entry, workerPids);
 		if (!incident) {
 			continue;
 		}
 		// The daemon writes the same lifecycle event both to the structured log
-		// and to the worker stderr forward; drop the second copy when it lands
-		// within 2s. Other classes may legitimately repeat that fast.
+		// (coding-agent.daemon) and to the worker stderr forward
+		// (coding-agent.daemon-supervisor); drop the second copy when it lands
+		// within 2s. A repeat from the SAME component is a real lifecycle
+		// transition — a worker restarted on its durable id within 2s — and is
+		// never a duplicate.
 		if (LIFECYCLE_CLASSES.has(incident.eventClass)) {
 			const key = `${incident.category}|${incident.summary}`;
 			const previous = lastSeen.get(key);
-			if (previous !== undefined && Math.abs(incident.timeMs - previous) <= 2000) {
+			if (
+				previous !== undefined &&
+				previous.component !== entry.component &&
+				Math.abs(incident.timeMs - previous.timeMs) <= 2000
+			) {
 				continue;
 			}
-			lastSeen.set(key, incident.timeMs);
+			lastSeen.set(key, { timeMs: incident.timeMs, component: entry.component });
 		}
 		events.push(incident);
 	}
@@ -947,6 +954,36 @@ export function computeIncidentAnomalies(events: readonly IncidentEvent[]): Inci
 		}
 	}
 	return anomalies.sort((a, b) => a.timeMs - b.timeMs);
+}
+
+/**
+ * Per subject, the latest timeout of the stall cluster computeIncidentAnomalies
+ * reports — the densest run within TIMEOUT_STALL_WINDOW_MS. The agents-view
+ * notice anchors its dismissal horizon there, so the notice, its horizon, and
+ * the reported cluster always describe the same incident, even when the window
+ * holds several stalls on one subject.
+ */
+export function latestIncidentStallTimeoutBySubject(events: readonly IncidentEvent[]): Map<string, number> {
+	const timeoutsBySubject = new Map<string, IncidentEvent[]>();
+	for (const incident of events) {
+		if (incident.eventClass !== "timeout") {
+			continue;
+		}
+		const group = timeoutsBySubject.get(incident.subject) ?? [];
+		group.push(incident);
+		timeoutsBySubject.set(incident.subject, group);
+	}
+	const latestBySubject = new Map<string, number>();
+	for (const [subject, timeouts] of timeoutsBySubject) {
+		// Callers pass time-sorted events; sort defensively so the run scan
+		// (which assumes ascending times) never sees them out of order.
+		timeouts.sort((a, b) => a.timeMs - b.timeMs);
+		const run = densestWindowRun(timeouts, TIMEOUT_STALL_WINDOW_MS);
+		if (run.count >= 2) {
+			latestBySubject.set(subject, timeouts[run.start + run.count - 1]!.timeMs);
+		}
+	}
+	return latestBySubject;
 }
 
 // ---------------------------------------------------------------------------
