@@ -338,6 +338,8 @@ export interface IpythonToolOptions {
 	 * the model before it wastes turns calling them.
 	 */
 	onUnavailableSkills?: (errors: UnavailablePythonSkills) => void;
+	/** Fires when the kernel's last live background bash() handle settles, so owed continuations can resume. */
+	onBackgroundWorkSettled?: () => void;
 	onLateSentAgentMessage?: (toolCallId: string, message: KernelSentAgentMessage) => void;
 	/** Shared provisioner owning the kernel lifecycle. When provided, the remaining options are ignored. */
 	provisioner?: IpythonKernelProvisioner;
@@ -520,6 +522,7 @@ export class IpythonKernelProvisioner {
 				},
 				sessionId: this.options?.sessionId,
 				hostHandlers: this.options?.hostHandlers,
+				onBackgroundWorkSettled: this.options?.onBackgroundWorkSettled,
 				pythonSkills: this.options?.pythonSkills,
 				// Only persistent sessions (which have an artifact dir) get a revivable snapshot.
 				snapshot: snapshotDir

@@ -1431,9 +1431,10 @@ export class AgentSession {
 	private _autonomousState: AutonomousRuntimeState;
 	private _autonomousContinuationSuppressionDepth = 0;
 	private _autonomousContinuationSuppressedMessages = new WeakSet<AgentMessage>();
-	// Held autonomous continuation owed while descendant work runs; mirrors
-	// _goalContinuationAwaitsRlmWork. Child replies and exit notices are the
-	// real wake-up signals, so timer-driven continuations pause instead of
+	// Held autonomous continuation owed while descendant or background bash
+	// work runs; mirrors _goalContinuationAwaitsRlmWork. Child replies, exit
+	// notices, and background bash completion follow-ups are the real
+	// wake-up signals, so timer-driven continuations pause instead of
 	// re-prompting a waiting parent (and pause without consuming budget).
 	private _autonomousContinuationAwaitsRlmWork = false;
 	private _autonomousSubagentKeepAliveTimer: ReturnType<typeof setTimeout> | undefined = undefined;
@@ -2543,7 +2544,14 @@ export class AgentSession {
 
 	private _maybeResumeGoalContinuationAfterRlmWork(): void {
 		if (!this._goalContinuationAwaitsRlmWork) return;
-		if (this._disposed || this._disposing || this._hasUnsettledRlmQuiescenceWork()) return;
+		if (
+			this._disposed ||
+			this._disposing ||
+			this._hasUnsettledRlmQuiescenceWork() ||
+			this._hasLiveBackgroundBashHandles()
+		) {
+			return;
+		}
 		if (this._goalState.status !== "active" || !this._goalState.objective) {
 			this._goalContinuationAwaitsRlmWork = false;
 			return;
@@ -2577,12 +2585,13 @@ export class AgentSession {
 	}
 
 	/**
-	 * Hold the timer-driven autonomous continuation while descendant work is
-	 * unsettled, mirroring the goal gate: delegating and ending the turn is
-	 * correct behavior, and child replies and exit notices are the real
-	 * wake-up signals. The owed continuation is delivered when descendants
-	 * settle without consuming the continuation budget while it waits. An
-	 * active goal holds its own continuation, so the held continuation is
+	 * Hold the timer-driven autonomous continuation while descendant or
+	 * background bash work is unsettled, mirroring the goal gate: delegating
+	 * and ending the turn is correct behavior, and child replies, exit
+	 * notices, and background bash completion follow-ups are the real
+	 * wake-up signals. The owed continuation is delivered when the pending
+	 * work settles without consuming the continuation budget while it waits.
+	 * An active goal holds its own continuation, so the held continuation is
 	 * not double-queued behind it.
 	 */
 	private _holdAutonomousContinuationForRlmWork(message: AssistantMessage): boolean {
@@ -2596,7 +2605,7 @@ export class AgentSession {
 			// The run is over: hold nothing so the hook can apply the limit.
 			return false;
 		}
-		if (!this._hasUnsettledRlmQuiescenceWork()) {
+		if (!this._hasUnsettledRlmQuiescenceWork() && !this._hasLiveBackgroundBashHandles()) {
 			return false;
 		}
 		// An active goal's own continuation gate owns the wake-up discipline;
@@ -2615,10 +2624,27 @@ export class AgentSession {
 		return this._goalState.status === "active" && !!this._goalState.objective;
 	}
 
+	/**
+	 * True while the session's kernel still runs background bash() handles.
+	 * The kernel's bash-activity tracking (the same state that powers the
+	 * bash-done completion follow-ups) is the liveness surface, so a live
+	 * handle's completion notice is the wake-up a held continuation waits for.
+	 */
+	private _hasLiveBackgroundBashHandles(): boolean {
+		return this._ipythonKernelProvisioner?.manager?.hasBackgroundWork === true;
+	}
+
 	/** Deliver the owed continuation once descendant work settles. */
 	private _maybeResumeAutonomousContinuationAfterRlmWork(): void {
 		if (!this._autonomousContinuationAwaitsRlmWork) return;
-		if (this._disposed || this._disposing || this._hasUnsettledRlmQuiescenceWork()) return;
+		if (
+			this._disposed ||
+			this._disposing ||
+			this._hasUnsettledRlmQuiescenceWork() ||
+			this._hasLiveBackgroundBashHandles()
+		) {
+			return;
+		}
 		if (!this._autonomousState.enabled || this._goalOwnsContinuationWakeup()) {
 			this._clearAutonomousContinuationAwait();
 			return;
@@ -2768,9 +2794,9 @@ export class AgentSession {
 	private _fireAutonomousSubagentKeepAlive(): void {
 		if (!this._autonomousContinuationAwaitsRlmWork) return;
 		if (this._disposed || this._disposing) return;
-		if (!this._hasUnsettledRlmQuiescenceWork()) {
-			// Descendants settled while the keep-alive was pending; the normal
-			// resume path owns delivery.
+		if (!this._hasUnsettledRlmQuiescenceWork() && !this._hasLiveBackgroundBashHandles()) {
+			// Descendants and background handles settled while the keep-alive
+			// was pending; the normal resume path owns delivery.
 			this._maybeResumeAutonomousContinuationAfterRlmWork();
 			return;
 		}
@@ -2781,6 +2807,14 @@ export class AgentSession {
 		// Keep the deferral while admission is paused or the pump is suspended
 		// (post-abort); the pause release and resumeQueuedWork retry.
 		if (this._sessionInputAdmissionPauses.size > 0 || this._sessionInputPumpSuspended) {
+			this._armAutonomousSubagentKeepAlive();
+			return;
+		}
+		if (!this._hasUnsettledRlmQuiescenceWork()) {
+			// Only background bash handles are pending: their completion
+			// follow-ups are the wake-up, so keep the deferral without waking
+			// the parent with a subagent keep-alive and poll again after
+			// another window.
 			this._armAutonomousSubagentKeepAlive();
 			return;
 		}
@@ -4018,9 +4052,10 @@ export class AgentSession {
 		if (signal?.aborted || this._goalState.status !== "active" || !this._goalState.objective) {
 			return [];
 		}
-		// Delegating and ending the turn is correct behavior; hold the continuation
-		// until descendants settle instead of re-prompting a waiting parent.
-		if (this._hasUnsettledRlmQuiescenceWork()) {
+		// Delegating and ending the turn is correct behavior; hold the
+		// continuation until descendants settle or the background bash
+		// handles finish instead of re-prompting a waiting parent.
+		if (this._hasUnsettledRlmQuiescenceWork() || this._hasLiveBackgroundBashHandles()) {
 			this._goalContinuationAwaitsRlmWork = true;
 			return [];
 		}
@@ -10401,6 +10436,10 @@ export class AgentSession {
 				readyGate: previousDispose,
 				onRestore: notifyRestore ? (result) => this._onIpythonStateRestored(result) : undefined,
 				onUnavailableSkills: (errors) => this._onPythonSkillsUnavailable(errors),
+				onBackgroundWorkSettled: () => {
+					this._maybeResumeGoalContinuationAfterRlmWork();
+					this._maybeResumeAutonomousContinuationAfterRlmWork();
+				},
 			});
 			configuredBaseToolDefinitions = createAllToolDefinitions(this._cwd, {
 				ipython: {
