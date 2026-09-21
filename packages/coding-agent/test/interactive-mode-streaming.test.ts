@@ -1,11 +1,13 @@
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import { Container, type MarkdownTheme, type TUI } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
-import { beforeAll, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
+import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.js";
 import type { AgentConnectionSessionEvent } from "../src/modes/agent-connection/index.js";
 import { AgentActivityTracker } from "../src/modes/interactive/agent-activity.js";
 import type { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";
 import type { FileChangeSummary } from "../src/modes/interactive/components/edit-summary.js";
+import { FooterComponent } from "../src/modes/interactive/components/footer.js";
 import type { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import { getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.js";
@@ -95,14 +97,14 @@ function createFakeInteractiveModeThis(): HandleEventThis {
 	return fakeThis;
 }
 
-function createAssistantMessage(text: string): AssistantMessage {
+function createAssistantMessage(text: string, usage: Usage = EMPTY_USAGE): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [{ type: "text", text }],
 		api: "test-api",
 		provider: "test-provider",
 		model: "test-model",
-		usage: EMPTY_USAGE,
+		usage,
 		stopReason: "stop",
 		timestamp: Date.now(),
 	};
@@ -152,5 +154,46 @@ describe("InteractiveMode streaming events", () => {
 		expect(renderChat(fakeThis.chatContainer)).toContain("partial response");
 		expect(fakeThis.streamingComponent).toBeUndefined();
 		expect(fakeThis.streamingMessage).toBeUndefined();
+	});
+	describe("speed display tok/sec tracking", () => {
+		const speedLine = (footer: FooterComponent) => stripAnsi(footer.render(200).join("\n"));
+		const makeSpeedThis = (enabled = true) => {
+			const fakeThis = createFakeInteractiveModeThis();
+			const footer = new FooterComponent({ getGitBranch: () => null } as ReadonlyFooterDataProvider);
+			footer.setSpeedEnabled(enabled);
+			Object.assign(fakeThis as Record<string, unknown>, { footer, speedDisplayEnabled: enabled });
+			return { fakeThis, footer };
+		};
+		const speedPrototype = InteractiveMode.prototype as unknown as {
+			handleEvent(this: Record<string, unknown>, event: AgentConnectionSessionEvent): Promise<void>;
+			recordSpeedSample(this: Record<string, unknown>, message: AssistantMessage): void;
+		};
+		afterEach(() => vi.restoreAllMocks());
+		test("records output tok/s per completed assistant message with a session average", async () => {
+			const { fakeThis, footer } = makeSpeedThis();
+			const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+			const first = createAssistantMessage("first", { ...EMPTY_USAGE, output: 100, totalTokens: 100 });
+			now.mockReturnValue(3_000);
+			await speedPrototype.handleEvent.call(fakeThis, { type: "message_end", message: first });
+			expect(speedLine(footer)).toBe("50.0 tok/s");
+			const second = createAssistantMessage("second", { ...EMPTY_USAGE, output: 300, totalTokens: 300 });
+			now.mockReturnValue(5_500);
+			await speedPrototype.handleEvent.call(fakeThis, { type: "message_end", message: second });
+			expect(speedLine(footer)).toBe("120 tok/s · avg 88.9");
+		});
+		test.each<[string, boolean, number, number, string, Record<string, unknown>]>([
+			["zero output tokens", true, 0, 2_000, "9.9 tok/s", { timestamp: 1_000 }],
+			["zero duration", true, 100, 0, "9.9 tok/s", {}],
+			["aborted message", true, 50, 2_000, "9.9 tok/s", { stopReason: "aborted", timestamp: 1_000 }],
+			["stripped usage and timestamp", true, 100, 2_000, "9.9 tok/s", { usage: undefined, timestamp: undefined }],
+			["display disabled", false, 100, 2_000, "", {}],
+		])("skips the sample when %s", (_label, enabled, output, durationMs, expected, overrides) => {
+			const { fakeThis, footer } = makeSpeedThis(enabled);
+			footer.setSpeedText("9.9 tok/s");
+			vi.spyOn(Date, "now").mockReturnValue(1_000 + durationMs);
+			const message = Object.assign(createAssistantMessage("partial", { ...EMPTY_USAGE, output }), overrides);
+			speedPrototype.recordSpeedSample.call(fakeThis, message);
+			expect(speedLine(footer)).toBe(expected);
+		});
 	});
 });
