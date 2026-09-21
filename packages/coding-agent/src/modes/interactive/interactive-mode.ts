@@ -1077,6 +1077,7 @@ export class InteractiveMode {
 
 	private autoCompactionLoader: Loader | undefined = undefined;
 	private refineLoader: Loader | undefined = undefined;
+	private cloudProvisionLoader: Loader | undefined = undefined;
 
 	private retryLoader: Loader | undefined = undefined;
 	private retryCountdown: CountdownTimer | undefined = undefined;
@@ -2928,6 +2929,8 @@ export class InteractiveMode {
 		this.activeBashComponent = undefined;
 		// Likewise: the next session's view may never see this refine settle.
 		this.discardRefineLoader();
+		// A rebind mid-conversion must not paint stale provisioning progress.
+		this.discardCloudProvisionLoader();
 		this.pendingBashComponents = [];
 		this.activityTracker.reset();
 		this.contextUsageTokenBaseline = 0;
@@ -3500,6 +3503,35 @@ export class InteractiveMode {
 		this.refineLoader = undefined;
 	}
 
+	/** Live status for the awaited /cloud conversion, mirroring the refine loader. */
+	private startCloudProvisionLoader(): void {
+		this.stopWorkingLoader();
+		this.statusContainer.clear();
+		this.cloudProvisionLoader = new Loader(
+			this.ui,
+			(spinner) => theme.fg("muted", spinner),
+			(text) => theme.fg("muted", text),
+			"Provisioning cloud session...",
+		);
+		this.statusContainer.addChild(this.cloudProvisionLoader);
+		this.ui.requestRender();
+	}
+
+	private stopCloudProvisionLoader(): void {
+		if (!this.cloudProvisionLoader) return;
+		this.discardCloudProvisionLoader();
+		this.statusContainer.clear();
+		this.syncWorkingLoader();
+	}
+
+	/** Stops and removes the loader without remounting old-session state. */
+	private discardCloudProvisionLoader(): void {
+		if (!this.cloudProvisionLoader) return;
+		this.cloudProvisionLoader.stop();
+		this.statusContainer.removeChild(this.cloudProvisionLoader);
+		this.cloudProvisionLoader = undefined;
+	}
+
 	private syncWorkingLoader(): void {
 		// A compaction that started before this client attached (or while another
 		// view was open) has no start-event edge; restore its loader from state.
@@ -3516,6 +3548,14 @@ export class InteractiveMode {
 			if (!this.statusContainer.children.includes(this.refineLoader)) {
 				this.statusContainer.clear();
 				this.statusContainer.addChild(this.refineLoader);
+			}
+			return;
+		}
+		// Same for the /cloud conversion: the awaited create is still in flight.
+		if (this.cloudProvisionLoader) {
+			if (!this.statusContainer.children.includes(this.cloudProvisionLoader)) {
+				this.statusContainer.clear();
+				this.statusContainer.addChild(this.cloudProvisionLoader);
 			}
 			return;
 		}
@@ -9732,15 +9772,22 @@ export class InteractiveMode {
 			this.showStatus("Cloud conversion cancelled.");
 			return;
 		}
-		const session = await this.agentConnection.cloudSessionCreate?.();
-		if (session === undefined) {
-			this.showError("Cloud sessions are unavailable on this connection.");
-			return;
+		this.startCloudProvisionLoader();
+		try {
+			const session = await this.agentConnection.cloudSessionCreate?.();
+			this.stopCloudProvisionLoader();
+			if (session === undefined) {
+				this.showError("Cloud sessions are unavailable on this connection.");
+				return;
+			}
+			const title = session.sessionName ?? session.sessionId;
+			this.showStatus(
+				`Session ${title} now runs resident in a Prime Sandbox. Prompts keep working through this session.`,
+			);
+		} catch (error) {
+			this.stopCloudProvisionLoader();
+			throw error;
 		}
-		const title = session.sessionName ?? session.sessionId;
-		this.showStatus(
-			`Session ${title} now runs resident in a Prime Sandbox. Prompts keep working through this session.`,
-		);
 	}
 
 	private async showCloudSessionsStatus(): Promise<void> {

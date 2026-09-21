@@ -1,0 +1,1 @@
+- Added a live "Provisioning cloud session..." indicator to the /cloud conversion so the ~30s sandbox creation shows visible progress, with no stale indicator on success, cancel, or failure.

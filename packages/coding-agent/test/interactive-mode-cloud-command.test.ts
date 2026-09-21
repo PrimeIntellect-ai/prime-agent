@@ -38,6 +38,8 @@ interface CloudCommandTestContext {
 	showStatus: ReturnType<typeof vi.fn>;
 	showError: ReturnType<typeof vi.fn>;
 	showExtensionConfirm: ReturnType<typeof vi.fn>;
+	startCloudProvisionLoader: ReturnType<typeof vi.fn>;
+	stopCloudProvisionLoader: ReturnType<typeof vi.fn>;
 }
 
 type CloudCommandInteractiveMode = {
@@ -74,6 +76,8 @@ function makeContext(options: {
 		showStatus: vi.fn(),
 		showError: vi.fn(),
 		showExtensionConfirm: vi.fn(async () => options.confirm ?? true),
+		startCloudProvisionLoader: vi.fn(),
+		stopCloudProvisionLoader: vi.fn(),
 	});
 	return context;
 }
@@ -99,6 +103,9 @@ describe("InteractiveMode /cloud", () => {
 
 		expect(context.agentConnection.cloudSessionCreate).not.toHaveBeenCalled();
 		expect(context.showStatus).toHaveBeenCalledWith("Cloud conversion cancelled.");
+		// Dismissal never starts the provisioning indicator, so nothing can linger.
+		expect(context.startCloudProvisionLoader).not.toHaveBeenCalled();
+		expect(context.stopCloudProvisionLoader).not.toHaveBeenCalled();
 	});
 
 	it("shows status instead of converting when the current session already runs in the cloud", async () => {
@@ -271,6 +278,130 @@ describe("InteractiveMode /cloud", () => {
 		await interactiveModePrototype.handleCloudCommand.call(context, "status");
 
 		expect(context.showError).toHaveBeenCalledWith("Cloud session command failed: daemon offline");
+	});
+});
+
+describe("InteractiveMode /cloud conversion progress", () => {
+	async function flushMicrotasks(ticks = 20): Promise<void> {
+		for (let i = 0; i < ticks; i++) {
+			await Promise.resolve();
+		}
+	}
+
+	it("shows the provisioning indicator before the pending create resolves, then clears it and shows success", async () => {
+		const context = makeContext({ sessions: [] });
+		let resolveCreate: (session: AgentConnectionCloudSession) => void = () => {};
+		context.agentConnection.cloudSessionCreate.mockImplementation(
+			() =>
+				new Promise<AgentConnectionCloudSession>((resolve) => {
+					resolveCreate = resolve;
+				}),
+		);
+		let commandSettled = false;
+		const command = interactiveModePrototype.handleCloudCommand.call(context, "").finally(() => {
+			commandSettled = true;
+		});
+
+		await flushMicrotasks();
+
+		// The indicator starts while cloudSessionCreate is still pending.
+		expect(context.agentConnection.cloudSessionCreate).toHaveBeenCalledTimes(1);
+		expect(context.startCloudProvisionLoader).toHaveBeenCalledTimes(1);
+		expect(context.startCloudProvisionLoader.mock.invocationCallOrder[0]).toBeLessThan(
+			context.agentConnection.cloudSessionCreate.mock.invocationCallOrder[0]!,
+		);
+		expect(commandSettled).toBe(false);
+		expect(context.stopCloudProvisionLoader).not.toHaveBeenCalled();
+
+		resolveCreate(cloudSession());
+		await command;
+
+		// The indicator clears before the connected success replaces it.
+		expect(context.stopCloudProvisionLoader).toHaveBeenCalledTimes(1);
+		expect(context.stopCloudProvisionLoader.mock.invocationCallOrder[0]).toBeLessThan(
+			context.showStatus.mock.invocationCallOrder[0]!,
+		);
+		expect(context.showStatus).toHaveBeenCalledWith(expect.stringContaining("resident"));
+		expect(context.showError).not.toHaveBeenCalled();
+	});
+
+	it("clears the indicator and surfaces the failure when conversion rejects", async () => {
+		const context = makeContext({ sessions: [] });
+		context.agentConnection.cloudSessionCreate.mockRejectedValue(new Error("sandbox quota exceeded"));
+
+		await interactiveModePrototype.handleCloudCommand.call(context, "");
+
+		expect(context.startCloudProvisionLoader).toHaveBeenCalledTimes(1);
+		expect(context.stopCloudProvisionLoader).toHaveBeenCalledTimes(1);
+		expect(context.stopCloudProvisionLoader.mock.invocationCallOrder[0]).toBeLessThan(
+			context.showError.mock.invocationCallOrder[0]!,
+		);
+		expect(context.showError).toHaveBeenCalledWith("Cloud session command failed: sandbox quota exceeded");
+	});
+
+	it("clears the indicator before the degraded-connection error", async () => {
+		const context = makeContext({ sessions: [] });
+		context.agentConnection.cloudSessionCreate.mockResolvedValue(undefined as unknown as AgentConnectionCloudSession);
+
+		await interactiveModePrototype.handleCloudCommand.call(context, "");
+
+		expect(context.startCloudProvisionLoader).toHaveBeenCalledTimes(1);
+		expect(context.stopCloudProvisionLoader).toHaveBeenCalledTimes(1);
+		expect(context.stopCloudProvisionLoader.mock.invocationCallOrder[0]).toBeLessThan(
+			context.showError.mock.invocationCallOrder[0]!,
+		);
+		expect(context.showError).toHaveBeenCalledWith("Cloud sessions are unavailable on this connection.");
+	});
+});
+
+describe("InteractiveMode cloud provisioning loader sync", () => {
+	interface SyncContext {
+		autoCompactionLoader: unknown;
+		retryLoader: unknown;
+		refineLoader: unknown;
+		cloudProvisionLoader: { stop(): void };
+		statusContainer: { children: { stop(): void }[]; clear(): void; addChild(child: { stop(): void }): void };
+		isAgentCompacting(): boolean;
+	}
+
+	type SyncInteractiveMode = {
+		syncWorkingLoader(this: SyncContext): void;
+	};
+
+	const syncPrototype = InteractiveMode.prototype as unknown as SyncInteractiveMode;
+
+	function makeSyncContext(mounted: boolean): SyncContext {
+		const loader = { stop: () => {} };
+		return {
+			autoCompactionLoader: undefined,
+			retryLoader: undefined,
+			refineLoader: undefined,
+			cloudProvisionLoader: loader,
+			statusContainer: {
+				children: mounted ? [loader] : [],
+				clear: vi.fn(),
+				addChild: vi.fn(),
+			},
+			isAgentCompacting: () => false,
+		};
+	}
+
+	it("remounts a cleared conversion loader while the create is still in flight", () => {
+		const context = makeSyncContext(false);
+
+		syncPrototype.syncWorkingLoader.call(context);
+
+		expect(context.statusContainer.clear).toHaveBeenCalledTimes(1);
+		expect(context.statusContainer.addChild).toHaveBeenCalledWith(context.cloudProvisionLoader);
+	});
+
+	it("leaves a mounted conversion loader in place", () => {
+		const context = makeSyncContext(true);
+
+		syncPrototype.syncWorkingLoader.call(context);
+
+		expect(context.statusContainer.clear).not.toHaveBeenCalled();
+		expect(context.statusContainer.addChild).not.toHaveBeenCalled();
 	});
 });
 

@@ -1408,6 +1408,7 @@ describe("InteractiveMode pending bash components", () => {
 			activityTracker: { reset: vi.fn() },
 			agentRunFileChanges: new Map(),
 			discardRefineLoader: vi.fn(),
+			discardCloudProvisionLoader: vi.fn(),
 			recapContainer: new Container(),
 			renderRecap: vi.fn(),
 			ipythonToolComponents: new Map(),
