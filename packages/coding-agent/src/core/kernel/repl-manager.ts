@@ -176,6 +176,7 @@ export class ReplKernelManager {
 		| "env"
 		| "sessionId"
 		| "hostHandlers"
+		| "onBackgroundWorkSettled"
 		| "pythonSkills"
 		| "snapshot"
 		| "bootstrapCode"
@@ -234,6 +235,7 @@ export class ReplKernelManager {
 			env: options.env,
 			sessionId: options.sessionId,
 			hostHandlers: options.hostHandlers,
+			onBackgroundWorkSettled: options.onBackgroundWorkSettled,
 			pythonSkills: options.pythonSkills,
 			snapshot: options.snapshot,
 			bootstrapCode: options.bootstrapCode,
@@ -818,6 +820,17 @@ export class ReplKernelManager {
 					}
 				} else if (this.backgroundBashHandles.get(activity.id) === activity.pid) {
 					this.backgroundBashHandles.delete(activity.id);
+					if (this.backgroundBashHandles.size === 0) {
+						// The last live handle settled: the completion notice for it
+						// is already admitted, so owed continuations may resume. A
+						// host callback failure must not break the event path.
+						try {
+							this.options.onBackgroundWorkSettled?.();
+						} catch (error) {
+							// The settlement already happened on the map.
+							this.appendKernelDiagnostic(`background work settled callback failed: ${errorMessage(error)}`);
+						}
+					}
 				}
 			}
 			return;
@@ -1341,7 +1354,18 @@ export class ReplKernelManager {
 		this.clearSnapshotTimer();
 		this.lateSentAgentMessageHandlers.clear();
 		this.pendingDoneWaiters.clear();
-		this.backgroundBashHandles.clear();
+		// Teardown kills the handles with the kernel, so owed continuations
+		// waiting on them must hear the settlement once before it is lost. A
+		// host callback failure must not abort the kernel teardown.
+		if (this.backgroundBashHandles.size > 0) {
+			this.backgroundBashHandles.clear();
+			try {
+				this.options.onBackgroundWorkSettled?.();
+			} catch (error) {
+				// The settlement already happened on the map; teardown continues.
+				this.appendKernelDiagnostic(`background work settled callback failed: ${errorMessage(error)}`);
+			}
+		}
 		// Stale pre-teardown background output must not surface after a restart.
 		this.pendingBackgroundOutput = "";
 		this.pendingBackgroundOutputTruncated = false;
