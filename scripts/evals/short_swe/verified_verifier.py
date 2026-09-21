@@ -77,8 +77,10 @@ TEST_CONTROL = re.compile(
 
 
 def _decode_patch(raw: bytes | str) -> str:
-    """Decode a runtime.read patch payload to text."""
+    """Decode a runtime.read patch payload to text, capped in both forms."""
     if isinstance(raw, str):
+        if len(raw.encode("utf-8")) > MAX_PATCH_BYTES:
+            raise RuntimeError("candidate patch exceeds the filtering cap")
         return raw
     if len(raw) > MAX_PATCH_BYTES:
         raise RuntimeError("candidate patch exceeds the filtering cap")

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import verifiers.v1 as vf
 from offline_swebench_grader import grade
-from verified_verifier import filter_test_control, rewrite_test_script, trusted_base_commit
+from verified_verifier import MAX_PATCH_BYTES, filter_test_control, rewrite_test_script, trusted_base_commit
 from verifiers.v1.runtimes import Runtime
 from verifiers.v1.tasksets.harbor import HarborEnv, HarborEnvConfig, HarborTask
 from verifiers.v1.tasksets.harbor.taskset import verifier_box_data
@@ -28,7 +28,7 @@ class SecureVerifiedMixin:
 
     async def stage_verifier(self, runtime: Runtime) -> None:
         await super().stage_verifier(runtime)
-        raw = await runtime.read("/tmp/prime-agent.patch")
+        raw = await runtime.read("/tmp/prime-agent.patch", max_bytes=MAX_PATCH_BYTES)
         if not raw:
             return
         filtered = filter_test_control(raw)
