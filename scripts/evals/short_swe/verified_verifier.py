@@ -142,7 +142,6 @@ def filter_test_control(raw: bytes | str) -> str:
     b_path = ""
     saw_header = False
     in_hunk = False
-    section_had_headers = False
     for line in patch.splitlines(keepends=True):
         if line.startswith("diff --git "):
             if not saw_header and current:
@@ -157,7 +156,6 @@ def filter_test_control(raw: bytes | str) -> str:
             a_path, b_path = _patch_paths(line)
             saw_header = True
             in_hunk = False
-            section_had_headers = False
         elif line.startswith("--- ") and current and _strip_diff_prefix(_unquote_path(line[4:])) not in (
             a_path,
             b_path,
@@ -172,7 +170,6 @@ def filter_test_control(raw: bytes | str) -> str:
             a_path = _strip_diff_prefix(_unquote_path(line[4:]))
             b_path = ""
             in_hunk = False
-            section_had_headers = True
         elif b_path == "" and line.startswith("+++ ") and current and _in_traditional_section(current):
             current.append(line)
             b_path = _strip_diff_prefix(_unquote_path(line[4:]))
@@ -181,8 +178,6 @@ def filter_test_control(raw: bytes | str) -> str:
                 in_hunk = True
             elif in_hunk and line.startswith("diff --git "):
                 in_hunk = False
-            elif line.startswith("--- ") or line.startswith("+++ "):
-                section_had_headers = True
             current.append(line)
     if current and not (TEST_CONTROL.fullmatch(a_path) or TEST_CONTROL.fullmatch(b_path)):
         kept.extend(current)
