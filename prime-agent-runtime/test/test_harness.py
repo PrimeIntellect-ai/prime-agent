@@ -362,6 +362,59 @@ class HarnessStateTest(unittest.TestCase):
                     arguments={},
                 )
 
+    def test_rejects_invalid_entry_fields_before_persisting(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness_state.json"
+            state = HarnessState(state_path)
+            state.create_memory("Valid", "seed content", id="valid_entry")
+            seeded = state_path.read_text(encoding="utf-8")
+
+            for label, kwargs, message in [
+                ("content list", dict(title="T", content=["one string"]), "content must be a non-empty string, got a list"),
+                ("title list", dict(title=["T"], content="c"), "title must be a non-empty string, got a list"),
+                ("empty title", dict(title="", content="c"), "title must be a non-empty string, got an empty string"),
+                ("numeric id", dict(title="T", content="c", id=7), "id must be a non-empty string, got int"),
+                ("unhashable list id", dict(title="T", content="c", id=["x"]), "id must be a non-empty string, got a list"),
+                ("falsy numeric id", dict(title="Zero", content="c", id=0), "id must be a non-empty string, got int"),
+                ("numeric path", dict(title="T", content="c", path=7), "path must be a non-empty string, got int"),
+                ("list metadata", dict(title="T", content="c", metadata=["m"]), "metadata must be a dict when provided, got a list"),
+            ]:
+                with self.subTest(case=f"create {label}"):
+                    with self.assertRaisesRegex(ValueError, message):
+                        state.create_memory(**kwargs)
+            with self.subTest(case="subagent with list content"):
+                with self.assertRaisesRegex(ValueError, "content must be a non-empty string, got a list"):
+                    state.create_subagent("T", ["one string"])
+            with self.subTest(case="skill create without a reference"):
+                with self.assertRaisesRegex(ValueError, "skill entries require a Python reference"):
+                    state.create("skill", "Skill", "content", id="orphan_skill")
+            with self.subTest(case="skill reference as a list"):
+                with self.assertRaisesRegex(
+                    ValueError, "skill entry 'Skill' rejected: skill entries require a Python reference"
+                ):
+                    state.create_skill("Skill", "content", reference=["bad"])
+            with self.subTest(case="update with list content"):
+                with self.assertRaisesRegex(ValueError, "content must be a non-empty string, got a list"):
+                    state.update_memory("valid_entry", "Valid", ["one string"])
+                self.assertEqual(state_path.read_text(encoding="utf-8"), seeded)
+            with self.subTest(case="invalid refinement events"):
+                for label, kwargs, message in [
+                    ("trigger list", dict(trigger=["t"], changes="ok"), "trigger must be a non-empty string, got a list"),
+                    ("event id list", dict(trigger="t", changes="ok", id=["x"]), "id must be a non-empty string when provided, got a list"),
+                    ("changes int", dict(trigger="t", changes=7), "changes must be a string or a list of strings, got int"),
+                    ("mixed changes", dict(trigger="t", changes=["ok", 2]), "changes must be a list of non-empty strings"),
+                    ("evidence list", dict(trigger="t", changes="ok", evidence=["e"]), "evidence must be a string"),
+                    ("outcome int", dict(trigger="t", changes="ok", outcome=7), "outcome must be a string"),
+                ]:
+                    with self.subTest(case=label):
+                        with self.assertRaisesRegex(ValueError, message):
+                            state.record_refinement(**kwargs)
+
+            reloaded = HarnessState(state_path)
+            self.assertEqual([entry.id for entry in reloaded.list("memory")], ["valid_entry"])
+            self.assertEqual(reloaded.refinements, [])
+            self.assertIsNone(reloaded.get("skill", "orphan_skill"))
+
     def test_load_tolerates_corrupt_or_non_object_state(self) -> None:
         for payload in ("not json at all", "null", "[]", '"a string"', "123"):
             with tempfile.TemporaryDirectory() as temp_dir:
