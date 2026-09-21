@@ -2055,13 +2055,6 @@ async function generateModels() {
 		});
 	}
 
-	// Add missing OpenCode Grok 4.7 until models.dev includes it. OpenCode Zen
-	// already serves it; clone the grok-4.6 row (same limits and pricing).
-	const opencodeGrok46 = allModels.find((m) => m.provider === "opencode" && m.id === "grok-4.6");
-	if (opencodeGrok46 && !allModels.some((m) => m.provider === "opencode" && m.id === "grok-4.7")) {
-		allModels.push({ ...opencodeGrok46, id: "grok-4.7", name: "Grok 4.7" });
-	}
-
 	// Add missing Mistral Medium 3.5 model until models.dev includes it
 	if (!allModels.some(m => m.provider === "mistral" && m.id === "mistral-medium-3.5")) {
 		allModels.push({
