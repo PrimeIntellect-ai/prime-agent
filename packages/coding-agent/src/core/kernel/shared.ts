@@ -7,6 +7,8 @@ export const HOST_REQUEST_SHUTDOWN_TIMEOUT_MS = 5000;
 export const KERNEL_SHUTDOWN_TIMEOUT_MS = 5000;
 export const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 1500;
 export const SNAPSHOT_EXECUTION_TIMEOUT_MS = 5000;
+/** Restore deserializes everything a snapshot serializes: bound like the repair step. */
+export const RESTORE_EXECUTION_TIMEOUT_MS = 30_000;
 export const KERNEL_ABORT_GRACE_MS = 1000;
 export const KERNEL_BUSY_REUSE_WAIT_MS = 5000;
 export const KERNEL_BUSY_INTERRUPT_INTERVAL_MS = 500;

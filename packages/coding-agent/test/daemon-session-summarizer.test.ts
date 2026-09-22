@@ -7,11 +7,12 @@ import {
 	type AgentStatusResult,
 	buildStatusContext,
 	DaemonSessionSummarizer,
+	type GenerateAgentStatusParams,
 	parseAgentStatusResponse,
 } from "../src/modes/daemon/daemon-session-summarizer.js";
 
-function userMessage(text: string): AgentMessage {
-	return { role: "user", content: [{ type: "text", text }], timestamp: 0 } as unknown as AgentMessage;
+function userMessage(text: string, timestamp = 0): AgentMessage {
+	return { role: "user", content: [{ type: "text", text }], timestamp } as unknown as AgentMessage;
 }
 
 function assistantMessage(text: string, tools: string[] = []): AgentMessage {
@@ -165,13 +166,14 @@ describe("daemon session summarizer", () => {
 		function makeState(options: {
 			messages: AgentMessage[];
 			isSessionActive: boolean;
+			activeSessionId?: string;
 			summaryState?: AgentStatus;
 			persistedStatus?: AgentStatus;
 			appendAgentStatus?: (status: AgentStatus) => void;
 			getLeafId?: () => string | null;
 		}): ActiveSessionState {
 			return {
-				activeSessionId: "active-1",
+				activeSessionId: options.activeSessionId ?? "active-1",
 				summaryState: options.summaryState,
 				runtime: {
 					session: {
@@ -289,6 +291,31 @@ describe("daemon session summarizer", () => {
 			await pass;
 
 			expect(internal.failedIdleGenerations.size).toBe(0);
+		});
+
+		test("caps concurrent generations and admits the most recently active waiter first", async () => {
+			const pendingGates: Array<() => void> = [];
+			const generate = vi.fn((_params: GenerateAgentStatusParams) =>
+				new Promise<void>((resolveGate) => pendingGates.push(resolveGate)).then(() => ({ summary: "done" })),
+			);
+			const states = ["s1", "s2", "s3", "s4", "s5", "s6"].map((id, index) =>
+				makeState({ activeSessionId: id, isSessionActive: true, messages: [userMessage("hi", index + 1)] }),
+			);
+			const summarizer = new DaemonSessionSummarizer(() => states, undefined, generate);
+			const internal = summarizer as unknown as { summarize(state: ActiveSessionState): Promise<void> };
+
+			const running = states.slice(0, 4).map((state) => internal.summarize(state));
+			states.slice(4).map((state) => internal.summarize(state));
+			expect(generate).toHaveBeenCalledTimes(4);
+			pendingGates[3]!();
+			await running[3];
+			expect(generate).toHaveBeenCalledTimes(5);
+			expect(generate.mock.calls[4]?.[0]?.messages.at(-1)?.timestamp).toBe(6);
+			summarizer.forget("s5");
+			pendingGates[0]!();
+			await running[0];
+			expect(generate).toHaveBeenCalledTimes(5);
+			for (const release of pendingGates) release();
 		});
 
 		test("an idle re-settle matching the latest persisted status appends nothing", async () => {

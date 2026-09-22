@@ -1,0 +1,1 @@
+- `turn_end` and `message_update` events are now typed as assistant messages (matching what is actually emitted), and the README documents the `max` thinking level and current `continue()` semantics.

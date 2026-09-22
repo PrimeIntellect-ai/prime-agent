@@ -33,7 +33,7 @@ describe("ENG-4527 worker heartbeat scheduling", () => {
 			const sessionFile = join(harness.tempDir, "sessions", `${sessionId}.jsonl`);
 			const store = AgentCronJobStore.forSessionArtifacts();
 			store.registerSessionArtifact(sessionId, artifactDir);
-			store.createHeartbeat({
+			await store.createHeartbeat({
 				activeSessionId: `worker-${index}`,
 				sessionId,
 				sessionFile,

@@ -1,0 +1,1 @@
+- Fixed provider safety-filter failures (e.g. content_filter) being auto-retried: they are permanent rejections.

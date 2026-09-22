@@ -120,6 +120,11 @@ describeIf("ReplKernelManager execute (real runtime)", () => {
 		const unknown = await manager.execute("import rlm\nawait rlm.host_request('test.unknown')");
 		expect(unknown.status).toBe("error");
 		expect(unknown.error?.evalue).toContain('host request type "test.unknown" is not available');
+
+		const padded = `${"# pad\n".repeat(500)}import rlm\nreply = await rlm.host_request('test.echo', {'value': 9, 'cellSourceCode': 'FAKE'})\n[len(reply['cell']), reply['cell'].endswith(' [... cell source truncated at 2048 chars ...]'), reply['cell'] == 'FAKE']`;
+		const capped = await manager.execute(padded);
+		expect(capped.status).toBe("ok");
+		expect(capped.result).toBe("[2094, True, False]");
 	}, 30_000);
 
 	it("spawns through rlm.spawn over the unchanged rlm.run wire type, requires a child name, and refuses a direct rlm call", async () => {

@@ -2,17 +2,19 @@ import { createConnection, type Socket } from "node:net";
 import { serializeJsonLine } from "../rpc/jsonl.js";
 import { type PrivateFrame, PrivateFramedChannel } from "../session-worker/private-framing.js";
 import {
+	awaitSocketConnect,
 	type DaemonClientMessageListener,
 	type DaemonClientRequestOptions,
 	DaemonSocketClosedError,
 } from "./daemon-client.js";
-import type {
-	DaemonClosingReason,
-	DaemonCommand,
-	DaemonOutbound,
-	DaemonPeerTransportTicket,
-	DaemonResponse,
-	DaemonServerCapability,
+import {
+	type DaemonClosingReason,
+	type DaemonCommand,
+	type DaemonOutbound,
+	type DaemonPeerTransportTicket,
+	type DaemonResponse,
+	type DaemonServerCapability,
+	isDaemonResponse,
 } from "./daemon-protocol.js";
 import {
 	type DaemonPeerCommand,
@@ -85,27 +87,10 @@ export class DaemonWorkerClient {
 		this.channel = new PrivateFramedChannel(socket, isDaemonWorkerFrameHeader);
 		this.channel.onFrame((frame) => this.handleFrame(frame));
 
-		await new Promise<void>((resolve, reject) => {
-			const timeout = setTimeout(() => {
-				cleanup();
-				socket.destroy();
-				reject(new Error(`Timed out connecting to daemon worker socket: ${this.socketPath}`));
-			}, timeoutMs);
-			const cleanup = () => {
-				clearTimeout(timeout);
-				socket.off("connect", onConnect);
-				socket.off("error", onError);
-			};
-			const onConnect = () => {
-				cleanup();
-				resolve();
-			};
-			const onError = (error: Error) => {
-				cleanup();
-				reject(error);
-			};
-			socket.once("connect", onConnect);
-			socket.once("error", onError);
+		await awaitSocketConnect(socket, timeoutMs, {
+			onFailure: () => this.clearSocketReference(socket),
+			timeoutError: () => new Error(`Timed out connecting to daemon worker socket: ${this.socketPath}`),
+			connectError: (error) => error,
 		});
 
 		socket.on("error", (error) => this.notifyClosed(socket, this.directCloseError(error)));
@@ -343,6 +328,14 @@ export class DaemonWorkerClient {
 		}
 	}
 
+	private clearSocketReference(socket: Socket): void {
+		if (this.socket !== socket) {
+			return;
+		}
+		this.socket = undefined;
+		this.channel = undefined;
+	}
+
 	private notifyClosed(socket: Socket, error: Error): void {
 		if (this.socket !== socket) {
 			return;
@@ -356,14 +349,4 @@ export class DaemonWorkerClient {
 			listener(error);
 		}
 	}
-}
-
-function isDaemonResponse(value: unknown): value is DaemonResponse {
-	if (!value || typeof value !== "object") {
-		return false;
-	}
-	const candidate = value as { type?: unknown; command?: unknown; success?: unknown };
-	return (
-		candidate.type === "response" && typeof candidate.command === "string" && typeof candidate.success === "boolean"
-	);
 }

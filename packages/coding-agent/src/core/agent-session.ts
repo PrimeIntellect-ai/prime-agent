@@ -27,13 +27,14 @@ import type {
 	UserMessage,
 } from "@earendil-works/pi-ai";
 import {
+	clampServiceTier,
 	clampThinkingLevel,
 	cleanupSessionResources,
 	getSupportedThinkingLevels,
 	isContextOverflow,
 	modelsAreEqual,
 	resetApiProviders,
-	supportsFastMode,
+	supportsServiceTier,
 } from "@earendil-works/pi-ai";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
@@ -109,7 +110,9 @@ import {
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
 	compact,
+	estimateBranchSummaryRequestTokens,
 	estimateContextTokens,
+	estimateSummaryRequestTokens,
 	generateBranchSummary,
 	prepareCompaction,
 	serializeConversation,
@@ -402,6 +405,9 @@ export interface RlmChildAgentSnapshot {
 	activityStaleMs?: number;
 	error?: string;
 }
+
+/** The observable state rlm_child_update events dedup on. */
+type RlmChildStableSnapshot = Omit<RlmChildAgentSnapshot, "lastActivityAt" | "activityStaleMs">;
 
 export type CompactionReason = "manual" | "threshold" | "overflow" | "requested";
 
@@ -1029,6 +1035,8 @@ type AutonomousRuntimeSnapshot = Pick<
 interface RlmChildRun {
 	id: string;
 	prompt: string;
+	/** rlmChildLabel(prompt), computed once: the prompt never changes. */
+	label: string;
 	sessionName: string;
 	sessionDir: string;
 	model: Model<Api>;
@@ -1078,7 +1086,9 @@ interface RlmChildRun {
 	completeDeletion?: () => Promise<void>;
 	reportDeletionCleanupFailure?: (error: unknown) => Promise<void>;
 	emitUpdate?: () => void;
-	lastEmittedUpdate?: string;
+	lastEmittedUpdate?: RlmChildStableSnapshot;
+	/** Monotonic time of the last streamed-delta emit; other event kinds still emit at once. */
+	lastStreamedUpdateMonotonicAt?: number;
 	unsubscribe?: () => void;
 }
 
@@ -1095,6 +1105,8 @@ const KERNEL_STATE_LISTING_TIMEOUT_MS = 5000;
 const RLM_MAX_DEPTH_STATE_CUSTOM_TYPE = "rlm_max_depth_state";
 /** Minimum spacing between accepted progress notes from one child session. */
 const RLM_PROGRESS_NOTE_MIN_INTERVAL_MS = 10_000;
+/** Minimum spacing between streamed-delta child update emits per child run. */
+export const RLM_CHILD_UPDATE_MIN_INTERVAL_MS = 1_000;
 /** Bounded ring of progress notes kept per child run; the snapshot exposes the newest. */
 const RLM_CHILD_PROGRESS_NOTE_RING_MAX = 5;
 /** A running child with no tracked activity for this long reports activityStaleMs. */
@@ -1330,6 +1342,39 @@ export function rlmChildLabel(prompt: string): string {
 	return prompt.replace(/\s+/g, " ").trim() || "child agent";
 }
 
+/** `satisfies` makes a field without a compare entry a compile error, not a silently suppressed rlm_child_update. */
+const RLM_CHILD_STABLE_SNAPSHOT_KEYS = Object.keys({
+	id: true,
+	parentId: true,
+	activeSessionId: true,
+	sessionName: true,
+	model: true,
+	label: true,
+	status: true,
+	durationMs: true,
+	answerPreview: true,
+	toolUseCount: true,
+	tokenCount: true,
+	recap: true,
+	sessionDir: true,
+	activity: true,
+	repliedSinceTask: true,
+	progressNote: true,
+	error: true,
+} satisfies Record<keyof RlmChildStableSnapshot, true>) as (keyof RlmChildStableSnapshot)[];
+
+/** Fields are primitives except activity, compared by value because each delta assigns a fresh activity object. */
+function rlmChildStableFieldsEqual(a: RlmChildStableSnapshot, b: RlmChildStableSnapshot): boolean {
+	for (const key of RLM_CHILD_STABLE_SNAPSHOT_KEYS) {
+		if (key === "activity") {
+			if (a.activity?.kind !== b.activity?.kind || a.activity?.toolName !== b.activity?.toolName) return false;
+		} else if (a[key] !== b[key]) {
+			return false;
+		}
+	}
+	return true;
+}
+
 /**
  * Record a tracked child activity on both clocks: lastActivityAt stays
  * wall-clock ms for snapshots, and its monotonic twin bounds staleness so a
@@ -1374,6 +1419,24 @@ function readAssistantText(message: AssistantMessage): string {
 		.filter((block) => block.type === "text")
 		.map((block) => block.text)
 		.join("");
+}
+
+// Trailing window feeding the streaming answer preview: message_update fires per token delta, so
+// rejoining the whole message costs O(length²); the preview shows the latest output, not the head.
+// Equal to compactRlmText's cap, so compaction never cuts the newest characters.
+const RLM_ANSWER_PREVIEW_TAIL_CHARS = 160;
+
+function tailRlmAnswerPreview(message: AssistantMessage): string {
+	const tail: string[] = [];
+	let collected = 0;
+	for (let index = message.content.length - 1; index >= 0 && collected < RLM_ANSWER_PREVIEW_TAIL_CHARS; index -= 1) {
+		const block = message.content[index];
+		if (block.type !== "text") continue;
+		const remaining = RLM_ANSWER_PREVIEW_TAIL_CHARS - collected;
+		tail.unshift(block.text.slice(-remaining));
+		collected += Math.min(block.text.length, remaining);
+	}
+	return compactRlmText(tail.join(""));
 }
 
 function waitForPromiseOrAbort<T>(
@@ -1449,11 +1512,8 @@ export class AgentSession {
 
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
-	private _lastSessionActionSnapshot: SessionActionSnapshot = {
-		queuedCount: 0,
-		steering: [],
-		followUps: [],
-	};
+	/** Serialized last-emitted queue snapshot, so a mutation pays one stringify, not two. */
+	private _lastSessionActionSnapshot = JSON.stringify({ queuedCount: 0, steering: [], followUps: [] });
 	private _agentEventQueue: Promise<void> = Promise.resolve();
 
 	/** Session-owned actions. Items are never fed into Agent.steer/followUp. */
@@ -1542,7 +1602,7 @@ export class AgentSession {
 				jobId?: string;
 				/** Pending in-process wake timer for the current park. */
 				timer?: ReturnType<typeof setTimeout>;
-				/** True from the wake until the park state clears (the resume probe is running). */
+				/** True from the wake until the park state clears: the resume probe is running, or a wake already due is owned by the durable job. */
 				waking?: boolean;
 				/** Wake re-arms consumed without a resume; bounded by QUOTA_WAKE_MAX_RETRIES. */
 				wakeRetries?: number;
@@ -1772,7 +1832,8 @@ export class AgentSession {
 			this._pendingNextTurnMessages.push(createGoalContextMessage(this._goalState, "continuation"));
 		}
 		this._restoreLateIpythonSentAgentMessages();
-		this._restoreQuotaPark();
+		// Cannot await in a constructor; a live wake job restores within a microtask, only a rebuilt job waits on the store.
+		void this._restoreQuotaPark();
 		if (this._goalState.status === "active") {
 			this._goalAccountingStartedAt = Date.now();
 		}
@@ -2011,8 +2072,9 @@ export class AgentSession {
 
 	private _emitQueueUpdate(): void {
 		const actions = this.getSessionActionSnapshot();
-		if (JSON.stringify(actions) === JSON.stringify(this._lastSessionActionSnapshot)) return;
-		this._lastSessionActionSnapshot = actions;
+		const serialized = JSON.stringify(actions);
+		if (serialized === this._lastSessionActionSnapshot) return;
+		this._lastSessionActionSnapshot = serialized;
 		this._emit({ type: "session_action_update", actions });
 	}
 
@@ -4031,7 +4093,10 @@ export class AgentSession {
 	 * These heartbeats are internal to this active session and never read or
 	 * mutate the user-level /heartbeat.
 	 */
-	handleRlmHeartbeatHostRequest(type: string, payload: Record<string, unknown> = {}): Record<string, unknown> {
+	async handleRlmHeartbeatHostRequest(
+		type: string,
+		payload: Record<string, unknown> = {},
+	): Promise<Record<string, unknown>> {
 		const controller = this._rlmHeartbeatController;
 		if (!controller) {
 			throw new Error("RLM heartbeat skill is not available in this session");
@@ -4058,7 +4123,7 @@ export class AgentSession {
 				const deliveryMode = normalizeHeartbeatDeliveryMode(payload.delivery_mode ?? payload.deliveryMode);
 				return {
 					heartbeat: rlmHeartbeatHostResponse(
-						controller.createRlmHeartbeat({
+						await controller.createRlmHeartbeat({
 							instruction: payload.instruction,
 							interval: payload.interval,
 							label: payload.label,
@@ -4094,7 +4159,7 @@ export class AgentSession {
 				) {
 					throw new Error("rlm_heartbeat.update requires at least one field to update");
 				}
-				const heartbeat = controller.updateRlmHeartbeat({
+				const heartbeat = await controller.updateRlmHeartbeat({
 					id: payload.id,
 					instruction: payload.instruction,
 					interval: payload.interval,
@@ -4110,7 +4175,7 @@ export class AgentSession {
 				if (typeof payload.id !== "string") {
 					throw new Error("rlm_heartbeat.delete id must be a string");
 				}
-				const heartbeat = controller.deleteRlmHeartbeat(payload.id);
+				const heartbeat = await controller.deleteRlmHeartbeat(payload.id);
 				return {
 					heartbeat: heartbeat ? rlmHeartbeatHostResponse(heartbeat) : null,
 				};
@@ -4600,11 +4665,11 @@ export class AgentSession {
 					this._retryAuthFailureSources = [];
 				}
 				if (assistantMsg.stopReason === "aborted") {
-					this._handleAbortedQuotaPark();
+					await this._handleAbortedQuotaPark();
 				} else if (assistantMsg.stopReason !== "error" && this._quotaPark) {
 					// A parked session that completes a model call has its quota back:
 					// clear the park (cancelling the pending wake) and resume the task.
-					this._completeQuotaParkResume();
+					await this._completeQuotaParkResume();
 				}
 				if (this._accountGoalUsageForAssistantMessage(assistantMsg)) {
 					const message = createGoalContextMessage(this._goalState, "budget_limit");
@@ -4652,7 +4717,7 @@ export class AgentSession {
 			this._finishActiveRetryWithFailure(msg);
 			this._resolveRetry();
 			if (!compactionWillRetry) {
-				this._handleErroredQuotaParkProbe(msg);
+				await this._handleErroredQuotaParkProbe(msg);
 				this._finishGoalForTerminalAssistantMessage(msg);
 				// In serialized mode, agent-callable refine.run is serviced
 				// at the shouldStopAfterTurn boundary, not here at agent_end.
@@ -7673,7 +7738,7 @@ export class AgentSession {
 						active: {
 							kind: active.payload.kind,
 							phase,
-							label: compactRlmText(active.payload.text),
+							label: compactRlmText(queuedAgentMessagePreview(active)),
 						},
 					}
 				: {}),
@@ -8434,16 +8499,19 @@ export class AgentSession {
 
 	setServiceTier(serviceTier: ServiceTier): void {
 		const effectiveServiceTier = this._getEffectiveServiceTier(serviceTier);
-		const preferenceChanged = effectiveServiceTier !== this._serviceTierPreference;
+		const preferenceChanged = serviceTier !== this._serviceTierPreference;
 		const effectiveTierChanged = effectiveServiceTier !== this.agent.state.serviceTier;
 		if (!preferenceChanged && !effectiveTierChanged) {
 			return;
 		}
-		this._serviceTierPreference = effectiveServiceTier;
+		// The preference and the session entry keep the REQUESTED tier (only the
+		// active state clamps), so switching to or resuming on a capable model
+		// re-activates it instead of a clamped "default" shadowing it.
+		this._serviceTierPreference = serviceTier;
 		if (preferenceChanged) {
-			this.sessionManager.appendServiceTierChange(effectiveServiceTier);
-			if (this.model && supportsFastMode(this.model)) {
-				this.settingsManager.setDefaultServiceTier(effectiveServiceTier);
+			this.sessionManager.appendServiceTierChange(serviceTier);
+			if (this.model && supportsServiceTier(this.model, serviceTier)) {
+				this.settingsManager.setDefaultServiceTier(serviceTier);
 			}
 		}
 		if (effectiveTierChanged) {
@@ -8456,7 +8524,7 @@ export class AgentSession {
 	}
 
 	private _getEffectiveServiceTier(serviceTier: ServiceTier): ServiceTier {
-		return serviceTier === "priority" && (!this.model || !supportsFastMode(this.model)) ? "default" : serviceTier;
+		return clampServiceTier(this.model, serviceTier);
 	}
 
 	private _getServiceTierForModelSwitch(): ServiceTier {
@@ -8781,6 +8849,24 @@ export class AgentSession {
 			if (extensionCompaction) {
 				({ summary, firstKeptEntryId, tokensBefore, details, usage } = extensionCompaction);
 			} else {
+				// Compaction fires at context peak, and the summarizer runs with its own
+				// prompt prefix (a different system prompt, no tools), so it cannot hit
+				// the session's cached prefix: on the session model the summary re-reads
+				// its whole input at peak price, and on OpenAI-style providers it rides
+				// the session's prompt_cache_key with a divergent prefix, depressing
+				// hit rates. Route summaries to the auxiliary model when one is configured.
+				const summarization = (await this._resolveAuxiliaryModel(
+					"compaction summary",
+					{ model, apiKey, headers },
+					// The summary request serializes the whole conversation, so a
+					// smaller auxiliary window must fall back to the session model
+					// instead of failing over-limit and stranding the context.
+					estimateSummaryRequestTokens(preparation, customInstructions),
+				)) ?? {
+					model,
+					apiKey,
+					headers,
+				};
 				// Each summary wire call gets its own request ID: split turns send two
 				// different bodies, and one Idempotency-Key must never cover both. A slice
 				// that succeeds on the wire stays uncommitted until the compaction itself
@@ -8791,10 +8877,10 @@ export class AgentSession {
 				): Promise<T> => {
 					const requestId = this._semanticEdges.startCompactionRequest(semanticCompaction.compactionId);
 					if (requestId === undefined) {
-						return call(headers);
+						return call(summarization.headers);
 					}
 					try {
-						const result = await call({ ...headers, ...modelRequestHeaders(requestId) });
+						const result = await call({ ...summarization.headers, ...modelRequestHeaders(requestId) });
 						// A slice resolving after a sibling's rejection already settled the
 						// compaction would push into a drained list and stay in-flight forever.
 						if (compactionSettled) {
@@ -8810,12 +8896,15 @@ export class AgentSession {
 				};
 				({ summary, firstKeptEntryId, tokensBefore, details, usage } = await compact(
 					preparation,
-					model,
-					apiKey,
-					headers,
+					summarization.model,
+					summarization.apiKey,
+					summarization.headers,
 					customInstructions,
 					signal,
-					this.thinkingLevel,
+					// Summarizing is transcription, not reasoning: no thinking level is
+					// requested, so the summary call stays cheap and cannot trip an invalid
+					// reasoning effort for the summary model.
+					undefined,
 					summaryCall,
 					providerRetryPolicy(this.settingsManager),
 					this.sessionId,
@@ -9325,23 +9414,36 @@ export class AgentSession {
 	}
 
 	/**
-	 * Refinement passes (review and planning) run with their own prompts, so
-	 * issuing them on the session model evicts the provider's prefix-cache entry
-	 * for the session and forces a full context re-read on the next session
-	 * request. Route them to the configured auxiliary model when it is set and
-	 * usable; fall back to the session model otherwise.
+	 * Background LLM passes (refinement review and planning, compaction summaries,
+	 * branch summaries) run with their own prompts, so they cannot hit the
+	 * session's cached prefix: on the session model they re-read their whole input
+	 * at peak price, and on OpenAI-style providers a divergent prefix riding the
+	 * session's prompt_cache_key depresses hit rates. Route them to the configured
+	 * auxiliary model when it is set and usable; fall back to the session model
+	 * otherwise.
+	 *
+	 * Callers that already resolved the session request auth pass it as
+	 * `fallback` so the fallback path reuses it instead of resolving again.
 	 */
-	private async _resolveRefinementModel(): Promise<
-		{ model: Model<Api>; apiKey: string; headers?: Record<string, string> } | undefined
-	> {
+	private async _resolveAuxiliaryModel(
+		purpose: string,
+		fallback?: { model: Model<Api>; apiKey: string; headers?: Record<string, string> },
+		requiredContextTokens?: number,
+	): Promise<{ model: Model<Api>; apiKey: string; headers?: Record<string, string> } | undefined> {
 		const sessionModel = this.model;
 		if (!sessionModel) {
-			return undefined;
+			return fallback;
 		}
-		const selector = this.settingsManager.getAuxiliaryModel()?.trim().toLowerCase();
-		if (!selector || `${sessionModel.provider}/${sessionModel.id}`.toLowerCase() === selector) {
+		const resolveSessionAuth = async () => {
+			if (fallback) {
+				return fallback;
+			}
 			const { apiKey, headers, requestModel } = await this._getRequiredRequestAuth(sessionModel);
 			return { model: requestModel, apiKey, headers };
+		};
+		const selector = this.settingsManager.getAuxiliaryModel()?.trim().toLowerCase();
+		if (!selector || `${sessionModel.provider}/${sessionModel.id}`.toLowerCase() === selector) {
+			return await resolveSessionAuth();
 		}
 		try {
 			const model = (await this._authenticatedRlmModels()).find(
@@ -9351,13 +9453,27 @@ export class AgentSession {
 				throw new Error(`model "${selector}" is unavailable, unauthenticated, or expired`);
 			}
 			const { apiKey, headers, requestModel } = await this._getRequiredRequestAuth(model);
+			// Callers that know the size of the request they will issue pass it in:
+			// an auxiliary model whose context window cannot hold that request
+			// fails over-limit on the wire (e.g. a compaction summary covering the
+			// whole conversation), leaving the caller unable to make progress. A
+			// known window that is too small routes to the session model through the
+			// warning below; an unknown window (<= 0) keeps the routing as-is
+			// rather than guessing. The throw lands in the catch, whose logging
+			// stays selector-only (CodeQL js/clear-text-logging).
+			if (
+				requiredContextTokens !== undefined &&
+				requestModel.contextWindow > 0 &&
+				requestModel.contextWindow < requiredContextTokens
+			) {
+				throw new Error("auxiliary model context window is too small for the request");
+			}
 			return { model: requestModel, apiKey, headers };
 		} catch {
 			// Error details from the auth stack can embed credential material, so only
 			// the selector is logged (CodeQL js/clear-text-logging).
-			console.warn(`Warning: auxiliaryModel "${selector}" unusable for refinement; using the session model.`);
-			const { apiKey, headers, requestModel } = await this._getRequiredRequestAuth(sessionModel);
-			return { model: requestModel, apiKey, headers };
+			console.warn(`Warning: auxiliaryModel "${selector}" unusable for ${purpose}; using the session model.`);
+			return await resolveSessionAuth();
 		}
 	}
 
@@ -9365,7 +9481,7 @@ export class AgentSession {
 		if (this._autoRefineReviewer) {
 			return this._autoRefineReviewer(context, signal);
 		}
-		const refinementModel = await this._resolveRefinementModel();
+		const refinementModel = await this._resolveAuxiliaryModel("refinement");
 		if (!refinementModel) {
 			return { shouldRefine: false, rationale: "No model selected." };
 		}
@@ -9728,7 +9844,7 @@ export class AgentSession {
 			throw new Error(formatNoModelSelectedMessage());
 		}
 
-		const refinementModel = await this._resolveRefinementModel();
+		const refinementModel = await this._resolveAuxiliaryModel("refinement");
 		if (!refinementModel) {
 			throw new Error(formatNoModelSelectedMessage());
 		}
@@ -11104,8 +11220,7 @@ export class AgentSession {
 			model: options.model,
 			thinkingLevel:
 				options.thinkingLevel ?? (clampThinkingLevel(options.model, this.thinkingLevel) as ThinkingLevel),
-			serviceTier:
-				this.serviceTier === "priority" && !supportsFastMode(options.model) ? "default" : this.serviceTier,
+			serviceTier: this._serviceTierPreference,
 			scopedModels: [...this._scopedModels],
 			activeToolNames: this.getActiveToolNames(),
 			allowedToolNames: this._allowedToolNames ? [...this._allowedToolNames] : undefined,
@@ -11144,7 +11259,7 @@ export class AgentSession {
 				systemPrompt: "",
 				model: options.model,
 				thinkingLevel: options.thinkingLevel,
-				serviceTier: options.serviceTier,
+				serviceTier: clampServiceTier(options.model, options.serviceTier),
 				tools: [],
 			},
 			convertToLlm: this.agent.convertToLlm,
@@ -11165,6 +11280,7 @@ export class AgentSession {
 			agent: childAgent,
 			sessionManager: childSessionManager,
 			settingsManager: this.settingsManager,
+			serviceTierPreference: options.serviceTier,
 			cwd: this._cwd,
 			agentDir: this._agentDir,
 			scopedModels: options.scopedModels,
@@ -11868,17 +11984,14 @@ export class AgentSession {
 		};
 	}
 
-	private _rlmChildSnapshotForRun(
-		run: RlmChildRun,
-		child = run.session ?? this._rlmChildSessions.get(run.id)?.session,
-	): RlmChildAgentSnapshot {
+	private _rlmChildStableSnapshotForRun(run: RlmChildRun, child: AgentSession | undefined): RlmChildStableSnapshot {
 		const model = child?.model ?? run.model;
 		return {
 			id: run.id,
 			parentId: this._rlmParentNodeId,
 			sessionName: child?.sessionName ?? run.sessionName,
 			model: `${model.provider}/${model.id}`,
-			label: rlmChildLabel(run.prompt),
+			label: run.label,
 			status: run.status,
 			durationMs: run.durationMs,
 			answerPreview: run.answerPreview,
@@ -11889,9 +12002,18 @@ export class AgentSession {
 			activity: run.activity,
 			repliedSinceTask: child?._repliedToParentSinceTask,
 			progressNote: run.progressNotes.at(-1),
+			error: run.error,
+		};
+	}
+
+	private _rlmChildSnapshotForRun(
+		run: RlmChildRun,
+		child = run.session ?? this._rlmChildSessions.get(run.id)?.session,
+	): RlmChildAgentSnapshot {
+		return {
+			...this._rlmChildStableSnapshotForRun(run, child),
 			lastActivityAt: run.lastActivityAt,
 			activityStaleMs: rlmActivityStaleMs(run.status, run.activity, run.lastActivityAt, run.lastActivityMonotonicAt),
-			error: run.error,
 		};
 	}
 
@@ -12370,6 +12492,7 @@ export class AgentSession {
 		const run: RlmChildRun = {
 			id: childNodeId,
 			prompt,
+			label: rlmChildLabel(prompt),
 			sessionName,
 			sessionDir: childSessionDir,
 			model: modelSelection.model,
@@ -12392,17 +12515,18 @@ export class AgentSession {
 		this._activeRlmChildRuns.set(run.id, run);
 		this._unsettledRlmChildRuns.add(run);
 		const emitChildUpdate = () => {
-			const child = this._rlmChildSnapshotForRun(run);
 			// Dedup compares observable child state, not clock-derived fields:
 			// lastActivityAt advances on every streamed token delta and
 			// activityStaleMs is recomputed on each snapshot build, so including
 			// either would re-emit on every delta once answerPreview saturates its
-			// cap. Emitted snapshots still carry both fields fresh.
-			const { lastActivityAt: _lastActivityAt, activityStaleMs: _activityStaleMs, ...stable } = child;
-			const serialized = JSON.stringify(stable);
-			if (serialized === run.lastEmittedUpdate) return;
-			run.lastEmittedUpdate = serialized;
-			this._emit({ type: "rlm_child_update", child });
+			// cap. Streamed deltas would otherwise pay a snapshot build plus a serialization
+			// each; only a detected change builds the fresh snapshot, which carries both clock fields.
+			const child = run.session ?? this._rlmChildSessions.get(run.id)?.session;
+			const next = this._rlmChildStableSnapshotForRun(run, child);
+			if (run.lastEmittedUpdate && rlmChildStableFieldsEqual(run.lastEmittedUpdate, next)) return;
+			// next holds run.activity by reference; safe because activity objects are replaced, never mutated.
+			run.lastEmittedUpdate = next;
+			this._emit({ type: "rlm_child_update", child: this._rlmChildSnapshotForRun(run, child) });
 		};
 		run.emitUpdate = emitChildUpdate;
 		emitChildUpdate();
@@ -12539,17 +12663,25 @@ export class AgentSession {
 								pendingChildUsage.set(origin, bucket);
 							}
 						}
-						const text = compactRlmText(readAssistantText(assistant));
+						const text = tailRlmAnswerPreview(assistant);
 						if (text) run.answerPreview = text;
 						touchRlmChildActivity(run);
 						emitChildUpdate();
 					} else if (event.type === "message_start" || event.type === "message_update") {
 						if (event.message.role === "assistant") {
-							const text = compactRlmText(readAssistantText(event.message as AssistantMessage));
+							const text = tailRlmAnswerPreview(event.message as AssistantMessage);
 							if (text) run.answerPreview = text;
 							run.activity = { kind: "writing" };
 							touchRlmChildActivity(run);
-							emitChildUpdate();
+							// Snapshot+stringify per delta dominates streaming cost; message_end emits the final preview.
+							const now = performance.now();
+							if (
+								run.lastStreamedUpdateMonotonicAt === undefined ||
+								now - run.lastStreamedUpdateMonotonicAt >= RLM_CHILD_UPDATE_MIN_INTERVAL_MS
+							) {
+								run.lastStreamedUpdateMonotonicAt = now;
+								emitChildUpdate();
+							}
 						}
 					} else if (event.type === "tool_execution_start") {
 						flushPendingChildUsageIfStale();
@@ -13242,7 +13374,7 @@ export class AgentSession {
 			// Future-scheduled parks survive; only stale post-wake parks clear.
 			const stalePark = this._quotaPark;
 			if (reason === "usage" && stalePark !== undefined && stalePark.resumeAtMs <= Date.now()) {
-				this._cancelQuotaParkWake(stalePark);
+				await this._cancelQuotaParkWake(stalePark);
 				this._quotaPark = undefined;
 			}
 			this._markProviderAuthStaleForRetryFailure(message, options);
@@ -13283,7 +13415,7 @@ export class AgentSession {
 	 * reset time. While parked the session makes no model calls; the wake
 	 * delivers the resume marker, whose first model call probes the quota.
 	 */
-	private _parkForQuotaReset(
+	private async _parkForQuotaReset(
 		message: AssistantMessage,
 		options:
 			| {
@@ -13294,7 +13426,7 @@ export class AgentSession {
 		pauseMs: number,
 		abortMessage: string,
 		parkedAttempt: number,
-	): boolean {
+	): Promise<boolean> {
 		const existing = this._quotaPark;
 		if (existing !== undefined && existing.resumeAtMs > Date.now()) {
 			// Already parked for this window (e.g. a heartbeat turn failed while
@@ -13307,10 +13439,10 @@ export class AgentSession {
 			);
 			return false;
 		}
-		this._cancelQuotaParkWake(existing);
+		await this._cancelQuotaParkWake(existing);
 		const parkCount = (existing?.parkCount ?? 0) + 1;
 		const resumeAtMs = Date.now() + pauseMs;
-		const jobId = this._createQuotaResumeJob(resumeAtMs);
+		const jobId = await this._createQuotaResumeJob(resumeAtMs);
 		const timer = this._scheduleQuotaResumeTimer(resumeAtMs);
 		this._quotaPark = {
 			parkCount,
@@ -13359,14 +13491,14 @@ export class AgentSession {
 	 * resume marker at the reset time. Best-effort: the in-process timer covers
 	 * live sessions when this cannot be persisted (e.g. in-memory sessions).
 	 */
-	private _createQuotaResumeJob(resumeAtMs: number): string | undefined {
+	private async _createQuotaResumeJob(resumeAtMs: number): Promise<string | undefined> {
 		const sessionFile = this.sessionFile;
 		const store = this._quotaResumeStore();
 		if (!sessionFile || !store) {
 			return undefined;
 		}
 		try {
-			const job = store.create({
+			const job = await store.create({
 				activeSessionId: this.sessionId,
 				sessionId: this.sessionId,
 				sessionFile,
@@ -13414,7 +13546,7 @@ export class AgentSession {
 	 * that has not run, and report a user cancellation as such. Anything else is
 	 * gone, leaving the in-process timer as the wake.
 	 */
-	private _resolveQuotaResumeJob(jobId: string): "delivered" | "user-cancelled" | "cancelled" | "gone" {
+	private async _resolveQuotaResumeJob(jobId: string): Promise<"delivered" | "user-cancelled" | "cancelled" | "gone"> {
 		const job = this._findQuotaResumeJob(jobId);
 		if (job?.status === "completed") {
 			return "delivered";
@@ -13427,23 +13559,23 @@ export class AgentSession {
 			return "gone";
 		}
 		try {
-			return store.cancel(jobId) === undefined ? "gone" : "cancelled";
+			return (await store.cancel(jobId)) === undefined ? "gone" : "cancelled";
 		} catch {
 			return "gone";
 		}
 	}
 
 	/** Cancel a park's pending wake: the in-process timer and the durable job. */
-	private _cancelQuotaParkWake(
+	private async _cancelQuotaParkWake(
 		park: { resumeAtMs: number; jobId?: string; timer?: ReturnType<typeof setTimeout> } | undefined,
-	): void {
+	): Promise<void> {
 		if (!park) return;
 		if (park.timer) {
 			clearTimeout(park.timer);
 			park.timer = undefined;
 		}
 		if (park.jobId !== undefined) {
-			this._resolveQuotaResumeJob(park.jobId);
+			await this._resolveQuotaResumeJob(park.jobId);
 		}
 		park.jobId = undefined;
 	}
@@ -13461,7 +13593,7 @@ export class AgentSession {
 			return;
 		}
 		if (park.jobId !== undefined) {
-			const resolved = this._resolveQuotaResumeJob(park.jobId);
+			const resolved = await this._resolveQuotaResumeJob(park.jobId);
 			if (resolved === "delivered") {
 				// The daemon dispatched the durable wake; its prompt drives the resume.
 				park.waking = true;
@@ -13485,7 +13617,7 @@ export class AgentSession {
 			// A refused admission must not leave a park whose wake is gone: re-arm
 			// it (bounded) so the session still resumes, or drop the park.
 			park.waking = false;
-			this._recoverQuotaParkWake("wake-failed");
+			await this._recoverQuotaParkWake("wake-failed");
 		}
 	}
 
@@ -13494,13 +13626,13 @@ export class AgentSession {
 	 * marker is still queued owns the resume, so an abort of some other turn must
 	 * not re-arm the wake under it; a wake this turn consumed re-arms instead.
 	 */
-	private _handleAbortedQuotaPark(): void {
+	private async _handleAbortedQuotaPark(): Promise<void> {
 		const park = this._quotaPark;
 		if (!park || (park.waking === true && this._hasQueuedQuotaResumeMarker())) {
 			return;
 		}
 		park.waking = false;
-		this._recoverQuotaParkWake("wake-aborted");
+		await this._recoverQuotaParkWake("wake-aborted");
 	}
 
 	/** Whether the park wake's resume marker is still waiting in the session input queue. */
@@ -13521,13 +13653,13 @@ export class AgentSession {
 	 * or drop the park once the retries are spent. A marker still queued owns
 	 * the resume, so an error from another turn must not re-arm under it.
 	 */
-	private _handleErroredQuotaParkProbe(message: AssistantMessage): void {
+	private async _handleErroredQuotaParkProbe(message: AssistantMessage): Promise<void> {
 		const park = this._quotaPark;
 		if (message.stopReason !== "error" || park?.waking !== true || this._hasQueuedQuotaResumeMarker()) {
 			return;
 		}
 		park.waking = false;
-		this._recoverQuotaParkWake("wake-error");
+		await this._recoverQuotaParkWake("wake-error");
 	}
 
 	/**
@@ -13536,21 +13668,21 @@ export class AgentSession {
 	 * never wake ends instead of staying parked with no wake and no way to
 	 * resume.
 	 */
-	private _recoverQuotaParkWake(outcome: "wake-failed" | "wake-aborted" | "wake-error"): void {
+	private async _recoverQuotaParkWake(outcome: "wake-failed" | "wake-aborted" | "wake-error"): Promise<void> {
 		const park = this._quotaPark;
 		if (!park || park.waking || park.resumeAtMs > Date.now()) {
 			return;
 		}
 		const retries = (park.wakeRetries ?? 0) + 1;
 		if (retries > QUOTA_WAKE_MAX_RETRIES) {
-			this._cancelQuotaParkWake(park);
+			await this._cancelQuotaParkWake(park);
 			this._quotaPark = undefined;
 			this.sessionManager.appendCustomEntry(QUOTA_RESUME_CUSTOM_ENTRY_TYPE, { outcome });
 			return;
 		}
 		park.wakeRetries = retries;
 		park.resumeAtMs = Date.now() + QUOTA_WAKE_RETRY_DELAY_MS;
-		park.jobId = this._createQuotaResumeJob(park.resumeAtMs);
+		park.jobId = await this._createQuotaResumeJob(park.resumeAtMs);
 		park.timer = this._scheduleQuotaResumeTimer(park.resumeAtMs);
 		// Record the replacement wake, or a restart reads the spent park entry,
 		// drops the park, and leaves this retry job armed with no owner to cancel.
@@ -13578,7 +13710,10 @@ export class AgentSession {
 	 * recreate one that was cancelled (a navigation cancels the left-behind
 	 * leaf's wake) or removed, so a restored park never waits on a dead job.
 	 */
-	private _restoreQuotaWakeJob(jobId: string | undefined, resumeAtMs: number): string | undefined | "user-cancelled" {
+	private async _restoreQuotaWakeJob(
+		jobId: string | undefined,
+		resumeAtMs: number,
+	): Promise<string | undefined | "user-cancelled"> {
 		if (jobId === undefined) {
 			return this._createQuotaResumeJob(resumeAtMs);
 		}
@@ -13600,7 +13735,7 @@ export class AgentSession {
 	 * wake is cancelled with it, so a parked leaf that was left behind cannot
 	 * resume its task on the selected branch.
 	 */
-	private _reloadQuotaParkFromBranch(): void {
+	private async _reloadQuotaParkFromBranch(): Promise<void> {
 		const previous = this._quotaPark;
 		this._quotaPark = undefined;
 		if (previous?.timer) {
@@ -13610,21 +13745,22 @@ export class AgentSession {
 		if (previous?.jobId !== undefined) {
 			// Only a wake this navigation actually cancels may be rebuilt on the way
 			// back; a wake the user cancelled in /cron stays cancelled.
-			if (this._resolveQuotaResumeJob(previous.jobId) === "cancelled") {
+			if ((await this._resolveQuotaResumeJob(previous.jobId)) === "cancelled") {
 				this._navigationCancelledWakeJobs.add(previous.jobId);
 			}
 		}
-		this._restoreQuotaPark();
+		await this._restoreQuotaPark();
 	}
 
 	/**
 	 * Restore the park this branch ended on: a restart (daemon or worker) leaves
 	 * waitForUsage.maxParks unbounded otherwise, because the park count would
 	 * start over at 1 each time. Parks recorded before the branch's last resume
-	 * entry are spent, and a park whose wake time has passed is left to the
-	 * durable wake job — only one that is still ahead re-arms the timer.
+	 * entry are spent, and a park whose wake time has passed is restored without
+	 * a timer when its durable job still owns the wake; with no job the
+	 * in-process timer wakes it at once.
 	 */
-	private _restoreQuotaPark(): void {
+	private async _restoreQuotaPark(): Promise<void> {
 		const branch = this.sessionManager.getBranch();
 		for (let index = branch.length - 1; index >= 0; index -= 1) {
 			const entry = branch[index];
@@ -13638,10 +13774,10 @@ export class AgentSession {
 				continue;
 			}
 			const resumeAtMs = Date.parse(entry.data.resumeAt);
-			if (!Number.isFinite(resumeAtMs) || resumeAtMs <= Date.now()) {
+			if (!Number.isFinite(resumeAtMs)) {
 				return;
 			}
-			const jobId = this._restoreQuotaWakeJob(entry.data.jobId, resumeAtMs);
+			const jobId = await this._restoreQuotaWakeJob(entry.data.jobId, resumeAtMs);
 			if (jobId === "user-cancelled") {
 				return;
 			}
@@ -13654,11 +13790,19 @@ export class AgentSession {
 					jobId,
 				});
 			}
+			// A wake already due belongs to its durable job (the daemon delivers it,
+			// or the next turn settles it): keep the park so its count still bounds
+			// the episode, and arm no timer that would race that delivery. With no
+			// job left (a one-shot cannot be rebuilt in the past) the in-process
+			// timer wakes the park at once.
+			const pastDue = resumeAtMs <= Date.now();
 			this._quotaPark = {
 				parkCount: entry.data.parkCount,
 				resumeAtMs,
 				...(jobId !== undefined ? { jobId } : {}),
-				timer: this._scheduleQuotaResumeTimer(resumeAtMs),
+				...(pastDue && jobId !== undefined
+					? { waking: true }
+					: { timer: this._scheduleQuotaResumeTimer(resumeAtMs) }),
 			};
 			return;
 		}
@@ -13670,14 +13814,14 @@ export class AgentSession {
 	 * transition, and — unless this success WAS the wake probe — deliver the
 	 * resume marker so the interrupted task continues right away.
 	 */
-	private _completeQuotaParkResume(): void {
+	private async _completeQuotaParkResume(): Promise<void> {
 		const park = this._quotaPark;
 		if (!park) return;
 		// A wake the daemon already delivered owns the resume even when the timer
 		// never observed it: the job's marker prompt is the continuation, so this
 		// success must not queue a second one.
-		const delivered = park.jobId !== undefined && this._resolveQuotaResumeJob(park.jobId) === "delivered";
-		this._cancelQuotaParkWake(park);
+		const delivered = park.jobId !== undefined && (await this._resolveQuotaResumeJob(park.jobId)) === "delivered";
+		await this._cancelQuotaParkWake(park);
 		const wasWaking = park.waking === true || delivered;
 		const restoredModel = this._restorePrimaryModelAfterBackup();
 		this._quotaPark = undefined;
@@ -14236,10 +14380,33 @@ export class AgentSession {
 			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
 				const { apiKey, headers, requestModel: model } = await this._getRequiredRequestAuth(this.model!);
 				const branchSummarySettings = this.settingsManager.getBranchSummarySettings();
-				const result = await generateBranchSummary(entriesToSummarize, {
+				// Branch summary fires at a tree-navigation context boundary, and the
+				// summarizer runs with its own prompt prefix (SUMMARIZATION_SYSTEM_PROMPT
+				// plus the <conversation> wrapper), so it cannot hit the session's cached
+				// prefix: on the session model the summary re-reads the whole branch at
+				// peak price. Route it to the auxiliary model when one is configured.
+				const summarization = (await this._resolveAuxiliaryModel(
+					"branch summary",
+					{ model, apiKey, headers },
+					// The estimator sizes the request the session model would issue for
+					// the branch being left. A smaller auxiliary window must fall back
+					// rather than truncate away branch context or fail over-limit and
+					// strand the navigation.
+					estimateBranchSummaryRequestTokens(entriesToSummarize, {
+						contextWindow: model.contextWindow,
+						reserveTokens: branchSummarySettings.reserveTokens,
+						customInstructions,
+						replaceInstructions,
+					}),
+				)) ?? {
 					model,
 					apiKey,
 					headers,
+				};
+				const result = await generateBranchSummary(entriesToSummarize, {
+					model: summarization.model,
+					apiKey: summarization.apiKey,
+					headers: summarization.headers,
 					signal: this._branchSummaryAbortController.signal,
 					sessionId: this.sessionId,
 					customInstructions,
@@ -14318,7 +14485,7 @@ export class AgentSession {
 			this._ensureHarnessDigestContext();
 			this._reloadGoalStateFromBranch({ monotonicTokens: Boolean(summaryText) });
 			this._reloadRlmMaxDepthFromBranch();
-			this._reloadQuotaParkFromBranch();
+			await this._reloadQuotaParkFromBranch();
 			this._invalidateQueuedPromptPreparation();
 
 			await this._extensionRunner.emit({
@@ -14494,9 +14661,9 @@ export class AgentSession {
 
 	/**
 	 * Build the agent context overview for /context: this session as the root
-	 * plus one node per RLM sub-agent, recursively. Running children are read
-	 * from their live sessions; completed children from their persisted session
-	 * dirs, so the tree survives child disposal and session resume.
+	 * plus one node per RLM sub-agent, recursively. Running and resident
+	 * finished children come from their live sessions, others from their
+	 * persisted session dirs, so the tree survives child disposal and session resume.
 	 */
 	getContextTree(): ContextTreeNode {
 		const resolveContextWindow = this._contextWindowResolver();
@@ -14517,11 +14684,39 @@ export class AgentSession {
 					children: [],
 				}),
 				id: run.id,
-				label: rlmChildLabel(run.prompt),
+				label: run.label,
 				status: run.status,
 			});
 		}
-		children.push(...loadContextTreeChildrenFromDisk(this._rlmSessionDirForReading(), resolveContextWindow, liveIds));
+		// Resident finished children project from their live sessions: usage
+		// reaches their session file only at settle boundaries, so memory is fresher than a re-parse.
+		const residentIds = new Set<string>(liveIds);
+		const rlmSessionDir = this._rlmSessionDirForReading();
+		for (const [childId, retained] of this._rlmChildSessions) {
+			if (
+				residentIds.has(childId) ||
+				this._deletingRlmChildren.has(childId) ||
+				this._deletedRlmChildIds.has(childId)
+			) {
+				continue;
+			}
+			// Only project children the disk walk would enumerate, so visibility stays identical.
+			const childDir = retained.session._rlmSessionDir ?? retained.session.sessionManager.getSessionDir();
+			if (!rlmSessionDir || basename(childDir) !== childId || dirname(childDir) !== rlmSessionDir) {
+				continue;
+			}
+			residentIds.add(childId);
+			children.push({
+				...retained.session.getContextTree(),
+				id: childId,
+				label: retained.run ? rlmChildLabel(retained.run.prompt) : (retained.session.sessionName ?? "child agent"),
+				// Without a run, status stays "done", matching _rlmChildSnapshotForSession.
+				status: retained.run?.status ?? "done",
+			});
+		}
+		children.push(
+			...loadContextTreeChildrenFromDisk(this._rlmSessionDirForReading(), resolveContextWindow, residentIds),
+		);
 
 		const model = this.model;
 		return {
