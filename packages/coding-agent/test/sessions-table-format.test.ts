@@ -1,6 +1,7 @@
 import stripAnsi from "strip-ansi";
 import { describe, expect, it } from "vitest";
 import { formatSessionsTable } from "../src/cli/sessions-table-format.js";
+import { getSessionStatusLabel } from "../src/modes/agents-view/agents-view-state.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 
 const NOW_MS = Date.parse("2026-05-29T12:00:00.000Z");
@@ -98,6 +99,22 @@ describe("formatSessionsTable", () => {
 
 	it("sorts failures first, then recovering workers, then running, then idle, then the rest", () => {
 		expectTable(UNSORTED, EXPECTED_SORT);
+	});
+
+	// One branch table (agent-roster.ts sessionActivityDetail) serves both surfaces; a re-added local branch splits the wording and fails here.
+	it.each<[string, Partial<SessionSummary>]>([
+		["thinking", { activity: "working", isStreaming: true }],
+		["running tools", { activity: "working", isStreaming: true, isRunningTools: true }],
+		["running bash", { activity: "working", isBashRunning: true }],
+		["compacting", { activity: "working", isCompacting: true }],
+		["starting", { activity: "working", workerState: "starting" }],
+		["archived", { lifecycle: "archived", rosterStatus: "inactive" }],
+		["replied", { runtimeKind: "subagent", repliedSinceTask: true }],
+		["classifying", { activity: "working" }],
+		["error", { taskState: "error" }],
+		["completed", { taskState: "completed" }],
+	])("%s agrees with the table's activity wording", (expected, overrides) => {
+		expect(getSessionStatusLabel(makeSummary(overrides))).toBe(expected);
 	});
 
 	it("measures wide-glyph cells by display width", () => {

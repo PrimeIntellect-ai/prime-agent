@@ -2,7 +2,7 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 import chalk from "chalk";
 import stripAnsi from "strip-ansi";
 import type { SessionUsageSummary } from "../core/usage.js";
-import { classifySessionRosterStatus } from "../modes/daemon/agent-roster.js";
+import { classifySessionRosterStatus, sessionActivityDetail } from "../modes/daemon/agent-roster.js";
 import { formatSessionDisplayId } from "../modes/daemon/daemon-session-id.js";
 import type { SessionSummary } from "../modes/daemon/daemon-session-list.js";
 import { formatSessionAge, formatTable } from "./daemon-list-format.js";
@@ -75,50 +75,16 @@ function sessionsStatusLabel(summary: SessionSummary): string {
 	return summary.statusLabel ?? sessionRosterStatus(summary);
 }
 
-// Mirrors the agents-view status label branch by branch, minus statusLabel and
-// lastHeardFromAt (they get their own columns here). Deliberate drops: the
-// heartbeat mark is just "heartbeat" (no countdown; the TUI has a live
-// next-run timer, this table does not), the final idle fallback is empty
-// instead of "needs input" (the status column already says idle), and the
-// agents view's action-label/queued-count branches are skipped — the
-// supervisor `list` RPC serves roster rows whose sessionActions are an empty
-// snapshot (see RosterSessionSummary), so those branches could never fire.
-function sessionActivityDetail(summary: SessionSummary): string {
-	if (summary.statusLabel === undefined && summary.workerState !== undefined && summary.workerState !== "ready") {
-		return summary.workerState;
-	}
-	if (summary.isCompacting) {
-		return "compacting";
-	}
-	if (summary.isStreaming) {
-		return summary.isRunningTools ? "running tools" : "thinking";
-	}
-	if (summary.isRunningTools === true) {
-		return "running tools";
-	}
-	if (summary.isBashRunning === true) {
-		return "running bash";
-	}
-	if (summary.lifecycle === "archived") {
-		return "archived";
-	}
-	if (summary.hasActiveHeartbeat) {
-		return "heartbeat";
-	}
-	if (summary.runtimeKind === "subagent" && summary.repliedSinceTask) {
-		return "replied";
-	}
-	if (summary.activity === "working") {
-		return "classifying";
-	}
-	if (summary.taskState === "error") {
-		return "error";
-	}
-	return summary.taskState === "completed" ? "completed" : "";
-}
-
+// The detail wording comes from the shared roster branch table (agent-roster.ts):
+// one table serves this column and the agents view status label, so a state
+// added there shows up on both surfaces. The table's knobs: the heartbeat mark
+// is just "heartbeat" (no countdown; the TUI has a live next-run timer, this
+// table does not) and the idle fallback is empty instead of "needs input"
+// (the status column already says idle). statusLabel and lastHeardFromAt get
+// their own columns here, and roster rows carry an empty sessionActions
+// snapshot (see RosterSessionSummary), so there is no action branch.
 function sessionActivityCell(summary: SessionSummary): string {
-	const detail = sessionActivityDetail(summary);
+	const detail = sessionActivityDetail(summary, { heartbeatLabel: "heartbeat", idleLabel: "" });
 	const recap = compactCellText(summary.summary);
 	return [detail, recap].filter((part) => part.length > 0).join(" · ");
 }
