@@ -2,9 +2,9 @@
 
 The state model is intentionally small: it records prompt notes, memory,
 skills, subagent specs, and engine-recorded refinement events in the
-session-local harness store by default; pass ``global_=True`` for the cross-session global store.
-Execution still belongs to Prime Agent's TypeScript host and the existing
-``rlm.spawn`` recursion bridge.
+session-local harness store by default; pass ``global_=True`` for the
+cross-session global store. Execution still belongs to Prime Agent's
+TypeScript host and the existing ``rlm.spawn`` recursion bridge.
 """
 
 from __future__ import annotations
@@ -569,12 +569,11 @@ class HarnessState:
         metadata: dict[str, Any] | None = None,
         source: str = "agent",
     ) -> HarnessEntry:
-        # Caller is responsible for syncing from disk first. create()/update() sync
-        # once and then call this directly so their existence check and the write are
+        # Caller is responsible for syncing from disk first. create_memory()/update_memory()
+        # sync once and then call this directly so their existence check and the write are
         # not separated by a second reload (which could turn create-or-fail into a
         # silent update).
-        if kind not in self.entries:
-            raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
+        self._require_kind(kind)
 
         # Guard before the id slug and the dict lookup: a non-string title or a
         # non-string id (falsy ids included, which the slug fallback would
@@ -638,8 +637,7 @@ class HarnessState:
         if target := self._global_target(global_, kwargs):
             return target.get(kind, id)
         self._sync_from_disk()
-        if kind not in self.entries:
-            raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
+        self._require_kind(kind)
         return self.entries[kind].get(id)
 
     def list(self, kind: HarnessKind | None = None, *, global_: bool = False, **kwargs: Any) -> list[HarnessEntry]:
@@ -649,8 +647,7 @@ class HarnessState:
         kinds = [kind] if kind else list(_KINDS)
         records: list[HarnessEntry] = []
         for current_kind in kinds:
-            if current_kind not in self.entries:
-                raise ValueError(f"unknown harness kind {current_kind!r}; expected one of {_KINDS}")
+            self._require_kind(current_kind)
             records.extend(self.entries[current_kind].values())
         return sorted(records, key=lambda entry: (entry.kind, entry.topic, entry.title, entry.id))
 
@@ -674,7 +671,7 @@ class HarnessState:
         method with ``kind`` covers them all. ``reference`` and ``arguments``
         describe a skill's Python call contract and are rejected for other kinds.
         ``topic`` groups entries and defaults to "policy" for prompt notes and
-        "general" otherwise; it was named ``path`` before.
+        "general" otherwise.
         """
         self._require_kind(kind)
         _reject_skill_only_fields(kind, reference, arguments)
@@ -771,10 +768,8 @@ class HarnessState:
         return True
 
     def __getattr__(self, name: str) -> Any:
-        # Removed methods: the per-kind wrappers for the non-memory kinds (create_skill,
-        # update_subagent, ...), record_refinement, and plan_refinement. Kernels and
-        # transcripts still carry the old names, so name the replacement instead of a
-        # bare AttributeError.
+        # Kernels and transcripts still carry the removed names, so name the
+        # replacement instead of a bare AttributeError.
         if guidance := _REMOVED_METHOD_GUIDANCE.get(name):
             raise AttributeError(guidance)
         action, _, suffix = name.partition("_")
@@ -869,9 +864,9 @@ class HarnessState:
         for entry in entries:
             title = entry.title.lower()
             content = entry.content.lower()
-            path_and_id = f"{entry.topic} {entry.id}".lower()
+            topic_and_id = f"{entry.topic} {entry.id}".lower()
             for term in terms:
-                if term in title or term in content or term in path_and_id:
+                if term in title or term in content or term in topic_and_id:
                     matches[term] += 1
         term_idf = {
             term: math.log(1 + len(entries) / count)
@@ -882,11 +877,11 @@ class HarnessState:
         def score(entry: HarnessEntry) -> float:
             title = entry.title.lower()
             content = entry.content.lower()
-            path_and_id = f"{entry.topic} {entry.id}".lower()
+            topic_and_id = f"{entry.topic} {entry.id}".lower()
             total = 0.0
             for term, idf in term_idf.items():
                 fields = (1 if term in title else 0) + (1 if term in content else 0) + (
-                    1 if term in path_and_id else 0
+                    1 if term in topic_and_id else 0
                 )
                 if fields:
                     total += idf * (1 + (fields - 1) * 0.5)

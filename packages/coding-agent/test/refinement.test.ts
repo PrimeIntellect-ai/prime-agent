@@ -441,7 +441,7 @@ describe("harness refinement", () => {
 		},
 		{
 			label: "a create with a numeric topic",
-			edit: editWith("create", "memory", "bad_path", { topic: 7 }),
+			edit: editWith("create", "memory", "bad_topic", { topic: 7 }),
 			error: "create requires topic to be a non-empty string when provided",
 		},
 		{
