@@ -343,7 +343,7 @@ class HarnessStateTest(unittest.TestCase):
             state.update_memory("grouped", "Grouped", "resaved")
             saved = json.loads(state_path.read_text(encoding="utf-8"))["entries"]["memory"]["grouped"]
             self.assertEqual(saved["topic"], "repo/testing")
-            self.assertNotIn("path", saved)
+            self.assertEqual(saved["path"], "repo/testing")
 
             updated = state.update_memory("known", "Known memory", "Updated content.")
             self.assertEqual(updated.version, 3)

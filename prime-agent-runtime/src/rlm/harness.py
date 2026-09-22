@@ -228,6 +228,14 @@ def _validate_python_skill_reference(reference: dict[str, Any] | None, entry_nam
     return normalized
 
 
+def _serialize_entry(entry: HarnessEntry) -> dict[str, Any]:
+    # Pre-topic builds rewriting the shared store drop "topic"; mirror the value under "path"
+    # so their rewrite round-trips it. Drop once no pre-topic build can reach a shared store.
+    record = asdict(entry)
+    record["path"] = entry.topic
+    return record
+
+
 def _default_topic(kind: HarnessKind) -> str:
     return "policy" if kind == "prompt" else "general"
 
@@ -505,7 +513,7 @@ class HarnessState:
         data = {
             "schema": 1,
             "entries": {
-                kind: {entry_id: asdict(entry) for entry_id, entry in records.items()}
+                kind: {entry_id: _serialize_entry(entry) for entry_id, entry in records.items()}
                 for kind, records in self.entries.items()
             },
             "refinements": [asdict(event) for event in self.refinements],

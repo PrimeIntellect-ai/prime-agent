@@ -393,12 +393,28 @@ export function mergeHarnessStates(globalState: HarnessState, localState?: Harne
 	return merged;
 }
 
+/**
+ * Pre-topic builds rewriting the shared global store drop unknown keys; mirror the grouping under
+ * `path` so their rewrite round-trips it. Drop once no pre-topic build can reach a shared store.
+ */
+function serializeHarnessState(state: HarnessState): HarnessState {
+	const serialized = emptyHarnessState();
+	serialized.schema = state.schema;
+	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
+		for (const [id, entry] of Object.entries(state.entries[kind])) {
+			serialized.entries[kind][id] = { ...entry, path: entry.topic } as HarnessEntry;
+		}
+	}
+	serialized.refinements = state.refinements;
+	return serialized;
+}
+
 export function saveHarnessState(harnessStateDir: string, state: HarnessState): string {
 	const statePath = getHarnessStatePath(harnessStateDir);
 	mkdirSync(harnessStateDir, { recursive: true });
 	const targetPath = realpathIfPresentSync(statePath);
 	const mode = existsSync(targetPath) ? statSync(targetPath).mode & 0o777 : 0o600;
-	writeFileAtomicSync(targetPath, `${JSON.stringify(state, null, 2)}\n`, { mode });
+	writeFileAtomicSync(targetPath, `${JSON.stringify(serializeHarnessState(state), null, 2)}\n`, { mode });
 	return statePath;
 }
 
@@ -976,7 +992,7 @@ export function normalizeRefinementProposal(value: unknown): RefinementProposal 
 				id: typeof edit.id === "string" ? edit.id : undefined,
 				title: typeof edit.title === "string" ? edit.title : undefined,
 				content: typeof edit.content === "string" ? edit.content : undefined,
-				topic: typeof edit.topic === "string" ? edit.topic : undefined,
+				topic: harnessTopic(edit),
 				reference: objectRecord(edit.reference),
 				arguments: objectRecord(edit.arguments),
 				metadata:

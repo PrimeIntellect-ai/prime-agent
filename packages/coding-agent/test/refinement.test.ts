@@ -572,7 +572,7 @@ describe("harness refinement", () => {
 		saveHarnessState(dir, state);
 		const saved = JSON.parse(readFileSync(getHarnessStatePath(dir), "utf8")).entries.memory.legacy;
 		expect(saved.topic).toBe("repo/testing");
-		expect(saved).not.toHaveProperty("path");
+		expect(saved.path).toBe("repo/testing");
 	});
 
 	it("extracts well-formed refinement history from custom session entries", () => {
@@ -610,6 +610,7 @@ describe("harness refinement", () => {
 			id: "native_validation",
 			title: "Native validation",
 			content: "Run validation through the target project environment.",
+			path: "validation",
 		};
 		completeSimpleMock.mockResolvedValueOnce(
 			assistantText(JSON.stringify({ summary: "s", rationale: "r", expectedOutcome: "o", edits: [edit] })),
@@ -635,7 +636,7 @@ describe("harness refinement", () => {
 			headers: { "x-test-header": "1" },
 		});
 		expect(result.appliedEdits[0]).toMatchObject({ kind: "memory", id: "native_validation", applied: true });
-		expect(state.entries.memory.native_validation.content).toBe(edit.content);
+		expect(state.entries.memory.native_validation).toMatchObject({ content: edit.content, topic: "validation" });
 	});
 
 	it("caps the refinement output budget by the policy ceiling for wide models", async () => {
