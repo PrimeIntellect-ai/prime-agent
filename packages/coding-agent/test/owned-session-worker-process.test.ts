@@ -139,6 +139,8 @@ async function spawnRpcFrontend(
 	tempDirs.push(root);
 	const pidPath = join(root, "worker.pid");
 	const frontend = spawnFrontend(args, pidPath, interactive, env);
+	// Absorb EPIPE from writing into a frontend that a regression crashed.
+	frontend.stdin?.on("error", () => {});
 	let stdout = "";
 	frontend.stdout?.on("data", (chunk: Buffer) => {
 		stdout += chunk.toString("utf8");
@@ -276,19 +278,16 @@ describe("owned session worker processes", () => {
 		const { frontend, workerPid, pidPath, stdout } = await spawnRpcFrontend(undefined, {
 			PRIME_AGENT_TEST_CLOSE_STDIN_ON_COMMAND: "close_stdin",
 		});
-		// The worker acks close_stdin, closes its stdin read end (marked via
-		// the .deaf file), and crashes itself 500ms later: the next bridge
-		// write EPIPEs, and the worker only dies after everything below was
-		// received.
+		// The worker acks close_stdin and closes its stdin read end (marked
+		// via the .deaf file): the next bridge write EPIPEs and the frontend
+		// kills the deaf worker so recovery can replay later arrivals.
 		frontend.stdin?.write(`${JSON.stringify({ id: "close-1", type: "close_stdin" })}\n`);
 		await waitForStdoutContains(frontend, stdout, "close_stdin");
 		while (!existsSync(`${pidPath}.deaf`)) await new Promise((r) => setImmediate(r));
-		frontend.stdin?.on("error", () => {});
 		frontend.stdin?.write(`${JSON.stringify({ type: "ack_result" })}\n`);
-		// The absorbed EPIPE tears the dead pipe down with no observable
-		// signal, so yield before the follow-up: after-1 must land in
-		// bufferedRpcInput, never in a racing write into the dead pipe. It
-		// never started, so it must not be reported uncertain.
+		// The absorbed EPIPE kills the worker with no observable signal, so
+		// yield before the follow-up: after-1 must land in bufferedRpcInput
+		// during the recovery delay, never in a racing write into the dead pipe.
 		await new Promise((resolveDelay) =>
 			// test-policy: allow wall-clock-timer -- no observable exists for the frontend's absorbed EPIPE teardown; this only selects the buffered interleaving
 			setTimeout(resolveDelay, 150),
@@ -306,6 +305,26 @@ describe("owned session worker processes", () => {
 		);
 		await waitForProcessGone(workerPid);
 		await waitForProcessGone(replacementPid);
+	});
+
+	it("fails buffered follow-ups when recovery cannot replay them", async () => {
+		const { frontend, workerPid, pidPath, stdout } = await spawnRpcFrontend(undefined, {
+			PRIME_AGENT_TEST_CLOSE_STDIN_ON_COMMAND: "close_stdin",
+		});
+		// Same deaf worker, but the client ends stdin with the follow-up in
+		// flight: it must be failed, not silently dropped.
+		frontend.stdin?.write(`${JSON.stringify({ id: "close-1", type: "close_stdin" })}\n`);
+		await waitForStdoutContains(frontend, stdout, "close_stdin");
+		while (!existsSync(`${pidPath}.deaf`)) await new Promise((r) => setImmediate(r));
+		const epipeChunk = `${JSON.stringify({ type: "ack_result" })}\n${JSON.stringify({ id: "after-1", type: "get_state" })}\n`;
+		frontend.stdin?.end(epipeChunk);
+		const exit = await waitForExit(frontend);
+		children.delete(frontend);
+
+		const ackLine = `${JSON.stringify({ id: "close-1", type: "response", command: "close_stdin", success: true })}\n`;
+		expect(exit).toEqual({ code: 1, signal: null });
+		expect(stdout()).toBe(ackLine + failedResponse("after-1"));
+		await waitForProcessGone(workerPid);
 	});
 
 	it("terminates the owned worker when its frontend is killed", async () => {

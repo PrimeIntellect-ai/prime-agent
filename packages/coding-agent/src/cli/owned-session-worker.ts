@@ -292,19 +292,32 @@ export async function runOwnedSessionWorkerFrontend(
 			pendingRpcCommands.delete(id);
 		}
 	};
+	const writeFailureResponse = (publicId: string | undefined, command: string) => {
+		process.stdout.write(
+			serializeJsonLine({
+				...(publicId !== undefined ? { id: publicId } : {}),
+				type: "response",
+				command,
+				success: false,
+				error: "The isolated session worker stopped during this command; its result is uncertain and was not replayed",
+			}),
+		);
+	};
 	const failPendingRpcCommands = () => {
 		for (const pending of pendingRpcCommands.values()) {
-			process.stdout.write(
-				serializeJsonLine({
-					...(pending.publicId !== undefined ? { id: pending.publicId } : {}),
-					type: "response",
-					command: pending.command,
-					success: false,
-					error: "The isolated session worker stopped during this command; its result is uncertain and was not replayed",
-				}),
-			);
+			writeFailureResponse(pending.publicId, pending.command);
 		}
 		pendingRpcCommands.clear();
+	};
+	// Buffered commands never started, so the pending map cannot fail them.
+	// When recovery will not run they would otherwise leave the client without
+	// any terminal outcome, so fail them on the way out instead.
+	const failBufferedRpcCommands = () => {
+		for (const prepared of bufferedRpcInput.splice(0)) {
+			if (prepared.pending) {
+				writeFailureResponse(prepared.pending.publicId, prepared.pending.command);
+			}
+		}
 	};
 	const reapWorkerResources = (workerPid: number | undefined) => {
 		if (!workerPid) {
@@ -378,10 +391,17 @@ export async function runOwnedSessionWorkerFrontend(
 		// A bridge write into a worker that closed its stdin lands as an
 		// unhandled 'error' event on that pipe (write EPIPE) and takes down the
 		// whole frontend, defeating the crash-recovery loop below. The child
-		// 'close' handler already owns the fallout (failing pending RPC
-		// commands, relaunching with the recovery descriptor), so this listener
-		// only stops the pipe error from becoming a fatal one.
-		child.stdin?.on("error", () => {});
+		// 'close' handler owns the fallout (failing pending RPC commands,
+		// relaunching with the recovery descriptor), so this listener keeps the
+		// pipe error from becoming a fatal one. When the pipe broke while the
+		// worker was still alive the bridge is permanently unusable: kill the
+		// child so its close event drives that fallout instead of waiting
+		// indefinitely on a worker that can no longer accept commands.
+		child.stdin?.on("error", (error) => {
+			if ((error as NodeJS.ErrnoException).code === "EPIPE") {
+				child.kill("SIGKILL");
+			}
+		});
 		if (!interactive) {
 			const childInput = child.stdin ?? undefined;
 			const childOutput = child.stdout ?? undefined;
@@ -475,10 +495,12 @@ export async function runOwnedSessionWorkerFrontend(
 			}
 			const shouldRecover = rpcCrashed && !stdinEnded && recoveryAttempt < 3;
 			if (!shouldRecover) {
+				failBufferedRpcCommands();
 				return terminationSignal ? exitCodeForSignal(terminationSignal) : workerExitCode;
 			}
 			const descriptor = readOwnedRecoveryDescriptor(recoveryDescriptorPath);
 			if (!descriptor?.sessionFile) {
+				failBufferedRpcCommands();
 				return terminationSignal ? exitCodeForSignal(terminationSignal) : workerExitCode;
 			}
 			workerArgs = createRpcRecoveryArgs(args, descriptor.sessionFile);

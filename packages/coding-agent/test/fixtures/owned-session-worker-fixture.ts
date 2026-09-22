@@ -64,18 +64,16 @@ if (process.env.PRIME_AGENT_INTERNAL_OWNED_WORKER === "1") {
 			if (process.env.PRIME_AGENT_TEST_CLOSE_STDIN_ON_COMMAND === command.type) {
 				outputResponse(command);
 				writeRecoveryDescriptor();
-				// Close the read end of the bridge pipe while the worker stays
-				// alive, then mark it: the next bridge write must EPIPE, not
-				// race the close.
+				// Close fd 0 while the worker stays alive, then mark it deaf.
 				closeSync(0);
 				if (pidPath) {
 					writeFileSync(`${pidPath}.deaf`, "deaf\n");
 				}
 				// fd 0 going away drains this loop, so the worker would exit
-				// cleanly before the test buffers follow-ups against it. The
-				// timer holds the loop and crashes the worker on its own.
-				// test-policy: allow wall-clock-timer -- schedules the deaf worker's own crash after the frontend has buffered the follow-up
-				setTimeout(() => process.exit(1), 500);
+				// cleanly before the test buffers follow-ups against it. Hold
+				// the loop: the frontend's EPIPE kill is the only worker death.
+				// test-policy: allow wall-clock-timer -- holds the deaf worker's loop so the frontend EPIPE kill is the only death
+				setInterval(() => {}, 1000);
 				return;
 			}
 			if (command.type === "ack_result") {
