@@ -1048,6 +1048,19 @@ async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> No
             await _handle_request(_handle_mcp_status, req, ns)
 
 
+def _handle_bash_activity(req: dict[str, Any]) -> None:
+    """Out-of-band: a running cell must not block inspection or cancellation."""
+    from .bash import activity_request
+
+    rid = req["id"]
+    try:
+        response = activity_request(req["action"], req.get("activityId"), req.get("lines", 50))
+        _send({"event": "done", "id": rid, "status": "ok", **response})
+    except (KeyError, ValueError) as exc:
+        _send({"event": "done", "id": rid, "status": "error", "reason": str(exc)})
+
+
+
 _REQUIRED_FIELDS = {
     "execute": ("id", "code"),
     "snapshot": ("id", "path", "manifest_path"),
@@ -1056,6 +1069,7 @@ _REQUIRED_FIELDS = {
     # mcp_status's server list is a JSON array, so only its id is a
     # string-required field; the handler validates the list itself.
     "mcp_status": ("id",),
+    "bash_activity": ("id", "action"),
     "shutdown": (),
 }
 
@@ -1092,6 +1106,17 @@ def _handle_request_line(raw: bytes, queue: asyncio.Queue[dict[str, Any]]) -> No
     missing = [f for f in _REQUIRED_FIELDS[rtype] if not isinstance(req.get(f), str)]
     if missing:
         _protocol_error(f"{rtype} request needs string fields: {', '.join(missing)}")
+        return
+    if rtype == "bash_activity":
+        if req["action"] not in ("list", "tail", "kill"):
+            _protocol_error("unknown bash activity action")
+            return
+        if req["action"] != "list" and not isinstance(req.get("activityId"), str):
+            _protocol_error("bash activity tail/kill requires string activityId")
+            return
+        # Like host_reply, this bypasses the cell FIFO. Handles remain owned
+        # by the runtime, not by an arbitrary PID supplied by the client.
+        _handle_bash_activity(req)
         return
     if rtype in ("execute", "snapshot", "restore"):
         with _interrupt_lock:

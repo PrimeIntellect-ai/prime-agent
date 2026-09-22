@@ -81,6 +81,10 @@ impl Inner {
                 }
             }
             Event::Done { id, fields } => {
+                if let Some(waiter) = lock(&self.guarded).bash_activity_waiters.remove(&id) {
+                    let _ = waiter.send(fields);
+                    return;
+                }
                 let status = fields
                     .get("status")
                     .and_then(Value::as_str)

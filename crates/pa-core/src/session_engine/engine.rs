@@ -771,6 +771,20 @@ impl SessionEngine {
         self.provisioner.dispose(None).await;
     }
 
+    /// Out-of-band kernel bash activity, scoped to this session's live kernel.
+    pub async fn bash_activity(
+        &self,
+        action: &str,
+        activity_id: Option<&str>,
+        lines: usize,
+    ) -> anyhow::Result<serde_json::Value> {
+        let manager = self
+            .provisioner
+            .manager()
+            .ok_or_else(|| anyhow::anyhow!("Kernel is not running"))?;
+        manager.bash_activity(action, activity_id, lines).await
+    }
+
     /// Per-server MCP tool listing through the session's kernel (the
     /// runtime `mcp_status` request): one entry per requested server —
     /// its tools, or the error string when that server failed or timed

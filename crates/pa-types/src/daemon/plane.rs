@@ -76,6 +76,9 @@ pub fn command_plane(command_type: &str) -> DaemonCommandPlane {
         | "abort_side_question"
         | "execute_bash"
         | "abort_bash"
+        | "list_kernel_bash"
+        | "tail_kernel_bash"
+        | "kill_kernel_bash"
         | "cancel_rlm_child"
         | "delete_rlm_subagent"
         | "wait_for_idle"
@@ -159,6 +162,8 @@ const READ_ONLY_DAEMON_COMMANDS: &[&str] = &[
     "roster_unsubscribe",
     "agent_messages_status",
     "wait_for_idle",
+    "list_kernel_bash",
+    "tail_kernel_bash",
     "get_session_header",
     "get_state",
     "get_connection_state",
@@ -201,6 +206,7 @@ pub fn is_update_drain_command(command_type: &str) -> bool {
         "extension_ui_response"
             | "abort"
             | "abort_bash"
+            | "kill_kernel_bash"
             | "abort_branch_summary"
             | "abort_compaction"
             | "abort_retry"

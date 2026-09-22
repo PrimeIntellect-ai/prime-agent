@@ -34,9 +34,10 @@ event.
 | `restore` | `{"type":"restore","id":str,"path":str}` |
 | `list_names` | `{"type":"list_names","id":str}` |
 | `mcp_status` | `{"type":"mcp_status","id":str,"servers":[str,...],"timeout_ms"?:number}` — host-side view query: per-server tool listing (opens each server on demand, bounded by `timeout_ms` per server; default 10s); the `done` frame carries `connections: [{server, tools: [{name, description}] | null, error: str | null}]` |
+| `bash_activity` | `{"type":"bash_activity","id":str,"action":"list"|"tail"|"kill","activityId"?:str,"lines"?:int}` — out-of-band even during a running cell; tail lines 1–200, response capped at 16 KiB; opaque IDs resolve only against this kernel’s handles |
 | `shutdown` | `{"type":"shutdown","id"?:str}` |
 
-Requests other than `interrupt` and `host_reply` run strictly in order, one at
+Requests other than `interrupt`, `host_reply`, and `bash_activity` run strictly in order, one at
 a time. A malformed line
 produces `{"event":"error","id":null,"ename":"ProtocolError",...}` and the
 runtime keeps serving. Closing stdin is equivalent to `shutdown`.
@@ -66,7 +67,15 @@ runtime keeps serving. Closing stdin is equivalent to `shutdown`.
   request, always after all of that request's other events. A snapshot `done`
   adds `saved`, `skipped`, `pruned`, `bytes`; a restore `done` adds `restored`,
   `failed`; a `list_names` `done` adds `names`; a failed snapshot/restore adds
-  `reason`. Restoring a missing file reports `status:"ok"` with empty
+  `reason`. Bash activity `done` carries `activities` (list), `tail` (tail),
+  or `killed` (kill); `status:"error"` with `reason` on unknown IDs.
+  The daemon advertises `kernel_bash_activity`; clients poll `list_kernel_bash`
+  for updates (no push events). Each row contains opaque `id`, `command`,
+  `pid`, `durationMs`, and `status` (`running` or `finished`). Finished rows
+  are retained for the latest 64 completions within a live kernel only; restart
+  invalidates all IDs. `tail_kernel_bash` returns `{id,tail}`, and
+  `kill_kernel_bash` returns `{id,killed}`. Neither action accepts a PID.
+  Restoring a missing file reports `status:"ok"` with empty
   `restored`/`failed` lists and `reason:"snapshot not found"`.
 
 Before a cell's `done`, the runtime drains both channels: tagged Python-level

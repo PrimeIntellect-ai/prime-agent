@@ -46,6 +46,26 @@ def _win_spawn(procs=None, resume=True):
 
 
 class BashTest(unittest.IsolatedAsyncioTestCase):
+    async def test_activity_handles_are_scoped_and_tail_is_bounded(self):
+        handle = bash("printf 'first\nsecond\n'; sleep 20")
+        from rlm.bash import activity_request
+
+        activity_id = handle._activity_id
+        rows = activity_request("list")["activities"]
+        self.assertEqual(next(row for row in rows if row["id"] == activity_id)["pid"], handle.pid)
+        for _ in range(100):
+            if "second" in activity_request("tail", activity_id, 1)["tail"]:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(activity_request("tail", activity_id, 1)["tail"], "second")
+        self.assertEqual(activity_request("kill", activity_id)["killed"], True)
+        await handle
+        with self.assertRaises(KeyError):
+            activity_request("kill", "not-a-handle")
+        with self.assertRaises(ValueError):
+            activity_request("tail", activity_id, 201)
+        self.assertFalse(activity_request("kill", activity_id)["killed"])
+
     async def test_await_returns_result(self):
         result = await bash("echo hi")
         self.assertEqual(result.exit_code, 0)

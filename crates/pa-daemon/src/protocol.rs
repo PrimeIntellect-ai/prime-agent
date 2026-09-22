@@ -66,6 +66,9 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "execute_bash",
     "execute_bash_and_wait",
     "abort_bash",
+    "list_kernel_bash",
+    "tail_kernel_bash",
+    "kill_kernel_bash",
     "cancel_rlm_child",
     "delete_rlm_subagent",
     "wait_for_idle",
@@ -307,6 +310,7 @@ pub fn default_server_capabilities() -> Vec<DaemonServerCapability> {
                 "model_catalog",
                 "side_question_transcript",
                 "transient_bash",
+                "kernel_bash_activity",
                 "session_input_admission",
                 "prompt_admission_cancellation",
                 "owned_prompt_cancellation",
@@ -566,6 +570,15 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
             active_session_id, ..
         }
         | DaemonCommand::AbortBash {
+            active_session_id, ..
+        }
+        | DaemonCommand::ListKernelBash {
+            active_session_id, ..
+        }
+        | DaemonCommand::TailKernelBash {
+            active_session_id, ..
+        }
+        | DaemonCommand::KillKernelBash {
             active_session_id, ..
         }
         | DaemonCommand::CancelRlmChild {
@@ -858,6 +871,9 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::AbortSideQuestion { .. } => "abort_side_question",
         DaemonCommand::ExecuteBash { .. } => "execute_bash",
         DaemonCommand::AbortBash { .. } => "abort_bash",
+        DaemonCommand::ListKernelBash { .. } => "list_kernel_bash",
+        DaemonCommand::TailKernelBash { .. } => "tail_kernel_bash",
+        DaemonCommand::KillKernelBash { .. } => "kill_kernel_bash",
         DaemonCommand::CancelRlmChild { .. } => "cancel_rlm_child",
         DaemonCommand::DeleteRlmSubagent { .. } => "delete_rlm_subagent",
         DaemonCommand::WaitForIdle { .. } => "wait_for_idle",
@@ -944,6 +960,31 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn kernel_bash_activity_commands_are_session_scoped() {
+        for (command, kind) in [
+            (
+                serde_json::json!({"type":"list_kernel_bash","activeSessionId":"session"}),
+                "list_kernel_bash",
+            ),
+            (
+                serde_json::json!({"type":"tail_kernel_bash","activeSessionId":"session","activityId":"opaque","lines":20}),
+                "tail_kernel_bash",
+            ),
+            (
+                serde_json::json!({"type":"kill_kernel_bash","activeSessionId":"session","activityId":"opaque"}),
+                "kill_kernel_bash",
+            ),
+        ] {
+            let line = serde_json::json!({"type":"command","id":"c1", "protocol":current_protocol_info(), "command":command}).to_string();
+            let parsed = parse_daemon_command_line(&line).unwrap();
+            assert_eq!(command_type_name(&parsed.command), kind);
+            assert_eq!(command_active_session_id(&parsed.command), Some("session"));
+            assert!(pa_types::daemon::is_session_plane_daemon_command(kind));
+        }
+        assert!(default_server_capabilities().contains(&"kernel_bash_activity".to_string()));
+    }
 
     #[test]
     fn envelope_round_trips() {

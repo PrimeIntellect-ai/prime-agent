@@ -765,6 +765,20 @@ impl AgentSessionEngine {
     pub fn session_is_closed(&self) -> bool {
         self.session_closed
             .load(std::sync::atomic::Ordering::SeqCst)
+    /// Session-scoped kernel shell activity; never builds a new session/kernel.
+    pub async fn bash_activity(
+        &self,
+        action: &str,
+        activity_id: Option<&str>,
+        lines: usize,
+    ) -> anyhow::Result<Value> {
+        let engine = self
+            .session
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Kernel is not running"))?;
+        engine.bash_activity(action, activity_id, lines).await
     }
 
     /// Build the core session once (same once-only rule as `session_agent`),

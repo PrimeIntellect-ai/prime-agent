@@ -1671,6 +1671,10 @@ impl Worker {
             "execute_bash" => self.handle_execute_bash(payload),
             "execute_bash_and_wait" => self.handle_execute_bash_and_wait(payload).await,
             "abort_bash" => self.handle_abort_bash().await,
+            "list_kernel_bash" | "tail_kernel_bash" | "kill_kernel_bash" => {
+                self.handle_kernel_bash_activity(command_type, payload)
+                    .await
+            }
             "append_custom_message" => self.handle_append_custom_message(payload),
             "restore_next_turn" => self.handle_restore_next_turn(payload),
             "restore_actions" => self.handle_restore_actions(payload),

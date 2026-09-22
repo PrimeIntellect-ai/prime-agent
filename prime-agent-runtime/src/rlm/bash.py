@@ -54,6 +54,10 @@ _ASYNCIO_WRAPPER_CALLBACKS = {
 }
 
 _live_handles: set["BashHandle"] = set()
+# Kernel-owned opaque IDs: retained results are bounded, never resolved by PID.
+_activity_handles: dict[str, "BashHandle"] = {}
+_activity_order: deque[str] = deque()
+_ACTIVITY_HISTORY_CAP = 64
 _live_lock = threading.Lock()
 _hook_installed = False
 _hook_lock = threading.Lock()
@@ -237,6 +241,7 @@ class BashHandle:
 
     def __init__(self, command: str) -> None:
         self.command = command
+        self._activity_id = secrets.token_hex(16)
         completion_context = _current_cell_completion_context()
         self._creating_cell_finished = completion_context[0] if completion_context else None
         self._creating_cell_task = completion_context[1] if completion_context else None
@@ -335,6 +340,7 @@ class BashHandle:
         self._released = False
         with _live_lock:
             _live_handles.add(self)
+            _activity_handles[self._activity_id] = self
         enrolled = _record_journal(self._pid, active=True)
         if not enrolled:
             # Fail closed: a configured journal that cannot enroll the pid must
@@ -548,6 +554,9 @@ class BashHandle:
             _record_journal(self._pid, active=False)
         with _live_lock:
             _live_handles.discard(self)
+            _activity_order.append(self._activity_id)
+            while len(_activity_order) > _ACTIVITY_HISTORY_CAP:
+                _activity_handles.pop(_activity_order.popleft(), None)
 
     def _reap_group(self) -> bool:
         # Group liveness, not leader death, gates the inactive record: members
@@ -680,7 +689,7 @@ class BashHandle:
             return
         from . import repl
 
-        activity = {"id": secrets.token_hex(16), "pid": self._pid, "active": True}
+        activity = {"id": self._activity_id, "pid": self._pid, "active": True}
         # Publish synchronously before bash() returns and the creating cell can end.
         repl.emit({"application/vnd.prime-agent.bash-activity+json": activity})
         notice = self._notify_background_completion(cell_finished, activity)
@@ -903,6 +912,7 @@ class BashHandle:
                 cast("_winjob.JobProcess", self._proc).close()
         with _live_lock:
             _live_handles.discard(self)
+            _activity_handles.pop(self._activity_id, None)
         if delivered:
             _record_journal(self._pid, active=False)
 
@@ -1212,3 +1222,37 @@ def _install_shutdown_hook() -> None:
             return
         _hook_installed = True
     atexit.register(_kill_live_handles)
+
+
+def activity_request(action: str, activity_id: str | None = None, lines: int = 50) -> dict[str, Any]:
+    """Inspect/stop only handles created by this kernel; called off the cell queue."""
+    with _live_lock:
+        if action == "list":
+            handles = list(_activity_handles.items())
+        else:
+            handle = _activity_handles.get(activity_id or "")
+            if handle is None:
+                raise KeyError("Unknown kernel bash activity")
+    if action == "list":
+        return {"activities": [
+            {
+                "id": key,
+                "command": handle.command,
+                "pid": handle._pid,
+                "durationMs": int((handle._result.duration if handle._result else time.monotonic() - handle._started) * 1000),
+                "status": "finished" if handle._reaped else "running",
+            }
+            for key, handle in handles
+        ]}
+    if action == "tail":
+        if isinstance(lines, bool) or not isinstance(lines, int) or not 1 <= lines <= 200:
+            raise ValueError("lines must be an integer between 1 and 200")
+        # Each retained buffer is bounded, and the response has a further byte cap.
+        tail = "\n".join(handle._buffer.text().splitlines()[-lines:])
+        return {"activityId": activity_id, "tail": tail.encode("utf-8")[-16_384:].decode("utf-8", errors="replace")}
+    if action == "kill":
+        if handle._reaped:
+            return {"activityId": activity_id, "killed": False}
+        handle.kill()
+        return {"activityId": activity_id, "killed": True}
+    raise ValueError("Unknown kernel bash action")

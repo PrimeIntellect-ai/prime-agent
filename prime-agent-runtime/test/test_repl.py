@@ -128,6 +128,29 @@ class ReplTest(unittest.TestCase):
         self.addCleanup(self.repl.close)
         self.ready_event, self.ready_ms = self.repl.ready()
 
+    def test_bash_activity_is_available_while_cell_is_running(self):
+        self.repl.send({"type": "execute", "id": "cell", "code": "from rlm import bash\nimport asyncio\nh = bash('echo ready; sleep 20'); await asyncio.sleep(20)"})
+        # Wait for the activity start display before requesting list.
+        while True:
+            event = self.repl.read_event()
+            data = event.get("data", {}).get("application/vnd.prime-agent.bash-activity+json")
+            if data and data.get("active"):
+                activity_id = data["id"]
+                break
+        self.repl.send({"type": "bash_activity", "id": "list", "action": "list"})
+        listed = self.repl.until_done("list")[-1]
+        self.assertEqual(listed["status"], "ok")
+        self.assertEqual(next(row for row in listed["activities"] if row["id"] == activity_id)["status"], "running")
+        self.repl.send({"type": "bash_activity", "id": "tail", "action": "tail", "activityId": activity_id})
+        tail = self.repl.until_done("tail")[-1]
+        self.assertIn("ready", tail["tail"])
+        self.repl.send({"type": "bash_activity", "id": "bad", "action": "kill", "activityId": "unknown"})
+        self.assertEqual(self.repl.until_done("bad")[-1]["status"], "error")
+        self.repl.send({"type": "bash_activity", "id": "kill", "action": "kill", "activityId": activity_id})
+        self.assertTrue(self.repl.until_done("kill")[-1]["killed"])
+        self.repl.send({"type": "interrupt", "id": "cell"})
+        self.repl.until_done("cell")
+
     def test_ready_handshake_and_startup_time(self):
         self.assertEqual(self.ready_event["event"], "ready")
         self.assertEqual(self.ready_event["protocol"], 3)

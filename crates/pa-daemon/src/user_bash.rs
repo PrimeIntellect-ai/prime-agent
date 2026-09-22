@@ -89,6 +89,65 @@ impl UserBash {
 }
 
 impl Worker {
+    /// Rust-native kernel bash activity commands. These inspect the Python
+    /// handle registry, not the user-bash slot or a client-supplied PID.
+    pub(crate) async fn handle_kernel_bash_activity(
+        &self,
+        command_type: &str,
+        payload: &Value,
+    ) -> DaemonResponse {
+        if let Err(response) = self.require_created(command_type) {
+            return response;
+        }
+        let Some(engine) = &self.agent_engine else {
+            return response_failure(None, command_type, "Kernel is not running", None);
+        };
+        let action = match command_type {
+            "list_kernel_bash" => "list",
+            "tail_kernel_bash" => "tail",
+            "kill_kernel_bash" => "kill",
+            _ => return response_failure(None, command_type, "Unknown kernel bash command", None),
+        };
+        let activity_id = payload.get("activityId").and_then(Value::as_str);
+        if action != "list" && activity_id.is_none_or(str::is_empty) {
+            return response_failure(None, command_type, "activityId is required", None);
+        }
+        let lines = if action == "tail" {
+            match payload.get("lines") {
+                None => 50,
+                Some(value) => match value.as_u64() {
+                    Some(lines) if (1..=200).contains(&lines) => lines as usize,
+                    _ => {
+                        return response_failure(
+                            None,
+                            command_type,
+                            "lines must be between 1 and 200",
+                            None,
+                        )
+                    }
+                },
+            }
+        } else {
+            50
+        };
+        match engine.bash_activity(action, activity_id, lines).await {
+            Ok(mut fields) => {
+                if let Some(object) = fields.as_object_mut() {
+                    object.remove("event");
+                    object.remove("status");
+                    object.remove("reason");
+                    object.remove("id"); // kernel request id, not activity id
+                    object.remove("activityId");
+                    if let Some(activity_id) = activity_id {
+                        object.insert("id".to_string(), json!(activity_id));
+                    }
+                }
+                response_success(None, command_type, Some(fields))
+            }
+            Err(error) => response_failure(None, command_type, &error.to_string(), None),
+        }
+    }
+
     /// `execute_bash { command, excludeFromContext?, transient?, runId? }`
     /// (TS `runUserBash`): the already-running guard rejects a second
     /// command, the response goes out before the run completes, output
