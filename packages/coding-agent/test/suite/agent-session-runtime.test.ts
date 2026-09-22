@@ -1285,7 +1285,7 @@ describe("ENG-4620 fast mode settings", () => {
 		expect(await switchTo(current, supported)).toBe("priority");
 	});
 
-	it("a clamped tier request keeps the requested preference and leaves the saved default alone", async () => {
+	it("a clamped tier request keeps the requested preference for the parent and its children", async () => {
 		const current = await createFastModeHarness(["gpt-5.5", "gpt-4-turbo"], {
 			api: "openai-responses",
 			provider: "openai",
@@ -1301,6 +1301,15 @@ describe("ENG-4620 fast mode settings", () => {
 		expect(current.session.serviceTier).toBe("default");
 		expect(current.settingsManager.getDefaultServiceTier()).toBe("priority");
 
+		current.setResponses([fauxAssistantMessage("child answer")]);
+		const published = new Promise<string>((resolve) =>
+			current.session.subscribe((event) => {
+				if (event.type === "rlm_child_update" && event.child.status === "running") resolve(event.child.id);
+			}),
+		);
+		void current.session.runRlmChild("do the work", { model: "openai/gpt-5.5" });
+		const child = current.session.getRlmChildSession(await published);
+		expect(child!.sessionManager.buildSessionContext().serviceTier).toBe("flex");
 		await current.session.setModel(current.getModel("gpt-5.5")!);
 		expect(current.session.serviceTier).toBe("flex");
 	});
