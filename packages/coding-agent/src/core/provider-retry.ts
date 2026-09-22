@@ -82,10 +82,8 @@ export type ProviderRetryDelay = { kind: "wait"; delayMs: number } | { kind: "ex
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 /**
- * Delay before retry `attempt` (1-based), honoring a server-requested wait.
- * The computed backoff gets +/-25% jitter so concurrent sessions do not retry
- * an outage in lockstep; a server-requested wait is honored exactly, and
- * jitter never waits less than the server asked.
+ * Delay before retry `attempt` (1-based), honoring a server-requested wait exactly.
+ * Backoff is jittered so concurrent sessions do not retry in lockstep; the server wait floors the jitter.
  */
 export function providerRetryDelay(
 	attempt: number,
@@ -98,10 +96,8 @@ export function providerRetryDelay(
 	}
 	const backoffMs = policy.baseDelayMs * 2 ** (attempt - 1);
 	if (retryAfterMs !== undefined && retryAfterMs >= backoffMs) {
-		// The server said when it will accept the next request; honor that wait exactly.
 		return { kind: "wait", delayMs: Math.min(retryAfterMs, MAX_TIMER_DELAY_MS) };
 	}
-	// Jitter de-synchronizes sessions retrying the same outage; the server wait stays a floor.
 	const jitteredMs = providerWaitJitter(backoffMs, rng);
 	const flooredMs = Math.max(jitteredMs, retryAfterMs ?? 0);
 	const clampedMs = Math.min(flooredMs, MAX_TIMER_DELAY_MS);
