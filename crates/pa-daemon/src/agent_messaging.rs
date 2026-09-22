@@ -64,23 +64,29 @@ const PEER_TICKET_TIMEOUT_MS: u64 = 5_000;
 /// The supervisor roster read behind `family()` and `agent_observe.list`.
 async fn roster_summaries(
     link: &Arc<crate::supervisor_link::SupervisorLink>,
-) -> anyhow::Result<Vec<Value>> {
-    let data = link
+    worker_token: &str,
+) -> Vec<Value> {
+    // TS uses the supervisor's pushed in-memory peer roster, not `list`
+    // (which refreshes every worker serially). An unavailable supervisor
+    // fails open so local child addressing remains usable.
+    let Ok(data) = link
         .request_success(
-            json!({ "type": "list" }),
-            std::time::Duration::from_secs(30),
+            json!({ "type": "list_agent_peers", "workerToken": worker_token }),
+            std::time::Duration::from_secs(5),
         )
-        .await?;
-    Ok(data
-        .get("sessions")
+        .await
+    else {
+        return Vec::new();
+    };
+    data.get("peers")
         .and_then(Value::as_array)
         .cloned()
-        .unwrap_or_default())
+        .unwrap_or_default()
 }
 
 impl AgentMessageController for LinkAgentMessageController {
     async fn family(&self) -> anyhow::Result<Vec<AgentFamilyMember>> {
-        let sessions = roster_summaries(&self.link).await?;
+        let sessions = roster_summaries(&self.link, &self.worker_token).await;
         // The parent identity (subagent summaries carry their parent's
         // live and persisted ids); a top-level session has none.
         let parent = self.parent_identity();
@@ -659,7 +665,11 @@ mod controller_tests {
                         let command = value["command"].clone();
                         let command_type = command["type"].as_str().unwrap_or_default().to_string();
                         let response = match command_type.as_str() {
-                            "list" => response_success(Some(&id), "list", Some(roster.clone())),
+                            "list_agent_peers" => response_success(
+                                Some(&id),
+                                "list_agent_peers",
+                                Some(json!({ "peers": roster["sessions"] })),
+                            ),
                             "get_worker_peer_transport" => match ticket_response.clone() {
                                 Some(ticket) => {
                                     response_success(Some(&id), &command_type, Some(ticket))

@@ -1,14 +1,7 @@
-//! Worker -> supervisor link: one lazily established JSONL client connection
-//! multiplexing cross-worker requests (agent messages, roster reads).
-//! Port of `modes/daemon/supervisor-link.ts`.
-//!
-//! Socket death is expected during supervisor restarts: the link tears down
-//! on connection-level failures and the next request reconnects. Requests
-//! are never retried - daemon commands are not idempotent - and command-level
-//! failures (timeouts, rejections) leave a healthy connection serving the
-//! next request. Requests serialize on one connection (the mutex); agent
-//! messages and roster reads are low-rate, so this matches the TS link's
-//! single-socket multiplexing without its in-flight request table.
+//! Worker -> supervisor link for cross-worker requests. Each command uses
+//! an independent JSONL socket so a long-running supervisor request cannot
+//! serialize roster and message admission behind its response.
+//! Requests are retried only when a write fails before the command is sent.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -17,12 +10,10 @@ use anyhow::{anyhow, Context, Result};
 use pa_types::platform::transport::{connect_transport, AsyncReadHalf, AsyncWriteHalf};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::Mutex;
 
 use crate::protocol::{current_protocol_info, DaemonResponse};
 
-/// Sentinel for command-level timeouts: unlike connection failures, a
-/// timeout leaves the shared socket healthy for the next request.
+/// Sentinel for command-level timeouts.
 #[derive(Debug, thiserror::Error)]
 #[error("supervisor link request timed out")]
 struct LinkTimeout;
@@ -90,18 +81,16 @@ impl LinkClient {
     }
 }
 
-/// Long-lived supervisor connection for a daemon worker.
+/// Supervisor connection endpoint for a daemon worker. Each request uses its
+/// own socket so a long-poll or slow worker cannot block a roster or message
+/// admission request behind the connection's read lock.
 pub struct SupervisorLink {
     socket_path: PathBuf,
-    client: Mutex<Option<LinkClient>>,
 }
 
 impl SupervisorLink {
     pub fn new(socket_path: PathBuf) -> Self {
-        Self {
-            socket_path,
-            client: Mutex::new(None),
-        }
+        Self { socket_path }
     }
 
     /// The supervisor socket this link dials.
@@ -109,39 +98,15 @@ impl SupervisorLink {
         &self.socket_path
     }
 
-    /// Send one request, connecting first when the link is down. Never
-    /// retries a delivered command: daemon commands are not idempotent. A
-    /// write-phase failure never delivered anything, so exactly one
-    /// transparent reconnect-and-retry covers the supervisor-restart
-    /// window (the TS link's close-listener teardown achieves the same).
+    /// Send one request over an independent connection. Once a command is
+    /// written it is never retried; only a failed write can reconnect once.
     pub async fn request(&self, command: Value, timeout: Duration) -> Result<DaemonResponse> {
-        let mut guard = self.client.lock().await;
-        if guard.is_none() {
-            *guard = Some(self.connect().await?);
-        }
-        let outcome = {
-            let client = guard.as_mut().expect("client was just connected");
-            client.request(command.clone(), timeout).await
-        };
-        match outcome {
-            Ok(response) => Ok(response),
+        let mut client = self.connect().await?;
+        match client.request(command.clone(), timeout).await {
             Err(error) if error.downcast_ref::<LinkWriteFailed>().is_some() => {
-                // The socket died before the request went out; a fresh
-                // connection gets exactly one retry and replaces the dead
-                // one for later requests.
-                let mut client = self.connect().await?;
-                let retried = client.request(command, timeout).await;
-                *guard = Some(client);
-                retried
+                self.connect().await?.request(command, timeout).await
             }
-            Err(error) => {
-                // Connection-level failures invalidate the shared socket;
-                // the next request reconnects. Timeouts keep the socket.
-                if error.downcast_ref::<LinkTimeout>().is_none() {
-                    *guard = None;
-                }
-                Err(error)
-            }
+            outcome => outcome,
         }
     }
 
@@ -189,6 +154,67 @@ impl SupervisorLink {
 mod tests {
     use super::*;
     use crate::protocol::{response_line, response_success};
+
+    #[tokio::test]
+    async fn long_request_does_not_block_roster_or_message_on_the_same_link() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("sup.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut started_tx = Some(started_tx);
+            for _ in 0..3 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let tx = started_tx.take();
+                tokio::spawn(async move {
+                    let (reader, mut writer) = stream.into_split();
+                    writer.write_all(b"{\"type\":\"daemon_hello\",\"protocol\":{\"name\":\"prime-agent.daemon\",\"version\":7}}\n").await.unwrap();
+                    let mut reader = BufReader::new(reader);
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.unwrap();
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    let kind = request["command"]["type"].as_str().unwrap();
+                    if kind == "wait_for_idle" {
+                        if let Some(tx) = tx {
+                            let _ = tx.send(());
+                        }
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                    let response = response_line(&response_success(
+                        request["id"].as_str(),
+                        kind,
+                        Some(json!({ "accepted": true })),
+                    ));
+                    writer
+                        .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+                        .await
+                        .unwrap();
+                    writer.write_all(b"\n").await.unwrap();
+                });
+            }
+        });
+        let link = std::sync::Arc::new(SupervisorLink::new(socket));
+        let waiting = {
+            let link = std::sync::Arc::clone(&link);
+            tokio::spawn(async move {
+                link.request_success(json!({ "type": "wait_for_idle" }), Duration::from_secs(1))
+                    .await
+            })
+        };
+        started_rx.await.unwrap();
+        for kind in ["list_agent_peers", "send_message"] {
+            let response = tokio::time::timeout(
+                Duration::from_millis(100),
+                link.request_success(json!({ "type": kind }), Duration::from_secs(1)),
+            )
+            .await
+            .expect("request queued behind idle wait")
+            .unwrap();
+            assert_eq!(response["accepted"], true);
+        }
+        waiting.await.unwrap().unwrap();
+        server.await.unwrap();
+    }
 
     /// The link round-trips one command against a JSONL echo server: hello
     /// handshake, id-matched response, reconnect after a dead connection.

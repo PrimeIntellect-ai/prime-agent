@@ -1330,12 +1330,10 @@ impl RlmSubagentHost for SupervisorChildSessions {
             let records = this.children.lock().await.clone();
             let mut entries = Vec::with_capacity(records.len());
             for record in &records {
-                this.refresh_record(record).await;
-                let entry = {
-                    let record = record.lock().await;
-                    SupervisorChildSessions::entry(&record)
-                };
-                entries.push(entry);
+                // The settle watcher owns worker refreshes. A roster read is a
+                // snapshot and must not queue behind a long supervisor request.
+                let record = record.lock().await;
+                entries.push(SupervisorChildSessions::entry(&record));
             }
             Ok(entries)
         })
@@ -1613,6 +1611,27 @@ mod watch_tests {
             })
             .await
             .expect("spawn must succeed against the fake supervisor")
+    }
+
+    #[tokio::test]
+    async fn roster_snapshot_does_not_wait_for_a_slow_child_worker() {
+        let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+        let (sessions, _kill_rx) =
+            sessions_with_fake_supervisor(follow_up_tx, 1_000, FakeKill::Success).await;
+        sessions
+            .push_test_child(RlmChildIdentity {
+                rlm_child_id: "child-id".to_string(),
+                active_session_id: "child-live".to_string(),
+                session_id: Some("child-file".to_string()),
+                session_name: "slow-child".to_string(),
+            })
+            .await;
+        let roster = tokio::time::timeout(Duration::from_millis(10), sessions.list_subagents())
+            .await
+            .expect("roster must not make a supervisor round trip")
+            .expect("roster snapshot");
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].status, "running");
     }
 
     /// A child that settles without replying delivers the no-reply terminal
