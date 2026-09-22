@@ -879,7 +879,7 @@ def _revive_with_live_globals(
             changed = changed or revived is not arg
             keywords[key] = revived
         if not changed:
-            return value
+            return memo.setdefault(id(value), value)
         rebuilt_partial = functools.partial(rebuilt, *args, **keywords)
         rebuilt_partial.__dict__.update(value.__dict__)
         return memo.setdefault(id(value), rebuilt_partial)
@@ -899,7 +899,7 @@ def _revive_with_live_globals(
     if type(value) is tuple:
         items = tuple(item if type(item) in atoms else revive(item) for item in value)
         if all(new is old for new, old in zip(items, value)):
-            return value
+            items = value
         return memo.setdefault(id(value), items)
     if not isinstance(value, types.FunctionType) or value.__module__ != "__main__":
         return value
