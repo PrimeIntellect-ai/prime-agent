@@ -1,9 +1,12 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
+import type { Keybinding, KeybindingConflict, KeybindingsConfig } from "../src/keybindings.js";
+import { KeybindingsManager, TUI_KEYBINDINGS } from "../src/keybindings.js";
 import {
 	decodeKittyPrintable,
 	decodePrintableKey,
 	Key,
+	type KeyId,
 	matchesKey,
 	parseKey,
 	setKittyProtocolActive,
@@ -596,4 +599,55 @@ describe("parseKey", () => {
 			assert.equal(matchesKey("\x1b\x1bOb", "ctrl+alt+down"), true);
 		});
 	});
+});
+
+describe("KeybindingsManager", () => {
+	const cases: Array<{
+		name: string;
+		userBindings: KeybindingsConfig;
+		keys: Array<[binding: Keybinding, expected: KeyId[]]>;
+		conflicts?: KeybindingConflict[];
+	}> = [
+		{
+			name: "keeps a shared default when a user binding repeats its own default",
+			userBindings: { "tui.input.submit": ["enter", "ctrl+enter"] },
+			keys: [
+				["tui.input.submit", ["enter", "ctrl+enter"]],
+				["tui.select.confirm", ["enter"]],
+			],
+		},
+		{
+			name: "evicts a default that a user binding claims for another action",
+			userBindings: { "tui.editor.cursorUp": ["up", "ctrl+b"] },
+			keys: [
+				["tui.editor.cursorUp", ["up", "ctrl+b"]],
+				["tui.editor.cursorLeft", ["left"]],
+			],
+		},
+		{
+			name: "reports two user bindings that claim the same key",
+			userBindings: { "tui.input.submit": "ctrl+x", "tui.select.confirm": "ctrl+x" },
+			keys: [["tui.editor.cursorLeft", ["left", "ctrl+b"]]],
+			conflicts: [{ key: "ctrl+x", keybindings: ["tui.input.submit", "tui.select.confirm"] }],
+		},
+		{
+			name: "reports a conflict when an explicit binding restates another action's default",
+			userBindings: { "tui.editor.cursorUp": ["up", "ctrl+b"], "tui.editor.cursorLeft": ["left", "ctrl+b"] },
+			keys: [
+				["tui.editor.cursorUp", ["up", "ctrl+b"]],
+				["tui.editor.cursorLeft", ["left", "ctrl+b"]],
+			],
+			conflicts: [{ key: "ctrl+b", keybindings: ["tui.editor.cursorUp", "tui.editor.cursorLeft"] }],
+		},
+	];
+
+	for (const testCase of cases) {
+		it(testCase.name, () => {
+			const keybindings = new KeybindingsManager(TUI_KEYBINDINGS, testCase.userBindings);
+			for (const [binding, expected] of testCase.keys) {
+				assert.deepStrictEqual(keybindings.getKeys(binding), expected, binding);
+			}
+			assert.deepStrictEqual(keybindings.getConflicts(), testCase.conflicts ?? []);
+		});
+	}
 });

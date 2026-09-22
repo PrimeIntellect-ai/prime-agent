@@ -114,13 +114,39 @@ describe("DaemonWorkerClient direct decoding", () => {
 		const client = new DaemonWorkerClient("/tmp/prime-agent-direct.sock");
 		const internals = client as unknown as {
 			socket: Socket;
+			channel: { send: ReturnType<typeof vi.fn>; close: ReturnType<typeof vi.fn> };
 			directPeer: boolean;
 			handleFrame(frame: { header: Record<string, unknown>; payload: Buffer }): void;
 		};
 		internals.socket = { destroyed: false, destroy: destroyed } as unknown as Socket;
+		internals.channel = { send: vi.fn().mockResolvedValue(undefined), close: vi.fn() };
 		internals.directPeer = true;
 		return { client, internals, destroyed };
 	}
+
+	it.each([false, true])("handles the response before following frames (callback throws=%s)", async (throws) => {
+		const { client, internals } = makeDirectClient();
+		const order: string[] = [];
+		client.onMessage((message) => order.push(message.type));
+		const request = client.request({ type: "attach", activeSessionId: "active-1" }, 30000, {
+			onResponse: () => {
+				order.push("response");
+				if (throws) throw new Error("response callback failed");
+			},
+		});
+		internals.handleFrame({
+			header: { kind: "outbound", outboundType: "response", requestId: "worker_1" },
+			payload: Buffer.from(JSON.stringify({ type: "response", command: "attach", success: true })),
+		});
+		internals.handleFrame({
+			header: { kind: "outbound", outboundType: "session_detached", payloadEncoding: "jsonl" },
+			payload: Buffer.from(JSON.stringify({ type: "session_detached", activeSessionId: "active-1" })),
+		});
+		expect(order).toEqual(["response", "session_detached"]);
+		if (throws) await expect(request).rejects.toThrow("response callback failed");
+		else await expect(request).resolves.toMatchObject({ success: true });
+		client.close();
+	});
 
 	it("emits decoded outbound frames to message listeners", () => {
 		const { client, internals } = makeDirectClient();

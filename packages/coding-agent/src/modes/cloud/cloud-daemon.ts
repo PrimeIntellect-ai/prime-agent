@@ -5,8 +5,8 @@ import { type Api, getLogger, type Model } from "@earendil-works/pi-ai";
 import {
 	AGENT_MESSAGE_SOURCE,
 	type AgentFamilyCatalogEntry,
+	type AgentFamilyMember,
 	type AgentFamilyRelationship,
-	type AgentFamilyRosterResult,
 	type AgentSessionMessageController,
 	type AgentSessionMessageDeliveryStatus,
 	type AgentSessionMessageEndpoint,
@@ -14,11 +14,11 @@ import {
 	type AgentSessionMessagePayload,
 	type AgentSessionMessageReceipt,
 	assertAgentFamilyReach,
-	buildAgentFamilyRoster,
 	createAgentSessionMessage,
 	createAgentSessionMessageId,
 	createAgentSessionMessageReceipt,
 	normalizeAgentSessionMessage,
+	selectAgentFamily,
 } from "../../core/agent-messages.js";
 import {
 	type AgentObserveAgentSnapshot,
@@ -1685,7 +1685,7 @@ export class CloudGuestDaemon {
 		};
 		return {
 			listAgents: async () => this.guestListAgents(requireCurrentState()),
-			roster: async () => this.guestFamilyRoster(requireCurrentState()),
+			family: async () => this.guestFamilyRoster(requireCurrentState()),
 			sendAgentMessage: async (input) => this.guestSendAgentMessage(requireCurrentState(), input),
 		};
 	}
@@ -1787,12 +1787,12 @@ export class CloudGuestDaemon {
 		return [...byId.values()];
 	}
 
-	private async guestFamilyRoster(currentState: ActiveSessionState): Promise<AgentFamilyRosterResult> {
+	private async guestFamilyRoster(currentState: ActiveSessionState): Promise<AgentFamilyMember[]> {
 		const catalog = await this.guestFamilyCatalog(currentState);
 		const currentEntry =
 			catalog.find((entry) => entry.id === currentState.runtime.session.sessionId) ??
 			this.guestFamilyEntry(currentState);
-		return buildAgentFamilyRoster(currentEntry, catalog);
+		return selectAgentFamily(currentEntry, catalog);
 	}
 
 	private async guestListAgents(currentState: ActiveSessionState): Promise<AgentSessionMessageListResult> {
@@ -1916,27 +1916,49 @@ export class CloudGuestDaemon {
 	}
 
 	private async guestObserveList(currentState: ActiveSessionState): Promise<AgentObserveListResult> {
-		const agents: AgentObserveAgentSummary[] = [];
-		const seen = new Set<string>();
-		for (const state of this.host.values()) {
-			if (state.activeSessionId === currentState.activeSessionId) continue;
-			try {
-				assertAgentFamilyReach(this.guestFamilyEntry(currentState), this.guestFamilyEntry(state));
-			} catch (error) {
-				if (
-					error instanceof Error &&
-					error.message === "Agent reach is limited to parent, siblings, and children"
-				) {
-					continue;
-				}
-				throw error;
-			}
-			agents.push(this.observeSummaryFor(state, currentState));
-			seen.add(state.activeSessionId);
-		}
+		// The observe list is the single family roster: every nuclear-family
+		// member appears, with live facts for resident rows and catalog facts
+		// for remote ones (main's unified surface replacing the old roster).
+		const family = await this.guestFamilyRoster(currentState);
+		const residentBySessionId = new Map(
+			[...this.host.values()].map((state) => [state.runtime.session.sessionId, state]),
+		);
+		const agents = family.map((member) => {
+			const state = residentBySessionId.get(member.entry.id);
+			return state
+				? {
+						...this.observeSummaryFor(state, currentState),
+						relationship: member.relationship,
+					}
+				: this.guestPersistedObserveSummary(member);
+		});
 		return {
 			current: this.observeSummaryFor(currentState, currentState),
 			agents,
+		};
+	}
+
+	/**
+	 * Family member with no live session in this guest: only catalog facts are
+	 * known, so the runtime flags stay false while status keeps the roster truth.
+	 */
+	private guestPersistedObserveSummary(member: AgentFamilyMember): AgentObserveAgentSummary {
+		const entry = member.entry;
+		return {
+			sessionId: entry.id,
+			...(entry.name ? { sessionName: entry.name } : {}),
+			relationship: member.relationship,
+			runtimeKind: entry.depth > 0 ? "subagent" : "top-level",
+			...(entry.cwd ? { cwd: entry.cwd } : {}),
+			status: entry.status,
+			isCurrent: false,
+			isStreaming: false,
+			isCompacting: false,
+			attachedClients: 0,
+			...(entry.messageCount !== undefined ? { messageCount: entry.messageCount } : {}),
+			queuedCount: 0,
+			isSessionActive: entry.status === "running",
+			...(entry.parentSessionId ? { parentSessionId: entry.parentSessionId } : {}),
 		};
 	}
 

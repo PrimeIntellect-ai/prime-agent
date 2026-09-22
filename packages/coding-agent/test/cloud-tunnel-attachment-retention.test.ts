@@ -1,16 +1,9 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { createConnection, type Socket } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { type CloudGuestCursorRecord, CloudTunnelAttachment } from "../src/core/cloud/bridge/tunnel-attachment.js";
-import {
-	type CloudTunnelConnection,
-	type CloudTunnelTransport,
-	CloudTunnelTransportError,
-} from "../src/core/cloud/bridge/tunnel-transport.js";
 import type { CloudCursor, CloudEvent } from "../src/core/cloud/protocol.js";
 import { CloudProtocolServer } from "../src/modes/cloud/cloud-protocol-server.js";
+import { cloudTemp, RecordingTunnelTransport } from "./cloud-support.js";
 
 /**
  * Production retention integration: the real CloudTunnelAttachment drives the
@@ -20,85 +13,10 @@ import { CloudProtocolServer } from "../src/modes/cloud/cloud-protocol-server.js
  * ping-pong, and a second trim with recovery.
  */
 
-const roots: string[] = [];
 const SESSION_ID = "sess_attach_test";
 const BRIDGE_TOKEN = "a".repeat(64);
 
-afterEach(() => {
-	for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true, maxRetries: 5 });
-});
-
 /** A real socket connection to the guest protocol server, framed as a tunnel transport. */
-class SocketTunnelTransport implements CloudTunnelTransport {
-	readonly sentFrames: string[] = [];
-	/** Every line the server sent, for resync and loop accounting. */
-	readonly serverFrames: string[] = [];
-	/** While set, connect() fails like a downed tunnel edge. */
-	down = false;
-	private socket: Socket | undefined;
-	private messageHandler: ((message: string) => void) | undefined;
-	private closeHandler: ((error?: CloudTunnelTransportError) => void) | undefined;
-	private buffer = "";
-	/** Lines that arrived before onMessage was registered; flushed then. */
-	private earlyLines: string[] = [];
-	closedByServer = false;
-	closedByClient = false;
-
-	async connect(socketPath: string): Promise<CloudTunnelConnection> {
-		if (this.down) {
-			throw new CloudTunnelTransportError("connect", "tunnel edge is down (test)");
-		}
-		await new Promise<void>((resolve, reject) => {
-			this.socket = createConnection(socketPath);
-			this.socket.setNoDelay(true);
-			this.socket.once("connect", () => resolve());
-			this.socket.once("error", (error) => reject(error));
-		});
-		this.socket!.on("data", (chunk: Buffer) => {
-			this.buffer += chunk.toString("utf8");
-			for (;;) {
-				const newline = this.buffer.indexOf("\n");
-				if (newline < 0) break;
-				const line = this.buffer.slice(0, newline);
-				this.buffer = this.buffer.slice(newline + 1);
-				if (line.length === 0) continue;
-				this.serverFrames.push(line);
-				if (this.messageHandler !== undefined) {
-					this.messageHandler(line);
-				} else {
-					this.earlyLines.push(line);
-				}
-			}
-		});
-		this.socket!.on("close", () => {
-			this.closedByServer = true;
-			this.closeHandler?.();
-		});
-		return {
-			send: (message: string) => {
-				this.sentFrames.push(message);
-				this.socket?.write(`${message}\n`);
-			},
-			close: () => {
-				this.closedByClient = true;
-				this.socket?.destroy();
-			},
-			onMessage: (handler) => {
-				this.messageHandler = handler;
-				for (const line of this.earlyLines.splice(0)) handler(line);
-			},
-			onClose: (handler) => {
-				this.closeHandler = handler;
-			},
-		};
-	}
-
-	/** Client-initiated disconnect: every in-flight frame and ack is dropped. */
-	drop(): void {
-		this.socket?.destroy();
-	}
-}
-
 function serverFramesOfType(type: string, frames: readonly string[]): string[] {
 	return frames.filter((line) => {
 		try {
@@ -109,13 +27,24 @@ function serverFramesOfType(type: string, frames: readonly string[]): string[] {
 	});
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 15_000, what = "condition"): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
+/**
+ * Drains the event loop until the observable settles: attachment delivery and
+ * server acks complete across turns, never a clock.
+ */
+async function waitFor(predicate: () => boolean): Promise<void> {
 	for (;;) {
 		if (predicate()) return;
-		if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-		await new Promise((resolve) => setTimeout(resolve, 20));
+		await new Promise((resolve) => setImmediate(resolve));
 	}
+}
+
+/**
+ * The server's acknowledged position: the deterministic signal that the
+ * client's ack landed (retention can only trim acknowledged history).
+ */
+function serverAckedSequence(server: CloudProtocolServer): number {
+	const outbox = (server as unknown as { outbox: { acknowledgedCursor: { sequence: number } } }).outbox;
+	return outbox.acknowledgedCursor.sequence;
 }
 
 function statusEvent(): { kind: "session_status"; recordedAt: string; status: "busy" | "idle" } {
@@ -124,8 +53,7 @@ function statusEvent(): { kind: "session_status"; recordedAt: string; status: "b
 
 describe("CloudTunnelAttachment retention against the real protocol server", () => {
 	it("resyncs through two retention trims with unique delivery, valid acks, and no frame ping-pong", async () => {
-		const root = mkdtempSync(join(tmpdir(), "attach-retention-"));
-		roots.push(root);
+		const root = cloudTemp("attach-retention-");
 		const socketPath = join(root, "cloud.sock");
 		const server = new CloudProtocolServer({
 			socketPath,
@@ -144,7 +72,7 @@ describe("CloudTunnelAttachment retention against the real protocol server", () 
 		});
 		await server.start();
 
-		const transport = new SocketTunnelTransport();
+		const transport = new RecordingTunnelTransport();
 		const mirrored: CloudEvent[] = [];
 		const errors: string[] = [];
 		let terminal: string | undefined;
@@ -188,63 +116,37 @@ describe("CloudTunnelAttachment retention against the real protocol server", () 
 			}
 			await waitFor(
 				() => mirrored.length >= 3 && persistedCursor?.sequence === 3 && persistedCursor.eventGeneration === 1,
-				15_000,
-				"phase 1 mirror + ack",
 			);
 
 			// Phase 2: the fourth record fills the log exactly.
 			server.appendEvent(statusEvent());
-			await waitFor(
-				() => persistedCursor?.sequence === 4 && persistedCursor.eventGeneration === 1,
-				15_000,
-				"phase 2 ack through 4",
-			);
+			await waitFor(() => persistedCursor?.sequence === 4 && persistedCursor.eventGeneration === 1);
 
 			// Phase 3: the fifth append overflows: acknowledged history trims,
 			// the event-log generation bumps to 2, and the client's stale
 			// cursor gets a snapshot resync instead of a wedge.
 			server.appendEvent(statusEvent());
-			await waitFor(() => persistedCursor?.eventGeneration === 2, 15_000, "first trim resync");
+			await waitFor(() => persistedCursor?.eventGeneration === 2);
 			// The renumbered head is not lost: event-5 arrives through the
 			// full-log snapshot the resync serves, and the count keeps
 			// growing monotonically - the dedupe reset means the renumbered
 			// epoch never double-imports.
-			await waitFor(
-				() => mirrored.filter((event) => event.kind === "session_status").length >= 5,
-				15_000,
-				"renumbered head delivery",
-			);
+			await waitFor(() => mirrored.filter((event) => event.kind === "session_status").length >= 5);
 
 			// Phase 4: live delivery continues in the new epoch.
 			server.appendEvent(statusEvent());
-			await waitFor(
-				() => persistedCursor?.eventGeneration === 2 && persistedCursor.sequence >= 2,
-				15_000,
-				"post-trim live delivery",
-			);
-			await waitFor(
-				() => mirrored.filter((event) => event.kind === "session_status").length >= 6,
-				15_000,
-				"post-trim mirror",
-			);
+			await waitFor(() => persistedCursor?.eventGeneration === 2 && persistedCursor.sequence >= 2);
+			await waitFor(() => mirrored.filter((event) => event.kind === "session_status").length >= 6);
 
 			// Phase 5: drive the log to the bound again and force a second
 			// trim, then prove recovery.
 			for (let index = 7; index <= 8; index++) {
 				server.appendEvent(statusEvent());
-				await waitFor(
-					() => persistedCursor?.eventGeneration === 2 && persistedCursor.sequence >= index - 4,
-					15_000,
-					`phase 5 ack through ${index}`,
-				);
+				await waitFor(() => persistedCursor?.eventGeneration === 2 && persistedCursor.sequence >= index - 4);
 			}
 			server.appendEvent(statusEvent());
-			await waitFor(() => persistedCursor?.eventGeneration === 3, 15_000, "second trim resync");
-			await waitFor(
-				() => mirrored.filter((event) => event.kind === "session_status").length >= 9,
-				15_000,
-				"post-second-trim mirror",
-			);
+			await waitFor(() => persistedCursor?.eventGeneration === 3);
+			await waitFor(() => mirrored.filter((event) => event.kind === "session_status").length >= 9);
 
 			// No wedge, no crash, honest supervision:
 			expect(terminal).toBeUndefined();
@@ -266,11 +168,10 @@ describe("CloudTunnelAttachment retention against the real protocol server", () 
 			await attachment.stop();
 			await server.stop();
 		}
-	}, 60_000);
+	});
 
 	it("resyncs gap-free when a trim retains more than one snapshot page: no lost tail, cursor never ahead of delivery", async () => {
-		const root = mkdtempSync(join(tmpdir(), "attach-retention-page-"));
-		roots.push(root);
+		const root = cloudTemp("attach-retention-page-");
 		const socketPath = join(root, "cloud.sock");
 		const server = new CloudProtocolServer({
 			socketPath,
@@ -294,7 +195,7 @@ describe("CloudTunnelAttachment retention against the real protocol server", () 
 		});
 		await server.start();
 
-		const transport = new SocketTunnelTransport();
+		const transport = new RecordingTunnelTransport();
 		const mirrored: CloudEvent[] = [];
 		/** Every persisted cursor sample with the mirror size at that moment. */
 		const cursorTimeline: Array<{ generation: number; sequence: number; delivered: number }> = [];
@@ -353,12 +254,10 @@ describe("CloudTunnelAttachment retention against the real protocol server", () 
 			for (let index = 1; index <= 24; index++) appendUnique(index);
 			await waitFor(
 				() => persistedCursor?.eventGeneration === 1 && persistedCursor.sequence === 24 && mirrored.length === 24,
-				15_000,
-				"phase 1 mirror + ack through 24",
 			);
-			// Let the final ack land on the server: the trim below must
-			// retain exactly the unacknowledged tail.
-			await new Promise((resolve) => setTimeout(resolve, 150));
+			// The final ack must land on the server: the trim below then
+			// retains exactly the unacknowledged tail.
+			await waitFor(() => serverAckedSequence(server) === 24);
 
 			// Phase 2: disconnect and drop every in-flight ack; the guest
 			// keeps producing into the durable log while the tunnel is
@@ -383,11 +282,9 @@ describe("CloudTunnelAttachment retention against the real protocol server", () 
 			transport.down = false;
 			await waitFor(
 				() => persistedCursor?.eventGeneration === 2 && persistedCursor.sequence === 277 && mirrored.length === 301,
-				20_000,
-				"gap-free resync to the retained tail",
 			);
 			// Let the resync ack land before the next drop.
-			await new Promise((resolve) => setTimeout(resolve, 150));
+			await waitFor(() => serverAckedSequence(server) === 277);
 
 			// Phase 5: a second disconnect and fill to the bound, then a
 			// second trim that retains 23 events plus the new one.
@@ -402,8 +299,6 @@ describe("CloudTunnelAttachment retention against the real protocol server", () 
 			transport.down = false;
 			await waitFor(
 				() => persistedCursor?.eventGeneration === 3 && persistedCursor.sequence === 24 && mirrored.length === 325,
-				20_000,
-				"second-trim recovery delivery",
 			);
 
 			// Every unique logical event arrived exactly once, no gaps:
@@ -466,7 +361,10 @@ describe("CloudTunnelAttachment retention against the real protocol server", () 
 				delivered: mirrored.length,
 			});
 			const before = settled();
-			await new Promise((resolve) => setTimeout(resolve, 500));
+			// A bounded turn drain proves delivery is truly settled.
+			for (let turn = 0; turn < 10; turn++) {
+				await new Promise((resolve) => setImmediate(resolve));
+			}
 			expect(settled()).toEqual(before);
 
 			// Honest supervision throughout: no terminal fallback, and the
@@ -477,11 +375,10 @@ describe("CloudTunnelAttachment retention against the real protocol server", () 
 			await attachment.stop();
 			await server.stop();
 		}
-	}, 60_000);
+	});
 
 	it("restarts a local attachment after a trim without re-importing retained events", async () => {
-		const root = mkdtempSync(join(tmpdir(), "attach-retention-restart-"));
-		roots.push(root);
+		const root = cloudTemp("attach-retention-restart-");
 		const socketPath = join(root, "cloud.sock");
 		const server = new CloudProtocolServer({
 			socketPath,
@@ -540,7 +437,7 @@ describe("CloudTunnelAttachment retention against the real protocol server", () 
 			if (appended === undefined) throw new Error(`event ${index} was dropped by the durable log`);
 		};
 
-		const firstTransport = new SocketTunnelTransport();
+		const firstTransport = new RecordingTunnelTransport();
 		const first = new CloudTunnelAttachment({
 			sessionId: SESSION_ID,
 			generation: 1,
@@ -555,20 +452,21 @@ describe("CloudTunnelAttachment retention against the real protocol server", () 
 			// Phase 1: four unique events fill the log; the attachment mirrors
 			// and acknowledges them, persisting {sandbox 1, event 1, seq 4}.
 			for (let index = 1; index <= 4; index++) appendUnique(index);
-			await waitFor(
-				() => persistedCursor?.sequence === 4 && persistedCursor.eventGeneration === 1,
-				15_000,
-				"phase 1 mirror + ack through 4",
-			);
+			await waitFor(() => persistedCursor?.sequence === 4 && persistedCursor.eventGeneration === 1);
 
+			// The phase-1 ack must land on the server first: retention can only
+			// trim acknowledged history, so the trim below frees exactly these
+			// four events.
+			await waitFor(() => serverAckedSequence(server) === 4);
 			// Phase 2: the fifth append overflows the bound: retention trims
 			// the acknowledged history, the event generation bumps to 2, and
 			// the resync delivers the renumbered event-5.
 			appendUnique(5);
-			await waitFor(() => persistedCursor?.eventGeneration === 2, 15_000, "first trim resync");
-			await waitFor(() => firstMirrored.length === 5, 15_000, "renumbered head delivery");
-			// Let the resync ack land on the server before the restart.
-			await new Promise((resolve) => setTimeout(resolve, 150));
+			await waitFor(() => persistedCursor?.eventGeneration === 2);
+			await waitFor(() => firstMirrored.length === 5);
+			// The renumbered event-5's ack must land on the server before the
+			// restart: the post-restart drain compares against the retained log.
+			await waitFor(() => server.currentGeneration() === 2 && serverAckedSequence(server) === 1);
 
 			// Phase 3: a real local attachment restart while the guest keeps
 			// running. The persisted cursor survives (durable), but the
@@ -581,7 +479,7 @@ describe("CloudTunnelAttachment retention against the real protocol server", () 
 			// epoch on the snapshot and drains ONLY the event produced while
 			// detached - the retained, already-mirrored event-5 is never
 			// re-imported.
-			const restartTransport = new SocketTunnelTransport();
+			const restartTransport = new RecordingTunnelTransport();
 			const restarted = new CloudTunnelAttachment({
 				sessionId: SESSION_ID,
 				generation: 1,
@@ -592,11 +490,7 @@ describe("CloudTunnelAttachment retention against the real protocol server", () 
 				submitWaitMs: 1_000,
 			});
 			restarted.start();
-			await waitFor(
-				() => persistedCursor?.eventGeneration === 2 && persistedCursor.sequence === 2,
-				15_000,
-				"restarted attachment drains the detached tail",
-			);
+			await waitFor(() => persistedCursor?.eventGeneration === 2 && persistedCursor.sequence === 2);
 
 			// Exactly the one event produced while detached was imported; the
 			// restart never replayed the retained log.
@@ -629,5 +523,5 @@ describe("CloudTunnelAttachment retention against the real protocol server", () 
 			await first.stop().catch(() => undefined);
 			await server.stop();
 		}
-	}, 60_000);
+	});
 });

@@ -1,9 +1,8 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
 	type CloudCommandRequest,
 	type CloudEvent,
@@ -13,6 +12,7 @@ import {
 } from "../src/core/cloud/protocol.js";
 import { CloudGuestDaemon, parseCloudDaemonEnv } from "../src/modes/cloud/cloud-daemon.js";
 import { CloudProtocolServer, type CloudProtocolServerCallbacks } from "../src/modes/cloud/cloud-protocol-server.js";
+import { cloudTemp } from "./cloud-support.js";
 import { createFauxRuntimeFactory } from "./fixtures/cloud-guest-daemon-fixture.js";
 
 /**
@@ -22,19 +22,18 @@ import { createFauxRuntimeFactory } from "./fixtures/cloud-guest-daemon-fixture.
  * bounds - all against a real AgentSession with a faux provider.
  */
 
-const roots: string[] = [];
-function temp(): string {
-	const root = mkdtempSync(join(tmpdir(), "cloud-guest-daemon-test-"));
-	roots.push(root);
-	return root;
-}
-
-afterEach(() => {
-	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 5 });
-});
-
 const SESSION_ID = "sess_daemon_test_1";
 const BRIDGE_TOKEN = "t".repeat(64);
+
+/**
+ * Two loop turns: the pending socket write flushes in the first poll phase and
+ * the server processes it in its data handler before the second check phase
+ * resumes. Deterministic ordering, never a wall clock.
+ */
+async function settleSocket(): Promise<void> {
+	await new Promise((resolve) => setImmediate(resolve));
+	await new Promise((resolve) => setImmediate(resolve));
+}
 
 function daemonEnv(root: string, options: { prompt?: string } = {}) {
 	return parseCloudDaemonEnv(
@@ -60,6 +59,7 @@ class LoopClient {
 	/** Raw bytes: a line decodes only once its \n byte arrived, so a multibyte UTF-8 sequence split across TCP chunks stays intact. */
 	private buffer = Buffer.alloc(0);
 	public readonly messages: string[] = [];
+	private readonly lineWaiters = new Set<() => void>();
 
 	constructor(socketPath: string) {
 		this.socket = createConnection(socketPath);
@@ -67,6 +67,7 @@ class LoopClient {
 		// The server drops protocol violators; an async EPIPE on a later write
 		// must stay handled or it surfaces as an unhandled error.
 		this.socket.on("error", () => undefined);
+		this.socket.on("close", () => this.notifyLines());
 		this.socket.on("data", (chunk: Buffer) => {
 			this.buffer = Buffer.concat([this.buffer, chunk]);
 			for (;;) {
@@ -76,6 +77,7 @@ class LoopClient {
 				this.buffer = this.buffer.subarray(newline + 1);
 				if (line.length > 0) this.messages.push(line);
 			}
+			this.notifyLines();
 		});
 	}
 
@@ -145,18 +147,28 @@ class LoopClient {
 		await closed;
 	}
 
-	async waitForSnapshot(timeoutMs = 15_000): Promise<void> {
-		await this.waitFor((_events, messages) => messages.some((line) => line.includes('"type":"snapshot"')), timeoutMs);
+	/** Resolves once the next message line has landed; data arrival is the only clock. */
+	private nextMessage(): Promise<void> {
+		return new Promise((resolve) => {
+			this.lineWaiters.add(resolve);
+		});
 	}
 
-	async waitFor(predicate: (events: CloudEvent[], messages: string[]) => boolean, timeoutMs = 15_000): Promise<void> {
-		const deadline = Date.now() + timeoutMs;
+	private notifyLines(): void {
+		const waiters = [...this.lineWaiters];
+		this.lineWaiters.clear();
+		for (const resolve of waiters) resolve();
+	}
+
+	async waitForSnapshot(): Promise<void> {
+		await this.waitFor((_events, messages) => messages.some((line) => line.includes('"type":"snapshot"')));
+	}
+
+	/** Event-driven wait: the predicate re-runs on every landed line, never on a clock. */
+	async waitFor(predicate: (events: CloudEvent[], messages: string[]) => boolean): Promise<void> {
 		for (;;) {
 			if (predicate(this.events(), this.messages)) return;
-			if (Date.now() > deadline) {
-				throw new Error("timed out waiting for a guest daemon event");
-			}
-			await new Promise((resolve) => setTimeout(resolve, 10));
+			await this.nextMessage();
 		}
 	}
 }
@@ -175,7 +187,7 @@ async function startDaemon(root: string): Promise<{ daemon: CloudGuestDaemon; cl
 
 describe("resident guest daemon (in-process, faux provider)", () => {
 	it("mirrors session entries, meta, roster, and usage, and translates the v2 command surface", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-daemon-test-");
 		const { daemon, client } = await startDaemon(root);
 		try {
 			// set_session_name lands in the session and in the mirror.
@@ -240,10 +252,10 @@ describe("resident guest daemon (in-process, faux provider)", () => {
 		} finally {
 			await daemon.stop().catch(() => undefined);
 		}
-	}, 30_000);
+	});
 
 	it("replays retained events from a cursor across reconnects and never duplicates", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-daemon-test-");
 		const { daemon, client } = await startDaemon(root);
 		try {
 			client.submit("cmd_name", { kind: "set_session_name", name: "replay-root" });
@@ -278,10 +290,10 @@ describe("resident guest daemon (in-process, faux provider)", () => {
 		} finally {
 			await daemon.stop().catch(() => undefined);
 		}
-	}, 30_000);
+	});
 
 	it("never re-executes a command restored uncertain after a crash", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-daemon-test-");
 		const socketPath = join(root, "crash.sock");
 		const options = {
 			socketPath,
@@ -345,13 +357,18 @@ describe("resident guest daemon (in-process, faux provider)", () => {
 		const uncertain = recovered.listUncertainCommands();
 		expect(uncertain.map((receipt) => receipt.commandId)).toContain("cmd_hang");
 		expect(uncertain.every((receipt) => receipt.uncertain)).toBe(true);
-		await new Promise((resolve) => setTimeout(resolve, 150));
+		// A full client round-trip is the server's serving cycle: the restored
+		// uncertain command must never re-execute through it.
+		const probe = new LoopClient(socketPath);
+		probe.hello();
+		await probe.waitForSnapshot();
 		expect(dispatched).toEqual([]);
+		await probe.close();
 		await recovered.stop();
-	}, 30_000);
+	});
 
 	it("stores oversized session entries as artifact refs instead of inline payloads", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-daemon-test-");
 		const { daemon, client } = await startDaemon(root);
 		try {
 			const session = daemon.rootSession;
@@ -389,10 +406,10 @@ describe("resident guest daemon (in-process, faux provider)", () => {
 		} finally {
 			await daemon.stop().catch(() => undefined);
 		}
-	}, 30_000);
+	});
 
 	it("rejects requests over the protocol bounds before any admission", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-daemon-test-");
 		const { daemon, client } = await startDaemon(root);
 		try {
 			const closed = client.closed();
@@ -410,10 +427,10 @@ describe("resident guest daemon (in-process, faux provider)", () => {
 		} finally {
 			await daemon.stop().catch(() => undefined);
 		}
-	}, 30_000);
+	});
 
 	it("reports retention stalls and recovery through the production daemon's status record", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-daemon-test-");
 		const env = daemonEnv(root);
 		// The production daemon must wire the protocol server's retention
 		// callbacks into its status record: this failed when
@@ -452,9 +469,10 @@ describe("resident guest daemon (in-process, faux provider)", () => {
 				sessionId: SESSION_ID,
 				cursor: { generation: daemon.protocolServer.currentGeneration(), sequence: tail },
 			});
-			// The ack travels over the socket asynchronously; let it land
-			// before the freeing append runs.
-			await new Promise((resolve) => setTimeout(resolve, 150));
+			// The ack travels over the socket; two loop turns land it on the
+			// server before the freeing append runs (the server processes the
+			// frame synchronously in its data handler).
+			await settleSocket();
 			const appended = daemon.protocolServer.appendEvent({
 				kind: "session_status",
 				recordedAt: new Date().toISOString(),
@@ -467,10 +485,10 @@ describe("resident guest daemon (in-process, faux provider)", () => {
 		} finally {
 			await daemon.stop();
 		}
-	}, 30_000);
+	});
 
 	it("rebinds entry mirroring across runtime session swaps, rebinds, and a restart", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-daemon-test-");
 		const responsesPath = join(root, "responses.jsonl");
 		process.env.PRIME_AGENT_TEST_FAUX_RESPONSES = responsesPath;
 		delete process.env.PRIME_AGENT_TEST_FAUX_ECHO;
@@ -495,10 +513,8 @@ describe("resident guest daemon (in-process, faux provider)", () => {
 		const submitTurn = async (client: LoopClient, commandId: string, text: string, answer: string) => {
 			queueTurn(answer);
 			client.submit(commandId, { kind: "prompt", text });
-			await client.waitFor(
-				(events) =>
-					events.some((event) => event.kind === "session_entry" && JSON.stringify(event.entry).includes(answer)),
-				20_000,
+			await client.waitFor((events) =>
+				events.some((event) => event.kind === "session_entry" && JSON.stringify(event.entry).includes(answer)),
 			);
 		};
 
@@ -610,10 +626,10 @@ describe("resident guest daemon (in-process, faux provider)", () => {
 			await restarted?.release("stopped").catch(() => undefined);
 			await daemon.stop().catch(() => undefined);
 		}
-	}, 60_000);
+	});
 
 	it("serializes transcript mirroring: duplicate opens, swaps, storm passes, and restarts stay exactly once", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-daemon-test-");
 		const responsesPath = join(root, "responses.jsonl");
 		process.env.PRIME_AGENT_TEST_FAUX_RESPONSES = responsesPath;
 		delete process.env.PRIME_AGENT_TEST_FAUX_ECHO;
@@ -638,10 +654,8 @@ describe("resident guest daemon (in-process, faux provider)", () => {
 		const submitTurn = async (client: LoopClient, commandId: string, text: string, answer: string) => {
 			queueTurn(answer);
 			client.submit(commandId, { kind: "prompt", text });
-			await client.waitFor(
-				(events) =>
-					events.some((event) => event.kind === "session_entry" && JSON.stringify(event.entry).includes(answer)),
-				20_000,
+			await client.waitFor((events) =>
+				events.some((event) => event.kind === "session_entry" && JSON.stringify(event.entry).includes(answer)),
 			);
 		};
 
@@ -711,7 +725,10 @@ describe("resident guest daemon (in-process, faux provider)", () => {
 			// session id re-emits the transcript on every mirror pass.
 			await Promise.all([daemon.openSession({}), daemon.openSession({})]);
 			daemon.startMirrorLoop();
-			await new Promise((resolve) => setTimeout(resolve, 100));
+			// Deterministic settle: queueMirror coalesces onto setImmediate, so
+			// one turn runs every queued pass; the interval loop adds nothing here.
+			daemon.queueMirror();
+			await new Promise((resolve) => setImmediate(resolve));
 			daemon.mirrorNow();
 			daemon.mirrorNow();
 			const distinct = expectExactlyOnce();
@@ -749,7 +766,8 @@ describe("resident guest daemon (in-process, faux provider)", () => {
 					daemon.queueMirror();
 					daemon.mirrorNow();
 				}
-				await new Promise((resolve) => setTimeout(resolve, 5));
+				// Drain this batch's queued passes before the next storm batch.
+				await new Promise((resolve) => setImmediate(resolve));
 			}
 			const stormDistinct = expectExactlyOnce();
 			expect(stormDistinct).toBeLessThan(500);
@@ -784,7 +802,9 @@ describe("resident guest daemon (in-process, faux provider)", () => {
 			second.hello();
 			await second.waitForSnapshot();
 			second.subscribe(0);
-			await new Promise((resolve) => setTimeout(resolve, 200));
+			// Settle the restarted daemon's queued mirror passes deterministically.
+			restarted.queueMirror();
+			await new Promise((resolve) => setImmediate(resolve));
 			expectExactlyOnce();
 			await submitTurn(second, "cmd_storm_turn_four", "storm turn four", "storm answer four");
 			expectExactlyOnce();
@@ -816,7 +836,7 @@ describe("resident guest daemon (in-process, faux provider)", () => {
 			await restarted?.release("stopped").catch(() => undefined);
 			await daemon.release("stopped").catch(() => undefined);
 		}
-	}, 60_000);
+	});
 });
 
 describe("guest daemon protocol hardening (in-process, faux provider)", () => {
@@ -856,7 +876,7 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 	}
 
 	it("frames UTF-8 lines split across TCP chunk boundaries without corruption", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-daemon-test-");
 		const server = await startServer(root);
 		try {
 			const client = new LoopClient((server as unknown as { socketPath: string }).socketPath);
@@ -883,7 +903,8 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 			// so split the LINE across two writes with a newline at the very end.
 			const socketField = (client as unknown as { socket: { write: (chunk: string | Buffer) => void } }).socket;
 			socketField.write(bytes.subarray(0, splitAt));
-			await new Promise((resolve) => setTimeout(resolve, 20));
+			// One loop turn lands the first write as its own socket chunk.
+			await new Promise((resolve) => setImmediate(resolve));
 			socketField.write(Buffer.concat([bytes.subarray(splitAt), Buffer.from("\n")]));
 			// The wrong session id is a fencing rejection, but the parse must be
 			// clean: the connection closes without the line having been decoded
@@ -908,7 +929,8 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 			})();
 			const socket2 = (client2 as unknown as { socket: { write: (chunk: string | Buffer) => void } }).socket;
 			socket2.write(bytes2.subarray(0, split2));
-			await new Promise((resolve) => setTimeout(resolve, 20));
+			// One loop turn lands the first write as its own socket chunk.
+			await new Promise((resolve) => setImmediate(resolve));
 			socket2.write(Buffer.concat([bytes2.subarray(split2), Buffer.from("\n")]));
 			await client2.waitForSnapshot();
 			// A prompt with split multibyte content parses and admits too.
@@ -931,7 +953,8 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 				return Math.floor(promptBytes.length / 2);
 			})();
 			socket2.write(promptBytes.subarray(0, split3));
-			await new Promise((resolve) => setTimeout(resolve, 20));
+			// One loop turn lands the first write as its own socket chunk.
+			await new Promise((resolve) => setImmediate(resolve));
 			socket2.write(promptBytes.subarray(split3));
 			await client2.waitFor((_events, messages) => messages.some((line) => line.includes('"commandId":"cmd_utf8"')));
 			await client2.close();
@@ -939,10 +962,10 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 		} finally {
 			await server.stop();
 		}
-	}, 30_000);
+	});
 
 	it("stalls honestly when the log fills with nothing acknowledged instead of crash-looping", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-daemon-test-");
 		const server = await startServer(root, { maxOutboxRecords: 3 });
 		try {
 			let stalled = 0;
@@ -977,34 +1000,27 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 				sessionId: SESSION_ID,
 				cursor: { generation: server.currentGeneration(), sequence: tail },
 			});
-			const recoveredPromise = new Promise<void>((resolve) => {
-				// The stall-clear callback fires on the next successful append.
-				const poll = setInterval(() => {
-					if (!server.retentionStalled) {
-						clearInterval(poll);
-						resolve();
-					}
-				}, 20);
-			});
-
-			// The ack travels over the socket asynchronously; let it land before
-			// the freeing append runs.
-			await new Promise((resolve) => setTimeout(resolve, 150));
-			server.appendEvent({
+			// The ack travels over the socket; two loop turns land it on the
+			// server before the freeing append runs (the server processes the
+			// frame synchronously in its data handler).
+			await settleSocket();
+			// A successful append is the deterministic recovery signal: the
+			// stall clears synchronously inside the append that freed retention.
+			const recovered = server.appendEvent({
 				kind: "session_status",
 				recordedAt: new Date().toISOString(),
 				status: "idle",
 			});
-			await recoveredPromise;
+			expect(recovered).toBeDefined();
 			expect(server.retentionStalled).toBe(false);
 			await client.close();
 		} finally {
 			await server.stop();
 		}
-	}, 30_000);
+	});
 
 	it("keeps a pre-trim client reconnecting after retention trims: resync, never wedge", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-daemon-test-");
 		const server = await startServer(root, { maxOutboxRecords: 2 });
 		try {
 			// First event; the client receives and acknowledges it.
@@ -1022,6 +1038,8 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 				sessionId: SESSION_ID,
 				cursor: { generation: preTrimGeneration, sequence: preTrimCursor },
 			});
+			// Land the ack write on the server before the socket is destroyed.
+			await settleSocket();
 			await client.close();
 
 			// Two more events past the 2-record bound: acknowledged history
@@ -1040,16 +1058,16 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 			await resumed.waitForSnapshot();
 			resumed.subscribe(preTrimCursor);
 			// The resync delivers the post-trim history without a wedge.
-			await resumed.waitFor((events) => events.some((event) => event.kind === "session_status"), 10_000);
+			await resumed.waitFor((events) => events.some((event) => event.kind === "session_status"));
 			expect(resumed.events().length).toBeGreaterThan(0);
 			await resumed.close();
 		} finally {
 			await server.stop();
 		}
-	}, 30_000);
+	});
 
 	it("deletes a spawned child through the runtime host and stops mirroring it", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-daemon-test-");
 		const { daemon, client } = await startDaemon(root);
 		try {
 			const runtime = daemon.rootRuntime;
@@ -1078,27 +1096,22 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 			});
 			expect(child.session.sessionName).toBe("deleteme");
 			// The mirror picks the child up as a roster row.
-			await client.waitFor(
-				(events) =>
-					events.some(
-						(event) => event.kind === "roster_delta" && event.rows.some((row) => row.childId === "child-del-1"),
-					),
-				20_000,
+			await client.waitFor((events) =>
+				events.some(
+					(event) => event.kind === "roster_delta" && event.rows.some((row) => row.childId === "child-del-1"),
+				),
 			);
 			// Delete through the protocol: cancel + runtime-host delete + the
 			// tracked-map entry for the child's session is dropped.
 			client.submit("cmd_delete_child", { kind: "delete_child", childId: "child-del-1" });
-			await client.waitFor(
-				(_events, messages) =>
-					messages.some(
-						(line) => line.includes('"commandId":"cmd_delete_child"') && line.includes('"state":"completed"'),
-					),
-				20_000,
+			await client.waitFor((_events, messages) =>
+				messages.some(
+					(line) => line.includes('"commandId":"cmd_delete_child"') && line.includes('"state":"completed"'),
+				),
 			);
 			// The emptied roster is itself a change: the empty delta arrives.
-			await client.waitFor(
-				(events) => events.some((event) => event.kind === "roster_delta" && event.rows.length === 0),
-				20_000,
+			await client.waitFor((events) =>
+				events.some((event) => event.kind === "roster_delta" && event.rows.length === 0),
 			);
 			// The child runtime is really gone.
 			expect(runtime!.listSubagentRuntimes().some((entry) => entry.metadata.rlmChildId === "child-del-1")).toBe(
@@ -1108,10 +1121,10 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 		} finally {
 			await daemon.stop().catch(() => undefined);
 		}
-	}, 30_000);
+	});
 
 	it("fails an open_session whose requested model cannot resolve instead of silently falling back", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-daemon-test-");
 		// Boot the daemon without opening the session: open_session arrives as
 		// a real first command with an unknown model.
 		const daemon = await CloudGuestDaemon.start(daemonEnv(root), {
@@ -1127,15 +1140,13 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 				cwd: daemonEnv(root).workspaceDir,
 				model: "unknown/model-does-not-exist",
 			});
-			await client.waitFor(
-				(_events, messages) =>
-					messages.some(
-						(line) =>
-							line.includes('"commandId":"cmd_open_unknown_model"') &&
-							line.includes('"state":"failed"') &&
-							line.includes("model-does-not-exist"),
-					),
-				20_000,
+			await client.waitFor((_events, messages) =>
+				messages.some(
+					(line) =>
+						line.includes('"commandId":"cmd_open_unknown_model"') &&
+						line.includes('"state":"failed"') &&
+						line.includes("model-does-not-exist"),
+				),
 			);
 			// The session was never created: no session file in the state dir.
 			const manifest = join(daemonEnv(root).stateDir, "session-file.json");
@@ -1144,10 +1155,10 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 		} finally {
 			await daemon.stop();
 		}
-	}, 30_000);
+	});
 
 	it("closes the connection on a command-id conflict and never re-admits", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-daemon-test-");
 		const server = await startServer(root);
 		try {
 			const socketPath = (server as unknown as { socketPath: string }).socketPath;
@@ -1188,10 +1199,10 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 		} finally {
 			await server.stop();
 		}
-	}, 30_000);
+	});
 
 	it("mirrors the transcript tail through release", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-daemon-test-");
 		const { daemon, client } = await startDaemon(root);
 		try {
 			const responsesPath = join(root, "responses.jsonl");
@@ -1227,10 +1238,10 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 		} finally {
 			await daemon.stop().catch(() => undefined);
 		}
-	}, 30_000);
+	});
 
 	it("drops a pre-auth socket on a deadline and bounds unframed buffers", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-daemon-test-");
 		const server = await startServer(root);
 		try {
 			const socketPath = (server as unknown as { socketPath: string }).socketPath;
@@ -1246,10 +1257,10 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 		} finally {
 			await server.stop();
 		}
-	}, 30_000);
+	});
 
 	it("replays in byte-bounded batches without exceeding the protocol frame bound", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-daemon-test-");
 		const server = await startServer(root);
 		try {
 			// ~1.2 MiB of events: one 512 KiB batch cannot carry them all.
@@ -1266,10 +1277,7 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 			client.hello();
 			await client.waitForSnapshot();
 			client.subscribe(0);
-			await client.waitFor(
-				(events) => events.filter((event) => event.kind === "output_delta").length === 20,
-				20_000,
-			);
+			await client.waitFor((events) => events.filter((event) => event.kind === "output_delta").length === 20);
 			// Batches arrive split by bytes, and every line is one bounded frame.
 			for (const line of client.messages) {
 				if (!line.includes('"type":"events"')) continue;
@@ -1287,10 +1295,10 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 		} finally {
 			await server.stop();
 		}
-	}, 30_000);
+	});
 
 	it("drains CJK output deltas in multiple byte-bounded frames without crashing", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-daemon-test-");
 		const server = await startServer(root);
 		try {
 			// Seven valid ~65K-character CJK deltas: each is ~196 KiB of
@@ -1315,7 +1323,7 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 			client.hello();
 			await client.waitForSnapshot();
 			client.subscribe(0);
-			await client.waitFor((events) => events.filter((event) => event.kind === "output_delta").length === 7, 20_000);
+			await client.waitFor((events) => events.filter((event) => event.kind === "output_delta").length === 7);
 			// The drain needs more than one bounded frame, and every frame is
 			// below the protocol byte bound.
 			const eventsFrames = client.messages.filter((line) => line.includes('"type":"events"'));
@@ -1349,10 +1357,10 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 		} finally {
 			await server.stop();
 		}
-	}, 30_000);
+	});
 
 	it("isolates one client's resync serialization failure per client instead of crashing", async () => {
-		const root = temp();
+		const root = cloudTemp("cloud-guest-daemon-test-");
 		const socketPath = join(root, "resync.sock");
 		const validState: CloudSessionState = { cwd: "/tmp", modelId: "faux-1", queuedCommandIds: [] };
 		// A state that fails snapshot serialization: every resync throws, so
@@ -1419,5 +1427,5 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 		} finally {
 			await server.stop().catch(() => undefined);
 		}
-	}, 30_000);
+	});
 });

@@ -1,7 +1,6 @@
-import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { CloudCommandJournal } from "../src/core/cloud/command-journal.js";
 import {
 	type CloudCommand,
@@ -11,6 +10,7 @@ import {
 	parseCloudMessage,
 	serializeCloudMessage,
 } from "../src/core/cloud/protocol.js";
+import { cloudTemp } from "./cloud-support.js";
 
 const promptA: CloudCommandRequest = { kind: "prompt", text: "hello cloud", queueIfBusy: true };
 const promptB: CloudCommandRequest = { kind: "prompt", text: "hello again" };
@@ -23,18 +23,8 @@ const sendMessageRequest: CloudCommandRequest = {
 };
 
 describe("CloudCommandJournal", () => {
-	const roots: string[] = [];
-
-	afterEach(() => {
-		for (const root of roots.splice(0)) {
-			rmSync(root, { recursive: true, force: true });
-		}
-	});
-
 	function createPath(): string {
-		const root = mkdtempSync(join(tmpdir(), "prime-agent-cloud-journal-"));
-		roots.push(root);
-		return join(root, "commands.jsonl");
+		return join(cloudTemp("prime-agent-cloud-journal-"), "commands.jsonl");
 	}
 
 	function recordCount(path: string): number {

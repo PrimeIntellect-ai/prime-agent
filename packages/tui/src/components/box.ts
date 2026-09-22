@@ -1,3 +1,4 @@
+import type { ClickRegion } from "../click-regions.js";
 import type { TableCellSelectionRegion } from "../selection-metadata.js";
 import type { Component } from "../tui.js";
 import { applyBackgroundToLine, visibleWidth } from "../utils.js";
@@ -10,6 +11,10 @@ type RenderCache = {
 	selectionRegions: TableCellSelectionRegion[];
 };
 
+type ClickCache = {
+	clickRegions: ClickRegion[];
+};
+
 /**
  * Box component - a container that applies padding and background to all children
  */
@@ -20,6 +25,7 @@ export class Box implements Component {
 	private bgFn?: (text: string) => string;
 
 	private cache?: RenderCache;
+	private clickCache?: ClickCache;
 
 	constructor(paddingX = 1, paddingY = 1, bgFn?: (text: string) => string) {
 		this.paddingX = paddingX;
@@ -52,6 +58,7 @@ export class Box implements Component {
 
 	private invalidateCache(): void {
 		this.cache = undefined;
+		this.clickCache = undefined;
 	}
 
 	private matchCache(width: number, childLines: string[], bgSample: string | undefined): boolean {
@@ -75,6 +82,7 @@ export class Box implements Component {
 	render(width: number): string[] {
 		if (this.children.length === 0) {
 			this.cache = undefined;
+			this.clickCache = { clickRegions: [] };
 			return [];
 		}
 
@@ -83,6 +91,7 @@ export class Box implements Component {
 
 		const childLines: string[] = [];
 		const selectionRegions: TableCellSelectionRegion[] = [];
+		const clickRegions: ClickRegion[] = [];
 		for (const child of this.children) {
 			const lineOffset = childLines.length;
 			const lines = child.render(contentWidth);
@@ -97,6 +106,13 @@ export class Box implements Component {
 					tableRight: region.tableRight + this.paddingX,
 				});
 			}
+			for (const region of child.getClickRegions?.() ?? []) {
+				clickRegions.push({
+					...region,
+					line: region.line + lineOffset + this.paddingY,
+					col: region.col + this.paddingX,
+				});
+			}
 			for (const line of lines) {
 				childLines.push(leftPad + line);
 			}
@@ -104,8 +120,10 @@ export class Box implements Component {
 
 		if (childLines.length === 0) {
 			this.cache = undefined;
+			this.clickCache = { clickRegions: [] };
 			return [];
 		}
+		this.clickCache = { clickRegions };
 
 		const bgSample = this.bgFn ? this.bgFn("test") : undefined;
 
@@ -135,6 +153,10 @@ export class Box implements Component {
 
 	getSelectionRegions(): ReadonlyArray<TableCellSelectionRegion> {
 		return this.cache?.selectionRegions ?? [];
+	}
+
+	getClickRegions(): ReadonlyArray<ClickRegion> {
+		return this.clickCache?.clickRegions ?? [];
 	}
 
 	private applyBg(line: string, width: number): string {

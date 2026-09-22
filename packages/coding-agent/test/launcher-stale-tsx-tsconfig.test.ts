@@ -7,7 +7,6 @@ import { VERSION } from "../src/config.js";
 
 const repoRoot = resolve(__dirname, "../../..");
 const launcherPath = join(repoRoot, "prime-agent.sh");
-const launcherTimeoutMs = 30_000;
 
 interface LauncherRun {
 	code: number | null;
@@ -35,17 +34,13 @@ function runLauncher(env: NodeJS.ProcessEnv, cwd: string): Promise<LauncherRun> 
 		run.stderr += chunk.toString("utf8");
 	});
 	return new Promise<LauncherRun>((resolveRun, rejectRun) => {
-		const timeout = setTimeout(() => {
-			child.kill("SIGKILL");
-			rejectRun(new Error(`launcher did not exit within ${launcherTimeoutMs}ms`));
-		}, launcherTimeoutMs);
+		// The child's own exit event is the only signal; a wedged launcher is
+		// bounded by the runner's test timeout, and afterEach kills stragglers.
 		child.once("exit", (code) => {
-			clearTimeout(timeout);
 			run.code = code;
 			resolveRun(run);
 		});
 		child.once("error", (error) => {
-			clearTimeout(timeout);
 			rejectRun(error);
 		});
 	});
@@ -70,34 +65,28 @@ afterEach(() => {
 });
 
 describe("source launcher tsconfig pinning", () => {
-	it.runIf(process.platform !== "win32")(
-		"starts with TSX_TSCONFIG_PATH pointing at a removed external checkout",
-		async () => {
-			const outside = tempDir();
-			const staleTsconfigPath = join(outside, "removed-checkout", "tsconfig.json");
-			const result = await runLauncher({ ...process.env, TSX_TSCONFIG_PATH: staleTsconfigPath }, outside);
-			expectLauncherStarted(result);
-			expect(result.stderr).not.toContain("Cannot resolve tsconfig");
-		},
-	);
+	it("starts with TSX_TSCONFIG_PATH pointing at a removed external checkout", async () => {
+		const outside = tempDir();
+		const staleTsconfigPath = join(outside, "removed-checkout", "tsconfig.json");
+		const result = await runLauncher({ ...process.env, TSX_TSCONFIG_PATH: staleTsconfigPath }, outside);
+		expectLauncherStarted(result);
+		expect(result.stderr).not.toContain("Cannot resolve tsconfig");
+	});
 
-	it.runIf(process.platform !== "win32")(
-		"starts with TSX_TSCONFIG_PATH pointing at another checkout's tsconfig",
-		async () => {
-			const outside = tempDir();
-			const otherCheckout = join(outside, "other-checkout");
-			mkdirSync(otherCheckout, { recursive: true });
-			writeFileSync(join(otherCheckout, "tsconfig.json"), `{\n\t"compilerOptions": {}\n}\n`);
-			const result = await runLauncher(
-				{ ...process.env, TSX_TSCONFIG_PATH: join(otherCheckout, "tsconfig.json") },
-				outside,
-			);
-			expectLauncherStarted(result);
-			expect(result.stderr).not.toContain("ERR_MODULE_NOT_FOUND");
-		},
-	);
+	it("starts with TSX_TSCONFIG_PATH pointing at another checkout's tsconfig", async () => {
+		const outside = tempDir();
+		const otherCheckout = join(outside, "other-checkout");
+		mkdirSync(otherCheckout, { recursive: true });
+		writeFileSync(join(otherCheckout, "tsconfig.json"), `{\n\t"compilerOptions": {}\n}\n`);
+		const result = await runLauncher(
+			{ ...process.env, TSX_TSCONFIG_PATH: join(otherCheckout, "tsconfig.json") },
+			outside,
+		);
+		expectLauncherStarted(result);
+		expect(result.stderr).not.toContain("ERR_MODULE_NOT_FOUND");
+	});
 
-	it.runIf(process.platform !== "win32")("starts from outside the checkout without TSX_TSCONFIG_PATH", async () => {
+	it("starts from outside the checkout without TSX_TSCONFIG_PATH", async () => {
 		const outside = tempDir();
 		const env = { ...process.env };
 		delete env.TSX_TSCONFIG_PATH;

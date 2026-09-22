@@ -1,16 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { type CloudOutboxEvent, DurableCloudEventOutbox } from "../src/core/cloud/event-outbox.js";
 import { CloudTraceMirrorError, type CloudTraceSink, DurableCloudTraceMirror } from "../src/core/cloud/trace-mirror.js";
+import { cloudTemp } from "./cloud-support.js";
 
-const roots: string[] = [];
-function root(): string {
-	const value = mkdtempSync(join(tmpdir(), "cloud-mirror-test-"));
-	roots.push(value);
-	return value;
-}
 function eventsAt(rootPath: string, count: number): CloudOutboxEvent[] {
 	const outbox = new DurableCloudEventOutbox({ directory: join(rootPath, "remote"), sessionId: "sess_test" });
 	return Array.from({ length: count }, (_, index) =>
@@ -35,13 +29,9 @@ async function rejected(work: Promise<unknown>): Promise<CloudTraceMirrorError> 
 	throw new Error("expected rejection");
 }
 
-afterEach(() => {
-	for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true });
-});
-
 describe("DurableCloudTraceMirror", () => {
 	it("persists events in order before returning an acknowledgement", async () => {
-		const path = root();
+		const path = cloudTemp("cloud-mirror-test-");
 		const sink = new Sink();
 		const mirror = new DurableCloudTraceMirror({ directory: join(path, "local"), sessionId: "sess_test", sink });
 		const events = eventsAt(path, 2);
@@ -52,7 +42,7 @@ describe("DurableCloudTraceMirror", () => {
 	});
 
 	it("restores its cursor and deduplicates an identical replay", async () => {
-		const path = root();
+		const path = cloudTemp("cloud-mirror-test-");
 		const sink = new Sink();
 		const events = eventsAt(path, 2);
 		await new DurableCloudTraceMirror({ directory: join(path, "local"), sessionId: "sess_test", sink }).import(
@@ -65,7 +55,7 @@ describe("DurableCloudTraceMirror", () => {
 	});
 
 	it("rejects gaps, tampered ids, and mismatched duplicate payloads", async () => {
-		const path = root();
+		const path = cloudTemp("cloud-mirror-test-");
 		const sink = new Sink();
 		const [first, second] = eventsAt(path, 2);
 		if (!first || !second) throw new Error("missing fixture");
@@ -79,7 +69,7 @@ describe("DurableCloudTraceMirror", () => {
 	});
 
 	it("does not advance durable state when the sink fails", async () => {
-		const path = root();
+		const path = cloudTemp("cloud-mirror-test-");
 		const sink = new Sink();
 		sink.fail = true;
 		const mirror = new DurableCloudTraceMirror({ directory: join(path, "local"), sessionId: "sess_test", sink });
@@ -93,7 +83,7 @@ describe("DurableCloudTraceMirror", () => {
 	});
 
 	it("accepts a newer generation only from sequence one", async () => {
-		const path = root();
+		const path = cloudTemp("cloud-mirror-test-");
 		const sink = new Sink();
 		const remote = new DurableCloudEventOutbox({ directory: join(path, "remote"), sessionId: "sess_test" });
 		const first = remote.append({ kind: "session_status", recordedAt: "a", status: "idle" });
@@ -107,7 +97,7 @@ describe("DurableCloudTraceMirror", () => {
 	});
 
 	it("bounds retained ids and fails closed on corrupt restart state", async () => {
-		const path = root();
+		const path = cloudTemp("cloud-mirror-test-");
 		const sink = new Sink();
 		const local = join(path, "local");
 		const mirror = new DurableCloudTraceMirror({

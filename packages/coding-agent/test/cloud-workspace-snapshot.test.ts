@@ -18,8 +18,6 @@ import {
 	type WorkspaceSnapshotOptions,
 } from "../src/core/cloud/workspace-snapshot.js";
 
-const isWindows = process.platform === "win32";
-
 // The node:fs module namespace is a frozen ESM namespace, so vi.spyOn cannot
 // patch it. A vi.mock factory is the supported way to instrument copyFileSync
 // for the unstable-capture tests; every other export delegates to the real
@@ -459,7 +457,7 @@ describe("createWorkspaceSnapshot", () => {
 	});
 
 	describe("symlinks", () => {
-		it.skipIf(isWindows)("captures symlinks whose targets stay inside the repository", async () => {
+		it("captures symlinks whose targets stay inside the repository", async () => {
 			const repo = makeRepo();
 			writeRepoFile(repo, "internal.txt", "inner\n");
 			commitAll(repo, "init");
@@ -487,7 +485,7 @@ describe("createWorkspaceSnapshot", () => {
 			expect(fs.readFileSync(stagedLink, "utf8")).toBe("inner\n");
 		});
 
-		it.skipIf(isWindows)("excludes symlinks whose targets escape the repository", async () => {
+		it("excludes symlinks whose targets escape the repository", async () => {
 			const repo = makeRepo();
 			writeRepoFile(repo, "keep.txt", "keep\n");
 			commitAll(repo, "init");
@@ -503,7 +501,7 @@ describe("createWorkspaceSnapshot", () => {
 			expect(stagingRelativePaths(snap)).not.toContain("workspace/link-relative-outside");
 		});
 
-		it.skipIf(isWindows)("rejects absolute symlink targets even when they point inside the repository", async () => {
+		it("rejects absolute symlink targets even when they point inside the repository", async () => {
 			const repo = makeRepo();
 			writeRepoFile(repo, "internal.txt", "inner\n");
 			commitAll(repo, "init");
@@ -518,7 +516,7 @@ describe("createWorkspaceSnapshot", () => {
 	});
 
 	describe("regular files only", () => {
-		it.skipIf(isWindows)("skips sockets, devices, and FIFOs", async () => {
+		it("skips sockets, devices, and FIFOs", async () => {
 			const repo = makeRepo();
 			writeRepoFile(repo, "fifo.txt", "fifo\n");
 			writeRepoFile(repo, "sock.txt", "sock\n");
@@ -548,64 +546,58 @@ describe("createWorkspaceSnapshot", () => {
 	});
 
 	describe("symlinked parent directories", () => {
-		it.skipIf(isWindows)(
-			"rejects tracked paths whose parent directory is a symlink outside the repository",
-			async () => {
-				const repo = makeRepo();
-				writeRepoFile(repo, "keep.txt", "keep\n");
-				writeRepoFile(repo, "linkdir/file.txt", "tracked\n");
-				commitAll(repo, "init");
+		it("rejects tracked paths whose parent directory is a symlink outside the repository", async () => {
+			const repo = makeRepo();
+			writeRepoFile(repo, "keep.txt", "keep\n");
+			writeRepoFile(repo, "linkdir/file.txt", "tracked\n");
+			commitAll(repo, "init");
 
-				const outsideDir = fs.mkdtempSync(join(tempRoot, "outside-"));
-				const hostBytes = "host secret bytes\n";
-				fs.writeFileSync(join(outsideDir, "file.txt"), hostBytes);
-				// Replace the tracked parent directory with a symlink to the
-				// outside directory, so "linkdir/file.txt" now names host bytes.
-				fs.rmSync(join(repo, "linkdir"), { recursive: true });
-				fs.symlinkSync(outsideDir, join(repo, "linkdir"));
+			const outsideDir = fs.mkdtempSync(join(tempRoot, "outside-"));
+			const hostBytes = "host secret bytes\n";
+			fs.writeFileSync(join(outsideDir, "file.txt"), hostBytes);
+			// Replace the tracked parent directory with a symlink to the
+			// outside directory, so "linkdir/file.txt" now names host bytes.
+			fs.rmSync(join(repo, "linkdir"), { recursive: true });
+			fs.symlinkSync(outsideDir, join(repo, "linkdir"));
 
-				const snap = await snapshot(repo);
-				expect(snap.manifest.entries.map((entry) => entry.path)).toEqual(["keep.txt"]);
-				expect(exclusionFor(snap, "linkdir/file.txt")?.reason).toBe("symlinked-parent");
-				// Git itself does not descend into a directory that became a
-				// symlink, so the tracked child counts as deleted for HEAD
-				// reconstruction; the host bytes are never captured.
-				expect(snap.manifest.deletedPaths).toEqual(["linkdir/file.txt"]);
-				for (const absPath of walk(snap.stagingDir)) {
-					if (fs.statSync(absPath).isFile()) {
-						expect(fs.readFileSync(absPath, "utf8")).not.toContain("host secret bytes");
-					}
+			const snap = await snapshot(repo);
+			expect(snap.manifest.entries.map((entry) => entry.path)).toEqual(["keep.txt"]);
+			expect(exclusionFor(snap, "linkdir/file.txt")?.reason).toBe("symlinked-parent");
+			// Git itself does not descend into a directory that became a
+			// symlink, so the tracked child counts as deleted for HEAD
+			// reconstruction; the host bytes are never captured.
+			expect(snap.manifest.deletedPaths).toEqual(["linkdir/file.txt"]);
+			for (const absPath of walk(snap.stagingDir)) {
+				if (fs.statSync(absPath).isFile()) {
+					expect(fs.readFileSync(absPath, "utf8")).not.toContain("host secret bytes");
 				}
-			},
-		);
+			}
+		});
 
-		it.skipIf(isWindows)(
-			"rejects regular files beneath a parent-directory symlink that resolves inside the repository",
-			async () => {
-				const repo = makeRepo();
-				writeRepoFile(repo, "insidelink/inner.txt", "placeholder\n");
-				commitAll(repo, "init");
-				// Replace the real directory with a symlink to another in-repo
-				// directory holding different bytes.
-				writeRepoFile(repo, "realdir/inner.txt", "inner\n");
-				fs.rmSync(join(repo, "insidelink"), { recursive: true });
-				fs.symlinkSync("realdir", join(repo, "insidelink"));
+		it("rejects regular files beneath a parent-directory symlink that resolves inside the repository", async () => {
+			const repo = makeRepo();
+			writeRepoFile(repo, "insidelink/inner.txt", "placeholder\n");
+			commitAll(repo, "init");
+			// Replace the real directory with a symlink to another in-repo
+			// directory holding different bytes.
+			writeRepoFile(repo, "realdir/inner.txt", "inner\n");
+			fs.rmSync(join(repo, "insidelink"), { recursive: true });
+			fs.symlinkSync("realdir", join(repo, "insidelink"));
 
-				const snap = await snapshot(repo);
-				// Intermediate symlinks are never traversed, so the tracked child
-				// is excluded even though the parent resolves inside the repo.
-				expect(snap.manifest.entries.map((entry) => entry.path)).toEqual(["insidelink", "realdir/inner.txt"]);
-				const linkEntry = requireEntry(snap, "insidelink");
-				expect(linkEntry.kind).toBe("symlink");
-				expect(linkEntry.target).toBe("realdir");
-				expect(exclusionFor(snap, "insidelink/inner.txt")?.reason).toBe("symlinked-parent");
-				expect(stagingRelativePaths(snap)).not.toContain("workspace/insidelink/inner.txt");
-				// The in-repo target bytes are captured at their own path, while
-				// the tracked child counts as deleted for HEAD reconstruction.
-				expect(fs.readFileSync(stagedWorkspacePath(snap, "realdir/inner.txt"), "utf8")).toBe("inner\n");
-				expect(snap.manifest.deletedPaths).toEqual(["insidelink/inner.txt"]);
-			},
-		);
+			const snap = await snapshot(repo);
+			// Intermediate symlinks are never traversed, so the tracked child
+			// is excluded even though the parent resolves inside the repo.
+			expect(snap.manifest.entries.map((entry) => entry.path)).toEqual(["insidelink", "realdir/inner.txt"]);
+			const linkEntry = requireEntry(snap, "insidelink");
+			expect(linkEntry.kind).toBe("symlink");
+			expect(linkEntry.target).toBe("realdir");
+			expect(exclusionFor(snap, "insidelink/inner.txt")?.reason).toBe("symlinked-parent");
+			expect(stagingRelativePaths(snap)).not.toContain("workspace/insidelink/inner.txt");
+			// The in-repo target bytes are captured at their own path, while
+			// the tracked child counts as deleted for HEAD reconstruction.
+			expect(fs.readFileSync(stagedWorkspacePath(snap, "realdir/inner.txt"), "utf8")).toBe("inner\n");
+			expect(snap.manifest.deletedPaths).toEqual(["insidelink/inner.txt"]);
+		});
 	});
 
 	describe("executable bit", () => {
@@ -671,7 +663,7 @@ describe("createWorkspaceSnapshot", () => {
 			expect(stagingRootEntries()).toEqual(before);
 		});
 
-		it.skipIf(isWindows)("counts symlinks toward the file count limit", async () => {
+		it("counts symlinks toward the file count limit", async () => {
 			const repo = makeRepo();
 			writeRepoFile(repo, "keep.txt", "keep\n");
 			fs.symlinkSync("keep.txt", join(repo, "link.txt"));
@@ -684,7 +676,7 @@ describe("createWorkspaceSnapshot", () => {
 			expect(stagingRootEntries()).toEqual(before);
 		});
 
-		it.skipIf(isWindows)("enforces the per-file size limit on symlink target bytes", async () => {
+		it("enforces the per-file size limit on symlink target bytes", async () => {
 			const repo = makeRepo();
 			writeRepoFile(repo, "keep.txt", "keep\n");
 			commitAll(repo, "init");

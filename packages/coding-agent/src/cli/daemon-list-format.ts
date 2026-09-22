@@ -34,7 +34,7 @@ export function formatSessionListTable(sessions: readonly SessionSummary[], nowM
 		id: formatSessionDisplayId(session.id),
 		status: listStatusForSummary(session),
 		age: formatSessionAge(session.modified, nowMs),
-		model: formatSessionModel(session.model),
+		model: formatModelSelector(session.model),
 		messages: String(session.messageCount),
 		clients: String(session.attachedClients),
 	}));
@@ -99,7 +99,7 @@ function formatSessionAge(modified: string | undefined, nowMs: number): string {
 	return `${Math.floor(ageWeeks / 52)}y`;
 }
 
-function formatSessionModel(model: SessionSummary["model"]): string {
+function formatModelSelector(model: SessionSummary["model"]): string {
 	return model ? `${model.provider}/${model.id}` : "";
 }
 

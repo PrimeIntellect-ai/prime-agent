@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "model": "internal/glm-5.3-fast",
+  "autonomous": false,
+  "max_concurrent": 4,
+  "num_rollouts": 1,
+  "verifiers_commit": "9df6a3c01bb640c34380f4f6dff63a1b168dee22",
+  "environments_commit": "a41660014674ba43d56ed054199dde25ddf69946",
+  "harbor_version": "0.21.0",
+  "scaleswe_dataset_revision": "8935f8e55244fd56080cdb8dcd0819a57e8a003c",
+  "tasksets": [
+    {
+      "id": "swebench-verified",
+      "dataset": "swe-bench/swe-bench-verified@sha256:b934b0cc3dc800fe945eaf9f1623329db97ee3133c706d20644524c7759fb341",
+      "package": "environments/swe/swebench_verified",
+      "tasks": [
+        "astropy__astropy-12907",
+        "django__django-16642",
+        "django__django-14034",
+        "matplotlib__matplotlib-26342",
+        "mwaskom__seaborn-3187",
+        "pallets__flask-5014",
+        "psf__requests-5414",
+        "pydata__xarray-6992",
+        "pylint-dev__pylint-8898",
+        "pytest-dev__pytest-7205",
+        "scikit-learn__scikit-learn-14629",
+        "sphinx-doc__sphinx-7462",
+        "sphinx-doc__sphinx-11445",
+        "sympy__sympy-16450",
+        "sympy__sympy-22914"
+      ]
+    },
+    {
+      "id": "swebench-pro",
+      "dataset": "scale-ai/swe-bench-pro@sha256:88411d32ff27e53a4c1a7e29f0c2aeba180c8e5d60f221cab5ed56325f33549d",
+      "package": "environments/swe/swebench_pro",
+      "tasks": [
+        "instance_element-hq__element-web-33e8edb3d508d6eefb354819ca693b7accc695e7",
+        "instance_internetarchive__openlibrary-111347e9583372e8ef91c82e0612ea437ae3a9c9-v2d9a6c849c60ed19fd0858ce9e40b7cc8e097e59",
+        "instance_qutebrowser__qutebrowser-44e64199ed38003253f0296badd4a447645067b6-v2ef375ac784985212b1805e1d0431dc8f1b3c171",
+        "instance_nodebb__nodebb-0f788b8eaa4bba3c142d171fd941d015c53b65fc-v0ec6d6c2baf3cb4797482ce4829bc25cd5716649",
+        "instance_ansible__ansible-a6e671db25381ed111bbad0ab3e7d97366395d05-v0f01c69f1e2528b935359cfe578530722bca2c59",
+        "instance_gravitational__teleport-0ecf31de0e98b272a6a2610abe1bbedd379a38a3-vce94f93ad1030e3136852817f2423c1b3ac37bc4",
+        "instance_navidrome__navidrome-8383527aaba1ae8fa9765e995a71a86c129ef626",
+        "instance_tutao__tutanota-09c2776c0fce3db5c6e18da92b5a45dce9f013aa-vbc0d9ba8f0071fbe982809910959a6ff8884dbbf"
+      ]
+    },
+    {
+      "id": "scaleswe",
+      "dataset": "PrimeIntellect/Scale-SWE-Verified",
+      "package": "environments/swe/scaleswe",
+      "tasks": [
+        "auth0_auth0-python_pr671",
+        "beetbox_beets_pr3661",
+        "adamtheturtle_doccmd_pr42",
+        "arviz-devs_preliz_pr249",
+        "beetbox_beets_pr4386"
+      ],
+      "filter_unavailable_images": false
+    }
+  ],
+  "network_policy": "framework-only",
+  "limits": {
+    "max_turns": 128,
+    "max_output_tokens": 100000,
+    "max_total_tokens": 5000000,
+    "rollout_timeout_seconds": 3600,
+    "max_model_request_bytes": 16000000
+  },
+  "backup_model": "internal/deepseek-v4.1-flash"
+}

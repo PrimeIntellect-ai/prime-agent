@@ -17,6 +17,7 @@ import type { InputSource } from "../../core/extensions/types.js";
 import type { GoalState } from "../../core/goals.js";
 import type { KernelSentAgentMessage } from "../../core/kernel/index.js";
 import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
+import type { CustomMessage } from "../../core/messages.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
 import type { RlmMaxDepthStatus, SetRlmMaxDepthResult } from "../../core/rlm-max-depth.js";
 import type {
@@ -108,7 +109,7 @@ export interface AgentConnectionSavedSessionState {
 
 export interface AgentConnectionAgentStatus {
 	summary: string;
-	taskState?: "needs_input" | "completed";
+	taskState?: "needs_input" | "completed" | "error";
 	basedOnMessageCount: number;
 }
 
@@ -138,6 +139,8 @@ export interface AgentConnectionSavedSessionInfo {
 	usage?: SessionUsageSummary;
 	/** Present when the saved row is a resident cloud session's shadow. */
 	execution?: SessionExecutionInfo;
+	/** Last recorded provider/model selector; absent for sessions that never ran a model. */
+	model?: { provider: string; modelId: string };
 }
 
 export type AgentConnectionSessionListProgress = (loaded: number, total: number) => void;
@@ -569,6 +572,11 @@ export interface AgentConnectionRlmChildAgentSnapshot {
 	recap?: string;
 	sessionDir: string;
 	activity?: AgentConnectionRlmChildAgentActivity;
+	/** Latest child progress note (`rlm.progress.note`), newest wins. */
+	progressNote?: string;
+	lastActivityAt?: number;
+	/** Set when a running child has had no tracked activity for the staleness threshold. */
+	activityStaleMs?: number;
 	error?: string;
 }
 
@@ -594,8 +602,25 @@ export type AgentConnectionSessionEvent =
 			errorSeverity?: "warning" | "error";
 			customInstructions?: string;
 	  }
-	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
-	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
+	| {
+			type: "auto_retry_start";
+			attempt: number;
+			maxAttempts: number;
+			delayMs: number;
+			errorMessage: string;
+			/** Why the retry loop re-issues the turn; absent = ordinary quick retry. */
+			reason?: "usage" | "unavailable" | "backup";
+			/** Present when reason is "backup": "provider/model-id" of the backup. */
+			backupModel?: string;
+	  }
+	| {
+			type: "auto_retry_end";
+			success: boolean;
+			attempt: number;
+			finalError?: string;
+			/** "provider/model-id" restored after a backup-model retry succeeded. */
+			restoredModel?: string;
+	  }
 	| { type: "auth_stale"; provider: string; sourceTokens?: readonly AuthSourceToken[] }
 	| { type: "rlm_child_update"; child: AgentConnectionRlmChildAgentSnapshot }
 	| {
@@ -603,6 +628,7 @@ export type AgentConnectionSessionEvent =
 			type: "streaming_state";
 			streaming: boolean;
 	  }
+	| { type: "rlm_progress_note"; message: string; timestamp: number }
 	| { type: "recap_update"; recap: string | undefined }
 	| { type: "goal_update"; goal: GoalState }
 	| { type: "bash_start"; command: string; excludeFromContext: boolean; transient?: boolean; runId?: string }
@@ -628,7 +654,13 @@ export type AgentConnectionEvent =
 	| { type: "session_status"; recap?: string }
 	| { type: "extension_ui_request"; request: AgentConnectionExtensionUiRequest }
 	| { type: "extension_error"; extensionPath: string; event: string; error: string }
-	| { type: "connection_status"; status: "reconnecting" | "connected"; error?: string }
+	| {
+			type: "connection_status";
+			status: "reconnecting" | "connected";
+			error?: string;
+			/** App version of the restarted daemon; set when recovery re-attached to it. */
+			daemonVersion?: string;
+	  }
 	| { type: "heartbeats_changed" }
 	| { type: "closed"; error?: string };
 
@@ -765,6 +797,13 @@ export interface AgentConnection {
 
 	getState(): Promise<AgentConnectionState>;
 	getInitialSnapshot(): Promise<AgentConnectionSnapshot>;
+	/**
+	 * Replay session events the adapter deferred between attach and this call.
+	 * Only deferring adapters implement it; the interactive UI calls it once
+	 * its initial transcript render is complete, so deferred events apply on
+	 * top of a fully rendered chat instead of racing the initial build.
+	 */
+	flushBufferedSessionEvents?(): Promise<void>;
 	getRlmChildSnapshots(): Promise<AgentConnectionRlmChildAgentSnapshot[]>;
 	getMessages(): Promise<AgentMessage[]>;
 	getSessionHeader(): Promise<AgentConnectionSessionHeader | undefined>;
@@ -855,6 +894,13 @@ export interface AgentConnection {
 	): Promise<AgentConnectionCloudSession>;
 	cloudSessionImportResult?(selector: string, cwd?: string): Promise<AgentConnectionCloudSession>;
 
+	/**
+	 * Append a durable custom message to the active session transcript without
+	 * triggering a turn: it persists in the session file and renders in chat.
+	 * Callers must not rely on it while the agent is streaming.
+	 */
+	appendCustomMessage(message: Pick<CustomMessage, "customType" | "content" | "display" | "details">): Promise<void>;
+
 	prompt(message: string, options?: AgentConnectionPromptOptions): Promise<void>;
 	promptAndWait(message: string, options?: AgentConnectionPromptOptions): Promise<void>;
 	startSideQuestion(id: string, question: string, previousTurns?: AgentConnectionSideQuestionTurn[]): Promise<void>;
@@ -862,6 +908,8 @@ export interface AgentConnection {
 	steer(message: string, images?: ImageContent[]): Promise<void>;
 	followUp(message: string, images?: ImageContent[]): Promise<void>;
 	abort(): Promise<void>;
+	/** Abort the active run and start all queued user steering together in one new turn; abort-only when the queue is empty. */
+	abortAndSendQueued(): Promise<void>;
 	cancelRlmChild(childId: string): Promise<boolean>;
 	waitForIdle(): Promise<void>;
 	waitForHeadlessCompletion(options?: AgentConnectionHeadlessCompletionOptions): Promise<AgentAutonomousStatus>;

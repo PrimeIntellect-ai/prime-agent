@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { CloudArtifactRef } from "../src/core/cloud/protocol.js";
 import {
 	CLOUD_SHADOW_HEAD_CUSTOM_TYPE,
@@ -11,23 +10,13 @@ import {
 	ShadowSessionWriter,
 } from "../src/core/cloud/shadow-session-writer.js";
 import { type CustomEntry, parseSessionEntries } from "../src/core/session-manager.js";
+import { cloudTemp } from "./cloud-support.js";
 
 /**
  * Strict tests for the single-writer shadow transcript: identity claims,
  * dedupe, fsync-before-ack semantics (every appended line is readable), and
  * bounded artifact resolution with digest verification.
  */
-
-const roots: string[] = [];
-function temp(): string {
-	const value = mkdtempSync(join(tmpdir(), "shadow-writer-test-"));
-	roots.push(value);
-	return value;
-}
-
-afterEach(() => {
-	for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true, maxRetries: 5 });
-});
 
 function messageEntry(id: string, text: string, parentId: string | null = null) {
 	return {
@@ -49,7 +38,7 @@ function artifactFor(payload: string): CloudArtifactRef {
 
 describe("ShadowSessionWriter", () => {
 	it("creates the shadow with a header that claims the remote session id and a cloud marker", () => {
-		const root = temp();
+		const root = cloudTemp("shadow-writer-test-");
 		const sessionFile = join(root, "sess_shadow_head_1.jsonl");
 		const writer = ShadowSessionWriter.openOrCreate({
 			sessionFile,
@@ -70,7 +59,7 @@ describe("ShadowSessionWriter", () => {
 	});
 
 	it("fails closed when the file belongs to another session id (split-brain guard)", () => {
-		const root = temp();
+		const root = cloudTemp("shadow-writer-test-");
 		const sessionFile = join(root, "sess_shadow_a.jsonl");
 		ShadowSessionWriter.openOrCreate({
 			sessionFile,
@@ -91,7 +80,7 @@ describe("ShadowSessionWriter", () => {
 	});
 
 	it("deduplicates mirrored entries by entry id and appends durably", async () => {
-		const root = temp();
+		const root = cloudTemp("shadow-writer-test-");
 		const sessionFile = join(root, "sess_shadow_dedupe.jsonl");
 		const writer = ShadowSessionWriter.openOrCreate({
 			sessionFile,
@@ -115,7 +104,7 @@ describe("ShadowSessionWriter", () => {
 	});
 
 	it("resolves artifact-backed entries through the bounded transfer and inlines small payloads", async () => {
-		const root = temp();
+		const root = cloudTemp("shadow-writer-test-");
 		const sessionFile = join(root, "sess_shadow_artifact.jsonl");
 		const payload = JSON.stringify(messageEntry("big1", "x".repeat(4096)));
 		let fetched = 0;
@@ -147,7 +136,7 @@ describe("ShadowSessionWriter", () => {
 	});
 
 	it("rejects an artifact whose digest or size does not match its reference", async () => {
-		const root = temp();
+		const root = cloudTemp("shadow-writer-test-");
 		const sessionFile = join(root, "sess_shadow_bad_artifact.jsonl");
 		const payload = JSON.stringify(messageEntry("bad1", "payload"));
 		const ref = artifactFor(payload);
@@ -171,7 +160,7 @@ describe("ShadowSessionWriter", () => {
 	});
 
 	it("stores oversized artifacts under the session artifact directory with a durable marker", async () => {
-		const root = temp();
+		const root = cloudTemp("shadow-writer-test-");
 		const sessionFile = join(root, "sess_shadow_huge.jsonl");
 		const huge = "z".repeat(1024 * 1024 + 512);
 		const payload = JSON.stringify(messageEntry("huge1", huge));
@@ -214,7 +203,7 @@ describe("ShadowSessionWriter", () => {
 	});
 
 	it("records a generation boundary when the session reprovisions", () => {
-		const root = temp();
+		const root = cloudTemp("shadow-writer-test-");
 		const sessionFile = join(root, "sess_shadow_gen.jsonl");
 		const writer = ShadowSessionWriter.openOrCreate({
 			sessionFile,
@@ -233,7 +222,7 @@ describe("ShadowSessionWriter", () => {
 	});
 
 	it("refuses a second session header from the stream", async () => {
-		const root = temp();
+		const root = cloudTemp("shadow-writer-test-");
 		const sessionFile = join(root, "sess_shadow_header.jsonl");
 		const writer = ShadowSessionWriter.openOrCreate({
 			sessionFile,
@@ -257,7 +246,7 @@ describe("ShadowSessionWriter", () => {
 	});
 
 	it("seeds nothing from a pre-existing unrelated file: it claims only its own path", () => {
-		const root = temp();
+		const root = cloudTemp("shadow-writer-test-");
 		const unrelated = join(root, "unrelated.jsonl");
 		writeFileSync(unrelated, `${JSON.stringify({ type: "session", id: "other" })}\n`, { mode: 0o600 });
 		// A fresh writer at its own path never touches the unrelated file.

@@ -10,6 +10,12 @@ export const MAX_THREAD_GOAL_OBJECTIVE_CHARS = 4000;
 export type GoalStatus = "idle" | "active" | "paused" | "budget_limited" | "complete" | "error";
 export type GoalContextKind = "continuation" | "budget_limit" | "objective_updated";
 
+const GOAL_CONTEXT_KIND_LABELS: Record<GoalContextKind, string> = {
+	continuation: "continuation",
+	budget_limit: "budget-limit",
+	objective_updated: "objective-updated",
+};
+
 export interface GoalState {
 	active: boolean;
 	status: GoalStatus;
@@ -160,7 +166,7 @@ export function createGoalContextMessage(
 		throw new Error("Cannot create goal context without an objective.");
 	}
 	const prompt = goalContextPrompt(goal, kind);
-	const text = `<goal_context>\n${prompt}\n</goal_context>`;
+	const text = `[goal: ${GOAL_CONTEXT_KIND_LABELS[kind]}]\n\n${prompt}`;
 	const content: string | (TextContent | ImageContent)[] =
 		images && images.length > 0 ? [{ type: "text", text }, ...images] : text;
 	return {
@@ -224,7 +230,7 @@ Goal state:
 
 The goal persists across turns. Ending one turn does not reduce or redefine the objective. If the goal is not complete yet, make concrete progress toward the full objective.
 
-Before marking the goal complete, audit the current state against every requirement in the objective. Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. If the objective is achieved, run \`await goal.complete()\` in ipython so usage accounting is preserved.
+Before marking the goal complete, audit the current state against every requirement in the objective. Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. If the objective is achieved, run \`await goal.complete()\` in the Python REPL so usage accounting is preserved.
 
 Do not call \`goal.complete()\` unless the goal is complete. Do not mark a goal complete merely because the budget is nearly exhausted or because you are stopping work.`;
 }

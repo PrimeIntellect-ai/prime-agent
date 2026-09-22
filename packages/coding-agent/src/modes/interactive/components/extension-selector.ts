@@ -7,12 +7,20 @@ import { Container, getKeybindings, Spacer, Text, type TUI } from "@earendil-wor
 import { theme } from "../theme/theme.js";
 import { CountdownTimer } from "./countdown-timer.js";
 import { keyHint, rawKeyHint } from "./keybinding-hints.js";
-import { getMenuListLayout, MenuList, MenuPanel, MenuRow, type MenuViewportProvider } from "./menu-panel.js";
+import {
+	getMenuListLayout,
+	inlineMenuPanelTopRuleRows,
+	MenuList,
+	MenuPanel,
+	MenuRow,
+	type MenuViewportProvider,
+} from "./menu-panel.js";
 
 export interface ExtensionSelectorOptions {
 	tui?: TUI;
 	timeout?: number;
 	getRows?: () => number;
+	inline?: boolean;
 }
 
 const PREFERRED_VISIBLE_OPTIONS = 8;
@@ -49,6 +57,7 @@ export class ExtensionSelectorComponent extends Container {
 		compactItemRows: 1,
 	});
 	private readonly viewport: MenuViewportProvider;
+	private readonly inline: boolean;
 
 	constructor(
 		title: string,
@@ -62,15 +71,16 @@ export class ExtensionSelectorComponent extends Container {
 		this.options = options;
 		this.onSelectCallback = onSelect;
 		this.onCancelCallback = onCancel;
+		this.inline = opts?.inline === true;
 		const header = splitTitleAndDescription(title);
 		this.baseTitle = header.title;
-		this.reservedRows = OPTION_LIST_RESERVED_BASE_ROWS + header.descriptionRows;
 		const tui = opts?.tui;
 		this.viewport = { getRows: opts?.getRows ?? (tui ? () => tui.terminal.rows : undefined) };
 
 		this.panel = new MenuPanel({
 			title: header.title,
 			subtitle: header.description,
+			inline: this.inline,
 		});
 		this.addChild(this.panel);
 
@@ -83,9 +93,20 @@ export class ExtensionSelectorComponent extends Container {
 			);
 		}
 
-		this.listContainer = new MenuList({ compact: true });
+		this.listContainer = new MenuList({ compact: true, inline: this.inline });
 		this.panel.addChild(this.listContainer);
-		this.panel.addChild(new Spacer(1));
+		// The inline panel opens with its separator rule; budget it.
+		this.reservedRows =
+			OPTION_LIST_RESERVED_BASE_ROWS +
+			header.descriptionRows +
+			(this.inline
+				? inlineMenuPanelTopRuleRows({
+						title: header.title,
+						subtitle: header.description,
+						firstChild: this.listContainer,
+					})
+				: 0);
+		if (!this.inline) this.panel.addChild(new Spacer(1));
 		this.panel.addChild(
 			new Text(
 				rawKeyHint("↑↓", "navigate") +
@@ -128,6 +149,7 @@ export class ExtensionSelectorComponent extends Container {
 				new MenuRow({
 					primary: this.options[i] ?? "",
 					selected: isSelected,
+					inline: this.inline,
 				}),
 			);
 		}

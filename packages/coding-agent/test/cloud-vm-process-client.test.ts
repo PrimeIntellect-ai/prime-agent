@@ -14,6 +14,14 @@ import {
 	type VmProcessClientOptions,
 	VmProcessError,
 } from "../src/core/cloud/vm-process-client.js";
+import {
+	expectErrorOf,
+	type FetchMock,
+	type FetchResponder,
+	fetchRecorder,
+	headerOf,
+	jsonResponse,
+} from "./cloud-prime-api-fakes.js";
 
 const GATEWAY_URL = "https://sandbox-gw.example.com";
 const NS = "ns_user1";
@@ -24,11 +32,6 @@ const REFRESH_TOKEN = "gateway-token-two";
 const SESSION_UUID = "7dd7ad0e-6f23-4a75-8d46-1e4a25ac9c12";
 const PID = 4242;
 
-interface Recorded {
-	url: string;
-	init: RequestInit | undefined;
-}
-
 function rpcUrl(method: string): string {
 	return `${BASE}/command_session.CommandSession/${method}`;
 }
@@ -37,24 +40,7 @@ function auth(overrides: Partial<VmGatewayAuth> = {}): VmGatewayAuth {
 	return { gatewayUrl: GATEWAY_URL, userNamespace: NS, jobId: JOB, token: TOKEN, ...overrides };
 }
 
-type FetchMock = ReturnType<typeof vi.fn>;
-
-function fetchRouter(responders: Array<(record: Recorded, index: number) => Response | Promise<Response>>): {
-	mock: FetchMock;
-	calls: Recorded[];
-} {
-	const calls: Recorded[] = [];
-	const mock = vi.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-		const record: Recorded = { url: String(input), init };
-		calls.push(record);
-		const responder = responders[calls.length - 1] ?? responders.at(-1);
-		if (responder === undefined) {
-			throw new Error(`unexpected fetch #${calls.length} to ${record.url}`);
-		}
-		return responder(record, calls.length - 1);
-	});
-	return { mock, calls };
-}
+const expectError = (promise: Promise<unknown>) => expectErrorOf(promise, VmProcessError);
 
 function makeClient(mock: FetchMock, options: Partial<VmProcessClientOptions> = {}) {
 	const authSource: VmProcessAuthSource = {
@@ -66,6 +52,12 @@ function makeClient(mock: FetchMock, options: Partial<VmProcessClientOptions> = 
 		fetchFn: mock as unknown as typeof fetch,
 		...options,
 	});
+}
+
+/** A client over a recorded fetch that answers from the responder list (the last repeats). */
+function vmCase(responders: FetchResponder[], options: Partial<VmProcessClientOptions> = {}) {
+	const { mock, calls } = fetchRecorder(responders);
+	return { client: makeClient(mock, options), mock, calls };
 }
 
 // ---------------------------------------------------------------------------
@@ -150,6 +142,14 @@ function* tfields(input: Uint8Array): Generator<TField> {
 	}
 }
 
+function findField(input: Uint8Array | undefined, field: number): TField | undefined {
+	return [...tfields(input ?? new Uint8Array(0))].find((entry) => entry.field === field);
+}
+
+function strOf(field: TField | undefined): string {
+	return new TextDecoder().decode(field?.bytes ?? new Uint8Array(0));
+}
+
 function bodyBytes(init: RequestInit | undefined): Uint8Array {
 	if (!(init?.body instanceof Uint8Array)) {
 		throw new Error("expected Uint8Array request body");
@@ -163,14 +163,6 @@ function unwrapEnvelope(body: Uint8Array): { flags: number; payload: Uint8Array 
 	const length = (body[1] << 24) | (body[2] << 16) | (body[3] << 8) | body[4];
 	expect(length).toBe(body.byteLength - 5);
 	return { flags, payload: body.slice(5) };
-}
-
-function headerOf(init: RequestInit | undefined): Record<string, string> {
-	const headers = init?.headers;
-	if (!headers || Array.isArray(headers) || headers instanceof Headers) {
-		throw new Error("expected plain record headers");
-	}
-	return headers as Record<string, string>;
 }
 
 // --- event fixtures ---
@@ -218,11 +210,6 @@ function endOfStream(json: unknown = {}): Uint8Array {
 	return envelope(new TextEncoder().encode(JSON.stringify(json)), 0x02);
 }
 
-/** Envelope one StartResponse/ConnectResponse message as a stream frame. */
-function env(payload: Uint8Array, flags = 0): Uint8Array {
-	return envelope(payload, flags);
-}
-
 function streamContentType(): Record<string, string> {
 	return { "Content-Type": "application/connect+proto" };
 }
@@ -243,20 +230,6 @@ function streamResponse(...frames: Uint8Array[]): Response {
 
 function unaryOk(body: Uint8Array = new Uint8Array(0)): Response {
 	return new Response(body, { status: 200, headers: { "Content-Type": "application/proto" } });
-}
-
-function jsonResponse(status: number, body: unknown): Response {
-	return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
-}
-
-async function expectError(promise: Promise<unknown>): Promise<VmProcessError> {
-	try {
-		await promise;
-	} catch (caught) {
-		expect(caught).toBeInstanceOf(VmProcessError);
-		return caught as VmProcessError;
-	}
-	throw new Error("expected the call to fail");
 }
 
 const noSleep = async () => undefined;
@@ -315,15 +288,14 @@ describe("canonicalUuidKey", () => {
 
 describe("VmProcessClient.start", () => {
 	it("sends an enveloped Start request with auth and Connect headers", async () => {
-		const { mock, calls } = fetchRouter([
-			(_record) =>
+		const { client, calls } = vmCase([
+			() =>
 				streamResponse(
-					env(startEvent(PID)),
-					env(dataEvent("stdout", new Uint8Array([65]))),
-					env(endEvent({ exitCode: 0 })),
+					envelope(startEvent(PID)),
+					envelope(dataEvent("stdout", new Uint8Array([65]))),
+					envelope(endEvent({ exitCode: 0 })),
 				),
 		]);
-		const client = makeClient(mock);
 		const stream = await client.start(startRequest, { connectTimeoutMs: 0, sleepFn: noSleep });
 
 		expect(calls.length).toBe(1);
@@ -345,23 +317,23 @@ describe("VmProcessClient.start", () => {
 		const sessionField = fields.find((f) => f.field === 5);
 		expect(spec?.bytes).toBeDefined();
 		const specFields = [...tfields(spec?.bytes ?? new Uint8Array(0))];
-		expect(new TextDecoder().decode(specFields[0]?.bytes ?? new Uint8Array(0))).toBe("/opt/prime/bin/daemon");
-		expect(new TextDecoder().decode(specFields[1]?.bytes ?? new Uint8Array(0))).toBe("--port");
-		const envEntry = specFields.find((f) => f.field === 3);
-		const envFields = [...tfields(envEntry?.bytes ?? new Uint8Array(0))];
-		expect(new TextDecoder().decode(envFields[0]?.bytes ?? new Uint8Array(0))).toBe("HOME");
-		expect(new TextDecoder().decode(envFields[1]?.bytes ?? new Uint8Array(0))).toBe("/root");
-		expect(new TextDecoder().decode(specFields.at(-1)?.bytes ?? new Uint8Array(0))).toBe("/workspace");
+		expect(strOf(specFields[0])).toBe("/opt/prime/bin/daemon");
+		expect(strOf(specFields[1])).toBe("--port");
+		const envFields = [...tfields(findField(spec?.bytes, 3)?.bytes ?? new Uint8Array(0))];
+		expect(strOf(envFields[0])).toBe("HOME");
+		expect(strOf(envFields[1])).toBe("/root");
+		expect(strOf(specFields.at(-1))).toBe("/workspace");
 		expect(stdinField?.varint).toBe(0);
-		expect(new TextDecoder().decode(sessionField?.bytes ?? new Uint8Array(0))).toBe(SESSION_UUID);
+		expect(strOf(sessionField)).toBe(SESSION_UUID);
 
 		await expect(stream.started).resolves.toBe(PID);
 		await stream.release();
 	});
 
 	it("canonicalizes session UUID spellings onto the wire", async () => {
-		const { mock, calls } = fetchRouter([() => streamResponse(env(startEvent(PID)), env(endEvent({ exitCode: 3 })))]);
-		const client = makeClient(mock);
+		const { client, calls } = vmCase([
+			() => streamResponse(envelope(startEvent(PID)), envelope(endEvent({ exitCode: 3 }))),
+		]);
 		const stream = await client.start(
 			{
 				...startRequest,
@@ -369,8 +341,7 @@ describe("VmProcessClient.start", () => {
 			},
 			{ sleepFn: noSleep },
 		);
-		const sessionField = [...tfields(unwrapEnvelope(bodyBytes(calls[0].init)).payload)].find((f) => f.field === 5);
-		expect(new TextDecoder().decode(sessionField?.bytes ?? new Uint8Array(0))).toBe(SESSION_UUID);
+		expect(strOf(findField(unwrapEnvelope(bodyBytes(calls[0].init)).payload, 5))).toBe(SESSION_UUID);
 		await expect(stream.exit).resolves.toMatchObject({ exitCode: 3 });
 	});
 
@@ -386,8 +357,9 @@ describe("VmProcessClient.start", () => {
 			{ label: "no fields at all", body: new Uint8Array(0) },
 		];
 		for (const scenario of scenarios) {
-			const { mock } = fetchRouter([() => streamResponse(env(startEvent(PID)), env(partialEnd(scenario.body)))]);
-			const client = makeClient(mock);
+			const { client } = vmCase([
+				() => streamResponse(envelope(startEvent(PID)), envelope(partialEnd(scenario.body))),
+			]);
 			const stream = await client.start({ ...startRequest, sessionUuid: SESSION_UUID }, { sleepFn: noSleep });
 			const end = await stream.exit;
 			expect(end.kind).toBe("end");
@@ -395,18 +367,16 @@ describe("VmProcessClient.start", () => {
 			await stream.release();
 		}
 		// Fields that ARE present still decode faithfully.
-		const { mock: full } = fetchRouter([
-			() => streamResponse(env(startEvent(PID)), env(endEvent({ exitCode: 7, status: "stopped" }))),
+		const full = vmCase([
+			() => streamResponse(envelope(startEvent(PID)), envelope(endEvent({ exitCode: 7, status: "stopped" }))),
 		]);
-		const client = makeClient(full);
-		const stream = await client.start({ ...startRequest, sessionUuid: SESSION_UUID }, { sleepFn: noSleep });
+		const stream = await full.client.start({ ...startRequest, sessionUuid: SESSION_UUID }, { sleepFn: noSleep });
 		await expect(stream.exit).resolves.toMatchObject({ exitCode: 7, exited: true, status: "stopped" });
 		await stream.release();
 	});
 
 	it("rejects invalid session UUIDs before any network call", async () => {
-		const { mock, calls } = fetchRouter([() => streamResponse()]);
-		const client = makeClient(mock);
+		const { client, calls } = vmCase([() => streamResponse()]);
 		for (const bad of ["not-a-uuid", "", "00000000-0000-0000-0000-000000000000", "urn:uuid:xyz"]) {
 			const error = await expectError(client.start({ ...startRequest, sessionUuid: bad }, { sleepFn: noSleep }));
 			expect(error.code).toBe("invalid_request");
@@ -415,18 +385,17 @@ describe("VmProcessClient.start", () => {
 	});
 
 	it("delivers events in order and resolves exit, skipping keepalives", async () => {
-		const { mock } = fetchRouter([
+		const { client } = vmCase([
 			() =>
 				streamResponse(
-					env(startEvent(PID)),
-					env(keepaliveEvent()),
-					env(dataEvent("stdout", new Uint8Array([0x68, 0x69]))),
-					env(dataEvent("stderr", new Uint8Array([0x65, 0x72, 0x72]))),
-					env(dataEvent("pty", new Uint8Array([0x70]))),
-					env(endEvent({ exitCode: -1, status: "exited", error: "boom" })),
+					envelope(startEvent(PID)),
+					envelope(keepaliveEvent()),
+					envelope(dataEvent("stdout", new Uint8Array([0x68, 0x69]))),
+					envelope(dataEvent("stderr", new Uint8Array([0x65, 0x72, 0x72]))),
+					envelope(dataEvent("pty", new Uint8Array([0x70]))),
+					envelope(endEvent({ exitCode: -1, status: "exited", error: "boom" })),
 				),
 		]);
-		const client = makeClient(mock);
 		const stream = await client.start(startRequest, { sleepFn: noSleep });
 		const seen: string[] = [];
 		for await (const event of stream) {
@@ -444,12 +413,12 @@ describe("VmProcessClient.start", () => {
 
 	it("releases the resident transport without terminating the process", async () => {
 		let cancelSeen = false;
-		const { mock, calls } = fetchRouter([
+		const { client, calls } = vmCase([
 			() =>
 				new Response(
 					new ReadableStream<Uint8Array>({
 						start(controller) {
-							controller.enqueue(env(startEvent(PID)));
+							controller.enqueue(envelope(startEvent(PID)));
 						},
 						cancel() {
 							cancelSeen = true;
@@ -459,7 +428,6 @@ describe("VmProcessClient.start", () => {
 				),
 			() => unaryOk(),
 		]);
-		const client = makeClient(mock);
 		const stream = await client.start(startRequest, { sleepFn: noSleep, connectTimeoutMs: 0 });
 		expect(stream.released).toBe(false);
 		await stream.release();
@@ -478,13 +446,16 @@ describe("VmProcessClient.start", () => {
 	});
 
 	it("retries Start with identical bytes after a pre-start drop (create-or-attach)", async () => {
-		const { mock, calls } = fetchRouter([
+		const { client, calls } = vmCase([
 			() => streamResponse(), // drops before any event
-			() => streamResponse(env(startEvent(PID)), env(endEvent({ exitCode: 0 }))),
+			() => streamResponse(envelope(startEvent(PID)), envelope(endEvent({ exitCode: 0 }))),
 		]);
-		const client = makeClient(mock);
 		const sleep = vi.fn(noSleep);
-		const stream = await client.start(startRequest, { sleepFn: sleep, maxReconnects: 2, reconnectBaseDelayMs: 500 });
+		const stream = await client.start(startRequest, {
+			sleepFn: sleep,
+			maxReconnects: 2,
+			reconnectBaseDelayMs: 500,
+		});
 		expect(calls.length).toBe(2);
 		expect(calls[0].url).toBe(rpcUrl("Start"));
 		expect(calls[1].url).toBe(rpcUrl("Start"));
@@ -495,28 +466,29 @@ describe("VmProcessClient.start", () => {
 	});
 
 	it("re-attaches with Connect by session selector after a post-start drop", async () => {
-		const { mock, calls } = fetchRouter([
-			() => streamResponse(env(startEvent(PID)), env(dataEvent("stdout", new Uint8Array([1])))),
+		const { client, calls } = vmCase([
+			() => streamResponse(envelope(startEvent(PID)), envelope(dataEvent("stdout", new Uint8Array([1])))),
 			// Retained-session replay: start + end, like sandboxd retention.
-			() => streamResponse(env(startEvent(PID)), env(endEvent({ exitCode: 5, status: "exited" })), endOfStream()),
+			() =>
+				streamResponse(
+					envelope(startEvent(PID)),
+					envelope(endEvent({ exitCode: 5, status: "exited" })),
+					endOfStream(),
+				),
 		]);
-		const client = makeClient(mock);
 		const stream = await client.start(startRequest, { sleepFn: noSleep, maxReconnects: 3 });
 		await expect(stream.exit).resolves.toMatchObject({ exitCode: 5 });
 		expect(calls.length).toBe(2);
 		expect(calls[1].url).toBe(rpcUrl("Connect"));
 		const { payload } = unwrapEnvelope(bodyBytes(calls[1].init));
-		const selector = [...tfields(payload)].find((f) => f.field === 1);
-		const sessionField = [...tfields(selector?.bytes ?? new Uint8Array(0))].find((f) => f.field === 3);
-		expect(new TextDecoder().decode(sessionField?.bytes ?? new Uint8Array(0))).toBe(SESSION_UUID);
+		expect(strOf(findField(findField(payload, 1)?.bytes, 3))).toBe(SESSION_UUID);
 		await expect(stream.started).resolves.toBe(PID);
 	});
 
 	it("connect() attaches without starting and replays a retained exit", async () => {
-		const { mock, calls } = fetchRouter([
-			() => streamResponse(env(startEvent(PID)), env(endEvent({ exitCode: 1 })), endOfStream()),
+		const { client, calls } = vmCase([
+			() => streamResponse(envelope(startEvent(PID)), envelope(endEvent({ exitCode: 1 })), endOfStream()),
 		]);
-		const client = makeClient(mock);
 		const stream = await client.connect(SESSION_UUID, { sleepFn: noSleep });
 		expect(calls[0].url).toBe(rpcUrl("Connect"));
 		await expect(stream.started).resolves.toBe(PID);
@@ -525,14 +497,13 @@ describe("VmProcessClient.start", () => {
 
 	it("surfaces fatal stream answers without reconnecting", async () => {
 		const cases: Record<string, () => Response> = {
-			not_found: () => jsonResponse(404, { code: "not_found", message: "process with session_uuid not found" }),
-			failed_precondition: () => jsonResponse(412, { code: "failed_precondition", message: "spec conflict" }),
-			invalid_argument: () => jsonResponse(400, { code: "invalid_argument", message: "bad session_uuid" }),
-			sandbox_not_found: () => jsonResponse(502, { error: "sandbox_not_found", message: "sandbox is gone" }),
+			not_found: () => jsonResponse({ code: "not_found", message: "process with session_uuid not found" }, 404),
+			failed_precondition: () => jsonResponse({ code: "failed_precondition", message: "spec conflict" }, 412),
+			invalid_argument: () => jsonResponse({ code: "invalid_argument", message: "bad session_uuid" }, 400),
+			sandbox_not_found: () => jsonResponse({ error: "sandbox_not_found", message: "sandbox is gone" }, 502),
 		};
 		for (const [code, respond] of Object.entries(cases)) {
-			const { mock, calls } = fetchRouter([respond]);
-			const client = makeClient(mock);
+			const { client, calls } = vmCase([respond]);
 			const error = await expectError(client.start(startRequest, { sleepFn: noSleep }));
 			expect(error.code, code).toBe(code);
 			// One fetch: the fault was definitive, so the reconnect budget is untouched.
@@ -541,14 +512,17 @@ describe("VmProcessClient.start", () => {
 	});
 
 	it("exhausts the reconnect budget and surfaces the last fault", async () => {
-		const { mock, calls } = fetchRouter([
-			() => streamResponse(env(startEvent(PID))),
-			() => streamResponse(env(startEvent(PID))),
-			() => streamResponse(env(startEvent(PID))),
+		const { client, calls } = vmCase([
+			() => streamResponse(envelope(startEvent(PID))),
+			() => streamResponse(envelope(startEvent(PID))),
+			() => streamResponse(envelope(startEvent(PID))),
 		]);
-		const client = makeClient(mock);
 		const sleep = vi.fn(noSleep);
-		const stream = await client.start(startRequest, { sleepFn: sleep, maxReconnects: 1, reconnectBaseDelayMs: 100 });
+		const stream = await client.start(startRequest, {
+			sleepFn: sleep,
+			maxReconnects: 1,
+			reconnectBaseDelayMs: 100,
+		});
 		// The first attempt (which start() awaits) succeeds; the drop happens after.
 		const error = await expectError(stream.exit);
 		expect(error.code).toBe("network");
@@ -557,10 +531,10 @@ describe("VmProcessClient.start", () => {
 	});
 
 	it("re-auths once per attempt when the stream attempt answers 401", async () => {
-		const { mock, calls } = fetchRouter([
-			() => jsonResponse(401, { code: "unauthenticated", message: "expired" }),
-			() => streamResponse(env(startEvent(PID)), env(endEvent({ exitCode: 0 }))),
-			() => jsonResponse(401, { code: "unauthenticated", message: "expired" }),
+		const { mock, calls } = fetchRecorder([
+			() => jsonResponse({ code: "unauthenticated", message: "expired" }, 401),
+			() => streamResponse(envelope(startEvent(PID)), envelope(endEvent({ exitCode: 0 }))),
+			() => jsonResponse({ code: "unauthenticated", message: "expired" }, 401),
 		]);
 		const authSource: VmProcessAuthSource = {
 			getAuth: async () => auth(),
@@ -579,10 +553,9 @@ describe("VmProcessClient.start", () => {
 	});
 
 	it("rejects non-connect+proto stream responses", async () => {
-		const { mock, calls } = fetchRouter([
+		const { client, calls } = vmCase([
 			() => new Response("nope", { status: 200, headers: { "Content-Type": "text/plain" } }),
 		]);
-		const client = makeClient(mock);
 		const error = await expectError(client.start(startRequest, { sleepFn: noSleep, maxReconnects: 0 }));
 		expect(error.code).toBe("invalid_response");
 		expect(calls.length).toBe(1);
@@ -590,46 +563,45 @@ describe("VmProcessClient.start", () => {
 
 	it("bounds frame size and aborts on oversize frames", async () => {
 		const big = envelope(new Uint8Array(64 * 1024).fill(0x41));
-		const { mock } = fetchRouter([
-			() => streamResponse(env(startEvent(PID)), env(big)),
-			() => streamResponse(env(startEvent(PID)), env(endEvent({ exitCode: 0 }))),
-		]);
-		const client = makeClient(mock, { maxEventFrameBytes: 32 * 1024 });
+		const { client } = vmCase(
+			[
+				() => streamResponse(envelope(startEvent(PID)), envelope(big)),
+				() => streamResponse(envelope(startEvent(PID)), envelope(endEvent({ exitCode: 0 }))),
+			],
+			{ maxEventFrameBytes: 32 * 1024 },
+		);
 		const stream = await client.start(startRequest, { sleepFn: noSleep });
 		const error = await expectError(stream.exit);
 		expect(error.code).toBe("too_large");
 	});
 
 	it("rejects compressed frames it never negotiated", async () => {
-		const { mock } = fetchRouter([() => streamResponse(env(startEvent(PID)), env(startEvent(PID), 0x01))]);
-		const client = makeClient(mock);
+		const { client } = vmCase([() => streamResponse(envelope(startEvent(PID)), envelope(startEvent(PID), 0x01))]);
 		const stream = await client.start(startRequest, { sleepFn: noSleep });
 		const error = await expectError(stream.exit);
 		expect(error.code).toBe("invalid_response");
 	});
 
 	it("treats a truncated frame at EOF as a recoverable network fault", async () => {
-		const truncated = env(startEvent(PID)).slice(0, 9); // header promises more payload bytes than delivered
-		const { mock, calls } = fetchRouter([
-			() => streamResponse(env(startEvent(PID)), truncated),
-			() => streamResponse(env(startEvent(PID)), env(endEvent({ exitCode: 0 }))),
+		const truncated = envelope(startEvent(PID)).slice(0, 9); // header promises more payload bytes than delivered
+		const { client, calls } = vmCase([
+			() => streamResponse(envelope(startEvent(PID)), truncated),
+			() => streamResponse(envelope(startEvent(PID)), envelope(endEvent({ exitCode: 0 }))),
 		]);
-		const client = makeClient(mock);
 		const stream = await client.start(startRequest, { sleepFn: noSleep });
 		await expect(stream.exit).resolves.toMatchObject({ exitCode: 0 });
 		expect(calls.length).toBe(2);
 	});
 
 	it("surfaces end-of-stream error frames with their Connect code", async () => {
-		const { mock, calls } = fetchRouter([
-			() => streamResponse(env(startEvent(PID))),
+		const { client, calls } = vmCase([
+			() => streamResponse(envelope(startEvent(PID))),
 			() =>
 				streamResponse(
-					env(startEvent(PID)),
+					envelope(startEvent(PID)),
 					endOfStream({ error: { code: "not_found", message: "session expired" } }),
 				),
 		]);
-		const client = makeClient(mock);
 		const stream = await client.start(startRequest, { sleepFn: noSleep });
 		const error = await expectError(stream.exit);
 		expect(error.code).toBe("not_found");
@@ -638,14 +610,14 @@ describe("VmProcessClient.start", () => {
 	});
 
 	it("stops reading while the consumer is behind, then resumes (backpressure)", async () => {
-		const frames = [env(startEvent(PID))];
+		const frames = [envelope(startEvent(PID))];
 		for (let index = 0; index < 5; index++) {
-			frames.push(env(dataEvent("stdout", Uint8Array.of(index))));
+			frames.push(envelope(dataEvent("stdout", Uint8Array.of(index))));
 		}
-		frames.push(env(endEvent({ exitCode: 0 })));
+		frames.push(envelope(endEvent({ exitCode: 0 })));
 		let pulls = 0;
 		let position = 0;
-		const { mock } = fetchRouter([
+		const { client } = vmCase([
 			() =>
 				new Response(
 					new ReadableStream<Uint8Array>({
@@ -662,7 +634,6 @@ describe("VmProcessClient.start", () => {
 					{ status: 200, headers: streamContentType() },
 				),
 		]);
-		const client = makeClient(mock);
 		const stream = await client.start(startRequest, { sleepFn: noSleep, maxPendingEvents: 2 });
 		// start() already consumed one event; the pump may buffer at most two more
 		// before it stops pulling. Drain slowly and check everything arrives.
@@ -681,8 +652,7 @@ describe("VmProcessClient.start", () => {
 
 describe("VmProcessClient control RPCs", () => {
 	it("sendInput posts a unary SendInput with selector, bytes, and idempotency key", async () => {
-		const { mock, calls } = fetchRouter([() => unaryOk()]);
-		const client = makeClient(mock);
+		const { client, calls } = vmCase([() => unaryOk()]);
 		const inputUuid = "11111111-2222-3333-4444-555555555555";
 		await client.sendInput(SESSION_UUID, "stdin", new Uint8Array([0xde, 0xad]), {
 			inputUuid,
@@ -696,32 +666,29 @@ describe("VmProcessClient control RPCs", () => {
 		expect(headers["Connect-Timeout-Ms"]).toBe("5000");
 		const fields = [...tfields(bodyBytes(init))];
 		const selector = fields.find((f) => f.field === 1);
-		const sessionField = [...tfields(selector?.bytes ?? new Uint8Array(0))].find((f) => f.field === 3);
-		expect(new TextDecoder().decode(sessionField?.bytes ?? new Uint8Array(0))).toBe(SESSION_UUID);
+		expect(strOf(findField(selector?.bytes, 3))).toBe(SESSION_UUID);
 		const input = fields.find((f) => f.field === 2);
-		const stdinField = [...tfields(input?.bytes ?? new Uint8Array(0))].find((f) => f.field === 1);
-		expect([...(stdinField?.bytes ?? new Uint8Array(0))]).toEqual([0xde, 0xad]);
-		const keyField = fields.find((f) => f.field === 3);
-		expect(new TextDecoder().decode(keyField?.bytes ?? new Uint8Array(0))).toBe(inputUuid);
+		expect([...(findField(input?.bytes, 1)?.bytes ?? new Uint8Array(0))]).toEqual([0xde, 0xad]);
+		expect(strOf(fields.find((f) => f.field === 3))).toBe(inputUuid);
 	});
 
 	it("sendInput writes to the pty channel when asked", async () => {
-		const { mock, calls } = fetchRouter([() => unaryOk()]);
-		const client = makeClient(mock);
+		const { client, calls } = vmCase([() => unaryOk()]);
 		await client.sendInput(SESSION_UUID, "pty", new Uint8Array([0x0d]));
-		const input = [...tfields(bodyBytes(calls[0].init))].find((f) => f.field === 2);
-		const ptyField = [...tfields(input?.bytes ?? new Uint8Array(0))].find((f) => f.field === 2);
-		expect(ptyField).toBeDefined();
+		const input = findField(bodyBytes(calls[0].init), 2);
+		expect(findField(input?.bytes, 2)).toBeDefined();
 	});
 
 	it("sendInput retries transient faults with identical bytes and backoff", async () => {
-		const { mock, calls } = fetchRouter([
-			() => jsonResponse(503, { code: "unavailable", message: "gateway busy" }),
-			() => jsonResponse(504, { code: "deadline_exceeded", message: "slow" }),
-			() => unaryOk(),
-		]);
 		const sleep = vi.fn(noSleep);
-		const client = makeClient(mock, { sleepFn: sleep });
+		const { client, calls } = vmCase(
+			[
+				() => jsonResponse({ code: "unavailable", message: "gateway busy" }, 503),
+				() => jsonResponse({ code: "deadline_exceeded", message: "slow" }, 504),
+				() => unaryOk(),
+			],
+			{ sleepFn: sleep },
+		);
 		await client.sendInput(SESSION_UUID, "stdin", new Uint8Array([1]));
 		expect(calls.length).toBe(3);
 		expect(Buffer.from(bodyBytes(calls[0].init))).toEqual(Buffer.from(bodyBytes(calls[1].init)));
@@ -732,10 +699,7 @@ describe("VmProcessClient control RPCs", () => {
 	});
 
 	it("sendInput fails fast on permanent answers", async () => {
-		const { mock, calls } = fetchRouter([
-			() => jsonResponse(404, { code: "not_found", message: "process not found" }),
-		]);
-		const client = makeClient(mock);
+		const { client, calls } = vmCase([() => jsonResponse({ code: "not_found", message: "process not found" }, 404)]);
 		const error = await expectError(client.sendInput(SESSION_UUID, "stdin", new Uint8Array([1])));
 		expect(error.code).toBe("not_found");
 		expect(error.message).toBe("process not found");
@@ -743,9 +707,9 @@ describe("VmProcessClient control RPCs", () => {
 	});
 
 	it("sendInput refreshes auth once on 401, then surfaces the second", async () => {
-		const { mock, calls } = fetchRouter([
-			() => jsonResponse(401, { code: "unauthenticated", message: "expired" }),
-			() => jsonResponse(401, { code: "unauthenticated", message: "expired again" }),
+		const { mock, calls } = fetchRecorder([
+			() => jsonResponse({ code: "unauthenticated", message: "expired" }, 401),
+			() => jsonResponse({ code: "unauthenticated", message: "expired again" }, 401),
 		]);
 		const authSource: VmProcessAuthSource = {
 			getAuth: async () => auth(),
@@ -761,8 +725,7 @@ describe("VmProcessClient control RPCs", () => {
 	});
 
 	it("validates input bounds before the network", async () => {
-		const { mock, calls } = fetchRouter([() => unaryOk()]);
-		const client = makeClient(mock);
+		const { client, calls } = vmCase([() => unaryOk()]);
 		const empty = await expectError(client.sendInput(SESSION_UUID, "stdin", new Uint8Array(0)));
 		expect(empty.code).toBe("invalid_request");
 		const tooLarge = await expectError(
@@ -779,8 +742,7 @@ describe("VmProcessClient control RPCs", () => {
 			new Response(new Uint8Array(0), { status: 200, headers: { "Content-Type": "application/json" } }),
 			unaryOk(new Uint8Array([0xff, 0xff, 0xff, 0xff, 0xff])),
 		]) {
-			const { mock, calls } = fetchRouter([() => response]);
-			const client = makeClient(mock);
+			const { client, calls } = vmCase([() => response]);
 			const error = await expectError(client.sendInput(SESSION_UUID, "stdin", new Uint8Array([1])));
 			expect(error.code).toBe("invalid_response");
 			expect(calls.length).toBe(1);
@@ -788,39 +750,29 @@ describe("VmProcessClient control RPCs", () => {
 	});
 
 	it("sendSignal encodes terminate as 15 and kill as 9 with a key", async () => {
-		const { mock, calls } = fetchRouter([() => unaryOk(), () => unaryOk()]);
-		const client = makeClient(mock);
+		const { client, calls } = vmCase([() => unaryOk(), () => unaryOk()]);
 		const signalUuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 		await client.sendSignal(SESSION_UUID, "terminate", { signalUuid });
 		await client.sendSignal(SESSION_UUID, "kill", { signalUuid });
 		expect(calls[0].url).toBe(rpcUrl("SendSignal"));
-		const termField = [...tfields(bodyBytes(calls[0].init))].find((f) => f.field === 2);
-		expect(termField?.varint).toBe(15);
-		const keyField = [...tfields(bodyBytes(calls[0].init))].find((f) => f.field === 3);
-		expect(new TextDecoder().decode(keyField?.bytes ?? new Uint8Array(0))).toBe(signalUuid);
-		const killField = [...tfields(bodyBytes(calls[1].init))].find((f) => f.field === 2);
-		expect(killField?.varint).toBe(9);
+		expect(findField(bodyBytes(calls[0].init), 2)?.varint).toBe(15);
+		expect(strOf(findField(bodyBytes(calls[0].init), 3))).toBe(signalUuid);
+		expect(findField(bodyBytes(calls[1].init), 2)?.varint).toBe(9);
 	});
 
 	it("resize encodes an Update with the PTY size", async () => {
-		const { mock, calls } = fetchRouter([() => unaryOk()]);
-		const client = makeClient(mock);
+		const { client, calls } = vmCase([() => unaryOk()]);
 		await client.resize(SESSION_UUID, { cols: 120, rows: 40 });
 		expect(calls[0].url).toBe(rpcUrl("Update"));
-		const fields = [...tfields(bodyBytes(calls[0].init))];
-		const pty = fields.find((f) => f.field === 2);
-		const size = [...tfields(pty?.bytes ?? new Uint8Array(0))].find((f) => f.field === 1);
-		const colsField = [...tfields(size?.bytes ?? new Uint8Array(0))].find((f) => f.field === 1);
-		const rowsField = [...tfields(size?.bytes ?? new Uint8Array(0))].find((f) => f.field === 2);
-		expect(colsField?.varint).toBe(120);
-		expect(rowsField?.varint).toBe(40);
+		const size = findField(findField(bodyBytes(calls[0].init), 2)?.bytes, 1);
+		expect(findField(size?.bytes, 1)?.varint).toBe(120);
+		expect(findField(size?.bytes, 2)?.varint).toBe(40);
 	});
 
 	it("maps gateway-shaped errors and never leaks the token", async () => {
-		const { mock } = fetchRouter([
-			() => jsonResponse(502, { error: "sandbox_not_found", message: `token ${TOKEN} in body` }),
+		const { client } = vmCase([
+			() => jsonResponse({ error: "sandbox_not_found", message: `token ${TOKEN} in body` }, 502),
 		]);
-		const client = makeClient(mock);
 		const error = await expectError(client.sendInput(SESSION_UUID, "stdin", new Uint8Array([1])));
 		expect(error.code).toBe("sandbox_not_found");
 		expect(error.message).not.toContain(TOKEN);
@@ -828,10 +780,9 @@ describe("VmProcessClient control RPCs", () => {
 	});
 
 	it("maps non-JSON HTTP errors by status", async () => {
-		const { mock } = fetchRouter([
+		const { client } = vmCase([
 			() => new Response("boom", { status: 500, headers: { "Content-Type": "text/plain" } }),
 		]);
-		const client = makeClient(mock);
 		const error = await expectError(client.sendInput(SESSION_UUID, "stdin", new Uint8Array([1])));
 		expect(error.code).toBe("internal");
 		expect(error.status).toBe(500);

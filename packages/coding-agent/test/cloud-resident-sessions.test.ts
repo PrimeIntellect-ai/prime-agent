@@ -58,9 +58,11 @@ function hello(options: { schemaRevision?: number; serverCapabilities?: readonly
 }
 
 describe("resident cloud session wire compatibility (schema revisions 31-32)", () => {
-	it("publishes revision 32 with the cloud_resident_sessions capability", () => {
-		expect(DAEMON_SCHEMA_REVISION).toBe(32);
-		expect(DAEMON_SCHEMA_ID).toContain("protocol-7-schema-32");
+	it("publishes at least revision 32 with the cloud_resident_sessions capability", () => {
+		// The merge lineage continues past 32 (33 adds abort_and_send_queued);
+		// revision 32's resident-cloud surface ships in every later revision.
+		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(32);
+		expect(DAEMON_SCHEMA_ID).toContain(`protocol-7-schema-${DAEMON_SCHEMA_REVISION}`);
 		expect(DAEMON_PROTOCOL_VERSION).toBe(7);
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("cloud_resident_sessions");
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("cloud_sessions");
@@ -104,9 +106,11 @@ describe("resident cloud session wire compatibility (schema revisions 31-32)", (
 		expect(DAEMON_COMMAND_COMPATIBILITY.list_agent_peers).toEqual({ minProtocol: 7, minSchemaRevision: 23 });
 	});
 
-	it("capability- and schema-gates every cloud_session_* command at revision 31", () => {
+	it("gates every cloud_session_* command at revision 31 and routes it through the control plane", () => {
 		for (const type of RESIDENT_COMMAND_TYPES) {
 			expect(DAEMON_COMMAND_COMPATIBILITY[type]).toEqual(CLOUD_RESIDENT_SESSIONS_COMMAND_COMPATIBILITY);
+			expect(DAEMON_COMMAND_PLANE[type]).toBe("control");
+			expect(isSessionPlaneDaemonCommand(type)).toBe(false);
 		}
 		expect(DAEMON_OUTBOUND_COMPATIBILITY.cloud_session_update).toEqual(CLOUD_RESIDENT_SESSIONS_COMMAND_COMPATIBILITY);
 		const update: Extract<DaemonOutbound, { type: "cloud_session_update" }> = {
@@ -155,13 +159,6 @@ describe("resident cloud session wire compatibility (schema revisions 31-32)", (
 			serverCapabilities: ["attach_snapshot", "event_sequence", "cloud_sessions"],
 		});
 		expect(meetsDaemonCommandCompatibility(oldClientHello, DAEMON_COMMAND_COMPATIBILITY.cloud_delegate)).toBe(true);
-	});
-
-	it("routes every cloud_session_* command through the supervisor control plane", () => {
-		for (const type of RESIDENT_COMMAND_TYPES) {
-			expect(DAEMON_COMMAND_PLANE[type]).toBe("control");
-			expect(isSessionPlaneDaemonCommand(type)).toBe(false);
-		}
 	});
 
 	it("keeps the execution marker optional on session summaries (local rows degrade to absent)", () => {

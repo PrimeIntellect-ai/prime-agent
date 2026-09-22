@@ -19,9 +19,14 @@ export function createFileOps(): FileOperations {
 }
 
 /**
- * Extract file operations from tool calls in an assistant message.
+ * Extract file operations from tool calls in an assistant message and from
+ * structured tool results.
  */
 export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOperations): void {
+	if (message.role === "toolResult") {
+		extractFileOpsFromToolResult(message, fileOps);
+		return;
+	}
 	if (message.role !== "assistant") return;
 	if (!("content" in message) || !Array.isArray(message.content)) return;
 
@@ -45,14 +50,92 @@ export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOp
 }
 
 /**
+ * Extract file operations from a tool result message.
+ *
+ * The default toolset routes file edits through the ipython kernel: the
+ * kernel's edit skill reports structured diff displays (path, oldStr, newStr)
+ * that ride on the tool result's details, and no assistant-side tool call
+ * ever carries the path. Without this branch, compaction summaries never
+ * learn about kernel-performed edits and <modified-files> stays empty in the
+ * default configuration.
+ */
+function extractFileOpsFromToolResult(message: AgentMessage, fileOps: FileOperations): void {
+	if (message.role !== "toolResult" || message.toolName !== "ipython") return;
+	const details =
+		typeof message.details === "object" && message.details !== null && !Array.isArray(message.details)
+			? (message.details as Record<string, unknown>)
+			: {};
+	const diffs = Array.isArray(details.diffs) ? details.diffs : [];
+	for (const diff of diffs) {
+		if (typeof diff !== "object" || diff === null || Array.isArray(diff)) continue;
+		const path = (diff as Record<string, unknown>).path;
+		if (typeof path === "string" && path) fileOps.edited.add(path);
+	}
+}
+
+/**
+ * Maximum files kept per summary block, so a single oversized kernel
+ * result cannot produce a file list larger than the model context limit.
+ */
+const FILE_LIST_MAX_ENTRIES = 200;
+
+/**
+ * Maximum combined characters the two file blocks may add to a summary.
+ * Repeated compactions merge lists carried in the previous entry's details,
+ * so without a character cap the appended block grows without bound.
+ */
+const FILE_LIST_MAX_COMBINED_CHARS = 6000;
+
+function fileListChars(readFiles: string[], modifiedFiles: string[]): number {
+	let chars = 0;
+	for (const file of readFiles) chars += file.length + 1;
+	for (const file of modifiedFiles) chars += file.length + 1;
+	return chars;
+}
+
+/**
  * Compute final file lists from file operations.
  * Returns readFiles (files only read, not modified) and modifiedFiles.
+ * Both lists are capped at FILE_LIST_MAX_ENTRIES (sorted, then truncated) and
+ * at FILE_LIST_MAX_COMBINED_CHARS combined characters: read-only entries are
+ * least valuable and drop first (from the alphabetical end), then modified
+ * entries drop only after the read-only list is empty.
  */
 export function computeFileLists(fileOps: FileOperations): { readFiles: string[]; modifiedFiles: string[] } {
 	const modified = new Set([...fileOps.edited, ...fileOps.written]);
-	const readOnly = [...fileOps.read].filter((f) => !modified.has(f)).sort();
-	const modifiedFiles = [...modified].sort();
-	return { readFiles: readOnly, modifiedFiles };
+	const readOnly = [...fileOps.read]
+		.filter((f) => !modified.has(f))
+		.sort()
+		.slice(0, FILE_LIST_MAX_ENTRIES);
+	const modifiedFiles = [...modified].sort().slice(0, FILE_LIST_MAX_ENTRIES);
+	const readFiles = readOnly.slice();
+	while (readFiles.length > 0 && fileListChars(readFiles, modifiedFiles) > FILE_LIST_MAX_COMBINED_CHARS) {
+		readFiles.pop();
+	}
+	while (
+		modifiedFiles.length > 0 &&
+		readFiles.length === 0 &&
+		fileListChars(readFiles, modifiedFiles) > FILE_LIST_MAX_COMBINED_CHARS
+	) {
+		modifiedFiles.pop();
+	}
+	return { readFiles, modifiedFiles };
+}
+
+/**
+ * Remove <read-files>/<modified-files> blocks from a stored summary.
+ *
+ * The blocks are re-appended mechanically after every summarization (see
+ * computeFileLists/formatFileOperations) and carried in the compaction entry's
+ * details. Feeding stale blocks back into the update prompt makes the model
+ * re-summarize them, so lists compound across repeated compactions. Strip
+ * them before a previous summary reaches the summarizer; the details plus the
+ * fresh append remain the single source of truth.
+ */
+const FILE_LIST_BLOCK_PATTERN = /(?:\n*)<(read-files|modified-files)>[\s\S]*?<\/\1>/g;
+
+export function stripFileListBlocks(summary: string): string {
+	return summary.replace(FILE_LIST_BLOCK_PATTERN, "").trimEnd();
 }
 
 /**
@@ -71,15 +154,27 @@ export function formatFileOperations(readFiles: string[], modifiedFiles: string[
 }
 /** Maximum characters for a tool result in serialized summaries. */
 const TOOL_RESULT_MAX_CHARS = 2000;
+/**
+ * Characters kept from the end of a truncated tool result. Tool output is
+ * tail-heavy: exit errors, stack traces, and log tails appear at the end.
+ */
+const TOOL_RESULT_TAIL_CHARS = 500;
 
 /**
  * Truncate text to a maximum character length for summarization.
- * Keeps the beginning and appends a truncation marker.
+ * Keeps the beginning and the end within the same total budget, marking
+ * the elided middle.
  */
 function truncateForSummary(text: string, maxChars: number): string {
 	if (text.length <= maxChars) return text;
-	const truncatedChars = text.length - maxChars;
-	return `${text.slice(0, maxChars)}\n\n[... ${truncatedChars} more characters truncated]`;
+	// The marker's digit counts are largest when the elided and kept sizes hit
+	// the text and budget maxima, so reserve space for that worst case to keep
+	// the result within maxChars.
+	const markerMaxLength =
+		`[... ${text.length} characters truncated; first ${maxChars} and last ${TOOL_RESULT_TAIL_CHARS} kept ...]`.length;
+	const headChars = maxChars - TOOL_RESULT_TAIL_CHARS - markerMaxLength - 4;
+	const elided = text.length - headChars - TOOL_RESULT_TAIL_CHARS;
+	return `${text.slice(0, headChars)}\n\n[... ${elided} characters truncated; first ${headChars} and last ${TOOL_RESULT_TAIL_CHARS} kept ...]\n\n${text.slice(text.length - TOOL_RESULT_TAIL_CHARS)}`;
 }
 
 /**
@@ -89,9 +184,19 @@ function truncateForSummary(text: string, maxChars: number): string {
  *
  * Tool results are truncated to keep the summarization request within
  * reasonable token budgets. Full content is not needed for summarization.
+ *
+ * Tool calls are serialized with a sequential `#N` prefix and results repeat
+ * the matching index, so repeated calls of the same tool pair unambiguously.
  */
 export function serializeConversation(messages: Message[]): string {
 	const parts: string[] = [];
+	// Tool calls are serialized with a 1-based sequential index and results
+	// repeat the index of their call (matched by toolCallId), so repeated
+	// calls of the same tool pair unambiguously in the summarizer input.
+	// The short index stands in for the raw provider toolCallId, which can
+	// exceed 450 characters on some providers.
+	const toolCallIndices = new Map<string, number>();
+	let toolCallIndex = 0;
 
 	for (const msg of messages) {
 		if (msg.role === "user") {
@@ -118,7 +223,9 @@ export function serializeConversation(messages: Message[]): string {
 					const argsStr = Object.entries(args)
 						.map(([k, v]) => `${k}=${JSON.stringify(v)}`)
 						.join(", ");
-					toolCalls.push(`${block.name}(${argsStr})`);
+					toolCallIndex += 1;
+					toolCallIndices.set(block.id, toolCallIndex);
+					toolCalls.push(`#${toolCallIndex} ${block.name}(${argsStr})`);
 				}
 			}
 
@@ -137,7 +244,19 @@ export function serializeConversation(messages: Message[]): string {
 				.map((c) => c.text)
 				.join("");
 			if (content) {
-				parts.push(`[Tool result]: ${truncateForSummary(content, TOOL_RESULT_MAX_CHARS)}`);
+				// Label the tool name, error status, and the index of the
+				// paired call so the summarizer can match each result to
+				// its `#N`-prefixed entry in the [Assistant tool calls]
+				// lines even when the same tool is called repeatedly in
+				// one turn. Results whose call is not part of the input
+				// (extension callers may pass partial message lists)
+				// fall back to the name-only label.
+				const callIndex = toolCallIndices.get(msg.toolCallId);
+				const indexSuffix = callIndex === undefined ? "" : ` #${callIndex}`;
+				const label = msg.isError
+					? `[Tool result (${msg.toolName}, error)${indexSuffix}]`
+					: `[Tool result (${msg.toolName})${indexSuffix}]`;
+				parts.push(`${label}: ${truncateForSummary(content, TOOL_RESULT_MAX_CHARS)}`);
 			}
 		}
 	}

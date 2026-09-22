@@ -131,9 +131,16 @@ describe("WsTunnelTransport close semantics", () => {
 			"Sec-WebSocket-Key": newSecWebSocketKey(),
 		});
 		const onClose = vi.fn();
-		connection.onClose(onClose);
+		// The close handshake's completion event is the deterministic signal.
+		const closed = new Promise<void>((resolve) => {
+			connection.onClose((...args) => {
+				onClose(...args);
+				resolve();
+			});
+		});
 		connection.close("test done");
-		await vi.waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+		await closed;
+		expect(onClose).toHaveBeenCalledTimes(1);
 		expect(onClose.mock.calls[0]).toHaveLength(1);
 		expect(onClose.mock.calls[0]?.[0]).toBeUndefined();
 		await bridge.close();
@@ -146,19 +153,31 @@ describe("WsTunnelTransport close semantics", () => {
 		});
 		const connection = await transport.connect(`http://127.0.0.1:${String(bridge.port)}`, {});
 		const onClose = vi.fn();
-		connection.onClose(onClose);
+		// The peer's close frame arriving is the deterministic signal.
+		const closed = new Promise<void>((resolve) => {
+			connection.onClose((...args) => {
+				onClose(...args);
+				resolve();
+			});
+		});
 		mini?.sendCloseFrame();
-		await vi.waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+		await closed;
+		expect(onClose).toHaveBeenCalledTimes(1);
 		expect(onClose.mock.calls[0]?.[0]).toBeUndefined();
 		await bridge.close();
 	});
 
 	it("stops an attachment over the real transport without hanging on its own loop", async () => {
 		let mini: MiniClient | undefined;
+		let resolveSubscribed!: () => void;
+		const subscribed = new Promise<void>((resolve) => {
+			resolveSubscribed = resolve;
+		});
 		const bridge = await startMiniBridge((client) => {
 			mini = client;
 			client.onMessage((message) => {
 				const parsed = JSON.parse(message) as CloudMessage;
+				if (parsed.type === "subscribe") resolveSubscribed();
 				if (parsed.type === "hello") {
 					client.send({
 						type: "snapshot",
@@ -212,14 +231,15 @@ describe("WsTunnelTransport close semantics", () => {
 			maxReconnectDelayMs: 20,
 			sleepFn: async () => {},
 		});
+		// The subscribe frame only leaves the attachment once it is attached:
+		// its arrival at the bridge is the deterministic attached signal.
 		attachment.start();
-		await vi.waitFor(() => expect(attachment.attached).toBe(true));
+		await subscribed;
+		expect(attachment.attached).toBe(true);
 		expect(mini).toBeDefined();
 		// stop() must settle on its own: it awaits the supervisor loop, which
 		// can only end when the close handshake notifies the close handler.
-		await vi.waitFor(async () => {
-			await expect(attachment.stop()).resolves.toBeUndefined();
-		});
+		await attachment.stop();
 		expect(attachment.attached).toBe(false);
 		await bridge.close();
 	});

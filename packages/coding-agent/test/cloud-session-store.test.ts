@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
 	CLOUD_SESSION_RECORD_MAX_BYTES,
 	CLOUD_SESSION_RECORD_VERSION,
@@ -12,23 +11,14 @@ import {
 	cloudSessionRecordProblem,
 } from "../src/core/cloud/cloud-session-store.js";
 import { cloudCursor } from "../src/core/cloud/protocol.js";
+import { cloudTemp } from "./cloud-support.js";
 
 const RESIDENT = "11111111-2222-3333-4444-555555555555";
 const RESIDENT2 = "aaaa1111-2222-3333-4444-555555555555";
 
 describe("CloudSessionStore", () => {
-	const roots: string[] = [];
-
-	afterEach(() => {
-		for (const root of roots.splice(0)) {
-			rmSync(root, { recursive: true, force: true });
-		}
-	});
-
 	function createDirectory(): string {
-		const root = mkdtempSync(join(tmpdir(), "prime-agent-cloud-session-store-"));
-		roots.push(root);
-		return join(root, "cloud-sessions");
+		return cloudTemp("prime-agent-cloud-session-store-");
 	}
 
 	function createSession(store: CloudSessionStore, sessionId = `sess_${randomUUID()}`): CloudSessionRecord {

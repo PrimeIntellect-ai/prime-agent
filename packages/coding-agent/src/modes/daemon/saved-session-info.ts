@@ -19,6 +19,7 @@ export function serializeSavedSessionInfo(session: SessionInfo): DaemonSavedSess
 		allMessagesText: session.allMessagesText,
 		agentStatus: session.agentStatus,
 		usage: session.usage,
+		model: session.model,
 	};
 }
 
@@ -47,5 +48,6 @@ export function deserializeSavedSessionInfo(session: DaemonSavedSessionInfo): Ag
 		agentStatus: session.agentStatus,
 		usage: session.usage,
 		...(session.execution ? { execution: session.execution } : {}),
+		model: session.model,
 	};
 }

@@ -19,7 +19,6 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { spawnHidden, waitForChildProcess } from "../../utils/child-process.js";
 import { findGitPaths } from "../../utils/git.js";
-import { loadPrimeCliConfig } from "../prime-inference-auth.js";
 import {
 	type CloudGuestCursorRecord,
 	CloudTunnelAttachment,
@@ -977,9 +976,8 @@ export class DirectCloudService {
 		this.traceSink =
 			options.traceSink ??
 			((activeSessionId, cloudSessionId, event) => this.persistDefaultTrace(activeSessionId, cloudSessionId, event));
-		const config = loadPrimeCliConfig();
-		const apiKey = options.apiKey ?? process.env.PRIME_API_KEY ?? config.apiKey;
-		if (!apiKey) throw new Error("Cloud delegation requires PRIME_API_KEY or a logged-in Prime CLI");
+		const apiKey = options.apiKey ?? process.env.PRIME_API_KEY;
+		if (!apiKey) throw new Error("Cloud delegation requires PRIME_API_KEY");
 		const dockerImage = options.dockerImage ?? process.env.PRIME_AGENT_CLOUD_IMAGE;
 		if (!dockerImage) throw new Error("Cloud delegation requires PRIME_AGENT_CLOUD_IMAGE");
 		const resolved =
@@ -994,7 +992,7 @@ export class DirectCloudService {
 		}
 		this.inferenceApiKey = inferenceApiKey;
 		this.dockerImage = dockerImage;
-		this.teamId = options.teamId ?? cloudTeamOverride() ?? config.teamId;
+		this.teamId = options.teamId ?? cloudTeamOverride();
 		this.inferenceTeamId = options.inferenceTeamId ?? cloudInferenceTeamOverride() ?? this.teamId;
 		this.store = options.store ?? new CloudSessionStore(join(options.stateDirectory, "sessions"));
 		this.resultStore = options.resultStore ?? new CloudResultStore(join(options.stateDirectory, "results"));
@@ -1009,14 +1007,14 @@ export class DirectCloudService {
 			new ConcreteTunnels(
 				new PrimeTunnelClient({
 					apiKey,
-					baseUrl: options.baseUrl ?? config.baseUrl ?? DEFAULT_BASE_URL,
+					baseUrl: options.baseUrl ?? DEFAULT_BASE_URL,
 				}),
 			);
 		this.platform =
 			options.platform ??
 			new PrimeSandboxClient({
 				apiKey,
-				baseUrl: options.baseUrl ?? config.baseUrl ?? DEFAULT_BASE_URL,
+				baseUrl: options.baseUrl ?? DEFAULT_BASE_URL,
 				teamId: this.teamId,
 			});
 		this.process = options.process ?? new ConcreteVmProcesses(this.platform, this.store);

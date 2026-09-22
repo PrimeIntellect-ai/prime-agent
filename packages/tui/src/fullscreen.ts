@@ -5,6 +5,7 @@
  * scroll position is application state, not terminal scrollback.
  */
 
+import type { ClickRegion } from "./click-regions.js";
 import type { TableCellSelectionRegion } from "./selection-metadata.js";
 import { isImageLine } from "./terminal-image.js";
 import { sliceByColumn, stripAnsi, urlAtColumn, visibleWidth } from "./utils.js";
@@ -38,6 +39,33 @@ interface FrameSelectionRegion {
 	line: number;
 	col: number;
 	width: number;
+}
+
+/**
+ * A click region projected onto visible frame rows. The hit rect may be
+ * narrower than `region` when overlay pixels cover it or the region is
+ * clipped at a viewport edge; click positions stay relative to `anchor`,
+ * the frame row of the region's top line even when that row is clipped away.
+ */
+export interface FrameClickTarget {
+	/** Frame row this target occupies. */
+	row: number;
+	col: number;
+	width: number;
+	anchor: number;
+	region: ClickRegion;
+}
+
+/** Visible frame rows of a projected region: hit rows plus the position anchor. */
+export interface ProjectedRegionRows {
+	anchor: number;
+	from: number;
+	count: number;
+}
+
+/** A region projected onto the frame: the region plus its visible hit rows. */
+export interface FrameClickEntry extends ProjectedRegionRows {
+	region: ClickRegion;
 }
 
 interface ColumnSpan {
@@ -79,6 +107,11 @@ export class FullscreenViewport {
 	private prevHeight = 0;
 	private lastMaxScroll = 0;
 	private lastWindowHeight = 0;
+	private lastHeaderHeight = 0;
+	private lastHeaderLines = 0;
+	private lastDockLines = 0;
+	private lastDockHeight = 0;
+	private frameClickTargets: FrameClickTarget[] = [];
 	private lastTranscript: string[] = [];
 	private lastFrame: string[] = [];
 	private lastFrameVisibleStart = 0;
@@ -92,22 +125,33 @@ export class FullscreenViewport {
 	private selectionMode: SelectionMode | null = null;
 
 	/**
-	 * Compose a frame of exactly `height` lines: scrolled transcript window on
-	 * top, dock pinned to the bottom. Following pins the window to the
-	 * transcript end; otherwise it stays frozen while content appends.
+	 * Compose a frame of exactly `height` lines: an optional pinned header on
+	 * top, the scrolled transcript window in the middle, and the dock pinned
+	 * to the bottom. Following pins the window to the transcript end;
+	 * otherwise it stays frozen while content appends.
 	 */
 	composeFrame(
 		transcript: string[],
 		dock: string[],
 		height: number,
 		tableCellSelectionRegions: ReadonlyArray<TableCellSelectionRegion> = [],
+		header?: string[],
 	): string[] {
 		let dockLines = dock;
 		const dockHeight = clippedFullscreenDockHeight(dockLines.length, height);
 		if (dockLines.length > dockHeight) {
 			dockLines = dockLines.slice(dockLines.length - dockHeight);
 		}
-		const windowHeight = height - dockLines.length;
+		let headerLines = header ?? [];
+		// Header rows are taken away from the transcript window, never from the
+		// dock; a too-tall header is clipped from the top like the dock clips
+		// from its bottom, so the bar keeps its bottom rows.
+		const maxHeader = Math.max(0, height - dockLines.length - FULLSCREEN_MIN_TRANSCRIPT_ROWS);
+		const headerHeight = Math.min(headerLines.length, maxHeader);
+		if (headerLines.length > headerHeight) {
+			headerLines = headerLines.slice(headerLines.length - headerHeight);
+		}
+		const windowHeight = height - dockLines.length - headerLines.length;
 		const maxScroll = Math.max(0, transcript.length - windowHeight);
 
 		if (this.following) {
@@ -117,6 +161,10 @@ export class FullscreenViewport {
 		}
 		this.lastMaxScroll = maxScroll;
 		this.lastWindowHeight = windowHeight;
+		this.lastHeaderHeight = headerLines.length;
+		this.lastHeaderLines = (header ?? []).length;
+		this.lastDockLines = dock.length;
+		this.lastDockHeight = dockLines.length;
 		this.lastTranscript = transcript;
 		this.tableCellSelectionRegions = tableCellSelectionRegions;
 
@@ -128,7 +176,98 @@ export class FullscreenViewport {
 		while (window.length < windowHeight) {
 			window.push("");
 		}
-		return [...window, ...dockLines];
+		return [...headerLines, ...window, ...dockLines];
+	}
+
+	/**
+	 * Intersect [line, line+height) with the visible frame rows [firstFrameRow,
+	 * firstFrameRow+frameRowCount). `anchor` keeps the frame row of the
+	 * region's top line even when it is clipped away, so click positions stay
+	 * relative to the region, not to the visible slice.
+	 */
+	private projectRows(
+		line: number,
+		height: number,
+		firstFrameRow: number,
+		frameRowCount: number,
+		frameRowOfLine: (line: number) => number,
+	): ProjectedRegionRows | null {
+		const anchor = frameRowOfLine(line);
+		const from = Math.max(anchor, firstFrameRow);
+		const end = Math.min(anchor + Math.max(1, height), firstFrameRow + frameRowCount);
+		return end > from ? { anchor, from, count: end - from } : null;
+	}
+
+	/** Project a header region; the header keeps its bottom rows when clipped. */
+	projectHeaderRegion(line: number, height: number): ProjectedRegionRows | null {
+		const start = Math.max(0, this.lastHeaderLines - this.lastHeaderHeight);
+		return this.projectRows(line, height, 0, this.lastHeaderHeight, (row) => row - start);
+	}
+
+	/** Project a transcript region onto the visible window rows. */
+	projectTranscriptRegion(line: number, height: number): ProjectedRegionRows | null {
+		const base = this.lastHeaderHeight - this.scrollTop;
+		return this.projectRows(line, height, this.lastHeaderHeight, this.lastWindowHeight, (row) => base + row);
+	}
+
+	/** Project a dock region; the dock keeps its bottom rows when clipped. */
+	projectDockRegion(line: number, height: number): ProjectedRegionRows | null {
+		const start = Math.max(0, this.lastDockLines - this.lastDockHeight);
+		const base = this.lastHeaderHeight + this.lastWindowHeight;
+		return this.projectRows(line, height, base, this.lastDockHeight, (row) => base + row - start);
+	}
+
+	/** Replace the click targets with regions projected onto visible frame rows. */
+	setFrameClickRegions(entries: ReadonlyArray<FrameClickEntry>): void {
+		const targets: FrameClickTarget[] = [];
+		for (const { region, anchor, from, count } of entries) {
+			for (let row = from; row < from + count; row++) {
+				targets.push({ row, col: region.col, width: region.width, anchor, region });
+			}
+		}
+		this.frameClickTargets = targets;
+	}
+
+	/** Register an overlay region at its composited frame position, clipped to visible rows. */
+	addFrameClickEntry(entry: FrameClickEntry): void {
+		for (let row = entry.from; row < entry.from + entry.count; row++) {
+			this.frameClickTargets.push({
+				row,
+				col: entry.region.col,
+				width: entry.region.width,
+				anchor: entry.anchor,
+				region: entry.region,
+			});
+		}
+	}
+
+	/** Drop click coverage under pixels painted over the frame (overlays, follow hint). */
+	subtractFrameClickCoverage(line: number, startCol: number, endCol: number): void {
+		for (let i = this.frameClickTargets.length - 1; i >= 0; i--) {
+			const target = this.frameClickTargets[i]!;
+			if (target.row !== line) continue;
+			const targetEnd = target.col + target.width;
+			if (endCol <= target.col || startCol >= targetEnd) continue;
+			const fragments: FrameClickTarget[] = [];
+			if (target.col < startCol) {
+				fragments.push({ ...target, col: target.col, width: startCol - target.col });
+			}
+			if (endCol < targetEnd) {
+				fragments.push({ ...target, col: endCol, width: targetEnd - endCol });
+			}
+			this.frameClickTargets.splice(i, 1, ...fragments);
+		}
+	}
+
+	/** Click target covering a screen position in the last composed frame, or null. */
+	clickTargetAt(screenRow: number, screenCol: number): FrameClickTarget | null {
+		if (screenRow < 0 || screenCol < 0) return null;
+		for (const target of this.frameClickTargets) {
+			if (target.row === screenRow && screenCol >= target.col && screenCol < target.col + target.width) {
+				return target;
+			}
+		}
+		return null;
 	}
 
 	private orderedSelection(): { start: SelectionPoint; end: SelectionPoint } | null {
@@ -361,8 +500,12 @@ export class FullscreenViewport {
 		if (visibleHeight <= 0) return null;
 		const visibleStart = this.lastFrameVisibleHeight > 0 ? this.lastFrameVisibleStart : 0;
 		const visibleEnd = visibleStart + visibleHeight - 1;
-		const transcriptStart = Math.max(0, visibleStart);
-		const transcriptEnd = Math.min(this.lastWindowHeight - 1, visibleEnd);
+		// The transcript window occupies frame rows [headerHeight, headerHeight +
+		// windowHeight); the pinned header sits above it and the dock below.
+		const windowStart = this.lastHeaderHeight;
+		const windowEnd = this.lastHeaderHeight + this.lastWindowHeight - 1;
+		const transcriptStart = Math.max(windowStart, visibleStart);
+		const transcriptEnd = Math.min(windowEnd, visibleEnd);
 		if (transcriptStart > transcriptEnd) return null;
 		return {
 			firstRow: transcriptStart - visibleStart,
@@ -381,7 +524,8 @@ export class FullscreenViewport {
 		const row = clamp ? Math.max(0, Math.min(screenRow, bounds.visibleHeight - 1)) : screenRow;
 		const frameLine = bounds.visibleStart + row;
 		if (!clamp && (frameLine < bounds.transcriptStart || frameLine > bounds.transcriptEnd)) return null;
-		return this.scrollTop + Math.max(bounds.transcriptStart, Math.min(frameLine, bounds.transcriptEnd));
+		const clampedFrameLine = Math.max(bounds.transcriptStart, Math.min(frameLine, bounds.transcriptEnd));
+		return this.scrollTop + clampedFrameLine - this.lastHeaderHeight;
 	}
 
 	private isFrameSelectable(point: SelectionPoint): boolean {
@@ -699,6 +843,11 @@ export class FullscreenViewport {
 
 	windowHeight(): number {
 		return this.lastWindowHeight;
+	}
+
+	/** Rows the pinned header currently occupies at the top of the frame. */
+	headerHeight(): number {
+		return this.lastHeaderHeight;
 	}
 
 	isFollowing(): boolean {
