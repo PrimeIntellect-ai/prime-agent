@@ -47,8 +47,8 @@ class GitHub:
         self, pr: int, harness_sha: str, run_id: int, attempt: int, config: Config
     ) -> tuple[Report, str]:
         pull = self.request("GET", f"pulls/{pr}")
-        if pull["state"] != "open" or pull["base"]["ref"] != "main":
-            raise ValueError("Benchmark requires an open PR targeting main")
+        if pull["state"] != "open":
+            raise ValueError("Benchmark requires an open PR")
         if pull["base"]["repo"]["full_name"] != self.repository:
             raise ValueError("PR belongs to another repository")
         base = self.request("GET", "git/ref/heads/main")["object"]["sha"]

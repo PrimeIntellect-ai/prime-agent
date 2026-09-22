@@ -20,6 +20,20 @@ Run from source:
 
 The script can be called from any directory and preserves the caller's working directory. Use that behavior to run a source checkout against a separate test project.
 
+## Pre-push Guard
+
+`.husky/pre-push` runs for every `git push` and refuses mirror-like pushes and remote branch deletions to real GitHub remotes (github.com and ssh.github.com in scp, `http://`, `https://`, and `ssh://` forms, with or without credentials and ports, including `www.` and trailing-dot host spellings); local, `file://`, and other remotes are always allowed. The hook ships via husky and is active after `npm ci`.
+
+Worktrees and clones without husky's `.husky/_` shims (for example a bare `git worktree add` tree) activate the tracked hooks directly, with no npm or husky needed:
+
+```bash
+git config core.hooksPath .husky
+```
+
+The setting is shared across worktrees and the relative path resolves per tree. Running `npm ci` in any tree regenerates husky's shims and resets the shared `core.hooksPath` to `.husky/_`, which silences the tracked hooks in shimless worktrees again; re-run the one-liner after `npm ci`, or run `npx husky` inside a worktree to give it its own shims.
+
+Intentional pushes can opt out once with `PRIME_AGENT_ALLOW_MIRROR_PUSH=1 git push ...`. Pushes with more than 10 refs (a `git push --tags` release) are refused; use the escape hatch. Not caught: deletions of remote-only refs through `--mirror` pruning (git never lists them on the pre-push stdin), ssh alias remotes, `insteadOf` rewrites to a proxy, and uppercase hostnames. `git push --no-verify` bypasses pre-push hooks entirely, so this guard is advisory; server-side, GitHub branch protection rules are the real mitigation, and `main` is protected — that is what rejected the incident's force update to `main`.
+
 ## Product and Source Names
 
 Prime Agent is the product, public CLI, release artifact, and repository name. The monorepo still retains inherited `@earendil-works/pi-*` npm workspace names, a source-package `pi` bin entry, the `pi` package manifest key, and some `PI_*` compatibility environment variables. These names are source and compatibility details, not a signal that contributors should install or develop against pi-mono.
@@ -54,6 +68,33 @@ Do not resolve packaged assets directly from `__dirname`.
 
 The hidden `/debug` command writes `~/.prime/agent/prime-agent-debug.log` with rendered TUI lines, their visible widths, and the current agent messages. Daemon, worker, client, and provider diagnostic logs live under `~/.prime/agent/logs/`.
 
+### Request timing
+
+When the UI sits in `Waiting` for a long time before the first model output appears, request timing shows what that wait is made of. Enable it with `PI_REQUEST_TIMING=1` in the environment (restart the daemon so worker processes inherit it) or `"requestTiming": true` in settings.json (applies to sessions opened after the change). Each agent-loop provider request then logs its phase timeline to `~/.prime/agent/logs/agent.jsonl` under the component `coding-agent.request-timing`. One-shot completion calls outside the agent loop (compaction, branch-summary, and refinement requests) use a separate path and are not logged:
+
+```bash
+grep '"coding-agent.request-timing"' ~/.prime/agent/logs/agent.jsonl | tail -5
+```
+
+Phases per request, in order. Each entry carries the gap it closed (`phaseMs`) and the elapsed time since turn dispatch (`totalMs`); `prompt-built` fires before the request has model or session fields, so correlate it with the later entries by `requestSeq`. If a provider never reports a phase (for example `request-sent` when no payload hook runs), that delta is simply omitted:
+
+| Phase | Meaning | A long gap here means |
+|-------|---------|----------------------|
+| `prompt-built` | Turn dispatched, prompt message array built | Client-side prompt build is slow |
+| `request-sent` | Payload handed to the provider client | Client-side request build (auth, params, extension payload hooks, the `requestBytes` serialization) is slow |
+| `first-byte` | HTTP response headers received (`requestBytes`: serialized request body size in UTF-8 bytes) | Upload of the request body plus provider TTFB (prefill, prompt-cache miss, queueing) |
+| `first-token` | First streamed content block (what clears `Waiting`) | Stream parse delay; usually near zero |
+| `stream-done` | Terminal event, with the summary below | Slow full stream |
+
+The final entry (`msg: "request timing summary"`) carries every delta it measured: `phases.dispatchToPromptBuiltMs`, `promptBuiltToRequestSentMs`, `requestSentToFirstByteMs`, `firstByteToFirstTokenMs`, `firstTokenToStreamDoneMs`, plus `contextEntries`, `requestBytes`, `sessionId`, the final `usage`, and an `outcome` (`done`, `aborted` for an early stop such as a user cancel, or `failed` when the provider failed before or during the stream).
+
+Reading it for a slow large-context turn:
+
+- Large `promptBuiltToRequestSentMs` — the client is slow. Both phases before the request leaves are client-side.
+- Large `requestSentToFirstByteMs` with a normal TTFT on the inference dashboard — the time is spent on the wire or inside inference before the dashboard's TTFT timer starts: uploading a multi-MB request body on a slow uplink, provider queueing, or prefilling an uncached prompt. `requestBytes` shows how much had to be uploaded.
+- Prompt-cache miss check — the summary's `usage.cacheRead` near 0 with `cacheWrite` close to the full prompt size means the provider re-prefilled the whole context instead of reading its prompt cache. `sessionId` is the cache key the client sends for OpenAI-family providers (session-affinity headers and `prompt_cache_key`); Anthropic instead caches the message prefix, so watch `cacheRead`/`cacheWrite` there.
+- Every retry re-issues the turn and gets a fresh request sequence number (`requestSeq`), so a silent retry loop shows up as several request timelines plus the usual auto-retry status.
+
 Useful service commands:
 
 ```bash
@@ -81,3 +122,15 @@ npx tsx ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts
 ```
 
 If you create or modify a test file, run that file and iterate until it passes. Coding-agent suite regressions belong under `test/suite/regressions/` and use the suite harness and faux provider rather than live provider credentials.
+
+## Capability Evals
+
+End-to-end capability evals live under `scripts/evals/` and are not part of CI: a real-model run is a manual step with credentials in the environment. Each harness ships model-free self-tests that validate its fixtures and rubric without any model call - run them from the eval directory:
+
+```bash
+cd scripts/evals/swarm_fanout
+uv run --locked ruff check .
+uv run --locked python -m unittest discover -s tests -v
+```
+
+See `scripts/evals/README.md` for the rubric and the real-model run instructions.

@@ -1,15 +1,18 @@
 # PR performance benchmarks
 
-Each push to an open, vouched PR starts an informational Prime Agent benchmark. Multiple commits in
-one push produce one run for the final head. Draft PRs are included. A two-second debounce and
-per-PR cancellation avoid finishing obsolete runs. `workflow_dispatch` reruns an open PR by number.
+Each push to an open, vouched PR starts an informational Prime Agent benchmark, including PRs targeting
+another branch in a stack. Multiple commits in one push produce one run for the final head. Draft PRs
+are included. A two-second debounce and per-PR cancellation avoid finishing obsolete runs.
+`workflow_dispatch` reruns an open PR by number.
 Identical automatic requests reuse the completed comment when both SHAs, harness, and configuration
 match. Manual dispatch and GitHub reruns force fresh measurements. Unvouched authors
 receive a pending-trust comment; a maintainer can rerun after vouching.
 
 The controller resolves current `main` and the PR head to full SHAs, builds both in separate Prime
 sandboxes, and alternates their measurements. Both use the same trusted harness revision, image
-digest and resource allocation. No performance gate blocks merging.
+digest and resource allocation. Performance changes are informational, not a regression gate. Failed or
+incomplete measurements make the benchmark command fail, even when some metrics succeeded.
+The baseline is always current `main`, not the PR's target branch or merge base.
 
 ## Enable in GitHub
 
@@ -21,6 +24,11 @@ The workflows must first land on `main`: both `pull_request_target` and the comp
 trusted default-branch code. Trigger `Prime Agent benchmarks` manually with an open PR number after
 configuring the sandbox secret. The first rollout should include a main-versus-main calibration.
 
+The request checks out the event's `GITHUB_SHA`, which GitHub resolves to the default-branch commit for
+[`pull_request_target`](https://github.blog/changelog/2025-11-07-actions-pull_request_target-and-environment-branch-protections-changes/),
+including stacked PRs. The benchmark job uses that exact harness SHA. Manual dispatch is allowed only
+from `main`.
+
 No credentials are injected into the sandboxes. The sandbox control key and GitHub token stay on the
 trusted controller; a separate publisher owns GitHub comment write permission. No PR checkout,
 build script, installer, executable, or archive is executed/extracted on a privileged GitHub runner.
@@ -28,7 +36,7 @@ The existing Vouch gate controls who can trigger compute usage.
 
 ## Measurements
 
-The default configuration uses two Linux x64 containers, each with 4 vCPU, 8 GB RAM, and 20 GB disk.
+The default configuration uses two Linux x64 VM sandboxes, each with 4 vCPU, 8 GB RAM, and 20 GB disk.
 `config.json` pins the image and sampling policy. Harness dependencies are locked with a seven-day
 release cutoff. Provisioning, harness setup, and source compilation have separate recorded durations
 outside the timed installation interval. Interactive runs use the same small committed Git fixture.
@@ -45,23 +53,36 @@ and other missing tools. Their setup time and disk usage are outside the install
 - **Installation:** the normal installer and Python/tool bootstrap in three new user homes, each
   with empty npm and uv caches. Unpublished candidate release tarballs are served over loopback;
   npm/Python dependencies use the real network. This does not measure public release-CDN latency.
-- **Compressed artifacts:** total bytes of the four tarballs produced by the release packer, using
-  an identical synthetic version and download origin for both sides. External registry dependencies
-  are not included in these tarballs.
+- **Compressed artifacts:** total bytes of the four npm tarballs and, for revisions with compiled
+  release support, the Linux x64 archive. Both sides use the same synthetic version and download
+  origin. This includes the npm fallback packages, but excludes other platforms and external registry
+  dependencies. The result records which formats were built.
 - **Installed footprint:** apparent bytes added after first use in the first fresh home, including stock Python,
   runtime, and tool assets; excluding download caches, session history, and logs. Shared system
   dependencies supplied by the base image and the fixture repository are excluded.
+- **Private frame decode:** one 32 MB frame with a snapshot-chunk routing header pushed through `PrivateFrameDecoder` in 8 KiB socket chunks, seconds per complete decode. This is the wire shape of the multi-MB snapshot and response frames on the daemon-worker and peer transport channels.
 - **Idle memory:** summed RSS across the benchmark user's entire process tree after input readiness
   and a one-second settle. Raw results include each process and PSS when Linux permits reading it.
   The controller, PTY harness, artifact server, and build user are excluded. RSS can double-count
   shared pages.
 
-Startup and memory use 10 trials per revision. Installation uses three; sizes are measured once.
+Startup and memory use 10 trials per revision. Installation uses three; sizes are measured once. UI interactions use 3 trials per revision (`ui_trials`). Transport probes also use 10 trials: they run compiled Node code from the prepared source build, not the installed home, so they measure the source revision even when the installation step failed.
+Compiled revisions provision pinned Bun tooling and build their Linux x64 archive during untimed
+setup. The installer selects its normal default from the available artifacts; the harness does not
+force Node or compiled mode. Loopback downloads use the installer's explicit test exception, while
+external downloads retain normal HTTPS checks. A compiled candidate that falls back to Node is
+reported as a failed installation, rather than measuring the wrong runtime. Harness changes must land on `main` before CI uses
+them, including when benchmarking the Bun migration stack.
 Stock tools, skills, daemon, persistence, and Python bootstrap remain enabled. Homes contain no
 credentials, extensions, MCP servers, or personal skills. The onboarding splash is marked as already
 shown before timing, so startup measures the editor rather than waiting for a person to sign in.
-The editor runs without a selected model; no prompts are submitted. These measurements cover the
-local startup path, not authenticated provider discovery or inference.
+The editor runs without a selected model; no prompts are submitted. Readiness requires a typed probe
+to appear in the terminal and be removed without Enter. Process creation and terminal input mode are
+not proof of editor readiness. Navigation labels, placeholders, and model names are not readiness
+signals. Both revisions use the same probe and launch-to-render timing; probe cleanup is untimed.
+Dropped input is retried every 20 ms, adding up to one retry interval plus terminal polling/rendering
+delay when the input handler starts after terminal raw mode. There is no fixed delay on the ready path.
+These measurements cover the local startup path, not authenticated provider discovery or inference.
 
 ### Python runtime
 
@@ -113,6 +134,88 @@ size, and 1% for disk footprint. A same-revision calibration on separate sandbox
 Smaller signed differences remain visible. Revisit these floors after collecting more control runs. This is a practical noise filter, not a statistical significance test. Inspect
 raw trials before acting on small changes; sandbox scheduling and filesystem caches still introduce noise.
 
+### UI interactions
+
+A separate probe drives the interactive TUI over a PTY with the same `pexpect`/`pyte` harness the
+startup metrics use, against a deterministic on-disk fixture set. Every UI trial regenerates the
+sessions directory, session artifacts, and spawn ledger from scratch, so trials cannot inherit state.
+
+The fixture set is fixed and mirrors a long-lived install: 194 top-level sessions (3 large —
+one of them a very large ~40 MB transcript — 150 medium, 40 small fan-out children of the chain
+root, and the root itself) plus a chain of 6 nested subagent sessions. Large sessions hold 1,999
+user/assistant/toolResult triples (~5 MB of JSONL each), the very large one 15,999 (~40 MB),
+medium sessions 119, and each subagent 399. Content is synthetic but shaped like real transcripts
+(thinking, tool calls, tool output). The subagent chain and the fan-out are linked through the
+same spawn-ledger records the daemon replays (~46 edges), so roster hydration, catalog scanning,
+and saved-session paths are exercised at a scale where regressions are visible. No inference is
+called at any point.
+
+Each trial stops all benchmark-user processes first, then measures:
+
+- **Resume large session (cold):** `prime-agent --resume <id>` from process spawn until the resumed
+  transcript tail is rendered and the editor echoes a typed marker. This is the "switch into a large
+  session" path including daemon and session-worker startup.
+- **Switch into large session:** in a running TUI, `/resume <id>` keystroke to rendered tail plus
+  echoed marker. Measures the in-place session switch with a ~40 MB transcript.
+- **Open agents view from a session:** the left-arrow keystroke to the rendered agents-view splash.
+- **Full agents roster, many sessions:** after the agents-view splash is rendered, until the
+  roster lists the fixture's saved sessions and its count stops growing. Saved sessions stream in, so this isolates
+  catalog scanning, spawn-ledger replay, and hydration across 200 session files.
+- **Open another session from agents view:** typing the target's unique session-id prefix,
+  right-arrow to open, until the target transcript renders and echoes. This is the full
+  "session → agents view → another session" round trip with many sessions on disk.
+- **Reopen resident large session:** return to agents view and select the large session just opened.
+  Time right-arrow through transcript tail and editor echo, excluding search setup and probe cleanup.
+  This exercises attach-snapshot reuse after model-catalog refresh (#2296), separately from cold
+  worker creation. Readiness retries the editor probe every 20 ms.
+- **Open chain parent from agents view:** back to the agents view, search the subagent chain's
+  root session by id prefix, right-arrow to open. The parent becomes live.
+- **Open subagent session at depth 6:** back to the agents view, then drill into the live chain:
+  filter by the deepest subagent's id prefix, clear the search (expansion needs an empty query),
+  expand the parent, refilter past the fan-out siblings, and repeat clear-expand-step for each of
+  the six levels until the deepest subagent row is selected, then right-arrow to open. This is the
+  exact manual flow the product requires today, so the metric includes its real cost.
+- **CPU per interaction:** summed `utime+stime` across the whole benchmark-user process tree
+  (TUI client, daemon, session workers, Python kernels) between two instants around each interaction.
+- **UI memory after interactions:** summed RSS across the same tree after the scenario settles.
+  Per-process snapshots with PSS and CPU are saved as raw artifacts, as for idle memory.
+
+Readiness is never a spinner or a status line: a trial only counts when the target session's
+final transcript line is visible and the editor echoes a marker, so half-rendered states fail
+loudly instead of measuring fast. The roster wait likewise only settles once the fixture's saved
+sessions are listed, so a stalled or empty catalog scan fails the trial instead of recording a
+fast sample. Raw results also record PTY bytes per interaction, a proxy for
+how much the renderer redraws. UI trials default to 3 per revision (`ui_trials` in `config.json`)
+to bound sandbox cost; the scenario takes roughly 60–90 s per trial.
+
+### Scheduled catalog and cold workers
+
+After the navigation scenario, the UI trial stops its benchmark-user processes and regenerates
+an independent 2,300-session fixture: 2,298 children linked through real ledger edges, their root,
+and an unrelated two-message cold target. Each non-target transcript contains 64 assistant usage
+entries (147,136 in total), exceeding the 100,000-entry metadata-cache budget. Thirteen children
+own scheduled-job artifacts. All schedules are paused, have no next run, and must retain runCount=0.
+
+The installed daemon runs on a dedicated socket. The probe requires protocol 7 and the negotiated
+heartbeat_catalog capability; unsupported revisions fail visibly. It records:
+
+- **Scheduled catalog, first request** and **repeated request:** complete global heartbeats_list
+  round trips, with process-tree CPU. The daemon may already have scanned schedules during startup;
+  the first request does not claim a cold filesystem or empty metadata cache.
+- **Cold worker with three catalog scans:** pipeline three global catalog requests, allow 20 ms
+  for their handlers to enter, then create the unrelated saved session. Time the create request
+  through a matching ready worker summary. The target must not already be resident. This isolates
+  worker readiness under scan traffic (#2299), without transcript rendering or PTY delays.
+
+Every catalog reply must contain exactly the expected 13 jobs, with owner names and first-message
+metadata. Competing scans must also complete successfully. Missing jobs, dropped metadata, failed
+scans, and wrong/not-ready workers cannot count as improvements. Raw results record how many scan
+replies arrived before worker readiness; this is an observed response order, not proof of which
+internal scan was executing at each instant. CPU for the cold-worker interval includes scan work.
+No schedules execute and no prompts are submitted. Scans remain independent of the ordinary UI
+fixture so the added history cannot change the original navigation measurements. Allow additional
+fixture-generation and five scan round trips per UI trial; full Linux calibration is still required.
+
 ## Lifecycle and costs
 
 The main workflow posts a single marked comment and updates it in place. A new push replaces the
@@ -127,13 +230,23 @@ SHAs, environment details, installed dependency inventory, transcripts, raw obse
 and estimated sandbox costs. The publisher validates schema, identity, finite numbers, and report
 size and escapes sandbox-provided text.
 
-The controller stops scheduling work at 20 minutes or its $1 estimated budget target. Every sandbox
+The controller stops scheduling work at 25 minutes or its $1 estimated budget target. Every sandbox
 has a 30-minute TTL. Teardown runs in `finally`; the independent completion workflow deletes any
 remaining sandboxes with the exact repository/run/attempt labels, including after cancellation.
 Cleanup enumerates all pages before deleting so pagination cannot skip a sandbox.
 
+By default, two consecutive identical failures stop further trials for that revision and phase
+(`failure_limit` in the configuration). Other independent phases can continue. A failed cold readiness
+probe skips warm startup because there is no verified cold session to retain; a failed first installation
+skips dependent interactive and runtime trials.
+Skipped trials are not measurements or successful samples. Failure causes and terminal transcripts
+remain in the result artifacts, which are uploaded even when the benchmark command fails.
+Log-collection and deferred sandbox-cleanup problems appear as operational warnings. They do not
+mark complete measurements as partial; missing or failed measurements still fail the command.
+
 At the configured list rates, two sandboxes cost about $0.01/minute together. A 10-minute run costs
-about $0.10 in sandbox compute. There are no inference charges. Full sandbox lifetimes are recorded,
+about $0.10 in sandbox compute. There are no inference charges. UI-interaction trials add roughly
+3–6 minutes per run at the default 3 trials per revision. Full sandbox lifetimes are recorded,
 including provisioning, setup, building, measurements, and cleanup. The $1 target is an estimate,
 not a hard billing cap; scheduling and deletion latency can increase the final bill.
 

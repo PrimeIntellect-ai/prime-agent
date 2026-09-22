@@ -1,16 +1,7 @@
 import { resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import {
-	type Component,
-	Container,
-	Markdown,
-	type MarkdownTheme,
-	Spacer,
-	Text,
-	truncateToWidth,
-	visibleWidth,
-} from "@earendil-works/pi-tui";
+import { type Component, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
 import { LOGIN_RECOVERY_MESSAGE } from "../../../core/auth-guidance.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
 import {
@@ -19,7 +10,6 @@ import {
 	shouldCollapseErrorDetails,
 	summarizeErrorDetails,
 } from "./collapsible-error.js";
-import { expandCollapseHint } from "./keybinding-hints.js";
 import type { MermaidMarkdownTransform } from "./mermaid.js";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
@@ -30,13 +20,13 @@ const LOGIN_RECOVERY_SUFFIX = `\n\n${LOGIN_RECOVERY_MESSAGE}`;
 export interface AssistantMessageComponentOptions {
 	cwd?: string;
 	expanded?: boolean;
-	precededByToolActivity?: boolean;
+	precededByToolActivity?: boolean | (() => boolean);
 	/** Replaces Mermaid code blocks in assistant text (never thinking) with Unicode diagrams. */
 	mermaidTransform?: MermaidMarkdownTransform;
 }
 
 function getThinkingMarkdownTheme(baseTheme: MarkdownTheme): MarkdownTheme {
-	const quiet = (text: string) => theme.fg("thinkingText", text);
+	const quiet = (text: string) => theme.fg("dim", text);
 	return {
 		...baseTheme,
 		heading: quiet,
@@ -51,49 +41,6 @@ function getThinkingMarkdownTheme(baseTheme: MarkdownTheme): MarkdownTheme {
 		listBullet: quiet,
 		highlightCode: (code: string) => code.split("\n").map((line) => quiet(line)),
 	};
-}
-
-/** Single collapsed-thinking row that truncates the recap to the render width instead of wrapping. */
-class CollapsedThinkingRow implements Component {
-	constructor(
-		private readonly label: string,
-		private readonly recap: string,
-		private readonly hint: string,
-	) {}
-
-	render(width: number): string[] {
-		const safeWidth = Math.max(1, width);
-		const separator = theme.fg("dim", " · ");
-		const fixedWidth = visibleWidth(` ${this.label}${separator} ${this.hint}`);
-		const recapWidth = Math.max(8, safeWidth - fixedWidth);
-		const recap = theme.fg("thinkingText", truncateToWidth(this.recap, recapWidth));
-		return [truncateToWidth(` ${this.label}${separator}${recap} ${this.hint}`, safeWidth, "")];
-	}
-
-	invalidate(): void {}
-}
-
-/**
- * One-line recap for a collapsed thinking block: the last bold section header
- * when the trace has one (reasoning summaries usually do), otherwise the first
- * non-empty line, stripped of markdown emphasis and truncated.
- */
-export function thinkingRecap(thinking: string, fallback: string, maxWidth = 120): string {
-	const lines = thinking
-		.split("\n")
-		.map((line) => line.trim())
-		.filter((line) => line.length > 0);
-	const lastHeader = [...lines].reverse().find((line) => /^\*\*[^*]+\*\*:?$/.test(line) || /^#{1,6}\s+\S/.test(line));
-	const source = lastHeader ?? lines[0] ?? fallback;
-	const plain = source
-		.replace(/^#{1,6}\s+/, "")
-		.replace(/\*\*([^*]+)\*\*/g, "$1")
-		.replace(/\*([^*]+)\*/g, "$1")
-		.replace(/`([^`]+)`/g, "$1")
-		.replace(/\s+/g, " ")
-		.replace(/:$/, "")
-		.trim();
-	return truncateToWidth(plain || fallback, Math.max(20, maxWidth));
 }
 
 function formatInlineLoginRecoveryMessage(message: string): string | undefined {
@@ -120,7 +67,6 @@ export class AssistantMessageComponent extends Container {
 	private contentContainer: Container;
 	private hideThinkingBlock: boolean;
 	private markdownTheme: MarkdownTheme;
-	private hiddenThinkingLabel: string;
 	private lastMessage?: AssistantMessage;
 	private hasToolCalls = false;
 	private expanded = false;
@@ -128,7 +74,8 @@ export class AssistantMessageComponent extends Container {
 	private lastSignature?: string;
 	private blockMarkdowns = new Map<number, Markdown>();
 	private lastBlockTexts = new Map<number, string>();
-	private precededByToolActivity: boolean;
+	private precededByToolActivity: boolean | (() => boolean);
+	private lastPrecededByToolActivity?: boolean;
 	private mermaidTransform?: MermaidMarkdownTransform;
 	private baseUrl?: string;
 	private isStreaming = false;
@@ -137,14 +84,12 @@ export class AssistantMessageComponent extends Container {
 		message?: AssistantMessage,
 		hideThinkingBlock = false,
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
-		hiddenThinkingLabel = "Thinking...",
 		options: AssistantMessageComponentOptions = {},
 	) {
 		super();
 
 		this.hideThinkingBlock = hideThinkingBlock;
 		this.markdownTheme = markdownTheme;
-		this.hiddenThinkingLabel = hiddenThinkingLabel;
 		this.expanded = options.expanded ?? false;
 		this.precededByToolActivity = options.precededByToolActivity ?? false;
 		this.mermaidTransform = options.mermaidTransform;
@@ -171,11 +116,6 @@ export class AssistantMessageComponent extends Container {
 		this.dirty = true;
 	}
 
-	setHiddenThinkingLabel(label: string): void {
-		this.hiddenThinkingLabel = label;
-		this.dirty = true;
-	}
-
 	setExpanded(expanded: boolean): void {
 		if (this.expanded !== expanded) {
 			this.expanded = expanded;
@@ -184,6 +124,12 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	override render(width: number): string[] {
+		const precededByToolActivity = this.isPrecededByToolActivity();
+		if (this.lastPrecededByToolActivity !== precededByToolActivity) {
+			this.lastPrecededByToolActivity = precededByToolActivity;
+			this.lastSignature = undefined;
+			this.dirty = true;
+		}
 		if (this.dirty) {
 			if (this.lastMessage) {
 				this.reconcile(this.lastMessage);
@@ -198,6 +144,40 @@ export class AssistantMessageComponent extends Container {
 		lines[0] = OSC133_ZONE_START + lines[0];
 		lines[lines.length - 1] = OSC133_ZONE_END + OSC133_ZONE_FINAL + lines[lines.length - 1];
 		return lines;
+	}
+
+	private isPrecededByToolActivity(): boolean {
+		return typeof this.precededByToolActivity === "function"
+			? this.precededByToolActivity()
+			: this.precededByToolActivity;
+	}
+
+	private hasVisibleBody(): boolean {
+		return (this.lastMessage?.content ?? []).some(
+			(content) =>
+				(content?.type === "text" && content.text.trim()) ||
+				(content?.type === "thinking" && !this.hideThinkingBlock && content.thinking.trim()),
+		);
+	}
+
+	/** Mirrors the trailing separator rendered before this message's tool calls. */
+	hasTrailingSpace(): boolean {
+		return (
+			!!this.lastMessage?.content.some((content) => content?.type === "toolCall") &&
+			(this.hasVisibleBody() || this.lastMessage.stopReason === "aborted" || !this.isPrecededByToolActivity())
+		);
+	}
+
+	getSpacingContent(): "visible" | "tool-only" | "hidden" {
+		const message = this.lastMessage;
+		const hasToolCalls = message?.content.some((content) => content?.type === "toolCall");
+		if (
+			this.hasVisibleBody() ||
+			message?.stopReason === "aborted" ||
+			(message?.stopReason === "error" && !hasToolCalls)
+		)
+			return "visible";
+		return hasToolCalls ? "tool-only" : "hidden";
 	}
 
 	updateContent(message: AssistantMessage, isStreaming = this.isStreaming): void {
@@ -219,19 +199,12 @@ export class AssistantMessageComponent extends Container {
 				parts.push(`${i}:text:${content.text.trim() ? 1 : 0}`);
 			} else if (content?.type === "thinking") {
 				parts.push(`${i}:thinking:${content.thinking.trim() ? 1 : 0}`);
-				if (this.hideThinkingBlock && content.thinking.trim()) {
-					// The collapsed row bakes the recap into a static line, so a recap
-					// change must count as a structural change during streaming.
-					// JSON-encode the free text so it cannot forge part boundaries.
-					parts.push(`${i}:recap:${JSON.stringify(thinkingRecap(content.thinking, this.hiddenThinkingLabel))}`);
-				}
 			} else {
 				parts.push(`${i}:${content?.type ?? "invalid"}`);
 			}
 		}
 		parts.push(
 			`hide:${this.hideThinkingBlock}`,
-			`label:${this.hiddenThinkingLabel}`,
 			`expanded:${this.expanded}`,
 			// In the signature so the streaming->final transition rebuilds (mermaid renders differently).
 			`streaming:${this.isStreaming}`,
@@ -277,7 +250,9 @@ export class AssistantMessageComponent extends Container {
 		this.lastBlockTexts.clear();
 
 		const hasVisibleContent = message.content.some(
-			(c) => (c?.type === "text" && c.text.trim()) || (c?.type === "thinking" && c.thinking.trim()),
+			(c) =>
+				(c?.type === "text" && c.text.trim()) ||
+				(c?.type === "thinking" && !this.hideThinkingBlock && c.thinking.trim()),
 		);
 
 		if (hasVisibleContent) {
@@ -292,46 +267,39 @@ export class AssistantMessageComponent extends Container {
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				const mermaidTransform = this.mermaidTransform;
 				const isStreaming = this.isStreaming;
-				const markdown = new Markdown(content.text.trim(), 1, 0, this.markdownTheme, undefined, {
-					baseUrl: this.baseUrl,
-					transform:
-						mermaidTransform && ((md, availableWidth) => mermaidTransform(md, availableWidth, isStreaming)),
-				});
+				const markdown = new Markdown(
+					content.text.trim(),
+					1,
+					0,
+					this.markdownTheme,
+					{
+						color: (text: string) => theme.fg("mdBody", text),
+					},
+					{
+						baseUrl: this.baseUrl,
+						transform:
+							mermaidTransform && ((md, availableWidth) => mermaidTransform(md, availableWidth, isStreaming)),
+					},
+				);
 				this.blockMarkdowns.set(i, markdown);
 				this.lastBlockTexts.set(i, content.text.trim());
 				this.contentContainer.addChild(markdown);
 			} else if (content?.type === "thinking" && content.thinking.trim()) {
-				// Add spacing only when another visible assistant content block follows.
-				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
-				const hasVisibleContentAfter = message.content
-					.slice(i + 1)
-					.some((c) => (c?.type === "text" && c.text.trim()) || (c?.type === "thinking" && c.thinking.trim()));
+				// Hidden thinking renders nothing at all; the working loader in the
+				// tray is the activity signal while the rows are hidden.
+				if (!this.hideThinkingBlock) {
+					// Add spacing only when another visible assistant content block follows.
+					const hasVisibleContentAfter = message.content
+						.slice(i + 1)
+						.some((c) => (c?.type === "text" && c.text.trim()) || (c?.type === "thinking" && c.thinking.trim()));
 
-				const thinkingLabel = theme.bold(theme.fg("thinkingText", this.hiddenThinkingLabel));
-				if (this.hideThinkingBlock) {
-					// Collapsed row: bold label, a one-line recap of the trace, and the
-					// hint. The row truncates the recap to the render width so it never
-					// wraps onto a second line on narrow terminals.
-					const recap = thinkingRecap(content.thinking, this.hiddenThinkingLabel);
-					this.contentContainer.addChild(
-						new CollapsedThinkingRow(thinkingLabel, recap, expandCollapseHint("app.thinking.toggle", false)),
-					);
-					if (hasVisibleContentAfter) {
-						this.contentContainer.addChild(new Spacer(1));
-					}
-				} else {
-					// Expanded: the same label line with the collapse hint, then the trace.
-					// Thinking traces keep Markdown structure but stay visually quiet.
-					this.contentContainer.addChild(
-						new Text(`${thinkingLabel} ${expandCollapseHint("app.thinking.toggle", true)}`, 1, 0),
-					);
 					const markdown = new Markdown(
 						content.thinking.trim(),
 						1,
 						0,
 						getThinkingMarkdownTheme(this.markdownTheme),
 						{
-							color: (text: string) => theme.fg("thinkingText", text),
+							color: (text: string) => theme.fg("dim", text),
 						},
 						{ baseUrl: this.baseUrl },
 					);
@@ -360,7 +328,7 @@ export class AssistantMessageComponent extends Container {
 			this.contentContainer.addChild(this.createErrorComponent(errorMsg, "Error"));
 		}
 
-		if (hasToolCalls && (hasVisibleContent || message.stopReason === "aborted" || !this.precededByToolActivity)) {
+		if (hasToolCalls && (hasVisibleContent || message.stopReason === "aborted" || !this.isPrecededByToolActivity())) {
 			this.contentContainer.addChild(new Spacer(1));
 		}
 	}

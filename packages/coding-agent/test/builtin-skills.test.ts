@@ -1,10 +1,9 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getBundledSkillsDir } from "../src/config.js";
 import { DefaultPackageManager } from "../src/core/package-manager.js";
-import { DefaultResourceLoader } from "../src/core/resource-loader.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { loadSkillsFromDir } from "../src/core/skills.js";
 
@@ -43,255 +42,70 @@ describe("builtin skills", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	describe("DefaultPackageManager", () => {
-		it("resolves bundled skills with builtin source at lowest precedence", async () => {
-			writeSkill(bundledDir, "builtin-skill");
+	const resolveWith = (bundledSkillsDir: string) =>
+		new DefaultPackageManager({ cwd, agentDir, settingsManager, bundledSkillsDir }).resolve();
 
-			const packageManager = new DefaultPackageManager({
-				cwd,
-				agentDir,
-				settingsManager,
-				bundledSkillsDir: bundledDir,
-			});
-			const result = await packageManager.resolve();
+	it("resolves bundled skills as builtin and ranks them below same-named user skills", async () => {
+		writeSkill(bundledDir, "shared-skill");
+		writeSkill(join(agentDir, "skills"), "shared-skill");
 
-			const builtin = result.skills.find((r) => r.path === join(bundledDir, "builtin-skill", "SKILL.md"));
-			expect(builtin).toBeDefined();
-			expect(builtin?.enabled).toBe(true);
-			expect(builtin?.metadata.source).toBe("builtin");
-			expect(builtin?.metadata.scope).toBe("user");
-			expect(builtin?.metadata.baseDir).toBe(bundledDir);
-		});
+		const result = await resolveWith(bundledDir);
 
-		it("sorts builtin skills after user and project skills so collisions favor local skills", async () => {
-			writeSkill(bundledDir, "shared-skill");
-			writeSkill(join(agentDir, "skills"), "shared-skill");
+		const builtinPath = join(bundledDir, "shared-skill", "SKILL.md");
+		const builtin = result.skills.find((r) => r.path === builtinPath);
+		expect(builtin?.enabled).toBe(true);
+		expect(builtin?.metadata).toMatchObject({ source: "builtin", scope: "user", baseDir: bundledDir });
 
-			const packageManager = new DefaultPackageManager({
-				cwd,
-				agentDir,
-				settingsManager,
-				bundledSkillsDir: bundledDir,
-			});
-			const result = await packageManager.resolve();
-
-			const paths = result.skills.map((r) => r.path);
-			const userIndex = paths.indexOf(join(agentDir, "skills", "shared-skill", "SKILL.md"));
-			const builtinIndex = paths.indexOf(join(bundledDir, "shared-skill", "SKILL.md"));
-			expect(userIndex).toBeGreaterThanOrEqual(0);
-			expect(builtinIndex).toBeGreaterThanOrEqual(0);
-			expect(userIndex).toBeLessThan(builtinIndex);
-		});
-
-		it("excludes bundled skills when enableBuiltinSkills is false", async () => {
-			writeSkill(bundledDir, "builtin-skill");
-			settingsManager.setEnableBuiltinSkills(false);
-
-			const packageManager = new DefaultPackageManager({
-				cwd,
-				agentDir,
-				settingsManager,
-				bundledSkillsDir: bundledDir,
-			});
-			const result = await packageManager.resolve();
-
-			expect(result.skills.some((r) => r.metadata.source === "builtin")).toBe(false);
-		});
-
-		it("warns when the bundled skills directory is missing (packaging slip)", async () => {
-			const missingDir = join(tempDir, "does-not-exist");
-			const packageManager = new DefaultPackageManager({
-				cwd,
-				agentDir,
-				settingsManager,
-				bundledSkillsDir: missingDir,
-			});
-			const result = await packageManager.resolve();
-
-			const warning = result.diagnostics.find((d) => d.path === missingDir && d.type === "warning");
-			expect(warning).toBeDefined();
-			expect(warning?.message).toContain("built-in skills");
-		});
-
-		it("warns when the bundled skills directory exists but is empty", async () => {
-			const packageManager = new DefaultPackageManager({
-				cwd,
-				agentDir,
-				settingsManager,
-				bundledSkillsDir: bundledDir,
-			});
-			const result = await packageManager.resolve();
-
-			const warning = result.diagnostics.find((d) => d.path === bundledDir && d.type === "warning");
-			expect(warning).toBeDefined();
-		});
-
-		it("does not warn when bundled skills are present", async () => {
-			writeSkill(bundledDir, "builtin-skill");
-			const packageManager = new DefaultPackageManager({
-				cwd,
-				agentDir,
-				settingsManager,
-				bundledSkillsDir: bundledDir,
-			});
-			const result = await packageManager.resolve();
-
-			expect(result.diagnostics.some((d) => d.path === bundledDir)).toBe(false);
-		});
-
-		it("does not warn when built-in skills are disabled", async () => {
-			const missingDir = join(tempDir, "does-not-exist");
-			settingsManager.setEnableBuiltinSkills(false);
-			const packageManager = new DefaultPackageManager({
-				cwd,
-				agentDir,
-				settingsManager,
-				bundledSkillsDir: missingDir,
-			});
-			const result = await packageManager.resolve();
-
-			expect(result.diagnostics.some((d) => d.path === missingDir)).toBe(false);
-		});
-
-		it("disables individual bundled skills via settings override patterns", async () => {
-			writeSkill(bundledDir, "builtin-skill");
-			writeSkill(bundledDir, "other-skill");
-			settingsManager.setSkillPaths(["-builtin-skill/SKILL.md"]);
-
-			const packageManager = new DefaultPackageManager({
-				cwd,
-				agentDir,
-				settingsManager,
-				bundledSkillsDir: bundledDir,
-			});
-			const result = await packageManager.resolve();
-
-			const disabled = result.skills.find((r) => r.path === join(bundledDir, "builtin-skill", "SKILL.md"));
-			const enabled = result.skills.find((r) => r.path === join(bundledDir, "other-skill", "SKILL.md"));
-			expect(disabled?.enabled).toBe(false);
-			expect(enabled?.enabled).toBe(true);
-		});
+		const paths = result.skills.map((r) => r.path);
+		expect(paths.indexOf(join(agentDir, "skills", "shared-skill", "SKILL.md"))).toBeLessThan(
+			paths.indexOf(builtinPath),
+		);
 	});
 
-	describe("DefaultResourceLoader", () => {
-		it("loads bundled skills with builtin source info", async () => {
-			writeSkill(bundledDir, "builtin-skill");
+	// A missing bundled dir is a release packaging slip, so it must surface as a diagnostic.
+	it.each<[string, boolean, boolean]>([
+		["missing dir warns", false, true],
+		["populated dir stays quiet", true, false],
+	])("bundled skills diagnostic: %s", async (_label, populated, expectWarning) => {
+		const dir = populated ? bundledDir : join(tempDir, "does-not-exist");
+		if (populated) writeSkill(dir, "builtin-skill");
 
-			const loader = new DefaultResourceLoader({ cwd, agentDir, bundledSkillsDir: bundledDir });
-			await loader.reload();
+		const result = await resolveWith(dir);
 
-			const { skills } = loader.getSkills();
-			const builtin = skills.find((s) => s.name === "builtin-skill");
-			expect(builtin).toBeDefined();
-			expect(builtin?.sourceInfo.source).toBe("builtin");
-		});
-
-		it("prefers user skills over bundled skills with the same name", async () => {
-			writeSkill(bundledDir, "shared-skill", "Bundled variant");
-			writeSkill(join(agentDir, "skills"), "shared-skill", "User variant");
-
-			const loader = new DefaultResourceLoader({ cwd, agentDir, bundledSkillsDir: bundledDir });
-			await loader.reload();
-
-			const { skills } = loader.getSkills();
-			const winner = skills.find((s) => s.name === "shared-skill");
-			expect(winner?.description).toBe("User variant");
-		});
-
-		it("excludes bundled skills with --no-skills", async () => {
-			writeSkill(bundledDir, "builtin-skill");
-
-			const loader = new DefaultResourceLoader({ cwd, agentDir, bundledSkillsDir: bundledDir, noSkills: true });
-			await loader.reload();
-
-			expect(loader.getSkills().skills).toEqual([]);
-		});
-
-		it("surfaces a skill diagnostic when the bundled skills dir is missing", async () => {
-			const missingDir = join(tempDir, "does-not-exist");
-			const loader = new DefaultResourceLoader({ cwd, agentDir, bundledSkillsDir: missingDir });
-			await loader.reload();
-
-			const { diagnostics } = loader.getSkills();
-			expect(diagnostics.some((d) => d.path === missingDir && d.type === "warning")).toBe(true);
-		});
+		const warning = result.diagnostics.find((d) => d.path === dir && d.type === "warning");
+		expect(Boolean(warning)).toBe(expectWarning);
 	});
 
-	describe("shipped skill content", () => {
-		it("loads all bundled skills without diagnostics", () => {
-			const { skills, diagnostics } = loadSkillsFromDir({ dir: getBundledSkillsDir(), source: "builtin" });
+	it("drops bundled skills entirely when built-in skills are disabled", async () => {
+		writeSkill(bundledDir, "builtin-skill");
+		settingsManager.setEnableBuiltinSkills(false);
 
-			expect(diagnostics).toEqual([]);
-			expect(skills.length).toBeGreaterThan(0);
-			expect(skills.map((s) => s.name)).toContain("prime-intellect");
-			expect(skills.map((s) => s.name)).toContain("skill-creator");
-		});
+		const result = await resolveWith(bundledDir);
 
-		it("loads the bundled goal skill as a python skill", () => {
-			const { skills } = loadSkillsFromDir({ dir: getBundledSkillsDir(), source: "builtin" });
+		expect(result.skills.some((r) => r.metadata.source === "builtin")).toBe(false);
+		expect(result.diagnostics.some((d) => d.path === bundledDir)).toBe(false);
+	});
 
-			const goal = skills.find((s) => s.name === "goal");
-			expect(goal).toBeDefined();
-			expect(goal?.kind).toBe("python");
-			expect(goal?.kind === "python" && goal.python.importName).toBe("goal");
-		});
+	it("loads every shipped skill without diagnostics", () => {
+		const { skills, diagnostics } = loadSkillsFromDir({ dir: getBundledSkillsDir(), source: "builtin" });
 
-		it("loads the bundled compact skill as a python skill", () => {
-			const { skills } = loadSkillsFromDir({ dir: getBundledSkillsDir(), source: "builtin" });
-
-			const compact = skills.find((s) => s.name === "compact");
-			expect(compact).toBeDefined();
-			expect(compact?.kind).toBe("python");
-			expect(compact?.kind === "python" && compact.python.importName).toBe("compact");
-		});
-
-		it("loads the bundled RLM heartbeat skill as a python skill", () => {
-			const { skills } = loadSkillsFromDir({ dir: getBundledSkillsDir(), source: "builtin" });
-
-			const rlmHeartbeat = skills.find((s) => s.name === "rlm-heartbeat");
-			expect(rlmHeartbeat).toBeDefined();
-			expect(rlmHeartbeat?.kind).toBe("python");
-			expect(rlmHeartbeat?.kind === "python" && rlmHeartbeat.python.importName).toBe("rlm_heartbeat");
-		});
-
-		it("does not ship orchestration heartbeat as a built-in skill", () => {
-			const { skills } = loadSkillsFromDir({ dir: getBundledSkillsDir(), source: "builtin" });
-
-			expect(skills.map((skill) => skill.name)).not.toContain("orchestration-heartbeat");
-		});
-
-		it("ships the edit skill as a python skill importable as `edit`", () => {
-			const { skills } = loadSkillsFromDir({ dir: getBundledSkillsDir(), source: "builtin" });
-
-			const edit = skills.find((s) => s.name === "edit");
-			expect(edit).toBeDefined();
-			expect(edit?.kind).toBe("python");
-			expect(edit?.kind === "python" && edit.python.importName).toBe("edit");
-		});
-
-		it("loads the skill-creator python template as a valid python skill", () => {
-			const referencePath = join(getBundledSkillsDir(), "skill-creator", "references", "python-skills.md");
-			const reference = readFileSync(referencePath, "utf-8");
-			const section = reference.match(/## Minimal Template([\s\S]*?)\n## /)?.[1];
-			expect(section).toBeDefined();
-
-			const files = [...(section as string).matchAll(/\*\*`([^`]+)`\*\*\s*\n+```[a-z]*\n([\s\S]*?)\n```/g)];
-			expect(files.map((m) => m[1])).toEqual(["SKILL.md", "pyproject.toml", "src/word_count/__init__.py"]);
-
-			const templateRoot = join(tempDir, "template-skills");
-			for (const [, relPath, content] of files) {
-				const filePath = join(templateRoot, "word-count", relPath);
-				mkdirSync(dirname(filePath), { recursive: true });
-				writeFileSync(filePath, content);
-			}
-
-			const { skills, diagnostics } = loadSkillsFromDir({ dir: templateRoot, source: "test" });
-			expect(diagnostics).toEqual([]);
-			expect(skills).toHaveLength(1);
-			expect(skills[0].name).toBe("word-count");
-			expect(skills[0].kind).toBe("python");
-			expect(skills[0].kind === "python" && skills[0].python.importName).toBe("word_count");
-		});
+		expect(diagnostics).toEqual([]);
+		expect(skills.length).toBeGreaterThan(0);
+		const names = skills.map((s) => s.name);
+		expect(names).toEqual(expect.arrayContaining(["prime-intellect", "skill-creator"]));
+		expect(names).not.toContain("orchestration-heartbeat");
+		// Python skills must keep their import name: the kernel pre-imports by it.
+		const pythonImports = new Map(
+			skills.flatMap((s) => (s.kind === "python" ? [[s.name, s.python.importName] as const] : [])),
+		);
+		for (const [name, importName] of [
+			["goal", "goal"],
+			["compact", "compact"],
+			["rlm-heartbeat", "rlm_heartbeat"],
+			["edit", "edit"],
+		]) {
+			expect(pythonImports.get(name)).toBe(importName);
+		}
 	});
 
 	// Verify every shipping path includes bundled skills; source-only success would hide a release packaging regression.

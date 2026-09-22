@@ -18,7 +18,8 @@ import { isSessionSlashCommandName, parseSessionSlashCommand, type SessionSlashC
 
 export const COMPACTION_SUMMARY_PREFIX = `[compaction-summary]
 
-The conversation history before this point was compacted into the following summary:
+The conversation history before this point was compacted into the following summary.
+The retained messages below are authoritative; this summary may lag behind them.
 
 <summary>
 `;
@@ -38,16 +39,18 @@ export const BRANCH_SUMMARY_SUFFIX = `</summary>`;
 export const HEARTBEAT_PROMPT_CUSTOM_TYPE = "heartbeat_prompt";
 export const HEARTBEAT_PROMPT_PREVIEW_LABEL = "Heartbeat prompt";
 export const IPYTHON_STATE_RESTORED_CUSTOM_TYPE = "ipython_state_restored";
+export const PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE = "python_skills_unavailable";
 export const SESSION_SLASH_COMMAND_CUSTOM_TYPE = "session_slash_command";
 export const SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE = "session_slash_command_result";
 export const COMPACTION_OUTCOME_CUSTOM_TYPE = "compaction_outcome";
+export const MCP_CONNECTION_OUTCOME_CUSTOM_TYPE = "mcp_connection_outcome";
 export const REFINEMENT_OUTCOME_CUSTOM_TYPE = "refinement_outcome";
 export const REFINEMENT_NOTICE_CUSTOM_TYPE = "refinement_notice";
 export const HARNESS_DIGEST_CUSTOM_TYPE = "harness_digest";
 export const RLM_CHILD_FAILURE_CUSTOM_TYPE = "rlm_child_failure";
 export const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE = "rlm_child_terminal_notice";
 export const ASYNC_BASH_COMPLETION_CUSTOM_TYPE = "async_bash_completion";
-export const ASYNC_BASH_COMPLETION_PREVIEW_LABEL = "Shell message received";
+export const ASYNC_BASH_COMPLETION_PREVIEW_LABEL = "Background command finished";
 
 /**
  * Names and other metadata interpolated into a `[<kind> ...]` header line must not
@@ -124,8 +127,72 @@ export interface RefinementNoticeMessage extends CustomMessage<RefinementNoticeD
 	details: RefinementNoticeDetails;
 }
 
+/** How an MCP connection attempt finished: verified handshake, saved but unverified, or unrecorded result. */
+export type McpConnectionVerificationState = "connected" | "unverified" | "unsaved";
+
+/** Which flow produced the outcome: a completed login, an inline token paste, or a pending-account retry verification. */
+export type McpConnectionOutcomeSource = "login" | "paste" | "retry";
+
+/** Whether the saved connection change is live in the current session. */
+export type McpConnectionActivationState = "active" | "inactive";
+
+export interface McpConnectionOutcomeDetails {
+	/** Absent on entries written before disconnect outcomes existed; both mean "connect". */
+	kind?: "connect";
+	/** Display label the outcome line names, e.g. "Linear" or "Acme (acme-2)". */
+	label: string;
+	source: McpConnectionOutcomeSource;
+	verification: McpConnectionVerificationState;
+	/** Tools verified by the MCP handshake; present only when verification is "connected". */
+	toolCount?: number;
+	/** Human-readable reason the handshake did not complete; present only when verification is "unverified". */
+	issue?: string;
+	/** Probe error category behind `issue` (e.g. "http-unauthorized"), so the renderer can name the fix. */
+	issueCategory?: string;
+	/** Account connection id when the outcome is account-scoped. */
+	connectionId?: string;
+	/** True when the login added a new account to a multi-account service. */
+	addedAccount?: boolean;
+	/** Whether the saved change is live in this session; absent until activation resolves. */
+	activation?: McpConnectionActivationState;
+}
+
+/**
+ * How a disconnect finished. Only outcomes that actually removed the stored
+ * credential are representable: a failed or partial removal never gets a
+ * durable "Disconnected" entry.
+ */
+export type McpDisconnectionState = "removed" | "credential-only" | "preserved";
+
+export interface McpDisconnectionOutcomeDetails {
+	kind: "disconnect";
+	/** Display label the outcome line names, e.g. "Granola" or "account acme-2". */
+	label: string;
+	removal: McpDisconnectionState;
+	/** Account connection id when the outcome is account-scoped. */
+	connectionId?: string;
+	/** Whether the saved change is live in this session; absent until activation resolves. */
+	activation?: McpConnectionActivationState;
+}
+
+/** Either side of the MCP connection lifecycle, carried by one durable entry type. */
+export type McpOutcomeDetails = McpConnectionOutcomeDetails | McpDisconnectionOutcomeDetails;
+
+/** Connect details predate the disconnect entry, so a missing `kind` means "connect". */
+export function isMcpDisconnectionOutcome(details: McpOutcomeDetails): details is McpDisconnectionOutcomeDetails {
+	return (details as Partial<McpDisconnectionOutcomeDetails>).kind === "disconnect";
+}
+
+export interface McpConnectionOutcomeMessage extends CustomMessage<McpOutcomeDetails> {
+	customType: typeof MCP_CONNECTION_OUTCOME_CUSTOM_TYPE;
+	content: string;
+	details: McpOutcomeDetails;
+}
+
 export interface HarnessDigestDetails {
 	digest: string;
+	/** Fingerprint of the harness state at delivery time; cold boundaries skip re-delivery when it still matches. */
+	stateFingerprint?: string;
 }
 
 export const HARNESS_DIGEST_PREFIX = `[harness-digest]
@@ -141,13 +208,14 @@ export const HARNESS_DIGEST_SUFFIX = `
 export function createHarnessDigestMessage(
 	digest: string,
 	timestamp = Date.now(),
+	stateFingerprint?: string,
 ): CustomMessage<HarnessDigestDetails> {
 	return {
 		role: "custom",
 		customType: HARNESS_DIGEST_CUSTOM_TYPE,
 		content: HARNESS_DIGEST_PREFIX + digest + HARNESS_DIGEST_SUFFIX,
 		display: false,
-		details: { digest },
+		details: { digest, ...(stateFingerprint ? { stateFingerprint } : {}) },
 		timestamp,
 	};
 }
@@ -276,6 +344,11 @@ export interface IpythonStateRestoredDetails {
 	restored: boolean;
 }
 
+/** Import names of the pre-imported Python skills that failed to import into the kernel. */
+export interface PythonSkillsUnavailableDetails {
+	skills: string[];
+}
+
 export interface BranchSummaryMessage {
 	role: "branchSummary";
 	summary: string;
@@ -293,6 +366,8 @@ export interface CompactionSummaryMessage {
 	customInstructions?: string;
 	/** Harness digest snapshot rendered before the summary in LLM context. Attached mechanically at compaction, never summarized. */
 	harnessDigest?: string;
+	/** Fingerprint of the harness state behind `harnessDigest` at compaction time; lets cold boundaries skip re-delivery. */
+	harnessStateFingerprint?: string;
 	timestamp: number;
 }
 
@@ -359,6 +434,7 @@ export function createCompactionSummaryMessage(
 	customInstructions?: string,
 	retainedMessageCount?: number,
 	harnessDigest?: string,
+	harnessStateFingerprint?: string,
 ): CompactionSummaryMessage {
 	return {
 		role: "compactionSummary",
@@ -367,6 +443,7 @@ export function createCompactionSummaryMessage(
 		retainedMessageCount,
 		customInstructions,
 		harnessDigest,
+		harnessStateFingerprint,
 		timestamp: new Date(timestamp).getTime(),
 	};
 }
@@ -485,6 +562,78 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
 
+/** The saved-but-not-live tail every outcome line shares. */
+function activationSuffix(details: McpOutcomeDetails): string {
+	return details.activation === "inactive" ? " The change remains saved, but it is not active in this session." : "";
+}
+
+/** Plain-text outcome line for a completed MCP disconnect. */
+function formatMcpDisconnectionNotice(details: McpDisconnectionOutcomeDetails): string {
+	const suffix = activationSuffix(details);
+	switch (details.removal) {
+		case "removed":
+			return `Disconnected ${details.label}.${suffix}`;
+		case "credential-only":
+			return `Disconnected ${details.label}. No saved connection entry existed; the stored credential was removed.${suffix}`;
+		case "preserved":
+			return `Disconnected ${details.label}. The saved connection entry was kept and now shows as not connected.${suffix}`;
+	}
+}
+
+/**
+ * Plain-text outcome line for an MCP connect or disconnect. This is the
+ * durable wording the flows already reported: it is what the entry persists as
+ * `content` and what the transient fallback shows, so it stays a full sentence
+ * even where the rendered entry splits it into a header and a detail line.
+ */
+export function formatMcpConnectionOutcomeNotice(details: McpOutcomeDetails): string {
+	if (isMcpDisconnectionOutcome(details)) return formatMcpDisconnectionNotice(details);
+	const prefix =
+		details.source === "login" && details.addedAccount === true && details.connectionId
+			? `Added account ${details.connectionId}. `
+			: "";
+	const suffix = activationSuffix(details);
+	switch (details.verification) {
+		case "connected":
+			return `${prefix}Connected ${details.label}${
+				details.toolCount !== undefined ? ` (${details.toolCount} tools verified)` : ""
+			}.${suffix}`;
+		case "unverified":
+			if (details.source === "retry") {
+				return `Verification did not complete: ${details.issue}. The connection is saved; retry from /plugins.${suffix}`;
+			}
+			if (details.source === "paste") {
+				// No login happened: the user pasted a token. "Login succeeded"
+				// would be a false claim here.
+				return `Token saved for ${details.label}, but connection verification did not complete: ${details.issue}. The connection is saved; retry from /plugins.${suffix}`;
+			}
+			return `${prefix}Login succeeded for ${details.label}, but connection verification did not complete: ${details.issue}. The connection is saved; retry from /plugins.${suffix}`;
+		case "unsaved":
+			if (details.source === "retry") {
+				return `The verification result could not be saved. The connection is saved; retry from /plugins.${suffix}`;
+			}
+			if (details.source === "paste") {
+				return `Token saved for ${details.label}, but the verification result could not be saved. The connection is saved; retry from /plugins.${suffix}`;
+			}
+			return `${prefix}Login succeeded for ${details.label}, but the verification result could not be saved. The connection is saved; retry from /plugins.${suffix}`;
+	}
+}
+
+export function createMcpConnectionOutcomeMessage(
+	details: McpOutcomeDetails,
+	display = true,
+	timestamp = Date.now(),
+): McpConnectionOutcomeMessage {
+	return {
+		role: "custom",
+		customType: MCP_CONNECTION_OUTCOME_CUSTOM_TYPE,
+		content: formatMcpConnectionOutcomeNotice(details),
+		display,
+		details: { ...details },
+		timestamp,
+	};
+}
+
 function hasValidCustomMessageEnvelope(message: Record<string, unknown>, customType: string): boolean {
 	return (
 		message.role === "custom" &&
@@ -575,6 +724,42 @@ export function isRefinementOutcomeMessage(message: unknown): message is Refinem
 	);
 }
 
+function isValidMcpActivation(activation: unknown): boolean {
+	return activation === undefined || activation === "active" || activation === "inactive";
+}
+
+function isValidMcpDisconnectionDetails(details: Record<string, unknown>): boolean {
+	return (
+		typeof details.label === "string" &&
+		(details.removal === "removed" || details.removal === "credential-only" || details.removal === "preserved") &&
+		(details.connectionId === undefined || typeof details.connectionId === "string") &&
+		isValidMcpActivation(details.activation)
+	);
+}
+
+export function isMcpConnectionOutcomeMessage(message: unknown): message is McpConnectionOutcomeMessage {
+	if (!isRecord(message) || !hasValidCustomMessageEnvelope(message, MCP_CONNECTION_OUTCOME_CUSTOM_TYPE)) return false;
+	if (!isRecord(message.details)) return false;
+	if (message.details.kind === "disconnect") return isValidMcpDisconnectionDetails(message.details);
+	return (
+		(message.details.kind === undefined || message.details.kind === "connect") &&
+		typeof message.details.label === "string" &&
+		(message.details.source === "login" ||
+			message.details.source === "retry" ||
+			message.details.source === "paste") &&
+		(message.details.verification === "connected" ||
+			message.details.verification === "unverified" ||
+			message.details.verification === "unsaved") &&
+		(message.details.toolCount === undefined ||
+			(typeof message.details.toolCount === "number" && Number.isInteger(message.details.toolCount))) &&
+		(message.details.issue === undefined || typeof message.details.issue === "string") &&
+		(message.details.issueCategory === undefined || typeof message.details.issueCategory === "string") &&
+		(message.details.connectionId === undefined || typeof message.details.connectionId === "string") &&
+		(message.details.addedAccount === undefined || typeof message.details.addedAccount === "boolean") &&
+		isValidMcpActivation(message.details.activation)
+	);
+}
+
 export interface HeartbeatPromptMessage extends CustomMessage<HeartbeatPromptDetails> {
 	customType: typeof HEARTBEAT_PROMPT_CUSTOM_TYPE;
 	content: string;
@@ -624,6 +809,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						m.customType === SESSION_SLASH_COMMAND_CUSTOM_TYPE ||
 						m.customType === SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE ||
 						m.customType === COMPACTION_OUTCOME_CUSTOM_TYPE ||
+						m.customType === MCP_CONNECTION_OUTCOME_CUSTOM_TYPE ||
 						m.customType === REFINEMENT_OUTCOME_CUSTOM_TYPE
 					) {
 						return undefined;

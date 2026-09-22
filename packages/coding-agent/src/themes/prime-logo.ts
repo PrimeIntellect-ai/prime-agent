@@ -16,3 +16,12 @@ export const PRIME_BUTTERFLY_LOGO = `                          ▄▄███�
  █████    ▀█▄▄▄█████▀
 ███████▄  ████████▀
 ▀███▀▀    █████▀`;
+
+/** Compact 7-row × 22-column butterfly, rendered from the brand SVG with solid quadrant cells. */
+export const PRIME_COMPACT_BUTTERFLY_LOGO = `                 ▗▄▄█▀
+   ███▄       ▗▄███▀
+  ▗█▛▐█▙   ▗▄█▀▗█▀
+ ▗█▛ ▟██▙▄██▛ ▟▛
+ ▗▟▌ ▐███▛▘▗▄█▖
+▟███▄  ▄▄▟███▀
+▜█▛▀▘  ▜█▛▀▘`;

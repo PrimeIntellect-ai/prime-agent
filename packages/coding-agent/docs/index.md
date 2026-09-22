@@ -7,7 +7,7 @@ Prime Agent is an RLM-native coding and research harness built around a persiste
 Install the latest stable release on Linux or macOS:
 
 ```bash
-curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
+curl --proto '=https' --proto-redir '=https' -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 ```
 
 Then run it in a project directory:

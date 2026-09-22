@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -78,6 +79,14 @@ class HarnessStateTest(unittest.TestCase):
             )
             state.update_memory("subagent_entry", "Subagent", "Subagent content updated", kind="subagent")
 
+            for mutate in (
+                lambda: state.delete_memory("prompt_entry"),
+                lambda: state.update_memory("prompt_entry", "Prompt note", "x"),
+            ):
+                with self.assertRaisesRegex(ValueError, "is kind='prompt'; pass kind='prompt'"):
+                    mutate()
+            self.assertFalse(state.delete_memory("absent"))
+
             for kind in ("prompt", "memory", "skill", "subagent"):
                 entry_id = f"{kind}_entry"
                 self.assertEqual(state.get(kind, entry_id).version, 2)
@@ -101,23 +110,14 @@ class HarnessStateTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "only accepted for kind='skill'"):
                     state.create_memory("Bad", "content", id=f"bad_{kind}", kind=kind, reference=PYTHON_REFERENCE)
                 with self.assertRaisesRegex(ValueError, "only accepted for kind='skill'"):
-                    state.create_memory("Bad", "content", id=f"bad_{kind}", kind=kind, arguments={})
-                with self.assertRaisesRegex(ValueError, "only accepted for kind='skill'"):
                     state.update_memory(default_entry.id, "Bad", "content", kind=kind, arguments={})
 
             # An unknown kind is reported as such, not as a skill-only field error.
             with self.assertRaisesRegex(ValueError, "unknown harness kind 'tool'"):
                 state.create_memory("Bad", "content", kind="tool", reference=PYTHON_REFERENCE)
 
-    def test_the_common_old_call_form_still_works_and_path_names_its_replacement(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            state = HarnessState(Path(temp_dir) / "harness_state.json")
-
-            entry = state.create_memory("Durable fact", "Unchanged call form.")
-            self.assertEqual((entry.kind, entry.topic), ("memory", "general"))
-
             with self.assertRaisesRegex(TypeError, "path was renamed to topic"):
-                state.create_memory("Grouped", "content", id="grouped", **{"path": "repo/testing"})
+                state.create_memory("Grouped", "content", **{"path": "repo/testing"})
 
     def test_removed_harness_methods_name_their_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -130,88 +130,22 @@ class HarnessStateTest(unittest.TestCase):
                 ),
                 ("plan_refinement", "plan_refinement was removed; use await refine.run() to schedule a refinement"),
             ):
-                with self.assertRaises(AttributeError) as caught:
+                with self.assertRaisesRegex(AttributeError, re.escape(message)):
                     getattr(state, name)
-                self.assertEqual(str(caught.exception), message)
 
             for name, replacement in (
                 ("update_skill", "update_memory(..., kind='skill')"),
                 ("delete_prompt_note", "delete_memory(..., kind='prompt')"),
                 ("create_subagent", "create_memory(..., kind='subagent')"),
             ):
-                with self.assertRaises(AttributeError) as caught:
+                with self.assertRaisesRegex(AttributeError, re.escape(f"{name} was removed; use rlm.harness.{replacement}")):
                     getattr(state, name)
-                self.assertEqual(
-                    str(caught.exception), f"{name} was removed; use rlm.harness.{replacement}"
-                )
-
-    def test_entries_that_store_the_grouping_as_path_load_and_resave_as_topic(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            state_path = Path(temp_dir) / "harness_state.json"
-            state_path.write_text(
-                json.dumps(
-                    {
-                        "schema": 1,
-                        "entries": {
-                            "memory": {
-                                "legacy": {
-                                    "id": "legacy",
-                                    "kind": "memory",
-                                    "title": "Legacy",
-                                    "content": "Stored with the older field name.",
-                                    "path": "repo/testing",
-                                }
-                            }
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            state = HarnessState(state_path)
-            self.assertEqual(state.get("memory", "legacy").topic, "repo/testing")
-
-            state.update_memory("legacy", "Legacy", "Resaved by the current writer.")
-            saved = json.loads(state_path.read_text(encoding="utf-8"))["entries"]["memory"]["legacy"]
-            self.assertEqual(saved["topic"], "repo/testing")
-            # The mirror keeps a pre-topic writer from resaving the entry ungrouped.
-            self.assertEqual(saved["path"], "repo/testing")
-
-    def test_grouping_survives_a_writer_that_only_knows_the_path_field(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            state_path = Path(temp_dir) / "harness_state.json"
-            HarnessState(state_path).create_memory("Grouped", "content", id="grouped", topic="repo/testing")
-
-            # A pre-topic build rewrites the file and drops fields it does not know.
-            saved = json.loads(state_path.read_text(encoding="utf-8"))
-            entry = saved["entries"]["memory"]["grouped"]
-            saved["entries"]["memory"]["grouped"] = {key: value for key, value in entry.items() if key != "topic"}
-            state_path.write_text(json.dumps(saved), encoding="utf-8")
-
-            self.assertEqual(HarnessState(state_path).get("memory", "grouped").topic, "repo/testing")
-
-    def test_delete_and_update_name_the_kind_an_id_actually_has(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            state = HarnessState(Path(temp_dir) / "harness_state.json")
-            state.create_memory("Policy note", "content", id="cadence", kind="prompt")
-
-            for mutate in (
-                lambda: state.delete_memory("cadence"),
-                lambda: state.update_memory("cadence", "Policy note", "new content"),
-            ):
-                with self.assertRaisesRegex(ValueError, "entry 'cadence' is kind='prompt'; pass kind='prompt'"):
-                    mutate()
-
-            self.assertIsNotNone(state.get("prompt", "cadence"))
-            # A plain miss still reports absence rather than a mismatch.
-            self.assertFalse(state.delete_memory("absent"))
 
     def test_engine_recorded_refinements_survive_a_kernel_save(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "harness_state.json"
             kernel_state = HarnessState(state_path)
             kernel_state.create_memory("Kernel note", "Written before the refinement.", id="kernel")
-
             # The refinement engine rewrites the same file from the host process.
             engine_write = json.loads(state_path.read_text(encoding="utf-8"))
             engine_write["refinements"] = [
@@ -221,9 +155,7 @@ class HarnessStateTest(unittest.TestCase):
             # Guarantee the mtime advances even on coarse-resolution filesystems.
             future = state_path.stat().st_mtime + 5
             os.utime(state_path, (future, future))
-
             kernel_state.create_memory("Later note", "Written after the refinement.", id="later")
-
             reloaded = HarnessState(state_path)
             self.assertEqual([event.id for event in reloaded.refinements], ["refine_1"])
             self.assertIsNotNone(reloaded.get("memory", "later"))
@@ -392,7 +324,12 @@ class HarnessStateTest(unittest.TestCase):
                                 },
                                 "missing_content": {
                                     "title": "Missing content",
-                                }
+                                },
+                                "grouped": {
+                                    "title": "Grouped",
+                                    "content": "c",
+                                    "path": "repo/testing",
+                                },
                             }
                         },
                         "refinements": [
@@ -427,6 +364,12 @@ class HarnessStateTest(unittest.TestCase):
             self.assertEqual(state.refinements[0].changes, ["1", "loaded"])
             self.assertEqual(len(state.refinements), 1)
             self.assertIn("1, loaded", state.overview())
+            self.assertEqual(state.get("memory", "grouped").topic, "repo/testing")
+
+            state.update_memory("grouped", "Grouped", "resaved")
+            saved = json.loads(state_path.read_text(encoding="utf-8"))["entries"]["memory"]["grouped"]
+            self.assertEqual(saved["topic"], "repo/testing")
+            self.assertNotIn("path", saved)
 
             updated = state.update_memory("known", "Known memory", "Updated content.")
             self.assertEqual(updated.version, 3)
@@ -504,6 +447,45 @@ class HarnessStateTest(unittest.TestCase):
                     arguments={},
                     kind="skill",
                 )
+
+    def test_rejects_invalid_entry_fields_before_persisting(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness_state.json"
+            state = HarnessState(state_path)
+            state.create_memory("Valid", "seed content", id="valid_entry")
+            seeded = state_path.read_text(encoding="utf-8")
+
+            for label, kwargs, message in [
+                ("content list", dict(title="T", content=["one string"]), "content must be a non-empty string, got a list"),
+                ("title list", dict(title=["T"], content="c"), "title must be a non-empty string, got a list"),
+                ("empty title", dict(title="", content="c"), "title must be a non-empty string, got an empty string"),
+                ("numeric id", dict(title="T", content="c", id=7), "id must be a non-empty string, got int"),
+                ("unhashable list id", dict(title="T", content="c", id=["x"]), "id must be a non-empty string, got a list"),
+                ("falsy numeric id", dict(title="Zero", content="c", id=0), "id must be a non-empty string, got int"),
+                ("numeric topic", dict(title="T", content="c", topic=7), "topic must be a non-empty string, got int"),
+                ("list metadata", dict(title="T", content="c", metadata=["m"]), "metadata must be a dict when provided, got a list"),
+            ]:
+                with self.subTest(case=f"create {label}"):
+                    with self.assertRaisesRegex(ValueError, message):
+                        state.create_memory(**kwargs)
+            with self.subTest(case="subagent with list content"):
+                with self.assertRaisesRegex(ValueError, "content must be a non-empty string, got a list"):
+                    state.create_memory("T", ["one string"], kind="subagent")
+            with self.subTest(case="skill create without a reference"):
+                with self.assertRaisesRegex(ValueError, "skill entries require a Python reference"):
+                    state.create_memory("Skill", "content", id="orphan_skill", kind="skill")
+            with self.subTest(case="skill reference as a list"):
+                with self.assertRaisesRegex(
+                    ValueError, "skill entry 'skill' rejected: reference must be a dict when provided, got a list"
+                ):
+                    state.create_memory("Skill", "content", reference=["bad"], kind="skill")
+            with self.subTest(case="update with list content"):
+                with self.assertRaisesRegex(ValueError, "content must be a non-empty string, got a list"):
+                    state.update_memory("valid_entry", "Valid", ["one string"])
+                self.assertEqual(state_path.read_text(encoding="utf-8"), seeded)
+            reloaded = HarnessState(state_path)
+            self.assertEqual([entry.id for entry in reloaded.list("memory")], ["valid_entry"])
+            self.assertIsNone(reloaded.get("skill", "orphan_skill"))
 
     def test_load_tolerates_corrupt_or_non_object_state(self) -> None:
         for payload in ("not json at all", "null", "[]", '"a string"', "123"):
@@ -1166,3 +1148,130 @@ class HarnessStateTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HarnessSearchTest(unittest.TestCase):
+    def test_search_ranks_relevant_entries_first(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Tea notes", "All about oolong brewing.", id="tea")
+            state.create_memory("Worktree policy", "Use git worktrees for parallel branches.", id="worktree")
+            state.create_memory("RSI program", "Ship [RSI] PRs from worktrees.", id="rsi", kind="prompt")
+
+            results = state.search("worktree branches")
+
+            self.assertTrue(results)
+            self.assertEqual(results[0].id, "worktree")
+            self.assertTrue(all(entry.id != "tea" for entry in results))
+
+    def test_search_filters_by_kind_and_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Worktree memory", "worktree workflow", id="m1")
+            state.create_memory("Worktree prompt", "worktree workflow", id="p1", kind="prompt")
+            state.create_memory("Worktree prompt 2", "worktree workflow", id="p2", kind="prompt")
+
+            prompts = state.search("worktree", kind="prompt")
+            self.assertTrue(prompts)
+            self.assertEqual({entry.kind for entry in prompts}, {"prompt"})
+
+            limited = state.search("worktree", kind="prompt", limit=1)
+            self.assertEqual(len(limited), 1)
+
+    def test_search_matches_non_ascii_queries(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Tokyo note", "東京ミーティングの議事録。", id="tokyo")
+
+            results = state.search("東京")
+            self.assertEqual([entry.id for entry in results], ["tokyo"])
+
+    def test_search_segments_whitespace_free_cjk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Login fix", "登录故障排查记录。", id="login")
+            state.create_memory("Tea notes", "All about oolong brewing.", id="tea")
+
+            results = state.search("修复登录")
+
+            self.assertEqual([entry.id for entry in results], ["login"])
+
+    def test_search_matches_supplementary_cjk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Ext B note", "𠀀𠀁 ideographs recorded.", id="extb")
+
+            self.assertEqual([entry.id for entry in state.search("𠀀")], ["extb"])
+            self.assertEqual([entry.id for entry in state.search("𠀀𠀁")], ["extb"])
+
+    def test_search_keeps_accented_latin_words_whole(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Review notes", "The naïve approach failed.", id="naive")
+
+            results = state.search("naïve")
+
+            self.assertEqual([entry.id for entry in results], ["naive"])
+
+    def test_search_matches_combining_mark_scripts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Book note", "किताब पढ़ रहा हूँ।", id="book")
+
+            results = state.search("किताब")
+
+            self.assertEqual([entry.id for entry in results], ["book"])
+
+    def test_search_drops_single_character_non_cjk_terms(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Russian note", "мир и согласие в команде.", id="mir")
+
+            self.assertEqual(state.search("и"), [])
+            self.assertEqual([entry.id for entry in state.search("мир")], ["mir"])
+
+    def test_search_treats_punctuation_as_separators(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Branch hygiene", "Use git worktrees for parallel branches.", id="worktree")
+            state.create_memory("Question", "Anything else left open?", id="question")
+
+            results = state.search("worktree?")
+            self.assertEqual([entry.id for entry in results], ["worktree"])
+
+            self.assertEqual(state.search("??? / . ,"), [])
+
+    def test_search_drops_zero_score_entries_and_validates_args(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Tea notes", "All about oolong brewing.", id="tea")
+
+            self.assertEqual(state.search("quantum"), [])
+            self.assertEqual(state.search("   "), [])
+            with self.assertRaises(TypeError):
+                state.search(42)
+            with self.assertRaises(TypeError):
+                state.search("worktree", limit=0)
+
+    def test_search_discounts_common_terms_and_keeps_frequency_ties(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+
+            # An empty corpus scores nothing, and a lone entry (N=1, df=1 -> log(2)) still scores.
+            self.assertEqual(state.search("session"), [])
+            state.create_memory("Session notes", "Session signal.", id="solo")
+            self.assertEqual([entry.id for entry in state.search("session")], ["solo"])
+            state.entries["memory"]["solo"].updated_at = "2026-07-01T00:00:00+00:00"
+
+            # Equal frequency discounts every match alike, so recency still orders them: id order
+            # alone would put aa_older first.
+            for entry_id, day in (("aa_older", "08-01"), ("zz_newer", "09-01")):
+                state.create_memory("Session notes", "Same session signal.", id=entry_id)
+                state.entries["memory"][entry_id].updated_at = f"2026-{day}T00:00:00+00:00"
+            self.assertEqual([entry.id for entry in state.search("session")], ["zz_newer", "aa_older", "solo"])
+
+            # "session" matches 3 of 4 (log(1 + 4/3)), "quantum" 1 of 4 (log(1 + 4)): rare ranks first.
+            state.create_memory("Quantum note", "Only quantum annealing matters once.", id="rare")
+            state.entries["memory"]["rare"].updated_at = "2026-07-01T00:00:00+00:00"
+            self.assertEqual([entry.id for entry in state.search("session quantum")], ["rare", "zz_newer", "aa_older", "solo"])
+

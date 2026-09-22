@@ -9,28 +9,14 @@ import {
 	Spacer,
 	Text,
 	type TUI,
-	truncateToWidth,
-	visibleWidth,
 } from "@earendil-works/pi-tui";
-import { PRIME_BUTTERFLY_LOGO } from "../../../themes/prime-logo.js";
 import { execFileHidden } from "../../../utils/child-process.js";
 import { copyToClipboard } from "../../../utils/clipboard.js";
 import { theme } from "../theme/theme.js";
 import { formatKeyText, keyHint } from "./keybinding-hints.js";
 import { MenuPanel, MenuSearchInput } from "./menu-panel.js";
 import { shouldTreatAsBack } from "./modal-back.js";
-
-const PRIME_INFERENCE_PROVIDER_ID = "prime-inference";
-const PRIME_LOGO_LINES = PRIME_BUTTERFLY_LOGO.split("\n");
-const PRIME_LOGO_WIDTH = PRIME_LOGO_LINES.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
-
-function centeredLine(text: string, width: number): string {
-	const safeWidth = Math.max(1, width);
-	const content = truncateToWidth(text, safeWidth, "");
-	const padding = Math.max(0, safeWidth - visibleWidth(content));
-	const left = Math.floor(padding / 2);
-	return " ".repeat(left) + content + " ".repeat(padding - left);
-}
+import { isOnboardingExitKey } from "./onboarding-exit.js";
 
 function isTextEntryKeybinding(key: string): boolean {
 	const parts = key.toLowerCase().split("+");
@@ -42,38 +28,13 @@ function isPrintableInput(data: string): boolean {
 	return data.length === 1 && data >= " " && data !== "\x7f";
 }
 
-class PrimeLoginHeader implements Component {
-	invalidate(): void {
-		// Header render is derived from the current theme.
-	}
-
-	render(width: number): string[] {
-		const safeWidth = Math.max(1, width);
-		const logoWidth = Math.min(PRIME_LOGO_WIDTH, safeWidth);
-		const logoLines = PRIME_LOGO_LINES.map((line) => {
-			const paddedLogoLine = line + " ".repeat(Math.max(0, PRIME_LOGO_WIDTH - visibleWidth(line)));
-			return centeredLine(theme.fg("text", truncateToWidth(paddedLogoLine, logoWidth, "")), safeWidth);
-		});
-		return [
-			...logoLines,
-			centeredLine("", safeWidth),
-			centeredLine(theme.bold(theme.fg("text", "Login to Prime Inference")), safeWidth),
-			centeredLine(
-				theme.fg("muted", "Connect your Prime Intellect account to enable Prime Inference models."),
-				safeWidth,
-			),
-		];
-	}
-}
-
 /**
- * Login dialog component - replaces editor during OAuth login flow
+ * Login dialog component - replaces the prompt area during provider login flows
  */
 export class LoginDialogComponent extends Container implements Focusable {
 	private contentContainer: Container;
 	private input: MenuSearchInput;
 	private tui: TUI;
-	private readonly isPrimeInference: boolean;
 	private abortController = new AbortController();
 	private inputResolver?: (value: string) => void;
 	private inputRejecter?: (error: Error) => void;
@@ -85,6 +46,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 	private continueRejecter?: (error: Error) => void;
 	private authUrl?: string;
 	private authActions?: Text;
+	private inputSpacer?: Spacer;
 
 	// Focusable implementation - propagate to input for IME cursor positioning
 	private _focused = false;
@@ -102,18 +64,22 @@ export class LoginDialogComponent extends Container implements Focusable {
 		private onComplete: (success: boolean, message?: string) => void,
 		providerNameOverride?: string,
 		titleOverride?: string,
+		private dialogOptions: { topRule?: boolean; hideTitle?: boolean; onExit?: () => void } = {},
 	) {
 		super();
 		this.tui = tui;
 
 		const providerInfo = getOAuthProviders().find((p) => p.id === providerId);
 		const providerName = providerNameOverride || providerInfo?.name || providerId;
-		this.isPrimeInference = providerId === PRIME_INFERENCE_PROVIDER_ID;
 		const title = titleOverride ?? `Login to ${providerName}`;
 
+		// The top rule keeps the inline login section separate from the transcript.
+		// Surfaces that own the screen above the panel (onboarding) turn both the
+		// rule and the title off: they already say where the user is.
 		const panel = new MenuPanel({
-			title: this.isPrimeInference ? "" : title,
-			subtitle: this.isPrimeInference ? undefined : "Complete this step to continue setup.",
+			title: this.dialogOptions.hideTitle ? "" : title,
+			inline: true,
+			topRule: this.dialogOptions.topRule ?? true,
 		});
 		this.addChild(panel);
 
@@ -122,7 +88,8 @@ export class LoginDialogComponent extends Container implements Focusable {
 		panel.addChild(this.contentContainer);
 
 		// Input (always present, used when needed)
-		this.input = new MenuSearchInput("Paste value");
+		// Plain field: the enclosing rules read as clutter in the login panel.
+		this.input = new MenuSearchInput("Paste value", true, true);
 		this.input.onSubmit = () => {
 			if (this.inputResolver) {
 				this.inputResolver(this.input.getValue());
@@ -134,6 +101,11 @@ export class LoginDialogComponent extends Container implements Focusable {
 
 	get signal(): AbortSignal {
 		return this.abortController.signal;
+	}
+
+	/** Cancel from outside the panel, e.g. when a session reset unmounts it. */
+	abort(): void {
+		this.cancel();
 	}
 
 	private cancel(): void {
@@ -157,19 +129,18 @@ export class LoginDialogComponent extends Container implements Focusable {
 	showAuth(url: string, instructions?: string): void {
 		this.startContent();
 		this.authUrl = url;
-		this.addSectionTitle("Browser sign-in");
-		this.addMutedText("The sign-in page should already be opening. If it did not open, use the link below.");
-		this.contentContainer.addChild(new Spacer(1));
-		this.addLabel("Sign-in link");
 		const linkedUrl = getCapabilities().hyperlinks ? `\x1b]8;;${url}\x07${url}\x1b]8;;\x07` : url;
 		this.contentContainer.addChild(new Text(theme.fg("text", linkedUrl), 0, 0));
+		// Keep the browser-step text visually distinct from the URL.
+		this.addSectionSpacer();
+		// Provider instructions already describe the browser step.
+		if (instructions) {
+			this.addInstructions(instructions);
+		} else {
+			this.addMutedText("Complete the sign-in in your browser.");
+		}
 		this.authActions = new Text(this.getAuthActionsText(), 0, 0);
 		this.contentContainer.addChild(this.authActions);
-
-		if (instructions) {
-			this.contentContainer.addChild(new Spacer(1));
-			this.addInstructions(instructions);
-		}
 
 		// Try to open browser
 		const [command, ...args] =
@@ -192,15 +163,45 @@ export class LoginDialogComponent extends Container implements Focusable {
 	 */
 	showManualInput(prompt: string): Promise<string> {
 		this.addSectionSpacer();
-		this.addSectionTitle("Manual fallback");
 		this.addMutedText(prompt);
-		this.contentContainer.addChild(this.input);
-		this.inputVisible = true;
-		this.authActions?.setText(this.getAuthActionsText());
-		this.contentContainer.addChild(new Text(theme.fg("muted", keyHint("tui.select.cancel", "cancel")), 0, 0));
+		this.addInputField();
 		this.tui.requestRender();
 
 		return this.waitForInput();
+	}
+
+	/** Append content while keeping the key-hint row as the panel's last row. */
+	private addChildAboveHints(component: Component): void {
+		if (!this.authActions) {
+			this.contentContainer.addChild(component);
+			return;
+		}
+		this.contentContainer.removeChild(this.authActions);
+		this.contentContainer.addChild(component);
+		this.contentContainer.addChild(this.authActions);
+		this.authActions.setText(this.getAuthActionsText());
+	}
+
+	/** Append the paste field plus the single key-hint line at the panel bottom. */
+	private addInputField(): void {
+		this.contentContainer.removeChild(this.input);
+		if (this.inputSpacer) {
+			this.contentContainer.removeChild(this.inputSpacer);
+		} else {
+			// A blank row keeps the key hints off the field. It is retained so a
+			// second prompt moves it instead of stacking another blank row.
+			this.inputSpacer = new Spacer(1);
+		}
+		if (this.authActions) {
+			this.contentContainer.removeChild(this.authActions);
+		} else {
+			this.authActions = new Text(this.getAuthActionsText(), 0, 0);
+		}
+		this.contentContainer.addChild(this.input);
+		this.inputVisible = true;
+		this.contentContainer.addChild(this.inputSpacer);
+		this.contentContainer.addChild(this.authActions);
+		this.authActions.setText(this.getAuthActionsText());
 	}
 
 	/**
@@ -223,15 +224,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 		if (placeholder) {
 			this.contentContainer.addChild(new Text(theme.fg("muted", `e.g., ${placeholder}`), 0, 0));
 		}
-		this.contentContainer.addChild(this.input);
-		this.inputVisible = true;
-		this.authActions?.setText(this.getAuthActionsText());
-		this.contentContainer.addChild(
-			new Text(
-				theme.fg("muted", `${keyHint("tui.select.confirm", "submit")}  ${keyHint("tui.select.cancel", "cancel")}`),
-				0,
-			),
-		);
+		this.addInputField();
 
 		this.input.setValue("");
 		this.tui.requestRender();
@@ -281,8 +274,11 @@ export class LoginDialogComponent extends Container implements Focusable {
 	 */
 	showWaiting(message: string): void {
 		this.addSectionSpacer();
-		this.contentContainer.addChild(new Text(theme.fg("accent", message), 0, 0));
-		this.contentContainer.addChild(new Text(theme.fg("muted", keyHint("tui.select.cancel", "cancel")), 0, 0));
+		this.addChildAboveHints(new Text(theme.fg("accent", message), 0, 0));
+		if (!this.authActions) {
+			this.authActions = new Text(this.getAuthActionsText(), 0, 0);
+			this.contentContainer.addChild(this.authActions);
+		}
 		this.tui.requestRender();
 	}
 
@@ -294,7 +290,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 			this.startContent();
 			this.addSectionTitle("Preparing authentication");
 		}
-		this.contentContainer.addChild(new Text(theme.fg("muted", message), 0, 0));
+		this.addChildAboveHints(new Text(theme.fg("muted", message), 0, 0));
 		this.tui.requestRender();
 	}
 
@@ -302,13 +298,9 @@ export class LoginDialogComponent extends Container implements Focusable {
 		this.contentContainer.clear();
 		this.authUrl = undefined;
 		this.authActions = undefined;
+		this.inputSpacer = undefined;
 		// The cleared panel no longer shows the paste field.
 		this.inputVisible = false;
-		if (this.isPrimeInference) {
-			this.contentContainer.addChild(new PrimeLoginHeader());
-			this.contentContainer.addChild(new Spacer(1));
-			return;
-		}
 		this.contentContainer.addChild(new Spacer(1));
 	}
 
@@ -317,22 +309,23 @@ export class LoginDialogComponent extends Container implements Focusable {
 			this.startContent();
 			return;
 		}
-		this.contentContainer.addChild(new Spacer(1));
+		this.addChildAboveHints(new Spacer(1));
 	}
 
 	private addInstructions(instructions: string): void {
 		const codeMatch = /^(?:Code|Enter code):\s*(.+)$/i.exec(instructions.trim());
 		if (codeMatch?.[1]) {
+			// A blank row separates the sign-in link from the code below it.
+			this.contentContainer.addChild(new Spacer(1));
 			this.addLabel("Verification code");
 			this.contentContainer.addChild(new Text(theme.bold(theme.fg("text", codeMatch[1])), 0, 0));
 			return;
 		}
-		this.addLabel("Next step");
 		this.contentContainer.addChild(new Text(theme.fg("text", instructions), 0, 0));
 	}
 
 	private addSectionTitle(text: string): void {
-		this.contentContainer.addChild(new Text(theme.bold(theme.fg("text", text)), 0, 0));
+		this.contentContainer.addChild(new Text(theme.fg("text", text), 0, 0));
 	}
 
 	private addLabel(text: string): void {
@@ -359,7 +352,8 @@ export class LoginDialogComponent extends Container implements Focusable {
 				: status === "failed"
 					? theme.fg("error", "Failed to copy sign-in link")
 					: undefined;
-		return [statusText, copyHint, keyHint("tui.select.cancel", "cancel")]
+		const submitHint = this.inputVisible ? keyHint("tui.select.confirm", "submit") : undefined;
+		return [submitHint, statusText, copyHint, keyHint("tui.select.cancel", "cancel")]
 			.filter((part): part is string => part !== undefined)
 			.join("  ");
 	}
@@ -385,6 +379,13 @@ export class LoginDialogComponent extends Container implements Focusable {
 
 	handleInput(data: string): void {
 		const kb = getKeybindings();
+
+		// On the onboarding surface the exit keys must quit the app; cancel
+		// would drop the user into an unconfigured chat instead.
+		if (this.dialogOptions.onExit && isOnboardingExitKey(data)) {
+			this.dialogOptions.onExit();
+			return;
+		}
 
 		if (
 			this.authUrl &&

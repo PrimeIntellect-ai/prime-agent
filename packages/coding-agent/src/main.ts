@@ -122,29 +122,7 @@ import { shouldRunOnboarding } from "./modes/interactive/onboarding.js";
 import { initTheme, preloadCodeHighlighter, stopThemeWatcher } from "./modes/interactive/theme/theme.js";
 import { handleConfigCommand } from "./package-manager-cli.js";
 import { isLocalPath } from "./utils/paths.js";
-
-/**
- * Read all content from piped stdin.
- * Returns undefined if stdin is a TTY (interactive terminal).
- */
-async function readPipedStdin(): Promise<string | undefined> {
-	// If stdin is a TTY, we're running interactively - don't read stdin
-	if (process.stdin.isTTY) {
-		return undefined;
-	}
-
-	return new Promise((resolve) => {
-		let data = "";
-		process.stdin.setEncoding("utf8");
-		process.stdin.on("data", (chunk) => {
-			data += chunk;
-		});
-		process.stdin.on("end", () => {
-			resolve(data.trim() || undefined);
-		});
-		process.stdin.resume();
-	});
-}
+import { readPipedStdin } from "./utils/piped-stdin.js";
 
 function collectSettingsDiagnostics(
 	settingsManager: SettingsManager,
@@ -506,6 +484,15 @@ export async function createSessionManager(
 					: SessionManager.open(resolved.path, sessionDir, explicitCwdOverride);
 
 			case "global": {
+				if (!process.stdin.isTTY) {
+					// The fork confirm reads stdin; without a TTY it would hang boot forever.
+					console.error(
+						chalk.red(
+							`Error: session ${resumeSelector} belongs to a different project (${resolved.cwd}). Pass --fork ${resumeSelector} to use it here, or run from that project's directory.`,
+						),
+					);
+					process.exit(1);
+				}
 				console.log(chalk.yellow(`Session found in different project: ${resolved.cwd}`));
 				const shouldFork = await promptConfirm("Fork this session into current directory?");
 				if (!shouldFork) {
@@ -597,7 +584,7 @@ function buildSessionOptions(
 		options.thinkingLevel = config.thinking;
 	}
 
-	// Scoped models for Ctrl+P cycling
+	// Scoped models for Alt+M cycling
 	// Keep thinking level undefined when not explicitly set in the model pattern.
 	// Undefined means "inherit current session thinking level" during cycling.
 	if (scopedModels.length > 0) {
@@ -830,6 +817,11 @@ async function prepareRuntimeServices(options: {
 		// the parent's and a subagent quit would release the still-active pane.
 		noBuiltinHerdrReporter: (options.sessionOptionsOverride?.rlmDepth ?? 0) > 0,
 		telemetryDisabled: config.telemetryDisabled,
+		// Interactive launches hold the notice back for onboarding, which marks
+		// itself shown; every other mode discloses immediately. Deriving it from
+		// the session config covers the daemon-hosted path too, which creates the
+		// session the TUI actually talks to.
+		deferTelemetryNoticeForOnboarding: config.executionMode === "interactive",
 		resourceLoaderOptions: {
 			additionalExtensionPaths: config.extensions,
 			additionalSkillPaths: config.skills,
@@ -1067,6 +1059,7 @@ async function createDaemonClientConnection(options: {
 		const attach = async (summary: SessionSummary) => {
 			const connection = await DaemonAgentConnection.attach(client, getDaemonSummaryActiveSessionId(summary), {
 				closeClientOnDispose: true,
+				deferSessionEvents: options.config.executionMode === "interactive",
 				sendClientEnv: true,
 				ownedSession: options.clientOwned,
 				ownedSessionRecoveryConfig: options.clientOwned ? options.config : undefined,
@@ -1442,7 +1435,7 @@ export async function main(args: string[], options?: MainOptions) {
 					return `${sm.model.id}${thinkingStr}`;
 				})
 				.join(", ");
-			console.log(chalk.dim(`Model scope: ${modelList} ${chalk.gray("(Ctrl+P to cycle)")}`));
+			console.log(chalk.dim(`Model scope: ${modelList} ${chalk.gray("(Alt+M to cycle)")}`));
 		}
 
 		const promptStashStore = new ClientPromptStashStore();
@@ -1478,7 +1471,6 @@ export async function main(args: string[], options?: MainOptions) {
 				migratedProviders,
 				modelFallbackMessage: startupModel.modelFallbackMessage,
 				promptStashStore,
-				startupModelId: startupModel.model?.id,
 				initialSession,
 				initialScopeKey,
 				verbose: parsed.verbose,
@@ -1728,7 +1720,7 @@ export async function main(args: string[], options?: MainOptions) {
 					return `${sm.model.id}${thinkingStr}`;
 				})
 				.join(", ");
-			console.log(chalk.dim(`Model scope: ${modelList} ${chalk.gray("(Ctrl+P to cycle)")}`));
+			console.log(chalk.dim(`Model scope: ${modelList} ${chalk.gray("(Alt+M to cycle)")}`));
 		}
 
 		const interactiveMode = new InteractiveMode({

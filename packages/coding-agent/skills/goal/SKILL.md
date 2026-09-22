@@ -12,7 +12,9 @@ it. Call it directly from the Python REPL:
 
 ```python
 await goal.get()
-await goal.create("ship the release notes", token_budget=200000)
+await goal.create("ship the release notes")
+# Only pass token_budget when the user explicitly asks for one:
+# await goal.create("ship the release notes", token_budget=200000)
 await goal.complete()
 ```
 

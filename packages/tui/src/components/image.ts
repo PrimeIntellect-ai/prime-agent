@@ -1,6 +1,7 @@
 import {
 	allocateImageId,
 	getCapabilities,
+	getCellDimensionsVersion,
 	getImageDimensions,
 	type ImageDimensions,
 	imageFallback,
@@ -47,6 +48,7 @@ export class Image implements Component {
 	private cachedLines?: string[];
 	private cachedWidth?: number;
 	private cachedFullscreenFallback?: boolean;
+	private cachedCellDimensionsVersion?: number;
 
 	constructor(
 		base64Data: string,
@@ -72,10 +74,17 @@ export class Image implements Component {
 		this.cachedLines = undefined;
 		this.cachedWidth = undefined;
 		this.cachedFullscreenFallback = undefined;
+		this.cachedCellDimensionsVersion = undefined;
 	}
 
 	render(width: number): string[] {
-		if (this.cachedLines && this.cachedWidth === width && this.cachedFullscreenFallback === fullscreenFallback) {
+		const cellDimensionsVersion = getCellDimensionsVersion();
+		if (
+			this.cachedLines &&
+			this.cachedWidth === width &&
+			this.cachedFullscreenFallback === fullscreenFallback &&
+			this.cachedCellDimensionsVersion === cellDimensionsVersion
+		) {
 			return this.cachedLines;
 		}
 
@@ -129,6 +138,7 @@ export class Image implements Component {
 		this.cachedLines = lines;
 		this.cachedWidth = width;
 		this.cachedFullscreenFallback = fullscreenFallback;
+		this.cachedCellDimensionsVersion = cellDimensionsVersion;
 
 		return lines;
 	}

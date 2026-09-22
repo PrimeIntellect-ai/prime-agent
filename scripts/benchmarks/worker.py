@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import os
 import pwd
 import shutil
@@ -29,6 +31,7 @@ from schema import (
     Request,
     Result,
     Side,
+    trial_errors,
     write_json,
 )
 from terminal import Terminal
@@ -38,6 +41,9 @@ SOURCE = HOMES / "builder/source"
 RESULTS = ROOT / "results"
 VERSION = "0.0.0-benchmark"
 ORIGIN = "http://127.0.0.1:18741"
+BUN_VERSION = "1.4.0"
+# Node transport benches: harness script, recorded metric, and the run timeout.
+TRANSPORT_BENCHES: tuple[tuple[str, Metric, int], ...] = (("frame-decode-bench.mjs", "frame_decode", 180),)
 
 
 def clean_error(error: Exception) -> str:
@@ -142,6 +148,41 @@ def memory(uid: int) -> list[ProcessMemory]:
     return processes
 
 
+def prepare_native_artifact(agent: Path, artifacts: Path, log: Path) -> bool:
+    build = agent / "scripts/build-binary.mjs"
+    assemble = SOURCE / "scripts/assemble-release-archives.mjs"
+    if not build.exists() and not assemble.exists():
+        return False
+    if not build.is_file() or not assemble.is_file():
+        raise RuntimeError("Compiled release build scripts are incomplete")
+    tools = SOURCE / ".benchmark-bun"
+    run_as(
+        "builder",
+        ["npm", "install", "--prefix", str(tools), "--no-audit", "--no-fund", f"bun@{BUN_VERSION}"],
+        SOURCE,
+        timeout=180,
+        log=log,
+    )
+    run_as(
+        "builder",
+        ["node", str(build), "--platform", "linux-x64"],
+        SOURCE,
+        timeout=600,
+        log=log,
+        extra_env={"BUN_BINARY": str(tools / "node_modules/.bin/bun")},
+    )
+    run_as(
+        "builder",
+        ["node", str(assemble), str(agent / "binaries"), str(artifacts), VERSION],
+        SOURCE,
+        timeout=180,
+        log=log,
+    )
+    if not (artifacts / f"prime-agent-{VERSION}-linux-x64.tar.gz").is_file():
+        raise RuntimeError("Compiled Linux x64 release archive is missing")
+    return True
+
+
 def prepare(request: Request, side: Side) -> None:
     log = RESULTS / "build.log"
     source_url = f"https://github.com/{request.source_repository}.git"
@@ -187,9 +228,14 @@ def prepare(request: Request, side: Side) -> None:
         log=log,
     )
     artifacts = agent / "release/benchmark/artifacts"
-    side.artifacts = {path.name: path.stat().st_size for path in sorted(artifacts.glob("*.tgz"))}
-    if len(side.artifacts) != 4:
+    if len(list(artifacts.glob("*.tgz"))) != 4:
         raise RuntimeError("Expected the four release package tarballs")
+    native = prepare_native_artifact(agent, artifacts, log)
+    archives = sorted([*artifacts.glob("*.tgz"), *artifacts.glob("*.tar.gz")])
+    side.artifacts = {path.name: path.stat().st_size for path in archives}
+    (artifacts / "SHA256SUMS").write_text(
+        "".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in archives)
+    )
     record(side, "bundle", 0, sum(side.artifacts.values()))
     release = ROOT / "www/releases" / f"v{VERSION}"
     release.parent.mkdir(parents=True, exist_ok=True)
@@ -198,7 +244,9 @@ def prepare(request: Request, side: Side) -> None:
         side.runtime[name] = run_as("builder", [name, "--version"], SOURCE).strip()
     side.runtime["kernel"] = os.uname().release
     side.runtime["machine"] = os.uname().machine
-    side.runtime["artifact_format"] = "npm-tarballs"
+    side.runtime["artifact_format"] = "npm-tarballs+linux-x64-native" if native else "npm-tarballs"
+    if native:
+        side.runtime["bun"] = BUN_VERSION
     cpu = Path("/proc/cpuinfo").read_text()
     side.runtime["cpu"] = next(
         (line.partition(":")[2].strip() for line in cpu.splitlines() if line.startswith("model name")),
@@ -228,6 +276,14 @@ def disk_bytes(home: Path) -> int:
     return int(output.split()[0])
 
 
+def verify_installation_format(home: Path, side: Side) -> None:
+    with (home / ".local/bin/prime-agent").open("rb") as executable:
+        compiled = executable.read(4) == b"\x7fELF"
+    side.runtime["installation_format"] = "compiled" if compiled else "npm"
+    if side.runtime.get("artifact_format") == "npm-tarballs+linux-x64-native" and not compiled:
+        raise RuntimeError("Expected the compiled installation, but the installer selected Node")
+
+
 def install(request: Request, side: Side, trial: int) -> None:
     user = f"benchmark{trial + 1}"
     subprocess.run(
@@ -244,6 +300,7 @@ def install(request: Request, side: Side, trial: int) -> None:
             timeout=240,
             log=RESULTS / f"install-{trial}.log",
             extra_env={
+                "PRIME_AGENT_ALLOW_INSECURE_HTTP_FOR_TESTS": "1",
                 "PRIME_AGENT_DOWNLOAD_BASE_URL": ORIGIN,
                 "PRIME_AGENT_INSTALLER_PLAIN": "1",
                 "PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL": "1",
@@ -255,6 +312,7 @@ def install(request: Request, side: Side, trial: int) -> None:
         version = run_as(user, ["prime-agent", "--version"], home, merge_output=True).strip()
         if VERSION not in version:
             raise RuntimeError(f"Installed version does not match the packed release: {version[:100]}")
+        verify_installation_format(home, side)
         if not (home / ".prime/agent/kernel-venv/bin/python").exists():
             raise RuntimeError("The installer's Python bootstrap did not complete")
         record(side, "install", trial, elapsed)
@@ -324,12 +382,20 @@ def record(
 def stop_agents(home: Path) -> None:
     listing = json.loads(run_as("benchmark1", ["prime-agent", "list", "--json"], home))
     for session in listing["sessions"]:
-        if session.get("activeSessionId"):
-            run_as(
-                "benchmark1",
-                ["prime-agent", "stop", session["activeSessionId"], "--json"],
-                home,
-            )
+        active_id = session.get("activeSessionId")
+        if not active_id:
+            continue
+        try:
+            run_as("benchmark1", ["prime-agent", "stop", active_id, "--json"], home)
+        except subprocess.CalledProcessError as error:
+            if (
+                error.returncode != 1
+                or (error.stderr or "").strip() != f"Error: Unknown active session: {active_id}"
+            ):
+                raise
+            current = json.loads(run_as("benchmark1", ["prime-agent", "list", "--json"], home))
+            if any(item.get("activeSessionId") == active_id for item in current["sessions"]):
+                raise
 
 
 def measure(request: Request, side: Side, trial: int) -> None:
@@ -337,40 +403,57 @@ def measure(request: Request, side: Side, trial: int) -> None:
         raise RuntimeError("The first installation must succeed before interactive measurements")
     home = HOMES / "benchmark1"
     stop_processes("benchmark1")
-    for mode in ("cold", "warm"):
-        terminal = Terminal(
-            [
-                "/usr/sbin/runuser",
-                "-u",
-                "benchmark1",
-                "--",
-                "prime-agent",
-            ],
-            home / "workspace",
-            environment("benchmark1"),
-            RESULTS / f"{mode}-{trial}",
-        )
-        try:
-            record(side, mode, trial, terminal.ready())
-            terminal.settle(1)
+    cold_ready = False
+    try:
+        for mode in ("cold", "warm"):
+            terminal = None
+            metric: Metric = mode
+            startup_ready = False
+            settled = False
+            try:
+                terminal = Terminal(
+                    ["/usr/sbin/runuser", "-u", "benchmark1", "--", "prime-agent"],
+                    home / "workspace",
+                    environment("benchmark1"),
+                    RESULTS / f"{mode}-{trial}",
+                )
+                record(side, mode, trial, terminal.ready())
+                startup_ready = True
+                if mode == "cold":
+                    cold_ready = True
+                    metric = "rss"
+                    terminal.settle(1)
+                    settled = True
+                    processes = memory(pwd.getpwnam("benchmark1").pw_uid)
+                    if not processes:
+                        raise RuntimeError("No owned processes found for memory measurement")
+                    record(side, "rss", trial, sum(process.rss for process in processes))
+                    if all(process.pss is not None for process in processes):
+                        record(side, "pss", trial, sum(process.pss or 0 for process in processes))
+                    side.processes = processes
+                    write_json(RESULTS / f"memory-{trial}.json", Result(request=request, side=side))
+                else:
+                    terminal.settle(1)
+            except Exception as error:
+                if mode == "warm" and startup_ready:
+                    side.error = f"warm settle: {clean_error(error)}"[:500]
+                else:
+                    record(side, metric, trial, error=clean_error(error))
+                # Memory collection does not determine whether the cold daemon can be reused.
+                if mode != "cold" or not startup_ready or not settled:
+                    return
+            finally:
+                if terminal:
+                    terminal.close()
             if mode == "cold":
-                processes = memory(pwd.getpwnam("benchmark1").pw_uid)
-                if not processes:
-                    raise RuntimeError("No owned processes found for memory measurement")
-                record(side, "rss", trial, sum(process.rss for process in processes))
-                if all(process.pss is not None for process in processes):
-                    record(side, "pss", trial, sum(process.pss or 0 for process in processes))
-                side.processes = processes
-                write_json(RESULTS / f"memory-{trial}.json", Result(request=request, side=side))
-        except Exception as error:
-            record(side, mode, trial, error=clean_error(error))
-        finally:
-            terminal.close()
-        if mode == "cold":
-            stop_agents(home)
-    stop_processes("benchmark1")
-    if trial == 0 and any(sample.value is not None for sample in side.metrics.get("cold", [])):
-        record(side, "disk", 0, disk_bytes(home) - int(side.runtime["home_before_install_bytes"]))
+                stop_agents(home)
+    finally:
+        stop_processes("benchmark1")
+        if trial == 0 and cold_ready:
+            try:
+                record(side, "disk", 0, disk_bytes(home) - int(side.runtime["home_before_install_bytes"]))
+            except Exception as error:
+                record(side, "disk", 0, error=clean_error(error))
 
 
 def runtime(side: Side, trial: int) -> None:
@@ -465,9 +548,75 @@ def runtime(side: Side, trial: int) -> None:
             shutil.rmtree(state)
 
 
+def transport_value(output: str) -> float:
+    """Read the single RESULT line a transport harness prints."""
+    for line in output.splitlines():
+        if line.startswith("RESULT "):
+            result = json.loads(line.removeprefix("RESULT "))
+            value = result.get("value") if isinstance(result, dict) else None
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise RuntimeError("Transport benchmark result is not a number")
+            if not math.isfinite(value) or value < 0:
+                raise RuntimeError("Transport benchmark result is not a non-negative number")
+            return float(value)
+    raise RuntimeError("Transport benchmark printed no RESULT line")
+
+
+def stop_transport_processes() -> None:
+    """Stop leftover builder-owned node processes; the python3 artifact server stays up."""
+    uid = pwd.getpwnam("builder").pw_uid
+    for sig, delay in ((signal.SIGTERM, 3), (signal.SIGKILL, 2)):
+        agents = [process.pid for process in memory(uid) if process.name == "node"]
+        if not agents:
+            return
+        for pid in agents:
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+        deadline = time.monotonic() + delay
+        while time.monotonic() < deadline:
+            if not any(process.name == "node" for process in memory(uid)):
+                return
+            time.sleep(0.05)
+    if any(process.name == "node" for process in memory(uid)):
+        raise RuntimeError("Builder node processes remain after the transport phase")
+
+
+def transport(side: Side, trial: int) -> None:
+    """Run the node transport benches against the prepared source build."""
+    dist = SOURCE / "packages/coding-agent/dist"
+    try:
+        for script, metric, timeout in TRANSPORT_BENCHES:
+            try:
+                output = run_as(
+                    "builder",
+                    ["node", str(ROOT / script), "--dist", str(dist)],
+                    SOURCE,
+                    timeout=timeout,
+                    merge_output=True,
+                )
+                (RESULTS / f"{metric}-{trial}.output").write_text(output)
+                record(side, metric, trial, transport_value(output))
+            except subprocess.CalledProcessError as error:
+                # Keep the harness's own failure text available in the saved output
+                # and in the recorded error, not only in the sandbox log.
+                failure_output = error.output if isinstance(error.output, str) else ""
+                (RESULTS / f"{metric}-{trial}.output").write_text(failure_output or clean_error(error))
+                detail = clean_error(error)
+                first_line = failure_output.strip().splitlines()[0] if failure_output.strip() else ""
+                if first_line:
+                    detail = f"{detail}: {first_line}"[:500]
+                record(side, metric, trial, error=detail)
+            except Exception as error:
+                record(side, metric, trial, error=clean_error(error))
+    finally:
+        stop_transport_processes()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("phase", choices=("prepare", "install", "measure", "runtime"))
+    parser.add_argument("phase", choices=("prepare", "install", "measure", "runtime", "transport", "ui"))
     parser.add_argument("--trial", type=int, default=0)
     args = parser.parse_args()
     RESULTS.mkdir(exist_ok=True)
@@ -481,6 +630,7 @@ def main() -> None:
             side=Side(sha=request.sha),
         )
     )
+    result.side.error = None
     try:
         if args.phase == "prepare":
             prepare(request, result.side)
@@ -488,6 +638,19 @@ def main() -> None:
             install(request, result.side, args.trial)
         elif args.phase == "measure":
             measure(request, result.side, args.trial)
+        elif args.phase == "transport":
+            transport(result.side, args.trial)
+        elif args.phase == "ui":
+            from ui import ui_measure
+
+            ui_measure(
+                request,
+                result.side,
+                args.trial,
+                results=RESULTS,
+                homes=HOMES,
+                user="benchmark1",
+            )
         else:
             runtime(result.side, args.trial)
     except Exception as error:
@@ -495,6 +658,9 @@ def main() -> None:
         raise
     finally:
         write_json(path, result)
+    errors = trial_errors(result.side, args.phase, args.trial)
+    if errors:
+        raise SystemExit("; ".join(errors))
 
 
 if __name__ == "__main__":

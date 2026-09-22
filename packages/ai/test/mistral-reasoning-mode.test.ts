@@ -1,3 +1,4 @@
+import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.js";
 import { streamSimple } from "../src/stream.js";
@@ -6,6 +7,7 @@ import type { Context, Model, SimpleStreamOptions } from "../src/types.js";
 interface MistralPayload {
 	promptMode?: "reasoning";
 	reasoningEffort?: "none" | "high";
+	tools?: Array<{ type: "function"; function: { name: string; parameters: Record<string, unknown> } }>;
 }
 
 function makeContext(): Context {
@@ -76,5 +78,46 @@ describe("Mistral reasoning mode selection", () => {
 
 		expect(payload.reasoningEffort).toBeUndefined();
 		expect(payload.promptMode).toBeUndefined();
+	});
+});
+
+describe("Mistral tool schema serialization", () => {
+	it("strips TypeBox symbol keys before the SDK validates tool schemas", async () => {
+		const model: Model<"mistral-conversations"> = {
+			...getModel("mistral", "devstral-medium-latest"),
+			baseUrl: "http://127.0.0.1:9",
+		};
+		let capturedPayload: MistralPayload | undefined;
+
+		const result = await streamSimple(
+			model,
+			{
+				messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+				tools: [
+					{
+						name: "inspect_schema",
+						description: "Inspect the schema",
+						parameters: Type.Object({ nested: Type.Object({ value: Type.String() }) }),
+					},
+				],
+			},
+			{
+				apiKey: "fake-key",
+				onPayload: (payload) => {
+					capturedPayload = payload as MistralPayload;
+					return payload;
+				},
+			},
+		).result();
+
+		const parameters = capturedPayload?.tools?.[0]?.function.parameters;
+		const properties = parameters?.properties as Record<string, unknown> | undefined;
+		expect(capturedPayload?.tools).toHaveLength(1);
+		for (const value of [parameters, properties, properties?.nested]) {
+			expect(value).toBeTruthy();
+			expect(Object.getOwnPropertySymbols(value as object)).toHaveLength(0);
+		}
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).not.toContain("Input validation failed");
 	});
 });

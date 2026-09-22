@@ -12,6 +12,59 @@ import { theme } from "../theme/theme.js";
 interface MenuPanelOptions {
 	title: string;
 	subtitle?: string;
+	inline?: boolean;
+	/**
+	 * Inline only: force or suppress the full-width separator rule above the
+	 * panel. By default an inline panel opens with exactly ONE rule — its own,
+	 * or the bordered search input's when that input already leads the panel
+	 * (never both).
+	 */
+	topRule?: boolean;
+}
+
+/**
+ * A component whose first rendered line is already a full-width rule: the
+ * inline MenuSearchInput. MenuPanel uses this to open every inline picker with
+ * exactly one separator rule instead of doubling the search input's border.
+ */
+interface InlineTopRuleComponent {
+	readonly rendersInlineTopRule: boolean;
+}
+
+function rendersInlineTopRule(component: Component | undefined): boolean {
+	return (component as InlineTopRuleComponent | undefined)?.rendersInlineTopRule === true;
+}
+
+/**
+ * The child whose first line opens the panel body. Children that render nothing
+ * (an empty placeholder Container, e.g. the model picker's header-help slot
+ * before it is populated) must be skipped: treating one as the opener answered
+ * "the search input does not lead" and drew a panel rule directly on top of the
+ * search box's own border — two stacked rules and one wasted list row.
+ */
+function firstRenderingChild(children: readonly Component[]): Component | undefined {
+	return children.find((child) => !(child instanceof Container) || child.children.length > 0);
+}
+
+/**
+ * Rows an inline MenuPanel draws above its children: one separator rule,
+ * except when the bordered search input already leads the panel and its own
+ * top border IS that rule. Components that budget viewport rows for an inline
+ * panel must add this to their reserved rows — it is the same decision
+ * MenuPanel.render applies, so the budget and the frame can never disagree.
+ */
+export function inlineMenuPanelTopRuleRows(options: {
+	title?: string;
+	subtitle?: string;
+	/** Prefer `children`: an empty placeholder child must not count as the opener. */
+	firstChild?: Component;
+	children?: readonly Component[];
+	topRule?: boolean;
+}): number {
+	const hasHeader = Boolean(options.title) || Boolean(options.subtitle?.trim());
+	const opener = options.children ? firstRenderingChild(options.children) : options.firstChild;
+	const firstChildLeadsWithRule = rendersInlineTopRule(opener);
+	return (options.topRule ?? (!firstChildLeadsWithRule || hasHeader)) ? 1 : 0;
 }
 
 export interface MenuViewportProvider {
@@ -20,6 +73,7 @@ export interface MenuViewportProvider {
 
 interface MenuListOptions {
 	compact?: boolean | (() => boolean);
+	inline?: boolean;
 }
 
 interface MenuListLayoutOptions extends MenuViewportProvider {
@@ -46,9 +100,9 @@ const ROW_PADDING_X = 2;
 const ROW_PADDING_Y = 1;
 const ANSI_RESET = "\x1b[0m";
 
-export function getMenuPanelInnerWidth(width: number): number {
-	const safeWidth = Math.max(PANEL_PADDING_X * 2 + 1, width);
-	return Math.max(1, safeWidth - PANEL_PADDING_X * 2);
+export function getMenuPanelInnerWidth(width: number, inline = false): number {
+	const padding = inline ? 1 : PANEL_PADDING_X;
+	return Math.max(1, width - padding * 2);
 }
 
 interface FullWidthMenuComponent {
@@ -189,6 +243,26 @@ export function getMenuListLayout(options: MenuListLayoutOptions): MenuListLayou
 		: { compact: false, visibleItems: comfortableLayout.visibleItems };
 }
 
+function reduceInlineTrailingSegments(segments: ReadonlyArray<string>, budget: number): string[] {
+	let current = segments.filter((segment) => segment.length > 0);
+	while (current.length > 1 && visibleWidth(current.join(" · ")) > budget) {
+		current = current.slice(1);
+	}
+	return current;
+}
+
+/**
+ * Rendered width of a trailing cluster at the given row width, mirroring how
+ * MenuRow degrades and truncates it. Pickers use this to budget row content.
+ */
+export function getInlineTrailingWidth(segments: ReadonlyArray<string>, width: number): number {
+	const innerWidth = Math.max(1, width - 2);
+	const budget = Math.max(1, innerWidth - 5);
+	const reduced = reduceInlineTrailingSegments(segments, budget);
+	if (reduced.length === 0) return 0;
+	return Math.min(visibleWidth(reduced.join(" · ")), budget);
+}
+
 function paddedBackgroundLine(
 	text: string,
 	width: number,
@@ -235,6 +309,38 @@ export class MenuPanel extends Container {
 	}
 
 	override render(width: number): string[] {
+		if (this.options.inline) {
+			const lines: string[] = [];
+			// Every inline picker opens with one full-width rule that separates
+			// it from the transcript above. A headerless panel led by the
+			// bordered search input keeps that input's own top border as the
+			// rule; a panel with a title or subtitle draws the rule above it.
+			if (
+				inlineMenuPanelTopRuleRows({
+					title: this.title,
+					subtitle: this.options.subtitle,
+					children: this.children,
+					topRule: this.options.topRule,
+				}) > 0
+			) {
+				lines.push(theme.fg("borderMuted", "─".repeat(Math.max(0, width))));
+			}
+			if (this.title) lines.push(theme.fg("muted", ` ${this.title}`));
+			const subtitle = this.options.subtitle?.trim();
+			if (subtitle) {
+				for (const line of wrapTextWithAnsi(subtitle, getMenuPanelInnerWidth(width, true))) {
+					lines.push(` ${theme.fg("muted", line)}`);
+				}
+			}
+			for (const child of this.children) {
+				lines.push(
+					...child
+						.render(fillsMenuPanel(child) ? width : getMenuPanelInnerWidth(width, true))
+						.map((line) => (fillsMenuPanel(child) ? line : ` ${line}`)),
+				);
+			}
+			return lines.map((line) => truncateToWidth(line, width, "", true));
+		}
 		const safeWidth = Math.max(PANEL_PADDING_X * 2 + 1, width);
 		const innerWidth = getMenuPanelInnerWidth(width);
 		const lines: string[] = [];
@@ -247,7 +353,7 @@ export class MenuPanel extends Container {
 		const hasSubtitle = subtitle !== undefined && subtitle.length > 0;
 		const hasHeader = hasTitle || hasSubtitle;
 		if (hasTitle) {
-			lines.push(surfaceLine(theme.bold(theme.fg("text", this.title)), safeWidth));
+			lines.push(surfaceLine(theme.fg("text", this.title), safeWidth));
 		}
 		if (hasSubtitle) {
 			lines.push(...surfaceWrappedLines(theme.fg("muted", subtitle), safeWidth));
@@ -272,9 +378,24 @@ export class MenuPanel extends Container {
 
 export class MenuSearchInput implements Component, Focusable, FullWidthMenuComponent {
 	readonly fillsMenuPanel = true;
-	private readonly input = new Input();
+	private readonly input: Input;
 
-	constructor(private readonly placeholder: string) {}
+	constructor(
+		private readonly placeholder: string,
+		private readonly inline = false,
+		/** Inline only: drop the enclosing rules and render just the field. */
+		private readonly plain = false,
+		/** Drop the "> " prompt for surfaces that mark selection with their own caret. */
+		private readonly hidePrompt = false,
+		options: { masked?: boolean } = {},
+	) {
+		this.input = new Input(options.masked === true ? { masked: true } : {});
+	}
+
+	/** The inline variant renders a full-width rule as its first line — unless it renders plain. */
+	get rendersInlineTopRule(): boolean {
+		return this.inline && !this.plain;
+	}
 
 	get focused(): boolean {
 		return this.input.focused;
@@ -309,6 +430,30 @@ export class MenuSearchInput implements Component, Focusable, FullWidthMenuCompo
 	}
 
 	render(width: number): string[] {
+		if (this.inline) {
+			let content = this.input.render(Math.max(1, width - 2))[0] ?? "";
+			if (this.hidePrompt) {
+				content = this.stripInputPrompt(content);
+			}
+			if (this.getValue() === "") {
+				const placeholder = theme.fg("dim", this.placeholder);
+				if (this.hidePrompt) {
+					// Sit the caret on the first placeholder character so the field keeps
+					// the same left edge as the text above it.
+					content = this.focused
+						? `\x1b[7m${this.placeholder.slice(0, 1)}\x1b[27m${theme.fg("dim", this.placeholder.slice(1))}`
+						: placeholder;
+				} else {
+					content = this.focused ? `${content.trimEnd()}${placeholder}` : `> ${placeholder}`;
+				}
+			}
+			const field = truncateToWidth(` ${content}`, width, "", true);
+			if (this.plain) {
+				return [field];
+			}
+			const border = theme.fg("borderMuted", "─".repeat(Math.max(0, width)));
+			return [border, field, border];
+		}
 		const safeWidth = Math.max(FIELD_PADDING_X * 2 + 1, width);
 		const innerWidth = Math.max(1, safeWidth - FIELD_PADDING_X * 2);
 		const content =
@@ -327,7 +472,13 @@ interface MenuRowOptions {
 	primary: string;
 	secondary?: string;
 	meta?: string;
+	/**
+	 * Inline-only segments rendered right-aligned; the last segment sits flush against the
+	 * row's right edge. Earlier segments drop first when the row is too narrow.
+	 */
+	trailing?: ReadonlyArray<string>;
 	selected: boolean;
+	inline?: boolean;
 }
 
 export class MenuRow implements Component, FullWidthMenuComponent {
@@ -353,6 +504,32 @@ export class MenuRow implements Component, FullWidthMenuComponent {
 	}
 
 	renderContent(width: number): string[] {
+		if (this.options.inline) {
+			// Trailing rows run flush to the right edge; legacy rows keep a one-column margin.
+			const hasTrailing = this.options.trailing !== undefined;
+			const innerWidth = Math.max(1, hasTrailing ? width - 2 : width - 3);
+			const trailing = this.getInlineTrailing(width, innerWidth);
+			const trailingWidth = visibleWidth(trailing);
+			const gap = trailingWidth > 0 ? 2 : 0;
+			const primaryWidth = Math.max(1, innerWidth - trailingWidth - gap);
+			const primaryText = theme.fg("text", this.options.primary);
+			const primary = truncateToWidth(
+				this.selected ? theme.bold(primaryText) : primaryText,
+				primaryWidth,
+				"…",
+				true,
+			);
+			const filler = " ".repeat(Math.max(0, innerWidth - visibleWidth(primary) - trailingWidth));
+			const content = `${this.selected ? "›" : " "} ${primary}${filler}${trailing}`;
+			return [
+				paddedBackgroundLine(
+					content,
+					width,
+					0,
+					this.selected ? theme.getSoftSelectionBackgroundColor() : undefined,
+				),
+			];
+		}
 		const safeWidth = Math.max(ROW_PADDING_X * 2 + 1, width);
 		const meta = this.options.meta ? theme.fg("muted", this.options.meta) : "";
 		const secondary = this.options.secondary ? theme.fg("muted", this.options.secondary) : "";
@@ -383,8 +560,20 @@ export class MenuRow implements Component, FullWidthMenuComponent {
 	}
 
 	private rowLine(text: string, width: number, selected: boolean): string {
-		const background = selected ? theme.getSelectionBackgroundColor() : theme.getEditorBackgroundColor();
+		const background = selected ? theme.getSoftSelectionBackgroundColor() : theme.getEditorBackgroundColor();
 		return paddedBackgroundLine(text, width, ROW_PADDING_X, background);
+	}
+
+	private getInlineTrailing(width: number, innerWidth: number): string {
+		if (this.options.trailing === undefined) {
+			const secondary = width >= 60 ? this.options.secondary : undefined;
+			const details = [secondary, this.options.meta].filter(Boolean).join(" · ");
+			return details ? truncateToWidth(theme.fg("muted", details), Math.floor(innerWidth / 2), "…") : "";
+		}
+		const budget = Math.max(1, innerWidth - 5);
+		const segments = reduceInlineTrailingSegments(this.options.trailing, budget);
+		if (segments.length === 0) return "";
+		return truncateToWidth(theme.fg("muted", segments.join(" · ")), budget, "…");
 	}
 }
 
@@ -396,6 +585,11 @@ export class MenuList extends Container implements FullWidthMenuComponent {
 	}
 
 	override render(width: number): string[] {
+		if (this.options.inline) {
+			return this.children.flatMap((child) =>
+				child instanceof MenuRow ? child.renderContent(width) : child.render(width),
+			);
+		}
 		const lines: string[] = [];
 		const compact = this.isCompact();
 		for (let index = 0; index < this.children.length; index++) {

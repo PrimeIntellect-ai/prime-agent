@@ -3,27 +3,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getBundledSkillsDir } from "../src/config.js";
-import { type KernelSentAgentMessage, ReplKernelManager } from "../src/core/kernel/index.js";
+import type { KernelSentAgentMessage } from "../src/core/kernel/index.js";
 import type { PythonSkillRuntimeInfo } from "../src/core/skills.js";
 import { IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
 
-function bundledAgentMessageSkill(): PythonSkillRuntimeInfo {
-	const packagePath = join(getBundledSkillsDir(), "agent-message");
-	return {
-		name: "agent-message",
-		importName: "agent_message",
-		packagePath,
-		pyprojectPath: join(packagePath, "pyproject.toml"),
-	};
+/** Runtime info for a bundled Python skill, e.g. ("agent-message", "agent_message"). */
+function bundledSkill(name: string, importName: string): PythonSkillRuntimeInfo {
+	const packagePath = join(getBundledSkillsDir(), name);
+	return { name, importName, packagePath, pyprojectPath: join(packagePath, "pyproject.toml") };
 }
 
-type LateHandlerRetentionHost = {
-	lateSentAgentMessageHandlers: Map<string, (message: KernelSentAgentMessage) => void>;
-	registerLateSentAgentMessageHandler: (
-		requestMessageId: string,
-		handler: (message: KernelSentAgentMessage) => void,
-	) => void;
-};
+const bundledAgentMessageSkill = () => bundledSkill("agent-message", "agent_message");
 
 describe("agent-message skill over the kernel host bridge", () => {
 	let tempDir: string;
@@ -249,19 +239,193 @@ background_send = asyncio.create_task(send_later())`,
 			target: { activeSessionId: "beta", sessionId: "session-beta", sessionName: "Beta" },
 		});
 	});
+});
 
-	it("bounds retained handlers for late sent messages", async () => {
-		const manager = new ReplKernelManager({ cwd: tempDir });
-		const host = manager as unknown as LateHandlerRetentionHost;
-		const handler = () => {};
+describe("rlm-heartbeat skill over the kernel host bridge", () => {
+	let tempDir: string;
+	let provisioner: IpythonKernelProvisioner | undefined;
 
-		for (let index = 0; index < 300; index += 1) {
-			host.registerLateSentAgentMessageHandler(`request-${index}`, handler);
-		}
+	beforeEach(() => {
+		tempDir = join(tmpdir(), `pi-rlm-heartbeat-skill-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(tempDir, { recursive: true });
+	});
 
-		expect(host.lateSentAgentMessageHandlers.size).toBe(256);
-		expect(host.lateSentAgentMessageHandlers.has("request-0")).toBe(false);
-		expect(host.lateSentAgentMessageHandlers.has("request-299")).toBe(true);
-		await manager.shutdown({ snapshot: true, drainHostRequests: true });
+	afterEach(async () => {
+		await provisioner?.dispose();
+		provisioner = undefined;
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("round-trips create, list, update, and delete through a live kernel", async () => {
+		const requests: Array<{ type: string; payload: Record<string, unknown> }> = [];
+		const record = (type: string) => async (payload: Record<string, unknown>) => {
+			requests.push({ type, payload });
+			return { heartbeat: { id: payload.id ?? "job-1", label: "tests", instruction: "check tests" } };
+		};
+		provisioner = new IpythonKernelProvisioner(tempDir, {
+			pythonSkills: [bundledSkill("rlm-heartbeat", "rlm_heartbeat")],
+			hostHandlers: {
+				"rlm_heartbeat.create": record("rlm_heartbeat.create"),
+				"rlm_heartbeat.list": async (payload) => {
+					requests.push({ type: "rlm_heartbeat.list", payload });
+					return { heartbeats: [{ id: "job-1", status: "active" }] };
+				},
+				"rlm_heartbeat.update": record("rlm_heartbeat.update"),
+				"rlm_heartbeat.delete": record("rlm_heartbeat.delete"),
+			},
+		});
+
+		const manager = await provisioner.ensure();
+		const result = await manager.execute(`
+import json
+created = await rlm_heartbeat.create("check tests", interval="5m", label="tests", delivery_mode="follow_up")
+listed = await rlm_heartbeat.list(include_inactive=True)
+updated = await rlm_heartbeat.update(created["heartbeat"]["id"], status="pause")
+deleted = await rlm_heartbeat.delete(created["heartbeat"]["id"])
+print(json.dumps({"created": created["heartbeat"], "listed": listed["heartbeats"]}, sort_keys=True))
+`);
+
+		expect(result.status).toBe("ok");
+		expect(JSON.parse(result.stdout.trim())).toMatchObject({
+			created: { id: "job-1", label: "tests", instruction: "check tests" },
+			listed: [{ id: "job-1", status: "active" }],
+		});
+		expect(requests.map((request) => request.type)).toEqual([
+			"rlm_heartbeat.create",
+			"rlm_heartbeat.list",
+			"rlm_heartbeat.update",
+			"rlm_heartbeat.delete",
+		]);
+		expect(requests[0].payload).toMatchObject({
+			type: "rlm_heartbeat.create",
+			instruction: "check tests",
+			interval: "5m",
+			label: "tests",
+			delivery_mode: "follow_up",
+		});
+		expect(requests[1].payload).toMatchObject({ type: "rlm_heartbeat.list", include_inactive: true });
+		expect(requests[2].payload).toMatchObject({ type: "rlm_heartbeat.update", id: "job-1", status: "pause" });
+		expect(requests[3].payload).toMatchObject({ type: "rlm_heartbeat.delete", id: "job-1" });
+	});
+
+	it("rejects non-string delivery modes before calling a missing host handler", async () => {
+		let hostRequestCount = 0;
+		provisioner = new IpythonKernelProvisioner(tempDir, {
+			pythonSkills: [bundledSkill("rlm-heartbeat", "rlm_heartbeat")],
+			hostHandlers: {
+				"rlm_heartbeat.create": async () => {
+					hostRequestCount++;
+					return {};
+				},
+			},
+		});
+
+		const manager = await provisioner.ensure();
+		const result = await manager.execute(`
+for value in ([], {}):
+    try:
+        await rlm_heartbeat.create("check tests", delivery_mode=value)
+    except TypeError as error:
+        print(f"TypeError: {error}")
+try:
+    await rlm_heartbeat.list()
+except RuntimeError as error:
+    print(f"RuntimeError: {error}")
+`);
+
+		expect(result.status).toBe("ok");
+		expect(result.stdout.trim().split("\n")).toEqual([
+			"TypeError: delivery_mode must be str or None, got list",
+			"TypeError: delivery_mode must be str or None, got dict",
+			'RuntimeError: host request type "rlm_heartbeat.list" is not available in this session',
+		]);
+		expect(hostRequestCount).toBe(0);
+	});
+});
+
+describe("goal skill over the kernel host bridge", { tags: ["kernel-heavy"] }, () => {
+	let tempDir: string;
+	let provisioner: IpythonKernelProvisioner | undefined;
+
+	beforeEach(() => {
+		tempDir = join(tmpdir(), `pi-goal-skill-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(tempDir, { recursive: true });
+	});
+
+	afterEach(async () => {
+		await provisioner?.dispose();
+		provisioner = undefined;
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("round-trips goal.create and goal.complete through a live kernel", async () => {
+		const requests: Array<{ type: string; payload: Record<string, unknown> }> = [];
+		provisioner = new IpythonKernelProvisioner(tempDir, {
+			pythonSkills: [bundledSkill("goal", "goal")],
+			hostHandlers: {
+				"goal.create": async (payload) => {
+					requests.push({ type: "goal.create", payload });
+					return {
+						goal: { objective: payload.objective, status: "active", tokens_used: 0 },
+						remaining_tokens: payload.token_budget ?? null,
+						completion_budget_report: null,
+					};
+				},
+				"goal.complete": async (payload) => {
+					requests.push({ type: "goal.complete", payload });
+					return { goal: { objective: "ship it", status: "complete", tokens_used: 7 }, remaining_tokens: 3 };
+				},
+			},
+		});
+
+		const manager = await provisioner.ensure();
+		const created = await manager.execute(`
+import json
+_created = await goal.create("ship it", token_budget=10)
+print(json.dumps(_created, sort_keys=True))
+`);
+		expect(created.status).toBe("ok");
+		expect(JSON.parse(created.stdout.trim())).toEqual({
+			goal: { objective: "ship it", status: "active", tokens_used: 0 },
+			remaining_tokens: 10,
+			completion_budget_report: null,
+		});
+
+		const completed = await manager.execute(`
+_completed = await goal.complete()
+print(_completed["goal"]["status"], _completed["remaining_tokens"])
+`);
+		expect(completed.status).toBe("ok");
+		expect(completed.stdout.trim()).toBe("complete 3");
+		expect(requests.map((request) => request.type)).toEqual(["goal.create", "goal.complete"]);
+		expect(requests[0].payload).toMatchObject({ type: "goal.create", objective: "ship it", token_budget: 10 });
+	});
+
+	it("surfaces host errors and missing handlers as Python exceptions", async () => {
+		provisioner = new IpythonKernelProvisioner(tempDir, {
+			pythonSkills: [bundledSkill("goal", "goal")],
+			hostHandlers: {
+				"goal.complete": async () => {
+					throw new Error("cannot complete goal because this thread has no goal");
+				},
+			},
+		});
+
+		const manager = await provisioner.ensure();
+		const result = await manager.execute(`
+import rlm as _rlm
+for call in (goal.complete(), goal.get(), _rlm.host_request("goal.get", {"type": "goal.complete"})):
+    try:
+        await call
+    except RuntimeError as error:
+        print(f"RuntimeError: {error}")
+`);
+		expect(result.status).toBe("ok");
+		// A missing handler cannot be rerouted by putting another type in the payload.
+		expect(result.stdout.trim().split("\n")).toEqual([
+			"RuntimeError: cannot complete goal because this thread has no goal",
+			'RuntimeError: host request type "goal.get" is not available in this session',
+			'RuntimeError: host request type "goal.get" is not available in this session',
+		]);
 	});
 });

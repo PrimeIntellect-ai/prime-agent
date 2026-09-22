@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import os
+import secrets
+import termios
 import time
 from collections.abc import Callable
 from pathlib import Path
 
 import pexpect
 import pyte
+
+# Bound input-handler detection delay without adding a fixed wait to fast startup.
+PROBE_INTERVAL = 0.02
+MAX_PENDING_INPUT = 65_536
 
 QUERIES = {
     "\x1b[6n": "\x1b[1;1R",
@@ -75,13 +82,32 @@ class Terminal:
             dimensions=(40, 120),
             echo=False,
         )
-        self.child.delaybeforesend = 0
-        self.display = Display(self.child.send)
+        os.set_blocking(self.child.child_fd, False)
+        self._pending_input = b""
+        self.display = Display(self._send)
         self.transcript = transcript
         self.raw: list[str] = []
         self.bytes = 0
 
+    def _send(self, text: str) -> None:
+        data = text.encode("utf-8")
+        if len(self._pending_input) + len(data) > MAX_PENDING_INPUT:
+            raise RuntimeError("Terminal input queue exceeds 64 KiB")
+        self._pending_input += data
+        self._flush_input()
+
+    def _flush_input(self) -> None:
+        # Never wait for a raw-mode child to read. The next pump retries the exact tail.
+        if not self._pending_input:
+            return
+        try:
+            written = os.write(self.child.child_fd, self._pending_input)
+        except (BlockingIOError, InterruptedError):
+            return
+        self._pending_input = self._pending_input[written:]
+
     def pump(self) -> bool:
+        self._flush_input()
         try:
             chunk = self.child.read_nonblocking(65536, timeout=0.005)
         except pexpect.TIMEOUT:
@@ -95,25 +121,102 @@ class Terminal:
         self.display.feed(chunk)
         return True
 
-    def until(self, predicate: Callable[[Display], bool], seconds: float) -> float:
-        deadline = time.perf_counter() + seconds
-        while time.perf_counter() < deadline:
-            if self.pump() and predicate(self.display):
-                return time.perf_counter()
-        raise TimeoutError("Timed out waiting for the expected terminal state")
-
     def settle(self, seconds: float) -> None:
         deadline = time.perf_counter() + seconds
         while time.perf_counter() < deadline:
             self.pump()
 
-    def ready(self) -> float:
-        self.until(lambda display: "agents/resume" in display.text(), 30)
-        self.child.send("benchready")
-        echoed = self.until(lambda display: "benchready" in display.text(), 5)
-        self.child.send("\x7f" * len("benchready"))
-        self.until(lambda display: "benchready" not in display.text(), 5)
-        return echoed - self.started
+    def until(self, predicate: Callable[[Display], bool], seconds: float) -> None:
+        deadline = time.perf_counter() + seconds
+        while (2026 << 5) in self.display.screen.mode or not predicate(self.display):
+            if time.perf_counter() >= deadline:
+                raise TimeoutError(
+                    "Timed out waiting for terminal display to reach the expected terminal state"
+                )
+            self.pump()
+
+    def until_output(self, predicate: Callable[[str], bool], seconds: float) -> None:
+        index = len(self.raw)
+        output = ""
+        deadline = time.perf_counter() + seconds
+        while True:
+            output += "".join(self.raw[index:])
+            index = len(self.raw)
+            if predicate(output):
+                return
+            if time.perf_counter() >= deadline:
+                raise TimeoutError("Timed out waiting for new terminal output")
+            self.pump()
+
+    def ready(self, seconds: float = 30) -> float:
+        deadline = time.perf_counter() + seconds
+        probes: list[str] = []
+        next_probe = 0.0
+        echoed: float | None = None
+        origin: tuple[int, int] | None = None
+        needs_clear = False
+        stage = "noncanonical, no-echo terminal input"
+        # Keep the ten-character input workload identical across benchmark revisions.
+        erase = "\x7f" * 10
+        try:
+            while time.perf_counter() < deadline:
+                updated = self.pump()
+                # pyte shifts DEC private modes by five bits. Do not inspect a partial
+                # synchronized TUI frame, especially while the editor row is cleared.
+                updated = updated and (2026 << 5) not in self.display.screen.mode
+                flags = termios.tcgetattr(self.child.child_fd)[3]
+                if flags & (termios.ICANON | termios.ECHO):
+                    continue
+                now = time.perf_counter()
+                if origin is not None:
+                    cursor = self.display.screen.cursor
+                    # A shortened marker is not a cleared editor. Verify the cursor
+                    # returns to the insertion point, allowing any empty-editor placeholder.
+                    if (
+                        updated
+                        and not self._pending_input
+                        and (cursor.y, cursor.x) == origin
+                        and not any(probe in self.display.text() for probe in probes)
+                    ):
+                        assert echoed is not None
+                        return echoed - self.started
+                    continue
+                if updated and probes:
+                    text = self.display.text()
+                    if echoed is None and any(probe in text for probe in probes):
+                        echoed = now
+                        stage = "latest editor probe rendering"
+                    if echoed is not None:
+                        for row, line in enumerate(self.display.screen.display):
+                            column = line.find(probes[-1])
+                            if column >= 0:
+                                origin = (row, column)
+                                self._send(erase)
+                                needs_clear = False
+                                stage = "editor probe cleanup"
+                                break
+                if echoed is None and not self._pending_input and now >= next_probe:
+                    # Raw mode can precede the editor's input handler. Balanced retries
+                    # replace dropped/partial probes without accumulating editor text.
+                    if needs_clear:
+                        self._send(erase)
+                    probe = "b" + secrets.token_hex(4) + "r"
+                    self._send(probe)
+                    probes.append(probe)
+                    needs_clear = True
+                    next_probe = now + PROBE_INTERVAL
+                    stage = "editor input rendering"
+                # Once any probe renders, stop retrying and acknowledge the newest one
+                # before clearing: older queued retries must not outlive cleanup.
+            raise TimeoutError(f"Timed out waiting for {stage}")
+        finally:
+            if needs_clear:
+                try:
+                    # Drop unsent retries; cleanup must not extend the shared deadline.
+                    self._pending_input = b""
+                    self._send(erase)
+                except (OSError, pexpect.EOF):
+                    pass
 
     def close(self) -> None:
         raw, snapshot = "".join(self.raw), self.display.text()
@@ -121,10 +224,11 @@ class Terminal:
         self.transcript.with_suffix(".txt").write_text(snapshot)
         try:
             if self.child.isalive():
-                self.child.sendcontrol("c")
+                self._pending_input = b""
+                self._send("\x03")
                 time.sleep(0.15)
                 if self.child.isalive():
-                    self.child.sendcontrol("c")
+                    self._send("\x03")
         except (OSError, pexpect.EOF):
             pass
         finally:

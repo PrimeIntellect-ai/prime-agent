@@ -13,6 +13,7 @@ import {
 	readFileSync,
 	readSync,
 	statSync,
+	writeSync,
 } from "fs";
 import { readdir, readFile, stat } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
@@ -27,6 +28,7 @@ import {
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
+	HARNESS_DIGEST_CUSTOM_TYPE,
 } from "./messages.js";
 import {
 	addAssistantUsage,
@@ -130,6 +132,8 @@ export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	usage?: Usage;
 	/** Harness digest snapshot taken at compaction time; rendered before the summary in LLM context. */
 	harnessDigest?: string;
+	/** Fingerprint of the harness state behind `harnessDigest` at compaction time; lets cold boundaries skip re-delivery. */
+	harnessStateFingerprint?: string;
 }
 
 export interface BranchSummaryEntry<T = unknown> extends SessionEntryBase {
@@ -182,7 +186,7 @@ export interface SessionStateEntry extends SessionEntryBase {
 	state: SessionState;
 }
 
-export type AgentTaskState = "needs_input" | "completed";
+export type AgentTaskState = "needs_input" | "completed" | "error";
 
 export interface AgentStatus {
 	summary: string;
@@ -301,6 +305,18 @@ function createUniqueSessionFileTarget(sessionDir: string): { sessionId: string;
 		}
 	}
 	throw new Error("Unable to create a unique session file");
+}
+
+// writeSync may return a short count without throwing; a torn line would
+// corrupt the forked JSONL on reopen, so loop until the whole buffer lands.
+function writeAllSync(descriptor: number, data: string, path: string): void {
+	const bytes = Buffer.from(data, "utf8");
+	let offset = 0;
+	while (offset < bytes.length) {
+		const written = writeSync(descriptor, bytes, offset, bytes.length - offset);
+		if (written <= 0) throw new Error(`Short write persisting ${path}`);
+		offset += written;
+	}
 }
 
 export function getSessionArtifactsRoot(sessionDir: string): string {
@@ -480,6 +496,30 @@ export function buildSessionContext(
 		}
 	}
 
+	// Harness digests are regenerable snapshots of persistent state, so only the
+	// newest one belongs in the built context: older digest custom messages are
+	// skipped at assembly time, and a compaction-entry snapshot yields to any
+	// digest appended after the compaction. Persisted entries keep every copy;
+	// the newest digest is authoritative and is re-delivered at cold boundaries.
+	let newestDigestEntryId: string | undefined;
+	let newestDigestIdx = -1;
+	for (let i = path.length - 1; i >= 0; i--) {
+		const entry = path[i];
+		if (entry.type === "custom_message" && entry.customType === HARNESS_DIGEST_CUSTOM_TYPE) {
+			newestDigestEntryId = entry.id;
+			newestDigestIdx = i;
+			break;
+		}
+	}
+
+	const compactionIdx = compaction ? path.findIndex((e) => e.type === "compaction" && e.id === compaction.id) : -1;
+	// True when the compaction snapshot is the newest digest in context, so every
+	// digest custom message is older and skipped entirely.
+	const snapshotOutranksDigest =
+		compaction?.harnessDigest !== undefined && (newestDigestIdx === -1 || newestDigestIdx < compactionIdx);
+	const keepDigestEntryId = snapshotOutranksDigest ? undefined : newestDigestEntryId;
+	const summaryHarnessDigest = newestDigestIdx > compactionIdx ? undefined : compaction?.harnessDigest;
+
 	// Build messages and collect corresponding entries
 	// When there's a compaction, model context remains summary-first while the
 	// summary records where clients should present it among retained messages.
@@ -489,6 +529,9 @@ export function buildSessionContext(
 		if (entry.type === "message") {
 			target.push(entry.message);
 		} else if (entry.type === "custom_message") {
+			if (entry.customType === HARNESS_DIGEST_CUSTOM_TYPE && entry.id !== keepDigestEntryId) {
+				return;
+			}
 			target.push(
 				createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
 			);
@@ -498,8 +541,6 @@ export function buildSessionContext(
 	};
 
 	if (compaction) {
-		const compactionIdx = path.findIndex((e) => e.type === "compaction" && e.id === compaction.id);
-
 		// Collect kept messages (before compaction, starting from firstKeptEntryId).
 		// The context remains summary-first for the model; retainedMessageCount records
 		// the exact chronological presentation boundary for clients.
@@ -522,7 +563,8 @@ export function buildSessionContext(
 				compaction.timestamp,
 				compaction.customInstructions,
 				retainedMessages.length,
-				compaction.harnessDigest,
+				summaryHarnessDigest,
+				summaryHarnessDigest === undefined ? undefined : compaction.harnessStateFingerprint,
 			),
 			...retainedMessages,
 		);
@@ -747,6 +789,213 @@ export async function loadEntriesFromFileAsync(
 		}
 	}
 	return finalizeLoadedEntries(entries);
+}
+
+// --- Append-only metadata writes for closed sessions -------------------------
+//
+// Catalog metadata operations (rename, archive, mark_interrupted) append a
+// single entry to a file no live session holds. Opening a SessionManager for
+// that parses and indexes the entire transcript — an O(session) stall and a
+// memory spike proportional to session size for every routine UI action. The
+// fast path below reads only a leading header window and a bounded tail window
+// instead, and falls back to a full open whenever those two windows cannot place
+// the entry (a file version this build does not write, a header beyond the
+// window, or a tail too large to resolve the leaf).
+
+const APPEND_HEADER_WINDOW_BYTES = 64 * 1024;
+const APPEND_TAIL_WINDOW_BYTES = 256 * 1024;
+
+/** Ids and timestamps shared by live appends and the append-only fast path. */
+interface AppendEntrySeed {
+	leafId: string | null;
+	newId(): string;
+	timestamp: string;
+}
+
+function buildSessionInfoEntry(name: string, seed: AppendEntrySeed): SessionInfoEntry {
+	return {
+		type: "session_info",
+		id: seed.newId(),
+		parentId: seed.leafId,
+		timestamp: seed.timestamp,
+		name: name.trim(),
+	};
+}
+
+function buildSessionStateEntry(state: SessionState, seed: AppendEntrySeed): SessionStateEntry {
+	return {
+		type: "session_state",
+		id: seed.newId(),
+		parentId: seed.leafId,
+		timestamp: seed.timestamp,
+		state: { status: state.status },
+	};
+}
+
+function buildCustomMessageEntry<T>(
+	customType: string,
+	content: string | (TextContent | ImageContent)[],
+	display: boolean,
+	details: T | undefined,
+	seed: AppendEntrySeed,
+): CustomMessageEntry<T> {
+	return {
+		type: "custom_message",
+		customType,
+		content,
+		display,
+		details,
+		id: seed.newId(),
+		parentId: seed.leafId,
+		timestamp: seed.timestamp,
+	};
+}
+
+/**
+ * First line that parses as JSON in the leading window, mirroring how the
+ * loader skips malformed or blank leading lines. Returns "window-truncated"
+ * when the window held no parseable line but stopped before the end of the
+ * file: a longer leading line may hide the header past it, and only a full
+ * load can tell.
+ */
+function readFirstParseableLine(
+	filePath: string,
+): { type?: unknown; id?: unknown; version?: unknown } | "window-truncated" | undefined {
+	const buffer = readBytesSync(filePath, 0, APPEND_HEADER_WINDOW_BYTES);
+	let start = 0;
+	while (start < buffer.length) {
+		let end = buffer.indexOf(0x0a, start);
+		if (end === -1) end = buffer.length;
+		const line = buffer.subarray(start, end);
+		if (line.length > 0) {
+			try {
+				return JSON.parse(line.toString("utf8")) as { type?: unknown; id?: unknown; version?: unknown };
+			} catch {
+				// Skip malformed or blank lines like appendEntryFromBuffer.
+			}
+		}
+		start = end + 1;
+	}
+	// A window shorter than the cap means the read reached EOF, so the file
+	// really has no parseable leading line.
+	return buffer.length < APPEND_HEADER_WINDOW_BYTES ? undefined : "window-truncated";
+}
+
+/**
+ * Reads a bounded tail window and returns the id of the file's current leaf
+ * entry: the last line that parses as a non-session entry, like _buildIndex
+ * computes on a full load. Returns null for a legacy leaf without an id or a
+ * file without entries, and undefined when the window is too small to decide —
+ * the caller then falls back to a full load.
+ */
+function readTailLeafId(filePath: string, fileSize: number): string | null | undefined {
+	const windowBytes = Math.min(fileSize, APPEND_TAIL_WINDOW_BYTES);
+	const buffer = readBytesSync(filePath, fileSize - windowBytes, fileSize);
+	const lines: Buffer[] = [];
+	let start = 0;
+	while (start < buffer.length) {
+		let end = buffer.indexOf(0x0a, start);
+		if (end === -1) end = buffer.length;
+		lines.push(buffer.subarray(start, end));
+		start = end + 1;
+	}
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const line = lines[i]!;
+		if (line.length === 0) continue;
+		let parsed: { type?: unknown; id?: unknown };
+		try {
+			parsed = JSON.parse(line.toString("utf8")) as { type?: unknown; id?: unknown };
+		} catch {
+			continue;
+		}
+		if (parsed.type === "session") continue;
+		return typeof parsed.id === "string" ? parsed.id : null;
+	}
+	return windowBytes === fileSize ? null : undefined;
+}
+
+/**
+ * Appends one metadata entry to an existing session file without parsing the
+ * transcript. Repairs crash damage like a full open would, validates the
+ * session header, then appends the entry in one line. Throws when the file is
+ * missing or its header is invalid; returns undefined whenever only a full open
+ * can place the entry (an older or newer version, a header beyond the window,
+ * or a tail too large to resolve the leaf), so the caller can fall back.
+ */
+function appendEntryToExistingFile(
+	sessionFile: string,
+	buildEntry: (seed: AppendEntrySeed) => SessionEntry,
+): string | undefined {
+	const targetPath = resolve(sessionFile);
+	if (!existsSync(targetPath)) {
+		throw new Error(`Cannot append to missing session file: ${sessionFile}`);
+	}
+	repairJsonlDamage(targetPath);
+	const header = readFirstParseableLine(targetPath);
+	if (header === "window-truncated") {
+		return undefined;
+	}
+	if (!header || header.type !== "session" || typeof header.id !== "string") {
+		throw new Error(`Session file has no valid session header: ${sessionFile}`);
+	}
+	// Append directly only to a file this build writes: a v1/v2 file needs the
+	// migration a full open performs and may not carry the ids an appended
+	// parentId chains to, and a future version may change the entry shape.
+	if (header.version !== CURRENT_SESSION_VERSION) {
+		return undefined;
+	}
+	const leafId = readTailLeafId(targetPath, statSync(targetPath).size);
+	if (leafId === undefined) {
+		return undefined;
+	}
+	// generateId checks the in-memory entry index, which only a full parse can
+	// build; without it, take generateId's guaranteed-unique fallback form. A
+	// duplicate short id would cycle the leaf-to-root walk in buildSessionContext.
+	const entry = buildEntry({ leafId, newId: () => randomUUID(), timestamp: new Date().toISOString() });
+	mkdirSync(dirname(targetPath), { recursive: true });
+	appendFileSync(targetPath, `${JSON.stringify(entry)}\n`);
+	return entry.id;
+}
+
+/**
+ * Appends a rename (session_info) entry to a closed session file without a
+ * full transcript parse; falls back to opening a SessionManager when only a
+ * full open can place the entry.
+ */
+export function appendSessionInfoToExistingFile(sessionFile: string, name: string): string {
+	const fastId = appendEntryToExistingFile(sessionFile, (seed) => buildSessionInfoEntry(name, seed));
+	return fastId ?? SessionManager.open(sessionFile).appendSessionInfo(name);
+}
+
+/**
+ * Appends a lifecycle (session_state) entry to a closed session file without a
+ * full transcript parse; falls back like appendSessionInfoToExistingFile.
+ */
+export function appendSessionStateToExistingFile(sessionFile: string, state: SessionState): string {
+	const fastId = appendEntryToExistingFile(sessionFile, (seed) => buildSessionStateEntry(state, seed));
+	return fastId ?? SessionManager.open(sessionFile).appendSessionState(state);
+}
+
+/**
+ * Appends a custom message entry to a closed session file without a full
+ * transcript parse; falls back like appendSessionInfoToExistingFile. Unlike a
+ * live append, this writes even when the file has no assistant entry yet:
+ * SessionManager._persist suppresses custom entries until then, which would
+ * drop the notice on the floor for a session whose first reply never landed.
+ * A session that falls back to a full open keeps the full-open behavior: with
+ * no assistant entry, _persist drops the entry and nothing is appended.
+ */
+export function appendCustomMessageToExistingFile<T = unknown>(
+	sessionFile: string,
+	customType: string,
+	content: string | (TextContent | ImageContent)[],
+	display: boolean,
+	details?: T,
+): string {
+	const fastId = appendEntryToExistingFile(sessionFile, (seed) =>
+		buildCustomMessageEntry(customType, content, display, details, seed),
+	);
+	return fastId ?? SessionManager.open(sessionFile).appendCustomMessageEntry(customType, content, display, details);
 }
 
 function readSessionHeader(filePath: string): Partial<SessionHeader> | undefined {
@@ -1083,9 +1332,9 @@ interface SessionScanState {
 
 const SESSION_SCAN_RESUME_TAIL_BYTES = 16;
 const NEWLINE_BUFFER = Buffer.from("\n");
-// Memory bound (~tens of MB): LRU whole-state eviction only while over it, so
-// small states never thrash and an evicted file just pays one full rescan.
-const SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES = 100_000;
+// Memory/performance budget: whole-state LRU eviction can force a full catalog rescan every refresh.
+// Keep large families (~2k sessions, 150k usage entries) and growth headroom resident.
+const SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES = 400_000;
 
 // Session files are append-only between whole-file rewrites, so scans resume
 // from the last consumed byte offset; rewrites are detected by shrink,
@@ -1236,9 +1485,63 @@ async function scanSessionLines(filePath: string, state: SessionScanState, size:
 	return undefined;
 }
 
+// Entry headers are serialized before any payload, so a message entry's own
+// type key and its message role both land in the first few hundred bytes.
+const SESSION_LIST_HEADER_PREFIX_MAX_CHARS = 512;
+const SESSION_LIST_MESSAGE_TYPE_HEADER = '"type":"message"';
+const SESSION_LIST_MESSAGE_ROLE_HEADER = '"message":{"role":"';
+const SESSION_LIST_USER_ROLE = 'user"';
+const SESSION_LIST_ASSISTANT_ROLE = 'assistant"';
+
+/**
+ * Return true when a line's serialized header proves the entry is a message
+ * whose role can only contribute its message count.
+ *
+ * Tool results (and extension message roles) carry no usage, model, name, state,
+ * activity timestamp, or search text, yet records commit them verbatim: they are
+ * the largest single share of the bytes a cold catalog scan parses for nothing.
+ * Counting them from the header also spares the oversize branch its preview
+ * scans for multi-megabyte tool results.
+ *
+ * `"` is escaped inside a JSON string, so a header that matches here can only be
+ * structural. Every layout the file writer does not produce — spacing, another
+ * key order, a nested container before the role marker, a role that runs past the
+ * prefix — falls through to the full parse.
+ */
+function isCountOnlyMessageLine(line: string): boolean {
+	// Only the entry header decides this, and the header always fits in the
+	// prefix: bounding the search keeps a file written in another layout
+	// (spacing, a different key order) from paying a full scan per line.
+	const prefix =
+		line.length > SESSION_LIST_HEADER_PREFIX_MAX_CHARS ? line.slice(0, SESSION_LIST_HEADER_PREFIX_MAX_CHARS) : line;
+	const typeIndex = prefix.indexOf(SESSION_LIST_MESSAGE_TYPE_HEADER);
+	if (typeIndex < 0) return false;
+	const roleMarkerIndex = prefix.indexOf(SESSION_LIST_MESSAGE_ROLE_HEADER, typeIndex);
+	if (roleMarkerIndex < 0) return false;
+	// The role marker carries the message object's own brace, so any earlier
+	// container belongs to another object: an entry that nests a payload before
+	// its type key, or one that quotes this header before its own message key.
+	// Either way the role found below is not the entry's message role.
+	const containerIndex = prefix.indexOf("{", 1);
+	if (containerIndex >= 0 && containerIndex < roleMarkerIndex) return false;
+	const roleIndex = roleMarkerIndex + SESSION_LIST_MESSAGE_ROLE_HEADER.length;
+	// A role that reaches past the prefix cannot be compared, so it takes the full parse.
+	if (roleIndex + SESSION_LIST_ASSISTANT_ROLE.length > prefix.length) return false;
+	return (
+		!prefix.startsWith(SESSION_LIST_USER_ROLE, roleIndex) &&
+		!prefix.startsWith(SESSION_LIST_ASSISTANT_ROLE, roleIndex)
+	);
+}
+
 function foldSessionScanLine(acc: SessionScanAccumulator, lineBuffer: Buffer): void {
 	const line = lineBuffer.toString("utf8");
 	if (!line.trim()) return;
+
+	// Guarded on the header so damaged-file detection still sees the first entry parsed.
+	if (acc.header !== undefined && isCountOnlyMessageLine(line)) {
+		acc.messageCount++;
+		return;
+	}
 
 	// Large tool-result entries can be many MB. They do not carry the
 	// session-list metadata we need, and parsing them during every refresh
@@ -1437,11 +1740,21 @@ export class SessionManager {
 	private cwd: string;
 	private persist: boolean;
 	private flushed: boolean = false;
+	// Flip-once cache for the no-assistant guard in _persist: true from the first
+	// assistant message on. Refreshed on every fileEntries reassignment; hot
+	// appends only ever set it to true, keeping _persist O(1).
+	private hasAssistantEntry = false;
 	private fileEntries: FileEntry[] = [];
 	private byId: Map<string, SessionEntry> = new Map();
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
+	// Cache of the live leaf's branch path, so the per-turn compaction check and the
+	// context-usage state build get an O(1) lookup instead of a leaf-to-root walk.
+	// Appends extend the cached array in place; every other leafId write drops the
+	// cache. The array is handed out as-is, so callers must treat it as read-only
+	// and must not hold it across an append.
+	private leafBranchCache: { leafId: string | null; entries: SessionEntry[] } | null = null;
 	private persistListeners = new Set<SessionPersistListener>();
 
 	private constructor(
@@ -1475,6 +1788,7 @@ export class SessionManager {
 		if (existsSync(this.sessionFile)) {
 			if (this.persist && preloadedEntries === undefined) repairJsonlDamage(this.sessionFile);
 			this.fileEntries = preloadedEntries ?? loadEntriesFromFile(this.sessionFile);
+			this._refreshHasAssistantEntry();
 
 			// If file was empty or corrupted (no valid header), truncate and start fresh
 			// to avoid appending messages without a session header (which breaks the session)
@@ -1552,10 +1866,12 @@ export class SessionManager {
 			git,
 		};
 		this.fileEntries = [header];
+		this.hasAssistantEntry = false;
 		this.byId.clear();
 		this.labelsById.clear();
 		this.labelTimestampsById.clear();
 		this.leafId = null;
+		this.leafBranchCache = null;
 		this.flushed = false;
 
 		if (this.persist) {
@@ -1564,11 +1880,19 @@ export class SessionManager {
 		return this.sessionFile;
 	}
 
+	// Cold-path recompute of the flip-once has-assistant cache. Hot appends keep
+	// it O(1) in _appendEntry; every fileEntries reassignment (open, branch,
+	// rollback) refreshes it here.
+	private _refreshHasAssistantEntry(): void {
+		this.hasAssistantEntry = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
+	}
+
 	private _buildIndex(): void {
 		this.byId.clear();
 		this.labelsById.clear();
 		this.labelTimestampsById.clear();
 		this.leafId = null;
+		this.leafBranchCache = null;
 		for (const entry of this.fileEntries) {
 			if (entry.type === "session") continue;
 			this.byId.set(entry.id, entry);
@@ -1668,6 +1992,7 @@ export class SessionManager {
 			git,
 		};
 		this.fileEntries = [header, ...this.getEntries()];
+		this._refreshHasAssistantEntry();
 		this._rewriteFile();
 		this.flushed = true;
 		return this.sessionFile;
@@ -1694,13 +2019,16 @@ export class SessionManager {
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
 
-		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
 		const shouldPersistWithoutAssistant = entry.type === "session_state" || entry.type === "session_info";
-		if (!hasAssistant && !shouldPersistWithoutAssistant) {
+		if (!this.hasAssistantEntry && !shouldPersistWithoutAssistant) {
 			this.flushed = false;
 			return;
 		}
 
+		// The existsSync check is what lets the next append recover from the session
+		// file being deleted underneath a live session: without it appendFileSync
+		// would recreate a headerless stub (pinned by session-state.test.ts's
+		// "rewrites the full session if the session file disappears after flushing").
 		if (!this.flushed || !existsSync(this.sessionFile)) {
 			this._rewriteFile();
 			this.flushed = true;
@@ -1711,11 +2039,37 @@ export class SessionManager {
 		}
 	}
 
+	private appendEntrySeed(): AppendEntrySeed {
+		return {
+			leafId: this.leafId,
+			newId: () => generateId(this.byId),
+			timestamp: new Date().toISOString(),
+		};
+	}
+
 	private _appendEntry(entry: SessionEntry): void {
 		this.fileEntries.push(entry);
+		if (entry.type === "message" && entry.message.role === "assistant") {
+			this.hasAssistantEntry = true;
+		}
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
 		this._persist(entry);
+		// After _persist: a throwing persist rolls the append back, and the cache must
+		// not grow past a leaf that never survived it.
+		this._extendLeafBranchCache(entry);
+	}
+
+	// Appends only ever extend the live branch path, so the leaf branch cache grows
+	// in place. Anything other than a straight append off the cached leaf drops it.
+	private _extendLeafBranchCache(entry: SessionEntry): void {
+		const cache = this.leafBranchCache;
+		if (cache && cache.leafId === entry.parentId) {
+			cache.leafId = entry.id;
+			cache.entries.push(entry);
+		} else {
+			this.leafBranchCache = null;
+		}
 	}
 
 	appendMessage(message: Message | CustomMessage | BashExecutionMessage): string {
@@ -1776,6 +2130,7 @@ export class SessionManager {
 		customInstructions?: string,
 		usage?: Usage,
 		harnessDigest?: string,
+		harnessStateFingerprint?: string,
 	): string {
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
@@ -1790,6 +2145,7 @@ export class SessionManager {
 			customInstructions,
 			usage,
 			harnessDigest,
+			harnessStateFingerprint,
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -1839,25 +2195,13 @@ export class SessionManager {
 	}
 
 	appendSessionInfo(name: string): string {
-		const entry: SessionInfoEntry = {
-			type: "session_info",
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			name: name.trim(),
-		};
+		const entry = buildSessionInfoEntry(name, this.appendEntrySeed());
 		this._appendEntry(entry);
 		return entry.id;
 	}
 
 	appendSessionState(state: SessionState): string {
-		const entry: SessionStateEntry = {
-			type: "session_state",
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			state: { status: state.status },
-		};
+		const entry = buildSessionStateEntry(state, this.appendEntrySeed());
 		this._appendEntry(entry);
 		return entry.id;
 	}
@@ -1979,16 +2323,13 @@ export class SessionManager {
 		display: boolean,
 		details?: T,
 	): string {
-		const entry: CustomMessageEntry<T> = {
-			type: "custom_message",
+		const entry: CustomMessageEntry<T> = buildCustomMessageEntry(
 			customType,
 			content,
 			display,
 			details,
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-		};
+			this.appendEntrySeed(),
+		);
 		this._appendEntry(entry);
 		return entry.id;
 	}
@@ -2015,9 +2356,18 @@ export class SessionManager {
 		} catch (error) {
 			// The append indexes the entry before persisting it; undo exactly that.
 			if (this.leafId !== null && this.leafId !== previousLeafId) {
-				this.byId.delete(this.leafId);
+				const rolledBackId = this.leafId;
+				this.byId.delete(rolledBackId);
 				this.fileEntries.pop();
+				this._refreshHasAssistantEntry();
+				// A cache extended by the append is live, so drop the rolled-back entry from
+				// the array a caller may already hold before invalidating the cache.
+				const cache = this.leafBranchCache;
+				if (cache && cache.entries[cache.entries.length - 1]?.id === rolledBackId) {
+					cache.entries.pop();
+				}
 				this.leafId = previousLeafId;
+				this.leafBranchCache = null;
 				// The failed append may have left a torn line on disk. Restore the file
 				// from the rolled-back entries now; if that also fails (e.g. the disk is
 				// still full), fall back to forcing the next persist to rewrite.
@@ -2081,7 +2431,18 @@ export class SessionManager {
 		return entry.id;
 	}
 
+	/**
+	 * Entries on the active branch, root to leaf. A leaf read returns the live
+	 * leaf-branch cache: treat the result as read-only and do not hold it across
+	 * appends.
+	 */
 	getBranch(fromId?: string): SessionEntry[] {
+		// Leaf-path reads are the per-turn hot path (compaction checks, context
+		// usage); a read for another entry walks the chain instead.
+		const isLeafPath = fromId === undefined || fromId === this.leafId;
+		if (isLeafPath && this.leafBranchCache?.leafId === this.leafId) {
+			return this.leafBranchCache.entries;
+		}
 		// push+reverse, not unshift-per-entry: unshift is O(n), which makes this O(n^2) on long sessions.
 		const path: SessionEntry[] = [];
 		const startId = fromId ?? this.leafId;
@@ -2091,6 +2452,9 @@ export class SessionManager {
 			current = current.parentId ? this.byId.get(current.parentId) : undefined;
 		}
 		path.reverse();
+		if (isLeafPath) {
+			this.leafBranchCache = { leafId: this.leafId, entries: path };
+		}
 		return path;
 	}
 
@@ -2161,10 +2525,12 @@ export class SessionManager {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
 		this.leafId = branchFromId;
+		this.leafBranchCache = null;
 	}
 
 	resetLeaf(): void {
 		this.leafId = null;
+		this.leafBranchCache = null;
 	}
 
 	branchWithSummary(
@@ -2178,6 +2544,7 @@ export class SessionManager {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
 		this.leafId = branchFromId;
+		this.leafBranchCache = null;
 		const entry: BranchSummaryEntry = {
 			type: "branch_summary",
 			id: generateId(this.byId),
@@ -2247,6 +2614,7 @@ export class SessionManager {
 			}
 
 			this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
+			this._refreshHasAssistantEntry();
 			this.sessionId = newSessionId;
 			this.sessionFile = newSessionFile;
 			this._buildIndex();
@@ -2256,8 +2624,7 @@ export class SessionManager {
 			// first assistant response, matching the newSession() contract
 			// and avoiding the duplicate-header bug when _persist()'s
 			// no-assistant guard later resets flushed to false.
-			const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
-			if (hasAssistant) {
+			if (this.hasAssistantEntry) {
 				this._rewriteFile();
 				this.flushed = true;
 			} else {
@@ -2282,6 +2649,7 @@ export class SessionManager {
 			parentId = labelEntry.id;
 		}
 		this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
+		this._refreshHasAssistantEntry();
 		this.sessionId = newSessionId;
 		this._buildIndex();
 		return undefined;
@@ -2378,24 +2746,34 @@ export class SessionManager {
 			rlmDepth: resolveSessionRlmDepth(sourceHeader, sourcePath),
 			git: captureGitContext(targetCwd) ?? undefined,
 		};
-		appendFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`);
+		// The whole fork flows through one descriptor: one openSync, one
+		// writeAllSync per line, one closeSync. writeAllSync loops past short
+		// counts so every JSONL line lands whole, and "w" creates the target
+		// fresh because createUniqueSessionFileTarget guarantees it does not
+		// exist yet.
+		const descriptor = openSync(newSessionFile, "w");
+		try {
+			writeAllSync(descriptor, `${JSON.stringify(newHeader)}\n`, newSessionFile);
 
-		// Drop the source's git_state entries (re-linking children): they describe the source repo,
-		// so the fork would otherwise report the source's git instead of its own target context.
-		const droppedParent = new Map<string, string | null>();
-		for (const entry of sourceEntries) {
-			if (entry.type === "git_state") droppedParent.set(entry.id, entry.parentId);
-		}
-		const liveParent = (parentId: string | null): string | null => {
-			let pid = parentId;
-			while (pid !== null && droppedParent.has(pid)) pid = droppedParent.get(pid) ?? null;
-			return pid;
-		};
-		for (const entry of sourceEntries) {
-			if (entry.type === "session" || entry.type === "git_state") continue;
-			const parentId = liveParent(entry.parentId);
-			const out = parentId === entry.parentId ? entry : { ...entry, parentId };
-			appendFileSync(newSessionFile, `${JSON.stringify(out)}\n`);
+			// Drop the source's git_state entries (re-linking children): they describe the source repo,
+			// so the fork would otherwise report the source's git instead of its own target context.
+			const droppedParent = new Map<string, string | null>();
+			for (const entry of sourceEntries) {
+				if (entry.type === "git_state") droppedParent.set(entry.id, entry.parentId);
+			}
+			const liveParent = (parentId: string | null): string | null => {
+				let pid = parentId;
+				while (pid !== null && droppedParent.has(pid)) pid = droppedParent.get(pid) ?? null;
+				return pid;
+			};
+			for (const entry of sourceEntries) {
+				if (entry.type === "session" || entry.type === "git_state") continue;
+				const parentId = liveParent(entry.parentId);
+				const out = parentId === entry.parentId ? entry : { ...entry, parentId };
+				writeAllSync(descriptor, `${JSON.stringify(out)}\n`, newSessionFile);
+			}
+		} finally {
+			closeSync(descriptor);
 		}
 
 		return new SessionManager(targetCwd, dir, newSessionFile, true);

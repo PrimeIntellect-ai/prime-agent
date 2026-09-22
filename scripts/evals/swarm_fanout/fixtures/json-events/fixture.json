@@ -1,0 +1,54 @@
+{
+  "name": "json-events",
+  "artifact": "combined-index.md",
+  "shards": [
+    {
+      "file": "events-01.jsonl",
+      "worker": "worker-events-01",
+      "question": "How many records have action \"deploy\"?",
+      "expected": 3
+    },
+    {
+      "file": "events-02.jsonl",
+      "worker": "worker-events-02",
+      "question": "What is the total of the bytes field over all records with action \"upload\"?",
+      "expected": 2044
+    },
+    {
+      "file": "events-03.jsonl",
+      "worker": "worker-events-03",
+      "question": "How many distinct users have at least one record with action \"login\"?",
+      "expected": 3
+    },
+    {
+      "file": "events-04.jsonl",
+      "worker": "worker-events-04",
+      "question": "What is the maximum value of the bytes field?",
+      "expected": 871
+    },
+    {
+      "file": "events-05.jsonl",
+      "worker": "worker-events-05",
+      "question": "How many records have action \"logout\"?",
+      "expected": 5
+    },
+    {
+      "file": "events-06.jsonl",
+      "worker": "worker-events-06",
+      "question": "How many records have bytes greater than 500?",
+      "expected": 5
+    },
+    {
+      "file": "events-07.jsonl",
+      "worker": "worker-events-07",
+      "question": "What is the total of the bytes field over all records with action \"deploy\"?",
+      "expected": 1912
+    },
+    {
+      "file": "events-08.jsonl",
+      "worker": "worker-events-08",
+      "question": "How many distinct users appear in the file?",
+      "expected": 3
+    }
+  ]
+}

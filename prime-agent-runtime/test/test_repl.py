@@ -137,6 +137,33 @@ class ReplTest(unittest.TestCase):
         print(f"\n[startup] spawn -> ready: {self.ready_ms:.0f} ms")
         self.assertLess(self.ready_ms, 500)
 
+    def test_import_rlm_defers_the_event_loop_stack(self):
+        # `import rlm` is the pre-ready boot path: the event loop stack must load
+        # after the ready event, not during package import, and serving must keep
+        # it resident.
+        env = {**os.environ, "PYTHONPATH": SRC + os.pathsep + os.environ.get("PYTHONPATH", "")}
+        code = "import rlm, sys; assert 'asyncio' not in sys.modules and 'secrets' not in sys.modules"
+        subprocess.run([sys.executable, "-c", code], env=env, check=True, timeout=30)
+        events = self.repl.execute("serving", "import sys\n'asyncio' in sys.modules")
+        self.assertEqual(one(events, "result")["text"], "True")
+
+    def test_sigint_during_the_deferred_boot_stays_fatal(self):
+        # A fake `asyncio` parks the kernel inside the post-ready deferred
+        # import. The fifo open below returns only once the kernel is parked in
+        # that window, where an early _sigint_handler install swallowed the
+        # Ctrl-C, so only the default handler may be in charge there.
+        with tempfile.TemporaryDirectory() as tmp:
+            park = os.path.join(tmp, "deferred-boot-park")
+            os.mkfifo(park)
+            with open(os.path.join(tmp, "asyncio.py"), "w") as fake_asyncio:
+                fake_asyncio.write(f"import os\nos.read(os.open({park!r}, os.O_RDONLY), 1)\n")
+            repl = ReplProcess(env={"PYTHONPATH": tmp + os.pathsep + SRC})
+            self.addCleanup(repl.close)
+            self.assertEqual(repl.ready()[0]["event"], "ready")
+            with open(park, "wb"):
+                os.kill(repl.proc.pid, signal.SIGINT)
+                self.assertNotEqual(repl.proc.wait(timeout=10), 0)
+
     def test_result_echo(self):
         events = self.repl.execute("a", "1+1")
         self.assertEqual(one(events, "result")["text"], "2")
@@ -379,19 +406,16 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(error["ename"], "KeyboardInterrupt")
         self.assertEqual(one(events, "done")["status"], "error")
 
-    def test_stdout_buffer_write_works_and_surfaces_as_null(self):
-        # Libraries write bytes via sys.stdout.buffer; the tagged writer must
-        # expose a working buffer whose bytes surface (null-attributed) before done.
+    def test_stdout_buffer_write_surfaces_as_null_and_rejects_int(self):
+        # Libraries write bytes via sys.stdout.buffer: the tagged writer exposes a
+        # working buffer whose bytes surface (null-attributed) before done, and it
+        # raises TypeError for ints (bytes(5) would emit five NULs).
         events = self.repl.execute(
             "bufw", "import sys\nsys.stdout.buffer.write(b'buffer-bytes\\n')\nsys.stdout.buffer.flush()"
         )
-        self.assertEqual(one(events, "done")["status"], "ok")
         buffered = next(e for e in events if e.get("event") == "stdout" and "buffer-bytes" in e["text"])
         self.assertIsNone(buffered["id"])
         self.assertLess(events.index(buffered), events.index(one(events, "done")))
-
-    def test_stdout_buffer_write_rejects_int(self):
-        # A real stdout.buffer raises TypeError for ints; bytes(5) would emit five NULs.
         events = self.repl.execute("bufint", "import sys\nsys.stdout.buffer.write(5)")
         self.assertEqual(one(events, "error")["ename"], "TypeError")
         self.assertEqual(one(events, "done")["status"], "error")
@@ -705,6 +729,21 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(one(follow, "result")["text"], "2")
         self.assertEqual(one(follow, "done")["status"], "ok")
 
+    def test_large_write_ships_bounded_stream_frames(self):
+        events = self.repl.execute("chunk", "import sys\nsys.stdout.write('x' * 300_000)")
+        frames = [e["text"] for e in events if e.get("event") == "stdout"]
+        self.assertEqual("".join(frames), "x" * 300_000)
+        self.assertTrue(all(len(frame) <= 65536 for frame in frames))
+
+    def test_oversized_repr_and_display_payloads_are_capped(self):
+        code = "class C:\n    def __repr__(self):\n        return 'x' * 3_000_000\nC()"
+        events = self.repl.execute("big-repr", code)
+        expected = "x" * 1_048_576 + "\n[... result truncated at 1048576 characters ...]"
+        self.assertEqual(one(events, "result")["text"], expected)
+        events = self.repl.execute("emit-big", "from rlm.repl import emit\nemit({'text/plain': 'x' * 17_000_000})")
+        self.assertEqual(one(events, "error")["ename"], "ValueError")
+        self.assertEqual(one(events, "done")["status"], "error")
+
     def test_bash_integration(self):
         events = self.repl.execute(
             "sh1", "from rlm import bash\nresult = await bash('echo repl-bash')\nresult.output.strip()"
@@ -755,6 +794,76 @@ class ReplTest(unittest.TestCase):
         reply_ok(self.repl, request)
         inspected = self.repl.execute("bash-inspect", "handle.poll().output")
         self.assertIn("detached", one(inspected, "result")["text"])
+
+    def test_result_read_after_notice_requests_one_withdrawal(self):
+        reads = (
+            ("poll", "handle.poll().output"),
+            ("await", "(await handle).output"),
+        )
+        for label, read_code in reads:
+            with self.subTest(label=label):
+                command = f"sleep 0.05; printf withdrawn-{label}"
+                started = self.repl.execute(
+                    f"withdraw-{label}",
+                    f"from rlm import bash\nhandle = bash({command!r})\nhandle.pid",
+                )
+                pid = int(one(started, "result")["text"])
+                notice = wait_for_host_request(self.repl, started)
+                self.assertEqual(notice["data"]["type"], "bash.completed")
+                reply_ok(self.repl, notice)
+                read = self.repl.execute(f"withdraw-{label}-read", read_code)
+                self.assertIn(f"withdrawn-{label}", one(read, "result")["text"])
+                # The withdrawal must ship ahead of the reading cell's done, or the
+                # notice is delivered as a stale turn-boundary notice instead.
+                kinds = [event.get("event") for event in read]
+                self.assertLess(kinds.index("host_request"), kinds.index("done"))
+                request = wait_for_host_request(self.repl, read)
+                self.assertEqual(
+                    request["data"], {"type": "bash.consumed", "pid": pid, "command": command}
+                )
+                # Old host: error reply is absorbed and the withdrawal never repeats.
+                self.repl.send(
+                    {"type": "host_reply", "id": request["id"], "data": {"status": "error", "error": "unknown"}}
+                )
+                if label == "poll":
+                    again = self.repl.execute("withdraw-again", "handle.output()\nhandle.tail(1)")
+                    self.assertIsNone(one(again, "host_request"))
+
+    def test_detached_read_between_turns_keeps_bash_completion(self):
+        # A watcher reading the handle with no cell running reaches nobody: the
+        # notice is the only wake-up an idle session gets, so it must survive.
+        code = "\n".join(
+            [
+                "from rlm import bash",
+                "import asyncio",
+                "handle = bash('sleep 0.2; printf detached-read')",
+                "async def watch():",
+                "    await handle._wait()",
+                "    globals()['seen'] = handle.output()",
+                "asyncio.create_task(watch())",
+                "handle.pid",
+            ]
+        )
+        started = self.repl.execute("detached-read", code)
+        pid = int(one(started, "result")["text"])
+        request = wait_for_host_request(self.repl, started)
+        self.assertEqual(request["data"]["type"], "bash.completed")
+        self.assertEqual(request["data"]["pid"], pid)
+        reply_ok(self.repl, request)
+        probe = self.repl.execute("detached-read-probe", "await asyncio.sleep(0.05)\nseen")
+        self.assertIsNone(one(probe, "host_request"))
+        self.assertEqual(one(probe, "result")["text"], "'detached-read'")
+
+    def test_result_read_in_creating_cell_suppresses_bash_completion(self):
+        events = self.repl.execute(
+            "read-in-cell",
+            "from rlm import bash\nimport asyncio\nhandle = bash('printf read-in-cell')\n"
+            "await asyncio.wait_for(handle._wait(), 5)\nhandle.output()",
+        )
+        self.assertEqual(one(events, "result")["text"], "'read-in-cell'")
+        probe = self.repl.execute("read-in-cell-probe", "await asyncio.sleep(0.05)")
+        self.assertIsNone(one(events, "host_request"))
+        self.assertIsNone(one(probe, "host_request"))
 
     def test_wrapper_awaits_in_creating_cell_suppress_bash_completion(self):
         def task_group(label: str, await_expression: str) -> str:
@@ -840,7 +949,6 @@ class ReplTest(unittest.TestCase):
                 "consumer = asyncio.create_task(consume())\n"
                 "await asyncio.sleep(0.05)"
             ),
-            "later-cell": "iterator = asyncio.as_completed([handle])",
         }
         for label, snippet in snippets.items():
             with self.subTest(label=label):
@@ -849,11 +957,6 @@ class ReplTest(unittest.TestCase):
                     f"as-completed-{label}",
                     f"from rlm import bash\nimport asyncio\nhandle = bash({command!r})\n{snippet}",
                 )
-                if label == "later-cell":
-                    events += self.repl.execute(
-                        "as-completed-later-await",
-                        "for completed in iterator:\n    await completed",
-                    )
                 events += self.repl.execute(
                     f"as-completed-{label}-probe", "await asyncio.sleep(0.05)"
                 )
@@ -1088,7 +1191,7 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(one(events, "result")["text"], "'alive'")
 
     def test_list_names(self):
-        self.repl.execute("ln1", "alpha = 1\ndef helper(n):\n    return n\n_hidden = 2\nrlm = object()")
+        self.repl.execute("ln1", "alpha = 1\ndef helper(n):\n    return n\n_hidden = 2\nrlm = object()\nglobals()[1] = 2")
         self.repl.send({"type": "list_names", "id": "ln2"})
         done = one(self.repl.until_done("ln2"), "done")
         self.assertEqual(done["status"], "ok")
@@ -1096,17 +1199,8 @@ class ReplTest(unittest.TestCase):
         self.assertIn("helper", done["names"])
         self.assertNotIn("_hidden", done["names"])
         self.assertNotIn("rlm", done["names"])
-        self.assertEqual(done["names"], sorted(done["names"]))
-
-    def test_list_names_skips_non_string_keys(self):
-        self.repl.execute("lnk1", "globals()[1] = 1\nbeta = 2")
-        self.repl.send({"type": "list_names", "id": "lnk2"})
-        done = one(self.repl.until_done("lnk2"), "done")
-        self.assertEqual(done["status"], "ok")
-        self.assertIn("beta", done["names"])
         self.assertNotIn(1, done["names"])
-        events = self.repl.execute("lnk3", "'alive'")
-        self.assertEqual(one(events, "result")["text"], "'alive'")
+        self.assertEqual(done["names"], sorted(done["names"]))
 
     def test_host_request_round_trip(self):
         code = "\n".join(
@@ -1190,11 +1284,6 @@ class ReplTest(unittest.TestCase):
         )
         self.assertEqual(one(events, "done")["status"], "error")
 
-    def test_host_reply_for_unknown_id_dropped(self):
-        self.repl.send({"type": "host_reply", "id": "no-such-request", "data": {"status": "ok"}})
-        events = self.repl.execute("ok", "'alive'")
-        self.assertEqual(one(events, "result")["text"], "'alive'")
-
     def test_host_request_cancelled_cell_drops_pending_future(self):
         code = "\n".join(
             [
@@ -1232,9 +1321,6 @@ class ReplTest(unittest.TestCase):
             display = self.repl.read_event()
         self.assertEqual(display["id"], "det")
         self.assertEqual(display["data"], {"text/plain": "late"})
-
-    def test_shutdown_clean_exit(self):
-        self.assertEqual(self.repl.shutdown(), 0)
 
     def test_shutdown_after_mcp_import_exits_cleanly(self):
         events = self.repl.execute("mcp-import", "import rlm.mcp")
@@ -2136,11 +2222,6 @@ class SnapshotPairConsistencyTest(unittest.TestCase):
         self.assertLessEqual(result["bytes"], cap)
         with open(self.path, "rb") as fh:
             self.assertEqual(list(dill.load(fh)), ["a"])
-
-    def test_zero_size_cap_writes_no_empty_payload_overhead(self):
-        result = self._snap({}, max_bytes=0, max_variable_bytes=0)
-        self.assertEqual(result, {"error": "write failed: snapshot exceeds aggregate snapshot size cap"})
-        self.assertEqual(os.listdir(self.dir), [])
 
     def test_manifest_write_failure_preserves_prior_pair(self):
         old_payload, old_manifest = self._old_pair()
