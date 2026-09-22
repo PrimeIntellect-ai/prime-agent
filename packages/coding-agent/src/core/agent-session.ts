@@ -394,10 +394,7 @@ export interface RlmChildAgentSnapshot {
 	error?: string;
 }
 
-/**
- * RlmChildAgentSnapshot minus its two clock-derived fields: the observable
- * state rlm_child_update events dedup on.
- */
+/** The observable state rlm_child_update events dedup on. */
 type RlmChildStableSnapshot = Omit<RlmChildAgentSnapshot, "lastActivityAt" | "activityStaleMs">;
 
 export type CompactionReason = "manual" | "threshold" | "overflow" | "requested";
@@ -1017,7 +1014,7 @@ type AutonomousRuntimeSnapshot = Pick<
 interface RlmChildRun {
 	id: string;
 	prompt: string;
-	/** Collapsed one-line prompt label; the prompt never changes, so the collapse runs once. */
+	/** The prompt never changes, so the collapse runs once. */
 	label: string;
 	sessionName: string;
 	sessionDir: string;
@@ -1278,11 +1275,7 @@ export function rlmChildLabel(prompt: string): string {
 	return prompt.replace(/\s+/g, " ").trim() || "child agent";
 }
 
-/**
- * Every RlmChildStableSnapshot key. `satisfies Record<keyof ..., true>` fails to
- * compile when a key is missing or extra, so a field added to the snapshot without
- * a compare entry is a type error, not a silently suppressed rlm_child_update.
- */
+/** `satisfies` makes a field without a compare entry a compile error, not a silently suppressed rlm_child_update. */
 const RLM_CHILD_STABLE_SNAPSHOT_KEYS = Object.keys({
 	id: true,
 	parentId: true,
@@ -1303,11 +1296,7 @@ const RLM_CHILD_STABLE_SNAPSHOT_KEYS = Object.keys({
 	error: true,
 } satisfies Record<keyof RlmChildStableSnapshot, true>) as (keyof RlmChildStableSnapshot)[];
 
-/**
- * Field-level equality over RlmChildStableSnapshot. Every field is a primitive
- * except activity ({kind, toolName?}), which is compared by value: the run
- * assigns a fresh activity object on every streamed delta.
- */
+/** Fields are primitives except activity, compared by value because each delta assigns a fresh activity object. */
 function rlmChildStableFieldsEqual(a: RlmChildStableSnapshot, b: RlmChildStableSnapshot): boolean {
 	for (const key of RLM_CHILD_STABLE_SNAPSHOT_KEYS) {
 		if (key === "activity") {
@@ -12138,10 +12127,8 @@ export class AgentSession {
 			// lastActivityAt advances on every streamed token delta and
 			// activityStaleMs is recomputed on each snapshot build, so including
 			// either would re-emit on every delta once answerPreview saturates its
-			// cap. The comparison projects the stable fields directly — streamed
-			// deltas would otherwise pay a snapshot build plus a serialization
-			// each — and only a detected change builds the fresh snapshot, which
-			// carries both clock fields.
+			// cap. Streamed deltas would otherwise pay a snapshot build plus a serialization
+			// each; only a detected change builds the fresh snapshot, which carries both clock fields.
 			const child = run.session ?? this._rlmChildSessions.get(run.id)?.session;
 			const next = this._rlmChildStableSnapshotForRun(run, child);
 			if (run.lastEmittedUpdate && rlmChildStableFieldsEqual(run.lastEmittedUpdate, next)) return;

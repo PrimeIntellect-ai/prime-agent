@@ -690,13 +690,13 @@ describe("supervisor roster ledger", () => {
 			workerRosterEntryFromSummary(summary({ id: "r", sessionId: "r", isSessionActive: a }));
 		const writeAndFlush = (a?: boolean) => supervisor.writeRosterEntry(row(a)) && supervisor.flushRosterUpdates();
 		writeAndFlush();
-		writeAndFlush(); // repair pulls, snapshot applies, and staleness sweeps rewrite unchanged rows
-		expect(write.mock.calls).toHaveLength(1); // the identical rewrite broadcast nothing
+		writeAndFlush();
+		expect(write.mock.calls).toHaveLength(1);
 		writeAndFlush(true);
-		expect(write.mock.calls).toHaveLength(2); // a real change broadcasts
+		expect(write.mock.calls).toHaveLength(2);
 		supervisor.roster().delete("r");
 		supervisor.flushRosterUpdates();
-		expect(write.mock.calls[2]?.[1]).toMatchObject({ removed: ["r"] }); // the removal reaches subscribers once
+		expect(write.mock.calls[2]?.[1]).toMatchObject({ removed: ["r"] });
 		writeAndFlush(true); // an identical re-add republishes: the removal dropped the baseline
 		expect(write.mock.calls).toHaveLength(4);
 	});

@@ -300,9 +300,9 @@ describe("AgentSession queue mutation", () => {
 		const updates: SessionActionSnapshot[] = [];
 		session.subscribe((event) => event.type === "session_action_update" && updates.push(event.actions));
 		expect(mutate("steering", 0, "s1", { type: "replace", text: "s1", lane: "steering" })).toBe("applied");
-		expect(updates).toEqual([]); // same text into the same lane: identical snapshot, no update
+		expect(updates).toEqual([]);
 		mutate("steering", 0, "s1", { type: "replace", text: "s1 edited", lane: "steering" });
-		expect(updates).toMatchObject([{ steering: ["s1 edited"] }]); // a real change re-emits
+		expect(updates).toMatchObject([{ steering: ["s1 edited"] }]);
 		await Promise.all([session.abort(), running.catch(() => {})]);
 	});
 });

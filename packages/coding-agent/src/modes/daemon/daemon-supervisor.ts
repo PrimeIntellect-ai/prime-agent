@@ -780,11 +780,7 @@ export class DaemonSupervisor {
 	private readonly pendingRosterRemoved = new Set<string>();
 	/** Ids declared to subscribers: gates removals to once and keeps owned-only row ids private. */
 	private readonly publishedRosterIds = new Set<string>();
-	/**
-	 * Last broadcast serialization per published id. Repair pulls, snapshot applies,
-	 * and staleness sweeps rewrite rows that did not change; comparing the
-	 * serialization keeps identical rewrites off every subscriber's wire.
-	 */
+	/** Last broadcast serialization per published id: identical rewrites stay off every subscriber's wire. */
 	private readonly publishedRosterJson = new Map<string, string>();
 	private rosterPushScheduled = false;
 	private rosterWatchdogTimer?: ReturnType<typeof setInterval>;
@@ -4467,17 +4463,13 @@ export class DaemonSupervisor {
 		const removed: string[] = [];
 		for (const agentId of this.pendingRosterRemoved) {
 			if (this.publishedRosterIds.delete(agentId)) removed.push(agentId);
-			// The id leaves the client view: a re-added row republishes even when
-			// its content repeats the last broadcast.
+			// The id leaves the client view: a re-added row republishes even when its content repeats the last broadcast.
 			this.publishedRosterJson.delete(agentId);
 		}
 		for (const agentId of this.pendingRosterChanged) {
 			const entry = this.roster().get(agentId);
 			if (!entry) continue;
 			if (this.isRosterEntryVisibleToClients(entry)) {
-				// A row rewritten with identical content stays in published standing but
-				// keeps its last serialization, so repair pulls and staleness sweeps do
-				// not re-broadcast it to every subscriber.
 				const json = JSON.stringify(entry);
 				if (this.publishedRosterJson.get(agentId) === json) continue;
 				this.publishedRosterJson.set(agentId, json);
