@@ -568,7 +568,6 @@ describe("worker roster reporter", () => {
 		daemon.observeRosterEvent(loud, statusFor(loud));
 		vi.advanceTimersByTime(0);
 		expect(sentDeltas).toHaveLength(1);
-		// The burst coalesces: nothing flushes mid-window; a flush-per-trigger schedule would.
 		(loud.runtime.session as unknown as { isStreaming: boolean }).isStreaming = true;
 		daemon.observeRosterEvent(loud, statusFor(loud));
 		vi.advanceTimersByTime(100);

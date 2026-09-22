@@ -307,7 +307,6 @@ describe("daemon session summarizer", () => {
 			const running = states.slice(0, 4).map((state) => internal.summarize(state));
 			states.slice(4).map((state) => internal.summarize(state));
 			expect(generate).toHaveBeenCalledTimes(4);
-			// Completing one admits the waiter with the newest last message.
 			pendingGates[3]!();
 			await running[3];
 			expect(generate).toHaveBeenCalledTimes(5);

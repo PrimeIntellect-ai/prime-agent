@@ -1789,11 +1789,7 @@ export class InteractiveMode {
 		await this.updateAvailableProviderCount();
 	}
 
-	/**
-	 * Leading-edge throttled refresh for status-driven call sites; drops calls
-	 * within TOP_BAR_COST_REFRESH_MIN_INTERVAL_MS of the last refresh (direct
-	 * refreshes included — they stamp the window too).
-	 */
+	/** Leading-edge throttled refresh for status-driven call sites; direct refreshes stamp the window too. */
 	private refreshTopBarCostThrottled(): void {
 		const refresh = this.topBarCostRefresh ?? { lastRefreshAt: 0 };
 		if (Date.now() - refresh.lastRefreshAt < TOP_BAR_COST_REFRESH_MIN_INTERVAL_MS) return;

@@ -624,11 +624,8 @@ export class AgentDaemon {
 	};
 	private rosterFlushScheduled = false;
 	private rosterFlushTimer?: ReturnType<typeof setTimeout>;
-	/** Last scheduled flush time (Date.now()); gates the flush coalescing window. */
 	private rosterLastFlushAt?: number;
-	/** Sessions a roster-event trigger marked dirty for the next flush. */
 	private readonly rosterDirtyAgentIds = new Set<string>();
-	/** Lifecycle/mutation triggers set this: the next flush recomposes everything. */
 	private rosterFlushFull = false;
 	private rosterHeartbeatTimer?: ReturnType<typeof setInterval>;
 	private rlmSpawnLedgerInstance?: RlmSpawnLedger;
@@ -7359,12 +7356,9 @@ export class AgentDaemon {
 		return { agentId: rosterAgentIdForSummary(summary), queuedChild: true, summary };
 	}
 
-	// Session-scoped triggers (roster events, child updates) mark only their
-	// session dirty and coalesce into the flush window; every other caller
-	// mutates state that can affect any session, so those schedule a full
-	// recompose on the next tick: the supervisor answers `list` from the
-	// published roster, so a hydrated or closed session must be visible there
-	// before the command's response reaches the client.
+	// Session-scoped triggers mark only their session dirty; other callers can affect any session
+	// and schedule a full recompose on the next tick: the supervisor answers `list` from the
+	// published roster, so a hydrated or closed session must be visible before the command's response.
 	private scheduleRosterFlush(state?: ActiveSessionState): void {
 		if (!this.options.worker || this.shuttingDown) return;
 		if (state === undefined) {
@@ -7396,8 +7390,7 @@ export class AgentDaemon {
 				this.rosterFlushTimer = undefined;
 				this.runScheduledRosterFlush();
 			},
-			// Clamp the elapsed at zero: a backwards wall-clock step (negative
-			// elapsed) must not arm an over-long window.
+			// Clamp the elapsed at zero: a backwards wall-clock step must not arm an over-long window.
 			ROSTER_FLUSH_MIN_INTERVAL_MS - Math.max(0, Date.now() - this.rosterLastFlushAt),
 		);
 		this.rosterFlushTimer.unref?.();
@@ -7420,11 +7413,8 @@ export class AgentDaemon {
 		// be reused instead of re-composed and re-stringified on every flush.
 		const composedSources = new Map<string, SessionSummary>();
 		const scheduledJobs = this.cronStore.list();
-		// Compose only what a trigger marked dirty (plus sessions never composed
-		// and rows whose previous entry is passivated); untouched sessions reuse
-		// their previous entry + composed source. Composing is the fingerprint
-		// walk, so skipping untouched sessions is the per-flush cost win. A flush
-		// with no marks recomposes everything: untracked callers exist.
+		// Compose only what a trigger marked dirty (plus never-composed or passivated rows): composing
+		// is the fingerprint walk. A flush with no marks recomposes everything: untracked callers exist.
 		const fullFlush = this.rosterFlushFull || this.rosterDirtyAgentIds.size === 0;
 		this.rosterFlushFull = false;
 		const dirtyAgentIds = new Set(this.rosterDirtyAgentIds);
@@ -8047,8 +8037,7 @@ const ROSTER_SESSION_EVENT_TRIGGERS = new Set([
 	"thinking_level_changed",
 ]);
 
-// Flushes coalesce into one window: streaming bursts fire several triggers per
-// turn, and a flush composes fingerprints for its target sessions.
+// Flushes coalesce into one window: streaming bursts fire several triggers per turn.
 const ROSTER_FLUSH_MIN_INTERVAL_MS = 250;
 
 /**

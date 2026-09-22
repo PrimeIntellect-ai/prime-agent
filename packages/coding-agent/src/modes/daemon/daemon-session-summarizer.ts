@@ -7,9 +7,8 @@ import type { AgentStatus, AgentTaskState } from "../../core/session-manager.js"
 import type { ActiveSessionState } from "./active-session-state.js";
 
 const SWEEP_INTERVAL_MS = 25_000;
-// Fleet-wide cap on concurrent model calls: bursty turn ends across many
-// sessions must not fan out into unbounded generations. Over-cap sessions
-// wait; the 25s sweep re-invokes them, so none is stranded.
+// Fleet-wide cap on concurrent model calls: bursty turn ends across many sessions must
+// not fan out into unbounded generations. Over-cap sessions wait; the 25s sweep re-invokes them.
 const MAX_CONCURRENT_SUMMARY_GENERATIONS = 4;
 // Collapse a tool-use loop's rapid turn_end bursts into one summarization.
 const SETTLE_DEBOUNCE_MS = 2_000;
@@ -251,7 +250,6 @@ export class DaemonSessionSummarizer {
 	private readonly inFlight = new Map<string, AbortController>();
 	// Sessions requested while one was running; get one more pass on completion.
 	private readonly rerunRequested = new Set<string>();
-	// Sessions admitted past the fleet cap, awaiting a free slot.
 	private readonly waitingForSlot = new Map<string, ActiveSessionState>();
 	// Failed idle generations per session, keyed to the settled content they saw.
 	private readonly failedIdleGenerations = new Map<
@@ -469,10 +467,8 @@ export class DaemonSessionSummarizer {
 	}
 
 	/**
-	 * Admit the most recently active waiting sessions (latest message timestamp,
-	 * id order breaks ties) while slots are free. summarize() claims its slot
-	 * before its first await, so a waiter that returns early without one leaves
-	 * inFlight unchanged and the loop admits the next waiter instead.
+	 * Admit the most recently active waiters while slots are free. summarize() claims its slot before
+	 * its first await, so a waiter that returns early without one leaves inFlight unchanged.
 	 */
 	private admitNextWaitingSession(): void {
 		while (this.inFlight.size < MAX_CONCURRENT_SUMMARY_GENERATIONS && this.waitingForSlot.size > 0) {

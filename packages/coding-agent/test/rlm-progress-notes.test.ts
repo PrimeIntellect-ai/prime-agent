@@ -546,7 +546,6 @@ describe("rlm.progress.note child progress channel", () => {
 			}
 			expect(childUpdates.length).toBe(saturated);
 
-			// Streaming still counts as activity, and the live preview follows every delta.
 			expect(run.lastActivityMonotonicAt).toBeGreaterThan(lastActivityMonotonicBefore ?? 0);
 			const streamedSnapshot = session
 				.getRlmChildSnapshots()

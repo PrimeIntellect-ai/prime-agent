@@ -1061,11 +1061,7 @@ interface RlmChildRun {
 	reportDeletionCleanupFailure?: (error: unknown) => Promise<void>;
 	emitUpdate?: () => void;
 	lastEmittedUpdate?: string;
-	/**
-	 * Monotonic time of the last streamed-delta emit (performance.now()). The
-	 * message_update/message_start branch throttles snapshot+emit work to
-	 * RLM_CHILD_UPDATE_MIN_INTERVAL_MS; other event kinds still emit at once.
-	 */
+	/** Monotonic time of the last streamed-delta emit; other event kinds still emit at once. */
 	lastStreamedUpdateMonotonicAt?: number;
 	unsubscribe?: () => void;
 }
@@ -1324,10 +1320,8 @@ function readAssistantText(message: AssistantMessage): string {
 		.join("");
 }
 
-// Trailing window feeding the streaming answer preview: message_update fires
-// per token delta, so rejoining (and re-collapsing) the whole message costs
-// O(length) per delta, O(length²) per streamed child message. The window keeps
-// each delta O(window); the preview shows the latest output, not the head.
+// Trailing window feeding the streaming answer preview: message_update fires per token delta, so
+// rejoining the whole message costs O(length²); the preview shows the latest output, not the head.
 // Equal to compactRlmText's cap, so compaction never cuts the newest characters.
 const RLM_ANSWER_PREVIEW_TAIL_CHARS = 160;
 
@@ -1337,7 +1331,6 @@ function tailRlmAnswerPreview(message: AssistantMessage): string {
 	for (let index = message.content.length - 1; index >= 0 && collected < RLM_ANSWER_PREVIEW_TAIL_CHARS; index -= 1) {
 		const block = message.content[index];
 		if (block.type !== "text") continue;
-		// Only the suffix that still fits: a single growing text block is O(length).
 		const remaining = RLM_ANSWER_PREVIEW_TAIL_CHARS - collected;
 		tail.unshift(block.text.slice(-remaining));
 		collected += Math.min(block.text.length, remaining);
@@ -12266,8 +12259,7 @@ export class AgentSession {
 							if (text) run.answerPreview = text;
 							run.activity = { kind: "writing" };
 							touchRlmChildActivity(run);
-							// Snapshot+stringify per delta dominates streaming cost; message_end
-							// still emits the final preview, so cap the per-delta path.
+							// Snapshot+stringify per delta dominates streaming cost; message_end emits the final preview.
 							const now = performance.now();
 							if (
 								run.lastStreamedUpdateMonotonicAt === undefined ||
