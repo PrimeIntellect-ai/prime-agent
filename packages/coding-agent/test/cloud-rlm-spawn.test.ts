@@ -2,11 +2,13 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
+import { type Api, fauxAssistantMessage, type Model, registerFauxProvider } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import type { CloudSessionStore } from "../src/core/cloud/cloud-session-store.js";
 import type { DirectCloudService } from "../src/core/cloud/direct-cloud-service.js";
+import type { CloudInferenceRequest } from "../src/core/cloud/protocol.js";
 import { convertToLlm } from "../src/core/messages.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { buildRlmPrompt } from "../src/core/prompts/index.js";
@@ -14,6 +16,7 @@ import type { RlmCloudChildLease, SubagentRuntimeHost } from "../src/core/rlm-ru
 import { parseSessionEntries, SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import type { DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
+import { CloudInferenceBroker } from "../src/modes/daemon/cloud-inference-broker.js";
 import {
 	CloudSessionRegistry,
 	type CloudSessionRegistryCallbacks,
@@ -111,7 +114,12 @@ interface RegistryHarness {
 
 function buildRegistry(
 	root: string,
-	options: { service?: DirectCloudService; store?: CloudSessionStore } = {},
+	options: {
+		service?: DirectCloudService;
+		store?: CloudSessionStore;
+		/** Wires the brokered-inference hook (the supervisor's broker). */
+		onInferenceRequest?: (request: CloudInferenceRequest) => Promise<void>;
+	} = {},
 ): RegistryHarness {
 	const { service, store } =
 		options.service !== undefined
@@ -161,6 +169,7 @@ function buildRegistry(
 		bridgeToken: CLOUD_TEST_BRIDGE_TOKEN,
 		reconnectDelayMs: 50,
 		submitWaitMs: 5_000,
+		...(options.onInferenceRequest !== undefined ? { onInferenceRequest: options.onInferenceRequest } : {}),
 		artifactResolver: {
 			fetch: async () => {
 				throw new Error("no artifacts expected in this suite");
@@ -204,9 +213,23 @@ describe("CloudSessionRegistry.spawnChild (fake transport, real guest daemon)", 
 	it("admits immediately with the frozen handle, ledger edge, and parented roster row; settles on mirrored completion", async () => {
 		const root = cloudTemp("cloud-rlm-spawn-test-");
 		const guestSessionId = "sess_cloud_kid_1";
-		queueFauxResponse(root, "cloud child finished answer");
+		// The spawned child opens on a non-prime model, which the guest stubs
+		// onto the cloud-broker api: the local broker answers the relayed
+		// completion exactly like a real session's brokered model would.
+		const registration = registerFauxProvider({ models: [{ id: "faux-1", contextWindow: 128_000 }] });
+		let broker: CloudInferenceBroker | undefined;
+		const harness = buildRegistry(root, {
+			onInferenceRequest: (request) => broker!.runRequest(request),
+		});
+		broker = new CloudInferenceBroker({
+			resolveModel: (selector) =>
+				selector.provider === "faux" ? (registration.getModel(selector.modelId) as Model<Api>) : undefined,
+			sendFrame: (frame) => harness.registry.sendInferenceFrame(frame),
+			onUsage: (sessionId, remoteSessionId, usage) =>
+				harness.registry.recordBrokeredUsage(sessionId, remoteSessionId, usage),
+		});
+		registration.setResponses([fauxAssistantMessage("cloud child finished answer")]);
 		const daemon = await startGuestDaemon(root, 1, guestSessionId);
-		const harness = buildRegistry(root);
 		try {
 			let admission: RlmCloudSpawnAdmission;
 			{
@@ -310,6 +333,7 @@ describe("CloudSessionRegistry.spawnChild (fake transport, real guest daemon)", 
 			expect(statuses.filter((status) => status === "completed").length).toBe(1);
 		} finally {
 			await harness.registry.dispose().catch(() => undefined);
+			registration.unregister();
 			await daemon.stop().catch(() => undefined);
 		}
 	});

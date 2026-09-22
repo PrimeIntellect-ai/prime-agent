@@ -40,16 +40,22 @@ import {
 	CLOUD_MAX_INLINE_ENTRY_BYTES,
 	CLOUD_MAX_OUTPUT_CHARS,
 	CLOUD_MAX_PREVIEW_CHARS,
+	type CloudClientId,
 	type CloudCommandId,
 	type CloudCommandRequest,
 	type CloudFamilyInfo,
 	type CloudFamilyRow,
+	type CloudInferenceEnd,
+	type CloudInferenceError,
+	type CloudInferenceEvent,
+	type CloudModelMetadata,
 	type CloudRosterRow,
 	type CloudSessionState,
 	type CloudSessionStatus,
 	splitCloudModelSelector,
 } from "../../core/cloud/protocol.js";
 import { isOfflineModeEnabled, type ModelRegistry } from "../../core/model-registry.js";
+import { PRIME_INFERENCE_PROVIDER_ID } from "../../core/prime-inference-auth.js";
 import { isPrivatePrimeInferenceModel } from "../../core/prime-inference-models.js";
 import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../../core/rlm-runtime.js";
 import { type SessionEntry, SessionManager } from "../../core/session-manager.js";
@@ -60,6 +66,16 @@ import type { ActiveSessionState } from "../daemon/active-session-state.js";
 import type { DaemonOutbound } from "../daemon/daemon-protocol.js";
 import { initTheme } from "../interactive/theme/theme.js";
 import { SessionHostCore } from "../shared/session-host-core.js";
+import {
+	CLOUD_BROKER_API,
+	createCloudBrokerStubModel,
+	DEFAULT_CLOUD_INFERENCE_TIMEOUT_MS,
+	failAllCloudBrokerRequests,
+	failCloudBrokerRequestsForClient,
+	handleCloudBrokerFrame,
+	registerCloudBrokerApiProvider,
+	setCloudBrokerTransport,
+} from "./cloud-broker-provider.js";
 import { type CloudProtocolDispatchResult, CloudProtocolServer } from "./cloud-protocol-server.js";
 
 /**
@@ -103,6 +119,8 @@ export interface CloudDaemonModeOptions {
 	defaultStateDir?: string;
 	/** Test seam for the durable outbox's record bound; production uses the default. */
 	maxOutboxRecords?: number;
+	/** Test seam for the brokered-inference response bound; production uses the default. */
+	cloudInferenceTimeoutMs?: number;
 }
 
 interface ParsedCloudDaemonEnv {
@@ -274,10 +292,20 @@ export class CloudGuestDaemon {
 					onRetentionStalled: () => daemon?.markRetentionStalled(),
 					onRetentionRecovered: () => daemon?.markRetentionRecovered(),
 					onDispatchError: (message) => daemon?.recordDispatchError(message),
+					onInferenceFrame: (frame) => daemon?.handleInferenceFrame(frame),
+					onAuthenticatedClientDrop: (clientId) => daemon?.handleInferenceClientDrop(clientId),
 				},
 			}),
 		);
 		await daemon.protocol.start();
+		// Brokered inference plumbing: the relay closes over this transport,
+		// so stub-model completions ride the same authenticated socket the
+		// bridge relays.
+		setCloudBrokerTransport({
+			cloudSessionId: env.sessionId,
+			timeoutMs: options.cloudInferenceTimeoutMs ?? DEFAULT_CLOUD_INFERENCE_TIMEOUT_MS,
+			sendRequest: (frame) => daemon.protocol.sendInferenceRequest(frame),
+		});
 		return daemon;
 	}
 
@@ -327,6 +355,7 @@ export class CloudGuestDaemon {
 		thinking?: string;
 		prompt?: string;
 		family?: CloudFamilyInfo;
+		modelMetadata?: CloudModelMetadata;
 	}): Promise<void> {
 		if (this.rootState) return;
 		if (this.openSessionInFlight !== undefined) {
@@ -351,6 +380,7 @@ export class CloudGuestDaemon {
 		model?: string;
 		thinking?: string;
 		family?: CloudFamilyInfo;
+		modelMetadata?: CloudModelMetadata;
 	}): Promise<void> {
 		this.family = input.family;
 		const sessionDir = join(this.env.stateDir, "sessions");
@@ -383,6 +413,7 @@ export class CloudGuestDaemon {
 			},
 			input.model ?? this.env.model,
 			input.thinking,
+			input.modelMetadata,
 		);
 		this.rootState = await this.host.addRuntime(runtime, undefined, undefined, (state) => {
 			rootStateRef = state;
@@ -400,7 +431,10 @@ export class CloudGuestDaemon {
 	 * selected provider/model here; a matching current model is a no-op (the
 	 * duplicate open stays idempotent for journal replays and retries).
 	 */
-	private async applyResidentOpenModel(model: string): Promise<CloudProtocolDispatchResult> {
+	private async applyResidentOpenModel(
+		model: string,
+		modelMetadata: CloudModelMetadata | undefined,
+	): Promise<CloudProtocolDispatchResult> {
 		const state = this.rootState;
 		if (!state) return failed("no open session");
 		const selector = splitCloudModelSelector(model);
@@ -410,7 +444,12 @@ export class CloudGuestDaemon {
 		if (session.model?.provider === provider && session.model.id === modelId) {
 			return completed();
 		}
-		const resolved = await resolveGuestModel(state.runtime.services.modelRegistry, provider, modelId);
+		// A brokered stub's id is the selector itself: a duplicate open of
+		// the same brokered model stays idempotent.
+		if (session.model?.api === CLOUD_BROKER_API && session.model.id === model) {
+			return completed();
+		}
+		const resolved = await resolveGuestOrBrokerModel(state.runtime.services.modelRegistry, selector, modelMetadata);
 		if (!resolved) return failed(`unknown model ${provider}/${modelId}`);
 		try {
 			await session.setModel(resolved);
@@ -614,6 +653,16 @@ export class CloudGuestDaemon {
 
 	recordDispatchError(message: string): void {
 		getLogger("cloud-daemon").warn(`guest command dispatch: ${message}`);
+	}
+
+	// Not private: the protocol server invokes these through its callbacks
+	// closure, like the retention hooks above.
+	handleInferenceFrame(frame: CloudInferenceEvent | CloudInferenceEnd | CloudInferenceError): void {
+		handleCloudBrokerFrame(frame);
+	}
+
+	handleInferenceClientDrop(clientId: CloudClientId): void {
+		failCloudBrokerRequestsForClient(clientId, "cloud inference broker connection lost");
 	}
 
 	private persistStatusFile(force = false): void {
@@ -1156,6 +1205,7 @@ export class CloudGuestDaemon {
 					model: request.model,
 					thinking: request.thinking,
 					family: request.family,
+					modelMetadata: request.modelMetadata,
 				});
 			} catch (error) {
 				return failure(error);
@@ -1169,7 +1219,7 @@ export class CloudGuestDaemon {
 			this.family = request.family;
 		}
 		if (request.model !== undefined && request.model.length > 0) {
-			const applied = await this.applyResidentOpenModel(request.model);
+			const applied = await this.applyResidentOpenModel(request.model, request.modelMetadata);
 			if (applied.state !== "completed") return applied;
 		}
 		if (request.thinking !== undefined && request.thinking.length > 0) {
@@ -1421,7 +1471,11 @@ export class CloudGuestDaemon {
 	private async dispatchSetModel(provider: string, modelId: string): Promise<CloudProtocolDispatchResult> {
 		const state = this.rootState;
 		if (!state) return failed("no open session");
-		const model = await resolveGuestModel(state.runtime.services.modelRegistry, provider, modelId);
+		const model = await resolveGuestOrBrokerModel(
+			state.runtime.services.modelRegistry,
+			{ provider, modelId },
+			undefined,
+		);
 		if (!model) return failed(`unknown model ${provider}/${modelId}`);
 		try {
 			await state.runtime.session.setModel(model);
@@ -1549,6 +1603,7 @@ export class CloudGuestDaemon {
 			pending.reject(new Error("the guest session is releasing"));
 		}
 		this.pendingRemoteRequests.clear();
+		failAllCloudBrokerRequests("the guest session is releasing");
 		const state = this.rootState;
 		if (state) {
 			await state.runtime.session.abort().catch(() => undefined);
@@ -1631,6 +1686,10 @@ export class CloudGuestDaemon {
 				sessionDir: options.sessionDir,
 			},
 		});
+		// Descendant sessions resolve models through their own registry: the
+		// cloud-broker api provider must be registered per runtime, like the
+		// root's, so brokered stubs stream through the local daemon too.
+		registerCloudBrokerApiProvider(runtime.services.modelRegistry);
 		const state = await this.host.addRuntime(runtime, undefined, undefined, (createdState) => {
 			stateRef = createdState;
 		});
@@ -2247,18 +2306,41 @@ async function resolveGuestModel(
 	return undefined;
 }
 
+/**
+ * Hybrid guest model routing. Prime-inference models keep the direct
+ * sandbox resolution (the scoped key runs them in the sandbox); every other
+ * provider becomes a cloud-broker stub whose completions the local daemon
+ * runs, because the sandbox holds no provider credentials by design. The
+ * stub always constructs, so an unknown brokered model fails honestly at
+ * inference time on the local side, never silently here.
+ */
+async function resolveGuestOrBrokerModel(
+	modelRegistry: ModelRegistry,
+	selector: { provider: string; modelId: string },
+	modelMetadata: CloudModelMetadata | undefined,
+): Promise<Model<Api> | undefined> {
+	if (selector.provider === PRIME_INFERENCE_PROVIDER_ID) {
+		return resolveGuestModel(modelRegistry, selector.provider, selector.modelId);
+	}
+	return createCloudBrokerStubModel(selector.provider, selector.modelId, modelMetadata);
+}
+
 async function createRuntimeWithModel(
 	factory: CreateAgentSessionRuntimeFactory,
 	options: Parameters<CreateAgentSessionRuntimeFactory>[0],
 	model: string | undefined,
 	thinking: string | undefined,
+	modelMetadata: CloudModelMetadata | undefined,
 ): Promise<AgentSessionRuntime> {
 	const result = await createAgentSessionRuntime(factory, options);
+	// The cloud-broker api provider is per-runtime state: the registry
+	// re-applies the provider config after every catalog refresh.
+	registerCloudBrokerApiProvider(result.services.modelRegistry);
 	if (model !== undefined && model.length > 0) {
 		const selector = splitCloudModelSelector(model);
 		if (selector) {
 			const { provider, modelId } = selector;
-			const resolved = await resolveGuestModel(result.services.modelRegistry, provider, modelId);
+			const resolved = await resolveGuestOrBrokerModel(result.services.modelRegistry, selector, modelMetadata);
 			if (!resolved) {
 				// A requested model that cannot resolve is an honest failure,
 				// never a silent fallback to an unconfigured session.

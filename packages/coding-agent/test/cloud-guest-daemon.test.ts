@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
 	type CloudCommandRequest,
 	type CloudEvent,
+	type CloudMessage,
 	type CloudSessionState,
 	cloudRequestDigest,
 	parseCloudMessage,
@@ -198,8 +199,10 @@ describe("resident guest daemon (in-process, faux provider)", () => {
 				),
 			);
 
-			// An unknown model is an honest failed receipt, never a silent fallback.
-			client.submit("cmd_model", { kind: "set_model", provider: "openai", modelId: "gpt-not-real" });
+			// An unknown prime-inference model is an honest failed receipt, never
+			// a silent fallback; non-prime providers route through the local
+			// broker instead (covered below).
+			client.submit("cmd_model", { kind: "set_model", provider: "prime-inference", modelId: "gpt-not-real" });
 			await client.waitFor((_events, messages) =>
 				messages.some((line) => line.includes('"commandId":"cmd_model"') && line.includes('"state":"failed"')),
 			);
@@ -1138,7 +1141,7 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 			client.submit("cmd_open_unknown_model", {
 				kind: "open_session",
 				cwd: daemonEnv(root).workspaceDir,
-				model: "unknown/model-does-not-exist",
+				model: "prime-inference/model-does-not-exist",
 			});
 			await client.waitFor((_events, messages) =>
 				messages.some(
@@ -1430,6 +1433,337 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 	});
 });
 
+describe("brokered guest inference (cloud-broker relay)", () => {
+	/** Read the next inference_request frame past a message cursor. */
+	async function nextInferenceRequest(
+		client: LoopClient,
+		seen: number,
+	): Promise<Extract<CloudMessage, { type: "inference_request" }>> {
+		await client.waitFor((_events, messages) =>
+			messages.slice(seen).some((line) => line.includes('"type":"inference_request"')),
+		);
+		const line = [...client.messages.slice(seen)]
+			.reverse()
+			.find((last) => last.includes('"type":"inference_request"'));
+		const parsed = parseCloudMessage(line ?? "");
+		if (!parsed.ok || parsed.message.type !== "inference_request") {
+			throw new Error("inference_request frame did not parse");
+		}
+		return parsed.message;
+	}
+
+	it("completes a brokered-model turn from relayed inference frames", async () => {
+		const root = cloudTemp("cloud-guest-daemon-test-");
+		const daemon = await CloudGuestDaemon.start(daemonEnv(root), { createRuntime: createFauxRuntimeFactory });
+		try {
+			const client = new LoopClient(daemonEnv(root).socketPath);
+			client.hello();
+			await client.waitForSnapshot();
+			client.subscribe(0);
+			// The local side opens on a non-prime model: the guest stubs it
+			// (cloud-broker api) with the metadata the open carried, and no
+			// provider credential ever exists in the sandbox.
+			client.submit("cmd_open_brokered", {
+				kind: "open_session",
+				cwd: daemonEnv(root).workspaceDir,
+				model: "anthropic/claude-broker-test",
+				modelMetadata: {
+					name: "Claude Broker Test",
+					contextWindow: 123_456,
+					maxTokens: 4_321,
+					reasoning: true,
+				},
+			});
+			await client.waitFor((_events, messages) =>
+				messages.some(
+					(line) => line.includes('"commandId":"cmd_open_brokered"') && line.includes('"state":"completed"'),
+				),
+			);
+			expect(daemon.rootSession?.model).toMatchObject({
+				api: "cloud-broker",
+				provider: "cloud-broker",
+				id: "anthropic/claude-broker-test",
+				name: "Claude Broker Test",
+				contextWindow: 123_456,
+				maxTokens: 4_321,
+				reasoning: true,
+			});
+
+			// A turn on the brokered model: its completion rides the wire.
+			const seenBeforeTurnOne = client.messages.length;
+			client.submit("cmd_brokered_turn", { kind: "prompt", text: "brokered hello" });
+			const request = await nextInferenceRequest(client, seenBeforeTurnOne);
+			expect(request.sessionId).toBe(SESSION_ID);
+			expect(request.model).toEqual({ provider: "anthropic", modelId: "claude-broker-test" });
+			expect(request.payload.messages.length).toBeGreaterThan(0);
+
+			// The scripted local stream: relayed events land verbatim and the
+			// end frame completes the turn's assistant message.
+			const partialBase = {
+				role: "assistant",
+				api: "cloud-broker",
+				provider: "cloud-broker",
+				model: "anthropic/claude-broker-test",
+				timestamp: Date.now(),
+			};
+			client.send({
+				type: "inference_event",
+				sessionId: SESSION_ID,
+				requestId: request.requestId,
+				event: { type: "start", partial: { ...partialBase, content: [] } },
+			});
+			client.send({
+				type: "inference_event",
+				sessionId: SESSION_ID,
+				requestId: request.requestId,
+				event: {
+					type: "text_start",
+					contentIndex: 0,
+					partial: { ...partialBase, content: [{ type: "text", text: "" }] },
+				},
+			});
+			client.send({
+				type: "inference_event",
+				sessionId: SESSION_ID,
+				requestId: request.requestId,
+				event: {
+					type: "text_end",
+					contentIndex: 0,
+					content: "brokered answer",
+					partial: { ...partialBase, content: [{ type: "text", text: "brokered answer" }] },
+				},
+			});
+			client.send({
+				type: "inference_end",
+				sessionId: SESSION_ID,
+				requestId: request.requestId,
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "brokered answer" }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					timestamp: Date.now(),
+					usage: {
+						input: 3,
+						output: 5,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 8,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+				},
+			});
+			// The answer streams back, mirrors as a durable entry, and the
+			// transcript holds the relayed final message.
+			await client.waitFor((events) =>
+				events.some((event) => event.kind === "output_delta" && event.text.includes("brokered answer")),
+			);
+			await client.waitFor((events) =>
+				events.some(
+					(event) => event.kind === "session_entry" && JSON.stringify(event.entry).includes("brokered answer"),
+				),
+			);
+			await client.waitFor((events) => events.some((event) => event.kind === "usage"));
+			const assistant = daemon.rootSession?.messages.at(-1) as
+				| { role: string; content: Array<{ type: string; text?: string }> }
+				| undefined;
+			expect(assistant?.role).toBe("assistant");
+			expect(assistant?.content[0]?.text).toBe("brokered answer");
+
+			// set_model to another non-prime provider stays brokered: the stub
+			// id is the canonical selector with bounded default metadata.
+			client.submit("cmd_brokered_set_model", {
+				kind: "set_model",
+				provider: "openrouter",
+				modelId: "z-ai/glm-4.5",
+			});
+			await client.waitFor((_events, messages) =>
+				messages.some(
+					(line) => line.includes('"commandId":"cmd_brokered_set_model"') && line.includes('"state":"completed"'),
+				),
+			);
+			expect(daemon.rootSession?.model).toMatchObject({
+				api: "cloud-broker",
+				id: "openrouter/z-ai/glm-4.5",
+				name: "openrouter/z-ai/glm-4.5",
+				contextWindow: 200_000,
+			});
+			// A slash-bearing model id survives the first-slash split on the
+			// wire: the local catalog resolves the provider and the FULL
+			// model id.
+			const seenBeforeTurnTwo = client.messages.length;
+			client.submit("cmd_brokered_turn_two", { kind: "prompt", text: "second brokered hello" });
+			const second = await nextInferenceRequest(client, seenBeforeTurnTwo);
+			expect(second.model).toEqual({ provider: "openrouter", modelId: "z-ai/glm-4.5" });
+			client.send({
+				type: "inference_end",
+				sessionId: SESSION_ID,
+				requestId: second.requestId,
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "brokered answer two" }],
+					api: "cloud-broker",
+					provider: "openrouter",
+					timestamp: Date.now(),
+				},
+			});
+			await client.waitFor((events) =>
+				events.some((event) => event.kind === "output_delta" && event.text.includes("brokered answer two")),
+			);
+			// The durable entry wait drains the queued mirror pass, so no
+			// mirror work outlives the daemon and the test's temp state.
+			await client.waitFor((events) =>
+				events.some(
+					(event) => event.kind === "session_entry" && JSON.stringify(event.entry).includes("brokered answer two"),
+				),
+			);
+			await client.close();
+		} finally {
+			await daemon.stop().catch(() => undefined);
+		}
+	});
+
+	it("errors a brokered turn from a relayed inference_error frame", async () => {
+		const root = cloudTemp("cloud-guest-daemon-test-");
+		const daemon = await CloudGuestDaemon.start(daemonEnv(root), { createRuntime: createFauxRuntimeFactory });
+		try {
+			const client = new LoopClient(daemonEnv(root).socketPath);
+			client.hello();
+			await client.waitForSnapshot();
+			client.subscribe(0);
+			// No modelMetadata on the open: the stub falls back to bounded
+			// defaults (the local sender ships metadata later; the guest
+			// tolerates its absence).
+			client.submit("cmd_open_defaults", {
+				kind: "open_session",
+				cwd: daemonEnv(root).workspaceDir,
+				model: "openai/gpt-broker-defaults",
+			});
+			await client.waitFor((_events, messages) =>
+				messages.some(
+					(line) => line.includes('"commandId":"cmd_open_defaults"') && line.includes('"state":"completed"'),
+				),
+			);
+			expect(daemon.rootSession?.model).toMatchObject({
+				api: "cloud-broker",
+				id: "openai/gpt-broker-defaults",
+				contextWindow: 200_000,
+				maxTokens: 8_192,
+				reasoning: false,
+			});
+			const seenBeforeErrorTurn = client.messages.length;
+			client.submit("cmd_brokered_error", { kind: "prompt", text: "fail the brokered call" });
+			const request = await nextInferenceRequest(client, seenBeforeErrorTurn);
+			client.send({
+				type: "inference_error",
+				sessionId: SESSION_ID,
+				requestId: request.requestId,
+				error: "unknown model: openai/gpt-broker-defaults",
+			});
+			// The failure surfaces as the turn's assistant error message.
+			await client.waitFor((events) =>
+				events.some(
+					(event) =>
+						event.kind === "session_entry" &&
+						JSON.stringify(event.entry).includes("unknown model: openai/gpt-broker-defaults"),
+				),
+			);
+			await client.close();
+		} finally {
+			await daemon.stop().catch(() => undefined);
+		}
+	});
+
+	it("errors a brokered turn when the local broker never responds (bounded wait)", async () => {
+		const root = cloudTemp("cloud-guest-daemon-test-");
+		const daemon = await CloudGuestDaemon.start(daemonEnv(root), {
+			createRuntime: createFauxRuntimeFactory,
+			cloudInferenceTimeoutMs: 150,
+		});
+		try {
+			const client = new LoopClient(daemonEnv(root).socketPath);
+			client.hello();
+			await client.waitForSnapshot();
+			client.subscribe(0);
+			client.submit("cmd_open_timeout", {
+				kind: "open_session",
+				cwd: daemonEnv(root).workspaceDir,
+				model: "anthropic/claude-broker-timeout",
+			});
+			await client.waitFor((_events, messages) =>
+				messages.some(
+					(line) => line.includes('"commandId":"cmd_open_timeout"') && line.includes('"state":"completed"'),
+				),
+			);
+			const seenBeforeTimeoutTurn = client.messages.length;
+			client.submit("cmd_brokered_timeout", { kind: "prompt", text: "never answered" });
+			await nextInferenceRequest(client, seenBeforeTimeoutTurn);
+			// No response frames arrive: the bounded wait errors the stream.
+			// The deadline only bounds failure; the timeout path itself is
+			// the behavior under test.
+			const settled = await Promise.race([
+				client
+					.waitFor((events) =>
+						events.some(
+							(event) =>
+								event.kind === "session_entry" &&
+								JSON.stringify(event.entry).includes("cloud inference broker did not respond"),
+						),
+					)
+					.then(() => true),
+				new Promise<boolean>((resolve) => {
+					const timer = setTimeout(() => resolve(false), 5_000);
+					timer.unref?.();
+				}),
+			]);
+			expect(settled).toBe(true);
+			await client.close();
+		} finally {
+			await daemon.stop().catch(() => undefined);
+		}
+	});
+
+	it("drops a client whose open_session modelMetadata fails validation, without wedging the daemon", async () => {
+		const root = cloudTemp("cloud-guest-daemon-test-");
+		const daemon = await CloudGuestDaemon.start(daemonEnv(root), { createRuntime: createFauxRuntimeFactory });
+		try {
+			const client = new LoopClient(daemonEnv(root).socketPath);
+			client.hello();
+			await client.waitForSnapshot();
+			client.subscribe(0);
+			const closed = client.closed();
+			// Deliberately invalid metadata (missing required fields): the
+			// protocol's request validation must reject it at admission.
+			client.submit("cmd_open_bad_metadata", {
+				kind: "open_session",
+				cwd: daemonEnv(root).workspaceDir,
+				model: "anthropic/claude-broker-test",
+				modelMetadata: { name: "partial" },
+			} as unknown as CloudCommandRequest);
+			await closed;
+			// The daemon stays healthy: a fresh client attaches and a valid
+			// open still completes.
+			const second = new LoopClient(daemonEnv(root).socketPath);
+			second.hello();
+			await second.waitForSnapshot();
+			second.subscribe(0);
+			second.submit("cmd_open_after_bad", {
+				kind: "open_session",
+				cwd: daemonEnv(root).workspaceDir,
+				model: "anthropic/claude-broker-test",
+			});
+			await second.waitFor((_events, messages) =>
+				messages.some(
+					(line) => line.includes('"commandId":"cmd_open_after_bad"') && line.includes('"state":"completed"'),
+				),
+			);
+			await second.close();
+		} finally {
+			await daemon.stop().catch(() => undefined);
+		}
+	});
+});
+
 describe("live session event wire trimming", () => {
 	it("trims oversized tool_execution_end payloads to a bounded tail instead of dropping the event", () => {
 		const hugeText = `${"x".repeat(200_000)}\nfinal line`;
@@ -1472,9 +1806,7 @@ describe("live session event wire trimming", () => {
 			message: { content: Array<{ type: string; text: string }> };
 			toolResults: Array<{ result: { content: Array<{ type: string; text: string }> } }>;
 		};
-		expect(
-			trimmed.message.content.find((block) => block.type === "text")?.text?.length ?? 0,
-		).toBeLessThan(180_000);
+		expect(trimmed.message.content.find((block) => block.type === "text")?.text?.length ?? 0).toBeLessThan(180_000);
 		expect(
 			trimmed.toolResults[0]?.result.content.find((block) => block.type === "text")?.text?.length ?? 0,
 		).toBeLessThan(180_000);

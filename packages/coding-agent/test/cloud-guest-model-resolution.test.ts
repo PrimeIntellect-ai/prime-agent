@@ -3,14 +3,16 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudGuestDaemon, parseCloudDaemonEnv } from "../src/modes/cloud/cloud-daemon.js";
 import { cloudTemp } from "./cloud-support.js";
-import { createFauxRuntimeFactory, createFauxRuntimeFactoryWithModels } from "./fixtures/cloud-guest-daemon-fixture.js";
+import { createFauxRuntimeFactory } from "./fixtures/cloud-guest-daemon-fixture.js";
 
 /**
  * Guest model-resolution regressions: a private Prime Inference route that
  * only the authenticated entitlement catalog supplies must open the cloud
  * session (the bundled registry alone cannot resolve it), a route the refresh
- * cannot authorize must fail honestly, and bundled models must resolve
- * without any network refresh.
+ * cannot authorize must fail honestly, bundled prime models must resolve
+ * without any network refresh, and every non-prime selection must stub to
+ * the local broker instead of resolving locally (the sandbox holds no
+ * provider credentials).
  */
 
 afterEach(async () => {
@@ -211,7 +213,7 @@ describe("resident guest daemon model resolution", () => {
 		}
 	});
 
-	it("does not retry a non-private model miss", async () => {
+	it("does not retry a non-private prime model miss", async () => {
 		const root = cloudTemp("cloud-guest-model-resolution-");
 		writePrimeInferenceAuth(join(root, "agent"));
 		const fetchMock = vi.fn(
@@ -219,10 +221,10 @@ describe("resident guest daemon model resolution", () => {
 				new Response(JSON.stringify({ data: [] }), { status: 200 }),
 		);
 		vi.stubGlobal("fetch", fetchMock);
-		const env = guestEnv(root, { model: "faux/faux-unknown" });
+		const env = guestEnv(root, { model: "prime-inference/public-not-bundled" });
 		const daemon = await CloudGuestDaemon.start(env, { createRuntime: createFauxRuntimeFactory });
 		try {
-			await expect(daemon.openSession({})).rejects.toThrow("unknown model faux/faux-unknown");
+			await expect(daemon.openSession({})).rejects.toThrow("unknown model prime-inference/public-not-bundled");
 			// Only the initial refresh runs: an unknown non-private route never
 			// enters the private-entitlement retry loop.
 			const entitlementFetches = fetchMock.mock.calls.filter(
@@ -234,55 +236,62 @@ describe("resident guest daemon model resolution", () => {
 		}
 	});
 
-	it("resolves a bundled model without any catalog refresh", async () => {
+	it("resolves a bundled prime model without any catalog refresh", async () => {
 		const root = cloudTemp("cloud-guest-model-resolution-");
+		writePrimeInferenceAuth(join(root, "agent"));
 		const fetchMock = vi.fn(async () => {
 			throw new Error("bundled model resolution must not fetch");
 		});
 		vi.stubGlobal("fetch", fetchMock);
-		const env = guestEnv(root, { model: "faux/faux-1" });
+		const env = guestEnv(root, { model: "prime-inference/Qwen/Qwen3.5-2B" });
 		const daemon = await CloudGuestDaemon.start(env, { createRuntime: createFauxRuntimeFactory });
 		try {
 			await daemon.openSession({});
-			expect(daemon.rootSession?.model).toMatchObject({ provider: "faux", id: "faux-1" });
+			expect(daemon.rootSession?.model).toMatchObject({
+				provider: "prime-inference",
+				id: "Qwen/Qwen3.5-2B",
+			});
 			expect(fetchMock).not.toHaveBeenCalled();
 		} finally {
 			await daemon.stop();
 		}
 	});
 
-	it("applies canonical selectors with slash-bearing and slash-free model ids exactly", async () => {
+	it("stubs canonical selectors with slash-bearing and slash-free model ids exactly", async () => {
 		const root = cloudTemp("cloud-guest-model-resolution-");
 		const fetchMock = vi.fn(async () => {
-			throw new Error("registered model resolution must not fetch");
+			throw new Error("brokered stub selection must not fetch");
 		});
 		vi.stubGlobal("fetch", fetchMock);
 		const env = guestEnv(root);
-		const daemon = await CloudGuestDaemon.start(env, {
-			createRuntime: createFauxRuntimeFactoryWithModels([
-				{ provider: "openrouter", models: [{ id: "z-ai/glm-4.5", name: "Z.ai: GLM 4.5" }] },
-				{ provider: "mistral", models: [{ id: "zai-glm-5-2", name: "GLM-5.2" }] },
-			]),
-		});
+		const daemon = await CloudGuestDaemon.start(env, { createRuntime: createFauxRuntimeFactory });
 		try {
 			await daemon.openSession({});
-			// A bundled-style `z-ai/glm` id survives the first-slash split as the
-			// full model id under its provider.
+			// Non-prime selections never resolve locally: the guest stubs
+			// them, and the stub id is the canonical selector, so a
+			// slash-bearing model id stays the full id under its provider
+			// when the relay splits the selector on the wire.
 			const zai = await daemon.dispatch(
 				{ kind: "open_session", cwd: env.workspaceDir, model: "openrouter/z-ai/glm-4.5" },
 				`cmd_open_zai_${SESSION_ID}`,
 			);
 			expect(zai.state).toBe("completed");
-			expect(daemon.rootSession?.model?.provider).toBe("openrouter");
-			expect(daemon.rootSession?.model?.id).toBe("z-ai/glm-4.5");
-			// A provider and model id without slashes stay intact.
+			expect(daemon.rootSession?.model).toMatchObject({
+				api: "cloud-broker",
+				provider: "cloud-broker",
+				id: "openrouter/z-ai/glm-4.5",
+			});
+			// A provider and model id without slashes stay intact too.
 			const simple = await daemon.dispatch(
 				{ kind: "open_session", cwd: env.workspaceDir, model: "mistral/zai-glm-5-2" },
 				`cmd_open_simple_${SESSION_ID}`,
 			);
 			expect(simple.state).toBe("completed");
-			expect(daemon.rootSession?.model?.provider).toBe("mistral");
-			expect(daemon.rootSession?.model?.id).toBe("zai-glm-5-2");
+			expect(daemon.rootSession?.model).toMatchObject({
+				api: "cloud-broker",
+				provider: "cloud-broker",
+				id: "mistral/zai-glm-5-2",
+			});
 			expect(fetchMock).not.toHaveBeenCalled();
 		} finally {
 			await daemon.stop();

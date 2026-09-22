@@ -1,0 +1,1 @@
+- Added brokered inference for cloud sessions: non-prime models now stream through the local daemon's broker instead of failing in the sandbox, which never holds provider credentials.

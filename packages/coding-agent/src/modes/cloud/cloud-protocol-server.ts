@@ -8,11 +8,16 @@ import {
 	CLOUD_MAX_QUEUED_COMMANDS,
 	CLOUD_MAX_SNAPSHOT_EVENTS,
 	CLOUD_PROTOCOL_VERSION,
+	type CloudClientId,
 	type CloudCommandId,
 	type CloudCommandReceipt,
 	type CloudCommandRequest,
 	type CloudCursor,
 	type CloudEvent,
+	type CloudInferenceEnd,
+	type CloudInferenceError,
+	type CloudInferenceEvent,
+	type CloudInferenceRequest,
 	type CloudMessage,
 	type CloudSessionId,
 	type CloudSessionState,
@@ -86,6 +91,17 @@ export interface CloudProtocolServerCallbacks {
 	onRetentionRecovered?(): void;
 	/** Non-fatal dispatch/settlement error, recorded for honest diagnostics. */
 	onDispatchError?(message: string): void;
+	/**
+	 * One brokered-inference response frame arrived from the local side
+	 * (inference_event / inference_end / inference_error). The frame is
+	 * validated by cloudMessageProblem before dispatch, like every frame.
+	 */
+	onInferenceFrame?(frame: CloudInferenceEvent | CloudInferenceEnd | CloudInferenceError): void;
+	/**
+	 * An authenticated client disconnected. Brokered requests carried by it
+	 * can never complete: the local side answers on the same connection.
+	 */
+	onAuthenticatedClientDrop?(clientId: CloudClientId): void;
 }
 
 interface ClientConnection {
@@ -276,6 +292,21 @@ export class CloudProtocolServer {
 		return this.outbox.tailCursor;
 	}
 
+	/**
+	 * Send one brokered inference request to an attached local client.
+	 * Returns the client id that carried the frame, or undefined when no
+	 * authenticated+subscribed client can serve it. Throws when the frame
+	 * fails protocol validation or exceeds the frame bound.
+	 */
+	sendInferenceRequest(frame: CloudInferenceRequest): CloudClientId | undefined {
+		for (const client of this.clients.values()) {
+			if (!client.authenticated || !client.subscribed) continue;
+			this.writeLine(client, serializeCloudMessage(frame));
+			return client.id;
+		}
+		return undefined;
+	}
+
 	// --- connections ---------------------------------------------------------------
 
 	private acceptConnection(socket: Socket): void {
@@ -305,6 +336,7 @@ export class CloudProtocolServer {
 	private dropClient(client: ClientConnection): void {
 		if (client.closed) return;
 		client.closed = true;
+		const wasAuthenticated = client.authenticated;
 		if (client.helloTimer !== undefined) {
 			clearTimeout(client.helloTimer);
 			client.helloTimer = undefined;
@@ -314,6 +346,9 @@ export class CloudProtocolServer {
 			client.socket.destroy();
 		} catch {
 			// The socket is already gone.
+		}
+		if (wasAuthenticated) {
+			this.options.callbacks.onAuthenticatedClientDrop?.(client.id);
 		}
 	}
 
@@ -374,6 +409,11 @@ export class CloudProtocolServer {
 				return;
 			case "ack":
 				this.handleAck(client, message);
+				return;
+			case "inference_event":
+			case "inference_end":
+			case "inference_error":
+				this.handleInferenceFrame(client, message);
 				return;
 			default:
 				// The server never receives snapshot/events/command.
@@ -532,6 +572,17 @@ export class CloudProtocolServer {
 		} catch {
 			this.dropClient(client);
 		}
+	}
+
+	private handleInferenceFrame(
+		client: ClientConnection,
+		message: CloudInferenceEvent | CloudInferenceEnd | CloudInferenceError,
+	): void {
+		if (!client.authenticated) {
+			this.dropClient(client);
+			return;
+		}
+		this.options.callbacks.onInferenceFrame?.(message);
 	}
 
 	private commandFrame(receipt: CloudCommandReceipt): CloudMessage {

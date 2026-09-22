@@ -82,6 +82,9 @@ interface RegistryHarness {
 	transport: RecordingTunnelTransport;
 	/** Every fake VM-process start, newest last; env carries the guest boot model. */
 	vmStarts: Array<{ sessionUuid: string; env: Record<string, string> }>;
+	/** The recording platform fake; tests flip sandbox status through setSandboxStatus. */
+	platform: DirectCloudServiceOptions["platform"];
+	setSandboxStatus: (status: string) => void;
 }
 
 function buildRegistry(
@@ -96,6 +99,8 @@ function buildRegistry(
 		writeSessionEvent?: CloudSessionRegistryCallbacks["writeSessionEvent"];
 		/** Lowers the turn-start window for honest-failure tests. */
 		turnStartTimeoutMs?: number;
+		/** Liveness sweep cadence for terminal-sandbox tests. */
+		sweepIntervalMs?: number;
 		/** Wires the brokered-inference hook (the supervisor's broker). */
 		onInferenceRequest?: (request: CloudInferenceRequest) => Promise<void>;
 		/** Lowers the attachment submit wait for brokered-flow tests. */
@@ -122,9 +127,10 @@ function buildRegistry(
 		createdAt: now,
 		updatedAt: now,
 	};
+	let sandboxStatus = "RUNNING";
 	const platform = {
 		createVmSandbox: async () => sandbox,
-		getSandbox: async () => sandbox,
+		getSandbox: async () => ({ ...sandbox, status: sandboxStatus }),
 		deleteSandbox: async () => undefined,
 		getSandboxAuth: async () => ({
 			sandboxId: sandbox.id,
@@ -277,6 +283,7 @@ function buildRegistry(
 		reconnectDelayMs: 50,
 		submitWaitMs: options.submitWaitMs ?? 5_000,
 		...(options.turnStartTimeoutMs === undefined ? {} : { turnStartTimeoutMs: options.turnStartTimeoutMs }),
+		...(options.sweepIntervalMs === undefined ? {} : { sweepIntervalMs: options.sweepIntervalMs }),
 		...(options.resolveModel === undefined ? {} : { resolveModel: options.resolveModel }),
 		...(options.onInferenceRequest === undefined ? {} : { onInferenceRequest: options.onInferenceRequest }),
 		artifactResolver: {
@@ -300,6 +307,10 @@ function buildRegistry(
 		store,
 		transport,
 		vmStarts,
+		platform,
+		setSandboxStatus: (status: string) => {
+			sandboxStatus = status;
+		},
 	};
 }
 
@@ -407,9 +418,25 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 		// The registry's event callback fans out through the supervisor's real
 		// writeCloudSessionEvent once the stub exists (the production wiring).
 		let eventFanout: CloudSessionRegistryCallbacks["writeSessionEvent"] | undefined;
+		let broker: CloudInferenceBroker | undefined;
 		const harness = buildRegistry(root, join(root, "guest.sock"), {
 			resolveModel,
 			writeSessionEvent: (activeSessionId, event, meta) => eventFanout?.(activeSessionId, event, meta) ?? false,
+			// The supervisor's brokered-inference hook: the guest opens this
+			// session on a non-prime model, which the guest stubs onto the
+			// cloud-broker api, so the turn's completion rides the local
+			// broker exactly like a real session's non-prime model would.
+			onInferenceRequest: (request) => broker!.runRequest(request),
+		});
+		// The local provider the broker resolves faux/faux-1 against and
+		// streams from; the sandbox holds no provider credential.
+		const registration = registerFauxProvider({ models: [{ id: "faux-1", contextWindow: 128_000 }] });
+		broker = new CloudInferenceBroker({
+			resolveModel: (selector) =>
+				selector.provider === "faux" ? (registration.getModel(selector.modelId) as Model<Api>) : undefined,
+			sendFrame: (frame) => harness.registry.sendInferenceFrame(frame),
+			onUsage: (sessionId, remoteSessionId, usage) =>
+				harness.registry.recordBrokeredUsage(sessionId, remoteSessionId, usage),
 		});
 		// The supervisor's model-catalog seam, as the daemon would own it.
 		const catalogStub = {
@@ -563,9 +590,11 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 			expect(attach).toMatchObject({ command: "attach", success: true });
 			expect(writes.some((frame) => frame.type === "session_attached")).toBe(true);
 
-			// A prompt round-trips through the guest: the reply mirrors into
-			// the shadow AND streams to the attached client as session events.
-			queueFauxResponse(root, "bootstrap parity answer");
+			// A prompt round-trips through the brokered guest: the local
+			// provider answers the relayed request, and the reply mirrors
+			// into the shadow AND streams to the attached client as session
+			// events.
+			registration.setResponses([fauxAssistantMessage("bootstrap parity answer")]);
 			const prompt = await send({
 				type: "prompt",
 				activeSessionId: record.activeSessionId!,
@@ -653,18 +682,28 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 				usage?: { inputTokens: number; outputTokens: number };
 			};
 			expect(rowSummary.model).toMatchObject({ provider: "faux", id: "faux-1" });
-			expect(rowSummary.usage).toMatchObject({ inputTokens: 3, outputTokens: 5 });
+			// The relayed completion's usage is the local provider's honest
+			// accounting: the row carries the same cumulative totals the
+			// guest's transcript holds.
+			const brokered = daemon.rootSession?.messages.at(-1) as
+				| { usage?: { input: number; output: number; cacheRead: number; cacheWrite: number } }
+				| undefined;
+			const brokeredInput = brokered?.usage?.input ?? 0;
+			const brokeredOutput = brokered?.usage?.output ?? 0;
+			const brokeredCacheRead = brokered?.usage?.cacheRead ?? 0;
+			expect(rowSummary.usage).toMatchObject({ inputTokens: brokeredInput, outputTokens: brokeredOutput });
 
 			// The prompt bar's context tray carries honest usage: the mirrored
 			// cumulative totals against the model's context window.
+			const brokeredTotal = brokeredInput + brokeredOutput + brokeredCacheRead;
 			const contextState = await send({
 				type: "get_connection_state",
 				activeSessionId: record.activeSessionId!,
 			} as never);
 			expect(contextState?.data?.contextUsage).toEqual({
-				tokens: 8,
+				tokens: brokeredTotal,
 				contextWindow: 128_000,
-				percent: (8 / 128_000) * 100,
+				percent: (brokeredTotal / 128_000) * 100,
 			});
 
 			// Shadow-served reads answer for cloud rows: stats, forking
@@ -678,9 +717,14 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 				assistantMessages: 1,
 				// user + assistant + the injected harness-digest custom message
 				totalMessages: 3,
-				tokens: { input: 3, output: 5, cacheRead: 0, total: 8 },
+				tokens: {
+					input: brokeredInput,
+					output: brokeredOutput,
+					cacheRead: brokeredCacheRead,
+					total: brokeredTotal,
+				},
 				cost: 0,
-				contextUsage: { tokens: 8, contextWindow: 128_000 },
+				contextUsage: { tokens: brokeredTotal, contextWindow: 128_000 },
 			});
 			const forking = await send({
 				type: "get_user_messages_for_forking",
@@ -710,6 +754,7 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 			).toBe(true);
 		} finally {
 			await harness.registry.dispose().catch(() => undefined);
+			registration.unregister();
 			await daemon.stop().catch(() => undefined);
 		}
 		// test-policy: allow explicit-test-timeout -- real in-process guest daemon e2e; the 30s default flakes on loaded runners
@@ -1036,6 +1081,43 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 		}
 	});
 
+	it("marks a live session lost when its sandbox terminates, and releases the attachment", async () => {
+		const root = temp();
+		const guestSessionId = "sess_sweep_lost";
+		const daemon = await startGuestDaemon(root, 1, guestSessionId);
+		const harness = buildRegistry(root, join(root, "guest.sock"), { sweepIntervalMs: 50 });
+		try {
+			const info = await harness.registry.convertSession({ cwd: root, sessionId: guestSessionId });
+			const record = harness.store.get(info.sessionId)!;
+			await waitFor(
+				() => harness.registry.resolveActive(record.activeSessionId!)?.summary.execution !== undefined,
+				10_000,
+				"target ready",
+			);
+			expect(harness.registry.resolveActive(record.activeSessionId!)).toBeDefined();
+
+			// The platform reports the sandbox TERMINATED (its lifetime
+			// timeout): the sweep must mark the record lost and release the
+			// attachment instead of letting it retry against a dead sandbox.
+			harness.setSandboxStatus("TERMINATED");
+			await waitFor(
+				() => harness.store.get(record.sessionId)?.observedLifecycle === "lost",
+				10_000,
+				"lost after sweep",
+			);
+			await waitFor(
+				() => harness.registry.resolveActive(record.activeSessionId!) === undefined,
+				10_000,
+				"live row released",
+			);
+			const lost = harness.store.get(record.sessionId)!;
+			expect(lost.lastError).toContain("TERMINATED");
+		} finally {
+			await harness.registry.dispose();
+			await daemon.stop().catch(() => undefined);
+		}
+	});
+
 	it("refuses prompts against a disconnected session with actionable guidance", async () => {
 		const root = temp();
 		const guestSessionId = "sess_disconnected_prompt";
@@ -1106,13 +1188,15 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 			);
 			expect(followed.success).toBe(true);
 
-			// Model and thinking-level changes fail honestly on unknown models
-			// instead of silently falling back.
+			// Model and thinking-level changes fail honestly on unknown prime
+			// models instead of silently falling back; non-prime providers
+			// stub to the local broker, where an unknown model fails at
+			// inference time.
 			const modelFailure = await harness.registry.handleSessionCommand(
 				{
 					type: "set_model",
 					activeSessionId: record.activeSessionId!,
-					provider: "openai",
+					provider: "prime-inference",
 					modelId: "gpt-not-real",
 				},
 				target,

@@ -191,6 +191,22 @@ export function splitCloudModelSelector(selector: string): { provider: string; m
 	return { provider: selector.slice(0, slash), modelId: selector.slice(slash + 1) };
 }
 
+/**
+ * Bounded metadata for the guest's brokered-model stub, sent by the local
+ * side at open so the guest's agent loop can plan (context window, output
+ * bound, reasoning flag, display name) without holding the local catalog.
+ */
+export interface CloudModelMetadata {
+	/** Display name for the guest's model stub. */
+	name: string;
+	/** Context window in tokens. */
+	contextWindow: number;
+	/** Maximum output tokens. */
+	maxTokens: number;
+	/** Whether the model supports reasoning levels. */
+	reasoning: boolean;
+}
+
 /** Cross-boundary family context for a spawned cloud child, passed at open. */
 export interface CloudFamilyInfo {
 	/** The cloud child's depth under its LOCAL parent (guest-relative root is 0). */
@@ -223,6 +239,8 @@ export type CloudCommandRequest =
 			prompt?: string;
 			/** v3: family context for a spawned child (absolute depth + local parent). */
 			family?: CloudFamilyInfo;
+			/** Bounded stub metadata for a brokered (non-prime) model. */
+			modelMetadata?: CloudModelMetadata;
 	  }
 	/** v3: `targetSessionId` addresses one remote descendant session. */
 	| { kind: "prompt"; text: string; queueIfBusy?: boolean; targetSessionId?: string }
@@ -680,13 +698,23 @@ export function cloudRequestProblem(value: unknown): string | undefined {
 	switch (value.kind) {
 		case "open_session":
 			return firstProblem(
-				expectFields(value, ["kind", "cwd", "model", "thinking", "seedTranscriptArtifact", "prompt", "family"]),
+				expectFields(value, [
+					"kind",
+					"cwd",
+					"model",
+					"thinking",
+					"seedTranscriptArtifact",
+					"prompt",
+					"family",
+					"modelMetadata",
+				]),
 				expectString(value.cwd, "request.cwd", CLOUD_MAX_PATH_CHARS, 1),
 				optionalString(value.model, "request.model", CLOUD_MAX_MODEL_ID_CHARS),
 				optionalString(value.thinking, "request.thinking", CLOUD_MAX_THINKING_CHARS),
 				optionalString(value.seedTranscriptArtifact, "request.seedTranscriptArtifact", CLOUD_MAX_PATH_CHARS),
 				optionalString(value.prompt, "request.prompt", CLOUD_MAX_PROMPT_CHARS),
 				familyInfoProblem(value.family, "request.family"),
+				modelMetadataProblem(value.modelMetadata, "request.modelMetadata"),
 			);
 		case "prompt":
 			return firstProblem(
@@ -815,6 +843,19 @@ function familyInfoProblem(value: unknown, label: string): Problem {
 		expectString(value.parentSessionId, `${label}.parentSessionId`, CLOUD_MAX_ID_CHARS, 1),
 		expectString(value.parentSessionFile, `${label}.parentSessionFile`, CLOUD_MAX_PATH_CHARS, 1),
 		optionalString(value.parentName, `${label}.parentName`, CLOUD_MAX_SESSION_NAME_CHARS),
+	);
+}
+
+/** Validation for the optional open_session brokered-model metadata. */
+function modelMetadataProblem(value: unknown, label: string): Problem {
+	if (value === undefined) return undefined;
+	if (!isRecord(value)) return `${label} must be an object`;
+	return firstProblem(
+		expectFields(value, ["name", "contextWindow", "maxTokens", "reasoning"]),
+		expectString(value.name, `${label}.name`, CLOUD_MAX_SESSION_NAME_CHARS),
+		expectInteger(value.contextWindow, `${label}.contextWindow`, 1),
+		expectInteger(value.maxTokens, `${label}.maxTokens`, 1),
+		typeof value.reasoning === "boolean" ? undefined : `${label}.reasoning must be a boolean`,
 	);
 }
 
