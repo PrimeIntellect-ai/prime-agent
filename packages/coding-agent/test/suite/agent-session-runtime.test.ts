@@ -1285,6 +1285,28 @@ describe("ENG-4620 fast mode settings", () => {
 		expect(await switchTo(current, supported)).toBe("priority");
 	});
 
+	it("a clamped tier request keeps the requested preference and leaves the saved default alone", async () => {
+		const current = await createFastModeHarness(["gpt-5.5", "gpt-4-turbo"], {
+			api: "openai-responses",
+			provider: "openai",
+		});
+
+		current.session.setServiceTier("priority");
+		expect(current.settingsManager.getDefaultServiceTier()).toBe("priority");
+
+		await current.session.setModel(current.getModel("gpt-4-turbo")!);
+		expect(current.session.serviceTier).toBe("default");
+
+		// A clamped request neither reaches the active state nor stomps the saved default.
+		current.session.setServiceTier("flex");
+		expect(current.session.serviceTier).toBe("default");
+		expect(current.settingsManager.getDefaultServiceTier()).toBe("priority");
+
+		// The preference keeps the requested tier, so a capable model re-activates it.
+		await current.session.setModel(current.getModel("gpt-5.5")!);
+		expect(current.session.serviceTier).toBe("flex");
+	});
+
 	it("persists the preference across settings manager restarts", async () => {
 		const current = await createFastModeHarness(["gpt-5.4"]);
 		const agentDir = join(current.tempDir, "agent");

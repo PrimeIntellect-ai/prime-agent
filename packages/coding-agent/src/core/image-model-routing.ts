@@ -3,7 +3,7 @@
  */
 
 import type { AgentModelOverride, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { type Api, clampThinkingLevel, type Model, type ServiceTier, supportsFastMode } from "@earendil-works/pi-ai";
+import { type Api, clampServiceTier, clampThinkingLevel, type Model, type ServiceTier } from "@earendil-works/pi-ai";
 import { formatImageModelRequiredMessage, formatImageModelUnusableMessage } from "./auth-guidance.js";
 import { findExactModelReferenceMatch } from "./model-resolver.js";
 
@@ -45,6 +45,6 @@ export function resolveImageModelOverride(inputs: ImageModelRoutingInputs): Agen
 	return {
 		model: imageModel,
 		thinkingLevel: clampThinkingLevel(imageModel, inputs.thinkingLevel) as ThinkingLevel,
-		serviceTier: inputs.serviceTier === "priority" && !supportsFastMode(imageModel) ? "default" : inputs.serviceTier,
+		serviceTier: clampServiceTier(imageModel, inputs.serviceTier),
 	};
 }

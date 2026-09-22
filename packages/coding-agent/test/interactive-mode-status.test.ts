@@ -1,7 +1,7 @@
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
-import { beforeAll, describe, expect, test, vi } from "vitest";
+import { beforeAll, describe, expect, it, test, vi } from "vitest";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { emptyGoalState } from "../src/core/goals.js";
@@ -1131,7 +1131,7 @@ describe("InteractiveMode live context usage", () => {
 describe("InteractiveMode Fast mode concurrency", () => {
 	type FastCommandContext = {
 		connectionState?: { sessionId: string; serviceTier: ServiceTier; thinkingLevel: ThinkingLevel };
-		fastModeToggleQueue: Promise<void>;
+		serviceTierChangeQueue: Promise<void>;
 		agentConnection: {
 			setServiceTier: (serviceTier: ServiceTier) => Promise<void>;
 			getState: () => Promise<{ sessionId: string; serviceTier: ServiceTier }>;
@@ -1144,11 +1144,23 @@ describe("InteractiveMode Fast mode concurrency", () => {
 		getCurrentModel: () => Model<Api> | undefined;
 		currentModelSupportsFastMode: () => boolean;
 		getConnectionContextUsage: () => undefined;
+		getAvailableServiceTiers: () => ServiceTier[];
+		enqueueServiceTierChange: (
+			computeTier: () => ServiceTier | undefined,
+			formatStatus: (t: ServiceTier) => string,
+		) => void;
 	};
 
 	type FastInteractiveModePrototype = {
 		currentModelSupportsFastMode(this: FastCommandContext): boolean;
 		handleFastCommand(this: FastCommandContext): void;
+		handleTierCommand(this: FastCommandContext, arg: string): void;
+		getAvailableServiceTiers(this: FastCommandContext): ServiceTier[];
+		enqueueServiceTierChange(
+			this: FastCommandContext,
+			computeTier: () => ServiceTier | undefined,
+			formatStatus: (serviceTier: ServiceTier) => string,
+		): void;
 		getModelContextLabel(this: FastCommandContext, maxWidth: number): string;
 	};
 
@@ -1172,7 +1184,7 @@ describe("InteractiveMode Fast mode concurrency", () => {
 	function makeFastContext(model: Model<Api> = testModel("openai-codex", "gpt-5.5", "openai-codex-responses")) {
 		const context: FastCommandContext = {
 			connectionState: { sessionId: "session-1", serviceTier: "default", thinkingLevel: "high" },
-			fastModeToggleQueue: Promise.resolve(),
+			serviceTierChangeQueue: Promise.resolve(),
 			agentConnection: undefined as never,
 			footer: { invalidate: vi.fn() },
 			subagentSummaryLine: { invalidate: vi.fn() },
@@ -1184,6 +1196,9 @@ describe("InteractiveMode Fast mode concurrency", () => {
 			getCurrentModel: () => model,
 			getConnectionContextUsage: () => undefined,
 			currentModelSupportsFastMode: () => fastInteractiveModePrototype.currentModelSupportsFastMode.call(context),
+			getAvailableServiceTiers: () => fastInteractiveModePrototype.getAvailableServiceTiers.call(context),
+			enqueueServiceTierChange: (computeTier, formatStatus) =>
+				fastInteractiveModePrototype.enqueueServiceTierChange.call(context, computeTier, formatStatus),
 		};
 		context.agentConnection = {
 			setServiceTier: vi.fn(async (serviceTier) => {
@@ -1215,7 +1230,7 @@ describe("InteractiveMode Fast mode concurrency", () => {
 		expect(context.agentConnection.setServiceTier).toHaveBeenCalledWith("priority");
 
 		firstToggle.resolve();
-		await context.fastModeToggleQueue;
+		await context.serviceTierChangeQueue;
 
 		expect(context.agentConnection.setServiceTier).toHaveBeenNthCalledWith(1, "priority");
 		expect(context.agentConnection.setServiceTier).toHaveBeenNthCalledWith(2, "default");
@@ -1229,7 +1244,7 @@ describe("InteractiveMode Fast mode concurrency", () => {
 		let releaseQueue!: () => void;
 		const context = makeFastContext();
 		const originalConnection = context.agentConnection;
-		context.fastModeToggleQueue = new Promise<void>((resolve) => {
+		context.serviceTierChangeQueue = new Promise<void>((resolve) => {
 			releaseQueue = resolve;
 		});
 
@@ -1245,7 +1260,7 @@ describe("InteractiveMode Fast mode concurrency", () => {
 		};
 		context.connectionState = { sessionId: "session-2", serviceTier: "default", thinkingLevel: "high" };
 		releaseQueue();
-		await context.fastModeToggleQueue;
+		await context.serviceTierChangeQueue;
 
 		expect(originalConnection.setServiceTier).not.toHaveBeenCalled();
 		expect(context.agentConnection.setServiceTier).not.toHaveBeenCalled();
@@ -1275,9 +1290,29 @@ describe("InteractiveMode Fast mode concurrency", () => {
 		};
 		context.connectionState = { sessionId: "session-2", serviceTier: "default", thinkingLevel: "high" };
 		finishToggle.resolve();
-		await context.fastModeToggleQueue;
+		await context.serviceTierChangeQueue;
 
 		expect(context.patchConnectionState).not.toHaveBeenCalled();
 		expect(context.showStatus).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		["openai", "openai-responses", true],
+		["openai-codex", "openai-codex-responses", false],
+	] as const)("/tier flex on $0 reaches the connection: $2", async (provider, api, reaches) => {
+		const context = makeFastContext(testModel(provider, "gpt-5.5", api));
+
+		fastInteractiveModePrototype.handleTierCommand.call(context, "flex");
+		await context.serviceTierChangeQueue;
+
+		if (reaches) {
+			expect(context.agentConnection.setServiceTier).toHaveBeenCalledWith("flex");
+			expect(context.patchConnectionState).toHaveBeenCalledWith({ serviceTier: "flex" });
+			expect(context.showError).not.toHaveBeenCalled();
+		} else {
+			expect(context.agentConnection.setServiceTier).not.toHaveBeenCalled();
+			expect(context.patchConnectionState).not.toHaveBeenCalled();
+			expect(context.showError).toHaveBeenCalledOnce();
+		}
 	});
 });
