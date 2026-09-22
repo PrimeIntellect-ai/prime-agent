@@ -509,13 +509,19 @@ impl AgentView {
     /// `None` when nothing but whitespace is spanned. The selection is
     /// cleared either way.
     pub fn end_active_selection(&mut self) -> Option<String> {
-        if self.selection.mode == Some(SelectionMode::Transcript) {
-            self.resolve_sparse_geometry();
-        }
         let text = match self.selection.mode {
             Some(SelectionMode::Transcript) => {
                 let sel = ordered_selection(self.selection.anchor, self.selection.head);
                 sel.and_then(|(start, end)| {
+                    let sparse = crate::image_component::with_fullscreen_image_fallback(|| {
+                        self.sparse_selection_rows(start.line, end.line - start.line + 1)
+                    });
+                    if let Some(rows) = sparse {
+                        return SelectionState::extract_transcript_text(&rows, start, end);
+                    }
+                    self.resolve_sparse_geometry();
+                    let (start, end) =
+                        ordered_selection(self.selection.anchor, self.selection.head)?;
                     let rows = crate::image_component::with_fullscreen_image_fallback(|| {
                         let layout = self.layout_pass(self.layout_width);
                         self.transcript_window(&layout, start.line, end.line - start.line + 1)
@@ -815,6 +821,72 @@ mod tests {
         v.render_frame(80, 12);
         v.render_frame(80, 12);
         assert_eq!(v.end_active_selection(), Some(expected));
+    }
+
+    #[test]
+    fn copy_after_scroll_before_redraw_matches_last_logical_endpoints() {
+        let mut v = view();
+        let mut oracle = view();
+        for index in 0..100 {
+            let entry = ChatEntry::Status {
+                text: format!("row {index}"),
+                kind: crate::chat::StatusKind::Info,
+            };
+            v.push_entry(entry.clone());
+            oracle.push_entry(entry);
+        }
+        let reference =
+            crate::image_component::with_fullscreen_image_fallback(|| oracle.render_transcript(80));
+        v.render_frame(80, 12);
+        assert!(v.begin_selection(2, 0));
+        v.extend_active_selection(4, 80);
+        v.scroll_by(-3);
+        v.extend_active_selection(2, 0);
+        let (mut start, mut end) = ordered_selection(v.selection.anchor, v.selection.head).unwrap();
+        start.line = reference.len() - (crate::view::lazy::TAIL_SELECTION_ORIGIN - start.line);
+        end.line = reference.len() - (crate::view::lazy::TAIL_SELECTION_ORIGIN - end.line);
+        let expected =
+            SelectionState::extract_transcript_text(&reference[start.line..=end.line], start, end);
+        assert_eq!(v.end_active_selection(), expected);
+    }
+
+    #[test]
+    fn sparse_copy_across_multiple_tail_frames_matches_full_rows() {
+        for reverse in [false, true] {
+            let mut v = view();
+            let mut oracle = view();
+            for index in 0..200 {
+                let entry = ChatEntry::Status {
+                    text: format!("row {index}: 界 wide text"),
+                    kind: crate::chat::StatusKind::Info,
+                };
+                v.push_entry(entry.clone());
+                oracle.push_entry(entry);
+            }
+            let reference = crate::image_component::with_fullscreen_image_fallback(|| {
+                oracle.render_transcript(80)
+            });
+            v.render_frame(80, 12);
+            if reverse {
+                v.scroll_by(-50);
+                v.render_frame(80, 12);
+            }
+            assert!(v.begin_selection(2, 2));
+            v.scroll_by(if reverse { 35 } else { -35 });
+            v.render_frame(80, 12);
+            v.render_frame(80, 12);
+            v.extend_active_selection(4, 10);
+            let (mut start, mut end) =
+                ordered_selection(v.selection.anchor, v.selection.head).unwrap();
+            start.line = reference.len() - (crate::view::lazy::TAIL_SELECTION_ORIGIN - start.line);
+            end.line = reference.len() - (crate::view::lazy::TAIL_SELECTION_ORIGIN - end.line);
+            let expected = SelectionState::extract_transcript_text(
+                &reference[start.line..=end.line],
+                start,
+                end,
+            );
+            assert_eq!(v.end_active_selection(), expected);
+        }
     }
 
     #[test]

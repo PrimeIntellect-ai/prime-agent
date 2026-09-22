@@ -70,6 +70,71 @@ impl AgentView {
         }
     }
 
+    /// Extract a logical row range from the current exact sparse cursor.
+    /// The coordinate origin cancels in the displacement, so tail selections
+    /// need neither a global row count nor a transcript-wide layout pass.
+    pub(crate) fn sparse_selection_rows(
+        &mut self,
+        start: usize,
+        height: usize,
+    ) -> Option<Vec<Line>> {
+        let window = self.sparse_window?;
+        if window.detail != self.detail || window.width != self.layout_width {
+            return None;
+        }
+        let (mut section, mut row) = window.cursor?;
+        let origin = self.selection_window_start();
+        let mut movement = if start >= origin {
+            isize::try_from(start - origin).ok()?
+        } else {
+            isize::try_from(origin - start).ok()?.checked_neg()?
+        }
+        .checked_add(window.pending)?;
+        let splash = std::sync::Arc::new(render_splash(&self.chrome, &self.theme, window.width));
+        let tail = std::sync::Arc::new(self.render_transcript_tail(window.width));
+        let last = self.chat.len() + 1;
+        let section_rows = |view: &mut Self, section: usize| {
+            if section == 0 {
+                splash.clone()
+            } else if section == last {
+                tail.clone()
+            } else {
+                view.sparse_entry_rows(section - 1, window.width)
+            }
+        };
+        while movement < 0 {
+            let step = row.min(movement.unsigned_abs());
+            row -= step;
+            movement += step as isize;
+            if movement == 0 || section == 0 {
+                break;
+            }
+            section -= 1;
+            row = section_rows(self, section).len();
+        }
+        while movement > 0 {
+            let count = section_rows(self, section).len();
+            let step = count.saturating_sub(row).min(movement as usize);
+            row += step;
+            movement -= step as isize;
+            if movement == 0 || section == last {
+                break;
+            }
+            section += 1;
+            row = 0;
+        }
+        let mut rows = Vec::new();
+        while rows.len() < height && section <= last {
+            let source = section_rows(self, section);
+            let from = row.min(source.len());
+            let to = from.saturating_add(height - rows.len()).min(source.len());
+            rows.extend_from_slice(&source[from..to]);
+            section += 1;
+            row = 0;
+        }
+        Some(rows)
+    }
+
     pub(crate) fn resolve_sparse_geometry(&mut self) {
         let Some(window) = self.sparse_window.take() else {
             return;

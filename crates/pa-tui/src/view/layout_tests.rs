@@ -189,6 +189,28 @@ fn cold_variable_detail_tail_and_streaming_selection() {
 }
 
 #[test]
+fn same_window_copy_is_bounded_for_100k_entries() {
+    let mut view = view();
+    for index in 0..100_000 {
+        view.push_entry(ChatEntry::Status {
+            text: format!("row {index}"),
+            kind: StatusKind::Info,
+        });
+    }
+    view.render_frame(80, 24);
+    assert!(view.begin_selection(2, 0));
+    view.extend_active_selection(5, 80);
+    ENTRY_VISITS.with(|count| count.set(0));
+    ENTRY_RENDERS.with(|count| count.set(0));
+    assert!(view.end_active_selection().is_some());
+    assert!(ENTRY_VISITS.with(std::cell::Cell::get) < 10);
+    assert_eq!(ENTRY_RENDERS.with(std::cell::Cell::get), 0);
+    ENTRY_VISITS.with(|count| count.set(0));
+    view.render_frame(80, 24);
+    assert!(ENTRY_VISITS.with(std::cell::Cell::get) < 30);
+}
+
+#[test]
 fn mutation_invalidates_every_detail_slot() {
     let mut view = view();
     view.push_entry(ChatEntry::Status {
