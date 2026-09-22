@@ -115,6 +115,7 @@ impl UnixSocketAddress {
     /// Re-anchor a too-long path through `/proc/self/fd/<dir fd>/<file name>`.
     #[cfg(target_os = "linux")]
     fn through_dir_fd(path: &Path) -> Result<(std::path::PathBuf, std::fs::File)> {
+        use anyhow::Context;
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::OpenOptionsExt;
         // `O_PATH` (Linux `asm-generic`): an fd that references the directory
