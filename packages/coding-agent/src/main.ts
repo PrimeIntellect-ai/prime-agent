@@ -1605,8 +1605,7 @@ export async function main(args: string[], options?: MainOptions) {
 				clientOwned: isClientOwnedDaemonSession(appMode, parsed.noSession),
 				noSession: parsed.noSession,
 				supportsExtensionUi: appMode === "rpc",
-				// The ACP adapter never issues a scheduled-job command, so its
-				// attach opts it into heartbeats_changed pushes instead.
+				// ACP never issues a scheduled-job command, so attach opts it into heartbeats_changed pushes.
 				tracksHeartbeats: appMode === "acp",
 			}));
 		} catch (error) {

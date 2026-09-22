@@ -894,8 +894,7 @@ describe("daemon supervisor scheduled-session wake", () => {
 		await supervisor.recomputeScheduledSessionWake();
 		expect(supervisor.scheduledWakeTimer).toBeDefined();
 
-		// A worker covering the root drops the snapshot's covered rows in
-		// memory: the residency event, not a fresh scan, converges the timer.
+		// A covering worker drops the covered rows in memory: the residency event, not a scan, converges the timer.
 		const resident = makeWorker("resident", []);
 		resident.descriptor.sessionFile = sessionFile;
 		supervisor.workers.set("resident", resident);
@@ -905,9 +904,7 @@ describe("daemon supervisor scheduled-session wake", () => {
 		expect(supervisor.scheduledWakeTimer).toBeUndefined();
 		supervisor.workers.delete("resident");
 
-		// The store mutations below are external writes the supervisor did not
-		// perform: each is signaled with the invalidating broadcast, and the
-		// recompute it arms enumerates fresh.
+		// The store mutations below are external writes; signal each with the invalidating broadcast.
 		await store.pauseHeartbeat("stale-active");
 		supervisor.broadcastHeartbeatsChanged();
 		await supervisor.scheduledWakeRecompute;

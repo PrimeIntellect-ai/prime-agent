@@ -70,10 +70,8 @@ export async function bindActiveSessionState(
 
 	state.runtime.setRebindSession(async () => {
 		await bindActiveSessionState(state, callbacks);
-		// The session_replaced broadcast must land after the (possibly async)
-		// replacement bookkeeping: a floating promise here would both let clients
-		// observe pre-rebind job state and turn a cron-store failure during a
-		// session switch into an unhandled rejection.
+		// A floating promise here would let clients observe pre-rebind job state
+		// and turn a cron-store failure into an unhandled rejection.
 		await callbacks.sessionReplaced?.(state);
 		callbacks.broadcast(state, {
 			type: "session_replaced",

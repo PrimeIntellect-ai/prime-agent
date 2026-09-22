@@ -95,9 +95,7 @@ export type DaemonClientCapability =
 	| "slim_attach"
 	| "chunked_snapshot"
 	| "client_owned_sessions"
-	// Client declaration, not a command gate: attaching with it opts the client
-	// into heartbeats_changed pushes (the ACP adapter attaches without ever
-	// issuing a scheduled-job command).
+	// Client declaration, not a command gate: attach with it opts into heartbeats_changed pushes.
 	| "heartbeat_catalog";
 export type DaemonPromptAdmissionCancellationStatus = "cancelled" | "owned" | "unknown";
 export interface DaemonPromptAdmissionCancellationResult {

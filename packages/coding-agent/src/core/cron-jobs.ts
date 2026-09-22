@@ -114,12 +114,7 @@ interface CronJobsStateSnapshot {
 	state: CronJobsState;
 }
 
-/**
- * Per-path outcome of a state mutation: dispatches created for that path plus
- * caller results gathered from it. The narrow-lock probe in mutateStates
- * applies mutators once to find changeable paths and discards the outcome, so
- * mutators must return every result here instead of writing closure variables.
- */
+/** Mutators must return all outcomes here: mutateStates probes them once and discards that pass's results. */
 interface CronJobsStateMutation<T> {
 	dispatches: AgentCronDispatch[];
 	results: T[];
@@ -844,13 +839,8 @@ export class AgentCronJobStore {
 	}
 
 	/**
-	 * Read-modify-write across the store's paths. Phase one applies the mutator
-	 * to lock-free snapshot clones to find the paths it can change and discards
-	 * the outcomes; phase two re-reads exactly those paths under their locks,
-	 * applies for real, and writes the changed ones. Untouched paths never take
-	 * a lock, while every written path stays guarded against concurrent
-	 * processes. The mutator can run twice per path, so it must be pure apart
-	 * from its return value.
+	 * Applies the mutator twice (lock-free probe to find changeable paths, then for
+	 * real under those paths' locks); the mutator must be pure apart from its return value.
 	 */
 	private async mutateStates<T>(
 		mutator: (state: CronJobsState) => CronJobsStateMutation<T>,
@@ -866,10 +856,8 @@ export class AgentCronJobStore {
 				changedPaths.push(path);
 			}
 		}
-		// A probe that found nothing takes every path's lock and applies on
-		// fresh reads: a change that landed in the probe->lock gap (a
-		// concurrent process's dispatch record during startup recovery) is then
-		// applied under the locks instead of missed until the next restart.
+		// An empty probe locks every path instead: a change landing in the
+		// probe->lock gap is applied under the locks, not missed until restart.
 		const pathsToLock = changedPaths.length > 0 ? changedPaths : paths;
 		let changed = false;
 		const outcome = await withCronJobsStateLocks(pathsToLock, () => {
@@ -889,8 +877,7 @@ export class AgentCronJobStore {
 			}
 			return mutation;
 		});
-		// Only this mutation's own writes notify: an external write racing the
-		// before/after signature reads must not fire a spurious change event.
+		// Only this mutation's own writes notify; an external racing write must not fire a spurious event.
 		if (changed && heartbeatCatalogSignature(this.readJobs()) !== previousHeartbeats) {
 			this.notifyHeartbeatChange();
 		}
@@ -898,12 +885,8 @@ export class AgentCronJobStore {
 	}
 
 	/**
-	 * Merge a fresh job set across the registered artifacts. A lock-free pass
-	 * of the pure merge over each path's snapshot finds the paths whose state
-	 * the write can change; exactly those take the lock, so a mutation of one
-	 * session no longer locks every registered path. A concurrent writer that
-	 * makes an unprobed path changeable after the probe fails closed instead of
-	 * writing a path this mutation did not lock.
+	 * Merges across the registered artifacts, locking only the paths whose state the
+	 * write can change, so a mutation of one session locks only that session's path.
 	 */
 	private async writeJobs(jobs: readonly AgentCronJob[]): Promise<void> {
 		const previousHeartbeats = heartbeatCatalogSignature(this.readJobs());
@@ -913,10 +896,7 @@ export class AgentCronJobStore {
 			if (unregistered) {
 				throw new Error(`Cron job ${unregistered.id} targets an unregistered session artifact`);
 			}
-			// Phase one (lock-free): run the pure merge against each path's
-			// snapshot state and lock only the paths whose state the write can
-			// change. The merge is pure, so recomputing under the locks below
-			// from the fresh reads is safe.
+			// Phase one (lock-free): the merge is pure, so recomputing under the locks is safe.
 			const snapshotBySessionId = new Map(
 				[...this.sessionArtifactFiles].map(([sessionId, path]) => [
 					sessionId,
@@ -936,8 +916,7 @@ export class AgentCronJobStore {
 					[...this.sessionArtifactFiles].map(([sessionId, path]) => [sessionId, this.readState(path)]),
 				);
 				const merged = mergeJobsStates(currentBySessionId, jobs);
-				// A concurrent writer must not make an unprobed path changeable:
-				// fail closed rather than write a path this mutation did not lock.
+				// A concurrent writer must not make an unprobed path changeable: fail closed.
 				for (const [sessionId, path] of this.sessionArtifactFiles) {
 					if (changedPaths.has(path)) continue;
 					const current = currentBySessionId.get(sessionId);
@@ -1041,9 +1020,8 @@ export class AgentCronScheduler {
 		this.stopped = false;
 		if (!this.hasStarted) {
 			this.hasStarted = true;
-			// The recovery must settle before the first claim: a stale dispatch
-			// record still on disk would make claimDue skip a due job once.
-			// start() stays synchronous, so the arm rides the recovery chain.
+			// Claims must wait: a stale dispatch record still on disk would make
+			// claimDue skip a due job once. start() stays synchronous.
 			this.initialRecovery = this.store
 				.recoverInterruptedDispatches(this.now())
 				// A failed startup recovery surfaces again on the next claim; it must not strand the scheduler.
@@ -1608,8 +1586,7 @@ function isDueJob(job: AgentCronJob, now: Date): boolean {
 	return job.status === "active" && job.nextRunAt !== undefined && Date.parse(job.nextRunAt) <= now.getTime();
 }
 
-// A contended cross-process lock retries asynchronously: the old Atomics.wait
-// busy-wait blocked the event loop up to 1s per path.
+// A contended cross-process lock retries asynchronously so it never blocks the event loop.
 const CRON_JOBS_LOCK_ATTEMPTS = 100;
 const CRON_JOBS_LOCK_RETRY_MS = 10;
 
@@ -1645,10 +1622,8 @@ async function acquireCronJobsLock(path: string): Promise<() => Promise<void>> {
 }
 
 /**
- * Serialize a read-modify-write against other processes for exactly the given
- * paths. Acquisition and the ELOCKED retry are async (proper-lockfile lock()),
- * so contention never blocks the event loop; the critical section itself runs
- * synchronously once every lock is held.
+ * Serialize a read-modify-write against other processes: acquisition retries
+ * asynchronously, and the critical section runs synchronously once held.
  */
 async function withCronJobsStateLocks<T>(paths: readonly string[], action: () => T): Promise<T> {
 	const releases: Array<() => Promise<void>> = [];
@@ -1733,10 +1708,8 @@ function writeJobsFile(path: string, jobs: readonly AgentCronJob[], mergeCurrent
 function writeJobsState(path: string, state: CronJobsState): CronJobsFileIdentity | undefined {
 	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 	let written: CronJobsFileIdentity | undefined;
-	// One fsync per write: the temp file's contents are durable before the
-	// rename, which itself is atomic. Losing the rename only after a power
-	// failure rolls the mutation back to the previous valid file, which the
-	// interrupted-dispatch recovery already tolerates.
+	// One fsync per write: losing the atomic rename after a power failure rolls
+	// back to the previous valid file, which recovery already tolerates.
 	writeFileAtomicSync(path, `${JSON.stringify(state, null, 2)}\n`, {
 		mode: 0o600,
 		fsync: true,
@@ -1747,7 +1720,6 @@ function writeJobsState(path: string, state: CronJobsState): CronJobsFileIdentit
 	return written;
 }
 
-/** Record a dispatch's outcome in one path's state; returns the updated job, if any. */
 function recordDispatchResultInState(
 	state: CronJobsState,
 	dispatchId: string,
@@ -1848,11 +1820,8 @@ function recoverInterruptedInState(
 }
 
 /**
- * The pure merge a full-list write performs across the registered paths:
- * retained jobs that an incoming job does not move out of a session, fresh
- * incoming jobs for the session, and dispatches routed to the session that
- * now owns their job. Returns the next state per session id, so callers can
- * compare per path without re-running the whole merge.
+ * The pure merge a full-list write performs across the registered paths; returns
+ * the next state per session id so callers can compare per path.
  */
 function mergeJobsStates(
 	currentBySessionId: ReadonlyMap<string, CronJobsState>,

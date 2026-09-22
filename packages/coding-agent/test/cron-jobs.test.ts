@@ -1227,8 +1227,7 @@ describe("AgentCronScheduler", () => {
 		});
 
 		const run = scheduler.runDue(new Date("2026-01-01T12:34:10.000Z"));
-		// The async lock means claims take a few I/O ticks; wait for both
-		// runJob invocations instead of assuming one macrotask is enough.
+		// The async lock spans a few I/O ticks; wait for both runJob invocations.
 		await whenBothStarted;
 
 		expect(started).toEqual(expect.arrayContaining(["active-1", "active-2"]));
@@ -1273,8 +1272,7 @@ describe("AgentCronScheduler", () => {
 		});
 
 		const run = scheduler.runDue(new Date("2026-01-01T12:35:00.000Z"));
-		// The async lock means the claim takes a few I/O ticks; wait for the
-		// first runJob invocation instead of assuming one macrotask is enough.
+		// The async lock spans a few I/O ticks; wait for the first runJob invocation.
 		await new Promise<void>((resolve) => {
 			firstStarted = resolve;
 		});

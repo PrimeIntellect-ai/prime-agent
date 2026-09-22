@@ -286,9 +286,7 @@ describe("daemon supervisor heartbeat aggregation", () => {
 			success: true,
 			data: { heartbeats: [{ job: { id: "heartbeat-1" } }, { job: { id: "heartbeat-2" } }] },
 		});
-		// The second list serves both workers from their cached snapshots: the
-		// recovering worker keeps its last complete one, and the healthy worker
-		// is not re-forwarded per request.
+		// The second list serves both workers from their cached snapshots: no re-forward per request.
 		expect(supervisor.forwardToWorker).toHaveBeenCalledTimes(2);
 	});
 

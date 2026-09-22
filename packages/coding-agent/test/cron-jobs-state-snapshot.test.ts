@@ -174,8 +174,7 @@ describe("AgentCronJobStore state snapshots", () => {
 		readCounts.clear();
 
 		// A fresh inode is guaranteed by creating the replacement while the
-		// original still exists; recreating in place can reuse the freed inode
-		// and then dev/ino/size/mtime all match, which is not the case under test.
+		// original still exists; in-place recreation can reuse the freed inode.
 		const replacementPath = `${storePath}.replaced`;
 		writeFileSync(replacementPath, bytes);
 		rmSync(storePath);
@@ -402,8 +401,7 @@ describe("AgentCronJobStore state snapshots", () => {
 		});
 		readCounts.clear();
 
-		// The mutator runs once lock-free to probe and once under the lock; both
-		// passes throw, and the unpersisted partial edit never reaches reads.
+		// The mutator runs once lock-free to probe and once under the lock; both passes throw.
 		await expect(
 			(
 				store as unknown as {
