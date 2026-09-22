@@ -478,11 +478,14 @@ export class ModelRegistry {
 		readonly authStorage: AuthStorage,
 		private modelsJsonPath: string | undefined,
 	) {
-		const cachePath = (name: string) => (modelsJsonPath ? join(dirname(modelsJsonPath), "catalog", name) : undefined);
+		const cachePath = (name: string) => (modelsJsonPath ? join(dirname(modelsJsonPath), "models", name) : undefined);
+		const legacyCachePaths = (name: string) =>
+			modelsJsonPath ? [join(dirname(modelsJsonPath), name), join(dirname(modelsJsonPath), "catalog", name)] : [];
 		this.providerCatalog = new CatalogCache(
 			PROVIDER_MODEL_CATALOG_URL,
 			cachePath("provider-model-catalog.v1.json"),
 			(payload) => parseProviderModelCatalog(payload, this.bundledCatalogModels),
+			legacyCachePaths("provider-model-catalog.v1.json"),
 		);
 		this.loadModels();
 		const reference = new WeakRef(this);
@@ -557,7 +560,7 @@ export class ModelRegistry {
 
 	private primeInferenceCatalogCachePath(): string | undefined {
 		return this.modelsJsonPath
-			? join(dirname(this.modelsJsonPath), "catalog", "prime-inference-models-cache.json")
+			? join(dirname(this.modelsJsonPath), "models", "prime-inference-models-cache.json")
 			: undefined;
 	}
 

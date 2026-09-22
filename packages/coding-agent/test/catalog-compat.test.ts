@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Api, createModelCatalog, getModels, type Model, parseModelCatalog } from "@earendil-works/pi-ai";
@@ -281,6 +281,64 @@ describe("remote catalog compatibility", () => {
 			expect(modelAfterFailedRefresh?.baseUrl).toBe(activeModel.baseUrl);
 		} finally {
 			session.dispose();
+		}
+	});
+});
+
+describe("legacy cache locations", () => {
+	it("reads a legacy flat cache when the primary path is missing", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-legacy-cache-"));
+		try {
+			const payload = createModelCatalog([getModels("openai")[0]!]);
+			writeFileSync(
+				join(dir, "legacy.v1.json"),
+				JSON.stringify({ url: "https://catalog.example/models", scope: "public", fetchedAt: Date.now(), payload }),
+			);
+			const cache = new CatalogCache(
+				"https://catalog.example/models",
+				join(dir, "new", "primary.v1.json"),
+				(p) => parseModelCatalog(p).models,
+				[join(dir, "legacy.v1.json")],
+			);
+			expect(cache.get("public")?.length).toBeGreaterThan(0);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("prefers the primary cache when both exist", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-primary-cache-"));
+		try {
+			const legacy = createModelCatalog([getModels("openai")[0]!]);
+			const primary = createModelCatalog([getModels("anthropic")[0]!]);
+			mkdirSync(join(dir, "new"), { recursive: true });
+			writeFileSync(
+				join(dir, "legacy.v1.json"),
+				JSON.stringify({
+					url: "https://catalog.example/models",
+					scope: "public",
+					fetchedAt: Date.now() - 1000,
+					payload: legacy,
+				}),
+			);
+			writeFileSync(
+				join(dir, "new", "primary.v1.json"),
+				JSON.stringify({
+					url: "https://catalog.example/models",
+					scope: "public",
+					fetchedAt: Date.now(),
+					payload: primary,
+				}),
+			);
+			const cache = new CatalogCache(
+				"https://catalog.example/models",
+				join(dir, "new", "primary.v1.json"),
+				(p) => parseModelCatalog(p).models,
+				[join(dir, "legacy.v1.json")],
+			);
+			expect(cache.get("public")?.[0]?.provider).toBe("anthropic");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 });

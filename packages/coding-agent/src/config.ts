@@ -547,6 +547,16 @@ export function getCatalogCacheDir(): string {
 	return join(getAgentDir(), "catalog");
 }
 
+/** Model catalog caches: provider catalog snapshot + Prime Inference model cache. */
+export function getModelCacheDir(): string {
+	return join(getAgentDir(), "models");
+}
+
+/** MCP service catalog cache. */
+export function getMcpCacheDir(): string {
+	return join(getAgentDir(), "mcp");
+}
+
 /** Directory where daemon and client diagnostic logs are written (e.g. ~/.prime/agent/logs/). */
 export function getLogsDir(): string {
 	return join(getAgentDir(), "logs");

@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { existsSync, readFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import {
 	type Api,
 	isPrivatePrimeInferenceModelId,
@@ -90,15 +91,24 @@ export function readCachedPrimeInferenceModels(
 	cachePath: string,
 	bundledModels: readonly Model<"openai-completions">[],
 ): Model<"openai-completions">[] | undefined {
-	if (!existsSync(cachePath)) return undefined;
-	try {
-		return buildPrimeInferenceModels(
-			bundledModels,
-			parsePrimeInferenceModelCatalog(JSON.parse(readFileSync(cachePath, "utf8")) as unknown),
-		);
-	} catch {
-		return undefined;
+	// Backward-compatible cache reads: the historical flat location (beside
+	// models.json) and the intermediate "catalog" location remain readable so
+	// upgrading never costs a cold fetch; writes go to the new path only.
+	const flat = join(dirname(cachePath), "..", basename(cachePath));
+	const catalog = join(dirname(cachePath), "..", "catalog", basename(cachePath));
+	const candidates = [cachePath, flat, catalog];
+	for (const candidate of candidates) {
+		if (!existsSync(candidate)) continue;
+		try {
+			return buildPrimeInferenceModels(
+				bundledModels,
+				parsePrimeInferenceModelCatalog(JSON.parse(readFileSync(candidate, "utf8")) as unknown),
+			);
+		} catch {
+			// Try the next candidate location.
+		}
 	}
+	return undefined;
 }
 
 function writeCache(cachePath: string, value: unknown): void {

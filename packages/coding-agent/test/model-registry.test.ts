@@ -350,9 +350,9 @@ describe("ModelRegistry", () => {
 					supports_reasoning: false,
 				},
 			});
-			mkdirSync(join(tempDir, "catalog"), { recursive: true });
+			mkdirSync(join(tempDir, "models"), { recursive: true });
 			writeFileSync(
-				join(tempDir, "catalog", "prime-inference-models-cache.json"),
+				join(tempDir, "models", "prime-inference-models-cache.json"),
 				JSON.stringify({ object: "list", data: catalogEntries }),
 			);
 			writeRawModelsJson({

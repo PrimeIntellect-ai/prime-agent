@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { getCatalogCacheDir } from "../config.js";
+import { getAgentDir, getCatalogCacheDir, getModelCacheDir } from "../config.js";
 import { CatalogCache } from "./model-catalog-cache.js";
 
 export const DEFAULT_MODEL_CATALOG_URL =
@@ -13,8 +13,10 @@ let defaultModelCache: CatalogCache<string> | undefined;
 function getDefaultModelCache(): CatalogCache<string> {
 	defaultModelCache ??= new CatalogCache(
 		DEFAULT_MODEL_CATALOG_URL,
-		join(getCatalogCacheDir(), "default-model.v1.json"),
+		join(getModelCacheDir(), "default-model.v1.json"),
 		(payload) => parseDefaultModelCatalog(payload),
+		// Historical locations remain readable; writes go to the models cache dir.
+		[join(getAgentDir(), "default-model.v1.json"), join(getCatalogCacheDir(), "default-model.v1.json")],
 	);
 	return defaultModelCache;
 }

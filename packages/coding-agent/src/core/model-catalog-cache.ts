@@ -60,6 +60,13 @@ export class CatalogCache<T> {
 		private readonly url: string,
 		private readonly cachePath: string | undefined,
 		private readonly parse: (payload: unknown, scope: string) => T,
+		/**
+		 * Older cache locations for the same source. Read-only fallbacks: a snapshot
+		 * found at a legacy path is used as-is (and superseded on the next write to
+		 * the primary path), so upgrading never costs a cold fetch and downgrading
+		 * keeps working against files the old version can still read.
+		 */
+		private readonly legacyCachePaths: readonly string[] = [],
 	) {}
 
 	get(scope: string): T | undefined {
@@ -70,8 +77,13 @@ export class CatalogCache<T> {
 		this.snapshot = undefined;
 		this.lastAttempt = undefined;
 		if (!this.cachePath) return undefined;
+		this.snapshot = this.readSnapshot(this.cachePath, scope) ?? this.readLegacySnapshot(scope);
+		return this.snapshot?.models;
+	}
+
+	private readSnapshot(path: string, scope: string): Snapshot<T> | undefined {
 		try {
-			const cached = JSON.parse(readFileSync(this.cachePath, "utf8")) as Partial<Snapshot<T>> & { url?: unknown };
+			const cached = JSON.parse(readFileSync(path, "utf8")) as Partial<Snapshot<T>> & { url?: unknown };
 			if (
 				cached.url !== this.url ||
 				cached.scope !== scope ||
@@ -79,7 +91,7 @@ export class CatalogCache<T> {
 				!Number.isFinite(cached.fetchedAt)
 			)
 				return undefined;
-			this.snapshot = {
+			return {
 				scope,
 				fetchedAt: cached.fetchedAt,
 				etag: typeof cached.etag === "string" ? cached.etag : undefined,
@@ -87,9 +99,17 @@ export class CatalogCache<T> {
 				models: this.parse(cached.payload, scope),
 			};
 		} catch {
-			// Invalid or missing disk state falls back to the catalog bundled with the client.
+			// Invalid or missing disk state falls back to the next candidate.
+			return undefined;
 		}
-		return this.snapshot?.models;
+	}
+
+	private readLegacySnapshot(scope: string): Snapshot<T> | undefined {
+		for (const path of this.legacyCachePaths) {
+			const snapshot = this.readSnapshot(path, scope);
+			if (snapshot) return snapshot;
+		}
+		return undefined;
 	}
 
 	clear(scope: string): void {

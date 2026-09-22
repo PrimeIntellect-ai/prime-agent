@@ -6,7 +6,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { LocalCatalogLoadResult, McpServiceEntry, McpServiceSetupField } from "@earendil-works/pi-ai/mcp";
 import {
 	createMcpOAuthProvider,
@@ -199,8 +199,17 @@ function getRemoteMcpCache(cachePath?: string): CatalogCache<readonly McpService
 	if (!cachePath) return undefined;
 	let cache = remoteMcpCaches.get(cachePath);
 	if (!cache) {
-		cache = new CatalogCache(REMOTE_MCP_SERVICE_CATALOG_URL, cachePath, (payload) =>
-			Object.freeze(parseMcpServiceCatalogFile(payload).entries),
+		// Historical cache locations (beside the agent files, and the intermediate
+		// "catalog" directory) remain readable so upgrading never costs a cold fetch.
+		const legacy = [
+			join(dirname(cachePath), "..", basename(cachePath)),
+			join(dirname(cachePath), "..", "catalog", basename(cachePath)),
+		];
+		cache = new CatalogCache(
+			REMOTE_MCP_SERVICE_CATALOG_URL,
+			cachePath,
+			(payload) => Object.freeze(parseMcpServiceCatalogFile(payload).entries),
+			legacy,
 		);
 		remoteMcpCaches.set(cachePath, cache);
 	}
