@@ -158,7 +158,7 @@ mod tests {
         RESTYLE_REBUILDS.with(|rebuilds| assert_eq!(rebuilds.get(), 0));
         view.extend_active_selection(row + 4, 6);
         let base_len = base.len();
-        let styled = view.selection_styled_window(base, start);
+        let styled_rows = view.selection_styled_window(base, start);
         RESTYLE_ROWS.with(|rows| {
             assert_eq!(
                 rows.get(),
@@ -167,7 +167,7 @@ mod tests {
             )
         });
         RESTYLE_REBUILDS.with(|rebuilds| assert_eq!(rebuilds.get(), 0));
-        assert_eq!(styled.len(), base_len);
+        assert_eq!(styled_rows.len(), base_len);
         assert!(
             styled.iter().any(|row| row
                 .iter()
