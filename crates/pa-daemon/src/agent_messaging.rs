@@ -503,8 +503,7 @@ impl AgentObserveController for LinkAgentObserveController {
     }
 }
 
-/// Flatten the supervisor's `list` rows (session summaries) into roster
-/// summaries for `agent_observe`.
+/// Project the supervisor's cached peer roster into observation summaries.
 fn summaries_from_roster(sessions: Vec<Value>) -> Vec<AgentObserveSummary> {
     sessions
         .into_iter()
@@ -521,8 +520,7 @@ fn summaries_from_roster(sessions: Vec<Value>) -> Vec<AgentObserveSummary> {
                 _ => None,
             };
             let queued = session
-                .get("sessionActions")
-                .and_then(|actions| actions.get("queuedCount"))
+                .get("unfinishedActionCount")
                 .and_then(Value::as_u64)
                 .unwrap_or_default() as usize;
             AgentObserveSummary {
@@ -543,7 +541,7 @@ fn summaries_from_roster(sessions: Vec<Value>) -> Vec<AgentObserveSummary> {
                     .map(str::to_string),
                 relationship,
                 runtime_kind: Some(runtime_kind),
-                status: if session.get("activity").and_then(Value::as_str) == Some("idle") {
+                status: if session.get("status").and_then(Value::as_str) == Some("idle") {
                     "inactive".to_string()
                 } else {
                     "running".to_string()
