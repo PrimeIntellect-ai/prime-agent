@@ -1,4 +1,13 @@
-import { appendFileSync, chmodSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	appendFileSync,
+	chmodSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -549,6 +558,23 @@ describe("harness refinement", () => {
 		},
 	);
 
+	it("loads an entry that stores the grouping as path and resaves it as topic", () => {
+		const dir = makeTempDir();
+		writeFileSync(
+			getHarnessStatePath(dir),
+			'{"schema":1,"entries":{"memory":{"legacy":{"id":"legacy","kind":"memory","title":"Legacy","content":"c","path":"repo/testing"}}}}',
+			"utf8",
+		);
+
+		const state = loadHarnessState(dir, "local");
+		expect(state.entries.memory.legacy.topic).toBe("repo/testing");
+
+		saveHarnessState(dir, state);
+		const saved = JSON.parse(readFileSync(getHarnessStatePath(dir), "utf8")).entries.memory.legacy;
+		expect(saved.topic).toBe("repo/testing");
+		expect(saved).not.toHaveProperty("path");
+	});
+
 	it("extracts well-formed refinement history from custom session entries", () => {
 		const result: RefinementResult = {
 			id: "refine_1",
@@ -691,7 +717,9 @@ describe("harness refinement", () => {
 			{ id: "refine_target" },
 		);
 
-		const rollback = await refineHarness([], state, [target], {} as never, "api-key", {
+		// An older build recorded the edit snapshots with the legacy field name.
+		const recorded = JSON.parse(JSON.stringify(target).replaceAll('"topic":', '"path":')) as RefinementResult;
+		const rollback = await refineHarness([], state, [recorded], {} as never, "api-key", {
 			rollbackId: "refine_target",
 		});
 

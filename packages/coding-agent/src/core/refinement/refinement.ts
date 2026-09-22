@@ -30,7 +30,7 @@ const DEFAULT_OVERVIEW_CONTENT_LIMIT = 180;
  * the shell flag was already false, i.e. identical renders), so equality
  * across the change is render-safe.
  */
-const HARNESS_DIGEST_FINGERPRINT_VERSION = 1;
+const HARNESS_DIGEST_FINGERPRINT_VERSION = 2;
 
 export type RefinementKind = "prompt" | "memory" | "skill" | "subagent";
 export type RefinementAction = "create" | "update" | "delete";
@@ -286,7 +286,7 @@ function objectRecord(value: unknown): Record<string, unknown> | undefined {
 }
 
 /** Grouping label of a stored entry, or undefined when it carries none. Older files spell it `path`. */
-export function harnessTopic(entry: { topic?: unknown; path?: unknown }): string | undefined {
+function harnessTopic(entry: { topic?: unknown; path?: unknown }): string | undefined {
 	if (typeof entry.topic === "string") return entry.topic;
 	return typeof entry.path === "string" ? entry.path : undefined;
 }
@@ -393,29 +393,12 @@ export function mergeHarnessStates(globalState: HarnessState, localState?: Harne
 	return merged;
 }
 
-/**
- * Writers that predate the topic field drop unknown keys and would resave every entry
- * ungrouped. Mirror the grouping under the old `path` key so those writers round-trip
- * it. Drop the mirror once no pre-topic build can reach a shared harness store.
- */
-function serializeHarnessState(state: HarnessState): HarnessState {
-	const serialized = emptyHarnessState();
-	serialized.schema = state.schema;
-	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
-		for (const [id, entry] of Object.entries(state.entries[kind])) {
-			serialized.entries[kind][id] = { ...entry, path: entry.topic } as HarnessEntry;
-		}
-	}
-	serialized.refinements = state.refinements;
-	return serialized;
-}
-
 export function saveHarnessState(harnessStateDir: string, state: HarnessState): string {
 	const statePath = getHarnessStatePath(harnessStateDir);
 	mkdirSync(harnessStateDir, { recursive: true });
 	const targetPath = realpathIfPresentSync(statePath);
 	const mode = existsSync(targetPath) ? statSync(targetPath).mode & 0o777 : 0o600;
-	writeFileAtomicSync(targetPath, `${JSON.stringify(serializeHarnessState(state), null, 2)}\n`, { mode });
+	writeFileAtomicSync(targetPath, `${JSON.stringify(state, null, 2)}\n`, { mode });
 	return statePath;
 }
 
@@ -820,7 +803,7 @@ export function harnessDigestFingerprint(
 			kind: entry.kind,
 			id: entry.id,
 			title: entry.title,
-			path: entry.path,
+			topic: entry.topic,
 			version: entry.version,
 			content: entry.content,
 			// Only skills render the kernel call contract, so another kind can
@@ -993,7 +976,7 @@ export function normalizeRefinementProposal(value: unknown): RefinementProposal 
 				id: typeof edit.id === "string" ? edit.id : undefined,
 				title: typeof edit.title === "string" ? edit.title : undefined,
 				content: typeof edit.content === "string" ? edit.content : undefined,
-				topic: harnessTopic(edit),
+				topic: typeof edit.topic === "string" ? edit.topic : undefined,
 				reference: objectRecord(edit.reference),
 				arguments: objectRecord(edit.arguments),
 				metadata:

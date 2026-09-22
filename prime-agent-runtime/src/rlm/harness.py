@@ -228,37 +228,20 @@ def _validate_python_skill_reference(reference: dict[str, Any] | None, entry_nam
     return normalized
 
 
-def _serialize_entry(entry: HarnessEntry) -> dict[str, Any]:
-    record = asdict(entry)
-    # Writers that predate the topic field drop unknown keys and would resave every
-    # entry ungrouped. Mirror the value under the old "path" key so those writers
-    # round-trip it. Drop the mirror once no pre-topic build can reach a shared store.
-    record["path"] = entry.topic
-    return record
-
-
 def _default_topic(kind: HarnessKind) -> str:
     return "policy" if kind == "prompt" else "general"
 
 
-def _validate_kind_extras(
+def _reject_skill_only_fields(
     kind: HarnessKind,
     reference: dict[str, Any] | None,
     arguments: dict[str, Any] | None,
-    *,
-    required: bool,
-) -> dict[str, Any] | None:
-    """Check the skill-only call contract fields, returning the normalized reference."""
+) -> None:
+    """Reject the skill-only call contract fields on the other kinds."""
     if kind != "skill":
         for name, value in (("reference", reference), ("arguments", arguments)):
             if value is not None:
                 raise ValueError(f"{name} is only accepted for kind='skill', not kind={kind!r}")
-        return reference
-    # An update that omits the reference keeps the stored one (see _upsert) instead of
-    # forcing every title/content edit to re-send the full Python call contract.
-    if reference is None and not required:
-        return None
-    return _validate_python_skill_reference(reference)
 
 
 def _type_name(value: Any) -> str:
@@ -522,7 +505,7 @@ class HarnessState:
         data = {
             "schema": 1,
             "entries": {
-                kind: {entry_id: _serialize_entry(entry) for entry_id, entry in records.items()}
+                kind: {entry_id: asdict(entry) for entry_id, entry in records.items()}
                 for kind, records in self.entries.items()
             },
             "refinements": [asdict(event) for event in self.refinements],
@@ -708,7 +691,7 @@ class HarnessState:
         "general" otherwise; it was named ``path`` before.
         """
         self._require_kind(kind)
-        reference = _validate_kind_extras(kind, reference, arguments, required=True)
+        _reject_skill_only_fields(kind, reference, arguments)
         id, global_ = _strip_scope_prefix(id, global_)
         if target := self._global_target(global_, kwargs):
             return target.create_memory(
@@ -756,7 +739,7 @@ class HarnessState:
     ) -> HarnessEntry:
         """Update an existing harness entry; omitted fields keep their value."""
         self._require_kind(kind)
-        reference = _validate_kind_extras(kind, reference, arguments, required=False)
+        _reject_skill_only_fields(kind, reference, arguments)
         id, global_ = _strip_scope_prefix(id, global_)
         if target := self._global_target(global_, kwargs):
             return target.update_memory(
