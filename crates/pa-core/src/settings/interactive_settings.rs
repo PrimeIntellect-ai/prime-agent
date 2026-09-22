@@ -272,7 +272,7 @@ impl SettingsManager {
     }
 
     /// `enabledModels` (TS `getEnabledModels`/`setEnabledModels`): the
-    /// persisted model-scope patterns the scoped-models selector saves.
+    /// persisted model-scope patterns (`None` is no filter).
     pub fn get_enabled_models(&self) -> Option<Vec<String>> {
         self.settings().enabled_models.clone()
     }

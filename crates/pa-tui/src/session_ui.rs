@@ -197,8 +197,8 @@ pub(crate) struct SessionUi {
     /// seeded from the attach state and kept live by `service_tier_changed`
     /// events; the `/fast` toggle reads it.
     service_tier: Option<String>,
-    /// The client-process settings seam (`/settings`, `/fullscreen`,
-    /// scoped-models save); the composition root supplies it.
+    /// The client-process settings seam (`/settings`, `/fullscreen`);
+    /// the composition root supplies it.
     client_settings: Option<std::sync::Arc<dyn crate::client_settings::ClientSettings>>,
     /// The side-question run currently streaming (TS `activeSideQuestionId`):
     /// at most one run per client, exactly like the daemon enforces.
@@ -2485,18 +2485,6 @@ impl SessionUi {
                 self.track_command_used("settings");
                 self.open_settings_menu(view).await;
             }
-            // `/scoped-models` (TS `showModelsSelector`): the checkbox list
-            // that picks the models Alt+M cycles through.
-            "scoped-models" => {
-                if !resolved.args.is_empty() {
-                    view.editor
-                        .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
-                    self.error_row("Usage: /scoped-models", view);
-                    return Ok(());
-                }
-                self.track_command_used("scoped-models");
-                self.open_scoped_models_selector(view).await?;
-            }
             // `/btw` (TS `handleSideQuestion` via the submit ladder; `/side`
             // resolves to it): start a side question without touching the
             // session transcript; the pane stays open for follow-ups until
@@ -3112,7 +3100,7 @@ impl SessionUi {
     }
 
     // ------------------------------------------------------------------
-    // Settings and scoped models (/settings, /scoped-models)
+    // Settings (/settings)
     // ------------------------------------------------------------------
 
     /// `/settings` (TS `showSettingsSelector`): read the daemon state and
@@ -3458,138 +3446,6 @@ impl SessionUi {
         {
             self.error_row(&format!("{error:#}"), view);
         }
-    }
-
-    /// `/scoped-models` (TS `showModelsSelector`): resolve the enabled
-    /// model ids from the session scope (the daemon state) or the settings
-    /// patterns, then mount the selector.
-    async fn open_scoped_models_selector(&mut self, view: &mut AgentView) -> Result<()> {
-        if self.model_catalog.is_empty() {
-            self.note("No models available", view);
-            return Ok(());
-        }
-        let state = self.connection_state(view).await;
-        let session_scope: Vec<String> = state
-            .as_ref()
-            .and_then(|state| state.get("scopedModels"))
-            .and_then(Value::as_array)
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter_map(|entry| {
-                        let model = entry.get("model")?;
-                        Some(format!(
-                            "{}/{}",
-                            model.get("provider").and_then(Value::as_str)?,
-                            model.get("id").and_then(Value::as_str)?
-                        ))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let enabled_ids = if !session_scope.is_empty() {
-            Some(session_scope)
-        } else {
-            // TS falls back to the settings patterns resolved against the
-            // catalog.
-            self.client_settings
-                .as_ref()
-                .and_then(|settings| settings.enabled_models())
-                .map(|patterns| {
-                    crate::scoped_models::resolve_pattern_scope(&patterns, &self.model_catalog)
-                })
-        };
-        view.scoped_models = Some(crate::scoped_models::ScopedModelsSelector::new(
-            &self.model_catalog,
-            enabled_ids,
-        ));
-        self.dirty = true;
-        // TS refreshes the catalog when the selector opens past its TTL.
-        if self.model_refresh_due(false) {
-            self.spawn_model_catalog_refresh();
-        }
-        Ok(())
-    }
-
-    /// One key press while the scoped-models selector is open.
-    async fn handle_scoped_models_key(
-        &mut self,
-        key: KeyEvent,
-        view: &mut AgentView,
-    ) -> Result<()> {
-        let Some(id) = key_event_to_id(&key) else {
-            return Ok(());
-        };
-        let action = {
-            let Some(selector) = view.scoped_models.as_mut() else {
-                return Ok(());
-            };
-            selector.handle_key(&id, view.editor.keybindings())
-        };
-        match action {
-            crate::scoped_models::ScopedModelsAction::None => {}
-            crate::scoped_models::ScopedModelsAction::Cancel => {
-                view.scoped_models = None;
-            }
-            crate::scoped_models::ScopedModelsAction::Change { enabled_ids } => {
-                // TS `updateSessionModels`: a strict subset scopes the
-                // session; all enabled (or none) clears the filter.
-                if let Some(enabled) = enabled_ids {
-                    if !enabled.is_empty() && enabled.len() < self.model_catalog.len() {
-                        let scoped_models: Vec<Value> = enabled
-                            .iter()
-                            .filter_map(|full_id| {
-                                let (provider, model_id) = full_id.split_once('/')?;
-                                let model = self.model_catalog.iter().find(|model| {
-                                    model.provider == provider && model.id == model_id
-                                })?;
-                                serde_json::to_value(model).ok()
-                            })
-                            .map(|model| serde_json::json!({ "model": model }))
-                            .collect();
-                        self.daemon_switch(
-                            DaemonCommand::SetScopedModels {
-                                id: None,
-                                active_session_id: self.active_session_id.clone(),
-                                scoped_models: Value::Array(scoped_models),
-                                rest: Default::default(),
-                            },
-                            view,
-                        )
-                        .await;
-                        return Ok(());
-                    }
-                }
-                self.daemon_switch(
-                    DaemonCommand::SetScopedModels {
-                        id: None,
-                        active_session_id: self.active_session_id.clone(),
-                        scoped_models: Value::Array(Vec::new()),
-                        rest: Default::default(),
-                    },
-                    view,
-                )
-                .await;
-            }
-            crate::scoped_models::ScopedModelsAction::Persist { enabled_ids } => {
-                // TS `onPersist`: all enabled clears the settings filter.
-                let patterns = match &enabled_ids {
-                    Some(enabled) if enabled.len() < self.model_catalog.len() => {
-                        Some(enabled.clone())
-                    }
-                    _ => None,
-                };
-                if let Some(settings) = &self.client_settings {
-                    if let Err(error) = settings.set_enabled_models(patterns) {
-                        self.error_row(&format!("{error:#}"), view);
-                    } else {
-                        self.note("Model selection saved to settings", view);
-                    }
-                }
-            }
-        }
-        self.dirty = true;
-        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -5616,13 +5472,10 @@ impl SessionUi {
         if view.provider_auth.is_some() {
             return self.handle_provider_auth_key(key, view).await;
         }
-        // The `/settings` menu and `/scoped-models` selector own the frame
-        // the same way (TS `showSelector`).
+        // The `/settings` menu owns the frame the same way (TS
+        // `showSelector`).
         if view.settings_menu.is_some() {
             return self.handle_settings_menu_key(key, view).await;
-        }
-        if view.scoped_models.is_some() {
-            return self.handle_scoped_models_key(key, view).await;
         }
         // The `/share` loader owns the frame while an upload runs (TS the
         // loader takes focus): the cancel binding aborts, other keys are

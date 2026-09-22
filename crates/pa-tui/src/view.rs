@@ -136,9 +136,6 @@ pub struct AgentView {
     /// The `/settings` inline menu (TS `SettingsSelectorComponent`):
     /// mounted in the editor dock like the tree and fork selectors.
     pub settings_menu: Option<crate::settings_menu::SettingsMenu>,
-    /// The `/scoped-models` selector (TS `ScopedModelsSelectorComponent`):
-    /// mounted in the editor dock the same way.
-    pub scoped_models: Option<crate::scoped_models::ScopedModelsSelector>,
     /// The `?` quick-shortcut guide (TS `shortcutGuideContainer`): while
     /// set, its markdown renders at the transcript tail, above the dock;
     /// the next submission clears it (TS `clearShortcutGuide`).
@@ -231,7 +228,6 @@ impl AgentView {
             reload_box: None,
             side_pane: None,
             settings_menu: None,
-            scoped_models: None,
             shortcut_guide: None,
             show_images: true,
             fullscreen: true,
@@ -1073,7 +1069,6 @@ impl AgentView {
             || self.provider_auth.is_some()
             || self.reload_box.is_some()
             || self.settings_menu.is_some()
-            || self.scoped_models.is_some()
         {
             // TS's editor container holds the prompt context (the detail
             // hint) and the editor; `showSelector` replaces only the editor
@@ -1093,8 +1088,6 @@ impl AgentView {
                 dock.extend(self.render_reload_box(message, width));
             } else if let Some(menu) = self.settings_menu.as_ref() {
                 dock.extend(menu.render(&self.theme, width));
-            } else if let Some(selector) = self.scoped_models.as_ref() {
-                dock.extend(selector.render(&self.theme, width, self.editor.keybindings()));
             }
             Some(dock)
         } else {
@@ -1255,7 +1248,6 @@ impl AgentView {
             || self.provider_auth.is_some()
             || self.reload_box.is_some()
             || self.settings_menu.is_some()
-            || self.scoped_models.is_some()
         {
             return None;
         }

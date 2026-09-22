@@ -178,17 +178,6 @@ impl ClientSettings for CliClientSettings {
         set_warnings_anthropic_extra_usage,
         bool
     );
-
-    fn enabled_models(&self) -> Option<Vec<String>> {
-        match self.manager() {
-            Ok(manager) => manager.get_enabled_models(),
-            Err(_) => None,
-        }
-    }
-
-    fn set_enabled_models(&self, models: Option<Vec<String>>) -> Result<()> {
-        self.manager()?.set_enabled_models(models)
-    }
 }
 
 #[cfg(test)]
@@ -219,19 +208,12 @@ mod tests {
         settings.set_theme("dark").expect("theme");
         settings.set_idle_eviction_minutes("off").expect("idle");
         settings.set_tree_filter_mode("all").expect("tree filter");
-        settings
-            .set_enabled_models(Some(vec!["anthropic/*".to_string()]))
-            .expect("models");
         settings.set_show_images(false).expect("show images");
 
         assert!(!settings.fullscreen());
         assert_eq!(settings.theme().as_deref(), Some("dark"));
         assert_eq!(settings.idle_eviction_minutes(), "off");
         assert_eq!(settings.tree_filter_mode(), "all");
-        assert_eq!(
-            settings.enabled_models(),
-            Some(vec!["anthropic/*".to_string()])
-        );
         assert!(!settings.show_images());
 
         // The persisted file the real consumers read.
@@ -242,6 +224,5 @@ mod tests {
         assert_eq!(value["theme"], "dark");
         assert_eq!(value["idleEvictionMinutes"], "off");
         assert_eq!(value["treeFilterMode"], "all");
-        assert_eq!(value["enabledModels"], serde_json::json!(["anthropic/*"]));
     }
 }

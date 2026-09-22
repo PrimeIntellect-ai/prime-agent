@@ -1,6 +1,6 @@
 //! The client-settings seam. pa-tui depends on pa-types only, so the
 //! interactive commands that read or persist user settings (`/settings`,
-//! `/fullscreen`, the scoped-models save) call this trait; the composition
+//! `/fullscreen`) call this trait; the composition
 //! root (pa-cli) implements it over the real settings manager. Every
 //! getter reads the effective settings with the TS default; every setter
 //! persists the global scope (TS `markModified` + `save`).
@@ -59,7 +59,4 @@ pub trait ClientSettings: Send + Sync {
     /// `warnings.anthropicExtraUsage` (TS default true).
     fn warnings_anthropic_extra_usage(&self) -> bool;
     fn set_warnings_anthropic_extra_usage(&self, enabled: bool) -> Result<()>;
-    /// `enabledModels` (the scoped-models patterns; `None` is no filter).
-    fn enabled_models(&self) -> Option<Vec<String>>;
-    fn set_enabled_models(&self, models: Option<Vec<String>>) -> Result<()>;
 }

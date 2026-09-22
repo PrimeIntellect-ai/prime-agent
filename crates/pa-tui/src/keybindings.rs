@@ -300,24 +300,6 @@ pub const APP_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
         "app.tree.toggleLabelTimestamp",
         def!(&["shift+t"], "Toggle tree label timestamps"),
     ),
-    ("app.models.save", def!(&["ctrl+s"], "Save model selection")),
-    (
-        "app.models.enableAll",
-        def!(&["ctrl+a"], "Enable all models"),
-    ),
-    ("app.models.clearAll", def!(&["ctrl+x"], "Clear all models")),
-    (
-        "app.models.toggleProvider",
-        def!(&["ctrl+p"], "Toggle all models for provider"),
-    ),
-    (
-        "app.models.reorderUp",
-        def!(&["alt+up"], "Move model up in order"),
-    ),
-    (
-        "app.models.reorderDown",
-        def!(&["alt+down"], "Move model down in order"),
-    ),
     (
         "app.tree.filter.default",
         def!(&["ctrl+d"], "Tree filter: default view"),
@@ -1284,8 +1266,8 @@ mod tests {
         );
         assert!(kb.get_keys("app.tools.expand").is_empty());
         assert_eq!(
-            kb.get_keys("app.models.toggleProvider"),
-            vec!["ctrl+p".to_string()]
+            kb.get_keys("app.heartbeats.open"),
+            vec!["ctrl+r".to_string()]
         );
         // No scope => a claim never frees its default.
         assert_eq!(kb.get_keys("app.agents.new"), vec!["ctrl+n".to_string()]);

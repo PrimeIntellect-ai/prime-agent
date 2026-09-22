@@ -257,7 +257,7 @@ pub struct InteractiveOptions {
     /// `sessionHasChildren`).
     pub session_has_children: bool,
     /// The client-process settings the interactive commands read and
-    /// persist (`/settings`, `/fullscreen`, the scoped-models save). The
+    /// persist (`/settings`, `/fullscreen`). The
     /// composition root implements the seam over the real store; `None`
     /// reports the commands' persistence as unavailable.
     pub client_settings: Option<std::sync::Arc<dyn crate::client_settings::ClientSettings>>,

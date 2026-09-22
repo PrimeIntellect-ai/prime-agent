@@ -2337,12 +2337,10 @@ async fn tui_side_question_pane_flow() {
     assert!(!leaked, "the side question stayed out of the session file");
 }
 
-/// `/settings` and `/scoped-models` (TS `showSettingsSelector` /
-/// `showModelsSelector`): both menus mount in the dock, the settings rows
-/// cycle, and the scoped-models picker toggles and persists through the
-/// settings seam.
+/// `/settings` (TS `showSettingsSelector`): the menu mounts in the dock
+/// and the settings rows cycle through the daemon switch.
 #[tokio::test]
-async fn tui_settings_menu_and_scoped_models_picker() {
+async fn tui_settings_menu_cycles_rows() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
@@ -2350,17 +2348,7 @@ async fn tui_settings_menu_and_scoped_models_picker() {
     let supervisor = spawn_supervisor(dir.path());
     let script = serde_json::json!({ "engine": "faux", "responses": [] });
     std::fs::write(dir.path().join("script.json"), script.to_string()).expect("write script");
-    let mut options = base_options(&supervisor, dir.path(), &session_dir);
-    // A catalog entry so the scoped-models picker has rows (TS renders the
-    // empty panel otherwise).
-    options.model_catalog = vec![serde_json::from_value(serde_json::json!({
-        "id": "claude-5", "name": "Claude 5", "api": "anthropic",
-        "provider": "anthropic", "baseUrl": "", "reasoning": false,
-        "input": ["text"],
-        "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-        "contextWindow": 100000, "maxTokens": 4096
-    }))
-    .expect("model")];
+    let options = base_options(&supervisor, dir.path(), &session_dir);
     let enter = || {
         pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Enter,
@@ -2380,16 +2368,6 @@ async fn tui_settings_menu_and_scoped_models_picker() {
             pa_tui::interactive::HeadlessStep::SettleIdle,
             // Enter on the first row (Auto-compact) cycles it to false —
             // the daemon `set_auto_compaction` switch.
-            enter(),
-            pa_tui::interactive::HeadlessStep::WaitMs(500),
-            pa_tui::interactive::HeadlessStep::SettleIdle,
-            escape(),
-            pa_tui::interactive::HeadlessStep::WaitMs(300),
-            // The scoped-models selector over the catalog.
-            pa_tui::interactive::HeadlessStep::Submit("/scoped-models".to_string()),
-            pa_tui::interactive::HeadlessStep::WaitMs(500),
-            pa_tui::interactive::HeadlessStep::SettleIdle,
-            // Enter toggles the model off (session-only).
             enter(),
             pa_tui::interactive::HeadlessStep::WaitMs(500),
             pa_tui::interactive::HeadlessStep::SettleIdle,
@@ -2421,21 +2399,6 @@ async fn tui_settings_menu_and_scoped_models_picker() {
     assert!(
         rendered.contains("Type to search · Enter/Space to change · Esc to cancel"),
         "the settings hint rendered:\n{rendered}"
-    );
-    assert!(
-        rendered.contains("Model Configuration"),
-        "the scoped-models selector rendered:\n{rendered}"
-    );
-    assert!(
-        rendered.contains("Session-only."),
-        "the scoped-models save hint rendered:\n{rendered}"
-    );
-    // The daemon's startup catalog refresh replaces the seeded catalog
-    // (the same refresh `/model` rides); the footer counts the toggle
-    // against the refreshed catalog.
-    assert!(
-        rendered.contains("1/") && rendered.contains("enabled (unsaved)"),
-        "the scoped-models footer counted the toggle and flagged it unsaved:\n{rendered}"
     );
 }
 

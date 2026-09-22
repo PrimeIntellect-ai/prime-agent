@@ -663,7 +663,7 @@ fn build_tui_options(
         // TS startup reads the settings theme (`getTheme() || "prime"`).
         theme: settings.get_theme().map(str::to_string).unwrap_or_default(),
         // The client-settings seam the interactive commands persist
-        // through (`/settings`, `/fullscreen`, the scoped-models save).
+        // through (`/settings`, `/fullscreen`).
         client_settings: Some(crate::client_settings::CliClientSettings::new(
             config.cwd.clone(),
             config.agent_dir.clone(),

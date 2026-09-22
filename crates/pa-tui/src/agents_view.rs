@@ -1267,7 +1267,16 @@ impl Renderer {
                 crate::input::spawn_terminal_reader(move |event| match event {
                     crossterm::event::Event::Key(key) => {
                         exit_guard.observe_key(&key);
-                        let id = crate::keys::key_event_to_id(&key).unwrap_or_default();
+                        // The id door filters the way every session handler
+                        // does (`let Some(id) = key_event_to_id(&key)`): kitty
+                        // Release events and unmappable keys map to no id, and
+                        // a forwarded empty id would run handle_key's "any
+                        // other key" arm — clearing the armed exit hint
+                        // between the presses of a double Ctrl+C, so the
+                        // second press re-arms instead of exiting.
+                        let Some(id) = crate::keys::key_event_to_id(&key) else {
+                            return true;
+                        };
                         ui_tx.send(UiInput::Key(id)).is_ok()
                     }
                     _ => true,
@@ -1525,12 +1534,17 @@ pub async fn run_agents_view(
                 // and returns instead of spinning forever.
                 UiInput::Done => mode.running = false,
             }
+            // The exit decision skips the draw: a handled Ctrl+C pair
+            // consumed the reader-armed force-quit deadline
+            // (note_ctrl_c_handled), and the draw is sync terminal I/O a
+            // wedged pty could block — break to the re-arming arm_for_exit
+            // with only memory ops in between.
+            if !mode.running {
+                break;
+            }
             if let Renderer::Terminal(_) = renderer {
                 renderer.draw(&mut mode);
             }
-        }
-        if !mode.running {
-            break;
         }
         tokio::select! {
             maybe_event = events.recv() => {
@@ -1937,6 +1951,21 @@ mod tests {
         mode.handle_key("ctrl+c");
         assert!(mode.exit_armed, "the cleared hint re-arms");
         assert!(mode.running);
+    }
+
+    /// Kitty-protocol key releases map to no key id: the reader filters
+    /// them the way every session handler does, so a release never runs
+    /// handle_key's "any other key" arm — which would clear the armed
+    /// exit hint between the presses of a double Ctrl+C, and the second
+    /// press would re-arm the hint instead of exiting.
+    #[test]
+    fn kitty_releases_map_to_no_key_id() {
+        let mut release = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::CONTROL,
+        );
+        release.kind = crossterm::event::KeyEventKind::Release;
+        assert!(crate::keys::key_event_to_id(&release).is_none());
     }
 
     #[test]

@@ -59,7 +59,6 @@ pub(crate) mod prompt_highlight;
 pub mod prompt_stash;
 pub mod provider_auth;
 pub mod queued;
-pub mod scoped_models;
 pub(crate) mod search_input;
 pub mod selection;
 pub mod session;
