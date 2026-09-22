@@ -89,8 +89,8 @@ pub(crate) type ShareNote = Result<GistOutcome, String>;
 pub(crate) type ReloadNote = Result<(), String>;
 
 /// A landed heartbeat-catalog refresh for the `/heartbeats` view (TS
-/// `refreshHeartbeatCatalog`'s fetch result): the scoped, sorted rows or
-/// the fetch error that replaces them.
+/// `refreshHeartbeatCatalog`'s fetch result): the scoped, sorted rows, or
+/// the fetch error that keeps the last catalog (stale-while-revalidate).
 pub(crate) struct HeartbeatsUpdate {
     pub heartbeats: Vec<HeartbeatEntry>,
     pub fetch_error: Option<String>,
@@ -5138,21 +5138,38 @@ impl SessionUi {
         update: HeartbeatsUpdate,
         view: &mut AgentView,
     ) {
+        // TS stale-while-revalidate: a failed refresh keeps the last catalog
+        // (the tray keeps counting the heartbeats it knows; the daemon's
+        // scheduler keeps firing while its catalog read times out), and the
+        // failure surfaces only inside an open manager view.
+        if let Some(error) = update.fetch_error {
+            if let Some(picker) = view.heartbeats_picker.as_mut() {
+                picker.set_fetch_error(Some(error));
+            }
+            self.dirty = true;
+            return;
+        }
         let mut heartbeats = self.scope_heartbeats(update.heartbeats);
         sort_heartbeats(&mut heartbeats);
         self.heartbeat_catalog = heartbeats.clone();
         if let Some(picker) = view.heartbeats_picker.as_mut() {
-            picker.apply_catalog(heartbeats, update.fetch_error);
+            picker.apply_catalog(heartbeats, None);
         }
         self.sync_heartbeat_tray(view);
         self.dirty = true;
     }
 
     /// Fetch the scoped catalog and open the `/heartbeats` view over it
-    /// (TS `showHeartbeatManager`): the fetch error replaces an empty
-    /// list, and the tray label follows the landed catalog.
+    /// (TS `showHeartbeatManager`): the fetch error opens over the cached
+    /// catalog with the failure surfaced inside the view (stale-while-
+    /// revalidate), and the tray label follows the landed catalog.
     async fn open_heartbeats_view(&mut self, view: &mut AgentView) {
-        let (heartbeats, fetch_error) = self.fetch_scoped_heartbeats().await;
+        let (fetched, fetch_error) = self.fetch_scoped_heartbeats().await;
+        let heartbeats = if fetch_error.is_some() {
+            self.heartbeat_catalog.clone()
+        } else {
+            fetched
+        };
         self.heartbeat_catalog = heartbeats.clone();
         view.heartbeats_picker = Some(HeartbeatsPicker::new(
             heartbeats,
@@ -7201,6 +7218,22 @@ mod tray_heartbeat_label_tests {
         assert_eq!(
             tray_heartbeat_label(&[active, paused], &kb).as_deref(),
             Some("2 heartbeats · 1 paused (Ctrl+R)")
+        );
+    }
+
+    /// The tray counts every in-scope heartbeat regardless of labels (the
+    /// dogfood repro: unlabeled agent heartbeats fire on schedule but a
+    /// label-keyed count showed none of them).
+    #[test]
+    fn label_counts_unlabeled_heartbeats_too() {
+        let kb = KeybindingsManager::new();
+        let labeled = entry(job("labeled", "active"));
+        let mut unlabeled = job("unlabeled", "active");
+        unlabeled["label"] = serde_json::Value::Null;
+        let unlabeled = entry(unlabeled);
+        assert_eq!(
+            tray_heartbeat_label(&[labeled, unlabeled], &kb).as_deref(),
+            Some("2 heartbeats (Ctrl+R)")
         );
     }
 }

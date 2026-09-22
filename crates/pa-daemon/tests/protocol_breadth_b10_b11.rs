@@ -676,3 +676,116 @@ fn wave_b11_saved_sessions_wire_shapes() {
         "Cannot delete the currently active session"
     );
 }
+
+/// The heartbeat-catalog snapshot fallback (TS `worker.heartbeatSnapshot`):
+/// a worker too busy to answer a fresh `heartbeats_list` serves its
+/// last-good rows, so a slow turn cannot empty the merged catalog while its
+/// scheduler keeps firing. A worker whose snapshot went stale (its own
+/// `heartbeats_changed` since the snapshot) fails the response instead (TS
+/// `failed`), which is the client's keep-the-last-catalog signal.
+#[test]
+fn wave_b10_heartbeat_snapshot_fallback() {
+    let _serial = serial_lock();
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let (_daemon, mut client, session_id, _socket) = scripted_session(dir.path(), &agent_dir);
+
+    // One live heartbeat, then a good catalog read: the worker's snapshot
+    // holds the row.
+    client.send_command(
+        "s1",
+        json!({
+            "type": "heartbeat_set", "activeSessionId": session_id,
+            "schedule": "every 10m", "prompt": "check in"
+        }),
+    );
+    let response = client.read_response("s1");
+    assert_eq!(response["success"], true, "{response}");
+    client.send_command("s2", json!({ "type": "heartbeats_list" }));
+    let response = client.read_response("s2");
+    assert_eq!(response["success"], true, "{response}");
+    let heartbeats = response["data"]["heartbeats"].as_array().expect("rows");
+    assert_eq!(heartbeats.len(), 1, "{heartbeats:?}");
+
+    // Freeze the worker: the supervisor's 5s forward cannot answer, and the
+    // last-good snapshot keeps the row in the merged catalog.
+    let pid = worker_pid(&agent_dir);
+    stop(pid);
+    client.send_command("s3", json!({ "type": "heartbeats_list" }));
+    let response = client.read_response("s3");
+    assert_eq!(response["success"], true, "{response}");
+    let heartbeats = response["data"]["heartbeats"].as_array().expect("rows");
+    assert_eq!(heartbeats.len(), 1, "{heartbeats:?}");
+    assert_eq!(heartbeats[0]["job"]["prompt"], "check in");
+    cont(pid);
+
+    // A worker-side mutation marks the snapshot stale; a frozen worker then
+    // fails the response instead of serving the stale rows (TS `failed`).
+    client.send_command(
+        "s4",
+        json!({
+            "type": "heartbeat_update", "activeSessionId": session_id,
+            "action": "pause"
+        }),
+    );
+    let response = client.read_response("s4");
+    assert_eq!(response["success"], true, "{response}");
+    stop(pid);
+    client.send_command("s5", json!({ "type": "heartbeats_list" }));
+    let response = client.read_response("s5");
+    assert_eq!(response["success"], false, "{response}");
+    cont(pid);
+}
+
+/// The resident worker's pid from its persisted descriptor.
+fn worker_pid(agent_dir: &std::path::Path) -> u32 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(agent_dir.join("daemon-workers"))
+            .expect("daemon-workers dir")
+            .filter_map(|entry| entry.ok())
+            .flat_map(|entry| std::fs::read_dir(entry.path()).ok())
+            .flatten()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+            .collect();
+        paths.sort();
+        if let Some(path) = paths.last() {
+            let descriptor: Value =
+                serde_json::from_str(&std::fs::read_to_string(path).expect("descriptor read"))
+                    .expect("descriptor parse");
+            if let Some(pid) = descriptor["pid"].as_u64() {
+                return pid as u32;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "worker descriptor never appeared"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn stop(pid: u32) {
+    assert!(
+        Command::new("kill")
+            .args(["-STOP", &pid.to_string()])
+            .status()
+            .expect("kill -STOP")
+            .success(),
+        "SIGSTOP {pid} failed"
+    );
+}
+
+fn cont(pid: u32) {
+    assert!(
+        Command::new("kill")
+            .args(["-CONT", &pid.to_string()])
+            .status()
+            .expect("kill -CONT")
+            .success(),
+        "SIGCONT {pid} failed"
+    );
+}

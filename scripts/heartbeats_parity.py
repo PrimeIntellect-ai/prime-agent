@@ -1,19 +1,27 @@
 #!/usr/bin/env python3
-"""Heartbeats-view verifier (lane: heartbeats-menu).
+"""Heartbeats-view verifier (lane: heartbeats-menu; extended by the
+hb-viewer dogfood lane for unlabeled rows and the tray count).
 
 tmux user-level test driving `/heartbeats` with a user heartbeat (wire
-`heartbeat_set`) and an agent heartbeat (a kernel `rlm_heartbeat.create`
-tool-call turn) registered on the same daemon session, then attaching the
+`heartbeat_set`, no label) and two agent heartbeats (kernel
+`rlm_heartbeat.create` tool-call turns: one labeled, one unlabeled — the
+dogfood repro) registered on the same daemon session, then attaching the
 interactive TUI and checking the management surface:
 
-  1. `/heartbeats` opens the view: title, count label, one row per
-     heartbeat with its status, source labels, schedule.
-  2. Down navigates the inline list (the selection marker moves).
-  3. Enter opens the actions pane (Pause/Resume, Stop with the TS
+  1. The tray counts every scoped heartbeat (labeled or not) before the
+     view is ever opened.
+  2. `/heartbeats` opens the view: title, count label, one row per
+     heartbeat with its status, source labels, schedule; unlabeled rows
+     identify themselves by their instruction preview (TS
+     `primary: label || prompt || default name`).
+  3. Down navigates the inline list (the selection marker moves).
+  4. Enter opens the actions pane (Pause/Resume, Stop with the TS
      descriptions).
-  4. Enter applies Pause: the view returns to the list and the paused
+  5. Enter applies Pause: the view returns to the list and the paused
      status shows; the wire catalog confirms the applied status.
-  5. Escape closes the view; the tray heartbeat label stays.
+  6. Escape closes the view; the tray heartbeat label stays.
+  7. The unlabeled agent heartbeat's action pane titles it with the
+     default name and rides the instruction as the subtitle.
 
 Runs one side at a time (`--side rust` or `--side ts`) so the same steps
 produce evidence frames on both products for the parity diff; the
@@ -43,6 +51,7 @@ import batterylib as B  # noqa: E402
 HEARTBEAT_PROMPT = "user heartbeat ping instruction"
 AGENT_HB_INSTRUCTION = "agent heartbeat check instruction"
 AGENT_HB_LABEL = "agent hb"
+AGENT_UNLABELED_INSTRUCTION = "agent unlabeled heartbeat watch instruction"
 USER_SCHEDULE = "every 30m"
 AGENT_INTERVAL = "every 30m"
 SEED_REPLY = "heartbeats verifier seed reply"
@@ -278,15 +287,55 @@ class Verifier:
         self.evidence_json("01-agent-heartbeat-turn.json", agent_reply)
         self.record("agent heartbeat turn ran", agent_reply.get("success") is True)
 
-        # The wire catalog must now carry both scoped heartbeats.
-        catalog = self.wait_catalog(session_id, 2)
+        # The create-without-label path (the dogfood repro): a second agent
+        # heartbeat with no label. Its row must identify itself by its
+        # instruction preview (TS `primary: label || prompt || default name`).
+        unlabeled_code = (
+            "import rlm_heartbeat\n"
+            "await rlm_heartbeat.create(\n"
+            f"    {AGENT_UNLABELED_INSTRUCTION!r},\n"
+            f"    interval={AGENT_INTERVAL!r},\n"
+            ")\n"
+            "print('created')\n"
+        )
+        self.side.mock.set_responses(
+            [
+                {"toolCall": {"name": "ipython", "arguments": {"code": unlabeled_code}}},
+                {"text": "unlabeled agent heartbeat created"},
+            ]
+        )
+        unlabeled_reply = wire.request(
+            "hb-agent-unlabeled",
+            {
+                "type": "prompt_and_wait",
+                "activeSessionId": session_id,
+                "message": "create the unlabeled agent heartbeat",
+            },
+            timeout=240,
+        )
+        self.evidence_json("01b-unlabeled-heartbeat-turn.json", unlabeled_reply)
+        self.record("unlabeled agent heartbeat turn ran", unlabeled_reply.get("success") is True)
+
+        # The wire catalog must now carry all three scoped heartbeats.
+        catalog = self.wait_catalog(session_id, 3)
         self.evidence_json("02-wire-catalog.json", catalog)
         sources = sorted(
             (entry.get("job") or {}).get("source") or "" for entry in catalog or []
         )
         self.record(
-            "wire catalog lists the user and agent heartbeat",
-            sources == ["heartbeat", "rlm_heartbeat"],
+            "wire catalog lists the user and both agent heartbeats",
+            sources == ["heartbeat", "rlm_heartbeat", "rlm_heartbeat"],
+            evidence="02-wire-catalog.json",
+        )
+        unlabeled_rows = [
+            entry
+            for entry in catalog or []
+            if (entry.get("job") or {}).get("label") in (None, "")
+                and (entry.get("job") or {}).get("source") == "rlm_heartbeat"
+        ]
+        self.record(
+            "the wire row keeps the unlabeled agent heartbeat unlabeled",
+            len(unlabeled_rows) == 1,
             evidence="02-wire-catalog.json",
         )
         wire.close()
@@ -304,6 +353,21 @@ class Verifier:
         frame = self.ready(tmux, ">")
         self.evidence("03-attached.txt", frame)
 
+        # The tray counts every scoped heartbeat before the view is ever
+        # opened (the dogfood repro: unlabeled heartbeats fired on schedule
+        # while the tray showed none of them).
+        tray = frame
+        deadline = time.time() + 20
+        while time.time() < deadline and "3 heartbeats" not in tray:
+            time.sleep(0.5)
+            tray = B.tmux_capture(tmux)
+        self.evidence("03b-tray.txt", tray)
+        self.record(
+            "the tray counts the labeled and unlabeled heartbeats before the view opens",
+            "3 heartbeats" in tray,
+            evidence="03b-tray.txt",
+        )
+
         # /heartbeats opens the management view.
         self.send(tmux, "/heartbeats")
         time.sleep(2.5)
@@ -316,11 +380,14 @@ class Verifier:
         self.evidence("04-opened.txt", opened)
         checks = {
             "title": "Heartbeats" in opened,
-            "count label": "2 heartbeats" in opened,
+            "count label": "3 heartbeats" in opened,
             "user source": "Created by you" in opened,
             "agent source": "Created by agent" in opened,
             "schedule": USER_SCHEDULE in opened,
             "status": "active" in opened,
+            "labeled agent row": AGENT_HB_LABEL in opened,
+            "unlabeled agent row preview": AGENT_UNLABELED_INSTRUCTION in opened,
+            "unlabeled user row preview": HEARTBEAT_PROMPT in opened,
         }
         failed = [name for name, ok in checks.items() if not ok]
         self.record(
@@ -391,11 +458,46 @@ class Verifier:
             closed != applied,
             evidence="09-closed.txt",
         )
-        tray_ok = "2 heartbeats" in closed and "1 paused" in closed
+        tray_ok = "3 heartbeats" in closed and "1 paused" in closed
         self.record(
             "the tray heartbeat label renders after close",
             tray_ok,
             evidence="09-closed.txt",
+        )
+
+        # Reopen and inspect the unlabeled agent heartbeat's action pane: the
+        # title falls back to the default name (TS
+        # `label?.trim() || defaultHeartbeatName`), the instruction rides as
+        # the subtitle.
+        self.send(tmux, "/heartbeats")
+        time.sleep(2.5)
+        reopened = B.tmux_capture(tmux)
+        deadline = time.time() + 20
+        while time.time() < deadline and AGENT_UNLABELED_INSTRUCTION not in reopened:
+            time.sleep(0.5)
+            reopened = B.tmux_capture(tmux)
+        self.send(tmux, "Down", enter=False)
+        time.sleep(0.8)
+        self.send(tmux, "Down", enter=False)
+        time.sleep(0.8)
+        self.send(tmux, "Enter", enter=False)
+        time.sleep(1.0)
+        unlabeled_actions = B.tmux_capture(tmux)
+        self.evidence("10-unlabeled-actions.txt", unlabeled_actions)
+        unlabeled_checks = {
+            "default-name title": "Agent-created heartbeat" in unlabeled_actions,
+            "instruction subtitle": AGENT_UNLABELED_INSTRUCTION in unlabeled_actions,
+            "pause or resume row": (
+                "Pause heartbeat" in unlabeled_actions
+            )
+            or ("Resume heartbeat" in unlabeled_actions),
+        }
+        failed = [name for name, ok in unlabeled_checks.items() if not ok]
+        self.record(
+            "the unlabeled heartbeat's action pane names it by the default name with the instruction subtitle"
+            + (f" (missing: {', '.join(failed)})" if failed else ""),
+            not failed,
+            evidence="10-unlabeled-actions.txt",
         )
 
         B.tmux_kill(tmux)

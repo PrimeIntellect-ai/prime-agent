@@ -802,9 +802,14 @@ impl Supervisor {
                             .unwrap_or(ClientRouting::Broadcast);
                         let _ = events.send((routing, payload));
                     } else if outbound_type == "heartbeats_changed" {
-                        // A worker's heartbeat catalog changed (TS
-                        // `broadcastHeartbeatsChanged` re-broadcast): every
-                        // client re-reads the catalog.
+                        // The worker's own catalog changed: its last-good
+                        // snapshot can no longer be trusted as fresh (TS
+                        // `heartbeatSnapshotStale = true`), and every client
+                        // re-reads the catalog (TS
+                        // `broadcastHeartbeatsChanged` re-broadcast).
+                        reader_resident
+                            .heartbeat_snapshot_stale
+                            .store(true, Ordering::Relaxed);
                         let _ = events.send((ClientRouting::Broadcast, payload));
                     }
                 }

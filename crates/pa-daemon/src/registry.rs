@@ -46,6 +46,15 @@ pub(crate) struct ResidentWorker {
     /// The worker advertised `direct_peer_transport` in its `worker_auth`
     /// response (TS `workerAuthAdvertisesPeerTransport`).
     pub(crate) peer_transport_capable: AtomicBool,
+    /// The last-good selector-less heartbeats catalog the worker answered
+    /// with (TS `worker.heartbeatSnapshot`): served when the worker is too
+    /// busy to answer a fresh list, so a slow turn cannot empty the merged
+    /// catalog while its scheduler keeps firing.
+    pub(crate) heartbeat_snapshot: Mutex<Option<Vec<Value>>>,
+    /// The worker announced `heartbeats_changed` since the snapshot was
+    /// taken (TS `worker.heartbeatSnapshotStale`): the rows can no longer
+    /// be trusted as fresh.
+    pub(crate) heartbeat_snapshot_stale: AtomicBool,
 }
 
 impl ResidentWorker {
@@ -63,6 +72,8 @@ impl ResidentWorker {
             intentional_stop: AtomicBool::new(false),
             consecutive_failures: AtomicU32::new(0),
             peer_transport_capable: AtomicBool::new(false),
+            heartbeat_snapshot: Mutex::new(None),
+            heartbeat_snapshot_stale: AtomicBool::new(false),
         })
     }
 

@@ -408,6 +408,13 @@ impl HeartbeatsPicker {
         self.mode = Mode::List;
     }
 
+    /// Surface a background-catalog refresh failure (TS
+    /// `heartbeatCatalogFetchError`): the rows stay (stale-while-revalidate)
+    /// and the failure renders inside the view until the next good refresh.
+    pub fn set_fetch_error(&mut self, error: Option<String>) {
+        self.fetch_error = error;
+    }
+
     /// Return to the list pane without a job patch (TS `runAction`'s
     /// success path still ends in `{ type: "list" }`).
     pub fn back_to_list(&mut self) {
@@ -1146,6 +1153,25 @@ mod tests {
             picker.selected_heartbeat_id.as_deref(),
             picker.heartbeats.first().map(|entry| entry.job.id.as_str())
         );
+    }
+
+    /// A failed background refresh keeps the rows (TS stale-while-revalidate):
+    /// the tray keeps counting, and only the in-view failure line appears.
+    #[test]
+    fn a_fetch_error_keeps_the_rows() {
+        let mut picker = HeartbeatsPicker::new(entries(), None, 24);
+        picker.set_fetch_error(Some("daemon busy".to_string()));
+        assert_eq!(picker.heartbeats.len(), 2);
+        assert_eq!(picker.fetch_error.as_deref(), Some("daemon busy"));
+        let frame = picker.render(&theme(), 70, &kb());
+        let text: Vec<String> = frame
+            .iter()
+            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+            .collect();
+        assert!(text
+            .iter()
+            .any(|row| row.contains("Heartbeat refresh failed: daemon busy")));
+        assert!(text.iter().any(|row| row.contains("tick user-1")));
     }
 
     #[test]

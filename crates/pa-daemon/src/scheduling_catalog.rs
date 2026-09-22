@@ -11,6 +11,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -211,6 +212,13 @@ impl Supervisor {
     /// Selector-less `heartbeats_list` (TS supervisor arm): merge every
     /// live worker's heartbeats with the passive heartbeat jobs; the
     /// passive rows carry the saved session's name and first message.
+    ///
+    /// Each worker serves its last-good snapshot when it cannot answer a
+    /// fresh list (TS `worker.heartbeatSnapshot`): a busy turn must not
+    /// empty the merged catalog while the worker's scheduler keeps firing.
+    /// A worker with no usable snapshot fails the whole response (TS
+    /// `failed`), so the client keeps its own last catalog instead of
+    /// reading a partial merge as an emptied one.
     pub(crate) async fn handle_heartbeats_list_catalog(
         &self,
         command: &DaemonCommand,
@@ -220,26 +228,48 @@ impl Supervisor {
     ) -> (Vec<Value>, bool) {
         let mut heartbeats: Vec<Value> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
+        let mut failed: Option<DaemonResponse> = None;
         for resident in self.live_workers_in_creation_order().await {
             let response = self
                 .forward_with_catalog_timeout(&resident, command, client_id)
                 .await;
-            if !response.success {
+            // TS `heartbeatsFromResponse`: a success without a rows array is
+            // an empty catalog (a good snapshot), not a failure.
+            let list = if response.success {
+                Some(
+                    response
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.get("heartbeats"))
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default(),
+                )
+            } else {
                 self.log_line(&format!(
                     "Could not list heartbeats from a worker: {}",
-                    response.error.unwrap_or_default()
+                    response.error.clone().unwrap_or_default()
                 ));
-                continue;
-            }
-            let Some(list) = response
-                .data
-                .as_ref()
-                .and_then(|data| data.get("heartbeats"))
-                .and_then(Value::as_array)
-                .cloned()
-            else {
-                continue;
+                None
             };
+            let list = match list {
+                Some(list) => list,
+                None => {
+                    let fresh = !resident.heartbeat_snapshot_stale.load(Ordering::Relaxed);
+                    let snapshot = resident.heartbeat_snapshot.lock().await;
+                    match snapshot.as_ref().filter(|_| fresh) {
+                        Some(snapshot) => snapshot.clone(),
+                        None => {
+                            failed.get_or_insert(response);
+                            continue;
+                        }
+                    }
+                }
+            };
+            *resident.heartbeat_snapshot.lock().await = Some(list.clone());
+            resident
+                .heartbeat_snapshot_stale
+                .store(false, Ordering::Relaxed);
             for heartbeat in list {
                 let Some(id) = heartbeat
                     .get("job")
@@ -253,6 +283,13 @@ impl Supervisor {
                     heartbeats.push(heartbeat);
                 }
             }
+        }
+        // A worker with no usable snapshot fails the response (TS
+        // `failed`): the client keeps its last catalog instead of reading a
+        // partial merge as an emptied one.
+        if let Some(mut response) = failed {
+            response.id = Some(command_id.to_string());
+            return (vec![response_line(&response)], false);
         }
         // Passivated sessions keep their armed heartbeats; no worker can
         // list them.
