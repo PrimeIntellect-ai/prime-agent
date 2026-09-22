@@ -1375,6 +1375,9 @@ impl RlmSubagentHost for SupervisorChildSessions {
             this.command(&command, KILL_TIMEOUT_MS)
                 .await
                 .with_context(|| format!("kill RLM child \"{target}\""))?;
+            // The watcher owns an Arc to this record; deleting the roster
+            // row alone cannot stop its polling loop.
+            record.lock().await.closed_by_parent = true;
             let entry = {
                 let record = record.lock().await;
                 SupervisorChildSessions::entry(&record)
