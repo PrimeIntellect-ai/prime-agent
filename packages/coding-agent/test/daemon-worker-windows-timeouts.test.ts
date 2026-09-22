@@ -100,6 +100,7 @@ describe("Windows worker connection timing", () => {
 			refreshWorkerSummaries: async () => {},
 			persistWorker: () => {},
 			broadcastHeartbeatsChanged: () => {},
+			onWorkerResidencyGained: () => {},
 		}) as { adoptOrRecoverWorker(candidate: typeof worker): Promise<void> };
 		await supervisor.adoptOrRecoverWorker(worker);
 		expect(connectWorker).toHaveBeenCalledWith(worker, 90_000);

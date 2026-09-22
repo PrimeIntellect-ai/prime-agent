@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { lock } from "proper-lockfile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getSessionsDir } from "../src/config.js";
 import { type AgentCronJob, AgentCronJobStore, SESSION_SCHEDULED_JOBS_FILENAME } from "../src/core/cron-jobs.js";
@@ -58,6 +59,8 @@ interface SupervisorInternals {
 	log: ReturnType<typeof vi.fn>;
 	scheduledWakeTimer?: ReturnType<typeof setTimeout>;
 	scheduledWakeRecompute?: Promise<void>;
+	onWorkerResidencyGained(worker: object): void;
+	broadcastHeartbeatsChanged(): void;
 	scheduleIdleEvictionSweep(): void;
 	runIdleEvictionSweep(now?: number): Promise<void>;
 	recomputeScheduledSessionWake(): Promise<void>;
@@ -83,6 +86,10 @@ const tempDirs: string[] = [];
 afterEach(() => {
 	for (const directory of tempDirs.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
+
+async function settleAsyncWork(): Promise<void> {
+	await new Promise((resolve) => setImmediate(resolve));
+}
 
 function makeSummary(id: string, now: number, overrides: Partial<SessionSummary> = {}): SessionSummary {
 	return {
@@ -774,8 +781,13 @@ describe("daemon supervisor scheduled-session wake", () => {
 		return { sessionFile, store };
 	}
 
-	function armHeartbeat(store: AgentCronJobStore, sessionId: string, sessionFile: string, at: number): AgentCronJob {
-		return store.createHeartbeat({
+	async function armHeartbeat(
+		store: AgentCronJobStore,
+		sessionId: string,
+		sessionFile: string,
+		at: number,
+	): Promise<AgentCronJob> {
+		return await store.createHeartbeat({
 			activeSessionId: "stale-active",
 			sessionId,
 			sessionFile,
@@ -790,7 +802,7 @@ describe("daemon supervisor scheduled-session wake", () => {
 		const supervisor = makeSupervisor();
 		const root = makeScheduledSessionFile("wake-root");
 		const child = makeScheduledSessionFile("wake-child");
-		armHeartbeat(child.store, "wake-child", child.sessionFile, now - 10 * 60_000);
+		await armHeartbeat(child.store, "wake-child", child.sessionFile, now - 10 * 60_000);
 		supervisor.rlmSpawnLedgerInstance = {
 			family: vi.fn(async () => [
 				makeSavedInfo(root.sessionFile, "wake-root"),
@@ -821,7 +833,7 @@ describe("daemon supervisor scheduled-session wake", () => {
 		supervisor.createOrReuseWorker = vi.fn();
 		const root = makeScheduledSessionFile("covered-mid-root");
 		const mid = makeScheduledSessionFile("covered-mid");
-		armHeartbeat(mid.store, "covered-mid", mid.sessionFile, now - 10 * 60_000);
+		await armHeartbeat(mid.store, "covered-mid", mid.sessionFile, now - 10 * 60_000);
 		supervisor.rlmSpawnLedgerInstance = {
 			family: vi.fn(async () => [
 				makeSavedInfo(root.sessionFile, "covered-mid-root"),
@@ -844,8 +856,8 @@ describe("daemon supervisor scheduled-session wake", () => {
 		const supervisor = makeSupervisor();
 		const healthy = makeScheduledSessionFile("healthy-root");
 		const corrupt = makeScheduledSessionFile("corrupt-root");
-		armHeartbeat(healthy.store, "healthy-root", healthy.sessionFile, now - 10 * 60_000);
-		armHeartbeat(corrupt.store, "corrupt-root", corrupt.sessionFile, now - 10 * 60_000);
+		await armHeartbeat(healthy.store, "healthy-root", healthy.sessionFile, now - 10 * 60_000);
+		await armHeartbeat(corrupt.store, "corrupt-root", corrupt.sessionFile, now - 10 * 60_000);
 		writeFileSync(
 			join(getSessionArtifactPathForFile(corrupt.sessionFile, "corrupt-root"), SESSION_SCHEDULED_JOBS_FILENAME),
 			"{ not json",
@@ -874,7 +886,7 @@ describe("daemon supervisor scheduled-session wake", () => {
 		const { sessionFile, store } = makeScheduledSessionFile("armed-root");
 		// Real-clock epochs keep nextRunAt in the future so the armed timer never fires mid-test.
 		const armedAt = Date.now();
-		const job = armHeartbeat(store, "armed-root", sessionFile, armedAt);
+		const job = await armHeartbeat(store, "armed-root", sessionFile, armedAt);
 		supervisor.rlmSpawnLedgerInstance = {
 			family: vi.fn(async () => [makeSavedInfo(sessionFile, "armed-root")]),
 			liveEdges: vi.fn(async () => []),
@@ -883,27 +895,34 @@ describe("daemon supervisor scheduled-session wake", () => {
 		await supervisor.recomputeScheduledSessionWake();
 		expect(supervisor.scheduledWakeTimer).toBeDefined();
 
+		// A covering worker drops the covered rows in memory: the residency event, not a scan, converges the timer.
 		const resident = makeWorker("resident", []);
 		resident.descriptor.sessionFile = sessionFile;
 		supervisor.workers.set("resident", resident);
-		await supervisor.recomputeScheduledSessionWake();
+		supervisor.onWorkerResidencyGained(resident);
+		await settleAsyncWork();
+		await supervisor.scheduledWakeRecompute;
 		expect(supervisor.scheduledWakeTimer).toBeUndefined();
 		supervisor.workers.delete("resident");
 
-		store.pauseHeartbeat("stale-active");
-		await supervisor.recomputeScheduledSessionWake();
+		// The store mutations below are external writes; signal each with the invalidating broadcast.
+		await store.pauseHeartbeat("stale-active");
+		supervisor.broadcastHeartbeatsChanged();
+		await supervisor.scheduledWakeRecompute;
 		expect(supervisor.scheduledWakeTimer).toBeUndefined();
 		await supervisor.wakeDueScheduledSessions(armedAt + 60 * 60_000);
 		expect(supervisor.createOrReuseWorker).not.toHaveBeenCalled();
 		// Settle the recompute the wake pass queued before mutating the store again.
 		await supervisor.scheduledWakeRecompute;
 
-		store.resumeHeartbeat("stale-active");
-		await supervisor.recomputeScheduledSessionWake();
+		await store.resumeHeartbeat("stale-active");
+		supervisor.broadcastHeartbeatsChanged();
+		await supervisor.scheduledWakeRecompute;
 		expect(supervisor.scheduledWakeTimer).toBeDefined();
 
-		store.cancel(job.id);
-		await supervisor.recomputeScheduledSessionWake();
+		await store.cancel(job.id);
+		supervisor.broadcastHeartbeatsChanged();
+		await supervisor.scheduledWakeRecompute;
 		expect(supervisor.scheduledWakeTimer).toBeUndefined();
 	});
 
@@ -911,7 +930,7 @@ describe("daemon supervisor scheduled-session wake", () => {
 		const supervisor = makeSupervisor();
 		supervisor.createOrReuseWorker = vi.fn();
 		const { sessionFile, store } = makeScheduledSessionFile("restart-root");
-		armHeartbeat(store, "restart-root", sessionFile, now - 10 * 60_000);
+		await armHeartbeat(store, "restart-root", sessionFile, now - 10 * 60_000);
 		supervisor.rlmSpawnLedgerInstance = {
 			family: vi.fn(async () => [makeSavedInfo(sessionFile, "restart-root")]),
 			liveEdges: vi.fn(async () => []),
@@ -938,8 +957,8 @@ describe("daemon supervisor scheduled-session wake", () => {
 		const root = makeScheduledSessionFile("owned-root");
 		// The child's persisted id differs from its filename; the artifact keys on the id.
 		const child = makeScheduledSessionFile("owned-child", "owned-child-real");
-		armHeartbeat(root.store, "owned-root", root.sessionFile, now);
-		armHeartbeat(child.store, "owned-child-real", child.sessionFile, now);
+		await armHeartbeat(root.store, "owned-root", root.sessionFile, now);
+		await armHeartbeat(child.store, "owned-child-real", child.sessionFile, now);
 		const owned = makeWorker("owned", []);
 		owned.descriptor.ownerClientId = "owner";
 		owned.descriptor.rootSessionId = "owned-root";
@@ -975,7 +994,7 @@ describe("daemon supervisor scheduled-session wake", () => {
 	it("keeps schedules that were promoted public while the ephemeral cancel was in flight", async () => {
 		const supervisor = makeSupervisor();
 		const { sessionFile, store } = makeScheduledSessionFile("promoted-root");
-		armHeartbeat(store, "promoted-root", sessionFile, now);
+		await armHeartbeat(store, "promoted-root", sessionFile, now);
 		let releaseFamily = () => {};
 		const familyGate = new Promise<void>((resolve) => {
 			releaseFamily = resolve;
@@ -1008,7 +1027,7 @@ describe("daemon supervisor scheduled-session wake", () => {
 		const supervisor = makeSupervisor();
 		supervisor.createOrReuseWorker = vi.fn();
 		const { sessionFile, store } = makeScheduledSessionFile("promoted-parked-root");
-		armHeartbeat(store, "promoted-parked-root", sessionFile, now - 10 * 60_000);
+		await armHeartbeat(store, "promoted-parked-root", sessionFile, now - 10 * 60_000);
 		let failFamily: (error: Error) => void = () => {};
 		const familyGate = new Promise<never>((_, reject) => {
 			failFamily = reject;
@@ -1052,7 +1071,7 @@ describe("daemon supervisor scheduled-session wake", () => {
 		const supervisor = makeSupervisor();
 		supervisor.createOrReuseWorker = vi.fn();
 		const { sessionFile, store } = makeScheduledSessionFile("failed-cancel-root");
-		armHeartbeat(store, "failed-cancel-root", sessionFile, now - 10 * 60_000);
+		await armHeartbeat(store, "failed-cancel-root", sessionFile, now - 10 * 60_000);
 		supervisor.rlmSpawnLedgerInstance = {
 			family: vi.fn(async () => [makeSavedInfo(sessionFile, "failed-cancel-root")]),
 			liveEdges: vi.fn(async () => []),
@@ -1097,6 +1116,65 @@ describe("daemon supervisor scheduled-session wake", () => {
 		expect(supervisor.scheduledWakeTimer).toBeUndefined();
 	});
 
+	it("stops cancelling when a promotion lands mid-loop between per-session cancels", async () => {
+		const supervisor = makeSupervisor();
+		const root = makeScheduledSessionFile("promoted-mid-root");
+		const child = makeScheduledSessionFile("promoted-mid-child");
+		await armHeartbeat(root.store, "promoted-mid-root", root.sessionFile, now);
+		await armHeartbeat(child.store, "promoted-mid-child", child.sessionFile, now);
+		supervisor.rlmSpawnLedgerInstance = {
+			family: vi.fn(async () => [
+				makeSavedInfo(root.sessionFile, "promoted-mid-root"),
+				makeSavedInfo(child.sessionFile, "promoted-mid-child", {
+					parentSessionPath: root.sessionFile,
+					rlmDepth: 1,
+				}),
+			]),
+			liveEdges: vi.fn(async () => []),
+		};
+		const originalCancel = AgentCronJobStore.prototype.cancelJobsForSession;
+		const cancel = vi.spyOn(AgentCronJobStore.prototype, "cancelJobsForSession");
+		cancel.mockImplementationOnce(async function (this: AgentCronJobStore, input, cancelNow) {
+			const cancelled = await originalCancel.call(this, input, cancelNow);
+			const resident = makeWorker("mid-loop-worker", []);
+			resident.descriptor.sessionFile = child.sessionFile;
+			supervisor.workers.set("mid-loop-worker", resident);
+			return cancelled;
+		});
+
+		await supervisor.cancelScheduledJobsForSessionTree("promoted-mid-root", root.sessionFile);
+
+		expect(cancel).toHaveBeenCalledTimes(1);
+		expect(root.store.list().map((job) => job.status)).toEqual(["cancelled"]);
+		expect(child.store.list().map((job) => job.status)).toEqual(["active"]);
+		cancel.mockRestore();
+	});
+
+	it("keeps schedules when a worker covers the tree while the cancel waits for the artifact lock", async () => {
+		const supervisor = makeSupervisor();
+		const root = makeScheduledSessionFile("locked-root");
+		await armHeartbeat(root.store, "locked-root", root.sessionFile, now);
+		supervisor.rlmSpawnLedgerInstance = {
+			family: vi.fn(async () => [makeSavedInfo(root.sessionFile, "locked-root")]),
+			liveEdges: vi.fn(async () => []),
+		};
+		const jobsPath = join(
+			getSessionArtifactPathForFile(root.sessionFile, "locked-root"),
+			SESSION_SCHEDULED_JOBS_FILENAME,
+		);
+		const release = await lock(jobsPath, { realpath: false, lockfilePath: `${jobsPath}.lock`, stale: 30_000 });
+
+		const cancel = supervisor.cancelScheduledJobsForSessionTree("locked-root", root.sessionFile);
+		await settleAsyncWork();
+		const resident = makeWorker("late-worker", []);
+		resident.descriptor.sessionFile = root.sessionFile;
+		supervisor.workers.set("late-worker", resident);
+		await release();
+		await cancel;
+
+		expect(root.store.list().map((job) => job.status)).toEqual(["active"]);
+	});
+
 	it("keeps the tombstoned descriptor after a failed ephemeral cancel so the next boot finishes it", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-durable-cancel-"));
 		tempDirs.push(directory);
@@ -1105,7 +1183,7 @@ describe("daemon supervisor scheduled-session wake", () => {
 		mkdirSync(workersDir, { recursive: true });
 		const socketPath = join(directory, "daemon.sock");
 		const { sessionFile, store } = makeScheduledSessionFile("durable-cancel-root");
-		armHeartbeat(store, "durable-cancel-root", sessionFile, now - 10 * 60_000);
+		await armHeartbeat(store, "durable-cancel-root", sessionFile, now - 10 * 60_000);
 		const bootSupervisor = (): SupervisorInternals => {
 			const supervisor = new DaemonSupervisor(socketPath, {
 				defaultSessionConfig: { agentDir: directory, cwd: directory },
@@ -1172,7 +1250,7 @@ describe("daemon supervisor scheduled-session wake", () => {
 		const supervisor = makeSupervisor();
 		supervisor.createOrReuseWorker = vi.fn();
 		const { sessionFile, store } = makeScheduledSessionFile("managed-root");
-		const job = armHeartbeat(store, "managed-root", sessionFile, now - 10 * 60_000);
+		const job = await armHeartbeat(store, "managed-root", sessionFile, now - 10 * 60_000);
 		supervisor.rlmSpawnLedgerInstance = {
 			family: vi.fn(async () => [makeSavedInfo(sessionFile, "managed-root")]),
 			liveEdges: vi.fn(async () => []),
@@ -1193,7 +1271,7 @@ describe("daemon supervisor scheduled-session wake", () => {
 	it("lists and cancels a passive scheduled job without a resident worker", async () => {
 		const supervisor = makeSupervisor();
 		const { sessionFile, store } = makeScheduledSessionFile("unscoped-root");
-		const job = armHeartbeat(store, "unscoped-root", sessionFile, now);
+		const job = await armHeartbeat(store, "unscoped-root", sessionFile, now);
 		supervisor.rlmSpawnLedgerInstance = {
 			family: vi.fn(async () => [makeSavedInfo(sessionFile, "unscoped-root")]),
 			liveEdges: vi.fn(async () => []),
@@ -1221,7 +1299,7 @@ describe("daemon supervisor scheduled-session wake", () => {
 	it("drops a stale ephemeral-cancel intent once a worker covers the tree again", async () => {
 		const supervisor = makeSupervisor();
 		const { sessionFile, store } = makeScheduledSessionFile("reopened-root");
-		armHeartbeat(store, "reopened-root", sessionFile, now);
+		await armHeartbeat(store, "reopened-root", sessionFile, now);
 		supervisor.rlmSpawnLedgerInstance = {
 			family: vi.fn(async () => [makeSavedInfo(sessionFile, "reopened-root")]),
 			liveEdges: vi.fn(async () => []),

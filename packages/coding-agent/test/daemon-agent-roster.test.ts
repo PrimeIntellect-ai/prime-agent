@@ -22,6 +22,7 @@ type RosterDelta = Extract<DaemonWorkerRosterOutbound, { type: "roster_delta" }>
 const tempDirs: string[] = [];
 
 afterEach(() => {
+	vi.useRealTimers();
 	for (const directory of tempDirs.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
@@ -31,6 +32,7 @@ interface WorkerReporterFixture {
 	daemon: {
 		sessions: Map<string, ActiveSessionState>;
 		observeRosterEvent(state: ActiveSessionState, message: unknown): void;
+		scheduleRosterFlush(state?: ActiveSessionState): void;
 		flushRoster(): void;
 		rosterReporter: {
 			lastComposed: Map<string, WorkerRosterEntry>;
@@ -63,6 +65,7 @@ function makeWorkerReporter(connected = true): WorkerReporterFixture {
 			snapshotPending: false,
 		},
 		rosterFlushScheduled: false,
+		rosterDirtyAgentIds: new Set<string>(),
 		shuttingDown: false,
 		hasAuthenticatedSupervisorClient: () => connection.connected,
 		broadcastRosterFrame: (message: DaemonWorkerRosterOutbound) => {
@@ -420,6 +423,7 @@ describe("worker roster reporter", () => {
 	});
 
 	it("flushes cron and model changes that have no session-event carrier", async () => {
+		vi.useFakeTimers();
 		const directory = mkdtempSync(join(tmpdir(), "prime-roster-cron-flush-"));
 		tempDirs.push(directory);
 		const daemon = new AgentDaemon(join(directory, "worker.sock"), {
@@ -452,7 +456,7 @@ describe("worker roster reporter", () => {
 			prompt: "check status",
 		});
 		expect(added.success).toBe(true);
-		await new Promise((resolveSettle) => setImmediate(resolveSettle));
+		await vi.advanceTimersByTimeAsync(300);
 		const agentId = "session-root-active";
 		expect(internals.rosterReporter.lastComposed.get(agentId)?.summary.hasRegisteredCronJob).toBe(true);
 
@@ -464,7 +468,7 @@ describe("worker roster reporter", () => {
 			activeSessionId: "root-active",
 			jobId,
 		});
-		await new Promise((resolveSettle) => setImmediate(resolveSettle));
+		await vi.advanceTimersByTimeAsync(300);
 		expect(internals.rosterReporter.lastComposed.get(agentId)?.summary.hasRegisteredCronJob).toBeUndefined();
 
 		// set_model has no session-event carrier either; its explicit flush publishes the new model.
@@ -482,7 +486,7 @@ describe("worker roster reporter", () => {
 			provider: "prov",
 			modelId: "m2",
 		});
-		await new Promise((resolveSettle) => setImmediate(resolveSettle));
+		await vi.advanceTimersByTimeAsync(300);
 		expect(internals.rosterReporter.lastComposed.get(agentId)?.summary.model).toMatchObject({ id: "m2" });
 	});
 
@@ -547,6 +551,50 @@ describe("worker roster reporter", () => {
 		session.isSessionActive = false;
 		daemon.flushRoster();
 		expect(sentDeltas.at(-1)?.entries[0]?.summary).toMatchObject({ isStreaming: false, activity: "idle" });
+	});
+
+	it("coalesces flush triggers into a 250ms window and scopes them to the dirty session", () => {
+		vi.useFakeTimers();
+		const { daemon, sentDeltas } = makeWorkerReporter();
+		const quiet = makeState({ activeSessionId: "quiet-active" });
+		const loud = makeState({ activeSessionId: "loud-active" });
+		daemon.sessions.set(quiet.activeSessionId, quiet).set(loud.activeSessionId, loud);
+		const statusFor = (state: ActiveSessionState) => ({
+			type: "session_status",
+			activeSessionId: state.activeSessionId,
+		});
+		const quietSummary = () => daemon.rosterReporter.lastComposed.get("session-quiet-active")?.summary.isStreaming;
+
+		daemon.observeRosterEvent(loud, statusFor(loud));
+		vi.advanceTimersByTime(0);
+		expect(sentDeltas).toHaveLength(1);
+		(loud.runtime.session as unknown as { isStreaming: boolean }).isStreaming = true;
+		daemon.observeRosterEvent(loud, statusFor(loud));
+		vi.advanceTimersByTime(100);
+		expect(sentDeltas).toHaveLength(1);
+		vi.advanceTimersByTime(150);
+		expect(sentDeltas).toHaveLength(2);
+		expect(
+			sentDeltas.at(-1)?.entries.find((entry) => entry.summary.sessionName === "name-loud-active")?.summary
+				.isStreaming,
+		).toBe(true);
+
+		// quiet flips busy with no roster event of its own: loud-only triggers must not republish it.
+		(quiet.runtime.session as unknown as { isStreaming: boolean }).isStreaming = true;
+		daemon.observeRosterEvent(loud, statusFor(loud));
+		vi.advanceTimersByTime(300);
+		expect(quietSummary()).toBe(false);
+		daemon.observeRosterEvent(quiet, statusFor(quiet));
+		vi.advanceTimersByTime(300);
+		expect(quietSummary()).toBe(true);
+
+		// A lifecycle (stateless) flush inside the window breaks through the pending trailing
+		// flush: the supervisor answers `list` from the published roster, so it must not lag.
+		(loud.runtime.session as unknown as { isStreaming: boolean }).isStreaming = false;
+		daemon.observeRosterEvent(loud, statusFor(loud));
+		daemon.scheduleRosterFlush();
+		vi.advanceTimersByTime(0);
+		expect(sentDeltas).toHaveLength(4);
 	});
 });
 

@@ -64,18 +64,16 @@ describe("SemanticEdgeRecorder", () => {
 		expect(recorder.lastCommittedRequestId).toBe(requestId);
 	});
 
-	it("reuses a parked retry ID only for a byte-identical body and re-logs the start", () => {
+	it("reuses a parked retry ID only for the same turn fingerprint and re-logs the start", () => {
 		const recorder = createRecorder();
 		const body = hashTurnBody({ provider: "p", id: "m" }, { messages: [{ role: "user", content: "hi" }] });
 		const failedId = recorder.startTurnRequest(body);
 		recorder.failRequest(failedId);
 		recorder.prepareTurnRetry();
 
-		// Same message count and roles but different content must not steal the key.
-		const sideBody = hashTurnBody(
-			{ provider: "p", id: "m" },
-			{ messages: [{ role: "user", content: "side question" }] },
-		);
+		// One queued steering message before the identical tail: only the count differs.
+		const queued = { role: "user", content: "queued" };
+		const sideBody = hashTurnBody({ provider: "p", id: "m" }, { messages: [queued, ...MESSAGES] });
 		const sideId = recorder.startTurnRequest(sideBody);
 		expect(sideId).not.toBe(failedId);
 
@@ -120,6 +118,12 @@ describe("SemanticEdgeRecorder", () => {
 		const failedId = recorder.startTurnRequest(failedBody());
 		recorder.prepareTurnRetry();
 		expect(recorder.startTurnRequest(retryBody())).not.toBe(failedId);
+	});
+
+	it("does not fingerprint earlier messages beyond the shared tail", () => {
+		const hashFor = (earlier: string) =>
+			hashTurnBody({ provider: "p", id: "m" }, { messages: [{ role: "user", content: earlier }, ...MESSAGES] });
+		expect(hashFor("old")).toBe(hashFor("rewritten"));
 	});
 
 	it("hashes the body at request time, not at park time", () => {
@@ -648,6 +652,23 @@ describe("wrapStreamFnWithSemanticEdges", () => {
 		expect(headers[MODEL_REQUEST_ID_HEADER]).toMatch(/^[0-9a-f]{32}$/);
 		expect(headers[IDEMPOTENCY_KEY_HEADER]).toBe(headers[MODEL_REQUEST_ID_HEADER]);
 		expect(headers[MODEL_REQUEST_ID_HEADER]).toBe(recorder.lastTurnRequestId);
+	});
+
+	it("memoizes the tools digest by element identity across calls", () => {
+		const recorder = recorderIn("tools-memo.jsonl");
+		const wrapped = wrapStreamFnWithSemanticEdges(() => createAssistantMessageEventStream(), recorder);
+		const call = (tools: unknown[]) => {
+			wrapped(model, { ...context, tools } as unknown as Parameters<StreamFn>[1], undefined);
+			return recorder.lastTurnRequestId;
+		};
+		const tools = [{ name: "bash", description: "" }];
+		const firstId = call(tools);
+		recorder.prepareTurnRetry();
+		// Mutated in place: identity keys the memo, so the parked ID is reused.
+		tools[0]!.description = "mutated in place";
+		expect(call(tools)).toBe(firstId);
+		recorder.prepareTurnRetry();
+		expect(call([{ name: "bash", description: "x" }])).not.toBe(firstId);
 	});
 
 	function outcomeHarness(name: string) {

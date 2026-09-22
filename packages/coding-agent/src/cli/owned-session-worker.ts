@@ -214,12 +214,16 @@ export async function runOwnedSessionWorkerFrontend(
 	let rpcStdoutPaused = false;
 	let detachRpcInput: (() => void) | undefined;
 	let detachRpcOutput: (() => void) | undefined;
-	const bufferedRpcInput: string[] = [];
+	type PreparedRpcInput = {
+		framed: string;
+		pending?: { internalId: string; publicId?: string; command: string };
+	};
+	const bufferedRpcInput: PreparedRpcInput[] = [];
 	const pendingRpcCommands = new Map<string, { publicId?: string; command: string }>();
 	const anonymousRpcIdPrefix = `prime-agent-owned-${randomUUID()}`;
 	let anonymousRpcCommandId = 0;
 
-	const prepareRpcInput = (line: string): string => {
+	const prepareRpcInput = (line: string): PreparedRpcInput => {
 		try {
 			const command = JSON.parse(line) as { id?: unknown; type?: unknown } | null;
 			if (
@@ -229,16 +233,31 @@ export async function runOwnedSessionWorkerFrontend(
 				command.type === "extension_ui_response" ||
 				command.type === "ack_result"
 			) {
-				return `${line}\n`;
+				return { framed: `${line}\n` };
 			}
 			const publicId = typeof command.id === "string" ? command.id : undefined;
 			const internalId = publicId ?? `${anonymousRpcIdPrefix}-${++anonymousRpcCommandId}`;
-			pendingRpcCommands.set(internalId, { publicId, command: command.type });
-			return publicId !== undefined ? `${line}\n` : serializeJsonLine({ ...command, id: internalId });
+			return {
+				framed: publicId !== undefined ? `${line}\n` : serializeJsonLine({ ...command, id: internalId }),
+				pending: { internalId, publicId, command: command.type },
+			};
 		} catch {
 			// The worker preserves the existing parse-error response contract.
-			return `${line}\n`;
+			return { framed: `${line}\n` };
 		}
+	};
+	// A command is pending only once it is actually written to a worker. A
+	// line that merely sits in bufferedRpcInput was never started, so recovery
+	// replays it to the replacement worker; a command that reached the dead
+	// worker is failed as uncertain below and never replayed. Registering at
+	// receipt instead reported a buffered command as "was not replayed" while
+	// recovery replayed the same id anyway.
+	const writeRpcInput = (input: NodeJS.WritableStream, prepared: PreparedRpcInput): boolean => {
+		if (prepared.pending) {
+			const { internalId, ...pending } = prepared.pending;
+			pendingRpcCommands.set(internalId, pending);
+		}
+		return input.write(prepared.framed);
 	};
 	const observeRpcOutput = (line: string) => {
 		let parsed: unknown;
@@ -273,19 +292,32 @@ export async function runOwnedSessionWorkerFrontend(
 			pendingRpcCommands.delete(id);
 		}
 	};
+	const writeFailureResponse = (publicId: string | undefined, command: string) => {
+		process.stdout.write(
+			serializeJsonLine({
+				...(publicId !== undefined ? { id: publicId } : {}),
+				type: "response",
+				command,
+				success: false,
+				error: "The isolated session worker stopped during this command; its result is uncertain and was not replayed",
+			}),
+		);
+	};
 	const failPendingRpcCommands = () => {
 		for (const pending of pendingRpcCommands.values()) {
-			process.stdout.write(
-				serializeJsonLine({
-					...(pending.publicId !== undefined ? { id: pending.publicId } : {}),
-					type: "response",
-					command: pending.command,
-					success: false,
-					error: "The isolated session worker stopped during this command; its result is uncertain and was not replayed",
-				}),
-			);
+			writeFailureResponse(pending.publicId, pending.command);
 		}
 		pendingRpcCommands.clear();
+	};
+	// Buffered commands never started, so the pending map cannot fail them.
+	// When recovery will not run they would otherwise leave the client without
+	// any terminal outcome, so fail them on the way out instead.
+	const failBufferedRpcCommands = () => {
+		for (const prepared of bufferedRpcInput.splice(0)) {
+			if (prepared.pending) {
+				writeFailureResponse(prepared.pending.publicId, prepared.pending.command);
+			}
+		}
 	};
 	const reapWorkerResources = (workerPid: number | undefined) => {
 		if (!workerPid) {
@@ -309,10 +341,15 @@ export async function runOwnedSessionWorkerFrontend(
 
 	if (profile === "rpc") {
 		detachRpcInput = attachJsonlLineReader(process.stdin, (line) => {
-			const framed = prepareRpcInput(line);
+			const prepared = prepareRpcInput(line);
 			const input = currentRpcInput;
 			if (input?.writable) {
-				if (!input.write(framed)) {
+				// A refused write only means backpressure while the bridge is
+				// still writable: pause until it drains. An errored bridge stays
+				// unwritable and never drains, so keep reading and let the
+				// buffer branch below hold later commands for the replacement
+				// worker instead of stalling stdin until the close event.
+				if (!writeRpcInput(input, prepared) && input.writable) {
 					process.stdin.pause();
 					input.once("drain", () => {
 						if (currentRpcInput === input && !stdinEnded) {
@@ -321,7 +358,7 @@ export async function runOwnedSessionWorkerFrontend(
 					});
 				}
 			} else {
-				bufferedRpcInput.push(framed);
+				bufferedRpcInput.push(prepared);
 			}
 		});
 		process.stdin.once("end", () => {
@@ -351,6 +388,28 @@ export async function runOwnedSessionWorkerFrontend(
 			stdio,
 		});
 		currentChild = child;
+		// A bridge write into a worker that closed its stdin lands as an
+		// unhandled 'error' event on that pipe (write EPIPE) and takes down the
+		// whole frontend, defeating the crash-recovery loop below. The child
+		// 'close' handler owns the fallout (failing pending RPC commands,
+		// relaunching with the recovery descriptor), so this listener keeps the
+		// pipe error from becoming a fatal one. When the pipe broke while the
+		// worker was still alive the bridge is permanently unusable: reap the
+		// worker process group so the close event always fires — a descendant
+		// holding inherited stdio would otherwise block it forever — and that
+		// close drives the fallout instead of waiting indefinitely on a worker
+		// that can no longer accept commands.
+		child.stdin?.on("error", (error) => {
+			if ((error as NodeJS.ErrnoException).code !== "EPIPE") {
+				return;
+			}
+			// Guard like forwardSignal: an exited child's pid may have been
+			// reassigned, so never signal the child itself after its exit.
+			if (child.exitCode === null && child.signalCode === null) {
+				child.kill("SIGKILL");
+			}
+			reapWorkerResources(child.pid);
+		});
 		if (!interactive) {
 			const childInput = child.stdin ?? undefined;
 			const childOutput = child.stdout ?? undefined;
@@ -371,7 +430,7 @@ export async function runOwnedSessionWorkerFrontend(
 				}
 				detachRpcOutput = attachJsonlLineReader(childOutput, observeRpcOutput);
 				for (const buffered of bufferedRpcInput.splice(0)) {
-					childInput.write(buffered);
+					writeRpcInput(childInput, buffered);
 				}
 				if (stdinEnded) {
 					childInput.end();
@@ -431,10 +490,16 @@ export async function runOwnedSessionWorkerFrontend(
 				child.disconnect();
 			}
 			reapWorkerResources(workerPid);
+			// Buffered commands never started, so they replay instead of
+			// failing whenever recovery can run; count them like written ones
+			// so a worker death still routes through the recovery path.
 			const rpcCrashed =
 				profile === "rpc" &&
 				!terminating &&
-				(exit.code !== 0 || exit.signal !== null || pendingRpcCommands.size > 0);
+				(exit.code !== 0 ||
+					exit.signal !== null ||
+					pendingRpcCommands.size > 0 ||
+					bufferedRpcInput.some((prepared) => prepared.pending !== undefined));
 			const workerExitCode = rpcCrashed && exit.code === 0 ? 1 : exit.code;
 			if (Date.now() - workerStartedAt >= 60_000) {
 				recoveryAttempt = 0;
@@ -444,10 +509,12 @@ export async function runOwnedSessionWorkerFrontend(
 			}
 			const shouldRecover = rpcCrashed && !stdinEnded && recoveryAttempt < 3;
 			if (!shouldRecover) {
+				failBufferedRpcCommands();
 				return terminationSignal ? exitCodeForSignal(terminationSignal) : workerExitCode;
 			}
 			const descriptor = readOwnedRecoveryDescriptor(recoveryDescriptorPath);
 			if (!descriptor?.sessionFile) {
+				failBufferedRpcCommands();
 				return terminationSignal ? exitCodeForSignal(terminationSignal) : workerExitCode;
 			}
 			workerArgs = createRpcRecoveryArgs(args, descriptor.sessionFile);

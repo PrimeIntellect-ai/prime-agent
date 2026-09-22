@@ -7,6 +7,15 @@ import { appendRotatingLog, getAgentDir, getAgentTracesLogPath, getSessionsDir, 
 import { readFirstLineSync } from "../utils/file-lines.js";
 import type { AuthStorage } from "./auth-storage.js";
 import {
+	fetchWithTimeout,
+	isRecord,
+	numberField,
+	parseResponseObject,
+	readResponseMessage,
+	stringEnv,
+	stringField,
+} from "./prime-http.js";
+import {
 	PRIME_AGENT_TRACES_PROVIDER_ID,
 	PRIME_INFERENCE_PROVIDER_ID,
 	resolvePrimeAgentTracesBaseUrl,
@@ -157,15 +166,6 @@ export interface AgentTraceUploadAllResult {
 	results: Array<{ sessionFile: string; result: AgentTraceUploadResult }>;
 }
 
-function stringEnv(name: string): string | undefined {
-	const value = process.env[name];
-	return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function describeError(error: unknown): string {
 	if (!(error instanceof Error)) {
 		return String(error);
@@ -214,16 +214,6 @@ function isRetriableNetworkError(error: unknown): boolean {
 	}
 	const cause = (error as { cause?: unknown }).cause;
 	return isRecord(cause) && typeof cause.code === "string" && RETRIABLE_NETWORK_CODES.has(cause.code);
-}
-
-function stringField(data: Record<string, unknown>, key: string): string | undefined {
-	const value = data[key];
-	return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function numberField(data: Record<string, unknown>, key: string): number | undefined {
-	const value = data[key];
-	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function isSessionHeader(value: unknown): value is SessionHeader {
@@ -320,75 +310,6 @@ function resolveTraceContext(
 	return { traceId, parentSessionId };
 }
 
-function parseResponseObject(text: string): Record<string, unknown> | undefined {
-	if (!text.trim()) {
-		return undefined;
-	}
-	try {
-		const parsed = JSON.parse(text) as unknown;
-		return isRecord(parsed) ? parsed : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-async function readResponseMessage(response: Response): Promise<string> {
-	const text = await response.text().catch(() => "");
-	if (!text.trim()) {
-		return response.statusText || "Unknown error";
-	}
-
-	const parsed = parseResponseObject(text);
-	if (parsed) {
-		const error = parsed.error;
-		if (isRecord(error)) {
-			const message = stringField(error, "message");
-			if (message) return message;
-		}
-		const detail = stringField(parsed, "detail");
-		if (detail) return detail;
-		const message = stringField(parsed, "message");
-		if (message) return message;
-	}
-
-	return text.trim();
-}
-
-async function fetchWithTimeout(
-	fetchFn: typeof fetch,
-	url: string,
-	init: RequestInit,
-	timeoutMs: number,
-	signal?: AbortSignal,
-): Promise<Response> {
-	const controller = new AbortController();
-	const timeoutError = new TraceUploadTimeoutError(timeoutMs);
-	let timedOut = false;
-	const timeout = setTimeout(() => {
-		timedOut = true;
-		controller.abort(timeoutError);
-	}, timeoutMs);
-	timeout.unref();
-	const onAbort = () => controller.abort(signal?.reason);
-	if (signal?.aborted) {
-		onAbort();
-	} else {
-		signal?.addEventListener("abort", onAbort, { once: true });
-	}
-
-	try {
-		return await fetchFn(url, { ...init, signal: controller.signal });
-	} catch (error) {
-		if (timedOut) {
-			throw timeoutError;
-		}
-		throw error;
-	} finally {
-		clearTimeout(timeout);
-		signal?.removeEventListener("abort", onAbort);
-	}
-}
-
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
 	return new Promise((resolve) => {
 		if (signal?.aborted) {
@@ -450,7 +371,10 @@ async function fetchWithRetry(request: TraceUploadRequest): Promise<Response> {
 			if (signal?.aborted) {
 				throw signal.reason ?? new Error("Trace upload cancelled");
 			}
-			const response = await fetchWithTimeout(fetchFn, url, init, timeoutMs, signal);
+			const response = await fetchWithTimeout(fetchFn, url, init, timeoutMs, {
+				timeoutError: new TraceUploadTimeoutError(timeoutMs),
+				signal,
+			});
 			if (attempt >= TRACE_UPLOAD_MAX_RETRIES || !RETRIABLE_HTTP_STATUSES.has(response.status)) {
 				return response;
 			}

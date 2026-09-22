@@ -274,6 +274,7 @@ interface SummaryComposeFingerprint {
 	metadataParentSessionFile: string | undefined;
 	metadataRlmChildId: string | undefined;
 	metadataRlmParentNodeId: string | undefined;
+	metadataSpawnCode: string | undefined;
 	sessionName: string | undefined;
 	sessionId: string;
 	sessionFile: string | undefined;
@@ -355,6 +356,7 @@ export function summaryForActiveSession(
 		metadataParentSessionFile: metadata.parentSessionFile,
 		metadataRlmChildId: metadata.rlmChildId,
 		metadataRlmParentNodeId: metadata.rlmParentNodeId,
+		metadataSpawnCode: metadata.spawnCode,
 		sessionName: session.sessionName,
 		sessionId: session.sessionId,
 		sessionFile: session.sessionFile,
@@ -425,7 +427,7 @@ export function summaryForActiveSession(
 		...(isSummaryCurrent(activeSession) ? { taskState: activeSession.summaryState?.taskState } : {}),
 	};
 	summaryComposeMemos.set(activeSession, { fingerprint, summary });
-	return summary;
+	return Object.freeze(summary);
 }
 
 function summaryComposeFingerprintsEqual(left: SummaryComposeFingerprint, right: SummaryComposeFingerprint): boolean {
@@ -456,6 +458,7 @@ function summaryComposeFingerprintsEqual(left: SummaryComposeFingerprint, right:
 		left.metadataParentSessionFile === right.metadataParentSessionFile &&
 		left.metadataRlmChildId === right.metadataRlmChildId &&
 		left.metadataRlmParentNodeId === right.metadataRlmParentNodeId &&
+		left.metadataSpawnCode === right.metadataSpawnCode &&
 		left.sessionName === right.sessionName &&
 		left.sessionId === right.sessionId &&
 		left.sessionFile === right.sessionFile &&

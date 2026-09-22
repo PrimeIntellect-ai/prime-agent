@@ -765,6 +765,11 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	return finalizeLoadedEntries(parseEntriesFromBuffer(readFileSync(filePath)));
 }
 
+// Buffer variant for callers that must verify the byte count they read (parse caches).
+export function loadEntriesFromBuffer(buffer: Buffer): FileEntry[] {
+	return finalizeLoadedEntries(parseEntriesFromBuffer(buffer));
+}
+
 // Async loader for the daemon: reads off the event loop and yields while parsing so a
 // large load doesn't freeze other sessions. Large files stream to avoid retaining both
 // the full input Buffer and the parsed entry graph at the same time.
