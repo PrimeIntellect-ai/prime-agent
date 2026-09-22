@@ -739,8 +739,7 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	return finalizeLoadedEntries(parseEntriesFromBuffer(readFileSync(filePath)));
 }
 
-// Buffer-based variant for callers that hold the bytes they parsed (e.g. parse
-// caches that must verify the byte count they read against the file's stats).
+// Buffer variant for callers that must verify the byte count they read (parse caches).
 export function loadEntriesFromBuffer(buffer: Buffer): FileEntry[] {
 	return finalizeLoadedEntries(parseEntriesFromBuffer(buffer));
 }

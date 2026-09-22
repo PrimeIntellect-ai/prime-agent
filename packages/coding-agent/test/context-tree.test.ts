@@ -363,13 +363,11 @@ describe("child node cache", () => {
 		const firstParent = first[0];
 		expect(firstParent.children.map((node) => node.id)).toEqual(["sub-gc000001", "sub-gc000002"]);
 
-		// Append to the grandchild only; the parent's own file is untouched.
 		changed.sessionManager.appendMessage(createAssistantMessage("extra", createUsage(300, 30, 0.03)));
 
 		const second = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
 		const secondParent = second[0];
 		expect(secondParent.children[0].ownUsage.input).toBe(500);
-		// The unchanged sibling grandchild is still the cached node.
 		expect(secondParent.children[1]).toBe(firstParent.children[1]);
 	});
 
@@ -382,8 +380,6 @@ describe("child node cache", () => {
 		writeChildSession(grandchildDir, "middle work", createUsage(50, 5, 0.005));
 		const deep = writeChildSession(deepDir, "deep work", createUsage(80, 8, 0.008));
 		loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
-		// The deepest session is resumed independently: only its file changes,
-		// so every level above it is a cache hit.
 		deep.sessionManager.appendMessage(createAssistantMessage("more", createUsage(400, 40, 0.04)));
 		const second = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
 		expect(second[0].children[0].children[0].ownUsage.input).toBe(480);
@@ -409,8 +405,6 @@ describe("child node cache", () => {
 		const first = loadContextTreeChildrenFromDisk(rlmDir, () => 200000);
 		expect(first[0].contextUsage).toEqual({ tokens: 2000, contextWindow: 200000, percent: 1 });
 
-		// Same file, but the registry now resolves a different window: the
-		// cached node must not keep the stale contextUsage.
 		const second = loadContextTreeChildrenFromDisk(rlmDir, () => 100000);
 		expect(second[0].contextUsage).toEqual({ tokens: 2000, contextWindow: 100000, percent: 2 });
 	});
@@ -490,8 +484,6 @@ describe("AgentSession.getContextTree", () => {
 
 	it("projects retained children from their resident sessions instead of disk", () => {
 		const rlmDir = makeTempDir();
-		// A finished child persisted to disk whose live session is still
-		// resident, with newer usage not yet attributed to the file.
 		writeChildSession(join(rlmDir, "sub-res00001"), "persisted child", createUsage(900, 90, 0.09));
 		const { session: parent } = createSession(rlmDir);
 		const { session: childSession, sessionManager: childManager } = createSession(join(rlmDir, "sub-res00001"));
@@ -501,9 +493,6 @@ describe("AgentSession.getContextTree", () => {
 		syncAgentMessages(childSession, childManager);
 		expect(parent.registerRlmChildSession("sub-res00001", childSession)).toBe(true);
 		const residentNodes = parent.getContextTree().children.filter((node) => node.id === "sub-res00001");
-		// Exactly one node (not one from memory plus one from disk), carrying
-		// the in-memory usage; without a run, label/status follow the roster
-		// convention for rehydrated children.
 		expect(residentNodes).toHaveLength(1);
 		expect(residentNodes[0].ownUsage.input).toBe(700);
 		expect(residentNodes[0]).toMatchObject({ status: "done", label: "child agent" });

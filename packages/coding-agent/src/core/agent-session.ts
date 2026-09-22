@@ -13717,10 +13717,9 @@ export class AgentSession {
 
 	/**
 	 * Build the agent context overview for /context: this session as the root
-	 * plus one node per RLM sub-agent, recursively. Running children and
-	 * finished children still resident in memory are read from their live
-	 * sessions; other completed children from their persisted session dirs, so
-	 * the tree survives child disposal and session resume.
+	 * plus one node per RLM sub-agent, recursively. Running and resident
+	 * finished children come from their live sessions, others from their
+	 * persisted session dirs, so the tree survives child disposal and session resume.
 	 */
 	getContextTree(): ContextTreeNode {
 		const resolveContextWindow = this._contextWindowResolver();
@@ -13745,12 +13744,8 @@ export class AgentSession {
 				status: run.status,
 			});
 		}
-		// Finished children still resident in memory are projected from their
-		// live sessions the way running children are: usage only reaches their
-		// session file at settle boundaries, so the in-memory session is both
-		// cheaper and more accurate than a re-parse. The disk walk below still
-		// enumerates every child not known to any in-memory map (e.g. after a
-		// daemon restart), with the resident ids skipped like the live ones.
+		// Resident finished children project from their live sessions: usage
+		// reaches their session file only at settle boundaries, so memory is fresher than a re-parse.
 		const residentIds = new Set<string>(liveIds);
 		const rlmSessionDir = this._rlmSessionDirForReading();
 		for (const [childId, retained] of this._rlmChildSessions) {
@@ -13761,8 +13756,7 @@ export class AgentSession {
 			) {
 				continue;
 			}
-			// Only project children the disk walk itself would enumerate, so
-			// visibility stays identical; anything else keeps coming from disk.
+			// Only project children the disk walk would enumerate, so visibility stays identical.
 			const childDir = retained.session._rlmSessionDir ?? retained.session.sessionManager.getSessionDir();
 			if (!rlmSessionDir || basename(childDir) !== childId || dirname(childDir) !== rlmSessionDir) {
 				continue;
@@ -13772,8 +13766,7 @@ export class AgentSession {
 				...retained.session.getContextTree(),
 				id: childId,
 				label: retained.run ? rlmChildLabel(retained.run.prompt) : (retained.session.sessionName ?? "child agent"),
-				// Without a run (e.g. rehydrated after daemon recovery) status
-				// stays "done", matching _rlmChildSnapshotForSession.
+				// Without a run, status stays "done", matching _rlmChildSnapshotForSession.
 				status: retained.run?.status ?? "done",
 			});
 		}
