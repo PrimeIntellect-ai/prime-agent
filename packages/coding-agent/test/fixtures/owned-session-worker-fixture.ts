@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { closeSync, existsSync, writeFileSync } from "node:fs";
 import {
 	closeOwnedSessionWorkerOwnerWatch,
@@ -64,6 +65,12 @@ if (process.env.PRIME_AGENT_INTERNAL_OWNED_WORKER === "1") {
 			if (process.env.PRIME_AGENT_TEST_CLOSE_STDIN_ON_COMMAND === command.type) {
 				outputResponse(command);
 				writeRecoveryDescriptor();
+				// A descendant holding the worker's inherited stdout/stderr keeps
+				// the child's close event from firing after a kill: the frontend
+				// must reap the whole worker group. The timer leases its life.
+				spawn(process.execPath, ["-e", "setTimeout(() => process.exit(0), 60000)"], {
+					stdio: ["ignore", "inherit", "inherit"],
+				});
 				// Close fd 0 while the worker stays alive, then mark it deaf.
 				closeSync(0);
 				if (pidPath) {

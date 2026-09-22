@@ -394,19 +394,21 @@ export async function runOwnedSessionWorkerFrontend(
 		// 'close' handler owns the fallout (failing pending RPC commands,
 		// relaunching with the recovery descriptor), so this listener keeps the
 		// pipe error from becoming a fatal one. When the pipe broke while the
-		// worker was still alive the bridge is permanently unusable: kill the
-		// child so its close event drives that fallout instead of waiting
-		// indefinitely on a worker that can no longer accept commands.
+		// worker was still alive the bridge is permanently unusable: reap the
+		// worker process group so the close event always fires — a descendant
+		// holding inherited stdio would otherwise block it forever — and that
+		// close drives the fallout instead of waiting indefinitely on a worker
+		// that can no longer accept commands.
 		child.stdin?.on("error", (error) => {
+			if ((error as NodeJS.ErrnoException).code !== "EPIPE") {
+				return;
+			}
 			// Guard like forwardSignal: an exited child's pid may have been
-			// reassigned, so never signal after its exit.
-			if (
-				(error as NodeJS.ErrnoException).code === "EPIPE" &&
-				child.exitCode === null &&
-				child.signalCode === null
-			) {
+			// reassigned, so never signal the child itself after its exit.
+			if (child.exitCode === null && child.signalCode === null) {
 				child.kill("SIGKILL");
 			}
+			reapWorkerResources(child.pid);
 		});
 		if (!interactive) {
 			const childInput = child.stdin ?? undefined;
