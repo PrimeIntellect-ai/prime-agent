@@ -478,7 +478,7 @@ export class ModelRegistry {
 		readonly authStorage: AuthStorage,
 		private modelsJsonPath: string | undefined,
 	) {
-		const cachePath = (name: string) => (modelsJsonPath ? join(dirname(modelsJsonPath), name) : undefined);
+		const cachePath = (name: string) => (modelsJsonPath ? join(dirname(modelsJsonPath), "catalog", name) : undefined);
 		this.providerCatalog = new CatalogCache(
 			PROVIDER_MODEL_CATALOG_URL,
 			cachePath("provider-model-catalog.v1.json"),
@@ -556,7 +556,9 @@ export class ModelRegistry {
 	}
 
 	private primeInferenceCatalogCachePath(): string | undefined {
-		return this.modelsJsonPath ? join(dirname(this.modelsJsonPath), "prime-inference-models-cache.json") : undefined;
+		return this.modelsJsonPath
+			? join(dirname(this.modelsJsonPath), "catalog", "prime-inference-models-cache.json")
+			: undefined;
 	}
 
 	private bundledPrimeInferenceModels(): Model<"openai-completions">[] {

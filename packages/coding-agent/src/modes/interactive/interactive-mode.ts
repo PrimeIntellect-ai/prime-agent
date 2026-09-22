@@ -61,6 +61,7 @@ import {
 	APP_TITLE,
 	getAgentDir,
 	getAgentTracesLogPath,
+	getCatalogCacheDir,
 	getDebugLogPath,
 	getLogsDir,
 	getShareViewerUrl,
@@ -9755,7 +9756,7 @@ export class InteractiveMode {
 		const resolution = resolveServiceCatalogWithDiagnostics(
 			this.settingsManager.getMcpCatalogSources(),
 			this.getMcpConnectionStore().records(),
-			path.join(getAgentDir(), "mcp-service-catalog.v2.json"),
+			path.join(getCatalogCacheDir(), "mcp-service-catalog.v2.json"),
 		);
 		const views = buildPluginViews({
 			services: resolution.descriptors,
@@ -9777,7 +9778,7 @@ export class InteractiveMode {
 		return resolveServiceCatalogWithDiagnostics(
 			this.settingsManager.getMcpCatalogSources(),
 			this.getMcpConnectionStore().records(),
-			path.join(getAgentDir(), "mcp-service-catalog.v2.json"),
+			path.join(getCatalogCacheDir(), "mcp-service-catalog.v2.json"),
 		).descriptors;
 	}
 

@@ -5,7 +5,7 @@
 import { join } from "node:path";
 import { registerBuiltinMcpOAuthProviders } from "@earendil-works/pi-ai/mcp";
 import { registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/pi-ai/oauth";
-import { getAgentDir } from "../../config.js";
+import { getAgentDir, getCatalogCacheDir } from "../../config.js";
 import type { AuthStorage } from "../auth-storage.js";
 import type { McpServerConfig } from "../settings-manager.js";
 import type { AcpMcpServerConfig } from "./acp-mcp-types.js";
@@ -131,14 +131,16 @@ export class McpManager {
 			defaultServiceCatalogProvider(
 				() => this.getCatalogSources?.() ?? [],
 				() => this.connectionStore.records(),
-				() => join(getAgentDir(), "mcp-service-catalog.v2.json"),
+				() => join(getCatalogCacheDir(), "mcp-service-catalog.v2.json"),
 			);
 		this.connectionStore =
 			options.connectionStore ?? McpConnectionStore.open(join(getAgentDir(), "mcp-connections.json"));
 		this.probeConnection = options.probeConnection;
 		this.noBackgroundVerification = options.noBackgroundVerification ?? false;
 		this.unsubscribeRemoteMcpServiceCatalogChange = onRemoteMcpServiceCatalogChange(() => this.refresh());
-		void refreshRemoteMcpServiceCatalog(join(getAgentDir(), "mcp-service-catalog.v2.json"), false).catch(() => {});
+		void refreshRemoteMcpServiceCatalog(join(getCatalogCacheDir(), "mcp-service-catalog.v2.json"), false).catch(
+			() => {},
+		);
 		this.refresh();
 	}
 
