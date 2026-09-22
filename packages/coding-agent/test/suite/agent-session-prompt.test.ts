@@ -1,12 +1,13 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { BashResult } from "../../src/core/bash-executor.js";
 import {
+	type CustomMessage,
 	convertToLlm,
 	HARNESS_DIGEST_CUSTOM_TYPE,
 	HARNESS_DIGEST_PREFIX,
@@ -15,6 +16,7 @@ import {
 import type { PromptTemplate } from "../../src/core/prompt-templates.js";
 import { getLocalHarnessStateDir, loadHarnessState, saveHarnessState } from "../../src/core/refinement/index.js";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.js";
+import { TOOL_INTENT_RECOVERY_CUSTOM_TYPE } from "../../src/core/tool-intent-recovery.js";
 import { createTestResourceLoader } from "../utilities.js";
 import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.js";
 import { createDeferred, createWaitingHarness } from "./scheduling.js";
@@ -891,6 +893,86 @@ describe("AgentSession prompt characterization", () => {
 		harness.setResponses([fauxAssistantMessage("clean after")]);
 		await harness.session.prompt("normal prompt");
 		expect(getAssistantTexts(harness)).toContain("clean after");
+	});
+
+	const probeTool: AgentTool = {
+		name: "probe",
+		label: "Probe",
+		description: "Probe tool",
+		parameters: Type.Object({}),
+		execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
+	};
+	const isToolIntentRecoveryMessage = (message: AgentMessage): message is CustomMessage =>
+		message.role === "custom" && message.customType === TOOL_INTENT_RECOVERY_CUSTOM_TYPE;
+	const toolChoiceOf = (options: unknown) => (options as { toolChoice?: string } | undefined)?.toolChoice;
+	const glmHarness = (overrides: Partial<NonNullable<Parameters<typeof createHarness>[0]>> = {}) =>
+		createHarness({
+			api: "openai-completions",
+			provider: "prime-inference",
+			models: [{ id: "internal/glm-5.3-fast" }],
+			tools: [probeTool],
+			...overrides,
+		});
+	it.each([
+		{ stopReason: "toolUse" as const, model: { id: "internal/glm-5.3-fast" }, retryToolChoice: "required" },
+		{
+			stopReason: "length" as const,
+			model: { id: "z-ai/glm-5.3", compat: { retryOnTruncatedToolCall: true } },
+			retryToolChoice: undefined,
+		},
+	])("retries once when a reply delivers no tool call: %j", async ({ stopReason, model, retryToolChoice }) => {
+		const harness = await glmHarness({ models: [model] });
+		harnesses.push(harness);
+		const toolChoices: Array<string | undefined> = [];
+		harness.setResponses([
+			(_context, options) => {
+				toolChoices.push(toolChoiceOf(options));
+				return fauxAssistantMessage("Let me actually check the evidence.", { stopReason });
+			},
+			(context, options) => {
+				toolChoices.push(toolChoiceOf(options));
+				expect(context.messages.at(-1)?.role).toBe("user");
+				return fauxAssistantMessage([fauxToolCall("probe", {})], { stopReason: "toolUse" });
+			},
+			(_context, options) => {
+				toolChoices.push(toolChoiceOf(options));
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await harness.session.prompt("why do the children die?");
+		expect(toolChoices).toEqual([undefined, retryToolChoice, undefined]);
+		expect(harness.eventsOfType("tool_execution_end").map((event) => event.toolName)).toEqual(["probe"]);
+		expect(harness.session.messages.find(isToolIntentRecoveryMessage)?.display).toBe(false);
+		// One recovery per run: a second undelivered call in the same run ends the turn.
+		harness.setResponses([
+			fauxAssistantMessage("I'll inspect the logs.", { stopReason }),
+			fauxAssistantMessage("I'll check again.", { stopReason }),
+		]);
+		await harness.session.prompt("inspect the logs too");
+		expect(harness.session.messages.filter(isToolIntentRecoveryMessage)).toHaveLength(2);
+		expect(harness.session.agent.state.errorMessage).toBeUndefined();
+	});
+
+	it.each([
+		{ text: "Let me actually check the evidence." },
+		{ text: "Would you like me to run a targeted check of the live session state?" },
+		{ text: "Let me check the logs.", stopReason: "error" as const },
+		{ text: "Let me check the logs.", stopReason: "aborted" as const },
+		{ text: "Let me check the logs.", stopReason: "length" as const },
+		{
+			text: "",
+			stopReason: "length" as const,
+			models: [{ id: "z-ai/glm-5.3", compat: { retryOnTruncatedToolCall: false } }],
+		},
+		{ text: "Let me check the logs.", stopReason: "toolUse" as const, tools: [] },
+	])("does not retry an ineligible terminal reply: %j", async ({ text, stopReason, ...overrides }) => {
+		const harness = await glmHarness({ settings: { retry: { enabled: false } }, ...overrides });
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage(text, { stopReason }), fauxAssistantMessage("unexpected retry")]);
+		await harness.session.prompt("Inspect the logs.");
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(harness.eventsOfType("tool_execution_start")).toHaveLength(0);
+		expect(harness.session.messages.filter(isToolIntentRecoveryMessage)).toHaveLength(0);
 	});
 });
 

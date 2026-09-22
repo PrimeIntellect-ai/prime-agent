@@ -120,7 +120,7 @@ describe("openai-completions tool_choice", () => {
 				onPayload: (params: unknown) => {
 					payload = params;
 				},
-			} as unknown as Parameters<typeof streamSimple>[2],
+			},
 		).result();
 
 		const params = (payload ?? mockState.lastParams) as { tool_choice?: string; tools?: unknown[] };
@@ -1438,6 +1438,7 @@ describe("openai-completions tool-result content", () => {
 		cacheControlFormat: "anthropic",
 		sendSessionAffinityHeaders: false,
 		supportsLongCacheRetention: true,
+		retryOnTruncatedToolCall: false,
 	};
 
 	function imageModel(): Model<"openai-completions"> {

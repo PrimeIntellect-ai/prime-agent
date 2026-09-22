@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Model } from "@earendil-works/pi-ai";
+import { getModels, type Model } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
 	buildPrimeInferenceModels,
@@ -10,6 +10,7 @@ import {
 } from "../src/core/prime-inference-model-catalog.js";
 import {
 	fetchAuthorizedPrivatePrimeInferenceModels,
+	getPrivatePrimeInferenceModels,
 	isPrivatePrimeInferenceModel,
 } from "../src/core/prime-inference-models.js";
 
@@ -141,5 +142,21 @@ describe("Prime Inference model catalog", () => {
 			vi.fn(async () => new Response(null, { status: 403 })),
 		);
 		expect(models).toEqual([]);
+	});
+	test("keeps the dropped-tool-call retry flag on the Dynamo-served GLM-5.3 templates", () => {
+		const publicTemplate = getModels("prime-inference").find(({ id }) => id === "z-ai/glm-5.3") as
+			| Model<"openai-completions">
+			| undefined;
+		expect(publicTemplate?.compat?.retryOnTruncatedToolCall).toBe(true);
+		const privateTemplates = getPrivatePrimeInferenceModels();
+		expect(privateTemplates.find(({ id }) => id === "internal/glm-5.3-fast")?.compat?.retryOnTruncatedToolCall).toBe(
+			true,
+		);
+		// Live catalog entries clone their template's compat, so a refresh keeps the flag.
+		const live = buildPrimeInferenceModels(privateTemplates, [{ id: "internal/glm-5.3-fast", input: 0, output: 0 }], {
+			includePrivate: true,
+			minimumModels: 0,
+		});
+		expect(live?.[0]?.compat?.retryOnTruncatedToolCall).toBe(true);
 	});
 });

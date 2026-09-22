@@ -347,6 +347,7 @@ import {
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
+import { createToolIntentRecoveryMessage, isDroppedToolCallStop } from "./tool-intent-recovery.js";
 import { acpMcpToolNames, createAcpMcpToolDefinitions } from "./tools/acp-mcp.js";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
 import { createAllToolDefinitions } from "./tools/index.js";
@@ -1781,6 +1782,7 @@ export class AgentSession {
 		this._installAgentToolHooks();
 		this._installAgentTurnHook();
 		this._installAgentContinuationHook();
+		this._installAgentToolIntentRecoveryHook();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -1991,6 +1993,27 @@ export class AgentSession {
 
 	private _installAgentContinuationHook(): void {
 		this.agent.getContinuationMessages = (context, signal) => this._getContinuationMessages(context, signal);
+	}
+
+	private _installAgentToolIntentRecoveryHook(): void {
+		this.agent.getToolIntentRecovery = (context) => {
+			// Autonomous and goal runs continue on their own after a text-only turn;
+			// recovery is for interactive runs, and never while other work is queued.
+			if (
+				this.queuedActionCount > 0 ||
+				this._goalState.status !== "idle" ||
+				this._autonomousState.enabled ||
+				this._autonomousContinuationSuppressionDepth > 0 ||
+				context.newMessages.some((message) => this._autonomousContinuationSuppressedMessages.has(message)) ||
+				this._hasUnsettledRlmQuiescenceWork() ||
+				this._hasLiveBackgroundBashHandles()
+			) {
+				return undefined;
+			}
+			return isDroppedToolCallStop(context.message, this._runModel())
+				? createToolIntentRecoveryMessage()
+				: undefined;
+		};
 	}
 
 	private _installAgentTurnHook(): void {

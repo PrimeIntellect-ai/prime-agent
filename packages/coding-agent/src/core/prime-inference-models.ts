@@ -28,6 +28,23 @@ const PRIVATE_PRIME_INFERENCE_MODELS: readonly Model<"openai-completions">[] = [
 			maxTokensField: "max_tokens",
 		},
 	},
+	{
+		id: "internal/glm-5.3-fast",
+		name: "GLM 5.3 Fast",
+		api: "openai-completions",
+		provider: "prime-inference",
+		baseUrl: PRIME_INFERENCE_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1048576,
+		maxTokens: 131072,
+		compat: {
+			supportsDeveloperRole: false,
+			maxTokensField: "max_tokens",
+			retryOnTruncatedToolCall: true,
+		},
+	},
 ];
 
 export function isPrivatePrimeInferenceModel(model: Pick<Model<string>, "provider" | "id">): boolean {

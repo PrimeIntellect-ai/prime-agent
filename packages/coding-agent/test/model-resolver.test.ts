@@ -160,11 +160,11 @@ describe("resolveCliModel", () => {
 
 		const priv = resolveCliModel({
 			cliProvider: "prime-inference",
-			cliModel: "internal/glm-5.3-fast",
+			cliModel: "internal/glm-5.4-fast",
 			modelRegistry: registry,
 		});
 		expect(priv.error).toBeUndefined();
-		expect(priv.model?.id).toBe("internal/glm-5.3-fast");
+		expect(priv.model?.id).toBe("internal/glm-5.4-fast");
 		expect(priv.model?.provider).toBe("prime-inference");
 		expect(priv.model?.baseUrl).toBe("https://api.pinference.ai/api/v1");
 		const privateModel = priv.model as Model<"openai-completions">;

@@ -61,7 +61,7 @@ describe("created-session private model request params", () => {
 	it("omits enable_thinking for an internal model resolved like a created session", async () => {
 		const resolved = resolveCliModel({
 			cliProvider: "prime-inference",
-			cliModel: "internal/glm-5.3-fast",
+			cliModel: "internal/glm-5.4-fast",
 			modelRegistry: freshWorkerRegistry,
 		});
 		expect(resolved.error).toBeUndefined();
@@ -74,7 +74,7 @@ describe("created-session private model request params", () => {
 		).result();
 
 		const params = mockState.lastParams as { model?: string; enable_thinking?: boolean };
-		expect(params.model).toBe("internal/glm-5.3-fast");
+		expect(params.model).toBe("internal/glm-5.4-fast");
 		expect("enable_thinking" in params).toBe(false);
 	});
 

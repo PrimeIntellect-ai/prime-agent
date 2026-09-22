@@ -114,7 +114,11 @@ interface OpenAICompatCacheControl {
 	ttl?: string;
 }
 
-type ResolvedOpenAICompletionsCompat = Omit<Required<OpenAICompletionsCompat>, "cacheControlFormat"> & {
+/** Wire-affecting compat resolved to concrete values; `retryOnTruncatedToolCall` is agent-layer policy left on `model.compat`. */
+type ResolvedOpenAICompletionsCompat = Omit<
+	Required<OpenAICompletionsCompat>,
+	"cacheControlFormat" | "retryOnTruncatedToolCall"
+> & {
 	cacheControlFormat?: OpenAICompletionsCompat["cacheControlFormat"];
 };
 
@@ -509,7 +513,7 @@ export const streamSimpleOpenAICompletions: StreamFunction<"openai-completions",
 	const reasoningSpecified = requestedReasoning !== undefined;
 	const clampedReasoning = reasoningSpecified ? clampThinkingLevel(model, requestedReasoning) : undefined;
 	const reasoningEffort = clampedReasoning === "off" ? undefined : clampedReasoning;
-	const toolChoice = (options as OpenAICompletionsOptions | undefined)?.toolChoice;
+	const toolChoice = options?.toolChoice;
 
 	return streamOpenAICompletions(model, context, {
 		...base,

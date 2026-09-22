@@ -1,0 +1,1 @@
+- Added an optional hook for one bounded retry per run when an OpenAI Chat Completions reply reports `toolUse` or `length` but delivers no tool call.

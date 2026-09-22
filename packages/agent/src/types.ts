@@ -242,6 +242,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	getContinuationMessages?: (context: GetContinuationMessagesContext, signal?: AbortSignal) => Promise<AgentMessage[]>;
 
+	/** Optional one-shot recovery message after an empty toolUse or length finish. */
+	getToolIntentRecovery?: (context: GetContinuationMessagesContext) => AgentMessage | undefined;
+
 	/**
 	 * Tool execution mode. Defaults to `"parallel"`.
 	 * Parallel mode preflights calls sequentially, executes allowed calls concurrently, emits

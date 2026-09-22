@@ -19261,7 +19261,7 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "prime-inference",
 			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false},
+			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false,"retryOnTruncatedToolCall":true},
 			reasoning: true,
 			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
 			input: ["text"],

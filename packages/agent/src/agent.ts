@@ -109,6 +109,7 @@ export interface AgentOptions {
 	shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
 	shouldStopBeforeTurn?: () => boolean;
 	getContinuationMessages?: (context: GetContinuationMessagesContext, signal?: AbortSignal) => Promise<AgentMessage[]>;
+	getToolIntentRecovery?: AgentLoopConfig["getToolIntentRecovery"];
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
 	sessionId?: string;
@@ -222,6 +223,7 @@ export class Agent {
 		context: GetContinuationMessagesContext,
 		signal?: AbortSignal,
 	) => Promise<AgentMessage[]>;
+	public getToolIntentRecovery?: AgentLoopConfig["getToolIntentRecovery"];
 	/**
 	 * Per-run model override. When set, every LLM request for prompt and
 	 * continuation runs uses this model (with its own thinking level and
@@ -251,6 +253,7 @@ export class Agent {
 		this.shouldStopAfterTurn = options.shouldStopAfterTurn;
 		this.shouldStopBeforeTurn = options.shouldStopBeforeTurn;
 		this.getContinuationMessages = options.getContinuationMessages;
+		this.getToolIntentRecovery = options.getToolIntentRecovery;
 		this.steeringQueue = new PendingMessageQueue(options.steeringMode ?? "one-at-a-time");
 		this.followUpQueue = new PendingMessageQueue(options.followUpMode ?? "one-at-a-time");
 		this.sessionId = options.sessionId;
@@ -507,6 +510,8 @@ export class Agent {
 			},
 			getFollowUpMessages: async () => this.followUpQueue.drain(),
 			getContinuationMessages: async (context, signal) => this.getContinuationMessages?.(context, signal) ?? [],
+			getToolIntentRecovery: (context) =>
+				this.hasQueuedMessages() ? undefined : this.getToolIntentRecovery?.(context),
 		};
 	}
 

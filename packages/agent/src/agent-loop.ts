@@ -174,6 +174,15 @@ async function pollMessagesUnlessAborted(
 	return (await maybePromiseWithAbort(poll(), signal)) || [];
 }
 
+/** Detect a tool-use or length finish with no delivered tool call. */
+function isEndedWithoutDeliveredToolCall(message: AssistantMessage, context: AgentContext): boolean {
+	return (
+		(message.stopReason === "toolUse" || message.stopReason === "length") &&
+		!message.content.some((part) => part.type === "toolCall") &&
+		(context.tools?.length ?? 0) > 0
+	);
+}
+
 /**
  * Start an agent loop with a new prompt message.
  * The prompt is added to the context and events are emitted for it.
@@ -312,6 +321,8 @@ async function runLoop(
 	let firstTurn = true;
 	let lastTurn: Parameters<NonNullable<AgentLoopConfig["getContinuationMessages"]>>[0] | undefined;
 	let pendingMessages: AgentMessage[] = await pollMessagesUnlessAborted(config.getSteeringMessages, signal);
+	let toolIntentRecoveryUsed = false;
+	let recoveryToolChoice: "required" | undefined;
 
 	const shouldStopBeforeTurn = (): boolean => !firstTurn && (config.shouldStopBeforeTurn?.() ?? false);
 
@@ -337,7 +348,15 @@ async function runLoop(
 				pendingMessages = [];
 			}
 
-			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
+			const message = await streamAssistantResponse(
+				currentContext,
+				config,
+				signal,
+				emit,
+				streamFn,
+				recoveryToolChoice,
+			);
+			recoveryToolChoice = undefined;
 			newMessages.push(message);
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
@@ -442,6 +461,32 @@ async function runLoop(
 			continue;
 		}
 
+		if (shouldStopBeforeTurn() || signal?.aborted) break;
+		if (
+			!toolIntentRecoveryUsed &&
+			config.model.api === "openai-completions" &&
+			(config.toolChoice === undefined || config.toolChoice === "auto") &&
+			lastTurn &&
+			isEndedWithoutDeliveredToolCall(lastTurn.message, currentContext)
+		) {
+			let recovery: AgentMessage | undefined;
+			try {
+				recovery = config.getToolIntentRecovery?.(lastTurn);
+			} catch {
+				recovery = undefined;
+			}
+			if (recovery) {
+				toolIntentRecoveryUsed = true;
+				// `required` is standard Chat Completions and the engines that emit `tool_calls`
+				// finishes accept it; a provider that rejects it fails the retry turn visibly
+				// rather than stopping silently. A length finish may be ordinary truncation,
+				// so only require a tool after toolUse.
+				recoveryToolChoice = lastTurn.message.stopReason === "toolUse" ? "required" : undefined;
+				pendingMessages = [recovery];
+				continue;
+			}
+		}
+
 		break;
 	}
 
@@ -454,6 +499,7 @@ async function streamAssistantResponse(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 	streamFn?: StreamFn,
+	perTurnToolChoice?: "required",
 ): Promise<AssistantMessage> {
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
@@ -494,6 +540,7 @@ async function streamAssistantResponse(
 		const response = await maybePromiseWithAbort(
 			streamFunction(config.model, llmContext, {
 				...config,
+				toolChoice: perTurnToolChoice ?? config.toolChoice,
 				apiKey: resolvedApiKey,
 				signal,
 			}),
