@@ -1115,6 +1115,12 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 		} finally {
 			await harness.registry.dispose();
 			await daemon.stop().catch(() => undefined);
+			// The guest daemon coalesces mirror passes on setImmediate; a
+			// queued pass that outlives stop() would write its durable outbox
+			// after this suite's afterEach removed the temp root. One
+			// setImmediate turn (the queue is FIFO and drains fully) runs any
+			// pending pass while the root still exists.
+			await new Promise((resolve) => setImmediate(resolve));
 		}
 	});
 
