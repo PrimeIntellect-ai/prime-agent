@@ -205,9 +205,12 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // Session persistence first: the conversation-log path and the resume
     // context both come from the session manager (TS `_rebuildSystemPrompt`
     // reads `sessionManager.getSessionFile()`).
-    let session_manager = config
+    let mut session_manager = config
         .session_manager
         .unwrap_or_else(|| SessionManager::in_memory(&cwd));
+    // Runtime construction consumes historical goal/refinement state as well
+    // as context. Keep that full-history boundary off the async executor.
+    session_manager.ensure_full_history().await?;
     let conversation_log = {
         let session = &session_manager;
         session

@@ -1472,6 +1472,57 @@ impl Worker {
     }
 
     pub(crate) async fn dispatch(&self, command_type: &str, payload: &Value) -> DaemonResponse {
+        // Attach reads use the complete compacted transcript. All other commands
+        // may inspect old entries or mutate history and need the full store.
+        if !matches!(
+            command_type,
+            "create"
+                | "attach"
+                | "detach"
+                | "get_state"
+                | "get_messages"
+                | "get_connection_state"
+                | "get_session_header"
+                | "get_session_stats"
+                | "get_queue"
+                | "get_model_catalog"
+                | "get_available_models"
+                | "heartbeats_list"
+                | "update_snapshot"
+        ) && self
+            .core
+            .lock()
+            .unwrap()
+            .store
+            .as_ref()
+            .is_some_and(|store| store.window.is_some())
+        {
+            let path = self
+                .core
+                .lock()
+                .unwrap()
+                .store
+                .as_ref()
+                .unwrap()
+                .path
+                .clone();
+            let load_path = path.clone();
+            let hydrated = tokio::task::spawn_blocking(move || SessionFile::open(&load_path))
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|result| result);
+            match hydrated {
+                Ok(full) => {
+                    let mut core = self.core.lock().unwrap();
+                    if let Some(store) = core.store.as_mut().filter(|store| store.path == path) {
+                        store.install_full_history(full);
+                    }
+                }
+                Err(error) => {
+                    return response_failure(None, command_type, &error.to_string(), None);
+                }
+            }
+        }
         match command_type {
             "create" => self.handle_create(payload).await,
             "attach" => self.handle_attach(payload),
@@ -1820,8 +1871,15 @@ impl Worker {
             .map(str::to_string);
 
         let mut store = match (&session_path, no_session) {
-            (Some(path), false) if path.exists() => match SessionFile::open(path) {
+            (Some(path), false) if path.exists() => match {
+                let path = path.clone();
+                tokio::task::spawn_blocking(move || SessionFile::open_windowed(&path))
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .and_then(|result| result)
+            } {
                 Ok(mut opened) => {
+                    let append_start = opened.entries.len();
                     append_creation_prefix(
                         &mut opened,
                         self.engine.as_ref(),
@@ -1830,7 +1888,12 @@ impl Worker {
                         false,
                     );
                     let _ = opened.append_session_state("active");
-                    if let Err(error) = opened.rewrite() {
+                    let persisted = if opened.window.is_some() {
+                        opened.persist_appended(append_start)
+                    } else {
+                        opened.rewrite()
+                    };
+                    if let Err(error) = persisted {
                         return response_failure(None, "create", &error.to_string(), None);
                     }
                     opened
@@ -1911,8 +1974,10 @@ impl Worker {
         };
 
         if let Some(name) = name.filter(|n| !n.trim().is_empty()) {
-            let _ = store.append_session_info(name);
-            let _ = store.rewrite();
+            if let Err(error) = store.persist_entry("session_info", json!({ "name": name.trim() }))
+            {
+                return response_failure(None, "create", &error.to_string(), None);
+            }
         }
         // Restore the persisted queue snapshot (crash/respawn recovery) from
         // the worker recovery journal.
@@ -4706,6 +4771,28 @@ impl TurnRunner {
                         || core.lock().unwrap().retry_abort_requested
                 }
             };
+            let hydration_path = core
+                .lock()
+                .unwrap()
+                .store
+                .as_ref()
+                .filter(|store| store.window.is_some())
+                .map(|store| store.path.clone());
+            if let Some(path) = hydration_path {
+                match SessionFile::open(&path) {
+                    Ok(full) => {
+                        let mut core = core.lock().unwrap();
+                        if let Some(store) = core.store.as_mut().filter(|store| store.path == path)
+                        {
+                            store.install_full_history(full);
+                        }
+                    }
+                    Err(error) => {
+                        emit(EngineEvent::Done(Err(error.to_string())));
+                        return;
+                    }
+                }
+            }
             // Restored next-turn rows ride this delivery (TS
             // `prefixMessages`): emitted before the accepted prompt, the
             // same durable-row path as in-turn custom rows.

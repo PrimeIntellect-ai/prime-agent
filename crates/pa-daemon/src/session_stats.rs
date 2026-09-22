@@ -42,7 +42,11 @@ pub fn session_stats(store: &SessionFile, context_window: Option<u64>) -> Value 
     let mut output = 0u64;
     let mut cache_read = 0u64;
     let mut cache_write = 0u64;
-    let mut cost = 0.0f64;
+    let mut cost = store
+        .window
+        .as_ref()
+        .map(|window| window.older_path_stats.cost)
+        .unwrap_or(0.0);
     for message in &durable_messages {
         match message.get("role").and_then(Value::as_str) {
             Some("user") => user_messages += 1,
@@ -77,6 +81,19 @@ pub fn session_stats(store: &SessionFile, context_window: Option<u64>) -> Value 
             _ => {}
         }
     }
+    let mut total_messages = durable_messages.len() as u64;
+    if let Some(window) = &store.window {
+        let older = &window.older_path_stats;
+        user_messages += older.user_messages;
+        assistant_messages += older.assistant_messages;
+        tool_results += older.tool_results;
+        tool_calls += older.tool_calls;
+        total_messages += older.total_messages;
+        input += older.input;
+        output += older.output;
+        cache_read += older.cache_read;
+        cache_write += older.cache_write;
+    }
     let mut stats = json!({
         "sessionFile": store.path.display().to_string(),
         "sessionId": store.session_id(),
@@ -84,7 +101,7 @@ pub fn session_stats(store: &SessionFile, context_window: Option<u64>) -> Value 
         "assistantMessages": assistant_messages,
         "toolCalls": tool_calls,
         "toolResults": tool_results,
-        "totalMessages": durable_messages.len(),
+        "totalMessages": total_messages,
         "tokens": {
             "input": input,
             "output": output,

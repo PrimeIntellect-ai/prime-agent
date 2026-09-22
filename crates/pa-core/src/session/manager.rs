@@ -267,9 +267,13 @@ fn finalize_loaded_entries(entries: Vec<FileEntry>) -> Vec<FileEntry> {
 
 /// Read just the header of a session file (first line).
 pub fn read_session_header(file_path: &Path) -> Option<SessionHeader> {
-    let content = std::fs::read_to_string(file_path).ok()?;
-    let first_line = content.lines().next()?;
-    let wrapper: SessionHeaderWrapper = serde_json::from_str(first_line).ok()?;
+    use std::io::BufRead;
+    let file = std::fs::File::open(file_path).ok()?;
+    let mut first_line = String::new();
+    std::io::BufReader::new(file)
+        .read_line(&mut first_line)
+        .ok()?;
+    let wrapper: SessionHeaderWrapper = serde_json::from_str(&first_line).ok()?;
     Some(wrapper.header)
 }
 
@@ -313,6 +317,7 @@ pub struct SessionManager {
     flushed: bool,
     has_assistant_entry: bool,
     file_entries: Vec<FileEntry>,
+    window: Option<super::window::WindowedSessionStore>,
     by_id: HashMap<String, usize>,
     labels_by_id: HashMap<String, String>,
     label_timestamps_by_id: HashMap<String, String>,
@@ -339,6 +344,7 @@ impl SessionManager {
             flushed: false,
             has_assistant_entry: false,
             file_entries: Vec::new(),
+            window: None,
             by_id: HashMap::new(),
             labels_by_id: HashMap::new(),
             label_timestamps_by_id: HashMap::new(),
@@ -374,12 +380,76 @@ impl SessionManager {
         )
     }
 
+    /// Open only the compacted active window off the async executor. Use
+    /// `active_context` until `ensure_full_history` completes before accessing
+    /// historical entries, navigation, or exporting.
+    pub async fn open_windowed(
+        cwd: &Path,
+        session_dir: &Path,
+        session_file: &Path,
+    ) -> anyhow::Result<Self> {
+        let cwd = cwd.to_owned();
+        let session_dir = session_dir.to_owned();
+        let path = session_file.to_owned();
+        tokio::task::spawn_blocking(move || {
+            repair_jsonl_damage(&path);
+            let Some(window) = super::window::WindowedSessionStore::open(&path)? else {
+                return Ok(Self::open(&cwd, &session_dir, &path));
+            };
+            let mut manager = Self::in_memory(&cwd);
+            manager.session_id = match window.entries().first() {
+                Some(FileEntry::Header { header }) => header.id.clone(),
+                _ => unreachable!("window validates header"),
+            };
+            manager.session_dir = session_dir;
+            manager.session_file = Some(path);
+            manager.persist = true;
+            manager.flushed = true;
+            manager.file_entries = window.entries().to_vec();
+            manager.has_assistant_entry = true;
+            manager.build_index();
+            manager.window = Some(window);
+            Ok(manager)
+        })
+        .await?
+    }
+
+    /// The active compacted context without hydrating old message bodies.
+    pub fn active_context(&self) -> super::SessionContext {
+        match &self.window {
+            Some(window) => window.context(),
+            None => super::build_session_context(&self.file_entries, self.get_leaf_id()),
+        }
+    }
+
+    pub fn is_full_history(&self) -> bool {
+        self.window.is_none()
+    }
+
+    /// Hydrate before historical reads or mutation. Loading uses a blocking
+    /// worker; the selected leaf is retained and disk appends are preserved.
+    pub async fn ensure_full_history(&mut self) -> anyhow::Result<()> {
+        let Some(window) = self.window.as_mut() else {
+            return Ok(());
+        };
+        window.ensure_full_history().await?;
+        let entries = window.entries().to_vec();
+        let leaf = self.leaf_id.clone();
+        self.refresh_has_assistant_entry(&entries);
+        self.file_entries = entries;
+        self.build_index();
+        self.leaf_id = leaf;
+        self.window = None;
+        Ok(())
+    }
+
     /// Switch to a different session file (resume/branch).
     pub fn set_session_file(
         &mut self,
         session_file: PathBuf,
         preloaded_entries: Option<Vec<FileEntry>>,
     ) {
+        self.window = None;
         self.session_file = Some(session_file);
         if self.session_file.as_ref().is_some_and(|path| path.exists()) {
             let path = self.session_file.clone().unwrap();
@@ -477,6 +547,7 @@ impl SessionManager {
             },
         };
         self.file_entries = vec![header];
+        self.window = None;
         self.has_assistant_entry = false;
         self.by_id.clear();
         self.labels_by_id.clear();
@@ -532,6 +603,10 @@ impl SessionManager {
     }
 
     fn rewrite_file(&mut self) {
+        assert!(
+            self.window.is_none(),
+            "hydrate full session history before this operation"
+        );
         let Some(session_file) = &self.session_file else {
             return;
         };
@@ -601,6 +676,10 @@ impl SessionManager {
 
     /// Entries excluding the session header (TS `getEntries()`).
     pub fn get_entries(&self) -> Vec<FileEntry> {
+        assert!(
+            self.window.is_none(),
+            "hydrate full session history before this operation"
+        );
         self.file_entries
             .iter()
             .filter(|entry| !matches!(entry, FileEntry::Header { .. }))
@@ -610,6 +689,10 @@ impl SessionManager {
 
     /// All entries including the header (whole-file views).
     pub fn get_all_entries(&self) -> &[FileEntry] {
+        assert!(
+            self.window.is_none(),
+            "hydrate full session history before this operation"
+        );
         &self.file_entries
     }
 
@@ -625,6 +708,10 @@ impl SessionManager {
     }
 
     pub fn get_session_name(&self) -> Option<String> {
+        assert!(
+            self.window.is_none(),
+            "hydrate full session history before this operation"
+        );
         self.file_entries
             .iter()
             .rev()
@@ -649,6 +736,10 @@ impl SessionManager {
 
     /// Materialize an in-memory session into a persisted file.
     pub fn materialize_session_file(&mut self, session_dir: Option<PathBuf>) -> PathBuf {
+        assert!(
+            self.window.is_none(),
+            "hydrate full session history before this operation"
+        );
         if let Some(session_file) = self.session_file.clone() {
             return session_file;
         }
@@ -706,6 +797,10 @@ impl SessionManager {
 
     /// The session tree (branch children + label state) over current entries.
     pub fn get_tree(&self) -> SessionTree {
+        assert!(
+            self.window.is_none(),
+            "hydrate full session history before this operation"
+        );
         SessionTree::build(&self.file_entries)
     }
 
@@ -715,6 +810,10 @@ impl SessionManager {
     /// entry with the given chain, and re-indexes so the leaf is the last
     /// adopted entry. In-memory only — the caller owns any persistence.
     pub fn adopt_entries(&mut self, entries: Vec<FileEntry>) {
+        assert!(
+            self.window.is_none(),
+            "hydrate full session history before this operation"
+        );
         let header = self
             .file_entries
             .iter()
@@ -780,6 +879,10 @@ impl SessionManager {
     }
 
     pub(crate) fn append_entry(&mut self, entry: FileEntry) {
+        assert!(
+            self.window.is_none(),
+            "hydrate full session history before this operation"
+        );
         self.file_entries.push(entry);
         let index = self.file_entries.len() - 1;
         if matches!(
@@ -799,6 +902,10 @@ impl SessionManager {
     }
 
     pub(crate) fn next_base(&self) -> EntryBase {
+        assert!(
+            self.window.is_none(),
+            "hydrate full session history before this operation"
+        );
         EntryBase {
             id: Some(generate_id(&self.by_id)),
             parent_id: self.leaf_id.clone(),
@@ -963,21 +1070,37 @@ impl SessionManager {
 
     /// Look up an entry by id (file position index).
     pub fn get_entry_by_id(&self, id: &str) -> Option<&FileEntry> {
+        assert!(
+            self.window.is_none(),
+            "hydrate full session history before this operation"
+        );
         self.by_id.get(id).map(|&index| &self.file_entries[index])
     }
 
     /// The active label for a target entry id.
     pub fn get_label(&self, target_id: &str) -> Option<String> {
+        assert!(
+            self.window.is_none(),
+            "hydrate full session history before this operation"
+        );
         self.labels_by_id.get(target_id).cloned()
     }
 
     /// The timestamp of the label entry that set the target's active label.
     pub fn get_label_timestamp(&self, target_id: &str) -> Option<String> {
+        assert!(
+            self.window.is_none(),
+            "hydrate full session history before this operation"
+        );
         self.label_timestamps_by_id.get(target_id).cloned()
     }
 
     /// Move the leaf (used by branch/branchWithSummary).
     pub(crate) fn set_leaf_id(&mut self, leaf_id: Option<&str>) {
+        assert!(
+            self.window.is_none(),
+            "hydrate full session history before this operation"
+        );
         self.leaf_id = leaf_id.map(str::to_string);
     }
 

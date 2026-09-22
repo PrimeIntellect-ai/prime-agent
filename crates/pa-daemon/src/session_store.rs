@@ -11,8 +11,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+
+#[cfg(test)]
+#[path = "session_store_window_tests.rs"]
+mod window_tests;
 
 pub const CURRENT_SESSION_VERSION: u32 = 3;
 /// Entry types that represent user intent (vs daemon bookkeeping).
@@ -85,6 +89,15 @@ pub struct SessionFile {
     pub(crate) entries: Vec<SessionEntry>,
     pub(crate) by_id: HashMap<String, usize>,
     pub(crate) leaf_id: Option<String>,
+    pub(crate) window: Option<SessionWindow>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SessionWindow {
+    message_count: usize,
+    first_message: Option<String>,
+    loaded_entries: usize,
+    pub(crate) older_path_stats: pa_core::session::window::WindowStats,
 }
 
 pub fn session_file_name(session_id: &str) -> String {
@@ -106,8 +119,9 @@ pub fn parse_session_entries(content: &str) -> Vec<Value> {
 
 /// Read the first line of a session file and parse it as a header.
 pub fn read_session_header(path: &Path) -> Option<SessionHeader> {
-    let content = fs::read_to_string(path).ok()?;
-    let first = content.lines().next()?;
+    let file = fs::File::open(path).ok()?;
+    let mut first = String::new();
+    std::io::BufReader::new(file).read_line(&mut first).ok()?;
     let value: Value = serde_json::from_str(first.trim()).ok()?;
     if value.get("type").and_then(Value::as_str) != Some("session") {
         return None;
@@ -144,6 +158,7 @@ impl SessionFile {
             entries: Vec::new(),
             by_id: HashMap::new(),
             leaf_id: None,
+            window: None,
         };
         for line in lines {
             let trimmed = line.trim();
@@ -157,6 +172,81 @@ impl SessionFile {
             }
         }
         Ok(file)
+    }
+
+    /// Load the verified compacted context without decoding old message bodies.
+    pub fn open_windowed(path: &Path) -> Result<Self> {
+        let Some(window) = pa_core::session::window::WindowedSessionStore::open(path)? else {
+            return Self::open(path);
+        };
+        let header = window
+            .entries()
+            .iter()
+            .find_map(|entry| match entry {
+                pa_types::session::FileEntry::Header { header } => Some(header.clone()),
+                _ => None,
+            })
+            .ok_or_else(|| anyhow!("window has no session header"))?;
+        let mut file = Self {
+            path: path.to_owned(),
+            header,
+            entries: Vec::new(),
+            by_id: HashMap::new(),
+            leaf_id: None,
+            window: None,
+        };
+        for line in window.metadata_entries().iter().chain(window.raw_entries()) {
+            let Ok(entry) = serde_json::from_str(line) else {
+                return Self::open(path);
+            };
+            file.push_index(entry);
+        }
+        file.leaf_id = Some(window.leaf_id().to_owned());
+        file.window = Some(SessionWindow {
+            message_count: window.message_count(),
+            first_message: window
+                .first_user_message()
+                .map(message_text)
+                .filter(|text| !text.is_empty()),
+            loaded_entries: file.entries.len(),
+            older_path_stats: window.older_path_stats().clone(),
+        });
+        Ok(file)
+    }
+
+    #[cfg(test)]
+    fn ensure_full_history(&mut self) -> Result<()> {
+        if self.window.is_some() {
+            let full = Self::open(&self.path)?;
+            self.install_full_history(full);
+        }
+        Ok(())
+    }
+
+    /// Merge appends made while the disk snapshot loaded without holding the store lock.
+    pub(crate) fn install_full_history(&mut self, mut full: Self) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        for entry in &self.entries[window.loaded_entries..] {
+            if !full.by_id.contains_key(&entry.id) {
+                full.push_index(entry.clone());
+            }
+        }
+        full.leaf_id.clone_from(&self.leaf_id);
+        *self = full;
+    }
+
+    /// Persist only the newly appended creation records on a resumed file.
+    pub(crate) fn persist_appended(&self, start: usize) -> Result<()> {
+        let file = fs::OpenOptions::new().append(true).open(&self.path)?;
+        let mut writer = std::io::BufWriter::new(file);
+        for entry in &self.entries[start..] {
+            write_line(&mut writer, entry)?;
+        }
+        writer.flush()?;
+        writer.get_ref().sync_data()?;
+        Ok(())
     }
 
     /// Create a new in-memory session; persisted with the first flush.
@@ -177,6 +267,7 @@ impl SessionFile {
             entries: Vec::new(),
             by_id: HashMap::new(),
             leaf_id: None,
+            window: None,
         }
     }
 
@@ -399,10 +490,26 @@ impl SessionFile {
     }
 
     pub fn message_count(&self) -> usize {
-        self.entries.iter().filter(|e| e.type_ == "message").count()
+        match &self.window {
+            Some(window) => {
+                window.message_count
+                    + self.entries[window.loaded_entries..]
+                        .iter()
+                        .filter(|entry| entry.type_ == "message")
+                        .count()
+            }
+            None => self
+                .entries
+                .iter()
+                .filter(|entry| entry.type_ == "message")
+                .count(),
+        }
     }
 
     pub fn first_message(&self) -> Option<String> {
+        if let Some(window) = &self.window {
+            return window.first_message.clone();
+        }
         self.entries
             .iter()
             .filter(|e| e.type_ == "message")
@@ -477,6 +584,10 @@ impl SessionFile {
 
     /// Write the full file atomically (header + every entry), like `_rewriteFile`.
     pub fn rewrite(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.window.is_none(),
+            "full history required before rewriting session"
+        );
         let path = self.path.as_path();
         let Some(path) = (if path.as_os_str().is_empty() {
             None
@@ -514,6 +625,10 @@ impl SessionFile {
     /// durability — when it fails the entry stays indexed (a reload of
     /// the file would load it as the leaf) and the error still surfaces.
     pub fn persist_entry(&mut self, entry_type: &str, fields: Value) -> Result<String> {
+        anyhow::ensure!(
+            self.window.is_none() || self.path.exists(),
+            "window-backed session file is missing"
+        );
         let entry = SessionEntry::new(entry_type, self.leaf_id.clone(), &self.index_map(), fields);
         let id = entry.id.clone();
         if !self.path.as_os_str().is_empty() && self.path.exists() {
