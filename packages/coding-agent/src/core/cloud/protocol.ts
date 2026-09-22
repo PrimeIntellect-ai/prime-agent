@@ -64,6 +64,8 @@ export const CLOUD_MAX_OUTPUT_CHARS = 65_536;
 export const CLOUD_MAX_INLINE_ENTRY_BYTES = 262_144;
 /** Bound on one ephemeral session_event frame's encoded JSON. */
 export const CLOUD_MAX_SESSION_EVENT_BYTES = 131_072;
+/** Bound on brokered inference request conversation length. */
+export const CLOUD_MAX_INFERENCE_MESSAGES = 2_048;
 /** Bound on one inline session_entry's encoded JSON. */
 export const CLOUD_MAX_ENTRY_JSON_CHARS = 262_144;
 export const CLOUD_MAX_THINKING_CHARS = 64;
@@ -534,6 +536,50 @@ export interface CloudAck {
 	cursor: CloudCursor;
 }
 
+/** Guest-to-local brokered inference: the sandbox's agent loop asks the local
+ * daemon to run one model call. The local side owns the model catalog and all
+ * provider credentials; the sandbox never sees them. */
+export interface CloudInferenceRequest {
+	type: "inference_request";
+	sessionId: CloudSessionId;
+	/** Remote session id the turn belongs to (the guest's own id namespace). */
+	remoteSessionId: string;
+	/** Client-chosen id; the response frames all echo it. */
+	requestId: string;
+	/** Selector resolved locally against the user's full model catalog. */
+	model: { provider: string; modelId: string };
+	/** Optional explicit reasoning level the guest's turn requested. */
+	thinking?: string;
+	/** Canonical completion payload: messages plus provider options. */
+	payload: { messages: unknown[]; options?: Record<string, unknown> };
+}
+
+/** One streamed assistant-message event for a brokered inference request. */
+export interface CloudInferenceEvent {
+	type: "inference_event";
+	sessionId: CloudSessionId;
+	requestId: string;
+	/** AssistantMessageEvent-shaped live frame (start/deltas/usage). */
+	event: Record<string, unknown>;
+}
+
+/** Terminal success for a brokered inference request: the final message. */
+export interface CloudInferenceEnd {
+	type: "inference_end";
+	sessionId: CloudSessionId;
+	requestId: string;
+	/** Final AssistantMessage. */
+	message: Record<string, unknown>;
+}
+
+/** Terminal failure for a brokered inference request. */
+export interface CloudInferenceError {
+	type: "inference_error";
+	sessionId: CloudSessionId;
+	requestId: string;
+	error: string;
+}
+
 export type CloudMessage =
 	| CloudHello
 	| CloudSnapshot
@@ -542,7 +588,11 @@ export type CloudMessage =
 	| CloudSubmit
 	| CloudGetCommand
 	| CloudCommand
-	| CloudAck;
+	| CloudAck
+	| CloudInferenceRequest
+	| CloudInferenceEvent
+	| CloudInferenceEnd
+	| CloudInferenceError;
 
 /**
  * Deterministic JSON: recursively sorted keys, no whitespace, plain objects
@@ -1383,9 +1433,68 @@ export function cloudMessageProblem(value: unknown): string | undefined {
 			return commandProblem(value);
 		case "ack":
 			return ackProblem(value);
+		case "inference_request":
+			return inferenceRequestProblem(value);
+		case "inference_event":
+			return inferenceResponseProblem(value, "event");
+		case "inference_end":
+			return inferenceResponseProblem(value, "message");
+		case "inference_error":
+			return inferenceResponseProblem(value, "error");
 		default:
 			return `message.type must be one of ${CLOUD_MESSAGE_TYPES.join(", ")}`;
 	}
+}
+
+/** Brokered inference request validation: bounded ids and a bounded payload. */
+function inferenceRequestProblem(value: Record<string, unknown>): Problem {
+	const base = firstProblem(
+		expectFields(value, ["type", "sessionId", "remoteSessionId", "requestId", "model", "payload"]),
+		expectString(value.sessionId, "sessionId", CLOUD_MAX_ID_CHARS, 1),
+		expectString(value.remoteSessionId, "remoteSessionId", CLOUD_MAX_ID_CHARS, 1),
+		expectString(value.requestId, "requestId", CLOUD_MAX_ID_CHARS, 1),
+	);
+	if (base !== undefined) return base;
+	if (value.thinking !== undefined && !isString(value.thinking, CLOUD_MAX_ID_CHARS)) {
+		return "thinking must be a bounded string";
+	}
+	const model = value.model;
+	if (!isRecord(model)) return "model must be a JSON object";
+	if (
+		!isString(model.provider, CLOUD_MAX_ID_CHARS) ||
+		!isString(model.modelId, CLOUD_MAX_MODEL_ID_CHARS)
+	) {
+		return "model must carry bounded provider and modelId strings";
+	}
+	const payload = value.payload;
+	if (!isRecord(payload)) return "payload must be a JSON object";
+	if (!Array.isArray(payload.messages)) return "payload.messages must be an array";
+	if (payload.messages.length > CLOUD_MAX_INFERENCE_MESSAGES) {
+		return `payload.messages exceeds ${CLOUD_MAX_INFERENCE_MESSAGES} entries`;
+	}
+	if (payload.options !== undefined && !isRecord(payload.options)) {
+		return "payload.options must be a JSON object";
+	}
+	return undefined;
+}
+
+/** Brokered inference response-frame validation: bounded request echo + one payload field. */
+function inferenceResponseProblem(
+	value: Record<string, unknown>,
+	field: "event" | "message" | "error",
+): Problem {
+	const base = firstProblem(
+		expectFields(value, ["type", "sessionId", "requestId", field]),
+		expectString(value.sessionId, "sessionId", CLOUD_MAX_ID_CHARS, 1),
+		expectString(value.requestId, "requestId", CLOUD_MAX_ID_CHARS, 1),
+	);
+	if (base !== undefined) return base;
+	if (field === "error") {
+		if (!isString(value.error, CLOUD_MAX_ERROR_CHARS)) return "error must be a bounded string";
+		return undefined;
+	}
+	if (!isRecord(value[field])) return `${field} must be a JSON object`;
+	return undefined;
 }
 
 export type CloudMessageParseResult = { ok: true; message: CloudMessage } | { ok: false; error: string };
@@ -1430,9 +1539,17 @@ const CLOUD_MESSAGE_TYPES = [
 	"get_command",
 	"command",
 	"ack",
+	"inference_request",
+	"inference_event",
+	"inference_end",
+	"inference_error",
 ] as const;
 
 type Problem = string | undefined;
+
+function isString(value: unknown, maxLength: number, minLength = 0): value is string {
+	return typeof value === "string" && value.length >= minLength && value.length <= maxLength;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
