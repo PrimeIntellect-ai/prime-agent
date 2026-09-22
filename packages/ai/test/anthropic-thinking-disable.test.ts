@@ -137,6 +137,18 @@ describe("Anthropic thinking disable payload", () => {
 		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
 		expect(payload.output_config).toEqual({ effort: "max" });
 	});
+
+	// Claude Opus 5.5 ships through the remote catalog (the compiled snapshot
+	// does not carry the id), so this uses the release id over the Opus 5
+	// surface: it rejects thinking disabled and sampling params with a 400.
+	it("omits thinking disabled and temperature for Claude Opus 5.5", async () => {
+		const opus55: Model<"anthropic-messages"> = { ...getModel("anthropic", "claude-opus-5"), id: "claude-opus-5-5" };
+		const payload = await capturePayload(opus55, { temperature: 0.5 });
+		expect(payload.thinking).toBeUndefined();
+		expect(payload.temperature).toBeUndefined();
+		const adaptive = await capturePayload(opus55, { reasoning: "xhigh" });
+		expect(adaptive.output_config).toEqual({ effort: "xhigh" });
+	});
 });
 
 interface CapturedRequest {
