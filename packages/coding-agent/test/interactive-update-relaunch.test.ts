@@ -282,6 +282,7 @@ describe("buildDaemonUpdateRestartReport", () => {
 		expect(report.info).toEqual(["Restored 2 daemon sessions", "Resumed 1 interrupted session"]);
 		expect(report.warnings).toEqual([
 			"Updated, but could not restart the daemon (could not stop predecessor).",
+			"The daemon still runs the previous version; run `prime-agent shutdown`, then run `prime-agent` to restart and apply the update.",
 			"1 daemon session could not be restored.",
 			"Could not restore /tmp/failed.jsonl: create failed",
 		]);

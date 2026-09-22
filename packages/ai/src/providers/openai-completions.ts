@@ -11,7 +11,7 @@ import type {
 	ChatCompletionToolMessageParam,
 } from "openai/resources/chat/completions.js";
 import { getAnthropicCacheWriteCost, hasStandardAnthropicCachePricing } from "../cache-pricing.js";
-import { getEnvApiKey, getPrimeTeamId } from "../env-api-keys.js";
+import { getEnvApiKey } from "../env-api-keys.js";
 import { calculateCost, clampThinkingLevel } from "../models.js";
 import type {
 	AssistantMessage,
@@ -545,11 +545,6 @@ function createClient(
 			hasImages,
 		});
 		Object.assign(headers, copilotHeaders);
-	}
-
-	if (model.provider === "prime-inference") {
-		const teamId = getPrimeTeamId();
-		if (teamId) headers["X-Prime-Team-ID"] = teamId;
 	}
 
 	if (cacheSessionId && compat.sendSessionAffinityHeaders) {

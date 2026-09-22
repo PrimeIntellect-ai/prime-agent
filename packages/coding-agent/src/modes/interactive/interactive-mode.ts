@@ -348,6 +348,9 @@ interface PendingToolCallRenderInput {
 const HEARTBEAT_LEGACY_PROMPT_MIN_TOLERANCE_MS = 15_000;
 const HEARTBEAT_LEGACY_PROMPT_MAX_TOLERANCE_MS = 120_000;
 const MODEL_CATALOG_REFRESH_TTL_MS = 60_000;
+// Status-driven top bar cost refreshes rebuild the full context tree; agent_end
+// and attach/reconnect refresh unthrottled for per-turn and per-attach convergence.
+const TOP_BAR_COST_REFRESH_MIN_INTERVAL_MS = 1_000;
 function isLabeledQueuedPreview(message: string): boolean {
 	return (
 		message.startsWith(`${HEARTBEAT_PROMPT_PREVIEW_LABEL}: `) ||
@@ -357,13 +360,13 @@ function isLabeledQueuedPreview(message: string): boolean {
 	);
 }
 
-export function formatQueuedMessagePreview(message: string, label: "Steering" | "Follow-up"): string {
+export function formatQueuedMessagePreview(message: string, label: "Steering" | "Follow-up" | "Starting"): string {
 	return isLabeledQueuedPreview(message) ? message : `${label}: ${message}`;
 }
 
 export function styleQueuedMessagePreview(
 	message: string,
-	label: "Steering" | "Follow-up",
+	label: "Steering" | "Follow-up" | "Starting",
 	isRecognizedSlashCommand: (name: string) => boolean,
 ): string {
 	const preview = formatQueuedMessagePreview(message, label);
@@ -1425,7 +1428,7 @@ export class InteractiveMode {
 	/** Cached session spend (USD) for the top bar, keyed to the session it was fetched for. */
 	private topBarCost: { sessionId?: string; total?: number } = {};
 	/** Stale-discard state for top bar cost refreshes (mirrors contextUsageRefresh). */
-	private topBarCostRefresh = { generation: 0, lastSuccessGeneration: 0 };
+	private topBarCostRefresh = { generation: 0, lastSuccessGeneration: 0, lastRefreshAt: 0 };
 
 	private builtInHeader: Component | undefined = undefined;
 
@@ -1862,6 +1865,13 @@ export class InteractiveMode {
 		await this.updateAvailableProviderCount();
 	}
 
+	/** Leading-edge throttled refresh for status-driven call sites; direct refreshes stamp the window too. */
+	private refreshTopBarCostThrottled(): void {
+		const refresh = this.topBarCostRefresh ?? { lastRefreshAt: 0 };
+		if (Date.now() - refresh.lastRefreshAt < TOP_BAR_COST_REFRESH_MIN_INTERVAL_MS) return;
+		this.refreshTopBarCost();
+	}
+
 	/**
 	 * Refresh the top bar's cached session spend from the context tree.
 	 * Results for a replaced session, or superseded by a newer successful
@@ -1871,8 +1881,9 @@ export class InteractiveMode {
 		// Partial-mode test harnesses skip the constructor, so the field
 		// initializer may be absent there; the refresh is cosmetic and must
 		// never crash a real flow on any `this`.
-		this.topBarCostRefresh ??= { generation: 0, lastSuccessGeneration: 0 };
+		this.topBarCostRefresh ??= { generation: 0, lastSuccessGeneration: 0, lastRefreshAt: 0 };
 		const refresh = this.topBarCostRefresh;
+		refresh.lastRefreshAt = Date.now();
 		const generation = ++refresh.generation;
 		const connection = this.agentConnection;
 		const sessionId = this.connectionState?.sessionId;
@@ -5793,7 +5804,7 @@ export class InteractiveMode {
 					this.sessionRecap = event.recap;
 					this.patchConnectionState({ recap: event.recap });
 					this.renderRecap();
-					this.refreshTopBarCost();
+					this.refreshTopBarCostThrottled();
 				} else if (event.type === "side_question_event") {
 					this.handleSideQuestionEvent(event.event);
 				} else if (event.type === "extension_ui_request") {
@@ -6042,7 +6053,7 @@ export class InteractiveMode {
 
 			case "session_info_changed":
 				this.updateTerminalTitle();
-				this.refreshTopBarCost();
+				this.refreshTopBarCostThrottled();
 				this.footer.invalidate();
 				this.ui.requestRender();
 				break;
@@ -8210,9 +8221,18 @@ export class InteractiveMode {
 		// their own container below the execution indicator and recap.
 		this.queuedMessagesContainer.clear();
 		const { steering: steeringMessages, followUp: followUpMessages } = this.getAllQueuedMessages();
+		const active = this.connectionState?.sessionActions.active;
+		// A queued turn leaves its lane once the pump selects it; its own pre-turn compaction can hold it here for minutes.
+		const startingTurn = active?.kind === "turn" && active.phase === "preparing" ? active.label : undefined;
 		const hasQueuedMessages = steeringMessages.length > 0 || followUpMessages.length > 0;
-		if (hasQueuedMessages) {
+		if (hasQueuedMessages || startingTurn !== undefined) {
 			this.queuedMessagesContainer.addChild(new Spacer(1));
+			if (startingTurn !== undefined) {
+				const text = styleQueuedMessagePreview(startingTurn, "Starting", (name) =>
+					this.isRecognizedSlashCommand(name),
+				);
+				this.queuedMessagesContainer.addChild(new TruncatedText(text, 1, 0));
+			}
 			for (const message of steeringMessages) {
 				const text = styleQueuedMessagePreview(message, "Steering", (name) => this.isRecognizedSlashCommand(name));
 				this.queuedMessagesContainer.addChild(new TruncatedText(text, 1, 0));
@@ -8221,6 +8241,8 @@ export class InteractiveMode {
 				const text = styleQueuedMessagePreview(message, "Follow-up", (name) => this.isRecognizedSlashCommand(name));
 				this.queuedMessagesContainer.addChild(new TruncatedText(text, 1, 0));
 			}
+		}
+		if (hasQueuedMessages) {
 			const dequeueHint = this.getAppKeyDisplay("app.message.navigateOlder");
 			const hintText = theme.fg("dim", `╰─ ${dequeueHint} to browse and edit queued messages`);
 			this.queuedMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));

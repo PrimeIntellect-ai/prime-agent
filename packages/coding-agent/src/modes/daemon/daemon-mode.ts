@@ -54,6 +54,7 @@ import {
 } from "../../core/agent-messages.js";
 import {
 	AGENT_OBSERVE_PREVIEW_MAX_CHARS,
+	type AgentObserveActivity,
 	type AgentObserveAgentSnapshot,
 	type AgentObserveAgentSummary,
 	type AgentObserveController,
@@ -623,6 +624,10 @@ export class AgentDaemon {
 		snapshotPending: false,
 	};
 	private rosterFlushScheduled = false;
+	private rosterFlushTimer?: ReturnType<typeof setTimeout>;
+	private rosterLastFlushAt?: number;
+	private readonly rosterDirtyAgentIds = new Set<string>();
+	private rosterFlushFull = false;
 	private rosterHeartbeatTimer?: ReturnType<typeof setInterval>;
 	private rlmSpawnLedgerInstance?: RlmSpawnLedger;
 	/** In-flight admission spawn appends, awaited (and consumed) by createRlmSubagentRuntime. */
@@ -1783,8 +1788,8 @@ export class AgentDaemon {
 			this.bindingCompletions.delete(state.activeSessionId);
 			completeBinding();
 		}
-		this.registerCronStoreForState(state);
-		this.rebindCronJobsToState(state);
+		await this.registerCronStoreForState(state);
+		await this.rebindCronJobsToState(state);
 		if (runtime.metadata.kind !== "subagent") {
 			// Mark the session as daemon-resident so a restarted daemon can
 			// restore it. Closes for kill/completed/replaced flip this back to
@@ -1801,7 +1806,7 @@ export class AgentDaemon {
 		return state;
 	}
 
-	private refreshReplacedSessionState(state: ActiveSessionState): void {
+	private async refreshReplacedSessionState(state: ActiveSessionState): Promise<void> {
 		this.acpMcpOwners?.delete(state.activeSessionId);
 		for (const client of state.clients) {
 			this.abortSideQuestionsFor(client, state.activeSessionId);
@@ -1814,11 +1819,11 @@ export class AgentDaemon {
 			const summaryState = state.summaryState as ActiveSessionState["summaryState"];
 			state.runtime.session.setCurrentRecap(summaryState?.summary);
 		}
-		this.registerCronStoreForState(state);
-		this.rebindCronJobsToState(state);
+		await this.registerCronStoreForState(state);
+		await this.rebindCronJobsToState(state);
 	}
 
-	private registerCronStoreForState(state: ActiveSessionState): void {
+	private async registerCronStoreForState(state: ActiveSessionState): Promise<void> {
 		if (!this.options.worker) {
 			return;
 		}
@@ -1828,7 +1833,7 @@ export class AgentDaemon {
 			return;
 		}
 		if (this.cronStore.registerSessionArtifact(session.sessionId, artifactDir)) {
-			this.cronStore.recoverSessionArtifact(session.sessionId);
+			await this.cronStore.recoverSessionArtifact(session.sessionId);
 			this.cronScheduler.wake();
 		}
 		// A fresh worker only knows resident sessions' jobs; passive descendants' schedules must fire without hydration.
@@ -1846,7 +1851,7 @@ export class AgentDaemon {
 				const artifactDir = getSessionArtifactPathForFile(resolve(passive.entry.sessionFile), passive.info.id);
 				if (this.cronStore.registerSessionArtifact(passive.info.id, artifactDir)) {
 					registered = true;
-					this.cronStore.recoverSessionArtifact(passive.info.id);
+					await this.cronStore.recoverSessionArtifact(passive.info.id);
 				}
 			} catch (error) {
 				this.log(
@@ -1906,7 +1911,7 @@ export class AgentDaemon {
 				await this.setStateSessionName(state, command.name);
 			}
 			this.adoptClientEnv(state, clientEnv);
-			this.rebindCronJobsToState(state);
+			await this.rebindCronJobsToState(state);
 			return state;
 		}
 
@@ -1984,7 +1989,7 @@ export class AgentDaemon {
 				await this.setStateSessionName(existing, command.name);
 			}
 			this.adoptClientEnv(existing, clientEnv);
-			this.rebindCronJobsToState(existing);
+			await this.rebindCronJobsToState(existing);
 			return existing;
 		}
 
@@ -2023,7 +2028,7 @@ export class AgentDaemon {
 					await this.setStateSessionName(existing, command.name);
 				}
 				this.adoptClientEnv(existing, clientEnv);
-				this.rebindCronJobsToState(existing);
+				await this.rebindCronJobsToState(existing);
 				return existing;
 			}
 			let stateRef: ActiveSessionState | undefined;
@@ -2187,13 +2192,17 @@ export class AgentDaemon {
 		return this.cronStore.getClaimedJob(jobId) ?? this.cronStore.getDueJob(jobId);
 	}
 
-	private createCronJobForState(state: ActiveSessionState, schedule: string, prompt: string): AgentCronJob {
+	private async createCronJobForState(
+		state: ActiveSessionState,
+		schedule: string,
+		prompt: string,
+	): Promise<AgentCronJob> {
 		const session = state.runtime.session;
 		const sessionFile = session.sessionFile;
 		if (!sessionFile) {
 			throw new Error("Cron jobs require a persisted session file");
 		}
-		const job = this.cronStore.create({
+		const job = await this.cronStore.create({
 			activeSessionId: state.activeSessionId,
 			sessionId: session.sessionId,
 			sessionFile,
@@ -2206,19 +2215,19 @@ export class AgentDaemon {
 		return job;
 	}
 
-	private createHeartbeatForState(
+	private async createHeartbeatForState(
 		state: ActiveSessionState,
 		schedule: string,
 		instruction: string,
 		deliveryMode?: AgentHeartbeatDeliveryMode,
-	): AgentCronJob {
+	): Promise<AgentCronJob> {
 		const session = state.runtime.session;
 		const sessionFile = session.sessionFile;
 		if (!sessionFile) {
 			throw new Error("Heartbeats require a persisted session file");
 		}
 		const previousHeartbeat = this.cronStore.getHeartbeat(state.activeSessionId);
-		const job = this.cronStore.createHeartbeat({
+		const job = await this.cronStore.createHeartbeat({
 			activeSessionId: state.activeSessionId,
 			sessionId: session.sessionId,
 			sessionFile,
@@ -2229,30 +2238,30 @@ export class AgentDaemon {
 			deliveryMode: deliveryMode ?? previousHeartbeat?.deliveryMode,
 		});
 		if (previousHeartbeat) {
-			this.removeQueuedHeartbeatFollowUp(state, previousHeartbeat);
+			await this.removeQueuedHeartbeatFollowUp(state, previousHeartbeat);
 		}
 		this.cronScheduler.wake();
 		return job;
 	}
 
-	private updateHeartbeatForState(
+	private async updateHeartbeatForState(
 		state: ActiveSessionState,
 		action: AgentHeartbeatUpdateAction,
-	): AgentCronJob | undefined {
+	): Promise<AgentCronJob | undefined> {
 		const job =
 			action === "pause"
-				? this.cronStore.pauseHeartbeat(state.activeSessionId)
+				? await this.cronStore.pauseHeartbeat(state.activeSessionId)
 				: action === "resume"
-					? this.cronStore.resumeHeartbeat(state.activeSessionId)
-					: this.cronStore.clearHeartbeat(state.activeSessionId);
+					? await this.cronStore.resumeHeartbeat(state.activeSessionId)
+					: await this.cronStore.clearHeartbeat(state.activeSessionId);
 		if (job && action !== "resume") {
-			this.removeQueuedHeartbeatFollowUp(state, job);
+			await this.removeQueuedHeartbeatFollowUp(state, job);
 		}
 		this.cronScheduler.wake();
 		return job;
 	}
 
-	private createRlmHeartbeatForState(
+	private async createRlmHeartbeatForState(
 		state: ActiveSessionState,
 		input: {
 			instruction: string;
@@ -2260,13 +2269,13 @@ export class AgentDaemon {
 			label?: string;
 			deliveryMode?: AgentHeartbeatDeliveryMode;
 		},
-	): AgentCronJob {
+	): Promise<AgentCronJob> {
 		const session = state.runtime.session;
 		const sessionFile = session.sessionFile;
 		if (!sessionFile) {
 			throw new Error("RLM heartbeats require a persisted session file");
 		}
-		const job = this.cronStore.createRlmHeartbeat({
+		const job = await this.cronStore.createRlmHeartbeat({
 			activeSessionId: state.activeSessionId,
 			sessionId: session.sessionId,
 			sessionFile,
@@ -2281,7 +2290,7 @@ export class AgentDaemon {
 		return job;
 	}
 
-	private updateRlmHeartbeatForState(
+	private async updateRlmHeartbeatForState(
 		state: ActiveSessionState,
 		input: {
 			id: string;
@@ -2291,8 +2300,8 @@ export class AgentDaemon {
 			status?: "pause" | "resume";
 			deliveryMode?: AgentHeartbeatDeliveryMode;
 		},
-	): AgentCronJob | undefined {
-		const job = this.cronStore.updateRlmHeartbeat(state.activeSessionId, input.id, {
+	): Promise<AgentCronJob | undefined> {
+		const job = await this.cronStore.updateRlmHeartbeat(state.activeSessionId, input.id, {
 			label: input.label,
 			prompt: input.instruction,
 			scheduleText: input.interval ? normalizeHeartbeatSchedule(input.interval) : undefined,
@@ -2306,17 +2315,17 @@ export class AgentDaemon {
 				input.status === "pause" ||
 				input.deliveryMode !== undefined
 			) {
-				this.removeQueuedHeartbeatFollowUp(state, job);
+				await this.removeQueuedHeartbeatFollowUp(state, job);
 			}
 			this.cronScheduler.wake();
 		}
 		return job;
 	}
 
-	private deleteRlmHeartbeatForState(state: ActiveSessionState, id: string): AgentCronJob | undefined {
-		const job = this.cronStore.deleteRlmHeartbeat(state.activeSessionId, id);
+	private async deleteRlmHeartbeatForState(state: ActiveSessionState, id: string): Promise<AgentCronJob | undefined> {
+		const job = await this.cronStore.deleteRlmHeartbeat(state.activeSessionId, id);
 		if (job) {
-			this.removeQueuedHeartbeatFollowUp(state, job);
+			await this.removeQueuedHeartbeatFollowUp(state, job);
 			this.cronScheduler.wake();
 		}
 		return job;
@@ -2339,15 +2348,15 @@ export class AgentDaemon {
 			});
 	}
 
-	private manageHeartbeat(
+	private async manageHeartbeat(
 		activeSessionId: string,
 		jobId: string,
 		action: AgentHeartbeatManagementAction,
-	): AgentCronJob | undefined {
-		const job = this.cronStore.manageHeartbeat(activeSessionId, jobId, action);
+	): Promise<AgentCronJob | undefined> {
+		const job = await this.cronStore.manageHeartbeat(activeSessionId, jobId, action);
 		const state = this.sessions.get(activeSessionId);
 		if (job && action !== "resume" && state) {
-			this.removeQueuedHeartbeatFollowUp(state, job);
+			await this.removeQueuedHeartbeatFollowUp(state, job);
 		}
 		if (job) {
 			this.cronScheduler.wake();
@@ -2355,12 +2364,12 @@ export class AgentDaemon {
 		return job;
 	}
 
-	private rebindCronJobsToState(state: ActiveSessionState): void {
+	private async rebindCronJobsToState(state: ActiveSessionState): Promise<void> {
 		const sessionFile = state.runtime.session.sessionFile;
 		if (!sessionFile) {
 			return;
 		}
-		const reboundJobs = this.cronStore.rebindSessionJobs({
+		const reboundJobs = await this.cronStore.rebindSessionJobs({
 			activeSessionId: state.activeSessionId,
 			sessionId: state.runtime.session.sessionId,
 			sessionFile,
@@ -2371,20 +2380,20 @@ export class AgentDaemon {
 		}
 	}
 
-	private cancelSubagentRlmHeartbeats(state: ActiveSessionState): void {
+	private async cancelSubagentRlmHeartbeats(state: ActiveSessionState): Promise<void> {
 		if (state.runtime.metadata.kind !== "subagent") {
 			return;
 		}
-		const cancelled = this.cronStore.cancelRlmHeartbeatsForSession(state.activeSessionId);
+		const cancelled = await this.cronStore.cancelRlmHeartbeatsForSession(state.activeSessionId);
 		for (const job of cancelled) {
-			this.removeQueuedHeartbeatFollowUp(state, job);
+			await this.removeQueuedHeartbeatFollowUp(state, job);
 		}
 		if (cancelled.length > 0) {
 			this.cronScheduler.wake();
 		}
 	}
 
-	private cancelScheduledJobsForSession(state: ActiveSessionState): void {
+	private async cancelScheduledJobsForSession(state: ActiveSessionState): Promise<void> {
 		const session = state.runtime.session;
 		const target: {
 			activeSessionId: string;
@@ -2399,17 +2408,17 @@ export class AgentDaemon {
 		if (session?.sessionFile) {
 			target.sessionFile = session.sessionFile;
 		}
-		const cancelled = this.cronStore.cancelJobsForSession(target);
+		const cancelled = await this.cronStore.cancelJobsForSession(target);
 		for (const job of cancelled) {
-			this.removeQueuedHeartbeatFollowUp(state, job);
+			await this.removeQueuedHeartbeatFollowUp(state, job);
 		}
 		if (cancelled.length > 0) {
 			this.cronScheduler.wake();
 		}
 	}
 
-	private cancelScheduledJobsForSessionFile(sessionFile: string): void {
-		const cancelled = this.cronStore.cancelJobsForSession({ sessionFile });
+	private async cancelScheduledJobsForSessionFile(sessionFile: string): Promise<void> {
+		const cancelled = await this.cronStore.cancelJobsForSession({ sessionFile });
 		if (cancelled.length > 0) {
 			this.cronScheduler.wake();
 		}
@@ -2422,7 +2431,7 @@ export class AgentDaemon {
 		return deleteSessionFile(sessionPath, options);
 	}
 
-	private removeQueuedHeartbeatFollowUp(state: ActiveSessionState, job: AgentCronJob): void {
+	private async removeQueuedHeartbeatFollowUp(state: ActiveSessionState, job: AgentCronJob): Promise<void> {
 		if (!isHeartbeatCronJob(job)) {
 			return;
 		}
@@ -2450,7 +2459,7 @@ export class AgentDaemon {
 		// A half-bound match falls through to createRuntime, which awaits the
 		// pending create for the same session file instead of prompting mid-bind.
 		if (current && !this.bindingSessions.has(current.activeSessionId) && !requiresRlmSubagentRestore) {
-			this.rebindCronJobsToState(current);
+			await this.rebindCronJobsToState(current);
 			const reboundJob = requirePersistedJob ? this.getRunnableCronJob(job.id) : dueJob;
 			return reboundJob && this.isCronJobRunnableForState(reboundJob, current, requirePersistedJob)
 				? current
@@ -2491,7 +2500,7 @@ export class AgentDaemon {
 			!parentInfo ||
 			parentInfo.state?.status !== "active"
 		) {
-			this.cancelRlmHeartbeat(job.id);
+			await this.cancelRlmHeartbeat(job.id);
 			return undefined;
 		}
 
@@ -2515,10 +2524,10 @@ export class AgentDaemon {
 				throw new RuntimeOpenCancelledError();
 			}
 			if (!childState || childState.runtime.metadata.kind !== "subagent") {
-				this.cancelRlmHeartbeat(job.id);
+				await this.cancelRlmHeartbeat(job.id);
 				return undefined;
 			}
-			this.rebindCronJobsToState(childState);
+			await this.rebindCronJobsToState(childState);
 			const reboundJob = this.getRunnableCronJob(job.id);
 			return reboundJob && this.isCronJobRunnableForState(reboundJob, childState, true) ? childState : undefined;
 		} catch (error) {
@@ -2529,8 +2538,8 @@ export class AgentDaemon {
 		}
 	}
 
-	private cancelRlmHeartbeat(jobId: string): void {
-		if (this.cronStore.cancel(jobId)) {
+	private async cancelRlmHeartbeat(jobId: string): Promise<void> {
+		if (await this.cronStore.cancel(jobId)) {
 			this.cronScheduler.wake();
 		}
 	}
@@ -2551,7 +2560,7 @@ export class AgentDaemon {
 				continue;
 			}
 			if (!sessionInfo || sessionInfo.id !== current.sessionId || sessionInfo.state?.status !== "active") {
-				this.cancelScheduledJobsForSessionFile(current.sessionFile);
+				await this.cancelScheduledJobsForSessionFile(current.sessionFile);
 				return false;
 			}
 			return true;
@@ -2790,7 +2799,7 @@ export class AgentDaemon {
 					// would mask the teardown error and skip the sweep.
 					if (childSessionFile) {
 						try {
-							this.cancelScheduledJobsForSessionFile(childSessionFile);
+							await this.cancelScheduledJobsForSessionFile(childSessionFile);
 						} catch (error) {
 							this.log(
 								`failed to cancel scheduled jobs for deleted RLM subagent ${childId}: ${error instanceof Error ? error.message : String(error)}`,
@@ -3595,7 +3604,7 @@ export class AgentDaemon {
 		const session = state.runtime.session;
 		const messages = session.messages;
 		const latest = messages.at(-1);
-		const status = session.isStreaming
+		const activity: AgentObserveActivity = session.isStreaming
 			? session.state.pendingToolCalls.size > 0
 				? "tool"
 				: "model"
@@ -3612,7 +3621,8 @@ export class AgentDaemon {
 			...(summary.sessionName ? { sessionName: summary.sessionName } : {}),
 			...(summary.runtimeKind ? { runtimeKind: summary.runtimeKind } : {}),
 			cwd: summary.cwd,
-			status,
+			status: summary.rosterStatus ?? classifySessionRosterStatus(summary),
+			activity,
 			isCurrent: state.activeSessionId === currentState.activeSessionId,
 			isStreaming: summary.isStreaming,
 			isCompacting: summary.isCompacting,
@@ -4535,8 +4545,8 @@ export class AgentDaemon {
 					composedEntry?.summary,
 				);
 				const result = await this.deleteSavedSessionFile(command.sessionPath, {
-					afterFileRemoved: () => {
-						this.cancelScheduledJobsForSessionFile(command.sessionPath);
+					afterFileRemoved: async () => {
+						await this.cancelScheduledJobsForSessionFile(command.sessionPath);
 					},
 				});
 				if (result.ok && this.options.worker) {
@@ -5170,7 +5180,7 @@ export class AgentDaemon {
 				});
 
 			case "heartbeat_manage": {
-				const heartbeat = this.manageHeartbeat(command.activeSessionId, command.jobId, command.action);
+				const heartbeat = await this.manageHeartbeat(command.activeSessionId, command.jobId, command.action);
 				if (!heartbeat) {
 					throw new Error(`No active heartbeat found: ${command.jobId}`);
 				}
@@ -5179,19 +5189,19 @@ export class AgentDaemon {
 
 			case "cron_add": {
 				const state = this.getSessionState(command.activeSessionId);
-				const job = this.createCronJobForState(state, command.schedule, command.prompt);
+				const job = await this.createCronJobForState(state, command.schedule, command.prompt);
 				this.scheduleRosterFlush();
 				return success(command.id, "cron_add", { job });
 			}
 
 			case "cron_cancel": {
-				const job = this.cronStore.cancel(command.jobId);
+				const job = await this.cronStore.cancel(command.jobId);
 				if (!job) {
 					throw new Error(`No cron job found: ${command.jobId}`);
 				}
 				const state = this.sessions.get(job.activeSessionId);
 				if (state) {
-					this.removeQueuedHeartbeatFollowUp(state, job);
+					await this.removeQueuedHeartbeatFollowUp(state, job);
 				}
 				this.cronScheduler.wake();
 				this.scheduleRosterFlush();
@@ -5209,13 +5219,13 @@ export class AgentDaemon {
 			case "heartbeat_set": {
 				const state = this.getSessionState(command.activeSessionId);
 				const deliveryMode = normalizeHeartbeatDeliveryMode(command.deliveryMode);
-				const heartbeat = this.createHeartbeatForState(state, command.schedule, command.prompt, deliveryMode);
+				const heartbeat = await this.createHeartbeatForState(state, command.schedule, command.prompt, deliveryMode);
 				return success(command.id, "heartbeat_set", { heartbeat });
 			}
 
 			case "heartbeat_update": {
 				const state = this.getSessionState(command.activeSessionId);
-				const heartbeat = this.updateHeartbeatForState(state, command.action);
+				const heartbeat = await this.updateHeartbeatForState(state, command.action);
 				return success(command.id, "heartbeat_update", {
 					heartbeat: heartbeat ?? null,
 				});
@@ -5355,7 +5365,7 @@ export class AgentDaemon {
 				const state = this.getSessionState(command.activeSessionId);
 				const options = command.parentSession ? { parentSession: command.parentSession } : undefined;
 				const result = await state.runtime.newSession(options);
-				this.rebindCronJobsToState(state);
+				await this.rebindCronJobsToState(state);
 				return success(command.id, "new_session", result);
 			}
 
@@ -5364,7 +5374,7 @@ export class AgentDaemon {
 				const result = await state.runtime.switchSession(command.sessionPath, {
 					cwdOverride: command.cwdOverride,
 				});
-				this.rebindCronJobsToState(state);
+				await this.rebindCronJobsToState(state);
 				// A client cannot resolve a relative sessionPath the way this process
 				// does, so the switch reports the file it resolved for the request.
 				return success(command.id, "switch_session", {
@@ -5378,7 +5388,7 @@ export class AgentDaemon {
 				const result = await state.runtime.fork(command.entryId, {
 					position: command.position,
 				});
-				this.rebindCronJobsToState(state);
+				await this.rebindCronJobsToState(state);
 				return success(command.id, "fork", result);
 			}
 
@@ -6879,10 +6889,10 @@ export class AgentDaemon {
 				closeError = error;
 				closeFailed = true;
 			}
-			const reasonUpgrade = (existingClose.reasonUpgrade ?? Promise.resolve()).then(() => {
+			const reasonUpgrade = (existingClose.reasonUpgrade ?? Promise.resolve()).then(async () => {
 				if (!this.isStrongerCloseReason(requestedReason, existingClose.reason)) return;
 				try {
-					this.applyReasonUpgrade(state, existingClose.descendants, existingClose.reason, requestedReason);
+					await this.applyReasonUpgrade(state, existingClose.descendants, existingClose.reason, requestedReason);
 				} finally {
 					existingClose.reason = requestedReason;
 				}
@@ -6924,17 +6934,17 @@ export class AgentDaemon {
 		return this.closeReasonStrength(candidate) > this.closeReasonStrength(current);
 	}
 
-	private applyReasonUpgrade(
+	private async applyReasonUpgrade(
 		state: ActiveSessionState,
 		descendants: ReadonlySet<ActiveSessionState>,
 		from: DaemonSessionClosedReason,
 		to: DaemonSessionClosedReason,
-	): void {
+	): Promise<void> {
 		let persistError: unknown;
 		let persistenceFailed = false;
 		for (const target of [state, ...descendants]) {
 			try {
-				if (to === "killed") this.cancelScheduledJobsForSession(target);
+				if (to === "killed") await this.cancelScheduledJobsForSession(target);
 			} catch (error) {
 				if (!persistenceFailed) persistError = error;
 				persistenceFailed = true;
@@ -6978,9 +6988,9 @@ export class AgentDaemon {
 			return;
 		}
 		if (reason === "killed") {
-			this.cancelScheduledJobsForSession(state);
+			await this.cancelScheduledJobsForSession(state);
 		} else if (reason !== "shutdown" && reason !== "update") {
-			this.cancelSubagentRlmHeartbeats(state);
+			await this.cancelSubagentRlmHeartbeats(state);
 		}
 		// Abort in-flight status work before any await/dispose so it can't write
 		// agent_status to a session being torn down.
@@ -7305,7 +7315,7 @@ export class AgentDaemon {
 		) {
 			return;
 		}
-		this.scheduleRosterFlush();
+		this.scheduleRosterFlush(state);
 	}
 
 	private observeRosterChildUpdate(state: ActiveSessionState, child: AgentConnectionRlmChildAgentSnapshot): void {
@@ -7316,7 +7326,7 @@ export class AgentDaemon {
 		} else {
 			this.rosterReporter.queuedChildren.delete(entry.agentId);
 		}
-		this.scheduleRosterFlush();
+		this.scheduleRosterFlush(state);
 	}
 
 	private hasSessionForRlmChild(parentState: ActiveSessionState, childId: string): boolean {
@@ -7357,17 +7367,53 @@ export class AgentDaemon {
 		return { agentId: rosterAgentIdForSummary(summary), queuedChild: true, summary };
 	}
 
-	private scheduleRosterFlush(): void {
-		if (!this.options.worker || this.rosterFlushScheduled || this.shuttingDown) return;
-		this.rosterFlushScheduled = true;
-		setImmediate(() => {
-			this.rosterFlushScheduled = false;
-			try {
-				this.flushRoster();
-			} catch (error) {
-				this.log(`could not publish roster delta: ${String(error)}`);
+	// Session-scoped triggers mark only their session dirty; other callers can affect any session
+	// and schedule a full recompose on the next tick: the supervisor answers `list` from the
+	// published roster, so a hydrated or closed session must be visible before the command's response.
+	private scheduleRosterFlush(state?: ActiveSessionState): void {
+		if (!this.options.worker || this.shuttingDown) return;
+		if (state === undefined) {
+			this.rosterFlushFull = true;
+		} else {
+			this.rosterDirtyAgentIds.add(this.rosterAgentIdForState(state));
+		}
+		if (this.rosterFlushScheduled) return;
+		if (
+			state === undefined ||
+			this.rosterLastFlushAt === undefined ||
+			Date.now() - this.rosterLastFlushAt >= ROSTER_FLUSH_MIN_INTERVAL_MS
+		) {
+			// A full flush subsumes a pending trailing flush: it consumes its dirty marks.
+			if (this.rosterFlushTimer !== undefined) {
+				clearTimeout(this.rosterFlushTimer);
+				this.rosterFlushTimer = undefined;
 			}
-		});
+			this.rosterFlushScheduled = true;
+			setImmediate(() => {
+				this.rosterFlushScheduled = false;
+				this.runScheduledRosterFlush();
+			});
+			return;
+		}
+		if (this.rosterFlushTimer !== undefined) return;
+		this.rosterFlushTimer = setTimeout(
+			() => {
+				this.rosterFlushTimer = undefined;
+				this.runScheduledRosterFlush();
+			},
+			// Clamp the elapsed at zero: a backwards wall-clock step must not arm an over-long window.
+			ROSTER_FLUSH_MIN_INTERVAL_MS - Math.max(0, Date.now() - this.rosterLastFlushAt),
+		);
+		this.rosterFlushTimer.unref?.();
+	}
+
+	private runScheduledRosterFlush(): void {
+		this.rosterLastFlushAt = Date.now();
+		try {
+			this.flushRoster();
+		} catch (error) {
+			this.log(`could not publish roster delta: ${String(error)}`);
+		}
 	}
 
 	private flushRoster(): void {
@@ -7378,18 +7424,49 @@ export class AgentDaemon {
 		// be reused instead of re-composed and re-stringified on every flush.
 		const composedSources = new Map<string, SessionSummary>();
 		const scheduledJobs = this.cronStore.list();
-		for (const summary of buildSessionList([...this.sessions.values()], [], scheduledJobs)) {
-			const agentId = rosterAgentIdForSummary(summary);
-			if (reporter.lastComposedSource.get(agentId) === summary) {
-				const entry = reporter.lastComposed.get(agentId);
-				if (entry) {
-					entries.set(agentId, entry);
-					composedSources.set(agentId, summary);
-					continue;
-				}
+		// Compose only what a trigger marked dirty (plus never-composed or passivated rows): composing
+		// is the fingerprint walk. A flush with no marks recomposes everything: untracked callers exist.
+		const fullFlush = this.rosterFlushFull || this.rosterDirtyAgentIds.size === 0;
+		this.rosterFlushFull = false;
+		const dirtyAgentIds = new Set(this.rosterDirtyAgentIds);
+		this.rosterDirtyAgentIds.clear();
+		const targetStates: ActiveSessionState[] = [];
+		for (const state of this.sessions.values()) {
+			if (fullFlush) {
+				targetStates.push(state);
+				continue;
 			}
-			entries.set(agentId, workerRosterEntryFromSummary(summary));
-			composedSources.set(agentId, summary);
+			const agentId = this.rosterAgentIdForState(state);
+			const previous = reporter.lastComposed.get(agentId);
+			if (dirtyAgentIds.has(agentId) || previous === undefined || previous.summary.activeSessionId === undefined) {
+				targetStates.push(state);
+			}
+		}
+		const composedSummaries = new Map<string, SessionSummary>();
+		for (const summary of buildSessionList(targetStates, [], scheduledJobs)) {
+			composedSummaries.set(rosterAgentIdForSummary(summary), summary);
+		}
+		for (const state of this.sessions.values()) {
+			const agentId = this.rosterAgentIdForState(state);
+			const summary = composedSummaries.get(agentId);
+			if (summary !== undefined) {
+				if (reporter.lastComposedSource.get(agentId) === summary) {
+					const entry = reporter.lastComposed.get(agentId);
+					if (entry) {
+						entries.set(agentId, entry);
+						composedSources.set(agentId, summary);
+						continue;
+					}
+				}
+				entries.set(agentId, workerRosterEntryFromSummary(summary));
+				composedSources.set(agentId, summary);
+				continue;
+			}
+			const previous = reporter.lastComposed.get(agentId);
+			if (previous === undefined) continue;
+			entries.set(agentId, previous);
+			const previousSource = reporter.lastComposedSource.get(agentId);
+			if (previousSource !== undefined) composedSources.set(agentId, previousSource);
 		}
 		for (const [agentId, queued] of reporter.queuedChildren) {
 			if (entries.has(agentId)) {
@@ -7908,6 +7985,10 @@ export class AgentDaemon {
 			clearInterval(this.rosterHeartbeatTimer);
 			this.rosterHeartbeatTimer = undefined;
 		}
+		if (this.rosterFlushTimer) {
+			clearTimeout(this.rosterFlushTimer);
+			this.rosterFlushTimer = undefined;
+		}
 		this.log(`shutting down (exit ${exitCode}); closing ${this.sessions.size} active session(s)`);
 		const closingReason = this.getShutdownClosingReason();
 		for (const client of this.clients) {
@@ -7966,6 +8047,9 @@ const ROSTER_SESSION_EVENT_TRIGGERS = new Set([
 	"session_info_changed",
 	"thinking_level_changed",
 ]);
+
+// Flushes coalesce into one window: streaming bursts fire several triggers per turn.
+const ROSTER_FLUSH_MIN_INTERVAL_MS = 250;
 
 /**
  * The transfer id must name the cursor observed at materialization, not the live session cursor:
