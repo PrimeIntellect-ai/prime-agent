@@ -268,6 +268,29 @@ describe("parseCloudMessage and serializeCloudMessage", () => {
 		}
 	});
 
+	it("round-trips brokered inference frames, including the optional thinking level", () => {
+		const messages: CloudMessage[] = [
+			{
+				type: "inference_request",
+				sessionId: "sess-1",
+				remoteSessionId: "sess-2",
+				requestId: "req-1",
+				model: { provider: "openai", modelId: "gpt-5.5" },
+				thinking: "high",
+				payload: {
+					messages: [{ role: "user", content: "hello", timestamp: 1 }],
+					options: { temperature: 0.5 },
+				},
+			},
+			{ type: "inference_event", sessionId: "sess-1", requestId: "req-1", event: { type: "start" } },
+			{ type: "inference_end", sessionId: "sess-1", requestId: "req-1", message: { role: "assistant" } },
+			{ type: "inference_error", sessionId: "sess-1", requestId: "req-1", error: "boom" },
+		];
+		for (const message of messages) {
+			expect(roundTrip(message)).toEqual(message);
+		}
+	});
+
 	it("parses validated objects as well as wire strings", () => {
 		expect(parseCloudMessage(validHello())).toEqual({ ok: true, message: validHello() });
 	});

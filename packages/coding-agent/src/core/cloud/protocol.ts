@@ -1449,7 +1449,7 @@ export function cloudMessageProblem(value: unknown): string | undefined {
 /** Brokered inference request validation: bounded ids and a bounded payload. */
 function inferenceRequestProblem(value: Record<string, unknown>): Problem {
 	const base = firstProblem(
-		expectFields(value, ["type", "sessionId", "remoteSessionId", "requestId", "model", "payload"]),
+		expectFields(value, ["type", "sessionId", "remoteSessionId", "requestId", "model", "thinking", "payload"]),
 		expectString(value.sessionId, "sessionId", CLOUD_MAX_ID_CHARS, 1),
 		expectString(value.remoteSessionId, "remoteSessionId", CLOUD_MAX_ID_CHARS, 1),
 		expectString(value.requestId, "requestId", CLOUD_MAX_ID_CHARS, 1),
@@ -1460,10 +1460,7 @@ function inferenceRequestProblem(value: Record<string, unknown>): Problem {
 	}
 	const model = value.model;
 	if (!isRecord(model)) return "model must be a JSON object";
-	if (
-		!isString(model.provider, CLOUD_MAX_ID_CHARS) ||
-		!isString(model.modelId, CLOUD_MAX_MODEL_ID_CHARS)
-	) {
+	if (!isString(model.provider, CLOUD_MAX_ID_CHARS) || !isString(model.modelId, CLOUD_MAX_MODEL_ID_CHARS)) {
 		return "model must carry bounded provider and modelId strings";
 	}
 	const payload = value.payload;
@@ -1479,10 +1476,7 @@ function inferenceRequestProblem(value: Record<string, unknown>): Problem {
 }
 
 /** Brokered inference response-frame validation: bounded request echo + one payload field. */
-function inferenceResponseProblem(
-	value: Record<string, unknown>,
-	field: "event" | "message" | "error",
-): Problem {
+function inferenceResponseProblem(value: Record<string, unknown>, field: "event" | "message" | "error"): Problem {
 	const base = firstProblem(
 		expectFields(value, ["type", "sessionId", "requestId", field]),
 		expectString(value.sessionId, "sessionId", CLOUD_MAX_ID_CHARS, 1),
