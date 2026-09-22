@@ -72,7 +72,7 @@ class Verifier:
             shutil.rmtree(agent)
         agent.mkdir(parents=True)
         mock = B.MockProvider(root, [])
-        mock.set_responses([{"text": SEED_REPLY}])
+        self._script_mock(mock)
         mock.start()
         tmpdir = Path("/tmp") / f"{self.runid}-{self.name}"
         if tmpdir.exists():
@@ -198,6 +198,74 @@ class Verifier:
             time.sleep(1.0)
         return None
 
+    def _script_mock(self, mock) -> None:
+        """Script the whole run once (before the mock starts): per-turn
+        queues matched on the turn's prompt, a catch-all queue for the
+        session-summary model (the wrap-up calls), and an idle default.
+        Order matters: the later turn's marker is checked first, because
+        a later conversation's history contains the earlier prompts.
+        """
+        mock.set_responses(
+            [{"text": "battery idle filler"}],
+            queues=[
+                {
+                    "name": "session-summary",
+                    "matchModels": ["qwen/qwen3-30b-a3b-instruct-2507"],
+                    "responses": [{"text": "summary filler"}],
+                },
+                {
+                    "name": "turn-unlabeled-agent-heartbeat",
+                    "match": ["create the unlabeled agent heartbeat"],
+                    "responses": [
+                        {
+                            "toolCall": {
+                                "name": "ipython",
+                                "arguments": {
+                                    "code": (
+                                        "import rlm_heartbeat\n"
+                                        "await rlm_heartbeat.create(\n"
+                                        f"    {AGENT_UNLABELED_INSTRUCTION!r},\n"
+                                        f"    interval={AGENT_INTERVAL!r},\n"
+                                        ")\n"
+                                        "print('created')\n"
+                                    )
+                                },
+                            }
+                        },
+                        {"text": "unlabeled agent heartbeat created"},
+                    ],
+                },
+                {
+                    "name": "turn-agent-heartbeat",
+                    "match": ["create the agent heartbeat"],
+                    "responses": [
+                        {
+                            "toolCall": {
+                                "name": "ipython",
+                                "arguments": {
+                                    "code": (
+                                        "import rlm_heartbeat\n"
+                                        "await rlm_heartbeat.create(\n"
+                                        f"    {AGENT_HB_INSTRUCTION!r},\n"
+                                        f"    interval={AGENT_INTERVAL!r},\n"
+                                        f"    label={AGENT_HB_LABEL!r},\n"
+                                        ")\n"
+                                        "print('created')\n"
+                                    )
+                                },
+                            }
+                        },
+                        {"text": "agent heartbeat created"},
+                    ],
+                },
+                {
+                    "name": "turn-seed",
+                    "match": ["verifier seed turn"],
+                    "responses": [{"text": SEED_REPLY}],
+                },
+            ],
+        )
+
     # -- the flow -----------------------------------------------------------
 
     def run(self) -> bool:
@@ -228,8 +296,6 @@ class Verifier:
             or ""
         )
 
-        # Seed turn (session becomes created + persisted).
-        self.side.mock.set_responses([{"text": SEED_REPLY}])
         seeded = wire.request(
             "hb-seed",
             {
@@ -260,21 +326,7 @@ class Verifier:
 
         # Agent heartbeat through the kernel: one ipython tool-call turn
         # creates an rlm_heartbeat (the rlm-heartbeat skill host request).
-        code = (
-            "import rlm_heartbeat\n"
-            "await rlm_heartbeat.create(\n"
-            f"    {AGENT_HB_INSTRUCTION!r},\n"
-            f"    interval={AGENT_INTERVAL!r},\n"
-            f"    label={AGENT_HB_LABEL!r},\n"
-            ")\n"
-            "print('created')"
-        )
-        self.side.mock.set_responses(
-            [
-                {"toolCall": {"name": "ipython", "arguments": {"code": code}}},
-                {"text": "agent heartbeat created"},
-            ]
-        )
+        # The create tool call rides the turn queue scripted above.
         agent_reply = wire.request(
             "hb-agent",
             {
@@ -290,20 +342,7 @@ class Verifier:
         # The create-without-label path (the dogfood repro): a second agent
         # heartbeat with no label. Its row must identify itself by its
         # instruction preview (TS `primary: label || prompt || default name`).
-        unlabeled_code = (
-            "import rlm_heartbeat\n"
-            "await rlm_heartbeat.create(\n"
-            f"    {AGENT_UNLABELED_INSTRUCTION!r},\n"
-            f"    interval={AGENT_INTERVAL!r},\n"
-            ")\n"
-            "print('created')\n"
-        )
-        self.side.mock.set_responses(
-            [
-                {"toolCall": {"name": "ipython", "arguments": {"code": unlabeled_code}}},
-                {"text": "unlabeled agent heartbeat created"},
-            ]
-        )
+        # The create tool call rides the turn queue scripted above.
         unlabeled_reply = wire.request(
             "hb-agent-unlabeled",
             {
