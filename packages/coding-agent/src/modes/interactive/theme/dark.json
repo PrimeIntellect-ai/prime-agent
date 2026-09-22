@@ -39,6 +39,8 @@
 		"customMessageBg": "customMsgBg",
 		"customMessageText": "",
 		"customMessageLabel": "#9575cd",
+		"refinementHeader": "#9575cd",
+		"refinementSummary": "#b7a1d6",
 		"toolPendingBg": "toolPendingBg",
 		"toolSuccessBg": "toolSuccessBg",
 		"toolErrorBg": "toolErrorBg",
@@ -48,6 +50,7 @@
 		"toolTitle": "",
 		"toolOutput": "gray",
 
+		"mdBody": "#c4c4c4",
 		"mdHeading": "#b294bb",
 		"mdLink": "#81a2be",
 		"mdLinkUrl": "dimGray",

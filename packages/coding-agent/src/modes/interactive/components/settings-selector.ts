@@ -45,7 +45,6 @@ export interface SettingsConfig {
 	availableThinkingLevels: ThinkingLevel[];
 	currentTheme: string;
 	availableThemes: string[];
-	hideThinkingBlock: boolean;
 	mermaidRenderingMode: MermaidRenderingMode;
 	treeFilterMode: "default" | "no-tools" | "user-only" | "labeled-only" | "all";
 	showHardwareCursor: boolean;
@@ -72,7 +71,6 @@ export interface SettingsCallbacks {
 	onThinkingLevelChange: (level: ThinkingLevel) => void;
 	onThemeChange: (theme: string) => void;
 	onThemePreview?: (theme: string) => void;
-	onHideThinkingBlockChange: (hidden: boolean) => void;
 	onMermaidRenderingModeChange: (mode: MermaidRenderingMode) => void;
 	onTreeFilterModeChange: (mode: "default" | "no-tools" | "user-only" | "labeled-only" | "all") => void;
 	onShowHardwareCursorChange: (enabled: boolean) => void;
@@ -142,7 +140,7 @@ class SelectSubmenu extends Container {
 	) {
 		super();
 
-		this.addChild(new Text(theme.bold(theme.fg("accent", title)), 0, 0));
+		this.addChild(new Text(theme.fg("accent", title), 0, 0));
 
 		if (description) {
 			this.addChild(new Spacer(1));
@@ -236,13 +234,6 @@ export class SettingsSelectorComponent extends Container {
 				description: "Preferred transport for providers that support multiple transports",
 				currentValue: config.transport,
 				values: ["sse", "websocket", "websocket-cached", "auto"],
-			},
-			{
-				id: "hide-thinking",
-				label: "Hide thinking",
-				description: "Hide thinking blocks in assistant responses",
-				currentValue: config.hideThinkingBlock ? "true" : "false",
-				values: ["true", "false"],
 			},
 			{
 				id: "mermaid-rendering",
@@ -477,9 +468,6 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "transport":
 						callbacks.onTransportChange(newValue as Transport);
-						break;
-					case "hide-thinking":
-						callbacks.onHideThinkingBlockChange(newValue === "true");
 						break;
 					case "mermaid-rendering":
 						callbacks.onMermaidRenderingModeChange(newValue as MermaidRenderingMode);

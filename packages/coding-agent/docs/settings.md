@@ -17,9 +17,47 @@ Edit directly or use `/settings` for common options.
 |---------|------|---------|-------------|
 | `defaultProvider` | string | - | Default provider (e.g., `"anthropic"`, `"openai"`) |
 | `defaultModel` | string | - | Default model ID |
-| `defaultThinkingLevel` | string | `"xhigh"` | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` |
-| `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in output |
+| `subagentDefaultModel` | string | - | Model selector (`"provider/id"`) used when `rlm.spawn` does not pin a model; unset inherits the parent model |
+| `imageModel` | string | none | Model (`"provider/model-id"` or a bare id) that serves turns attaching images when the session model does not accept image input |
+| `defaultThinkingLevel` | string | `"medium"` | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level |
+
+`subagentDefaultModel` applies only to spawned subagents whose `rlm.spawn` call omits `model=`. An explicit `model=` per spawn always wins, and an unset setting keeps the inherit-parent behavior. If the configured default is unavailable, unauthenticated, or expired, the spawn fails with that error instead of silently falling back.
+
+When `defaultThinkingLevel` is unset, new sessions start at `"medium"` reasoning, clamped to the levels each model supports.
+
+`imageModel` routes image turns on text-only session or subagent models. When a
+turn attaches images and the selected model has no image input, that turn (and
+its retries and post-compaction continuations) is served by the configured
+image-capable model instead; the session model selection stays unchanged, and
+the routed assistant messages record the model that served them. Later
+image-free turns return to the session model, where images already in the
+transcript appear as "(image omitted: model does not support images)"
+placeholders. With no `imageModel` set (default), image turns on a text-only
+model fail with an actionable error instead of silently dropping the images:
+switch the session model with `/model` or configure `imageModel`. Set
+`images.blockImages: true` to drop images everywhere instead of routing or
+refusing.
+
+### Autonomous Runs
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `autonomous.maxContinuations` | number or `"unlimited"` | `3` | Continuation budget for autonomous runs |
+| `autonomous.maxTurns` | number or `"unlimited"` | `12` | Turn budget for autonomous runs |
+| `autonomous.maxTokens` | number or `"unlimited"` | `80000` | Token budget for autonomous runs |
+| `autonomous.timeoutMs` | number or `"unlimited"` | `1800000` | Wall-clock budget in milliseconds |
+
+```json
+{
+  "autonomous": {
+    "maxContinuations": "unlimited",
+    "maxTokens": 1000000
+  }
+}
+```
+
+These are the persisted defaults for the same limits as the `--autonomous-*` CLI flags and `/autonomous on` budget flags. Set them once so every autonomous run starts with your budget instead of the built-in defaults; explicit flags on a given run still win. Invalid values are ignored per-field, falling back to the built-in defaults.
 
 #### thinkingBudgets
 
@@ -36,11 +74,12 @@ Edit directly or use `/settings` for common options.
 
 ### UI & Display
 
+Conversation output starts in overview. Ctrl+O cycles through details and all output; the old `hideThinkingBlock` setting no longer controls visibility.
+
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `theme` | string | `"dark"` | Theme name (`"dark"`, `"light"`, or custom) |
+| `theme` | string | detected | Theme name (built-ins: `"prime"`, `"dark"`, `"light"`; or custom). Unset uses `"prime"` on dark terminals and `"light"` on light terminals |
 | `quietStartup` | boolean | `false` | Hide startup header |
-| `collapseChangelog` | boolean | `false` | Show condensed changelog after updates |
 | `treeFilterMode` | string | `"user-only"` | Default filter for `/tree`: `"default"`, `"no-tools"`, `"user-only"`, `"labeled-only"`, `"all"` |
 | `editorPaddingX` | number | `0` | Horizontal padding for input editor (0-3) |
 | `autocompleteMaxVisible` | number | `5` | Max visible items in autocomplete dropdown (3-20) |
@@ -67,6 +106,21 @@ The stable `latest.json` and beta `beta.json` manifests use the same JSON shape:
 ### Pseudonymous usage analytics
 
 Prime Agent sends pseudonymous, aggregate usage and performance events to Prime Intellect. These events include version and operating-system category, onboarding outcome and duration, execution mode (`interactive`, `print`, `json`, `rpc`, or `acp`), run outcomes, TTFT and latency, prompt and turn counts, token usage, tool success counts, retries, and compactions.
+
+Every event also carries a small platform descriptor, used to decide which prebuilt binaries Prime Agent has to ship:
+
+| Property | Values |
+|----------|--------|
+| `os_family` | `linux`, `darwin`, `win32`, ... |
+| `architecture` | `arm64`, `x64`, ... |
+| `install_method` | `bun-binary`, `homebrew`, `npm`, `pnpm`, `yarn`, `bun`, `unknown` |
+| `libc` | `glibc`, `musl`, `none` (not Linux), `unknown` |
+| `libc_version` | glibc runtime version such as `2.39`, else `unknown` |
+| `cpu_baseline` | `avx2`, `no_avx2` (both measured on x86_64), `avx2_assumed` (Intel Macs, inferred), `not_applicable` (not x86_64), `unknown` |
+| `os_release` | kernel version such as `6.8.0-45-generic` or `24.6.0` |
+| `os_product_version` | macOS product version such as `15.6`; `unknown` elsewhere |
+
+Most of these are coarse platform categories shared by millions of machines. `os_release` is the one exception: it is the raw kernel release string, capped at 64 characters. Stock kernel names such as `6.8.0-45-generic` are shared widely, but custom or self-built kernels can embed organization-, user-, or machine-specific labels in that string, so `os_release` is not guaranteed to be non-identifying. The remaining fields contain no hostname, username, path, serial number, or other hardware identifier.
 
 Prime Agent does not send prompts, responses, thinking, tool arguments or results, command text, filenames, paths, repository information, environment variables, credentials, raw error messages, hostnames, usernames, emails, or hardware identifiers. A random installation ID is stored as `telemetry.json` in the configured agent directory (normally `~/.prime/agent/`).
 
@@ -145,6 +199,62 @@ prime-agent --offline
 
 When a provider requests a retry delay longer than `retry.provider.maxRetryDelayMs` (e.g. a usage-limit reset hours away), auto-retry stops immediately with an informative error instead of waiting. Set to `0` to disable the cap.
 
+### Wait-for-usage and provider recovery
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `retry.provider.waitForUsage.enabled` | boolean | `true` | Bounded wait-for-recovery loop for quota exhaustion and provider unavailability |
+| `retry.provider.waitForUsage.baseDelayMs` | number | `1000` | First ping delay (doubles per ping) |
+| `retry.provider.waitForUsage.maxDelayMs` | number | `300000` | Per-ping ceiling (5m) |
+| `retry.provider.waitForUsage.maxAttempts` | number | `30` | Abort bound: maximum recovery pings |
+| `retry.provider.waitForUsage.maxWaitMs` | number | `900000` | Abort bound: maximum total wait (15m) |
+| `retry.provider.waitForUsage.pauseUntilReset` | boolean | `true` | Park quota-blocked sessions until the provider-reported reset instead of dying mid-task |
+| `retry.provider.waitForUsage.maxPauseMs` | number | `86400000` | Abort bound: maximum single park (24h; clamped to 7d) |
+| `retry.provider.waitForUsage.maxParks` | number | `8` | Abort bound: maximum parks per quota episode |
+| `providerBackupModel` | string | none | Backup model ("provider/model-id" or bare id) used while the primary is quota-blocked or unavailable |
+
+The wait loop runs under the `retry.enabled` master switch: with retries
+disabled, no waits run either.
+
+When a request fails with quota/subscription exhaustion (429s, usage limits), the
+session waits for usage to come back: it pings the provider with exponential
+backoff and jitter (1s doubling to a 5m ceiling) and resumes automatically when
+the provider recovers. If the provider reports a reset time (Retry-After header
+or "Try again in ~90 min" style text), the resume is scheduled exactly then
+instead of pinging. Quick retries still run first for transient errors (5xx,
+overload, network, and 404 routing blips); the wait loop takes over when they
+are exhausted. Every wait shows attempts and the next check countdown in the
+status line, and both abort bounds (`maxAttempts`, `maxWaitMs`) are hard stops:
+waits never hang. When a reported reset time exceeds `maxWaitMs`, the wait gives
+up immediately with an informative error instead of pinging pointlessly — raise
+`maxWaitMs` to wait out long subscription windows.
+
+When `pauseUntilReset` is on (the default) and such a reset is reported — e.g.
+the ChatGPT-plan "Try again in ~7272 min" 429 — the session does not die
+mid-task: it parks. The turn ends cleanly with a "parked until ..." status, the
+park/resume transitions are recorded in the session log, and one durable
+one-shot scheduled job (visible via `/cron`) wakes the session at the reset
+time — or sooner when `maxPauseMs` caps the park. While parked the session
+itself makes no model calls. The wake delivers an
+in-context marker telling the model the pause happened and to continue the
+interrupted task; that turn's single model call probes the quota. If the quota
+is back, the task resumes with its context. If not, the session re-parks with
+the newly reported reset, bounded by `maxPauseMs` per park and `maxParks` per
+quota episode; when the budget is spent, it aborts exactly like the bounded
+wait it replaced. Parks apply at the session level (subagents included), only
+for quota failures with a provider-reported reset, and only when no backup
+model took over; a `maxPauseMs` above 7 days is clamped. Set
+`pauseUntilReset: false` to keep the pre-park behavior of failing immediately.
+
+`providerBackupModel` routes failed turns to a user-defined backup model
+instead of waiting while the primary is quota-blocked or unavailable. It is
+disabled by default: with no setting, behavior is unchanged and requests never
+silently switch models. When set, the retry status line shows an explicit
+"retrying on backup model X" indicator, the switch is recorded in the session
+log, and the session returns to the primary model automatically (the next turn
+probes the primary again). If the backup reference cannot be resolved to an
+available, authenticated model, the bounded wait runs instead.
+
 ```json
 {
   "retry": {
@@ -153,11 +263,28 @@ When a provider requests a retry delay longer than `retry.provider.maxRetryDelay
     "baseDelayMs": 2000,
     "provider": {
       "timeoutMs": 3600000,
-      "maxRetryDelayMs": 60000
+      "maxRetryDelayMs": 60000,
+      "waitForUsage": {
+        "enabled": true,
+        "baseDelayMs": 1000,
+        "maxDelayMs": 300000,
+        "maxAttempts": 30,
+        "maxWaitMs": 900000,
+        "pauseUntilReset": true,
+        "maxPauseMs": 86400000,
+        "maxParks": 8
+      }
     }
-  }
+  },
+  "providerBackupModel": "anthropic/claude-opus-4-7"
 }
 ```
+
+### Diagnostics
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `requestTiming` | boolean | `false` | Log per-request provider timing phases to the diagnostic log (see [Development: Request timing](development.md#request-timing)); `PI_REQUEST_TIMING=1` also enables it |
 
 ### Message Delivery
 
@@ -165,7 +292,7 @@ When a provider requests a retry delay longer than `retry.provider.maxRetryDelay
 |---------|------|---------|-------------|
 | `steeringMode` | string | `"one-at-a-time"` | How steering messages are sent: `"all"` or `"one-at-a-time"` |
 | `followUpMode` | string | `"one-at-a-time"` | How follow-up messages are sent: `"all"` or `"one-at-a-time"` |
-| `transport` | string | `"sse"` | Preferred transport for providers that support multiple transports: `"sse"`, `"websocket"`, or `"auto"` |
+| `transport` | string | `"auto"` | Preferred transport for providers that support multiple transports: `"sse"`, `"websocket"`, `"websocket-cached"`, or `"auto"` |
 
 ### Terminal & Images
 
@@ -218,7 +345,7 @@ When multiple sources specify a session directory, precedence is `--session-dir`
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `enabledModels` | string[] | - | Model patterns for Ctrl+P cycling (same format as `--models` CLI flag) |
+| `enabledModels` | string[] | - | Model patterns for Alt+M cycling (same format as `--models` CLI flag) |
 
 ```json
 {

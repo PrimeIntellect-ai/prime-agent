@@ -1,0 +1,1 @@
+- Fixed opening an agent from Agents View during a daemon auto-update failing with "Daemon is preparing an update restart": the open now waits through the update restart (bounded) and reconnects once the daemon returns, with a notice that it waited instead of a hard failure.

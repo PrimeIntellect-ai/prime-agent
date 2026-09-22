@@ -199,6 +199,92 @@ function connectAcpClient(connection: any, options: ClientHarnessOptions = {}): 
 }
 
 describe("ACP mode end to end", () => {
+	it("advertises model and effort pickers and applies unambiguous ACP selections (#2455)", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "reasoner", reasoning: true },
+				{ id: "plain/model", reasoning: false },
+			],
+		});
+		const connection = new InProcessAgentConnection(runtimeHostFor(harness.session));
+		const otherProvider = `${harness.models[0].provider}/plain`;
+		harness.session.modelRegistry.registerProvider(otherProvider, {
+			api: harness.faux.api,
+			apiKey: "faux-key",
+			baseUrl: harness.models[0].baseUrl,
+			models: [{ ...harness.models[1], id: "model" }],
+		});
+		const { client, updates, close } = connectAcpClient(connection);
+		try {
+			await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+			const params = { cwd: harness.tempDir, mcpServers: [] };
+			const session = (await client.request("session/new", params)) as acp.NewSessionResponse;
+			const model = JSON.stringify([harness.models[0].provider, "plain/model"]);
+			expect(session.configOptions).toMatchObject([
+				{
+					id: "model",
+					category: "model",
+					type: "select",
+					currentValue: JSON.stringify([harness.models[0].provider, "reasoner"]),
+					options: expect.arrayContaining([expect.objectContaining({ value: model })]),
+				},
+				{
+					id: "thought_level",
+					category: "thought_level",
+					currentValue: harness.session.thinkingLevel,
+				},
+			]);
+			const select = (configId: string, value: string, sessionId = session.sessionId) =>
+				client.request("session/set_config_option", { sessionId, configId, value });
+			const effort = await select("thought_level", "high");
+			expect(harness.session.thinkingLevel).toBe("high");
+			expect(effort.configOptions).toContainEqual(
+				expect.objectContaining({ id: "thought_level", currentValue: "high" }),
+			);
+			const configurations = () => updates.filter((item) => item.update.sessionUpdate === "config_option_update");
+			expect(configurations().map((item) => item.update.configOptions)).toContainEqual(effort.configOptions);
+			for (const [configId, value, sessionId] of [
+				["model", "missing", session.sessionId],
+				["thought_level", "invalid", session.sessionId],
+				["unknown", "high", session.sessionId],
+				["thought_level", "low", "missing-session"],
+			]) {
+				await expect(select(configId, value, sessionId)).rejects.toMatchObject({ code: -32602 });
+			}
+			expect(harness.session.thinkingLevel).toBe("high");
+			harness.session.setThinkingLevel("low");
+			const changed = await select("model", model);
+			expect(configurations().flatMap((item) => item.update.configOptions)).toContainEqual(
+				expect.objectContaining({ id: "thought_level", currentValue: "low" }),
+			);
+			expect(changed.configOptions).toEqual([expect.objectContaining({ id: "model", currentValue: model })]);
+			expect(harness.session.model?.id).toBe("plain/model");
+			expect(harness.session.thinkingLevel).toBe("off");
+			await expect(select("thought_level", "high")).rejects.toMatchObject({ code: -32602 });
+			const restored = await select("model", JSON.stringify([harness.models[0].provider, "reasoner"]));
+			expect(restored.configOptions).toContainEqual(
+				expect.objectContaining({ id: "thought_level", currentValue: "low" }),
+			);
+			await select("model", JSON.stringify([otherProvider, "model"]));
+			expect(harness.session.model).toMatchObject({ provider: otherProvider, id: "model" });
+			const discovery = vi.spyOn(connection, "getAvailableModels").mockRejectedValue(new Error("offline"));
+			try {
+				const retained = await select("model", JSON.stringify([otherProvider, "model"]));
+				expect(retained.configOptions).toEqual([
+					expect.objectContaining({ currentValue: JSON.stringify([otherProvider, "model"]) }),
+				]);
+				await expect(select("model", model)).rejects.toMatchObject({ code: -32602 });
+				discovery.mockResolvedValue([]);
+				await expect(select("model", JSON.stringify([otherProvider, "model"]))).resolves.toEqual(retained);
+			} finally {
+				discovery.mockRestore();
+			}
+		} finally {
+			close();
+			harness.cleanup();
+		}
+	});
+
 	it("completes a prompt turn and streams assistant text", async () => {
 		const harness = await createHarness();
 		harness.setResponses([fauxAssistantMessage("Hello from prime-agent.")]);

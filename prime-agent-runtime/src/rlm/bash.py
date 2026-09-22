@@ -2,34 +2,30 @@
 
 from __future__ import annotations
 
-import asyncio
-import atexit
 import functools
 import json
 import os
-import secrets
-import selectors
-import shutil
 import signal
 import socket
-import struct
 import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections import deque
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any, cast
 
 from . import _winjob
 
-_IS_POSIX = os.name == "posix"
+# Boot-lean imports: asyncio, secrets, shutil, datetime, selectors, struct,
+# fcntl/termios, and atexit load on first use below so `import rlm` (and with
+# it the kernel's pre-ready startup path) stays small. asyncio is bound onto
+# this module's globals by BashHandle.__init__ before any code path here can
+# touch it; every other user imports inside the function that needs it.
 
-if _IS_POSIX:
-    import fcntl
-    import termios
+_IS_POSIX = os.name == "posix"
 
 _HEAD_CAP = 512 * 1024
 _TAIL_CAP = 3 * 512 * 1024
@@ -158,6 +154,18 @@ def _creating_cell_waits_for(
     return _completion_reaches(awaiter, targets)
 
 
+def _live_cell_owner() -> asyncio.Task[Any] | None:
+    """Body task of the cell executing right now, ignoring detached context copies."""
+    try:
+        from . import repl
+
+        if repl.is_active():
+            return repl.active_cell_task()
+    except (ImportError, RuntimeError):
+        pass
+    return None
+
+
 @dataclass(frozen=True)
 class BashResult:
     exit_code: int
@@ -224,6 +232,12 @@ class BashHandle:
     """
 
     def __init__(self, command: str) -> None:
+        # Every asyncio use in this module runs on a handle path (bash() is the
+        # only constructor), so bind the module global here, before
+        # _schedule_background_completion_notice or any await can run.
+        global asyncio
+        import asyncio
+
         self.command = command
         completion_context = _current_cell_completion_context()
         self._creating_cell_finished = completion_context[0] if completion_context else None
@@ -242,6 +256,8 @@ class BashHandle:
         self._result: BashResult | None = None
         self._callbacks: list[Callable[[], None]] = []
         self._reap_callback: Callable[[], None] | None = None
+        self._result_consumed = False
+        self._consumed_notice: Callable[[], None] | None = None
         self._callback_lock = threading.Lock()
         # Serializes kill/reap so a pid fallback can never outlive the process handle.
         self._kill_lock = threading.Lock()
@@ -257,6 +273,8 @@ class BashHandle:
         self._completion_marker: bytes | None = None
         status_write = -1
         if _IS_POSIX:
+            import secrets
+
             # Full-duplex status channel: the child end rides in as stdin (fd 0)
             # and the script remaps it to _STATUS_FD before swapping in /dev/null
             # (dash rejects multi-digit fds in redirections at parse time). The
@@ -364,14 +382,17 @@ class BashHandle:
 
     def output(self) -> str:
         self._released = True
+        self._note_result_consumed()
         return self._buffer.text()
 
     def tail(self, n: int = 50) -> str:
         self._released = True
+        self._note_result_consumed()
         return "\n".join(self._buffer.text().splitlines()[-n:])
 
     def poll(self) -> BashResult | None:
         self._released = True
+        self._note_result_consumed()
         return self._result if self._done.is_set() else None
 
     def kill(self, sig: int = signal.SIGTERM, grace: float = 5.0) -> None:
@@ -404,6 +425,8 @@ class BashHandle:
             _signal_group(self._pid, signal.SIGKILL)
 
     def _pump(self) -> None:
+        import selectors
+
         stdout = self._proc.stdout
         assert stdout is not None
         if not _IS_POSIX:
@@ -556,6 +579,8 @@ class BashHandle:
     def _read_status(self) -> int | None:
         if self._status_read < 0:
             return None
+        import selectors
+
         try:
             # DefaultSelector (kqueue/epoll) instead of select(): select() rejects
             # fds >= FD_SETSIZE (1024) even when the process fd limit is higher.
@@ -602,6 +627,9 @@ class BashHandle:
         # quiescence heuristic (best-effort parity).
         if not _IS_POSIX or self._eof.is_set():
             return False
+        import fcntl
+        import struct
+        import termios
         stdout = self._proc.stdout
         if stdout is None:
             return False
@@ -633,6 +661,26 @@ class BashHandle:
                 return
         callback()
 
+    def _note_result_consumed(self, awaiter: asyncio.Task[Any] | None = None) -> None:
+        """Record a result read that reaches the model: only reads during a live
+        cell count (a detached reader between turns must keep the notice — it is
+        the idle session's only wake-up), and an awaiting reader must be one the
+        live cell waits for."""
+        if not self._done.is_set():
+            return
+        owner = _live_cell_owner()
+        if owner is None:
+            return
+        if awaiter is not None and not _creating_cell_waits_for(owner, awaiter):
+            return
+        with self._callback_lock:
+            if self._result_consumed:
+                return
+            self._result_consumed = True
+            notice, self._consumed_notice = self._consumed_notice, None
+        if notice is not None:
+            notice()
+
     def _schedule_background_completion_notice(self) -> None:
         cell_finished = self._creating_cell_finished
         if cell_finished is None:
@@ -642,6 +690,7 @@ class BashHandle:
         except RuntimeError:
             return
         from . import repl
+        import secrets
 
         activity = {"id": secrets.token_hex(16), "pid": self._pid, "active": True}
         # Publish synchronously before bash() returns and the creating cell can end.
@@ -667,7 +716,7 @@ class BashHandle:
             # The cell may do other work before awaiting this handle. Do not classify
             # it as detached until that whole cell has crossed its completion barrier.
             await cell_finished.wait()
-            if self._awaited_by_creating_cell or not repl.is_active():
+            if self._awaited_by_creating_cell or self._result_consumed or not repl.is_active():
                 return
             command = self.command
             if len(command) > _COMPLETION_NOTICE_COMMAND_CAP:
@@ -680,7 +729,10 @@ class BashHandle:
                     "exitCode": result.exit_code,
                 }
             )
-            if not isinstance(reply, dict) or reply.get("status") != "ok":
+            if isinstance(reply, dict) and reply.get("status") == "ok":
+                # Notice accepted by the host; later reads must ask it to withdraw.
+                self._arm_consumed_notice(command)
+            else:
                 sys.stderr.write(
                     f"Background bash completion follow-up for pid {self._pid} was not accepted. "
                     "Inspect the saved handle with poll(), output(), or tail().\n"
@@ -692,6 +744,40 @@ class BashHandle:
         finally:
             # Reap and deliver (or report rejection) before releasing kernel residency.
             repl.emit({"application/vnd.prime-agent.bash-activity+json": {**activity, "active": False}})
+
+    def _arm_consumed_notice(self, command: str) -> None:
+        # Armed only post-acceptance: the withdrawal can never overtake its notice.
+        dispatch = functools.partial(self._notify_result_consumed, command)
+
+        with self._callback_lock:
+            if not self._result_consumed:
+                self._consumed_notice = dispatch
+                return
+        dispatch()
+
+    def _notify_result_consumed(self, command: str) -> None:
+        """Ship the withdrawal inside the read, ahead of the cell's done event.
+
+        The host delivers a queued notice at the reading cell's turn boundary,
+        which begins when that cell's done event is processed: a withdrawal
+        frame that leaves the kernel after done arrives too late, and the stale
+        notice wakes the model anyway. Reads happen inside a live cell, so
+        writing the frame right here puts it ahead of done on the wire, where
+        the host must withdraw before it can dispatch. The reply never matters
+        (unknown reply ids are dropped), so the request is fire-and-forget:
+        no future to await, no event-loop hop that could run after the cell.
+        """
+        from . import repl
+
+        if not repl.is_active():
+            return
+        repl._send(
+            {
+                "event": "host_request",
+                "id": uuid.uuid4().hex,
+                "data": {"type": "bash.consumed", "pid": self._pid, "command": command},
+            }
+        )
 
     async def _wait_reaped(self) -> None:
         loop = asyncio.get_running_loop()
@@ -857,6 +943,8 @@ class BashHandle:
                 or _creating_cell_waits_for(self._creating_cell_task, current_task)
             ):
                 self._awaited_by_creating_cell = True
+            if completed:
+                self._note_result_consumed(current_task)
 
     def __repr__(self) -> str:
         state = f"exit_code={self._result.exit_code}" if self._result else "running"
@@ -885,6 +973,8 @@ def bash(command: str) -> BashHandle:
 
 
 def _shell() -> str:
+    import shutil
+
     # Read per call so env changes made in the REPL apply to later commands.
     override = os.environ.get("PRIME_AGENT_BASH_SHELL")
     if override:
@@ -911,6 +1001,8 @@ def _with_prefix(command: str) -> str:
 
 
 def _fence_printf() -> str:
+    import shutil
+
     # `\command -p printf` defeats alias expansion but not a user-defined shell
     # function named `command`, which would swallow both fence frames and leave
     # the await hanging until the shell dies (wedged behind background jobs). A
@@ -943,7 +1035,33 @@ def _status_script(command: str, completion_a: str, completion_b: str) -> str:
 
 
 def _child_env() -> dict[str, str]:
-    return {**os.environ, "NO_COLOR": "1", "TERM": "dumb", "CLICOLOR": "0", "FORCE_COLOR": "0"}
+    """Environment for kernel-spawned shell commands.
+
+    Same non-interactive guard as the coding-agent shell tool
+    (packages/coding-agent/src/utils/shell.ts): agent shell commands have no
+    usable stdin, so interactive prompts (git commit without -m opening
+    $EDITOR, credential asks, pagers) can only hang. Fail fast or no-op
+    instead. Deliberately overrides inherited terminal settings; a
+    per-command inline assignment (`GIT_EDITOR=vim git commit`) still wins
+    because it replaces the exported value for that command.
+    """
+    return {
+        **os.environ,
+        "NO_COLOR": "1",
+        "TERM": "dumb",
+        "CLICOLOR": "0",
+        "FORCE_COLOR": "0",
+        "GIT_EDITOR": "true",
+        "GIT_SEQUENCE_EDITOR": "true",
+        "GIT_TERMINAL_PROMPTS": "0",
+        "GIT_ASKPASS": "true",
+        "SSH_ASKPASS_REQUIRE": "never",
+        "EDITOR": "true",
+        "VISUAL": "true",
+        "PAGER": "cat",
+        "GIT_PAGER": "cat",
+        "DEBIAN_FRONTEND": "noninteractive",
+    }
 
 
 def _signal_group(pid: int, sig: int) -> bool:
@@ -1030,6 +1148,8 @@ def _record_journal(pid: int, active: bool) -> bool:
     # Returns False only when the journal is configured but enrollment failed;
     # active-record callers must then fail closed. Active records always carry
     # a processStartId so host reaping stays identity-verified.
+    from datetime import datetime, timezone
+
     path = os.environ.get("PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL")
     owner = os.environ.get("PRIME_AGENT_KERNEL_OWNER_PID")
     if not path or not owner:
@@ -1097,6 +1217,8 @@ def _kill_live_handles() -> None:
 
 def _install_shutdown_hook() -> None:
     global _hook_installed
+    import atexit
+
     with _hook_lock:
         if _hook_installed:
             return

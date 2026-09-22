@@ -1,13 +1,13 @@
 import * as path from "node:path";
 import { getProviders, type OAuthProviderId, type OAuthSelectPrompt } from "@earendil-works/pi-ai";
-import type { OverlayHandle, TUI } from "@earendil-works/pi-tui";
+import type { Component, TUI } from "@earendil-works/pi-tui";
 import { getAuthPath, getDocsPath } from "../../config.js";
+import type { McpRemoveAccountResult } from "../../core/mcp/connection-store.js";
 import type { ModelRegistry } from "../../core/model-registry.js";
 import {
 	checkPrimeAgentTracesAccess,
 	checkPrimeInferenceAccess,
 	fetchPrimeTeams,
-	loadPrimeCliConfig,
 	loginPrimeAgentTraces,
 	loginPrimeInference,
 	PRIME_AGENT_TRACES_PROVIDER_ID,
@@ -16,10 +16,10 @@ import {
 	PRIME_INFERENCE_PROVIDER_NAME,
 	type PrimeTeam,
 	resolvePrimeAgentTracesBaseUrl,
+	resolvePrimeInferenceAuthConfig,
 } from "../../core/prime-inference-auth.js";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.js";
 import { SERPER_CREDENTIAL_ID, SERPER_CREDENTIAL_NAME } from "../../core/websearch-credential.js";
-import { showFullPaneOverlay } from "./components/centered-overlay.js";
 import { ExtensionSelectorComponent } from "./components/extension-selector.js";
 import { LoginDialogComponent } from "./components/login-dialog.js";
 import {
@@ -28,6 +28,7 @@ import {
 	compareAuthSelectorProviders,
 	OAuthSelectorComponent,
 } from "./components/oauth-selector.js";
+import { OnboardingChoiceComponent } from "./components/onboarding-choice.js";
 import { PrimeTeamSelectorComponent } from "./components/prime-team-selector.js";
 import { theme } from "./theme/theme.js";
 
@@ -97,12 +98,43 @@ export interface ProviderAuthFlowsHost {
 	readonly modelRegistry: ModelRegistry;
 	showStatus(message: string): void;
 	showError(message: string): void;
+	/**
+	 * Mount a provider-auth panel (login dialog or in-flow selector) in place of
+	 * the prompt area. Returns a callback that unmounts the panel and restores
+	 * the previous content and focus.
+	 */
+	/** `onReset` settles the caller's step when a session reset unmounts the panel. */
+	showAuthPanel(component: Component, options?: { heading?: string; onReset?: () => void }): () => void;
+	/** Terminal rows available to auth panels; selectors size their lists to it. */
+	getAuthPanelRows(): number;
+	/** True while onboarding owns the screen and supplies its own heading. */
+	isOnboardingSurface?(): boolean;
+	/** Quits the app from an onboarding panel, where the editor has no focus. */
+	exitApp?(): void;
 	/** Models currently visible to the host; used to detect providers configured via external credentials. */
 	getAvailableModels(): Promise<ReadonlyArray<{ provider: string }>>;
 	/** Invoked after stored credentials change so the host can refresh dependent UI. */
 	onAuthChanged?(): void | Promise<void>;
 	/** Invoked after a successful login (e.g. to surface billing warnings). */
 	onLoginCompleted?(): void;
+	/**
+	 * OWNS the MCP account login for the generic /login service options and
+	 * the config menu: the host runs the ONE guarded connect operation
+	 * (claim under the store lock, staged OAuth, guarded finalize). There
+	 * is NO raw-dialog fallback for MCP ids — an unresolvable provider
+	 * reports an explicit configuration-required outcome; only the guarded
+	 * operation's private staging dialog exists.
+	 */
+	onMcpAccountLogin?(providerId: string): Promise<AuthenticationResult>;
+	/**
+	 * OWNS the entire MCP account logout for the generic /logout route: the
+	 * host must perform verified credential deletion AND pending-attempt
+	 * cancellation under ONE connection-store critical section (store->auth)
+	 * BEFORE the route reports anything. Called INSTEAD of
+	 * authStorage.logout for MCP credential ids; non-MCP logouts are
+	 * unaffected.
+	 */
+	onMcpAccountLogout?(providerId: string): Promise<McpRemoveAccountResult> | McpRemoveAccountResult;
 }
 
 export interface ProviderLoginOptions {
@@ -131,6 +163,26 @@ export class ProviderAuthFlows {
 		return this.showLoginDialog(providerId, label ?? provider.name, "service");
 	}
 
+	/**
+	 * Panel chrome for login dialogs. Onboarding renders its own heading above
+	 * the panel, so it drops both the transcript rule and the panel title.
+	 */
+	private loginDialogOptions(): { topRule: boolean; hideTitle: boolean; onExit?: () => void } {
+		const onboarding = this.isOnboarding();
+		// While onboarding owns the screen the dialog answers the exit keys
+		// itself; the editor that normally owns them has no focus yet.
+		return {
+			topRule: !onboarding,
+			hideTitle: onboarding,
+			...(onboarding ? { onExit: () => this.host.exitApp?.() } : {}),
+		};
+	}
+
+	/** Onboarding narrates itself; step chatter belongs to the chat surfaces. */
+	private isOnboarding(): boolean {
+		return this.host.isOnboardingSurface?.() ?? false;
+	}
+
 	runLogin(options: ProviderLoginOptions = {}): Promise<AuthenticationResult> {
 		const { authType, initialCategory } = options;
 		const providerOptions = this.getLoginProviderOptions(authType);
@@ -146,33 +198,38 @@ export class ProviderAuthFlows {
 		}
 
 		return new Promise((resolve) => {
-			let handle: OverlayHandle | undefined;
-			const close = () => {
-				handle?.hide();
-				this.host.ui.requestRender();
-			};
+			let close: (() => void) | undefined;
 			const selector = new OAuthSelectorComponent(
 				"login",
 				this.host.modelRegistry.authStorage,
 				providerOptions,
 				async (providerOption: AuthSelectorProvider) => {
-					close();
+					close?.();
 					resolve(await this.loginProvider(providerOption));
 				},
 				() => {
-					close();
+					close?.();
 					resolve({ status: "cancelled" });
 				},
 				(providerId) => this.host.modelRegistry.getProviderAuthStatus(providerId),
-				{ getRows: () => this.host.ui.terminal.rows, initialCategory },
+				{ getRows: () => this.host.getAuthPanelRows(), initialCategory, inline: true },
 			);
-			handle = showFullPaneOverlay(this.host.ui, selector, 78);
+			close = this.host.showAuthPanel(selector);
 		});
 	}
 
 	loginProvider(providerOption: AuthSelectorProvider): Promise<AuthenticationResult> {
 		const kind = providerOption.category === "service" ? "service" : "provider";
 		if (providerOption.authType === "oauth") {
+			// MCP account logins are DELEGATED to the host's guarded connect
+			// operation BEFORE any dialog writes the final credential: a
+			// concurrent logout can cancel the attempt and a late callback
+			// can never reactivate or clobber the account.
+			if (providerOption.id.startsWith("mcp:")) {
+				if (this.host.onMcpAccountLogin) return this.host.onMcpAccountLogin(providerOption.id);
+				this.host.showError("MCP account login requires the guarded host connection flow.");
+				return Promise.resolve({ status: "failed" });
+			}
 			return this.showLoginDialog(providerOption.id, providerOption.name, kind);
 		}
 		if (providerOption.id === PRIME_INFERENCE_PROVIDER_ID) {
@@ -194,20 +251,45 @@ export class ProviderAuthFlows {
 		}
 
 		return new Promise((resolve) => {
-			let handle: OverlayHandle | undefined;
-			const close = () => {
-				handle?.hide();
-				this.host.ui.requestRender();
-			};
+			let close: (() => void) | undefined;
 			const selector = new OAuthSelectorComponent(
 				"logout",
 				this.host.modelRegistry.authStorage,
 				providerOptions,
 				async (providerOption: AuthSelectorProvider) => {
-					close();
+					close?.();
 
 					try {
-						this.host.modelRegistry.authStorage.logout(providerOption.id);
+						// MCP logouts are DELEGATED whole before this route touches
+						// auth: a plain authStorage.logout would race a concurrent
+						// finalize that could re-create the credential after it.
+						if (providerOption.id.startsWith("mcp:") && this.host.onMcpAccountLogout) {
+							const outcome = await this.host.onMcpAccountLogout(providerOption.id);
+							if (outcome === "refused") {
+								// State-neutral: the attempt is no longer current
+								// — no "Logged out" claim, and no Connected
+								// claim from mere token presence.
+								this.host.showStatus(
+									`This login attempt is no longer current; manage the account from /plugins.`,
+								);
+								resolve(providerOption.id);
+								return;
+							}
+							if (outcome === "failed") {
+								throw new Error(
+									`Logout failed: the change could not be saved; try logging out ${providerOption.name} again.`,
+								);
+							}
+							if (outcome === "logged-out") {
+								this.host.showStatus(
+									`Logged out of ${providerOption.name}, but the change could not be saved. It may still appear in the list; try again to finish cleanup.`,
+								);
+								resolve(providerOption.id);
+								return;
+							}
+						} else {
+							this.host.modelRegistry.authStorage.logout(providerOption.id);
+						}
 						this.host.modelRegistry.refresh();
 						await this.host.onAuthChanged?.();
 						const message =
@@ -222,13 +304,13 @@ export class ProviderAuthFlows {
 					}
 				},
 				() => {
-					close();
+					close?.();
 					resolve(null);
 				},
 				undefined,
-				{ getRows: () => this.host.ui.terminal.rows },
+				{ getRows: () => this.host.getAuthPanelRows(), inline: true },
 			);
-			handle = showFullPaneOverlay(this.host.ui, selector, 78);
+			close = this.host.showAuthPanel(selector);
 		});
 	}
 
@@ -288,20 +370,11 @@ export class ProviderAuthFlows {
 			options.push({
 				id: providerId,
 				name,
-				authType: credential.type,
+				// A pasted MCP static token is key-shaped for the selector: it
+				// is removed exactly like a stored API key.
+				authType: credential.type === "mcp_static_token" ? "api_key" : credential.type,
 				category: isSerper || isMcp ? "service" : "provider",
 			});
-		}
-
-		if (!options.some((option) => option.id === PRIME_INFERENCE_PROVIDER_ID)) {
-			const primeInferenceStatus = authStorage.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID);
-			if (primeInferenceStatus.source === "prime_cli") {
-				options.push({
-					id: PRIME_INFERENCE_PROVIDER_ID,
-					name: PRIME_INFERENCE_PROVIDER_NAME,
-					authType: "api_key",
-				});
-			}
 		}
 
 		return options.sort((a, b) => a.name.localeCompare(b.name));
@@ -319,9 +392,11 @@ export class ProviderAuthFlows {
 
 		const actionLabel = authType === "oauth" ? `Logged in to ${providerName}` : `Saved API key for ${providerName}`;
 		await this.host.onAuthChanged?.();
-		this.host.showStatus(
-			`${actionLabel}. Credentials saved to ${credentialPath}${statusSuffix ? `. ${statusSuffix}` : ""}`,
-		);
+		if (!this.isOnboarding()) {
+			this.host.showStatus(
+				`${actionLabel}. Credentials saved to ${credentialPath}${statusSuffix ? `. ${statusSuffix}` : ""}`,
+			);
+		}
 		this.host.onLoginCompleted?.();
 		return {
 			status: "success",
@@ -353,12 +428,15 @@ export class ProviderAuthFlows {
 	}
 
 	private async showBedrockSetupDialog(providerId: string, providerName: string): Promise<AuthenticationResult> {
-		const dialog = new LoginDialogComponent(this.host.ui, providerId, () => {}, providerName, "Amazon Bedrock setup");
-		const handle = showFullPaneOverlay(this.host.ui, dialog, 88);
-		const closeDialog = () => {
-			handle.hide();
-			this.host.ui.requestRender();
-		};
+		const dialog = new LoginDialogComponent(
+			this.host.ui,
+			providerId,
+			() => {},
+			providerName,
+			"Amazon Bedrock setup",
+			this.loginDialogOptions(),
+		);
+		const closeDialog = this.host.showAuthPanel(dialog);
 
 		try {
 			await dialog.showContinueInfo([
@@ -388,48 +466,55 @@ export class ProviderAuthFlows {
 		teams: PrimeTeam[],
 		currentTeamId: string | undefined,
 	): Promise<PrimeTeam | null | undefined> {
+		if (this.host.isOnboardingSurface?.()) {
+			return new Promise((resolve) => {
+				let close: (() => void) | undefined;
+				const options = [
+					{ label: "Personal account" },
+					...teams.map((team) => ({ label: team.name, ...(team.slug ? { detail: team.slug } : {}) })),
+				];
+				const current = teams.findIndex((team) => team.teamId === currentTeamId);
+				const choice = new OnboardingChoiceComponent(
+					options,
+					(index) => {
+						close?.();
+						resolve(index === 0 ? null : (teams[index - 1] ?? null));
+					},
+					() => {
+						close?.();
+						resolve(undefined);
+					},
+					{
+						prompt: "Which account should Prime Agent use?",
+						selectedIndex: current >= 0 ? current + 1 : 0,
+						requestRender: () => this.host.ui.requestRender(),
+						onExit: () => this.host.exitApp?.(),
+					},
+				);
+				close = this.host.showAuthPanel(choice, { onReset: () => resolve(undefined) });
+			});
+		}
 		return new Promise((resolve) => {
-			let handle: OverlayHandle | undefined;
-			const close = () => {
-				handle?.hide();
-				this.host.ui.requestRender();
-			};
+			let close: (() => void) | undefined;
 			const selector = new PrimeTeamSelectorComponent(
 				teams,
 				currentTeamId,
 				(team) => {
-					close();
+					close?.();
 					resolve(team);
 				},
 				() => {
-					close();
+					close?.();
 					resolve(undefined);
 				},
-				{ getRows: () => this.host.ui.terminal.rows },
+				{ getRows: () => this.host.getAuthPanelRows() },
 			);
-			handle = showFullPaneOverlay(this.host.ui, selector, 78);
+			close = this.host.showAuthPanel(selector);
 		});
 	}
 
 	private getPrimeInferenceDefaultTeamStatus(): string {
-		const configPath = this.host.modelRegistry.authStorage.getPrimeCliConfigPath();
-		if (configPath) {
-			let config: ReturnType<typeof loadPrimeCliConfig>;
-			try {
-				config = loadPrimeCliConfig(configPath);
-			} catch {
-				return "Using personal account.";
-			}
-			if (config.teamIdFromEnv) {
-				return "Using team from PRIME_TEAM_ID.";
-			}
-			if (config.teamName) {
-				return `Using team "${config.teamName}".`;
-			}
-			if (config.teamId) {
-				return "Using Prime CLI team.";
-			}
-		}
+		if (process.env.PRIME_TEAM_ID?.trim()) return "Using team from PRIME_TEAM_ID.";
 		const storedTeam = this.host.modelRegistry.authStorage.getPrimeInferenceTeamSelection();
 		if (storedTeam) {
 			return `Using team "${storedTeam.name}".`;
@@ -442,27 +527,37 @@ export class ProviderAuthFlows {
 
 	private async selectPrimeInferenceTeam(apiKey: string, dialog: LoginDialogComponent): Promise<string | undefined> {
 		try {
-			const config = loadPrimeCliConfig(this.host.modelRegistry.authStorage.getPrimeCliConfigPath());
-			if (config.teamIdFromEnv) {
+			if (process.env.PRIME_TEAM_ID?.trim()) {
 				this.host.modelRegistry.authStorage.reload();
 				return "Using team from PRIME_TEAM_ID.";
 			}
 
-			dialog.showProgress("Loading Prime teams...");
-			const teams = await fetchPrimeTeams(apiKey, config.baseUrl, { signal: dialog.signal });
+			if (!this.isOnboarding()) {
+				dialog.showProgress("Loading Prime teams...");
+			}
+			const teams = await fetchPrimeTeams(apiKey, resolvePrimeInferenceAuthConfig().baseUrl, {
+				signal: dialog.signal,
+			});
 			if (dialog.signal.aborted) {
 				return this.getPrimeInferenceDefaultTeamStatus();
 			}
 			if (teams.length === 0) {
-				this.host.modelRegistry.authStorage.setPrimeInferenceTeamSelection(null);
+				this.host.modelRegistry.authStorage.setPrimeInferenceTeamSelection(null, apiKey);
 				return "Using personal account.";
+			}
+			// A single team is not a choice during onboarding; /login still offers it
+			// alongside the personal account so the selection stays reversible.
+			if (this.isOnboarding() && teams.length === 1 && teams[0]) {
+				const onlyTeam = teams[0];
+				this.host.modelRegistry.authStorage.setPrimeInferenceTeamSelection(onlyTeam, apiKey);
+				return `Using team "${onlyTeam.name}".`;
 			}
 
 			const storedTeam = this.host.modelRegistry.authStorage.getPrimeInferenceTeamSelection();
-			const currentTeamId = storedTeam === null ? undefined : (storedTeam?.teamId ?? config.teamId);
+			const currentTeamId = storedTeam === null ? undefined : storedTeam?.teamId;
 			const selectedTeam = await this.showPrimeTeamSelector(teams, currentTeamId);
 			if (selectedTeam !== undefined) {
-				this.host.modelRegistry.authStorage.setPrimeInferenceTeamSelection(selectedTeam);
+				this.host.modelRegistry.authStorage.setPrimeInferenceTeamSelection(selectedTeam, apiKey);
 			}
 			return selectedTeam
 				? `Using team "${selectedTeam.name}".`
@@ -479,18 +574,23 @@ export class ProviderAuthFlows {
 		apiKey: string,
 		dialog: LoginDialogComponent,
 		closeDialog: () => void,
+		primeTeam?: PrimeTeam | null,
 	): Promise<AuthenticationResult> {
-		this.host.modelRegistry.authStorage.setPrimeInferenceApiKey(apiKey);
+		this.host.modelRegistry.authStorage.setPrimeInferenceApiKey(apiKey, primeTeam);
 		const teamStatus = await this.selectPrimeInferenceTeam(apiKey, dialog);
 
 		closeDialog();
+		// A reset unmounts the dialog and aborts its signal: completing now would
+		// refresh the registry and notify a session that was already torn down.
+		if (dialog.signal.aborted) {
+			return { status: "cancelled" };
+		}
 		return await this.completeProviderAuthentication(
 			PRIME_INFERENCE_PROVIDER_ID,
 			PRIME_INFERENCE_PROVIDER_NAME,
 			"api_key",
 			teamStatus,
 			"provider",
-			this.host.modelRegistry.authStorage.getPrimeCliConfigPath() ?? getAuthPath(),
 		);
 	}
 
@@ -514,17 +614,11 @@ export class ProviderAuthFlows {
 			PRIME_INFERENCE_PROVIDER_ID,
 			(_success, _message) => {},
 			PRIME_INFERENCE_PROVIDER_NAME,
+			undefined,
+			this.loginDialogOptions(),
 		);
 
-		const handle = showFullPaneOverlay(this.host.ui, dialog, {
-			maxContentWidth: 88,
-			suspendFullscreenMouse: true,
-		});
-
-		const closeDialog = () => {
-			handle.hide();
-			this.host.ui.requestRender();
-		};
+		const closeDialog = this.host.showAuthPanel(dialog, { heading: "Login with Prime Intellect" });
 
 		// The browser challenge gets its own controller so a manually pasted key
 		// can stop the polling without tearing down the dialog.
@@ -558,12 +652,16 @@ export class ProviderAuthFlows {
 						armManualInput("Complete the sign-in in your browser, or paste an API key below:");
 					},
 					onProgress: (message) => {
-						dialog.showProgress(message);
+						// Onboarding narrates itself; step chatter stays in the chat flows.
+						if (!this.isOnboarding()) {
+							dialog.showProgress(message);
+						}
 					},
 					signal: browserAbort.signal,
 				},
 				{
 					configPath: this.host.modelRegistry.authStorage.getPrimeCliConfigPath(),
+					usePrimeCliConfig: this.host.modelRegistry.authStorage.getPrimeCliConfigPath() !== undefined,
 				},
 			);
 			// When the browser challenge cannot start or breaks down, keep the dialog
@@ -598,9 +696,12 @@ export class ProviderAuthFlows {
 
 			if (result.source === "manual") {
 				browserAbort.abort();
-				dialog.showProgress("Checking Prime Inference access...");
-				const config = loadPrimeCliConfig(this.host.modelRegistry.authStorage.getPrimeCliConfigPath());
-				const access = await checkPrimeInferenceAccess(result.apiKey, config.baseUrl, { signal: dialog.signal });
+				if (!this.isOnboarding()) {
+					dialog.showProgress("Checking Prime Inference access...");
+				}
+				const access = await checkPrimeInferenceAccess(result.apiKey, resolvePrimeInferenceAuthConfig().baseUrl, {
+					signal: dialog.signal,
+				});
 				if (dialog.signal.aborted) {
 					closeDialog();
 					return { status: "cancelled" };
@@ -611,7 +712,12 @@ export class ProviderAuthFlows {
 				}
 			}
 
-			return await this.completePrimeInferenceLogin(result.apiKey, dialog, closeDialog);
+			return await this.completePrimeInferenceLogin(
+				result.apiKey,
+				dialog,
+				closeDialog,
+				"primeTeam" in result ? result.primeTeam : undefined,
+			);
 		} catch (error: unknown) {
 			closeDialog();
 			const errorMsg = error instanceof Error ? error.message : String(error);
@@ -631,17 +737,11 @@ export class ProviderAuthFlows {
 			PRIME_AGENT_TRACES_PROVIDER_ID,
 			(_success, _message) => {},
 			PRIME_AGENT_TRACES_PROVIDER_NAME,
+			undefined,
+			this.loginDialogOptions(),
 		);
 
-		const handle = showFullPaneOverlay(this.host.ui, dialog, {
-			maxContentWidth: 88,
-			suspendFullscreenMouse: true,
-		});
-
-		const closeDialog = () => {
-			handle.hide();
-			this.host.ui.requestRender();
-		};
+		const closeDialog = this.host.showAuthPanel(dialog);
 
 		const browserAbort = new AbortController();
 		const onDialogAbort = () => browserAbort.abort();
@@ -666,16 +766,25 @@ export class ProviderAuthFlows {
 		};
 
 		try {
-			const browserLogin = loginPrimeAgentTraces({
-				onAuth: (info) => {
-					dialog.showAuth(info.url, info.instructions);
-					armManualInput("Complete the sign-in in your browser, or paste a Prime API key below:");
+			const browserLogin = loginPrimeAgentTraces(
+				{
+					onAuth: (info) => {
+						dialog.showAuth(info.url, info.instructions);
+						armManualInput("Complete the sign-in in your browser, or paste a Prime API key below:");
+					},
+					onProgress: (message) => {
+						// Onboarding narrates itself; step chatter stays in the chat flows.
+						if (!this.isOnboarding()) {
+							dialog.showProgress(message);
+						}
+					},
+					signal: browserAbort.signal,
 				},
-				onProgress: (message) => {
-					dialog.showProgress(message);
+				{
+					configPath: this.host.modelRegistry.authStorage.getPrimeCliConfigPath(),
+					usePrimeCliConfig: this.host.modelRegistry.authStorage.getPrimeCliConfigPath() !== undefined,
 				},
-				signal: browserAbort.signal,
-			});
+			);
 			const browserLoginOrFallback = browserLogin.catch((error: unknown) => {
 				if (browserAbort.signal.aborted) {
 					throw error;
@@ -734,14 +843,16 @@ export class ProviderAuthFlows {
 		providerName: string,
 		kind: "provider" | "service" = "provider",
 	): Promise<AuthenticationResult> {
-		const dialog = new LoginDialogComponent(this.host.ui, providerId, (_success, _message) => {}, providerName);
+		const dialog = new LoginDialogComponent(
+			this.host.ui,
+			providerId,
+			(_success, _message) => {},
+			providerName,
+			undefined,
+			this.loginDialogOptions(),
+		);
 
-		const handle = showFullPaneOverlay(this.host.ui, dialog, 88);
-
-		const closeDialog = () => {
-			handle.hide();
-			this.host.ui.requestRender();
-		};
+		const closeDialog = this.host.showAuthPanel(dialog);
 
 		try {
 			const apiKey = (await dialog.showPrompt("Enter API key:")).trim();
@@ -764,31 +875,24 @@ export class ProviderAuthFlows {
 		}
 	}
 
-	private showOAuthLoginSelect(dialogHandle: OverlayHandle, prompt: OAuthSelectPrompt): Promise<string | undefined> {
+	private showOAuthLoginSelect(prompt: OAuthSelectPrompt): Promise<string | undefined> {
 		return new Promise((resolve) => {
-			dialogHandle.setHidden(true);
-			let selectorHandle: OverlayHandle | undefined;
-			const restoreDialog = () => {
-				selectorHandle?.hide();
-				dialogHandle.setHidden(false);
-				dialogHandle.focus();
-				this.host.ui.requestRender();
-			};
+			let close: (() => void) | undefined;
 			const labels = prompt.options.map((option) => option.label);
 			const selector = new ExtensionSelectorComponent(
 				prompt.message,
 				labels,
 				(optionLabel) => {
-					restoreDialog();
+					close?.();
 					resolve(prompt.options.find((option) => option.label === optionLabel)?.id);
 				},
 				() => {
-					restoreDialog();
+					close?.();
 					resolve(undefined);
 				},
-				{ getRows: () => this.host.ui.terminal.rows },
+				{ getRows: () => this.host.getAuthPanelRows(), inline: true },
 			);
-			selectorHandle = showFullPaneOverlay(this.host.ui, selector, 76);
+			close = this.host.showAuthPanel(selector);
 		});
 	}
 
@@ -803,12 +907,16 @@ export class ProviderAuthFlows {
 
 		const usesCallbackServer = providerInfo?.usesCallbackServer ?? false;
 
-		const dialog = new LoginDialogComponent(this.host.ui, providerId, (_success, _message) => {}, providerName);
+		const dialog = new LoginDialogComponent(
+			this.host.ui,
+			providerId,
+			(_success, _message) => {},
+			providerName,
+			undefined,
+			this.loginDialogOptions(),
+		);
 
-		const dialogHandle = showFullPaneOverlay(this.host.ui, dialog, {
-			maxContentWidth: 88,
-			suspendFullscreenMouse: true,
-		});
+		const closeDialog = this.host.showAuthPanel(dialog);
 
 		let manualCodeResolve: ((code: string) => void) | undefined;
 		let manualCodeReject: ((err: Error) => void) | undefined;
@@ -816,11 +924,6 @@ export class ProviderAuthFlows {
 			manualCodeResolve = resolve;
 			manualCodeReject = reject;
 		});
-
-		const closeDialog = () => {
-			dialogHandle.hide();
-			this.host.ui.requestRender();
-		};
 
 		try {
 			await this.host.modelRegistry.authStorage.login(providerId as OAuthProviderId, {
@@ -855,7 +958,7 @@ export class ProviderAuthFlows {
 					dialog.showProgress(message);
 				},
 
-				onSelect: (prompt: OAuthSelectPrompt) => this.showOAuthLoginSelect(dialogHandle, prompt),
+				onSelect: (prompt: OAuthSelectPrompt) => this.showOAuthLoginSelect(prompt),
 
 				onManualCodeInput: () => manualCodePromise,
 

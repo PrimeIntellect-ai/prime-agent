@@ -40,7 +40,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/login`, `/logout` | Manage OAuth or API-key credentials |
 | `/model` | Switch models |
 | `/effort` | Set the reasoning/thinking level |
-| `/scoped-models` | Enable/disable models for Ctrl+P cycling |
+| `/scoped-models` | Enable/disable models for Alt+M cycling |
 | `/settings` | Thinking level, theme, message delivery, transport |
 | `/resume [id\|path]` | Open the agents view, or resume a session directly |
 | `/new` | Start a new session |
@@ -48,6 +48,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/session` | Show session file, ID, and message counts |
 | `/traces [status\|on\|off\|preview\|upload-current\|upload-all\|login]` | Preview, upload, or manage opt-in trace sharing |
 | `/usage`, `/context` | Show the parent and subagent context, token, and cost breakdown |
+| `/speed [on\|off]` | Toggle footer readout of model output tok/sec (latest response and session average) |
 | `/tree` | Jump to any point in the session and continue from there |
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
@@ -61,6 +62,12 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
 | `/quit` | Quit Prime Agent |
+
+### Prime credentials and trace sharing
+
+Prime Inference uses Agent-owned credentials in `~/.prime/agent/auth.json`, with `--api-key` and `PRIME_API_KEY` taking priority. Normal use ignores Prime CLI credentials, URLs, and teams in `~/.prime/config.json`. Run `/login` once if you previously relied on CLI credentials. Explicit login can import a production-compatible CLI key and its file team snapshot after production validation. Agent login, team changes, and logout never modify CLI config.
+
+Trace uploads also ignore live CLI credentials. Use `/traces login` to save a trace credential, or set `PRIME_AGENT_TRACES_API_KEY`. Explicit trace login can reuse a CLI key only after production URL and scope validation. Trace sharing is opt-in; `/traces off` disables automatic sharing. See [Providers](providers.md#prime-inference) for credential precedence, team overrides, and production endpoint details.
 
 ## Message Queue
 
@@ -209,7 +216,7 @@ cat README.md | prime-agent -p "Summarize this text"
 | `--model <pattern>` | Model pattern or ID; supports `provider/id` and optional `:<thinking>` |
 | `--api-key <key>` | API key, overriding environment variables |
 | `--thinking <level>` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` |
-| `--models <patterns>` | Comma-separated patterns for Ctrl+P cycling |
+| `--models <patterns>` | Comma-separated patterns for Alt+M cycling |
 
 Use `prime-agent model list [search]` to list available models.
 
@@ -258,6 +265,8 @@ prime-agent --no-extensions -e ./my-extension.ts
 ### Autonomous Options
 
 Autonomous mode is a host policy for unattended work. It starts disabled. `--autonomous` enables it, and supplying any `--autonomous-*` sub-option also enables it. The host starts each enabled run with fresh continuation, turn, token, and elapsed-time counters.
+
+Interactive sessions set the same budget from the `/autonomous` slash command: `/autonomous on` accepts every budget option above using the flag name without the `--autonomous-` prefix (`--max-continuations`, `--max-turns`, `--max-tokens`, `--timeout-ms`, `--gate`, `--gate-retries`, `--gate-timeout-ms`), plus the full CLI spellings as aliases. For example, `/autonomous on --max-continuations 10 --gate "npm run check"` enables a ten-continuation run instead of the default three. Values follow the same positive-integer rules, may use `--flag=<value>` or `--flag <value>`, and accept `,` or `_` as digit separators, so `--max-tokens 100,000,000,000` and `--max-tokens 100_000_000_000` both work. The four budget limits also accept `unlimited` to remove that cap. Named budget flags define the whole budget: any limit you do not name becomes unlimited, so only the flags you pass (plus gates) decide when the run stops — for example, `/autonomous on --max-tokens 100,000` runs until that token budget is spent. With no budget flags at all, the configured or default limits still apply. A run with every budget limit unlimited and no gates has no automatic stopping point, so pair it with a gate or an explicit large budget.
 
 | Option | Behavior, units, and default |
 |--------|------------------------------|
@@ -360,6 +369,9 @@ prime-agent --tools ipython -p "Review the code"
 | `PRIME_AGENT_DOWNLOAD_BASE_URL` | Override the Prime Agent release manifest and tarball base URL |
 | `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache where supported |
 | `PRIME_API_KEY` | Prime Inference API key; also used for trace sharing when it has `agent_traces` scope |
+| `PRIME_TEAM_ID` | Override the Prime Inference team request header without changing the saved Agent team |
+| `PRIME_AGENT_INFERENCE_API_BASE_URL` | Override Agent authentication and team API URLs, not model inference URLs; defaults to production |
+| `PRIME_AGENT_INFERENCE_FRONTEND_URL` | Override the Agent login browser frontend; defaults to production |
 | `PRIME_AGENT_TRACES_API_KEY` | Prime API key used only for opt-in trace sharing |
 | `PRIME_AGENT_TRACES_BASE_URL` | Override the Prime Agent trace upload API base URL |
 | `PRIME_AGENT_KERNEL_PYTHON` | Use an existing Python environment with `prime-agent-runtime` instead of bootstrapping `~/.prime/agent/kernel-venv` |

@@ -418,6 +418,11 @@ export async function showDeprecationWarnings(warnings: string[]): Promise<void>
 	console.log(chalk.yellow(`Documentation: ${EXTENSIONS_DOC_URL}`));
 	console.log(chalk.dim(`\nPress any key to continue...`));
 
+	if (!process.stdin.isTTY) {
+		// A non-interactive parent never delivers the keypress; don't hang waiting for it.
+		console.log();
+		return;
+	}
 	await new Promise<void>((resolve) => {
 		process.stdin.setRawMode?.(true);
 		process.stdin.resume();

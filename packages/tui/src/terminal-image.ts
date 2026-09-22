@@ -31,12 +31,24 @@ let cachedCapabilities: TerminalCapabilities | null = null;
 // Default cell dimensions - updated by TUI when terminal responds to query
 let cellDimensions: CellDimensions = { widthPx: 9, heightPx: 18 };
 
+// Bumped whenever the cell dimensions actually change. Image components keep
+// this in their cache key so a cell-size response only re-renders images
+// instead of invalidating every component cache.
+let cellDimensionsVersion = 0;
+
 export function getCellDimensions(): CellDimensions {
 	return cellDimensions;
 }
 
 export function setCellDimensions(dims: CellDimensions): void {
-	cellDimensions = dims;
+	if (dims.widthPx !== cellDimensions.widthPx || dims.heightPx !== cellDimensions.heightPx) {
+		cellDimensions = dims;
+		cellDimensionsVersion++;
+	}
+}
+
+export function getCellDimensionsVersion(): number {
+	return cellDimensionsVersion;
 }
 
 export function detectCapabilities(): TerminalCapabilities {

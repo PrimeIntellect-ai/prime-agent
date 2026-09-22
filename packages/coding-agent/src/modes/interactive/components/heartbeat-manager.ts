@@ -15,6 +15,8 @@ type HeartbeatManagerMode = { type: "list" } | { type: "actions"; heartbeatId: s
 
 export interface HeartbeatManagerOptions {
 	getHeartbeats: () => readonly AgentConnectionHeartbeat[];
+	/** Last catalog fetch failure to surface in the list view, if any. */
+	getFetchError?: () => string | undefined;
 	getRows: () => number;
 	onAction: (heartbeat: AgentConnectionHeartbeat, action: AgentHeartbeatManagementAction) => Promise<void>;
 	onClose: () => void;
@@ -111,6 +113,13 @@ export class HeartbeatManagerComponent implements Component, Focusable {
 		const list = new MenuList({ compact: this.getListLayout().compact });
 		this.populateHeartbeatList(list);
 		panel.addChild(list);
+		const fetchError = this.options.getFetchError?.();
+		if (fetchError) {
+			panel.addChild(new Spacer(1));
+			panel.addChild(
+				new TruncatedText(theme.fg("warning", `Heartbeat refresh failed: ${this.singleLine(fetchError)}`)),
+			);
+		}
 		if (this.error) {
 			panel.addChild(new Spacer(1));
 			panel.addChild(new TruncatedText(theme.fg("error", `Error: ${this.error}`)));
@@ -270,7 +279,7 @@ export class HeartbeatManagerComponent implements Component, Focusable {
 			getRows: this.options.getRows,
 			preferredVisibleItems: PREFERRED_VISIBLE_HEARTBEATS,
 			totalItems: this.heartbeats.length,
-			reservedRows: HEARTBEAT_LIST_RESERVED_ROWS + (this.error ? 2 : 0),
+			reservedRows: HEARTBEAT_LIST_RESERVED_ROWS + (this.error || this.options.getFetchError?.() ? 2 : 0),
 			comfortableItemRows: 3,
 			compactItemRows: 2,
 			scrollIndicatorRows: HEARTBEAT_SCROLL_INDICATOR_ROWS,

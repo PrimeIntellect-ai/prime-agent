@@ -1,0 +1,1 @@
+- Private worker framing now decodes large frames in linear time across socket chunks: delivered chunks are kept as-is and a completed frame's bytes are joined exactly once, and consumed chunks are skipped via a head cursor with amortized compaction instead of being shifted off the queue one per chunk, so a multi-MB frame arriving in small writes can no longer pin the event loop.

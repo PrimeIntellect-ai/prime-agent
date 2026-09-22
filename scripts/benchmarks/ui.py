@@ -1,0 +1,888 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import pwd
+import re
+import shutil
+import socket
+import subprocess
+import time
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+
+from schema import ProcessMemory, Request, Side
+from terminal import Terminal
+
+# Fixture shape: "many sessions, many large sessions" plus a deep subagent chain.
+# Scale mirrors real long-lived installs: hundreds of saved sessions, one very
+# large transcript, and a spawn ledger with enough edges to stress hydration.
+MEDIUM_COUNT = 150
+MEDIUM_MESSAGES = 120
+LARGE_COUNT = 3
+LARGE_MESSAGES = 2000
+HUGE_MESSAGES = 16000
+FANOUT_COUNT = 40
+FANOUT_MESSAGES = 20
+SUBAGENT_DEPTH = 6
+SUBAGENT_MESSAGES = 400
+
+BASE_TIMESTAMP_MS = 946684800000  # 2000-01-01T00:00:00Z; fixed so fixtures are deterministic
+TOOL_OUTPUT_LINES = 60
+
+SEARCH_PLACEHOLDER = "Search sessions"
+AGENTS_VIEW_FOOTER = "Ctrl+N new"
+ROSTER_COUNT = re.compile(r"agents\s+(\d+) running, (\d+) idle, (\d+) inactive")
+LEFT_ARROW = "\x1b[D"
+RIGHT_ARROW = "\x1b[C"
+DOWN_ARROW = "\x1b[B"
+EXPAND_ARROW = "\x1b[1;3C"
+BACKSPACE = "\x7f"
+ENTER = "\r"
+FIXTURE_NAMESPACE = uuid.UUID("b0d5f4a1-6d64-4bf8-9d7a-2f4f0a9c1e10")
+
+
+def session_id(kind: str, index: int) -> str:
+    return str(uuid.uuid5(FIXTURE_NAMESPACE, f"prime-agent-ui-bench/{kind}/{index}"))
+
+
+def session_name(kind: str, index: int) -> str:
+    return f"ui-bench-{kind}-{index:02d}"
+
+
+def tail_marker(kind: str, index: int) -> str:
+    return f"ui-bench-tail-{kind}-{index:02d}"
+
+
+@dataclass(frozen=True)
+class FixtureSpec:
+    """Session ids the probe addresses; every id is derived deterministically."""
+
+    large: list[str]
+    medium: list[str]
+    root: str
+    subagents: list[str]
+    fanout: list[str]
+
+    @property
+    def resume_id(self) -> str:
+        """Cold-resume target; never touched by the warm scenario."""
+        return self.large[1]
+
+    @property
+    def switch_id(self) -> str:
+        """Warm in-session /resume target; the very large transcript."""
+        return self.large[2]
+
+    @property
+    def open_id(self) -> str:
+        """Search-and-open target from the agents view."""
+        return self.large[0]
+
+
+def _iso(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, tz=UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _session_lines(
+    name: str,
+    identifier: str,
+    count: int,
+    cwd: Path,
+    *,
+    depth: int,
+    tail: str | None,
+) -> list[dict]:
+    """One deterministic session transcript: header, name, model, then a realistic message mix."""
+    timestamp = BASE_TIMESTAMP_MS
+    parent: str | None = None
+    lines: list[dict] = []
+    prefix = identifier.replace("-", "")[:8]
+
+    def link(entry_id: str) -> dict:
+        nonlocal parent, timestamp
+        timestamp += 1000
+        entry = {"id": entry_id, "parentId": parent, "timestamp": _iso(timestamp)}
+        parent = entry_id
+        return entry
+
+    lines.append(
+        {
+            "type": "session",
+            "version": 3,
+            "id": identifier,
+            "timestamp": _iso(timestamp),
+            "cwd": str(cwd),
+            "rlmDepth": depth,
+        }
+    )
+    entry = link(f"{prefix}n")
+    entry.update({"type": "session_info", "name": name})
+    lines.append(entry)
+    entry = link(f"{prefix}m")
+    entry.update({"type": "model_change", "provider": "prime-inference", "modelId": "internal/glm-5.3-fast"})
+    lines.append(entry)
+    usage = {
+        "input": 100,
+        "output": 50,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 150,
+        "cost": {"input": 0.0001, "output": 0.0001, "cacheRead": 0, "cacheWrite": 0, "total": 0.0002},
+    }
+    for index in range(count):
+        final = index == count - 1
+        entry = link(f"{prefix}u{index}")
+        entry.update(
+            {
+                "type": "message",
+                "message": {
+                    "role": "user",
+                    "timestamp": 0,
+                    "content": (
+                        f"Please continue task {name} step {index}: review the module, run the checks, "
+                        "and summarize findings for the migration notes."
+                    ),
+                },
+            }
+        )
+        lines.append(entry)
+        text = (
+            f"Working on {name} step {index}. The parser handles nested records correctly; the next edit "
+            "keeps the schema stable while trimming the duplicated branch."
+        )
+        if final and tail:
+            text = f"Finished all steps. {tail}"
+        content = [
+            {
+                "type": "thinking",
+                "thinking": (
+                    f"Step {index} for {name}: check the invariants, then update the affected call "
+                    "sites before running the full suite again to confirm no behavior changed."
+                ),
+            },
+            {"type": "text", "text": text},
+        ]
+        if not final:
+            content.append(
+                {"type": "toolCall", "id": f"call-{index}", "name": "ipython", "arguments": {"code": "pass"}}
+            )
+        entry = link(f"{prefix}a{index}")
+        entry.update(
+            {
+                "type": "message",
+                "message": {
+                    "role": "assistant",
+                    "timestamp": 0,
+                    "content": content,
+                    "api": "responses",
+                    "provider": "prime-inference",
+                    "model": "internal/glm-5.3-fast",
+                    "usage": usage,
+                    "stopReason": "stop" if final else "toolUse",
+                },
+            }
+        )
+        lines.append(entry)
+        if not final:
+            entry = link(f"{prefix}t{index}")
+            entry.update(
+                {
+                    "type": "message",
+                    "message": {
+                        "role": "toolResult",
+                        "toolCallId": f"call-{index}",
+                        "toolName": "ipython",
+                        "content": [{"type": "text", "text": "all checks passed\n" * TOOL_OUTPUT_LINES}],
+                        "isError": False,
+                        "timestamp": 0,
+                    },
+                }
+            )
+            lines.append(entry)
+    return lines
+
+
+def spawn_ledger_path(agent_dir: Path, sessions_dir: Path) -> Path:
+    canonical = Path(os.path.realpath(sessions_dir))
+    digest = hashlib.sha256(str(canonical).encode()).hexdigest()[:16]
+    return agent_dir / "rlm-ledger" / f"{digest}.jsonl"
+
+
+def write_fixtures(agent_dir: Path, workspace: Path, spec: FixtureSpec, *, uid: int | None = None) -> None:
+    """Regenerate every session file and the spawn ledger from scratch for one trial.
+
+    The harness runs as root; pass the benchmark user's ids so the spawned CLI can
+    read and append its own sessions.
+    """
+    sessions_dir = agent_dir / "sessions"
+    for directory in (sessions_dir, agent_dir / "session-artifacts", agent_dir / "session-leases"):
+        shutil.rmtree(directory, ignore_errors=True)
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+
+    def write(identifier: str, name: str, count: int, *, depth: int = 0, tail: str | None = None) -> Path:
+        path = sessions_dir / f"{identifier}.jsonl"
+        path.write_text(
+            "".join(
+                json.dumps(line, separators=(",", ":")) + "\n"
+                for line in _session_lines(name, identifier, count, workspace, depth=depth, tail=tail)
+            )
+        )
+        return path
+
+    for index in range(1, LARGE_COUNT + 1):
+        identifier = spec.large[index - 1]
+        messages = HUGE_MESSAGES if index == 3 else LARGE_MESSAGES
+        write(identifier, session_name("large", index), messages, tail=tail_marker("large", index))
+    for index in range(1, MEDIUM_COUNT + 1):
+        identifier = spec.medium[index - 1]
+        write(identifier, session_name("medium", index), MEDIUM_MESSAGES)
+    parent = write(spec.root, session_name("root", 0), SUBAGENT_MESSAGES, tail=tail_marker("root", 0))
+    edges = []
+    for fanout in range(1, FANOUT_COUNT + 1):
+        identifier = spec.fanout[fanout - 1]
+        path = write(identifier, session_name("fan", fanout), FANOUT_MESSAGES, depth=1)
+        edges.append(
+            {
+                "childId": identifier,
+                "parent": str(parent),
+                "child": str(path),
+                "depth": 1,
+                "name": session_name("fan", fanout),
+            }
+        )
+    for depth in range(1, SUBAGENT_DEPTH + 1):
+        identifier = spec.subagents[depth - 1]
+        path = write(
+            identifier,
+            session_name("sub", depth),
+            SUBAGENT_MESSAGES,
+            depth=depth,
+            tail=tail_marker("sub", depth),
+        )
+        edges.append(
+            {
+                "childId": identifier,
+                "parent": str(parent),
+                "child": str(path),
+                "depth": depth,
+                "name": session_name("sub", depth),
+            }
+        )
+        parent = path
+    ledger = spawn_ledger_path(agent_dir, sessions_dir)
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    records = [
+        {
+            "v": 1,
+            "op": "meta",
+            "at": _iso(BASE_TIMESTAMP_MS),
+            "sessionsDir": str(Path(os.path.realpath(sessions_dir))),
+        }
+    ]
+    records.extend(
+        {"v": 1, "op": "spawn", "at": _iso(BASE_TIMESTAMP_MS + edge["depth"]), **edge} for edge in edges
+    )
+    ledger.write_text("".join(json.dumps(record, separators=(",", ":")) + "\n" for record in records))
+    if uid is not None:
+        gid = pwd.getpwuid(uid).pw_gid
+        os.chown(agent_dir, uid, gid)
+        for path in agent_dir.rglob("*"):
+            os.chown(path, uid, gid)
+
+
+def fixture_spec() -> FixtureSpec:
+    return FixtureSpec(
+        large=[session_id("large", index) for index in range(1, LARGE_COUNT + 1)],
+        medium=[session_id("medium", index) for index in range(1, MEDIUM_COUNT + 1)],
+        root=session_id("root", 0),
+        subagents=[session_id("sub", depth) for depth in range(1, SUBAGENT_DEPTH + 1)],
+        fanout=[session_id("fan", index) for index in range(1, FANOUT_COUNT + 1)],
+    )
+
+
+def process_stats(uid: int) -> list[ProcessMemory]:
+    """Snapshot every live process of one user with RSS, PSS, and cumulative CPU time."""
+    stats: list[ProcessMemory] = []
+    try:
+        clock_ticks = os.sysconf("SC_CLK_TCK")
+    except (ValueError, AttributeError, OSError):
+        return stats
+    for status_path in Path("/proc").glob("[0-9]*/status"):
+        try:
+            fields = dict(line.split(":", 1) for line in status_path.read_text().splitlines() if ":" in line)
+            if int(fields["Uid"].split()[0]) != uid or fields["State"].strip().startswith("Z"):
+                continue
+            stat_fields = (status_path.parent / "stat").read_text().rsplit(")", 1)[1].split()
+            cpu_seconds = (int(stat_fields[11]) + int(stat_fields[12])) / clock_ticks
+            pss = None
+            try:
+                for line in (status_path.parent / "smaps_rollup").read_text().splitlines():
+                    if line.startswith("Pss:"):
+                        pss = int(line.split()[1]) * 1024
+            except (PermissionError, FileNotFoundError, ProcessLookupError):
+                pass
+            stats.append(
+                ProcessMemory(
+                    pid=int(status_path.parent.name),
+                    name=fields["Name"].strip(),
+                    rss=int(fields.get("VmRSS", "0").split()[0]) * 1024,
+                    pss=pss,
+                    cpu=cpu_seconds,
+                )
+            )
+        except (PermissionError, FileNotFoundError, ProcessLookupError, ValueError, IndexError):
+            continue
+    return stats
+
+
+def total_cpu(stats: list[ProcessMemory]) -> float:
+    return sum(process.cpu or 0.0 for process in stats)
+
+
+def cpu_delta(start: float, total: float) -> float:
+    """CPU seconds consumed since ``start``.
+
+    ``total`` sums the live process tree, so a child that exits between the two
+    samples takes its CPU time with it and the raw difference can dip slightly
+    below zero. That is measurement noise, not negative work, and the report
+    schema rejects negative observations, so clamp at zero.
+    """
+    return max(0.0, total - start)
+
+
+def input_ready(terminal: Terminal, marker: str, *, timeout: float = 120) -> float:
+    """Return the first successful editor-echo timestamp after the transcript tail appears."""
+    terminal.until(lambda display: marker in display.text(), timeout)
+    return terminal.started + terminal.ready(timeout)
+
+
+def clear_search(terminal: Terminal, *, attempts: int = 5) -> None:
+    """Empty the agents-view search box; keystrokes can be eaten by re-entry renders."""
+    for _ in range(attempts):
+        terminal.child.send(BACKSPACE * 24)
+        try:
+            terminal.until(lambda display: SEARCH_PLACEHOLDER in display.text(), 5)
+            return
+        except TimeoutError:
+            continue
+    raise TimeoutError("Agents-view search box did not clear")
+
+
+def open_agents_view(terminal: Terminal, *, clear: bool, timeout: float = 60) -> None:
+    """Open a freshly rendered agents view, then optionally clear its preserved search."""
+    terminal.child.send(LEFT_ARROW)
+    terminal.until_output(lambda output: AGENTS_VIEW_FOOTER in output, timeout)
+    if clear:
+        clear_search(terminal)
+
+
+def type_query(terminal: Terminal, query: str, *, attempts: int = 3) -> None:
+    """Type a search query and verify it echoed before filtering on it."""
+    for _ in range(attempts):
+        clear_search(terminal)
+        terminal.child.send(query)
+        try:
+            terminal.until(lambda display: query in display.text(), 8)
+            return
+        except TimeoutError:
+            continue
+    raise TimeoutError("Agents-view search query did not echo")
+
+
+def move_down(terminal: Terminal, steps: int) -> None:
+    """Move through a deterministic fixture tree without coalescing keypresses."""
+    for _ in range(steps):
+        terminal.child.send(DOWN_ARROW)
+        terminal.settle(0.08)
+
+
+def expand_subagents(terminal: Terminal, *, attempts: int = 4) -> None:
+    """Expand the selected row's subagent list; the toggle retries to survive eaten keystrokes."""
+    expanded = terminal.display.text().count("▾")
+    for _ in range(attempts):
+        terminal.child.send(EXPAND_ARROW)
+        terminal.settle(1.0)
+        if terminal.display.text().count("▾") > expanded:
+            return
+    raise TimeoutError("Selected agent subagents did not expand")
+
+
+def roster_inactive(display) -> int | None:  # type: ignore[no-untyped-def]
+    for line in display.text().splitlines():
+        match = ROSTER_COUNT.search(line)
+        if match:
+            return int(match.group(3))
+    return None
+
+
+def expected_roster_inactive() -> int:
+    """Saved top-level fixture sessions a hydrated roster must list.
+
+    Large, medium, and the chain-root fixtures are top-level roster rows, but
+    the warm scenario holds the switch target live; nested fan-out and
+    subagent-chain files stay out of the top-level count either way.
+    """
+    top_level = LARGE_COUNT + MEDIUM_COUNT + 1
+    return top_level - 1
+
+
+def wait_for_roster(terminal: Terminal, *, minimum: int, settle: float = 3.0, timeout: float = 90) -> float:
+    """Wait until the roster lists `minimum` inactive sessions and stops growing.
+
+    Saved sessions stream in, but an empty or stalled roster must not count
+    as settled just because its count stopped moving.
+    """
+    started = time.perf_counter()
+    last_count: int | None = None
+    last_change = time.perf_counter()
+    while time.perf_counter() - started < timeout:
+        terminal.settle(0.4)
+        count = roster_inactive(terminal.display)
+        if (
+            count is not None
+            and count == last_count
+            and count >= minimum
+            and time.perf_counter() - last_change >= settle
+        ):
+            return time.perf_counter() - started
+        if count != last_count:
+            last_count = count
+            last_change = time.perf_counter()
+    raise TimeoutError("Agents-view roster did not settle")
+
+
+CATALOG_COUNT = 2300
+CATALOG_MESSAGES = 64
+SCHEDULED_OWNERS = 13
+
+
+def write_catalog_fixtures(
+    agent_dir: Path, workspace: Path, *, uid: int | None = None
+) -> tuple[Path, set[str]]:
+    """A large ledger with sparse paused schedules and an unrelated two-message cold target."""
+    sessions = agent_dir / "sessions"
+    artifacts = agent_dir / "session-artifacts"
+    for directory in (sessions, artifacts, agent_dir / "session-leases"):
+        shutil.rmtree(directory, ignore_errors=True)
+    sessions.mkdir(parents=True)
+    parent_id = session_id("catalog", 0)
+    parent = sessions / f"{parent_id}.jsonl"
+    children = artifacts / parent_id / "children"
+    children.mkdir(parents=True)
+    records = [{"v": 1, "op": "meta", "at": _iso(BASE_TIMESTAMP_MS), "sessionsDir": str(sessions.resolve())}]
+    jobs = set()
+    for index in range(CATALOG_COUNT):
+        cold = index == CATALOG_COUNT - 1
+        identifier = session_id("catalog", index)
+        path = (sessions if index == 0 or cold else children) / f"{identifier}.jsonl"
+        path.write_text(
+            "".join(
+                json.dumps(entry, separators=(",", ":")) + "\n"
+                for entry in _session_lines(
+                    session_name("catalog", index),
+                    identifier,
+                    1 if cold else CATALOG_MESSAGES,
+                    workspace,
+                    depth=0 if index == 0 or cold else 1,
+                    tail=None,
+                )
+            )
+        )
+        if index != 0 and not cold:
+            records.append(
+                {
+                    "v": 1,
+                    "op": "spawn",
+                    "at": _iso(BASE_TIMESTAMP_MS),
+                    "childId": identifier,
+                    "parent": str(parent.resolve()),
+                    "child": str(path.resolve()),
+                    "depth": 1,
+                    "name": session_name("catalog", index),
+                }
+            )
+        if 1 <= index <= SCHEDULED_OWNERS:
+            job_id = f"catalog-job-{index}"
+            jobs.add(job_id)
+            artifact = path.parent.parent / "session-artifacts" / identifier
+            artifact.mkdir(parents=True)
+            job = {
+                "id": job_id,
+                "status": "paused",
+                "source": "heartbeat",
+                "runtimeKind": "subagent",
+                "activeSessionId": identifier,
+                "sessionId": identifier,
+                "sessionFile": str(path.resolve()),
+                "cwd": str(workspace),
+                "prompt": "benchmark fixture; must remain paused",
+                "runCount": 0,
+                "schedule": {"kind": "interval", "expression": "every 1h", "intervalMs": 3600000},
+                "createdAt": _iso(BASE_TIMESTAMP_MS),
+                "updatedAt": _iso(BASE_TIMESTAMP_MS),
+            }
+            (artifact / "scheduled-jobs.json").write_text(
+                json.dumps({"jobs": [job], "dispatches": []}) + "\n"
+            )
+    ledger = spawn_ledger_path(agent_dir, sessions)
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text("".join(json.dumps(record) + "\n" for record in records))
+    if uid is not None:
+        gid = pwd.getpwuid(uid).pw_gid
+        for directory in (sessions, artifacts, ledger.parent):
+            os.chown(directory, uid, gid)
+            for path in directory.rglob("*"):
+                os.chown(path, uid, gid)
+    return sessions / f"{session_id('catalog', CATALOG_COUNT - 1)}.jsonl", jobs
+
+
+class CatalogClient:
+    """Small bounded JSONL client; retains out-of-order replies for concurrent scans and create."""
+
+    def __init__(self, channel: socket.socket, stream):
+        self.channel = channel
+        self.stream = stream
+        self.responses: dict[str, tuple[dict, float]] = {}
+        hello = self.receive()
+        if (
+            hello.get("type") != "daemon_hello"
+            or hello.get("protocol", {}).get("name") != "prime-agent.daemon"
+            or hello["protocol"]["version"] != 7
+            or "heartbeat_catalog" not in hello.get("serverCapabilities", [])
+        ):
+            raise RuntimeError("Catalog benchmark requires daemon protocol 7 and heartbeat_catalog")
+        self.protocol = hello["protocol"]
+
+    def receive(self) -> dict:
+        line = self.stream.readline(2_000_001)
+        if not line or len(line) > 2_000_000 or not line.endswith(b"\n"):
+            raise RuntimeError("Daemon closed or exceeded the catalog response limit")
+        message = json.loads(line)
+        return message["event"] if message.get("type") == "event" else message
+
+    def send(self, identifier: str, command: dict) -> float:
+        started = time.perf_counter()
+        self.channel.sendall(
+            (
+                json.dumps(
+                    {
+                        "type": "command",
+                        "id": identifier,
+                        "protocol": self.protocol,
+                        "clientId": "catalog-benchmark",
+                        "command": {**command, "id": identifier},
+                    }
+                )
+                + "\n"
+            ).encode()
+        )
+        return started
+
+    def wait(self, identifier: str) -> tuple[dict, float]:
+        deadline = time.perf_counter() + 120
+        while identifier not in self.responses:
+            self.channel.settimeout(max(0.001, deadline - time.perf_counter()))
+            message = self.receive()
+            if message.get("type") == "response":
+                self.responses[message["id"]] = (message, time.perf_counter())
+            if time.perf_counter() >= deadline:
+                raise TimeoutError(f"Timed out waiting for {identifier}")
+        message, finished = self.responses.pop(identifier)
+        if not message.get("success"):
+            raise RuntimeError(f"{identifier}: {message.get('error', 'daemon command failed')}")
+        return message["data"], finished
+
+
+def check_scheduled_jobs(data: dict, expected: set[str]) -> None:
+    jobs = [item["job"] for item in data["heartbeats"]]
+    if len(jobs) != len(expected) or {job["id"] for job in jobs} != expected:
+        raise RuntimeError("Scheduled catalog omitted or duplicated fixture jobs")
+    if any(job["status"] != "paused" or job["runCount"] != 0 for job in jobs):
+        raise RuntimeError("Benchmark schedules must stay paused and never execute")
+    for item in data["heartbeats"]:
+        index = int(item["job"]["id"].removeprefix("catalog-job-"))
+        if item.get("sessionName") != session_name("catalog", index) or not item.get("firstMessage"):
+            raise RuntimeError("Scheduled catalog omitted owner display metadata")
+
+
+def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes: Path, user: str) -> None:
+    """One UI-interaction trial: fresh fixtures, a cold resume, then the warm navigation scenario."""
+    from worker import clean_error, environment, record, stop_processes
+
+    if not any(s.value is not None and s.trial == 0 for s in side.metrics.get("install", [])):
+        raise RuntimeError("The first installation must succeed before interactive measurements")
+    home = homes / user
+    workspace = home / "workspace"
+    agent_dir = home / ".prime/agent"
+    uid = pwd.getpwnam(user).pw_uid
+    spec = fixture_spec()
+    details: dict[str, dict] = {}
+    metric = "resume_large"
+    catalog_daemon = None
+
+    def note(name: str, *, seconds: float, cpu: float, pty_bytes: int) -> None:
+        details[name] = {"seconds": round(seconds, 4), "cpu": round(cpu, 4), "pty_bytes": pty_bytes}
+
+    def cpu_total() -> float:
+        return total_cpu(process_stats(uid))
+
+    stop_processes(user)
+    write_fixtures(agent_dir, workspace, spec, uid=uid)
+    env = environment(user)
+    runuser = "/usr/sbin/runuser"
+    try:
+        # Cold resume of a large session from the CLI, from process spawn to usable editor.
+        cpu_start = cpu_total()
+        terminal = Terminal(
+            [runuser, "-u", user, "--", "prime-agent", "--resume", spec.resume_id],
+            workspace,
+            env,
+            results / f"ui-resume-{trial}",
+        )
+        try:
+            metric = "resume_large"
+            bytes_start = terminal.bytes
+            input_ready(terminal, tail_marker("large", 2))
+            elapsed = time.perf_counter() - terminal.started
+            cpu = cpu_delta(cpu_start, cpu_total())
+            record(side, "resume_large", trial, elapsed)  # type: ignore[arg-type]
+            record(side, "resume_large_cpu", trial, cpu)  # type: ignore[arg-type]
+            note("resume_large", seconds=elapsed, cpu=cpu, pty_bytes=terminal.bytes - bytes_start)
+        finally:
+            terminal.close()
+        stop_processes(user)
+
+        # Warm navigation scenario in a single TUI process.
+        metric = "switch_large"
+        terminal = Terminal(
+            [runuser, "-u", user, "--", "prime-agent"], workspace, env, results / f"ui-scenario-{trial}"
+        )
+        try:
+            terminal.ready()
+
+            # Warm switch into a different large session from the running editor.
+            started = time.perf_counter()
+            cpu_start = cpu_total()
+            bytes_start = terminal.bytes
+            terminal.child.send(f"/resume {spec.switch_id}{ENTER}")
+            input_ready(terminal, tail_marker("large", 3))
+            elapsed = time.perf_counter() - started
+            cpu = cpu_delta(cpu_start, cpu_total())
+            record(side, "switch_large", trial, elapsed)  # type: ignore[arg-type]
+            record(side, "switch_large_cpu", trial, cpu)  # type: ignore[arg-type]
+            note("switch_large", seconds=elapsed, cpu=cpu, pty_bytes=terminal.bytes - bytes_start)
+
+            # Session -> agents view: keystroke to rendered roster splash.
+            metric = "agents_view"
+            started = time.perf_counter()
+            cpu_start = cpu_total()
+            bytes_start = terminal.bytes
+            open_agents_view(terminal, clear=False)
+            elapsed = time.perf_counter() - started
+            cpu = cpu_delta(cpu_start, cpu_total())
+            record(side, "agents_view", trial, elapsed)  # type: ignore[arg-type]
+            record(side, "agents_view_cpu", trial, cpu)  # type: ignore[arg-type]
+            note("agents_view", seconds=elapsed, cpu=cpu, pty_bytes=terminal.bytes - bytes_start)
+
+            # Full roster with many sessions: saved sessions and ledger children stream in.
+            metric = "agents_roster"
+            cpu_start = cpu_total()
+            bytes_start = terminal.bytes
+            roster_seconds = wait_for_roster(terminal, minimum=expected_roster_inactive())
+            cpu = cpu_delta(cpu_start, cpu_total())
+            record(side, "agents_roster", trial, roster_seconds)  # type: ignore[arg-type]
+            record(side, "agents_roster_cpu", trial, cpu)  # type: ignore[arg-type]
+            note("agents_roster", seconds=roster_seconds, cpu=cpu, pty_bytes=terminal.bytes - bytes_start)
+
+            # Agents view -> another large session, found by its unique id prefix.
+            metric = "agents_open"
+            started = time.perf_counter()
+            cpu_start = cpu_total()
+            bytes_start = terminal.bytes
+            type_query(terminal, spec.open_id[:8])
+            terminal.until(lambda display: session_name("large", 1) in display.text(), 60)
+            terminal.settle(0.8)
+            terminal.child.send(RIGHT_ARROW)
+            input_ready(terminal, tail_marker("large", 1))
+            elapsed = time.perf_counter() - started
+            cpu = cpu_delta(cpu_start, cpu_total())
+            record(side, "agents_open", trial, elapsed)  # type: ignore[arg-type]
+            record(side, "agents_open_cpu", trial, cpu)  # type: ignore[arg-type]
+            note("agents_open", seconds=elapsed, cpu=cpu, pty_bytes=terminal.bytes - bytes_start)
+
+            # Reattach to the worker just opened, excluding search/navigation setup from timing.
+            metric = "agents_reopen"
+            open_agents_view(terminal, clear=True)
+            type_query(terminal, spec.open_id[:8])
+            terminal.until(lambda display: session_name("large", 1) in display.text(), 60)
+            terminal.settle(0.8)
+            started = time.perf_counter()
+            cpu_start = cpu_total()
+            bytes_start = terminal.bytes
+            terminal.child.send(RIGHT_ARROW)
+            ready_at = input_ready(terminal, tail_marker("large", 1))
+            elapsed = ready_at - started
+            cpu = cpu_delta(cpu_start, cpu_total())
+            record(side, "agents_reopen", trial, elapsed)
+            record(side, "agents_reopen_cpu", trial, cpu)
+            note("agents_reopen", seconds=elapsed, cpu=cpu, pty_bytes=terminal.bytes - bytes_start)
+
+            # Chain parent: open the root so the deepest subagent opens against a live parent.
+            metric = "parent_open"
+            started = time.perf_counter()
+            cpu_start = cpu_total()
+            bytes_start = terminal.bytes
+            open_agents_view(terminal, clear=True)
+            terminal.settle(1.0)
+            type_query(terminal, spec.root[:8])
+            terminal.until(lambda display: session_name("root", 0) in display.text(), 60)
+            terminal.settle(0.5)
+            terminal.child.send(RIGHT_ARROW)
+            input_ready(terminal, tail_marker("root", 0))
+            elapsed = time.perf_counter() - started
+            cpu = cpu_delta(cpu_start, cpu_total())
+            record(side, "parent_open", trial, elapsed)  # type: ignore[arg-type]
+            record(side, "parent_open_cpu", trial, cpu)  # type: ignore[arg-type]
+            note("parent_open", seconds=elapsed, cpu=cpu, pty_bytes=terminal.bytes - bytes_start)
+
+            # Deepest subagent session: expand the deterministic fixture tree and
+            # drill to depth SUBAGENT_DEPTH while its parent session is live.
+            metric = "subagent_open"
+            started = time.perf_counter()
+            cpu_start = cpu_total()
+            bytes_start = terminal.bytes
+            open_agents_view(terminal, clear=True)
+            terminal.settle(1.0)
+            type_query(terminal, spec.root[:8])
+            terminal.until(lambda display: session_name("root", 0) in display.text(), 60)
+            clear_search(terminal)
+            expand_subagents(terminal)
+            for depth in range(1, SUBAGENT_DEPTH + 1):
+                # Filtering keeps the selected parent visible and removes its
+                # unrelated siblings. Move across its summary row to the child,
+                # then clear search before the next expansion key.
+                type_query(terminal, spec.subagents[depth - 1][:8])
+                terminal.settle(0.5)
+                move_down(terminal, 2)
+                clear_search(terminal)
+                if depth < SUBAGENT_DEPTH:
+                    expand_subagents(terminal)
+            terminal.child.send(RIGHT_ARROW)
+            input_ready(terminal, tail_marker("sub", SUBAGENT_DEPTH))
+            elapsed = time.perf_counter() - started
+            cpu = cpu_delta(cpu_start, cpu_total())
+            record(side, "subagent_open", trial, elapsed)  # type: ignore[arg-type]
+            record(side, "subagent_open_cpu", trial, cpu)  # type: ignore[arg-type]
+            note("subagent_open", seconds=elapsed, cpu=cpu, pty_bytes=terminal.bytes - bytes_start)
+
+            # Whole-tree memory after the interactions.
+            metric = "ui_rss"
+            terminal.settle(1)
+            processes = process_stats(uid)
+            if not processes:
+                raise RuntimeError("No owned processes found for the UI memory measurement")
+            record(side, "ui_rss", trial, sum(process.rss for process in processes))  # type: ignore[arg-type]
+            side.processes = processes
+            (results / f"ui-memory-{trial}.json").write_text(
+                json.dumps([process.model_dump() for process in processes], indent=2) + "\n"
+            )
+        finally:
+            terminal.close()
+        # A separate stopped-process workload isolates sparse schedule scans and cold-worker queueing.
+        metric = "scheduled_catalog"
+        stop_processes(user)
+        cold_path, expected_jobs = write_catalog_fixtures(agent_dir, workspace, uid=uid)
+        socket_path = Path(f"/tmp/prime-catalog-{uid}-{trial}.sock")
+        with (results / f"catalog-daemon-{trial}.log").open("w") as log:
+            catalog_daemon = subprocess.Popen(
+                [
+                    runuser,
+                    "-u",
+                    user,
+                    "--",
+                    "prime-agent",
+                    "--mode",
+                    "daemon",
+                    "--daemon-socket",
+                    str(socket_path),
+                ],
+                cwd=workspace,
+                env=env,
+                stdout=log,
+                stderr=log,
+            )
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
+            channel.settimeout(120)
+            deadline = time.perf_counter() + 120
+            while True:
+                try:
+                    channel.connect(str(socket_path))
+                    break
+                except (FileNotFoundError, ConnectionRefusedError):
+                    if catalog_daemon.poll() is not None:
+                        raise RuntimeError("Catalog daemon exited during startup") from None
+                    if time.perf_counter() >= deadline:
+                        raise TimeoutError("Catalog daemon did not start") from None
+                    time.sleep(0.02)
+            with channel.makefile("rb") as stream:
+                client = CatalogClient(channel, stream)
+                for metric in ("scheduled_catalog", "scheduled_catalog_warm"):
+                    cpu_start = cpu_total()
+                    started = client.send(metric, {"type": "heartbeats_list"})
+                    data, finished = client.wait(metric)
+                    cpu = cpu_delta(cpu_start, cpu_total())
+                    check_scheduled_jobs(data, expected_jobs)
+                    record(side, metric, trial, finished - started)
+                    record(side, metric + "_cpu", trial, cpu)
+                    details[metric] = {"seconds": finished - started, "cpu": cpu, "jobs": len(expected_jobs)}
+
+                metric = "cold_open_catalog"
+                client.send("residents", {"type": "list"})
+                residents, _ = client.wait("residents")
+                cold_id = cold_path.stem
+                if any(item["sessionId"] == cold_id for item in residents["sessions"]):
+                    raise RuntimeError("Catalog cold target already has a resident worker")
+                cpu_start = cpu_total()
+                for index in range(3):
+                    client.send(f"scan-{index}", {"type": "heartbeats_list"})
+                # Let read-only handlers enter their scans before registering a new worker.
+                time.sleep(0.02)
+                started = client.send(
+                    "cold-open",
+                    {
+                        "type": "create",
+                        "sessionPath": str(cold_path),
+                        "config": {"cwd": str(workspace), "agentDir": str(agent_dir)},
+                        "launchEnv": env,
+                    },
+                )
+                summary, finished = client.wait("cold-open")
+                cpu = cpu_delta(cpu_start, cpu_total())
+                if summary.get("sessionId") != cold_id or summary.get("workerState") != "ready":
+                    raise RuntimeError("Cold worker did not return the expected ready session")
+                replies_before_open = len(client.responses)
+                # A failed competing scan is a failed sample, even when the worker opens quickly.
+                for index in range(3):
+                    data, _ = client.wait(f"scan-{index}")
+                    check_scheduled_jobs(data, expected_jobs)
+                record(side, metric, trial, finished - started)
+                record(side, metric + "_cpu", trial, cpu)
+                details[metric] = {
+                    "seconds": finished - started,
+                    "cpu": cpu,
+                    "scan_replies_before_open": replies_before_open,
+                    "concurrent_scans": 3,
+                    "worker_pid": summary.get("workerPid"),
+                    "sessions": CATALOG_COUNT,
+                }
+    except Exception as error:
+        record(side, metric, trial, error=clean_error(error))  # type: ignore[arg-type]
+    finally:
+        stop_processes(user)
+        if catalog_daemon is not None:
+            catalog_daemon.wait(timeout=10)
+        (results / f"ui-{trial}.json").write_text(json.dumps(details, indent=2, sort_keys=True) + "\n")

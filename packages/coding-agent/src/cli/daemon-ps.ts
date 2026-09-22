@@ -16,6 +16,7 @@ import {
 	type DaemonRuntimeIdentity,
 } from "../modes/daemon/daemon-protocol.js";
 import { defaultDaemonSocketDir, defaultDaemonSocketPath, normalizeSocketPath } from "../modes/daemon/daemon-socket.js";
+import { createDaemonStateRootMatcher } from "../modes/daemon/daemon-state-root.js";
 import { acquireDaemonShutdownAdmission } from "../modes/daemon/daemon-supervisor-ownership.js";
 import type { DaemonWorkerDescriptor } from "../modes/daemon/daemon-worker-protocol.js";
 import {
@@ -29,15 +30,18 @@ import { formatDaemonListTable } from "./daemon-ps-format.js";
 import { promptYesNo } from "./daemon-stop-confirm.js";
 
 /**
- * `daemon ps` discovers every prime-agent daemon on the machine, not just the
- * one on a single socket. Discovery has two sources merged by socket path:
+ * `daemon ps` discovers every prime-agent daemon in *our state root*, not just
+ * the one on a single socket. Discovery has two sources merged by socket path:
  *
  *  1. The OS list of listening unix sockets owned by a prime-agent process
  *     (`ss -lxp` on Linux, `lsof` on macOS). Daemons set process.title to
  *     APP_NAME and carry nothing useful in argv, so the socket→pid mapping the
  *     kernel keeps is the only reliable way to find daemons on arbitrary
  *     `--daemon-socket` paths. This is the same data as `ss -lxp | grep
- *     prime-agent`, just parsed.
+ *     prime-agent`, just parsed. The kernel list is machine-wide, so it is
+ *     filtered to our state root (see createDaemonStateRootMatcher): a daemon
+ *     started under a different HOME or agent dir is another root's business,
+ *     and stopping it from here would kill unrelated live sessions.
  *  2. A sweep of the default socket dir, which catches orphaned socket *files*
  *     left behind by daemons that are no longer running.
  *
@@ -176,7 +180,18 @@ export function parsePsEtimes(stdout: string): Map<number, number> {
 	return uptimes;
 }
 
+/**
+ * Listening prime-agent daemons that belong to this state root. The OS sweep
+ * behind it sees every daemon the user can observe, including daemons from an
+ * isolated HOME or a different agent dir, so the result is filtered before any
+ * caller can list, signal or reap it.
+ */
 function scanListeningDaemons(): DiscoveredDaemonProcess[] {
+	const belongsToStateRoot = createDaemonStateRootMatcher();
+	return scanAllListeningDaemons().filter((daemon) => belongsToStateRoot(daemon.socketPath));
+}
+
+function scanAllListeningDaemons(): DiscoveredDaemonProcess[] {
 	if (process.platform === "win32") {
 		return [];
 	}
@@ -343,7 +358,7 @@ export function verifyHelloSupervisorPid(
 	return pid;
 }
 
-/** Discover every daemon on the machine and probe each for version + session count. */
+/** Discover every daemon in this state root and probe each for version + session count. */
 export async function discoverDaemons(): Promise<DaemonInfo[]> {
 	const processBySocket = new Map<string, DiscoveredDaemonProcess>();
 	for (const daemon of scanListeningDaemons()) {
@@ -688,6 +703,9 @@ async function stopHiddenSupervisors(
 	assertAdmission: () => Promise<void>,
 ): Promise<void> {
 	while (true) {
+		// Renew before the scan: scanListeningDaemons blocks the event loop in synchronous ps/lsof/ss
+		// calls, and the admission lease cannot refresh itself while that runs.
+		await assertAdmission();
 		const listeners = scanListeningDaemons().filter((listener) => !isWorkerSocketPath(listener.socketPath));
 		const bySocket = new Map<string, DiscoveredDaemonProcess[]>();
 		for (const listener of listeners) {
@@ -882,9 +900,19 @@ function recordShutdownFailure(
 	failed.push({ socketPath, reason });
 }
 
+// Windows worker named pipes live in the `\\.\pipe\` namespace instead of the
+// default daemon socket dir, and their names carry no `.sock` suffix
+// (`\\.\pipe\prime-agent-worker-<key>-<workerId12>`; see workerSocketPath in
+// daemon-supervisor.ts), so the default-dir + `.sock` checks below never match
+// them. Match the exact pipe name instead: pure string matching, so the
+// predicate stays testable and correct on every platform.
+const WORKER_NAMED_PIPE_PATTERN = /^\\\\\.\\pipe\\prime-agent-worker-[0-9a-f]+-[0-9a-f]{12}$/;
+
 export function isWorkerSocketPath(socketPath: string): boolean {
+	if (WORKER_NAMED_PIPE_PATTERN.test(socketPath)) {
+		return true;
+	}
 	return (
-		process.platform !== "win32" &&
 		resolve(dirname(socketPath)) === resolve(defaultDaemonSocketDir()) &&
 		basename(socketPath).startsWith("worker-") &&
 		basename(socketPath).endsWith(".sock")

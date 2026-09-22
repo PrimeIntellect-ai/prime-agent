@@ -7,7 +7,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Literal
 
-from schema import Metric, Observation, Report
+from schema import UI_METRIC_KEYS, Metric, Observation, Report
 
 MARKER = "<!-- prime-agent-benchmark:v1 -->"
 PERFORMANCE_NOISE_FLOOR = 0.2
@@ -107,6 +107,78 @@ RUNTIME_METRICS = (
         PERFORMANCE_NOISE_FLOOR,
     ),
 )
+TRANSPORT_METRICS = (
+    Definition(
+        "frame_decode",
+        "Private frame decode, 32 MiB in 8 KiB chunks",
+        1000,
+        "ms",
+        0.02,
+        PERFORMANCE_NOISE_FLOOR,
+    ),
+)
+UI_METRICS = (
+    Definition("resume_large", "Resume large session (cold)", 1000, "ms", 0.1, PERFORMANCE_NOISE_FLOOR),
+    Definition("resume_large_cpu", "CPU, resume large session", 1000, "ms", 0.05, PERFORMANCE_NOISE_FLOOR),
+    Definition("switch_large", "Switch into large session", 1000, "ms", 0.05, PERFORMANCE_NOISE_FLOOR),
+    Definition(
+        "switch_large_cpu", "CPU, switch into large session", 1000, "ms", 0.02, PERFORMANCE_NOISE_FLOOR
+    ),
+    Definition("agents_view", "Open agents view from a session", 1000, "ms", 0.02, PERFORMANCE_NOISE_FLOOR),
+    Definition("agents_view_cpu", "CPU, open agents view", 1000, "ms", 0.01, PERFORMANCE_NOISE_FLOOR),
+    Definition("agents_roster", "Full agents roster, many sessions", 1, "s", 0.1, PERFORMANCE_NOISE_FLOOR),
+    Definition("agents_roster_cpu", "CPU, full agents roster", 1, "s", 0.05, PERFORMANCE_NOISE_FLOOR),
+    Definition(
+        "agents_open", "Open another session from agents view", 1000, "ms", 0.1, PERFORMANCE_NOISE_FLOOR
+    ),
+    Definition("agents_open_cpu", "CPU, open from agents view", 1000, "ms", 0.05, PERFORMANCE_NOISE_FLOOR),
+    Definition("agents_reopen", "Reopen resident large session", 1000, "ms", 0.02, PERFORMANCE_NOISE_FLOOR),
+    Definition(
+        "agents_reopen_cpu", "CPU, reopen resident session", 1000, "ms", 0.01, PERFORMANCE_NOISE_FLOOR
+    ),
+    Definition(
+        "subagent_open",
+        "Open subagent session at depth 6",
+        1000,
+        "ms",
+        0.1,
+        PERFORMANCE_NOISE_FLOOR,
+    ),
+    Definition(
+        "subagent_open_cpu", "CPU, open subagent at depth 6", 1000, "ms", 0.05, PERFORMANCE_NOISE_FLOOR
+    ),
+    Definition(
+        "parent_open",
+        "Open chain parent from agents view",
+        1000,
+        "ms",
+        0.1,
+        PERFORMANCE_NOISE_FLOOR,
+    ),
+    Definition("parent_open_cpu", "CPU, open chain parent", 1000, "ms", 0.05, PERFORMANCE_NOISE_FLOOR),
+    Definition(
+        "scheduled_catalog", "Scheduled catalog, first request", 1000, "ms", 0.05, PERFORMANCE_NOISE_FLOOR
+    ),
+    Definition("scheduled_catalog_cpu", "CPU, scheduled catalog", 1000, "ms", 0.02, PERFORMANCE_NOISE_FLOOR),
+    Definition(
+        "scheduled_catalog_warm",
+        "Scheduled catalog, repeated request",
+        1000,
+        "ms",
+        0.05,
+        PERFORMANCE_NOISE_FLOOR,
+    ),
+    Definition(
+        "scheduled_catalog_warm_cpu", "CPU, repeated catalog", 1000, "ms", 0.02, PERFORMANCE_NOISE_FLOOR
+    ),
+    Definition(
+        "cold_open_catalog", "Cold worker with three catalog scans", 1000, "ms", 0.05, PERFORMANCE_NOISE_FLOOR
+    ),
+    Definition(
+        "cold_open_catalog_cpu", "CPU, cold worker and scans", 1000, "ms", 0.02, PERFORMANCE_NOISE_FLOOR
+    ),
+    Definition("ui_rss", "UI memory after interactions", 1e-6, "MB", 10485760, PERFORMANCE_NOISE_FLOOR),
+)
 
 
 def escape(text: str) -> str:
@@ -190,10 +262,12 @@ def comparison(
 
 def comparisons(report: Report) -> dict[Metric, Comparison]:
     results = {}
-    for definition in (*METRICS, *RUNTIME_METRICS):
+    for definition in (*METRICS, *RUNTIME_METRICS, *TRANSPORT_METRICS, *UI_METRICS):
         expected = report.config.install_trials if definition.key == "install" else report.config.trials
         if definition.key in ("bundle", "disk"):
             expected = 1
+        if definition.key in UI_METRIC_KEYS:
+            expected = report.config.ui_trials
         results[definition.key] = comparison(
             definition,
             report.main.metrics.get(definition.key, []),
@@ -226,6 +300,38 @@ def render(report: Report) -> str:
             else "Benchmarking the latest PR commit. Results will appear here when this run finishes."
         )
         return "\n".join([*lines, message, "", result_link, ""])
+    errors = list(report.errors)
+    for name, side in (("main", report.main), ("PR", report.pr_head)):
+        if side.error:
+            errors.append(f"{name}: {side.error}")
+        errors.extend(
+            f"{name} {metric} trial {sample.trial}: {sample.error}"
+            for metric, samples in side.metrics.items()
+            for sample in samples
+            if sample.error
+        )
+    if report.status != "completed":
+        lines.extend(
+            [
+                "**Benchmark execution did not complete successfully. "
+                "Missing measurements are not performance wins.**",
+                "",
+            ]
+        )
+    if errors:
+        lines.extend(["**Failure diagnostics:**", "", *[f"- {escape(error)}" for error in errors[:3]], ""])
+        lines.extend(["See the saved per-trial logs and terminal transcripts for details.", ""])
+    if report.warnings:
+        lines.extend(
+            [
+                "**Operational warnings — log collection or sandbox cleanup needs attention:**",
+                "",
+                *[f"- {escape(warning)}" for warning in report.warnings],
+                "",
+                "These warnings do not change measurement completeness.",
+                "",
+            ]
+        )
     results = comparisons(report)
     counts = Counter(result.outcome for result in results.values())
     summary = [f"{counts[outcome]} {outcome}" for outcome in ("regressed", "improved", "no clear change")]
@@ -240,12 +346,32 @@ def render(report: Report) -> str:
             "| --- | ---: | ---: | ---: |",
         ]
     )
-    for definition in (*METRICS, *RUNTIME_METRICS):
+    for definition in (*METRICS, *RUNTIME_METRICS, *TRANSPORT_METRICS, *UI_METRICS):
         if definition == RUNTIME_METRICS[0]:
             lines.extend(
                 [
                     "",
                     "**Python runtime**",
+                    "",
+                    "| Metric | Main | This PR | Change |",
+                    "| --- | ---: | ---: | ---: |",
+                ]
+            )
+        if definition == TRANSPORT_METRICS[0]:
+            lines.extend(
+                [
+                    "",
+                    "**Session transport**",
+                    "",
+                    "| Metric | Main | This PR | Change |",
+                    "| --- | ---: | ---: | ---: |",
+                ]
+            )
+        if definition == UI_METRICS[0]:
+            lines.extend(
+                [
+                    "",
+                    "**UI interactions**",
                     "",
                     "| Metric | Main | This PR | Change |",
                     "| --- | ---: | ---: | ---: |",
@@ -287,29 +413,38 @@ def render(report: Report) -> str:
             "State fixture: a 10,000-row × 8-column integer DataFrame and a 10,000-integer list.",
             "Restore runs in a fresh kernel, including pandas imports; kernel startup is excluded.",
             "Kernel RSS covers the isolated Python process; loaded RSS follows the pandas workload.",
+            "Transport benches run node against the prepared source build, outside the installed home.",
+            "Frame decode times one 32 MiB private frame, snapshot-chunk header, pushed in",
+            "8 KiB chunks; the wire shape of multi-MB frames on the daemon-worker channels.",
+            "UI trials use a fresh fixture set: 194 top-level sessions including one ~40 MB transcript,",
+            "40 ledger fan-out children, and a 6-deep subagent chain (~46 spawn edges).",
+            "Large fixtures hold 1,999 complete triples (~5 MB JSONL); medium 119; subagents 399 each.",
+            "Interactions: cold --resume of a large session, warm /resume switch, left-arrow to agents view,",
+            "roster settle with many saved sessions, search-and-open of another large session,",
+            "reattaching to that resident session, opening the chain parent, and drilling to depth 6.",
+            "Readiness is the rendered transcript tail plus a confirmed editor echo.",
+            "CPU metrics sum utime+stime across the whole benchmark-user process tree per interaction.",
+            "UI memory sums RSS after the interactions; PTY byte counts are in the raw results.",
+            "A separate catalog fixture has 2,300 sessions, 2,298 edges, and 13 paused scheduled-job owners.",
+            "Catalog timings cover first/repeated reads and cold worker creation under three pending scans.",
+            "All expected jobs and owner metadata are checked; worker readiness excludes TUI rendering.",
             "Costs estimate full sandbox lifetimes at configured rates, including setup and build.",
-            f"Budget target: ${report.config.budget_usd:g}; not a billing cap. Checks are informational.",
+            f"Budget target: ${report.config.budget_usd:g}; not a billing cap. "
+            "Performance changes are informational.",
+            "Failed or incomplete execution fails the workflow; saved artifacts remain available.",
+            f"Each side stops a phase after {report.config.failure_limit} identical consecutive failures.",
+            "Skipped trials are not attempted samples. Warm startup requires a successful cold launch.",
             "",
             "| Metric | Main successful/attempted | PR successful/attempted | Main spread | PR spread |",
             "| --- | ---: | ---: | ---: | ---: |",
         ]
     )
-    for definition in (*METRICS, *RUNTIME_METRICS):
+    for definition in (*METRICS, *RUNTIME_METRICS, *TRANSPORT_METRICS, *UI_METRICS):
         left = report.main.metrics.get(definition.key, [])
         right = report.pr_head.metrics.get(definition.key, [])
         lines.append(
             f"| {definition.title} | {len(values(left))}/{len(left)} | {len(values(right))}/{len(right)} | "
             f"{dispersion(left, definition)} | {dispersion(right, definition)} |"
-        )
-    errors = list(report.errors)
-    for name, side in (("main", report.main), ("PR", report.pr_head)):
-        if side.error:
-            errors.append(f"{name}: {side.error}")
-        errors.extend(
-            f"{name} {metric} trial {sample.trial}: {sample.error}"
-            for metric, samples in side.metrics.items()
-            for sample in samples
-            if sample.error
         )
     if errors:
         lines.extend(["", "Failures:", ""] + [f"- {escape(error)}" for error in errors[:30]])

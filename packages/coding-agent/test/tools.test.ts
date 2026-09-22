@@ -3,7 +3,9 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { executeBashWithOperations } from "../src/core/bash-executor.js";
+import type { ExtensionContext } from "../src/core/extensions/types.js";
 import { type BashOperations, createBashTool, createLocalBashOperations } from "../src/core/tools/bash.js";
+import { createEditToolDefinition } from "../src/core/tools/edit.js";
 import { computeEditsDiff } from "../src/core/tools/edit-diff.js";
 import { createEditTool } from "../src/index.js";
 import * as shellModule from "../src/utils/shell.js";
@@ -765,5 +767,71 @@ describe("edit tool CRLF handling", () => {
 
 		const content = readFileSync(testFile, "utf-8");
 		expect(content).toBe("\uFEFFfirst\r\nSECOND\r\nthird\r\nFOURTH\r\n");
+	});
+});
+describe("edit tool prepareArguments", () => {
+	const definition = createEditToolDefinition(process.cwd());
+	const prepare = definition.prepareArguments!;
+
+	it("keeps legacy fields out of the public schema", () => {
+		expect(definition.parameters.properties).not.toHaveProperty("oldText");
+		expect(definition.parameters.properties).not.toHaveProperty("newText");
+	});
+
+	it.each<[string, unknown, unknown]>([
+		[
+			"folds top-level oldText/newText into edits",
+			{ path: "file.txt", oldText: "before", newText: "after" },
+			{ path: "file.txt", edits: [{ oldText: "before", newText: "after" }] },
+		],
+		[
+			"appends a legacy replacement to existing edits",
+			{ path: "file.txt", edits: [{ oldText: "a", newText: "b" }], oldText: "c", newText: "d" },
+			{
+				path: "file.txt",
+				edits: [
+					{ oldText: "a", newText: "b" },
+					{ oldText: "c", newText: "d" },
+				],
+			},
+		],
+		[
+			"parses edits from a JSON string",
+			{ path: "file.txt", edits: JSON.stringify([{ oldText: "a", newText: "b" }]) },
+			{ path: "file.txt", edits: [{ oldText: "a", newText: "b" }] },
+		],
+		[
+			"leaves edits alone when the string is not valid JSON",
+			{ path: "file.txt", edits: "not json" },
+			{ path: "file.txt", edits: "not json" },
+		],
+	])("%s", (_label, input, expected) => {
+		expect(prepare(input)).toEqual(expected);
+	});
+
+	it.each<[string, unknown]>([
+		["valid input", { path: "file.txt", edits: [{ oldText: "a", newText: "b" }] }],
+		["null", null],
+		["undefined", undefined],
+		["a non-object", "garbage"],
+	])("passes through %s unchanged", (_label, input) => {
+		expect(prepare(input)).toBe(input);
+	});
+
+	it("produces arguments the edit tool can execute", async () => {
+		const dir = join(tmpdir(), `coding-agent-legacy-edit-${Date.now()}`);
+		mkdirSync(dir, { recursive: true });
+		try {
+			const filePath = join(dir, "legacy.txt");
+			writeFileSync(filePath, "before\n", "utf8");
+			const scoped = createEditToolDefinition(dir);
+
+			const prepared = scoped.prepareArguments!({ path: "legacy.txt", oldText: "before", newText: "after" });
+			await scoped.execute("tool-1", prepared, undefined, undefined, {} as ExtensionContext);
+
+			expect(readFileSync(filePath, "utf8")).toBe("after\n");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

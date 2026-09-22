@@ -1,4 +1,4 @@
-import { basename, resolve } from "node:path";
+import { basename, isAbsolute, resolve } from "node:path";
 import { canonicalizePath } from "../../utils/paths.js";
 import type { AgentConnectionHeartbeat, AgentConnectionSavedSessionInfo } from "../agent-connection/index.js";
 import { rosterAgentIdForSummary } from "../daemon/agent-roster.js";
@@ -140,8 +140,49 @@ function formatAgeLabel(timestamp: string): string {
 	return minutes < 120 ? `${minutes}m ago` : `${Math.round(minutes / 60)}h ago`;
 }
 
+const SESSION_IDENTITY_CACHE_LIMIT = 4096;
+const SESSION_IDENTITY_CACHE_TTL_MS = 60_000;
+interface CachedSessionIdentity {
+	value: string;
+	expiresAt: number;
+}
+// Cache misses too to avoid repeated filesystem calls during rebuilds. File creation
+// and symlink changes can take up to a minute to appear in these UI-only caches.
+const canonicalSessionPathCache = new Map<string, CachedSessionIdentity>();
+const rosterAgentIdCache = new Map<string, CachedSessionIdentity>();
+
+function cachedSessionIdentity(cache: Map<string, CachedSessionIdentity>, key: string, compute: () => string): string {
+	const now = Date.now();
+	const cached = cache.get(key);
+	if (cached) {
+		cache.delete(key);
+		if (cached.expiresAt > now) {
+			cache.set(key, cached);
+			return cached.value;
+		}
+	}
+	const value = compute();
+	if (cache.size >= SESSION_IDENTITY_CACHE_LIMIT) {
+		const oldestKey = cache.keys().next().value;
+		if (oldestKey !== undefined) cache.delete(oldestKey);
+	}
+	cache.set(key, { value, expiresAt: now + SESSION_IDENTITY_CACHE_TTL_MS });
+	return value;
+}
+
 function canonicalSessionPath(path: string): string {
-	return resolve(canonicalizePath(path));
+	const key = isAbsolute(path) ? path : `${process.cwd()}\0${path}`;
+	return cachedSessionIdentity(canonicalSessionPathCache, key, () => resolve(canonicalizePath(path)));
+}
+
+function cachedRosterAgentIdForSummary(summary: SessionSummary): string {
+	const key = JSON.stringify([
+		summary.parentSessionPath,
+		summary.parentActiveSessionId,
+		summary.rlmChildId,
+		summary.parentSessionPath && !isAbsolute(summary.parentSessionPath) ? process.cwd() : undefined,
+	]);
+	return cachedSessionIdentity(rosterAgentIdCache, key, () => rosterAgentIdForSummary(summary));
 }
 
 function fileIdentity(path: string): string {
@@ -151,7 +192,7 @@ function fileIdentity(path: string): string {
 function summaryIdentityAliases(summary: SessionSummary): string[] {
 	return [
 		summary.runtimeKind === "subagent" && summary.rlmChildId
-			? `agent:${rosterAgentIdForSummary(summary)}`
+			? `agent:${cachedRosterAgentIdForSummary(summary)}`
 			: undefined,
 		summary.sessionFile ? fileIdentity(summary.sessionFile) : undefined,
 		`session:${summary.sessionId}`,
@@ -408,8 +449,8 @@ export function getUnifiedSessionAncestorSessionIds(
 export function filterUnifiedSessions(
 	records: readonly UnifiedSessionRecord[],
 	matches: (searchableText: string) => boolean,
+	index: UnifiedSessionIndex = buildUnifiedSessionIndex(records),
 ): UnifiedSessionRecord[] {
-	const index = buildUnifiedSessionIndex(records);
 	const retained = new Set<UnifiedSessionRecord>();
 	for (const record of records) {
 		if (!matches(record.searchableText)) continue;
@@ -421,6 +462,43 @@ export function filterUnifiedSessions(
 	}
 	// Keep catalog order and the original records so row ranking and sections
 	// remain authoritative while ancestors provide the hierarchy for matches.
+	return records.filter((record) => retained.has(record));
+}
+
+/** Hide abandoned empty catalog entries without changing saved sessions or their ancestry. */
+export function filterEmptyAgentsViewSessions(
+	records: readonly UnifiedSessionRecord[],
+	preservedSessionIds: ReadonlySet<string> = new Set(),
+	index: UnifiedSessionIndex = buildUnifiedSessionIndex(records),
+): UnifiedSessionRecord[] {
+	const retained = new Set<UnifiedSessionRecord>();
+	for (const record of records) {
+		const summary = summaryForUnifiedRecord(record);
+		const firstMessage = summary.firstMessage?.trim();
+		const keep =
+			record.section !== "inactive" ||
+			summary.activeSessionId !== undefined ||
+			summary.isSessionActive ||
+			summary.attachedClients > 0 ||
+			summary.hasActiveHeartbeat ||
+			summary.hasRegisteredHeartbeat ||
+			summary.hasRegisteredCronJob ||
+			(record.heartbeat?.activeCount ?? 0) + (record.heartbeat?.pausedCount ?? 0) > 0 ||
+			!isEmptyAgentsViewSession(summary) ||
+			(record.saved?.messageCount ?? 0) > 0 ||
+			Boolean(summary.sessionName?.trim()) ||
+			Boolean(firstMessage && firstMessage !== "(no messages)") ||
+			Boolean(record.saved?.allMessagesText.trim()) ||
+			(summary.usage?.cost ?? 0) > 0 ||
+			isSubagentSummary(summary) ||
+			preservedSessionIds.has(summary.sessionId);
+		if (!keep) continue;
+		let current: UnifiedSessionRecord | undefined = record;
+		while (current && !retained.has(current)) {
+			retained.add(current);
+			current = findParentRecord(current, index.byKey);
+		}
+	}
 	return records.filter((record) => retained.has(record));
 }
 
@@ -635,20 +713,53 @@ function getParentKeys(summary: SessionSummary): string[] {
 	].filter((key): key is string => key !== undefined);
 }
 
-/** Direct-child linkage over getParentKeys, shared by the view tree and the chat subagents bar. */
-export function isDirectAgentChild(
-	child: SessionSummary,
+// The parent side of getParentKeys: the keys by which a session is referenced as a parent.
+function parentIdentityKeys(summary: {
+	activeSessionId?: string | undefined;
+	sessionId?: string | undefined;
+	sessionFile?: string | undefined;
+}): string[] {
+	return [
+		summary.activeSessionId !== undefined ? `active:${summary.activeSessionId}` : undefined,
+		summary.sessionId !== undefined ? `session:${summary.sessionId}` : undefined,
+		summary.sessionFile !== undefined ? fileIdentity(summary.sessionFile) : undefined,
+	].filter((key): key is string => key !== undefined);
+}
+
+/**
+ * Every subagent summary descending from the parent session, breadth-first over the shared parent
+ * linkage. Rows of any lifecycle link so live descendants stay reachable; callers decide what counts.
+ */
+export function collectSubagentDescendantSummaries(
+	summaries: Iterable<SessionSummary>,
 	parent: { activeSessionId?: string | undefined; sessionId?: string | undefined; sessionFile?: string | undefined },
-): boolean {
-	const parentKeys = new Set(getParentKeys(child));
-	if (parent.activeSessionId !== undefined && parentKeys.has(`active:${parent.activeSessionId}`)) return true;
-	if (parent.sessionId !== undefined && parentKeys.has(`session:${parent.sessionId}`)) return true;
-	return parent.sessionFile !== undefined && parentKeys.has(fileIdentity(parent.sessionFile));
+): SessionSummary[] {
+	const rowsByParentKey = new Map<string, SessionSummary[]>();
+	for (const summary of summaries) {
+		if (summary.runtimeKind !== "subagent") continue;
+		for (const key of getParentKeys(summary)) {
+			const siblings = rowsByParentKey.get(key) ?? [];
+			siblings.push(summary);
+			rowsByParentKey.set(key, siblings);
+		}
+	}
+	const descendants: SessionSummary[] = [];
+	const linked = new Set<SessionSummary>();
+	const keyQueue = [...parentIdentityKeys(parent)];
+	for (let index = 0; index < keyQueue.length; index++) {
+		for (const row of rowsByParentKey.get(keyQueue[index]!) ?? []) {
+			if (linked.has(row)) continue;
+			linked.add(row);
+			descendants.push(row);
+			keyQueue.push(...parentIdentityKeys(row));
+		}
+	}
+	return descendants;
 }
 
 export function getAgentsViewSummaryIdentity(summary: SessionSummary): string {
 	if (summary.runtimeKind === "subagent" && summary.rlmChildId) {
-		return `agent:${rosterAgentIdForSummary(summary)}`;
+		return `agent:${cachedRosterAgentIdForSummary(summary)}`;
 	}
 	if (summary.sessionFile) {
 		return fileIdentity(summary.sessionFile);
@@ -678,6 +789,9 @@ export function resolveAgentsViewSelectionIndex(
 ): number {
 	const findSelectable = (predicate: (row: AgentsViewRow) => boolean): number =>
 		rows.findIndex((row) => row.selectable && predicate(row));
+	const selectedSyntheticKind = identity?.startsWith("subagents:") ? "subagent-summary" : undefined;
+	const preservesSelectedKind = (row: AgentsViewRow): boolean =>
+		selectedSyntheticKind === undefined || row.kind === selectedSyntheticKind;
 
 	if (identity !== undefined) {
 		const index = findSelectable((row) => row.identity === identity);
@@ -689,7 +803,9 @@ export function resolveAgentsViewSelectionIndex(
 	}
 	if (key?.activeSessionId !== undefined) {
 		const activeSessionId = key.activeSessionId;
-		const index = findSelectable((row) => (row.summary.activeSessionId ?? row.summary.id) === activeSessionId);
+		const index = findSelectable(
+			(row) => preservesSelectedKind(row) && (row.summary.activeSessionId ?? row.summary.id) === activeSessionId,
+		);
 		if (index >= 0) {
 			return index;
 		}
@@ -702,7 +818,7 @@ export function resolveAgentsViewSelectionIndex(
 	}
 	if (key?.sessionId !== undefined) {
 		const sessionId = key.sessionId;
-		return findSelectable((row) => row.summary.sessionId === sessionId);
+		return findSelectable((row) => preservesSelectedKind(row) && row.summary.sessionId === sessionId);
 	}
 	return -1;
 }
@@ -1100,7 +1216,7 @@ function getSessionSubtitle(summary: SessionSummary): string {
 	return parts.join("  ");
 }
 
-function getSessionStatusLabel(summary: SessionSummary, heartbeat?: UnifiedSessionHeartbeat): string {
+export function getSessionStatusLabel(summary: SessionSummary, heartbeat?: UnifiedSessionHeartbeat): string {
 	if (summary.statusLabel !== undefined) {
 		return summary.statusLabel;
 	}
@@ -1145,6 +1261,9 @@ function getSessionStatusLabel(summary: SessionSummary, heartbeat?: UnifiedSessi
 	}
 	if (summary.activity === "working") {
 		return "classifying";
+	}
+	if (summary.taskState === "error") {
+		return "error";
 	}
 	return summary.taskState === "completed" ? "completed" : "needs input";
 }

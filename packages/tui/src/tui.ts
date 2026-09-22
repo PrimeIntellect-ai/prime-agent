@@ -7,8 +7,16 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { performance } from "node:perf_hooks";
+import type { ClickRegion } from "./click-regions.js";
 import { withFullscreenImageFallback } from "./components/image.js";
-import { FullscreenViewport, type ScrollInfo, type SelectionScrollDirection } from "./fullscreen.js";
+import {
+	type FrameClickEntry,
+	type FrameClickTarget,
+	FullscreenViewport,
+	type ProjectedRegionRows,
+	type ScrollInfo,
+	type SelectionScrollDirection,
+} from "./fullscreen.js";
 import { getKeybindings } from "./keybindings.js";
 import { isKeyRelease, matchesKey } from "./keys.js";
 import { isMouseSequence, isWheelDown, isWheelUp, MOUSE_BUTTON_LEFT, parseSgrMouseEvent } from "./mouse.js";
@@ -61,6 +69,12 @@ export interface Component {
 	getSelectionRegions?(): ReadonlyArray<TableCellSelectionRegion>;
 
 	/**
+	 * Click regions produced by the last render() call, in the component's own
+	 * render-output coordinates. Containers aggregate them with line offsets.
+	 */
+	getClickRegions?(): ReadonlyArray<ClickRegion>;
+
+	/**
 	 * Optional handler for keyboard input when component has focus
 	 */
 	handleInput?(data: string): void;
@@ -86,6 +100,8 @@ export interface TuiStopOptions {
 export interface FullscreenOptions {
 	scroll: Component[];
 	dock: Component;
+	/** Pinned above the scrolling transcript — stays on top while scrolling. */
+	pin?: Component;
 	mouse?: boolean;
 	viewportControls?: boolean;
 }
@@ -245,10 +261,12 @@ export interface OverlayHandle {
 export class Container implements Component {
 	children: Component[] = [];
 	private selectionRegions: TableCellSelectionRegion[] = [];
+	protected clickRegions: ClickRegion[] = [];
 
 	addChild(component: Component): void {
 		this.children.push(component);
 		this.selectionRegions = [];
+		this.clickRegions = [];
 	}
 
 	removeChild(component: Component): void {
@@ -256,12 +274,14 @@ export class Container implements Component {
 		if (index !== -1) {
 			this.children.splice(index, 1);
 			this.selectionRegions = [];
+			this.clickRegions = [];
 		}
 	}
 
 	clear(): void {
 		this.children = [];
 		this.selectionRegions = [];
+		this.clickRegions = [];
 	}
 
 	invalidate(): void {
@@ -274,6 +294,7 @@ export class Container implements Component {
 	render(width: number): string[] {
 		const lines: string[] = [];
 		const selectionRegions: TableCellSelectionRegion[] = [];
+		const clickRegions: ClickRegion[] = [];
 		for (const child of this.children) {
 			const lineOffset = lines.length;
 			const childLines = child.render(width);
@@ -285,16 +306,24 @@ export class Container implements Component {
 					tableBottom: region.tableBottom + lineOffset,
 				});
 			}
+			for (const region of child.getClickRegions?.() ?? []) {
+				clickRegions.push({ ...region, line: region.line + lineOffset });
+			}
 			for (const line of childLines) {
 				lines.push(line);
 			}
 		}
 		this.selectionRegions = selectionRegions;
+		this.clickRegions = clickRegions;
 		return lines;
 	}
 
 	getSelectionRegions(): ReadonlyArray<TableCellSelectionRegion> {
 		return this.selectionRegions;
+	}
+
+	getClickRegions(): ReadonlyArray<ClickRegion> {
+		return this.clickRegions;
 	}
 }
 
@@ -331,6 +360,7 @@ export class TUI extends Container {
 	private stopped = false;
 	private fullscreenLeftMouseDragged = false;
 	private fullscreenPressedHyperlink: string | null = null;
+	private fullscreenPressedClick: FrameClickTarget | null = null;
 	private overlaySelectionRegions: FrameSelectionRegion[] = [];
 
 	// While set, doRender paints fixed frames via the viewport; the inline
@@ -339,6 +369,7 @@ export class TUI extends Container {
 		viewport: FullscreenViewport;
 		scroll: Component[];
 		dock: Component;
+		pin: Component | undefined;
 		mouse: boolean;
 		viewportControls: boolean;
 		inlineState: {
@@ -556,6 +587,7 @@ export class TUI extends Container {
 			this.stopSelectionAutoScroll();
 			this.fullscreenLeftMouseDragged = false;
 			this.fullscreenPressedHyperlink = null;
+			this.fullscreenPressedClick = null;
 			this.fullscreen?.viewport.clearSelection();
 		} else if (this.isFullscreenOverlayFocused()) {
 			this.stopSelectionAutoScroll();
@@ -682,10 +714,12 @@ export class TUI extends Container {
 		if (this.fullscreen) return;
 		this.fullscreenLeftMouseDragged = false;
 		this.fullscreenPressedHyperlink = null;
+		this.fullscreenPressedClick = null;
 		this.fullscreen = {
 			viewport: new FullscreenViewport(),
 			scroll: options.scroll,
 			dock: options.dock,
+			pin: options.pin,
 			mouse: options.mouse !== false,
 			viewportControls: options.viewportControls !== false,
 			inlineState: {
@@ -937,6 +971,12 @@ export class TUI extends Container {
 				this.fullscreenLeftMouseDragged = event.motion;
 				if (!event.motion) {
 					this.fullscreenPressedHyperlink = fullscreen.viewport.hyperlinkAt(event.y - 1, event.x - 1);
+					// Hyperlinks win over component regions at the press position;
+					// shift/alt/ctrl clicks stay selection-only.
+					this.fullscreenPressedClick =
+						!event.shift && !event.alt && !event.ctrl && !this.fullscreenPressedHyperlink
+							? fullscreen.viewport.clickTargetAt(event.y - 1, event.x - 1)
+							: null;
 				}
 			}
 			if (event && !overlayFocused) {
@@ -967,7 +1007,11 @@ export class TUI extends Container {
 					viewport.clearSelection();
 					if (event.button === MOUSE_BUTTON_LEFT && !event.motion && !leftReleaseWasDrag) {
 						const url = this.fullscreenPressedHyperlink ?? viewport.hyperlinkAt(event.y - 1, event.x - 1);
-						if (url) this.openHyperlink(url);
+						if (url) {
+							this.openHyperlink(url);
+						} else if (!event.shift && !event.alt && !event.ctrl) {
+							this.dispatchFullscreenClick(event.y - 1, event.x - 1);
+						}
 					}
 				}
 			} else if (event && overlayFocused) {
@@ -989,13 +1033,18 @@ export class TUI extends Container {
 					viewport.clearSelection();
 					if (event.button === MOUSE_BUTTON_LEFT && !event.motion && !leftReleaseWasDrag) {
 						const url = this.fullscreenPressedHyperlink ?? viewport.hyperlinkAt(event.y - 1, event.x - 1);
-						if (url) this.openHyperlink(url);
+						if (url) {
+							this.openHyperlink(url);
+						} else if (!event.shift && !event.alt && !event.ctrl) {
+							this.dispatchFullscreenClick(event.y - 1, event.x - 1);
+						}
 					}
 				}
 			}
 			if (event?.button === MOUSE_BUTTON_LEFT && !event.press) {
 				this.fullscreenLeftMouseDragged = false;
 				this.fullscreenPressedHyperlink = null;
+				this.fullscreenPressedClick = null;
 			}
 			return true;
 		}
@@ -1023,6 +1072,15 @@ export class TUI extends Container {
 		return false;
 	}
 
+	/** Fire the region pressed without dragging, when the release lands inside it. */
+	private dispatchFullscreenClick(row: number, col: number): void {
+		const pressed = this.fullscreenPressedClick;
+		if (!pressed) return;
+		if (row !== pressed.row || col < pressed.col || col >= pressed.col + pressed.width) return;
+		pressed.region.onClick({ row: row - pressed.anchor, col: col - pressed.region.col });
+		this.requestRender();
+	}
+
 	private consumeCellSizeResponse(data: string): boolean {
 		// Response format: ESC [ 6 ; height ; width t
 		const match = data.match(/^\x1b\[6;(\d+);(\d+)t$/);
@@ -1037,8 +1095,8 @@ export class TUI extends Container {
 		}
 
 		setCellDimensions({ widthPx, heightPx });
-		// Invalidate all components so images re-render with correct dimensions.
-		this.invalidate();
+		// Images keep the cell-dimensions version in their cache key, so a change
+		// here re-renders only image components on the next frame.
 		this.requestRender();
 		return true;
 	}
@@ -1289,6 +1347,30 @@ export class TUI extends Container {
 					if (span) {
 						overlaySelectionRegions.push({ line: idx, col: col + span.from, width: span.to - span.from });
 					}
+					// Painted overlay pixels swallow clicks aimed at content
+					// beneath. Click targets are screen-relative, so an
+					// over-tall overlay must subtract from the on-screen row.
+					const screenRow = idx - viewportStart;
+					if (this.fullscreen && screenRow >= 0 && screenRow < termHeight) {
+						this.fullscreen.viewport.subtractFrameClickCoverage(screenRow, col, col + w);
+					}
+				}
+			}
+			if (!aboveMarker) {
+				for (const region of component.getClickRegions?.() ?? []) {
+					if (region.line >= overlayLines.length) continue;
+					const height = Math.min(region.height, overlayLines.length - region.line);
+					const screenTop = overlayStart + row + region.line - viewportStart;
+					const from = Math.max(screenTop, 0);
+					const to = Math.min(screenTop + height, termHeight);
+					if (to > from) {
+						this.fullscreen?.viewport.addFrameClickEntry({
+							region: { ...region, col: col + region.col },
+							anchor: screenTop,
+							from,
+							count: to - from,
+						});
+					}
 				}
 			}
 		}
@@ -1301,13 +1383,9 @@ export class TUI extends Container {
 		return visibleContentSpan(line, maxWidth);
 	}
 
-	private createDockSelectionRegions(
-		frame: string[],
-		transcriptWindowHeight: number,
-		width: number,
-	): FrameSelectionRegion[] {
+	private createDockSelectionRegions(frame: string[], firstDockRow: number, width: number): FrameSelectionRegion[] {
 		const regions: FrameSelectionRegion[] = [];
-		for (let row = Math.max(0, transcriptWindowHeight); row < frame.length; row++) {
+		for (let row = Math.max(0, firstDockRow); row < frame.length; row++) {
 			const span = this.selectableSpan(frame[row] ?? "", width);
 			if (span) {
 				regions.push({ line: row, col: span.from, width: span.to - span.from });
@@ -1407,15 +1485,23 @@ export class TUI extends Container {
 
 		// Single pass through baseLine extracts both before and after segments
 		const afterStart = startCol + overlayWidth;
-		const base = extractSegments(baseLine, startCol, afterStart, totalWidth - afterStart, true);
+		const base = extractSegments(
+			normalizeTerminalOutput(baseLine),
+			startCol,
+			afterStart,
+			totalWidth - afterStart,
+			true,
+		);
+		// Clip a wide character crossing the overlay boundary instead of shifting the overlay.
+		const before = sliceWithWidth(base.before, 0, startCol, true);
 
 		// Extract overlay with width tracking (strict=true to exclude wide chars at boundary)
 		const overlay = sliceWithWidth(overlayLine, 0, overlayWidth, true);
 
 		// Pad segments to target widths
-		const beforePad = Math.max(0, startCol - base.beforeWidth);
+		const beforePad = Math.max(0, startCol - before.width);
 		const overlayPad = Math.max(0, overlayWidth - overlay.width);
-		const actualBeforeWidth = Math.max(startCol, base.beforeWidth);
+		const actualBeforeWidth = Math.max(startCol, before.width);
 		const actualOverlayWidth = Math.max(overlayWidth, overlay.width);
 		const afterTarget = Math.max(0, totalWidth - actualBeforeWidth - actualOverlayWidth);
 		const afterPad = Math.max(0, afterTarget - base.afterWidth);
@@ -1423,7 +1509,7 @@ export class TUI extends Container {
 		// Compose result
 		const r = TUI.SEGMENT_RESET;
 		const result =
-			base.before +
+			before.text +
 			" ".repeat(beforePad) +
 			r +
 			overlay.text +
@@ -1484,6 +1570,9 @@ export class TUI extends Container {
 
 		const transcript: string[] = [];
 		const selectionRegions: TableCellSelectionRegion[] = [];
+		const transcriptClickRegions: ClickRegion[] = [];
+		let dockClickRegions: ClickRegion[] = [];
+		let headerClickRegions: ClickRegion[] = [];
 		const dock = withFullscreenImageFallback(() => {
 			for (const component of fullscreen.scroll) {
 				const lineOffset = transcript.length;
@@ -1496,14 +1585,48 @@ export class TUI extends Container {
 						tableBottom: region.tableBottom + lineOffset,
 					});
 				}
+				for (const region of component.getClickRegions?.() ?? []) {
+					transcriptClickRegions.push({ ...region, line: region.line + lineOffset });
+				}
 				transcript.push(...componentLines);
 			}
-			return fullscreen.dock.render(width);
+			const dockLines = fullscreen.dock.render(width);
+			dockClickRegions = [...(fullscreen.dock.getClickRegions?.() ?? [])];
+			return dockLines;
+		});
+		const header = withFullscreenImageFallback(() => {
+			const headerLines = fullscreen.pin?.render(width) ?? [];
+			headerClickRegions = [...(fullscreen.pin?.getClickRegions?.() ?? [])];
+			return headerLines;
 		});
 
-		let frame = fullscreen.viewport.composeFrame(transcript, dock, height, selectionRegions);
+		let frame = fullscreen.viewport.composeFrame(transcript, dock, height, selectionRegions, header);
+		// Project component-space regions onto visible frame rows through the
+		// same header/window/dock layout composeFrame just established. Regions
+		// clipped at a viewport edge keep only their visible rows, and click
+		// positions stay relative to the region's top even when clipped away.
+		const frameClickEntries: FrameClickEntry[] = [];
+		const projectRegions = (
+			regions: ReadonlyArray<ClickRegion>,
+			project: (line: number, height: number) => ProjectedRegionRows | null,
+		): void => {
+			for (const region of regions) {
+				const rows = project(region.line, region.height);
+				if (rows) frameClickEntries.push({ region, ...rows });
+			}
+		};
+		projectRegions(headerClickRegions, (line, height) => fullscreen.viewport.projectHeaderRegion(line, height));
+		projectRegions(transcriptClickRegions, (line, height) =>
+			fullscreen.viewport.projectTranscriptRegion(line, height),
+		);
+		projectRegions(dockClickRegions, (line, height) => fullscreen.viewport.projectDockRegion(line, height));
+		fullscreen.viewport.setFrameClickRegions(frameClickEntries);
 		this.overlaySelectionRegions.push(
-			...this.createDockSelectionRegions(frame, fullscreen.viewport.windowHeight(), width),
+			...this.createDockSelectionRegions(
+				frame,
+				fullscreen.viewport.headerHeight() + fullscreen.viewport.windowHeight(),
+				width,
+			),
 		);
 		const scrollInfo = fullscreen.viewport.scrollInfo();
 		if (fullscreen.viewportControls && !scrollInfo.following) {
@@ -1512,10 +1635,11 @@ export class TUI extends Container {
 			const followKey = getKeybindings().getKeys("tui.viewport.follow")[0] ?? "ctrl+shift+down";
 			const label = ` ${followKey} to follow `;
 			const labelWidth = visibleWidth(label);
-			const row = fullscreen.viewport.windowHeight() - 1;
+			const row = fullscreen.viewport.headerHeight() + fullscreen.viewport.windowHeight() - 1;
 			if (row >= 0 && row < frame.length && labelWidth <= width) {
 				const col = Math.floor((width - labelWidth) / 2);
 				frame[row] = this.compositeLineAt(frame[row], `\x1b[7m${label}\x1b[27m`, col, labelWidth, width);
+				fullscreen.viewport.subtractFrameClickCoverage(row, col, col + labelWidth);
 			}
 		}
 		if (this.overlayStack.length > 0) {

@@ -479,6 +479,57 @@ class HarnessStateTest(unittest.TestCase):
                     kind="skill",
                 )
 
+    def test_rejects_invalid_entry_fields_before_persisting(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness_state.json"
+            state = HarnessState(state_path)
+            state.create_memory("Valid", "seed content", id="valid_entry")
+            seeded = state_path.read_text(encoding="utf-8")
+
+            for label, kwargs, message in [
+                ("content list", dict(title="T", content=["one string"]), "content must be a non-empty string, got a list"),
+                ("title list", dict(title=["T"], content="c"), "title must be a non-empty string, got a list"),
+                ("empty title", dict(title="", content="c"), "title must be a non-empty string, got an empty string"),
+                ("numeric id", dict(title="T", content="c", id=7), "id must be a non-empty string, got int"),
+                ("unhashable list id", dict(title="T", content="c", id=["x"]), "id must be a non-empty string, got a list"),
+                ("falsy numeric id", dict(title="Zero", content="c", id=0), "id must be a non-empty string, got int"),
+                ("numeric topic", dict(title="T", content="c", topic=7), "topic must be a non-empty string, got int"),
+                ("list metadata", dict(title="T", content="c", metadata=["m"]), "metadata must be a dict when provided, got a list"),
+            ]:
+                with self.subTest(case=f"create {label}"):
+                    with self.assertRaisesRegex(ValueError, message):
+                        state.create_memory(**kwargs)
+            with self.subTest(case="subagent with list content"):
+                with self.assertRaisesRegex(ValueError, "content must be a non-empty string, got a list"):
+                    state.create_memory("T", ["one string"], kind="subagent")
+            with self.subTest(case="skill create without a reference"):
+                with self.assertRaisesRegex(ValueError, "skill entries require a Python reference"):
+                    state.create_memory("Skill", "content", id="orphan_skill", kind="skill")
+            with self.subTest(case="skill reference as a list"):
+                with self.assertRaisesRegex(ValueError, "skill entries require a Python reference"):
+                    state.create_memory("Skill", "content", reference=["bad"], kind="skill")
+            with self.subTest(case="update with list content"):
+                with self.assertRaisesRegex(ValueError, "content must be a non-empty string, got a list"):
+                    state.update_memory("valid_entry", "Valid", ["one string"])
+                self.assertEqual(state_path.read_text(encoding="utf-8"), seeded)
+            with self.subTest(case="invalid refinement events"):
+                for label, kwargs, message in [
+                    ("trigger list", dict(trigger=["t"], changes="ok"), "trigger must be a non-empty string, got a list"),
+                    ("event id list", dict(trigger="t", changes="ok", id=["x"]), "id must be a non-empty string when provided, got a list"),
+                    ("changes int", dict(trigger="t", changes=7), "changes must be a string or a list of strings, got int"),
+                    ("mixed changes", dict(trigger="t", changes=["ok", 2]), "changes must be a list of non-empty strings"),
+                    ("evidence list", dict(trigger="t", changes="ok", evidence=["e"]), "evidence must be a string"),
+                    ("outcome int", dict(trigger="t", changes="ok", outcome=7), "outcome must be a string"),
+                ]:
+                    with self.subTest(case=label):
+                        with self.assertRaisesRegex(ValueError, message):
+                            state.record_refinement(**kwargs)
+
+            reloaded = HarnessState(state_path)
+            self.assertEqual([entry.id for entry in reloaded.list("memory")], ["valid_entry"])
+            self.assertEqual(reloaded.refinements, [])
+            self.assertIsNone(reloaded.get("skill", "orphan_skill"))
+
     def test_load_tolerates_corrupt_or_non_object_state(self) -> None:
         for payload in ("not json at all", "null", "[]", '"a string"', "123"):
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -1151,3 +1202,130 @@ class HarnessStateTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HarnessSearchTest(unittest.TestCase):
+    def test_search_ranks_relevant_entries_first(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Tea notes", "All about oolong brewing.", id="tea")
+            state.create_memory("Worktree policy", "Use git worktrees for parallel branches.", id="worktree")
+            state.create_memory("RSI program", "Ship [RSI] PRs from worktrees.", id="rsi", kind="prompt")
+
+            results = state.search("worktree branches")
+
+            self.assertTrue(results)
+            self.assertEqual(results[0].id, "worktree")
+            self.assertTrue(all(entry.id != "tea" for entry in results))
+
+    def test_search_filters_by_kind_and_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Worktree memory", "worktree workflow", id="m1")
+            state.create_memory("Worktree prompt", "worktree workflow", id="p1", kind="prompt")
+            state.create_memory("Worktree prompt 2", "worktree workflow", id="p2", kind="prompt")
+
+            prompts = state.search("worktree", kind="prompt")
+            self.assertTrue(prompts)
+            self.assertEqual({entry.kind for entry in prompts}, {"prompt"})
+
+            limited = state.search("worktree", kind="prompt", limit=1)
+            self.assertEqual(len(limited), 1)
+
+    def test_search_matches_non_ascii_queries(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Tokyo note", "東京ミーティングの議事録。", id="tokyo")
+
+            results = state.search("東京")
+            self.assertEqual([entry.id for entry in results], ["tokyo"])
+
+    def test_search_segments_whitespace_free_cjk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Login fix", "登录故障排查记录。", id="login")
+            state.create_memory("Tea notes", "All about oolong brewing.", id="tea")
+
+            results = state.search("修复登录")
+
+            self.assertEqual([entry.id for entry in results], ["login"])
+
+    def test_search_matches_supplementary_cjk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Ext B note", "𠀀𠀁 ideographs recorded.", id="extb")
+
+            self.assertEqual([entry.id for entry in state.search("𠀀")], ["extb"])
+            self.assertEqual([entry.id for entry in state.search("𠀀𠀁")], ["extb"])
+
+    def test_search_keeps_accented_latin_words_whole(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Review notes", "The naïve approach failed.", id="naive")
+
+            results = state.search("naïve")
+
+            self.assertEqual([entry.id for entry in results], ["naive"])
+
+    def test_search_matches_combining_mark_scripts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Book note", "किताब पढ़ रहा हूँ।", id="book")
+
+            results = state.search("किताब")
+
+            self.assertEqual([entry.id for entry in results], ["book"])
+
+    def test_search_drops_single_character_non_cjk_terms(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Russian note", "мир и согласие в команде.", id="mir")
+
+            self.assertEqual(state.search("и"), [])
+            self.assertEqual([entry.id for entry in state.search("мир")], ["mir"])
+
+    def test_search_treats_punctuation_as_separators(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Branch hygiene", "Use git worktrees for parallel branches.", id="worktree")
+            state.create_memory("Question", "Anything else left open?", id="question")
+
+            results = state.search("worktree?")
+            self.assertEqual([entry.id for entry in results], ["worktree"])
+
+            self.assertEqual(state.search("??? / . ,"), [])
+
+    def test_search_drops_zero_score_entries_and_validates_args(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Tea notes", "All about oolong brewing.", id="tea")
+
+            self.assertEqual(state.search("quantum"), [])
+            self.assertEqual(state.search("   "), [])
+            with self.assertRaises(TypeError):
+                state.search(42)
+            with self.assertRaises(TypeError):
+                state.search("worktree", limit=0)
+
+    def test_search_discounts_common_terms_and_keeps_frequency_ties(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+
+            # An empty corpus scores nothing, and a lone entry (N=1, df=1 -> log(2)) still scores.
+            self.assertEqual(state.search("session"), [])
+            state.create_memory("Session notes", "Session signal.", id="solo")
+            self.assertEqual([entry.id for entry in state.search("session")], ["solo"])
+            state.entries["memory"]["solo"].updated_at = "2026-07-01T00:00:00+00:00"
+
+            # Equal frequency discounts every match alike, so recency still orders them: id order
+            # alone would put aa_older first.
+            for entry_id, day in (("aa_older", "08-01"), ("zz_newer", "09-01")):
+                state.create_memory("Session notes", "Same session signal.", id=entry_id)
+                state.entries["memory"][entry_id].updated_at = f"2026-{day}T00:00:00+00:00"
+            self.assertEqual([entry.id for entry in state.search("session")], ["zz_newer", "aa_older", "solo"])
+
+            # "session" matches 3 of 4 (log(1 + 4/3)), "quantum" 1 of 4 (log(1 + 4)): rare ranks first.
+            state.create_memory("Quantum note", "Only quantum annealing matters once.", id="rare")
+            state.entries["memory"]["rare"].updated_at = "2026-07-01T00:00:00+00:00"
+            self.assertEqual([entry.id for entry in state.search("session quantum")], ["rare", "zz_newer", "aa_older", "solo"])
+

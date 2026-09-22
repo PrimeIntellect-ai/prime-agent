@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { transformMessages } from "../src/providers/transform-messages.js";
-import type { AssistantMessage, Message, Model, StopReason, ToolResultMessage } from "../src/types.js";
+import type { AssistantMessage, Message, Model, StopReason, ToolCall, ToolResultMessage } from "../src/types.js";
 
 const model: Model<"anthropic-messages"> = {
 	id: "fixture",
@@ -136,5 +136,77 @@ describe("tool-result pairing boundaries", () => {
 			toolResult("finished"),
 			user,
 		]);
+	});
+});
+
+describe("cross-model session migration", () => {
+	const copilotClaude: Model<"anthropic-messages"> = {
+		...model,
+		id: "claude-sonnet-4.5",
+		provider: "github-copilot",
+		baseUrl: "https://api.individual.githubcopilot.com",
+		reasoning: true,
+	};
+
+	function fromOtherModel(api: AssistantMessage["api"], content: AssistantMessage["content"]): AssistantMessage {
+		return { ...assistant("toolUse"), api, provider: "github-copilot", model: "gpt-5", content };
+	}
+
+	function migrate(messages: Message[]): Message[] {
+		return transformMessages(messages, copilotClaude, (id) => id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64));
+	}
+
+	it("converts thinking blocks to plain text when the source model differs", () => {
+		const result = migrate([
+			user,
+			fromOtherModel("openai-completions", [
+				{ type: "thinking", thinking: "Let me think about this...", thinkingSignature: "reasoning_content" },
+				{ type: "text", text: "Hi there!" },
+			]),
+		]);
+
+		const migrated = result.find((message) => message.role === "assistant") as AssistantMessage;
+		expect(migrated.content.filter((block) => block.type === "thinking")).toHaveLength(0);
+		expect(migrated.content.filter((block) => block.type === "text").length).toBeGreaterThanOrEqual(2);
+	});
+
+	it("removes thoughtSignature from tool calls when migrating between models", () => {
+		const result = migrate([
+			user,
+			fromOtherModel("openai-responses", [
+				{
+					type: "toolCall",
+					id: "call_123",
+					name: "bash",
+					arguments: { command: "ls" },
+					thoughtSignature: JSON.stringify({ type: "reasoning.encrypted", id: "call_123", data: "encrypted" }),
+				},
+			]),
+			toolResult("call_123"),
+		]);
+
+		const migrated = result.find((message) => message.role === "assistant") as AssistantMessage;
+		expect(
+			(migrated.content.find((block) => block.type === "toolCall") as ToolCall).thoughtSignature,
+		).toBeUndefined();
+	});
+
+	it("adds synthetic results for trailing orphaned tool calls across the migration", () => {
+		const result = migrate([
+			user,
+			fromOtherModel("openai-responses", [
+				{ type: "toolCall", id: "call_1|fc_1", name: "read", arguments: { path: "README.md" } },
+				{ type: "toolCall", id: "call_2|fc_2", name: "bash", arguments: { command: "pwd" } },
+			]),
+			{ ...toolResult("call_1|fc_1"), toolName: "read" },
+		]);
+
+		const synthetic = result.filter((message) => message.role === "toolResult" && message.isError);
+		expect(synthetic).toHaveLength(1);
+		expect(synthetic[0]).toMatchObject({
+			toolCallId: "call_2_fc_2",
+			toolName: "bash",
+			content: [{ type: "text", text: "No result provided" }],
+		});
 	});
 });

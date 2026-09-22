@@ -10,8 +10,11 @@ Execution still belongs to Prime Agent's TypeScript host and the existing
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import stat
+import unicodedata
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +43,76 @@ def _slug(raw: str, fallback: str) -> str:
     normalized = "".join(ch.lower() if ch.isalnum() else "_" for ch in raw.strip())
     normalized = "_".join(part for part in normalized.split("_") if part)
     return (normalized or fallback)[:80]
+
+
+_CJK_TERM_CHARS = re.compile(
+    r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af"
+    r"\U00020000-\U0002a6df\U0002a700-\U0002b73f\U0002b740-\U0002b81f"
+    r"\U0002b820-\U0002ceaf\U0002ceb0-\U0002ebef\U0002ebf0-\U0002ee5f"
+    r"\U0002f800-\U0002fa1f\U00030000-\U0003134f\U00031350-\U000323af"
+    r"\U000323b0-\U0003347f]"
+)
+
+
+def _harness_query_runs(text: str) -> list[str]:
+    """Split lowercase text into word runs.
+
+    Letters, digits, and combining marks of any script share a run;
+    punctuation and symbols end it. Runs break only at CJK boundaries:
+    accented Latin stays whole (naïve) while spacing-free CJK is cut
+    apart from adjacent words it would otherwise swallow (修复login).
+    """
+    runs: list[str] = []
+    run: list[str] = []
+    run_is_cjk = False
+    for ch in text:
+        if unicodedata.category(ch).startswith("M") or ch.isalnum():
+            ch_is_cjk = bool(_CJK_TERM_CHARS.match(ch))
+            if run and ch_is_cjk != run_is_cjk:
+                runs.append("".join(run))
+                run = []
+            run_is_cjk = ch_is_cjk
+            run.append(ch)
+        elif run:
+            runs.append("".join(run))
+            run = []
+    if run:
+        runs.append("".join(run))
+    return runs
+
+
+def _harness_query_terms(query: str) -> list[str]:
+    """Tokenize a search query into lowercase substring terms.
+
+    Letters and digits of every script form terms; punctuation and symbols
+    only separate them, so ``worktree?`` never ranks entries by question
+    marks. CJK runs carry no spaces between words, so each run becomes
+    overlapping bigrams: ``修复登录`` yields ``修复``/``复登``/``登录`` and
+    still matches an entry containing ``登录故障``. Each term counts once.
+    Minimum lengths stay below the digest builder's four-character cut
+    because ``search`` tokenizes explicit queries, not mined conversation:
+    three ASCII characters keep real terms (rlm, api, cli), two characters
+    keep short words of other scripts (мир), and single characters are
+    terms only for CJK, where one character is a word.
+    """
+    terms: list[str] = []
+    seen: set[str] = set()
+    for run in _harness_query_runs(query.lower()):
+        if _CJK_TERM_CHARS.search(run):
+            # Bigrams keep whitespace-free CJK findable without single
+            # characters matching too loosely.
+            candidates = [run[i : i + 2] for i in range(len(run) - 1)] or [run]
+        elif run.isascii():
+            candidates = [run] if len(run) >= 3 else []
+        else:
+            # Other scripts space out words: lone characters match too
+            # broadly, so two characters is the floor.
+            candidates = [run] if len(run) >= 2 else []
+        for term in candidates:
+            if term not in seen:
+                seen.add(term)
+                terms.append(term)
+    return terms
 
 
 def _agent_dir() -> Path:
@@ -135,16 +208,23 @@ _ENTRY_FIELDS = {field.name for field in fields(HarnessEntry)}
 _REFINEMENT_FIELDS = {field.name for field in fields(RefinementEvent)}
 
 
-def _validate_python_skill_reference(reference: dict[str, Any] | None) -> dict[str, Any]:
+def _validate_python_skill_reference(reference: dict[str, Any] | None, entry_name: str = "") -> dict[str, Any]:
+    # Rejections name the entry so the caller can repair the right skill; the
+    # suffix keeps the historical message text greppable.
+    prefix = f"skill entry {entry_name!r} rejected: " if entry_name else ""
+
+    def reject(message: str) -> None:
+        raise ValueError(f"{prefix}{message}")
+
     if not isinstance(reference, dict):
-        raise ValueError("skill entries require a Python reference")
+        reject("skill entries require a Python reference")
     normalized = dict(reference)
     if normalized.get("type") != "python":
-        raise ValueError("skill reference.type must be 'python'")
+        reject("skill reference.type must be 'python'")
     if not any(isinstance(normalized.get(key), str) and normalized[key] for key in ("import", "python_import")):
-        raise ValueError("skill reference requires a Python import")
+        reject("skill reference requires a Python import")
     if not any(isinstance(normalized.get(key), str) and normalized[key] for key in ("callable", "call_pattern")):
-        raise ValueError("skill reference requires a callable or call_pattern")
+        reject("skill reference requires a callable or call_pattern")
     return normalized
 
 
@@ -179,6 +259,101 @@ def _validate_kind_extras(
     if reference is None and not required:
         return None
     return _validate_python_skill_reference(reference)
+
+
+def _type_name(value: Any) -> str:
+    if isinstance(value, list):
+        return "a list"
+    if value == "":
+        return "an empty string"
+    return type(value).__name__
+
+
+def _describe_entry(id: Any, title: Any) -> str:
+    """Best available entry name for rejection messages."""
+    if isinstance(id, str) and id:
+        return id
+    if isinstance(title, str) and title:
+        return title
+    return "<unnamed>"
+
+
+def _require_text(kind: str, entry_name: str, field: str, value: Any) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValueError(
+            f"{kind} entry {entry_name!r} rejected: {field} must be a non-empty string, got {_type_name(value)}"
+        )
+
+
+def _require_optional_text(kind: str, entry_name: str, field: str, value: Any) -> None:
+    if value is not None:
+        _require_text(kind, entry_name, field, value)
+
+
+def _require_optional_record(kind: str, entry_name: str, field: str, value: Any) -> None:
+    if value is not None and not isinstance(value, dict):
+        raise ValueError(
+            f"{kind} entry {entry_name!r} rejected: {field} must be a dict when provided, got {_type_name(value)}"
+        )
+
+
+def _validate_entry_shape(
+    kind: str,
+    entry_id: Any,
+    title: Any,
+    content: Any,
+    *,
+    topic: Any,
+    reference: Any,
+    arguments: Any,
+    metadata: Any,
+    source: Any,
+    existing: "HarnessEntry | None",
+) -> None:
+    """Reject an invalid harness entry before anything is persisted.
+
+    Every create/update/upsert write funnels through here, so a malformed
+    entry (content as a list, title as a number) fails with an actionable
+    error naming the entry and the field instead of being saved and later
+    crashing the host digest that renders every session's system prompt.
+    """
+    entry_name = _describe_entry(entry_id, title)
+    _require_text(kind, entry_name, "id", entry_id)
+    _require_text(kind, entry_name, "title", title)
+    _require_text(kind, entry_name, "content", content)
+    _require_optional_text(kind, entry_name, "topic", topic)
+    _require_optional_record(kind, entry_name, "reference", reference)
+    _require_optional_record(kind, entry_name, "arguments", arguments)
+    _require_optional_record(kind, entry_name, "metadata", metadata)
+    _require_text(kind, entry_name, "source", source)
+    if kind == "skill":
+        if reference is None:
+            # A new skill without a Python reference is invalid; an update that
+            # omits it preserves the existing reference instead.
+            if existing is None:
+                raise ValueError(f"skill entry {entry_name!r} rejected: skill entries require a Python reference")
+        else:
+            _validate_python_skill_reference(reference, entry_name)
+
+
+def _validate_refinement_event(trigger: Any, changes: Any, *, evidence: Any, outcome: Any) -> None:
+    """Reject a refinement event whose persisted shape would break the digest."""
+    if not isinstance(trigger, str) or not trigger:
+        raise ValueError(f"refinement event rejected: trigger must be a non-empty string, got {_type_name(trigger)}")
+    if isinstance(changes, str):
+        if not changes:
+            raise ValueError("refinement event rejected: changes must be a non-empty string or a list of strings")
+    elif isinstance(changes, list):
+        if not all(isinstance(change, str) and change for change in changes):
+            raise ValueError("refinement event rejected: changes must be a list of non-empty strings")
+    else:
+        raise ValueError(
+            f"refinement event rejected: changes must be a string or a list of strings, got {_type_name(changes)}"
+        )
+    if not isinstance(evidence, str):
+        raise ValueError(f"refinement event rejected: evidence must be a string when provided, got {_type_name(evidence)}")
+    if not isinstance(outcome, str):
+        raise ValueError(f"refinement event rejected: outcome must be a string when provided, got {_type_name(outcome)}")
 
 
 class HarnessState:
@@ -432,8 +607,27 @@ class HarnessState:
         if kind not in self.entries:
             raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
 
+        # Guard before the id slug and the dict lookup: a non-string title or a
+        # non-string id (falsy ids included, which the slug fallback would
+        # silently collapse) must fail with a clear rejection, not an
+        # AttributeError inside slug normalization or a TypeError from the lookup.
+        _require_text(kind, _describe_entry(id, title), "title", title)
+        if id is not None:
+            _require_text(kind, _describe_entry(id, title), "id", id)
         entry_id = id or _slug(title, kind)
         existing = self.entries[kind].get(entry_id)
+        _validate_entry_shape(
+            kind,
+            entry_id,
+            title,
+            content,
+            topic=topic,
+            reference=reference,
+            arguments=arguments,
+            metadata=metadata,
+            source=source,
+            existing=existing,
+        )
         if existing:
             existing.title = title
             existing.content = content
@@ -529,6 +723,9 @@ class HarnessState:
             )
         self._ensure_local_writable()
         self._sync_from_disk()
+        _require_text(kind, _describe_entry(id, title), "title", title)
+        if id is not None:
+            _require_text(kind, _describe_entry(id, title), "id", id)
         entry_id = id or _slug(title, kind)
         if entry_id in self.entries[kind]:
             raise ValueError(f"{kind} entry {entry_id!r} already exists")
@@ -574,6 +771,7 @@ class HarnessState:
             )
         self._ensure_local_writable()
         self._sync_from_disk()
+        _require_text(kind, _describe_entry(id, title), "id", id)
         if id not in self.entries[kind]:
             raise ValueError(self._missing_entry_message(kind, id))
         return self._upsert(
@@ -629,6 +827,11 @@ class HarnessState:
             return target.record_refinement(trigger, changes, evidence=evidence, outcome=outcome, id=id)
         self._ensure_local_writable()
         self._sync_from_disk()
+        _validate_refinement_event(trigger, changes, evidence=evidence, outcome=outcome)
+        if id is not None and (not isinstance(id, str) or not id):
+            raise ValueError(
+                f"refinement event rejected: id must be a non-empty string when provided, got {_type_name(id)}"
+            )
         event_id = id or f"refine_{len(self.refinements) + 1:04d}"
         normalized_changes = [changes] if isinstance(changes, str) else list(changes)
         event = RefinementEvent(
@@ -707,6 +910,73 @@ class HarnessState:
         else:
             lines.append("refinements: 0")
         return "\n".join(lines)
+
+    def search(
+        self,
+        query: str,
+        kind: HarnessKind | None = None,
+        limit: int = 10,
+        *,
+        global_: bool = False,
+        **kwargs: Any,
+    ) -> list[HarnessEntry]:
+        """Return harness entries ranked by weighted term overlap with *query*.
+
+        Terms are scored against an entry's title, content, topic, and id;
+        matches in more distinct fields count more. Each matched term is
+        discounted by its document frequency across the ranked corpus
+        (tf-idf style, ``weight * log(1 + N / df)``), so a rare,
+        distinctive term outranks terms present in most entries.
+        """
+        if target := self._global_target(global_, kwargs):
+            return target.search(query, kind=kind, limit=limit)
+        self._sync_from_disk()
+        if not isinstance(query, str):
+            raise TypeError(f"query must be str, got {type(query).__name__}")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise TypeError("limit must be a positive int")
+        terms = _harness_query_terms(query)
+        if not terms:
+            return []
+
+        entries = self.list(kind, **kwargs) if kind is not None else self.list(None, **kwargs)
+
+        # Document frequency per term over the ranked corpus: a term in
+        # every entry weighs log(2), a term in one entry of N weighs
+        # log(1 + N), so rare distinctive terms outrank ubiquitous ones.
+        matches: dict[str, int] = {term: 0 for term in terms}
+        for entry in entries:
+            title = entry.title.lower()
+            content = entry.content.lower()
+            path_and_id = f"{entry.topic} {entry.id}".lower()
+            for term in terms:
+                if term in title or term in content or term in path_and_id:
+                    matches[term] += 1
+        term_idf = {
+            term: math.log(1 + len(entries) / count)
+            for term, count in matches.items()
+            if count > 0
+        }
+
+        def score(entry: HarnessEntry) -> float:
+            title = entry.title.lower()
+            content = entry.content.lower()
+            path_and_id = f"{entry.topic} {entry.id}".lower()
+            total = 0.0
+            for term, idf in term_idf.items():
+                fields = (1 if term in title else 0) + (1 if term in content else 0) + (
+                    1 if term in path_and_id else 0
+                )
+                if fields:
+                    total += idf * (1 + (fields - 1) * 0.5)
+            return total
+
+        def recency(entry: HarnessEntry) -> str:
+            return entry.updated_at if isinstance(entry.updated_at, str) else ""
+
+        ranked = sorted(entries, key=lambda e: (score(e), recency(e)), reverse=True)
+        ranked = [e for e in ranked if score(e) > 0]
+        return ranked[:limit]
 
     def snapshot(self, *, global_: bool = False, **kwargs: Any) -> dict[str, Any]:
         if target := self._global_target(global_, kwargs):

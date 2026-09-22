@@ -1,4 +1,4 @@
-import { Box, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
+import { Box, Clickable, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
 import type { BranchSummaryMessage } from "../../../core/messages.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
 import { expandCollapseHint } from "./keybinding-hints.js";
@@ -33,7 +33,7 @@ export class BranchSummaryMessageComponent extends Box {
 		this.clear();
 
 		const label = theme.fg("customMessageLabel", `\x1b[1m[branch]\x1b[22m`);
-		this.addChild(new Text(label, 0, 0));
+		this.addChild(new Clickable(new Text(label, 0, 0), () => this.setExpanded(!this.expanded)));
 		this.addChild(new Spacer(1));
 
 		if (this.expanded) {
@@ -45,10 +45,13 @@ export class BranchSummaryMessageComponent extends Box {
 			);
 		} else {
 			this.addChild(
-				new Text(
-					`${theme.fg("customMessageText", "Branch summary")} ${expandCollapseHint("app.tools.expand", false)}`,
-					0,
-					0,
+				new Clickable(
+					new Text(
+						`${theme.fg("customMessageText", "Branch summary")} ${expandCollapseHint("app.tools.expand", false)}`,
+						0,
+						0,
+					),
+					() => this.setExpanded(!this.expanded),
 				),
 			);
 		}

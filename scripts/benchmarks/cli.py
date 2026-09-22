@@ -12,7 +12,7 @@ from prime_sandboxes import APIClient, SandboxClient
 from controller import Controller, cleanup
 from github import WORKFLOW, GitHub
 from report import render
-from schema import Config, Report, Side, load_report, write_json
+from schema import Config, Report, Side, load_report, report_complete, write_json
 
 
 def workflow_source(event: dict) -> dict:
@@ -58,6 +58,9 @@ def completed_report(result_path: Path, request_path: Path, run: dict) -> Report
         report = request
         report.status = "failed"
         report.errors.append("Benchmark report failed validation; see the workflow artifacts")
+    if report.status == "completed" and not report_complete(report):
+        report.status = "partial"
+        report.errors.append("Benchmark claimed completion with failed or missing measurements")
     if report.status == "running":
         report.status = "canceled" if run["conclusion"] == "cancelled" else "failed"
         report.errors.append("Benchmark did not produce a final report; see the workflow logs")
@@ -96,7 +99,9 @@ def main() -> None:
             main=Side(sha=args.base),
             pr_head=Side(sha=args.head),
         )
-        Controller(report, args.results, live_github=False).run()
+        controller = Controller(report, args.results, live_github=False)
+        controller.run()
+        require_success(controller.report)
         return
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     if args.command == "cleanup":
@@ -159,6 +164,13 @@ def main() -> None:
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         Path(summary).write_text(render(report))
+    if args.command == "run":
+        require_success(report)
+
+
+def require_success(report: Report) -> None:
+    if report.status != "completed" or not report_complete(report):
+        raise SystemExit(f"Benchmark {report.status}: failed or incomplete; see saved report and transcripts")
 
 
 if __name__ == "__main__":
