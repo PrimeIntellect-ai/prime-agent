@@ -1014,7 +1014,7 @@ type AutonomousRuntimeSnapshot = Pick<
 interface RlmChildRun {
 	id: string;
 	prompt: string;
-	/** The prompt never changes, so the collapse runs once. */
+	/** rlmChildLabel(prompt), computed once: the prompt never changes. */
 	label: string;
 	sessionName: string;
 	sessionDir: string;
