@@ -17,12 +17,18 @@
 //! line. A zero-timeout poll after each read marks the chunk boundary:
 //! crossterm serves the rest of the same OS read without blocking, so a
 //! burst is exactly the events one terminal write carried.
+//!
+//! Every chunk then flows through the TS enhanced-key dispatch filters
+//! (see [`filter_enhanced_key_events`]): key releases are dropped (TS
+//! tui.ts dispatch filter) and a duplicate-reporting kitty terminal's
+//! raw-text twin of a plain CSI-u character is deduplicated (TS
+//! StdinBuffer `pendingKittyPrintableCodepoint`, stdin-buffer.ts:307).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 struct Reader {
     handle: std::thread::JoinHandle<()>,
@@ -92,7 +98,11 @@ where
 /// The shared reader body: one reader per process, joined across surfaces.
 /// `paste_aware` selects the burst coalescing; a plain reader forwards
 /// every event unchanged (surfaces without the editor's paste path would
-/// lose a coalesced burst they cannot consume).
+/// lose a coalesced burst they cannot consume). Every chunk — one
+/// terminal write — flows through [`filter_enhanced_key_events`] (the TS
+/// release-event dispatch filter and the kitty-printable dedup) before it
+/// reaches the surface, in TS order: the raw-paste heuristic sees the
+/// untouched chunk first.
 fn spawn_reader<F>(paste_aware: bool, mut on_input: F)
 where
     F: FnMut(ReaderInput) -> bool + Send + 'static,
@@ -113,17 +123,6 @@ where
         match crossterm::event::poll(Duration::from_millis(POLL_TIMEOUT_MS)) {
             Ok(false) => continue,
             Ok(true) => {
-                if !paste_aware {
-                    match crossterm::event::read() {
-                        Ok(event) => {
-                            if !on_input(ReaderInput::Event(event)) {
-                                return;
-                            }
-                        }
-                        Err(_) => return,
-                    }
-                    continue;
-                }
                 // Drain every event of this terminal write: a zero-timeout
                 // poll serves the rest of the same OS read without
                 // blocking, so the drain stops exactly at the chunk
@@ -134,9 +133,11 @@ where
                 loop {
                     match crossterm::event::read() {
                         Ok(event) => {
-                            match printable_text(&event) {
-                                Some(chunk) => text.push_str(&chunk),
-                                None => burst_is_plain_text = false,
+                            if paste_aware {
+                                match printable_text(&event) {
+                                    Some(chunk) => text.push_str(&chunk),
+                                    None => burst_is_plain_text = false,
+                                }
                             }
                             events.push(event);
                             match crossterm::event::poll(Duration::ZERO) {
@@ -147,15 +148,16 @@ where
                         Err(_) => return,
                     }
                 }
-                if burst_is_plain_text && is_raw_multiline_paste(&text) {
+                if paste_aware && burst_is_plain_text && is_raw_multiline_paste(&text) {
                     if !on_input(ReaderInput::BurstPaste(text)) {
                         return;
                     }
-                } else {
-                    for event in events {
-                        if !on_input(ReaderInput::Event(event)) {
-                            return;
-                        }
+                    continue;
+                }
+                let events = merge_legacy_meta_escapes(events);
+                for event in filter_enhanced_key_events(events) {
+                    if !on_input(ReaderInput::Event(event)) {
+                        return;
                     }
                 }
             }
@@ -163,6 +165,280 @@ where
         }
     });
     *previous = Some(Reader { handle, stop });
+}
+
+/// The TS enhanced-key dispatch filters, applied to one terminal write:
+///
+/// - Key releases are dropped before any surface sees them (TS tui.ts:
+///   `isKeyRelease(data) && !focusedComponent.wantsKeyRelease` — the only
+///   TS opt-ins are example extensions, which this port does not ship).
+/// - The kitty-printable dedup (TS StdinBuffer
+///   `pendingKittyPrintableCodepoint`, stdin-buffer.ts:307): a
+///   duplicate-reporting kitty terminal sends BOTH the plain CSI-u form
+///   and the raw character for one keypress (Italian-style layouts, TS
+///   #3780). crossterm folds both encodings into the same unmodified
+///   `Char` key event, so the raw-text duplicate cannot be told from a
+///   typed duplicate at the event layer; the port therefore drops an
+///   identical back-to-back plain-character pair — but only within one
+///   terminal write (a real keypress report never spans writes) and only
+///   while the kitty protocol is active (a plain-typed pair in legacy
+///   terminals never carries the CSI-u form, so TS never dedups it).
+///
+/// The pending state is chunk-local where TS keeps it across `process`
+/// calls: TS sets it only from actual CSI-u forms, which this layer
+/// cannot observe, so a cross-chunk pending would eat a fast-typed
+/// double character instead.
+fn filter_enhanced_key_events(events: Vec<Event>) -> Vec<Event> {
+    if !crate::enhanced_keys::kitty_active() {
+        return events
+            .into_iter()
+            .filter(|event| !is_key_release(event))
+            .collect();
+    }
+    let mut out = Vec::with_capacity(events.len());
+    let mut pending: Option<char> = None;
+    for event in events {
+        if is_key_release(&event) {
+            // Dropped at dispatch (TS tui.ts), and it also clears the
+            // pending: TS's emitDataSequence overwrites the pending with
+            // undefined for every emitted non-matching sequence, so the
+            // release form (`CSI 97;1:3u` — modifier section present)
+            // never keeps a dedup alive.
+            pending = None;
+            continue;
+        }
+        let plain_press = plain_press_char(&event);
+        if plain_press.is_some_and(|c| pending == Some(c)) {
+            // The raw-text duplicate of the CSI-u form (one keypress).
+            pending = None;
+            continue;
+        }
+        pending = plain_press;
+        out.push(event);
+    }
+    out
+}
+
+/// macOS-Terminal legacy-meta repair (TS `matchesKey`'s double-ESC branch,
+/// keys.ts:788): with "use option as meta key" the terminal wraps the whole
+/// sequence in an extra ESC — Option+Up arrives as `ESC ESC [ A`. crossterm
+/// folds that byte stream into `Esc` + literal `[` + a SHIFT-ed letter (its
+/// ESC branch consumes the second ESC and re-parses the rest byte by byte),
+/// so the option identity is lost: the escape fires the interrupt ladder and
+/// `[A` types into the editor. TS matches the wrapped form byte-wise (strip
+/// "alt" from the key id, match the rest), so Option+Up browses the queue.
+///
+/// This pass rebuilds the wrapped identity from one terminal write's events:
+/// an `Esc` press followed by `Char('[')`/`Char('O')` and a body that
+/// reassembles into a known legacy CSI/SS3 sequence decodes back to the
+/// inner key with ALT added. The shape cannot come from typed input (a
+/// keypress never spans writes; ESC `[` letter as one write is exactly the
+/// wrapped encoding), so the repair never steals a real escape press.
+/// Inactive while the kitty protocol is active: those terminals report
+/// option-modified keys natively and never send the double-ESC form. A tail
+/// that does not decode stays untouched.
+fn merge_legacy_meta_escapes(events: Vec<Event>) -> Vec<Event> {
+    if crate::enhanced_keys::kitty_active() {
+        return events;
+    }
+    let mut out: Vec<Event> = Vec::with_capacity(events.len());
+    let mut index = 0;
+    while index < events.len() {
+        if !is_meta_escape_head(&events[index]) {
+            out.push(events[index].clone());
+            index += 1;
+            continue;
+        }
+        let (consumed, repaired) = decode_meta_escape_body(&events[index + 1..]);
+        match repaired {
+            Some(mut key) => {
+                key.modifiers |= KeyModifiers::ALT;
+                out.push(Event::Key(key));
+                index += 1 + consumed;
+            }
+            // Not a wrapped sequence: keep the escape (and re-scan the rest).
+            None => {
+                out.push(events[index].clone());
+                index += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The repair's head: a bare `Esc` press (the meta wrapper ESC; the inner
+/// sequence's own bytes follow as folded `Char` events).
+fn is_meta_escape_head(event: &Event) -> bool {
+    matches!(event, Event::Key(key) if key.code == KeyCode::Esc
+        && key.kind == KeyEventKind::Press
+        && key.modifiers.is_empty())
+}
+
+/// Decode the wrapped body — the sequence's remaining bytes, which crossterm
+/// folded into plain (symbols, digits) and SHIFT-synthesized (uppercase
+/// letters) `Char` presses. Returns the consumed event count and the inner
+/// key WITHOUT the meta ALT (the caller adds it); `None` when the tail is
+/// not a known legacy sequence.
+fn decode_meta_escape_body(rest: &[Event]) -> (usize, Option<KeyEvent>) {
+    let mut body: Vec<char> = Vec::new();
+    let mut consumed = 0;
+    for event in rest {
+        let Event::Key(key) = event else { break };
+        if key.kind != KeyEventKind::Press {
+            break;
+        }
+        let KeyCode::Char(c) = key.code else { break };
+        if !key.modifiers.is_empty() && !key.modifiers.contains(KeyModifiers::SHIFT) {
+            break;
+        }
+        body.push(c);
+        consumed += 1;
+        // SS3 closes on its one designator; CSI closes on a letter, `~`,
+        // or the rxvt `$`/`^` modifier-designator final byte.
+        if body[0] == 'O' && body.len() == 2 {
+            break;
+        }
+        if body[0] == '['
+            && body.len() >= 2
+            && (c == '~' || c == '$' || c == '^' || c.is_ascii_alphabetic())
+        {
+            break;
+        }
+        if body.len() >= 16 {
+            break;
+        }
+    }
+    (consumed, decode_legacy_meta_sequence(&body))
+}
+
+/// The inner legacy sequence (`ESC` + the body): the same forms crossterm
+/// parses natively without the wrapper, so the decoded identity matches the
+/// unwrapped byte stream (TS strips the meta ESC and matches the rest).
+fn decode_legacy_meta_sequence(body: &[char]) -> Option<KeyEvent> {
+    let inner: String = std::iter::once('\x1b')
+        .chain(body.iter().copied())
+        .collect();
+    let (code, modifiers) = match inner.as_str() {
+        "\x1bOA" => (KeyCode::Up, KeyModifiers::NONE),
+        "\x1bOB" => (KeyCode::Down, KeyModifiers::NONE),
+        "\x1bOC" => (KeyCode::Right, KeyModifiers::NONE),
+        "\x1bOD" => (KeyCode::Left, KeyModifiers::NONE),
+        "\x1bOH" => (KeyCode::Home, KeyModifiers::NONE),
+        "\x1bOF" => (KeyCode::End, KeyModifiers::NONE),
+        // rxvt-style ctrl arrows over SS3 (TS keys.ts keys.ctrl map).
+        "\x1bOa" => (KeyCode::Up, KeyModifiers::CONTROL),
+        "\x1bOb" => (KeyCode::Down, KeyModifiers::CONTROL),
+        "\x1bOc" => (KeyCode::Right, KeyModifiers::CONTROL),
+        "\x1bOd" => (KeyCode::Left, KeyModifiers::CONTROL),
+        "\x1bOP" => (KeyCode::F(1), KeyModifiers::NONE),
+        "\x1bOQ" => (KeyCode::F(2), KeyModifiers::NONE),
+        "\x1bOR" => (KeyCode::F(3), KeyModifiers::NONE),
+        "\x1bOS" => (KeyCode::F(4), KeyModifiers::NONE),
+        "\x1b[A" => (KeyCode::Up, KeyModifiers::NONE),
+        "\x1b[B" => (KeyCode::Down, KeyModifiers::NONE),
+        "\x1b[C" => (KeyCode::Right, KeyModifiers::NONE),
+        "\x1b[D" => (KeyCode::Left, KeyModifiers::NONE),
+        "\x1b[H" => (KeyCode::Home, KeyModifiers::NONE),
+        "\x1b[F" => (KeyCode::End, KeyModifiers::NONE),
+        "\x1b[Z" => (KeyCode::BackTab, KeyModifiers::NONE),
+        "\x1b[2~" => (KeyCode::Insert, KeyModifiers::NONE),
+        "\x1b[3~" => (KeyCode::Delete, KeyModifiers::NONE),
+        "\x1b[5~" => (KeyCode::PageUp, KeyModifiers::NONE),
+        "\x1b[6~" => (KeyCode::PageDown, KeyModifiers::NONE),
+        "\x1b[7~" => (KeyCode::Home, KeyModifiers::NONE),
+        "\x1b[8~" => (KeyCode::End, KeyModifiers::NONE),
+        // rxvt-style shift+arrows over SS3-lite CSI (TS keys.ts
+        // LEGACY_SHIFT_SEQUENCES) — Option+Shift+Up arrives meta-wrapped on
+        // those terminals.
+        "\x1b[a" => (KeyCode::Up, KeyModifiers::SHIFT),
+        "\x1b[b" => (KeyCode::Down, KeyModifiers::SHIFT),
+        "\x1b[c" => (KeyCode::Right, KeyModifiers::SHIFT),
+        "\x1b[d" => (KeyCode::Left, KeyModifiers::SHIFT),
+        "\x1b[2$" => (KeyCode::Insert, KeyModifiers::SHIFT),
+        "\x1b[3$" => (KeyCode::Delete, KeyModifiers::SHIFT),
+        "\x1b[5$" => (KeyCode::PageUp, KeyModifiers::SHIFT),
+        "\x1b[6$" => (KeyCode::PageDown, KeyModifiers::SHIFT),
+        "\x1b[7$" => (KeyCode::Home, KeyModifiers::SHIFT),
+        "\x1b[8$" => (KeyCode::End, KeyModifiers::SHIFT),
+        // rxvt-style ctrl-modified tilde finals (TS keys.ts
+        // LEGACY_CTRL_SEQUENCES, the `$`/`^` complement rows).
+        "\x1b[2^" => (KeyCode::Insert, KeyModifiers::CONTROL),
+        "\x1b[3^" => (KeyCode::Delete, KeyModifiers::CONTROL),
+        "\x1b[5^" => (KeyCode::PageUp, KeyModifiers::CONTROL),
+        "\x1b[6^" => (KeyCode::PageDown, KeyModifiers::CONTROL),
+        "\x1b[7^" => (KeyCode::Home, KeyModifiers::CONTROL),
+        "\x1b[8^" => (KeyCode::End, KeyModifiers::CONTROL),
+        _ => decode_csi_with_modifier(inner.strip_prefix("\x1b[")?)?,
+    };
+    Some(KeyEvent::new_with_kind(
+        code,
+        modifiers,
+        KeyEventKind::Press,
+    ))
+}
+
+/// `ESC [ 1;<m><final>` and `ESC [ <n>;<m>~` (the xterm modifier parameter,
+/// m-1 a bitfield: 1 shift, 2 alt, 4 ctrl). The alt bit is the meta wrapper
+/// itself, so only modifier values without it decode (1 plain, 2 shift,
+/// 5 ctrl, 6 shift+ctrl) — with alt in the parameter TS's strip-and-match
+/// never finds a key either. Kept to the finals the product binds.
+fn decode_csi_with_modifier(rest: &str) -> Option<(KeyCode, KeyModifiers)> {
+    let (params, last) = rest.split_once(';')?;
+    if last.is_empty() {
+        return None;
+    }
+    let (modifier, final_char) = last.split_at(last.chars().count() - 1);
+    let modifiers = match modifier.parse::<u8>().ok()? {
+        1 => KeyModifiers::NONE,
+        2 => KeyModifiers::SHIFT,
+        5 => KeyModifiers::CONTROL,
+        6 => KeyModifiers::SHIFT | KeyModifiers::CONTROL,
+        _ => return None,
+    };
+    let code = match final_char {
+        "A" => KeyCode::Up,
+        "B" => KeyCode::Down,
+        "C" => KeyCode::Right,
+        "D" => KeyCode::Left,
+        "H" => KeyCode::Home,
+        "F" => KeyCode::End,
+        "~" => match params {
+            "2" => KeyCode::Insert,
+            "3" => KeyCode::Delete,
+            "5" => KeyCode::PageUp,
+            "6" => KeyCode::PageDown,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some((code, modifiers))
+}
+
+/// A key release event (kitty event type 3; TS tui.ts drops them at
+/// dispatch unless the focused component opts in).
+fn is_key_release(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Key(key) if key.kind == KeyEventKind::Release
+    )
+}
+
+/// The event shape the kitty CSI-u plain-printable form and its raw-text
+/// duplicate both parse to: an unmodified character press (the TS
+/// `parseUnmodifiedKittyPrintableCodepoint` regex admits only
+/// modifier-free, event-type-free sequences, so lock states — which ride
+/// the modifier mask — never join the dedup).
+fn plain_press_char(event: &Event) -> Option<char> {
+    let Event::Key(key) = event else {
+        return None;
+    };
+    if key.kind != KeyEventKind::Press || !key.modifiers.is_empty() || !key.state.is_empty() {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char(c) => Some(c),
+        _ => None,
+    }
 }
 
 /// The plain-text contribution of one event for a marker-less burst: the
@@ -294,6 +570,119 @@ mod tests {
         assert_eq!(printable_text(&Event::Resize(80, 24)), None);
     }
 
+    fn press(c: char) -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+    }
+
+    fn key_with_kind(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> Event {
+        Event::Key(KeyEvent::new_with_kind(code, modifiers, kind))
+    }
+
+    /// Key releases never reach a surface (TS tui.ts: the focused
+    /// component must opt in with wantsKeyRelease; no TS surface except
+    /// example extensions does).
+    #[test]
+    fn key_releases_are_dropped_in_both_kitty_modes() {
+        let release = key_with_kind(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        );
+        let up_release = key_with_kind(KeyCode::Up, KeyModifiers::NONE, KeyEventKind::Release);
+        let ctrl_c_release = key_with_kind(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Release,
+        );
+        let chunk = vec![press('a'), release, up_release, ctrl_c_release, press('b')];
+        let filtered = filter_enhanced_key_events(chunk);
+        let ids: Vec<String> = filtered
+            .iter()
+            .map(|event| {
+                let Event::Key(key) = event else {
+                    unreachable!()
+                };
+                crate::keys::key_event_to_id(key).unwrap()
+            })
+            .collect();
+        assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    /// The kitty-printable dedup (TS #3780): a duplicate-reporting kitty
+    /// terminal sends `CSI 97u` followed by the raw character for ONE
+    /// keypress; crossterm parses both to the same unmodified Char
+    /// press, so the pair collapses to one. Identical back-to-back
+    /// pairs keep TS's pending semantics: after a drop the pending
+    /// clears, so a triple renders as two (never one, never three).
+    #[test]
+    fn kitty_printable_duplicates_collapse_within_a_chunk() {
+        let _guard = crate::enhanced_keys::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::enhanced_keys::set_kitty_active_for_tests(true);
+        // `CSI 64u` + `@` (the TS regression case): one press.
+        let filtered = filter_enhanced_key_events(vec![press('@'), press('@')]);
+        assert_eq!(filtered.len(), 1);
+        // A triple (`CSI 97u a a`): pending clears after the drop, so
+        // two presses survive.
+        let triple = filter_enhanced_key_events(vec![press('a'), press('a'), press('a')]);
+        assert_eq!(triple.len(), 2);
+        // A non-matching char after the CSI-u form is kept (TS: the
+        // pending only matches the same codepoint).
+        let mixed = filter_enhanced_key_events(vec![press('a'), press('b')]);
+        assert_eq!(mixed.len(), 2);
+        // A modified press never joins the dedup (TS: the regex admits
+        // only modifier-free sequences — `CSI 97;5u` is ctrl+a).
+        let modified_then_plain = filter_enhanced_key_events(vec![
+            key_with_kind(
+                KeyCode::Char('a'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            ),
+            press('a'),
+        ]);
+        assert_eq!(modified_then_plain.len(), 2);
+        // A repeat event (`CSI 97;1:2u`) overwrites the pending (TS: the
+        // regex has no modifier/event-type section), so the raw char
+        // after it is kept.
+        let repeat = key_with_kind(KeyCode::Char('a'), KeyModifiers::NONE, KeyEventKind::Repeat);
+        let after_repeat = filter_enhanced_key_events(vec![press('a'), repeat, press('a')]);
+        assert_eq!(after_repeat.len(), 3);
+        // A release between the pair breaks it (releases are dropped,
+        // the pending never spans them).
+        let release = key_with_kind(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        );
+        let spanned = filter_enhanced_key_events(vec![press('a'), release, press('a')]);
+        assert_eq!(spanned.len(), 2);
+        // Lock states ride the modifier mask in CSI-u (`CSI 97;65u`):
+        // TS never dedups them.
+        let caps_lock = Event::Key(KeyEvent {
+            code: KeyCode::Char('a'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::CAPS_LOCK,
+        });
+        let with_caps = filter_enhanced_key_events(vec![caps_lock, press('a')]);
+        assert_eq!(with_caps.len(), 2);
+        crate::enhanced_keys::set_kitty_active_for_tests(false);
+    }
+
+    /// Without the kitty protocol the dedup is off: a plain terminal's
+    /// identical pair is real input (TS never sees a CSI-u form to set
+    /// the pending in legacy mode).
+    #[test]
+    fn plain_terminals_keep_identical_pairs() {
+        let _guard = crate::enhanced_keys::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::enhanced_keys::set_kitty_active_for_tests(false);
+        let filtered = filter_enhanced_key_events(vec![press('a'), press('a')]);
+        assert_eq!(filtered.len(), 2);
+    }
+
     #[test]
     fn multiline_shape_needs_text_on_both_sides() {
         assert!(is_raw_multiline_paste("alpha\nbeta\ngamma"));
@@ -308,5 +697,157 @@ mod tests {
         assert!(!is_raw_multiline_paste("\nalpha"));
         assert!(!is_raw_multiline_paste("alpha"));
         assert!(!is_raw_multiline_paste(""));
+    }
+
+    // --- legacy meta-escape repair (TS matchesKey's double-ESC branch) ---
+
+    fn shift_press(c: char) -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT))
+    }
+
+    fn ids_of(events: &[Event]) -> Vec<String> {
+        events
+            .iter()
+            .map(|event| match event {
+                Event::Key(key) => {
+                    crate::keys::key_event_to_id(key).unwrap_or_else(|| "<unmapped>".to_string())
+                }
+                other => format!("<{other:?}>"),
+            })
+            .collect()
+    }
+
+    /// macOS Terminal with "use option as meta key": Option+Up arrives as
+    /// `ESC ESC [ A` - crossterm folds it into Esc + `[` + SHIFT-ed `A` in
+    /// one write, and the repair rebuilds the Alt+Up identity (the TS
+    /// strip-alt match), so the queue browse opens instead of the escape
+    /// firing the interrupt ladder.
+    #[test]
+    fn wrapped_meta_escape_rebuilds_alt_arrows() {
+        let _guard = crate::enhanced_keys::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::enhanced_keys::set_kitty_active_for_tests(false);
+        let merged = merge_legacy_meta_escapes(vec![
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            press('['),
+            shift_press('A'),
+        ]);
+        assert_eq!(ids_of(&merged), vec!["alt+up".to_string()]);
+
+        let merged = merge_legacy_meta_escapes(vec![
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            press('O'),
+            shift_press('B'),
+        ]);
+        assert_eq!(ids_of(&merged), vec!["alt+down".to_string()]);
+    }
+
+    /// The xterm modifier parameter inside the wrapper: 1 plain, 2 shift,
+    /// 5 ctrl, 6 shift+ctrl decode (TS's strip-alt match accepts exactly
+    /// these); 3/4/7/8 carry the alt bit IN the parameter, which TS's
+    /// stripped key id can never match, so the chunk stays untouched.
+    #[test]
+    fn wrapped_modifier_parameters_decode_like_ts() {
+        let _guard = crate::enhanced_keys::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::enhanced_keys::set_kitty_active_for_tests(false);
+        let wrapped = |body: &[char]| {
+            let mut events = vec![Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))];
+            for (index, c) in body.iter().enumerate() {
+                let uppercase_last = index == body.len() - 1 && c.is_ascii_uppercase();
+                events.push(if uppercase_last {
+                    shift_press(*c)
+                } else {
+                    press(*c)
+                });
+            }
+            merge_legacy_meta_escapes(events)
+        };
+        assert_eq!(ids_of(&wrapped(&['[', '1', ';', '1', 'A']))[0], "alt+up");
+        assert_eq!(
+            ids_of(&wrapped(&['[', '1', ';', '2', 'A']))[0],
+            "shift+alt+up"
+        );
+        assert_eq!(
+            ids_of(&wrapped(&['[', '1', ';', '5', 'A']))[0],
+            "ctrl+alt+up"
+        );
+        assert_eq!(
+            ids_of(&wrapped(&['[', '1', ';', '6', 'A']))[0],
+            "shift+ctrl+alt+up"
+        );
+        // Alt-bit parameter values: TS matches nothing either - the escape
+        // and the folded characters survive as-is.
+        let untouched = wrapped(&['[', '1', ';', '3', 'A']);
+        assert_eq!(untouched.len(), 6);
+        assert!(matches!(untouched[0], Event::Key(ref k) if k.code == KeyCode::Esc));
+    }
+
+    /// rxvt-family rows inside the wrapper: shift+arrows (`\x1b[a`),
+    /// ctrl+arrows over SS3 (`\x1bOa`), the `$`/`^` tilde complements, and
+    /// the home/end alternates - the TS LEGACY_SHIFT/CTRL/KEY rows its
+    /// strip-and-match still reaches through the wrapper.
+    #[test]
+    fn wrapped_rxvt_modifier_rows_decode() {
+        let _guard = crate::enhanced_keys::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::enhanced_keys::set_kitty_active_for_tests(false);
+        let wrapped = |body: &[char]| {
+            let mut events = vec![Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))];
+            for (index, c) in body.iter().enumerate() {
+                let uppercase_last = index == body.len() - 1 && c.is_ascii_uppercase();
+                events.push(if uppercase_last {
+                    shift_press(*c)
+                } else {
+                    press(*c)
+                });
+            }
+            merge_legacy_meta_escapes(events)
+        };
+        assert_eq!(ids_of(&wrapped(&['[', 'a']))[0], "shift+alt+up");
+        assert_eq!(ids_of(&wrapped(&['[', 'd']))[0], "shift+alt+left");
+        assert_eq!(ids_of(&wrapped(&['O', 'a']))[0], "ctrl+alt+up");
+        assert_eq!(ids_of(&wrapped(&['[', '5', '$']))[0], "shift+alt+pageUp");
+        assert_eq!(ids_of(&wrapped(&['[', '3', '^']))[0], "ctrl+alt+delete");
+        assert_eq!(ids_of(&wrapped(&['[', '7', '~']))[0], "alt+home");
+    }
+
+    /// A real escape press is never stolen: a bare Esc, an Esc followed by
+    /// typed text, and an incomplete tail all pass through unchanged (the
+    /// wrapped shape - ESC `[` letter as ONE write - never comes from
+    /// typing).
+    #[test]
+    fn typed_escapes_survive_the_repair() {
+        let _guard = crate::enhanced_keys::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::enhanced_keys::set_kitty_active_for_tests(false);
+        let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(merge_legacy_meta_escapes(vec![esc.clone()]).len(), 1);
+        let mixed = merge_legacy_meta_escapes(vec![esc.clone(), press('x')]);
+        assert_eq!(ids_of(&mixed), vec!["escape".to_string(), "x".to_string()]);
+        let incomplete = merge_legacy_meta_escapes(vec![esc.clone(), press('[')]);
+        assert_eq!(incomplete.len(), 2);
+        assert!(matches!(incomplete[0], Event::Key(ref k) if k.code == KeyCode::Esc));
+    }
+
+    /// Inactive under the kitty protocol: those terminals report
+    /// option-modified keys natively and never send the double-ESC form.
+    #[test]
+    fn kitty_mode_disables_the_meta_repair() {
+        let _guard = crate::enhanced_keys::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::enhanced_keys::set_kitty_active_for_tests(true);
+        let chunk = vec![
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            press('['),
+            shift_press('A'),
+        ];
+        assert_eq!(merge_legacy_meta_escapes(chunk).len(), 3);
+        crate::enhanced_keys::set_kitty_active_for_tests(false);
     }
 }

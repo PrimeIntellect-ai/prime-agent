@@ -902,10 +902,15 @@ impl AgentView {
         if scroll_offset > 0 {
             let indicator = format!(" \u{2191} {scroll_offset} more");
             rows.push(indicator_row(&indicator, bg, border, width));
-        } else if let Some(selected) = &self.queue_selected {
-            // TS `getQueueSelectionHeader`: the editor's header line while
-            // a parked message is selected - one dim row on the editor
-            // background where the blank top row sits otherwise.
+        } else {
+            rows.push(vec![Span::styled(" ".repeat(width), bg)]);
+        }
+        if let Some(selected) = &self.queue_selected {
+            // TS `getQueueSelectionHeader` (the editor's header line while a
+            // parked message is selected): `CustomEditor.render` inserts the
+            // dim header row plus an empty companion row BELOW the top row,
+            // so the editor box grows by two rows while a message is selected
+            // (TS `getContentLineOffset` shifts the click regions with it).
             let keys = {
                 let kb = self.editor.keybindings();
                 let display =
@@ -929,7 +934,6 @@ impl AgentView {
             let used = crate::width::line_width(&row);
             row.push(Span::styled(" ".repeat(width.saturating_sub(used)), bg));
             rows.push(row);
-        } else {
             rows.push(vec![Span::styled(" ".repeat(width), bg)]);
         }
         // TS `CustomEditor.render`: a bare `--` separator highlights only
@@ -1378,15 +1382,18 @@ fn composite_follow_hint(row: &Line, label: &str, width: usize) -> Line {
     let (markers, rest) = crate::osc133::split_leading_markers(row);
     let col = width.saturating_sub(label_width) / 2;
     let mut out: Line = markers;
-    out.extend(crate::width::slice_line_by_column(&rest, 0, col));
+    out.extend(crate::width::slice_line_by_column_strict(
+        &rest, 0, col, true,
+    ));
     out.push(Span::styled(
         label.to_string(),
         Style::default().add_modifier(Modifier::REVERSED),
     ));
-    out.extend(crate::width::slice_line_by_column(
+    out.extend(crate::width::slice_line_by_column_strict(
         &rest,
         col.saturating_add(label_width),
         width,
+        true,
     ));
     out
 }
@@ -1820,6 +1827,7 @@ mod tests {
                 is_error: false,
             }),
             result_partial: false,
+            aborted: false,
         }))
     }
 
@@ -1889,6 +1897,7 @@ mod tests {
             ended_at: None,
             result: None,
             result_partial: false,
+            aborted: false,
         }));
         let mut view = view_with(vec![running, settled_tool_card("call_d")]);
         view.pulse_frame = 0;
@@ -2160,5 +2169,42 @@ mod tests {
         view.mark_entry_stale(0);
         let frame1 = transcript_text(&mut view, 80);
         assert!(frame1.contains("and more"));
+    }
+
+    /// The browse header inserts BELOW the editor's top row with an empty
+    /// companion row (TS `CustomEditor.render`'s two header rows), so the
+    /// content rows shift down two rows while a parked message is selected.
+    #[test]
+    fn browse_header_pair_sits_below_the_editor_top_row() {
+        let mut v = view();
+        v.queue_selected = Some(crate::queued::QueueSelectionItem {
+            lane: crate::queued::QueueLane::Steering,
+            index: 0,
+            text: "turn right".to_string(),
+        });
+        let frame = v.render_frame(80, 24);
+        let joined: Vec<String> = frame.iter().map(text_of).collect();
+        // The header truncates at the content width; `browse` sits inside
+        // the visible prefix (the strip hint row is absent - the queue is
+        // empty here, only the selection is set).
+        let header_row = joined
+            .iter()
+            .position(|row| row.contains("browse"))
+            .expect("the queue browse header renders");
+        assert!(
+            joined[header_row - 1].trim().is_empty(),
+            "the editor top row stays above the header: {:?}",
+            joined[header_row - 1]
+        );
+        assert!(
+            joined[header_row + 1].trim().is_empty(),
+            "the empty companion row follows the header: {:?}",
+            joined[header_row + 1]
+        );
+        assert!(
+            joined[header_row + 2].contains("> "),
+            "the content rows shift below the header pair: {:?}",
+            joined[header_row + 2]
+        );
     }
 }
