@@ -68,19 +68,32 @@ impl Worker {
     /// `get_context_tree` (TS `session.getContextTree`): the root node is
     /// the session itself — label, model, and the cumulative usage totals
     /// over the persisted branch (own usage excludes child usage
-    /// attributions) — and the children are the RLM child roster
-    /// (supervisor-backed children answer the TS disk-fallback node
-    /// shape: empty usage, no nested children).
+    /// attributions; the usage walk bridges ghost-parent gaps so one lost
+    /// append cannot zero the session's real spend) — and the children are
+    /// the live RLM roster plus every persisted child session dir under
+    /// the session's artifact tree (TS live runs + resident children +
+    /// `loadContextTreeChildrenFromDisk`): idle, settled, and
+    /// restart-orphaned subagents all appear, with their real usage and
+    /// recursive grandchildren. A live child's node is read from its
+    /// session file (the TS disk-fallback shape; the id, label, and status
+    /// come from the live registry, the fresher sources for a running
+    /// child).
     pub(crate) async fn handle_get_context_tree(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("get_context_tree") {
             return response;
         }
-        let (branch, all_entries, label, context_usage) = {
+        let (branch, all_entries, label, context_usage, session_file) = {
             let core = self.core.lock().unwrap();
             let store = core.store.as_ref();
             // Owned copies: the branch borrows the store, which the core
             // lock guards, so the walk below runs after the lock drops.
-            let branch = store.map(|store| store.branch().into_iter().cloned().collect::<Vec<_>>());
+            let branch = store.map(|store| {
+                store
+                    .branch_bridged()
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            });
             let all_entries = store.map(|store| store.entries().to_vec());
             let label = store
                 .and_then(|store| store.session_name().map(str::to_string))
@@ -88,7 +101,8 @@ impl Worker {
             let context_usage = store.and_then(|store| {
                 crate::session_stats::store_context_usage(store, self.engine.model_context_window())
             });
-            (branch, all_entries, label, context_usage)
+            let session_file = store.map(|store| store.path.clone());
+            (branch, all_entries, label, context_usage, session_file)
         };
         let (own_usage, total_usage) = match (&branch, &all_entries) {
             (Some(branch), Some(entries)) => compute_own_and_total_usage(branch, entries),
@@ -100,22 +114,49 @@ impl Worker {
                 "id": model.get("id")?,
             }))
         });
-        let children: Vec<Value> = self
-            .engine
-            .rlm_child_snapshots()
-            .await
-            .into_iter()
-            .map(|child| {
-                json!({
-                    "id": child.get("id").cloned().unwrap_or(Value::Null),
-                    "label": child.get("label").cloned().unwrap_or(Value::Null),
-                    "status": child.get("status").cloned().unwrap_or(Value::Null),
-                    "ownUsage": empty_usage(),
-                    "totalUsage": empty_usage(),
-                    "children": [],
+        let registry = worker_model_registry(&self.config.agent_dir);
+        let snapshots = self.engine.rlm_child_snapshots().await;
+        let mut live_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut children: Vec<Value> = Vec::with_capacity(snapshots.len());
+        for child in &snapshots {
+            let id = child.get("id").and_then(Value::as_str).map(str::to_string);
+            if let Some(id) = &id {
+                live_ids.insert(id.clone());
+            }
+            // TS: `run.session?.getContextTree() ?? loadContextTreeChildFromDisk(...)`
+            // — the node carries the child's real usage and its recursive
+            // grandchildren; the registry supplies the fresher identity.
+            let mut node = child
+                .get("sessionDir")
+                .and_then(Value::as_str)
+                .and_then(|dir| {
+                    crate::context_tree_children::load_context_tree_child(
+                        std::path::Path::new(dir),
+                        &registry,
+                    )
                 })
-            })
-            .collect();
+                .unwrap_or_else(|| {
+                    json!({
+                        "ownUsage": empty_usage(),
+                        "totalUsage": empty_usage(),
+                        "children": [],
+                    })
+                });
+            node["id"] = id.map(Value::String).unwrap_or(Value::Null);
+            node["label"] = child.get("label").cloned().unwrap_or(Value::Null);
+            node["status"] = child.get("status").cloned().unwrap_or(Value::Null);
+            children.push(node);
+        }
+        if let Some(artifact_dir) = session_file
+            .as_deref()
+            .and_then(crate::context_tree_children::session_artifact_dir)
+        {
+            children.extend(crate::context_tree_children::load_context_tree_children(
+                &artifact_dir,
+                &registry,
+                &live_ids,
+            ));
+        }
         let mut tree = json!({
             "id": "root",
             "label": label,
@@ -397,6 +438,39 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
 
+    /// A created worker backed by an existing session file (the store's
+    /// path, so the artifact tree beside it resolves).
+    async fn created_worker_at(
+        root: &std::path::Path,
+        session_file: &std::path::Path,
+    ) -> Arc<Worker> {
+        std::fs::create_dir_all(root).unwrap();
+        let config = crate::worker::WorkerConfig {
+            socket_path: root.join("worker.sock"),
+            supervisor_socket_path: std::path::PathBuf::new(),
+            token: "token".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "getter-session".to_string(),
+            agent_dir: root.join("agent"),
+            recovery_journal_path: root.join("recovery.jsonl"),
+            telemetry_disabled: None,
+            script: Some(json!({ "responses": ["ack"] })),
+        };
+        let worker = Arc::new(Worker::new(config, None));
+        let created = worker
+            .dispatch(
+                "create",
+                &json!({
+                    "sessionPath": session_file.display().to_string(),
+                    "cwd": "/tmp",
+                    "name": "getters",
+                }),
+            )
+            .await;
+        assert!(created.success, "create failed: {created:?}");
+        worker
+    }
+
     async fn created_worker() -> Arc<Worker> {
         let dir = std::env::temp_dir().join(format!("pa-worker-sg-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -547,6 +621,105 @@ mod tests {
         assert_eq!(tree["ownUsage"]["input"], json!(120));
         assert_eq!(tree["totalUsage"]["totalTokens"], json!(128));
         assert_eq!(tree["totalUsage"]["cost"]["total"].as_f64(), Some(0.0));
+    }
+
+    /// `get_context_tree` surfaces the persisted child sessions under the
+    /// session's artifact tree (idle, settled, and restart-orphaned
+    /// subagents all appear, with their real usage and recursive
+    /// grandchildren — TS `loadContextTreeChildrenFromDisk`).
+    #[tokio::test]
+    async fn get_context_tree_lists_persisted_children() {
+        let root = std::env::temp_dir().join(format!("pa-worker-ct-{}", uuid::Uuid::new_v4()));
+        let sessions = root.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let session_id = "01a0ct-1111-2222-3333-444444444444";
+        let session_file = sessions.join(format!("{session_id}.jsonl"));
+        let usage = json!({
+            "input": 30, "output": 6, "cacheRead": 0, "cacheWrite": 0,
+            "totalTokens": 36,
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0 },
+        });
+        let content = [
+            json!({"type": "session", "version": 3, "id": session_id, "timestamp": "2026-09-22T00:00:00.000Z", "cwd": "/tmp"}),
+            json!({"type": "message", "id": "e1", "parentId": null, "timestamp": "2026-09-22T00:00:01.000Z", "message": {"role": "user", "content": "hi"}}),
+            json!({"type": "message", "id": "e2", "parentId": "e1", "timestamp": "2026-09-22T00:00:02.000Z", "message": {"role": "assistant", "content": [{ "type": "text", "text": "hello" }], "provider": "prime-inference", "model": "internal/glm-5.3-fast", "usage": usage}}),
+        ]
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        std::fs::write(&session_file, content).unwrap();
+        // One settled child (with a grandchild) under the artifact tree.
+        let artifacts = root.join("session-artifacts").join(session_id);
+        let child_dir = artifacts.join("sub-003f741a");
+        let grandchild_dir = child_dir.join("sub-00aa00aa");
+        std::fs::create_dir_all(&grandchild_dir).unwrap();
+        let child_session = |stop: &str| {
+            json!({
+                "role": "assistant",
+                "content": [{ "type": "text", "text": "done" }],
+                "provider": "prime-inference", "model": "internal/glm-5.3-fast",
+                "stopReason": stop,
+                "usage": {
+                    "input": 10, "output": 5, "cacheRead": 0, "cacheWrite": 0,
+                    "totalTokens": 15,
+                    "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0 },
+                },
+            })
+        };
+        let write_child = |dir: &std::path::Path, session: &str, stop: &str| {
+            let lines = [
+                json!({"type": "session", "version": 3, "id": session, "timestamp": "2026-09-22T00:00:00.000Z", "cwd": "/tmp"}),
+                json!({"type": "message", "id": "c1", "parentId": null, "timestamp": "2026-09-22T00:00:01.000Z", "message": {"role": "user", "content": "fix the login bug"}}),
+                json!({"type": "message", "id": "c2", "parentId": "c1", "timestamp": "2026-09-22T00:00:02.000Z", "message": child_session(stop)}),
+            ];
+            std::fs::write(
+                dir.join(format!("{session}.jsonl")),
+                lines
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+            .unwrap();
+        };
+        write_child(&child_dir, "01a0child-1111-2222-3333-4444444444", "stop");
+        write_child(
+            &grandchild_dir,
+            "01a0grand-1111-2222-3333-4444444444",
+            "stop",
+        );
+
+        let worker = created_worker_at(&root, &session_file).await;
+        let response = worker
+            .dispatch(
+                "get_context_tree",
+                &json!({ "activeSessionId": "getter-session" }),
+            )
+            .await;
+        assert!(response.success, "failed: {response:?}");
+        let tree = response.data.expect("data");
+        assert_eq!(
+            tree["ownUsage"]["input"],
+            json!(30),
+            "the root usage counts"
+        );
+        let children = tree["children"].as_array().expect("children");
+        assert_eq!(
+            children.len(),
+            1,
+            "the persisted child appears: {children:?}"
+        );
+        let child = &children[0];
+        assert_eq!(child["id"], json!("sub-003f741a"));
+        assert_eq!(child["status"], json!("done"));
+        assert_eq!(child["label"], json!("fix the login bug"));
+        assert_eq!(child["ownUsage"]["totalTokens"], json!(15));
+        let grandchildren = child["children"].as_array().expect("grandchildren");
+        assert_eq!(grandchildren.len(), 1);
+        assert_eq!(grandchildren[0]["id"], json!("sub-00aa00aa"));
+        assert_eq!(grandchildren[0]["ownUsage"]["totalTokens"], json!(15));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The own/total split (TS `computeOwnAndTotalUsage`): attributions
