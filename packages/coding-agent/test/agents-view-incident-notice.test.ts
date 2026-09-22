@@ -1,4 +1,4 @@
-import { appendFileSync, linkSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, linkSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setKeybindings } from "@earendil-works/pi-tui";
@@ -32,7 +32,6 @@ vi.mock("../src/utils/tools-manager.js", async (importOriginal) => {
 });
 
 const DAEMON_SOCKET = "/tmp/prime-agent-501/daemon.sock";
-
 function logLine(fields: Record<string, unknown>): string {
 	return JSON.stringify({ level: "warn", ...fields });
 }
@@ -48,7 +47,6 @@ function supervisorStartLine(base: number, minutesAgoValue: number, generation =
 		pid: 15026,
 	});
 }
-
 function workerCrashLine(base: number, workerId: string, secondsAgoValue: number): string {
 	return logLine({
 		ts: tsAgo(base, secondsAgoValue * 1000),
@@ -56,7 +54,6 @@ function workerCrashLine(base: number, workerId: string, secondsAgoValue: number
 		msg: `Session worker ${workerId} stderr: uncaught exception: Error: write EPIPE`,
 	});
 }
-
 function commandTimeoutLine(base: number, minutesAgoValue: number, socketPath: string = DAEMON_SOCKET): string {
 	return logLine({
 		ts: tsAgo(base, minutesAgoValue * 60_000),
@@ -65,7 +62,6 @@ function commandTimeoutLine(base: number, minutesAgoValue: number, socketPath: s
 		msg: "Supervisor command attach failed: Error: Timed out waiting for daemon worker response to attach\n    at Timeout._onTimeout (node:internal/timers:618:7)",
 	});
 }
-
 function fixtureEntries(lines: readonly string[]) {
 	return lines.map((line) => parseIncidentLogLine(line)).filter((entry) => entry !== undefined);
 }
@@ -93,7 +89,6 @@ function useTempAgentDir(): string {
 	mkdirSync(join(dir, "logs"), { recursive: true });
 	return dir;
 }
-
 function writeAgentLog(lines: readonly string[]): void {
 	writeFileSync(getAgentLogPath(), `${lines.join("\n")}\n`);
 }
@@ -103,18 +98,15 @@ function appendAgentLog(lines: readonly string[]): void {
 function newView(persistentState: AgentsViewPersistentState = { savedCatalogLoaded: true }): AgentsViewMode {
 	return new AgentsViewMode({ config: {}, uiServices: createUiServices() }, persistentState);
 }
-
 /** The incident notice lines renderContent produces (startup notices stay unset). */
 function renderedIncidentLines(view: AgentsViewMode): string[] {
 	const lines = invoke("renderContent", view, 120, 40) as string[];
 	return lines.map(stripAnsi).filter((line) => line.includes("prime-agent incident"));
 }
-
 beforeAll(() => {
 	setKeybindings(new KeybindingsManager());
 	previousAgentDir = process.env[ENV_AGENT_DIR];
 });
-
 afterAll(() => {
 	if (previousAgentDir === undefined) {
 		delete process.env[ENV_AGENT_DIR];
@@ -125,7 +117,6 @@ afterAll(() => {
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
-
 beforeEach(() => {
 	vi.clearAllMocks();
 });
@@ -289,5 +280,18 @@ describe("agents view incident notices", () => {
 		const state = createIncidentNoticeState();
 		refreshIncidentNoticeState(state, getAgentLogPath(), Date.now());
 		expect(state.entries).toHaveLength(1);
+	});
+
+	it("completes the un-consumed tail of a generation that rotates out mid-session", () => {
+		useTempAgentDir();
+		const logPath = getAgentLogPath();
+		writeAgentLog([workerCrashLine(Date.now(), "5b1d3aeb91ee", 60)]);
+		const state = createIncidentNoticeState();
+		refreshIncidentNoticeState(state, logPath, Date.now());
+		appendAgentLog([workerCrashLine(Date.now(), "9f2c7a44b021", 30)]);
+		renameSync(logPath, `${logPath}.old`);
+		writeAgentLog([]);
+		refreshIncidentNoticeState(state, logPath, Date.now());
+		expect(state.notice).toMatchObject({ subject: "worker 9f2c7a44b021" });
 	});
 });
