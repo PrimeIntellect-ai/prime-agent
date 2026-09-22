@@ -7,13 +7,12 @@
 
 use serde_json::Value;
 
-use super::{
-    format_bash_duration, image_rows, panel_header, panel_line, ToolCallCard, ToolResultView,
-};
+use super::layout::{panel_content_width, RowOutput};
+use super::{format_bash_duration, ToolCallCard, ToolResultView};
 use crate::chat::Detail;
 use crate::code_preview::{preview_bash_command, CodePreviewLanguage};
-use crate::theme::{Theme, ThemeBg, ThemeColor};
-use crate::width::wrap_text;
+use crate::theme::{Theme, ThemeColor};
+use crate::width::{wrap_text, wrapped_text_count};
 use crate::{Line, Span};
 
 /// Collapsed preview length in visual lines (TS `BASH_PREVIEW_LINES`).
@@ -27,33 +26,46 @@ pub fn render(
     width: usize,
     show_images: bool,
 ) -> Vec<Line> {
-    let bg = theme.bg_style(ThemeBg::ToolPanelBg);
-    let content_width = width.saturating_sub(2 * 2).max(1);
-    let mut children: Vec<Line> = format_bash_call(card, theme, content_width);
+    let mut rows = RowOutput::paint();
+    visit(card, detail, theme, width, &mut rows);
+    rows.images(&card.result, show_images, theme);
+    rows.panel(card, frame, theme, width);
+    rows.into_lines()
+}
+
+pub(crate) fn count(
+    card: &ToolCallCard,
+    frame: usize,
+    detail: Detail,
+    theme: &Theme,
+    width: usize,
+    show_images: bool,
+) -> usize {
+    let mut rows = RowOutput::count();
+    visit(card, detail, theme, width, &mut rows);
+    rows.images(&card.result, show_images, theme);
+    rows.panel(card, frame, theme, width);
+    rows.len()
+}
+
+fn visit(card: &ToolCallCard, detail: Detail, theme: &Theme, width: usize, rows: &mut RowOutput) {
+    let content_width = panel_content_width(width);
+    rows.wrapped_line(&format_bash_call(card, theme), content_width);
     if let Some(result) = &card.result {
-        children.extend(bash_result_rows(
+        bash_result_rows(
             card,
             result,
             detail.tool_output_expanded(),
             theme,
             content_width,
-        ));
+            rows,
+        );
     }
-    children.extend(image_rows(&card.result, show_images, theme));
-
-    let mut lines = vec![panel_line(panel_header(card, frame, theme), bg, width)];
-    if !children.is_empty() {
-        lines.push(panel_line(Vec::new(), bg, width));
-        for child in children {
-            lines.push(panel_line(child, bg, width));
-        }
-    }
-    lines
 }
 
 /// The `$ command` call row (TS `formatBashCall`): dim, with the command
 /// preview (a non-bash language prefixes its label) and the timeout suffix.
-fn format_bash_call(card: &ToolCallCard, theme: &Theme, width: usize) -> Vec<Line> {
+fn format_bash_call(card: &ToolCallCard, theme: &Theme) -> Line {
     let dim = theme.fg_style(ThemeColor::Dim);
     let error = theme.fg_style(ThemeColor::Error);
     let tool_output = theme.fg_style(ThemeColor::ToolOutput);
@@ -83,7 +95,7 @@ fn format_bash_call(card: &ToolCallCard, theme: &Theme, width: usize) -> Vec<Lin
     if let Some(timeout) = card.args.get("timeout").and_then(Value::as_f64) {
         row.push(Span::styled(format!(" (timeout {timeout:.0}s)"), dim));
     }
-    crate::width::wrap_line(&row, width)
+    row
 }
 
 /// The result rows (TS `rebuildBashResultRenderComponent`): output rows,
@@ -94,66 +106,81 @@ fn bash_result_rows(
     expanded: bool,
     theme: &Theme,
     content_width: usize,
-) -> Vec<Line> {
+    rows: &mut RowOutput,
+) {
     let tool_output = theme.fg_style(ThemeColor::ToolOutput);
-    let mut rows: Vec<Line> = Vec::new();
-    let output = result.text_output(true).trim().to_string();
+    let output = result.text_output(true);
+    let output = output.trim();
     if !output.is_empty() {
+        rows.blank();
         if expanded {
-            rows.push(Vec::new());
             for line in output.split('\n') {
-                rows.push(vec![Span::styled(line.to_string(), tool_output)]);
+                rows.push(|| vec![Span::styled(line.to_string(), tool_output)]);
             }
         } else {
-            let (visual, skipped) = truncate_to_visual_lines(&output, content_width);
-            rows.push(Vec::new());
+            let total: usize = output
+                .split('\n')
+                .map(|line| wrapped_text_count(line, content_width).max(1))
+                .sum();
+            let skipped = total.saturating_sub(BASH_PREVIEW_LINES);
             if skipped > 0 {
-                rows.push(vec![Span::styled(
-                    format!("... {skipped} earlier lines"),
-                    theme.fg_style(ThemeColor::Dim),
-                )]);
+                rows.push(|| {
+                    vec![Span::styled(
+                        format!("... {skipped} earlier lines"),
+                        theme.fg_style(ThemeColor::Dim),
+                    )]
+                });
             }
-            rows.extend(
-                visual
-                    .into_iter()
-                    .map(|line| vec![Span::styled(line, tool_output)]),
-            );
+            if rows.is_counting() {
+                rows.add_count(total.min(BASH_PREVIEW_LINES));
+            } else {
+                let mut remaining = skipped;
+                for line in output.split('\n') {
+                    let count = wrapped_text_count(line, content_width).max(1);
+                    if remaining >= count {
+                        remaining -= count;
+                        continue;
+                    }
+                    let wrapped = wrap_text(line, content_width);
+                    if wrapped.is_empty() {
+                        rows.push(|| vec![Span::styled(String::new(), tool_output)]);
+                    } else {
+                        for row in wrapped.into_iter().skip(remaining) {
+                            rows.push(|| {
+                                vec![Span::styled(
+                                    row.iter()
+                                        .map(|span| span.content.as_str())
+                                        .collect::<String>(),
+                                    tool_output,
+                                )]
+                            });
+                        }
+                    }
+                    remaining = 0;
+                }
+            }
         }
     }
-    rows.extend(truncation_warning_rows(result, theme, content_width));
-    rows.extend(duration_rows(card, result, theme, content_width));
-    rows
-}
-
-/// `truncateToVisualLines` from the end: the wrapped rows and how many
-/// earlier rows were skipped.
-fn truncate_to_visual_lines(text: &str, width: usize) -> (Vec<String>, usize) {
-    let mut visual: Vec<String> = Vec::new();
-    for line in text.split('\n') {
-        let wrapped = wrap_text(line, width);
-        if wrapped.is_empty() {
-            visual.push(String::new());
-            continue;
-        }
-        for row in wrapped {
-            let text: String = row.iter().map(|s| s.content.as_str()).collect();
-            visual.push(text);
-        }
+    if let Some(warning) = truncation_warning(result) {
+        rows.blank();
+        rows.wrapped_text(&warning, theme.fg_style(ThemeColor::Warning), content_width);
     }
-    if visual.len() <= BASH_PREVIEW_LINES {
-        return (visual, 0);
+    if let Some(started) = card.started_at {
+        let label = if card.result_partial {
+            "Elapsed"
+        } else {
+            "Took"
+        };
+        let elapsed = card.ended_at.unwrap_or_else(std::time::Instant::now) - started;
+        let text = format!("{label} {}", format_bash_duration(elapsed.as_millis()));
+        rows.blank();
+        rows.wrapped_text(&text, theme.fg_style(ThemeColor::Dim), content_width);
     }
-    let skipped = visual.len() - BASH_PREVIEW_LINES;
-    (visual.split_off(skipped), skipped)
 }
 
 /// The truncation notice (`[Full output: ... . Truncated: ...]`, warning
 /// color) when the engine cut the output or spilled it to a file.
-fn truncation_warning_rows(
-    result: &ToolResultView,
-    theme: &Theme,
-    content_width: usize,
-) -> Vec<Line> {
+fn truncation_warning(result: &ToolResultView) -> Option<String> {
     let details = result.details.as_object();
     let truncation = details.and_then(|d| d.get("truncation"));
     let full_output_path = details
@@ -163,7 +190,7 @@ fn truncation_warning_rows(
     let truncated =
         truncation.is_some_and(|t| t.get("truncated").and_then(Value::as_bool).unwrap_or(false));
     if !truncated && full_output_path.is_none() {
-        return Vec::new();
+        return None;
     }
     let mut warnings: Vec<String> = Vec::new();
     if let Some(path) = full_output_path {
@@ -196,66 +223,9 @@ fn truncation_warning_rows(
         }
     }
     if warnings.is_empty() {
-        return Vec::new();
+        return None;
     }
-    let text = format!("[{}]", warnings.join(". "));
-    styled_wrapped(&text, ThemeColor::Warning, theme, content_width, true)
-}
-
-/// The `Took 1.2s` row (live timing: a card that never saw its execution
-/// start renders no duration row, matching the TS render-state lifecycle).
-fn duration_rows(
-    card: &ToolCallCard,
-    _result: &ToolResultView,
-    theme: &Theme,
-    content_width: usize,
-) -> Vec<Line> {
-    let Some(started) = card.started_at else {
-        return Vec::new();
-    };
-    let label = if card.result_partial {
-        "Elapsed"
-    } else {
-        "Took"
-    };
-    let elapsed = card.ended_at.unwrap_or_else(std::time::Instant::now) - started;
-    let text = format!("{label} {}", format_bash_duration(elapsed.as_millis()));
-    let mut rows = vec![Vec::new()];
-    rows.extend(styled_wrapped(
-        &text,
-        ThemeColor::Dim,
-        theme,
-        content_width,
-        false,
-    ));
-    rows
-}
-
-/// One row list in one color, wrapped at the content width; `leading_blank`
-/// prepends the separator row TS's `\n` prefix produces.
-fn styled_wrapped(
-    text: &str,
-    color: ThemeColor,
-    theme: &Theme,
-    content_width: usize,
-    leading_blank: bool,
-) -> Vec<Line> {
-    let style = theme.fg_style(color);
-    let mut rows: Vec<Line> = Vec::new();
-    if leading_blank {
-        rows.push(Vec::new());
-    }
-    for row in wrap_text(text, content_width) {
-        rows.push(
-            row.into_iter()
-                .map(|mut span| {
-                    span.style = style;
-                    span
-                })
-                .collect(),
-        );
-    }
-    rows
+    Some(format!("[{}]", warnings.join(". ")))
 }
 
 #[cfg(test)]
@@ -436,5 +406,52 @@ mod tests {
         let rows = render(&card, 0, Detail::Overview, &theme(), 120, true);
         let flat: Vec<String> = rows.iter().map(text_of).collect();
         assert!(flat.iter().any(|r| r.contains("$ ...")), "got: {flat:?}");
+    }
+    #[test]
+    fn geometry_matches_render_across_card_states() {
+        let theme = theme();
+        for output in [
+            "",
+            "a\n\nb\n",
+            "界e\u{301} 👩‍💻\tend",
+            "abcdefghijklmnopqrstuvwxyz",
+            "a\nb\nc\nd\ne\nf\ng",
+            "\u{1b}[31mred\u{1b}[0m",
+        ] {
+            for args in [
+                json!({}),
+                json!({"command": null}),
+                json!({"command": "echo hello", "timeout": 123}),
+                json!({"command": "python -c 'print(1)'"}),
+            ] {
+                for state in 0..4 {
+                    let mut card = done_card("", output);
+                    card.args = args.clone();
+                    card.result_partial = state == 1;
+                    if state == 0 {
+                        card.result = None;
+                        card.started_at = None;
+                    }
+                    if let Some(result) = &mut card.result {
+                        result.is_error = state == 2;
+                        result.details = json!({"truncation": {"truncated": true, "truncatedBy": "lines", "outputLines": 2, "totalLines": 10}, "fullOutputPath": "/tmp/full"});
+                        result
+                            .content
+                            .push(json!({"type": "image", "data": "", "mimeType": "image/png"}));
+                    }
+                    for width in [0, 1, 2, 3, 4, 5, 8, 20, 40, 80] {
+                        for detail in [Detail::Overview, Detail::Details, Detail::All] {
+                            for show_images in [false, true] {
+                                let painted = render(&card, 3, detail, &theme, width, show_images);
+                                assert_eq!(
+                                    count(&card, 3, detail, &theme, width, show_images),
+                                    painted.len()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

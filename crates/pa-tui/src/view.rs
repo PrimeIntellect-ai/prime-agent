@@ -22,6 +22,7 @@ use crate::{Line, Span};
 use pa_types::slash_commands::SlashCommandRegistry;
 use ratatui::style::{Modifier, Style};
 
+mod geometry;
 mod layout;
 pub(crate) mod lazy;
 
@@ -175,6 +176,7 @@ pub struct AgentView {
     /// pre-fix render loop re-rendered every agent message in the
     /// transcript on every streaming delta, the dogfood CPU spin.
     entry_layout: Vec<[Option<EntryLayout>; 3]>,
+    entry_heights: Vec<[Option<(bool, usize)>; 3]>,
     sparse_window: Option<lazy::SparseWindow>,
     sparse_enabled: bool,
     sparse_entries: std::collections::BTreeSet<usize>,
@@ -243,6 +245,7 @@ impl AgentView {
             window_rows: 0,
             osc_last_rows: std::collections::HashMap::new(),
             entry_layout: Vec::new(),
+            entry_heights: Vec::new(),
             sparse_window: None,
             sparse_enabled: true,
             sparse_entries: std::collections::BTreeSet::new(),
@@ -416,6 +419,7 @@ impl AgentView {
         self.sparse_window = None;
         self.chat.clear();
         self.entry_layout.clear();
+        self.entry_heights.clear();
         self.md_caches.borrow_mut().clear();
     }
 
@@ -438,12 +442,18 @@ impl AgentView {
         if let Some(slot) = self.entry_layout.get_mut(index) {
             *slot = [None, None, None];
         }
+        if let Some(slot) = self.entry_heights.get_mut(index) {
+            *slot = [None, None, None];
+        }
         for (offset, entry) in self.chat.iter().enumerate().skip(index + 1) {
             if matches!(
                 entry,
                 ChatEntry::AgentMessage(_) | ChatEntry::ShellCompletion(_) | ChatEntry::Tool(_)
             ) {
                 if let Some(slot) = self.entry_layout.get_mut(offset) {
+                    *slot = [None, None, None];
+                }
+                if let Some(slot) = self.entry_heights.get_mut(offset) {
                     *slot = [None, None, None];
                 }
             }

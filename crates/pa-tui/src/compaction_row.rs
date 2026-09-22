@@ -130,6 +130,75 @@ pub fn render_compaction_summary(
     theme: &Theme,
     width: usize,
 ) -> Vec<Line> {
+    let mut rows = SummaryRows::Paint(Vec::new());
+    visit_summary(
+        summary,
+        tokens_before,
+        custom_instructions,
+        expanded,
+        theme,
+        width,
+        &mut rows,
+    );
+    match rows {
+        SummaryRows::Paint(output) => output,
+        SummaryRows::Count(_) => unreachable!("paint sink"),
+    }
+}
+
+pub(crate) fn count_compaction_summary(
+    summary: &str,
+    tokens_before: u64,
+    custom_instructions: Option<&str>,
+    expanded: bool,
+    theme: &Theme,
+    width: usize,
+) -> usize {
+    let mut rows = SummaryRows::Count(0);
+    visit_summary(
+        summary,
+        tokens_before,
+        custom_instructions,
+        expanded,
+        theme,
+        width,
+        &mut rows,
+    );
+    match rows {
+        SummaryRows::Count(count) => count,
+        SummaryRows::Paint(_) => unreachable!("count sink"),
+    }
+}
+
+enum SummaryRows {
+    Paint(Vec<Line>),
+    Count(usize),
+}
+
+impl SummaryRows {
+    fn text(&mut self, text: &str, style: ratatui::style::Style, width: usize) {
+        match self {
+            Self::Paint(output) => output.extend(crate::chat::render_text_rows(text, style, width)),
+            Self::Count(count) => {
+                if !text.trim().is_empty() {
+                    *count +=
+                        crate::width::wrapped_text_count(text, width.saturating_sub(2).max(1))
+                            .max(1);
+                }
+            }
+        }
+    }
+}
+
+fn visit_summary(
+    summary: &str,
+    tokens_before: u64,
+    custom_instructions: Option<&str>,
+    expanded: bool,
+    theme: &Theme,
+    width: usize,
+    rows: &mut SummaryRows,
+) {
     let header = theme.fg_style(ThemeColor::RefinementHeader);
     let body = theme.fg_style(ThemeColor::RefinementSummary);
     let summary = if summary.trim().is_empty() {
@@ -137,15 +206,20 @@ pub fn render_compaction_summary(
     } else {
         summary
     };
-    let mut rows: Vec<Line> = Vec::new();
-    rows.extend(crate::chat::render_text_rows(
-        "\u{25c6} Context compacted",
-        header,
-        width,
-    ));
+    rows.text("\u{25c6} Context compacted", header, width);
     if !expanded {
-        rows.extend(collapsed_summary_rows(summary, body, width));
-        return rows;
+        let collapsed = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+        match rows {
+            SummaryRows::Paint(output) => {
+                output.extend(collapsed_summary_rows(&collapsed, body, width))
+            }
+            SummaryRows::Count(count) => {
+                *count +=
+                    crate::width::wrapped_text_count(&collapsed, width.saturating_sub(1).max(1))
+                        .min(2)
+            }
+        }
+        return;
     }
     // The expanded view: the raw summary through the markdown renderer
     // (TS passes `this.message.summary` untrimmed — the final paragraph row
@@ -154,35 +228,43 @@ pub fn render_compaction_summary(
     let content_width = width.saturating_sub(2).max(1);
     let mut md = crate::markdown::MarkdownStyle::from_theme(theme);
     md.body = body;
-    for line in crate::markdown::render_markdown(summary, content_width, &md) {
-        let mut row: Line = vec![Span::raw(" ".to_string())];
-        row.extend(line);
-        rows.push(crate::chat::pad_to(
-            row,
-            width,
-            ratatui::style::Style::default(),
-        ));
+    match rows {
+        SummaryRows::Count(count) => {
+            *count += crate::markdown::markdown_row_count(summary, content_width, &md)
+        }
+        SummaryRows::Paint(output) => {
+            for line in crate::markdown::render_markdown(summary, content_width, &md) {
+                let mut row = vec![Span::raw(" ".to_string())];
+                row.extend(line);
+                output.push(crate::chat::pad_to(
+                    row,
+                    width,
+                    ratatui::style::Style::default(),
+                ));
+            }
+        }
     }
     let focus = custom_instructions
         .filter(|instructions| !instructions.is_empty())
         .map(|instructions| format!(" \u{b7} focus: {instructions}"))
         .unwrap_or_default();
     // TS `Spacer(1)` between the markdown body and the metadata row.
-    rows.push(Vec::new());
-    rows.extend(crate::chat::render_text_rows(
+    match rows {
+        SummaryRows::Paint(output) => output.push(Vec::new()),
+        SummaryRows::Count(count) => *count += 1,
+    }
+    rows.text(
         &format!("Compacted from {} tokens{focus}", grouped(tokens_before)),
         theme.fg_style(ThemeColor::Dim),
         width,
-    ));
-    rows
+    );
 }
 
 /// The collapsed summary (TS `EventSummary`): whitespace collapsed, wrapped
 /// at `width - 1`, capped at two lines with the ellipsis on the second.
 fn collapsed_summary_rows(summary: &str, style: ratatui::style::Style, width: usize) -> Vec<Line> {
     let content_width = width.saturating_sub(1).max(1);
-    let collapsed = summary.split_whitespace().collect::<Vec<_>>().join(" ");
-    let wrapped = wrap_text(&collapsed, content_width);
+    let wrapped = wrap_text(summary, content_width);
     let mut lines: Vec<String> = wrapped
         .iter()
         .map(|line| {
@@ -397,5 +479,37 @@ mod tests {
         assert_eq!(grouped(999), "999");
         assert_eq!(grouped(1234), "1,234");
         assert_eq!(grouped(12_345_678), "12,345,678");
+    }
+    #[test]
+    fn summary_geometry_matches_render() {
+        let theme = theme();
+        for summary in [
+            "",
+            "   ",
+            "plain text\n more words",
+            "界e\u{301} 👩‍💻 end",
+            "## heading\nbody  ",
+            "- first\n- second",
+            "```python\nprint(1)\n```",
+            "| a | b |\n|---|---|\n| wide word | 界 |",
+            "> quote\n\n---",
+        ] {
+            for width in 0..=80 {
+                for expanded in [false, true] {
+                    for focus in [None, Some(""), Some("a long focus with words and 界")] {
+                        let painted = render_compaction_summary(
+                            summary, 12345, focus, expanded, &theme, width,
+                        );
+                        assert_eq!(
+                            count_compaction_summary(
+                                summary, 12345, focus, expanded, &theme, width
+                            ),
+                            painted.len(),
+                            "summary={summary:?} width={width} expanded={expanded}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

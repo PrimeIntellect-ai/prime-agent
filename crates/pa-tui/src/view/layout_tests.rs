@@ -233,3 +233,129 @@ fn mutation_invalidates_every_detail_slot() {
     }
     assert_eq!(ENTRY_RENDERS.with(std::cell::Cell::get), 3);
 }
+
+#[test]
+fn cold_paused_detail_uses_counts_not_offscreen_lines_for_supported_entries() {
+    let mut view = view();
+    for index in 0..100_000 {
+        view.push_entry(ChatEntry::Assistant(Box::new(AssistantMessage {
+            blocks: vec![
+                MessageBlock::Text(format!("body {index}")),
+                MessageBlock::Thinking("thought\nthought".into()),
+            ],
+            has_tool_calls: false,
+            streaming: false,
+            error: None,
+            aborted: false,
+        })));
+    }
+    view.render_frame(80, 24);
+    view.scroll_by(-100);
+    view.render_frame(80, 24);
+    view.detail = Detail::All;
+    ENTRY_RENDERS.with(|count| count.set(0));
+    view.render_frame(80, 24);
+    assert!(ENTRY_RENDERS.with(std::cell::Cell::get) < 30);
+    ENTRY_RENDERS.with(|count| count.set(0));
+    view.detail = Detail::Overview;
+    view.render_frame(80, 24);
+    assert!(ENTRY_RENDERS.with(std::cell::Cell::get) < 30);
+}
+
+#[test]
+fn mixed_100k_paused_toggle_materializes_only_viewport_entries() {
+    let mut view = view();
+    for index in 0..100_000 {
+        let entry = match index % 4 {
+            0 => ChatEntry::User {
+                text: format!("message {index}"),
+            },
+            1 => ChatEntry::Assistant(Box::new(AssistantMessage {
+                blocks: vec![
+                    MessageBlock::Text("body".into()),
+                    MessageBlock::Thinking("reasoning".into()),
+                ],
+                has_tool_calls: true,
+                streaming: false,
+                error: None,
+                aborted: false,
+            })),
+            2 => ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
+                name: "other".into(),
+                result: Some(crate::chat::ToolResultView {
+                    content: vec![
+                        serde_json::json!({"type":"text","text":"one\ntwo\nthree\nfour"}),
+                    ],
+                    details: serde_json::Value::Null,
+                    is_error: false,
+                }),
+                ..Default::default()
+            })),
+            3 => ChatEntry::CompactionSummary {
+                summary: "summary\nnext".into(),
+                tokens_before: 100,
+                custom_instructions: None,
+            },
+            _ => unreachable!("modulo four"),
+        };
+        view.push_entry(entry);
+    }
+    view.render_frame(80, 24);
+    view.scroll_by(-100);
+    view.render_frame(80, 24);
+    ENTRY_RENDERS.with(|count| count.set(0));
+    view.detail = Detail::All;
+    view.render_frame(80, 24);
+    assert!(ENTRY_RENDERS.with(std::cell::Cell::get) < 30);
+    assert!(
+        view.entry_layout
+            .iter()
+            .filter(|slots| slots.iter().any(Option::is_some))
+            .count()
+            < 100
+    );
+}
+
+#[test]
+fn height_cache_tracks_mutations_and_spacing_in_all_details() {
+    let mut view = view();
+    view.push_entry(ChatEntry::Assistant(Box::new(AssistantMessage {
+        blocks: vec![MessageBlock::Thinking("hidden".into())],
+        has_tool_calls: false,
+        streaming: true,
+        error: None,
+        aborted: false,
+    })));
+    view.push_entry(ChatEntry::Tool(Box::default()));
+    for detail in [Detail::Overview, Detail::Details, Detail::All] {
+        view.detail = detail;
+        view.layout_pass(30);
+    }
+    view.prepare_entry_mutation();
+    if let ChatEntry::Assistant(message) = &mut view.chat[0] {
+        message
+            .blocks
+            .push(MessageBlock::Text("visible words\nmore words".into()));
+        message.streaming = false;
+        message.has_tool_calls = true;
+    }
+    view.mark_entry_stale(0);
+    for detail in [Detail::Overview, Detail::Details, Detail::All] {
+        view.detail = detail;
+        for width in [30, 12] {
+            let layout = view.layout_pass(width);
+            let mut reference = render_splash(&view.chrome, &view.theme, width);
+            for (index, entry) in view.chat.iter().enumerate() {
+                reference.extend(view.render_entry(
+                    index,
+                    entry,
+                    width,
+                    index == 0,
+                    index > 0 && matches!(view.chat[index - 1], ChatEntry::Tool(_)),
+                ));
+            }
+            assert_eq!(layout.total, reference.len());
+            assert_eq!(view.transcript_window(&layout, 0, usize::MAX), reference);
+        }
+    }
+}

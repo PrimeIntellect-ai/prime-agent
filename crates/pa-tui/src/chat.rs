@@ -5,6 +5,9 @@
 //! block spacers, and `loader.ts` (`Loader` + `agent-activity.ts` labels).
 //! Tool-call cards live in `crate::tool_card`.
 
+mod geometry;
+pub(crate) use geometry::{assistant_row_count, user_block_row_count};
+
 use crate::snapshot::RetryStartReason;
 use crate::theme::{Theme, ThemeBg, ThemeColor};
 use crate::width::str_width;
@@ -309,10 +312,7 @@ pub fn render_user_block(
     let body = theme.fg_style(ThemeColor::UserMessageText);
     let mut md = crate::markdown::MarkdownStyle::from_theme(theme);
     md.code_block_indent = code_block_indent.to_string();
-    let (command_end, include_bare_separator) =
-        crate::prompt_highlight::user_message_command_span(text);
-    let mask =
-        crate::prompt_highlight::PromptTokenMask::new(text, command_end, include_bare_separator);
+    let mask = geometry::user_mask(text);
     let rendered = crate::markdown::render_markdown(&mask.text, content_width, &md);
     let mut rows: Vec<Line> = Vec::new();
     let blank = vec![Span::styled(" ".repeat(width), bg)];
@@ -361,15 +361,7 @@ pub fn render_assistant(
     preceded_by_tool_activity: bool,
     cache: &mut crate::markdown::MarkdownBlockCache,
 ) -> Vec<Line> {
-    let show_thinking = detail.show_thinking();
-    let visible_blocks: Vec<&MessageBlock> = message
-        .blocks
-        .iter()
-        .filter(|block| match block {
-            MessageBlock::Thinking(text) => show_thinking && !text.trim().is_empty(),
-            MessageBlock::Text(text) => !text.trim().is_empty(),
-        })
-        .collect();
+    let visible_blocks = geometry::visible_blocks(message, detail);
     let has_visible_content = !visible_blocks.is_empty();
     let mut out: Vec<Line> = Vec::new();
     if has_visible_content {
@@ -405,9 +397,7 @@ pub fn render_assistant(
     // TS `AssistantMessageComponent.hasTrailingSpace`: the tool-call
     // separator renders for visible bodies, aborted messages, and messages
     // not following tool activity.
-    if message.has_tool_calls
-        && (has_visible_content || message.aborted || !preceded_by_tool_activity)
-    {
+    if geometry::trailing_space(message, has_visible_content, preceded_by_tool_activity) {
         out.push(spacer());
     }
     // Zone markers on message bodies without tool calls (TS
@@ -457,22 +447,7 @@ fn render_thinking_block(
     width: usize,
     cache: &mut crate::markdown::MarkdownBlockCache,
 ) -> Vec<Line> {
-    let mut md = md.clone();
-    let dim = theme.fg_style(ThemeColor::Dim);
-    // TS `getThinkingMarkdownTheme` replaces `highlightCode` with uniform
-    // dim lines: the thinking code blocks never highlight.
-    md.syntax = None;
-    md.body = dim;
-    md.heading = dim;
-    md.link = dim;
-    md.link_url = dim;
-    md.code = dim;
-    md.code_block = dim;
-    md.code_block_border = dim;
-    md.quote = dim;
-    md.quote_border = dim;
-    md.hr = dim;
-    md.list_bullet = dim;
+    let md = geometry::thinking_style(md, theme);
     let content_width = width.saturating_sub(2).max(1);
     let rendered =
         crate::markdown::render_markdown_tagged(text.trim(), content_width, &md, "dim", cache);

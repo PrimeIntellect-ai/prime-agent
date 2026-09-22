@@ -1,12 +1,9 @@
-//! The generic tool panel for tools without a dedicated card (TS
-//! `ToolExecutionComponent`'s fallback path): a `label \u{00b7} status`
-//! header, then the call arguments and any text output with the shared
-//! `... more lines` fallback preview.
+//! Generic tool-panel rendering and count-only geometry share one preview traversal.
 
-use super::{image_rows, panel_header, panel_line, ToolCallCard};
+use super::layout::{panel_content_width, RowOutput};
+use super::ToolCallCard;
 use crate::chat::Detail;
-use crate::theme::{Theme, ThemeBg, ThemeColor};
-use crate::width::wrap_text;
+use crate::theme::{Theme, ThemeColor};
 use crate::{Line, Span};
 
 pub fn render(
@@ -17,78 +14,86 @@ pub fn render(
     width: usize,
     show_images: bool,
 ) -> Vec<Line> {
-    let bg = theme.bg_style(ThemeBg::ToolPanelBg);
-    let content_width = width.saturating_sub(2 * 2).max(1);
-    let mut children: Vec<Line> = Vec::new();
-    // TS `formatToolExecution`: the arguments preview, a blank row, then the
-    // output preview (each independently previewed). Hidden image blocks
-    // contribute their `[Image: ...]` text here (`getTextOutput` with
-    // `showImages` false).
+    let mut out = RowOutput::paint();
+    traverse(card, detail, theme, width, show_images, &mut out);
+    out.panel(card, frame, theme, width);
+    out.into_lines()
+}
+
+pub(crate) fn count(
+    card: &ToolCallCard,
+    frame: usize,
+    detail: Detail,
+    theme: &Theme,
+    width: usize,
+    show_images: bool,
+) -> usize {
+    let mut out = RowOutput::count();
+    traverse(card, detail, theme, width, show_images, &mut out);
+    out.panel(card, frame, theme, width);
+    out.len()
+}
+
+fn traverse(
+    card: &ToolCallCard,
+    detail: Detail,
+    theme: &Theme,
+    width: usize,
+    show_images: bool,
+    out: &mut RowOutput,
+) {
+    let content_width = panel_content_width(width);
     let args = serde_json::to_string_pretty(&card.args).unwrap_or_default();
     let output = card.result.as_ref().map(|r| r.text_output(show_images));
     if !args.is_empty() {
-        children.extend(fallback_preview(
+        fallback_preview(
             &args,
             detail.tool_output_expanded(),
             theme,
             content_width,
-        ));
+            out,
+        );
     }
     if let Some(output) = output.as_deref().filter(|o| !o.is_empty()) {
-        if !children.is_empty() {
-            children.push(Vec::new());
+        if out.len() > 0 {
+            out.blank();
         }
-        children.extend(fallback_preview(
+        fallback_preview(
             output,
             detail.tool_output_expanded(),
             theme,
             content_width,
-        ));
+            out,
+        );
     }
-    children.extend(image_rows(&card.result, show_images, theme));
-
-    let mut lines = vec![panel_line(panel_header(card, frame, theme), bg, width)];
-    if !children.is_empty() {
-        lines.push(panel_line(Vec::new(), bg, width));
-        for child in children {
-            lines.push(panel_line(child, bg, width));
-        }
-    }
-    lines
+    out.images(&card.result, show_images, theme);
 }
 
-/// The fallback preview (TS `formatFallbackPreview`): the full text
-/// expanded, the first three lines plus `\u{2026} N more lines` collapsed.
-/// (`getTextOutput` with `showImages` false appends the image fallbacks, so
-/// image results show their placeholder rows here too.)
-fn fallback_preview(text: &str, expanded: bool, theme: &Theme, content_width: usize) -> Vec<Line> {
-    let dim = theme.fg_style(ThemeColor::Dim);
+/// Preview the first three source lines, not the first three wrapped rows.
+fn fallback_preview(
+    text: &str,
+    expanded: bool,
+    theme: &Theme,
+    content_width: usize,
+    out: &mut RowOutput,
+) {
     let tool_output = theme.fg_style(ThemeColor::ToolOutput);
     if expanded {
-        return styled_rows(text, tool_output, content_width);
+        out.wrapped_text(text, tool_output, content_width);
+        return;
     }
     let lines: Vec<&str> = text.split('\n').collect();
     if lines.len() <= 3 {
-        return styled_rows(text, tool_output, content_width);
+        out.wrapped_text(text, tool_output, content_width);
+        return;
     }
-    let mut rows = styled_rows(&lines[..3].join("\n"), tool_output, content_width);
-    let more = format!("\u{2026} {} more lines", lines.len() - 3);
-    rows.push(vec![Span::styled(more, dim)]);
-    rows
-}
-
-fn styled_rows(text: &str, style: ratatui::style::Style, width: usize) -> Vec<Line> {
-    wrap_text(text, width)
-        .into_iter()
-        .map(|row| {
-            row.into_iter()
-                .map(|mut span| {
-                    span.style = style;
-                    span
-                })
-                .collect()
-        })
-        .collect()
+    out.wrapped_text(&lines[..3].join("\n"), tool_output, content_width);
+    out.push(|| {
+        vec![Span::styled(
+            format!("\u{2026} {} more lines", lines.len() - 3),
+            theme.fg_style(ThemeColor::Dim),
+        )]
+    });
 }
 
 #[cfg(test)]
@@ -132,6 +137,46 @@ mod tests {
         bytes.extend(width.to_be_bytes());
         bytes.extend(height.to_be_bytes());
         base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn geometry_matches_rendered_generic_cards() {
+        let theme = theme();
+        let mut cards = vec![ToolCallCard::default(), image_card()];
+        for text in [
+            "",
+            "a\n",
+            "one\ntwo\nthree\nfour\n",
+            "数据 é 👩‍💻\n\nlong long long words\n\u{1b}[31mred\u{1b}[0m",
+        ] {
+            cards.push(ToolCallCard {
+                name: "custom".into(),
+                args: json!({ "long": [1, 2, 3, 4], "unicode": "数据" }),
+                result: Some(super::super::ToolResultView {
+                    content: vec![
+                        json!({"type":"text", "text":text}),
+                        json!({"type":"image", "mimeType":"image/png"}),
+                    ],
+                    is_error: true,
+                    ..Default::default()
+                }),
+                result_partial: true,
+                ..Default::default()
+            });
+        }
+        for card in cards {
+            for detail in [Detail::Overview, Detail::Details, Detail::All] {
+                for show_images in [false, true] {
+                    let expected: Vec<_> = (0..90)
+                        .map(|width| render(&card, 0, detail, &theme, width, show_images).len())
+                        .collect();
+                    let actual: Vec<_> = (0..90)
+                        .map(|width| count(&card, 0, detail, &theme, width, show_images))
+                        .collect();
+                    assert_eq!(actual, expected, "{detail:?}, show_images={show_images}");
+                }
+            }
+        }
     }
 
     #[test]

@@ -10,6 +10,7 @@ pub mod generic;
 pub mod highlight;
 pub mod ipython;
 pub mod ipython_details;
+mod layout;
 
 use std::time::Instant;
 
@@ -169,7 +170,7 @@ pub(crate) fn panel_header(card: &ToolCallCard, frame: usize, theme: &Theme) -> 
 /// the panel background (TS `toolPanelLine`).
 pub(crate) fn panel_line(content: Line, bg: ratatui::style::Style, width: usize) -> Line {
     let padding = 2usize;
-    let content_width = width.saturating_sub(padding * 2).max(1);
+    let content_width = layout::panel_content_width(width);
     let mut line: Line = vec![Span::styled(" ".repeat(padding), bg)];
     let used: usize = content
         .iter()
@@ -218,23 +219,8 @@ pub(crate) fn image_rows(
     show_images: bool,
     theme: &Theme,
 ) -> Vec<Line> {
-    let Some(result) = result else {
-        return Vec::new();
-    };
     let mut rows: Vec<Line> = Vec::new();
-    for block in &result.content {
-        if block.get("type").and_then(Value::as_str) != Some("image") {
-            continue;
-        }
-        let (Some(data), Some(mime)) = (
-            block.get("data").and_then(Value::as_str),
-            block.get("mimeType").and_then(Value::as_str),
-        ) else {
-            continue;
-        };
-        if !show_images {
-            continue;
-        }
+    for (data, mime) in eligible_images(result, show_images) {
         let mut image = crate::image_component::ImageComponent::new(
             data.to_string(),
             mime.to_string(),
@@ -251,6 +237,40 @@ pub(crate) fn image_rows(
         rows.extend(image.render(80));
     }
     rows
+}
+
+fn eligible_images(
+    result: &Option<ToolResultView>,
+    show_images: bool,
+) -> impl Iterator<Item = (&str, &str)> {
+    result
+        .iter()
+        .flat_map(|result| &result.content)
+        .filter_map(move |block| {
+            if !show_images || block.get("type").and_then(Value::as_str) != Some("image") {
+                return None;
+            }
+            Some((
+                block.get("data")?.as_str()?,
+                block.get("mimeType")?.as_str()?,
+            ))
+        })
+}
+
+/// Exact row geometry for every tool shell without painting output rows.
+pub(crate) fn count_tool_card(
+    card: &ToolCallCard,
+    frame: usize,
+    detail: Detail,
+    theme: &Theme,
+    width: usize,
+    show_images: bool,
+) -> usize {
+    match card.name.as_str() {
+        "ipython" => ipython::count(card, frame, detail, theme, width, show_images),
+        "bash" => bash::count(card, frame, detail, theme, width, show_images),
+        _ => generic::count(card, frame, detail, theme, width, show_images),
+    }
 }
 
 #[cfg(test)]

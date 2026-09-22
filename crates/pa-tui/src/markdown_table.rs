@@ -3,7 +3,7 @@
 //! alignment/delimiter row, and data rows, sized so every column fits the
 //! available width, with cells wrapped and padded per column.
 
-use crate::markdown::{render_inline, wrap_spans, MarkdownStyle};
+use crate::markdown::{render_inline, wrap_spans, wrapped_span_count, MarkdownStyle};
 use crate::width::str_width;
 use crate::{Line, Span};
 use ratatui::style::Style;
@@ -133,35 +133,24 @@ pub(crate) fn parse_table_block(lines: &[&str], index: &mut usize) -> Table {
     Table { header, rows, raw }
 }
 
-/// Render the table (TS `renderTable`): compute per-column widths from the
-/// natural cell widths and the longest unbroken word (capped at 30), wrap
-/// cells that overflow their column, pad every cell to the column width,
-/// bold the header row, and draw the box borders. When the width is too
-/// small for a stable table, fall back to the raw markdown wrapped.
-pub(crate) fn render_table(
+struct TableLayout {
+    header_spans: Vec<Line>,
+    row_spans: Vec<Vec<Line>>,
+    column_widths: Vec<usize>,
+}
+
+fn table_layout(
     header: &[String],
     rows: &[Vec<String>],
-    raw: &[String],
     width: usize,
     style: &MarkdownStyle,
-    out: &mut Vec<Line>,
-) {
+) -> Option<TableLayout> {
     let num_cols = header.len();
-    if num_cols == 0 {
-        return;
-    }
     let border_overhead = 3 * num_cols + 1;
     let available_for_cells = width.saturating_sub(border_overhead);
-    if available_for_cells < num_cols {
-        // Too narrow to render a stable table: fall back to raw markdown,
-        // unstyled (the TS fallback pushes the raw lines with no theme
-        // wrapper, so they carry the terminal default color).
-        for raw_line in raw {
-            wrap_spans(&[Span::raw(raw_line.clone())], width, Style::default(), out);
-        }
-        return;
+    if num_cols == 0 || available_for_cells < num_cols {
+        return None;
     }
-
     let max_unbroken_word_width = 30usize;
 
     // Render each cell's inline content once; measure natural and
@@ -258,6 +247,72 @@ pub(crate) fn render_table(
             }
         }
     }
+
+    Some(TableLayout {
+        header_spans,
+        row_spans,
+        column_widths,
+    })
+}
+
+/// Count table rows without constructing wrapped cells, padding, or borders.
+pub(crate) fn count_table(
+    header: &[String],
+    rows: &[Vec<String>],
+    raw: &[String],
+    width: usize,
+    style: &MarkdownStyle,
+) -> usize {
+    if header.is_empty() {
+        return 0;
+    }
+    let Some(layout) = table_layout(header, rows, width, style) else {
+        return raw
+            .iter()
+            .map(|line| wrapped_span_count(&[Span::raw(line.clone())], width))
+            .sum();
+    };
+    let content_rows: usize = std::iter::once(&layout.header_spans)
+        .chain(&layout.row_spans)
+        .map(|row| {
+            row.iter()
+                .zip(&layout.column_widths)
+                .map(|(spans, &width)| wrapped_span_count(spans, width.max(1)).max(1))
+                .max()
+                .unwrap_or(0)
+        })
+        .sum();
+    content_rows + 3 + rows.len().saturating_sub(1)
+}
+
+/// Render the table (TS `renderTable`): compute per-column widths from the
+/// natural cell widths and the longest unbroken word (capped at 30), wrap
+/// cells that overflow their column, pad every cell to the column width,
+/// bold the header row, and draw the box borders. When the width is too
+/// small for a stable table, fall back to the raw markdown wrapped.
+pub(crate) fn render_table(
+    header: &[String],
+    rows: &[Vec<String>],
+    raw: &[String],
+    width: usize,
+    style: &MarkdownStyle,
+    out: &mut Vec<Line>,
+) {
+    if header.is_empty() {
+        return;
+    }
+    let Some(TableLayout {
+        header_spans,
+        row_spans,
+        column_widths,
+    }) = table_layout(header, rows, width, style)
+    else {
+        // The narrow fallback preserves the raw markdown without styling.
+        for raw_line in raw {
+            wrap_spans(&[Span::raw(raw_line.clone())], width, Style::default(), out);
+        }
+        return;
+    };
 
     let dashes = |w: usize| "─".repeat(w);
     let join = |left: char, mid: char, right: char| -> String {
@@ -386,6 +441,43 @@ mod tests {
             &mut out,
         );
         rows(out)
+    }
+
+    #[test]
+    fn table_geometry_matches_rendered_rows() {
+        let style = MarkdownStyle::default();
+        let mut empty_rendered = Vec::new();
+        render_table(&[], &[], &[], 40, &style, &mut empty_rendered);
+        assert_eq!(count_table(&[], &[], &[], 40, &style), empty_rendered.len());
+        let fixtures = [
+            "| a | b |\n| --- | --- |\n| 1 | 2 |",
+            "| a | b |\n| --- | --- |",
+            "| **long header** | `code` |\n| --- | --- |\n| aa bb cc dd | one |\n| 数据 👩‍💻 | é |\n| | |",
+            "| a | b |\n| --- | --- |\n| abcdefghijklmnopqrstuvwxyz0123456789 | short |\n| lone |",
+            "| | |\n| --- | --- |\n| | |",
+        ];
+        for source in fixtures {
+            let lines: Vec<_> = source.lines().collect();
+            let table = parse_table_block(&lines, &mut 0);
+            let expected: Vec<_> = (0..100)
+                .map(|width| {
+                    let mut rendered = Vec::new();
+                    render_table(
+                        &table.header,
+                        &table.rows,
+                        &table.raw,
+                        width,
+                        &style,
+                        &mut rendered,
+                    );
+                    rendered.len()
+                })
+                .collect();
+            let actual: Vec<_> = (0..100)
+                .map(|width| count_table(&table.header, &table.rows, &table.raw, width, &style))
+                .collect();
+            assert_eq!(actual, expected, "{source}");
+        }
     }
 
     #[test]

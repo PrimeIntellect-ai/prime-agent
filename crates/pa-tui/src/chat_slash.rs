@@ -63,6 +63,32 @@ fn wrap_block(
 /// color on both halves.
 pub fn render_slash_command(text: &str, theme: &Theme, width: usize) -> Vec<Line> {
     let bg = theme.bg_style(ThemeBg::UserMessageBg);
+    let paragraphs = source_paragraphs(text, theme);
+    let mut rows = vec![vec![Span::styled(" ".repeat(width), bg)]];
+    let mut wrapped_any = false;
+    for paragraph in &paragraphs {
+        for line in crate::width::wrap_line(paragraph, content_width(width)) {
+            rows.push(block_row(line, bg, width));
+            wrapped_any = true;
+        }
+    }
+    if !wrapped_any {
+        rows.push(block_row(Vec::new(), bg, width));
+    }
+    rows.push(vec![Span::styled(" ".repeat(width), bg)]);
+    // Zone markers on the echo block (TS `SlashCommandMessageComponent`);
+    // result rows render unmarked.
+    if let Some(first) = rows.first_mut() {
+        crate::osc133::mark_start(first);
+    }
+    if let Some(last) = rows.last_mut() {
+        crate::osc133::mark_end(last);
+    }
+    rows
+}
+
+/// Styled source paragraphs shared by rendering and exact row measurement.
+fn source_paragraphs(text: &str, theme: &Theme) -> Vec<Line> {
     // The styled source line: the accent and token spans over the typed
     // text (default foreground between them, TS `styleOther` identity).
     let mut styled: Line = Vec::new();
@@ -101,27 +127,15 @@ pub fn render_slash_command(text: &str, theme: &Theme, width: usize) -> Vec<Line
             }
         }
     }
-    let mut rows = vec![vec![Span::styled(" ".repeat(width), bg)]];
-    let mut wrapped_any = false;
-    for paragraph in &paragraphs {
-        for line in crate::width::wrap_line(paragraph, content_width(width)) {
-            rows.push(block_row(line, bg, width));
-            wrapped_any = true;
-        }
-    }
-    if !wrapped_any {
-        rows.push(block_row(Vec::new(), bg, width));
-    }
-    rows.push(vec![Span::styled(" ".repeat(width), bg)]);
-    // Zone markers on the echo block (TS `SlashCommandMessageComponent`);
-    // result rows render unmarked.
-    if let Some(first) = rows.first_mut() {
-        crate::osc133::mark_start(first);
-    }
-    if let Some(last) = rows.last_mut() {
-        crate::osc133::mark_end(last);
-    }
-    rows
+    paragraphs
+}
+
+pub(crate) fn slash_command_row_count(text: &str, theme: &Theme, width: usize) -> usize {
+    2 + source_paragraphs(text, theme)
+        .iter()
+        .map(|paragraph| crate::width::wrapped_line_count(paragraph, content_width(width)))
+        .sum::<usize>()
+        .max(1)
 }
 
 /// The result row: plain content, default foreground on the block surface.

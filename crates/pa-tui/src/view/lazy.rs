@@ -205,8 +205,7 @@ impl AgentView {
                 pending: 0,
             });
             self.sparse_enabled = true;
-            // Exact fallback rows remain available for future revisits.
-            self.sparse_entries.extend(0..self.chat.len());
+            // Only visible entries acquired Lines; exact heights remain cached.
             return (rows, self.scroll_top);
         }
         let mut window = self.sparse_window.expect("sparse window established above");
@@ -318,7 +317,11 @@ impl AgentView {
         (rows, start)
     }
 
-    fn sparse_entry_rows(&mut self, index: usize, width: usize) -> std::sync::Arc<Vec<Line>> {
+    pub(super) fn sparse_entry_rows(
+        &mut self,
+        index: usize,
+        width: usize,
+    ) -> std::sync::Arc<Vec<Line>> {
         #[cfg(test)]
         super::layout::ENTRY_VISITS.with(|count| count.set(count.get() + 1));
         self.sparse_entries.insert(index);
@@ -328,12 +331,15 @@ impl AgentView {
             Detail::All => 2,
         };
         let entry = &self.chat[index];
+        let preceded_by_tool = index > 0 && matches!(self.chat[index - 1], ChatEntry::Tool(_));
+        let spacing = self.entry_spacing(index, entry, index == 0, preceded_by_tool);
         if self.entry_cacheable(entry) {
             if let Some(layout) = &self.entry_layout[index][detail] {
-                return layout.rows.clone();
+                if layout.spacing == spacing {
+                    return layout.rows.clone();
+                }
             }
         }
-        let preceded_by_tool = index > 0 && matches!(self.chat[index - 1], ChatEntry::Tool(_));
         let rows = std::sync::Arc::new(self.render_entry(
             index,
             entry,
@@ -342,7 +348,6 @@ impl AgentView {
             preceded_by_tool,
         ));
         if self.entry_cacheable(entry) {
-            let spacing = self.entry_spacing(index, entry, index == 0, preceded_by_tool);
             self.entry_layout[index][detail] = Some(EntryLayout {
                 spacing,
                 rows: rows.clone(),

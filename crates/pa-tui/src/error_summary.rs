@@ -97,6 +97,47 @@ pub fn summarize_error_details(text: &str) -> String {
     lines[0].trim().to_string()
 }
 
+fn display_content(text: &str, summary: Option<&str>, expanded: bool) -> Option<String> {
+    let text = normalize_error_details(text);
+    if text.is_empty() {
+        return None;
+    }
+    let collapsed = should_collapse_error_details(&text);
+    let content = if collapsed && !expanded {
+        let summary = match summary {
+            Some(summary) => normalize_error_details(summary),
+            None => summarize_error_details(&text),
+        };
+        format!("{summary} ")
+    } else {
+        text
+    };
+    Some(content)
+}
+
+/// Count the same normalized and collapsed content without painting rows.
+pub(crate) fn collapsible_error_row_count(
+    text: &str,
+    summary: Option<&str>,
+    expanded: bool,
+    width: usize,
+) -> usize {
+    let Some(content) = display_content(text, summary, expanded) else {
+        return 0;
+    };
+    content
+        .split('\n')
+        .map(|raw| {
+            let spans = if raw.is_empty() {
+                Vec::new()
+            } else {
+                vec![Span::raw(raw)]
+            };
+            crate::width::wrapped_line_count(&spans, width.saturating_sub(1).max(1))
+        })
+        .sum()
+}
+
 /// The collapsible error rows (`CollapsibleErrorComponent.render`): the
 /// summary line while collapsed, the full text expanded; every row
 /// one-space indented, wrapped at `width - 1`, padded with plain spaces.
@@ -108,19 +149,8 @@ pub fn render_collapsible_error(
     theme: &Theme,
     width: usize,
 ) -> Vec<Line> {
-    let text = normalize_error_details(text);
-    if text.is_empty() {
+    let Some(content) = display_content(text, summary, expanded) else {
         return Vec::new();
-    }
-    let collapsed = should_collapse_error_details(&text);
-    let content = if collapsed && !expanded {
-        let summary = match summary {
-            Some(summary) => normalize_error_details(summary),
-            None => summarize_error_details(&text),
-        };
-        format!("{summary} ")
-    } else {
-        text
     };
     let style = theme.fg_style(color);
     let content_width = width.saturating_sub(1).max(1);
