@@ -1087,6 +1087,16 @@ interface RetainedRlmChild {
 	run?: RlmChildRun;
 }
 
+/**
+ * A delete receipt frees the name once the child runtime is bound and only the
+ * detached deletion unwind remains. A deleted startup without a bound session
+ * still reserves its name until that startup settles, because the queued
+ * runtime work can still surface under it.
+ */
+function freedRlmChildSessionId(run: RlmChildRun): string | undefined {
+	return run.detachedDeletion !== undefined ? run.session?.sessionId : undefined;
+}
+
 interface RlmSubagentModelSelection {
 	model: Model<Api>;
 }
@@ -11107,6 +11117,7 @@ export class AgentSession {
 		thinkingLevel?: ThinkingLevel;
 		spawnedByRequestId?: string;
 	}): CreateRlmSubagentRuntimeOptions {
+		const freedSessionIds = this._freedRlmChildSessionIds();
 		return {
 			parentSession: this,
 			id: options.id,
@@ -11129,6 +11140,10 @@ export class AgentSession {
 			rlmMaxDepth: this._rlmMaxDepth,
 			rlmParentNodeId: options.id,
 			spawnedByRequestId: options.spawnedByRequestId,
+			// The daemon host re-asserts the name at the runtime boundary
+			// against a catalog that still lists the unwinding child, so the
+			// receipt's freed ids must survive that second check.
+			...(freedSessionIds.length > 0 ? { ignoreSessionIds: freedSessionIds } : {}),
 		};
 	}
 
@@ -11677,6 +11692,17 @@ export class AgentSession {
 	}
 
 	async deleteRlmSubagent(target: string): Promise<RlmDeleteSubagentResult> {
+		// Freeing a name at the delete receipt reaches two transient selector
+		// states, both inherent to that design and recoverable, so neither is
+		// guarded away: (a) while an old generation with an accepted delete
+		// still unwinds, its reservation matches the reused name and unions
+		// with the live replacement below, so a name delete of the replacement
+		// throws ambiguous until the unwind settles; the replacement stays
+		// deletable by child id. (b) if that old generation's detached cleanup
+		// fails after a replacement took the name, the cleanup-failure entry
+		// keeps the name blocked for new spawns even after the replacement is
+		// deleted, until the failed delete is retried by child id and the
+		// cleanup succeeds.
 		const inFlight = [...this._deletingRlmChildren.values()].filter(({ subagent }) =>
 			this._rlmSubagentMatchesTarget(subagent, target),
 		);
@@ -12303,33 +12329,38 @@ export class AgentSession {
 		return cancelled;
 	}
 
+	/**
+	 * Session ids of every child whose delete receipt already returned. Both the
+	 * name-availability check and the spawn options the daemon host re-asserts
+	 * with must ignore the same set, or a same-name respawn that admission
+	 * allowed fails later inside the detached child startup.
+	 */
+	private _freedRlmChildSessionIds(): string[] {
+		const freed = new Set<string>();
+		for (const run of this._activeRlmChildRuns.values()) {
+			const sessionId = freedRlmChildSessionId(run);
+			if (sessionId) freed.add(sessionId);
+		}
+		for (const { session, run } of this._rlmChildSessions.values()) {
+			if (run && freedRlmChildSessionId(run)) freed.add(session.sessionId);
+		}
+		return [...freed];
+	}
+
 	private async _assertRlmSubagentSessionNameAvailable(name: string, ignorePendingReservation = false): Promise<void> {
 		const depth = this._rlmDepth + 1;
 		if (!ignorePendingReservation && this._pendingRlmSubagentSessionNames.has(name)) {
 			throw new Error(formatAgentSessionNameUnavailable(name, depth));
 		}
-		// A delete receipt frees the name once the child runtime is bound and only
-		// the detached deletion unwind remains. A deleted startup without a bound
-		// session still reserves its name until that startup settles, because
-		// the queued runtime work can still surface under it.
-		const freedSessionId = (run: RlmChildRun): string | undefined =>
-			run.detachedDeletion !== undefined ? run.session?.sessionId : undefined;
 		// A daemon catalog still lists the closing child under its old name while
 		// the detached unwind runs, which is after the delete receipt returned.
 		// Forward every freed session id so both controller paths below admit the
 		// immediate same-name respawn the receipt already promised.
-		const ignoreSessionIds = new Set<string>();
-		for (const run of this._activeRlmChildRuns.values()) {
-			const sessionId = freedSessionId(run);
-			if (sessionId) ignoreSessionIds.add(sessionId);
-		}
-		for (const { session, run } of this._rlmChildSessions.values()) {
-			if (run && freedSessionId(run)) ignoreSessionIds.add(session.sessionId);
-		}
+		const ignoreSessionIds = new Set(this._freedRlmChildSessionIds());
 		const localConflict =
 			[...this._activeRlmChildRuns.values()].some(
 				(run) =>
-					freedSessionId(run) === undefined &&
+					freedRlmChildSessionId(run) === undefined &&
 					(run.session?.sessionName === name || (!run.session && run.sessionName === name)),
 			) ||
 			[...this._rlmChildSessions.values()].some(

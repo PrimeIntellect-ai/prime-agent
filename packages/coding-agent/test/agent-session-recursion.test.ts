@@ -562,6 +562,27 @@ describe("AgentSession rlm recursion", () => {
 		await expect(root.runRlmChild("respawn while retained", { name: "slow-worker" })).rejects.toThrow(unavailable);
 	});
 
+	it("admits a same-name respawn while the deleted child still unwinds", async () => {
+		const unblockUnwind = deferred<void>();
+		const root = createSession();
+		const first = await root.runRlmChild("first shard", { name: "reused-worker" });
+		const firstRun = (root as unknown as InspectableRlmSession)._activeRlmChildRuns.get(first.rlm_child_id)!;
+		await firstRun.publication!.promise;
+		const firstChild = firstRun.session!;
+		// The blocked dispose holds the unwind open past the receipt.
+		vi.spyOn(firstChild, "disposeAsync").mockImplementation(() => unblockUnwind.promise);
+		await root.deleteRlmSubagent(first.rlm_child_id);
+		const forwarded = (
+			root as unknown as {
+				_createRlmSubagentRuntimeOptions(options: Record<string, unknown>): { ignoreSessionIds?: string[] };
+			}
+		)._createRlmSubagentRuntimeOptions({ id: "probe", prompt: "p", sessionName: "reused-worker", model });
+		// The freed id rides along for the daemon host's own name re-assert.
+		expect(forwarded.ignoreSessionIds).toContain(firstChild.sessionId);
+		await root.runRlmChild("second shard", { name: "reused-worker" });
+		unblockUnwind.resolve();
+	});
+
 	it("makes an externally restored retained child listable and deletable", async () => {
 		const childId = "restored-child";
 		const childDir = join(tempDir, childId);

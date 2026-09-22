@@ -2902,12 +2902,17 @@ export class AgentDaemon {
 		// The sibling name is held under a daemon-wide reservation for the
 		// whole admission and re-asserted at this boundary, so a same-name
 		// sibling that lands mid-admission fails closed before the durable
-		// ledger edge is appended.
+		// ledger edge is appended. A spawn admission may pass the parent's
+		// name check on a delete receipt that freed the name while the old
+		// child is still unwinding here: ignore the same freed ids, or the
+		// admitted respawn errors "name unavailable" at startup instead of
+		// failing synchronously where the caller could react.
 		const nameReservation = {
 			name: options.sessionName,
 			depth: options.rlmDepth,
 			parentSessionId: options.parentSession.sessionId,
 			...(options.parentSession.sessionFile ? { parentSessionPath: options.parentSession.sessionFile } : {}),
+			...(options.ignoreSessionIds ? { ignoreSessionIds: options.ignoreSessionIds } : {}),
 		};
 		const reservationKey = sessionNameReservationKey(nameReservation);
 		if (this.pendingSessionNames.has(reservationKey)) {

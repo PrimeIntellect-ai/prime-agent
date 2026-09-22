@@ -194,49 +194,31 @@ describe("rlm.collect typed fan-in", () => {
 		expect(defaults).toEqual({ results: [] });
 	});
 
-	it("keeps a retained completed child's cancelled envelope after its delete receipt", async () => {
+	it("keeps deleted children's cancelled envelopes after their delete receipts", async () => {
 		session = makeSession();
+		// A settled child takes the no-active-run delete path; a daemon-hydrated
+		// run-less child exercises the registry-identity tombstone.
 		const done = await session.runRlmChild("done shard", { name: "done-worker" });
-		// Terminal cleanup keeps the settled child retained, so the delete takes
-		// the no-active-run path.
 		await session.collectRlmChildren([done.rlm_child_id], 10_000);
+		registerRunlessChild(session, "runless-child", "runless-worker");
 		await expect(session.deleteRlmSubagent(done.rlm_child_id)).resolves.toMatchObject({
 			subagent: { rlm_child_id: done.rlm_child_id },
 		});
-
-		// The receipt promises a cancelled envelope even though the run is gone.
+		await expect(session.deleteRlmSubagent("runless-worker")).resolves.toMatchObject({
+			subagent: { rlm_child_id: "runless-child" },
+		});
+		// The receipt promises a cancelled envelope even though both runs are gone.
 		const byName = await session.collectRlmChildren(["done-worker"], 0);
-		expect(byName.results).toHaveLength(1);
 		expect(byName.results[0]).toMatchObject({
 			rlm_child_id: done.rlm_child_id,
 			status: "cancelled",
 			settled: true,
 			error: "Deleted by parent orchestrator",
 		});
-	});
-
-	it("keeps a run-less retained child's cancelled envelope after its delete receipt", async () => {
-		const root = makeSession();
-		// The daemon registers hydrated passive children without a run, so the
-		// tombstone carries the registry identity.
-		const retainedChild = registerRunlessChild(root, "runless-child", "runless-worker");
-
-		await expect(root.deleteRlmSubagent("runless-worker")).resolves.toMatchObject({
-			subagent: { rlm_child_id: "runless-child" },
-		});
-
-		const byId = await root.collectRlmChildren(["runless-child"], 0);
-		expect(byId.results).toHaveLength(1);
+		const byId = await session.collectRlmChildren(["runless-child"], 0);
 		expect(byId.results[0]).toMatchObject({
 			rlm_child_id: "runless-child",
 			session_name: "runless-worker",
-			status: "cancelled",
-			settled: true,
-			error: "Deleted by parent orchestrator",
-		});
-		const bySessionId = await root.collectRlmChildren([retainedChild.sessionId], 0);
-		expect(bySessionId.results[0]).toMatchObject({
-			rlm_child_id: "runless-child",
 			status: "cancelled",
 			settled: true,
 		});

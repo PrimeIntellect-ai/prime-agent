@@ -119,7 +119,7 @@ describe("daemon mode helpers", () => {
 				hasRunningRlmChildren: () => false,
 				getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
 			});
-			const spawn = (id: string) =>
+			const spawn = (id: string, ignoreSessionIds?: string[]) =>
 				internals.createRlmSubagentRuntime(parentState, {
 					parentSession: parentState.runtime.session,
 					id,
@@ -137,6 +137,7 @@ describe("daemon mode helpers", () => {
 					rlmDepth: 1,
 					rlmMaxDepth: 4,
 					rlmParentNodeId: id,
+					...(ignoreSessionIds ? { ignoreSessionIds } : {}),
 				});
 			const admission = spawn("child-1");
 			await expect(spawn("child-2")).rejects.toThrow('Agent name "real-worker" is unavailable');
@@ -181,11 +182,14 @@ describe("daemon mode helpers", () => {
 				prompt: "complete and persist",
 			});
 			await host.deleteRlmSubagentRuntime?.("child-1", childRuntime.session);
-			await spawn("child-3");
+			const child3Runtime = await spawn("child-3");
 			const edgesAfter = await internals.rlmSpawnLedger().liveEdges();
 			const namedEdges = edgesAfter.filter((edge) => edge.name === "real-worker");
 			expect(namedEdges).toHaveLength(1);
 			expect(namedEdges[0]?.childId).toBe("child-3");
+			// A respawn admitted past a freed name must hold at this re-asserting boundary.
+			await expect(spawn("child-4")).rejects.toThrow('Agent name "real-worker" is unavailable');
+			await expect(spawn("child-4", [child3Runtime.session.sessionId])).resolves.toBeTruthy();
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -3352,6 +3356,7 @@ function makeRuntimeSession(
 		},
 		sessionFile: sessionManager.getSessionFile(),
 		sessionId: sessionManager.getSessionId(),
+		rlmDepth: sessionManager.getHeader()?.rlmDepth ?? 0,
 		get sessionName() {
 			return sessionManager.getSessionName();
 		},
