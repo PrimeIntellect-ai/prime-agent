@@ -713,6 +713,18 @@ class ReplTest(unittest.TestCase):
             probe = "('PUB' in dir(), '_hidden' in dir(), 'In' in dir(), 'Out' in dir())"
             self.assertEqual(one(self.repl.execute("ex4", probe), "result")["text"], "(True, False, False, False)")
 
+    def test_restore_revives_callables_in_defaults_and_closures_pr2471(self):
+        code = "G = 1\ndef helper():\n    return G\nrun = lambda fn=helper: fn()\nrun2 = lambda *, fn=helper: fn()\nclosed = (lambda fn: lambda: fn())(helper)"
+        with tempfile.TemporaryDirectory() as tmp:
+            self._snapshot_restore("dc", code, tmp)
+            self.assertEqual(one(self.repl.execute("dc4", "G = 2\n(run(), run2(), closed())"), "result")["text"], "(2, 2, 2)")
+
+    def test_restore_publishes_rebuilt_partial_in_backfill_cycle_pr2471(self):
+        code = ("exec('import functools\\nG = 1\\ndef base():\\n    return G, wrapped\\nwrapped = functools.partial(base)\\n"
+                "def entry():\\n    return wrapped()', pn:={'__name__': '__main__'})\nentry = pn['entry']")
+        self._snapshot_restore("bp", code, self.enterContext(tempfile.TemporaryDirectory()))
+        self.assertEqual(one(self.repl.execute("bp4", "G = 2\nentry()[0]"), "result")["text"], "2")
+
     def test_snapshot_prune_oversized(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "kernel-state.dill")

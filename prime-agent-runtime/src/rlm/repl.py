@@ -859,39 +859,54 @@ def _revive_with_live_globals(
         memo = {}
     if id(value) in memo:
         return memo[id(value)]
+
+    def revive(dep: Any) -> Any:
+        return _revive_with_live_globals(dep, ns, backfill, memo)
+
     if isinstance(value, functools.partial):
-        # Register before recursing: a callable graph can loop back here.
-        memo[id(value)] = value
-        rebuilt = _revive_with_live_globals(value.func, ns, backfill, memo)
+        # No placeholder memo entry: a partial is immutable, so it could never be patched;
+        # every cycle passes through a function, which is memoized before recursing.
+        rebuilt = revive(value.func)
         changed = rebuilt is not value.func
         args = []
         keywords = {}
         for arg in value.args:
-            revived = _revive_with_live_globals(arg, ns, backfill, memo)
+            revived = revive(arg)
             changed = changed or revived is not arg
             args.append(revived)
         for key, arg in value.keywords.items():
-            revived = _revive_with_live_globals(arg, ns, backfill, memo)
+            revived = revive(arg)
             changed = changed or revived is not arg
             keywords[key] = revived
         if not changed:
             return value
         rebuilt_partial = functools.partial(rebuilt, *args, **keywords)
         rebuilt_partial.__dict__.update(value.__dict__)
-        memo[id(value)] = rebuilt_partial
-        return rebuilt_partial
+        return memo.setdefault(id(value), rebuilt_partial)
     if not isinstance(value, types.FunctionType) or value.__module__ != "__main__":
         return value
-    rebound = types.FunctionType(value.__code__, ns, value.__name__, value.__defaults__, value.__closure__)
+    # Defaults and cell contents are revived only after the rebound function is
+    # memoized, so a function reachable from its own defaults or closure resolves to it.
+    cells = tuple(memo.setdefault(id(cell), types.CellType()) for cell in value.__closure__ or ())
+    rebound = types.FunctionType(value.__code__, ns, value.__name__, None, cells or None)
     memo[id(value)] = rebound
     if backfill is not None:
         for name, dep in value.__globals__.items():
             # Snapshots never save _-prefixed or skip-listed names; backfill must not smuggle them past that policy.
             if name in ns or name.startswith("_") or name in _ALWAYS_SKIP or name in _RESTORE_SKIP:
                 continue
-            backfill.append((name, _revive_with_live_globals(dep, ns, backfill, memo)))
+            backfill.append((name, revive(dep)))
+    if value.__defaults__:
+        rebound.__defaults__ = tuple(revive(dep) for dep in value.__defaults__)
+    if value.__kwdefaults__:
+        rebound.__kwdefaults__ = {key: revive(dep) for key, dep in value.__kwdefaults__.items()}
+    for cell, fresh in zip(value.__closure__ or (), cells):
+        try:
+            contents = cell.cell_contents
+        except ValueError:
+            continue
+        fresh.cell_contents = revive(contents)
     rebound.__doc__ = value.__doc__
-    rebound.__kwdefaults__ = value.__kwdefaults__
     rebound.__dict__.update(value.__dict__)
     rebound.__annotations__ = value.__annotations__
     rebound.__qualname__ = value.__qualname__
