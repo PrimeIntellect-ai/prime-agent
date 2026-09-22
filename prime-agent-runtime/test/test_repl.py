@@ -664,8 +664,7 @@ class ReplTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "state.dill")
             self.repl.execute("fn1", "G = 1\ndef reader():\n    return G\ndef prober():\n    return late")
-            # A function defined against a private exec dict: its names must
-            # backfill into ns on revival or the rebuilt function loses them.
+            # priv.__globals__ is the private exec dict pn, not ns: drives backfill.
             self.repl.execute("fn0", "exec('SECRET = 42\\ndef priv():\\n    return SECRET', pn:={'__name__': '__main__'})\npriv = pn['priv']")
             self.repl.send({"type": "snapshot", "id": "fn2", "path": path, "manifest_path": os.path.join(tmp, "state.json")})
             self.repl.send({"type": "restore", "id": "fn3", "path": path})
@@ -678,8 +677,7 @@ class ReplTest(unittest.TestCase):
             self.assertEqual(one(events, "result")["text"], "42")
 
     def test_restore_revives_partial_wrapped_functions_pr2471(self):
-        # dill revives a partial's wrapped __main__ function with frozen
-        # globals; the restored partial must read the live namespace.
+        # dill revives a partial's wrapped __main__ function with frozen globals.
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "state.dill")
             self.repl.execute("pt1", "import functools\nG = 1\ndef base():\n    return G\nwrapped = functools.partial(base)")

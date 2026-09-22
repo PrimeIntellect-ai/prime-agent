@@ -824,23 +824,9 @@ def _revive_with_live_globals(
     backfill: list[tuple[str, Any]] | None = None,
     memo: dict[int, Any] | None = None,
 ) -> Any:
-    """Rebind restored __main__ callables onto the live namespace.
-
-    A saved __main__ function is rebuilt with ns as its __globals__ so later
-    cells read live values, keeping dill's other revival fidelity: docstring,
-    keyword-only defaults, annotations, type params, qualname, module,
-    attribute dict. Names its revival globals carry that ns lacks (private
-    exec dicts, snapshot-pruned names) are collected as backfill (name,
-    revived value) pairs — each value itself rebound, so nested helpers read
-    the live namespace too — for the caller to apply when the restore commits;
-    the live ns always wins, and excluded names (leading-underscore and
-    always/restore-skip) are never collected. A functools.partial wrapping such
-    a function — or carrying one in its args/keywords — is rebuilt around the
-    revived callables, keeping its own attribute dict; everything else —
-    dill's by-reference revivals like imported functions, or by-value user
-    __main__ classes keeping dill's own revived globals — passes through
-    untouched. memo breaks cycles in the callable graph.
-    """
+    """Rebind restored __main__ callables onto the live namespace, collecting
+    names their saved globals carry but ns lacks as backfill for the caller
+    to apply at commit (live ns values always win)."""
     import functools
 
     if memo is None:
@@ -872,9 +858,6 @@ def _revive_with_live_globals(
         return value
     rebound = types.FunctionType(value.__code__, ns, value.__name__, value.__defaults__, value.__closure__)
     memo[id(value)] = rebound
-    # Collect only what ns is missing (never clobber live values), never
-    # smuggle names past the restore exclusions, and revive each value so
-    # backfilled helpers read the live namespace too (memo breaks cycles).
     if backfill is not None:
         for name, dep in value.__globals__.items():
             if name in ns or name.startswith("_") or name in _ALWAYS_SKIP or name in _RESTORE_SKIP:
@@ -920,10 +903,8 @@ def _restore_state(
             staged[name] = dill.loads(blob)
         except Exception as err:  # noqa: BLE001 - revive every other name regardless
             failed.append({"name": name, "reason": f"{type(err).__name__}: {_safe_str(err)[:200]}"})
-    # Revive every staged name before parking: a revival failure must never
-    # abort the apply loop halfway and leave the namespace half old, half new.
-    # Backfill pairs collect alongside (nothing is written to ns yet) so the
-    # gap names commit with the restore, all-or-nothing.
+    # Revive every staged name before parking: a failure must never abort the
+    # apply halfway and leave the namespace half old, half new.
     prepared: dict[str, Any] = {}
     backfill: list[tuple[str, Any]] = []
     revive_failed: list[dict[str, str]] = []
@@ -939,7 +920,6 @@ def _restore_state(
         for name, value in prepared.items():
             ns[name] = value
         for name, value in backfill:
-            # Only genuine gaps: a live value or a restored name always wins.
             if name not in ns:
                 ns[name] = value
         # Publish while still parked: a later KeyboardInterrupt into this task finds the committed result (see _handle_state).
