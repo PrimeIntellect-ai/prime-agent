@@ -156,6 +156,16 @@ function importedPrimeTeam(config: PrimeCliConfig): PrimeTeam | null {
 		: null;
 }
 
+/**
+ * The logged-in Prime CLI's api key, when a production config exists.
+ * Same strict production-config validation as the inference challenge flow;
+ * returns undefined when the config is absent, unparseable, or points at a
+ * non-production endpoint.
+ */
+export function resolvePrimeCliApiKey(configPath?: string): string | undefined {
+	return loadProductionPrimeCliConfig(configPath)?.apiKey;
+}
+
 export function resolvePrimeInferenceAuthConfig(): PrimeChallengeConfig {
 	return {
 		baseUrl: normalizeBaseUrl(stringEnv("PRIME_AGENT_INFERENCE_API_BASE_URL")),

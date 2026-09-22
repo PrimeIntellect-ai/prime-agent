@@ -28,6 +28,7 @@ import {
 	type PrimeSandboxVmCreateRequest,
 } from "../src/core/cloud/prime-sandbox-client.js";
 import { type CloudEvent, type CloudMessage, cloudRequestDigest } from "../src/core/cloud/protocol.js";
+import { resolvePrimeCliApiKey } from "../src/core/prime-inference-auth.js";
 import { cloudTemp, type RecordingDelegationStack, recordingDelegationStack } from "./cloud-support.js";
 
 /**
@@ -72,6 +73,21 @@ describe("DirectCloudService configuration", () => {
 				PRIME_AGENT_CLOUD_INFERENCE_API_KEY: "guest-key",
 			}),
 		).toBe(true);
+	});
+
+	it("falls back to the logged-in Prime CLI key when the platform key env var is absent", () => {
+		const home = cloudTemp("cloud-config-fallback-");
+		const configPath = join(home, "config.json");
+		writeFileSync(configPath, JSON.stringify({ api_key: "cli-key" }));
+		expect(resolvePrimeCliApiKey(configPath)).toBe("cli-key");
+
+		// A redirected (non-production) config is refused, matching the
+		// inference challenge flow's strict validation.
+		writeFileSync(configPath, JSON.stringify({ api_key: "cli-key", base_url: "https://evil.example" }));
+		expect(resolvePrimeCliApiKey(configPath)).toBeUndefined();
+
+		const absent = join(home, "missing.json");
+		expect(resolvePrimeCliApiKey(absent)).toBeUndefined();
 	});
 });
 

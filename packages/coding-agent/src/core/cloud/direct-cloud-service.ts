@@ -19,6 +19,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { spawnHidden, waitForChildProcess } from "../../utils/child-process.js";
 import { findGitPaths } from "../../utils/git.js";
+import { resolvePrimeCliApiKey } from "../prime-inference-auth.js";
 import {
 	type CloudGuestCursorRecord,
 	CloudTunnelAttachment,
@@ -976,8 +977,8 @@ export class DirectCloudService {
 		this.traceSink =
 			options.traceSink ??
 			((activeSessionId, cloudSessionId, event) => this.persistDefaultTrace(activeSessionId, cloudSessionId, event));
-		const apiKey = options.apiKey ?? process.env.PRIME_API_KEY;
-		if (!apiKey) throw new Error("Cloud delegation requires PRIME_API_KEY");
+		const apiKey = options.apiKey ?? process.env.PRIME_API_KEY ?? resolvePrimeCliApiKey();
+		if (!apiKey) throw new Error("Cloud delegation requires PRIME_API_KEY or a logged-in Prime CLI");
 		const dockerImage = options.dockerImage ?? process.env.PRIME_AGENT_CLOUD_IMAGE;
 		if (!dockerImage) throw new Error("Cloud delegation requires PRIME_AGENT_CLOUD_IMAGE");
 		const resolved =

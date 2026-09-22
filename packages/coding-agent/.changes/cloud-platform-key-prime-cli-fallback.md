@@ -1,0 +1,1 @@
+- Restored the logged-in Prime CLI config as a fallback for the cloud platform key when PRIME_API_KEY is unset, with the same strict production-endpoint validation as the inference auth flow.
