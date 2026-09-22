@@ -910,7 +910,7 @@ def _revive_with_live_globals(
             continue
         cell.cell_contents = revive(contents)
     rebound.__doc__ = value.__doc__
-    rebound.__dict__.update(value.__dict__)
+    rebound.__dict__.update({key: revive(attr) for key, attr in value.__dict__.items()})
     rebound.__annotations__ = value.__annotations__
     rebound.__qualname__ = value.__qualname__
     rebound.__module__ = value.__module__

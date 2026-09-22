@@ -715,10 +715,10 @@ class ReplTest(unittest.TestCase):
 
     def test_restore_revives_callables_in_defaults_and_closures_pr2471(self):
         code = ("G = 1\ndef helper():\n    return G\nrun = lambda fn=helper: fn()\nrun2 = lambda *, fn=helper: fn()\nclosed = (lambda fn: lambda: fn())(helper)\n"
-                "def make():\n    n = 0\n    def get():\n        return n\n    def set(v):\n        nonlocal n\n        n = v\n    get.set = set\n    return get\ncounter = make()")
+                "def make():\n    n = 0\n    def get():\n        return n\n    def set(v):\n        nonlocal n\n        n = v\n    get.set = set\n    return get\ncounter = make()\nrun.callback = helper")
         with tempfile.TemporaryDirectory() as tmp:
             self._snapshot_restore("dc", code, tmp)
-            self.assertEqual(one(self.repl.execute("dc4", "G = 2\ncounter.set(5)\n(run(), run2(), closed(), counter())"), "result")["text"], "(2, 2, 2, 5)")
+            self.assertEqual(one(self.repl.execute("dc4", "G = 2\ncounter.set(5)\n(run(), run2(), closed(), counter(), run.callback())"), "result")["text"], "(2, 2, 2, 5, 2)")
 
     def test_restore_publishes_rebuilt_partial_in_backfill_cycle_pr2471(self):
         code = ("exec('import functools\\nG = 1\\ndef base():\\n    return G, wrapped\\nwrapped = functools.partial(base)\\n"
