@@ -451,7 +451,7 @@ function cacheBuiltChildNode(
 	if (!stable) {
 		return;
 	}
-	// Delete first so a reused entry moves to the end (evicted first by the cap).
+	// Delete first so a re-set entry moves to the end; the cap evicts from the front.
 	childNodeCache.delete(childSessionDir);
 	childNodeCache.set(childSessionDir, { file, childFiles, contextWindow, node });
 	while (childNodeCache.size > CHILD_NODE_CACHE_MAX) {
