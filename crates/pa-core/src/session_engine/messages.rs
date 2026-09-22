@@ -1,6 +1,8 @@
 //! LLM-facing message conversion. Port of convertToLlm and the message
 //! presentation constants in core/messages.ts.
 
+use super::agent_messaging::sanitize_message_header_value;
+use crate::cron::AgentCronJob;
 use pa_types::ai::{
     AssistantMessage, TextContent, ToolResultMessage, UserContent, UserContentBlock, UserMessage,
 };
@@ -94,6 +96,53 @@ pub fn create_compaction_outcome_message(
             "outcome": outcome.wire(),
         })),
         timestamp: now_millis(),
+        rest: Default::default(),
+    }
+}
+
+/// The durable heartbeat delivery row (TS `createHeartbeatPromptMessage`):
+/// a `heartbeat_prompt` custom message carrying the job's prompt under the
+/// `[heartbeat: <schedule> run#<n>]` header, with the job's run bookkeeping
+/// in details. The header value is sanitized like every other
+/// `[<kind> ...]` header (TS `sanitizeMessageHeaderValue`); the daemon's
+/// fire delivers the row as the turn's injected prompt, so the transcript
+/// renders the heartbeat component instead of a plain user message.
+pub fn create_heartbeat_prompt_message(
+    job: &AgentCronJob,
+    timestamp: u64,
+) -> pa_types::session::CustomMessage {
+    let schedule = sanitize_message_header_value(&job.schedule.expression);
+    let content = format!(
+        "[heartbeat: {schedule} run#{}]\n\n{}",
+        job.run_count, job.prompt
+    );
+    // The details block mirrors the TS JSON exactly: the fixed keys in
+    // the TS order, and the optional `nextRunAt`/`lastRunAt` omitted
+    // while undefined (TS `JSON.stringify` drops undefined fields, so a
+    // first fire carries no `lastRunAt`).
+    let mut details = serde_json::Map::new();
+    details.insert("jobId".to_string(), serde_json::json!(job.id));
+    details.insert(
+        "schedule".to_string(),
+        serde_json::json!(job.schedule.expression),
+    );
+    details.insert(
+        "status".to_string(),
+        serde_json::to_value(job.status).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert("runCount".to_string(), serde_json::json!(job.run_count));
+    if let Some(next_run_at) = &job.next_run_at {
+        details.insert("nextRunAt".to_string(), serde_json::json!(next_run_at));
+    }
+    if let Some(last_run_at) = &job.last_run_at {
+        details.insert("lastRunAt".to_string(), serde_json::json!(last_run_at));
+    }
+    pa_types::session::CustomMessage {
+        custom_type: HEARTBEAT_PROMPT_CUSTOM_TYPE.to_string(),
+        content: UserContent::Text(content),
+        display: true,
+        details: Some(serde_json::Value::Object(details)),
+        timestamp,
         rest: Default::default(),
     }
 }
@@ -440,6 +489,78 @@ state
             }
             _ => panic!("expected user message"),
         }
+    }
+
+    #[test]
+    fn heartbeat_prompt_message_matches_the_ts_shape() {
+        let job = AgentCronJob {
+            id: "job-1".to_string(),
+            status: crate::cron::JobStatus::Active,
+            source: Some("rlm_heartbeat".to_string()),
+            runtime_kind: None,
+            delivery_mode: Some(crate::cron::DeliveryMode::Steer),
+            active_session_id: "live-1".to_string(),
+            session_id: "session-1".to_string(),
+            session_file: "/w/session.jsonl".to_string(),
+            cwd: "/w".to_string(),
+            label: Some("mission".to_string()),
+            prompt: "check the mission".to_string(),
+            schedule: crate::cron::AgentCronSchedule {
+                kind: crate::cron::ScheduleKind::Interval,
+                expression: "every 10m".to_string(),
+                interval_ms: Some(600_000),
+            },
+            created_at: "2026-09-22T00:00:00.000Z".to_string(),
+            updated_at: "2026-09-22T00:00:00.000Z".to_string(),
+            next_run_at: Some("2026-09-22T00:10:00.000Z".to_string()),
+            last_run_at: None,
+            last_skipped_at: None,
+            last_error: None,
+            run_count: 0,
+        };
+        let message = create_heartbeat_prompt_message(&job, 1_000);
+        assert_eq!(message.custom_type, "heartbeat_prompt");
+        assert!(message.display);
+        assert_eq!(message.timestamp, 1_000);
+        // The header sanitizes its schedule value; the prompt rides as
+        // the body (TS `createHeartbeatPromptMessage`).
+        assert_eq!(
+            message.content,
+            UserContent::Text("[heartbeat: every 10m run#0]\n\ncheck the mission".to_string())
+        );
+        let details = message.details.unwrap();
+        assert_eq!(details["jobId"], "job-1");
+        assert_eq!(details["schedule"], "every 10m");
+        assert_eq!(details["status"], "active");
+        assert_eq!(details["runCount"], 0);
+        assert_eq!(details["nextRunAt"], "2026-09-22T00:10:00.000Z");
+        // An undefined lastRunAt is omitted, not null (TS JSON.stringify
+        // drops undefined fields; a first fire carries no lastRunAt).
+        assert!(details.get("lastRunAt").is_none());
+        // A schedule with header delimiters collapses to spaces.
+        let delimited = crate::cron::AgentCronJob {
+            schedule: crate::cron::AgentCronSchedule {
+                kind: crate::cron::ScheduleKind::Cron,
+                expression: "0 0,12:every[day]".to_string(),
+                interval_ms: None,
+            },
+            ..job.clone()
+        };
+        let message = create_heartbeat_prompt_message(&delimited, 2_000);
+        assert!(matches!(message.content, UserContent::Text(text)
+                if text.starts_with("[heartbeat: 0 0 12 every day run#0]")));
+        // A repeat fire carries the previous run's lastRunAt.
+        let repeat = crate::cron::AgentCronJob {
+            last_run_at: Some("2026-09-22T00:10:00.000Z".to_string()),
+            run_count: 1,
+            ..job
+        };
+        let message = create_heartbeat_prompt_message(&repeat, 2_000);
+        assert!(matches!(message.content, UserContent::Text(text)
+                if text.starts_with("[heartbeat: every 10m run#1]")));
+        let details = message.details.unwrap();
+        assert_eq!(details["runCount"], 1);
+        assert_eq!(details["lastRunAt"], "2026-09-22T00:10:00.000Z");
     }
 
     #[test]

@@ -16,9 +16,11 @@
 //! Delivery: a due job is claimed by the store and fired through the
 //! session's queue lanes — heartbeats on their delivery-mode lane (steer
 //! -> steering, follow-up -> follow-up) with the TS queue key
-//! `heartbeat:<id>` (a later fire replaces the queued one), plain cron
-//! jobs on the follow-up lane (TS queues a busy session's scheduled
-//! prompt as a follow-up). The fire settles when its turn settles, so the
+//! `heartbeat:<id>` (a later fire replaces the queued one) as the
+//! injected `heartbeat_prompt` custom row (TS `promptHeartbeat` /
+//! `createHeartbeatPromptMessage`), plain cron jobs on the follow-up
+//! lane as a regular prompt (TS queues a busy session's scheduled prompt
+//! as a follow-up). The fire settles when its turn settles, so the
 //! store's run bookkeeping (`lastRunAt`/`runCount`) matches the TS
 //! record-after-run timing.
 //!
@@ -107,7 +109,8 @@ impl AgentCronSchedulerHooks for QueueHooks {
             // `resumeIfIdle: true`): a fire on a post-abort/post-compact
             // session is a resume site.
             core.queued_input_suspended = false;
-            let queue_key = is_heartbeat_cron_job(job).then(|| format!("heartbeat:{}", job.id));
+            let heartbeat = is_heartbeat_cron_job(job);
+            let queue_key = heartbeat.then(|| format!("heartbeat:{}", job.id));
             // The TS `heartbeat:<id>` queue key: a later fire replaces the
             // queued one instead of stacking.
             if let Some(key) = &queue_key {
@@ -117,7 +120,7 @@ impl AgentCronSchedulerHooks for QueueHooks {
                     .retain(|item| item.queue_key.as_deref() != Some(key.as_str()));
             }
             let lane = match (
-                is_heartbeat_cron_job(job),
+                heartbeat,
                 matches!(job.delivery_mode, Some(DeliveryMode::FollowUp)),
             ) {
                 // A heartbeat rides its delivery-mode lane; a plain cron
@@ -125,9 +128,28 @@ impl AgentCronSchedulerHooks for QueueHooks {
                 (true, false) => &mut core.steering,
                 _ => &mut core.follow_up,
             };
+            // TS `runCronJob`: a heartbeat fire delivers through
+            // `promptHeartbeat`, so the turn IS the injected
+            // `heartbeat_prompt` custom row (TS
+            // `createHeartbeatPromptMessage`) — the transcript renders the
+            // heartbeat prompt component while the model turn runs on the
+            // row's content. A plain cron job stays a regular prompt (TS
+            // `promptUntilAccepted`).
+            let (message, custom_message) = if heartbeat {
+                let row = pa_core::session_engine::messages::create_heartbeat_prompt_message(
+                    job,
+                    crate::util::now_ms(),
+                );
+                (
+                    row.content.text(),
+                    Some(crate::session_commands::custom_message_value(&row)),
+                )
+            } else {
+                (job.prompt.clone(), None)
+            };
             lane.push_back(QueuedItem {
-                message: job.prompt.clone(),
-                custom_message: None,
+                message,
+                custom_message,
                 agent_message: None,
                 admission_id: None,
                 images: Vec::new(),
@@ -811,9 +833,11 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
-        // The fired prompt ran as the session's turn: the instruction
-        // persisted as the turn's user message.
-        let prompted = {
+        // The fired prompt ran as the session's turn and persisted as the
+        // injected `heartbeat_prompt` custom row (TS `promptHeartbeat`):
+        // the ♥ Heartbeat transcript component's wire shape, never a
+        // plain user message.
+        let fired_row = {
             let core = worker
                 .core
                 .lock()
@@ -824,19 +848,20 @@ mod tests {
             store
                 .entries()
                 .iter()
-                .filter(|entry| {
-                    entry
-                        .fields
-                        .get("message")
-                        .and_then(|message| message.get("content"))
-                        .and_then(Value::as_str)
-                        .is_some_and(|content| content.contains("print hello world"))
+                .find(|entry| {
+                    entry.fields.get("customType").and_then(Value::as_str)
+                        == Some(pa_core::session_engine::messages::HEARTBEAT_PROMPT_CUSTOM_TYPE)
                 })
-                .count()
+                .map(|entry| entry.fields.clone())
         };
-        assert!(
-            prompted >= 1,
-            "the heartbeat prompt never reached the session"
-        );
+        let fired_row = fired_row.expect("the heartbeat fire never persisted its prompt row");
+        let content = fired_row.get("content").and_then(Value::as_str).unwrap();
+        // The claimed job snapshot carries the pre-increment run count.
+        assert_eq!(content, "[heartbeat: every 10s run#0]\n\nprint hello world");
+        let details = fired_row.get("details").cloned().unwrap_or(Value::Null);
+        assert_eq!(details["jobId"], job.id);
+        assert_eq!(details["schedule"], "every 10s");
+        assert_eq!(details["status"], "active");
+        assert_eq!(details["runCount"], 0);
     }
 }
