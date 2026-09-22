@@ -682,6 +682,23 @@ class ReplTest(unittest.TestCase):
             events = self.repl.execute("p3", "'big' in dir()")
             self.assertEqual(one(events, "result")["text"], "False")
 
+    def test_prune_measures_the_current_value_2478(self):
+        # Redefinition or in-place shrink after an oversized skip: prune must re-measure.
+        for cell in ("def big(): pass", "big.clear()"):
+            with self.subTest(cell=cell):
+                with tempfile.TemporaryDirectory() as tmp:
+                    base = {"type": "snapshot", "path": os.path.join(tmp, "kernel-state.dill"),
+                            "manifest_path": os.path.join(tmp, "kernel-state.json"), "max_variable_bytes": 1024}
+                    self.repl.execute("pk1", "big = bytearray(b'x' * 100_000)\nkeep = 1")
+                    self.repl.send({"id": "pk2", **base})
+                    self.assertEqual(one(self.repl.until_done("pk2"), "done")["status"], "ok")
+                    self.repl.execute("pk3", cell)
+                    self.repl.send({"id": "pk4", "prune_oversized": True, **base})
+                    done = one(self.repl.until_done("pk4"), "done")
+                    self.assertEqual(done["status"], "ok")
+                    self.assertEqual(done["pruned"], [])
+                    self.assertEqual(done["saved"], ["big", "keep"])
+
     def test_emit_display(self):
         payloads = {
             "application/vnd.prime-agent.diff+json": {
@@ -728,6 +745,26 @@ class ReplTest(unittest.TestCase):
         follow = self.repl.execute("after-emit-nan", "1+1")
         self.assertEqual(one(follow, "result")["text"], "2")
         self.assertEqual(one(follow, "done")["status"], "ok")
+
+    def test_large_write_ships_bounded_stream_frames(self):
+        events = self.repl.execute("chunk", "import sys\nsys.stdout.write('x' * 300_000)")
+        frames = [e["text"] for e in events if e.get("event") == "stdout"]
+        self.assertEqual("".join(frames), "x" * 300_000)
+        self.assertTrue(all(len(frame) <= 65536 for frame in frames))
+
+    def test_oversized_text_and_payloads_are_capped(self):
+        code = "class C:\n    def __repr__(self):\n        return 'x' * 3_000_000\nC()"
+        events = self.repl.execute("big-repr", code)
+        expected = "x" * 1_048_576 + "\n[... result truncated at 1048576 characters ...]"
+        self.assertEqual(one(events, "result")["text"], expected)
+        error = one(self.repl.execute("big-error", "raise ValueError('x' * 3_000_000)"), "error")
+        self.assertEqual(error["evalue"], expected)
+        self.assertEqual(error["traceback"][-1], "ValueError: " + expected[len("ValueError: ") :])
+        events = self.repl.execute("emit-big", "from rlm.repl import emit\nemit({'text/plain': 'x' * 17_000_000})")
+        self.assertEqual(one(events, "error")["ename"], "ValueError")
+        self.assertEqual(one(events, "done")["status"], "error")
+        code = "from rlm.repl import host_request\nawait host_request({'type': 'demo', 'blob': 'x' * 17_000_000})"
+        self.assertEqual(one(self.repl.execute("hr-big", code), "error")["ename"], "ValueError")
 
     def test_bash_integration(self):
         events = self.repl.execute(
@@ -806,13 +843,21 @@ class ReplTest(unittest.TestCase):
                 self.assertEqual(
                     request["data"], {"type": "bash.consumed", "pid": pid, "command": command}
                 )
-                # Old host: error reply is absorbed and the withdrawal never repeats.
+                # Old host: the error reply is dropped silently and the withdrawal never repeats.
                 self.repl.send(
                     {"type": "host_reply", "id": request["id"], "data": {"status": "error", "error": "unknown"}}
                 )
                 if label == "poll":
                     again = self.repl.execute("withdraw-again", "handle.output()\nhandle.tail(1)")
-                    self.assertIsNone(one(again, "host_request"))
+                    self.assertEqual([e for e in again if e.get("event") in ("error", "host_request")], [])
+
+    def test_result_read_before_notice_acceptance_withdraws_at_acceptance(self):
+        started = self.repl.execute("early", "from rlm import bash\nhandle = bash('printf early')\nhandle.pid")
+        notice = wait_for_host_request(self.repl, started)
+        self.assertIsNone(one(self.repl.execute("early-read", "handle.poll().output"), "host_request"))
+        reply_ok(self.repl, notice)
+        withdrawal = wait_for_host_request(self.repl, [])["data"]
+        self.assertEqual(withdrawal, {"type": "bash.consumed", "pid": notice["data"]["pid"], "command": "printf early"})
 
     def test_detached_read_between_turns_keeps_bash_completion(self):
         # A watcher reading the handle with no cell running reaches nobody: the
@@ -2098,11 +2143,10 @@ class SnapshotTempCleanupTest(unittest.TestCase):
 
             real_dump = dill.dump
 
-            def interrupted_dump(payload, fh):
-                if isinstance(payload, dict):  # the complete payload, not a per-variable value
-                    fh.write(b"partial")
-                    raise KeyboardInterrupt
-                return real_dump(payload, fh)
+            def interrupted_dump(value, fh):
+                # Interrupt mid-dump, after partial bytes landed in the staged temp.
+                fh.write(b"partial")
+                raise KeyboardInterrupt
 
             with unittest_mock.patch.object(dill, "dump", interrupted_dump):
                 with self.assertRaises(KeyboardInterrupt):
@@ -2194,19 +2238,22 @@ class SnapshotPairConsistencyTest(unittest.TestCase):
     def test_near_cap_payload_skips_tail_instead_of_failing_snapshot(self):
         import dill
 
+        from rlm.repl import _SNAPSHOT_MAGIC, _restore_state
+
         dill.settings["recurse"] = True
         source = {"a": "first", "b": "second"}
         blobs = {name: dill.dumps(value) for name, value in source.items()}
-        cap = len(dill.dumps(blobs)) - 1
-        self.assertLessEqual(sum(map(len, blobs.values())), cap)
-        self.assertLessEqual(len(dill.dumps({"a": blobs["a"]})), cap)
+        # One byte short of the full single-pass payload (magic + both records),
+        # so "a" fits exactly and "b" overflows the remaining aggregate budget.
+        cap = len(_SNAPSHOT_MAGIC) + 13 + len(blobs["a"]) + 13 + len(blobs["b"]) - 1
 
         result = self._snap(source, max_bytes=cap, max_variable_bytes=cap)
         self.assertEqual(result["saved"], ["a"])
         self.assertEqual(result["skipped"], [{"name": "b", "reason": "exceeds aggregate snapshot size cap"}])
         self.assertLessEqual(result["bytes"], cap)
-        with open(self.path, "rb") as fh:
-            self.assertEqual(list(dill.load(fh)), ["a"])
+        ns: dict = {}
+        self.assertNotIn("error", _restore_state(ns, self.path))
+        self.assertEqual(ns, {"a": "first"})
 
     def test_manifest_write_failure_preserves_prior_pair(self):
         old_payload, old_manifest = self._old_pair()
@@ -2390,6 +2437,28 @@ class SnapshotPairConsistencyTest(unittest.TestCase):
                 with open(manifest_path) as fh:
                     self.assertEqual(json.load(fh)["savedNames"], ["keep"])
                 self.assertEqual(sorted(os.listdir(d)), sorted([payload_name, manifest_name]))
+
+    def test_each_variable_serialized_once_and_payload_is_not_a_pickle(self):
+        import dill
+
+        from rlm.repl import _SNAPSHOT_MAGIC
+
+        real_dump = dill.dump
+        dumped: list[object] = []
+
+        def counting_dump(value, writer):
+            dumped.append(value)
+            return real_dump(value, writer)
+
+        with mock.patch.object(dill, "dump", counting_dump):
+            result = self._snap({"a": 1, "b": 2, "c": 3})
+        self.assertEqual(result["saved"], ["a", "b", "c"])
+        self.assertEqual(dumped, [1, 2, 3])
+        self.assertEqual(result["bytes"], os.path.getsize(self.path))
+        with open(self.path, "rb") as fh:
+            self.assertEqual(fh.read(len(_SNAPSHOT_MAGIC)), _SNAPSHOT_MAGIC)
+            with self.assertRaises(Exception):
+                dill.load(fh)
 
 
 class OwnerWatchdogTest(unittest.TestCase):

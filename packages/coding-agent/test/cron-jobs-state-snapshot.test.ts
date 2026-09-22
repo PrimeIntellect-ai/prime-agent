@@ -1,5 +1,5 @@
 import type * as FsModule from "node:fs";
-import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -78,10 +78,10 @@ describe("AgentCronJobStore state snapshots", () => {
 		renameAfterHook.after = undefined;
 	});
 
-	it("serves repeated reads of an unchanged file from the in-memory snapshot", () => {
+	it("serves repeated reads of an unchanged file from the in-memory snapshot", async () => {
 		const storePath = join(makeTempDir(tempDirs), "cron-jobs.json");
 		const store = new AgentCronJobStore(storePath);
-		store.create({
+		await store.create({
 			activeSessionId: "active-1",
 			sessionId: "session-1",
 			sessionFile: "/tmp/session-1.jsonl",
@@ -101,10 +101,10 @@ describe("AgentCronJobStore state snapshots", () => {
 		expect(jobsReads(storePath)).toBe(0);
 	});
 
-	it("publishes the mutated state so the next read does not re-parse the file", () => {
+	it("publishes the mutated state so the next read does not re-parse the file", async () => {
 		const storePath = join(makeTempDir(tempDirs), "cron-jobs.json");
 		const store = new AgentCronJobStore(storePath);
-		const job = store.create({
+		const job = await store.create({
 			activeSessionId: "active-1",
 			sessionId: "session-1",
 			sessionFile: "/tmp/session-1.jsonl",
@@ -121,10 +121,10 @@ describe("AgentCronJobStore state snapshots", () => {
 		expect(jobsReads(storePath)).toBe(0);
 	});
 
-	it("re-reads the file when an external writer changes it and caches the new parse", () => {
+	it("re-reads the file when an external writer changes it and caches the new parse", async () => {
 		const storePath = join(makeTempDir(tempDirs), "cron-jobs.json");
 		const store = new AgentCronJobStore(storePath);
-		store.create({
+		await store.create({
 			activeSessionId: "active-1",
 			sessionId: "session-1",
 			sessionFile: "/tmp/session-1.jsonl",
@@ -155,10 +155,10 @@ describe("AgentCronJobStore state snapshots", () => {
 		expect(jobsReads(storePath)).toBe(1);
 	});
 
-	it("re-reads when the file is replaced by a fresh inode with the same size and mtime", () => {
+	it("re-reads when the file is replaced by a fresh inode with the same size and mtime", async () => {
 		const storePath = join(makeTempDir(tempDirs), "cron-jobs.json");
 		const store = new AgentCronJobStore(storePath);
-		store.create({
+		await store.create({
 			activeSessionId: "active-1",
 			sessionId: "session-1",
 			sessionFile: "/tmp/session-1.jsonl",
@@ -173,19 +173,23 @@ describe("AgentCronJobStore state snapshots", () => {
 		const bytes = readFileSync(storePath, "utf-8");
 		readCounts.clear();
 
+		// A fresh inode is guaranteed by creating the replacement while the
+		// original still exists; in-place recreation can reuse the freed inode.
+		const replacementPath = `${storePath}.replaced`;
+		writeFileSync(replacementPath, bytes);
 		rmSync(storePath);
-		writeFileSync(storePath, bytes);
+		renameSync(replacementPath, storePath);
 		utimesSync(storePath, pinned, pinned);
 
 		expect(store.list()).toHaveLength(1);
 		expect(jobsReads(storePath)).toBe(1);
 	});
 
-	it("keeps concurrent store instances on one file consistent", () => {
+	it("keeps concurrent store instances on one file consistent", async () => {
 		const storePath = join(makeTempDir(tempDirs), "cron-jobs.json");
 		const first = new AgentCronJobStore(storePath);
 		const second = new AgentCronJobStore(storePath);
-		const jobA = first.create({
+		const jobA = await first.create({
 			activeSessionId: "active-1",
 			sessionId: "session-1",
 			sessionFile: "/tmp/session-1.jsonl",
@@ -196,7 +200,7 @@ describe("AgentCronJobStore state snapshots", () => {
 		});
 		expect(second.list().map((candidate) => candidate.id)).toEqual([jobA.id]);
 
-		const jobB = second.create({
+		const jobB = await second.create({
 			activeSessionId: "active-2",
 			sessionId: "session-2",
 			sessionFile: "/tmp/session-2.jsonl",
@@ -232,10 +236,10 @@ describe("AgentCronJobStore state snapshots", () => {
 		expect(second.list().map((candidate) => candidate.id)).toEqual(["external-1"]);
 	});
 
-	it("drops the snapshot when a mutation fails to persist and re-reads the disk", () => {
+	it("drops the snapshot when a mutation fails to persist and re-reads the disk", async () => {
 		const storePath = join(makeTempDir(tempDirs), "cron-jobs.json");
 		const store = new AgentCronJobStore(storePath);
-		const first = store.create({
+		const first = await store.create({
 			activeSessionId: "active-1",
 			sessionId: "session-1",
 			sessionFile: "/tmp/session-1.jsonl",
@@ -250,7 +254,7 @@ describe("AgentCronJobStore state snapshots", () => {
 
 		renameFault.remaining = 1;
 		renameFault.path = storePath;
-		expect(() =>
+		await expect(
 			store.create({
 				activeSessionId: "active-2",
 				sessionId: "session-2",
@@ -260,7 +264,7 @@ describe("AgentCronJobStore state snapshots", () => {
 				prompt: "never lands",
 				now: start,
 			}),
-		).toThrow();
+		).rejects.toThrow();
 
 		readCounts.clear();
 		expect(store.list().map((candidate) => candidate.id)).toEqual([first.id]);
@@ -289,14 +293,14 @@ describe("AgentCronJobStore state snapshots", () => {
 		expect(jobsReads(storePath)).toBe(0);
 	});
 
-	it("caches per registered session artifact and re-reads only the changed file", () => {
+	it("caches per registered session artifact and re-reads only the changed file", async () => {
 		const root = makeTempDir(tempDirs);
 		const store = AgentCronJobStore.forSessionArtifacts();
 		const firstDir = join(root, "artifacts-1");
 		const secondDir = join(root, "artifacts-2");
 		store.registerSessionArtifact("session-1", firstDir);
 		store.registerSessionArtifact("session-2", secondDir);
-		store.createHeartbeat({
+		await store.createHeartbeat({
 			activeSessionId: "active-1",
 			sessionId: "session-1",
 			sessionFile: join(root, "session-1.jsonl"),
@@ -305,7 +309,7 @@ describe("AgentCronJobStore state snapshots", () => {
 			prompt: "first heartbeat",
 			now: start,
 		});
-		store.createHeartbeat({
+		await store.createHeartbeat({
 			activeSessionId: "active-2",
 			sessionId: "session-2",
 			sessionFile: join(root, "session-2.jsonl"),
@@ -341,10 +345,10 @@ describe("AgentCronJobStore state snapshots", () => {
 		expect(jobsReads(secondPath)).toBe(0);
 	});
 
-	it("serves read-only views: an in-place edit of a listed job cannot change store behavior or reach disk", () => {
+	it("serves read-only views: an in-place edit of a listed job cannot change store behavior or reach disk", async () => {
 		const storePath = join(makeTempDir(tempDirs), "cron-jobs.json");
 		const store = new AgentCronJobStore(storePath);
-		const job = store.create({
+		const job = await store.create({
 			activeSessionId: "active-1",
 			sessionId: "session-1",
 			sessionFile: "/tmp/session-1.jsonl",
@@ -369,7 +373,7 @@ describe("AgentCronJobStore state snapshots", () => {
 		expect(jobsReads(storePath)).toBe(0);
 
 		// An unrelated mutation must persist the true state, not a leaked in-place edit.
-		store.create({
+		await store.create({
 			activeSessionId: "active-2",
 			sessionId: "session-2",
 			sessionFile: "/tmp/session-2.jsonl",
@@ -383,10 +387,10 @@ describe("AgentCronJobStore state snapshots", () => {
 		expect(store.list()).toHaveLength(2);
 	});
 
-	it("keeps the published snapshot intact when a mutator throws mid-edit", () => {
+	it("keeps the published snapshot intact when a mutator throws mid-edit", async () => {
 		const storePath = join(makeTempDir(tempDirs), "cron-jobs.json");
 		const store = new AgentCronJobStore(storePath);
-		const job = store.create({
+		const job = await store.create({
 			activeSessionId: "active-1",
 			sessionId: "session-1",
 			sessionFile: "/tmp/session-1.jsonl",
@@ -397,20 +401,23 @@ describe("AgentCronJobStore state snapshots", () => {
 		});
 		readCounts.clear();
 
-		expect(() =>
+		// The mutator runs once lock-free to probe and once under the lock; both passes throw.
+		await expect(
 			(
-				store as unknown as { mutateStates: (mutator: (state: MutableJobsState) => unknown[]) => unknown[] }
+				store as unknown as {
+					mutateStates: (mutator: (state: MutableJobsState) => unknown[]) => Promise<unknown[]>;
+				}
 			).mutateStates((state) => {
 				state.jobs = state.jobs.map((candidate) => ({ ...candidate, status: "cancelled" as const }));
 				throw new Error("mutator crashed mid-edit");
 			}),
-		).toThrow("mutator crashed mid-edit");
+		).rejects.toThrow("mutator crashed mid-edit");
 
 		// The unpersisted partial edit never reaches reads...
 		expect(store.list().map((candidate) => candidate.status)).toEqual(["active"]);
 		expect(jobsReads(storePath)).toBe(0);
 		// ...nor does a later unrelated mutation resurrect it.
-		store.create({
+		await store.create({
 			activeSessionId: "active-2",
 			sessionId: "session-2",
 			sessionFile: "/tmp/session-2.jsonl",
@@ -424,10 +431,10 @@ describe("AgentCronJobStore state snapshots", () => {
 		expect(store.list().map((candidate) => candidate.status)).toEqual(["active", "active"]);
 	});
 
-	it("re-reads instead of caching an external replacement that lands right after our own write", () => {
+	it("re-reads instead of caching an external replacement that lands right after our own write", async () => {
 		const storePath = join(makeTempDir(tempDirs), "cron-jobs.json");
 		const store = new AgentCronJobStore(storePath);
-		store.create({
+		await store.create({
 			activeSessionId: "active-1",
 			sessionId: "session-1",
 			sessionFile: "/tmp/session-1.jsonl",
@@ -454,7 +461,7 @@ describe("AgentCronJobStore state snapshots", () => {
 				new Date("2026-01-08T00:00:00.000Z"),
 			);
 		};
-		store.create({
+		await store.create({
 			activeSessionId: "active-2",
 			sessionId: "session-2",
 			sessionFile: "/tmp/session-2.jsonl",
@@ -470,7 +477,7 @@ describe("AgentCronJobStore state snapshots", () => {
 		expect(jobsReads(storePath)).toBe(1);
 
 		// A later mutation must operate on the external state, not our stale write.
-		const cancelled = store.cancel("external-raced");
+		const cancelled = await store.cancel("external-raced");
 		expect(cancelled?.status).toBe("cancelled");
 		expect(store.list()[0]?.status).toBe("cancelled");
 	});

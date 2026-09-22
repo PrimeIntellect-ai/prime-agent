@@ -914,6 +914,8 @@ describe("Harness digest at cold boundaries", () => {
 		);
 	}
 
+	type DigestPeek = { _harnessDigestWithFingerprint(): { digest: string } };
+
 	it("keeps untouched sessions empty and injects the digest at the first committed turn", async () => {
 		const harness = await createHarness({ persistSession: true });
 		harnesses.push(harness);
@@ -1004,7 +1006,41 @@ describe("Harness digest at cold boundaries", () => {
 		};
 	}
 
-	it("skips digest re-delivery on resume when only query terms drifted and the state is unchanged", async () => {
+	it("delivers a diagnostic digest instead of crashing on a malformed global entry", async () => {
+		// Regression for the fleet-wide incident: one entry with list content in
+		// the global store bricked all child spawn creation via the digest crash.
+		const agentDir = isolatedAgentDir("pi-digest-malformed");
+		mkdirSync(join(agentDir, "harness"), { recursive: true });
+		writeFileSync(
+			join(agentDir, "harness", "harness_state.json"),
+			'{"schema":1,"entries":{"prompt":{},"skill":{},"subagent":{},"memory":{"broken_memory":{"id":"broken_memory","kind":"memory","title":"Breaking memory","content":["one string"],"path":"arc","scope":"global","version":1},"valid_memory":{"id":"valid_memory","kind":"memory","title":"Valid memory","content":"Worktree workflow notes.","path":"general","scope":"global","version":1}}},"refinements":[{"id":"refine_bad","trigger":["not a string"],"changes":[],"evidence":"","outcome":""},null,"RAWLEAK-5f1e",{"id":null,"trigger":"t","changes":["update memory:m"]},{"id":"bad_changes","trigger":"t","changes":[7]}]}',
+		);
+
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("hi")]);
+		await harness.session.prompt("hello");
+
+		const digests = digestMessages(harness);
+		expect(digests).toHaveLength(1);
+		const digest = getMessageText(digests[0]);
+		expect(digest).toContain("harness: skipped malformed entry broken_memory (content not a string)");
+		expect(digest).toContain("harness: skipped malformed refinement event refine_bad (trigger not a string)");
+		expect(digest).toContain("harness: skipped malformed refinement event null (event not an object)");
+		// Non-object elements are labeled by type only: the raw value must not leak.
+		expect(digest).toContain("harness: skipped malformed refinement event a string (event not an object)");
+		expect(digest).not.toContain("RAWLEAK-5f1e");
+		// Non-string ids and non-string change elements are skipped by type label, not rendered.
+		expect(digest).toContain("harness: skipped malformed refinement event a object id (id not a string)");
+		expect(digest).toContain(
+			"harness: skipped malformed refinement event bad_changes (changes contain a non-string)",
+		);
+		expect(digest).toContain("[global:valid_memory]");
+		// The malformed content itself must never leak into the digest.
+		expect(digest).not.toContain("one string");
+	});
+
+	it("keeps one digest block across resumes and compaction: fingerprint dedupe, replaced on state change", async () => {
 		// Hermetic store: the ambient developer harness would crowd the ranked window.
 		isolatedAgentDir("pi-digest-resume");
 		const harness = await createHarness({ persistSession: true });
@@ -1038,12 +1074,39 @@ describe("Harness digest at cold boundaries", () => {
 		const after = digestMessages(resumed);
 		expect(after).toHaveLength(1);
 		expect(getMessageText(after[0])).toBe(digestTextBefore);
-		const freshDigest = (
-			resumed.session as unknown as {
-				_harnessDigestWithFingerprint(): { digest: string; stateFingerprint: string };
-			}
-		)._harnessDigestWithFingerprint().digest;
+		const freshDigest = (resumed.session as unknown as DigestPeek)._harnessDigestWithFingerprint().digest;
 		expect(HARNESS_DIGEST_PREFIX + freshDigest + HARNESS_DIGEST_SUFFIX).not.toBe(getMessageText(after[0]));
 		resumed.session.dispose();
+
+		// Changed disk state: the fresh digest replaces the stale copy instead of stacking.
+		seedMemory(state, "resume_test_memory", "Resume test memory", "Written between resumes.");
+		saveHarnessState(localDir!, state);
+		const settings = { compaction: { keepRecentTokens: 1 } }; // lets compact() below cut at the last reply
+		const refreshed = await createHarness({ existingSessionFile: sessionFile, settings });
+		harnesses.push(refreshed);
+		const digests = digestMessages(refreshed);
+		expect(digests).toHaveLength(1);
+		expect(getMessageText(digests[0])).toContain("[local:resume_test_memory] Resume test memory");
+
+		// Compaction moves the digest and its fingerprint onto the summary head. Only "ack" stays
+		// in context, so the next resume's render drifts again and only the fingerprint can dedupe.
+		refreshed.setResponses([fauxAssistantMessage("summary"), fauxAssistantMessage("turn summary")]);
+		await refreshed.session.compact();
+		const snapshot = (refreshed.session.messages[0] as { harnessDigest?: string }).harnessDigest;
+		refreshed.session.dispose();
+		const compacted = await createHarness({ existingSessionFile: sessionFile });
+		harnesses.push(compacted);
+		expect(digestMessages(compacted)).toHaveLength(0);
+		expect(compacted.session.messages[0]).toMatchObject({ role: "compactionSummary", harnessDigest: snapshot });
+		expect((compacted.session as unknown as DigestPeek)._harnessDigestWithFingerprint().digest).not.toBe(snapshot);
+
+		// Changed disk state after compaction: the fresh digest replaces the snapshot instead of stacking on it.
+		seedMemory(state, "late_note", "Late note", "Written after compaction.");
+		saveHarnessState(localDir!, state);
+		compacted.session.dispose();
+		const replaced = await createHarness({ existingSessionFile: sessionFile });
+		harnesses.push(replaced);
+		expect(digestMessages(replaced)).toHaveLength(1);
+		expect(replaced.session.messages[0]).toMatchObject({ role: "compactionSummary", harnessDigest: undefined });
 	});
 });

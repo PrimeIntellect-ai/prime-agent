@@ -150,7 +150,7 @@ When you use the `Agent` class, assistant `message_end` processing is treated as
 await agent.continue();
 ```
 
-The last message in context must be `user` or `toolResult` (not `assistant`).
+The last message in context must not be `assistant`. When it is, or when the context is empty, `continue()` runs a queued steering or follow-up message instead, and throws `AgentContinueError` with code `nothing-to-continue` only when no message is queued either. A `custom` tail also prefers a queued message over a plain continuation.
 
 ### Event Types
 
@@ -177,7 +177,7 @@ const agent = new Agent({
   initialState: {
     systemPrompt: string,
     model: Model<any>,
-    thinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh",
+    thinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max",
     tools: AgentTool<any>[],
     messages: AgentMessage[],
   },
@@ -273,7 +273,7 @@ await agent.prompt("What's in this image?", [
 // AgentMessage directly
 await agent.prompt({ role: "user", content: "Hello", timestamp: Date.now() });
 
-// Continue from current context (last message must be user or toolResult)
+// Continue from current context (tail must not be assistant unless a message is queued)
 await agent.continue();
 ```
 

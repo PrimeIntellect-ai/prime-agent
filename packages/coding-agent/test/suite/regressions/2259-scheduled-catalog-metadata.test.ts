@@ -58,7 +58,7 @@ describe("scheduled catalog metadata scans", () => {
 			const store = AgentCronJobStore.forSessionArtifacts();
 			for (const manager of [child!, archived!]) {
 				store.registerSessionArtifact(manager.getSessionId(), manager.getSessionArtifactDir()!);
-				store.createHeartbeat({
+				await store.createHeartbeat({
 					activeSessionId: manager.getSessionId(),
 					sessionId: manager.getSessionId(),
 					sessionFile: manager === child ? childFile : manager.getSessionFile()!,
@@ -85,7 +85,7 @@ describe("scheduled catalog metadata scans", () => {
 			expect(readInfo).not.toHaveBeenCalledWith(unrelated!.getSessionFile());
 			const late = unrelated!;
 			store.registerSessionArtifact(late.getSessionId(), late.getSessionArtifactDir()!);
-			store.createHeartbeat({
+			await store.createHeartbeat({
 				activeSessionId: late.getSessionId(),
 				sessionId: late.getSessionId(),
 				sessionFile: late.getSessionFile()!,

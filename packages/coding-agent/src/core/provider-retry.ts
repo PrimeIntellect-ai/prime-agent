@@ -60,7 +60,8 @@ export function providerStreamFailureStatus(message: AssistantMessage): number |
  * Deterministic rejections never retry; auth gets one retry before it can be
  * marked stale. A 404 is the exception: a live model briefly 404s on routing
  * blips (observed 2026-09-13 killing every active session), so it counts as
- * transient unavailability, not a permanent rejection.
+ * transient unavailability, not a permanent rejection. Safety filters
+ * deterministically reject identical requests, so they never retry.
  */
 export function isPermanentProviderFailureKind(
 	kind: string | undefined,
@@ -70,7 +71,7 @@ export function isPermanentProviderFailureKind(
 	if (kind === "invalid_request" && status === 404) {
 		return false;
 	}
-	if (kind === "invalid_request" || kind === "refusal" || kind === "permission") {
+	if (kind === "invalid_request" || kind === "refusal" || kind === "permission" || kind === "safety") {
 		return true;
 	}
 	return retriesPerformed > 0 && kind === "auth";
@@ -81,19 +82,27 @@ export type ProviderRetryDelay = { kind: "wait"; delayMs: number } | { kind: "ex
 /** Node caps timers at 2^31-1 ms; longer delays overflow setTimeout and fire after ~1ms. */
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
-/** Delay before retry `attempt` (1-based), honoring a server-requested wait. */
+/**
+ * Delay before retry `attempt` (1-based). A server-requested wait at or above the backoff is used as-is;
+ * otherwise the backoff is jittered so concurrent sessions do not retry in lockstep, floored at the server wait.
+ */
 export function providerRetryDelay(
 	attempt: number,
 	retryAfterMs: number | undefined,
 	policy: Pick<ProviderRetryPolicy, "baseDelayMs" | "maxRetryDelayMs">,
+	rng: () => number = Math.random,
 ): ProviderRetryDelay {
 	if (retryAfterMs !== undefined && policy.maxRetryDelayMs > 0 && retryAfterMs > policy.maxRetryDelayMs) {
 		return { kind: "exceeds-cap", retryAfterMs };
 	}
-	return {
-		kind: "wait",
-		delayMs: Math.min(Math.max(policy.baseDelayMs * 2 ** (attempt - 1), retryAfterMs ?? 0), MAX_TIMER_DELAY_MS),
-	};
+	const backoffMs = policy.baseDelayMs * 2 ** (attempt - 1);
+	if (retryAfterMs !== undefined && retryAfterMs >= backoffMs) {
+		return { kind: "wait", delayMs: Math.min(retryAfterMs, MAX_TIMER_DELAY_MS) };
+	}
+	const jitteredMs = providerWaitJitter(backoffMs, rng);
+	const flooredMs = Math.max(jitteredMs, retryAfterMs ?? 0);
+	const clampedMs = Math.min(flooredMs, MAX_TIMER_DELAY_MS);
+	return { kind: "wait", delayMs: clampedMs };
 }
 
 /**
@@ -180,6 +189,12 @@ export interface ProviderWaitPolicy {
 	maxAttempts: number;
 	/** Abort bound: maximum total wait. Default 15m. */
 	maxWaitMs: number;
+	/** Park sessions for provider-reported resets beyond maxWaitMs. Default true. */
+	pauseUntilReset: boolean;
+	/** Abort bound: maximum single park duration. Default 24h, clamped to 7d. */
+	maxPauseMs: number;
+	/** Abort bound: maximum parks per quota episode. Default 8. */
+	maxParks: number;
 }
 
 export const DEFAULT_PROVIDER_WAIT_POLICY: ProviderWaitPolicy = {
@@ -188,7 +203,43 @@ export const DEFAULT_PROVIDER_WAIT_POLICY: ProviderWaitPolicy = {
 	maxDelayMs: 300_000,
 	maxAttempts: 30,
 	maxWaitMs: 900_000,
+	pauseUntilReset: true,
+	maxPauseMs: 86_400_000,
+	maxParks: 8,
 };
+
+/** Parks wake slightly after the reported reset so the window has actually rolled over. */
+export const PROVIDER_RESUME_GRACE_MS = 30_000;
+
+/** Upper clamp for maxPauseMs: one week per park, so long-horizon resets still get probed. */
+export const MAX_PROVIDER_PAUSE_MS = 7 * 86_400_000;
+
+export type ProviderParkDecision =
+	| { kind: "park"; delayMs: number }
+	| { kind: "none"; reason: "disabled" | "park-budget" | "no-reset" };
+
+/**
+ * Park decision after a quota failure whose provider-reported reset time exceeds
+ * the bounded wait: the session ends the turn cleanly and wakes at the reset
+ * (plus a small grace), capped at maxPauseMs. Only a provider-reported reset
+ * parks: without one, the bounded wait keeps its existing abort behavior.
+ */
+export function providerParkDecision(
+	parksUsed: number,
+	resetMs: number | undefined,
+	policy: Pick<ProviderWaitPolicy, "pauseUntilReset" | "maxPauseMs" | "maxParks">,
+): ProviderParkDecision {
+	if (!policy.pauseUntilReset) {
+		return { kind: "none", reason: "disabled" };
+	}
+	if (parksUsed >= policy.maxParks) {
+		return { kind: "none", reason: "park-budget" };
+	}
+	if (resetMs === undefined) {
+		return { kind: "none", reason: "no-reset" };
+	}
+	return { kind: "park", delayMs: Math.min(resetMs + PROVIDER_RESUME_GRACE_MS, policy.maxPauseMs) };
+}
 
 export type ProviderWaitDecision =
 	| { kind: "wait"; delayMs: number }
@@ -204,7 +255,7 @@ export function providerWaitPingDelay(
 	return Math.min(capped, MAX_TIMER_DELAY_MS);
 }
 
-/** +/-25% jitter around a ping delay (avoids thundering-herd retries). */
+/** +/-25% jitter around a delay (avoids thundering-herd retries). */
 export function providerWaitJitter(delayMs: number, rng: () => number = Math.random): number {
 	const factor = 0.75 + 0.5 * Math.max(0, Math.min(1, rng()));
 	return Math.max(0, Math.round(delayMs * factor));

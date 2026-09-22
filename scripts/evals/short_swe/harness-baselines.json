@@ -1,0 +1,183 @@
+{
+  "schema_version": 2,
+  "description": "Static harness baselines on the 28-task Short SWE suite",
+  "model": "internal/glm-5.3-fast",
+  "model_note": "All harnesses measured on internal/glm-5.3-fast \u2014 same model as the paired evaluation. Same 28-task suite, same scoring. The comparison isolates the harness contribution.",
+  "baselines": [
+    {
+      "harness": "pi-coding-harness",
+      "label": "Pi coding harness",
+      "tasksets": {
+        "swebench-verified": {
+          "resolved": 13,
+          "tasks": 15,
+          "uncached_input_tokens": 1690000,
+          "cached_input_tokens": 18150000,
+          "output_tokens": 250300,
+          "measured": true
+        },
+        "swebench-pro": {
+          "resolved": 6,
+          "tasks": 8,
+          "uncached_input_tokens": 1080000,
+          "cached_input_tokens": 14200000,
+          "output_tokens": 191100,
+          "measured": true
+        },
+        "scaleswe": {
+          "resolved": 3,
+          "tasks": 5,
+          "uncached_input_tokens": 350000,
+          "cached_input_tokens": 2440000,
+          "output_tokens": 46300,
+          "measured": true
+        }
+      },
+      "model_failures": 0,
+      "e2e_seconds": 4186.0,
+      "measured_at": "2026-09-18T00:00:00Z",
+      "source": "Same-model re-eval Sept 18 2026, pi 0.85.1 with internal/glm-5.3-fast via Prime Inference, official swebench 5.0.2 + Pro + ScaleSWE docker scoring; all 28 tasks, 0 API errors",
+      "model": "internal/glm-5.3-fast"
+    },
+    {
+      "harness": "codex",
+      "label": "Codex",
+      "tasksets": {
+        "swebench-verified": {
+          "resolved": 9,
+          "tasks": 15,
+          "uncached_input_tokens": 703673,
+          "cached_input_tokens": 5988352,
+          "output_tokens": 64452,
+          "measured": true
+        },
+        "swebench-pro": {
+          "resolved": 5,
+          "tasks": 8,
+          "uncached_input_tokens": 1574479,
+          "cached_input_tokens": 49020928,
+          "output_tokens": 101388,
+          "measured": true
+        },
+        "scaleswe": {
+          "resolved": 3,
+          "tasks": 5,
+          "uncached_input_tokens": 426738,
+          "cached_input_tokens": 5228544,
+          "output_tokens": 52676,
+          "measured": true
+        }
+      },
+      "model_failures": 0,
+      "e2e_seconds": 1623.1,
+      "measured_at": "2026-09-18T00:00:00Z",
+      "source": "Same-model re-eval Sept 18 2026, codex 0.154.0 with internal/glm-5.3-fast via Prime Inference (Responses API), Prime VM sandbox per task, official scoring; all 28 tasks, 0 model failures",
+      "model": "internal/glm-5.3-fast"
+    },
+    {
+      "harness": "claude-code",
+      "label": "Claude Code",
+      "tasksets": {
+        "swebench-verified": {
+          "resolved": 12,
+          "tasks": 15,
+          "uncached_input_tokens": 2476452,
+          "cached_input_tokens": 46053376,
+          "output_tokens": 1475250,
+          "measured": true
+        },
+        "swebench-pro": {
+          "resolved": 6,
+          "tasks": 8,
+          "uncached_input_tokens": 1280056,
+          "cached_input_tokens": 23324672,
+          "output_tokens": 287563,
+          "measured": true
+        },
+        "scaleswe": {
+          "resolved": 3,
+          "tasks": 5,
+          "uncached_input_tokens": 806904,
+          "cached_input_tokens": 14674944,
+          "output_tokens": 683901,
+          "measured": true
+        }
+      },
+      "model_failures": 0,
+      "e2e_seconds": 0.0,
+      "measured_at": "2026-09-18T00:00:00Z",
+      "source": "Same-model re-eval Sept 18 2026, claude-code 2.1.274 with internal/glm-5.3-fast via Prime Inference (Anthropic-compatible), 3600s rollout budget, official scoring; all 28 tasks",
+      "model": "internal/glm-5.3-fast"
+    },
+    {
+      "harness": "swe-agent",
+      "label": "SWE Agent",
+      "tasksets": {
+        "swebench-verified": {
+          "resolved": 11,
+          "tasks": 15,
+          "uncached_input_tokens": 2288590,
+          "cached_input_tokens": 8957952,
+          "output_tokens": 145302,
+          "measured": true
+        },
+        "swebench-pro": {
+          "resolved": 2,
+          "tasks": 8,
+          "uncached_input_tokens": 3844170,
+          "cached_input_tokens": 8013824,
+          "output_tokens": 175265,
+          "measured": true
+        },
+        "scaleswe": {
+          "resolved": 3,
+          "tasks": 5,
+          "uncached_input_tokens": 1901909,
+          "cached_input_tokens": 5091328,
+          "output_tokens": 58997,
+          "measured": true
+        }
+      },
+      "model_failures": 0,
+      "e2e_seconds": 0.0,
+      "measured_at": "2026-09-18T00:00:00Z",
+      "source": "Same-model re-eval Sept 18 2026, SWE-agent 1.1.0 with internal/glm-5.3-fast via Prime Inference, Prime VM sandbox per task, official scoring; all 28 tasks, 0 failures, avg 124-259s/task",
+      "model": "internal/glm-5.3-fast"
+    },
+    {
+      "harness": "bash-edit",
+      "label": "Bash Edit",
+      "tasksets": {
+        "swebench-verified": {
+          "resolved": 6,
+          "tasks": 15,
+          "uncached_input_tokens": 1497428,
+          "cached_input_tokens": 13005824,
+          "output_tokens": 1095094,
+          "measured": true
+        },
+        "swebench-pro": {
+          "resolved": 3,
+          "tasks": 8,
+          "uncached_input_tokens": 972615,
+          "cached_input_tokens": 10501120,
+          "output_tokens": 607403,
+          "measured": true
+        },
+        "scaleswe": {
+          "resolved": 3,
+          "tasks": 5,
+          "uncached_input_tokens": 667659,
+          "cached_input_tokens": 5729280,
+          "output_tokens": 346989,
+          "measured": true
+        }
+      },
+      "model_failures": 0,
+      "e2e_seconds": 20345.0,
+      "measured_at": "2026-09-18T00:00:00Z",
+      "source": "Fresh eval Sept 18 2026, minimal bash REPL harness with internal/glm-5.3-fast (same model as paired eval), network-free docker per task, pinned suite verifiers; all 28 tasks",
+      "model": "internal/glm-5.3-fast"
+    }
+  ]
+}

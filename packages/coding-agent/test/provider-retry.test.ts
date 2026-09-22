@@ -1,10 +1,12 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	completeWithProviderRetry,
 	DEFAULT_PROVIDER_WAIT_POLICY,
+	type ProviderParkDecision,
 	type ProviderWaitPolicy,
 	parseProviderResetMs,
+	providerParkDecision,
 	providerRetryDelay,
 	providerWaitClass,
 	providerWaitDecision,
@@ -12,7 +14,7 @@ import {
 	providerWaitPingDelay,
 } from "../src/core/provider-retry.js";
 
-function providerError(): AssistantMessage {
+function providerError(kind?: string): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [],
@@ -30,10 +32,19 @@ function providerError(): AssistantMessage {
 		stopReason: "error",
 		errorMessage: "500 Internal Server Error",
 		timestamp: Date.now(),
+		diagnostics: kind ? [{ type: "provider_stream_failure", timestamp: Date.now(), details: { kind } }] : undefined,
 	};
 }
 
 describe("completeWithProviderRetry", () => {
+	it("jitters the computed backoff while honoring a server wait exactly", () => {
+		const policy = { baseDelayMs: 2000, maxRetryDelayMs: 60_000 };
+		expect(providerRetryDelay(1, undefined, policy, () => 0)).toEqual({ kind: "wait", delayMs: 1500 });
+		expect(providerRetryDelay(1, undefined, policy, () => 1)).toEqual({ kind: "wait", delayMs: 2500 });
+		expect(providerRetryDelay(1, 5000, policy, () => 1)).toEqual({ kind: "wait", delayMs: 5000 });
+		expect(providerRetryDelay(3, 7000, policy, () => 0)).toEqual({ kind: "wait", delayMs: 7000 });
+	});
+
 	it("returns an aborted result instead of the provider error when cancelled during backoff", async () => {
 		const controller = new AbortController();
 		setTimeout(() => controller.abort(), 10);
@@ -46,18 +57,14 @@ describe("completeWithProviderRetry", () => {
 		expect(result.stopReason).toBe("aborted");
 	});
 
-	it("makes a single attempt when the policy disables retries", async () => {
-		let attempts = 0;
-		const result = await completeWithProviderRetry(
-			async () => {
-				attempts++;
-				return providerError();
-			},
-			{ policy: { enabled: false, maxRetries: 3, baseDelayMs: 1, maxRetryDelayMs: 60_000 } },
-		);
-
-		expect(attempts).toBe(1);
+	it.each([
+		{ kind: undefined, policy: { enabled: false, maxRetries: 3, baseDelayMs: 1, maxRetryDelayMs: 60_000 } },
+		{ kind: "safety", policy: { enabled: true, maxRetries: 3, baseDelayMs: 1, maxRetryDelayMs: 60_000 } },
+	])("PR#2472: single attempt when retries are disabled or the failure is permanent", async ({ kind, policy }) => {
+		const attempt = vi.fn(async () => providerError(kind));
+		const result = await completeWithProviderRetry(attempt, { policy });
 		expect(result.stopReason).toBe("error");
+		expect(attempt).toHaveBeenCalledTimes(1);
 	});
 
 	it("clamps uncapped server delays to Node's max timer instead of overflowing setTimeout", () => {
@@ -75,6 +82,9 @@ const TEST_WAIT_POLICY: ProviderWaitPolicy = {
 	maxDelayMs: 300_000,
 	maxAttempts: 30,
 	maxWaitMs: 900_000,
+	pauseUntilReset: true,
+	maxPauseMs: 86_400_000,
+	maxParks: 8,
 };
 
 describe("providerWaitClass", () => {
@@ -193,7 +203,25 @@ describe("providerWaitDecision", () => {
 			maxDelayMs: 300_000,
 			maxAttempts: 30,
 			maxWaitMs: 900_000,
+			pauseUntilReset: true,
+			maxPauseMs: 86_400_000,
+			maxParks: 8,
 		});
+	});
+});
+
+describe("providerParkDecision", () => {
+	// maxParks 0 disables parking outright, including the first park, and a park
+	// is never guessed without a provider-reported reset.
+	it.each<[number, number | undefined, Partial<ProviderWaitPolicy>, ProviderParkDecision]>([
+		[0, 2 * 3_600_000, {}, { kind: "park", delayMs: 7_230_000 }],
+		[0, 10 * 86_400_000, {}, { kind: "park", delayMs: 86_400_000 }],
+		[0, 3_600_000, { pauseUntilReset: false }, { kind: "none", reason: "disabled" }],
+		[8, 3_600_000, {}, { kind: "none", reason: "park-budget" }],
+		[0, 3_600_000, { maxParks: 0 }, { kind: "none", reason: "park-budget" }],
+		[0, undefined, {}, { kind: "none", reason: "no-reset" }],
+	])("uses %i parks at a reported reset of %s", (parksUsed, resetMs, overrides, expected) => {
+		expect(providerParkDecision(parksUsed, resetMs, { ...TEST_WAIT_POLICY, ...overrides })).toEqual(expected);
 	});
 });
 

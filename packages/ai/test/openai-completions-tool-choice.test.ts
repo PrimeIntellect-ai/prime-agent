@@ -23,12 +23,16 @@ const mockState = vi.hoisted(() => ({
 		| Array<null | {
 				id?: string;
 				model?: string;
+				service_tier?: string;
 				choices?: Array<{ delta: Record<string, unknown>; finish_reason: string | null; usage?: unknown }>;
 				usage?: {
 					prompt_tokens: number;
 					completion_tokens: number;
 					prompt_tokens_details: { cached_tokens: number; cache_write_tokens?: number };
 					completion_tokens_details: { reasoning_tokens: number };
+					cost?: number;
+					is_byok?: boolean;
+					cost_details?: { upstream_inference_cost?: number };
 				};
 		  }>
 		| undefined,
@@ -1266,6 +1270,7 @@ describe("openai-completions tools payload", () => {
 	afterEach(() => {
 		delete process.env.CLOUDFLARE_ACCOUNT_ID;
 		delete process.env.CLOUDFLARE_GATEWAY_ID;
+		delete process.env.PRIME_TEAM_ID;
 	});
 
 	it.each([
@@ -1369,6 +1374,12 @@ describe("openai-completions tools payload", () => {
 		const clientOptions = mockState.lastClientOptions as { defaultHeaders?: Record<string, unknown> };
 		expect(clientOptions.defaultHeaders?.Authorization).toBe("Bearer upstream-token");
 		expect(clientOptions.defaultHeaders?.["cf-aig-authorization"]).toBe("Bearer cf-token");
+	});
+	it("adds no Prime Inference team header the caller did not pass", async () => {
+		process.env.PRIME_TEAM_ID = "cli-profile-team";
+		const context = { messages: [{ role: "user" as const, content: "hi", timestamp: 1 }] };
+		await streamSimple(getModel("prime-inference", "openai/gpt-5")!, context, { apiKey: "k" }).result();
+		expect(mockState.lastClientOptions).not.toHaveProperty(["defaultHeaders", "X-Prime-Team-ID"]);
 	});
 });
 
@@ -1508,6 +1519,108 @@ describe("openai-completions tool-result content", () => {
 		const messages = convertMessages(model, buildContext(model, [toolResult]), compat);
 
 		expect(messages.find((message) => message.role === "tool")?.content).toBe("");
+	});
+});
+
+describe("openai-completions service tier", () => {
+	function serviceTierModel(provider: string): Model<"openai-completions"> {
+		const { compat: _compat, ...base } = getModel("openai", "gpt-4o-mini")!;
+		return {
+			...base,
+			api: "openai-completions",
+			id: "anthropic/claude-opus-5",
+			provider,
+			baseUrl: "https://openrouter.ai/api/v1",
+			cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+		};
+	}
+
+	it.each([
+		["openrouter", "flex"],
+		["openai", "flex"],
+		["prime-inference", undefined],
+	])("forwards a requested tier only for openai and openrouter: $0", async (provider, forwarded) => {
+		await streamSimple(
+			serviceTierModel(provider),
+			{ messages: [{ role: "user", content: "Hi", timestamp: Date.now() }] },
+			{ apiKey: "test", serviceTier: "flex" },
+		).result();
+
+		expect((mockState.lastParams as { service_tier?: string }).service_tier).toBe(forwarded);
+	});
+
+	it.each([
+		{
+			name: "uses OpenRouter's reported cost, already priced by the serving tier",
+			provider: "openrouter",
+			requestedTier: "priority",
+			responseServiceTier: "priority",
+			reported: { cost: 0.0009 },
+			expectedTotal: 0.0009,
+		},
+		{
+			name: "records BYOK spend from the upstream bill plus OpenRouter's fee",
+			provider: "openrouter",
+			requestedTier: undefined,
+			responseServiceTier: undefined,
+			reported: { cost: 0.95, is_byok: true, cost_details: { upstream_inference_cost: 19 } },
+			expectedTotal: 19.95,
+		},
+		{
+			name: "keeps catalog rates when OpenRouter reports a cost of 0",
+			provider: "openrouter",
+			requestedTier: undefined,
+			responseServiceTier: undefined,
+			reported: { cost: 0 },
+			expectedTotal: 0.00015,
+		},
+		{
+			name: "keeps unmultiplied catalog rates for a gateway tier echo without reported cost",
+			provider: "openrouter",
+			requestedTier: "priority",
+			responseServiceTier: "priority",
+			reported: undefined,
+			expectedTotal: 0.00015,
+		},
+		{
+			name: "multiplies direct OpenAI usage by the tier OpenAI echoes as served",
+			provider: "openai",
+			requestedTier: "flex",
+			responseServiceTier: "flex",
+			reported: undefined,
+			expectedTotal: 0.000075,
+		},
+		{
+			name: "never multiplies from the requested tier when no served tier is echoed",
+			provider: "openai",
+			requestedTier: "flex",
+			responseServiceTier: undefined,
+			reported: undefined,
+			expectedTotal: 0.00015,
+		},
+	] as const)("$name", async ({ provider, requestedTier, responseServiceTier, reported, expectedTotal }) => {
+		mockState.chunks = [
+			{
+				id: "chatcmpl-1",
+				service_tier: responseServiceTier,
+				choices: [{ delta: {}, finish_reason: "stop" }],
+				usage: {
+					prompt_tokens: 100,
+					completion_tokens: 50,
+					prompt_tokens_details: { cached_tokens: 0 },
+					completion_tokens_details: { reasoning_tokens: 0 },
+					...reported,
+				},
+			},
+		];
+
+		const response = await streamSimple(
+			serviceTierModel(provider),
+			{ messages: [{ role: "user", content: "Hi", timestamp: Date.now() }] },
+			{ apiKey: "test", serviceTier: requestedTier },
+		).result();
+
+		expect(response.usage.cost.total).toBeCloseTo(expectedTotal, 10);
 	});
 });
 

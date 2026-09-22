@@ -7,6 +7,8 @@ export const HOST_REQUEST_SHUTDOWN_TIMEOUT_MS = 5000;
 export const KERNEL_SHUTDOWN_TIMEOUT_MS = 5000;
 export const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 1500;
 export const SNAPSHOT_EXECUTION_TIMEOUT_MS = 5000;
+/** Restore deserializes everything a snapshot serializes: bound like the repair step. */
+export const RESTORE_EXECUTION_TIMEOUT_MS = 30_000;
 export const KERNEL_ABORT_GRACE_MS = 1000;
 export const KERNEL_BUSY_REUSE_WAIT_MS = 5000;
 export const KERNEL_BUSY_INTERRUPT_INTERVAL_MS = 500;
@@ -51,6 +53,8 @@ export interface KernelManagerOptions {
 	env?: Record<string, string>;
 	sessionId?: string;
 	hostHandlers?: HostRequestHandlers;
+	/** Fires when the last live background bash() handle settles (its activity track empties or the kernel tears down). */
+	onBackgroundWorkSettled?: () => void;
 	pythonSkills?: readonly KernelPythonSkill[];
 	/** Persist/revive the user namespace across kernel restarts and session resume. */
 	snapshot?: KernelSnapshotConfig;

@@ -89,6 +89,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "model", description: "Select model (opens selector UI)", argumentHint: "[search]" },
 	{ name: "effort", description: "Select reasoning/thinking level (opens selector UI)", argumentHint: "[level]" },
 	{ name: "fast", description: "Toggle OpenAI Fast mode" },
+	{ name: "tier", description: "Show or set the service tier", argumentHint: "[default|flex|priority|auto]" },
 	{ name: "scoped-models", description: "Enable/disable models for Alt+M cycling" },
 	{
 		name: "export",
@@ -209,6 +210,12 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{
 		name: "fullscreen",
 		description: "Toggle fullscreen (alternate screen) rendering with scrollable transcript",
+		argumentHint: "[on|off]",
+		takesArgument: true,
+	},
+	{
+		name: "speed",
+		description: "Toggle footer readout of model output tok/sec (latest response and session average)",
 		argumentHint: "[on|off]",
 		takesArgument: true,
 	},

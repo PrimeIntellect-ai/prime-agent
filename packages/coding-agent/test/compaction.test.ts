@@ -1,17 +1,27 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, Message, ToolCall, Usage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Message, Model, ToolCall, Usage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { readFileSync } from "fs";
 import { join } from "path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	type CompactionSettings,
+	compact,
 	DEFAULT_COMPACTION_SETTINGS,
 	estimateContextTokens,
+	estimateSummaryRequestTokens,
 	findCutPoint,
 	prepareCompaction,
 	shouldCompact,
 } from "../src/core/compaction/index.js";
-import { serializeConversation } from "../src/core/compaction/utils.js";
+import { SUMMARIZATION_SYSTEM_PROMPT, serializeConversation } from "../src/core/compaction/utils.js";
+
+const { completeSimpleMock } = vi.hoisted(() => ({ completeSimpleMock: vi.fn() }));
+vi.mock("@earendil-works/pi-ai", async (importOriginal) => {
+	const actual = await importOriginal<Record<string, unknown>>();
+	return { ...actual, completeSimple: completeSimpleMock };
+});
+
 import {
 	buildSessionContext,
 	type CompactionEntry,
@@ -298,6 +308,72 @@ describe("prepareCompaction with previous compaction", () => {
 		expect(summarizedText).toContain("user msg 3 - kept by compaction1");
 		expect(summarizedText).not.toContain("First summary");
 		expect(preparation!.previousSummary).toBe("First summary");
+	});
+});
+
+describe("prepareCompaction recency anchor", () => {
+	// A long user message crosses the tiny keep-recent budget, so the cut
+	// lands on it: a deterministic user-message cut with no split turn.
+	const longUserText = `user tail ${"x".repeat(400)}`;
+	const anchoredPreparation = (previousSummary: string, tailTexts: string[]) => {
+		const u2 = createMessageEntry(createUserMessage("user msg 2"));
+		const entries = [
+			createMessageEntry(createUserMessage("user msg 1")),
+			createMessageEntry(createAssistantMessage("assistant msg 1", createMockUsage(5000, 1000))),
+			u2,
+			createMessageEntry(createAssistantMessage("assistant msg 2", createMockUsage(6000, 2000))),
+			createCompactionEntry(previousSummary, u2.id),
+			createMessageEntry(createUserMessage(longUserText)),
+			...tailTexts.map((text) => createMessageEntry(createAssistantMessage(text, createMockUsage(7000, 3000)))),
+		];
+		return prepareCompaction(entries, { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 10 });
+	};
+
+	it.each([
+		{
+			name: "anchors to the newest kept-tail assistant text, skipping empty ones",
+			previousSummary: "First summary",
+			tailTexts: ["", "older kept text", "newest kept text"],
+			anchor: "newest kept text",
+			keptSummary: "First summary",
+		},
+		{
+			name: "drops the previous summary entirely when it contained only file blocks",
+			previousSummary: "<read-files>\nold/a.ts\n</read-files>\n\n<modified-files>\nold/b.ts\n</modified-files>",
+			tailTexts: [],
+			anchor: undefined,
+			keptSummary: undefined,
+		},
+	])("$name", ({ previousSummary, tailTexts, anchor, keptSummary }) => {
+		const preparation = anchoredPreparation(previousSummary, tailTexts);
+		expect(preparation).toBeDefined();
+		expect(preparation!.recentStateAnchor).toBe(anchor);
+		expect(preparation!.previousSummary).toBe(keptSummary);
+	});
+	it("sizes the history request estimate with the recency anchor", () => {
+		const preparation = anchoredPreparation("First summary", ["newest kept text"]);
+		expect(estimateSummaryRequestTokens(preparation!)).toBeGreaterThan(
+			estimateSummaryRequestTokens({ ...preparation!, recentStateAnchor: undefined }),
+		);
+	});
+	it("sizes the window from the exact wire bodies compact() issues", async () => {
+		const preparation = anchoredPreparation("First summary", ["newest kept text"]);
+		completeSimpleMock.mockReset().mockResolvedValue(fauxAssistantMessage("Test summary"));
+		const model = { provider: "faux", id: "faux-1" } as unknown as Model<string>;
+		await compact(preparation!, model, "test-key");
+		const calls = completeSimpleMock.mock.calls.filter(
+			(call) => (call[1] as { systemPrompt?: string }).systemPrompt === SUMMARIZATION_SYSTEM_PROMPT,
+		);
+		expect(calls.length).toBeGreaterThan(0);
+		const required = estimateSummaryRequestTokens(preparation!);
+		for (const call of calls) {
+			const text = (call[1] as unknown as { messages: { content: { text: string }[] }[] }).messages[0].content[0]
+				.text;
+			const { maxTokens = 0 } = call[2] as { maxTokens?: number };
+			expect(required).toBeGreaterThanOrEqual(
+				Math.ceil(SUMMARIZATION_SYSTEM_PROMPT.length / 4) + Math.ceil(text.length / 4) + maxTokens,
+			);
+		}
 	});
 });
 

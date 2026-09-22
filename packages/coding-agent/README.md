@@ -161,6 +161,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/session` | Show session info (file, ID, messages) |
 | `/traces [status\|on\|off\|preview\|upload-current\|upload-all\|login]` | Preview traces, run one-shot current/all uploads, and manage automatic sharing (`upload` aliases `upload-current`) |
 | `/usage` | Show token, cost, and context usage |
+| `/speed [on\|off]` | Toggle footer readout of model output tok/sec (latest response and session average) |
 | `/tree` | Jump to any point in the session and continue from there |
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
@@ -507,6 +508,7 @@ Run `prime-agent help` for the command list and `prime-agent help <command>` for
 ```bash
 prime-agent agents                         # Search running, idle, and inactive sessions
 prime-agent list [--all]                   # List active or saved agents
+prime-agent sessions [--all] [--json]     # Show agent status, activity, and usage
 prime-agent attach <agent>                 # Attach the interactive UI
 prime-agent stop <agent>                   # Stop one agent
 prime-agent rename <agent> <name>          # Rename an agent

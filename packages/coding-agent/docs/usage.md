@@ -48,6 +48,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/session` | Show session file, ID, and message counts |
 | `/traces [status\|on\|off\|preview\|upload-current\|upload-all\|login]` | Preview, upload, or manage opt-in trace sharing |
 | `/usage`, `/context` | Show the parent and subagent context, token, and cost breakdown |
+| `/speed [on\|off]` | Toggle footer readout of model output tok/sec (latest response and session average) |
 | `/tree` | Jump to any point in the session and continue from there |
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
@@ -173,6 +174,7 @@ prime-agent [options] [@files...] [messages...]
 ```bash
 prime-agent agents
 prime-agent list [--all]
+prime-agent sessions [--all] [--json]
 prime-agent attach <agent>
 prime-agent stop <agent>
 prime-agent rename <agent> <name>

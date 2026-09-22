@@ -9,6 +9,7 @@ import {
 	AgentContinueError,
 	type AgentEvent,
 	type AgentMessage,
+	type AgentModelOverride,
 	type AgentState,
 	type AgentTool,
 	type GetContinuationMessagesContext,
@@ -26,13 +27,14 @@ import type {
 	UserMessage,
 } from "@earendil-works/pi-ai";
 import {
+	clampServiceTier,
 	clampThinkingLevel,
 	cleanupSessionResources,
 	getSupportedThinkingLevels,
 	isContextOverflow,
 	modelsAreEqual,
 	resetApiProviders,
-	supportsFastMode,
+	supportsServiceTier,
 } from "@earendil-works/pi-ai";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
@@ -108,7 +110,9 @@ import {
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
 	compact,
+	estimateBranchSummaryRequestTokens,
 	estimateContextTokens,
+	estimateSummaryRequestTokens,
 	generateBranchSummary,
 	prepareCompaction,
 	serializeConversation,
@@ -121,8 +125,13 @@ import {
 	loadContextTreeChildFromDisk,
 	loadContextTreeChildrenFromDisk,
 } from "./context-tree.js";
-import type { AgentCronJob, AgentRlmHeartbeatController, AgentRlmHeartbeatStatusUpdate } from "./cron-jobs.js";
-import { normalizeHeartbeatDeliveryMode } from "./cron-jobs.js";
+import {
+	type AgentCronJob,
+	AgentCronJobStore,
+	type AgentRlmHeartbeatController,
+	type AgentRlmHeartbeatStatusUpdate,
+	normalizeHeartbeatDeliveryMode,
+} from "./cron-jobs.js";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.js";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.js";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.js";
@@ -171,6 +180,7 @@ import {
 	validateGoalBudget,
 	validateGoalObjective,
 } from "./goals.js";
+import { resolveImageModelOverride } from "./image-model-routing.js";
 import type { HostRequestHandlers, KernelSentAgentMessage } from "./kernel/index.js";
 import { type RestoreResult, snapshotPathIn } from "./kernel/state-snapshot.js";
 import type { AcpMcpServerConfig } from "./mcp/acp-mcp-types.js";
@@ -200,6 +210,7 @@ import {
 	HEARTBEAT_PROMPT_PREVIEW_LABEL,
 	IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
 	isSessionSlashCommandMessage,
+	PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE,
 	type RefinementSource,
 	RLM_CHILD_FAILURE_CUSTOM_TYPE,
 	RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
@@ -214,6 +225,7 @@ import {
 	isPermanentProviderFailureKind,
 	type ProviderWaitPolicy,
 	parseProviderResetMs,
+	providerParkDecision,
 	providerRetryDelay,
 	providerRetryPolicy,
 	providerStreamFailureKind,
@@ -341,7 +353,7 @@ import { THINKING_LEVELS } from "./thinking-levels.js";
 import { acpMcpToolNames, createAcpMcpToolDefinitions } from "./tools/acp-mcp.js";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
 import { createAllToolDefinitions } from "./tools/index.js";
-import { IpythonKernelProvisioner } from "./tools/ipython.js";
+import { IpythonKernelProvisioner, type UnavailablePythonSkills } from "./tools/ipython.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
 import {
 	addAssistantUsage,
@@ -844,6 +856,15 @@ function normalizeMessageContent(content: string | (TextContent | ImageContent)[
 	return { text, ...(images.length > 0 ? { images } : {}) };
 }
 
+/**
+ * Whether a delivered message attaches image content. Used to route
+ * image-carrying turns off session models without image input.
+ */
+function messageCarriesImages(message: QueuedAgentMessage | AgentMessage): boolean {
+	const content = (message as { content?: unknown }).content;
+	return Array.isArray(content) && content.some((part: { type?: string }) => part?.type === "image");
+}
+
 function queuedAgentMessagePreview(action: QueuedSessionAction): string {
 	const payload = action.payload;
 	if (payload.kind === "session_command") return payload.text;
@@ -1066,6 +1087,8 @@ interface RlmChildRun {
 	reportDeletionCleanupFailure?: (error: unknown) => Promise<void>;
 	emitUpdate?: () => void;
 	lastEmittedUpdate?: RlmChildStableSnapshot;
+	/** Monotonic time of the last streamed-delta emit; other event kinds still emit at once. */
+	lastStreamedUpdateMonotonicAt?: number;
 	unsubscribe?: () => void;
 }
 
@@ -1082,6 +1105,8 @@ const KERNEL_STATE_LISTING_TIMEOUT_MS = 5000;
 const RLM_MAX_DEPTH_STATE_CUSTOM_TYPE = "rlm_max_depth_state";
 /** Minimum spacing between accepted progress notes from one child session. */
 const RLM_PROGRESS_NOTE_MIN_INTERVAL_MS = 10_000;
+/** Minimum spacing between streamed-delta child update emits per child run. */
+export const RLM_CHILD_UPDATE_MIN_INTERVAL_MS = 1_000;
 /** Bounded ring of progress notes kept per child run; the snapshot exposes the newest. */
 const RLM_CHILD_PROGRESS_NOTE_RING_MAX = 5;
 /** A running child with no tracked activity for this long reports activityStaleMs. */
@@ -1090,6 +1115,48 @@ const RLM_CHILD_STALE_ACTIVITY_THRESHOLD_MS = 10 * 60_000;
 const RLM_REGISTRY_ANSWER_PREVIEW_MAX_LENGTH = 200;
 /** Hard cap for labels carried into kernel roster entries (snapshots keep the full prompt). */
 const RLM_REGISTRY_LABEL_MAX_LENGTH = 200;
+
+/** Session-log entry recorded when a quota-blocked session parks until the provider reset. */
+const QUOTA_PARK_CUSTOM_ENTRY_TYPE = "provider_quota_park";
+/** Session-log entry recorded when a parked session resumes, or when its wake could not resume it. */
+const QUOTA_RESUME_CUSTOM_ENTRY_TYPE = "provider_quota_resume";
+/** Label for the durable one-shot wake that resumes a parked session. */
+const QUOTA_RESUME_CRON_LABEL = "quota-resume";
+/**
+ * In-context marker delivered on resume: tells the model the pause happened and
+ * that it should continue the interrupted task. The same text is the prompt of
+ * the durable wake job, so daemon-delivered resumes read identically.
+ */
+const QUOTA_RESUME_MARKER_TEXT =
+	"<provider_quota_resumed>\n" +
+	"The provider usage limit that paused this session has been reported as reset; this resume is automatic (retry.provider.waitForUsage.pauseUntilReset). Continue the interrupted task from where it stopped.\n" +
+	"</provider_quota_resumed>";
+/** Node caps timers at 2^31-1 ms; longer delays overflow setTimeout and fire after ~1ms. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+/** Retry delay for a wake that was consumed without resuming (refused admission, aborted probe). */
+const QUOTA_WAKE_RETRY_DELAY_MS = 60_000;
+/** Cap on those retries: a park that can never wake is dropped instead of parked forever. */
+const QUOTA_WAKE_MAX_RETRIES = 3;
+
+/** Data carried by a persisted provider_quota_park entry, used to restore a park after a restart. */
+interface PersistedQuotaParkData {
+	resumeAt: string;
+	parkCount: number;
+	jobId?: string;
+}
+
+function isPersistedQuotaParkData(value: unknown): value is PersistedQuotaParkData {
+	if (!value || typeof value !== "object") {
+		return false;
+	}
+	const record = value as Record<string, unknown>;
+	return (
+		typeof record.resumeAt === "string" &&
+		typeof record.parkCount === "number" &&
+		Number.isFinite(record.parkCount) &&
+		(record.jobId === undefined || typeof record.jobId === "string")
+	);
+}
 
 function noopRlmChildAbort(): void {}
 function noopRlmChildEventUnsubscribe(): void {}
@@ -1354,6 +1421,24 @@ function readAssistantText(message: AssistantMessage): string {
 		.join("");
 }
 
+// Trailing window feeding the streaming answer preview: message_update fires per token delta, so
+// rejoining the whole message costs O(length²); the preview shows the latest output, not the head.
+// Equal to compactRlmText's cap, so compaction never cuts the newest characters.
+const RLM_ANSWER_PREVIEW_TAIL_CHARS = 160;
+
+function tailRlmAnswerPreview(message: AssistantMessage): string {
+	const tail: string[] = [];
+	let collected = 0;
+	for (let index = message.content.length - 1; index >= 0 && collected < RLM_ANSWER_PREVIEW_TAIL_CHARS; index -= 1) {
+		const block = message.content[index];
+		if (block.type !== "text") continue;
+		const remaining = RLM_ANSWER_PREVIEW_TAIL_CHARS - collected;
+		tail.unshift(block.text.slice(-remaining));
+		collected += Math.min(block.text.length, remaining);
+	}
+	return compactRlmText(tail.join(""));
+}
+
 function waitForPromiseOrAbort<T>(
 	promise: Promise<T>,
 	signal: AbortSignal | undefined,
@@ -1465,9 +1550,10 @@ export class AgentSession {
 	private _autonomousState: AutonomousRuntimeState;
 	private _autonomousContinuationSuppressionDepth = 0;
 	private _autonomousContinuationSuppressedMessages = new WeakSet<AgentMessage>();
-	// Held autonomous continuation owed while descendant work runs; mirrors
-	// _goalContinuationAwaitsRlmWork. Child replies and exit notices are the
-	// real wake-up signals, so timer-driven continuations pause instead of
+	// Held autonomous continuation owed while descendant or background bash
+	// work runs; mirrors _goalContinuationAwaitsRlmWork. Child replies, exit
+	// notices, and background bash completion follow-ups are the real
+	// wake-up signals, so timer-driven continuations pause instead of
 	// re-prompting a waiting parent (and pause without consuming budget).
 	private _autonomousContinuationAwaitsRlmWork = false;
 	private _autonomousSubagentKeepAliveTimer: ReturnType<typeof setTimeout> | undefined = undefined;
@@ -1500,6 +1586,32 @@ export class AgentSession {
 	private _retryAuthFailureSources: AuthSourceToken[] = [];
 	/** Ongoing wait-for-recovery state: pings issued and when the wait started. */
 	private _providerWait: { attempts: number; startedAtMs: number } | undefined = undefined;
+	/**
+	 * Quota park state: the session ended its turn because the provider-reported
+	 * usage reset was beyond the bounded wait, and a wake (in-process timer plus
+	 * a durable one-shot scheduled job) will resume the task automatically. While
+	 * parked the session itself makes no model calls.
+	 */
+	private _quotaPark:
+		| {
+				/** Parks consumed in this quota episode; bounded by waitForUsage.maxParks. */
+				parkCount: number;
+				/** Wall-clock wake time for the current park. */
+				resumeAtMs: number;
+				/** Id of the durable one-shot wake job, when the session persists artifacts. */
+				jobId?: string;
+				/** Pending in-process wake timer for the current park. */
+				timer?: ReturnType<typeof setTimeout>;
+				/** True from the wake until the park state clears: the resume probe is running, or a wake already due is owned by the durable job. */
+				waking?: boolean;
+				/** Wake re-arms consumed without a resume; bounded by QUOTA_WAKE_MAX_RETRIES. */
+				wakeRetries?: number;
+		  }
+		| undefined = undefined;
+	/** Lazily built session-artifact store for durable quota-resume wake jobs. */
+	private _quotaResumeJobStore: AgentCronJobStore | undefined = undefined;
+	/** Wake jobs branch navigation cancelled, so returning to the parked branch can rebuild one. */
+	private readonly _navigationCancelledWakeJobs = new Set<string>();
 	/** Set while turns are routed to the user-configured backup model. */
 	private _backupModel:
 		| {
@@ -1507,6 +1619,8 @@ export class AgentSession {
 				primary: Model<any>;
 				thinkingLevel: ThinkingLevel;
 				serviceTier: ServiceTier;
+				/** Image-model routing active when the backup took over; restored on return. */
+				routedOverride?: AgentModelOverride;
 		  }
 		| undefined = undefined;
 	private _agentMessageClearEpoch = 0;
@@ -1718,6 +1832,8 @@ export class AgentSession {
 			this._pendingNextTurnMessages.push(createGoalContextMessage(this._goalState, "continuation"));
 		}
 		this._restoreLateIpythonSentAgentMessages();
+		// Cannot await in a constructor; a live wake job restores within a microtask, only a rebuilt job waits on the store.
+		void this._restoreQuotaPark();
 		if (this._goalState.status === "active") {
 			this._goalAccountingStartedAt = Date.now();
 		}
@@ -2218,7 +2334,10 @@ export class AgentSession {
 				const restorable = payload.records
 					.filter(
 						(record): record is DeliveryRecord & { message: CustomMessage } =>
-							(record.role === "next_turn" || (payload.acceptedAgentMessage && record.role === "prefix")) &&
+							// Prefix records are parked next-turn context the action captured
+							// on admission; a cancelled turn hands them back, like the
+							// admission-rejection and dispatch-failure paths already do.
+							(record.role === "next_turn" || record.role === "prefix") &&
 							record.message.role === "custom" &&
 							record.message.customType !== HARNESS_DIGEST_CUSTOM_TYPE &&
 							!record.durable,
@@ -2361,6 +2480,12 @@ export class AgentSession {
 		if (message.stopReason === "error") {
 			if (this._goalAbortInProgress) {
 				this._goalAbortInProgress = false;
+				return;
+			}
+			// A live quota park owns the resume: the parked turn is the park's
+			// pause, not the goal's death, so the goal survives until the wake
+			// (or a spent park budget, which clears the park first) ends it.
+			if (this._quotaPark !== undefined) {
 				return;
 			}
 			this._finishGoalWithError(message.errorMessage || "Assistant response failed");
@@ -2550,6 +2675,87 @@ export class AgentSession {
 	}
 
 	/**
+	 * Routing decision for a dispatched turn batch: when any delivered message
+	 * attaches images and the session model has no image input, serve the turn
+	 * on the user-configured imageModel (settings.imageModel) instead.
+	 *
+	 * The override is stored on the agent, so retries and post-compaction
+	 * continuations of the routed turn keep serving it; the next dispatch
+	 * re-evaluates it, so later image-free turns return to the session model.
+	 * A missing session model is reported by _validateCanStartAgentRun.
+	 */
+	private _imageModelOverrideForTurns(
+		turns: SessionAction<PreparedTurnPayload>[],
+		extraMessages: AgentMessage[] = [],
+	): AgentModelOverride | undefined {
+		const sessionModel = this.model;
+		if (!sessionModel) return undefined;
+		const carriesImages =
+			extraMessages.some((message) => messageCarriesImages(message)) ||
+			turns.some((action) => action.payload.records.some((record) => messageCarriesImages(record.message)));
+		if (!carriesImages) return undefined;
+		return resolveImageModelOverride({
+			sessionModel,
+			thinkingLevel: this.thinkingLevel,
+			serviceTier: this.serviceTier,
+			imageModelReference: this.settingsManager.getImageModel(),
+			availableModels: this._modelRegistry.getAvailable(),
+			hasConfiguredAuth: (model) => this._modelRegistry.hasConfiguredAuth(model),
+			blockImages: this.settingsManager.getBlockImages(),
+		});
+	}
+
+	/**
+	 * Model serving the current run: the routed image model while a routed
+	 * turn (or its retries/continuations) is active, the session model
+	 * otherwise. Compaction decisions compare context against the model that
+	 * actually serves the requests, so a routed run uses the routed model's
+	 * context window and accepts its assistant messages as its own.
+	 */
+	private _runModel(): Model<any> | undefined {
+		return this.agent.modelOverride?.model ?? this.model;
+	}
+
+	/**
+	 * Whether a dispatched turn is still in flight: streaming, retrying with
+	 * backoff, compacting before a continuation, an overflow recovery or
+	 * provider wait still settling, or a post-compaction continuation that
+	 * has been scheduled but not yet dispatched. Model selection during any
+	 * of these must not tear down a routed run's override, or the run's
+	 * retries, continuations, and failure attribution would leave the
+	 * image-capable model mid-turn.
+	 */
+	private get _hasActiveTurnLifecycle(): boolean {
+		return (
+			this.isStreaming ||
+			this.isRetrying ||
+			this.isCompacting ||
+			this._postCompactionContinuationScheduled ||
+			// Covers the whole submission-to-settled window: preflight (before the
+			// action enqueues), the queued turn, and any in-flight run - without
+			// latching on stale overflow-recovery state.
+			this._promptSubmissionInFlight ||
+			this._hasPendingOrRunningTurnAction
+		);
+	}
+
+	private get _hasPendingOrRunningTurnAction(): boolean {
+		return this._actionStore.unfinishedActions().some((action) => action.payload.kind === "turn");
+	}
+
+	/**
+	 * An explicit selection wins over image-model routing still lingering from
+	 * the last dispatched turn, but not over the model already serving an
+	 * active run. Cycling or switching mid-stream keeps the routed override
+	 * until the turn settles; the next dispatch re-evaluates the routing
+	 * against the new selection.
+	 */
+	private _clearModelOverrideWhenIdle(): void {
+		if (this._hasActiveTurnLifecycle) return;
+		this.agent.modelOverride = undefined;
+	}
+
+	/**
 	 * Goals are pursued through the kernel goal skill, so the only tool the
 	 * model needs is ipython. Force-activate it (including into a live
 	 * continuation context) so the model can always reach `goal.complete()`.
@@ -2578,7 +2784,14 @@ export class AgentSession {
 
 	private _maybeResumeGoalContinuationAfterRlmWork(): void {
 		if (!this._goalContinuationAwaitsRlmWork) return;
-		if (this._disposed || this._disposing || this._hasUnsettledRlmQuiescenceWork()) return;
+		if (
+			this._disposed ||
+			this._disposing ||
+			this._hasUnsettledRlmQuiescenceWork() ||
+			this._hasLiveBackgroundBashHandles()
+		) {
+			return;
+		}
 		if (this._goalState.status !== "active" || !this._goalState.objective) {
 			this._goalContinuationAwaitsRlmWork = false;
 			return;
@@ -2612,12 +2825,13 @@ export class AgentSession {
 	}
 
 	/**
-	 * Hold the timer-driven autonomous continuation while descendant work is
-	 * unsettled, mirroring the goal gate: delegating and ending the turn is
-	 * correct behavior, and child replies and exit notices are the real
-	 * wake-up signals. The owed continuation is delivered when descendants
-	 * settle without consuming the continuation budget while it waits. An
-	 * active goal holds its own continuation, so the held continuation is
+	 * Hold the timer-driven autonomous continuation while descendant or
+	 * background bash work is unsettled, mirroring the goal gate: delegating
+	 * and ending the turn is correct behavior, and child replies, exit
+	 * notices, and background bash completion follow-ups are the real
+	 * wake-up signals. The owed continuation is delivered when the pending
+	 * work settles without consuming the continuation budget while it waits.
+	 * An active goal holds its own continuation, so the held continuation is
 	 * not double-queued behind it.
 	 */
 	private _holdAutonomousContinuationForRlmWork(message: AssistantMessage): boolean {
@@ -2631,7 +2845,7 @@ export class AgentSession {
 			// The run is over: hold nothing so the hook can apply the limit.
 			return false;
 		}
-		if (!this._hasUnsettledRlmQuiescenceWork()) {
+		if (!this._hasUnsettledRlmQuiescenceWork() && !this._hasLiveBackgroundBashHandles()) {
 			return false;
 		}
 		// An active goal's own continuation gate owns the wake-up discipline;
@@ -2650,10 +2864,27 @@ export class AgentSession {
 		return this._goalState.status === "active" && !!this._goalState.objective;
 	}
 
+	/**
+	 * True while the session's kernel still runs background bash() handles.
+	 * The kernel's bash-activity tracking (the same state that powers the
+	 * bash-done completion follow-ups) is the liveness surface, so a live
+	 * handle's completion notice is the wake-up a held continuation waits for.
+	 */
+	private _hasLiveBackgroundBashHandles(): boolean {
+		return this._ipythonKernelProvisioner?.manager?.hasBackgroundWork === true;
+	}
+
 	/** Deliver the owed continuation once descendant work settles. */
 	private _maybeResumeAutonomousContinuationAfterRlmWork(): void {
 		if (!this._autonomousContinuationAwaitsRlmWork) return;
-		if (this._disposed || this._disposing || this._hasUnsettledRlmQuiescenceWork()) return;
+		if (
+			this._disposed ||
+			this._disposing ||
+			this._hasUnsettledRlmQuiescenceWork() ||
+			this._hasLiveBackgroundBashHandles()
+		) {
+			return;
+		}
 		if (!this._autonomousState.enabled || this._goalOwnsContinuationWakeup()) {
 			this._clearAutonomousContinuationAwait();
 			return;
@@ -2803,9 +3034,9 @@ export class AgentSession {
 	private _fireAutonomousSubagentKeepAlive(): void {
 		if (!this._autonomousContinuationAwaitsRlmWork) return;
 		if (this._disposed || this._disposing) return;
-		if (!this._hasUnsettledRlmQuiescenceWork()) {
-			// Descendants settled while the keep-alive was pending; the normal
-			// resume path owns delivery.
+		if (!this._hasUnsettledRlmQuiescenceWork() && !this._hasLiveBackgroundBashHandles()) {
+			// Descendants and background handles settled while the keep-alive
+			// was pending; the normal resume path owns delivery.
 			this._maybeResumeAutonomousContinuationAfterRlmWork();
 			return;
 		}
@@ -2816,6 +3047,14 @@ export class AgentSession {
 		// Keep the deferral while admission is paused or the pump is suspended
 		// (post-abort); the pause release and resumeQueuedWork retry.
 		if (this._sessionInputAdmissionPauses.size > 0 || this._sessionInputPumpSuspended) {
+			this._armAutonomousSubagentKeepAlive();
+			return;
+		}
+		if (!this._hasUnsettledRlmQuiescenceWork()) {
+			// Only background bash handles are pending: their completion
+			// follow-ups are the wake-up, so keep the deferral without waking
+			// the parent with a subagent keep-alive and poll again after
+			// another window.
 			this._armAutonomousSubagentKeepAlive();
 			return;
 		}
@@ -3497,7 +3736,7 @@ export class AgentSession {
 		const settings = this.settingsManager.getCompactionSettings();
 		if (!settings.enabled) return false;
 
-		const contextWindow = this.model?.contextWindow ?? 0;
+		const contextWindow = this._runModel()?.contextWindow ?? 0;
 		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
 		const compactionTimestamp = compactionEntry ? new Date(compactionEntry.timestamp).getTime() : undefined;
 		if (compactionTimestamp !== undefined && context.message.timestamp <= compactionTimestamp) {
@@ -3854,7 +4093,10 @@ export class AgentSession {
 	 * These heartbeats are internal to this active session and never read or
 	 * mutate the user-level /heartbeat.
 	 */
-	handleRlmHeartbeatHostRequest(type: string, payload: Record<string, unknown> = {}): Record<string, unknown> {
+	async handleRlmHeartbeatHostRequest(
+		type: string,
+		payload: Record<string, unknown> = {},
+	): Promise<Record<string, unknown>> {
 		const controller = this._rlmHeartbeatController;
 		if (!controller) {
 			throw new Error("RLM heartbeat skill is not available in this session");
@@ -3881,7 +4123,7 @@ export class AgentSession {
 				const deliveryMode = normalizeHeartbeatDeliveryMode(payload.delivery_mode ?? payload.deliveryMode);
 				return {
 					heartbeat: rlmHeartbeatHostResponse(
-						controller.createRlmHeartbeat({
+						await controller.createRlmHeartbeat({
 							instruction: payload.instruction,
 							interval: payload.interval,
 							label: payload.label,
@@ -3917,7 +4159,7 @@ export class AgentSession {
 				) {
 					throw new Error("rlm_heartbeat.update requires at least one field to update");
 				}
-				const heartbeat = controller.updateRlmHeartbeat({
+				const heartbeat = await controller.updateRlmHeartbeat({
 					id: payload.id,
 					instruction: payload.instruction,
 					interval: payload.interval,
@@ -3933,7 +4175,7 @@ export class AgentSession {
 				if (typeof payload.id !== "string") {
 					throw new Error("rlm_heartbeat.delete id must be a string");
 				}
-				const heartbeat = controller.deleteRlmHeartbeat(payload.id);
+				const heartbeat = await controller.deleteRlmHeartbeat(payload.id);
 				return {
 					heartbeat: heartbeat ? rlmHeartbeatHostResponse(heartbeat) : null,
 				};
@@ -4053,9 +4295,10 @@ export class AgentSession {
 		if (signal?.aborted || this._goalState.status !== "active" || !this._goalState.objective) {
 			return [];
 		}
-		// Delegating and ending the turn is correct behavior; hold the continuation
-		// until descendants settle instead of re-prompting a waiting parent.
-		if (this._hasUnsettledRlmQuiescenceWork()) {
+		// Delegating and ending the turn is correct behavior; hold the
+		// continuation until descendants settle or the background bash
+		// handles finish instead of re-prompting a waiting parent.
+		if (this._hasUnsettledRlmQuiescenceWork() || this._hasLiveBackgroundBashHandles()) {
 			this._goalContinuationAwaitsRlmWork = true;
 			return [];
 		}
@@ -4421,6 +4664,13 @@ export class AgentSession {
 					this._providerWait = undefined;
 					this._retryAuthFailureSources = [];
 				}
+				if (assistantMsg.stopReason === "aborted") {
+					await this._handleAbortedQuotaPark();
+				} else if (assistantMsg.stopReason !== "error" && this._quotaPark) {
+					// A parked session that completes a model call has its quota back:
+					// clear the park (cancelling the pending wake) and resume the task.
+					await this._completeQuotaParkResume();
+				}
 				if (this._accountGoalUsageForAssistantMessage(assistantMsg)) {
 					const message = createGoalContextMessage(this._goalState, "budget_limit");
 					const normalized = normalizeMessageContent(message.content);
@@ -4467,6 +4717,7 @@ export class AgentSession {
 			this._finishActiveRetryWithFailure(msg);
 			this._resolveRetry();
 			if (!compactionWillRetry) {
+				await this._handleErroredQuotaParkProbe(msg);
 				this._finishGoalForTerminalAssistantMessage(msg);
 				// In serialized mode, agent-callable refine.run is serviced
 				// at the shouldStopAfterTurn boundary, not here at agent_end.
@@ -4878,6 +5129,12 @@ export class AgentSession {
 			}
 			this._scheduledAutoRefineTimers.clear();
 			this._disarmAutonomousSubagentKeepAlive();
+			// The in-process wake dies with the session; the durable one-shot job
+			// stays so a restart can still restore the session and resume the task.
+			if (this._quotaPark) {
+				if (this._quotaPark.timer) clearTimeout(this._quotaPark.timer);
+				this._quotaPark = undefined;
+			}
 			this._serializedPlanInFlight = undefined;
 			this._serializedExplicitRefineOptions = undefined;
 			this._pendingRequestedRefine = undefined;
@@ -5684,7 +5941,21 @@ export class AgentSession {
 		}
 	}
 
+	private _promptSubmissionInFlight = false;
+
 	private async _prompt(text: string, options?: InternalPromptOptions): Promise<void> {
+		// Synchronous preflight guard: from submission until the prompt promise
+		// settles, a model switch must not tear down a routed turn's override
+		// (the routing decision for this turn's images may already be made).
+		this._promptSubmissionInFlight = true;
+		try {
+			return await this._promptInner(text, options);
+		} finally {
+			this._promptSubmissionInFlight = false;
+		}
+	}
+
+	private async _promptInner(text: string, options?: InternalPromptOptions): Promise<void> {
 		const resumeSuspendedInput = options?.resumeIfIdle !== false;
 		if (!this.isStreaming) {
 			if (resumeSuspendedInput) this._resumeSessionInputAdmission();
@@ -6873,6 +7144,12 @@ export class AgentSession {
 					if (this._isSessionInputHandoffDeferred(epoch)) {
 						throw new DeferredSessionInputError("Session input paused before preflight");
 					}
+					// Re-evaluate image routing for this batch before any pre-commit read of
+					// the serving model: pre-turn compaction must not follow the previous
+					// turn's override. Retries and post-compaction continuations of a routed
+					// turn re-read the override, so they keep serving it; the next dispatch
+					// overwrites it with its fresh decision.
+					this.agent.modelOverride = this._imageModelOverrideForTurns(activeTurns());
 				},
 				prepare: async () => {
 					if (executionPolicy.nextTurnContextTiming === "preparation") {
@@ -6970,6 +7247,10 @@ export class AgentSession {
 					for (const action of turns) transitionSessionAction(action, { state: "committing" });
 					this._notifySessionInputCheckpointChange();
 					this._emitQueueUpdate();
+					// Re-evaluate image routing for the exact message set being sent:
+					// before_agent_start injections land after the earlier per-turn
+					// decision and may carry images the session model cannot serve.
+					this.agent.modelOverride = this._imageModelOverrideForTurns(turns, preparedMessages);
 					return turns.some((action) => action.suppressAutonomousContinuation)
 						? this._runWithAutonomousContinuationSuppressed(() => this.agent.prompt(preparedMessages))
 						: this.agent.prompt(preparedMessages);
@@ -7457,7 +7738,7 @@ export class AgentSession {
 						active: {
 							kind: active.payload.kind,
 							phase,
-							label: compactRlmText(active.payload.text),
+							label: compactRlmText(queuedAgentMessagePreview(active)),
 						},
 					}
 				: {}),
@@ -8063,6 +8344,7 @@ export class AgentSession {
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
 		const serviceTier = this._getServiceTierForModelSwitch();
 		this.agent.state.model = model;
+		this._clearModelOverrideWhenIdle();
 		this.sessionManager.appendModelChange(model.provider, model.id);
 		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
 
@@ -8130,6 +8412,7 @@ export class AgentSession {
 		const serviceTier = this._getServiceTierForModelSwitch();
 
 		this.agent.state.model = next.model;
+		this._clearModelOverrideWhenIdle();
 		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
 		this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
 
@@ -8169,6 +8452,7 @@ export class AgentSession {
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
 		const serviceTier = this._getServiceTierForModelSwitch();
 		this.agent.state.model = nextModel;
+		this._clearModelOverrideWhenIdle();
 		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
 		this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
 
@@ -8215,16 +8499,19 @@ export class AgentSession {
 
 	setServiceTier(serviceTier: ServiceTier): void {
 		const effectiveServiceTier = this._getEffectiveServiceTier(serviceTier);
-		const preferenceChanged = effectiveServiceTier !== this._serviceTierPreference;
+		const preferenceChanged = serviceTier !== this._serviceTierPreference;
 		const effectiveTierChanged = effectiveServiceTier !== this.agent.state.serviceTier;
 		if (!preferenceChanged && !effectiveTierChanged) {
 			return;
 		}
-		this._serviceTierPreference = effectiveServiceTier;
+		// The preference and the session entry keep the REQUESTED tier (only the
+		// active state clamps), so switching to or resuming on a capable model
+		// re-activates it instead of a clamped "default" shadowing it.
+		this._serviceTierPreference = serviceTier;
 		if (preferenceChanged) {
-			this.sessionManager.appendServiceTierChange(effectiveServiceTier);
-			if (this.model && supportsFastMode(this.model)) {
-				this.settingsManager.setDefaultServiceTier(effectiveServiceTier);
+			this.sessionManager.appendServiceTierChange(serviceTier);
+			if (this.model && supportsServiceTier(this.model, serviceTier)) {
+				this.settingsManager.setDefaultServiceTier(serviceTier);
 			}
 		}
 		if (effectiveTierChanged) {
@@ -8237,7 +8524,7 @@ export class AgentSession {
 	}
 
 	private _getEffectiveServiceTier(serviceTier: ServiceTier): ServiceTier {
-		return serviceTier === "priority" && (!this.model || !supportsFastMode(this.model)) ? "default" : serviceTier;
+		return clampServiceTier(this.model, serviceTier);
 	}
 
 	private _getServiceTierForModelSwitch(): ServiceTier {
@@ -8362,6 +8649,34 @@ export class AgentSession {
 				content: lines.join("\n"),
 				display: true,
 				details: { restored: result.restored.length > 0 },
+			},
+			{ deliverAs: "nextTurn" },
+		).catch(() => {});
+	}
+
+	/**
+	 * Tell the model which pre-imported Python skills failed to import into the
+	 * freshly started kernel, before it spends turns reading their SKILL.md and
+	 * calling them (the placeholder objects only raise on first call).
+	 */
+	private _onPythonSkillsUnavailable(errors: UnavailablePythonSkills): void {
+		const lines = ["[python-skills-unavailable]", ""];
+		lines.push(
+			"These installed Python skill modules failed to import into the Python kernel, so calling them raises an error:",
+		);
+		for (const [name, error] of Object.entries(errors)) {
+			lines.push(`- ${name}: ${error}`);
+		}
+		lines.push(
+			"",
+			"Their shell command forms fail the same way. Fix the import error first (for example install the missing dependency with `uv pip install <pkg>` or reinstall the skill into the kernel venv), or use another approach.",
+		);
+		void this.sendCustomMessage(
+			{
+				customType: PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE,
+				content: lines.join("\n"),
+				display: true,
+				details: { skills: Object.keys(errors) },
 			},
 			{ deliverAs: "nextTurn" },
 		).catch(() => {});
@@ -8514,7 +8829,9 @@ export class AgentSession {
 				const result = (await this._extensionRunner.emit({
 					type: "session_before_compact",
 					preparation,
-					branchEntries: pathEntries,
+					// slice: getBranch() returns the live leaf-branch cache, which appends
+					// extend in place, so the awaited handler gets a snapshot.
+					branchEntries: pathEntries.slice(),
 					customInstructions,
 					signal,
 				})) as SessionBeforeCompactResult | undefined;
@@ -8532,6 +8849,24 @@ export class AgentSession {
 			if (extensionCompaction) {
 				({ summary, firstKeptEntryId, tokensBefore, details, usage } = extensionCompaction);
 			} else {
+				// Compaction fires at context peak, and the summarizer runs with its own
+				// prompt prefix (a different system prompt, no tools), so it cannot hit
+				// the session's cached prefix: on the session model the summary re-reads
+				// its whole input at peak price, and on OpenAI-style providers it rides
+				// the session's prompt_cache_key with a divergent prefix, depressing
+				// hit rates. Route summaries to the auxiliary model when one is configured.
+				const summarization = (await this._resolveAuxiliaryModel(
+					"compaction summary",
+					{ model, apiKey, headers },
+					// The summary request serializes the whole conversation, so a
+					// smaller auxiliary window must fall back to the session model
+					// instead of failing over-limit and stranding the context.
+					estimateSummaryRequestTokens(preparation, customInstructions),
+				)) ?? {
+					model,
+					apiKey,
+					headers,
+				};
 				// Each summary wire call gets its own request ID: split turns send two
 				// different bodies, and one Idempotency-Key must never cover both. A slice
 				// that succeeds on the wire stays uncommitted until the compaction itself
@@ -8542,10 +8877,10 @@ export class AgentSession {
 				): Promise<T> => {
 					const requestId = this._semanticEdges.startCompactionRequest(semanticCompaction.compactionId);
 					if (requestId === undefined) {
-						return call(headers);
+						return call(summarization.headers);
 					}
 					try {
-						const result = await call({ ...headers, ...modelRequestHeaders(requestId) });
+						const result = await call({ ...summarization.headers, ...modelRequestHeaders(requestId) });
 						// A slice resolving after a sibling's rejection already settled the
 						// compaction would push into a drained list and stay in-flight forever.
 						if (compactionSettled) {
@@ -8561,12 +8896,15 @@ export class AgentSession {
 				};
 				({ summary, firstKeptEntryId, tokensBefore, details, usage } = await compact(
 					preparation,
-					model,
-					apiKey,
-					headers,
+					summarization.model,
+					summarization.apiKey,
+					summarization.headers,
 					customInstructions,
 					signal,
-					this.thinkingLevel,
+					// Summarizing is transcription, not reasoning: no thinking level is
+					// requested, so the summary call stays cheap and cannot trip an invalid
+					// reasoning effort for the summary model.
+					undefined,
 					summaryCall,
 					providerRetryPolicy(this.settingsManager),
 					this.sessionId,
@@ -9076,23 +9414,36 @@ export class AgentSession {
 	}
 
 	/**
-	 * Refinement passes (review and planning) run with their own prompts, so
-	 * issuing them on the session model evicts the provider's prefix-cache entry
-	 * for the session and forces a full context re-read on the next session
-	 * request. Route them to the configured auxiliary model when it is set and
-	 * usable; fall back to the session model otherwise.
+	 * Background LLM passes (refinement review and planning, compaction summaries,
+	 * branch summaries) run with their own prompts, so they cannot hit the
+	 * session's cached prefix: on the session model they re-read their whole input
+	 * at peak price, and on OpenAI-style providers a divergent prefix riding the
+	 * session's prompt_cache_key depresses hit rates. Route them to the configured
+	 * auxiliary model when it is set and usable; fall back to the session model
+	 * otherwise.
+	 *
+	 * Callers that already resolved the session request auth pass it as
+	 * `fallback` so the fallback path reuses it instead of resolving again.
 	 */
-	private async _resolveRefinementModel(): Promise<
-		{ model: Model<Api>; apiKey: string; headers?: Record<string, string> } | undefined
-	> {
+	private async _resolveAuxiliaryModel(
+		purpose: string,
+		fallback?: { model: Model<Api>; apiKey: string; headers?: Record<string, string> },
+		requiredContextTokens?: number,
+	): Promise<{ model: Model<Api>; apiKey: string; headers?: Record<string, string> } | undefined> {
 		const sessionModel = this.model;
 		if (!sessionModel) {
-			return undefined;
+			return fallback;
 		}
-		const selector = this.settingsManager.getAuxiliaryModel()?.trim().toLowerCase();
-		if (!selector || `${sessionModel.provider}/${sessionModel.id}`.toLowerCase() === selector) {
+		const resolveSessionAuth = async () => {
+			if (fallback) {
+				return fallback;
+			}
 			const { apiKey, headers, requestModel } = await this._getRequiredRequestAuth(sessionModel);
 			return { model: requestModel, apiKey, headers };
+		};
+		const selector = this.settingsManager.getAuxiliaryModel()?.trim().toLowerCase();
+		if (!selector || `${sessionModel.provider}/${sessionModel.id}`.toLowerCase() === selector) {
+			return await resolveSessionAuth();
 		}
 		try {
 			const model = (await this._authenticatedRlmModels()).find(
@@ -9102,13 +9453,27 @@ export class AgentSession {
 				throw new Error(`model "${selector}" is unavailable, unauthenticated, or expired`);
 			}
 			const { apiKey, headers, requestModel } = await this._getRequiredRequestAuth(model);
+			// Callers that know the size of the request they will issue pass it in:
+			// an auxiliary model whose context window cannot hold that request
+			// fails over-limit on the wire (e.g. a compaction summary covering the
+			// whole conversation), leaving the caller unable to make progress. A
+			// known window that is too small routes to the session model through the
+			// warning below; an unknown window (<= 0) keeps the routing as-is
+			// rather than guessing. The throw lands in the catch, whose logging
+			// stays selector-only (CodeQL js/clear-text-logging).
+			if (
+				requiredContextTokens !== undefined &&
+				requestModel.contextWindow > 0 &&
+				requestModel.contextWindow < requiredContextTokens
+			) {
+				throw new Error("auxiliary model context window is too small for the request");
+			}
 			return { model: requestModel, apiKey, headers };
 		} catch {
 			// Error details from the auth stack can embed credential material, so only
 			// the selector is logged (CodeQL js/clear-text-logging).
-			console.warn(`Warning: auxiliaryModel "${selector}" unusable for refinement; using the session model.`);
-			const { apiKey, headers, requestModel } = await this._getRequiredRequestAuth(sessionModel);
-			return { model: requestModel, apiKey, headers };
+			console.warn(`Warning: auxiliaryModel "${selector}" unusable for ${purpose}; using the session model.`);
+			return await resolveSessionAuth();
 		}
 	}
 
@@ -9116,7 +9481,7 @@ export class AgentSession {
 		if (this._autoRefineReviewer) {
 			return this._autoRefineReviewer(context, signal);
 		}
-		const refinementModel = await this._resolveRefinementModel();
+		const refinementModel = await this._resolveAuxiliaryModel("refinement");
 		if (!refinementModel) {
 			return { shouldRefine: false, rationale: "No model selected." };
 		}
@@ -9241,6 +9606,24 @@ export class AgentSession {
 			);
 		} catch {
 			// Unpersisted session: context-only injection.
+		}
+		// The fresh digest is authoritative and older in-context copies are
+		// regenerable redundancy, so the append replaces them instead of stacking.
+		const withoutOlderDigests = this.agent.state.messages.filter(
+			(existing) => !(existing.role === "custom" && existing.customType === HARNESS_DIGEST_CUSTOM_TYPE),
+		);
+		if (withoutOlderDigests.length !== this.agent.state.messages.length) {
+			this.agent.state.messages = withoutOlderDigests;
+		}
+		// The fresh append outranks the compaction snapshot the same way a newer
+		// digest entry does at rebuild time, so the live summary must yield its
+		// snapshot now: the context would otherwise render both the superseded
+		// snapshot and the fresh digest until the next rebuild.
+		for (const existing of this.agent.state.messages) {
+			if (existing.role === "compactionSummary" && existing.harnessDigest !== undefined) {
+				existing.harnessDigest = undefined;
+				existing.harnessStateFingerprint = undefined;
+			}
 		}
 		this.agent.state.messages.push(message);
 	}
@@ -9461,7 +9844,7 @@ export class AgentSession {
 			throw new Error(formatNoModelSelectedMessage());
 		}
 
-		const refinementModel = await this._resolveRefinementModel();
+		const refinementModel = await this._resolveAuxiliaryModel("refinement");
 		if (!refinementModel) {
 			throw new Error(formatNoModelSelectedMessage());
 		}
@@ -9751,14 +10134,18 @@ export class AgentSession {
 		}
 
 		const settings = this.settingsManager.getCompactionSettings();
-		const contextWindow = this.model?.contextWindow ?? 0;
+		const runModel = this._runModel();
+		const contextWindow = runModel?.contextWindow ?? 0;
 
 		// Skip overflow check if the message came from a different model.
 		// This handles the case where user switched from a smaller-context model (e.g. opus)
 		// to a larger-context model (e.g. codex) - the overflow error from the old model
-		// shouldn't trigger compaction for the new model.
+		// shouldn't trigger compaction for the new model. A routed image-model turn keeps
+		// its override, so its overflow errors recover like the session model's own.
 		const sameModel =
-			this.model && assistantMessage.provider === this.model.provider && assistantMessage.model === this.model.id;
+			runModel !== undefined &&
+			assistantMessage.provider === runModel.provider &&
+			assistantMessage.model === runModel.id;
 
 		// Skip overflow/threshold checks if this assistant message is older than the
 		// latest compaction boundary. This prevents a stale pre-compaction usage/error
@@ -10407,6 +10794,11 @@ export class AgentSession {
 				snapshotDir: this._ipythonKernelSnapshotDir,
 				readyGate: previousDispose,
 				onRestore: notifyRestore ? (result) => this._onIpythonStateRestored(result) : undefined,
+				onUnavailableSkills: (errors) => this._onPythonSkillsUnavailable(errors),
+				onBackgroundWorkSettled: () => {
+					this._maybeResumeGoalContinuationAfterRlmWork();
+					this._maybeResumeAutonomousContinuationAfterRlmWork();
+				},
 			});
 			configuredBaseToolDefinitions = createAllToolDefinitions(this._cwd, {
 				ipython: {
@@ -10828,8 +11220,7 @@ export class AgentSession {
 			model: options.model,
 			thinkingLevel:
 				options.thinkingLevel ?? (clampThinkingLevel(options.model, this.thinkingLevel) as ThinkingLevel),
-			serviceTier:
-				this.serviceTier === "priority" && !supportsFastMode(options.model) ? "default" : this.serviceTier,
+			serviceTier: this._serviceTierPreference,
 			scopedModels: [...this._scopedModels],
 			activeToolNames: this.getActiveToolNames(),
 			allowedToolNames: this._allowedToolNames ? [...this._allowedToolNames] : undefined,
@@ -10868,7 +11259,7 @@ export class AgentSession {
 				systemPrompt: "",
 				model: options.model,
 				thinkingLevel: options.thinkingLevel,
-				serviceTier: options.serviceTier,
+				serviceTier: clampServiceTier(options.model, options.serviceTier),
 				tools: [],
 			},
 			convertToLlm: this.agent.convertToLlm,
@@ -10889,6 +11280,7 @@ export class AgentSession {
 			agent: childAgent,
 			sessionManager: childSessionManager,
 			settingsManager: this.settingsManager,
+			serviceTierPreference: options.serviceTier,
 			cwd: this._cwd,
 			agentDir: this._agentDir,
 			scopedModels: options.scopedModels,
@@ -12271,17 +12663,25 @@ export class AgentSession {
 								pendingChildUsage.set(origin, bucket);
 							}
 						}
-						const text = compactRlmText(readAssistantText(assistant));
+						const text = tailRlmAnswerPreview(assistant);
 						if (text) run.answerPreview = text;
 						touchRlmChildActivity(run);
 						emitChildUpdate();
 					} else if (event.type === "message_start" || event.type === "message_update") {
 						if (event.message.role === "assistant") {
-							const text = compactRlmText(readAssistantText(event.message as AssistantMessage));
+							const text = tailRlmAnswerPreview(event.message as AssistantMessage);
 							if (text) run.answerPreview = text;
 							run.activity = { kind: "writing" };
 							touchRlmChildActivity(run);
-							emitChildUpdate();
+							// Snapshot+stringify per delta dominates streaming cost; message_end emits the final preview.
+							const now = performance.now();
+							if (
+								run.lastStreamedUpdateMonotonicAt === undefined ||
+								now - run.lastStreamedUpdateMonotonicAt >= RLM_CHILD_UPDATE_MIN_INTERVAL_MS
+							) {
+								run.lastStreamedUpdateMonotonicAt = now;
+								emitChildUpdate();
+							}
 						}
 					} else if (event.type === "tool_execution_start") {
 						flushPendingChildUsageIfStale();
@@ -12554,7 +12954,7 @@ export class AgentSession {
 	private _isRetryableError(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error" || !message.errorMessage) return false;
 
-		const contextWindow = this.model?.contextWindow ?? 0;
+		const contextWindow = this._runModel()?.contextWindow ?? 0;
 		if (isContextOverflow(message, contextWindow)) return false;
 
 		if (this._isFauxProviderQueueExhausted(message)) {
@@ -12700,10 +13100,13 @@ export class AgentSession {
 
 		// User-defined backup model (settings.providerBackupModel, default none):
 		// route the failed turn to the backup instead of waiting while the
-		// primary is quota-blocked or its provider is unavailable.
+		// primary is quota-blocked or its provider is unavailable. The guard
+		// compares against the model serving the run, so a backup equal to a
+		// routed turn's image model is recognized as the duplicate it is instead
+		// of reporting a no-op backup switch with a zero-delay retry.
 		if (waitClass !== "permanent") {
 			const backupModel = this._resolveBackupModel();
-			if (backupModel && !modelsAreEqual(this.model, backupModel)) {
+			if (backupModel && !modelsAreEqual(this._runModel(), backupModel)) {
 				return this._handleBackupModelRetry(message, options, backupModel);
 			}
 		}
@@ -12858,13 +13261,19 @@ export class AgentSession {
 	/**
 	 * Resolve the user-configured backup model reference against the available
 	 * models. Unknown or unauthenticated references resolve to undefined: the
-	 * wait loop runs instead, and never surprises the user with a switch.
+	 * wait loop runs instead, and never surprises the user with a switch. A
+	 * run routed for images also rejects a text-only backup the same way: the
+	 * retry then stays on the routed model instead of serving the turn's
+	 * images to a model that would silently downgrade them to placeholders.
 	 */
 	private _resolveBackupModel(): Model<any> | undefined {
 		const reference = this.settingsManager.getProviderBackupModel();
 		if (!reference) return undefined;
 		const backupModel = findExactModelReferenceMatch(reference, this._modelRegistry.getAvailable());
 		if (!backupModel || !this._modelRegistry.hasConfiguredAuth(backupModel)) {
+			return undefined;
+		}
+		if (this.agent.modelOverride && !backupModel.input.includes("image")) {
 			return undefined;
 		}
 		return backupModel;
@@ -12884,11 +13293,22 @@ export class AgentSession {
 		const previousModel = this.agent.state.model;
 		const previousThinkingLevel = this.agent.state.thinkingLevel;
 		const previousServiceTier = this.agent.state.serviceTier;
+		// A routed image-model turn keeps serving on the override, so the backup
+		// must take the override too or the retry would silently return to the
+		// routed model while reporting the backup.
+		const routedOverride = this.agent.modelOverride;
 		this.agent.state.model = backupModel;
 		// Clamp per-request fields to what the backup supports; all of them are
 		// restored when the turn returns to the primary.
 		this.agent.state.thinkingLevel = clampThinkingLevel(backupModel, previousThinkingLevel) as ThinkingLevel;
 		this._clampServiceTierForModel();
+		if (routedOverride) {
+			this.agent.modelOverride = {
+				model: backupModel,
+				thinkingLevel: this.agent.state.thinkingLevel,
+				serviceTier: this.agent.state.serviceTier,
+			};
+		}
 		// Session-log the switch so primary->backup->primary transitions stay debuggable.
 		this.sessionManager.appendModelChange(backupModel.provider, backupModel.id);
 		this._backupModel = {
@@ -12896,6 +13316,7 @@ export class AgentSession {
 			primary: previousModel,
 			thinkingLevel: previousThinkingLevel,
 			serviceTier: previousServiceTier,
+			routedOverride,
 		};
 		this._retryAttempt++;
 		this._providerWait = undefined;
@@ -12940,6 +13361,22 @@ export class AgentSession {
 		const resetMs = providerStreamFailureRetryAfterMs(message) ?? parseProviderResetMs(message.errorMessage);
 		const decision = providerWaitDecision(pingAttempt, Date.now() - startedAtMs, resetMs, policy);
 		if (decision.kind === "abort") {
+			// A quota reset beyond the bounded wait parks the session instead of
+			// dying mid-task: end the turn cleanly and resume at the reset time.
+			if (reason === "usage" && decision.reason === "reset-too-far") {
+				const park = providerParkDecision(this._quotaPark?.parkCount ?? 0, resetMs, policy);
+				if (park.kind === "park") {
+					return this._parkForQuotaReset(message, options, park.delayMs, decision.message, pingAttempt - 1);
+				}
+			}
+			// A quota wait that gives up ends the episode's park: its wake has
+			// already fired (or was never armed), so nothing else would resume it.
+			// Future-scheduled parks survive; only stale post-wake parks clear.
+			const stalePark = this._quotaPark;
+			if (reason === "usage" && stalePark !== undefined && stalePark.resumeAtMs <= Date.now()) {
+				await this._cancelQuotaParkWake(stalePark);
+				this._quotaPark = undefined;
+			}
 			this._markProviderAuthStaleForRetryFailure(message, options);
 			const restoredModel = this._restorePrimaryModelAfterBackup();
 			this._emit({
@@ -12972,6 +13409,439 @@ export class AgentSession {
 	}
 
 	/**
+	 * Park a quota-blocked session: end the failed turn cleanly, record the
+	 * parked transition in the session log, and schedule one wake (a durable
+	 * one-shot scheduled job plus an in-process timer) at the provider-reported
+	 * reset time. While parked the session makes no model calls; the wake
+	 * delivers the resume marker, whose first model call probes the quota.
+	 */
+	private async _parkForQuotaReset(
+		message: AssistantMessage,
+		options:
+			| {
+					markAuthStaleOnFailure?: boolean;
+					authSourceTokens?: readonly AuthSourceToken[];
+			  }
+			| undefined,
+		pauseMs: number,
+		abortMessage: string,
+		parkedAttempt: number,
+	): Promise<boolean> {
+		const existing = this._quotaPark;
+		if (existing !== undefined && existing.resumeAtMs > Date.now()) {
+			// Already parked for this window (e.g. a heartbeat turn failed while
+			// parked): keep the scheduled wake, consume no park, end the turn.
+			this._finishQuotaParkedTurn(
+				message,
+				options,
+				parkedAttempt,
+				`Session is parked until ${new Date(existing.resumeAtMs).toISOString()} waiting for the provider usage reset; this turn ended without a retry: ${message.errorMessage || "unknown error"}`,
+			);
+			return false;
+		}
+		await this._cancelQuotaParkWake(existing);
+		const parkCount = (existing?.parkCount ?? 0) + 1;
+		const resumeAtMs = Date.now() + pauseMs;
+		const jobId = await this._createQuotaResumeJob(resumeAtMs);
+		const timer = this._scheduleQuotaResumeTimer(resumeAtMs);
+		this._quotaPark = {
+			parkCount,
+			resumeAtMs,
+			...(jobId !== undefined ? { jobId } : {}),
+			...(timer !== undefined ? { timer } : {}),
+		};
+		this.sessionManager.appendCustomEntry(QUOTA_PARK_CUSTOM_ENTRY_TYPE, {
+			resumeAt: new Date(resumeAtMs).toISOString(),
+			parkCount,
+			...(jobId !== undefined ? { jobId } : {}),
+			provider: message.provider,
+		});
+		this._finishQuotaParkedTurn(
+			message,
+			options,
+			parkedAttempt,
+			`${abortMessage}. Session parked until ${new Date(resumeAtMs).toISOString()} and will resume automatically (retry.provider.waitForUsage.pauseUntilReset): ${message.errorMessage || "unknown error"}`,
+		);
+		return false;
+	}
+
+	/** Shared park tail: mark auth stale, surface the parked status, end the retry and the turn. */
+	private _finishQuotaParkedTurn(
+		message: AssistantMessage,
+		options:
+			| {
+					markAuthStaleOnFailure?: boolean;
+					authSourceTokens?: readonly AuthSourceToken[];
+			  }
+			| undefined,
+		parkedAttempt: number,
+		finalError: string,
+	): void {
+		this._markProviderAuthStaleForRetryFailure(message, options);
+		this._emit({ type: "auto_retry_end", success: false, attempt: parkedAttempt, finalError });
+		this._retryAttempt = 0;
+		this._providerWait = undefined;
+		this._retryAuthFailureSources = [];
+		this._resolveRetry();
+	}
+
+	/**
+	 * Durable wake: a one-shot scheduled job in this session's artifacts, so a
+	 * restart or closed worker still restores the session and delivers the
+	 * resume marker at the reset time. Best-effort: the in-process timer covers
+	 * live sessions when this cannot be persisted (e.g. in-memory sessions).
+	 */
+	private async _createQuotaResumeJob(resumeAtMs: number): Promise<string | undefined> {
+		const sessionFile = this.sessionFile;
+		const store = this._quotaResumeStore();
+		if (!sessionFile || !store) {
+			return undefined;
+		}
+		try {
+			const job = await store.create({
+				activeSessionId: this.sessionId,
+				sessionId: this.sessionId,
+				sessionFile,
+				cwd: this.sessionManager.getCwd(),
+				label: QUOTA_RESUME_CRON_LABEL,
+				prompt: QUOTA_RESUME_MARKER_TEXT,
+				scheduleText: `at ${new Date(resumeAtMs).toISOString()}`,
+				runtimeKind: this._rlmDepth > 0 ? "subagent" : "top-level",
+			});
+			return job.id;
+		} catch {
+			return undefined;
+		}
+	}
+
+	/** In-process wake for live sessions; unref'd so a parked session never holds the process open. */
+	private _scheduleQuotaResumeTimer(resumeAtMs: number): ReturnType<typeof setTimeout> | undefined {
+		const delayMs = Math.min(Math.max(resumeAtMs - Date.now(), 0), MAX_TIMER_DELAY_MS);
+		const timer = setTimeout(() => {
+			void this._resumeFromQuotaPark();
+		}, delayMs);
+		timer.unref();
+		return timer;
+	}
+
+	/** Store over this session's artifact file; undefined for in-memory sessions. */
+	private _quotaResumeStore(): AgentCronJobStore | undefined {
+		if (this._quotaResumeJobStore) {
+			return this._quotaResumeJobStore;
+		}
+		const artifactDir = this.sessionManager.getSessionArtifactDir();
+		if (!this.sessionFile || !artifactDir) {
+			return undefined;
+		}
+		const store = AgentCronJobStore.forSessionArtifacts();
+		store.registerSessionArtifact(this.sessionId, artifactDir);
+		this._quotaResumeJobStore = store;
+		return store;
+	}
+
+	/**
+	 * Settle a park's durable wake: report a job the daemon already ran as
+	 * delivered (its prompt drives the resume) and leave it alone — rewriting a
+	 * completed job to cancelled would hide that the wake landed — cancel one
+	 * that has not run, and report a user cancellation as such. Anything else is
+	 * gone, leaving the in-process timer as the wake.
+	 */
+	private async _resolveQuotaResumeJob(jobId: string): Promise<"delivered" | "user-cancelled" | "cancelled" | "gone"> {
+		const job = this._findQuotaResumeJob(jobId);
+		if (job?.status === "completed") {
+			return "delivered";
+		}
+		if (job?.status === "cancelled") {
+			return "user-cancelled";
+		}
+		const store = this._quotaResumeStore();
+		if (!store) {
+			return "gone";
+		}
+		try {
+			return (await store.cancel(jobId)) === undefined ? "gone" : "cancelled";
+		} catch {
+			return "gone";
+		}
+	}
+
+	/** Cancel a park's pending wake: the in-process timer and the durable job. */
+	private async _cancelQuotaParkWake(
+		park: { resumeAtMs: number; jobId?: string; timer?: ReturnType<typeof setTimeout> } | undefined,
+	): Promise<void> {
+		if (!park) return;
+		if (park.timer) {
+			clearTimeout(park.timer);
+			park.timer = undefined;
+		}
+		if (park.jobId !== undefined) {
+			await this._resolveQuotaResumeJob(park.jobId);
+		}
+		park.jobId = undefined;
+	}
+
+	/**
+	 * Wake a parked session and deliver the resume marker: its first model call
+	 * probes the quota, resumes the interrupted task on success, and re-parks
+	 * with the newly reported reset on failure. The durable wake job and this
+	 * timer race for live sessions; whoever lands first owns the resume — the
+	 * job's prompt is the same marker text, so both paths read identically.
+	 */
+	private async _resumeFromQuotaPark(): Promise<void> {
+		const park = this._quotaPark;
+		if (!park || park.waking || park.resumeAtMs > Date.now()) {
+			return;
+		}
+		if (park.jobId !== undefined) {
+			const resolved = await this._resolveQuotaResumeJob(park.jobId);
+			if (resolved === "delivered") {
+				// The daemon dispatched the durable wake; its prompt drives the resume.
+				park.waking = true;
+				return;
+			}
+			if (resolved === "user-cancelled") {
+				// The user cancelled the wake: honor it and drop the park.
+				this._quotaPark = undefined;
+				return;
+			}
+			// Cancelled by this timer or gone: the timer owns the resume.
+		}
+		park.waking = true;
+		try {
+			await this._queuePreparedPrompt("followUp", QUOTA_RESUME_MARKER_TEXT, undefined, {
+				source: "internal",
+				priority: "background",
+				resumeIfIdle: true,
+			});
+		} catch {
+			// A refused admission must not leave a park whose wake is gone: re-arm
+			// it (bounded) so the session still resumes, or drop the park.
+			park.waking = false;
+			await this._recoverQuotaParkWake("wake-failed");
+		}
+	}
+
+	/**
+	 * An aborted turn is not evidence the quota is back. A wake whose resume
+	 * marker is still queued owns the resume, so an abort of some other turn must
+	 * not re-arm the wake under it; a wake this turn consumed re-arms instead.
+	 */
+	private async _handleAbortedQuotaPark(): Promise<void> {
+		const park = this._quotaPark;
+		if (!park || (park.waking === true && this._hasQueuedQuotaResumeMarker())) {
+			return;
+		}
+		park.waking = false;
+		await this._recoverQuotaParkWake("wake-aborted");
+	}
+
+	/** Whether the park wake's resume marker is still waiting in the session input queue. */
+	private _hasQueuedQuotaResumeMarker(): boolean {
+		return this._actionStore.unfinishedActions().some((action) => {
+			if (action.payload.kind !== "turn" || action.lifecycle.state !== "queued") {
+				return false;
+			}
+			const { text } = normalizeMessageContent(primaryDeliveryRecord(action).message.content);
+			return text.includes(QUOTA_RESUME_MARKER_TEXT);
+		});
+	}
+
+	/**
+	 * A turn that ended in a plain error after the wake's probe consumed the
+	 * marker is neither a resume nor a re-park: the park would sit `waking` with
+	 * no timer or job left, never resuming. Re-arm the wake (bounded) instead,
+	 * or drop the park once the retries are spent. A marker still queued owns
+	 * the resume, so an error from another turn must not re-arm under it.
+	 */
+	private async _handleErroredQuotaParkProbe(message: AssistantMessage): Promise<void> {
+		const park = this._quotaPark;
+		if (message.stopReason !== "error" || park?.waking !== true || this._hasQueuedQuotaResumeMarker()) {
+			return;
+		}
+		park.waking = false;
+		await this._recoverQuotaParkWake("wake-error");
+	}
+
+	/**
+	 * Wake re-arm for a park whose wake was consumed without resuming (refused
+	 * admission, aborted or errored probe turn). Bounded so a park that can
+	 * never wake ends instead of staying parked with no wake and no way to
+	 * resume.
+	 */
+	private async _recoverQuotaParkWake(outcome: "wake-failed" | "wake-aborted" | "wake-error"): Promise<void> {
+		const park = this._quotaPark;
+		if (!park || park.waking || park.resumeAtMs > Date.now()) {
+			return;
+		}
+		const retries = (park.wakeRetries ?? 0) + 1;
+		if (retries > QUOTA_WAKE_MAX_RETRIES) {
+			await this._cancelQuotaParkWake(park);
+			this._quotaPark = undefined;
+			this.sessionManager.appendCustomEntry(QUOTA_RESUME_CUSTOM_ENTRY_TYPE, { outcome });
+			return;
+		}
+		park.wakeRetries = retries;
+		park.resumeAtMs = Date.now() + QUOTA_WAKE_RETRY_DELAY_MS;
+		park.jobId = await this._createQuotaResumeJob(park.resumeAtMs);
+		park.timer = this._scheduleQuotaResumeTimer(park.resumeAtMs);
+		// Record the replacement wake, or a restart reads the spent park entry,
+		// drops the park, and leaves this retry job armed with no owner to cancel.
+		this.sessionManager.appendCustomEntry(QUOTA_PARK_CUSTOM_ENTRY_TYPE, {
+			resumeAt: new Date(park.resumeAtMs).toISOString(),
+			parkCount: park.parkCount,
+			...(park.jobId !== undefined ? { jobId: park.jobId } : {}),
+		});
+	}
+
+	private _findQuotaResumeJob(jobId: string): AgentCronJob | undefined {
+		const store = this._quotaResumeStore();
+		if (!store) {
+			return undefined;
+		}
+		try {
+			return store.list().find((job) => job.id === jobId);
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
+	 * Durable wake for a restored park: reuse a job that can still fire and
+	 * recreate one that was cancelled (a navigation cancels the left-behind
+	 * leaf's wake) or removed, so a restored park never waits on a dead job.
+	 */
+	private async _restoreQuotaWakeJob(
+		jobId: string | undefined,
+		resumeAtMs: number,
+	): Promise<string | undefined | "user-cancelled"> {
+		if (jobId === undefined) {
+			return this._createQuotaResumeJob(resumeAtMs);
+		}
+		const job = this._findQuotaResumeJob(jobId);
+		if (job === undefined || job.status !== "cancelled") {
+			// Not cancelled: still scheduled, or already delivered by the daemon.
+			return jobId;
+		}
+		// A cancelled wake stays cancelled unless navigation cancelled it, which
+		// frees the wake so returning to the parked branch can rebuild it.
+		if (this._navigationCancelledWakeJobs.has(jobId)) {
+			return this._createQuotaResumeJob(resumeAtMs);
+		}
+		return "user-cancelled";
+	}
+
+	/**
+	 * Rebuild the park for the branch this navigation selected. The old leaf's
+	 * wake is cancelled with it, so a parked leaf that was left behind cannot
+	 * resume its task on the selected branch.
+	 */
+	private async _reloadQuotaParkFromBranch(): Promise<void> {
+		const previous = this._quotaPark;
+		this._quotaPark = undefined;
+		if (previous?.timer) {
+			clearTimeout(previous.timer);
+			previous.timer = undefined;
+		}
+		if (previous?.jobId !== undefined) {
+			// Only a wake this navigation actually cancels may be rebuilt on the way
+			// back; a wake the user cancelled in /cron stays cancelled.
+			if ((await this._resolveQuotaResumeJob(previous.jobId)) === "cancelled") {
+				this._navigationCancelledWakeJobs.add(previous.jobId);
+			}
+		}
+		await this._restoreQuotaPark();
+	}
+
+	/**
+	 * Restore the park this branch ended on: a restart (daemon or worker) leaves
+	 * waitForUsage.maxParks unbounded otherwise, because the park count would
+	 * start over at 1 each time. Parks recorded before the branch's last resume
+	 * entry are spent, and a park whose wake time has passed is restored without
+	 * a timer when its durable job still owns the wake; with no job the
+	 * in-process timer wakes it at once.
+	 */
+	private async _restoreQuotaPark(): Promise<void> {
+		const branch = this.sessionManager.getBranch();
+		for (let index = branch.length - 1; index >= 0; index -= 1) {
+			const entry = branch[index];
+			if (entry.type !== "custom") {
+				continue;
+			}
+			if (entry.customType === QUOTA_RESUME_CUSTOM_ENTRY_TYPE) {
+				return;
+			}
+			if (entry.customType !== QUOTA_PARK_CUSTOM_ENTRY_TYPE || !isPersistedQuotaParkData(entry.data)) {
+				continue;
+			}
+			const resumeAtMs = Date.parse(entry.data.resumeAt);
+			if (!Number.isFinite(resumeAtMs)) {
+				return;
+			}
+			const jobId = await this._restoreQuotaWakeJob(entry.data.jobId, resumeAtMs);
+			if (jobId === "user-cancelled") {
+				return;
+			}
+			if (jobId !== undefined && jobId !== entry.data.jobId) {
+				// A rebuilt wake replaces the cancelled one: record it, so the next
+				// restore reuses this job instead of arming another one beside it.
+				this.sessionManager.appendCustomEntry(QUOTA_PARK_CUSTOM_ENTRY_TYPE, {
+					resumeAt: entry.data.resumeAt,
+					parkCount: entry.data.parkCount,
+					jobId,
+				});
+			}
+			// A wake already due belongs to its durable job (the daemon delivers it,
+			// or the next turn settles it): keep the park so its count still bounds
+			// the episode, and arm no timer that would race that delivery. With no
+			// job left (a one-shot cannot be rebuilt in the past) the in-process
+			// timer wakes the park at once.
+			const pastDue = resumeAtMs <= Date.now();
+			this._quotaPark = {
+				parkCount: entry.data.parkCount,
+				resumeAtMs,
+				...(jobId !== undefined ? { jobId } : {}),
+				...(pastDue && jobId !== undefined
+					? { waking: true }
+					: { timer: this._scheduleQuotaResumeTimer(resumeAtMs) }),
+			};
+			return;
+		}
+	}
+
+	/**
+	 * A parked session completed a model call successfully: the quota is back.
+	 * Clear the park (cancelling any pending wake), record the resumed
+	 * transition, and — unless this success WAS the wake probe — deliver the
+	 * resume marker so the interrupted task continues right away.
+	 */
+	private async _completeQuotaParkResume(): Promise<void> {
+		const park = this._quotaPark;
+		if (!park) return;
+		// A wake the daemon already delivered owns the resume even when the timer
+		// never observed it: the job's marker prompt is the continuation, so this
+		// success must not queue a second one.
+		const delivered = park.jobId !== undefined && (await this._resolveQuotaResumeJob(park.jobId)) === "delivered";
+		await this._cancelQuotaParkWake(park);
+		const wasWaking = park.waking === true || delivered;
+		const restoredModel = this._restorePrimaryModelAfterBackup();
+		this._quotaPark = undefined;
+		this.sessionManager.appendCustomEntry(QUOTA_RESUME_CUSTOM_ENTRY_TYPE, {
+			outcome: wasWaking ? "wake" : "early",
+			...(restoredModel ? { restoredModel } : {}),
+		});
+		if (!wasWaking) {
+			void this._queuePreparedPrompt("followUp", QUOTA_RESUME_MARKER_TEXT, undefined, {
+				source: "internal",
+				priority: "background",
+				resumeIfIdle: true,
+			}).catch(() => {
+				// The early-resume marker could not be queued; the park is cleared,
+				// so a later quota failure parks again with a fresh schedule.
+			});
+		}
+	}
+
+	/**
 	 * Return to the primary model after a backup-model retry, unless the user
 	 * switched models meanwhile. Returns the restored "provider/model-id"
 	 * reference for the retry-end event.
@@ -12982,6 +13852,7 @@ export class AgentSession {
 		if (!backup || !modelsAreEqual(this.model, backup.backup)) return undefined;
 		this.agent.state.model = backup.primary;
 		this.agent.state.thinkingLevel = backup.thinkingLevel;
+		this.agent.modelOverride = backup.routedOverride;
 		// Restore the saved effective tier: reclamping from the current state
 		// would keep the tier the backup clamped it to.
 		this._clampServiceTierForModel(backup.serviceTier);
@@ -13023,6 +13894,11 @@ export class AgentSession {
 
 	get isRetrying(): boolean {
 		return this._retryPromise !== undefined;
+	}
+
+	/** True while the session is parked waiting out a provider-reported usage reset. */
+	get isQuotaParked(): boolean {
+		return this._quotaPark !== undefined;
 	}
 
 	get hasAcceptedPromptInFlight(): boolean {
@@ -13504,10 +14380,33 @@ export class AgentSession {
 			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
 				const { apiKey, headers, requestModel: model } = await this._getRequiredRequestAuth(this.model!);
 				const branchSummarySettings = this.settingsManager.getBranchSummarySettings();
-				const result = await generateBranchSummary(entriesToSummarize, {
+				// Branch summary fires at a tree-navigation context boundary, and the
+				// summarizer runs with its own prompt prefix (SUMMARIZATION_SYSTEM_PROMPT
+				// plus the <conversation> wrapper), so it cannot hit the session's cached
+				// prefix: on the session model the summary re-reads the whole branch at
+				// peak price. Route it to the auxiliary model when one is configured.
+				const summarization = (await this._resolveAuxiliaryModel(
+					"branch summary",
+					{ model, apiKey, headers },
+					// The estimator sizes the request the session model would issue for
+					// the branch being left. A smaller auxiliary window must fall back
+					// rather than truncate away branch context or fail over-limit and
+					// strand the navigation.
+					estimateBranchSummaryRequestTokens(entriesToSummarize, {
+						contextWindow: model.contextWindow,
+						reserveTokens: branchSummarySettings.reserveTokens,
+						customInstructions,
+						replaceInstructions,
+					}),
+				)) ?? {
 					model,
 					apiKey,
 					headers,
+				};
+				const result = await generateBranchSummary(entriesToSummarize, {
+					model: summarization.model,
+					apiKey: summarization.apiKey,
+					headers: summarization.headers,
 					signal: this._branchSummaryAbortController.signal,
 					sessionId: this.sessionId,
 					customInstructions,
@@ -13586,6 +14485,7 @@ export class AgentSession {
 			this._ensureHarnessDigestContext();
 			this._reloadGoalStateFromBranch({ monotonicTokens: Boolean(summaryText) });
 			this._reloadRlmMaxDepthFromBranch();
+			await this._reloadQuotaParkFromBranch();
 			this._invalidateQueuedPromptPreparation();
 
 			await this._extensionRunner.emit({
@@ -13761,9 +14661,9 @@ export class AgentSession {
 
 	/**
 	 * Build the agent context overview for /context: this session as the root
-	 * plus one node per RLM sub-agent, recursively. Running children are read
-	 * from their live sessions; completed children from their persisted session
-	 * dirs, so the tree survives child disposal and session resume.
+	 * plus one node per RLM sub-agent, recursively. Running and resident
+	 * finished children come from their live sessions, others from their
+	 * persisted session dirs, so the tree survives child disposal and session resume.
 	 */
 	getContextTree(): ContextTreeNode {
 		const resolveContextWindow = this._contextWindowResolver();
@@ -13788,7 +14688,35 @@ export class AgentSession {
 				status: run.status,
 			});
 		}
-		children.push(...loadContextTreeChildrenFromDisk(this._rlmSessionDirForReading(), resolveContextWindow, liveIds));
+		// Resident finished children project from their live sessions: usage
+		// reaches their session file only at settle boundaries, so memory is fresher than a re-parse.
+		const residentIds = new Set<string>(liveIds);
+		const rlmSessionDir = this._rlmSessionDirForReading();
+		for (const [childId, retained] of this._rlmChildSessions) {
+			if (
+				residentIds.has(childId) ||
+				this._deletingRlmChildren.has(childId) ||
+				this._deletedRlmChildIds.has(childId)
+			) {
+				continue;
+			}
+			// Only project children the disk walk would enumerate, so visibility stays identical.
+			const childDir = retained.session._rlmSessionDir ?? retained.session.sessionManager.getSessionDir();
+			if (!rlmSessionDir || basename(childDir) !== childId || dirname(childDir) !== rlmSessionDir) {
+				continue;
+			}
+			residentIds.add(childId);
+			children.push({
+				...retained.session.getContextTree(),
+				id: childId,
+				label: retained.run ? rlmChildLabel(retained.run.prompt) : (retained.session.sessionName ?? "child agent"),
+				// Without a run, status stays "done", matching _rlmChildSnapshotForSession.
+				status: retained.run?.status ?? "done",
+			});
+		}
+		children.push(
+			...loadContextTreeChildrenFromDisk(this._rlmSessionDirForReading(), resolveContextWindow, residentIds),
+		);
 
 		const model = this.model;
 		return {

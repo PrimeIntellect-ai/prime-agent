@@ -7,6 +7,9 @@ import type { AgentStatus, AgentTaskState } from "../../core/session-manager.js"
 import type { ActiveSessionState } from "./active-session-state.js";
 
 const SWEEP_INTERVAL_MS = 25_000;
+// Fleet-wide cap on concurrent model calls: bursty turn ends across many sessions must
+// not fan out into unbounded generations. Over-cap sessions wait; the 25s sweep re-invokes them.
+const MAX_CONCURRENT_SUMMARY_GENERATIONS = 4;
 // Collapse a tool-use loop's rapid turn_end bursts into one summarization.
 const SETTLE_DEBOUNCE_MS = 2_000;
 // Idle generations stop retrying (and paying) on unchanged content until the
@@ -247,6 +250,7 @@ export class DaemonSessionSummarizer {
 	private readonly inFlight = new Map<string, AbortController>();
 	// Sessions requested while one was running; get one more pass on completion.
 	private readonly rerunRequested = new Set<string>();
+	private readonly waitingForSlot = new Map<string, ActiveSessionState>();
 	// Failed idle generations per session, keyed to the settled content they saw.
 	private readonly failedIdleGenerations = new Map<
 		string,
@@ -287,6 +291,7 @@ export class DaemonSessionSummarizer {
 			controller.abort();
 		}
 		this.rerunRequested.clear();
+		this.waitingForSlot.clear();
 		this.failedIdleGenerations.clear();
 	}
 
@@ -299,6 +304,7 @@ export class DaemonSessionSummarizer {
 		}
 		this.inFlight.get(activeSessionId)?.abort();
 		this.rerunRequested.delete(activeSessionId);
+		this.waitingForSlot.delete(activeSessionId);
 		this.failedIdleGenerations.delete(activeSessionId);
 	}
 
@@ -392,6 +398,11 @@ export class DaemonSessionSummarizer {
 		const streaming = isWorking ? session.state.streamingMessage : undefined;
 		const contextMessages = streaming ? [...messages, streaming] : messages;
 
+		if (this.inFlight.size >= MAX_CONCURRENT_SUMMARY_GENERATIONS) {
+			this.waitingForSlot.set(id, state);
+			return;
+		}
+
 		const controller = new AbortController();
 		this.inFlight.set(id, controller);
 		try {
@@ -447,10 +458,36 @@ export class DaemonSessionSummarizer {
 			);
 		} finally {
 			this.inFlight.delete(id);
+			this.admitNextWaitingSession();
 			// Re-debounce a request that arrived mid-pass instead of dropping it.
 			if (this.rerunRequested.delete(id)) {
 				this.notifyActivity(state);
 			}
+		}
+	}
+
+	/**
+	 * Admit the most recently active waiters while slots are free. summarize() claims its slot before
+	 * its first await, so a waiter that returns early without one leaves inFlight unchanged.
+	 */
+	private admitNextWaitingSession(): void {
+		while (this.inFlight.size < MAX_CONCURRENT_SUMMARY_GENERATIONS && this.waitingForSlot.size > 0) {
+			let next: ActiveSessionState | undefined;
+			let nextActivityAt = -1;
+			for (const candidate of this.waitingForSlot.values()) {
+				const activityAt = candidate.runtime.session.messages.at(-1)?.timestamp ?? 0;
+				if (
+					activityAt > nextActivityAt ||
+					(activityAt === nextActivityAt &&
+						(next === undefined || candidate.activeSessionId > next.activeSessionId))
+				) {
+					next = candidate;
+					nextActivityAt = activityAt;
+				}
+			}
+			if (next === undefined) return;
+			this.waitingForSlot.delete(next.activeSessionId);
+			void this.summarize(next);
 		}
 	}
 

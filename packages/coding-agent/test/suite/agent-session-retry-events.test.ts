@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { AgentContinueError, type AgentEvent, type AgentTool, type ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
@@ -9,8 +11,9 @@ import {
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AgentCronJobStore } from "../../src/core/cron-jobs.js";
 import type { Settings } from "../../src/core/settings-manager.js";
-import { createHarness, getAssistantTexts, type Harness } from "./harness.js";
+import { createHarness, getAssistantTexts, getUserTexts, type Harness } from "./harness.js";
 
 function normalizeEventOrder(events: Harness["events"]): string[] {
 	const normalized: string[] = [];
@@ -741,6 +744,9 @@ describe("AgentSession retry and event characterization", () => {
 		maxDelayMs?: number;
 		maxAttempts?: number;
 		maxWaitMs?: number;
+		pauseUntilReset?: boolean;
+		maxPauseMs?: number;
+		maxParks?: number;
 	}): Partial<Settings> {
 		return {
 			retry: {
@@ -808,10 +814,8 @@ describe("AgentSession retry and event characterization", () => {
 		expect(harness.session.isRetrying).toBe(false);
 	});
 
-	it("aborts immediately when the provider-reported reset exceeds the wait bound", async () => {
-		const harness = await createHarness({
-			settings: waitSettings({ baseDelayMs: 1, maxDelayMs: 2, maxAttempts: 5, maxWaitMs: 1_000 }),
-		});
+	it("aborts immediately when the provider-reported reset exceeds the wait bound and parking is disabled", async () => {
+		const harness = await createHarness({ settings: parkSettings({ pauseUntilReset: false }) });
 		harnesses.push(harness);
 		harness.setResponses([quotaFailure({ retryAfterMs: 3_600_000 }), fauxAssistantMessage("unused")]);
 
@@ -824,6 +828,322 @@ describe("AgentSession retry and event characterization", () => {
 		expect(retryEnd[0]?.success).toBe(false);
 		expect(retryEnd[0]?.finalError).toContain("maxWaitMs");
 		expect(harness.session.isRetrying).toBe(false);
+		expect(harness.session.isQuotaParked).toBe(false);
+	});
+
+	type QuotaParkInternals = {
+		_quotaPark: { parkCount: number; resumeAtMs: number; jobId?: string; waking?: boolean } | undefined;
+		_resumeFromQuotaPark: () => Promise<void>;
+		_agentEventQueue: Promise<void>;
+	};
+
+	const quotaPark = (harness: Harness): QuotaParkInternals["_quotaPark"] =>
+		(harness.session as unknown as QuotaParkInternals)._quotaPark;
+
+	const parkSettings = (wait: Parameters<typeof waitSettings>[0]): Partial<Settings> =>
+		waitSettings({ baseDelayMs: 1, maxDelayMs: 2, maxAttempts: 5, maxWaitMs: 1_000, ...wait });
+
+	const parkHarness = async (settings: Partial<Settings>, persist = false): Promise<Harness> => {
+		const harness = await createHarness({ persistSession: persist, settings });
+		harnesses.push(harness);
+		if (persist) harness.sessionManager.materializeSessionFile();
+		return harness;
+	};
+
+	const farReset = (): AssistantMessage => quotaFailure({ retryAfterMs: 3_600_000 });
+	const promptParked = async (harness: Harness, text: string, ends = 1): Promise<void> => {
+		const parked = waitForRetryEnds(harness, ends);
+		await harness.session.prompt(text);
+		await parked;
+	};
+
+	const quotaEntries = (harness: Harness, customType: string): Array<Record<string, unknown>> =>
+		harness.sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "custom" && entry.customType === customType)
+			.map((entry) => (entry as { data?: Record<string, unknown> }).data ?? {});
+
+	const assistantTurns = (harness: Harness): (() => Promise<AssistantMessage>) => {
+		const buffered: AssistantMessage[] = [];
+		const waiters: Array<(message: AssistantMessage) => void> = [];
+		harness.session.subscribe((event) => {
+			if (event.type !== "message_end" || event.message.role !== "assistant") return;
+			const message = event.message as AssistantMessage;
+			const waiter = waiters.shift();
+			if (waiter) waiter(message);
+			else buffered.push(message);
+		});
+		return async () => buffered.shift() ?? (await new Promise<AssistantMessage>((resolve) => waiters.push(resolve)));
+	};
+
+	const waitFor = (harness: Harness, ready: () => boolean): Promise<void> =>
+		new Promise((resolve) => {
+			const settle = (): void => {
+				if (!ready()) return;
+				unsubscribe();
+				resolve();
+			};
+			const unsubscribe = harness.session.subscribe(settle);
+			settle();
+		});
+	const waitForRetryEnds = (harness: Harness, count: number): Promise<void> =>
+		waitFor(harness, () => harness.eventsOfType("auto_retry_end").length >= count);
+
+	const fireQuotaWake = async (harness: Harness): Promise<void> => {
+		const internals = harness.session as unknown as QuotaParkInternals;
+		if (!internals._quotaPark) throw new Error("the session is not parked");
+		internals._quotaPark.resumeAtMs = Date.now() - 1;
+		await internals._resumeFromQuotaPark();
+	};
+	const wakeQuotaProbe = (harness: Harness): (() => Promise<AssistantMessage>) => {
+		const turn = assistantTurns(harness);
+		const internals = harness.session as unknown as QuotaParkInternals;
+		return async () => {
+			const message = await fireQuotaWake(harness).then(turn);
+			await internals._agentEventQueue;
+			return message;
+		};
+	};
+
+	const readQuotaWakeJob = (harness: Harness, jobId: string | undefined) =>
+		(
+			JSON.parse(
+				readFileSync(join(harness.sessionManager.getSessionArtifactDir()!, "scheduled-jobs.json"), "utf-8"),
+			) as {
+				jobs?: Array<{ id: string; status: string; prompt: string; schedule: { kind: string } }>;
+			}
+		).jobs?.find((job) => job.id === jobId);
+	const lastUserEntryId = (harness: Harness): string =>
+		harness.sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "message" && entry.message.role === "user")
+			.at(-1)!.id;
+
+	it("parks a quota-blocked session until the provider reset and resumes automatically", async () => {
+		const harness = await parkHarness(parkSettings({ maxPauseMs: 2_000 }), true);
+		harness.setResponses([farReset(), farReset(), fauxAssistantMessage("recovered")]);
+		await promptParked(harness, "do the work");
+		expect([harness.session.isQuotaParked, harness.faux.state.callCount]).toEqual([true, 1]);
+		const wakeJob = readQuotaWakeJob(harness, quotaPark(harness)?.jobId);
+		expect([wakeJob?.status, wakeJob?.schedule.kind]).toEqual(["active", "once"]);
+		expect(wakeJob?.prompt).toContain("<provider_quota_resumed>");
+		await promptParked(harness, "second task", 2);
+		expect([quotaPark(harness)?.parkCount, quotaPark(harness)?.jobId]).toEqual([1, wakeJob?.id]);
+		await wakeQuotaProbe(harness)();
+		expect(harness.session.isQuotaParked).toBe(false);
+		expect(getUserTexts(harness).join("\n")).toContain("<provider_quota_resumed>");
+		expect(quotaEntries(harness, "provider_quota_resume")[0]?.outcome).toBe("wake");
+		expect(readQuotaWakeJob(harness, wakeJob?.id)?.status).toBe("cancelled");
+	});
+
+	it("re-parks at the wake with the newly reported reset and stops at the park bound", async () => {
+		const harness = await parkHarness(parkSettings({ maxPauseMs: 2_000, maxParks: 2 }));
+		harness.setResponses([farReset(), farReset(), farReset()]);
+		await promptParked(harness, "/goal finish the task");
+		const reparked = waitForRetryEnds(harness, 2);
+		await fireQuotaWake(harness);
+		await reparked;
+		expect([harness.session.isQuotaParked, quotaPark(harness)?.parkCount]).toEqual([true, 2]);
+		expect(harness.session.goalState.status).toBe("active");
+		const spent = waitForRetryEnds(harness, 3);
+		const goalErrored = waitFor(harness, () => harness.session.goalState.status === "error");
+		await fireQuotaWake(harness);
+		await spent;
+		await goalErrored;
+		expect(harness.session.isQuotaParked).toBe(false);
+		expect(harness.eventsOfType("auto_retry_end").at(-1)?.finalError).toContain("maxWaitMs");
+	});
+
+	it("resumes early and cancels the scheduled wake when quota returns via another turn", async () => {
+		const harness = await parkHarness(parkSettings({ maxPauseMs: 2_000 }), true);
+		harness.setResponses([farReset(), fauxAssistantMessage("side answer"), fauxAssistantMessage("recovered")]);
+		await promptParked(harness, "do the work");
+		const wakeJobId = quotaPark(harness)?.jobId;
+		const answered = assistantTurns(harness);
+		await harness.session.prompt("side question");
+		await answered();
+		expect(harness.session.isQuotaParked).toBe(false);
+		expect(getUserTexts(harness).join("\n")).toContain("<provider_quota_resumed>");
+		expect(quotaEntries(harness, "provider_quota_resume")[0]?.outcome).toBe("early");
+		expect(readQuotaWakeJob(harness, wakeJobId)?.status).toBe("cancelled");
+	});
+
+	it("stands down when the daemon already delivered the durable wake", async () => {
+		const harness = await parkHarness(parkSettings({ maxPauseMs: 2_000 }), true);
+		harness.setResponses([farReset(), fauxAssistantMessage("delivered")]);
+		await promptParked(harness, "do the work");
+		const jobId = quotaPark(harness)?.jobId;
+		const artifactDir = harness.sessionManager.getSessionArtifactDir()!;
+
+		const store = AgentCronJobStore.forSessionArtifacts();
+		store.registerSessionArtifact(harness.sessionManager.getSessionId(), artifactDir);
+		const [dispatch] = await store.claimDue(new Date(Date.now() + 60_000));
+		await store.recordDispatchResult(dispatch!.id, { outcome: "ran" });
+		await fireQuotaWake(harness);
+		expect([quotaPark(harness)?.waking, harness.faux.state.callCount]).toEqual([true, 1]);
+		expect(readQuotaWakeJob(harness, jobId)?.status).toBe("completed");
+	});
+
+	it("keeps the park, re-arms the wake, and restores the re-arm across a restart", async () => {
+		const settings = parkSettings({ maxPauseMs: 60_000 });
+		const abortedHarness = await parkHarness(settings, true);
+		abortedHarness.setResponses([farReset(), fauxAssistantMessage("", { stopReason: "aborted" })]);
+		await promptParked(abortedHarness, "do the work");
+		const parkedAtMs = quotaPark(abortedHarness)?.resumeAtMs ?? 0;
+
+		// An aborted probe is no evidence the quota is back: the park re-arms.
+		const aborted = assistantTurns(abortedHarness);
+		await fireQuotaWake(abortedHarness);
+		expect((await aborted()).stopReason).toBe("aborted");
+		await (abortedHarness.session as unknown as QuotaParkInternals)._agentEventQueue;
+		const reArmed = quotaPark(abortedHarness);
+		expect([reArmed?.waking, (reArmed?.resumeAtMs ?? 0) > parkedAtMs]).toEqual([false, true]);
+
+		// The re-armed wake is recorded, so a restart restores the park with the retry job still owned.
+		const restarted = await createHarness({ existingSessionFile: abortedHarness.session.sessionFile!, settings });
+		harnesses.push(restarted);
+		expect([restarted.session.isQuotaParked, quotaPark(restarted)?.parkCount]).toEqual([true, 1]);
+		expect(readQuotaWakeJob(abortedHarness, reArmed?.jobId)?.status).toBe("active");
+		restarted.setResponses([fauxAssistantMessage("recovered")]);
+		await wakeQuotaProbe(restarted)();
+		expect(readQuotaWakeJob(abortedHarness, reArmed?.jobId)?.status).toBe("cancelled");
+		expect(restarted.session.isQuotaParked).toBe(false);
+
+		// A refused admission re-arms too, and gives the park up once spent.
+		const refusedHarness = await parkHarness(parkSettings({ maxPauseMs: 2_000 }));
+		refusedHarness.setResponses([farReset(), fauxAssistantMessage("unused")]);
+		await promptParked(refusedHarness, "do the work");
+		const refusedAtMs = quotaPark(refusedHarness)?.resumeAtMs ?? 0;
+		const pause = refusedHarness.session.acquireSessionInputPause();
+		try {
+			await fireQuotaWake(refusedHarness);
+			expect(quotaPark(refusedHarness)?.resumeAtMs).toBeGreaterThan(refusedAtMs);
+			for (let attempt = 0; attempt < 3; attempt += 1) await fireQuotaWake(refusedHarness);
+		} finally {
+			pause.release();
+		}
+		expect(refusedHarness.session.isQuotaParked).toBe(false);
+	});
+
+	it("re-arms the wake when the resume probe dies a plain error", async () => {
+		const harness = await parkHarness(parkSettings({ maxPauseMs: 2_000 }), true);
+		harness.setResponses([farReset(), structuredProviderFailure("invalid_request")]);
+		await promptParked(harness, "do the work");
+		const parkedAtMs = quotaPark(harness)?.resumeAtMs ?? 0;
+
+		// The wake was consumed and the probe errored: without a re-arm the park
+		// sits `waking` with no timer or job left, and the session never resumes.
+		const probeEnded = waitFor(harness, () => harness.eventsOfType("agent_end").length >= 2);
+		const errored = assistantTurns(harness);
+		await fireQuotaWake(harness);
+		expect((await errored()).stopReason).toBe("error");
+		// The re-arm runs at the probe turn's terminal tail: settle the agent_end
+		// event and the agent event queue before reading the park.
+		await probeEnded;
+		await (harness.session as unknown as QuotaParkInternals)._agentEventQueue;
+		const reArmed = quotaPark(harness);
+		expect([reArmed?.waking, (reArmed?.resumeAtMs ?? 0) > parkedAtMs]).toEqual([false, true]);
+		expect(readQuotaWakeJob(harness, reArmed?.jobId)?.status).toBe("active");
+	});
+
+	it("restores a park across a restart, and honours a cancelled wake", async () => {
+		const settings = parkSettings({ maxPauseMs: 60_000 });
+		const harness = await parkHarness(settings, true);
+		harness.setResponses([farReset()]);
+		await promptParked(harness, "do the work");
+		const sessionFile = harness.session.sessionFile!;
+
+		// A restart past the wake time keeps the park count and leaves the wake to the durable job: no timer.
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(quotaPark(harness)!.resumeAtMs + 1);
+		const late = await createHarness({ existingSessionFile: sessionFile, settings }).finally(() =>
+			vi.useRealTimers(),
+		);
+		harnesses.push(late);
+		expect(quotaPark(late)).toMatchObject({ parkCount: 1, jobId: quotaPark(harness)?.jobId, waking: true });
+		expect(quotaPark(late)).not.toHaveProperty("timer");
+
+		// A restart rebuilds the park, and the wake still bounds the episode.
+		const restarted = await createHarness({ existingSessionFile: sessionFile, settings });
+		harnesses.push(restarted);
+		expect([restarted.session.isQuotaParked, quotaPark(restarted)?.parkCount]).toEqual([true, 1]);
+		restarted.setResponses([farReset()]);
+		const reparked = waitForRetryEnds(restarted, 1);
+		await fireQuotaWake(restarted);
+		await reparked;
+		expect(quotaPark(restarted)?.parkCount).toBe(2);
+
+		// A wake the user cancelled stays cancelled, through a navigation and a restart.
+		const store = AgentCronJobStore.forSessionArtifacts();
+		store.registerSessionArtifact(
+			restarted.sessionManager.getSessionId(),
+			restarted.sessionManager.getSessionArtifactDir()!,
+		);
+		await store.cancel(quotaPark(restarted)!.jobId!);
+		await restarted.session.navigateTree(lastUserEntryId(restarted));
+		await restarted.session.navigateTree(restarted.sessionManager.getLeafId()!);
+		expect(restarted.session.isQuotaParked).toBe(false);
+		const afterCancel = await createHarness({ existingSessionFile: sessionFile, settings });
+		harnesses.push(afterCancel);
+		expect(afterCancel.session.isQuotaParked).toBe(false);
+	});
+
+	it("moves the park with branch navigation", async () => {
+		const settings = parkSettings({ maxPauseMs: 2_000 });
+		const harness = await parkHarness(settings, true);
+		harness.setResponses([farReset(), fauxAssistantMessage("recovered")]);
+		await promptParked(harness, "do the work");
+		const parkedLeaf = harness.sessionManager.getLeafId()!;
+		await harness.session.navigateTree(lastUserEntryId(harness));
+		expect([harness.session.isQuotaParked, harness.faux.state.callCount]).toEqual([false, 1]);
+
+		await harness.session.navigateTree(parkedLeaf);
+		expect(harness.session.isQuotaParked).toBe(true);
+		const wakeJob = readQuotaWakeJob(harness, quotaPark(harness)?.jobId);
+		expect(wakeJob?.status).toBe("active");
+
+		const restarted = await createHarness({ existingSessionFile: harness.session.sessionFile!, settings });
+		harnesses.push(restarted);
+		expect(restarted.session.isQuotaParked).toBe(true);
+
+		// Past the wake time the rebuild cannot schedule a one-shot job: the in-process timer wakes the park at once.
+		const resumed = assistantTurns(harness);
+		await harness.session.navigateTree(lastUserEntryId(harness));
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(quotaPark(restarted)!.resumeAtMs + 1);
+		await harness.session.navigateTree(parkedLeaf);
+		await resumed().finally(() => vi.useRealTimers());
+		expect([harness.session.isQuotaParked, harness.faux.state.callCount]).toEqual([false, 2]);
+		expect(quotaEntries(harness, "provider_quota_resume")[0]?.outcome).toBe("wake");
+	});
+
+	it("preserves an active goal across a quota park and resumes its continuation", async () => {
+		const harness = await parkHarness(parkSettings({ maxPauseMs: 2_000 }));
+		const completeGoal = (): AssistantMessage => {
+			harness.session.handleGoalHostRequest("goal.complete", {});
+			return fauxAssistantMessage("Goal complete.");
+		};
+		harness.setResponses([farReset(), fauxAssistantMessage("recovered"), completeGoal]);
+		await promptParked(harness, "/goal finish the task");
+		// The parked turn is the park's pause, not the goal's death.
+		expect([harness.session.isQuotaParked, harness.session.goalState.status]).toEqual([true, "active"]);
+		const goalTurns = assistantTurns(harness);
+		await fireQuotaWake(harness);
+		await goalTurns(); // the wake's resume probe
+		await goalTurns(); // the resumed goal-driven continuation completes the goal
+		expect([harness.session.isQuotaParked, harness.session.goalState.status]).toEqual([false, "complete"]);
+	});
+
+	it("does not park while a backup model is configured and available", async () => {
+		const harness = await createHarness({
+			models: [{ id: "faux-1" }, { id: "faux-backup" }],
+			settings: { providerBackupModel: "faux/faux-backup", ...parkSettings({}) },
+		});
+		harnesses.push(harness);
+		harness.setResponses([quotaFailure({ retryAfterMs: 3_600_000 }), fauxAssistantMessage("backup answer")]);
+		await harness.session.prompt("do the work");
+		expect(harness.eventsOfType("auto_retry_start").map((event) => event.reason)).toEqual(["backup"]);
+		expect(harness.session.isQuotaParked).toBe(false);
 	});
 
 	it("waits for an unavailable provider after quick retries exhaust", async () => {

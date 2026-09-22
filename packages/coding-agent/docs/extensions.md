@@ -411,7 +411,7 @@ Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `
 
 #### session_before_compact / session_compact
 
-Fired on compaction. See [compaction.md](compaction.md) for details.
+Fired on compaction. See [compaction.md](compaction.md) for details. `branchEntries` is a read-only snapshot of the active branch taken before compaction, so it does not include entries appended while your handler runs and must not be mutated.
 
 ```typescript
 pi.on("session_before_compact", async (event, ctx) => {
