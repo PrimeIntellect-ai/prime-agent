@@ -211,7 +211,17 @@ Create provider file exporting:
    npm run release:minor    # API breaking changes
    ```
 
-The script handles: version bump, folding `.changes/` fragments into the release section, commit, tag, and publish.
+The script handles: version bump, folding `.changes/` fragments into the release section, a commit on a
+`release/vX.Y.Z` branch, and pushing that branch.
+
+3. **Open a pull request from the release branch, get it approved, and merge it.** That approval is the
+   release approval: the workflow refuses to publish unattended unless the merge commit belongs to a
+   merged pull request carrying a human approval.
+
+The script does **not** push `main`, create the tag, or publish. CI builds, signs, publishes and tags the
+release, so no publish credential is ever present on a developer machine. See
+`packages/coding-agent/docs/releasing.md` for the full flow, `packages/coding-agent/docs/release-security.md`
+for the trust model, and `scripts/npm-release-contract.md` for the npm packages and their publish order.
 
 ## **CRITICAL** Git Rules for Parallel Agents **CRITICAL**
 

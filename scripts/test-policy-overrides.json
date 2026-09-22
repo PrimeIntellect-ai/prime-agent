@@ -1,0 +1,10 @@
+{
+  "$comment": "Reviewed exceptions to the test-line budget. Add an entry only with a reviewer-visible justification; keep the budget tight to the measured overage.",
+  "excess-test-lines": [
+    {
+      "pr": 2337,
+      "budget": 4000,
+      "reason": "Security hardening: the tests pin every evasion the review bots found across nine rounds (compiled-updater signature chain, installer verification, release workflow checker). Deleting them to fit a ratio would remove the regression proof the fixes exist for."
+    }
+  ]
+}

@@ -33,10 +33,16 @@ import {
 	launchDaemonUpdateRestartCoordinator,
 	waitForActiveDaemonUpdateRestartCoordinator,
 } from "./cli/daemon-update-restart.js";
-import { getNativeUpdatePlan, NativeReleaseUnavailableError } from "./cli/native-update.js";
+import {
+	describeNativeUpdatePlan,
+	getNativeUpdatePlan,
+	NativeReleaseUnavailableError,
+	type NativeUpdatePlan,
+} from "./cli/native-update.js";
 import {
 	APP_NAME,
 	CONFIG_DIR_NAME,
+	detectInstallMethod,
 	getAgentDir,
 	getDaemonUpdateRestartManifestPath,
 	getLegacyDaemonUpdateRestartManifestPath,
@@ -75,6 +81,7 @@ import {
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
 } from "./modes/daemon/daemon-worker-protocol.js";
 import { shouldUseWindowsShell } from "./utils/child-process.js";
+import { DownloadOriginError } from "./utils/download-url.js";
 import {
 	getLatestPiRelease,
 	isBaseVersionDowngrade,
@@ -480,6 +487,15 @@ interface SelfUpdatePlan {
 	command?: SelfUpdateCommand;
 	/** The requested channel could not be resolved; nothing was installed and nothing should be persisted. */
 	unavailable?: boolean;
+	/** Present for compiled installations: what the plan trusts, reported before the installer runs. */
+	nativePlan?: NativeUpdatePlan;
+}
+
+/** Tell the user which signer the release was verified against and whether the download origin was overridden. */
+function printNativeUpdateProvenance(plan: NativeUpdatePlan): void {
+	const { notes, warnings } = describeNativeUpdatePlan(plan);
+	for (const line of notes) console.log(chalk.dim(line));
+	for (const line of warnings) console.error(chalk.yellow(line));
 }
 
 /** A cancelled or refused self-update: the interactive parent must not relaunch, a shell caller gets a failure. */
@@ -528,19 +544,36 @@ async function getSelfUpdatePlan(force: boolean, rollback = false, channel?: Upd
 	// A -beta install with no saved preference is on the nightly channel too; a missing manifest
 	// must never push it onto the stable registry package.
 	const effectiveChannel = resolveUpdateChannel(VERSION, channel);
-	if (isBunBinary) {
+	// Only a loose compiled binary belongs to the self-updater. A compiled binary that a package
+	// manager installed (our npm per-platform packages, a Homebrew keg) is updated by that manager,
+	// so it takes the registry path below and gets that manager's command or a clear instruction.
+	const installMethod = detectInstallMethod();
+	if (isBunBinary && installMethod === "bun-binary") {
 		try {
 			const plan = await getNativeUpdatePlan({ force, rollback, channel });
 			if (plan.refusedDowngradeTo) return behindChannelPlan(plan.refusedDowngradeTo, force, channel);
 			if (!plan.command) console.log(chalk.green(`${APP_NAME} is already up to date (v${plan.targetVersion})`));
-			return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: !!plan.command, ...plan };
+			return {
+				installSpec: PACKAGE_NAME,
+				packageName: PACKAGE_NAME,
+				shouldRun: !!plan.command,
+				targetVersion: plan.targetVersion,
+				command: plan.command,
+				nativePlan: plan,
+			};
 		} catch (error) {
 			if (effectiveChannel === "nightly" && error instanceof NativeReleaseUnavailableError)
 				return nightlyReleaseUnavailablePlan();
 			throw error;
 		}
 	}
-	if (rollback) throw new Error("Rollback is only available for managed compiled installations.");
+	if (rollback) {
+		if (isBunBinary && installMethod !== "bun-binary")
+			throw new Error(
+				`Rollback is only available for compiled installations managed by the ${APP_NAME} installer; this copy is managed by ${installMethod}.`,
+			);
+		throw new Error("Rollback is only available for managed compiled installations.");
+	}
 	try {
 		const latestRelease = await getLatestPiRelease(VERSION, { channel });
 		// The registry default resolves to the stable package, so a missing nightly manifest must not fall through to it.
@@ -558,7 +591,10 @@ async function getSelfUpdatePlan(force: boolean, rollback = false, channel?: Upd
 		) {
 			return { installSpec, packageName, shouldRun: true, targetVersion: latestRelease?.version };
 		}
-	} catch {
+	} catch (error) {
+		// A misconfigured download origin is the user's explicit choice of where updates come from.
+		// Never answer it by quietly installing from somewhere else.
+		if (error instanceof DownloadOriginError) throw error;
 		if (effectiveChannel === "nightly") return nightlyReleaseUnavailablePlan();
 		return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: true };
 	}
@@ -1738,6 +1774,8 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 						process.exitCode = 1;
 						return true;
 					}
+					// Say what is about to be installed and where it comes from before asking for confirmation.
+					if (selfUpdatePlan.nativePlan) printNativeUpdateProvenance(selfUpdatePlan.nativePlan);
 					// Confirm before the install, since upgrading the daemon afterward stops and resumes busy work.
 					const daemonSocketPath = resolveUpdateDaemonSocketPath(options.daemonSocketPath);
 					const daemonProbe = await probeRunningDaemonSessions(daemonSocketPath);

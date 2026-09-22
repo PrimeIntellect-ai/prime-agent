@@ -83,11 +83,24 @@ function makeSelfUpdateCommandStep(command: string, args: string[]): SelfUpdateC
 }
 
 export function detectInstallMethod(): InstallMethod {
-	if (isBunBinary) {
-		return "bun-binary";
-	}
+	// Homebrew is checked FIRST, before the compiled-binary branch. Our tap ships the prebuilt
+	// binary, so a brew copy is a compiled binary living inside a keg. Detecting it as "bun-binary"
+	// would route `prime-agent update` into the self-updater, which would overwrite files Homebrew
+	// owns and leave the keg inconsistent with its receipt. A brew copy must always be updated with
+	// `brew upgrade`.
 	if (isHomebrewInstall()) {
 		return "homebrew";
+	}
+	if (isBunBinary) {
+		// A compiled binary can also be delivered by a package manager (the per-platform npm
+		// packages install the same executable under node_modules). Those copies belong to the
+		// package manager too, not to the self-updater. Classify the RESOLVED executable as well as
+		// the invoked path: a `bin` symlink into a package tree must not look like a loose binary.
+		return (
+			classifyPackageManagerPath(
+				`${getPackageDir()}\0${process.execPath || ""}\0${resolveExecutablePath(process.execPath || "")}`,
+			) ?? "bun-binary"
+		);
 	}
 
 	const resolvedPath = `${__dirname}\0${process.execPath || ""}`.toLowerCase().replace(/\\/g, "/");
@@ -108,9 +121,76 @@ export function detectInstallMethod(): InstallMethod {
 	return "unknown";
 }
 
+/**
+ * Which package manager, if any, owns a compiled executable at this path. Only used for the
+ * compiled-binary branch; the Node branch keeps its own looser matching for compatibility.
+ */
+function classifyPackageManagerPath(rawPath: string): InstallMethod | undefined {
+	const path = rawPath.toLowerCase().replace(/\\/g, "/");
+	if (path.includes("/pnpm/") || path.includes("/.pnpm/")) return "pnpm";
+	if (path.includes("/yarn/") || path.includes("/.yarn/")) return "yarn";
+	if (path.includes("/install/global/node_modules/")) return "bun";
+	if (path.includes("/node_modules/")) return "npm";
+	return undefined;
+}
+
+/** Homebrew's documented default prefixes (macOS Apple silicon, macOS Intel, Linuxbrew). */
+const HOMEBREW_DEFAULT_PREFIXES = ["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"];
+
+/**
+ * Whether a path sits inside a Homebrew keg: `<prefix>/Cellar/<formula>/<version>/...`. The shape
+ * alone is not enough - a user directory named `Cellar` must not make the self-updater refuse to
+ * work - so the Cellar has to belong to Homebrew: either it sits under a known prefix (the defaults
+ * or `HOMEBREW_PREFIX`/`HOMEBREW_CELLAR` from the environment), or the keg carries the
+ * `INSTALL_RECEIPT.json` that `brew` writes into every keg it installs.
+ */
+export function isHomebrewManagedPath(rawPath: string): boolean {
+	const normalized = rawPath.replace(/\\/g, "/");
+	const match = /^(.*?)\/cellar\/([^/]+)\/([^/]+)(?:\/|$)/i.exec(normalized);
+	if (!match) return false;
+	const [, prefix, formula, version] = match;
+	if (!formula || !version || formula === "." || formula === "..") return false;
+	const cellar = `${prefix}/Cellar`;
+	const knownPrefixes = new Set(HOMEBREW_DEFAULT_PREFIXES.map((entry) => entry.toLowerCase()));
+	const knownCellars = new Set<string>();
+	const envPrefix = process.env.HOMEBREW_PREFIX?.replace(/\\/g, "/").replace(/\/+$/, "");
+	const envCellar = process.env.HOMEBREW_CELLAR?.replace(/\\/g, "/").replace(/\/+$/, "");
+	if (envPrefix) knownPrefixes.add(envPrefix.toLowerCase());
+	if (envCellar) knownCellars.add(envCellar.toLowerCase());
+	if (knownPrefixes.has(prefix.toLowerCase()) || knownCellars.has(cellar.toLowerCase())) return true;
+	try {
+		return statSync(join(cellar, formula, version, "INSTALL_RECEIPT.json")).isFile();
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Resolve an executable path through every symlink to the file that actually runs. Install-method
+ * decisions (Homebrew, package manager, self-updater) must be made on THIS path, never on the path
+ * as invoked: Homebrew and npm both expose a `bin` symlink whose own location says nothing about who
+ * owns the target. Returns the input unchanged when it cannot be resolved, so callers still see a
+ * non-empty path to match against.
+ */
+export function resolveExecutablePath(executablePath: string): string {
+	if (!executablePath) return executablePath;
+	try {
+		return realpathSync(executablePath);
+	} catch {
+		return executablePath;
+	}
+}
+
 function isHomebrewInstall(): boolean {
-	const packageDir = getPackageDir().toLowerCase().replace(/\\/g, "/");
-	return packageDir.includes("/cellar/") && packageDir.includes("/libexec/lib/node_modules/");
+	// Homebrew symlinks `<prefix>/bin/prime-agent` at the keg, so the executable as invoked may not
+	// look like a keg path until it is resolved. Check both, plus the package dir for npm layouts.
+	const candidates = [
+		getPackageDir(),
+		process.execPath || "",
+		resolveExecutablePath(process.execPath || ""),
+		__dirname,
+	];
+	return candidates.some((candidate) => candidate && isHomebrewManagedPath(candidate));
 }
 
 function getInferredNpmInstall(): { root: string; prefix: string } | undefined {
@@ -344,8 +424,10 @@ export function getSelfUpdateUnavailableInstruction(
 }
 
 export function getUpdateInstruction(packageName: string): string {
-	if (isBunBinary && getNativeInstallationTarget()) return `Run: ${APP_NAME} update`;
 	const method = detectInstallMethod();
+	// Homebrew outranks the self-updater: never tell a brew user to overwrite their own keg.
+	if (method === "homebrew") return `Update with: brew upgrade ${APP_NAME}`;
+	if (isBunBinary && getNativeInstallationTarget()) return `Run: ${APP_NAME} update`;
 	const command = getSelfUpdateCommandForMethod(method, packageName);
 	if (command) {
 		return `Run: ${command.display}`;

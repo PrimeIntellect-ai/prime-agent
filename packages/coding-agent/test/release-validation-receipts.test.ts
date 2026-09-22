@@ -179,7 +179,7 @@ describe("macOS validation receipt publication gate", () => {
 			const workflow = parse(
 				readFileSync(resolve(__dirname, "../../../.github/workflows/build-binaries.yml"), "utf8"),
 			);
-			const gate = workflow.jobs.publish.steps.find(
+			const gate = workflow.jobs.assemble.steps.find(
 				(step: { name?: string }) => step.name === "Match native validation to publication artifacts",
 			);
 			expect(gate).toBeDefined();

@@ -1545,6 +1545,7 @@ download_prime_agent_package() {
 		"Downloading release checksums" \
 		"Prime Agent v$version" \
 		prime_agent_curl_download -fsSL "$checksums_url" -o "$checksums_path"
+	prime_agent_verify_release_inventory "$checksums_path" "$prime_agent_base_url/releases/v$version" || exit 1
 
 	prime_agent_run_quiet_with_animation \
 		"Downloading Prime Agent" \
@@ -2198,6 +2199,60 @@ prime_agent_release_is_node_only() {
 	' "$1"
 }
 
+# Signature verification of the release inventory.
+#
+# Every release publishes SHA256SUMS.sigstore.json, a keyless cosign signature over SHA256SUMS whose
+# certificate names this repository's release workflow. Verifying it proves the inventory - and so
+# every digest the installer trusts - came from that workflow rather than from whoever serves the
+# download. The installer verifies with cosign when it is available. Without cosign a fresh install
+# has only the same-origin checksum and TLS, which is stated plainly; set PRIME_AGENT_REQUIRE_SIGNATURE=1
+# to refuse installing in that case. `prime-agent update` always verifies, with no such fallback.
+prime_agent_release_signer_identity_regexp='^https://github\.com/PrimeIntellect-ai/prime-agent/\.github/workflows/build-binaries\.yml@refs/(heads/main|tags/v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?)$'
+prime_agent_release_signer_oidc_issuer='https://token.actions.githubusercontent.com'
+
+prime_agent_verify_release_inventory() {
+	inventory_path="$1"
+	inventory_url_base="$2"
+	# Test feeds (npm-12 smoke, the benchmark harness, release-format fixtures) cannot mint a real
+	# cosign bundle - only the release workflow's OIDC identity can. They already run under
+	# PRIME_AGENT_ALLOW_INSECURE_HTTP_FOR_TESTS, the strictly-test-mode flag that permits loopback
+	# http feeds; production never sets it. Signature verification may be skipped only when BOTH
+	# flags are set, and the skip is announced on stderr. Every other path - including every
+	# production install - downloads the bundle and verifies it (or fails).
+	if [ "${PRIME_AGENT_ALLOW_INSECURE_HTTP_FOR_TESTS:-0}" = 1 ] && [ "${PRIME_AGENT_SKIP_SIGNATURE_FOR_TESTS:-0}" = 1 ]; then
+		printf 'TEST MODE: release signature verification skipped (PRIME_AGENT_SKIP_SIGNATURE_FOR_TESTS=1).\n' >&2
+		return 0
+	fi
+	# cosign decides how strict this can be. With cosign, the bundle is REQUIRED and must verify:
+	# that is the fail-closed path. Without cosign a bundle cannot be verified at all - its presence
+	# would prove nothing - so the install takes the documented TLS-and-checksum fallback instead of
+	# refusing historical releases that predate signatures. PRIME_AGENT_REQUIRE_SIGNATURE=1 refuses
+	# the weaker path outright.
+	if ! command -v cosign >/dev/null 2>&1; then
+		if [ "${PRIME_AGENT_REQUIRE_SIGNATURE:-0}" = 1 ]; then
+			printf 'error: cosign is required to verify the release signature (PRIME_AGENT_REQUIRE_SIGNATURE=1) and was not found.\n' >&2
+			return 1
+		fi
+		printf 'note: cosign was not found, so the release signature was not verified. This install relies on TLS and the release checksums; `prime-agent update` verifies signatures on every later update. Install cosign and set PRIME_AGENT_REQUIRE_SIGNATURE=1 to require it here.\n' >&2
+		return 0
+	fi
+	inventory_bundle="$inventory_path.sigstore.json"
+	if ! prime_agent_curl_download -fsSL --connect-timeout 10 --max-time 120 "$inventory_url_base/SHA256SUMS.sigstore.json" -o "$inventory_bundle"; then
+		printf 'error: the release signature (SHA256SUMS.sigstore.json) could not be downloaded. Refusing to install an unsigned inventory.\n' >&2
+		return 1
+	fi
+	if ! cosign verify-blob \
+		--bundle "$inventory_bundle" \
+		--certificate-oidc-issuer "$prime_agent_release_signer_oidc_issuer" \
+		--certificate-identity-regexp "$prime_agent_release_signer_identity_regexp" \
+		"$inventory_path" >/dev/null 2>"$inventory_path.verify.log"; then
+		cat "$inventory_path.verify.log" >&2
+		printf 'error: the release inventory is not signed by the Prime Agent release workflow. Refusing to install.\n' >&2
+		return 1
+	fi
+	return 0
+}
+
 prime_agent_install_native() {
 	native_platform="$1"
 	shift
@@ -2217,6 +2272,7 @@ prime_agent_install_native() {
 	native_checksums="$prime_agent_download_dir/SHA256SUMS"
 	prime_agent_run_quiet_with_animation "Downloading Prime Agent" "Downloading release checksums" "Prime Agent v$native_version" \
 		prime_agent_curl_download -fsSL --connect-timeout 10 --max-time 120 "$prime_agent_base_url/releases/v$native_version/SHA256SUMS" -o "$native_checksums"
+	prime_agent_verify_release_inventory "$native_checksums" "$prime_agent_base_url/releases/v$native_version" || exit 1
 	awk -v file="$native_file" '$2 == file { count++; hash=$1; fields=NF } END { if (count != 1 || fields != 2 || length(hash) != 64 || hash ~ /[^0-9a-fA-F]/) exit 1; print tolower(hash) "  " file }' \
 		"$native_checksums" >"$prime_agent_download_dir/selected.sha256" || {
 		if [ "${PRIME_AGENT_INSTALL_METHOD:-auto}" = auto ] &&

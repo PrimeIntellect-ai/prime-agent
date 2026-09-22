@@ -121,6 +121,7 @@ describe.skipIf(process.platform === "win32")("npm release bridge", () => {
 			["cli/npm-native-bridge", "bundle/cli"],
 			["utils/native-installation", "utils/native-installation"],
 			["utils/version-check", "utils/version-check"],
+			["utils/download-url", "utils/download-url"],
 			["utils/pi-user-agent", "utils/pi-user-agent"],
 		]) {
 			const destination = join(pkg, "dist", `${target}.js`);

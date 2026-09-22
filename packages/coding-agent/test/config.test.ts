@@ -69,8 +69,11 @@ function createNpmPrefixInstall(template = "pi-prefix-"): { prefix: string; pack
 
 function createHomebrewInstall(): void {
 	const prefix = mkdtempSync(join(tmpdir(), "pi-homebrew-"));
+	const packageDir = join(prefix, "Cellar", "prime-agent", "0.7.0", "libexec", "lib", "node_modules", "prime-agent");
 	tempDir = prefix;
-	usePackageDir(join(prefix, "Cellar", "prime-agent", "0.7.0", "libexec", "lib", "node_modules", "prime-agent"));
+	usePackageDir(packageDir);
+	// brew writes an INSTALL_RECEIPT.json into every keg; it is what marks a Cellar as Homebrew's.
+	writeFileSync(join(prefix, "Cellar", "prime-agent", "0.7.0", "INSTALL_RECEIPT.json"), "{}\n");
 }
 
 function createPnpmGlobalInstall(): void {

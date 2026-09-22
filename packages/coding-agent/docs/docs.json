@@ -163,6 +163,14 @@
         {
           "title": "RLM Runtime Architecture",
           "path": "rlm-runtime.md"
+        },
+        {
+          "title": "Releasing Prime Agent",
+          "path": "releasing.md"
+        },
+        {
+          "title": "Release Security",
+          "path": "release-security.md"
         }
       ]
     }

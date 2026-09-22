@@ -301,6 +301,9 @@ def install(request: Request, side: Side, trial: int) -> None:
             log=RESULTS / f"install-{trial}.log",
             extra_env={
                 "PRIME_AGENT_ALLOW_INSECURE_HTTP_FOR_TESTS": "1",
+                # The harness feed cannot carry a real cosign bundle; the installer's
+                # signature requirement is test-skipped here, exactly like the npm-12 smoke feed.
+                "PRIME_AGENT_SKIP_SIGNATURE_FOR_TESTS": "1",
                 "PRIME_AGENT_DOWNLOAD_BASE_URL": ORIGIN,
                 "PRIME_AGENT_INSTALLER_PLAIN": "1",
                 "PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL": "1",

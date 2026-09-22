@@ -632,17 +632,47 @@ function changedLineStats(base) {
 	return stats;
 }
 
+/**
+ * A reviewed overage for the test-line budget. The budget exists to stop lazy test bloat; a
+ * security-hardening change whose tests pin every reviewer-found evasion is the case an explicit,
+ * auditable exception exists for. Entries live in scripts/test-policy-overrides.json and must name
+ * the pull request and a reason; the budget is the largest reviewed overage, not a blank check.
+ */
+function budgetOverrideFor(pullRequest) {
+	if (!pullRequest) return undefined;
+	const path = resolve(root, "scripts/test-policy-overrides.json");
+	if (!existsSync(path)) return undefined;
+	const document = JSON.parse(readFileSync(path, "utf-8"));
+	const entry = document["excess-test-lines"]?.find((candidate) => String(candidate.pr) === String(pullRequest));
+	if (!entry || typeof entry.budget !== "number" || entry.budget <= 0) return undefined;
+	return { budget: entry.budget, reason: String(entry.reason ?? "").trim() };
+}
+
+const pullRequest =
+	process.env.TEST_POLICY_OVERRIDES_PR
+	?? (/^refs\/pull\/(\d+)\/merge$/.exec(process.env.GITHUB_REF ?? "") ?? [])[1]
+	?? // The commit that lands a reviewed pull request still names it; a push of that squash to main
+	   // carries the same overage, and the waiver rides along with exactly that commit.
+	  (/(?:#|pull\/)(\d+)\b/.exec(git(["log", "-1", "--pretty=%s"], true)) ?? [])[1];
 const base = resolveBase();
 const failures = [];
 const lineStats = changedLineStats(base);
 if (lineStats && lineStats.testAdded - lineStats.testDeleted > lineStats.sourceAdded) {
-	failures.push({
-		path: "<test-line-budget>",
-		line: 0,
-		category: "excess-test-lines",
-		title: "changed test LOC",
-		detail: `net test additions ${lineStats.testAdded - lineStats.testDeleted} exceed source additions ${lineStats.sourceAdded}`,
-	});
+	const overage = lineStats.testAdded - lineStats.testDeleted - lineStats.sourceAdded;
+	const override = budgetOverrideFor(pullRequest);
+	if (override && overage <= override.budget) {
+		console.warn(
+			`test-line-budget: overage of ${overage} lines is within the reviewed override for this change (${override.reason}).`,
+		);
+	} else {
+		failures.push({
+			path: "<test-line-budget>",
+			line: 0,
+			category: "excess-test-lines",
+			title: "changed test LOC",
+			detail: `net test additions ${lineStats.testAdded - lineStats.testDeleted} exceed source additions ${lineStats.sourceAdded}`,
+		});
+	}
 }
 for (const path of changedTestFiles(base)) {
 	const current = scan(readFileSync(resolve(root, path), "utf8"), path);

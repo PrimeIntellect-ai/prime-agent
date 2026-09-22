@@ -35,6 +35,7 @@ out.jsonl
 pi-*.html
 out.html
 packages/coding-agent/binaries/
+packages/coding-agent/binaries-test-signer/
 packages/coding-agent/release/
 todo.md
 plans/

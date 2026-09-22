@@ -282,6 +282,21 @@ ${options.failInstall ? 'if(args.includes("install")) process.exit(23);' : ""}
 		expect(recordedArgs).not.toContain(fixture.projectPrefix);
 	});
 
+	it("refuses a self update when the configured download origin is invalid instead of falling back", async () => {
+		const fixture = setupSelfUpdate({
+			downloadBaseUrl: "http://mirror.example/prime-agent",
+			manifest: { tarball: "https://downloads.example.test/prime-agent/prime-agent-current.tgz", version: VERSION },
+		});
+
+		await expect(runSelfUpdateInstallChild(["update", "--self", "--force"])).resolves.toBeUndefined();
+
+		expect(fixture.stderr()).toMatch(/PRIME_AGENT_DOWNLOAD_BASE_URL must use https/);
+		expect(process.exitCode).toBe(1);
+		// The registry fallback never ran: nothing was fetched, npm was never invoked.
+		expect(fixture.fetchMock).not.toHaveBeenCalled();
+		expect(fixture.ranNpm()).toBe(false);
+	});
+
 	it("uses the current package name when the update check omits packageName", async () => {
 		const fixture = setupSelfUpdate({ scope: "@mariozechner", manifest: { version: getNewerPatchVersion() } });
 
