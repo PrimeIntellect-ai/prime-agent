@@ -7399,8 +7399,9 @@ export class DaemonSupervisor {
 				this.isWorkerStopping(worker) || worker.descriptor.lifecycle !== "ready" || worker.client === undefined,
 		);
 		if (unavailable) {
+			const session = unavailable.descriptor.sessionFile ?? unavailable.descriptor.rootActiveSessionId;
 			throw new Error(
-				`Cannot prepare update restart while resident worker ${unavailable.descriptor.workerId} is ${this.effectiveWorkerState(unavailable)}${unavailable.client ? "" : " and disconnected"}`,
+				`Cannot prepare update restart while resident worker ${unavailable.descriptor.workerId} is ${this.effectiveWorkerState(unavailable)}${unavailable.client ? "" : " and disconnected"} (session ${session})`,
 			);
 		}
 		const workers = residents as Array<ResidentWorker & { client: DaemonWorkerClient }>;
