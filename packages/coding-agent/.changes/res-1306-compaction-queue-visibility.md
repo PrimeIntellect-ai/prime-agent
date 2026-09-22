@@ -1,1 +1,1 @@
-- Fixed queued messages disappearing from the interactive queued-messages preview while a compaction runs: a queued prompt whose own pre-turn compaction is in progress now stays visible as a "Starting" entry, labelled with the same preview the queue lanes use.
+- Fixed a queued prompt disappearing from the interactive queued-messages area while its own pre-turn compaction runs; it now stays visible there (as a "Starting" entry) until the turn begins.
