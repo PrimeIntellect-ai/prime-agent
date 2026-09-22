@@ -1297,12 +1297,10 @@ describe("ENG-4620 fast mode settings", () => {
 		await current.session.setModel(current.getModel("gpt-4-turbo")!);
 		expect(current.session.serviceTier).toBe("default");
 
-		// A clamped request neither reaches the active state nor stomps the saved default.
 		current.session.setServiceTier("flex");
 		expect(current.session.serviceTier).toBe("default");
 		expect(current.settingsManager.getDefaultServiceTier()).toBe("priority");
 
-		// The preference keeps the requested tier, so a capable model re-activates it.
 		await current.session.setModel(current.getModel("gpt-5.5")!);
 		expect(current.session.serviceTier).toBe("flex");
 	});

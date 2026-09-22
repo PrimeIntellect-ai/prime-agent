@@ -1,7 +1,7 @@
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
-import { beforeAll, describe, expect, it, test, vi } from "vitest";
+import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { emptyGoalState } from "../src/core/goals.js";
@@ -1296,7 +1296,7 @@ describe("InteractiveMode Fast mode concurrency", () => {
 		expect(context.showStatus).not.toHaveBeenCalled();
 	});
 
-	it.each([
+	test.each([
 		["openai", "openai-responses", true],
 		["openai-codex", "openai-codex-responses", false],
 	] as const)("/tier flex on $0 reaches the connection: $2", async (provider, api, reaches) => {

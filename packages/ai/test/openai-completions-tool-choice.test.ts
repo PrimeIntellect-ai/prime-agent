@@ -1523,7 +1523,7 @@ describe("openai-completions service tier", () => {
 			api: "openai-completions",
 			id: "anthropic/claude-opus-5",
 			provider,
-			baseUrl: provider === "openai" ? "https://api.openai.com/v1" : "https://openrouter.ai/api/v1",
+			baseUrl: "https://openrouter.ai/api/v1",
 			cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
 		};
 	}

@@ -689,12 +689,12 @@ const THINKING_LEVEL_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	max: "Maximum reasoning",
 };
 
-const SERVICE_TIER_CHOICES: Exclude<ServiceTier, null>[] = ["default", "flex", "priority", "auto"];
+const SERVICE_TIER_CHOICES = ["default", "flex", "priority", "auto"] as const satisfies ServiceTier[];
+type ServiceTierChoice = (typeof SERVICE_TIER_CHOICES)[number];
 
-const SERVICE_TIER_DESCRIPTIONS: Record<Exclude<ServiceTier, null>, string> = {
+const SERVICE_TIER_DESCRIPTIONS: Record<ServiceTierChoice, string> = {
 	default: "Standard processing",
 	flex: "Cheaper, slower, may hit capacity limits",
-	scale: "Reserved-capacity scale tier",
 	priority: "Faster, more expensive (fast mode)",
 	auto: "Provider picks the tier",
 };
@@ -8790,7 +8790,7 @@ export class InteractiveMode {
 		);
 	}
 
-	private getAvailableServiceTiers(): Exclude<ServiceTier, null>[] {
+	private getAvailableServiceTiers(): ServiceTierChoice[] {
 		const model = this.getCurrentModel();
 		return SERVICE_TIER_CHOICES.filter(
 			(tier) => tier === "default" || (model !== undefined && supportsServiceTier(model, tier)),
@@ -8819,7 +8819,7 @@ export class InteractiveMode {
 			this.showStatus(`Service tier: ${current} (available: ${tiers.join(", ")})`);
 			return;
 		}
-		if (!tiers.includes(requested as Exclude<ServiceTier, null>)) {
+		if (!tiers.includes(requested as ServiceTierChoice)) {
 			this.showError(
 				`Service tier '${requested}' is not available for the current model. Available: ${tiers.join(", ")}`,
 			);

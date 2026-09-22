@@ -462,10 +462,8 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				}
 			}
 
-			// The multiplier table is authoritative only for OpenAI's own rates, and
-			// providers may serve a tier request off-tier, so multiply only when this
-			// is OpenAI's surface AND it echoed the tier that actually served. OpenRouter
-			// costs come from its reported usage.cost instead (see parseChunkUsage).
+			// The multiplier table is OpenAI's own; gateways price tiers per endpoint
+			// (OpenRouter reports its cost in usage instead, see parseChunkUsage).
 			if (model.provider === "openai") {
 				applyServiceTierPricing(output.usage, responseServiceTier, model.id);
 			}
@@ -1169,8 +1167,6 @@ function parseChunkUsage(
 			usage.cost.output = (reportedCost * usage.output) / usage.totalTokens;
 			usage.cost.cacheRead = (reportedCost * usage.cacheRead) / usage.totalTokens;
 			usage.cost.cacheWrite = (reportedCost * usage.cacheWrite) / usage.totalTokens;
-		} else {
-			usage.cost.input = reportedCost;
 		}
 		usage.cost.total = reportedCost;
 	}

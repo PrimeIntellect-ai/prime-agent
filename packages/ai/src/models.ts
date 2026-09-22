@@ -35,11 +35,7 @@ export function getModels<TProvider extends KnownProvider>(
 	return models ? (Array.from(models.values()) as Model<ModelApi<TProvider, keyof (typeof MODELS)[TProvider]>>[]) : [];
 }
 
-/**
- * Whether a model's provider accepts (and honors) a requested service tier.
- * This is the single eligibility truth shared by tier UI gating and request
- * building; keep it in sync with the per-provider service_tier forwarding.
- */
+/** Whether a model's provider accepts (and honors) a requested service tier. */
 export function supportsServiceTier<TApi extends Api>(model: Model<TApi>, tier: ServiceTier): boolean {
 	if (tier === null || tier === "default") return true;
 	// OpenRouter accepts top-level service_tier (flex|priority) for every model,
