@@ -298,7 +298,7 @@ fn to_terminal_color(color: Color, mode: ColorMode) -> Color {
 }
 
 /// The active theme: resolved styles per color slot.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
     pub name: String,
     fg: BTreeMap<&'static str, Style>,

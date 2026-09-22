@@ -9,6 +9,16 @@ use crate::chat::{render_loader, ChatEntry};
 use crate::chrome::render_splash;
 use crate::Line;
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static ENTRY_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static ENTRY_RENDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+#[path = "layout_tests.rs"]
+mod tests;
+
 /// One chat entry's cached transcript layout: its rendered rows plus the
 /// spacing decision they were laid out under (TS keeps every component's
 /// rendered lines resident across renders and recomputes only the dynamic
@@ -19,38 +29,33 @@ use crate::Line;
 pub(super) struct EntryLayout {
     /// The [`AgentView::entry_spacing`] decision the rows render under.
     pub(super) spacing: bool,
-    pub(super) rows: Vec<Line>,
+    pub(super) rows: std::sync::Arc<Vec<Line>>,
 }
 
 /// One transcript layout pass's output ([`AgentView::layout_pass`]): the
-/// splash rows, the per-entry row counts (no clones — the window
+/// splash rows, the per-entry row offsets (no clones — the window
 /// composition slices the cached layouts), the fresh rows of entries that
 /// could not be cached (streaming messages, queued/running tool cards),
 /// the status-area tail, and the whole transcript's row count.
-pub(super) struct TranscriptLayout {
+pub(crate) struct TranscriptLayout {
     splash: Vec<Line>,
-    counts: Vec<usize>,
+    /// Absolute row starts, including the end sentinel.
+    offsets: Vec<usize>,
     fresh: std::collections::HashMap<usize, Vec<Line>>,
     tail: Vec<Line>,
     pub(super) total: usize,
 }
 
-/// Which transcript composition a frame prepared: the scroll-window
-/// layout (the hot frame path — counts plus cached rows sliced on
-/// demand) or the full rows (a live transcript selection keeps the whole
-/// compose so the copy buffer's text stays fresh).
-pub(super) enum TranscriptWindow {
-    Window(TranscriptLayout),
-    Full(Vec<Line>),
-}
-
-impl TranscriptWindow {
-    /// The whole transcript's row count (the scroll math's input).
-    pub(super) fn len(&self) -> usize {
-        match self {
-            TranscriptWindow::Window(layout) => layout.total,
-            TranscriptWindow::Full(rows) => rows.len(),
+impl TranscriptLayout {
+    pub(super) fn cursor_at(&self, row: usize) -> (usize, usize) {
+        if row < self.splash.len() {
+            return (0, row);
         }
+        let index = self
+            .offsets
+            .partition_point(|offset| *offset <= row)
+            .saturating_sub(1);
+        (index + 1, row.saturating_sub(self.offsets[index]))
     }
 }
 
@@ -60,11 +65,11 @@ impl AgentView {
     /// an assistant message stops changing when its stream settles; a tool
     /// card stops animating once it holds a final result). Everything else
     /// the rows depend on rides the cache key instead (the spacing
-    /// decision) or the whole-cache reset (width, detail), so a settled
+    /// decision) or the cache key (width, detail, render options), so a settled
     /// entry keeps its layout while another message streams — the
     /// transcript-wide "any streaming" exclusion re-rendered every
     /// settled agent message per streaming delta, the dogfood CPU spin.
-    fn entry_cacheable(&self, entry: &ChatEntry) -> bool {
+    pub(super) fn entry_cacheable(&self, entry: &ChatEntry) -> bool {
         match entry {
             ChatEntry::Status { .. } | ChatEntry::User { .. } => true,
             ChatEntry::SlashCommand { .. } | ChatEntry::SlashCommandResult { .. } => true,
@@ -99,7 +104,7 @@ impl AgentView {
     /// is stable for a settled entry while a tail message streams; the
     /// stored rows go stale with it only through `mark_entry_stale`'s
     /// forward propagation.
-    fn entry_spacing(
+    pub(super) fn entry_spacing(
         &self,
         index: usize,
         entry: &ChatEntry,
@@ -150,21 +155,17 @@ impl AgentView {
     /// cached rows later, so a frame clones only the visible window (the
     /// pre-fix pass deep-cloned every cached row of the whole transcript
     /// on every render, the dogfood render-loop spin).
-    pub(super) fn layout_pass(&mut self, width: usize) -> TranscriptLayout {
-        if let (Some(working), Some(since)) = (&mut self.working, self.working_since) {
-            working.elapsed_secs = since.elapsed().as_secs();
-        }
-        // A width or detail change re-flows every row: drop the whole
-        // layout cache (the spacing keys below gate every entry's slot).
-        if self.layout_width != width || self.layout_detail != self.detail {
-            self.layout_width = width;
-            self.layout_detail = self.detail;
-            self.entry_layout.iter_mut().for_each(|slot| *slot = None);
-            self.md_caches.borrow_mut().clear();
-        }
-        self.entry_layout.resize(self.chat.len(), None);
+    pub(crate) fn layout_pass(&mut self, width: usize) -> TranscriptLayout {
+        self.sparse_enabled = false;
+        self.prepare_layout(width);
+        let detail = match self.detail {
+            crate::chat::Detail::Overview => 0,
+            crate::chat::Detail::Details => 1,
+            crate::chat::Detail::All => 2,
+        };
         let splash = render_splash(&self.chrome, &self.theme, width);
-        let mut counts: Vec<usize> = Vec::with_capacity(self.chat.len());
+        let mut offsets = Vec::with_capacity(self.chat.len() + 1);
+        offsets.push(splash.len());
         let mut fresh: std::collections::HashMap<usize, Vec<Line>> =
             std::collections::HashMap::new();
         let mut first = true;
@@ -172,21 +173,25 @@ impl AgentView {
         for (index, entry) in self.chat.iter().enumerate() {
             let spacing = self.entry_spacing(index, entry, first, preceded_by_tool_activity);
             let cacheable = self.entry_cacheable(entry);
-            let hit = self.entry_layout[index]
+            let hit = self.entry_layout[index][detail]
                 .as_ref()
                 .is_some_and(|slot| slot.spacing == spacing);
             if cacheable && hit {
-                counts.push(
-                    self.entry_layout[index]
-                        .as_ref()
-                        .map(|slot| slot.rows.len())
-                        .unwrap_or(0),
+                offsets.push(
+                    offsets.last().copied().unwrap_or(0)
+                        + self.entry_layout[index][detail]
+                            .as_ref()
+                            .map(|slot| slot.rows.len())
+                            .unwrap_or(0),
                 );
             } else {
                 let rows = self.render_entry(index, entry, width, first, preceded_by_tool_activity);
-                counts.push(rows.len());
+                offsets.push(offsets.last().copied().unwrap_or(0) + rows.len());
                 if cacheable {
-                    self.entry_layout[index] = Some(EntryLayout { spacing, rows });
+                    self.entry_layout[index][detail] = Some(EntryLayout {
+                        spacing,
+                        rows: std::sync::Arc::new(rows),
+                    });
                 } else {
                     // Still animating (streaming message, queued/running
                     // tool card): its rows ride the pass so the window
@@ -197,6 +202,47 @@ impl AgentView {
             preceded_by_tool_activity = matches!(entry, ChatEntry::Tool(_));
             first = false;
         }
+        let tail = self.render_transcript_tail(width);
+        let total = offsets.last().copied().unwrap_or(splash.len()) + tail.len();
+        TranscriptLayout {
+            splash,
+            offsets,
+            fresh,
+            tail,
+            total,
+        }
+    }
+
+    pub(super) fn prepare_layout(&mut self, width: usize) {
+        if let (Some(working), Some(since)) = (&mut self.working, self.working_since) {
+            working.elapsed_secs = since.elapsed().as_secs();
+        }
+        let options = (
+            self.theme.clone(),
+            self.code_block_indent.clone(),
+            self.show_images,
+            crate::image_component::fullscreen_image_fallback_active(),
+        );
+        if self.layout_width != width || self.layout_options.as_ref() != Some(&options) {
+            self.layout_width = width;
+            self.layout_options = Some(options);
+            if self.sparse_enabled {
+                for index in &self.sparse_entries {
+                    self.entry_layout[*index] = [None, None, None];
+                }
+                self.sparse_entries.clear();
+            } else {
+                self.entry_layout
+                    .iter_mut()
+                    .for_each(|slot| *slot = [None, None, None]);
+            }
+            self.md_caches.borrow_mut().clear();
+        }
+        self.entry_layout
+            .resize_with(self.chat.len(), || [None, None, None]);
+    }
+
+    pub(super) fn render_transcript_tail(&self, width: usize) -> Vec<Line> {
         let mut tail: Vec<Line> = Vec::new();
         // The `?` quick-shortcut guide renders right below the chat rows
         // (TS mounts `shortcutGuideContainer` between the chat and the
@@ -255,14 +301,7 @@ impl AgentView {
             tail.push(Vec::new());
             tail.extend(pane.render(&self.theme, width));
         }
-        let total = splash.len() + counts.iter().sum::<usize>() + tail.len();
-        TranscriptLayout {
-            splash,
-            counts,
-            fresh,
-            tail,
-            total,
-        }
+        tail
     }
 
     /// Compose the transcript rows of one layout pass restricted to the
@@ -270,7 +309,7 @@ impl AgentView {
     /// and clone only inside the window, fresh rows join from the pass.
     /// `height == usize::MAX` composes the whole transcript (the inline
     /// frame and the headless verifiers).
-    pub(super) fn transcript_window(
+    pub(crate) fn transcript_window(
         &self,
         layout: &TranscriptLayout,
         start: usize,
@@ -278,32 +317,42 @@ impl AgentView {
     ) -> Vec<Line> {
         let end = start.saturating_add(height);
         let mut rows: Vec<Line> = Vec::new();
-        let mut offset = 0usize;
-        offset = Self::slice_rows(&layout.splash, &mut rows, offset, start, end);
-        for (index, count) in layout.counts.iter().enumerate() {
+        Self::slice_rows(&layout.splash, &mut rows, 0, start, end);
+        let detail = match self.detail {
+            crate::chat::Detail::Overview => 0,
+            crate::chat::Detail::Details => 1,
+            crate::chat::Detail::All => 2,
+        };
+        let first = layout
+            .offsets
+            .partition_point(|offset| *offset <= start)
+            .saturating_sub(1);
+        for index in first..self.chat.len() {
+            let offset = layout.offsets[index];
             if offset >= end {
                 break;
-            }
-            if offset + count <= start {
-                offset += count;
-                continue;
             }
             let source: &[Line] = if let Some(fresh) = layout.fresh.get(&index) {
                 fresh.as_slice()
             } else {
-                // The pass guarantees a cacheable entry's slot: the hit
-                // check validated the spacing key; the fallback only
-                // defends a count-zero pass mismatch.
-                self.entry_layout[index]
+                self.entry_layout[index][detail]
                     .as_ref()
                     .map(|slot| slot.rows.as_slice())
                     .unwrap_or(&[])
             };
-            offset = Self::slice_rows(source, &mut rows, offset, start, end);
+            Self::slice_rows(source, &mut rows, offset, start, end);
         }
-        if offset < end {
-            Self::slice_rows(&layout.tail, &mut rows, offset, start, end);
-        }
+        Self::slice_rows(
+            &layout.tail,
+            &mut rows,
+            layout
+                .offsets
+                .last()
+                .copied()
+                .unwrap_or(layout.splash.len()),
+            start,
+            end,
+        );
         rows
     }
 
@@ -317,11 +366,10 @@ impl AgentView {
         start: usize,
         end: usize,
     ) -> usize {
-        for (row, line) in source.iter().enumerate() {
-            let at = offset + row;
-            if at >= start && at < end {
-                out.push(line.clone());
-            }
+        let from = start.saturating_sub(offset).min(source.len());
+        let to = end.saturating_sub(offset).min(source.len());
+        if from < to {
+            out.extend_from_slice(&source[from..to]);
         }
         offset + source.len()
     }

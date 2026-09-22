@@ -858,6 +858,7 @@ pub fn apply_streamed_tool_card(
         .position(|entry| matches!(entry, ChatEntry::Tool(card) if card.id == id));
     match card_index {
         Some(index) => {
+            view.prepare_entry_mutation();
             if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
                 card.name = name.to_string();
                 card.args = args.clone();
@@ -891,6 +892,7 @@ pub fn apply_tool_execution_start(
         .iter()
         .position(|entry| matches!(entry, ChatEntry::Tool(card) if card.id == tool_call_id));
     if let Some(index) = card_index {
+        view.prepare_entry_mutation();
         if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
             card.started = true;
             card.started_at = Some(std::time::Instant::now());

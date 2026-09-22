@@ -187,9 +187,6 @@ pub(crate) struct SelectionState {
     frame_text: Vec<String>,
     /// Selectable spans of the last composed frame's dock rows.
     frame_regions: Vec<FrameRegion>,
-    /// Plain text of the transcript at the last compose, kept only while a
-    /// transcript selection is active (TS `lastTranscript`).
-    transcript_text: Vec<String>,
 }
 
 impl SelectionState {
@@ -198,7 +195,6 @@ impl SelectionState {
         self.head = None;
         self.mode = None;
         self.frame = None;
-        self.transcript_text.clear();
     }
 
     fn has_selection(&self) -> bool {
@@ -316,19 +312,19 @@ impl SelectionState {
     /// `extractSelectionText`): per-line column slices, trailing
     /// whitespace trimmed, joined by newlines; `None` when only whitespace.
     fn extract_transcript_text(
-        &self,
+        rows: &[Line],
         start: SelectionPoint,
         end: SelectionPoint,
     ) -> Option<String> {
         let lines = (start.line..=end.line)
             .filter_map(|line| {
                 let (from, to) = selection_span(line, start, end)?;
-                let row = self.transcript_text.get(line)?;
+                let row = row_text(rows.get(line - start.line)?);
                 let width = row.chars().map(char_width).sum();
                 let from = from.min(width);
                 let to = to.min(width);
                 Some(
-                    slice_text_by_column(row, from, to - from)
+                    slice_text_by_column(&row, from, to - from)
                         .trim_end()
                         .to_string(),
                 )
@@ -373,6 +369,21 @@ impl TrimLength for str {
 }
 
 impl AgentView {
+    /// Map private end-relative selection coordinates to exact transcript rows.
+    pub(crate) fn resolve_tail_selection(&mut self, total: usize) {
+        if self.selection.mode != Some(SelectionMode::Transcript) {
+            return;
+        }
+        for point in [&mut self.selection.anchor, &mut self.selection.head]
+            .into_iter()
+            .flatten()
+        {
+            point.line = total.saturating_sub(
+                crate::view::lazy::TAIL_SELECTION_ORIGIN.saturating_sub(point.line),
+            );
+        }
+    }
+
     /// The transcript line under a screen row (TS
     /// `transcriptLineForScreenRow`): `None` outside the window unless
     /// clamping, which folds the position onto the nearest window row.
@@ -390,7 +401,7 @@ impl AgentView {
             return None;
         }
         let row = screen_row.clamp(first, last);
-        Some(self.scroll_top + row - HEADER_ROWS)
+        Some(self.selection_window_start() + row - HEADER_ROWS)
     }
 
     /// Begin a transcript selection at a screen position (TS
@@ -465,7 +476,6 @@ impl AgentView {
         self.selection.anchor = Some(point);
         self.selection.head = Some(point);
         self.selection.mode = Some(SelectionMode::Frame);
-        self.selection.transcript_text.clear();
         true
     }
 
@@ -499,10 +509,19 @@ impl AgentView {
     /// `None` when nothing but whitespace is spanned. The selection is
     /// cleared either way.
     pub fn end_active_selection(&mut self) -> Option<String> {
+        if self.selection.mode == Some(SelectionMode::Transcript) {
+            self.resolve_sparse_geometry();
+        }
         let text = match self.selection.mode {
             Some(SelectionMode::Transcript) => {
                 let sel = ordered_selection(self.selection.anchor, self.selection.head);
-                sel.and_then(|(start, end)| self.selection.extract_transcript_text(start, end))
+                sel.and_then(|(start, end)| {
+                    let rows = crate::image_component::with_fullscreen_image_fallback(|| {
+                        let layout = self.layout_pass(self.layout_width);
+                        self.transcript_window(&layout, start.line, end.line - start.line + 1)
+                    });
+                    SelectionState::extract_transcript_text(&rows, start, end)
+                })
             }
             Some(SelectionMode::Frame) => {
                 let sel = ordered_selection(self.selection.anchor, self.selection.head);
@@ -534,10 +553,13 @@ impl AgentView {
         let (anchor, head) = (self.selection.anchor?, self.selection.head?);
         let first = HEADER_ROWS;
         let last = HEADER_ROWS + self.window_rows.saturating_sub(1);
-        if head.line < anchor.line && screen_row <= first && self.scroll_top > 0 {
+        if head.line < anchor.line && screen_row <= first && self.selection_window_start() > 0 {
             return Some(-1);
         }
-        if head.line > anchor.line && screen_row >= last && self.scroll_top < self.last_max_scroll {
+        if head.line > anchor.line
+            && screen_row >= last
+            && (!self.is_following() || self.scroll_top < self.last_max_scroll)
+        {
             return Some(1);
         }
         None
@@ -550,9 +572,9 @@ impl AgentView {
         if self.selection.mode != Some(SelectionMode::Transcript) {
             return false;
         }
-        let previous = self.scroll_top;
+        let previous = self.selection_window_start();
         self.scroll_by(direction);
-        if self.scroll_top == previous {
+        if self.selection_window_start() == previous {
             return false;
         }
         let edge = if direction < 0 {
@@ -594,22 +616,6 @@ impl AgentView {
                 }
             }
         }
-    }
-
-    /// Whether a transcript selection is live: the frame keeps the whole
-    /// transcript compose while one is (its copy buffer needs the plain
-    /// text of every row, TS `lastTranscript`).
-    pub(crate) fn transcript_selection_active(&self) -> bool {
-        self.selection.mode == Some(SelectionMode::Transcript)
-    }
-
-    /// Record the transcript's plain rows for the active transcript
-    /// selection (TS `lastTranscript`; kept only while one is active).
-    pub(crate) fn note_transcript_text(&mut self, transcript: &[Line]) {
-        if self.selection.mode != Some(SelectionMode::Transcript) {
-            return;
-        }
-        self.selection.transcript_text = transcript.iter().map(|line| row_text(line)).collect();
     }
 }
 
@@ -706,6 +712,134 @@ mod tests {
             );
         }
         assert_eq!(text, expected.join("\n"));
+    }
+
+    #[test]
+    fn unseen_dynamic_mutation_preserves_tail_selection() {
+        let mut v = view();
+        v.push_entry(ChatEntry::Assistant(Box::new(
+            crate::chat::AssistantMessage {
+                blocks: vec![crate::chat::MessageBlock::Text("old hidden stream".into())],
+                has_tool_calls: false,
+                streaming: true,
+                error: None,
+                aborted: false,
+            },
+        )));
+        for index in 0..100 {
+            v.push_entry(ChatEntry::Status {
+                text: format!("original {index}"),
+                kind: crate::chat::StatusKind::Info,
+            });
+        }
+        let frame = v.render_frame(80, 12);
+        let row = (1..1 + v.window_rows)
+            .find(|row| rendered_row(&frame, *row).contains("original"))
+            .unwrap();
+        assert!(v.begin_selection(row, 0));
+        v.extend_active_selection(row, 80);
+        v.prepare_entry_mutation();
+        let start = v.selection.anchor.unwrap();
+        let end = v.selection.head.unwrap();
+        if let ChatEntry::Assistant(message) = &mut v.chat[0] {
+            message
+                .blocks
+                .push(crate::chat::MessageBlock::Text("new\nnew\nnew".into()));
+        }
+        v.mark_entry_stale(0);
+        v.render_frame(80, 12);
+        let reference =
+            crate::image_component::with_fullscreen_image_fallback(|| v.render_transcript(80));
+        let expected =
+            SelectionState::extract_transcript_text(&reference[start.line..=end.line], start, end);
+        assert_eq!(v.end_active_selection(), expected);
+    }
+
+    #[test]
+    fn growing_stream_during_selection_keeps_original_row() {
+        let mut v = view();
+        for index in 0..30 {
+            v.push_entry(ChatEntry::Status {
+                text: format!("original {index}"),
+                kind: crate::chat::StatusKind::Info,
+            });
+        }
+        v.push_entry(ChatEntry::Assistant(Box::new(
+            crate::chat::AssistantMessage {
+                blocks: vec![crate::chat::MessageBlock::Text("stream".into())],
+                has_tool_calls: false,
+                streaming: true,
+                error: None,
+                aborted: false,
+            },
+        )));
+        let frame = v.render_frame(80, 20);
+        let row = (1..1 + v.window_rows)
+            .find(|row| rendered_row(&frame, *row).contains("original"))
+            .unwrap();
+        assert!(v.begin_selection(row, 0));
+        v.extend_active_selection(row, 80);
+        let expected = rendered_row(&frame, row).trim_end().to_string();
+        let index = v.chat.len() - 1;
+        v.prepare_entry_mutation();
+        if let ChatEntry::Assistant(message) = &mut v.chat[index] {
+            message
+                .blocks
+                .push(crate::chat::MessageBlock::Text("new\nnew\nnew".into()));
+        }
+        v.mark_entry_stale(index);
+        v.render_frame(80, 20);
+        assert_eq!(v.end_active_selection(), Some(expected));
+    }
+
+    #[test]
+    fn append_during_tail_selection_preserves_original_text() {
+        let mut v = view();
+        for index in 0..30 {
+            v.push_entry(ChatEntry::Status {
+                text: format!("original {index}"),
+                kind: crate::chat::StatusKind::Info,
+            });
+        }
+        let frame = v.render_frame(80, 12);
+        let row = (1..1 + v.window_rows)
+            .find(|row| rendered_row(&frame, *row).contains("original"))
+            .unwrap();
+        assert!(v.begin_selection(row, 0));
+        v.extend_active_selection(row, 80);
+        let expected = rendered_row(&frame, row).trim_end().to_string();
+        v.push_entry(ChatEntry::Status {
+            text: "new content".into(),
+            kind: crate::chat::StatusKind::Info,
+        });
+        v.render_frame(80, 12);
+        v.render_frame(80, 12);
+        assert_eq!(v.end_active_selection(), Some(expected));
+    }
+
+    #[test]
+    fn copy_across_unseen_window_gap_matches_full_reference() {
+        let mut v = view();
+        for index in 0..200 {
+            v.push_entry(ChatEntry::Status {
+                text: format!("row {index}: 界 wide text"),
+                kind: crate::chat::StatusKind::Info,
+            });
+        }
+        v.render_frame(80, 12);
+        v.scroll_to_top();
+        v.render_frame(80, 12);
+        assert!(v.begin_selection(2, 2));
+        let start = v.selection.anchor.unwrap();
+        v.scroll_by(180);
+        v.render_frame(80, 12);
+        v.extend_active_selection(3, 10);
+        let end = v.selection.head.unwrap();
+        let reference =
+            crate::image_component::with_fullscreen_image_fallback(|| v.render_transcript(80));
+        let expected =
+            SelectionState::extract_transcript_text(&reference[start.line..=end.line], start, end);
+        assert_eq!(v.end_active_selection(), expected);
     }
 
     /// A press outside the transcript window (the dock) starts no
@@ -812,10 +946,10 @@ mod tests {
         v.extend_active_selection(last, 0);
         // The press's draw records the transcript text the release copies.
         v.render_frame(80, 12);
-        let before = v.scroll_top;
+        let before = v.selection_window_start();
         assert!(v.scroll_selection(1, 0));
         assert_eq!(
-            v.scroll_top,
+            v.selection_window_start(),
             before + 1,
             "the window scrolled one line down"
         );

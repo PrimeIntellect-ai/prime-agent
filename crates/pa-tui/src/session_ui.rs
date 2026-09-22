@@ -6588,6 +6588,7 @@ impl SessionUi {
                 .iter()
                 .position(|entry| matches!(entry, ChatEntry::Tool(card) if card.id == card_id));
             if let Some(index) = card_index {
+                view.prepare_entry_mutation();
                 if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
                     card.ended_at = Some(std::time::Instant::now());
                     card.result_partial = false;
@@ -6642,6 +6643,7 @@ impl SessionUi {
             .iter()
             .position(|entry| matches!(entry, ChatEntry::Tool(card) if card.id == card_id));
         if let Some(index) = card_index {
+            view.prepare_entry_mutation();
             if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
                 card.result = Some(result);
                 card.result_partial = partial;
@@ -6731,6 +6733,7 @@ impl SessionUi {
         }
         match self.streaming_index {
             Some(index) => {
+                view.prepare_entry_mutation();
                 if let Some(ChatEntry::Assistant(open)) = view.chat.get_mut(index) {
                     open.blocks = blocks;
                     open.has_tool_calls = has_tool_calls;
@@ -6787,6 +6790,7 @@ impl SessionUi {
         };
         self.turn_error_shown = true;
         if let Some(index) = open {
+            view.prepare_entry_mutation();
             if let Some(ChatEntry::Assistant(entry)) = view.chat.get_mut(index) {
                 entry.error = Some(error.text);
                 entry.aborted = error.aborted;
@@ -6831,6 +6835,7 @@ impl SessionUi {
             .iter()
             .position(|entry| matches!(entry, ChatEntry::Tool(card) if card.id == tool_call_id));
         if let Some(index) = card_index {
+            view.prepare_entry_mutation();
             if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
                 card.result = Some(result);
                 card.result_partial = partial;
