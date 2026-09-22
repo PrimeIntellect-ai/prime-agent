@@ -74,9 +74,8 @@ const MAX_BACKGROUND_OUTPUT_CHARS = 64 * 1024;
 // MAX_ATTACHMENT_DATA_CHARS; a line that cannot complete within this ceiling is
 // corruption the protocol repair owns, not output worth buffering until OOM.
 const MAX_PROTOCOL_LINE_CHARS = 32 * 1024 * 1024;
-// The spawning cell's source rides every host-request round trip (spawns,
-// progress notes, collects) and persists per child as runtimeMetadata.spawnCode;
-// only the first 2KB is useful context, so cap it once at the host-request boundary.
+// The spawning cell's source rides every host-request round trip and persists per child
+// as runtimeMetadata.spawnCode, so cap it once at this boundary.
 // Keep below SPAWN_CODE_MAX_CHARS in daemon-session-list.ts so its 4000-char display slice stays a no-op.
 const MAX_CELL_SOURCE_CHARS = 2 * 1024;
 const CELL_SOURCE_TRUNCATION_MARKER = ` [... cell source truncated at ${MAX_CELL_SOURCE_CHARS} chars ...]`;
@@ -97,7 +96,6 @@ function writeFullySync(fd: number, data: Buffer): void {
 	}
 }
 
-/** Cap the spawning cell source before it rides a host-request payload or persists per child. */
 function capCellSourceCode(code: string | undefined): string | undefined {
 	if (code === undefined || code.length <= MAX_CELL_SOURCE_CHARS) return code;
 	return `${code.slice(0, MAX_CELL_SOURCE_CHARS)}${CELL_SOURCE_TRUNCATION_MARKER}`;
@@ -1355,8 +1353,7 @@ export class ReplKernelManager {
 		}
 		// Tag the request with the cell that triggered it. A blocking call is still
 		// the in-flight execution; detached spawns (asyncio.create_task) fire after
-		// the scheduling cell goes idle, so fall back to that last cell's source,
-		// capped so the full cell never rides or persists with the request.
+		// the scheduling cell goes idle, so fall back to that last cell's source.
 		const cellSourceCode = capCellSourceCode(this.activeExecution?.code ?? this.lastCellCode);
 		return handler({ ...data, cellSourceCode });
 	}
