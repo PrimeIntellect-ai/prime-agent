@@ -383,6 +383,8 @@ describe("child node cache", () => {
 		deep.sessionManager.appendMessage(createAssistantMessage("more", createUsage(400, 40, 0.04)));
 		const second = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
 		expect(second[0].children[0].children[0].ownUsage.input).toBe(480);
+		const third = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
+		expect(third[0]).toBe(second[0]);
 	});
 
 	it("picks up a grandchild whose session file appears after the parent was cached", () => {

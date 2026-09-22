@@ -367,7 +367,10 @@ export function loadContextTreeChildFromDisk(
 				changed = true;
 			}
 		}
-		return changed ? { ...cached.node, children } : cached.node;
+		if (changed) {
+			cached.node = { ...cached.node, children };
+		}
+		return cached.node;
 	}
 	return buildContextTreeChildFromDisk(childSessionDir, file, childFiles, resolveContextWindow);
 }
