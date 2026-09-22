@@ -774,6 +774,8 @@ export interface AgentConnectionCloudSession {
 	lastError?: string;
 	createdAt: string;
 	updatedAt: string;
+	/** Sandbox lifetime deadline; the UI renders the remaining time. */
+	expiresAt?: string;
 }
 
 export interface AgentConnectionCloudSessionCreateOptions {

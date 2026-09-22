@@ -1,0 +1,2 @@
+- Fixed cloud sessions staying listed as running after their sandbox hit its lifetime timeout: a periodic liveness sweep now checks live sessions' sandboxes, marks TERMINATED or missing ones lost, and releases their tunnel attachments with the reprovision guidance.
+- Added the sandbox lifetime deadline to cloud session status: /cloud status now shows the remaining sandbox time so expiry is visible before it happens.

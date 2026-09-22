@@ -167,6 +167,8 @@ export interface CloudSessionRegistryOptions {
 	timeoutMinutes?: number;
 	/** Bounded window for a submitted prompt to observably start; tests lower it. */
 	turnStartTimeoutMs?: number;
+	/** Resident liveness sweep cadence; tests lower it. */
+	sweepIntervalMs?: number;
 	/** Tunnel bridge token override (tests pin the guest's expected token). */
 	bridgeToken?: string;
 	/** Tunnel attachment reconnect floor; small in tests. */
@@ -363,10 +365,17 @@ export class CloudSessionRegistry {
 	private readonly activeIndex = new Map<string, { sessionId: string; remoteSessionId: string }>();
 	private readonly shadowIndex = new Map<string, string>();
 	private disposed = false;
+	/** Liveness sweep for live resident sessions; sees dead sandboxes the
+	 * tunnel cannot (a sandbox's timeout termination leaves the tunnel
+	 * registration alive, so the attachment keeps retrying past a dead
+	 * sandbox until this sweep marks the record lost). */
+	private sweepTimer: ReturnType<typeof setInterval> | undefined;
+	private readonly sweepIntervalMs: number;
 
 	constructor(options: CloudSessionRegistryOptions) {
 		this.options = options;
 		this.callbacks = options.callbacks;
+		this.sweepIntervalMs = options.sweepIntervalMs ?? 30_000;
 		this.transport = options.transport ?? new WsTunnelTransport();
 		// The session dir must exist before any shadow path is canonicalized
 		// (the canonical path is the create/attach interception key).
@@ -1429,6 +1438,41 @@ export class CloudSessionRegistry {
 		this.pushSpawnTaskUpdate(session, this.spawnTaskAlreadyAdmitted(session) ? "running" : "queued");
 	}
 
+	/**
+	 * Periodic liveness sweep for live resident sessions: the sandbox is the
+	 * session's ground truth, and a VM sandbox hitting its lifetime timeout
+	 * dies without any tunnel signal (the tunnel registration outlives it).
+	 * Refreshing each live record marks TERMINATED/ERROR/missing sandboxes
+	 * lost and releases their attachments so the row turns honest instead of
+	 * refusing prompts on a session whose sandbox is already gone.
+	 */
+	private async sweepResidentLiveness(): Promise<void> {
+		if (this.disposed) return;
+		for (const record of this.store.list()) {
+			if (this.disposed) return;
+			if (!isResidentCloudSessionRecord(record)) continue;
+			if (!this.isResidentLive(record)) continue;
+			try {
+				await this.refreshResidentRecord(record);
+			} catch (error) {
+				// Transient platform errors are retried on the next sweep; the
+				// sweep must never wedge on one bad record.
+				this.callbacks.log(`cloud session liveness sweep failed for ${record.sessionId}: ${String(error)}`);
+				continue;
+			}
+			const current = this.store.get(record.sessionId);
+			const session = this.sessions.get(record.sessionId);
+			if (current !== undefined && !this.isResidentLive(current) && session !== undefined) {
+				// The sweep observed a terminal transition: release the
+				// attachment so it stops retrying against a dead sandbox and
+				// broadcast the honest row.
+				await session.attachment.stop().catch(() => undefined);
+				await this.disposeSession(session, { closeShadows: true, broadcast: true });
+				this.callbacks.broadcastCloudSessionUpdate(this.recordInfo(current));
+			}
+		}
+	}
+
 	/** Stop one session's tunnel attachment; prompts refuse until it reconnects. */
 	async stopAttachment(sessionId: string): Promise<void> {
 		const session = this.sessions.get(sessionId);
@@ -1439,6 +1483,10 @@ export class CloudSessionRegistry {
 	/** Stop every attachment and close shadows; used on supervisor shutdown. */
 	async dispose(): Promise<void> {
 		this.disposed = true;
+		if (this.sweepTimer !== undefined) {
+			clearInterval(this.sweepTimer);
+			this.sweepTimer = undefined;
+		}
 		for (const session of this.sessions.values()) {
 			try {
 				await session.attachment.stop();
@@ -1499,7 +1547,18 @@ export class CloudSessionRegistry {
 		// registered the tunnel (an earlier start would terminate against the
 		// not-yet-registered target and never reconnect).
 		if (options?.startAttachment !== false) session.attachment.start();
+		this.ensureLivenessSweep();
 		return session;
+	}
+
+	/** One sweep timer for all live resident sessions; idempotent. */
+	private ensureLivenessSweep(): void {
+		if (this.disposed || this.sweepTimer !== undefined) return;
+		this.sweepTimer = setInterval(() => {
+			void this.sweepResidentLiveness().catch(() => undefined);
+		}, this.sweepIntervalMs);
+		// A long-lived timer must never hold the event loop open.
+		this.sweepTimer.unref?.();
 	}
 
 	private createAttachment(session: CloudResidentSession): CloudTunnelAttachment {
@@ -2753,6 +2812,7 @@ export class CloudSessionRegistry {
 			...(record.lastError ? { lastError: record.lastError } : {}),
 			createdAt: record.createdAt,
 			updatedAt: record.updatedAt,
+			...(record.deadlineAt ? { expiresAt: record.deadlineAt } : {}),
 		};
 	}
 
@@ -2772,6 +2832,7 @@ export class CloudSessionRegistry {
 			...(record.lastError ? { lastError: record.lastError } : {}),
 			createdAt: record.createdAt,
 			updatedAt: record.updatedAt,
+			...(record.deadlineAt ? { expiresAt: record.deadlineAt } : {}),
 		};
 	}
 

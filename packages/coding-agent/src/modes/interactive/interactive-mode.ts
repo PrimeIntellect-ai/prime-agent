@@ -12298,6 +12298,17 @@ export class InteractiveMode {
 		if (session.lastError && session.status !== "failed") {
 			lines.push(`Last error: ${session.lastError}`);
 		}
+		if (session.status === "running" && session.expiresAt !== undefined) {
+			const remaining = Date.parse(session.expiresAt) - Date.now();
+			if (remaining > 0) {
+				const minutes = Math.floor(remaining / 60_000);
+				lines.push(
+					minutes >= 60
+						? `Sandbox lifetime: ~${Math.floor(minutes / 60)}h ${minutes % 60}m remaining`
+						: `Sandbox lifetime: ${minutes}m remaining`,
+				);
+			}
+		}
 		if (session.status === "running" && session.connectivity !== "connected") {
 			lines.push(
 				session.connectivity === "reconnecting"

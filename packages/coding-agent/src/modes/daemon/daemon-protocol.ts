@@ -478,6 +478,8 @@ export interface DaemonCloudSessionInfo {
 	lastError?: string;
 	createdAt: string;
 	updatedAt: string;
+	/** Sandbox lifetime deadline; /cloud status renders the remaining time. */
+	expiresAt?: string;
 }
 
 export type CloudSessionStatusSummary = "provisioning" | "running" | "stopping" | "stopped" | "failed" | "lost";
