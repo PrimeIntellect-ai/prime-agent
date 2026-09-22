@@ -885,10 +885,10 @@ def _revive_with_live_globals(
         return memo.setdefault(id(value), rebuilt_partial)
     if not isinstance(value, types.FunctionType) or value.__module__ != "__main__":
         return value
-    # Defaults and cell contents are revived only after the rebound function is
-    # memoized, so a function reachable from its own defaults or closure resolves to it.
-    cells = tuple(memo.setdefault(id(cell), types.CellType()) for cell in value.__closure__ or ())
-    rebound = types.FunctionType(value.__code__, ns, value.__name__, None, cells or None)
+    # Defaults and cell contents are revived only after the rebound function is memoized, so a
+    # function reachable from its own defaults or closure resolves to it. Cells are revived in
+    # place: holders this walk never sees (attribute-held siblings) must keep sharing them.
+    rebound = types.FunctionType(value.__code__, ns, value.__name__, None, value.__closure__)
     memo[id(value)] = rebound
     if backfill is not None:
         for name, dep in value.__globals__.items():
@@ -900,12 +900,15 @@ def _revive_with_live_globals(
         rebound.__defaults__ = tuple(revive(dep) for dep in value.__defaults__)
     if value.__kwdefaults__:
         rebound.__kwdefaults__ = {key: revive(dep) for key, dep in value.__kwdefaults__.items()}
-    for cell, fresh in zip(value.__closure__ or (), cells):
+    for cell in value.__closure__ or ():
+        if id(cell) in memo:
+            continue
+        memo[id(cell)] = cell
         try:
             contents = cell.cell_contents
         except ValueError:
             continue
-        fresh.cell_contents = revive(contents)
+        cell.cell_contents = revive(contents)
     rebound.__doc__ = value.__doc__
     rebound.__dict__.update(value.__dict__)
     rebound.__annotations__ = value.__annotations__
