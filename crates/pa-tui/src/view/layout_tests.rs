@@ -331,7 +331,7 @@ fn height_cache_tracks_mutations_and_spacing_in_all_details() {
         view.detail = detail;
         view.layout_pass(30);
     }
-    view.prepare_entry_mutation();
+    view.prepare_entry_mutation(0);
     if let ChatEntry::Assistant(message) = &mut view.chat[0] {
         message
             .blocks

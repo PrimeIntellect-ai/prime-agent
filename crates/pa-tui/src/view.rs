@@ -25,6 +25,7 @@ use ratatui::style::{Modifier, Style};
 mod geometry;
 mod layout;
 pub(crate) mod lazy;
+mod restyle;
 
 use layout::EntryLayout;
 
@@ -179,6 +180,11 @@ pub struct AgentView {
     entry_heights: Vec<[Option<(bool, usize)>; 3]>,
     sparse_window: Option<lazy::SparseWindow>,
     sparse_enabled: bool,
+    /// The height of the entry an in-place mutation is about to change,
+    /// captured by `prepare_entry_mutation` and consumed by
+    /// `mark_entry_stale` to grow the sparse window's tail bookkeeping by
+    /// the mutation's delta instead of resolving the whole geometry.
+    sparse_mutation: Option<(usize, usize)>,
     sparse_entries: std::collections::BTreeSet<usize>,
     /// Per-assistant-entry markdown block caches (TS `Markdown.blockCache`,
     /// one per component instance): a streaming message re-renders every
@@ -203,6 +209,10 @@ pub struct AgentView {
     /// In-app mouse text selection (TS `FullscreenViewport`'s selection
     /// state): anchor/head points, the mode, and the frame snapshot.
     pub(crate) selection: crate::selection::SelectionState,
+    /// The selection restyle cache (TS re-styles rendered rows per
+    /// frame; the window re-styles only the rows the selection change
+    /// touched): walked base rows, their styled copies, and the spans.
+    pub(crate) selection_restyle: restyle::SelectionRestyle,
 }
 
 impl AgentView {
@@ -255,6 +265,8 @@ impl AgentView {
             flushed_frame: Vec::new(),
             frame_rows: 0,
             selection: crate::selection::SelectionState::default(),
+            selection_restyle: restyle::SelectionRestyle::default(),
+            sparse_mutation: None,
         }
     }
 
@@ -303,13 +315,13 @@ impl AgentView {
     }
 
     /// Append one chat component (no cached layout yet: the next frame
-    /// renders it and stores its rows).
+    /// renders it and stores its rows). A paused window keeps its rows:
+    /// the append folds into the sparse window's tail bookkeeping (TS
+    /// keeps `scrollTop` while content appends), never a geometry resolve.
     pub fn push_entry(&mut self, entry: ChatEntry) {
-        if !self.following || self.has_selection() {
-            self.resolve_sparse_geometry();
-        }
         self.chat.push(entry);
         self.entry_layout.push([None, None, None]);
+        self.sparse_note_append();
     }
 
     /// The number of chat entries (the status-row in-place update checks
@@ -327,7 +339,7 @@ impl AgentView {
         text: &str,
         kind: crate::chat::StatusKind,
     ) -> bool {
-        self.prepare_entry_mutation();
+        self.prepare_entry_mutation(index);
         let Some(ChatEntry::Status {
             text: slot,
             kind: kind_slot,
@@ -348,9 +360,6 @@ impl AgentView {
     /// components, never a new row); a result without a pending card keeps
     /// its standalone card so the row never disappears.
     pub fn push(&mut self, item: TranscriptItem) {
-        if !self.following || self.has_selection() {
-            self.resolve_sparse_geometry();
-        }
         if let TranscriptItem::ToolResult {
             tool_call_id,
             tool_name,
@@ -405,10 +414,12 @@ impl AgentView {
                     ..Default::default()
                 })));
             self.entry_layout.push([None, None, None]);
+            self.sparse_note_append();
             return;
         }
         self.chat.push(item_to_entry(item));
         self.entry_layout.push([None, None, None]);
+        self.sparse_note_append();
     }
 
     /// Drop the whole transcript and its cached layout (a fresh snapshot
@@ -423,10 +434,16 @@ impl AgentView {
         self.md_caches.borrow_mut().clear();
     }
 
-    /// Preserve exact absolute viewport and selection coordinates before editing chat.
-    pub fn prepare_entry_mutation(&mut self) {
-        if !self.following || self.has_selection() {
-            self.resolve_sparse_geometry();
+    /// Prepare an in-place mutation of one entry: capture its current
+    /// height so `mark_entry_stale` folds the growth into the sparse
+    /// window's tail bookkeeping instead of resolving the whole geometry
+    /// (a streaming delta on a paused or selecting view re-styles the
+    /// entry's rows, never the transcript). Top-anchored windows are
+    /// absolute already and need nothing.
+    pub fn prepare_entry_mutation(&mut self, index: usize) {
+        if self.sparse_window_is_tail_anchored() && self.layout_width > 0 {
+            let rows = self.count_entry_rows(index, self.layout_width);
+            self.sparse_mutation = Some((index, rows));
         }
     }
 
@@ -439,6 +456,12 @@ impl AgentView {
     /// mutation point, which is the animating tail in the streaming case,
     /// not the whole transcript.
     pub fn mark_entry_stale(&mut self, index: usize) {
+        if let Some((pending, before)) = self.sparse_mutation.take() {
+            if pending == index && self.layout_width > 0 {
+                let after = self.count_entry_rows(index, self.layout_width);
+                self.sparse_tail_delta(after as isize - before as isize, index);
+            }
+        }
         if let Some(slot) = self.entry_layout.get_mut(index) {
             *slot = [None, None, None];
         }
@@ -1162,13 +1185,15 @@ impl AgentView {
             .max(FULLSCREEN_MIN_TRANSCRIPT_ROWS.min(height.saturating_sub(top_rows + dock.len())));
         let (window_rows, start) = self.visible_transcript_window(width, window_height);
         self.window_rows = window_height;
+        // The selection restyle diff: only the rows the selection change
+        // touched re-style; the rest reuse the cached styled rows.
+        let window_rows = self.selection_styled_window(window_rows, start);
         let mut frame: Vec<Line> = Vec::with_capacity(height);
         if let Some(top) = top {
             frame.push(pad_row(top, width));
         }
-        for (window_index, line) in window_rows.iter().enumerate() {
-            let row = self.highlight_transcript_row(line, start + window_index);
-            frame.push(pad_row(row, width));
+        for line in window_rows {
+            frame.push(pad_row(line, width));
         }
         while frame.len() < height.saturating_sub(dock.len()) {
             frame.push(vec![Span::raw(" ".repeat(width))]);

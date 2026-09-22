@@ -60,6 +60,68 @@ impl SparseWindow {
 }
 
 impl AgentView {
+    /// Whether the sparse window anchors to the transcript end (its
+    /// selection coordinates are tail-relative) or to an absolute row.
+    pub(super) fn sparse_window_is_tail_anchored(&self) -> bool {
+        self.sparse_window
+            .is_some_and(|window| matches!(window.anchor, Anchor::Tail(_)))
+    }
+
+    /// Fold a chat append or entry growth of `delta` rows at entry
+    /// `index` into the sparse window's bookkeeping (TS keeps `scrollTop`
+    /// while content appends: a paused window stays on its rows, and the
+    /// scroll room below it grows with the content). A Tail-anchored
+    /// window keeps its mapping when the growth sits at or below its
+    /// first visible entry: the anchor distance moves with the growth and
+    /// the tail-relative selection endpoints move with it; growth ABOVE
+    /// the window leaves every row's distance-from-the-end unchanged, so
+    /// nothing moves. A Top-anchored window (absolute rows) never moves;
+    /// only the scroll bound grows. Without a sparse window (exact
+    /// geometry) the next frame's layout pass recomputes everything.
+    pub(super) fn sparse_tail_delta(&mut self, delta: isize, index: usize) {
+        if delta == 0 {
+            return;
+        }
+        let Some(mut window) = self.sparse_window else {
+            return;
+        };
+        self.last_max_scroll = (self.last_max_scroll as isize + delta).max(0) as usize;
+        match window.anchor {
+            Anchor::Top(_) => {}
+            Anchor::Tail(distance) => {
+                // Whether the growth sits above the window's first visible
+                // entry: with a walked cursor that is the cursor's
+                // section, without one (a following window re-derived
+                // from the end) only the tail entry itself is in view.
+                let above = match window.cursor {
+                    Some((section, _)) => index + 1 < section,
+                    None => index + 1 < self.chat.len(),
+                };
+                if above {
+                    return;
+                }
+                if !self.following {
+                    window.anchor = Anchor::Tail((distance as isize + delta).max(0) as usize);
+                }
+                self.shift_tail_selection_points(delta);
+            }
+        }
+        self.sparse_window = Some(window);
+    }
+
+    /// The delta of a just-appended entry: the push landed, so its rows are
+    /// countable under the window's geometry.
+    pub(super) fn sparse_note_append(&mut self) {
+        let Some(window) = self.sparse_window else {
+            return;
+        };
+        if window.width == 0 {
+            return;
+        }
+        let rows = self.count_entry_rows(self.chat.len() - 1, window.width);
+        self.sparse_tail_delta(rows as isize, self.chat.len() - 1);
+    }
+
     pub(crate) fn selection_window_start(&self) -> usize {
         match self.sparse_window.map(|window| window.anchor) {
             Some(Anchor::Tail(distance)) => TAIL_SELECTION_ORIGIN
@@ -289,8 +351,25 @@ impl AgentView {
         // as the full renderer. Re-anchor from the end once, not per draw.
         if rows.len() < height && matches!(window.anchor, Anchor::Top(_)) && !self.chat.is_empty() {
             if self.has_selection() {
-                self.sparse_window = Some(window);
-                self.resolve_sparse_geometry();
+                // The walk ran out of content, so the transcript's total
+                // row count is the window's start plus the rows it walked:
+                // the selection endpoints rebase onto the tail frame
+                // without an exact geometry pass (and without losing the
+                // highlight, which the old full resolve could not express
+                // against the re-anchored window).
+                let Anchor::Top(offset) = window.anchor else {
+                    unreachable!("the branch matched a top anchor");
+                };
+                let total = offset + rows.len();
+                self.rebase_top_selection_to_tail(total);
+                self.sparse_window = Some(SparseWindow {
+                    anchor: Anchor::Tail(0),
+                    detail: self.detail,
+                    width,
+                    visible_rows: 0,
+                    cursor: None,
+                    pending: 0,
+                });
                 self.following = true;
                 return self.visible_transcript_window(width, height);
             }
