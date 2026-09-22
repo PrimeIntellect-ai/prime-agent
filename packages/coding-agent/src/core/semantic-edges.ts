@@ -114,42 +114,25 @@ function mintId(): string {
 	return randomUUID().replaceAll("-", "");
 }
 
-/** SHA-256 hex digest of a raw string: no JSON quoting layer, no copy of the material. */
 function digestRaw(value: string): string {
 	return createHash("sha256").update(value).digest("hex");
 }
 
-/** SHA-256 hex digest of a value's JSON serialization. */
 function digestJson(value: unknown): string {
 	return digestRaw(JSON.stringify(value));
 }
 
-/**
- * Bump when the fingerprinted material or its canonical serialization changes,
- * so fingerprints minted under different versions never compare equal.
- */
+/** Bump when the fingerprinted material or its serialization changes, so fingerprints never compare across versions. */
 const TURN_BODY_FINGERPRINT_VERSION = 1;
 
 /**
- * Fingerprint of one turn call body. The recorder compares it against a parked
- * auto-retry to decide request-ID (Idempotency-Key) reuse: an equal fingerprint
- * reuses the parked ID — the retry re-issues the failed request — and any other
- * fingerprint mints a fresh ID. It covers {fingerprint version, model identity,
- * request-shaping options, system prompt, message count, last-message digest,
- * tool-schema digest}: consecutive requests in a session differ in message
- * count and/or tail, and the digests keep the hashed material bounded, so the
- * full body (0.1-1+ MB near the context window; tool schemas alone are
- * typically 50-200KB) is never re-serialized per request.
+ * Fingerprint of one turn call body: the recorder reuses a parked retry's Idempotency-Key only for an equal
+ * fingerprint. It hashes a bounded subset (model, options, system-prompt digest, message count, last-message
+ * digest, tools digest) so the full body (0.1-1+ MB near the context window) is never re-serialized per request;
+ * earlier messages are deliberately not covered — the fingerprint only gates parked-retry ID reuse within one
+ * retry window, where steering appends change the message count and compaction changes the recorder epoch.
  *
- * The fingerprint is this subset, not the wire body: earlier messages are
- * deliberately NOT covered, because the fingerprint only gates parked-retry ID
- * reuse inside one retry window — steering appends change the message count,
- * compaction changes the recorder epoch, and ID reuse beyond byte-identical
- * retries is the only thing the gate protects.
- *
- * @param toolsDigest precomputed digest of JSON.stringify(context.tools),
- * memoized by element identity in {@link wrapStreamFnWithSemanticEdges}; when
- * omitted, the tools are serialized here.
+ * @param toolsDigest memoized digest of JSON.stringify(context.tools), computed here when omitted.
  */
 export function hashTurnBody(
 	model: { provider: string; id: string },
@@ -179,8 +162,6 @@ export function hashTurnBody(
 				temperature: options?.temperature,
 				maxTokens: options?.maxTokens,
 				serviceTier: options?.serviceTier,
-				// The system prompt is digested raw (never JSON.stringify'd) and each
-				// large field lands as a small fixed-size digest, not as material.
 				systemPromptDigest: context.systemPrompt === undefined ? undefined : digestRaw(context.systemPrompt),
 				messageCount: context.messages.length,
 				lastMessageDigest: lastMessage === undefined ? undefined : digestJson(lastMessage),
@@ -580,11 +561,8 @@ export function unwrapSemanticEdgeStreamFn(streamFn: StreamFn): StreamFn {
  */
 export function wrapStreamFnWithSemanticEdges(streamFn: StreamFn, recorder: SemanticEdgeRecorder): StreamFn {
 	const inner = unwrapSemanticEdgeStreamFn(streamFn);
-	// One wrapper binds one session, and a session's tool schemas are commonly
-	// stable across its requests, so their digest is memoized by element identity:
-	// same length + element-wise === reuses it, any difference recomputes. A
-	// tool object mutated in place therefore keeps its memoized digest —
-	// replacing the object or the array is the supported way to change tools.
+	// Tool schemas are usually stable across a session's requests, so the digest is memoized by element identity;
+	// a tool mutated in place keeps the stale digest — replace the object to change tools.
 	let memoizedTools: { elements: unknown[]; digest: string } | undefined;
 	const toolsDigestFor = (tools: unknown[] | undefined): string | undefined => {
 		if (tools === undefined) {

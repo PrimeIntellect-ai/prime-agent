@@ -71,7 +71,7 @@ describe("SemanticEdgeRecorder", () => {
 		recorder.failRequest(failedId);
 		recorder.prepareTurnRetry();
 
-		// One queued steering message before the identical tail: the count alone must not steal the key.
+		// One queued steering message before the identical tail: only the count differs.
 		const queued = { role: "user", content: "queued" };
 		const sideBody = hashTurnBody({ provider: "p", id: "m" }, { messages: [queued, ...MESSAGES] });
 		const sideId = recorder.startTurnRequest(sideBody);
@@ -121,7 +121,6 @@ describe("SemanticEdgeRecorder", () => {
 	});
 
 	it("does not fingerprint earlier messages beyond the shared tail", () => {
-		// The perf bound itself: pre-tail history must not change the fingerprint.
 		const hashFor = (earlier: string) =>
 			hashTurnBody({ provider: "p", id: "m" }, { messages: [{ role: "user", content: earlier }, ...MESSAGES] });
 		expect(hashFor("old")).toBe(hashFor("rewritten"));
@@ -665,10 +664,9 @@ describe("wrapStreamFnWithSemanticEdges", () => {
 		const tools = [{ name: "bash", description: "" }];
 		const firstId = call(tools);
 		recorder.prepareTurnRetry();
-		// Same elements, mutated content: identity keys the memo, so the parked ID is reused.
+		// Mutated in place: identity keys the memo, so the parked ID is reused.
 		tools[0]!.description = "mutated in place";
 		expect(call(tools)).toBe(firstId);
-		// Different tool objects: the memo misses and recomputes a distinct digest.
 		recorder.prepareTurnRetry();
 		expect(call([{ name: "bash", description: "x" }])).not.toBe(firstId);
 	});
