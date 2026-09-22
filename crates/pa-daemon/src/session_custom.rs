@@ -153,6 +153,7 @@ impl Worker {
                 let lane_follow_up =
                     action.get("delivery").and_then(Value::as_str) != Some("next_turn_boundary");
                 let item = crate::worker::QueuedItem {
+                    preview: None,
                     message: payload
                         .get("text")
                         .and_then(Value::as_str)

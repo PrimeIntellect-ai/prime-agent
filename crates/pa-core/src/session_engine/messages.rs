@@ -22,6 +22,10 @@ pub const COMPACTION_OUTCOME_CUSTOM_TYPE: &str = "compaction_outcome";
 pub const REFINEMENT_OUTCOME_CUSTOM_TYPE: &str = "refinement_outcome";
 pub const REFINEMENT_NOTICE_CUSTOM_TYPE: &str = "refinement_notice";
 pub const HEARTBEAT_PROMPT_CUSTOM_TYPE: &str = "heartbeat_prompt";
+/// The queue-strip preview label for a parked heartbeat fire (TS
+/// `HEARTBEAT_PROMPT_PREVIEW_LABEL`): the queued row reads
+/// `Heartbeat prompt: <content>` instead of the lane-labeled preview.
+pub const HEARTBEAT_PROMPT_PREVIEW_LABEL: &str = "Heartbeat prompt";
 
 /// Why an unsuccessful compaction ran (TS `CompactionOutcomeReason`): the
 /// automatic threshold trigger, the overflow recovery, or the model's

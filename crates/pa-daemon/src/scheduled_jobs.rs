@@ -135,20 +135,32 @@ impl AgentCronSchedulerHooks for QueueHooks {
             // heartbeat prompt component while the model turn runs on the
             // row's content. A plain cron job stays a regular prompt (TS
             // `promptUntilAccepted`).
-            let (message, custom_message) = if heartbeat {
+            let (message, preview, custom_message) = if heartbeat {
                 let row = pa_core::session_engine::messages::create_heartbeat_prompt_message(
                     job,
                     crate::util::now_ms(),
                 );
+                let content = row.content.text();
+                // TS `_createPreparedTurnAction` over
+                // `injectedMessagePreviewLabel`: the parked row reads
+                // `Heartbeat prompt: <content>` (the TUI renders it with its
+                // own label, no lane label), while the active-action label
+                // keeps the raw content (TS `compactRlmText(payload.text)`).
+                let preview = format!(
+                    "{}: {content}",
+                    pa_core::session_engine::messages::HEARTBEAT_PROMPT_PREVIEW_LABEL
+                );
                 (
-                    row.content.text(),
+                    content,
+                    Some(preview),
                     Some(crate::session_commands::custom_message_value(&row)),
                 )
             } else {
-                (job.prompt.clone(), None)
+                (job.prompt.clone(), None, None)
             };
             lane.push_back(QueuedItem {
                 message,
+                preview,
                 custom_message,
                 agent_message: None,
                 admission_id: None,
@@ -750,6 +762,136 @@ mod tests {
     /// mutation plus the mutation hook the worker installs must re-arm the
     /// bind-time (empty) scheduler, fire the job on schedule, deliver its
     /// prompt onto the session's steer lane, and record the run.
+    /// An active rlm heartbeat job due to fire (`every 10s`, never run).
+    fn heartbeat_job(id: &str, prompt: &str, delivery_mode: DeliveryMode) -> AgentCronJob {
+        AgentCronJob {
+            id: id.to_string(),
+            status: JobStatus::Active,
+            source: Some("rlm_heartbeat".to_string()),
+            runtime_kind: None,
+            delivery_mode: Some(delivery_mode),
+            active_session_id: "test-session".to_string(),
+            session_id: "test-session".to_string(),
+            session_file: "/w/s.jsonl".to_string(),
+            cwd: "/w".to_string(),
+            label: None,
+            prompt: prompt.to_string(),
+            schedule: pa_core::cron::AgentCronSchedule {
+                kind: pa_core::cron::ScheduleKind::Interval,
+                expression: "every 10s".to_string(),
+                interval_ms: Some(10_000),
+            },
+            created_at: "2026-09-22T00:00:00.000Z".to_string(),
+            updated_at: "2026-09-22T00:00:00.000Z".to_string(),
+            next_run_at: None,
+            last_run_at: None,
+            last_skipped_at: None,
+            last_error: None,
+            run_count: 0,
+        }
+    }
+
+    /// The fire's parked shape (TS `runCronJob` -> `promptHeartbeat`): a
+    /// heartbeat parks on its delivery-mode lane as the injected
+    /// `heartbeat_prompt` row with the TS preview — the queue strip reads
+    /// `Heartbeat prompt: <content>` (no lane label), while the turn text
+    /// and the active-action label keep the raw content — and a plain cron
+    /// job parks as a regular follow-up prompt.
+    #[tokio::test]
+    async fn heartbeat_fire_parks_the_labeled_preview_on_its_lane() {
+        let core = Arc::new(std::sync::Mutex::new(
+            crate::worker::SessionCore::test_core(None, "/w".to_string()),
+        ));
+        let hooks = Arc::new(QueueHooks {
+            core: Arc::clone(&core),
+            work_notify: Arc::new(Notify::new()),
+            user_bash: Arc::new(crate::user_bash::UserBash::new()),
+        });
+        let steer_heartbeat = heartbeat_job("hb-1", "steer the mission", DeliveryMode::Steer);
+        let follow_up_heartbeat =
+            heartbeat_job("hb-2", "wrap the mission up", DeliveryMode::FollowUp);
+        let plain_cron = AgentCronJob {
+            source: Some("cron".to_string()),
+            ..heartbeat_job("cron-1", "nightly sweep", DeliveryMode::Steer)
+        };
+        for job in [&steer_heartbeat, &follow_up_heartbeat, &plain_cron] {
+            let hooks = Arc::clone(&hooks);
+            let spawned_job = job.clone();
+            let run = tokio::spawn(async move {
+                pa_core::cron::scheduler::AgentCronSchedulerHooks::run_job(&*hooks, &spawned_job)
+                    .await
+            });
+            // The spawned fire parks its item before its settle wait; the
+            // runner is absent, so the item stays parked until this test
+            // pops it (releasing the settle).
+            let park_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let (lane, item) = loop {
+                let popped = {
+                    let mut core = core.lock().unwrap();
+                    core.steering
+                        .pop_front()
+                        .map(|item| ("steering", item))
+                        .or_else(|| core.follow_up.pop_front().map(|item| ("follow_up", item)))
+                };
+                if let Some(popped) = popped {
+                    break popped;
+                }
+                assert!(
+                    std::time::Instant::now() < park_deadline,
+                    "the fire for {} never parked",
+                    job.id
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            };
+            let content = item.message.clone();
+            if is_heartbeat_cron_job(job) {
+                assert_eq!(
+                    content,
+                    format!("[heartbeat: every 10s run#0]\n\n{}", job.prompt)
+                );
+                assert_eq!(
+                    item.preview.as_deref(),
+                    Some(
+                        format!(
+                            "{}: {content}",
+                            pa_core::session_engine::messages::HEARTBEAT_PROMPT_PREVIEW_LABEL
+                        )
+                        .as_str()
+                    ),
+                    "the parked row must carry the labeled preview"
+                );
+                assert_eq!(
+                    item.queue_key.as_deref(),
+                    Some(format!("heartbeat:{}", job.id).as_str())
+                );
+                assert_eq!(
+                    item.custom_message
+                        .as_ref()
+                        .and_then(|row| row.get("customType"))
+                        .and_then(Value::as_str),
+                    Some(pa_core::session_engine::messages::HEARTBEAT_PROMPT_CUSTOM_TYPE)
+                );
+                assert_eq!(
+                    lane,
+                    if job.delivery_mode == Some(DeliveryMode::Steer) {
+                        "steering"
+                    } else {
+                        "follow_up"
+                    }
+                );
+            } else {
+                assert_eq!(content, "nightly sweep");
+                assert_eq!(item.preview, None);
+                assert_eq!(item.custom_message, None);
+                assert_eq!(item.queue_key, None);
+                assert_eq!(lane, "follow_up");
+            }
+            drop(item);
+            let outcome = run.await.unwrap().expect("run_job");
+            assert_eq!(outcome, None);
+        }
+    }
+
     #[tokio::test]
     async fn rlm_heartbeat_mutation_hook_fires_into_the_session_queue() {
         let dir = std::env::temp_dir().join(format!("pa-hb-fire-{}", uuid::Uuid::new_v4()));

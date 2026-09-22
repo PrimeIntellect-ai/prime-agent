@@ -158,6 +158,12 @@ pub(crate) const QUEUED_INPUT_SUSPENDED: &str =
 #[derive(Debug)]
 pub(crate) struct QueuedItem {
     pub(crate) message: String,
+    /// The labeled queue-strip row (TS `payload.preview`): the queue
+    /// snapshot serves it instead of `message` when the delivery carries
+    /// one (TS `queuedAgentMessagePreview` returns
+    /// `payload.preview ?? payload.text`). The active-action label and the
+    /// turn's prompt text stay `message` (TS `compactRlmText(payload.text)`).
+    pub(crate) preview: Option<String>,
     /// An injected custom row that replaces this turn's user message (the
     /// RLM child terminal notices ride the follow-up lane this way).
     pub(crate) custom_message: Option<Value>,
@@ -2347,6 +2353,7 @@ impl Worker {
                 }
             };
             let item = QueuedItem {
+                preview: None,
                 message: message.to_string(),
                 custom_message,
                 agent_message: None,
@@ -2404,6 +2411,7 @@ impl Worker {
             Lane::FollowUp => &mut core.follow_up,
         }
         .push_back(QueuedItem {
+            preview: None,
             message: message.to_string(),
             custom_message,
             agent_message: None,
@@ -2519,6 +2527,7 @@ impl Worker {
                 Lane::FollowUp => &mut core.follow_up,
             }
             .push_back(QueuedItem {
+                preview: None,
                 message: prompt,
                 custom_message: None,
                 // The agent-message marker: `agent_messages_clear` /
@@ -3056,6 +3065,7 @@ impl Worker {
                         {
                             let mut core = self.core.lock().unwrap();
                             core.follow_up.push_back(QueuedItem {
+                                preview: None,
                                 message: continuation.request.message,
                                 custom_message: continuation.request.custom_message,
                                 agent_message: None,
@@ -3317,12 +3327,15 @@ impl Worker {
             return response;
         }
         let core = self.core.lock().unwrap();
+        // TS `get_queue` serves `getSteeringMessagePreviews` /
+        // `getFollowUpMessagePreviews`: the labeled preview when the
+        // delivery carries one, else the message text.
         response_success(
             None,
             "get_queue",
             Some(json!({
-                "steering": core.steering.iter().map(|item| item.message.clone()).collect::<Vec<_>>(),
-                "followUp": core.follow_up.iter().map(|item| item.message.clone()).collect::<Vec<_>>(),
+                "steering": core.steering.iter().map(|item| item.preview.clone().unwrap_or_else(|| item.message.clone())).collect::<Vec<_>>(),
+                "followUp": core.follow_up.iter().map(|item| item.preview.clone().unwrap_or_else(|| item.message.clone())).collect::<Vec<_>>(),
             })),
         )
     }
@@ -3831,6 +3844,7 @@ fn restore_queue_snapshot(
         lanes
             .into_iter()
             .map(|message| QueuedItem {
+                preview: None,
                 message,
                 custom_message: None,
                 agent_message: None,
@@ -3903,6 +3917,7 @@ pub(crate) fn admit_autonomous_follow_up(
     {
         let mut core = core.lock().unwrap();
         core.follow_up.push_back(QueuedItem {
+            preview: None,
             message: text,
             custom_message: None,
             agent_message: None,
@@ -3944,6 +3959,7 @@ pub(crate) fn admit_goal_follow_up(
     {
         let mut core = core.lock().unwrap();
         let item = QueuedItem {
+            preview: None,
             message: follow_up.request.message,
             custom_message: follow_up.request.custom_message,
             agent_message: None,
@@ -4734,20 +4750,7 @@ impl TurnRunner {
     }
 
     fn snapshot_from(&self, core: &SessionCore) -> SessionActionSnapshot {
-        SessionActionSnapshot {
-            queued_count: (core.steering.len() + core.follow_up.len()) as u32,
-            steering: core
-                .steering
-                .iter()
-                .map(|item| item.message.clone())
-                .collect(),
-            follow_ups: core
-                .follow_up
-                .iter()
-                .map(|item| item.message.clone())
-                .collect(),
-            active: core.active_action.clone(),
-        }
+        session_snapshot(core)
     }
 
     fn emit_turn_event(&self, event: Value) {
@@ -4923,15 +4926,18 @@ fn session_summary(
 fn session_snapshot(core: &SessionCore) -> SessionActionSnapshot {
     SessionActionSnapshot {
         queued_count: (core.steering.len() + core.follow_up.len()) as u32,
+        // TS `queuedAgentMessagePreview`: a parked row reads the
+        // delivery's labeled preview when it carries one, else the
+        // message text.
         steering: core
             .steering
             .iter()
-            .map(|item| item.message.clone())
+            .map(|item| item.preview.clone().unwrap_or_else(|| item.message.clone()))
             .collect(),
         follow_ups: core
             .follow_up
             .iter()
-            .map(|item| item.message.clone())
+            .map(|item| item.preview.clone().unwrap_or_else(|| item.message.clone()))
             .collect(),
         active: core.active_action.clone(),
     }
@@ -4981,6 +4987,62 @@ mod update_snapshot_tests {
         assert!(created.success, "create must succeed: {created:?}");
         let response = worker.dispatch("update_snapshot", &json!({})).await;
         (worker, response)
+    }
+
+    /// TS `queuedAgentMessagePreview`: the queue action rows serve a
+    /// delivery's labeled preview when it carries one, while the raw
+    /// steering lane keeps the message text (TS `getSteeringMessages`).
+    #[tokio::test]
+    async fn queue_action_rows_serve_the_labeled_preview() {
+        let (worker, _) = snapshot_after_create().await;
+        {
+            let mut core = worker.core.lock().unwrap();
+            core.steering.push_back(QueuedItem {
+                message: "[heartbeat: every 10m run#0]\n\nnudge the mission".to_string(),
+                preview: Some(
+                    "Heartbeat prompt: [heartbeat: every 10m run#0]\n\nnudge the mission"
+                        .to_string(),
+                ),
+                custom_message: None,
+                agent_message: None,
+                queue_key: None,
+                admission_id: None,
+                images: Vec::new(),
+                done: None,
+                queue_visible: true,
+            });
+            core.steering.push_back(QueuedItem {
+                message: "plain queued prompt".to_string(),
+                preview: None,
+                custom_message: None,
+                agent_message: None,
+                queue_key: None,
+                admission_id: None,
+                images: Vec::new(),
+                done: None,
+                queue_visible: true,
+            });
+        }
+        let response = worker.dispatch("update_snapshot", &json!({})).await;
+        assert!(response.success);
+        let data = response.data.expect("snapshot data");
+        assert_eq!(
+            data["queue"]["actions"]["steering"],
+            json!([
+                "Heartbeat prompt: [heartbeat: every 10m run#0]\n\nnudge the mission",
+                "plain queued prompt",
+            ]),
+            "the action rows must serve the labeled preview"
+        );
+        assert_eq!(
+            data["queue"]["steering"],
+            json!([
+                "[heartbeat: every 10m run#0]\n\nnudge the mission",
+                "plain queued prompt",
+            ]),
+            "the raw lane keeps the message text"
+        );
+        assert_eq!(data["queue"]["actions"]["queuedCount"], 2);
     }
 
     #[tokio::test]
@@ -5189,6 +5251,7 @@ mod agent_message_tests {
             let mut core = worker.core.lock().unwrap();
             for _ in 0..DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION {
                 core.follow_up.push_back(QueuedItem {
+                    preview: None,
                     message: "occupied".to_string(),
                     custom_message: None,
                     agent_message: None,
@@ -5605,6 +5668,7 @@ mod tests {
             let mut core = worker.core.lock().unwrap();
             core.queued_input_suspended = true;
             core.follow_up.push_back(QueuedItem {
+                preview: None,
                 message: "parked queued work".to_string(),
                 custom_message: None,
                 agent_message: None,
@@ -6803,6 +6867,7 @@ mod turn_stream_tests {
             let mut core = runner.core.lock().unwrap();
             core.queued_input_suspended = true;
             core.steering.push_back(QueuedItem {
+                preview: None,
                 message: "parked steer".to_string(),
                 custom_message: None,
                 agent_message: None,
@@ -6861,6 +6926,7 @@ mod turn_stream_tests {
                 .run_turn(
                     engine,
                     QueuedItem {
+                        preview: None,
                         message: "burst".to_string(),
                         custom_message: None,
                         agent_message: None,
@@ -6894,6 +6960,7 @@ mod turn_stream_tests {
             .run_turn(
                 engine,
                 QueuedItem {
+                    preview: None,
                     message: "burst".to_string(),
                     custom_message: None,
                     agent_message: None,
@@ -6928,6 +6995,7 @@ mod turn_stream_tests {
             .run_turn(
                 engine,
                 QueuedItem {
+                    preview: None,
                     message: "[child-exited: no-reply child:lane]".to_string(),
                     custom_message: Some(custom_message),
                     agent_message: None,
