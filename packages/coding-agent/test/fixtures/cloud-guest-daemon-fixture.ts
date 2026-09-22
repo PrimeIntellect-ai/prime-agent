@@ -26,7 +26,6 @@ import {
 	createAssistantMessageEventStream,
 	type Model,
 	registerApiProvider,
-	type SimpleStreamOptions,
 	type StreamOptions,
 } from "@earendil-works/pi-ai";
 import { AgentSession } from "../../src/core/agent-session.js";
@@ -112,46 +111,49 @@ function emitStep(stream: AssistantMessageEventStream, message: AssistantMessage
 	stream.end(message);
 }
 
-const registeredStream = (_model: Model<string>, _context: Context, _options?: SimpleStreamOptions) => {
+/**
+ * The faux stream. Also rides every provider-config registration below: a
+ * `ModelRegistry.refresh()` clears the process-global api-provider registry,
+ * and `registerProvider` configs that carry `streamSimple` are re-applied (and
+ * so re-registered) on every session open, keeping the faux api available no
+ * matter which registry refreshed in between.
+ */
+const fauxStream = (model: Model<string>, _context: Context, options?: StreamOptions) => {
 	const outer = createAssistantMessageEventStream();
-	queueMicrotask(() => emitStep(outer, nextResponseStep()));
+	queueMicrotask(async () => {
+		try {
+			await options?.onResponse?.({ status: 200, headers: {} }, model);
+			if (options?.signal?.aborted) {
+				const aborted: AssistantMessage = {
+					...nextResponseStep(),
+					stopReason: "aborted",
+				};
+				outer.push({ type: "error", reason: "aborted", error: aborted });
+				outer.end(aborted);
+				return;
+			}
+			emitStep(outer, nextResponseStep());
+		} catch (error) {
+			const failed: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: `faux stream failed: ${String(error)}` }],
+				api: fauxApi,
+				provider: fauxProvider,
+				timestamp: Date.now(),
+				stopReason: "error",
+			} as AssistantMessage;
+			outer.push({ type: "error", reason: "error", error: failed });
+			outer.end(failed);
+		}
+	});
 	return outer;
 };
 
 registerApiProvider(
 	{
 		api: fauxApi,
-		stream: (model: Model<string>, _context: Context, options?: StreamOptions) => {
-			const outer = createAssistantMessageEventStream();
-			queueMicrotask(async () => {
-				try {
-					await options?.onResponse?.({ status: 200, headers: {} }, model);
-					if (options?.signal?.aborted) {
-						const aborted: AssistantMessage = {
-							...nextResponseStep(),
-							stopReason: "aborted",
-						};
-						outer.push({ type: "error", reason: "aborted", error: aborted });
-						outer.end(aborted);
-						return;
-					}
-					emitStep(outer, nextResponseStep());
-				} catch (error) {
-					const failed: AssistantMessage = {
-						role: "assistant",
-						content: [{ type: "text", text: `faux stream failed: ${String(error)}` }],
-						api: fauxApi,
-						provider: fauxProvider,
-						timestamp: Date.now(),
-						stopReason: "error",
-					} as AssistantMessage;
-					outer.push({ type: "error", reason: "error", error: failed });
-					outer.end(failed);
-				}
-			});
-			return outer;
-		},
-		streamSimple: registeredStream,
+		stream: fauxStream,
+		streamSimple: fauxStream,
 	},
 	"cloud-guest-daemon-fixture",
 );
@@ -187,6 +189,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, 
 		baseUrl: "http://localhost:0",
 		apiKey: "faux-key",
 		api: fauxApi,
+		streamSimple: fauxStream,
 		models: [
 			{
 				id: fauxModelId,
@@ -249,6 +252,7 @@ export function createFauxRuntimeFactoryWithModels(
 				baseUrl: "http://localhost:0",
 				apiKey,
 				api: fauxApi,
+				streamSimple: fauxStream,
 				models: config.models.map((model) => ({
 					id: model.id,
 					name: model.name ?? model.id,
