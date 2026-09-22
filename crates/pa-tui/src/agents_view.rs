@@ -44,8 +44,10 @@ pub struct AgentsViewOptions {
     pub session_dir: Option<PathBuf>,
     pub theme: String,
     pub version: String,
-    /// The session the view was opened from: keeps its recency slot and
-    /// survives the empty-catalog filter.
+    /// The session the view was opened from: keeps its recency slot,
+    /// survives the empty-catalog filter, and anchors a fresh open's entry
+    /// selection on its row (the agents-back handoff selects the session
+    /// just left, not the first row).
     pub anchor_session_id: Option<String>,
     /// Open scoped to one session's subtree (the subagent summary line's
     /// open action; TS `scoped_agents_view`): the root lists its
@@ -237,6 +239,13 @@ struct AgentsViewMode {
     /// The selection key that survives an identity flip (TS
     /// `persistentState.selectedSessionKey`).
     selected_key: Option<SelectionKey>,
+    /// Whether the entry selection still waits on the anchor session's row:
+    /// a fresh open (the agents-back handoff opens the view on the session
+    /// just left) lands the selection there once the row appears — a nested
+    /// anchor arrives with its ancestors' lists expanded — and the first
+    /// user move cancels the wait. A scoped view never lists the anchor
+    /// (the scope root is excluded), so the first-row default stands there.
+    anchor_selection_pending: bool,
     /// First ctrl+c shows the exit hint; the second exits.
     exit_armed: bool,
     /// The double-Ctrl+C force-quit guard (the run's shared instance is
@@ -270,6 +279,23 @@ impl AgentsViewMode {
         let selected_identity = options.selected_row_identity.clone();
         let selected_key = options.selected_key.clone();
         let keybindings = options.keybindings.clone();
+        // A fresh open (no carried identity or usable key — the scope-back
+        // handoff leaks an empty identity and a key with no session ids,
+        // neither restores anything) waits on the anchor: the session the
+        // view was opened from, the agents-back handoff's anchor.
+        let carried_selection = options
+            .selected_row_identity
+            .as_deref()
+            .is_some_and(|identity| !identity.is_empty())
+            || options
+                .selected_key
+                .as_ref()
+                .is_some_and(|key| key.session_id.is_some() || key.active_session_id.is_some());
+        let anchor_selection_pending = !carried_selection
+            && options
+                .anchor_session_id
+                .as_deref()
+                .is_some_and(|anchor| !anchor.is_empty());
         AgentsViewMode {
             options,
             theme,
@@ -288,6 +314,7 @@ impl AgentsViewMode {
             pending_ancestors,
             selected_identity,
             selected_key,
+            anchor_selection_pending,
             exit_armed: false,
             exit_guard: crate::exit_guard::ExitGuard::new(),
             pulse: 0,
@@ -367,6 +394,25 @@ impl AgentsViewMode {
             &rollups,
             self.options.anchor_session_id.as_deref(),
         );
+        // The entry anchor's row may be nested: arm the same ancestor
+        // expansion below so this pass reveals it (a top-level anchor has
+        // no ancestors, and a scoped view never lists the anchor at all —
+        // the scope root is excluded — so the wait just stands by).
+        if let (true, Some(anchor)) = (
+            self.anchor_selection_pending
+                && self.options.scope.is_none()
+                && self.pending_ancestors.is_none(),
+            self.options.anchor_session_id.as_deref(),
+        ) {
+            self.pending_ancestors = Some(scope_ancestors(
+                &records,
+                &AgentsViewScope {
+                    session_id: Some(anchor.to_string()),
+                    active_session_id: None,
+                    session_name: None,
+                },
+            ));
+        }
         // Re-expand the drilled-in row's ancestors (TS
         // `applyPendingAncestorExpansion`): a nested ancestor's row only
         // appears once its own parent is expanded, so expand-and-rebuild
@@ -405,6 +451,23 @@ impl AgentsViewMode {
             identity.as_deref().or(self.selected_identity.as_deref()),
             self.selected_key.as_ref(),
         );
+        // The entry anchor lands the selection on the anchor session's row
+        // once it appears (the agents-back handoff: the view opens on the
+        // session just left); until then the rebuild's default holds. The
+        // sync below then pins the anchor row, so later rebuilds restore
+        // onto it through the carried identity/key alone.
+        if let (true, Some(anchor)) = (
+            self.anchor_selection_pending,
+            self.options.anchor_session_id.as_deref(),
+        ) {
+            if let Some(index) = rows.iter().position(|row| {
+                row.selectable()
+                    && row.summary.get("sessionId").and_then(Value::as_str) == Some(anchor)
+            }) {
+                self.selected = index;
+                self.anchor_selection_pending = false;
+            }
+        }
         self.rows = rows;
         self.sync_selected_row_state();
     }
@@ -456,8 +519,11 @@ impl AgentsViewMode {
     /// Move the selection by `delta` selectable rows (TS `moveSelection`,
     /// which ends with `syncSelectedRowState`): the move refreshes the
     /// carried identity/key so the next roster rebuild resolves the
-    /// selection back onto the row the user actually landed on.
+    /// selection back onto the row the user actually landed on. The first
+    /// move is an explicit user choice: it cancels the entry anchor's wait,
+    /// which must never override it.
     fn move_selection(&mut self, delta: isize) {
+        self.anchor_selection_pending = false;
         let selectable: Vec<usize> = self
             .rows
             .iter()
@@ -1780,6 +1846,160 @@ mod tests {
         ];
         mode.rebuild_rows();
         mode
+    }
+
+    /// A fresh-open view anchored on the given session (the agents-back
+    /// handoff state: no carried selection, the session just left).
+    fn mode_with_anchor(anchor: Option<&str>, roster: Vec<serde_json::Value>) -> AgentsViewMode {
+        let mut mode = AgentsViewMode::new(AgentsViewOptions {
+            socket_path: PathBuf::from("/tmp/agents-view-test.sock"),
+            cwd: PathBuf::from("/tmp"),
+            session_dir: None,
+            theme: "prime".to_string(),
+            version: "0.0.0".to_string(),
+            anchor_session_id: anchor.map(str::to_string),
+            scope: None,
+            query: None,
+            expanded_ancestors: Vec::new(),
+            selected_row_identity: None,
+            selected_key: None,
+            status_message: None,
+            keybindings: crate::keybindings::KeybindingsManager::new(),
+        });
+        mode.roster = roster;
+        mode.rebuild_rows();
+        mode
+    }
+
+    /// A fresh open (the agents-back handoff) anchors the entry selection
+    /// on the session the view was opened from, not the first row.
+    #[test]
+    fn entry_anchor_selects_the_left_session() {
+        let mode = mode_with_anchor(
+            Some("s2"),
+            vec![
+                roster_entry("s1", "idle", parent_summary("s1")),
+                roster_entry("s2", "idle", parent_summary("s2")),
+            ],
+        );
+        assert_eq!(mode.rows[mode.selected].summary["sessionId"], "s2");
+        assert!(!mode.anchor_selection_pending);
+    }
+
+    /// The anchor row can arrive after the first rebuild (the roster
+    /// streams, the saved catalog lands later): the wait survives the
+    /// rebuilds that pin other rows and lands once the row appears.
+    #[test]
+    fn anchor_wait_survives_until_the_row_arrives() {
+        let mut mode = mode_with_anchor(
+            Some("s2"),
+            vec![roster_entry("s1", "idle", parent_summary("s1"))],
+        );
+        assert_eq!(mode.rows[mode.selected].summary["sessionId"], "s1");
+        assert!(mode.anchor_selection_pending);
+        mode.roster
+            .push(roster_entry("s2", "idle", parent_summary("s2")));
+        mode.rebuild_rows();
+        assert_eq!(mode.rows[mode.selected].summary["sessionId"], "s2");
+        assert!(!mode.anchor_selection_pending);
+    }
+
+    /// The first user move cancels the wait: the anchor never overrides an
+    /// explicit selection.
+    #[test]
+    fn anchor_wait_cancels_on_the_first_user_move() {
+        let mut mode = mode_with_anchor(
+            Some("s2"),
+            vec![roster_entry("s1", "idle", parent_summary("s1"))],
+        );
+        mode.handle_key("down");
+        assert!(!mode.anchor_selection_pending);
+        mode.roster
+            .push(roster_entry("s2", "idle", parent_summary("s2")));
+        mode.rebuild_rows();
+        assert_eq!(mode.rows[mode.selected].summary["sessionId"], "s1");
+    }
+
+    /// A nested anchor (a subagent session the user was attached to) arrives
+    /// with its ancestors' lists expanded so its row is reachable — the
+    /// same expansion the drilled-in return path uses.
+    #[test]
+    fn nested_anchor_expands_its_ancestors() {
+        let mode = mode_with_anchor(
+            Some("c"),
+            vec![
+                roster_entry("p", "idle", parent_summary("p")),
+                roster_entry("c", "running", child_summary("c", "p", "worker one")),
+            ],
+        );
+        assert_eq!(mode.rows.len(), 3, "the parent's list opened");
+        assert_eq!(mode.rows[mode.selected].summary["sessionId"], "c");
+    }
+
+    /// A carried selection (the view/session loop's restore) wins over the
+    /// anchor: only fresh opens wait on it.
+    #[test]
+    fn carried_selection_wins_over_the_entry_anchor() {
+        let mut mode = AgentsViewMode::new(AgentsViewOptions {
+            socket_path: PathBuf::from("/tmp/agents-view-test.sock"),
+            cwd: PathBuf::from("/tmp"),
+            session_dir: None,
+            theme: "prime".to_string(),
+            version: "0.0.0".to_string(),
+            anchor_session_id: Some("s2".to_string()),
+            scope: None,
+            query: None,
+            expanded_ancestors: Vec::new(),
+            selected_row_identity: None,
+            selected_key: Some(crate::agents_view_forest::SelectionKey {
+                session_id: Some("s1".to_string()),
+                active_session_id: Some("s1-live".to_string()),
+            }),
+            status_message: None,
+            keybindings: crate::keybindings::KeybindingsManager::new(),
+        });
+        mode.roster = vec![
+            roster_entry("s1", "idle", parent_summary("s1")),
+            roster_entry("s2", "idle", parent_summary("s2")),
+        ];
+        mode.rebuild_rows();
+        assert_eq!(mode.rows[mode.selected].summary["sessionId"], "s1");
+        assert!(!mode.anchor_selection_pending);
+    }
+
+    /// The scoped view (the subagents summary line's open action) never
+    /// lists the anchor — the scope root is excluded — so the first-row
+    /// default stands there.
+    #[test]
+    fn scoped_view_keeps_the_first_row_default() {
+        let mut mode = AgentsViewMode::new(AgentsViewOptions {
+            socket_path: PathBuf::from("/tmp/agents-view-test.sock"),
+            cwd: PathBuf::from("/tmp"),
+            session_dir: None,
+            theme: "prime".to_string(),
+            version: "0.0.0".to_string(),
+            anchor_session_id: Some("p".to_string()),
+            scope: Some(AgentsViewScope {
+                session_id: Some("p".to_string()),
+                active_session_id: Some("p-live".to_string()),
+                session_name: Some("p name".to_string()),
+            }),
+            query: None,
+            expanded_ancestors: Vec::new(),
+            selected_row_identity: None,
+            selected_key: None,
+            status_message: None,
+            keybindings: crate::keybindings::KeybindingsManager::new(),
+        });
+        mode.roster = vec![
+            roster_entry("p", "idle", parent_summary("p")),
+            roster_entry("c", "running", child_summary("c", "p", "worker one")),
+        ];
+        mode.rebuild_rows();
+        assert_eq!(mode.rows.len(), 1, "the scope root is excluded");
+        assert_eq!(mode.selected, 0);
+        assert_eq!(mode.rows[0].summary["sessionId"], "c");
+        assert!(mode.anchor_selection_pending, "the wait never resolves");
     }
 
     /// TS `countRowsBySection` (the splash header counts) counts agent-kind
