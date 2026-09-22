@@ -212,6 +212,12 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		argumentHint: "[on|off]",
 		takesArgument: true,
 	},
+	{
+		name: "speed",
+		description: "Toggle footer readout of model output tok/sec (latest response and session average)",
+		argumentHint: "[on|off]",
+		takesArgument: true,
+	},
 	{ name: "quit", description: `Quit ${APP_NAME}` },
 ];
 
