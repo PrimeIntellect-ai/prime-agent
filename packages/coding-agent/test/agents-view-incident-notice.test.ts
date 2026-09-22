@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, linkSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setKeybindings } from "@earendil-works/pi-tui";
@@ -36,11 +36,9 @@ const DAEMON_SOCKET = "/tmp/prime-agent-501/daemon.sock";
 function logLine(fields: Record<string, unknown>): string {
 	return JSON.stringify({ level: "warn", ...fields });
 }
-
 function tsAgo(base: number, ms: number): string {
 	return new Date(base - ms).toISOString();
 }
-
 function supervisorStartLine(base: number, minutesAgoValue: number, generation = "e14de15c"): string {
 	return logLine({
 		ts: tsAgo(base, minutesAgoValue * 60_000),
@@ -71,13 +69,11 @@ function commandTimeoutLine(base: number, minutesAgoValue: number, socketPath: s
 function fixtureEntries(lines: readonly string[]) {
 	return lines.map((line) => parseIncidentLogLine(line)).filter((entry) => entry !== undefined);
 }
-
 function invoke(method: string, self: object, ...args: unknown[]): unknown {
 	const member = Reflect.get(AgentsViewMode.prototype, method) as ((...a: unknown[]) => unknown) | undefined;
 	if (typeof member !== "function") throw new Error(`AgentsViewMode.${method} no longer exists`);
 	return member.call(self, ...args);
 }
-
 function createUiServices(): InteractiveModeUiServices {
 	return {
 		settingsManager: SettingsManager.inMemory({ theme: "dark" }),
@@ -87,10 +83,8 @@ function createUiServices(): InteractiveModeUiServices {
 		getThemes: () => [],
 	};
 }
-
 const cleanupDirs: string[] = [];
 let previousAgentDir: string | undefined;
-
 /** Fresh per-test agent dir so getAgentLogPath() points at a fixture log. */
 function useTempAgentDir(): string {
 	const dir = mkdtempSync(join(tmpdir(), "agents-view-incident-"));
@@ -103,11 +97,9 @@ function useTempAgentDir(): string {
 function writeAgentLog(lines: readonly string[]): void {
 	writeFileSync(getAgentLogPath(), `${lines.join("\n")}\n`);
 }
-
 function appendAgentLog(lines: readonly string[]): void {
 	appendFileSync(getAgentLogPath(), `${lines.join("\n")}\n`);
 }
-
 function newView(persistentState: AgentsViewPersistentState = { savedCatalogLoaded: true }): AgentsViewMode {
 	return new AgentsViewMode({ config: {}, uiServices: createUiServices() }, persistentState);
 }
@@ -288,5 +280,14 @@ describe("agents view incident notices", () => {
 		const state = createIncidentNoticeState();
 		refreshIncidentNoticeState(state, getAgentLogPath(), Date.now());
 		expect(state.notice).toMatchObject({ kind: "worker-crash" });
+	});
+
+	it("skips the .old bridge when a rotation makes it the live log's own generation", () => {
+		useTempAgentDir();
+		writeAgentLog([supervisorStartLine(Date.now(), 600)]);
+		linkSync(getAgentLogPath(), `${getAgentLogPath()}.old`);
+		const state = createIncidentNoticeState();
+		refreshIncidentNoticeState(state, getAgentLogPath(), Date.now());
+		expect(state.entries).toHaveLength(1);
 	});
 });

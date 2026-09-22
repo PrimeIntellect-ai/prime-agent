@@ -413,13 +413,19 @@ export function refreshIncidentNoticeState(state: IncidentNoticeState, logPath: 
 			);
 	let parsed: IncidentLogEntry[] = [];
 	if (chunk !== undefined) {
-		// Mirror the CLI's [agent.jsonl.old, agent.jsonl] source order (merge sorts
-		// by time anyway), tailing .old with the same bounded tail as the main log.
+		// Tail the rotated .old with the same bounded tail as the main log: the
+		// CLI reads the same [agent.jsonl.old, agent.jsonl] pair, and the merge
+		// below sorts by time, so the read order here does not matter.
 		if (firstRead) {
 			// The rotated .old is frozen: include its final line even without a
 			// trailing newline — no later poll will ever complete it.
 			const rotated = readIncidentLogLines(`${logPath}.old`, undefined, undefined, true);
-			if (rotated !== undefined) {
+			// A rename rotation can land between the live read above and this one:
+			// the .old path then names the very file the chunk just consumed, and
+			// re-parsing it would double supervisor starts into a phantom update
+			// restart (the classifier does not dedupe supervisor-start) and double
+			// timeout counts. Bridge only a genuinely different generation.
+			if (rotated !== undefined && rotated.fileId !== chunk.fileId) {
 				parsed = parseWindowedLines(rotated.lines);
 			}
 		}
