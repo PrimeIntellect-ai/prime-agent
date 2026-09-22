@@ -33,6 +33,7 @@ vi.mock("../src/cli/daemon-update-restart.js", async (importOriginal) => ({
 import { buildDaemonUpdateRestartReport } from "../src/cli/daemon-update-restart.js";
 import {
 	buildUpdateRelaunchArgs,
+	formatDaemonReconnectBanner,
 	InteractiveMode,
 	tryExecUpdateRelaunch,
 } from "../src/modes/interactive/interactive-mode.js";
@@ -241,6 +242,28 @@ describe("interactive self-update relaunch", () => {
 	);
 });
 
+describe("formatDaemonReconnectBanner", () => {
+	it.each([
+		[undefined, "1.2.3", "Daemon reconnected", "dim"],
+		["1.2.3", "1.2.3", "Daemon restarted (v1.2.3) - reconnected", "dim"],
+		[
+			"2.0.0",
+			"1.2.3",
+			"Daemon restarted (v2.0.0), this window still runs v1.2.3 - restart the window to pick up the update.",
+			"warning",
+		],
+		[
+			"1.2.3",
+			"1.2.3-beta.1",
+			"Daemon restarted (v1.2.3), this window still runs v1.2.3-beta.1 - restart the window to pick up the update.",
+			"warning",
+		],
+		["1.2.3-beta.1", "1.2.3", "Daemon restarted (v1.2.3-beta.1), this window runs v1.2.3.", "dim"],
+	])("maps daemon version %s vs client %s to banner", (daemonVersion, clientVersion, message, tone) => {
+		expect(formatDaemonReconnectBanner(daemonVersion, clientVersion)).toEqual({ message, tone });
+	});
+});
+
 describe("buildDaemonUpdateRestartReport", () => {
 	it("reports recovery results when the daemon restart fails", () => {
 		const report = buildDaemonUpdateRestartReport({
@@ -259,6 +282,7 @@ describe("buildDaemonUpdateRestartReport", () => {
 		expect(report.info).toEqual(["Restored 2 daemon sessions", "Resumed 1 interrupted session"]);
 		expect(report.warnings).toEqual([
 			"Updated, but could not restart the daemon (could not stop predecessor).",
+			"The daemon still runs the previous version; run `prime-agent shutdown`, then run `prime-agent` to restart and apply the update.",
 			"1 daemon session could not be restored.",
 			"Could not restore /tmp/failed.jsonl: create failed",
 		]);

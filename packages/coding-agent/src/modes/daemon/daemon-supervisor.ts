@@ -903,7 +903,6 @@ export class DaemonSupervisor {
 			if (migratedJobs > 0) {
 				this.log(`Migrated ${migratedJobs} scheduled jobs into session artifacts`);
 			}
-			await this.catalog.start().catch((error) => this.log(`Could not start daemon catalog: ${String(error)}`));
 			this.assertSocketLeaseHeld();
 			await this.seedRosterLedger();
 			let adoptionFailure: unknown;
@@ -2582,9 +2581,14 @@ export class DaemonSupervisor {
 			case "restart":
 				setImmediate(() => void this.shutdown(0, false, true, false, "update"));
 				return success(command.id, command.type);
-			case "shutdown":
-				setImmediate(() => void this.shutdown(0, true, false, command.force === true, "shutdown"));
+			case "shutdown": {
+				// An update-restart coordinator stops a prepared daemon with this command;
+				// attached windows need the "update" reason to recover instead of dying.
+				// Capture the reason now: a later phase change must not rewrite it.
+				const closingReason: DaemonClosingReason = this.updateRestartPhase === "prepared" ? "update" : "shutdown";
+				setImmediate(() => void this.shutdown(0, true, false, command.force === true, closingReason));
 				return success(command.id, "shutdown");
+			}
 			case "prepare_update_restart": {
 				const manifest = await this.prepareUpdateRestart();
 				return success(command.id, "prepare_update_restart", manifest);
@@ -4454,11 +4458,19 @@ export class DaemonSupervisor {
 			throw new SupervisorRecoveryCancelledError("Worker recovery was cancelled before interruption was recorded");
 		}
 		await Promise.all(
-			[...interruptedSessions.values()].map((interrupted) =>
-				this.catalog.markInterrupted(interrupted.sessionFile, interrupted.activeSessionId, [
-					...interrupted.operations,
-				]),
-			),
+			[...interruptedSessions.values()].map(async (interrupted) => {
+				try {
+					await this.catalog.markInterrupted(interrupted.sessionFile, interrupted.activeSessionId, [
+						...interrupted.operations,
+					]);
+				} catch (error) {
+					// The notice is advisory: an unwritable session file must not abort
+					// the orphan reap, the journal resolution, or the recovery retry.
+					this.log(
+						`Could not record the interrupted session notice for ${interrupted.sessionFile}: ${String(error)}`,
+					);
+				}
+			}),
 		);
 		await this.assertRecoveryAllowed();
 		if (this.isWorkerCleanupCancelled(worker)) {
@@ -6665,8 +6677,9 @@ export class DaemonSupervisor {
 				this.isWorkerStopping(worker) || worker.descriptor.lifecycle !== "ready" || worker.client === undefined,
 		);
 		if (unavailable) {
+			const session = unavailable.descriptor.sessionFile ?? unavailable.descriptor.rootActiveSessionId;
 			throw new Error(
-				`Cannot prepare update restart while resident worker ${unavailable.descriptor.workerId} is ${this.effectiveWorkerState(unavailable)}${unavailable.client ? "" : " and disconnected"}`,
+				`Cannot prepare update restart while resident worker ${unavailable.descriptor.workerId} is ${this.effectiveWorkerState(unavailable)}${unavailable.client ? "" : " and disconnected"} (session ${session})`,
 			);
 		}
 		const workers = residents as Array<ResidentWorker & { client: DaemonWorkerClient }>;

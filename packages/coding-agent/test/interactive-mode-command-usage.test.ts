@@ -82,4 +82,21 @@ describe("InteractiveMode no-argument command usage errors", () => {
 		expect(context.showError).toHaveBeenCalledWith(`Usage: /${command}`);
 		expect(prompt).not.toHaveBeenCalled();
 	});
+
+	it("toggles /speed on and off, parses explicit args, and rejects invalid arguments", async () => {
+		const context = makeSubmitContext();
+		Object.setPrototypeOf(context, InteractiveMode.prototype); // runs the real setSpeedDisplay
+		const footer = { setSpeedEnabled: vi.fn(), setSpeedText: vi.fn() };
+		Object.assign(context, { footer, speedDisplayEnabled: false });
+		Object.assign(context, { ui: { requestRender: vi.fn() }, uiServices: { settingsManager: {} } });
+		prototype.setupEditorSubmitHandler.call(context);
+		await context.defaultEditor.onSubmit?.("/speed");
+		expect(footer.setSpeedEnabled).toHaveBeenLastCalledWith(true);
+		await context.defaultEditor.onSubmit?.("/speed off");
+		expect(footer.setSpeedEnabled).toHaveBeenLastCalledWith(false);
+		expect(footer.setSpeedText).toHaveBeenCalledWith(undefined);
+		await context.defaultEditor.onSubmit?.("/speed banana");
+		expect(context.showError).toHaveBeenCalledWith("Usage: /speed [on|off]");
+		expect((context.agentConnection as { prompt: ReturnType<typeof vi.fn> }).prompt).not.toHaveBeenCalled();
+	});
 });

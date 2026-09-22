@@ -180,6 +180,12 @@ export interface ProviderWaitPolicy {
 	maxAttempts: number;
 	/** Abort bound: maximum total wait. Default 15m. */
 	maxWaitMs: number;
+	/** Park sessions for provider-reported resets beyond maxWaitMs. Default true. */
+	pauseUntilReset: boolean;
+	/** Abort bound: maximum single park duration. Default 24h, clamped to 7d. */
+	maxPauseMs: number;
+	/** Abort bound: maximum parks per quota episode. Default 8. */
+	maxParks: number;
 }
 
 export const DEFAULT_PROVIDER_WAIT_POLICY: ProviderWaitPolicy = {
@@ -188,7 +194,43 @@ export const DEFAULT_PROVIDER_WAIT_POLICY: ProviderWaitPolicy = {
 	maxDelayMs: 300_000,
 	maxAttempts: 30,
 	maxWaitMs: 900_000,
+	pauseUntilReset: true,
+	maxPauseMs: 86_400_000,
+	maxParks: 8,
 };
+
+/** Parks wake slightly after the reported reset so the window has actually rolled over. */
+export const PROVIDER_RESUME_GRACE_MS = 30_000;
+
+/** Upper clamp for maxPauseMs: one week per park, so long-horizon resets still get probed. */
+export const MAX_PROVIDER_PAUSE_MS = 7 * 86_400_000;
+
+export type ProviderParkDecision =
+	| { kind: "park"; delayMs: number }
+	| { kind: "none"; reason: "disabled" | "park-budget" | "no-reset" };
+
+/**
+ * Park decision after a quota failure whose provider-reported reset time exceeds
+ * the bounded wait: the session ends the turn cleanly and wakes at the reset
+ * (plus a small grace), capped at maxPauseMs. Only a provider-reported reset
+ * parks: without one, the bounded wait keeps its existing abort behavior.
+ */
+export function providerParkDecision(
+	parksUsed: number,
+	resetMs: number | undefined,
+	policy: Pick<ProviderWaitPolicy, "pauseUntilReset" | "maxPauseMs" | "maxParks">,
+): ProviderParkDecision {
+	if (!policy.pauseUntilReset) {
+		return { kind: "none", reason: "disabled" };
+	}
+	if (parksUsed >= policy.maxParks) {
+		return { kind: "none", reason: "park-budget" };
+	}
+	if (resetMs === undefined) {
+		return { kind: "none", reason: "no-reset" };
+	}
+	return { kind: "park", delayMs: Math.min(resetMs + PROVIDER_RESUME_GRACE_MS, policy.maxPauseMs) };
+}
 
 export type ProviderWaitDecision =
 	| { kind: "wait"; delayMs: number }

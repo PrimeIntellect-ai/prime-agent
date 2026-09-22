@@ -194,6 +194,7 @@ export function getXaiSubscriptionModel(model: Model<Api>): Model<"openai-respon
 				thinkingLevelMap = { off: null, minimal: null };
 				break;
 			case "grok-4.6":
+			case "grok-4.7":
 				thinkingLevelMap = { off: null, minimal: null, xhigh: "xhigh" };
 				break;
 			default:
