@@ -1179,7 +1179,6 @@ export class DaemonSupervisor {
 		}
 	}
 
-	/** Stale-while-revalidate for served worker snapshots: a missed frame cannot pin stale data forever. */
 	private maybeRefreshAgedWorkerHeartbeatSnapshot(worker: ResidentWorker): void {
 		if (
 			worker.heartbeatSnapshotRefresh ||
@@ -2350,8 +2349,6 @@ export class DaemonSupervisor {
 				return success(command.id, "create", this.publicSummary(worker, sessionSummaryFromRosterEntry(root)));
 			}
 			case "attach": {
-				// The heartbeat_catalog capability opts a client into pushes: the ACP
-				// adapter issues no scheduled-job command but still acts on the frame.
 				if (command.capabilities?.includes("heartbeat_catalog")) {
 					client.tracksHeartbeats = true;
 				}
@@ -2385,7 +2382,6 @@ export class DaemonSupervisor {
 				return success(command.id, "attach", attached.result);
 			}
 			case "reattach": {
-				// Same capability opt-in as attach for reconnecting clients.
 				if (command.capabilities?.includes("heartbeat_catalog")) {
 					client.tracksHeartbeats = true;
 				}

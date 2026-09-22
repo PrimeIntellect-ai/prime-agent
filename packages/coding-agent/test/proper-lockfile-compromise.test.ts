@@ -137,7 +137,6 @@ describe("proper-lockfile compromise boundaries", () => {
 	});
 
 	it("does not mutate scheduled jobs after a lock compromise", async () => {
-		// The cron store now takes its lock through proper-lockfile's async lock().
 		lockState.compromiseAsync = true;
 		const root = tempDir("pa-lock-cron-");
 		const artifactDir = join(root, "artifact");

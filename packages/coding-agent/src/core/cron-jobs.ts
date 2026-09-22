@@ -1020,8 +1020,7 @@ export class AgentCronScheduler {
 		this.stopped = false;
 		if (!this.hasStarted) {
 			this.hasStarted = true;
-			// Claims must wait: a stale dispatch record still on disk would make
-			// claimDue skip a due job once. start() stays synchronous.
+			// Claims must wait: a stale dispatch record still on disk would make claimDue skip a due job once.
 			this.initialRecovery = this.store
 				.recoverInterruptedDispatches(this.now())
 				// A failed startup recovery surfaces again on the next claim; it must not strand the scheduler.
