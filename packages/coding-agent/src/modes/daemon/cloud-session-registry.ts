@@ -37,6 +37,7 @@ import {
 	type CloudCommandRequest,
 	type CloudEvent,
 	type CloudFamilyRow,
+	type CloudModelMetadata,
 	type CloudInferenceEnd,
 	type CloudInferenceError,
 	type CloudInferenceEvent,
@@ -546,11 +547,13 @@ export class CloudSessionRegistry {
 		const session = this.registerResidentSession(record);
 		this.writeRootShadow(session, record);
 		try {
+			const brokered = this.brokeredModelMetadata(input.model);
 			await this.submitResident(session, `open_${randomUUID()}`, {
 				kind: "open_session",
 				cwd: input.cwd,
 				...(input.model ? { model: input.model } : {}),
 				...(input.thinking ? { thinking: input.thinking } : {}),
+				...(brokered?.modelMetadata ? { modelMetadata: brokered.modelMetadata } : {}),
 			});
 			session.opened = true;
 			if (input.sessionName) {
@@ -728,6 +731,7 @@ export class CloudSessionRegistry {
 			// guest admitted it before the restart; re-sending it would run
 			// the task twice, so only the session open is repeated (idempotent).
 			const alreadyAdmitted = this.spawnTaskAlreadyAdmitted(session);
+			const spawnBrokered = this.brokeredModelMetadata(spawn.model);
 			await this.submitResident(
 				session,
 				`open_${randomUUID()}`,
@@ -736,6 +740,7 @@ export class CloudSessionRegistry {
 					cwd,
 					...(spawn.model ? { model: spawn.model } : {}),
 					...(spawn.thinking ? { thinking: spawn.thinking } : {}),
+					...(spawnBrokered?.modelMetadata ? { modelMetadata: spawnBrokered.modelMetadata } : {}),
 					...(alreadyAdmitted ? {} : { prompt: `[task from parent]\n\n${spawn.prompt}` }),
 					// The guest links itself to its LOCAL parent with this
 					// durable context, so role-addressed replies and rosters
@@ -981,6 +986,7 @@ export class CloudSessionRegistry {
 		else this.writeRootShadow(nextSession, fresh);
 		try {
 			const spawn = fresh.location === "spawned-child" ? fresh.spawn : undefined;
+			const reprovisionBrokered = this.brokeredModelMetadata(model);
 			await this.submitResident(
 				nextSession,
 				`open_${randomUUID()}`,
@@ -988,6 +994,9 @@ export class CloudSessionRegistry {
 					kind: "open_session",
 					cwd,
 					...(model ? { model } : {}),
+					...(reprovisionBrokered?.modelMetadata
+						? { modelMetadata: reprovisionBrokered.modelMetadata }
+						: {}),
 					...(spawn
 						? {
 								family: {
@@ -2599,6 +2608,35 @@ export class CloudSessionRegistry {
 	private resolveSessionModel(session: CloudResidentSession, remoteSessionId: string): Model<Api> | undefined {
 		const identity = this.cloudModelIdentity(session, remoteSessionId);
 		return identity === undefined ? undefined : this.options.resolveModel?.(identity);
+	}
+
+	/**
+	 * Brokered (non-prime-inference) models run their completions through the
+	 * local daemon: the guest holds only a stub, so the open_session request
+	 * carries the real model's bounded metadata (window, output cap, reasoning
+	 * flag, display name) for the guest's bookkeeping.
+	 */
+	private brokeredModelMetadata(
+		model: string | undefined,
+	): { provider: string; modelId: string; modelMetadata: CloudModelMetadata } | undefined {
+		if (model === undefined) return undefined;
+		const separator = model.indexOf("/");
+		if (separator <= 0) return undefined;
+		const provider = model.slice(0, separator);
+		const modelId = model.slice(separator + 1);
+		if (provider === "prime-inference") return undefined;
+		const resolved = this.options.resolveModel?.({ provider, modelId });
+		if (resolved === undefined) return undefined;
+		return {
+			provider,
+			modelId,
+			modelMetadata: {
+				name: resolved.name,
+				contextWindow: resolved.contextWindow,
+				maxTokens: resolved.maxTokens,
+				reasoning: resolved.reasoning,
+			},
+		};
 	}
 
 	private connectionState(session: CloudResidentSession, target: CloudSessionTarget): AgentConnectionState {
