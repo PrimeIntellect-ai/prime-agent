@@ -119,6 +119,17 @@ async function waitForProcessGone(pid: number): Promise<void> {
 	throw new Error(`Owned worker ${pid} remained alive`);
 }
 
+const waitForStdoutContains = (frontend: ChildProcess, stdout: () => string, needle: string) =>
+	new Promise<void>((resolve) => {
+		if (stdout().includes(needle)) return resolve();
+		frontend.stdout?.on("data", function check() {
+			if (stdout().includes(needle)) {
+				frontend.stdout?.off("data", check);
+				resolve();
+			}
+		});
+	});
+
 async function spawnRpcFrontend(
 	args: string[] = ["--mode", "rpc"],
 	env: Record<string, string> = {},
@@ -247,46 +258,54 @@ describe("owned session worker processes", () => {
 			"",
 			"request-1",
 		],
-		[
-			"absorbs a bridge write EPIPE after closing stdin mid-session",
-			{ PRIME_AGENT_TEST_CLOSE_STDIN_ON_COMMAND: "close_stdin" },
-			async (frontend: ChildProcess, workerPid: number, stdout: () => string) => {
-				// The worker acks close_stdin then closes its stdin read end: the
-				// next bridge write EPIPEs. Pre-fix that crashed the frontend.
-				frontend.stdin?.write(`${JSON.stringify({ id: "close-1", type: "close_stdin" })}\n`);
-				await new Promise<void>((resolve) => {
-					frontend.stdout?.on("data", function check() {
-						if (stdout().includes("close_stdin")) {
-							frontend.stdout?.off("data", check);
-							resolve();
-						}
-					});
-				});
-				frontend.stdin?.write(`${JSON.stringify({ id: "after-1", type: "get_state" })}\n`);
-				frontend.stdin?.end();
-				process.kill(workerPid, "SIGKILL");
-			},
-			`${JSON.stringify({ id: "close-1", type: "response", command: "close_stdin", success: true })}\n`,
-			"after-1",
-		],
-	] as Array<
-		[
-			string,
-			Record<string, string>,
-			(f: ChildProcess, p: number, s: () => string) => Promise<void> | void,
-			string,
-			string,
-		]
-	>)("fails pending RPC commands when the worker %s", async (_label, env, drive, prefix, failedId) => {
-		const interactive = env.PRIME_AGENT_TEST_CLOSE_STDIN_ON_COMMAND === "close_stdin";
-		const { frontend, workerPid, stdout } = await spawnRpcFrontend(undefined, env, interactive);
-		await drive(frontend, workerPid, stdout);
+	] as Array<[string, Record<string, string>, (frontend: ChildProcess) => void, string, string]>)(
+		"fails pending RPC commands when the worker %s",
+		async (_label, env, drive, prefix, failedId) => {
+			const { frontend, workerPid, stdout } = await spawnRpcFrontend(undefined, env);
+			drive(frontend);
+			const exit = await waitForExit(frontend);
+			children.delete(frontend);
+
+			expect(exit).toEqual({ code: 1, signal: null });
+			expect(stdout()).toBe(prefix + failedResponse(failedId));
+			await waitForProcessGone(workerPid);
+		},
+	);
+
+	it("absorbs a bridge write EPIPE and replays buffered follow-ups exactly once", async () => {
+		const { frontend, workerPid, pidPath, stdout } = await spawnRpcFrontend(undefined, {
+			PRIME_AGENT_TEST_CLOSE_STDIN_ON_COMMAND: "close_stdin",
+		});
+		// The worker acks close_stdin, closes its stdin read end (marked via
+		// the .deaf file), and crashes itself 500ms later: the next bridge
+		// write EPIPEs, and the worker only dies after everything below was
+		// received.
+		frontend.stdin?.write(`${JSON.stringify({ id: "close-1", type: "close_stdin" })}\n`);
+		await waitForStdoutContains(frontend, stdout, "close_stdin");
+		while (!existsSync(`${pidPath}.deaf`)) await new Promise((r) => setImmediate(r));
+		frontend.stdin?.on("error", () => {});
+		frontend.stdin?.write(`${JSON.stringify({ type: "ack_result" })}\n`);
+		// The absorbed EPIPE tears the dead pipe down with no observable
+		// signal, so yield before the follow-up: after-1 must land in
+		// bufferedRpcInput, never in a racing write into the dead pipe. It
+		// never started, so it must not be reported uncertain.
+		await new Promise((resolveDelay) =>
+			// test-policy: allow wall-clock-timer -- no observable exists for the frontend's absorbed EPIPE teardown; this only selects the buffered interleaving
+			setTimeout(resolveDelay, 150),
+		);
+		frontend.stdin?.write(`${JSON.stringify({ id: "after-1", type: "get_state" })}\n`);
+		const replacementPid = await waitForReplacementWorkerPid(pidPath, workerPid);
+		await waitForStdoutContains(frontend, stdout, '"after-1"');
+		frontend.stdin?.end();
 		const exit = await waitForExit(frontend);
 		children.delete(frontend);
 
-		expect(exit).toEqual({ code: 1, signal: null });
-		expect(stdout()).toBe(prefix + failedResponse(failedId));
+		expect(exit).toEqual({ code: 0, signal: null });
+		expect(stdout()).toBe(
+			`${JSON.stringify({ id: "close-1", type: "response", command: "close_stdin", success: true })}\n${JSON.stringify({ id: "after-1", type: "response", command: "get_state", success: true })}\n`,
+		);
 		await waitForProcessGone(workerPid);
+		await waitForProcessGone(replacementPid);
 	});
 
 	it("terminates the owned worker when its frontend is killed", async () => {

@@ -39,6 +39,20 @@ if (process.env.PRIME_AGENT_INTERNAL_OWNED_WORKER === "1") {
 				}),
 			);
 		};
+		const writeRecoveryDescriptor = () => {
+			const recoveryPath = process.env.PRIME_AGENT_INTERNAL_OWNED_RECOVERY_DESCRIPTOR;
+			if (pidPath && recoveryPath) {
+				writeFileSync(
+					recoveryPath,
+					`${JSON.stringify({
+						version: 1,
+						sessionId: "fixture-session",
+						sessionFile: `${pidPath}.jsonl`,
+						cwd: process.cwd(),
+					})}\n`,
+				);
+			}
+		};
 		attachJsonlLineReader(process.stdin, (line) => {
 			const command = JSON.parse(line) as { id?: string; type: string; marker?: string };
 			if (process.env.PRIME_AGENT_TEST_EXIT_ZERO_ON_COMMAND === command.type) {
@@ -49,31 +63,25 @@ if (process.env.PRIME_AGENT_INTERNAL_OWNED_WORKER === "1") {
 			}
 			if (process.env.PRIME_AGENT_TEST_CLOSE_STDIN_ON_COMMAND === command.type) {
 				outputResponse(command);
-				// Close the read end of the bridge pipe (fd 0) while the worker
-				// stays alive: the next frontend bridge write EPIPEs, the same
-				// kernel-level condition a dying worker leaves behind before
-				// Node tears its pipe down. An EPIPE race here used to be
-				// nondeterministic; closing the fd makes it reproducible.
+				writeRecoveryDescriptor();
+				// Close the read end of the bridge pipe while the worker stays
+				// alive, then mark it: the next bridge write must EPIPE, not
+				// race the close.
 				closeSync(0);
+				if (pidPath) {
+					writeFileSync(`${pidPath}.deaf`, "deaf\n");
+				}
+				// fd 0 going away drains this loop, so the worker would exit
+				// cleanly before the test buffers follow-ups against it. The
+				// timer holds the loop and crashes the worker on its own.
+				// test-policy: allow wall-clock-timer -- schedules the deaf worker's own crash after the frontend has buffered the follow-up
+				setTimeout(() => process.exit(1), 500);
 				return;
 			}
 			if (command.type === "ack_result") {
 				if (process.env.PRIME_AGENT_TEST_CRASH_ON_ACK === "1" && pidPath && !existsSync(`${pidPath}.crashed`)) {
 					writeFileSync(`${pidPath}.crashed`, "crashed\n");
-					const recoveryPath = process.env.PRIME_AGENT_INTERNAL_OWNED_RECOVERY_DESCRIPTOR;
-					if (recoveryPath) {
-						writeFileSync(
-							recoveryPath,
-							`${JSON.stringify({
-								version: 1,
-								profile: "rpc",
-								sessionId: "fixture-session",
-								sessionFile: `${pidPath}.jsonl`,
-								cwd: process.cwd(),
-								updatedAt: new Date().toISOString(),
-							})}\n`,
-						);
-					}
+					writeRecoveryDescriptor();
 					process.exit(1);
 				}
 				return;
