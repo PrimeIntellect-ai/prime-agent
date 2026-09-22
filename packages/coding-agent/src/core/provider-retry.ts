@@ -82,8 +82,8 @@ export type ProviderRetryDelay = { kind: "wait"; delayMs: number } | { kind: "ex
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 /**
- * Delay before retry `attempt` (1-based), honoring a server-requested wait exactly.
- * Backoff is jittered so concurrent sessions do not retry in lockstep; the server wait floors the jitter.
+ * Delay before retry `attempt` (1-based). A server-requested wait at or above the backoff is used as-is;
+ * otherwise the backoff is jittered so concurrent sessions do not retry in lockstep, floored at the server wait.
  */
 export function providerRetryDelay(
 	attempt: number,
