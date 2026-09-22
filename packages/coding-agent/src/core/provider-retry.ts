@@ -61,8 +61,7 @@ export function providerStreamFailureStatus(message: AssistantMessage): number |
  * marked stale. A 404 is the exception: a live model briefly 404s on routing
  * blips (observed 2026-09-13 killing every active session), so it counts as
  * transient unavailability, not a permanent rejection. Safety filters
- * deterministically reject identical requests, so like refusal and permission
- * they never retry; providerWaitClass routes safety as permanent too.
+ * deterministically reject identical requests, so they never retry.
  */
 export function isPermanentProviderFailureKind(
 	kind: string | undefined,
