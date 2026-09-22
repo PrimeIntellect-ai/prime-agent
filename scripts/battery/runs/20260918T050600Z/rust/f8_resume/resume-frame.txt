@@ -1,0 +1,36 @@
+                                                    battery-compact  $0.00
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.1.0
+  ▗█▛ ▟██▙▄██▛ ▟▛         model z-ai/glm-5.3
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd ~/prime-agent-rs/scripts/battery/runs/20260918T050600Z/rust/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      Collapsed mode (Ctrl+O to expand)
+
+ >
+
+← manage                                                                                                    z-ai/glm-5.3

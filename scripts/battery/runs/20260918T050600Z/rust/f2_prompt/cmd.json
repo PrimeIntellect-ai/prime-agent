@@ -1,0 +1,19 @@
+{
+ "argv": [
+  "/home/ubuntu/prime-agent-rs/target/release/prime-agent",
+  "-p",
+  "--daemon-socket",
+  "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260918T050600Z/rust/daemon.sock",
+  "--provider",
+  "prime-inference",
+  "--model",
+  "mock-1",
+  "--offline",
+  "Say hello"
+ ],
+ "exit_code": 0,
+ "stdout": "battery hello from mock\n",
+ "stderr": "",
+ "duration_s": 0.18,
+ "timeout": false
+}

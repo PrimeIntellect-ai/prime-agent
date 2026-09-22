@@ -72,6 +72,24 @@ impl BashOperations for LocalBashOperations {
             let mut child = process.spawn()?;
 
             let pid = child.id() as i32;
+            // Track the detached child for shutdown-signal kills (TS
+            // `trackDetachedChildPid` right after the spawn): the child's
+            // process group outlives this process's own death, so a
+            // SIGTERM-handling parent drains the registry instead of
+            // orphaning the run.
+            crate::platform::track_detached_child_pid(pid);
+            // The settle-side untrack (TS drops the pid in both
+            // `waitForChildProcess` arms): a guard, because a cancelled
+            // tool run drops this future before the wait resolves - the
+            // abort already killed the tree, so the pid must leave the
+            // registry no matter which way the operation leaves.
+            struct UntrackOnExit(i32);
+            impl Drop for UntrackOnExit {
+                fn drop(&mut self) {
+                    crate::platform::untrack_detached_child_pid(self.0);
+                }
+            }
+            let _untrack = UntrackOnExit(pid);
             let stdout = child.stdout.take().expect("piped stdout");
             let stderr = child.stderr.take().expect("piped stderr");
 

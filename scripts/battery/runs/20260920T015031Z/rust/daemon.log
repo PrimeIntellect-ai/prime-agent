@@ -1,0 +1,130 @@
+pa-daemon client connection error: Broken pipe (os error 32)
+Python 3.11 is already installed
+Using CPython 3.11.16
+Creating virtual environment with seed packages at: /home/ubuntu/.prime/agent/kernel-venv
+ + packaging==26.3
+ + pip==26.2.1
+ + setuptools==84.0.0
+ + wheel==0.48.0
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 50 packages in 223ms
+   Building prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+      Built prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+Prepared 1 package in 278ms
+Installed 50 packages in 180ms
+ + annotated-types==0.8.0
+ + anyio==4.15.1
+ + attrs==26.1.0
+ + beautifulsoup4==4.15.0
+ + certifi==2026.7.22
+ + cffi==2.1.1
+ + charset-normalizer==3.5.1
+ + click==8.5.0
+ + cryptography==50.0.1
+ + dill==0.4.1
+ + docstring-parser==0.18.0
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpcore2==2.13.0
+ + httpx==0.28.1
+ + httpx2==2.13.0
+ + idna==3.20
+ + jsonschema==4.26.0
+ + jsonschema-specifications==2025.9.1
+ + lxml==6.1.3
+ + mcp==2.2.0
+ + mcp-types==2.2.0
+ + numpy==2.4.6
+ + opentelemetry-api==1.44.0
+ + pandas==3.0.6
+ + prime-agent-runtime==0.1.0 (from file:///home/ubuntu/prime-agent-rs/prime-agent-runtime)
+ + pycparser==3.0
+ + pydantic==2.13.5
+ + pydantic-core==2.46.5
+ + pyjwt==2.14.0
+ + python-dateutil==2.9.0.post0
+ + python-dotenv==1.2.3
+ + python-multipart==0.0.32
+ + pyyaml==6.0.3
+ + referencing==0.37.0
+ + requests==2.34.2
+ + rpds-py==2026.6.3
+ + scipy==1.17.1
+ + six==1.17.0
+ + soupsieve==2.9.2
+ + sse-starlette==3.4.11
+ + starlette==1.6.0
+ + tomli==2.4.1
+ + truststore==0.10.4
+ + typeguard==4.6.0
+ + typing-extensions==4.16.0
+ + typing-inspection==0.4.4
+ + tyro==1.0.16
+ + urllib3==2.8.0
+ + uvicorn==0.53.0
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+      Built agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+Prepared 1 package in 329ms
+Installed 1 package in 0.66ms
+ + agent-message==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-message)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+      Built agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+Prepared 1 package in 281ms
+Installed 1 package in 0.67ms
+ + agent-observe==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-observe)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 34 packages in 261ms
+   Building prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+      Built prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+Prepared 1 package in 272ms
+Installed 2 packages in 7ms
+ + pillow==12.3.0
+ + prime-agent-skill-attach-image==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/attach-image)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+      Built compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+Prepared 1 package in 285ms
+Installed 1 package in 1ms
+ + compact==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/compact)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+      Built edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+Prepared 1 package in 275ms
+Installed 1 package in 1ms
+ + edit==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/edit)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+      Built goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+Prepared 1 package in 270ms
+Installed 1 package in 0.65ms
+ + goal==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/goal)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+      Built refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+Prepared 1 package in 285ms
+Installed 1 package in 0.65ms
+ + refine==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/refine)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+      Built rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+Prepared 1 package in 278ms
+Installed 1 package in 0.69ms
+ + rlm-heartbeat==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 36 packages in 71ms
+   Building prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+      Built prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+Prepared 1 package in 256ms
+Installed 1 package in 1ms
+ + prime-agent-skill-websearch==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/websearch)
+pa-daemon worker connection error: Connection reset by peer (os error 104)
+pa-daemon client connection error: Broken pipe (os error 32)

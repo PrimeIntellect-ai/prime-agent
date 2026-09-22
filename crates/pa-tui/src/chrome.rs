@@ -48,6 +48,11 @@ pub struct ChromeState {
     pub cwd: String,
     /// Current model id (splash `model` line; `None` hides the line).
     pub model_id: Option<String>,
+    /// The current model's provider, when the state/event that reported the
+    /// model carried it. Live-catalog ids repeat across providers
+    /// (openrouter entries reuse `vendor/model` paths), so the provider is
+    /// what disambiguates the current row.
+    pub model_provider: Option<String>,
     /// Extra metadata lines under the splash (`label value` each; e.g. the
     /// agents view's `agents N running, ...` count row and, in scoped
     /// mode, the `depth N` row). Empty renders none.

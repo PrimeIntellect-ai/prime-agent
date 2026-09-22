@@ -1,0 +1,27 @@
+{
+  "version": 2,
+  "workerId": "7c0edea9d124",
+  "pid": 416060,
+  "socketPath": "/tmp/vbat20260922T131236Z-rust/prime-agent-1000/worker-f3ff43c6a25c-7c0edea9d124.sock",
+  "recoveryJournalPath": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/daemon-workers/f3ff43c6a25c/7c0edea9d124.recovery.jsonl",
+  "supervisorSocketPath": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/daemon.sock",
+  "authenticationToken": "ec8e669b-a81a-4c68-97fb-614a24186b95",
+  "workerInstanceId": "554ffd31-ab8a-47a5-b87f-04b40fd360db",
+  "rootActiveSessionId": "7c0edea9d124",
+  "ownerClientId": "656bce15396a",
+  "rootSessionId": "01a0c947-86bb-746b-8aaa-da95f028e28e",
+  "sessionFile": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/sessions/01a0c947-86bb-746b-8aaa-da95f028e28e.jsonl",
+  "sessionDir": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/sessions",
+  "createdAt": "2026-09-22T13:21:42.976Z",
+  "updatedAt": "2026-09-22T13:21:43.212Z",
+  "lifecycle": "ready",
+  "createCommand": {
+    "sessionPath": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/sessions/01a0c947-86bb-746b-8aaa-da95f028e28e.jsonl",
+    "cwd": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/work",
+    "sessionDir": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/sessions",
+    "name": "battery-f15-a",
+    "provider": "prime-inference",
+    "model": "mock-1"
+  },
+  "consecutiveFailures": 0
+}

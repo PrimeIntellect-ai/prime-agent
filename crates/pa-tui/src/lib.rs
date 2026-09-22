@@ -66,6 +66,7 @@ pub mod session;
 pub mod session_ui;
 pub mod settings_menu;
 pub mod side_question;
+mod signals;
 pub mod snapshot;
 pub mod subagents;
 mod suspend;

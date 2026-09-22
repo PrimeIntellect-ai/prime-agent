@@ -1,0 +1,6 @@
+{
+ "id": "sq1",
+ "type": "response",
+ "command": "start_side_question",
+ "success": true
+}

@@ -1,0 +1,8 @@
+{"cwd":"/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260918T050600Z/rust/work","id":"01a0b2e8-fe89-75c7-b83e-b30e26595d78","rlmDepth":0,"timestamp":"2026-09-18T05:06:49.097Z","type":"session","version":3}
+{"type":"model_change","id":"3875b5d1","parentId":null,"timestamp":"2026-09-18T05:06:49.121Z","modelId":"mock-1","provider":"prime-inference"}
+{"type":"thinking_level_change","id":"ea4dba38","parentId":"3875b5d1","timestamp":"2026-09-18T05:06:49.121Z","thinkingLevel":"off"}
+{"type":"service_tier_change","id":"de68bf0d","parentId":"ea4dba38","timestamp":"2026-09-18T05:06:49.121Z","serviceTier":"default"}
+{"type":"session_state","id":"ba0432bb","parentId":"de68bf0d","timestamp":"2026-09-18T05:06:49.121Z","state":{"status":"active"}}
+{"type":"session_info","id":"9b9fcb91","parentId":"ba0432bb","timestamp":"2026-09-18T05:06:49.123Z","name":"battery-side-questions"}
+{"type":"message","id":"feb5a3b1","parentId":"9b9fcb91","timestamp":"2026-09-18T05:06:49.158Z","message":{"content":[{"text":"start a turn","type":"text"}],"role":"user","timestamp":1789708009158}}
+{"type":"message","id":"3ec2f7e0","parentId":"feb5a3b1","timestamp":"2026-09-18T05:06:49.244Z","message":{"api":"openai-completions","content":[{"text":"main turn reply","type":"text"}],"model":"mock-1","provider":"prime-inference","responseId":"chatcmpl-battery","role":"assistant","stopReason":"stop","timestamp":1789708009229,"usage":{"cacheRead":80,"cacheWrite":0,"cost":{"cacheRead":0,"cacheWrite":0,"input":0,"output":0,"total":0},"input":20,"output":10,"totalTokens":110}}}

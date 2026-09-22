@@ -1,0 +1,482 @@
+[
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: /compact shows the durable '\u25c6 Context compacted' summary row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: the Ctrl+O detail cycle expands the compaction summary block",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: the third Ctrl+O re-collapses the compaction summary block",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: crossing the compaction threshold auto-compacts and shows the summary row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: /compact shows the durable '\u25c6 Context compacted' summary row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: the Ctrl+O detail cycle expands the compaction summary block",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: the third Ctrl+O re-collapses the compaction summary block",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "behavior",
+  "gap": true,
+  "summary": "rust: threshold crossing produced no visible auto-compaction outcome",
+  "evidence": "rust/f14_compact/05-auto-after.txt",
+  "expectedFail": "compact-fb-2"
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "manual-compact: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "manual-expanded: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": true,
+  "summary": "auto-compact: frames differ TS vs Rust (see frame-diff-auto-compact.txt)",
+  "evidence": "ts/f14_compact/frame-diff-auto-compact.txt",
+  "expectedFail": "compact-fb-2"
+ },
+ {
+  "flow": "f17_slash_model",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: /model opens the selector with the configured model listed",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f17_slash_model",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: picking a model in the selector shows the 'Model: <id>' confirm row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f17_slash_model",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: /effort shows the thinking-level picker or its unsupported-model row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f17_slash_model",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: /model opens the selector with the configured model listed",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f17_slash_model",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: picking a model in the selector shows the 'Model: <id>' confirm row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f17_slash_model",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: /effort shows the thinking-level picker or its unsupported-model row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f17_slash_model",
+  "category": "visual",
+  "gap": false,
+  "summary": "model-selector: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f17_slash_model",
+  "category": "visual",
+  "gap": false,
+  "summary": "model-selected: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f17_slash_model",
+  "category": "visual",
+  "gap": false,
+  "summary": "effort-picker: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: a kernel rlm.spawn renders the subagent summary line above the editor with the running/idle/inactive counts",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: a child finishing without a reply renders the 'RLM child status' terminal-notice row in the parent transcript",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: the scoped agents view lists the spawned child by name",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: a kernel rlm.spawn renders the subagent summary line above the editor with the running/idle/inactive counts",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: a child finishing without a reply renders the 'RLM child status' terminal-notice row in the parent transcript",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: the scoped agents view lists the spawned child by name",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": true,
+  "summary": "spawn: frames differ TS vs Rust (see frame-diff-spawn.txt)",
+  "evidence": "ts/f20_subagents/frame-diff-spawn.txt",
+  "expectedFail": "subagents-tui"
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": true,
+  "summary": "child-status: frames differ TS vs Rust (see frame-diff-child-status.txt)",
+  "evidence": "ts/f20_subagents/frame-diff-child-status.txt",
+  "expectedFail": "subagents-tui"
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": false,
+  "summary": "scoped-agents: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: the prompt-context hint renders the user override (X), not the default",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: the override key cycled the conversation detail",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: the removed default key no longer cycles the detail",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: /hotkeys documents the effective override (X row)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: the ? quick-shortcut guide mounted with the effective bindings",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: the submission cleared the quick-shortcut guide",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: the prompt-context hint renders the user override (X), not the default",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: the override key cycled the conversation detail",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: the removed default key no longer cycles the detail",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: /hotkeys documents the effective override (X row)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: the ? quick-shortcut guide mounted with the effective bindings",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: the submission cleared the quick-shortcut guide",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "detail-hint: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "override-fired: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "default-key: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "hotkeys-guide: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "shortcut-guide: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "guide-cleared: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: agents view groups the roster into Running/Idle/Inactive sections with the scripted sessions in place",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: opening the Running row attached to the live session and its in-flight reply rendered",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: agents view groups the roster into Running/Idle/Inactive sections with the scripted sessions in place",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: opening the Running row attached to the live session and its in-flight reply rendered",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "visual",
+  "gap": true,
+  "summary": "agents view frames differ at 120x36 (see frame-diff-120x36.txt)",
+  "evidence": "ts/f9_agents_view/frame-diff-120x36.txt",
+  "expectedFail": null
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "visual",
+  "gap": true,
+  "summary": "agents view frames differ at 220x50 (see frame-diff-220x50.txt)",
+  "evidence": "ts/f9_agents_view/frame-diff-220x50.txt",
+  "expectedFail": null
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "visual",
+  "gap": false,
+  "summary": "agents view frames identical at filtered-120x36 (normalized: paths, ids, ages)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "visual",
+  "gap": false,
+  "summary": "agents view frames identical at transcript-120x36 (normalized: paths, ids, ages)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f11_provider_failure",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: provider failure surfaces (retry banner + 4 error row(s))",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f11_provider_failure",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: provider failure surfaces (retry banner + 4 error row(s))",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f11_provider_failure",
+  "category": "visual",
+  "gap": false,
+  "summary": "provider-failure rendering parity: 4 error row(s) on both sides",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f12_scroll",
+  "category": "behavior",
+  "gap": true,
+  "summary": "ts: scrollback checks failed: paged shows early prompt",
+  "evidence": "ts/f12_scroll",
+  "expectedFail": null
+ },
+ {
+  "flow": "f12_scroll",
+  "category": "behavior",
+  "gap": true,
+  "summary": "rust: scrollback checks failed: paged shows early prompt",
+  "evidence": "rust/f12_scroll",
+  "expectedFail": null
+ }
+]

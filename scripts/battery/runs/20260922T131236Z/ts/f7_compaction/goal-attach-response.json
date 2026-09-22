@@ -1,0 +1,159 @@
+{
+ "id": "ga1",
+ "type": "response",
+ "command": "attach",
+ "success": true,
+ "data": {
+  "protocol": {
+   "name": "prime-agent.daemon",
+   "version": 7
+  },
+  "activeSessionId": "cbbe21b8bb7d",
+  "snapshot": {
+   "activeSessionId": "cbbe21b8bb7d",
+   "summary": {
+    "id": "cbbe21b8bb7d",
+    "lifecycle": "draft",
+    "activity": "idle",
+    "isSessionActive": false,
+    "lastActivityAt": "2026-09-22T13:15:10.142Z",
+    "runtimeKind": "top-level",
+    "rlmDepth": 0,
+    "activeSessionId": "cbbe21b8bb7d",
+    "sessionId": "01a0c941-86c9-707c-a7c2-893385c1f28f",
+    "sessionFile": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/agent/sessions/01a0c941-86c9-707c-a7c2-893385c1f28f.jsonl",
+    "sessionName": "battery-goal-continue",
+    "cwd": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/work",
+    "model": {
+     "id": "mock-1",
+     "name": "Mock 1",
+     "api": "openai-completions",
+     "provider": "prime-inference",
+     "baseUrl": "http://127.0.0.1:41165/v1",
+     "reasoning": false,
+     "input": [
+      "text"
+     ],
+     "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+     },
+     "contextWindow": 128000,
+     "maxTokens": 4096
+    },
+    "thinkingLevel": "off",
+    "isStreaming": false,
+    "isCompacting": false,
+    "isBashRunning": false,
+    "hasRunningRlmChildren": false,
+    "isRunningTools": false,
+    "attachedClients": 1,
+    "messageCount": 0,
+    "unfinishedActionCount": 0,
+    "sessionActions": {
+     "queuedCount": 0,
+     "steering": [],
+     "followUps": []
+    },
+    "created": "2026-09-22T13:15:09.897Z",
+    "modified": "2026-09-22T13:15:10.142Z",
+    "diagnostics": [],
+    "workerState": "ready",
+    "workerPid": 401552
+   },
+   "state": {
+    "activeSessionId": "cbbe21b8bb7d",
+    "cwd": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/work",
+    "model": {
+     "id": "mock-1",
+     "name": "Mock 1",
+     "api": "openai-completions",
+     "provider": "prime-inference",
+     "baseUrl": "http://127.0.0.1:41165/v1",
+     "reasoning": false,
+     "input": [
+      "text"
+     ],
+     "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+     },
+     "contextWindow": 128000,
+     "maxTokens": 4096
+    },
+    "thinkingLevel": "off",
+    "serviceTier": "default",
+    "availableThinkingLevels": [
+     "off"
+    ],
+    "isStreaming": false,
+    "isCompacting": false,
+    "isBashRunning": false,
+    "retryAttempt": 0,
+    "steeringMode": "one-at-a-time",
+    "followUpMode": "one-at-a-time",
+    "sessionFile": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/agent/sessions/01a0c941-86c9-707c-a7c2-893385c1f28f.jsonl",
+    "sessionId": "01a0c941-86c9-707c-a7c2-893385c1f28f",
+    "sessionName": "battery-goal-continue",
+    "sessionDir": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/agent/sessions",
+    "leafId": "900f80bb",
+    "autoCompactionEnabled": true,
+    "messageCount": 0,
+    "sessionActions": {
+     "queuedCount": 0,
+     "steering": [],
+     "followUps": []
+    },
+    "compactionCount": 0,
+    "goal": {
+     "active": false,
+     "status": "idle",
+     "tokensUsed": 0,
+     "timeUsedSeconds": 0,
+     "continuationsUsed": 0
+    },
+    "scopedModels": [],
+    "activeToolNames": [
+     "ipython"
+    ],
+    "contextUsage": {
+     "tokens": 0,
+     "contextWindow": 128000,
+     "percent": 0
+    },
+    "heartbeat": null
+   },
+   "messages": [],
+   "lastEventSequence": 0,
+   "lastEventCursor": {
+    "generation": "96b15469c466",
+    "sequence": 0
+   },
+   "children": []
+  },
+  "replay": {
+   "status": "complete",
+   "toSequence": 0,
+   "toCursor": {
+    "generation": "96b15469c466",
+    "sequence": 0
+   }
+  },
+  "lastEventSequence": 0,
+  "lastEventCursor": {
+   "generation": "96b15469c466",
+   "sequence": 0
+  },
+  "client": {
+   "id": "d3f1b1786ec7",
+   "capabilities": [
+    "attach_snapshot",
+    "event_sequence"
+   ]
+  }
+ }
+}

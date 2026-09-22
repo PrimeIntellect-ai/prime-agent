@@ -1,0 +1,36 @@
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.9.5
+  ▗█▛ ▟██▙▄██▛ ▟▛         model mock-1
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd ~/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+  hold the turn
+
+
+ Operation aborted · 0s
+
+                                                                                      Collapsed mode (Ctrl+O to expand)
+
+ >
+
+← manage                                                                                               mock-1 · 666 (1%)
+
+Resume this session with: prime-agent --resume 01a0c945-cf37-772d-b29e-d7eb33edfa4d
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Pane is dead (status 0, Tue Sep 22 13:19:51 2026)

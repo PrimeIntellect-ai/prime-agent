@@ -1,0 +1,46 @@
+[
+ {
+  "path": "/v1/chat/completions",
+  "body": {
+   "max_tokens": 400,
+   "messages": [
+    {
+     "content": "You generate a status line for an AI coding agent dashboard. You are given the recent conversation between a user and the agent, plus whether the agent is currently working or idle.\n\nOutput ONLY these two tags, nothing before, between, or after. Do not think out loud, explain, or count words.\n<recap>a present-tense clause, at most 12 words, saying what the agent is doing or just did, no trailing period</recap>\n<status>one of NEEDS_INPUT, COMPLETED</status>\n\nSTATUS meaning:\n- COMPLETED: the agent finished its turn AND the user's request is fully done with nothing left.\n- NEEDS_INPUT: the agent finished its turn but the task is not fully done \u2014 it asked a question, hit a blocker, or needs more prompting.\nWhen you are unsure between COMPLETED and NEEDS_INPUT, choose NEEDS_INPUT.\n\nExample:\n<recap>Refactoring the auth middleware and updating its tests</recap>\n<status>NEEDS_INPUT</status>",
+     "role": "system"
+    },
+    {
+     "content": "<agent-state>idle (finished its turn)</agent-state>\n<conversation>\nuser: hi\nassistant: battery hello from mock\n</conversation>",
+     "role": "user"
+    }
+   ],
+   "model": "qwen/qwen3-30b-a3b-instruct-2507",
+   "stream": true,
+   "stream_options": {
+    "include_usage": true
+   }
+  },
+  "auth": "Bearer sk-battery"
+ },
+ {
+  "path": "/v1/chat/completions",
+  "body": {
+   "max_tokens": 400,
+   "messages": [
+    {
+     "content": "You generate a status line for an AI coding agent dashboard. You are given the recent conversation between a user and the agent, plus whether the agent is currently working or idle.\n\nOutput ONLY these two tags, nothing before, between, or after. Do not think out loud, explain, or count words.\n<recap>a present-tense clause, at most 12 words, saying what the agent is doing or just did, no trailing period</recap>\n<status>one of NEEDS_INPUT, COMPLETED</status>\n\nSTATUS meaning:\n- COMPLETED: the agent finished its turn AND the user's request is fully done with nothing left.\n- NEEDS_INPUT: the agent finished its turn but the task is not fully done \u2014 it asked a question, hit a blocker, or needs more prompting.\nWhen you are unsure between COMPLETED and NEEDS_INPUT, choose NEEDS_INPUT.\n\nExample:\n<recap>Refactoring the auth middleware and updating its tests</recap>\n<status>NEEDS_INPUT</status>",
+     "role": "system"
+    },
+    {
+     "content": "<agent-state>idle (finished its turn)</agent-state>\n<conversation>\nuser: start a turn\nassistant: main turn reply\n</conversation>",
+     "role": "user"
+    }
+   ],
+   "model": "qwen/qwen3-30b-a3b-instruct-2507",
+   "stream": true,
+   "stream_options": {
+    "include_usage": true
+   }
+  },
+  "auth": "Bearer sk-battery"
+ }
+]

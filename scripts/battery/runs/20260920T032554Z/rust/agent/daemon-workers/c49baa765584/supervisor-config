@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "socketPath": "/tmp/auto-compact-battery/20260920T032552Z/20260920T032554Z/rust/daemon.sock",
+  "defaultSessionDir": "/tmp/auto-compact-battery/20260920T032552Z/20260920T032554Z/rust/agent/sessions"
+}

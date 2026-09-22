@@ -1,0 +1,36 @@
+                                                          work  $0.00
+ ⚠ Error: Retry failed after 3 attempts: Connection failed: error sending request for url
+ (http://127.0.0.1:45419/v1/chat/completions)
+
+
+  prompt 3
+
+
+ Error: Connection failed: error sending request for url (http://127.0.0.1:45419/v1/chat/completions)
+
+ Error: Connection failed: error sending request for url (http://127.0.0.1:45419/v1/chat/completions)
+
+ Error: Connection failed: error sending request for url (http://127.0.0.1:45419/v1/chat/completions)
+
+ Error: Connection failed: error sending request for url (http://127.0.0.1:45419/v1/chat/completions)
+
+ ⚠ Error: Retry failed after 3 attempts: Connection failed: error sending request for url
+ (http://127.0.0.1:45419/v1/chat/completions)
+
+
+  prompt 4
+
+
+ Error: Connection failed: error sending request for url (http://127.0.0.1:45419/v1/chat/completions)
+
+ Error: Connection failed: error sending request for url (http://127.0.0.1:45419/v1/chat/completions)
+
+ Error: Connection failed: error sending request for url (http://127.0.0.1:45419/v1/chat/completions)
+
+ Error: Connection failed: error sending reque ctrl+shift+down to follow 1:45419/v1/chat/completions)
+
+                                                                                           Collapsed mode (X to expand)
+
+ >
+
+← manage                                                                                                mock-1 · 38 (0%)

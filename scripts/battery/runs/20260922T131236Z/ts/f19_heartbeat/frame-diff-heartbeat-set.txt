@@ -1,0 +1,75 @@
+--- ts (heartbeat-set)
+                                                      battery-f19  $0.00
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.9.5
+  ▗█▛ ▟██▙▄██▛ ▟▛         model mock-1
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd ~/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+  f19 seed turn
+
+
+ f19 heartbeat fixture reply
+
+ Heartbeat set
+ Delivery: steer
+ Next run: 2026-09-22T13:30:06.307Z
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      Collapsed mode (Ctrl+O to expand)
+
+ >
+
+← manage                                                                        1 heartbeat (Ctrl+R) · mock-1 · 110 (0%)
+
++++ rust (heartbeat-set)
+                                                      battery-f19  $0.00
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.1.0
+  ▗█▛ ▟██▙▄██▛ ▟▛         model mock-1
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd ~/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+  f19 seed turn
+
+
+ f19 heartbeat fixture reply
+
+ /heartbeat is not available in this client yet
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      Collapsed mode (Ctrl+O to expand)
+
+ >
+
+← manage                                                                                               mock-1 · 110 (0%)

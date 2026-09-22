@@ -1,0 +1,33 @@
+Prime Agent daemon supervisor 84171f92-180a-47eb-bbb0-88c1fec04059 listening on /home/ubuntu/prime-agent-rs/scripts/battery/runs/20260920T015031Z/ts/daemon.sock
+Session worker 644cc89e0abd stderr: Prime Agent daemon listening on /tmp/vbat20260920T015031Z-ts/prime-agent-1000/worker-0b984baee85a-644cc89e0abd.sock
+Session worker 9780e0439c46 stderr: Prime Agent daemon listening on /tmp/vbat20260920T015031Z-ts/prime-agent-1000/worker-0b984baee85a-9780e0439c46.sock
+Session worker ef445f2c62c7 stderr: Prime Agent daemon listening on /tmp/vbat20260920T015031Z-ts/prime-agent-1000/worker-0b984baee85a-ef445f2c62c7.sock
+Session worker ef445f2c62c7 stderr: shutdown command received over socket; 1 active session(s) will be closed
+Session worker ef445f2c62c7 stderr: shutting down (exit 0); closing 1 active session(s)
+Evicted empty session worker ef445f2c62c7 root=01a0bc84-79f8-7468-a610-24946cca9c5d on last client detach
+Session worker 7a192772a656 stderr: Prime Agent daemon listening on /tmp/vbat20260920T015031Z-ts/prime-agent-1000/worker-0b984baee85a-7a192772a656.sock
+Session worker 48e7561a81f4 stderr: Prime Agent daemon listening on /tmp/vbat20260920T015031Z-ts/prime-agent-1000/worker-0b984baee85a-48e7561a81f4.sock
+Daemon supervisor startup failed: Error: Lock file is already being held
+    at <anonymous> (/$bunfs/root/prime-agent:309:11883)
+    at A (/$bunfs/root/prime-agent:308:664298)
+    at guarded (internal:shared:114:26)
+    at <anonymous> (node:fs:194:13)
+    at processTicksAndRejections (native:7:39)
+304 | ${this._constructorStack}
+305 | Lifetime used`);throw new Xpn.QuickJSUseAfterFree("Lifetime not alive")}}}tAn.Lifetime=GQ;class Zpn extends GQ{constructor(e,t){super(e,void 0,void 0,t)}get dupable(){return!0}dup(){return this}dispose(){}}tAn.StaticLifetime=Zpn;class eAn extends GQ{constructor(e,t,n,r){super(e,t,n,r)}dispose(){this._alive=!1}}tAn.WeakLifetime=eAn;function g5e(e,t){let n;try{e.dispose()}catch(r){n=r}if(t&&n)throw Object.assign(t,{message:`${t.message}
+306 |  Then, failed to dispose scope: ${n.message}`,disposeError:n}),t;if(t||n)throw t||n}class Pq{constructor(){this._disposables=new GQ(new Set)}static withScope(e){let t=new Pq,n;try{return e(t)}catch(r){throw n=r,r}finally{g5e(t,n)}}static withScopeMaybeAsync(e,t){return(0,Sds.maybeAsync)(void 0,function*(n){let r=new Pq,s;try{return yield*n.of(t.call(e,n,r))}catch(i){throw s=i,i}finally{g5e(r,s)}})}static async withScopeAsync(e){let t=new Pq,n;try{return await e(t)}catch(r){throw n=r,r}finally{g5e(t,n)}}manage(e){return this._disposables.value.add(e),e}get alive(){return this._disposables.alive}dispose(){let e=Array.from(this._disposables.value.values()).reverse();for(let t of e)if(t.alive)t.dispose();this._disposables.dispose()}}tAn.Scope=Pq});var I5e=Se(function(sAn){Object.defineProperty(sAn,"__esModule",{value:!0});sAn.QuickJSDeferredPromise=void 0;class rAn{constructor(e){this.resolve=(t)=>{if(!this.resolveHandle.alive)return;this.context.unwrapResult(this.context.callFunction(this.resolveHandle,this.cont
+307 | ${n.stack}Host: ${a}`;throw Object.assign(o,{cause:n,context:t,message:r}),o}throw new fAn.QuickJSUnwrapError(n,t)}return e.value}getFunction(e){let t=e>>8,n=this.fnMaps.get(t);if(!n)return;return n.get(e)}setFunction(e,t){let n=e>>8,r=this.fnMaps.get(n);if(!r)r=new Map,this.fnMaps.set(n,r);return r.set(e,t)}errorToHandle(e){if(e instanceof pu.Lifetime)return e;return this.newError(e)}}gAn.QuickJSContext=hAn});var y5e=Se(function(yAn){Object.defineProperty(yAn,"__esModule",{value:!0});yAn.QuickJSRuntime=void 0;var EAn=h5e(),Pds=H5e(),Gae=UQ(),Ods=Jb(),CAn=jb(),Fds=C5e(),Uds=zQ();class HAn{constructor(e){this.scope=new CAn.Scope,this.contextMap=new Map,this.cToHostCallbacks={shouldInterrupt:(t)=>{if(t!==this.rt.value)throw Error("QuickJSContext instance received C -> JS interrupt with mismatched rt");let n=this.interruptHandler;if(!n)throw Error("QuickJSContext had no interrupt handler");return n(this)?1:0},loadModuleSource:(0,EAn.maybeAsyncFn)(this,function*(t,n,r,s){let i=this.moduleLoader;if(!i)throw Error(
+308 | Attempted to suspend at:`);else this.suspended=new SAn.QuickJSAsyncifySuspended(`(${this.suspendedCount++})`),(0,Oq.debugLog)("asyncify.handleSleep: suspending:",this.suspended);s.then((i)=>{this.suspended=void 0,(0,Oq.debugLog)("asyncify.handleSleep: resolved:",i),r(i)},(i)=>{(0,Oq.debugLog)("asyncify.handleSleep: rejected:",i),console.error("QuickJS: cannot handle error in suspended function",i),this.suspended=void 0})}catch(s){throw(0,Oq.debugLog)("asyncify.handleSleep: error:",s),this.suspended=void 0,s}});let n=t();if(n instanceof Promise)throw Error("Promise return value not supported in non-asyncify context.");return n}}vAn.QuickJSModuleCallbacks=_5e;function wAn(e,t){if(t.interruptHandler)e.setInterruptHandler(t.interruptHandler);if(t.maxStackSizeBytes!==void 0)e.setMaxStackSize(t.maxStackSizeBytes);if(t.memoryLimitBytes!==void 0)e.setMemoryLimit(t.memoryLimitBytes)}vAn.applyBaseRuntimeOptions=wAn;function BAn(e,t){if(t.moduleLoader)e.setModuleLoader(t.moduleLoader);if(t.shouldInterrupt)e.setInterrupt
+309 | GFS4: `),console.error(e)};if(!wc[Cd]){if(N5e=global[Cd]||[],Lfn(wc,N5e),wc.close=function(e){function t(n,r){return e.call(wc,n,function(s){if(!s)Tfn();if(typeof r==="function")r.apply(this,arguments)})}return Object.defineProperty(t,Zae,{value:e}),t}(wc.close),wc.closeSync=function(e){function t(n){e.apply(wc,arguments),Tfn()}return Object.defineProperty(t,Zae,{value:e}),t}(wc.closeSync),/\bgfs4\b/i.test(process.env.NODE_DEBUG||""))process.on("exit",function(){Gv(wc[Cd]),jt("assert").equal(wc[Cd].length,0)})}var N5e;if(!global[Cd])Lfn(global,wc[Cd]);F5e.exports=P5e(fAs(wc));if(process.env.TEST_GRACEFUL_FS_GLOBAL_PATCH&&!wc.__patched)F5e.exports=P5e(wc),wc.__patched=!0;function P5e(e){pAs(e),e.gracefulify=P5e,e.createReadStream=S,e.createWriteStream=b;var t=e.readFile;e.readFile=n;function n(T,k,U){if(typeof k==="function")U=k,k=null;return G(T,k,U);function G(q,z,te,le){return t(q,z,function(ee){if(ee&&(ee.code==="EMFILE"||ee.code==="ENFILE"))JQ([G,[q,z,te],ee,le||Date.now(),Date.now()]);else if(typeof te==
+
+error: Lock file is already being held
+ file: "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260920T015031Z/ts/daemon.sock",
+ code: "ELOCKED"
+
+      at /$bunfs/root/prime-agent:309:11883
+      at A (/$bunfs/root/prime-agent:308:664298)
+      at guarded (internal:shared:114:26)
+      at node:fs:194:13
+      at processTicksAndRejections (native:7:39)
+
+Bun v1.4.0 (Linux x64)

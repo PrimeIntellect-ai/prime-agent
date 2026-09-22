@@ -1,0 +1,58 @@
+{
+ "id": "c1",
+ "type": "response",
+ "command": "create",
+ "success": true,
+ "data": {
+  "id": "618c2b720ee6",
+  "lifecycle": "draft",
+  "activity": "idle",
+  "isSessionActive": false,
+  "lastActivityAt": "2026-09-18T05:07:15.792Z",
+  "runtimeKind": "top-level",
+  "rlmDepth": 0,
+  "activeSessionId": "618c2b720ee6",
+  "sessionId": "01a0b2e9-65c5-774a-862b-d7307f54f48a",
+  "sessionFile": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260918T050600Z/ts/agent/sessions/01a0b2e9-65c5-774a-862b-d7307f54f48a.jsonl",
+  "sessionName": "battery-compact",
+  "cwd": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260918T050600Z/ts/work",
+  "model": {
+   "id": "mock-1",
+   "name": "Mock 1",
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "baseUrl": "http://127.0.0.1:37927/v1",
+   "reasoning": false,
+   "input": [
+    "text"
+   ],
+   "cost": {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0
+   },
+   "contextWindow": 128000,
+   "maxTokens": 4096
+  },
+  "thinkingLevel": "off",
+  "isStreaming": false,
+  "isCompacting": false,
+  "isBashRunning": false,
+  "hasRunningRlmChildren": false,
+  "isRunningTools": false,
+  "attachedClients": 0,
+  "messageCount": 0,
+  "unfinishedActionCount": 0,
+  "created": "2026-09-18T05:07:15.525Z",
+  "modified": "2026-09-18T05:07:15.792Z",
+  "sessionActions": {
+   "queuedCount": 0,
+   "steering": [],
+   "followUps": []
+  },
+  "rosterStatus": "idle",
+  "workerState": "ready",
+  "workerPid": 1015769
+ }
+}

@@ -1,0 +1,19 @@
+{
+ "argv": [
+  "/home/ubuntu/prime-agent-rs/target/release/prime-agent",
+  "-p",
+  "--daemon-socket",
+  "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260918T050600Z/rust/daemon.sock",
+  "--provider",
+  "prime-inference",
+  "--model",
+  "mock-1",
+  "--offline",
+  "Run the tool"
+ ],
+ "exit_code": 0,
+ "stdout": "tool turn done\n",
+ "stderr": "Python 3.11 is already installed\nUsing CPython 3.11.16\nCreating virtual environment with seed packages at: /home/ubuntu/.prime/agent/kernel-venv\n + packaging==26.3\n + pip==26.2.1\n + setuptools==84.0.0\n + wheel==0.48.0\nActivate with: source /home/ubuntu/.prime/agent/kernel-venv/bin/activate\nUsing Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv\nerror: No solution found when resolving dependencies\n  cause: Because prime-agent-runtime was not found in the package registry and you require prime-agent-runtime, we can conclude that your requirements are unsatisfiable.\n",
+ "duration_s": 3.59,
+ "timeout": false
+}

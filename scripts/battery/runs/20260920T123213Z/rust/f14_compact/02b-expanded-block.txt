@@ -1,0 +1,36 @@
+                                                   battery-f14-manual  $0.00
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.1.0
+  ▗█▛ ▟██▙▄██▛ ▟▛         model mock-1
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd ~/prime-agent-rs/scripts/battery/runs/20260920T123213Z/rust/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+  f14 seed turn 2 of the parity battery with deterministic content
+
+
+ f14 parity fixture reply
+
+
+  /compact
+
+
+ ◆ Context compacted
+ f14 parity fixture reply
+
+ Compacted from 110 tokens
+
+
+
+
+
+
+
+                                                                                     Expanded mode (Ctrl+O to collapse)
+
+ >
+
+← manage                                                                                                          mock-1

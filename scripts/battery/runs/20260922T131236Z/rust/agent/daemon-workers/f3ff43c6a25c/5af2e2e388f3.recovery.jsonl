@@ -1,0 +1,10 @@
+{"activeSessionId":"5af2e2e388f3","sessionId":"01a0c941-7bf5-729d-b8b1-3028e22cee0f","sessionFile":"/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/sessions/01a0c941-7bf5-729d-b8b1-3028e22cee0f.jsonl","busy":true,"operation":"create","recordedAt":"2026-09-22T13:15:07.226Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"5af2e2e388f3","steering":["suspension seed turn with enough history for the compaction to summarize"],"follow_up":[],"recorded_at":"2026-09-22T13:15:07.315Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"5af2e2e388f3","steering":[],"follow_up":[],"recorded_at":"2026-09-22T13:15:07.752Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"5af2e2e388f3","steering":["steer resumes the suspension"],"follow_up":[],"recorded_at":"2026-09-22T13:15:07.804Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"5af2e2e388f3","steering":[],"follow_up":[],"recorded_at":"2026-09-22T13:15:08.162Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"5af2e2e388f3","steering":["plain prompt after the steer resumed the session"],"follow_up":[],"recorded_at":"2026-09-22T13:15:08.177Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"5af2e2e388f3","steering":[],"follow_up":[],"recorded_at":"2026-09-22T13:15:08.503Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"5af2e2e388f3","steering":["plain prompt after resume_queue cleared the suspension"],"follow_up":[],"recorded_at":"2026-09-22T13:15:08.518Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"5af2e2e388f3","steering":[],"follow_up":[],"recorded_at":"2026-09-22T13:15:08.960Z"}
+{"activeSessionId":"5af2e2e388f3","sessionId":"01a0c941-7bf5-729d-b8b1-3028e22cee0f","sessionFile":"/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/sessions/01a0c941-7bf5-729d-b8b1-3028e22cee0f.jsonl","busy":false,"operation":"shutdown","recordedAt":"2026-09-22T13:18:00.205Z"}

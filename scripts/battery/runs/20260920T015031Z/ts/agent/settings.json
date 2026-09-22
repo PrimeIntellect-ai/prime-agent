@@ -1,0 +1,1 @@
+{"onboardingShown": true, "telemetry": {"noticeShown": true}, "compaction": {"enabled": true}, "defaultProvider": "prime-inference", "defaultModel": "mock-1", "recentModels": ["prime-inference/mock-1"]}

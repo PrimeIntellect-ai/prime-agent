@@ -1,0 +1,36 @@
+                                                          work  $0.00
+
+ Error: Connection error.
+
+ Error: Connection error.
+
+ Error: Connection error.
+
+ Error: Connection error.
+
+ Error: Connection error.
+
+ ⠼ Waiting for provider to recover (9/30), next check in 8s... (Ctrl+C to cancel)
+
+ Steering: prompt 1
+ Steering: prompt 2
+ Steering: prompt 3
+ Steering: prompt 4
+ Steering: prompt 5
+ Steering: prompt 6
+ Steering: prompt 7
+ Steering: prompt 8
+ Steering: prompt 9
+ Steering: prompt 10
+ Steering: prompt 11
+ Steering: prompt 12
+ Steering: prompt 13
+ Steering: prompt 14
+ Steering: prompt 15
+ ╰─ Alt+↑ to browse and edit queued messages
+
+                                                                                           Collapsed mode (X to expand)
+
+ >
+
+← manage                                                                                               mock-1 · 664 (1%)

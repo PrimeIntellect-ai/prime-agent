@@ -1,0 +1,36 @@
+                                                          work  $0.00
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.9.5
+  ▗█▛ ▟██▙▄██▛ ▟▛         model mock-1
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd ~/prime-agent-rs/scripts/battery/runs/20260918T050600Z/ts/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      Collapsed mode (Ctrl+O to expand)
+
+ >
+
+← manage                                                                                                 mock-1 · 0 (0%)

@@ -1,0 +1,20 @@
+{
+ "ts": {
+  "session": 3,
+  "model_change": 3,
+  "thinking_level_change": 3,
+  "service_tier_change": 3,
+  "session_state": 3,
+  "custom_message": 3,
+  "message": 8
+ },
+ "rust": {
+  "session": 3,
+  "model_change": 3,
+  "thinking_level_change": 3,
+  "service_tier_change": 3,
+  "session_state": 1,
+  "message": 8,
+  "custom_message": 2
+ }
+}

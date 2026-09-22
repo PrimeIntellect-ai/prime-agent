@@ -1,0 +1,63 @@
+{
+ "abort_response": {
+  "success": true,
+  "command": "abort_compaction",
+  "has_data": false
+ },
+ "prompt_response": {
+  "success": true
+ },
+ "events": [
+  {
+   "reason": "threshold",
+   "type": "compaction_start"
+  },
+  {
+   "type": "message_start",
+   "message": {
+    "content": "Compaction cancelled",
+    "customType": "compaction_outcome",
+    "details": {
+     "outcome": "cancelled",
+     "reason": "threshold"
+    },
+    "display": true,
+    "role": "custom"
+   }
+  },
+  {
+   "type": "message_end",
+   "message": {
+    "content": "Compaction cancelled",
+    "customType": "compaction_outcome",
+    "details": {
+     "outcome": "cancelled",
+     "reason": "threshold"
+    },
+    "display": true,
+    "role": "custom"
+   }
+  },
+  {
+   "aborted": true,
+   "reason": "threshold",
+   "type": "compaction_end",
+   "willRetry": false
+  }
+ ],
+ "durable": {
+  "outcome_rows": [
+   {
+    "type": "custom_message",
+    "content": "Compaction cancelled",
+    "customType": "compaction_outcome",
+    "details": {
+     "outcome": "cancelled",
+     "reason": "threshold"
+    },
+    "display": true
+   }
+  ],
+  "compaction_entries": 0
+ }
+}

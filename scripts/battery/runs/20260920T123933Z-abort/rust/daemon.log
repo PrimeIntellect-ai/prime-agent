@@ -1,0 +1,2 @@
+pa-daemon client connection error: Broken pipe (os error 32)
+pa-daemon worker: supervisor /home/ubuntu/prime-agent-rs/scripts/battery/runs/20260920T123933Z-abort/rust/daemon.sock unreachable for 300s; exiting orphaned worker

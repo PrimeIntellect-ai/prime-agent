@@ -1,0 +1,36 @@
+                                                          work  $0.00
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.1.0
+  ▗█▛ ▟██▙▄██▛ ▟▛         model mock-1
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd ~/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+  run the main task
+
+
+ main turn reply
+
+
+  /btw  what is the side answer?
+
+  btw answer from mock
+
+
+  and the follow-up?
+
+
+  btw follow-up answer from mock
+
+  reply to follow up · esc to return to session
+
+
+
+                                                                                      Collapsed mode (Ctrl+O to expand)
+
+ >
+
+← manage                                                                                               mock-1 · 110 (0%)

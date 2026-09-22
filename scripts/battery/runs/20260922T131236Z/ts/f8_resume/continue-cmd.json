@@ -1,0 +1,20 @@
+{
+ "argv": [
+  "/home/ubuntu/.local/share/prime-agent/releases/0.9.5-linux-x64-bc4b0ed791d1e8b3b5d6a95249a60306d9579fc0d6038e5d7d82f068d81f008d/prime-agent",
+  "-p",
+  "--daemon-socket",
+  "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/daemon.sock",
+  "--provider",
+  "prime-inference",
+  "--model",
+  "mock-1",
+  "--offline",
+  "-c",
+  "Continue this session"
+ ],
+ "exit_code": 1,
+ "stdout": "",
+ "stderr": "Error: Session is already active in badd449f8bc3: /home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/agent/sessions/01a0c942-f685-7487-9bfb-dfb6d4d539f0.jsonl\n",
+ "duration_s": 0.44,
+ "timeout": false
+}

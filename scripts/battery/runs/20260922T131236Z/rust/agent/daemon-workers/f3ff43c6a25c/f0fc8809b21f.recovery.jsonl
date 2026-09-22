@@ -1,0 +1,5 @@
+{"activeSessionId":"f0fc8809b21f","sessionId":"01a0c962-4e37-75f0-b25b-7e294d7ab1b8","sessionFile":"/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/sessions/01a0c962-4e37-75f0-b25b-7e294d7ab1b8.jsonl","busy":true,"operation":"create","recordedAt":"2026-09-22T13:50:58.430Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"f0fc8809b21f","steering":["f24 seed turn of the parity battery"],"follow_up":[],"recorded_at":"2026-09-22T13:50:58.767Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"f0fc8809b21f","steering":[],"follow_up":[],"recorded_at":"2026-09-22T13:50:59.994Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"f0fc8809b21f","steering":["f24 stashed draft payload 4242"],"follow_up":[],"recorded_at":"2026-09-22T13:51:15.524Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"f0fc8809b21f","steering":[],"follow_up":[],"recorded_at":"2026-09-22T13:51:16.392Z"}

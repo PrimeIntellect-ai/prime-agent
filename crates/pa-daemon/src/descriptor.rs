@@ -228,6 +228,16 @@ pub fn load_descriptors(
         if path.file_name().and_then(|n| n.to_str()) == Some(SUPERVISOR_CONFIG_FILE_NAME) {
             continue;
         }
+        // Post-mortem archives of workers that exhausted their failure
+        // budget (renamed to `<id>.failed.json` by the give-up path): they
+        // carry the `.json` extension but must never be revived.
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|name| name.ends_with(".failed.json"))
+        {
+            continue;
+        }
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }

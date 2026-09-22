@@ -1,0 +1,36 @@
+                                                     battery-f15-b  $0.00
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.1.0
+  ▗█▛ ▟██▙▄██▛ ▟▛         model mock-1
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd ~/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+  f15 seed b
+
+
+ f15 a2a turn reply
+
+
+  [agent-message from battery-f15-a]
+
+  f15 a2a payload from a to b
+
+
+ f15 a2a turn reply
+
+
+
+
+
+
+
+
+                                                                                      Collapsed mode (Ctrl+O to expand)
+
+ >
+
+← manage                                                                                               mock-1 · 110 (0%)

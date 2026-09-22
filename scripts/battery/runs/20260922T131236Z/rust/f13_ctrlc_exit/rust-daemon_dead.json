@@ -1,0 +1,8 @@
+{
+ "case": "daemon_dead",
+ "elapsed_s": 0.58,
+ "status": "1 0",
+ "exit_code": 0,
+ "resume_hint": true,
+ "exit_frame": true
+}

@@ -1,0 +1,36 @@
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.9.5
+  ▗█▛ ▟██▙▄██▛ ▟▛         agents 0 running, 13 idle, 0 inactive
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd ~/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+ >   Search sessions
+
+Session                       Model         Activity                                                           Cost  Age
+
+Idle (13)
+• battery-f20                 mock-1                                                                          $0.00   5s
+• battery-f19                 mock-1                                                                          $0.00   1m
+• battery-f18                 mock-1                                                                          $0.00   3m
+• battery-f16                 mock-1                                                                          $0.00   9m
+• battery-f15-b               mock-1                                                                          $0.00  10m
+• battery-f15-a               mock-1                                                                          $0.00  10m
+• battery-f14-auto            mock-1                                                                          $0.00  11m
+• battery-f14-manual          mock-1                                                                          $0.00  11m
+• hold the turn               mock-1                                                                          $0.00  11m
+• prompt 0                    mock-1                                                                          $0.00  12m
+• hello                       mock-1        Model request failed: Connection error.                           $0.00  12m
+• battery-f9-idle             mock-1                                                                          $0.00  14m
+• battery-f9-busy             mock-1                                                                          $0.00  14m
+
+
+
+
+
+
+
+
+↑/↓ navigate   Enter/→ open   Ctrl+N new

@@ -1,0 +1,451 @@
+[
+ {
+  "type": "session_event",
+  "activeSessionId": "91ca2151b689",
+  "event": {
+   "type": "agent_start"
+  },
+  "meta": {
+   "id": "91ca2151b689:1",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "91ca2151b689",
+   "sequence": 1,
+   "cursor": {
+    "generation": "c2a74ac10a7f",
+    "sequence": 1
+   },
+   "emittedAt": "2026-09-22T13:14:29.251Z"
+  }
+ },
+ {
+  "type": "session_event",
+  "activeSessionId": "91ca2151b689",
+  "event": {
+   "type": "turn_start"
+  },
+  "meta": {
+   "id": "91ca2151b689:2",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "91ca2151b689",
+   "sequence": 2,
+   "cursor": {
+    "generation": "c2a74ac10a7f",
+    "sequence": 2
+   },
+   "emittedAt": "2026-09-22T13:14:29.252Z"
+  }
+ },
+ {
+  "type": "session_event",
+  "activeSessionId": "91ca2151b689",
+  "event": {
+   "type": "message_start",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "say something"
+     }
+    ],
+    "timestamp": 1790082869253
+   }
+  },
+  "meta": {
+   "id": "91ca2151b689:3",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "91ca2151b689",
+   "sequence": 3,
+   "cursor": {
+    "generation": "c2a74ac10a7f",
+    "sequence": 3
+   },
+   "emittedAt": "2026-09-22T13:14:29.256Z"
+  }
+ },
+ {
+  "type": "session_event",
+  "activeSessionId": "91ca2151b689",
+  "event": {
+   "type": "message_end",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "say something"
+     }
+    ],
+    "timestamp": 1790082869253
+   }
+  },
+  "meta": {
+   "id": "91ca2151b689:4",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "91ca2151b689",
+   "sequence": 4,
+   "cursor": {
+    "generation": "c2a74ac10a7f",
+    "sequence": 4
+   },
+   "emittedAt": "2026-09-22T13:14:29.256Z"
+  }
+ },
+ {
+  "type": "session_event",
+  "activeSessionId": "91ca2151b689",
+  "event": {
+   "type": "message_start",
+   "message": {
+    "role": "assistant",
+    "content": [],
+    "api": "openai-completions",
+    "provider": "prime-inference",
+    "model": "mock-1",
+    "usage": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "totalTokens": 0,
+     "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0
+     }
+    },
+    "stopReason": "stop",
+    "timestamp": 1790082869438
+   },
+   "assistantMessageEvent": {
+    "type": "start"
+   }
+  },
+  "meta": {
+   "id": "91ca2151b689:5",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "91ca2151b689",
+   "sequence": 5,
+   "cursor": {
+    "generation": "c2a74ac10a7f",
+    "sequence": 5
+   },
+   "emittedAt": "2026-09-22T13:14:29.444Z"
+  }
+ },
+ {
+  "type": "session_event",
+  "activeSessionId": "91ca2151b689",
+  "event": {
+   "type": "message_update",
+   "message": {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "text",
+      "text": "attach stream reply"
+     }
+    ],
+    "api": "openai-completions",
+    "provider": "prime-inference",
+    "model": "mock-1",
+    "responseId": "chatcmpl-battery",
+    "usage": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "totalTokens": 0,
+     "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0
+     }
+    },
+    "stopReason": "stop",
+    "timestamp": 1790082869438
+   },
+   "assistantMessageEvent": {
+    "type": "text_delta",
+    "delta": "attach stream reply"
+   }
+  },
+  "meta": {
+   "id": "91ca2151b689:7",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "91ca2151b689",
+   "sequence": 7,
+   "cursor": {
+    "generation": "c2a74ac10a7f",
+    "sequence": 7
+   },
+   "emittedAt": "2026-09-22T13:14:29.494Z"
+  }
+ },
+ {
+  "type": "session_event",
+  "activeSessionId": "91ca2151b689",
+  "event": {
+   "type": "message_update",
+   "message": {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "text",
+      "text": "attach stream reply"
+     }
+    ],
+    "api": "openai-completions",
+    "provider": "prime-inference",
+    "model": "mock-1",
+    "responseId": "chatcmpl-battery",
+    "usage": {
+     "input": 20,
+     "output": 10,
+     "cacheRead": 80,
+     "cacheWrite": 0,
+     "totalTokens": 110,
+     "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0
+     }
+    },
+    "stopReason": "stop",
+    "timestamp": 1790082869438
+   },
+   "assistantMessageEvent": {
+    "type": "text_end"
+   }
+  },
+  "meta": {
+   "id": "91ca2151b689:8",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "91ca2151b689",
+   "sequence": 8,
+   "cursor": {
+    "generation": "c2a74ac10a7f",
+    "sequence": 8
+   },
+   "emittedAt": "2026-09-22T13:14:29.494Z"
+  }
+ },
+ {
+  "type": "session_event",
+  "activeSessionId": "91ca2151b689",
+  "event": {
+   "type": "message_end",
+   "message": {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "text",
+      "text": "attach stream reply"
+     }
+    ],
+    "api": "openai-completions",
+    "provider": "prime-inference",
+    "model": "mock-1",
+    "responseId": "chatcmpl-battery",
+    "usage": {
+     "input": 20,
+     "output": 10,
+     "cacheRead": 80,
+     "cacheWrite": 0,
+     "totalTokens": 110,
+     "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0
+     }
+    },
+    "stopReason": "stop",
+    "timestamp": 1790082869438
+   }
+  },
+  "meta": {
+   "id": "91ca2151b689:9",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "91ca2151b689",
+   "sequence": 9,
+   "cursor": {
+    "generation": "c2a74ac10a7f",
+    "sequence": 9
+   },
+   "emittedAt": "2026-09-22T13:14:29.502Z"
+  }
+ },
+ {
+  "type": "session_event",
+  "activeSessionId": "91ca2151b689",
+  "event": {
+   "type": "turn_end",
+   "message": {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "text",
+      "text": "attach stream reply"
+     }
+    ],
+    "api": "openai-completions",
+    "provider": "prime-inference",
+    "model": "mock-1",
+    "responseId": "chatcmpl-battery",
+    "usage": {
+     "input": 20,
+     "output": 10,
+     "cacheRead": 80,
+     "cacheWrite": 0,
+     "totalTokens": 110,
+     "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0
+     }
+    },
+    "stopReason": "stop",
+    "timestamp": 1790082869438
+   },
+   "toolResults": []
+  },
+  "meta": {
+   "id": "91ca2151b689:10",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "91ca2151b689",
+   "sequence": 10,
+   "cursor": {
+    "generation": "c2a74ac10a7f",
+    "sequence": 10
+   },
+   "emittedAt": "2026-09-22T13:14:29.502Z"
+  }
+ },
+ {
+  "type": "session_event",
+  "activeSessionId": "91ca2151b689",
+  "event": {
+   "type": "agent_end",
+   "messages": [
+    {
+     "customType": "harness_digest",
+     "content": "[harness-digest]\n\nThe persistent memories produced across this session so far:\n\n<harness_state>\n# Continual Harness State\n\nLocal continual harness entries belong to this Prime Agent session. Global continual harness entries persist across Prime Agent sessions.\nThe continual harness entries below are compact summaries, not full descriptions. Use them as routing/context hints; inspect or refine the underlying continual harness entry only when detail matters.\nDefault to local continual harness refinement for current task progress, temporary blockers, and session coordination. Use global continual harness refinement only for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.\nUse these continual harness prompt notes, memories, skills, and subagent specs when they are relevant. The base system prompt is immutable; prompt entries below are supplemental notes only.\n\nWhen to call `await refine.run()`: after a repeated failure, a reusable tactic emerges, a repeated delegation role should become a subagent spec, a repeated procedure should become a skill, a durable fact/preference should become a memory, a narrow behavioral policy should become a prompt addendum, a user corrects behavior that should persist locally or globally, validation shows a continual harness entry is wrong, or a skill/subagent/memory/prompt note should be created, updated, deleted, or rolled back. Keep `await refine.run()` continual harness edits small and evidence-backed.\n\nCall contract: read each installed Python skill's SKILL.md and call its documented module function in the Python REPL; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm.spawn('sub-task', name='worker')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries.\n\nprompt: 0\n\nmemory: 0\n\nskill: 0\n\nsubagent: 0\n\nNo saved harness entries yet.\n\nrecent refinements: 0\n</harness_state>",
+     "display": false,
+     "details": {
+      "digest": "# Continual Harness State\n\nLocal continual harness entries belong to this Prime Agent session. Global continual harness entries persist across Prime Agent sessions.\nThe continual harness entries below are compact summaries, not full descriptions. Use them as routing/context hints; inspect or refine the underlying continual harness entry only when detail matters.\nDefault to local continual harness refinement for current task progress, temporary blockers, and session coordination. Use global continual harness refinement only for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.\nUse these continual harness prompt notes, memories, skills, and subagent specs when they are relevant. The base system prompt is immutable; prompt entries below are supplemental notes only.\n\nWhen to call `await refine.run()`: after a repeated failure, a reusable tactic emerges, a repeated delegation role should become a subagent spec, a repeated procedure should become a skill, a durable fact/preference should become a memory, a narrow behavioral policy should become a prompt addendum, a user corrects behavior that should persist locally or globally, validation shows a continual harness entry is wrong, or a skill/subagent/memory/prompt note should be created, updated, deleted, or rolled back. Keep `await refine.run()` continual harness edits small and evidence-backed.\n\nCall contract: read each installed Python skill's SKILL.md and call its documented module function in the Python REPL; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm.spawn('sub-task', name='worker')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries.\n\nprompt: 0\n\nmemory: 0\n\nskill: 0\n\nsubagent: 0\n\nNo saved harness entries yet.\n\nrecent refinements: 0"
+     },
+     "timestamp": 1790082869427,
+     "role": "custom"
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "text": "say something",
+       "type": "text"
+      }
+     ],
+     "timestamp": 1790082869428
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "attach stream reply"
+      }
+     ],
+     "api": "openai-completions",
+     "provider": "prime-inference",
+     "model": "mock-1",
+     "responseId": "chatcmpl-battery",
+     "usage": {
+      "input": 20,
+      "output": 10,
+      "cacheRead": 80,
+      "cacheWrite": 0,
+      "totalTokens": 110,
+      "cost": {
+       "input": 0,
+       "output": 0,
+       "cacheRead": 0,
+       "cacheWrite": 0,
+       "total": 0
+      }
+     },
+     "stopReason": "stop",
+     "timestamp": 1790082869438
+    }
+   ]
+  },
+  "meta": {
+   "id": "91ca2151b689:11",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "91ca2151b689",
+   "sequence": 11,
+   "cursor": {
+    "generation": "c2a74ac10a7f",
+    "sequence": 11
+   },
+   "emittedAt": "2026-09-22T13:14:29.502Z"
+  }
+ },
+ {
+  "type": "session_status",
+  "activeSessionId": "91ca2151b689",
+  "meta": {
+   "id": "91ca2151b689:12",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "91ca2151b689",
+   "sequence": 12,
+   "cursor": {
+    "generation": "c2a74ac10a7f",
+    "sequence": 12
+   },
+   "emittedAt": "2026-09-22T13:14:31.626Z"
+  }
+ }
+]

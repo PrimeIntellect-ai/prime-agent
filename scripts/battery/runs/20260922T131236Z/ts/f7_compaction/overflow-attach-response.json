@@ -1,0 +1,159 @@
+{
+ "id": "oa1",
+ "type": "response",
+ "command": "attach",
+ "success": true,
+ "data": {
+  "protocol": {
+   "name": "prime-agent.daemon",
+   "version": 7
+  },
+  "activeSessionId": "03a3b7bc34d2",
+  "snapshot": {
+   "activeSessionId": "03a3b7bc34d2",
+   "summary": {
+    "id": "03a3b7bc34d2",
+    "lifecycle": "draft",
+    "activity": "idle",
+    "isSessionActive": false,
+    "lastActivityAt": "2026-09-22T13:14:41.714Z",
+    "runtimeKind": "top-level",
+    "rlmDepth": 0,
+    "activeSessionId": "03a3b7bc34d2",
+    "sessionId": "01a0c941-180a-736e-b1f1-9a4665d89680",
+    "sessionFile": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/agent/sessions/01a0c941-180a-736e-b1f1-9a4665d89680.jsonl",
+    "sessionName": "battery-overflow",
+    "cwd": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/work",
+    "model": {
+     "id": "mock-1",
+     "name": "Mock 1",
+     "api": "openai-completions",
+     "provider": "prime-inference",
+     "baseUrl": "http://127.0.0.1:41165/v1",
+     "reasoning": false,
+     "input": [
+      "text"
+     ],
+     "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+     },
+     "contextWindow": 128000,
+     "maxTokens": 4096
+    },
+    "thinkingLevel": "off",
+    "isStreaming": false,
+    "isCompacting": false,
+    "isBashRunning": false,
+    "hasRunningRlmChildren": false,
+    "isRunningTools": false,
+    "attachedClients": 1,
+    "messageCount": 0,
+    "unfinishedActionCount": 0,
+    "sessionActions": {
+     "queuedCount": 0,
+     "steering": [],
+     "followUps": []
+    },
+    "created": "2026-09-22T13:14:41.546Z",
+    "modified": "2026-09-22T13:14:41.714Z",
+    "diagnostics": [],
+    "workerState": "ready",
+    "workerPid": 400282
+   },
+   "state": {
+    "activeSessionId": "03a3b7bc34d2",
+    "cwd": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/work",
+    "model": {
+     "id": "mock-1",
+     "name": "Mock 1",
+     "api": "openai-completions",
+     "provider": "prime-inference",
+     "baseUrl": "http://127.0.0.1:41165/v1",
+     "reasoning": false,
+     "input": [
+      "text"
+     ],
+     "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+     },
+     "contextWindow": 128000,
+     "maxTokens": 4096
+    },
+    "thinkingLevel": "off",
+    "serviceTier": "default",
+    "availableThinkingLevels": [
+     "off"
+    ],
+    "isStreaming": false,
+    "isCompacting": false,
+    "isBashRunning": false,
+    "retryAttempt": 0,
+    "steeringMode": "one-at-a-time",
+    "followUpMode": "one-at-a-time",
+    "sessionFile": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/agent/sessions/01a0c941-180a-736e-b1f1-9a4665d89680.jsonl",
+    "sessionId": "01a0c941-180a-736e-b1f1-9a4665d89680",
+    "sessionName": "battery-overflow",
+    "sessionDir": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/agent/sessions",
+    "leafId": "c1484870",
+    "autoCompactionEnabled": true,
+    "messageCount": 0,
+    "sessionActions": {
+     "queuedCount": 0,
+     "steering": [],
+     "followUps": []
+    },
+    "compactionCount": 0,
+    "goal": {
+     "active": false,
+     "status": "idle",
+     "tokensUsed": 0,
+     "timeUsedSeconds": 0,
+     "continuationsUsed": 0
+    },
+    "scopedModels": [],
+    "activeToolNames": [
+     "ipython"
+    ],
+    "contextUsage": {
+     "tokens": 0,
+     "contextWindow": 128000,
+     "percent": 0
+    },
+    "heartbeat": null
+   },
+   "messages": [],
+   "lastEventSequence": 0,
+   "lastEventCursor": {
+    "generation": "afd0c60523b8",
+    "sequence": 0
+   },
+   "children": []
+  },
+  "replay": {
+   "status": "complete",
+   "toSequence": 0,
+   "toCursor": {
+    "generation": "afd0c60523b8",
+    "sequence": 0
+   }
+  },
+  "lastEventSequence": 0,
+  "lastEventCursor": {
+   "generation": "afd0c60523b8",
+   "sequence": 0
+  },
+  "client": {
+   "id": "b5852357bbb4",
+   "capabilities": [
+    "attach_snapshot",
+    "event_sequence"
+   ]
+  }
+ }
+}

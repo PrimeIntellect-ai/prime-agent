@@ -794,9 +794,17 @@ pub fn wrap_spans(spans: &[Span], width: usize, base: Style, out: &mut Vec<Line>
         out.push(spans.to_vec());
         return;
     }
-    // tokens: (text, style); alternating words and single-space gaps. A gap
-    // at a span boundary must survive (bold text followed by " plain"), so
-    // whitespace runs collapse to one gap token across the whole line.
+    // TS `wrapSingleLine` returns a fitting line UNCHANGED (`visibleLength
+    // <= width`), so its spacing never re-tokenizes.
+    let joined_width: usize = spans.iter().map(|s| str_width(&s.content)).sum();
+    if joined_width <= width {
+        out.push(spans.to_vec());
+        return;
+    }
+    // tokens: (text, style); alternating words and whitespace-run gaps. TS
+    // `splitIntoTokensWithAnsi` keeps each whitespace RUN whole (a run at a
+    // span boundary joins the previous gap token), never collapsing it to a
+    // single space.
     let mut tokens: Vec<(String, Style)> = Vec::new();
     for span in spans {
         let mut word = String::new();
@@ -805,9 +813,9 @@ pub fn wrap_spans(spans: &[Span], width: usize, base: Style, out: &mut Vec<Line>
                 if !word.is_empty() {
                     tokens.push((std::mem::take(&mut word), span.style));
                 }
-                let gap_already_emitted = tokens.last().is_some_and(|(text, _)| text == " ");
-                if !gap_already_emitted {
-                    tokens.push((" ".to_string(), span.style));
+                match tokens.last_mut() {
+                    Some((text, _)) if text.chars().all(|c| c == ' ') => text.push(' '),
+                    _ => tokens.push((" ".to_string(), span.style)),
                 }
             } else {
                 word.push(ch);
@@ -923,9 +931,11 @@ pub fn to_ratatui_line(line: &Line) -> rt::Line<'static> {
     let mut stripped = line.clone();
     crate::osc133::strip(&mut stripped);
     crate::hyperlinks::strip_osc8(&mut stripped);
+    // TS `applyLineResets` normalizes every painted line right before the
+    // differential paint (Thai/Lao AM decomposition, tabs to three spaces).
     let spans: Vec<rt::Span<'static>> = stripped
         .iter()
-        .map(|s| rt::Span::styled(s.content.clone(), s.style))
+        .map(|s| rt::Span::styled(crate::width::normalize_terminal_output(&s.content), s.style))
         .collect();
     rt::Line::from(spans)
 }
@@ -1255,10 +1265,14 @@ mod tests {
         let lines = render_markdown("**Hello.** I can render", 80, &style);
         let joined: String = lines[0].iter().map(|s| s.content.as_str()).collect();
         assert_eq!(joined, "Hello. I can render");
-        // Whitespace runs still collapse to a single gap across spans.
+        // Whitespace runs keep their length across spans: TS
+        // `splitIntoTokensWithAnsi` holds each run as ONE token and a
+        // fitting line passes through unchanged (wrapSingleLine's
+        // visibleLength early return) — verified against the TS dist
+        // (wrapTextWithAnsi renders "a b   c ...").
         let spans = render_inline("a **b**   c", &style);
         let wrapped = wrap_spans_to_text(&spans, 40);
-        assert_eq!(wrapped, "a b c");
+        assert_eq!(wrapped, "a b   c");
     }
 
     fn wrap_spans_to_text(spans: &[Span], width: usize) -> String {
@@ -1287,5 +1301,16 @@ mod tests {
         let lines = render_markdown("> wisdom", 40, &style);
         assert_eq!(lines[0][0].content, "▐ ");
         assert_eq!(lines[0][1].content, "wisdom");
+    }
+
+    #[test]
+    fn probe_inline_spaces() {
+        let md = crate::markdown::MarkdownStyle::default();
+        let line = crate::markdown::render_inline("a   b c", &md);
+        let s: String = line.iter().map(|sp| sp.content.as_str()).collect();
+        eprintln!("inline row: {s:?}");
+        let line2 = crate::markdown::render_inline("a\u{9}b", &md);
+        let s2: String = line2.iter().map(|sp| sp.content.as_str()).collect();
+        eprintln!("inline tab row: {s2:?}");
     }
 }

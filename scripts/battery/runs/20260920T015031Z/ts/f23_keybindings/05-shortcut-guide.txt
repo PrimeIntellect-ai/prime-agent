@@ -1,0 +1,80 @@
+                                                          work  $0.00
+ └──────────────────────┴──────────────────────────────────────────────┘
+
+ Other
+
+ ┌─────────────────────────┬──────────────────────────────────────────────────────────┐
+ │ Key                     │ Action                                                   │
+ ├─────────────────────────┼──────────────────────────────────────────────────────────┤
+ │ Tab                     │ Path completion / accept autocomplete                    │
+ ├─────────────────────────┼──────────────────────────────────────────────────────────┤
+ │ Esc                     │ Clear input / cancel autocomplete                        │
+ ├─────────────────────────┼──────────────────────────────────────────────────────────┤
+ │ Ctrl+C                  │ Interrupt current operation (first) / exit (second)      │
+ ├─────────────────────────┼──────────────────────────────────────────────────────────┤
+ │ ?                       │ Show quick shortcuts                                     │
+ ├─────────────────────────┼──────────────────────────────────────────────────────────┤
+ │ Ctrl+D                  │ Exit (when editor is empty)                              │
+ ├─────────────────────────┼──────────────────────────────────────────────────────────┤
+ │ Ctrl+L                  │ Open model selector                                      │
+ ├─────────────────────────┼──────────────────────────────────────────────────────────┤
+ │ X                       │ Cycle overview → thinking + diffs → all output           │
+ ├─────────────────────────┼──────────────────────────────────────────────────────────┤
+ │ Alt+A                   │ Focus the subagent summary / open the scoped agents view │
+ ├─────────────────────────┼──────────────────────────────────────────────────────────┤
+ │ Ctrl+R                  │ Manage heartbeats                                        │
+ ├─────────────────────────┼──────────────────────────────────────────────────────────┤
+ │ Ctrl+G                  │ Edit message in external editor                          │
+ ├─────────────────────────┼──────────────────────────────────────────────────────────┤
+ │ Ctrl+S                  │ Stash or restore draft prompt                            │
+ ├─────────────────────────┼──────────────────────────────────────────────────────────┤
+ │ Alt+Enter               │ Queue follow-up message                                  │
+ ├─────────────────────────┼──────────────────────────────────────────────────────────┤
+ │ Alt+↑                   │ Browse and edit queued messages                          │
+ ├─────────────────────────┼──────────────────────────────────────────────────────────┤
+ │ Ctrl+Alt+↑ / Ctrl+Alt+↓ │ Reorder the selected queued message                      │
+ ├─────────────────────────┼──────────────────────────────────────────────────────────┤
+ │ Ctrl+V                  │ Paste image from clipboard                               │
+ ├─────────────────────────┼──────────────────────────────────────────────────────────┤
+ │ /                       │ Slash commands                                           │
+ └─────────────────────────┴──────────────────────────────────────────────────────────┘
+
+ Fullscreen mode (/fullscreen)
+
+ ┌─────────────────────┬────────────────────────────────────┐
+ │ Key                 │ Action                             │
+ ├─────────────────────┼────────────────────────────────────┤
+ │ PageUp / PageDown   │ Scroll transcript by page          │
+ ├─────────────────────┼────────────────────────────────────┤
+ │ Shift+Alt+↑         │ Scroll to top                      │
+ ├─────────────────────┼────────────────────────────────────┤
+ │ Ctrl+Shift+↓        │ Scroll to bottom and follow output │
+ ├─────────────────────┼────────────────────────────────────┤
+ │ mouse wheel         │ Scroll transcript                  │
+ ├─────────────────────┼────────────────────────────────────┤
+ │ mouse drag          │ Select and copy text               │
+ ├─────────────────────┼────────────────────────────────────┤
+ │ mouse click on link │ Open link in browser               │
+ └─────────────────────┴────────────────────────────────────┘
+
+
+
+ Prompt
+ ! shell mode · / commands · @ file paths
+ Tab complete paths · Shift+Enter new line
+ Esc interrupt · press twice to rewind or clear the prompt
+
+ Controls
+ Ctrl+L select model · /effort set reasoning · X overview → thinking + diffs → all output
+ Ctrl+S stash prompt · Ctrl+G edit in $EDITOR
+ Ctrl+V paste image
+
+ Help
+ ? quick shortcuts · /hotkeys full reference
+
+
+                                                                                             Details mode (X to expand)
+
+ >
+
+← manage                                                                                                 mock-1 · 0 (0%)

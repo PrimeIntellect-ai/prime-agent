@@ -1,0 +1,36 @@
+                                                          work  $0.00
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.9.5
+  ▗█▛ ▟██▙▄██▛ ▟▛         model mock-1
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd ~/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+  prompt 0
+
+
+ scroll filler reply
+
+
+  prompt 1
+
+
+ scroll filler reply
+
+
+  prompt 2
+
+
+ scroll filler reply
+
+
+  prompt 3                                     ctrl+shift+down to follow
+
+                                                                                      Collapsed mode (Ctrl+O to expand)
+
+ >
+
+← manage                                                                                               mock-1 · 110 (0%)

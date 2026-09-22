@@ -1,0 +1,26 @@
+{
+  "jobs": [
+    {
+      "id": "916d082e-fafe-42d6-8e21-0a3ef62f69e9",
+      "status": "cancelled",
+      "source": "heartbeat",
+      "runtimeKind": "top-level",
+      "deliveryMode": "steer",
+      "activeSessionId": "f69f0eff0c84",
+      "sessionId": "01a0c94e-e8d4-705a-b2c7-0244385bd32c",
+      "sessionFile": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/agent/sessions/01a0c94e-e8d4-705a-b2c7-0244385bd32c.jsonl",
+      "cwd": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/work",
+      "prompt": "f19 heartbeat ping instruction",
+      "schedule": {
+        "kind": "interval",
+        "expression": "every 10s",
+        "intervalMs": 10000
+      },
+      "createdAt": "2026-09-22T13:29:56.307Z",
+      "updatedAt": "2026-09-22T13:30:13.684Z",
+      "runCount": 1,
+      "lastRunAt": "2026-09-22T13:30:06.361Z"
+    }
+  ],
+  "dispatches": []
+}

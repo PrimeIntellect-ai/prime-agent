@@ -1,0 +1,7 @@
+{"type":"session","version":3,"id":"01a0c945-df20-7746-9c7e-39a6ed3e6b05","timestamp":"2026-09-22T13:19:54.656Z","cwd":"/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/work","rlmDepth":0}
+{"type":"model_change","id":"3f8afa22","parentId":null,"timestamp":"2026-09-22T13:19:54.707Z","provider":"prime-inference","modelId":"mock-1"}
+{"type":"thinking_level_change","id":"572b8658","parentId":"3f8afa22","timestamp":"2026-09-22T13:19:54.707Z","thinkingLevel":"off"}
+{"type":"service_tier_change","id":"b1b89036","parentId":"572b8658","timestamp":"2026-09-22T13:19:54.708Z","serviceTier":"default"}
+{"type":"session_state","id":"d8fb9465","parentId":"b1b89036","timestamp":"2026-09-22T13:19:54.708Z","state":{"status":"active"}}
+{"type":"message","id":"6d7f5d2d","parentId":"d8fb9465","timestamp":"2026-09-22T13:19:55.374Z","message":{"role":"user","content":[{"type":"text","text":"hold the turn"}],"timestamp":1790083195374}}
+{"type":"session_state","id":"d7b7351a","parentId":"6d7f5d2d","timestamp":"2026-09-22T13:19:57.160Z","state":{"status":"active"}}

@@ -1,0 +1,75 @@
+--- ts (child-transcript)
+                                                       f20-worker  $0.00
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.9.5
+  ▗█▛ ▟██▙▄██▛ ▟▛         model mock-1
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd ~/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+ ◆ Agent message received · from parent battery-f20
+
+ f20 child fixture reply
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      Collapsed mode (Ctrl+O to expand)
+
+ >
+
+← manage  depth 1                                                                                      mock-1 · 110 (0%)
+
++++ rust (child-transcript)
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.1.0
+  ▗█▛ ▟██▙▄██▛ ▟▛         agents 0 running, 1 idle, 0 inactive
+  ▗▟▌ ▐███▛▘▗▄█▖          depth 1
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+← back · battery-f20 › subagents
+
+ >   Search sessions
+
+Session                       Model         Activity                                                           Cost  Age
+
+Idle (1)
+• f20-worker                  mock-1                                                                          $0.00   4m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+↑/↓ navigate   Enter/→ open   ← parent   Ctrl+N new

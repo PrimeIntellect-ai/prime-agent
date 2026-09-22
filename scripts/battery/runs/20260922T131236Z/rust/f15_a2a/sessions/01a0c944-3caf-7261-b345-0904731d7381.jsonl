@@ -1,0 +1,8 @@
+{"type":"session","version":3,"id":"01a0c944-3caf-7261-b345-0904731d7381","timestamp":"2026-09-22T13:18:07.535Z","cwd":"/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/work","rlmDepth":0}
+{"type":"model_change","id":"cb3c71e7","parentId":null,"timestamp":"2026-09-22T13:18:07.605Z","provider":"prime-inference","modelId":"mock-1"}
+{"type":"thinking_level_change","id":"78c52139","parentId":"cb3c71e7","timestamp":"2026-09-22T13:18:07.605Z","thinkingLevel":"off"}
+{"type":"service_tier_change","id":"fdc4ae9d","parentId":"78c52139","timestamp":"2026-09-22T13:18:07.606Z","serviceTier":"default"}
+{"type":"session_state","id":"1b7fd438","parentId":"fdc4ae9d","timestamp":"2026-09-22T13:18:07.606Z","state":{"status":"active"}}
+{"type":"session_info","id":"e7faa0c2","parentId":"1b7fd438","timestamp":"2026-09-22T13:18:07.619Z","name":"battery-f9-busy"}
+{"type":"message","id":"ac12a30a","parentId":"e7faa0c2","timestamp":"2026-09-22T13:18:07.947Z","message":{"role":"user","content":[{"type":"text","text":"f9 busy prompt"}],"timestamp":1790083087946}}
+{"type":"message","id":"344249ad","parentId":"ac12a30a","timestamp":"2026-09-22T13:18:33.252Z","message":{"role":"assistant","content":[{"type":"text","text":"f9 busy reply"}],"api":"openai-completions","provider":"prime-inference","model":"mock-1","responseId":"chatcmpl-battery","usage":{"input":20,"output":10,"cacheRead":80,"cacheWrite":0,"totalTokens":110,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1790083088156}}

@@ -1,0 +1,49 @@
+{
+ "type": "daemon_hello",
+ "socketPath": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/daemon.sock",
+ "protocol": {
+  "name": "prime-agent.daemon",
+  "version": 7
+ },
+ "schemaId": "protocol-7-schema-28-92bc5368a082",
+ "schemaRevision": 28,
+ "appVersion": "0.1.0",
+ "runtime": {
+  "buildId": "pa-daemon-rs-0.1.0",
+  "executablePath": "/home/ubuntu/prime-agent-rs/target/debug/prime-agent"
+ },
+ "supervisorGeneration": "sup:394641",
+ "supervisorPid": 394641,
+ "supervisorOwnerToken": "52794a6a-18bb-4570-9ff5-6e87a2b04f59",
+ "supervisorProcessStartId": "proc:26425136",
+ "supervisorSocketPath": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/daemon.sock",
+ "updateResume": {
+  "complete": true
+ },
+ "clientId": "b0f85a0bf883",
+ "serverCapabilities": [
+  "attach_snapshot",
+  "event_sequence",
+  "extension_ui",
+  "slim_attach",
+  "chunked_snapshot",
+  "client_owned_sessions",
+  "delete_rlm_subagent",
+  "heartbeat_catalog",
+  "heartbeat_management",
+  "model_catalog",
+  "side_question_transcript",
+  "transient_bash",
+  "session_input_admission",
+  "prompt_admission_cancellation",
+  "owned_prompt_cancellation",
+  "queue_message_mutation",
+  "authoritative_child_roster",
+  "owned_session_recovery_context",
+  "rlm_quiescence_barrier",
+  "session_input_pause",
+  "acp_mcp_servers",
+  "agent_roster",
+  "direct_peer_transport"
+ ]
+}

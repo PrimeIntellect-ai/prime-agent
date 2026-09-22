@@ -1,0 +1,46 @@
+{
+ "appVersion": "0.1.0",
+ "clientId": "bd750baeb9c8",
+ "protocol": {
+  "name": "prime-agent.daemon",
+  "version": 7
+ },
+ "runtime": {
+  "buildId": "pa-daemon-rs-0.1.0",
+  "executablePath": "/home/ubuntu/prime-agent-rs/target/release/prime-agent"
+ },
+ "schemaId": "protocol-7-schema-28-92bc5368a082",
+ "schemaRevision": 28,
+ "serverCapabilities": [
+  "attach_snapshot",
+  "event_sequence",
+  "extension_ui",
+  "slim_attach",
+  "chunked_snapshot",
+  "client_owned_sessions",
+  "delete_rlm_subagent",
+  "heartbeat_catalog",
+  "heartbeat_management",
+  "model_catalog",
+  "side_question_transcript",
+  "transient_bash",
+  "session_input_admission",
+  "prompt_admission_cancellation",
+  "owned_prompt_cancellation",
+  "queue_message_mutation",
+  "authoritative_child_roster",
+  "owned_session_recovery_context",
+  "rlm_quiescence_barrier",
+  "session_input_pause",
+  "acp_mcp_servers",
+  "agent_roster",
+  "direct_peer_transport"
+ ],
+ "socketPath": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260918T050600Z/rust/daemon.sock",
+ "supervisorGeneration": "sup:1012531",
+ "supervisorOwnerToken": "f6fe001b-db72-4346-af36-bda6f07a2926",
+ "supervisorPid": 1012531,
+ "supervisorProcessStartId": "proc:1988742",
+ "supervisorSocketPath": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260918T050600Z/rust/daemon.sock",
+ "type": "daemon_hello"
+}

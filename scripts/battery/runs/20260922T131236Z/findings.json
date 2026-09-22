@@ -1,0 +1,1482 @@
+[
+ {
+  "flow": "f1_launch",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: first interactive prompt answered by the mock provider",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f1_launch",
+  "category": "protocol",
+  "gap": false,
+  "summary": "ts: interactive model flags are authoritative (request model: mock-1)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f1_launch",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: first interactive prompt answered by the mock provider",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f1_launch",
+  "category": "protocol",
+  "gap": false,
+  "summary": "rust: interactive model flags are authoritative (request model: mock-1)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f1_launch",
+  "category": "visual",
+  "gap": false,
+  "summary": "first-run splash + trace-sharing notice rendered and answerable on both sides (fresh install)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f2_prompt",
+  "category": "behavior",
+  "gap": false,
+  "summary": "print-mode stdout identical: 'battery hello from mock'",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f2_prompt",
+  "category": "protocol",
+  "gap": false,
+  "summary": "system prompt: rust layered redesign (cached static layers + dynamic tail; TS-prompt parity superseded; raw prompts in protocol-request-diff.txt)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f3_tool",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: ipython tool call executed and output captured",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f3_tool",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: ipython tool call executed and output captured",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f3_tool",
+  "category": "protocol",
+  "gap": false,
+  "summary": "session entry type sets match (['custom_message', 'message', 'model_change', 'service_tier_change', 'session', 'session_state', 'thinking_level_change'])",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f4_commands",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: '/' shows a slash-command menu",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f4_commands",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: '/' shows a slash-command menu",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f5_side_questions",
+  "category": "protocol",
+  "gap": false,
+  "summary": "ts: start_side_question answered via mock with side_question_event stream",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f5_side_questions",
+  "category": "protocol",
+  "gap": false,
+  "summary": "rust: start_side_question answered via mock with side_question_event stream",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f5_side_questions",
+  "category": "protocol",
+  "gap": false,
+  "summary": "post-turn status-line request issued by both sides (ts=5, rust=2 requests, model qwen/qwen3-30b-a3b-instruct-2507)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f5_side_questions",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: /btw pane renders the question header and the streamed answer",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f5_side_questions",
+  "category": "protocol",
+  "gap": false,
+  "summary": "ts: follow-up reply seeded the side transcript (previous turns replayed to the provider)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f5_side_questions",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: esc closes the /btw pane and returns to the main thread",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f5_side_questions",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: /btw pane renders the question header and the streamed answer",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f5_side_questions",
+  "category": "protocol",
+  "gap": false,
+  "summary": "rust: follow-up reply seeded the side transcript (previous turns replayed to the provider)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f5_side_questions",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: esc closes the /btw pane and returns to the main thread",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f5_side_questions",
+  "category": "visual",
+  "gap": false,
+  "summary": "btw-pane-answered: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f6_attach",
+  "category": "protocol",
+  "gap": false,
+  "summary": "ts: wire attach returned a snapshot (data keys: ['activeSessionId', 'client', 'lastEventCursor', 'lastEventSequence', 'protocol', 'replay', 'snapshot'])",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f6_attach",
+  "category": "protocol",
+  "gap": false,
+  "summary": "ts: attached client received 14 events during the turn",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f6_attach",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: CLI 'attach' opened the session in tmux (frame captured)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f6_attach",
+  "category": "protocol",
+  "gap": false,
+  "summary": "rust: wire attach returned a snapshot (data keys: ['activeSessionId', 'client', 'lastEventCursor', 'lastEventSequence', 'protocol', 'replay', 'snapshot'])",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f6_attach",
+  "category": "protocol",
+  "gap": false,
+  "summary": "rust: attached client received 11 events during the turn",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f6_attach",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: CLI 'attach' opened the session in tmux (frame captured)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f6_attach",
+  "category": "protocol",
+  "gap": true,
+  "summary": "attach event sequences differ: ts=12 rust=11; ts-only=['message_update:assistant'] rust-only=[]",
+  "evidence": "f6_attach",
+  "expectedFail": null
+ },
+ {
+  "flow": "f7_compaction",
+  "category": "protocol",
+  "gap": false,
+  "summary": "ts: daemon 'compact' succeeded: {\"summary\": \"pre-compaction reply 6\", \"firstKeptEntryId\": \"f8743b1a\", \"tokensBefore\": 110, \"details\": {\"readFiles\": [], \"modifiedFiles\": []}}",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f7_compaction",
+  "category": "protocol",
+  "gap": false,
+  "summary": "rust: daemon 'compact' succeeded: {\"summary\": \"pre-compaction reply 6\", \"firstKeptEntryId\": \"41389668\", \"tokensBefore\": 110, \"details\": {\"readFiles\": [], \"modifiedFiles\": []}}",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f7_compaction",
+  "category": "behavior",
+  "gap": false,
+  "summary": "overflow compact-and-retry wire surface identical: [{\"type\": \"assistant_error\", \"overflow\": true}, {\"type\": \"assistant_error\", \"overflow\": true}, {\"type\": \"compaction_start\", \"reason\": \"overflow\"}, {\"type\": \"compaction_end\", \"reason\": \"overflow\", \"willRetry\": true, \"hasResult\": true, \"errorMessage\": null, \"errorSeverity\": null}, {\"type\": \"assistant_",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f7_compaction",
+  "category": "behavior",
+  "gap": false,
+  "summary": "split-turn compaction: two summarizer requests with identical prompt shapes: [{\"user_text\": [\"<conversation>\\n[User]: seed turn\\n\\n[Assistant]: seed reply\\n</conversation>\\n\\nThe messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.\\n\\nUse this EXACT format:\\n\\n## Goal\\n[What is the user",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f7_compaction",
+  "category": "behavior",
+  "gap": false,
+  "summary": "split-turn durable compaction row identical (merged summary, summed usage): {\"summary\": \"the history summary\\n\\n---\\n\\n**Turn Context (split turn):**\\n\\nthe turn prefix summary\", \"tokensBefore\": 110, \"details\": {\"readFiles\": [], \"modifiedFiles\": []}, \"fromHook\": false, \"usage\": {\"input\": 40, \"output\": 20, \"cacheRead\": 160, \"cacheWrite\": 0, \"totalTokens\": 220, \"cost\": {\"inpu",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f7_compaction",
+  "category": "behavior",
+  "gap": false,
+  "summary": "second-compaction update-mode summarizer request identical (previous-summary merge, new history only): <conversation>\n[User]: history turn two kept by the first compact\n\n[Assistant]: second reply\n</conversation>\n\n<previous-summary>\nthe first compaction summary\n</previous-summary>\n\nThe messages above ar",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f7_compaction",
+  "category": "behavior",
+  "gap": false,
+  "summary": "iterative compaction durable rows identical (checkpoint + updated summary): [{\"summary\": \"the first compaction summary\", \"tokensBefore\": 110, \"details\": {\"readFiles\": [], \"modifiedFiles\": []}, \"fromHook\": false, \"usage\": {\"input\": 20, \"output\": 10, \"cacheRead\": 80, \"cacheWrite\": 0, \"totalTokens\": 110, \"cost\": {\"input\": 0, \"output\": 0, \"cacheRead\": 0, \"cacheWrite\": 0, \"total",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f7_compaction",
+  "category": "behavior",
+  "gap": false,
+  "summary": "post-compact suspension lifecycle identical (plain prompts rejected with the TS admission error, steer/resume_queue resume): {\"compact\": {\"success\": false, \"error\": \"Session is too short to compact \\u2014 try again once it grows\"}, \"plain_after_compact\": {\"success\": false, \"error\": \"Cannot admit a session action while queued session input is suspended.\"}, \"steer\": {\"success\": true, \"error\": null}, \"plain_after_resume\": {\"success\": true, \"error\": null}, \"abort\": {\"success\": true, \"error\": null}, \"plain_after_abort\": {\"su",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f7_compaction",
+  "category": "behavior",
+  "gap": false,
+  "summary": "post-compact goal continuation identical (compaction pair, minted goal_update, goal-context row, continuation turn, completion): [{\"type\": \"compaction_start\", \"reason\": \"manual\"}, {\"type\": \"compaction_end\", \"reason\": \"manual\", \"hasResult\": true, \"errorMessage\": null}, {\"type\": \"goal_update\", \"status\": \"active\", \"objective\": \"land the post-compact continuation parity row\", \"continuationsUsed\": 1}, {\"type\": \"message_start\", \"customType\": \"goal_context\", \"content\": \"[goal: continuation]\\n\\nContinue working toward the active th",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f7_compaction",
+  "category": "behavior",
+  "gap": false,
+  "summary": "post-compact goal continuation model requests identical (goal-start turn, summarizer, continuation prompt): [{\"model\": \"mock-1\", \"last_user_text\": \"[goal: continuation]\\n\\nContinue working toward the active thread goal.\\n\\nThe objective below is user-provided data. Treat it as the task to pursue, not as higher-priority instructions.\\n<objective>\\nland the post-compact continuation parity row\\n</objective>\\n\\nGoal state:\\n- status: active\\n- tokens used: 0\\n- token budget: none\\n- remaining tokens: unbou",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f7_compaction",
+  "category": "behavior",
+  "gap": false,
+  "summary": "post-compact goal compact response identical (success, tokensBefore present): {\"success\": true, \"error\": null, \"hasTokensBefore\": true, \"summary\": \"the post-compact goal continuation summary\"}",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f7_compaction",
+  "category": "behavior",
+  "gap": false,
+  "summary": "durable compaction entries identical (tokensBefore, fromHook, details, usage, harnessDigest; normalized ids/timestamps): [{\"summary\": \"pre-compaction reply 6\", \"tokensBefore\": 110, \"details\": {\"readFiles\": [], \"modifiedFiles\": []}, \"fromHook\": false, \"usage\": {\"input\": 20, \"output\": 10, \"cacheRead\": 80, \"cacheWrite\": 0, \"totalTokens\": 110, \"cost\": {\"input\": 0, \"output\": 0, \"cacheRead\": 0, \"cacheWrite\": 0, \"total\": 0}}",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f7_compaction",
+  "category": "behavior",
+  "gap": false,
+  "summary": "battery-ipython-notice parity: ipython_state row after each compaction, back-to-back second compact runs (update mode): [{\"customType\": \"ipython_state\", \"display\": false, \"content_shape\": \"[python-state]\\n\\nYour Python kernel persisted through compaction; its remaining variables, imports, and helpers are still available.\"}, {\"customType\": \"ipython_state\", \"display\": false, \"content_shape\": \"[python-state]\\n\\nYour Pyt",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f7_compaction",
+  "category": "behavior",
+  "gap": false,
+  "summary": "battery-ipython-prewarm parity: ipython_state row after each compaction, back-to-back second compact runs (update mode): [{\"customType\": \"ipython_state\", \"display\": false, \"content_shape\": \"[python-state]\\n\\nYour Python kernel persisted through compaction; its remaining variables, imports, and helpers are still available.\"}, {\"customType\": \"ipython_state\", \"display\": false, \"content_shape\": \"[python-state]\\n\\nYour Pyt",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f8_resume",
+  "category": "behavior",
+  "gap": false,
+  "summary": "print '-c' refuses a session active in the daemon on both sides: badd449f8bc3 (ts) vs c52c4617f56f (rust)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f8_resume",
+  "category": "protocol",
+  "gap": false,
+  "summary": "session entry type sets match (['agent_status', 'compaction', 'custom', 'custom_message', 'message', 'model_change', 'service_tier_change', 'session', 'session_info', 'session_state', 'thinking_level_change'])",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: agents view groups the roster into Running/Idle/Inactive sections with the scripted sessions in place",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: opening the Running row attached to the live session and its in-flight reply rendered",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: the selection stayed on the same session row through live roster churn ('battery-f9-idle')",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: agents view groups the roster into Running/Idle/Inactive sections with the scripted sessions in place",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: opening the Running row attached to the live session and its in-flight reply rendered",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: the selection stayed on the same session row through live roster churn ('battery-f9-idle')",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "visual",
+  "gap": false,
+  "summary": "agents view frames identical at 120x36 (normalized: paths, ids, ages)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "visual",
+  "gap": false,
+  "summary": "agents view frames identical at 220x50 (normalized: paths, ids, ages)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "visual",
+  "gap": false,
+  "summary": "agents view frames identical at filtered-120x36 (normalized: paths, ids, ages)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "visual",
+  "gap": false,
+  "summary": "agents view frames identical at transcript-120x36 (normalized: paths, ids, ages)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f10_perf",
+  "category": "perf",
+  "gap": false,
+  "summary": "ts: cold startup to interactive-ready median 2.574s over 3 launches (first frame median 2.529s); typing latency median 10.3ms, p95 23.8ms over 75 keystrokes",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f10_perf",
+  "category": "perf",
+  "gap": false,
+  "summary": "rust: cold startup to interactive-ready median 1.026s over 3 launches (first frame median 0.206s); typing latency median 18.3ms, p95 37.5ms over 75 keystrokes",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f10_perf",
+  "category": "perf",
+  "gap": false,
+  "summary": "startup: rust 1.026s vs ts 2.574s cold-ready median (ratio 0.40, threshold 1.5)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f10_perf",
+  "category": "perf",
+  "gap": true,
+  "summary": "REGRESSION typing: rust p95 37.5ms vs ts p95 23.8ms keystroke-to-render (ratio 1.58, threshold 1.5)",
+  "evidence": "/home/ubuntu/prime-agent-rs/target/debug/prime-agent",
+  "expectedFail": null
+ },
+ {
+  "flow": "f10_perf",
+  "category": "perf",
+  "gap": true,
+  "summary": "rust binary measured is a debug build (/home/ubuntu/prime-agent-rs/target/debug/prime-agent, 484MB); the perf posture is cargo build --release",
+  "evidence": "/home/ubuntu/prime-agent-rs/target/debug/prime-agent",
+  "expectedFail": null
+ },
+ {
+  "flow": "f11_provider_failure",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: provider failure surfaces (retry banner + 4 error row(s))",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f11_provider_failure",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: provider failure surfaces (retry banner + 4 error row(s))",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f11_provider_failure",
+  "category": "visual",
+  "gap": false,
+  "summary": "provider-failure rendering parity: 4 error row(s) on both sides",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f12_scroll",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: PageUp pages history into view with the follow hint; paging back to the tail resumes following",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f12_scroll",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: PageUp pages history into view with the follow hint; paging back to the tail resumes following",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f13_ctrlc_exit",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: C-c C-c exits in 0.14s (case healthy, exit code 0)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f13_ctrlc_exit",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: C-c C-c exits in 0.7s (case healthy, exit code 0)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f13_ctrlc_exit",
+  "category": "behavior",
+  "gap": true,
+  "summary": "rust: C-c C-c did not exit cleanly (case wedged): exit took 1.26s, status 1 0",
+  "evidence": "rust/f13_ctrlc_exit/rust-wedged.json",
+  "expectedFail": null
+ },
+ {
+  "flow": "f13_ctrlc_exit",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: C-c C-c exits in 0.58s (case daemon_dead, exit code 0)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: /compact shows the durable '\u25c6 Context compacted' summary row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: the Ctrl+O detail cycle expands the compaction summary block",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: the third Ctrl+O re-collapses the compaction summary block",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: crossing the compaction threshold auto-compacts and shows the summary row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: /compact shows the durable '\u25c6 Context compacted' summary row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: the Ctrl+O detail cycle expands the compaction summary block",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: the third Ctrl+O re-collapses the compaction summary block",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: crossing the compaction threshold auto-compacts and shows the summary row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "manual-compact: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "manual-expanded: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "auto-compact: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f15_a2a",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: a sibling agent message renders the '\u25c6 Agent message received' row with participant label",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f15_a2a",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: the sender's ipython cell renders the '\u25c6 Agent message sent/queued' summary row with the participant label",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f15_a2a",
+  "category": "visual",
+  "gap": true,
+  "summary": "rust: the delivered sibling message shows no 'Agent message received' row",
+  "evidence": "rust/f15_a2a/02-received-settled.txt",
+  "expectedFail": "decorations-3"
+ },
+ {
+  "flow": "f15_a2a",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: the sender's ipython cell renders the '\u25c6 Agent message sent/queued' summary row with the participant label",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f15_a2a",
+  "category": "visual",
+  "gap": true,
+  "summary": "received: frames differ TS vs Rust (see frame-diff-received.txt)",
+  "evidence": "ts/f15_a2a/frame-diff-received.txt",
+  "expectedFail": "decorations-3"
+ },
+ {
+  "flow": "f15_a2a",
+  "category": "visual",
+  "gap": true,
+  "summary": "sent: frames differ TS vs Rust (see frame-diff-sent.txt)",
+  "evidence": "ts/f15_a2a/frame-diff-sent.txt",
+  "expectedFail": "decorations-3"
+ },
+ {
+  "flow": "f16_refine",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: the kernel-scheduled refinement renders the '\u25c6 Harness refined' outcome row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f16_refine",
+  "category": "visual",
+  "gap": true,
+  "summary": "ts: no [harness-digest] message row on the post-refinement boundary",
+  "evidence": "ts/f16_refine/04-digest-settled.txt",
+  "expectedFail": "decorations-3"
+ },
+ {
+  "flow": "f16_refine",
+  "category": "visual",
+  "gap": true,
+  "summary": "rust: no '\u25c6 Harness refined' outcome row after the kernel-scheduled refinement",
+  "evidence": "rust/f16_refine/02-refine-settled.txt",
+  "expectedFail": "decorations-3"
+ },
+ {
+  "flow": "f16_refine",
+  "category": "visual",
+  "gap": true,
+  "summary": "rust: no [harness-digest] message row on the post-refinement boundary",
+  "evidence": "rust/f16_refine/04-digest-settled.txt",
+  "expectedFail": "decorations-3"
+ },
+ {
+  "flow": "f16_refine",
+  "category": "visual",
+  "gap": true,
+  "summary": "refine: frames differ TS vs Rust (see frame-diff-refine.txt)",
+  "evidence": "ts/f16_refine/frame-diff-refine.txt",
+  "expectedFail": "decorations-3"
+ },
+ {
+  "flow": "f16_refine",
+  "category": "visual",
+  "gap": true,
+  "summary": "digest: frames differ TS vs Rust (see frame-diff-digest.txt)",
+  "evidence": "ts/f16_refine/frame-diff-digest.txt",
+  "expectedFail": "decorations-3"
+ },
+ {
+  "flow": "f17_slash_model",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: /model opens the selector with the configured model listed",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f17_slash_model",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: picking a model in the selector shows the 'Model: <id>' confirm row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f17_slash_model",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: /effort shows the thinking-level picker or its unsupported-model row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f17_slash_model",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: /model opens the selector with the configured model listed",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f17_slash_model",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: picking a model in the selector shows the 'Model: <id>' confirm row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f17_slash_model",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: /effort shows the thinking-level picker or its unsupported-model row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f17_slash_model",
+  "category": "visual",
+  "gap": false,
+  "summary": "model-selector: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f17_slash_model",
+  "category": "visual",
+  "gap": false,
+  "summary": "model-selected: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f17_slash_model",
+  "category": "visual",
+  "gap": false,
+  "summary": "effort-picker: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f18_goal_autonomous",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: /goal start renders the goal context row / active goal label",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f18_goal_autonomous",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: /goal pause renders the paused row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f18_goal_autonomous",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: goal.complete() renders the completion row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f18_goal_autonomous",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: /autonomous on renders the autonomous status row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f18_goal_autonomous",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: /goal start renders the goal context row / active goal label",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f18_goal_autonomous",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: /goal pause renders the paused row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f18_goal_autonomous",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: goal.complete() renders the completion row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f18_goal_autonomous",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: /autonomous on renders the autonomous status row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f18_goal_autonomous",
+  "category": "visual",
+  "gap": true,
+  "summary": "goal-start: frames differ TS vs Rust (see frame-diff-goal-start.txt)",
+  "evidence": "ts/f18_goal_autonomous/frame-diff-goal-start.txt",
+  "expectedFail": "goal-autonomous"
+ },
+ {
+  "flow": "f18_goal_autonomous",
+  "category": "visual",
+  "gap": true,
+  "summary": "goal-status: frames differ TS vs Rust (see frame-diff-goal-status.txt)",
+  "evidence": "ts/f18_goal_autonomous/frame-diff-goal-status.txt",
+  "expectedFail": "goal-autonomous"
+ },
+ {
+  "flow": "f18_goal_autonomous",
+  "category": "visual",
+  "gap": true,
+  "summary": "goal-pause: frames differ TS vs Rust (see frame-diff-goal-pause.txt)",
+  "evidence": "ts/f18_goal_autonomous/frame-diff-goal-pause.txt",
+  "expectedFail": "goal-autonomous"
+ },
+ {
+  "flow": "f18_goal_autonomous",
+  "category": "visual",
+  "gap": true,
+  "summary": "goal-resume: frames differ TS vs Rust (see frame-diff-goal-resume.txt)",
+  "evidence": "ts/f18_goal_autonomous/frame-diff-goal-resume.txt",
+  "expectedFail": "goal-autonomous"
+ },
+ {
+  "flow": "f18_goal_autonomous",
+  "category": "visual",
+  "gap": true,
+  "summary": "goal-complete: frames differ TS vs Rust (see frame-diff-goal-complete.txt)",
+  "evidence": "ts/f18_goal_autonomous/frame-diff-goal-complete.txt",
+  "expectedFail": "goal-autonomous"
+ },
+ {
+  "flow": "f18_goal_autonomous",
+  "category": "visual",
+  "gap": true,
+  "summary": "autonomous-on: frames differ TS vs Rust (see frame-diff-autonomous-on.txt)",
+  "evidence": "ts/f18_goal_autonomous/frame-diff-autonomous-on.txt",
+  "expectedFail": "goal-autonomous"
+ },
+ {
+  "flow": "f18_goal_autonomous",
+  "category": "visual",
+  "gap": false,
+  "summary": "autonomous-off: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f19_heartbeat",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: /heartbeat renders the 'Heartbeat set' status row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f19_heartbeat",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: a fired heartbeat renders the '\u2665 Heartbeat prompt \u00b7 every 10s' row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f19_heartbeat",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: /heartbeats opens the heartbeat manager view",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f19_heartbeat",
+  "category": "visual",
+  "gap": true,
+  "summary": "rust: /heartbeat produced no 'Heartbeat set' status row",
+  "evidence": "rust/f19_heartbeat/01-heartbeat-set.txt",
+  "expectedFail": "heartbeat-tui"
+ },
+ {
+  "flow": "f19_heartbeat",
+  "category": "behavior",
+  "gap": true,
+  "summary": "rust: the fired heartbeat produced no visible '\u2665 Heartbeat prompt' row",
+  "evidence": "rust/f19_heartbeat/03-heartbeat-fired-settled.txt",
+  "expectedFail": "heartbeat-tui"
+ },
+ {
+  "flow": "f19_heartbeat",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: /heartbeats opens the heartbeat manager view",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f19_heartbeat",
+  "category": "visual",
+  "gap": true,
+  "summary": "heartbeat-set: frames differ TS vs Rust (see frame-diff-heartbeat-set.txt)",
+  "evidence": "ts/f19_heartbeat/frame-diff-heartbeat-set.txt",
+  "expectedFail": "heartbeat-tui"
+ },
+ {
+  "flow": "f19_heartbeat",
+  "category": "visual",
+  "gap": true,
+  "summary": "heartbeat-fired: frames differ TS vs Rust (see frame-diff-heartbeat-fired.txt)",
+  "evidence": "ts/f19_heartbeat/frame-diff-heartbeat-fired.txt",
+  "expectedFail": "heartbeat-tui"
+ },
+ {
+  "flow": "f19_heartbeat",
+  "category": "visual",
+  "gap": true,
+  "summary": "heartbeats-manager: frames differ TS vs Rust (see frame-diff-heartbeats-manager.txt)",
+  "evidence": "ts/f19_heartbeat/frame-diff-heartbeats-manager.txt",
+  "expectedFail": "heartbeat-tui"
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: a kernel rlm.spawn renders the subagent summary line above the editor with the running/idle/inactive counts",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: a child finishing without a reply renders the 'RLM child status' terminal-notice row in the parent transcript",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: the scoped agents view lists the spawned child by name",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: the session-scoped mock routed the spawn turn deterministically (1 child-session request(s) to the child queue, 3 parent-session request(s) to the default queue)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: Down at the end of the prompt focuses the subagent panel (the hint flips to the focused open pair)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: Enter on the child row drills into the child transcript",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: the agents-back key returns from the child transcript to the view",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: a kernel rlm.spawn renders the subagent summary line above the editor with the running/idle/inactive counts",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": true,
+  "summary": "rust: the completed child produced no 'RLM child status' terminal-notice row",
+  "evidence": "rust/f20_subagents/04-child-status-settled.txt",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: the scoped agents view lists the spawned child by name",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: the session-scoped mock routed the spawn turn deterministically (1 child-session request(s) to the child queue, 3 parent-session request(s) to the default queue)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: Down at the end of the prompt focuses the subagent panel (the hint flips to the focused open pair)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": true,
+  "summary": "rust: Enter on the child row did not open the child transcript",
+  "evidence": "rust/f20_subagents/13-child-transcript-settled.txt",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: the agents-back key returns from the child transcript to the view",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": true,
+  "summary": "spawn: frames differ TS vs Rust (see frame-diff-spawn.txt)",
+  "evidence": "ts/f20_subagents/frame-diff-spawn.txt",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": true,
+  "summary": "child-status: frames differ TS vs Rust (see frame-diff-child-status.txt)",
+  "evidence": "ts/f20_subagents/frame-diff-child-status.txt",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": true,
+  "summary": "scoped-agents: frames differ TS vs Rust (see frame-diff-scoped-agents.txt)",
+  "evidence": "ts/f20_subagents/frame-diff-scoped-agents.txt",
+  "expectedFail": null
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": true,
+  "summary": "reattached: frames differ TS vs Rust (see frame-diff-reattached.txt)",
+  "evidence": "ts/f20_subagents/frame-diff-reattached.txt",
+  "expectedFail": "ipython-replay"
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": true,
+  "summary": "panel-focused: frames differ TS vs Rust (see frame-diff-panel-focused.txt)",
+  "evidence": "ts/f20_subagents/frame-diff-panel-focused.txt",
+  "expectedFail": "ipython-replay"
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": true,
+  "summary": "child-transcript: frames differ TS vs Rust (see frame-diff-child-transcript.txt)",
+  "evidence": "ts/f20_subagents/frame-diff-child-transcript.txt",
+  "expectedFail": "child-task-message"
+ },
+ {
+  "flow": "f20_subagents",
+  "category": "visual",
+  "gap": true,
+  "summary": "back-to-view: frames differ TS vs Rust (see frame-diff-back-to-view.txt)",
+  "evidence": "ts/f20_subagents/frame-diff-back-to-view.txt",
+  "expectedFail": null
+ },
+ {
+  "flow": "f21_worker_recovery",
+  "category": "protocol",
+  "gap": false,
+  "summary": "ts: the session summary exposes the live worker pid (workerState: ready)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f21_worker_recovery",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: the attached TUI keeps the transcript after the worker process is killed",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f21_worker_recovery",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: the worker death surfaces the daemon reconnection status row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f21_worker_recovery",
+  "category": "behavior",
+  "gap": true,
+  "summary": "ts ground truth (EXPECTED-FAIL, ruling in the flow docstring): the wire-created (unowned) session does not survive its worker's death \u2014 the daemon parks the worker failed and the follow-up submit fails with \"Session worker is failed\"; the owned-path respawn is the behavior Rust ports",
+  "evidence": "ts/f21_worker_recovery/06-recovered-settled.txt",
+  "expectedFail": "worker-recovery"
+ },
+ {
+  "flow": "f21_worker_recovery",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts ground truth: the failed follow-up surfaces the \"\u26a0 Error: Session worker is failed\" and \"\u26a0 Error: Daemon reconnection failed: Session worker is failed\" rows with the typed text preserved in the input",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f21_worker_recovery",
+  "category": "protocol",
+  "gap": true,
+  "summary": "ts ground truth (EXPECTED-FAIL, ruling in the flow docstring): get_state fails with \"Session worker is failed\" \u2014 the unowned worker stays parked failed, no new ready worker in this daemon's lifetime",
+  "evidence": "ts/f21_worker_recovery/07-post-recovery-state.json",
+  "expectedFail": "worker-recovery"
+ },
+ {
+  "flow": "f21_worker_recovery",
+  "category": "protocol",
+  "gap": false,
+  "summary": "rust: the session summary exposes the live worker pid (workerState: ready)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f21_worker_recovery",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: the attached TUI keeps the transcript after the worker process is killed",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f21_worker_recovery",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: the worker death surfaces the daemon reconnection status row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f21_worker_recovery",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: after the worker is killed the session recovers \u2014 the next turn completes with the transcript intact",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f21_worker_recovery",
+  "category": "protocol",
+  "gap": false,
+  "summary": "rust: recovery respawned the worker (pid 465895 -> 466293, workerState ready)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f21_worker_recovery",
+  "category": "visual",
+  "gap": true,
+  "summary": "post-kill: frames differ TS vs Rust (see frame-diff-post-kill.txt)",
+  "evidence": "ts/f21_worker_recovery/frame-diff-post-kill.txt",
+  "expectedFail": "worker-recovery"
+ },
+ {
+  "flow": "f21_worker_recovery",
+  "category": "visual",
+  "gap": true,
+  "summary": "recovered: frames differ TS vs Rust (see frame-diff-recovered.txt)",
+  "evidence": "ts/f21_worker_recovery/frame-diff-recovered.txt",
+  "expectedFail": "worker-recovery"
+ },
+ {
+  "flow": "f22_provider_failover",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: the TS product has no provider failover \u2014 the same flow exhausts its quick retries and surfaces the failure (the resilience feature is Rust-side only; intentional divergence)",
+  "evidence": "ts/f22_provider_failover/02-provider-failure.txt",
+  "expectedFail": null
+ },
+ {
+  "flow": "f22_provider_failover",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: provider failure re-routed to prime-backup/mock-1, the backup answered, and the primary was restored (switch surface rendered: True)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f24_prompt_stash",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: the reopened chat restored the stashed draft into the editor",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f24_prompt_stash",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: the reopened chat restored the stashed draft into the editor",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f24_prompt_stash",
+  "category": "visual",
+  "gap": true,
+  "summary": "agents-view-back: the roster frame differs \u2014 the TS binary clears the search query after the chat round trip, the Rust build keeps it (agents-view query persistence; both sides set the query before the open, see 00b-filtered.txt)",
+  "evidence": "ts/f24_prompt_stash/frame-diff-agents-view-back.txt",
+  "expectedFail": "agents-view"
+ },
+ {
+  "flow": "f24_prompt_stash",
+  "category": "visual",
+  "gap": false,
+  "summary": "typed-draft: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f24_prompt_stash",
+  "category": "visual",
+  "gap": false,
+  "summary": "restored: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f24_prompt_stash",
+  "category": "visual",
+  "gap": false,
+  "summary": "submitted: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: the prompt-context hint renders the user override (X), not the default",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: the override key cycled the conversation detail",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: the removed default key no longer cycles the detail",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: /hotkeys documents the effective override (X row)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: the ? quick-shortcut guide mounted with the effective bindings",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: the submission cleared the quick-shortcut guide",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: the prompt-context hint renders the user override (X), not the default",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: the override key cycled the conversation detail",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: the removed default key no longer cycles the detail",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: /hotkeys documents the effective override (X row)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: the ? quick-shortcut guide mounted with the effective bindings",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: the submission cleared the quick-shortcut guide",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "detail-hint: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "override-fired: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "default-key: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "hotkeys-guide: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "shortcut-guide: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f23_keybindings",
+  "category": "visual",
+  "gap": false,
+  "summary": "guide-cleared: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ }
+]

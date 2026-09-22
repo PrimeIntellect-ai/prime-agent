@@ -1,0 +1,7 @@
+{
+ "id": "zk1",
+ "type": "response",
+ "command": "compact",
+ "success": false,
+ "error": "Session is too short to compact \u2014 try again once it grows"
+}

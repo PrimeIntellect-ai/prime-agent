@@ -1,0 +1,8 @@
+{
+ "case": "healthy",
+ "elapsed_s": 0.7,
+ "status": "1 0",
+ "exit_code": 0,
+ "resume_hint": true,
+ "exit_frame": true
+}

@@ -1,0 +1,2 @@
+Prime Agent daemon supervisor 232ce158-0f98-45af-bee2-bedf52c5b662 listening on /home/ubuntu/prime-agent-rs/scripts/battery/runs/20260920T123933Z-abort/ts/daemon.sock
+Session worker 7e62006cae4b stderr: Prime Agent daemon listening on /tmp/compaction-abort-ts-1096244/prime-agent-1000/worker-2a744a3f274a-7e62006cae4b.sock

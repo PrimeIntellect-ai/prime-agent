@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "socketPath": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/daemon.sock",
+  "defaultSessionConfig": {
+    "cwd": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/work",
+    "agentDir": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/agent"
+  }
+}

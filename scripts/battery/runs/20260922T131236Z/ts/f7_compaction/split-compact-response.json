@@ -1,0 +1,15 @@
+{
+ "id": "sk1",
+ "type": "response",
+ "command": "compact",
+ "success": true,
+ "data": {
+  "summary": "the history summary\n\n---\n\n**Turn Context (split turn):**\n\nthe turn prefix summary",
+  "firstKeptEntryId": "e5967157",
+  "tokensBefore": 110,
+  "details": {
+   "readFiles": [],
+   "modifiedFiles": []
+  }
+ }
+}

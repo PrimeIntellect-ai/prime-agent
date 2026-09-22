@@ -1,0 +1,5 @@
+{"cwd":"/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260918T050600Z/rust/work","id":"01a0b2e8-c520-7190-b352-48e39bc4a03d","rlmDepth":0,"timestamp":"2026-09-18T05:06:34.400Z","type":"session","version":3}
+{"type":"model_change","id":"12e0ef99","parentId":null,"timestamp":"2026-09-18T05:06:34.422Z","modelId":"z-ai/glm-5.3","provider":"prime-inference"}
+{"type":"thinking_level_change","id":"11522121","parentId":"12e0ef99","timestamp":"2026-09-18T05:06:34.422Z","thinkingLevel":"high"}
+{"type":"service_tier_change","id":"e0e2285b","parentId":"11522121","timestamp":"2026-09-18T05:06:34.422Z","serviceTier":"default"}
+{"type":"session_state","id":"2273495d","parentId":"e0e2285b","timestamp":"2026-09-18T05:06:34.422Z","state":{"status":"active"}}

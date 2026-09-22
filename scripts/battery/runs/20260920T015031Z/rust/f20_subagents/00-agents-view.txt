@@ -1,0 +1,36 @@
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.1.0
+  ▗█▛ ▟██▙▄██▛ ▟▛         agents 0 running, 4 idle, 0 inactive
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd ~/prime-agent-rs/scripts/battery/runs/20260920T015031Z/rust/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+ >   Search sessions
+
+Session                       Model         Activity                                                           Cost  Age
+
+Idle (4)
+• battery-f20                 mock-1                                                                          $0.00   2s
+• battery-f14-auto            mock-1                                                                          $0.00   2m
+• battery-f14-manual          mock-1                                                                          $0.00   2m
+• (no messages)               mock-1                                                                          $0.00  32s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+↑/↓ navigate   Enter/→ open   Ctrl+N new

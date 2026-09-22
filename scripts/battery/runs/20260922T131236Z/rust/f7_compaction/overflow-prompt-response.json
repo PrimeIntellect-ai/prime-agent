@@ -1,0 +1,7 @@
+{
+ "id": "op1",
+ "type": "response",
+ "command": "prompt_and_wait",
+ "success": false,
+ "error": "400 prompt is too long: 213462 tokens > 200000 maximum"
+}

@@ -32,6 +32,31 @@ const DEFAULT_MAX_LINES: usize = 2000;
 /// The TS spill prefix (temp file names in `$TMPDIR`).
 const SPILL_PREFIX: &str = "pa-bash";
 
+/// A tracked detached child (TS `trackDetachedChildPid`/
+/// `untrackDetachedChildPid`): the pid leaves the shutdown registry when
+/// the run leaves — the settle and the cancelled run both drop it, and a
+/// recycled pid can never be killed by a later shutdown sweep.
+struct TrackedDetachedChild {
+    pid: Option<u32>,
+}
+
+impl TrackedDetachedChild {
+    fn new(pid: Option<u32>) -> Self {
+        if let Some(pid) = pid {
+            pa_core::platform::track_detached_child_pid(pid as i32);
+        }
+        Self { pid }
+    }
+}
+
+impl Drop for TrackedDetachedChild {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid {
+            pa_core::platform::untrack_detached_child_pid(pid as i32);
+        }
+    }
+}
+
 /// The user-bash slot: one command runs at a time (TS `_userBashRunning`
 /// plus the per-invocation abort controllers), with a kill switch the
 /// `abort_bash` command pulls.
@@ -424,10 +449,16 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Detached process group + tracking (TS `createLocalBashOperations`:
+    // every local bash child — the tool and the user-bash slot — runs
+    // detached and tracked, so the shutdown-signal registry kills it with
+    // its descendants instead of orphaning it inside the worker's group).
+    pa_core::platform::process::set_new_process_group(command.as_std_mut());
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => return spawn_failure(error.to_string()),
     };
+    let _untrack_on_settle = TrackedDetachedChild::new(child.id());
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     {

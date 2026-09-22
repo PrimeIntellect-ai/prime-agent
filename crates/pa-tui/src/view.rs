@@ -1386,15 +1386,18 @@ fn composite_follow_hint(row: &Line, label: &str, width: usize) -> Line {
     let (markers, rest) = crate::osc133::split_leading_markers(row);
     let col = width.saturating_sub(label_width) / 2;
     let mut out: Line = markers;
-    out.extend(crate::width::slice_line_by_column(&rest, 0, col));
+    out.extend(crate::width::slice_line_by_column_strict(
+        &rest, 0, col, true,
+    ));
     out.push(Span::styled(
         label.to_string(),
         Style::default().add_modifier(Modifier::REVERSED),
     ));
-    out.extend(crate::width::slice_line_by_column(
+    out.extend(crate::width::slice_line_by_column_strict(
         &rest,
         col.saturating_add(label_width),
         width,
+        true,
     ));
     out
 }
@@ -1828,6 +1831,7 @@ mod tests {
                 is_error: false,
             }),
             result_partial: false,
+            aborted: false,
         }))
     }
 
@@ -1897,6 +1901,7 @@ mod tests {
             ended_at: None,
             result: None,
             result_partial: false,
+            aborted: false,
         }));
         let mut view = view_with(vec![running, settled_tool_card("call_d")]);
         view.pulse_frame = 0;

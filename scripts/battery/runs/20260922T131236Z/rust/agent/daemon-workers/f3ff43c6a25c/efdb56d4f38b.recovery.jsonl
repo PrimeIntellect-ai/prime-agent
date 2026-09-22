@@ -1,0 +1,7 @@
+{"activeSessionId":"efdb56d4f38b","sessionId":"01a0c947-8b23-754d-8f60-19b1cc63d083","sessionFile":"/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/sessions/01a0c947-8b23-754d-8f60-19b1cc63d083.jsonl","busy":true,"operation":"create","recordedAt":"2026-09-22T13:21:44.496Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"efdb56d4f38b","steering":["f15 seed b"],"follow_up":[],"recorded_at":"2026-09-22T13:21:45.276Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"efdb56d4f38b","steering":[],"follow_up":[],"recorded_at":"2026-09-22T13:21:45.757Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"efdb56d4f38b","steering":["[agent-message from battery-f15-a]\n\nf15 a2a payload from a to b"],"follow_up":[],"recorded_at":"2026-09-22T13:21:55.538Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"efdb56d4f38b","steering":[],"follow_up":[],"recorded_at":"2026-09-22T13:21:56.253Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"efdb56d4f38b","steering":["f15 send the sibling message back to a"],"follow_up":[],"recorded_at":"2026-09-22T13:22:02.623Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"efdb56d4f38b","steering":[],"follow_up":[],"recorded_at":"2026-09-22T13:22:04.097Z"}

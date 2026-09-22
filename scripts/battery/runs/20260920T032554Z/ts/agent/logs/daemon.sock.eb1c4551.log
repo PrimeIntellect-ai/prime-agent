@@ -1,0 +1,5 @@
+[2026-09-20T03:25:55.413Z] supervisor: Prime Agent daemon supervisor 84fa627f-ca90-4098-b1ea-3b522ed16797 listening on /tmp/auto-compact-battery/20260920T032552Z/20260920T032554Z/ts/daemon.sock
+[2026-09-20T03:25:55.695Z] supervisor: Session worker 8785b3e8bea3 stderr: Prime Agent daemon listening on /tmp/vbat20260920T032554Z-ts/prime-agent-1000/worker-eb1c45510d95-8785b3e8bea3.sock
+[2026-09-20T03:26:20.897Z] supervisor: Session worker dd5cc494697f stderr: Prime Agent daemon listening on /tmp/vbat20260920T032554Z-ts/prime-agent-1000/worker-eb1c45510d95-dd5cc494697f.sock
+[2026-09-20T03:27:07.193Z] supervisor: Session worker dd5cc494697f stderr: shutting down (exit 0); closing 0 active session(s)
+[2026-09-20T03:27:07.196Z] supervisor: Session worker 8785b3e8bea3 stderr: shutting down (exit 0); closing 0 active session(s)

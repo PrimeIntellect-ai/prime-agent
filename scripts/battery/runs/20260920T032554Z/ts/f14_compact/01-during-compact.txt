@@ -1,0 +1,36 @@
+                                                   battery-f14-manual  $0.00
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.9.5
+  ▗█▛ ▟██▙▄██▛ ▟▛         model mock-1
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd /tmp/auto-compact-battery/20260920T032552Z/20260920T032554Z/ts/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+  f14 seed turn 2 of the parity battery with deterministic content
+
+
+ f14 parity fixture reply
+
+
+  /compact
+
+
+ ◆ Context compacted
+ f14 parity fixture reply
+
+
+
+
+
+
+
+
+
+                                                                                      Collapsed mode (Ctrl+O to expand)
+
+ >
+
+← manage                                                                                                          mock-1

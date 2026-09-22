@@ -1,0 +1,3 @@
+[2026-09-20T17:35:24.651Z] supervisor: Prime Agent daemon supervisor d57b6df5-650a-43c7-851e-862c8b1b38fc listening on /home/ubuntu/prime-agent-rs/scripts/battery/runs/20260920T173524Z-abort/ts/daemon.sock
+[2026-09-20T17:35:25.090Z] supervisor: Session worker c4b4f6a384b8 stderr: Prime Agent daemon listening on /tmp/compaction-abort-ts-1310578/prime-agent-1000/worker-64b6d196bfbd-c4b4f6a384b8.sock
+[2026-09-20T17:35:29.608Z] supervisor: Session worker c4b4f6a384b8 stderr: shutting down (exit 0); closing 0 active session(s)

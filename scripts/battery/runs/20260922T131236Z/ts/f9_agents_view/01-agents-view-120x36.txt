@@ -1,0 +1,36 @@
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.9.5
+  ▗█▛ ▟██▙▄██▛ ▟▛         agents 1 running, 1 idle, 1 inactive
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd ~/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+ >   Search sessions
+
+Session                       Model         Activity                                                           Cost  Age
+
+Running (1)
+◈ battery-f9-busy             mock-1                                                                          $0.00   1s
+
+Idle (1)
+• battery-f9-idle             mock-1                                                                          $0.00   6s
+
+Inactive (1)
+• f9 inactive prompt          mock-1                                                                          $0.00   5s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+↑/↓ navigate   Enter/→ open   Ctrl+N new

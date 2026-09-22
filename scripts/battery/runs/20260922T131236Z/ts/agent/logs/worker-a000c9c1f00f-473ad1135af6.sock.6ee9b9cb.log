@@ -1,0 +1,3 @@
+[2026-09-22T13:17:28.381Z] Prime Agent daemon listening on /tmp/vbat20260922T131236Z-ts/prime-agent-1000/worker-a000c9c1f00f-473ad1135af6.sock
+[2026-09-22T13:51:57.797Z] received SIGTERM; shutting down
+[2026-09-22T13:51:57.978Z] shutting down (exit 143); closing 1 active session(s)

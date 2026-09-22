@@ -1,0 +1,36 @@
+                                                      battery-f20  $0.00
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.1.0
+  ▗█▛ ▟██▙▄██▛ ▟▛         model mock-1
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd ~/prime-agent-rs/scripts/battery/runs/20260920T015031Z/rust/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+  f20 seed turn
+
+
+ f20 parent fixture reply
+
+
+  f20 spawn the subagent now
+
+
+ ✓ python · ↑ 1 ↓ 1 lines · 72ms
+
+ f20 child fixture reply
+
+
+
+
+
+                                                                                      Collapsed mode (Ctrl+O to expand)
+
+ >
+
+← manage                                                                                               mock-1 · 110 (0%)
+╭─ subagents ──────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ ● 0 running   ◐ 1 idle   ○ 0 inactive                                                                       ↓ select │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

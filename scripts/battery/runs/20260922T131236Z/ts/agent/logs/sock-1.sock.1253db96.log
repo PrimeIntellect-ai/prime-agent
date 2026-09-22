@@ -1,0 +1,3 @@
+[2026-09-22T13:18:50.545Z] supervisor: Prime Agent daemon supervisor 25627f2d-c8be-44c1-955a-89bbbea2ef39 listening on /home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/perf/sock-1.sock
+[2026-09-22T13:18:51.041Z] supervisor: Session worker a1156eee47f6 stderr: Prime Agent daemon listening on /tmp/vbat20260922T131236Z-ts/prime-agent-1000/worker-1253db9602f8-a1156eee47f6.sock
+[2026-09-22T13:18:52.377Z] supervisor: Session worker a1156eee47f6 stderr: shutting down (exit 0); closing 0 active session(s)

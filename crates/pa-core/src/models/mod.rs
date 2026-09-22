@@ -4,12 +4,28 @@ pub use private_auth::{
     get_private_prime_inference_models, private_prime_authorization_fingerprint,
     PrivatePrimeAuthorizationCache, PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS,
 };
-pub use registry::{ModelRegistry, ProviderRequestConfig, ResolvedRequestAuth};
+pub use registry::{
+    ModelCatalogSnapshot, ModelRegistry, ProviderRequestConfig, ResolvedRequestAuth,
+};
+
+/// Fire-and-forget catalog refresh from an auth change (TS
+/// `authStorage.onChange` → `scheduleCatalogRefresh`): a fresh registry
+/// fetches the provider catalog past the hourly gate and the live
+/// entitlements, writing the disk caches the daemon's registries read.
+/// Every failure keeps the last-good snapshot; nothing surfaces.
+pub fn spawn_background_catalog_refresh(agent_dir: std::path::PathBuf) {
+    tokio::spawn(async move {
+        let auth = crate::auth::AuthStorage::create(&agent_dir);
+        let mut registry = ModelRegistry::create(auth, agent_dir.join("models.json"));
+        registry.refresh_after_auth_change().await;
+    });
+}
 
 pub(crate) mod custom;
 pub(crate) mod prime_inference;
 pub(crate) mod prime_inference_catalog;
 pub(crate) mod private_auth;
+pub(crate) mod provider_catalog;
 pub(crate) mod registry;
 pub(crate) mod resolver;
 

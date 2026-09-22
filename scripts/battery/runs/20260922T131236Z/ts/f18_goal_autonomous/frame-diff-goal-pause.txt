@@ -1,0 +1,75 @@
+--- ts (goal-pause)
+                                                      battery-f18  $0.00
+
+ Goal continuation · f18 parity objective: land the battery flows
+
+ f18 goal fixture reply
+
+ Goal continuation · f18 parity objective: land the battery flows
+
+ f18 goal fixture reply
+
+ Goal continuation · f18 parity objective: land the battery flows
+
+ f18 goal fixture reply
+
+ Goal continuation · f18 parity objective: land the battery flows
+
+ f18 goal fixture reply
+
+ Goal continuation · f18 parity objective: land the battery flows
+
+ f18 goal fixture reply
+
+
+  /goal pause
+
+
+ Goal paused: Paused by user
+
+  Goal paused: f18 parity objective: land the battery flows
+
+
+                                                                                      Collapsed mode (Ctrl+O to expand)
+
+ >
+
+← manage                                                                            Goal paused (0s) · mock-1 · 128 (0%)
+
++++ rust (goal-pause)
+                                                      battery-f18  $0.00
+  f18 seed turn
+
+
+ f18 goal fixture reply
+
+
+  /goal f18 parity objective: land the battery flows
+
+
+  Goal active: f18 parity objective: land the battery flows
+
+
+ Goal: f18 parity objective: land the battery flows
+
+ Goal continuation · f18 parity objective: land the battery flows
+
+ f18 goal fixture reply
+
+
+  /goal pause
+
+
+  Goal paused: f18 parity objective: land the battery flows
+
+
+ Goal paused: Paused by user
+
+ Follow-up: [goal: continuation]
+ ╰─ Alt+↑ to browse and edit queued messages
+
+                                                                                      Collapsed mode (Ctrl+O to expand)
+
+ >
+
+← manage                                                                            Goal paused (0s) · mock-1 · 110 (0%)

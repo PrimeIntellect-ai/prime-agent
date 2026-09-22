@@ -1,0 +1,24 @@
+{
+ "ts": {
+  "session": 7,
+  "model_change": 7,
+  "thinking_level_change": 7,
+  "service_tier_change": 7,
+  "session_state": 7,
+  "custom_message": 6,
+  "message": 24,
+  "session_info": 3,
+  "compaction": 1
+ },
+ "rust": {
+  "session": 7,
+  "model_change": 7,
+  "thinking_level_change": 7,
+  "service_tier_change": 7,
+  "session_state": 5,
+  "message": 24,
+  "custom_message": 2,
+  "session_info": 3,
+  "compaction": 1
+ }
+}

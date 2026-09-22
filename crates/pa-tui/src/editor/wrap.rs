@@ -143,30 +143,26 @@ pub(crate) fn segment_with_markers(
     while i < text.len() {
         if bytes[i] == b'[' {
             let rest = &text[i..];
-            let close = rest.find(']').map(|p| i + p + 1);
-            if let Some(end) = close {
-                let cand = &text[i..end];
-                let id = cand
-                    .strip_prefix("[paste #")
-                    .and_then(|b| b.split([']', ' ']).next().map(|s| s.to_string()))
-                    .and_then(|s| s.parse::<usize>().ok());
-                let keep = match id {
-                    Some(id) => has_paste && valid_paste_ids(id),
-                    None => has_image && is_image_marker(cand),
-                };
-                if keep {
-                    // Byte offsets slice the marker text, char-scalar
-                    // offsets index it in the same space as the grapheme
-                    // `Segment.index` values it is matched against (TS:
-                    // Intl.Segmenter + matchAll both index by code unit).
-                    markers.push(MarkerSpan {
-                        byte: (i, end),
-                        char: (char_offset(text, i), char_offset(text, end)),
-                    });
+            // The TS regexes match a STRICT marker grammar: `split`-style
+            // id extraction would keep `[paste #1 junk]` atomic where TS
+            // rejects it (PASTE_MARKER_REGEX), so the parse is exact.
+            if let Some((id, len)) = parse_paste_marker(rest) {
+                if has_paste && valid_paste_ids(id) {
+                    markers.push(marker_span(text, i, len));
                 }
-                i = end;
+                i += len;
                 continue;
             }
+            if let Some(len) = parse_image_marker(rest) {
+                if has_image {
+                    markers.push(marker_span(text, i, len));
+                }
+                i += len;
+                continue;
+            }
+            // A miss advances one char: TS matchAll finds inner markers
+            // (`[[paste #1]]` keeps the inner one), never skipping ahead
+            // to the first `]`.
         }
         i += 1;
     }
@@ -198,10 +194,33 @@ pub(crate) fn segment_with_markers(
     result
 }
 
+/// `[image #N]` (the TS IMAGE_MARKER_REGEX grammar): the byte length of
+/// the marker, or `None` when the head is malformed.
+fn parse_image_marker(s: &str) -> Option<usize> {
+    let rest = s.strip_prefix("[image #")?;
+    let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if digits == 0 || !rest[digits..].starts_with(']') {
+        return None;
+    }
+    Some("[image #".len() + digits + 1)
+}
+
 /// Byte and char-scalar bounds of one atomic marker within the source text.
 struct MarkerSpan {
     byte: (usize, usize),
     char: (usize, usize),
+}
+
+/// One accepted marker's span at byte `start`: byte offsets slice the
+/// marker text, char-scalar offsets index it in the same space as the
+/// grapheme `Segment.index` values it is matched against (TS:
+/// Intl.Segmenter + matchAll both index by code unit).
+fn marker_span(text: &str, start: usize, len: usize) -> MarkerSpan {
+    let end = start + len;
+    MarkerSpan {
+        byte: (start, end),
+        char: (char_offset(text, start), char_offset(text, end)),
+    }
 }
 
 /// Char-scalar offset of a byte offset into `text` (byte must be a char
@@ -506,6 +525,218 @@ mod tests {
             assert_eq!(joined, line);
             for c in &chunks {
                 assert!(str_width(&c.text) <= 5, "chunk too wide: {:?}", c.text);
+            }
+        }
+    }
+
+    /// Golden wrap cases generated from the TS `wordWrapLine` (the installed
+    /// parity ground truth, editor.ts:119) over the lane's Unicode corpus —
+    /// CJK, emoji + ZWJ, flags, combining marks, halfwidth voicing marks,
+    /// zero-width joiners, and marker-bearing text (plain-grapheme
+    /// segmentation: marker merging belongs to the callers that pass
+    /// `Some(segments)`). Chunk bounds are char-scalar offsets (the TS
+    /// values are UTF-16 code units; converted 1:1 at grapheme boundaries).
+    /// One golden wrap case: the line, the viewport width, and the expected
+    /// chunk sequence (text + char-scalar bounds).
+    type WrapCase<'a> = (&'a str, usize, Vec<(&'a str, usize, usize)>);
+
+    #[test]
+    fn word_wrap_matches_ts_golden_corpus() {
+        let cases: Vec<WrapCase> = vec![
+            (
+                "你好世界，这是一段很长的中文文本，会触发换行逻辑。",
+                10,
+                vec![
+                    ("你好世界，", 0, 5),
+                    ("这是一段很", 5, 10),
+                    ("长的中文文", 10, 15),
+                    ("本，会触发", 15, 20),
+                    ("换行逻辑。", 20, 25),
+                ],
+            ),
+            (
+                "日本語 テキスト は 長い 長い 長い",
+                6,
+                vec![
+                    ("日本語", 0, 3),
+                    (" ", 3, 4),
+                    ("テキス", 4, 7),
+                    ("ト は ", 7, 11),
+                    ("長い ", 11, 14),
+                    ("長い ", 14, 17),
+                    ("長い", 17, 19),
+                ],
+            ),
+            (
+                "hello 안녕하세요 world 안녕",
+                7,
+                vec![
+                    ("hello ", 0, 6),
+                    ("안녕하", 6, 9),
+                    ("세요 ", 9, 12),
+                    ("world ", 12, 18),
+                    ("안녕", 18, 20),
+                ],
+            ),
+            (
+                "word 👨‍👩‍👧‍👦 word 🇯🇵 end",
+                3,
+                vec![
+                    ("wor", 0, 3),
+                    ("d ", 3, 5),
+                    ("👨‍👩‍👧‍👦 ", 5, 13),
+                    ("wor", 13, 16),
+                    ("d ", 16, 18),
+                    ("🇯🇵 ", 18, 21),
+                    ("end", 21, 24),
+                ],
+            ),
+            (
+                "café café café tail",
+                4,
+                vec![
+                    ("café", 0, 4),
+                    (" ", 4, 5),
+                    ("café", 5, 9),
+                    (" ", 9, 10),
+                    ("café", 10, 14),
+                    (" ", 14, 15),
+                    ("tail", 15, 19),
+                ],
+            ),
+            (
+                "カﾞキﾞクﾞケﾞ",
+                3,
+                vec![("カﾞ", 0, 2), ("キﾞ", 2, 4), ("クﾞ", 4, 6), ("ケﾞ", 6, 8)],
+            ),
+            (
+                "aaaaaaaaaa‍bbbbbbbbbb ccc",
+                5,
+                vec![
+                    ("aaaaa", 0, 5),
+                    ("aaaaa‍", 5, 11),
+                    ("bbbbb", 11, 16),
+                    ("bbbbb", 16, 21),
+                    (" ccc", 21, 25),
+                ],
+            ),
+            (
+                "ab你好 cd",
+                4,
+                vec![("ab你", 0, 3), ("好 ", 3, 5), ("cd", 5, 7)],
+            ),
+            (
+                "(prefix)[image #1](suffix)",
+                6,
+                vec![
+                    ("(prefi", 0, 6),
+                    ("x)[ima", 6, 12),
+                    ("ge ", 12, 15),
+                    ("#1](su", 15, 21),
+                    ("ffix)", 21, 26),
+                ],
+            ),
+            (
+                "前[paste #1 +2 lines]后",
+                6,
+                vec![
+                    ("前[pas", 0, 5),
+                    ("te #1 ", 5, 11),
+                    ("+2 ", 11, 14),
+                    ("lines]", 14, 20),
+                    ("后", 20, 21),
+                ],
+            ),
+            (
+                "plain ascii wrapping sanity check",
+                8,
+                vec![
+                    ("plain ", 0, 6),
+                    ("ascii ", 6, 12),
+                    ("wrapping", 12, 20),
+                    (" sanity ", 20, 28),
+                    ("check", 28, 33),
+                ],
+            ),
+        ];
+        for (line, max_width, expected) in cases {
+            let chunks = word_wrap_line(line, max_width, None);
+            let got: Vec<(&str, usize, usize)> = chunks
+                .iter()
+                .map(|c| (c.text.as_str(), c.start_index, c.end_index))
+                .collect();
+            assert_eq!(
+                got, expected,
+                "wrap mismatch for {line:?} at width {max_width}"
+            );
+        }
+    }
+
+    /// The marker scan matches the TS regex grammars exactly (editor.ts:44
+    /// segmentWithMarkers): a loose `[paste #1 junk]` head with a VALID id
+    /// is NOT atomic (PASTE_MARKER_REGEX rejects it), and a miss advances
+    /// one char so `[[paste #1]]` keeps the INNER marker (matchAll
+    /// semantics), never skipping to the first `]`.
+    #[test]
+    fn marker_scan_matches_the_ts_regex_grammar() {
+        // Loose paste head: valid id, rejected by the strict grammar.
+        let segs = segment_with_markers("[paste #1 junk]", &|_| true);
+        assert_eq!(segs.len(), 15, "the loose head must not be atomic");
+        // Loose image head: same rejection.
+        let segs = segment_with_markers("[image #1 junk]", &|_| true);
+        assert_eq!(segs.len(), 15, "the loose image head must not be atomic");
+        // Double bracket: the inner marker stays atomic (matchAll finds it
+        // at the second `[`); the outer brackets stay plain graphemes.
+        let segs = segment_with_markers("[[paste #1]]", &|id| id == 1);
+        assert_eq!(segs[0].segment, "[");
+        assert_eq!(segs[1].segment, "[paste #1]");
+        assert_eq!(segs[1].index, 1);
+        assert_eq!(segs[2].segment, "]");
+        // A miss inside a double-bracketed image marker keeps the inner one.
+        let segs = segment_with_markers("[[image #1]]", &|_| false);
+        assert_eq!(
+            segs[1].segment, "[image #1]",
+            "inner image marker is atomic"
+        );
+        // Invalid paste id: never atomic even with the strict grammar.
+        let segs = segment_with_markers("x[paste #9]y", &|id| id == 1);
+        assert_eq!(segs.len(), 12, "invalid id must not be atomic");
+    }
+    #[test]
+    fn ascii_wrap_matches_ts_golden() {
+        // Byte-exact ASCII regression: the TS binary's wordWrapLine over a pure
+        // ASCII corpus; chunk text AND indices must match (code units == chars on
+        // ASCII). Guards the wrap-opportunity/backtrack behavior against drift.
+        let raw = include_str!("../../tests/fixtures/ascii-wrap-golden.json");
+        let cases: Vec<serde_json::Value> = serde_json::from_str(raw).expect("fixture parses");
+        assert!(cases.len() >= 100, "corpus shrank: {}", cases.len());
+        for case in &cases {
+            let line = case["line"].as_str().expect("line");
+            let width = case["width"].as_u64().expect("width") as usize;
+            let chunks = word_wrap_line(line, width, None);
+            let expected: Vec<&serde_json::Value> =
+                case["chunks"].as_array().expect("chunks").iter().collect();
+            assert_eq!(
+                chunks.len(),
+                expected.len(),
+                "chunk count diverges for {line:?} @ {width}"
+            );
+            for (got, want) in chunks.iter().zip(expected.iter()) {
+                assert_eq!(
+                    got.text,
+                    want["text"].as_str().expect("text"),
+                    "{line:?} @ {width}"
+                );
+                assert_eq!(
+                    got.start_index,
+                    want["startIndex"].as_u64().expect("start") as usize,
+                    "{line:?} @ {width}"
+                );
+                assert_eq!(
+                    got.end_index,
+                    want["endIndex"].as_u64().expect("end") as usize,
+                    "{line:?} @ {width}"
+                );
             }
         }
     }

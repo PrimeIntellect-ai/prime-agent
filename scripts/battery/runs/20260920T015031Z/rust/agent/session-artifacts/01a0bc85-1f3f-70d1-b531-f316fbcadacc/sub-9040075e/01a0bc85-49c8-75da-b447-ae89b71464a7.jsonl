@@ -1,0 +1,8 @@
+{"cwd":"/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260920T015031Z/rust/work","id":"01a0bc85-49c8-75da-b447-ae89b71464a7","parentSession":"/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260920T015031Z/rust/agent/sessions/01a0bc85-1f3f-70d1-b531-f316fbcadacc.jsonl","rlmDepth":1,"timestamp":"2026-09-20T01:54:06.920Z","type":"session","version":3}
+{"type":"model_change","id":"6b4469d0","parentId":null,"timestamp":"2026-09-20T01:54:06.927Z","modelId":"mock-1","provider":"prime-inference"}
+{"type":"thinking_level_change","id":"494dcb01","parentId":"6b4469d0","timestamp":"2026-09-20T01:54:06.927Z","thinkingLevel":"off"}
+{"type":"service_tier_change","id":"527fad51","parentId":"494dcb01","timestamp":"2026-09-20T01:54:06.927Z","serviceTier":"default"}
+{"type":"session_state","id":"260e15ed","parentId":"527fad51","timestamp":"2026-09-20T01:54:06.927Z","state":{"status":"active"}}
+{"type":"session_info","id":"84897559","parentId":"260e15ed","timestamp":"2026-09-20T01:54:06.929Z","name":"f20-worker"}
+{"type":"message","id":"f3d4da62","parentId":"84897559","timestamp":"2026-09-20T01:54:06.975Z","message":{"content":[{"text":"f20 child task: reply with the fixture summary","type":"text"}],"role":"user","timestamp":1789869246975}}
+{"type":"message","id":"251431c5","parentId":"f3d4da62","timestamp":"2026-09-20T01:54:06.996Z","message":{"api":"openai-completions","content":[{"text":"f20 parent fixture reply","type":"text"}],"model":"mock-1","provider":"prime-inference","responseId":"chatcmpl-battery","role":"assistant","stopReason":"stop","timestamp":1789869246994,"usage":{"cacheRead":80,"cacheWrite":0,"cost":{"cacheRead":0,"cacheWrite":0,"input":0,"output":0,"total":0},"input":20,"output":10,"totalTokens":110}}}

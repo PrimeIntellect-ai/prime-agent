@@ -1,0 +1,103 @@
+--- ts (220x50)
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.9.5
+  ▗█▛ ▟██▙▄██▛ ▟▛         agents 1 running, 5 idle, 1 inactive
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd ~/prime-agent-rs/scripts/battery/runs/20260920T015031Z/ts/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+ >   Search sessions
+
+Session                       Model         Activity                                                                                                                                                               Cost  Age
+
+Running (1)
+◇ battery-f9-busy             mock-1                                                                                                                                                                              $0.00   1s
+
+Idle (5)
+• battery-f9-idle             mock-1                                                                                                                                                                              $0.00   6s
+• f23 closing turn            mock-1                                                                                                                                                                              $0.00  39s
+• battery-f20                 mock-1                                                                                                                                                                              $0.00   1m
+  ▸ 1 subagent
+• battery-f14-auto            mock-1                                                                                                                                                                              $0.00   3m
+• battery-f14-manual          mock-1                                                                                                                                                                              $0.00   4m
+
+Inactive (1)
+• f9 inactive prompt          mock-1                                                                                                                                                                              $0.00   5s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+↑/↓ navigate   Enter/→ open   Ctrl+N new
+
++++ rust (220x50)
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.1.0
+  ▗█▛ ▟██▙▄██▛ ▟▛         agents 1 running, 7 idle, 1 inactive
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd ~/prime-agent-rs/scripts/battery/runs/20260920T015031Z/rust/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+ >   Search sessions
+
+Session                       Model         Activity                                                                                                                                                               Cost  Age
+
+Running (1)
+◈ battery-f9-busy             mock-1                                                                                                                                                                              $0.00   0s
+
+Idle (6)
+• battery-f9-idle             mock-1                                                                                                                                                                              $0.00   4s
+• f23 closing turn            mock-1                                                                                                                                                                              $0.00  54s
+• battery-f20                 mock-1                                                                                                                                                                              $0.00   1m
+  ▸ 1 subagent
+• battery-f14-auto            mock-1                                                                                                                                                                              $0.00   3m
+• battery-f14-manual          mock-1                                                                                                                                                                              $0.00   4m
+• work                        mock-1                                                                                                                                                                              $0.00   2m
+
+Inactive (1)
+• f9 inactive prompt          mock-1                                                                                                                                                                              $0.00   4s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+↑/↓ navigate   Enter/→ open   Ctrl+N new

@@ -365,16 +365,18 @@ pub async fn fetch_prime_inference_model_catalog(
 }
 
 /// Refresh: fetch, build, persist; fall back to the disk cache on any failure.
+/// `headers` carries the current credentials (entitled models surface).
 pub async fn refresh_prime_inference_models(
     cache_path: &Path,
     bundled: &[Model],
     offline: bool,
+    headers: Option<&HashMap<String, String>>,
 ) -> Option<Vec<Model>> {
     let cached = read_cached_prime_inference_models(cache_path, bundled);
     if offline {
         return cached;
     }
-    match fetch_prime_inference_model_catalog(None, FETCH_TIMEOUT_MS, false).await {
+    match fetch_prime_inference_model_catalog(headers, FETCH_TIMEOUT_MS, false).await {
         Ok((payload, entries)) => match build_prime_inference_models(bundled, &entries, false) {
             Some(models) => {
                 write_catalog_cache(cache_path, &payload);

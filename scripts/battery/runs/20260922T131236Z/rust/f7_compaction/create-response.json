@@ -1,0 +1,43 @@
+{
+ "id": "c1",
+ "type": "response",
+ "command": "create",
+ "success": true,
+ "data": {
+  "id": "cf0ae1ae9231",
+  "lifecycle": "draft",
+  "activity": "idle",
+  "isSessionActive": false,
+  "hasRegisteredCronJob": false,
+  "lastActivityAt": "2026-09-22T13:14:37.566Z",
+  "rlmDepth": 0,
+  "activeSessionId": "cf0ae1ae9231",
+  "sessionId": "01a0c941-0855-7389-9485-f05201974249",
+  "sessionFile": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/sessions/01a0c941-0855-7389-9485-f05201974249.jsonl",
+  "sessionName": "battery-compact",
+  "cwd": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/work",
+  "thinkingLevel": "off",
+  "isStreaming": false,
+  "isCompacting": false,
+  "isBashRunning": false,
+  "attachedClients": 0,
+  "messageCount": 0,
+  "sessionActions": {
+   "queuedCount": 0,
+   "steering": [],
+   "followUps": []
+  },
+  "created": "2026-09-22T13:14:37.525Z",
+  "modified": "2026-09-22T13:14:37.566Z",
+  "workerState": "ready",
+  "workerPid": 400168,
+  "model": {
+   "id": "mock-1",
+   "name": "Mock 1",
+   "provider": "prime-inference",
+   "reasoning": false
+  },
+  "runtimeKind": "top-level",
+  "unfinishedActionCount": 0
+ }
+}

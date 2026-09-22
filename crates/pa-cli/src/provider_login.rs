@@ -307,11 +307,19 @@ impl ProviderAuthCommands for ProviderAuth {
             // The auth-store writes and the MCP manager locks stay off
             // the async workers (the terminal is suspended around the
             // flow).
-            tokio::task::spawn_blocking(move || {
-                login_blocking(provider_row, cwd, agent_dir, api_key)
+            let task_agent_dir = agent_dir.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                login_blocking(provider_row, cwd, task_agent_dir, api_key)
             })
             .await
-            .expect("the login task ran")
+            .expect("the login task ran");
+            // The auth-change trigger (TS `authStorage.onChange` →
+            // `scheduleCatalogRefresh`): the catalog refresh fires past the
+            // hourly gate, fire-and-forget.
+            if matches!(outcome, ProviderAuthOutcome::Status(_)) {
+                pa_core::models::spawn_background_catalog_refresh(agent_dir);
+            }
+            outcome
         })
     }
 
@@ -321,9 +329,18 @@ impl ProviderAuthCommands for ProviderAuth {
         let provider_row = provider.clone();
         let agent_dir = self.agent_dir.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || logout_blocking(provider_row, agent_dir))
-                .await
-                .expect("the logout task ran")
+            let task_agent_dir = agent_dir.clone();
+            let (outcome, changed) =
+                tokio::task::spawn_blocking(move || logout_blocking(provider_row, task_agent_dir))
+                    .await
+                    .expect("the logout task ran");
+            // The auth-change trigger (TS `authStorage.onChange` →
+            // `scheduleCatalogRefresh`), same as the login path: only an
+            // actual credential change fires it.
+            if changed {
+                pa_core::models::spawn_background_catalog_refresh(agent_dir);
+            }
+            outcome
         })
     }
 }
@@ -557,17 +574,25 @@ fn login_blocking(
 }
 
 /// The logout body (blocking: the auth store lock stays off the async
-/// workers).
-fn logout_blocking(provider_row: ProviderRow, agent_dir: PathBuf) -> ProviderAuthOutcome {
+/// workers). The flag reports whether a stored credential actually went
+/// away (a no-op logout is not an auth change; TS `authStorage.onChange`
+/// only fires on writes).
+fn logout_blocking(provider_row: ProviderRow, agent_dir: PathBuf) -> (ProviderAuthOutcome, bool) {
     let mut auth = pa_core::auth::AuthStorage::create(&agent_dir);
     if auth.get_all().get(&provider_row.id).is_none() {
-        return ProviderAuthOutcome::Status(format!("{} is not configured.", provider_row.name));
+        return (
+            ProviderAuthOutcome::Status(format!("{} is not configured.", provider_row.name)),
+            false,
+        );
     }
     auth.logout(&provider_row.id);
     if let Some(error) = auth.drain_errors().pop() {
-        return ProviderAuthOutcome::Error(format!("Logout failed: {error}"));
+        return (
+            ProviderAuthOutcome::Error(format!("Logout failed: {error}")),
+            false,
+        );
     }
-    match provider_row.auth_type {
+    let outcome = match provider_row.auth_type {
         AuthType::Oauth => ProviderAuthOutcome::Status(format!(
             "Logged out of {}",
             provider_row.name
@@ -576,7 +601,8 @@ fn logout_blocking(provider_row: ProviderRow, agent_dir: PathBuf) -> ProviderAut
             "Removed stored API key for {}. Environment variables and models.json config are unchanged.",
             provider_row.name
         )),
-    }
+    };
+    (outcome, true)
 }
 
 #[cfg(test)]

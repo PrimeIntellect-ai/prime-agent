@@ -1,0 +1,11 @@
+{
+ "command": "compact",
+ "data": {
+  "firstKeptEntryId": "a686ee6d",
+  "summary": "pre-compaction reply 6",
+  "tokensBefore": 110
+ },
+ "id": "k1",
+ "success": true,
+ "type": "response"
+}

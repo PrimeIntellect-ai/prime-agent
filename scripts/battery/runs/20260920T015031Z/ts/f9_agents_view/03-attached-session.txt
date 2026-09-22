@@ -1,0 +1,36 @@
+                                                    battery-f9-busy  $0.00
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.9.5
+  ▗█▛ ▟██▙▄██▛ ▟▛         model mock-1
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd ~/prime-agent-rs/scripts/battery/runs/20260920T015031Z/ts/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+  f9 busy prompt
+
+
+ f9 busy reply
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                           Collapsed mode (X to expand)
+
+ >
+
+← manage                                                                                               mock-1 · 110 (0%)

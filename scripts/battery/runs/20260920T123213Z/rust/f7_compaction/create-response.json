@@ -1,0 +1,43 @@
+{
+ "command": "create",
+ "data": {
+  "activeSessionId": "b3c1b8d82b07",
+  "activity": "idle",
+  "attachedClients": 0,
+  "created": "2026-09-20T12:32:15.496Z",
+  "cwd": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260920T123213Z/rust/work",
+  "hasRegisteredCronJob": false,
+  "id": "b3c1b8d82b07",
+  "isBashRunning": false,
+  "isCompacting": false,
+  "isSessionActive": false,
+  "isStreaming": false,
+  "lastActivityAt": "2026-09-20T12:32:15.501Z",
+  "lifecycle": "resident",
+  "messageCount": 0,
+  "model": {
+   "id": "mock-1",
+   "name": "Mock 1",
+   "provider": "prime-inference",
+   "reasoning": false
+  },
+  "modified": "2026-09-20T12:32:15.501Z",
+  "rlmDepth": 0,
+  "runtimeKind": "top-level",
+  "sessionActions": {
+   "followUps": [],
+   "queuedCount": 0,
+   "steering": []
+  },
+  "sessionFile": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260920T123213Z/rust/agent/sessions/01a0becd-8688-7556-8f49-99729ccac621.jsonl",
+  "sessionId": "01a0becd-8688-7556-8f49-99729ccac621",
+  "sessionName": "battery-compact",
+  "thinkingLevel": "off",
+  "unfinishedActionCount": 0,
+  "workerPid": 1091545,
+  "workerState": "ready"
+ },
+ "id": "c1",
+ "success": true,
+ "type": "response"
+}

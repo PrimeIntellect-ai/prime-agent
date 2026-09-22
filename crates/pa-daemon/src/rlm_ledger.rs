@@ -498,8 +498,23 @@ impl RlmSpawnLedger {
             let Some(record) = parse_ledger_line(line, index)
                 .with_context(|| format!("RLM ledger {}", self.path.display()))?
             else {
+                // Versioned skip: the unknown op and its record version name
+                // the writer this reader cannot understand, so a boot log
+                // says which grammar moved on (forward compatibility, TS
+                // `rlm-ledger.ts` skips unknown ops the same way).
+                let skipped = serde_json::from_str::<Value>(line.trim()).ok();
+                let op = skipped
+                    .as_ref()
+                    .and_then(|value| value.get("op"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let version = skipped
+                    .as_ref()
+                    .and_then(|value| value.get("v"))
+                    .cloned()
+                    .unwrap_or_else(|| json!("?"));
                 self.log(&format!(
-                    "RLM ledger: skipped record with unknown op on line {}",
+                    "RLM ledger: skipped record with unknown op {op:?} (v {version}) on line {}",
                     index + 1
                 ));
                 continue;
@@ -905,6 +920,55 @@ mod tests {
 
     fn ledger_for(dir: &Path) -> RlmSpawnLedger {
         RlmSpawnLedger::new(dir, &dir.join("sessions"), |_| {})
+    }
+
+    /// An unknown op (a newer writer's grammar) is tolerated with a
+    /// versioned warning: the replay continues past it and the log names
+    /// the op and record version instead of a bare line number.
+    #[test]
+    fn unknown_op_skips_with_a_versioned_warning() {
+        let dir = temp_dir("unknown-op");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink = std::sync::Arc::clone(&seen);
+        let ledger = RlmSpawnLedger::new(&dir, &dir.join("sessions"), move |message| {
+            sink.lock().unwrap().push(message.to_string())
+        });
+        // The ledger file is written directly (the reader's view of a
+        // newer writer's file): its directory only exists once an append
+        // creates it, so seed it here.
+        fs::create_dir_all(ledger.ledger_path().parent().unwrap()).unwrap();
+        fs::write(
+            ledger.ledger_path(),
+            concat!(
+                "{\"v\":1,\"op\":\"spawn\",\"at\":\"t\",\"childId\":\"c\",\"parent\":\"p\",\"child\":\"c.jsonl\",\"depth\":1,\"name\":\"n\"}\n",
+                // v1 with an op this reader does not know: the tolerated
+                // forward-compat skip (a newer v would fail closed, like
+                // TS rlm-ledger.ts).
+                "{\"v\":1,\"op\":\"merge\",\"at\":\"t\",\"childId\":\"c\"}\n"
+            ),
+        )
+        .unwrap();
+        let edges = ledger.edges(false).expect("unknown op is tolerated");
+        assert_eq!(edges.len(), 1, "the known record still replays");
+        let seen = seen.lock().unwrap().join("\n");
+        assert_eq!(
+            seen.lines().count(),
+            1,
+            "one warning for the unknown line: {seen}"
+        );
+        assert!(
+            seen.contains("skipped record with unknown op \"merge\""),
+            "the warning names the op: {seen}"
+        );
+        assert!(
+            seen.contains("(v 1)"),
+            "the warning carries the record version: {seen}"
+        );
+        assert!(
+            seen.contains("on line 2"),
+            "the warning names the line: {seen}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

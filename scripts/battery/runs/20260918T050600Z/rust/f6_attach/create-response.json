@@ -1,0 +1,37 @@
+{
+ "command": "create",
+ "data": {
+  "activeSessionId": "f76a2337b410",
+  "activity": "idle",
+  "attachedClients": 0,
+  "created": "2026-09-18T05:07:08.454Z",
+  "cwd": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260918T050600Z/rust/work",
+  "hasRegisteredCronJob": false,
+  "id": "f76a2337b410",
+  "isBashRunning": false,
+  "isCompacting": false,
+  "isSessionActive": false,
+  "isStreaming": false,
+  "lastActivityAt": "2026-09-18T05:07:08.472Z",
+  "lifecycle": "resident",
+  "messageCount": 0,
+  "modified": "2026-09-18T05:07:08.472Z",
+  "rlmDepth": 0,
+  "runtimeKind": "top-level",
+  "sessionActions": {
+   "followUps": [],
+   "queuedCount": 0,
+   "steering": []
+  },
+  "sessionFile": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260918T050600Z/rust/agent/sessions/01a0b2e9-4a26-77b9-88df-e9b08f6b196a.jsonl",
+  "sessionId": "01a0b2e9-4a26-77b9-88df-e9b08f6b196a",
+  "sessionName": "battery-attach",
+  "thinkingLevel": "off",
+  "unfinishedActionCount": 0,
+  "workerPid": 1015618,
+  "workerState": "ready"
+ },
+ "id": "c1",
+ "success": true,
+ "type": "response"
+}

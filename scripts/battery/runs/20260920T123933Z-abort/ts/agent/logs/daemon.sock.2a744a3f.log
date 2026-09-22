@@ -1,0 +1,6 @@
+[2026-09-20T12:39:33.927Z] supervisor: Prime Agent daemon supervisor 232ce158-0f98-45af-bee2-bedf52c5b662 listening on /home/ubuntu/prime-agent-rs/scripts/battery/runs/20260920T123933Z-abort/ts/daemon.sock
+[2026-09-20T12:39:34.276Z] supervisor: Session worker 7e62006cae4b stderr: Prime Agent daemon listening on /tmp/compaction-abort-ts-1096244/prime-agent-1000/worker-2a744a3f274a-7e62006cae4b.sock
+[2026-09-20T12:40:23.993Z] supervisor: Could not adopt worker 7e62006cae4b: Error: Timed out connecting to daemon session worker: Error: connect ENOENT /tmp/compaction-abort-ts-1096244/prime-agent-1000/worker-2a744a3f274a-7e62006cae4b.sock
+[2026-09-20T12:40:23.997Z] supervisor: Prime Agent daemon supervisor aa876d44-de2b-490c-b34d-210884a248d6 listening on /home/ubuntu/prime-agent-rs/scripts/battery/runs/20260920T123933Z-abort/ts/daemon.sock
+[2026-09-20T12:58:52.901Z] supervisor: Worker 7e62006cae4b is unresponsive; parked failed after 10 probe rounds
+[2026-09-20T13:20:30.117Z] supervisor: Daemon catalog exited (SIGTERM)

@@ -1,0 +1,8 @@
+{"activeSessionId":"836c7124ea10","busy":true,"operation":"create","recordedAt":"2026-09-20T03:26:34.403Z","sessionFile":"/tmp/auto-compact-battery/20260920T032552Z/20260920T032554Z/rust/agent/sessions/01a0bcd9-ef95-73ff-91a4-93e4b349d536.jsonl","sessionId":"01a0bcd9-ef95-73ff-91a4-93e4b349d536"}
+{"active_session_id":"836c7124ea10","follow_up":[],"recorded_at":"2026-09-20T03:26:34.418Z","steering":["f14 seed turn 1 of the parity battery with deterministic content"],"type":"queue_snapshot","version":1}
+{"active_session_id":"836c7124ea10","follow_up":[],"recorded_at":"2026-09-20T03:26:34.464Z","steering":["f14 seed turn 2 of the parity battery with deterministic content"],"type":"queue_snapshot","version":1}
+{"active_session_id":"836c7124ea10","follow_up":[],"recorded_at":"2026-09-20T03:26:34.465Z","steering":["f14 seed turn 2 of the parity battery with deterministic content"],"type":"queue_snapshot","version":1}
+{"active_session_id":"836c7124ea10","follow_up":[],"recorded_at":"2026-09-20T03:26:34.538Z","steering":[],"type":"queue_snapshot","version":1}
+{"active_session_id":"836c7124ea10","follow_up":[],"recorded_at":"2026-09-20T03:26:40.096Z","steering":["/compact"],"type":"queue_snapshot","version":1}
+{"active_session_id":"836c7124ea10","follow_up":[],"recorded_at":"2026-09-20T03:26:40.121Z","steering":[],"type":"queue_snapshot","version":1}
+{"activeSessionId":"836c7124ea10","busy":false,"operation":"shutdown","recordedAt":"2026-09-20T03:27:09.009Z","sessionFile":"/tmp/auto-compact-battery/20260920T032552Z/20260920T032554Z/rust/agent/sessions/01a0bcd9-ef95-73ff-91a4-93e4b349d536.jsonl","sessionId":"01a0bcd9-ef95-73ff-91a4-93e4b349d536"}

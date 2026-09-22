@@ -1,0 +1,3 @@
+
+{"version":1,"type":"received","key":"[\"1061161010fb\",\"sd\"]","clientId":"1061161010fb","commandId":"sd","commandType":"shutdown","recordedAt":"2026-09-18T05:09:00.661Z"}
+{"version":1,"type":"result","key":"[\"1061161010fb\",\"sd\"]","response":{"id":"sd","type":"response","command":"shutdown","success":true},"recordedAt":"2026-09-18T05:09:00.664Z"}

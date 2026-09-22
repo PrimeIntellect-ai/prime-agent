@@ -76,6 +76,34 @@ pub(crate) const LONG_ROUTE_TIMEOUT_MS: u64 = 600_000;
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const BASE_BACKOFF_MS: u64 = 250;
 const MAX_BACKOFF_MS: u64 = 30_000;
+/// How long a relaunched worker must stay up before its life counts as
+/// stable and earns the failure streak a fresh start. A worker that dies
+/// inside this window is an unstable launch (the crash-loop incident:
+/// spawn -> instant bind-conflict exit, forever): it keeps the streak
+/// growing instead of resetting it.
+const WORKER_STABLE_LIFETIME: Duration = Duration::from_secs(1);
+/// A dead-epoch record with this many (or more) persisted restart failures
+/// is a stale crash-loop record - the previous daemon was already
+/// escalating on it - so boot archives it instead of relaunching it. One
+/// recorded failure stays relaunchable: a single transient crash must not
+/// orphan a healthy session's rehydration.
+const STALE_RECORD_FAILURE_FLOOR: u64 = 2;
+
+/// How the monitor observes one resident worker's liveness.
+#[derive(Debug)]
+pub(crate) enum WorkerWatch {
+    /// The supervisor spawned this worker process: its exit is waitable.
+    Child(Child),
+    /// A foreign process (adopted from the record, a registration, or the
+    /// socket holder): polled for liveness.
+    Pid(u64),
+    /// An adopted socket endpoint whose holder pid is unknown: polled by
+    /// whether the endpoint still accepts connections.
+    Socket(PathBuf),
+    /// Nothing to watch (a relaunch that produced no worker): the monitor
+    /// falls straight to the failure/backoff/relaunch arm.
+    Nothing,
+}
 
 #[derive(Debug, Clone)]
 pub struct SupervisorOptions {
@@ -397,23 +425,102 @@ impl Supervisor {
             ));
             return;
         }
+        // Revival guard, part one: a record the previous daemon already
+        // declared failed is a stale record, not a session to recover.
+        // Its pid is dead and its socket unheld by definition (it gave up
+        // relaunching), so archive the record instead of reviving it - a
+        // fresh daemon must not re-enter a restart loop that already
+        // exhausted its failure budget once.
+        if descriptor.lifecycle == DaemonWorkerLifecycle::Failed {
+            let archived = path.with_extension("failed.json");
+            match std::fs::rename(&path, &archived) {
+                Ok(()) => self.log_line(&format!(
+                    "session worker {worker_id} record is failed; archived to {} instead of reviving",
+                    archived.display()
+                )),
+                Err(error) => self.log_line(&format!(
+                    "session worker {worker_id} record is failed but could not be archived: {error}"
+                )),
+            }
+            return;
+        }
         let socket_path = PathBuf::from(&descriptor.socket_path);
         let alive = socket::can_connect(&socket_path, Duration::from_millis(500)).await;
         let pid = descriptor.pid;
+        // Revival health check: a record proves life with its process or
+        // its socket. A dead-epoch record (dead pid, unconnectable socket)
+        // whose persisted streak shows the previous daemon already
+        // restarting it is a stale crash-loop record: archive it instead of
+        // relaunching it into another boot loop (the flip incident revived
+        // dead-epoch records that were already looping). A clean dead
+        // record - no recorded failures, the update flow's kept workers, a
+        // daemon that died beside a healthy worker - still relaunches from
+        // its durable create command (rehydration).
+        let pid_alive = pid != 0 && is_process_alive(pid as u32).unwrap_or(false);
+        if is_stale_dead_epoch_record(pid_alive, alive, descriptor.consecutive_failures) {
+            let archived = path.with_extension("failed.json");
+            match std::fs::rename(&path, &archived) {
+                Ok(()) => self.log_line(&format!(
+                    "session worker {worker_id} record is stale (dead pid, socket gone, {} recorded failures); archived to {} instead of relaunching",
+                    descriptor.consecutive_failures,
+                    archived.display()
+                )),
+                Err(error) => self.log_line(&format!(
+                    "session worker {worker_id} stale record could not be archived: {error}"
+                )),
+            }
+            return;
+        }
         let resident = ResidentWorker::new(worker_id.clone(), descriptor, path);
         let result = if alive {
+            // A live listener owns the socket endpoint: adopt it, never
+            // spawn a duplicate against a held socket (the crash-loop
+            // failure mode). A failed connect defers (the record stays).
             self.connect_worker(&resident, worker_connect_deadline())
                 .await
+                .map(|_| {
+                    // The monitor must watch the live holder of the socket,
+                    // not the recorded pid: after a restart race the socket
+                    // can be held by the worker's own older epoch while the
+                    // record names a dead pid, and a stale watch would
+                    // declare the healthy holder crashed. The connect above
+                    // authenticated the holder as this worker's.
+                    match socket::socket_owner_pid(&socket_path) {
+                        Some(holder) if is_process_alive(holder).unwrap_or(false) => {
+                            WorkerWatch::Pid(u64::from(holder))
+                        }
+                        _ => WorkerWatch::Socket(socket_path.clone()),
+                    }
+                })
         } else {
             // Dead worker: relaunch from the durable create command. The
             // worker rehydrates the session store, restoring history and
             // the persisted queue snapshot.
-            self.relaunch_worker(&resident).await.map(|_| ())
+            self.relaunch_worker(&resident).await
         };
         match result {
-            Ok(()) => {
+            Ok(watch) => {
+                if alive {
+                    // A healthy adoption clears the recorded failure streak
+                    // (TS resets consecutiveFailures when a worker proves
+                    // healthy): the next crash escalates from one, not from
+                    // the previous daemon's count. The holder's real pid
+                    // also lands in the record - the stale recorded pid
+                    // must not survive adoption as the monitored identity.
+                    let holder = match &watch {
+                        WorkerWatch::Pid(holder) if *holder != 0 && *holder != pid => Some(*holder),
+                        _ => None,
+                    };
+                    resident.consecutive_failures.store(0, Ordering::SeqCst);
+                    let mut descriptor = resident.descriptor.lock().await;
+                    descriptor.consecutive_failures = 0;
+                    if let Some(holder) = holder {
+                        descriptor.pid = holder;
+                    }
+                    let _ = persist_worker(&resident.descriptor_path, &descriptor);
+                }
                 self.registry.insert(Arc::clone(&resident)).await;
-                self.spawn_monitor(Arc::clone(&resident), None, pid);
+                self.spawn_monitor(Arc::clone(&resident), watch);
                 // The adopted worker joins the roster from its live state.
                 self.refresh_roster_entry(&resident).await;
                 self.log_line(&format!(
@@ -421,65 +528,119 @@ impl Supervisor {
                 ));
             }
             Err(error) => {
-                self.log_line(&format!("could not adopt worker {worker_id}: {error:#}"));
+                let held_by = socket::socket_owner_pid(&socket_path)
+                    .map(|pid| format!(" (socket {} is held by pid {pid})", socket_path.display()))
+                    .unwrap_or_default();
+                self.log_line(&format!(
+                    "could not adopt worker {worker_id}: {error:#}{held_by}"
+                ));
             }
         }
         drop(guard);
     }
 
     /// Watch a worker process: on unexpected exit, restart with backoff.
-    fn spawn_monitor(
-        self: &Arc<Self>,
-        resident: Arc<ResidentWorker>,
-        child: Option<Child>,
-        pid: u64,
-    ) {
+    fn spawn_monitor(self: &Arc<Self>, resident: Arc<ResidentWorker>, watch: WorkerWatch) {
         let supervisor = Arc::clone(self);
         tokio::spawn(async move {
-            supervisor.watch_worker(resident, child, pid).await;
+            supervisor.watch_worker(resident, watch).await;
         });
     }
 
-    async fn watch_worker(
-        self: Arc<Self>,
-        resident: Arc<ResidentWorker>,
-        mut child: Option<Child>,
-        mut adopted_pid: u64,
-    ) {
+    async fn watch_worker(self: Arc<Self>, resident: Arc<ResidentWorker>, mut watch: WorkerWatch) {
+        let worker_socket = {
+            let descriptor = resident.descriptor.lock().await;
+            PathBuf::from(&descriptor.socket_path)
+        };
+        // When the current child was spawned (the stability clock for the
+        // failure streak).
+        let mut spawned_at: Option<tokio::time::Instant> = None;
         loop {
-            if let Some(mut child) = child.take() {
-                let status = child.wait().await;
-                if resident.intentional_stop.load(Ordering::SeqCst)
-                    || self.shutting_down.load(Ordering::SeqCst)
-                {
-                    self.log_line(&format!(
-                        "session worker {} stopped intentionally (status {status:?})",
-                        resident.worker_id
-                    ));
-                    self.note_daemon_event("worker_exited", Some("normal"));
-                    return;
+            match std::mem::replace(&mut watch, WorkerWatch::Nothing) {
+                WorkerWatch::Nothing => {}
+                WorkerWatch::Child(mut child) => {
+                    let status = child.wait().await;
+                    if resident.intentional_stop.load(Ordering::SeqCst)
+                        || self.shutting_down.load(Ordering::SeqCst)
+                    {
+                        self.log_line(&format!(
+                            "session worker {} stopped intentionally (status {status:?})",
+                            resident.worker_id
+                        ));
+                        self.note_daemon_event("worker_exited", Some("normal"));
+                        return;
+                    }
+                    // The crash-loop fix: a life that lasted the stability
+                    // window earned the streak a fresh start; an unstable
+                    // life (spawned, then dead inside the window) does NOT
+                    // reset it. The old reset-on-relaunch-success never
+                    // escalated: a relaunched worker that died instantly
+                    // on a bind conflict restarted the streak from zero
+                    // every attempt ("failure 1/5" forever).
+                    let elapsed = spawned_at.map(|at| at.elapsed());
+                    if let Some(elapsed) = elapsed {
+                        if elapsed >= WORKER_STABLE_LIFETIME {
+                            resident.consecutive_failures.store(0, Ordering::SeqCst);
+                        } else if socket::can_connect(&worker_socket, Duration::from_millis(250))
+                            .await
+                        {
+                            // Conflict detection: the child died inside the
+                            // stability window with a listener already on
+                            // its socket endpoint - a bind conflict. Name
+                            // the holder so the operator sees the owning
+                            // pid immediately.
+                            let holder = socket::socket_owner_pid(&worker_socket);
+                            self.log_line(&format!(
+                                "session worker {} exited {}ms after spawn; its socket {} is held by {}",
+                                resident.worker_id,
+                                elapsed.as_millis(),
+                                worker_socket.display(),
+                                holder
+                                    .map(|pid| format!("pid {pid}"))
+                                    .unwrap_or_else(|| "an unidentifiable process".to_string()),
+                            ));
+                        }
+                    }
                 }
-            } else if adopted_pid != 0 {
-                // Adopted worker: poll liveness (cannot wait on a foreign
-                // pid). A previous relaunch that produced no worker leaves
-                // pid 0 here - there is nothing to watch, and polling pid 0
-                // would report a phantom exit; fall straight to the
-                // failure/backoff/relaunch arm instead.
-                loop {
-                    if self.shutting_down.load(Ordering::SeqCst)
-                        || resident.intentional_stop.load(Ordering::SeqCst)
+                WorkerWatch::Pid(adopted_pid) => {
+                    // Adopted worker: poll liveness (cannot wait on a foreign
+                    // pid).
+                    loop {
+                        if self.shutting_down.load(Ordering::SeqCst)
+                            || resident.intentional_stop.load(Ordering::SeqCst)
+                        {
+                            return;
+                        }
+                        if !matches!(is_process_alive(adopted_pid as u32), Ok(true)) {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                    if resident.intentional_stop.load(Ordering::SeqCst)
+                        || self.shutting_down.load(Ordering::SeqCst)
                     {
                         return;
                     }
-                    if !matches!(is_process_alive(adopted_pid as u32), Ok(true)) {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
-                if resident.intentional_stop.load(Ordering::SeqCst)
-                    || self.shutting_down.load(Ordering::SeqCst)
-                {
-                    return;
+                WorkerWatch::Socket(path) => {
+                    // Adopted endpoint whose holder pid is unknown: poll
+                    // whether it still accepts connections.
+                    loop {
+                        if self.shutting_down.load(Ordering::SeqCst)
+                            || resident.intentional_stop.load(Ordering::SeqCst)
+                        {
+                            return;
+                        }
+                        if !socket::can_connect(&path, Duration::from_millis(250)).await {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                    if resident.intentional_stop.load(Ordering::SeqCst)
+                        || self.shutting_down.load(Ordering::SeqCst)
+                    {
+                        return;
+                    }
                 }
             }
             self.note_daemon_event("worker_exited", Some("crash"));
@@ -489,11 +650,36 @@ impl Supervisor {
             // never resumes beside an orphaned child worker (TS children
             // die with the in-process parent).
             self.close_children_of_dead_parent(&resident).await;
+            // A record that left the namespace under us (manual cleanup
+            // while the daemon ran, or the give-up archive) stays gone: a
+            // restart write here would resurrect it and re-arm the loop
+            // the cleanup stopped (the incident's manual cleanup kept
+            // being undone by the restart flush).
+            if !resident.descriptor_path.exists() {
+                self.log_line(&format!(
+                    "session worker {} record is gone from disk; standing down instead of rewriting it",
+                    resident.worker_id
+                ));
+                self.registry.remove(&resident.worker_id).await;
+                self.registry.forget(&resident.worker_id).await;
+                self.remove_roster_worker(&resident.worker_id);
+                self.seed_roster_ledger().await;
+                return;
+            }
             let failures = resident.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+            {
+                // Keep the durable record in step with the live streak, so
+                // a post-mortem archive tells the truth about the budget.
+                let mut descriptor = resident.descriptor.lock().await;
+                descriptor.consecutive_failures = u64::from(failures);
+                descriptor.last_failure_at = Some(util::now_iso());
+                let _ = persist_worker(&resident.descriptor_path, &descriptor);
+            }
             if failures > MAX_CONSECUTIVE_FAILURES {
                 let mut descriptor = resident.descriptor.lock().await;
                 descriptor.lifecycle = DaemonWorkerLifecycle::Failed;
-                descriptor.last_failure_at = Some(util::now_iso());
+                descriptor.last_error =
+                    Some(format!("gave up after {failures} consecutive failures"));
                 let _ = persist_worker(&resident.descriptor_path, &descriptor);
                 drop(descriptor);
                 self.registry.remove(&resident.worker_id).await;
@@ -503,30 +689,56 @@ impl Supervisor {
                     "session worker {} failed after {failures} consecutive failures",
                     resident.worker_id
                 ));
+                // Archive the record for post-mortem, then take it out of
+                // the live namespace so the next daemon does not revive a
+                // worker that already exhausted its failure budget.
+                let archived = resident.descriptor_path.with_extension("failed.json");
+                match std::fs::rename(&resident.descriptor_path, &archived) {
+                    Ok(()) => self.log_line(&format!(
+                        "session worker {} gave up; record archived to {}",
+                        resident.worker_id,
+                        archived.display()
+                    )),
+                    Err(error) => self.log_line(&format!(
+                        "session worker {} gave up; record could not be archived: {error}",
+                        resident.worker_id
+                    )),
+                }
+                // Adoption telemetry: the give-up drops the session from
+                // the roster (schema v1, kind `worker_gave_up`).
+                self.note_daemon_event("worker_gave_up", None);
                 // The dead worker's transcript stays a passive family row
                 // while any resident root anchors it (the seed walk).
                 self.seed_roster_ledger().await;
                 return;
             }
-            let backoff_ms = (BASE_BACKOFF_MS << (failures - 1).min(7)).min(MAX_BACKOFF_MS);
+            let backoff_ms = restart_backoff_ms(failures);
             self.log_line(&format!(
                 "session worker {} exited unexpectedly; restarting in {backoff_ms}ms (failure {failures}/{MAX_CONSECUTIVE_FAILURES})",
                 resident.worker_id
             ));
             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             match self.relaunch_worker(&resident).await {
-                Ok(new_child) => {
-                    resident.consecutive_failures.store(0, Ordering::SeqCst);
+                Ok(WorkerWatch::Child(new_child)) => {
+                    // No counter reset here: the streak clears only when
+                    // the relaunched worker proves stability (see the
+                    // stability window above).
+                    spawned_at = Some(tokio::time::Instant::now());
                     self.note_daemon_event("worker_restarted", None);
-                    child = Some(new_child);
+                    watch = WorkerWatch::Child(new_child);
+                }
+                Ok(other) => {
+                    spawned_at = None;
+                    self.note_daemon_event("worker_restarted", None);
+                    watch = other;
                 }
                 Err(error) => {
                     self.log_line(&format!(
                         "worker {} relaunch failed: {error:#}",
                         resident.worker_id
                     ));
-                    child = None;
-                    adopted_pid = 0;
+                    spawned_at = None;
+                    watch = WorkerWatch::Nothing;
                 }
             }
         }
@@ -543,20 +755,64 @@ impl Supervisor {
         self.shutting_down.load(Ordering::SeqCst)
     }
 
-    /// Spawn a fresh worker process, connect, and replay the durable create.
+    /// Spawn a fresh worker process, connect, and replay the durable
+    /// create. Returns how the monitor must watch the relaunched worker.
+    /// The revival guard runs first: a listener already on the worker's
+    /// socket endpoint (an old-epoch orphan, or this worker's own healthy
+    /// process) means a spawn would die on the bind conflict the moment it
+    /// tries to bind - wire the existing worker instead of spawning a
+    /// doomed duplicate against the held endpoint.
     pub(crate) async fn relaunch_worker(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
-    ) -> Result<Child> {
+    ) -> Result<WorkerWatch> {
         if self.is_stopping(resident) {
             return Err(anyhow!("supervisor is shutting down"));
         }
+        // A record that left the namespace under us (manual cleanup while
+        // the daemon ran, or the give-up archive) stays gone: a relaunch
+        // here would persist the record back onto its path and re-arm the
+        // loop the cleanup stopped.
+        if !resident.descriptor_path.exists() {
+            return Err(anyhow!(
+                "worker {} record is gone from disk; not relaunching",
+                resident.worker_id
+            ));
+        }
+        let worker_socket = {
+            let descriptor = resident.descriptor.lock().await;
+            PathBuf::from(&descriptor.socket_path)
+        };
         let deadline = worker_connect_deadline();
-        let child = self.spawn_worker_process(resident, deadline).await?;
+        let guard_hit = socket::can_connect(&worker_socket, Duration::from_millis(250)).await;
+        let (child, watch) = if guard_hit {
+            // The auth handshake below rejects a holder that is not this
+            // worker (the token was issued to this worker id), so a rogue
+            // listener fails the relaunch instead of being adopted.
+            let holder = socket::socket_owner_pid(&worker_socket);
+            self.log_line(&format!(
+                "worker {} socket {} already held{}; wiring the existing worker instead of spawning",
+                resident.worker_id,
+                worker_socket.display(),
+                holder
+                    .map(|pid| format!(" by pid {pid}"))
+                    .unwrap_or_default()
+            ));
+            (
+                None,
+                holder
+                    .map(|pid| WorkerWatch::Pid(u64::from(pid)))
+                    .unwrap_or_else(|| WorkerWatch::Socket(worker_socket.clone())),
+            )
+        } else {
+            let child = self.spawn_worker_process(resident, deadline).await?;
+            (Some(child), WorkerWatch::Nothing)
+        };
         if let Err(error) = self.connect_worker(resident, deadline).await {
             // Never leave a spawned-but-unwired worker process behind.
-            let mut child = child;
-            let _ = child.start_kill();
+            if let Some(mut child) = child {
+                let _ = child.start_kill();
+            }
             return Err(error);
         }
         let payload = {
@@ -573,8 +829,9 @@ impl Supervisor {
             // die with the relaunch attempt instead of orphaning (and
             // holding its socket path against the next one).
             Err(error) => {
-                let mut child = child;
-                let _ = child.start_kill();
+                if let Some(mut child) = child {
+                    let _ = child.start_kill();
+                }
                 return Err(error);
             }
         };
@@ -584,25 +841,33 @@ impl Supervisor {
             let _ = self
                 .route_command(resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
                 .await;
-            let mut child = child;
-            let _ = child.start_kill();
+            if let Some(mut child) = child {
+                let _ = child.start_kill();
+            }
             return Err(anyhow!("supervisor is shutting down"));
         }
         if !response.success {
             // Same rule as the route error above: a worker whose create
             // replay failed must not be left running.
-            let mut child = child;
-            let _ = child.start_kill();
+            if let Some(mut child) = child {
+                let _ = child.start_kill();
+            }
             return Err(anyhow!(
                 "worker create failed on relaunch: {}",
                 response.error.unwrap_or_default()
             ));
         }
-        let mut descriptor = resident.descriptor.lock().await;
-        descriptor.lifecycle = DaemonWorkerLifecycle::Ready;
-        descriptor.consecutive_failures = 0;
-        let _ = persist_worker(&resident.descriptor_path, &descriptor);
-        Ok(child)
+        {
+            let mut descriptor = resident.descriptor.lock().await;
+            descriptor.lifecycle = DaemonWorkerLifecycle::Ready;
+            let _ = persist_worker(&resident.descriptor_path, &descriptor);
+        }
+        Ok(match child {
+            Some(child) => WorkerWatch::Child(child),
+            // The guard arm already resolved the watch (holder pid or
+            // socket poll); `watch` holds it.
+            None => watch,
+        })
     }
 
     async fn spawn_worker_process(
@@ -808,6 +1073,18 @@ impl Supervisor {
                         let _ = events.send((ClientRouting::Broadcast, payload));
                     }
                 }
+                // The worker connection is gone: its in-flight requests
+                // will never be answered, and the channel must not accept
+                // new ones either. Release the pending replies and retire
+                // the command channel so a request that raced the drop
+                // (inserted after the reader exited) fails fast instead of
+                // stranding until its route timeout - a foreign socket
+                // holder that only drops connections must fail the
+                // handshake immediately, not burn the whole connect budget
+                // on every restart attempt (the crash-loop incident's slow
+                // mode: escalation in minutes instead of seconds).
+                reader_resident.pending.lock().await.clear();
+                *reader_resident.cmd_tx.lock().await = None;
             });
         }
         *resident.cmd_tx.lock().await = Some(cmd_tx);
@@ -886,11 +1163,23 @@ impl Supervisor {
             .insert(request_id.clone(), reply_tx);
         cmd_tx
             .send(WorkerRequest {
-                request_id,
+                request_id: request_id.clone(),
                 command_type: command_type.to_string(),
                 payload,
             })
             .map_err(|_| anyhow!("Session worker is not connected"))?;
+        // The reader pump retires the command channel when the connection
+        // dies. A request that lost the race (the socket dropped between
+        // the channel clone and this send - a foreign holder that accepts
+        // and drops) can never be answered: the reader already exited, so
+        // resolve it now instead of waiting out the route timeout.
+        let retired = resident.cmd_tx.lock().await.is_none();
+        if retired {
+            let stranded = resident.pending.lock().await.remove(&request_id);
+            if stranded.is_some() {
+                return Err(anyhow!("Session worker dropped the request"));
+            }
+        }
         match tokio::time::timeout(Duration::from_millis(timeout_ms), reply_rx).await {
             Ok(Ok(response)) => Ok(response),
             Ok(Err(_)) => Err(anyhow!("Session worker dropped the request")),
@@ -1124,8 +1413,7 @@ impl Supervisor {
             }
             persist_worker(&descriptor_path, &descriptor)?;
         }
-        let pid = child.id().unwrap_or(0);
-        self.spawn_monitor(Arc::clone(&resident), Some(child), pid as u64);
+        self.spawn_monitor(Arc::clone(&resident), WorkerWatch::Child(child));
         Ok(resident)
     }
 
@@ -2128,9 +2416,9 @@ impl Supervisor {
                             WorkerStopVerdict::Stopped => {
                                 resident.intentional_stop.store(false, Ordering::SeqCst);
                                 match self.relaunch_worker(resident).await {
-                                    Ok(child) => {
+                                    Ok(watch) => {
                                         resident.consecutive_failures.store(0, Ordering::SeqCst);
-                                        self.spawn_monitor(Arc::clone(resident), Some(child), 0);
+                                        self.spawn_monitor(Arc::clone(resident), watch);
                                     }
                                     Err(error) => {
                                         self.log_line(&format!(
@@ -2340,6 +2628,12 @@ impl Supervisor {
         };
         // Refresh the durable identity from the live worker (the token was
         // issued by this supervisor; a mismatch is a rogue registration).
+        // NOTE: a registration proves the worker PROCESS is healthy, not
+        // the session: the create replay after it is the session proof, and
+        // a worker that registers then fails its replay must keep its
+        // failure streak (the crash-loop counter pinned at 1/5 forever
+        // when this reset existed). The streak clears only on proven
+        // stability (the watch window) or a live boot adoption.
         {
             let mut descriptor = resident.descriptor.lock().await;
             if token.as_str() != descriptor.authentication_token {
@@ -2413,7 +2707,7 @@ impl Supervisor {
         self.connect_worker(&resident, worker_connect_deadline())
             .await?;
         self.registry.insert(Arc::clone(&resident)).await;
-        self.spawn_monitor(Arc::clone(&resident), None, registration.pid);
+        self.spawn_monitor(Arc::clone(&resident), WorkerWatch::Pid(registration.pid));
         self.refresh_roster_entry(&resident).await;
         self.log_line(&format!(
             "adopted session worker {worker_id} via self-registration"
@@ -3310,6 +3604,21 @@ fn worker_connect_deadline() -> tokio::time::Instant {
     tokio::time::Instant::now() + Duration::from_millis(WORKER_CONNECT_TIMEOUT_MS)
 }
 
+/// The restart backoff for a failure-streak position: exponential from the
+/// base, capped at the max (the ladder the crash-loop incident never
+/// climbed: its counter reset every attempt and stayed at "failure 1/5").
+fn restart_backoff_ms(failures: u32) -> u64 {
+    (BASE_BACKOFF_MS << (failures - 1).min(7)).min(MAX_BACKOFF_MS)
+}
+
+/// The revival health check's stale-record verdict: a record that is
+/// neither pid-alive nor socket-live (dead epoch) and whose persisted
+/// streak shows the previous daemon already restarting it is stale -
+/// archive it at boot, never relaunch it into another boot loop.
+fn is_stale_dead_epoch_record(pid_alive: bool, socket_live: bool, failures: u64) -> bool {
+    !pid_alive && !socket_live && failures >= STALE_RECORD_FAILURE_FLOOR
+}
+
 fn streamed_attach_lines(
     mut response: DaemonResponse,
     active_session_id: &str,
@@ -3638,5 +3947,51 @@ mod tests {
         let _ = std::fs::remove_file(&socket);
         drop(listener);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The restart backoff climbs exponentially and caps (the incident's
+    /// counter never climbed: it reset every attempt and stayed at
+    /// "failure 1/5" for 12,000 restarts).
+    #[test]
+    fn restart_backoff_climbs_exponentially_and_caps() {
+        assert_eq!(restart_backoff_ms(1), 250);
+        assert_eq!(restart_backoff_ms(2), 500);
+        assert_eq!(restart_backoff_ms(3), 1_000);
+        assert_eq!(restart_backoff_ms(4), 2_000);
+        assert_eq!(restart_backoff_ms(5), 4_000);
+        assert_eq!(restart_backoff_ms(6), 8_000);
+        assert_eq!(restart_backoff_ms(8), 30_000);
+        assert_eq!(restart_backoff_ms(9), 30_000, "the ladder caps");
+        assert_eq!(
+            restart_backoff_ms(1_000),
+            30_000,
+            "no overflow at huge streaks"
+        );
+    }
+
+    /// The revival health check's stale verdict: a dead-epoch record (pid
+    /// dead, socket gone) the previous daemon was already restarting is
+    /// stale; one recorded failure stays relaunchable, and any live sign
+    /// (pid or socket) never archives.
+    #[test]
+    fn stale_dead_epoch_verdict_needs_crash_loop_evidence() {
+        assert!(is_stale_dead_epoch_record(false, false, 2));
+        assert!(is_stale_dead_epoch_record(false, false, 5));
+        assert!(
+            !is_stale_dead_epoch_record(false, false, 1),
+            "a single crash stays relaunchable"
+        );
+        assert!(
+            !is_stale_dead_epoch_record(false, false, 0),
+            "a clean dead record relaunches (rehydration)"
+        );
+        assert!(
+            !is_stale_dead_epoch_record(true, false, 5),
+            "a live pid revives"
+        );
+        assert!(
+            !is_stale_dead_epoch_record(false, true, 5),
+            "a held socket revives (adopt or defer, never archive)"
+        );
     }
 }

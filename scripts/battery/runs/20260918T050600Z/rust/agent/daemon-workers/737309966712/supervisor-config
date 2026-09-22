@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "socketPath": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260918T050600Z/rust/daemon.sock",
+  "defaultSessionDir": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260918T050600Z/rust/agent/sessions"
+}

@@ -1,0 +1,9 @@
+[2026-09-20T12:32:14.438Z] supervisor: Prime Agent daemon supervisor 5f128786-8955-4362-b337-b1a3a3734b1e listening on /home/ubuntu/prime-agent-rs/scripts/battery/runs/20260920T123213Z/ts/daemon.sock
+[2026-09-20T12:32:14.763Z] supervisor: Session worker 697ed695964c stderr: Prime Agent daemon listening on /tmp/vbat20260920T123213Z-ts/prime-agent-1000/worker-6e61271e2cbc-697ed695964c.sock
+[2026-09-20T12:32:16.334Z] supervisor: Session worker c9fbb36a781d stderr: Prime Agent daemon listening on /tmp/vbat20260920T123213Z-ts/prime-agent-1000/worker-6e61271e2cbc-c9fbb36a781d.sock
+[2026-09-20T12:32:33.087Z] supervisor: Session worker 38cb62cb1e34 stderr: Prime Agent daemon listening on /tmp/vbat20260920T123213Z-ts/prime-agent-1000/worker-6e61271e2cbc-38cb62cb1e34.sock
+[2026-09-20T12:32:57.878Z] supervisor: Session worker 19f38281ed52 stderr: Prime Agent daemon listening on /tmp/vbat20260920T123213Z-ts/prime-agent-1000/worker-6e61271e2cbc-19f38281ed52.sock
+[2026-09-20T12:35:18.265Z] supervisor: Session worker 38cb62cb1e34 stderr: shutting down (exit 0); closing 0 active session(s)
+[2026-09-20T12:35:18.277Z] supervisor: Session worker 19f38281ed52 stderr: shutting down (exit 0); closing 0 active session(s)
+[2026-09-20T12:35:18.287Z] supervisor: Session worker c9fbb36a781d stderr: shutting down (exit 0); closing 0 active session(s)
+[2026-09-20T12:35:18.296Z] supervisor: Session worker 697ed695964c stderr: shutting down (exit 0); closing 0 active session(s)

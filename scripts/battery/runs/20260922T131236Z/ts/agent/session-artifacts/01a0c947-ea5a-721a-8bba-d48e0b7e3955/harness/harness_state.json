@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "entries": {
+    "prompt": {},
+    "memory": {
+      "f16_battery_memory": {
+        "id": "f16_battery_memory",
+        "kind": "memory",
+        "title": "f16-battery-memory",
+        "content": "The f16 battery flow verified the kernel-scheduled refinement end to end.",
+        "path": "general",
+        "scope": "local",
+        "reference": {},
+        "arguments": {},
+        "metadata": {
+          "scope": "local"
+        },
+        "source": "refine",
+        "created_at": "2026-09-22T13:22:24.044Z",
+        "updated_at": "2026-09-22T13:22:24.044Z",
+        "version": 1
+      }
+    },
+    "skill": {},
+    "subagent": {}
+  },
+  "refinements": [
+    {
+      "id": "refine_20260922132224037",
+      "trigger": "Record the f16 battery parity fixture",
+      "changes": [
+        "create memory:f16_battery_memory"
+      ],
+      "evidence": "The parity check requires one local memory entry to prove refinement applies edits.",
+      "outcome": "A local memory titled f16-battery-memory exists.",
+      "created_at": "2026-09-22T13:22:24.044Z"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+ "id": "ik2",
+ "type": "response",
+ "command": "compact",
+ "success": true,
+ "data": {
+  "summary": "the second compaction summary",
+  "firstKeptEntryId": "7ef6cbbe",
+  "tokensBefore": 110,
+  "details": {
+   "readFiles": [],
+   "modifiedFiles": []
+  }
+ }
+}

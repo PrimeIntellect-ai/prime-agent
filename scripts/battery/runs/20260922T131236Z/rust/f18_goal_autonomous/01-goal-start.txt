@@ -1,0 +1,36 @@
+                                                      battery-f18  $0.00
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.1.0
+  ▗█▛ ▟██▙▄██▛ ▟▛         model mock-1
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd ~/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+  f18 seed turn
+
+
+ f18 goal fixture reply
+
+
+  /goal f18 parity objective: land the battery flows
+
+
+  Goal active: f18 parity objective: land the battery flows
+
+
+ Goal: f18 parity objective: land the battery flows
+
+ Goal continuation · f18 parity objective: land the battery flows
+
+ ⠸ Waiting · 0s
+
+
+
+                                                                                      Collapsed mode (Ctrl+O to expand)
+
+ >
+
+← manage                                                                          Pursuing goal (0s) · mock-1 · 110 (0%)

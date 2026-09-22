@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "token": "af005f4b-3521-4e49-a321-7896e695fd33",
+  "pid": 411618,
+  "processStartId": "proc:26464297",
+  "activeSessionId": "26c0ba928e9e",
+  "sessionPath": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/agent/sessions/01a0c945-617c-7378-8796-684ed7f516b3.jsonl",
+  "createdAt": "2026-09-22T13:19:22.505Z"
+}

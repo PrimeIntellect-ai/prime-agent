@@ -1,0 +1,19 @@
+{
+ "argv": [
+  "/home/ubuntu/prime-agent-rs/target/release/prime-agent",
+  "-p",
+  "--daemon-socket",
+  "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260918T050600Z/rust/daemon.sock",
+  "--provider",
+  "prime-inference",
+  "--model",
+  "mock-1",
+  "--offline",
+  "f9 inactive prompt"
+ ],
+ "exit_code": 0,
+ "stdout": "f9 idle reply\n",
+ "stderr": "",
+ "duration_s": 0.17,
+ "timeout": false
+}

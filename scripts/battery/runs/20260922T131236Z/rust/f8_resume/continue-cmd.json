@@ -1,0 +1,20 @@
+{
+ "argv": [
+  "/home/ubuntu/prime-agent-rs/target/debug/prime-agent",
+  "-p",
+  "--daemon-socket",
+  "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/daemon.sock",
+  "--provider",
+  "prime-inference",
+  "--model",
+  "mock-1",
+  "--offline",
+  "-c",
+  "Continue this session"
+ ],
+ "exit_code": 1,
+ "stdout": "",
+ "stderr": "Error: Session is already active in c52c4617f56f: /home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/sessions/01a0c943-34f4-7645-a43c-38069682138b.jsonl\n",
+ "duration_s": 0.45,
+ "timeout": false
+}

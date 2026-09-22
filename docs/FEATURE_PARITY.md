@@ -65,11 +65,11 @@ Missing rate: 254/689 rows MISSING (37%), plus 128 PARTIAL (19%). The interactiv
 orchestration layer (section 4) carries the largest gap mass; the renderer core
 (message components, section 1) is closest to parity.
 
-Crash-class finding (verified by reading `crates/pa-tui/src/editor/wrap.rs:39-47`
-and the slicing at `wrap.rs:193`, and reproduced with a temp integration test,
-removed): `word_wrap_line` mixes grapheme-ordinal `Segment.index` with byte
-slicing, so any non-ASCII prompt wider than the editor panics
-(`byte index is not a char boundary`). See lane `editor-wrap-unicode`.
+Crash-class finding — RESOLVED (#269 landed the char-scalar index model;
+the editor-wrap-unicode lane verified the full wrap/width/marker surface
+against TS goldens and replayed the panic repro as a regression test):
+the audit's `word_wrap_line` panic (`byte index is not a char boundary`
+on any non-ASCII prompt wider than the editor) is gone.
 
 Notable systemic findings:
 - 30+ registered client commands fall through to "not available in this client yet"
@@ -163,7 +163,7 @@ Paths are relative to the two repo roots.
 | packages/coding-agent/src/modes/interactive/components/tool-execution.ts:55-75 + core/tools/bash.ts:595-640 | bash card: collapsed 5-line tail preview, "... N earlier lines" hint | crates/pa-tui/src/tool_card/bash.rs:89-148 | PARTIAL | - |
 | packages/coding-agent/src/modes/interactive/components/tool-execution.ts:449-477 | Result image blocks below the card (fallbackOnly Image, "    ╰─ " prefix) | crates/pa-tui/src/tool_card/mod.rs:216-254 | MATCHES | - |
 | packages/coding-agent/src/modes/interactive/components/tool-execution.ts:586-598 | selectLatestToolExpandHint (expand hint only on the newest tool) | crates/pa-tui/src/chrome.rs:360-373 (the hint text renders empty in both: keybinding-hints.ts:70-74) | MATCHES | - |
-| packages/coding-agent/src/modes/interactive/components/tool-execution.ts:248-274 + packages/coding-agent/src/modes/interactive/interactive-mode.ts:5913-5923 | Aborted/error assistant: every pending tool card gets the error result | MISSING (cards stay running; {R}/session_ui.rs:3545-3576 only renders the assistant error row) | MISSING | abort-tool-cards (new) |
+| packages/coding-agent/src/modes/interactive/components/tool-execution.ts:248-274 + packages/coding-agent/src/modes/interactive/interactive-mode.ts:5913-5923 | Aborted/error assistant: every pending tool card gets the error result | crates/pa-tui/src/snapshot.rs `settle_pending_tool_cards` + session_ui.rs `apply_assistant_message` (the card's `aborted` flag drops the late tool_execution_end, TS `resetPendingToolState`) | MATCHES | interrupt-paths |
 | packages/coding-agent/src/modes/interactive/components/tool-execution.ts:323-331 + packages/coding-agent/src/modes/interactive/interactive-mode.ts:5974-5982 | ipython_sent_agent_message live appends to the in-flight card | MISSING (event ignored; {R}/snapshot.rs:407-582 has no arm) | MISSING | agent-message-ui |
 | packages/coding-agent/src/modes/interactive/components/user-message.ts:44-71 | User block: Box(2,1) on userMessageBg, masked markdown, token restore | crates/pa-tui/src/chat.rs:284-333 | MATCHES | - |
 | packages/coding-agent/src/modes/interactive/components/user-message.ts:13-15,62-71 | OSC133 A/B/C markers on the user block | crates/pa-tui/src/chat.rs:324-331; crates/pa-tui/src/osc133.rs:17-36 | MATCHES | - |
@@ -339,8 +339,8 @@ Method: every TS file in `packages/tui/src` read in full; each behavior located 
 | fullscreen.ts:234 | `scrollBy`/`scrollToTop`/`scrollToBottom`/`pageSize`/`ScrollInfo` following semantics | crates/pa-tui/src/view.rs:305-355 | MATCHES | — |
 | fullscreen.ts:658 | `paint`: absolute row-diff, `\x1b[2K` per row, cursor address, ?2026 sync | crates/pa-tui/src/app.rs:205 (ratatui double-buffer diff; no ?2026 wrapper) | PARTIAL | term-integration (new) |
 | fullscreen.ts:649 | `hyperlinkAt` (link lookup in last painted frame) | crates/pa-tui/src/hyperlinks.rs:125 (`frame_link_ranges`; not exposed to mouse dispatch) | PARTIAL | mouse-select |
-| keys.ts:788 | `matchesKey`/`parseKey`: kitty CSI-u, legacy tables, modifyOtherKeys | crates/pa-tui/src/keys.rs:12 (`key_event_to_id` over crossterm events) | PARTIAL | term-enhanced-keys (new) |
-| keys.ts:505 | `isKeyRelease`/`isKeyRepeat` (kitty event types) | crates/pa-tui/src/keys.rs:12 (crossterm kinds; release filtered) | PARTIAL | term-enhanced-keys (new) |
+| keys.ts:788 | `matchesKey`/`parseKey`: kitty CSI-u, legacy tables, modifyOtherKeys | crates/pa-tui/src/keys.rs (`key_event_to_id` + `ctrl_char_id`: kitty CSI-u matrix incl. shifted identities and kpEnter via crossterm's parser; shift+ctrl/alt+letter, ctrl+\]/ctrl+- complement, mode-aware LF, super/space combos; DIVERGENCE: crossterm parses raw bytes, so raw-evidence distinctions are folds — a kitty custom `\x1b\r` shift+enter mapping reports alt+enter, real ctrl+j under kitty reports shift+enter, kitty ctrl+4..7 keep digit ids (no legacy complement), and unparseable legacy sequences (`\x1bOa`, `\x1b[a`, `\x1b[[5~`) are dropped by crossterm's parser (TS decodes them) | DIVERGES | — |
+| keys.ts:505 | `isKeyRelease`/`isKeyRepeat` (kitty event types) | crates/pa-tui/src/input.rs `filter_enhanced_key_events` (releases dropped at reader dispatch, TS tui.ts:948 — no surface opts in; crossterm parses the `:1/:2/:3` event types on CSI-u, `~`, and arrow forms) + keys.rs (repeat = press, release = None); the TS paste-content guard is unnecessary (bracketed paste arrives as `Event::Paste`, never key events) | MATCHES | — |
 | keys.ts:1379 | `decodePrintableKey` (CSI-u / modifyOtherKeys printable decode) | crates/pa-tui/src/keys.rs tests + editor text_utils: crossterm resolves the kitty CSI-u alternate (`shift+=` -> `+`) before the id layer; a trailing `+` key id is the literal plus (split_key_id); modifyOtherKeys sequences never arrive (the fallback is never armed) | MATCHES | — |
 | keys.ts:44 | Kitty protocol global flag (`setKittyProtocolActive`) | crates/pa-tui/src/enhanced_keys.rs (module state; crossterm parses CSI-u) | MATCHES | — |
 | keybindings.ts:56 | `TUI_KEYBINDINGS` definition table | crates/pa-tui/src/keybindings.rs:40 (defaults verbatim) | MATCHES | — |
@@ -353,9 +353,9 @@ Method: every TS file in `packages/tui/src` read in full; each behavior located 
 | selection-metadata.ts:80 | `extractTableCellSelectionRegions` | MISSING | MISSING | mouse-select |
 | slash-command-context.ts:5 | `getSlashCommandContext` (name/argument, prompt-start, mid-line) | crates/pa-tui/src/autocomplete.rs:92 | MATCHES | — |
 | render-cache.ts:1 | `VersionedRenderCache` (width+version keyed) | MISSING (per-entry layout cache exists: crates/pa-tui/src/view.rs:357, not the generic cache; only TS consumer is ipython-cell) | MISSING | render-cache (new) |
-| stdin-buffer.ts:232 | `StdinBuffer`: complete-sequence splitting (CSI/OSC/APC/DCS), timeout flush | crates/pa-tui/src/input.rs:30 (crossterm parses sequences; no buffer-timeout semantics) | PARTIAL | term-enhanced-keys (new) |
+| stdin-buffer.ts:232 | `StdinBuffer`: complete-sequence splitting (CSI/OSC/APC/DCS), timeout flush | crates/pa-tui/src/input.rs (crossterm's `Parser` owns the byte stream: buffers partial sequences across reads and delivers a lone ESC as soon as no more input is pending, so the TS 10ms timeout hold has no observable effect; sequences crossterm cannot parse are dropped where TS passes them through — same divergence class as keys.ts:788) | MATCHES (see divergence notes on keys.ts:788) | — |
 | stdin-buffer.ts:171 | Raw multiline-paste heuristic (`[^\r\n][\r\n]+[^\r\n]`) | crates/pa-tui/src/input.rs (`is_raw_multiline_paste` + burst coalescing over the chunk boundary) | MATCHES | — |
-| stdin-buffer.ts:307 | Kitty-printable dedup (`pendingKittyPrintableCodepoint`) | MISSING | MISSING | term-enhanced-keys (new) |
+| stdin-buffer.ts:307 | Kitty-printable dedup (`pendingKittyPrintableCodepoint`) | crates/pa-tui/src/input.rs `filter_enhanced_key_events` (kitty-gated, chunk-local pending; crossterm folds the CSI-u and raw-text encodings into one `Char` event, so the dedup keys on an identical back-to-back pair within one terminal write — DIVERGENCE: TS's pending spans chunks and keys on the raw CSI-u evidence, so a kitty-over-SSH batched identical double keystroke collapses here where TS keeps both) | DIVERGES | — |
 | terminal.ts:143 | `ProcessTerminal`: raw mode, resize, alt-screen handoff | crates/pa-tui/src/interactive.rs:1190 (`setup`) + crates/pa-tui/src/altscreen.rs:20 | MATCHES | — |
 | terminal.ts:137 | Bracketed paste enable/disable (`?2004h/l`) | crates/pa-tui/src/enhanced_keys.rs (`enable`/`disable`, wired into every raw-mode bracket) | MATCHES | — |
 | terminal.ts:288 | Kitty keyboard protocol query + `\x1b[>7u` push | crates/pa-tui/src/enhanced_keys.rs (crossterm support probe — query `?u` + DA1 — then `>7u`, 150ms fallback, late-answer upgrade) | MATCHES | — |
@@ -377,15 +377,15 @@ Method: every TS file in `packages/tui/src` read in full; each behavior located 
 | terminal-image.ts:425 | `hyperlink()` OSC 8 helper | crates/pa-tui/src/hyperlinks.rs:37 | MATCHES | — |
 | terminal-image.ts:416 | `imageFallback` (`[Image: name [mime] WxH]`) | crates/pa-tui/src/terminal_image.rs:553 | MATCHES | — |
 | latex.ts:829 | `latexToUnicode` (symbols, scripts, accents, frac/sqrt, alphabets) | MISSING (no latex/math anywhere in crates/pa-tui) | MISSING | md-latex (new) |
-| utils.ts:196 | `visibleWidth` (grapheme, east-asian, RGI emoji=2, regional=2, cache) | crates/pa-tui/src/width.rs:77 (char-based `unicode-width`; no emoji-2 rule, no regional-indicator clamp, no cache) | PARTIAL | editor-wrap-unicode (new) |
+| utils.ts:196 | `visibleWidth` (grapheme, east-asian, RGI emoji=2, regional=2, cache) | crates/pa-tui/src/width.rs — full `graphemeWidth` port: RGI emoji = 2 (ZWJ sequences, skin tones, keycaps, VS16 on Emoji bases, single-codepoint Emoji_Presentation), regional indicators = 2, zero-width clusters incl. \p{Mark} spacing marks (unicode-properties), leading non-printing strip (Cf/DIC/Mark), EAW + trailing halfwidth/fullwidth + Thai/Lao AM forms, tab = 3, 512-entry cache; TS golden corpus + ts_reference probes | MATCHES | — |
 | utils.ts:792 | `wrapTextWithAnsi` / `wrapSingleLine` / `breakLongWord` | crates/pa-tui/src/width.rs:190 (`wrap_line`; span-based styling carries across breaks) | MATCHES | — |
 | utils.ts:1041 | `truncateToWidth` (ellipsis, pad, ANSI/grapheme aware) | crates/pa-tui/src/width.rs:134 (`truncate_line`) + crates/pa-tui/src/width.rs:225 (`pad_line`) | MATCHES | — |
-| utils.ts:899 | `stripAnsi` (CSI/OSC/DCS/APC/two-char strip) | crates/pa-tui/src/hyperlinks.rs:203 (`strip_osc8_content`-style scanner via crates/pa-tui/src/width.rs:31 `escape_len`; no general-purpose strip API) | PARTIAL | editor-wrap-unicode (new) |
+| utils.ts:899 | `stripAnsi` (CSI/OSC/DCS/APC/two-char strip) | crates/pa-tui/src/ansi.rs — exact port (common-CSI fast path, the shared scanner for OSC/DCS/APC/PM/SOS, ESC-before-line-separator rule); error_summary delegates; TS-dist goldens | MATCHES | — |
 | utils.ts:1189 | `sliceByColumn`/`sliceWithWidth` (strict wide-char boundary) | crates/pa-tui/src/width.rs:307 (`slice_line_by_column`; no strict boundary exclusion) | PARTIAL | mouse-select |
 | utils.ts:255 | `visibleContentSpan` (selectable span for frame selection) | MISSING | MISSING | mouse-select |
 | utils.ts:1241 | `hyperlinkAtColumn` (OSC 8 lookup by column) | crates/pa-tui/src/hyperlinks.rs:125 (`frame_link_ranges`; no column query API) | PARTIAL | mouse-select |
 | utils.ts:1271 | `urlAtColumn` (bare HTTP(S) URL spans, bracket trimming) | MISSING | MISSING | mouse-select |
-| utils.ts:313 | `normalizeTerminalOutput` (Thai/Lao AM decomposition + tab→3) | MISSING (Rust paints via ratatui cells; no pre-paint normalization) | MISSING | editor-wrap-unicode (new) |
+| utils.ts:313 | `normalizeTerminalOutput` (Thai/Lao AM decomposition + tab→3) | crates/pa-tui/src/width.rs `normalize_terminal_output`, wired at the paint seam (markdown::to_ratatui_line, TS `applyLineResets` position); TS-dist goldens (editor-wrap-unicode) | MATCHES | — |
 | utils.ts:1335 | `extractSegments` (overlay before/after compositing) | MISSING | MISSING | panel-nav |
 | fuzzy.ts:12 | `fuzzyMatch` scoring (consecutive, boundary, exact, swapped groups) | crates/pa-tui/src/fuzzy.rs:6 | MATCHES | — |
 | fuzzy.ts:102 | `fuzzyFilterScored` / `fuzzyFilter` (multi-token, stable sort) | crates/pa-tui/src/fuzzy.rs:84 | MATCHES | — |
@@ -401,8 +401,8 @@ Method: every TS file in `packages/tui/src` read in full; each behavior located 
 | components/editor.ts:251 | `Editor` state: lines/cursor, multi-line | crates/pa-tui/src/editor/mod.rs:61 | MATCHES | — |
 | components/editor.ts:456 | History navigation (up/down, 100 cap, dedupe, first-visual-line rules) | crates/pa-tui/src/editor/mod.rs:327 (`navigate_history`) + crates/pa-tui/src/editor/input.rs:178 | MATCHES | — |
 | components/editor.ts:938 | `layoutText`/word-wrap layout with cursor placement per chunk | crates/pa-tui/src/editor/layout.rs:8 | MATCHES | — |
-| components/editor.ts:119 | `wordWrapLine` (wrap opportunities, backtrack, atomic re-wrap) | crates/pa-tui/src/editor/wrap.rs:154 — **panics on non-ASCII wrap** (char-ordinal `Segment.index` sliced as byte offset; reproduced: `end byte index 16 is not a char boundary` in wrap.rs:193) | PARTIAL | editor-wrap-unicode (new) |
-| components/editor.ts:44 | `segmentWithMarkers` (atomic paste/image markers by valid id) | crates/pa-tui/src/editor/wrap.rs:88 (byte/char index mixing; see row above) | PARTIAL | editor-wrap-unicode (new) |
+| components/editor.ts:119 | `wordWrapLine` (wrap opportunities, backtrack, atomic re-wrap) | crates/pa-tui/src/editor/wrap.rs — char-scalar `Segment.index` + byte-slice tables (#269); wrap opportunities, backtrack, atomic re-wrap byte-exact vs TS on the CJK/emoji/ZWJ/combining-mark corpus + a 153-case ASCII replay golden | MATCHES | — |
+| components/editor.ts:44 | `segmentWithMarkers` (atomic paste/image markers by valid id) | crates/pa-tui/src/editor/wrap.rs — char-space marker spans; the scan matches the strict PASTE/IMAGE_MARKER_REGEX grammars (`parse_paste_marker`/`parse_image_marker`) and advances one char on a miss (`[[paste #1]]` keeps the inner marker); goldens vs the TS regexes | MATCHES | — |
 | components/editor.ts:1207 | `handlePaste` (large-paste markers >10 lines/>1000 chars, ctrl CSI-u decode, path space) | crates/pa-tui/src/editor/mod.rs:475 (marker logic + `decode_paste_ctrl_sequences` in text_utils.rs) | MATCHES | — |
 | components/editor.ts:1320 | Backspace (grapheme delete, line merge) | crates/pa-tui/src/editor/text_ops.rs:7 | MATCHES | — |
 | components/editor.ts:1380 | `moveToVisualLine` + snap-to-marker + `computeVerticalMoveColumn` sticky table | crates/pa-tui/src/editor/motion.rs:240 + crates/pa-tui/src/editor/motion.rs:215 | MATCHES | — |
@@ -421,7 +421,7 @@ Method: every TS file in `packages/tui/src` read in full; each behavior located 
 | components/select-list.ts:189 | Metadata item: argumentHint + sourceTag columns | crates/pa-tui/src/autocomplete.rs:449 (`render_item` handles argumentHint; **sourceTag not rendered**) | PARTIAL | autocomplete-fd (new) |
 | components/select-list.ts:60 | `setFilter` (prefix filter, reset selection) | MISSING (dropdown re-filters via provider per keystroke; menu-panel pickers keep own filter) | PARTIAL | autocomplete-fd (new) |
 | components/settings-list.ts:34 | `SettingsList` (label/value rows, cycle, submenu, search) | crates/pa-tui/src/config_selector.rs (config selector surface; no generic submenu component) | PARTIAL | model-fix |
-| components/input.ts:18 | `Input` single-line model: kill ring, undo, word motion, CSI-u paste | crates/pa-tui/src/search_input.rs:80 (char-based not grapheme-based; paste via session routing) | PARTIAL | editor-wrap-unicode (new) |
+| components/input.ts:18 | `Input` single-line model: kill ring, undo, word motion, CSI-u paste | crates/pa-tui/src/search_input.rs — grapheme-step cursor/deletion/word motion (kill ring + undo unchanged; positions char-scalar at grapheme boundaries) | MATCHES | — |
 | components/input.ts:255 | `Input.render` (`> ` prompt, horizontal scroll) | crates/pa-tui/src/search_input.rs (cursor/column used by picker render; no own `> ` prefix render) | PARTIAL | model-fix |
 | components/box.ts:16 | `Box` (padding + bg + child cache) | MISSING (panel chrome hand-rolled per surface; no generic Box component) | MISSING | panel-nav |
 | components/loader.ts:15 | `Loader` (braille frames, 80ms interval, setIndicator) | crates/pa-tui/src/chat.rs:212 (`LOADER_FRAMES` + view pulse; 50ms loop tick) | PARTIAL | — |
@@ -458,17 +458,17 @@ Method: every TS file in `packages/tui/src` read in full; each behavior located 
 - **keys.ts:788 matchesKey** — crossterm decodes sequences into key ids; kitty base-layout-key matching (non-Latin layouts), kpEnter, Windows-Terminal raw-BS heuristic, and ctrl+shift+letter identity are not reproduced (ctrl+shift collapses to ctrl).
 - **keys.ts:505 event types** — release filtered, repeat treated as press via crossterm kinds; no kitty `:2/:3` sequence parsing of raw data.
 - **terminal-colors.ts:138 color mode** — Rust resolves truecolor vs 256 only; `ansi16`/`unknown` modes and `bestAnsiColor`'s "" fallback do not exist.
-- **utils.ts:196 visibleWidth** — char-based `unicode-width`, no RGI-emoji width-2 rule, no regional-indicator clamp, no zero-width combination handling, no width cache; diverges on emoji-heavy text.
-- **utils.ts:899 stripAnsi** — the escape scanner exists (`escape_len`) and OSC-8/OSC-133 stripping exists, but no general-purpose ANSI stripper utility.
-- **utils.ts:1189 sliceByColumn** — no `strict` boundary exclusion, so a wide char crossing the boundary is kept instead of clipped.
-- **components/editor.ts:119 wordWrapLine** — **reproduced panic**: `word_wrap_line` mixes grapheme-ordinal indices with byte slicing (`wrap.rs:193` panics on non-ASCII text with `end byte index … is not a char boundary`); TS uses Intl.Segmenter offsets throughout.
-- **components/editor.ts:44 segmentWithMarkers** — marker ranges are byte offsets compared against char-ordinal grapheme indices (same root cause as the wrap panic).
+- **utils.ts:196 visibleWidth** — LANDED (editor-wrap-unicode): `width.rs` is the full `graphemeWidth` port (RGI emoji = 2 incl. single-codepoint Emoji_Presentation, regional indicators = 2, \p{Mark} spacing marks zero via unicode-properties, leading non-printing strip, trailing halfwidth/fullwidth + Thai/Lao AM forms, tab = 3, the 512-entry cache); TS golden corpus + reference probes gate it.
+- **utils.ts:899 stripAnsi** — LANDED (editor-wrap-unicode): `ansi::strip_ansi` is the exact TS scanner (common-CSI fast path + OSC/DCS/APC/PM/SOS + the ESC-newline rule); `error_summary` delegates.
+- **utils.ts:1189 sliceByColumn** — LANDED (editor-wrap-unicode): `slice_line_by_column` is grapheme-level with the strict variant (overlay compositing clips wide clusters at the boundary; selection keeps the include-whole default).
+- **components/editor.ts:119 wordWrapLine** — LANDED (#269 + editor-wrap-unicode goldens): char-scalar `Segment.index` + byte-slice tables; wrap opportunities, backtrack, and atomic re-wrap are byte-exact vs the TS dist on the Unicode corpus and a 153-case ASCII replay golden. The audit's panic repro is covered by `cjk_wider_than_editor_does_not_panic`.
+- **components/editor.ts:44 segmentWithMarkers** — LANDED (#269 + editor-wrap-unicode): char-space marker spans; the scan matches the strict TS regex grammars and advances one char on a miss (`[[paste #1]]` keeps the inner marker).
 - **components/editor.ts:1207 handlePaste** — the large-paste marker logic matches, but the CSI-u ctrl decode inside pasted text (tmux popup re-encoding) is missing. (Fixed in `term-enhanced-keys`: `decode_paste_ctrl_sequences`.)
 - **components/editor.ts:2389 autocomplete triggers** — Rust lacks the TS "regular state + no completion context → cancel" rule; only empty-text cancels.
 - **components/editor.ts:2205 async request** — parked-until-idle replaces the TS abort/20ms-symbol-debounce machinery; symbol-typing debounce timing differs.
 - **components/select-list.ts:189 metadata** — `sourceTag` column and its theme hook are not rendered.
 - **components/settings-list.ts:34** — the config selector covers label/value rows and cycling; generic submenus (per-setting Component handoff) are not present.
-- **components/input.ts:18 Input** — char-based cursor/deletion (TS is grapheme-based); no kitty CSI-u printable decode inside `handleInput`; paste depends on session routing.
+- **components/input.ts:18 Input** — LANDED (editor-wrap-unicode): `search_input.rs` walks grapheme clusters for cursor motion, deletion, and word motion (kill ring + undo unchanged). Kitty CSI-u printables decode upstream in `keys.rs`/enhanced-keys; the paste path rides the session routing.
 - **components/loader.ts:15** — spinner frames and pulse exist; the 80ms own-interval and `setIndicator` custom-frame API are the host loop's 50ms tick instead.
 - **components/markdown.ts:428 heading taper** — Rust renders every level in mdHeading alone, per the in-code probe note that chalk modifiers never reach the wire in the deployed TS binary; verify against the binary per frame-diff before "fixing".
 - **components/markdown.ts:495 blockquote** — Rust uses a `▐ ` border (TS `│ `), renders inline-only content (no nested paragraph/list/code), and drops the trailing blank row.
@@ -834,17 +834,17 @@ Method: every TS method in scope read in full; the Rust implementing code locate
 | interactive-mode.ts:6639 | echoLocalCommand (local command echoed as user message) | crates/pa-tui/src/session_ui.rs:1424-1440 (/hotkeys only) | PARTIAL | info-commands |
 | interactive-mode.ts:6650 | addMessageToEditorHistory | MISSING | MISSING | transcript-extras |
 | interactive-mode.ts:7078 | getUserInput (input promise / agentsViewRequest guard) | crates/pa-tui/src/interactive.rs:581-616 (UiInput queue) | MATCHES | — |
-| interactive-mode.ts:7095 | handleEscape (arm + interrupt-or-clear) | crates/pa-tui/src/session_ui.rs:2680-2712 | PARTIAL | interrupt-paths |
+| interactive-mode.ts:7095 | handleEscape (arm + interrupt-or-clear) | crates/pa-tui/src/session_ui.rs (the escape repeat arm then `interrupt_or_clear_input`; the arm decision reads `has_interruptible_work`) | MATCHES | interrupt-paths |
 | interactive-mode.ts:7116 | armEscapeRepeat/takeEscapeRepeatAction/clearEscapeRepeat (500ms window) | crates/pa-tui/src/session_ui.rs:1927-1947 | MATCHES | — |
 | interactive-mode.ts:7145 | handleCtrlC/handleInterruptKey (first press abort + hint) | crates/pa-tui/src/session_ui.rs:2718-2753 | MATCHES | — |
-| interactive-mode.ts:7160 | interruptOrClearInput (abort retry/bash/compaction/branch-summary/side-question/stream) | crates/pa-tui/src/session_ui.rs (Abort/AbortCompaction/AbortSideQuestion; AbortBash/AbortRetry/AbortBranchSummary still unsent) | PARTIAL | interrupt-paths |
+| interactive-mode.ts:7160 | interruptOrClearInput (abort retry/bash/compaction/branch-summary/side-question/stream) | crates/pa-tui/src/session_ui.rs `interrupt_or_clear_input` (Abort for the stream; AbortCompaction+AbortBranchSummary, AbortRetry, AbortBash, AbortSideQuestion — one `tui interrupt issued` event per fired target) | MATCHES | interrupt-paths |
 | interactive-mode.ts:7184 | showCtrlCExitHint/clearCtrlCExitHint/isCtrlCExitHintVisible (2s window) | crates/pa-tui/src/session_ui.rs:2112-2142 | MATCHES | — |
 | interactive-mode.ts:7221 | handleCtrlD (exit on empty editor) | crates/pa-tui/src/session_ui.rs:2713-2717 | MATCHES | — |
 | interactive-mode.ts:7232 | shutdown (stats, drain, dispose, resume hint, exit 0) | crates/pa-tui/src/interactive.rs:1055-1103 + session_ui.rs:808-854 | MATCHES | — |
 | interactive-mode.ts:7264 | teardownSessionUi (preserveAltScreen, theme watcher stop) | crates/pa-tui/src/interactive.rs:1460-1480 (Renderer::finish) | MATCHES | — |
-| interactive-mode.ts:7322 | emergencyTerminalExit (EIO/dead terminal, exit 129) | MISSING | MISSING | signal-handlers |
-| interactive-mode.ts:7339 | registerSignalHandlers (SIGTERM/SIGHUP, stdout/stderr error) | MISSING | MISSING | signal-handlers |
-| interactive-mode.ts:7332 | killTrackedDetachedChildren (detached child kill) | MISSING | MISSING | signal-handlers |
+| interactive-mode.ts:7322 | emergencyTerminalExit (EIO/dead terminal, exit 129) | crates/pa-tui/src/exit_guard.rs `emergency_terminal_exit` + `is_dead_terminal_error` (the paint path's `draw_frame` takes it on EIO/EPIPE/ENOTCONN) | MATCHES | interrupt-paths |
+| interactive-mode.ts:7339 | registerSignalHandlers (SIGTERM/SIGHUP, stdout/stderr error) | crates/pa-tui/src/signals.rs (SIGTERM: kill tracked children + graceful leave, `tui signal shutdown`; SIGHUP: emergency exit; the worker's own SIGINT/SIGTERM/SIGHUP handlers live in crates/pa-daemon/src/worker_signals.rs, TS daemon-mode) | MATCHES | interrupt-paths |
+| interactive-mode.ts:7332 | killTrackedDetachedChildren (detached child kill) | crates/pa-types/src/platform/detached_children.rs (track at the bash-tool spawn in crates/pa-core/src/tools/bash_local.rs; drained by the client and worker signal handlers) | MATCHES | interrupt-paths |
 | interactive-mode.ts:7378 | handleCtrlZ suspend cycle (SIGTSTP/SIGCONT, SIGINT ignored) | crates/pa-tui/src/suspend.rs:56 + session_ui.rs:2771-2778 + interactive.rs:670-688 | MATCHES | — |
 | interactive-mode.ts:7271 | handleAgentsBack/requestAgentsView/returnToAgentsView | crates/pa-tui/src/session_ui.rs:2870-2884 + interactive.rs:1081-1094 | MATCHES | — |
 | interactive-mode.ts:7419 | handleFollowUp (alt+enter queues on follow-up lane) | crates/pa-tui/src/session_ui.rs:2938-2958 | MATCHES | — |
@@ -973,8 +973,8 @@ Method: every TS method in scope read in full; the Rust implementing code locate
 #### Partial notes
 
 - `interactive-mode.ts:6639` echoLocalCommand (local command echoed as user message): Rust echoes only /hotkeys; TS echoes /session,/system-prompt,/context,/logs,/changelog,/hotkeys — moot until those commands land, but the echo seam exists for exactly one of six.
-- `interactive-mode.ts:7095` handleEscape (arm + interrupt-or-clear): Arm/tree/clear/draft-restore match (session_ui.rs:2680-2712), but the first Escape never calls interruptOrClearInput, so a running turn/retry/bash is not aborted by Escape.
-- `interactive-mode.ts:7160` interruptOrClearInput (abort retry/bash/compaction/branch-summary/side-question/stream): Rust sends Abort (turn), AbortCompaction, and AbortSideQuestion; AbortBash/AbortRetry/AbortBranchSummary exist on the wire (crates/pa-types/src/daemon/command.rs:419-840) but are never sent by the interrupt key.
+- `interactive-mode.ts:7095` handleEscape (arm + interrupt-or-clear): MATCHES since `interrupt-paths` — the escape repeat arm is followed by the interrupt ladder, and the arm decision reads the interruptible-work set (stream/bash/retry/compaction/side-question).
+- `interactive-mode.ts:7160` interruptOrClearInput (abort retry/bash/compaction/branch-summary/side-question/stream): MATCHES since `interrupt-paths` — `interrupt_or_clear_input` fires every ladder target (one `tui interrupt issued` event per target, primitive enum only).
 - `interactive-mode.ts:7631` collectQueueReplaceImages (marker-resolved image replace/clear): Rust always omits `images` on a queue replace (preserves server attachments); TS resolves markers to replace, sends [] to clear when none, and undefined only when unresolvable.
 - `interactive-mode.ts:7680` applyFullscreen (alt screen + mouse + scroll): The Rust client is structurally always-fullscreen (alt screen + SGR mouse + scroll on every run); there is no inline mode and no on/off toggle.
 - `interactive-mode.ts:7881` flushPendingBashComponents / pendingMessagesContainer (live bash above indicator): Live bash output streams into the transcript tool card; TS holds in-flight bash output in a pending strip above the execution indicator and flushes it into the chat at turn end.
@@ -1026,7 +1026,7 @@ Priority reflects user-visible impact.
 
 | Proposed lane | Rows | Scope |
 |---|---|---|
-| `editor-wrap-unicode` | ~10 (section 3) | The `word_wrap_line` non-ASCII panic + `segmentWithMarkers` grapheme/byte index mixing + `visibleWidth` emoji/zero-width gaps + the `Input` char-vs-grapheme model + Thai/Lao normalization. One correctness pass over indexing semantics removes a user-visible crash class (any CJK/emoji prompt wider than the editor). |
+| `editor-wrap-unicode` | ~10 (section 3) | LANDED: the `word_wrap_line` non-ASCII panic + `segmentWithMarkers` grapheme/byte index mixing + `visibleWidth` emoji/zero-width gaps + the `Input` char-vs-grapheme model + Thai/Lao normalization (plus the `stripAnsi`/`sliceByColumn` ports and the ASCII wrap replay golden). |
 
 ### Tier 1 — high-visibility feature gaps
 

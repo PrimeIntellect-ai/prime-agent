@@ -1,0 +1,4 @@
+{"activeSessionId":"8b392824c5c7","busy":true,"operation":"create","recordedAt":"2026-09-18T05:06:11.350Z","sessionFile":"/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260918T050600Z/rust/agent/sessions/01a0b2e8-6b04-7025-b64a-e037d558c341.jsonl","sessionId":"01a0b2e8-6b04-7025-b64a-e037d558c341"}
+{"active_session_id":"8b392824c5c7","follow_up":["hi"],"recorded_at":"2026-09-18T05:06:16.795Z","steering":[],"type":"queue_snapshot","version":1}
+{"active_session_id":"8b392824c5c7","follow_up":[],"recorded_at":"2026-09-18T05:06:16.929Z","steering":[],"type":"queue_snapshot","version":1}
+{"activeSessionId":"8b392824c5c7","busy":false,"operation":"shutdown","recordedAt":"2026-09-18T05:07:56.954Z","sessionFile":"/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260918T050600Z/rust/agent/sessions/01a0b2e8-6b04-7025-b64a-e037d558c341.jsonl","sessionId":"01a0b2e8-6b04-7025-b64a-e037d558c341"}

@@ -1,0 +1,7 @@
+{
+ "id": "zp1",
+ "type": "response",
+ "command": "prompt_and_wait",
+ "success": false,
+ "error": "Cannot admit a session action while queued session input is suspended."
+}

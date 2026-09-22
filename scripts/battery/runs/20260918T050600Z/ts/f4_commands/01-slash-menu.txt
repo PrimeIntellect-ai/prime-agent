@@ -1,0 +1,36 @@
+                                                          work  $0.00
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.9.5
+  ▗█▛ ▟██▙▄██▛ ▟▛         model z-ai/glm-5.3
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd ~/prime-agent-rs/scripts/battery/runs/20260918T050600Z/ts/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    › settings
+      model                  [search]
+      effort                 [low/high/max]
+      scoped-models
+      export                 [path]
+      ↓ 43 more
+
+      Open settings menu
+
+
+ >  /
+
+← manage                                                                                      z-ai/glm-5.3:high · 0 (0%)

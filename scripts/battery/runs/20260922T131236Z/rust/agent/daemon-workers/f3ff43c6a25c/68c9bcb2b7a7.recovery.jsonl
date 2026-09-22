@@ -1,0 +1,7 @@
+{"activeSessionId":"68c9bcb2b7a7","sessionId":"01a0c946-a0e3-7446-b9ba-b0fba855acaa","sessionFile":"/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/sessions/01a0c946-a0e3-7446-b9ba-b0fba855acaa.jsonl","busy":true,"operation":"create","recordedAt":"2026-09-22T13:20:44.403Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"68c9bcb2b7a7","steering":["f14 seed turn 1 of the parity battery with deterministic content"],"follow_up":[],"recorded_at":"2026-09-22T13:20:44.579Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"68c9bcb2b7a7","steering":[],"follow_up":[],"recorded_at":"2026-09-22T13:20:44.994Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"68c9bcb2b7a7","steering":["f14 seed turn 2 of the parity battery with deterministic content"],"follow_up":[],"recorded_at":"2026-09-22T13:20:45.002Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"68c9bcb2b7a7","steering":[],"follow_up":[],"recorded_at":"2026-09-22T13:20:45.442Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"68c9bcb2b7a7","steering":["/compact"],"follow_up":[],"recorded_at":"2026-09-22T13:20:53.546Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"68c9bcb2b7a7","steering":[],"follow_up":[],"recorded_at":"2026-09-22T13:20:53.898Z"}

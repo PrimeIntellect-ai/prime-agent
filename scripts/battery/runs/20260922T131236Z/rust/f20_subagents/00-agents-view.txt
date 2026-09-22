@@ -1,0 +1,36 @@
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.1.0
+  ▗█▛ ▟██▙▄██▛ ▟▛         agents 0 running, 15 idle, 1 inactive
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd ~/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+ >   Search sessions
+
+Session                       Model         Activity                                                           Cost  Age
+
+Idle (15)
+• battery-f20                 mock-1                                                                          $0.00   7s
+• battery-f19                 mock-1                                                                          $0.00   3m
+• battery-f18                 mock-1                                                                          $0.00   4m
+• battery-f16                 mock-1                                                                          $0.00   8m
+• battery-f15-a               mock-1                                                                          $0.00  11m
+• battery-f15-b               mock-1                                                                          $0.00  11m
+• battery-f14-auto            mock-1                                                                          $0.00  12m
+• battery-f14-manual          mock-1                                                                          $0.00  12m
+• hold the turn               mock-1                                                                          $0.00  13m
+• hold the turn               mock-1                                                                          $0.00  13m
+• hold the turn               mock-1                                                                          $0.00  13m
+• prompt 0                    mock-1                                                                          $0.00  13m
+• battery-f9-idle             mock-1                                                                          $0.00  15m
+• hello                       mock-1                                                                          $0.00  14m
+• battery-f9-busy             mock-1                                                                          $0.00  15m
+
+Inactive (1)
+• f9 inactive prompt          mock-1                                                                          $0.00  15m
+
+
+
+↑/↓ navigate   Enter/→ open   Ctrl+N new

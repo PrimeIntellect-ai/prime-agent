@@ -647,6 +647,9 @@ pub struct Worker {
     /// the turn runner, which commits a queued admission when its turn
     /// starts.
     pub(crate) prompt_admissions: crate::prompt_admission::WorkerAdmissions,
+    /// Whether the hourly catalog refresh loop already started (the loop
+    /// is fire-and-forget; the flag keeps it a singleton per worker).
+    catalog_refresh_started: std::sync::atomic::AtomicBool,
     /// The scheduling surface (wave b10): the session's cron/heartbeat
     /// artifact store plus the scheduler firing due jobs into the queue;
     /// the worker rebinds the live session's jobs onto it after create
@@ -768,6 +771,7 @@ impl Worker {
         // heartbeats reach the `heartbeats_list` catalog and the scheduler;
         // TS daemon-mode wires the same `forSessionArtifacts()` store into
         // the session runtime).
+        let catalog_refresh_started = std::sync::atomic::AtomicBool::new(false);
         let user_bash = std::sync::Arc::new(crate::user_bash::UserBash::new());
         let scheduled = std::sync::Arc::new(crate::scheduled_jobs::ScheduledJobs::new(
             Arc::clone(&core),
@@ -994,6 +998,7 @@ impl Worker {
             input_pauses,
             navigation,
             prompt_admissions,
+            catalog_refresh_started,
             scheduled,
         }
     }
@@ -2025,18 +2030,33 @@ impl Worker {
             registration.notify_session_created(session_id);
         }
         // TS session boot resolves the initial model through
-        // `refreshAvailableModels`, which also fetches the live Prime
-        // Inference catalog in the background and caches it on disk. Fire
-        // the same refresh here: the effect is the cache file (fresh
-        // registries read it), and failures fall back to the cached or
-        // bundled catalog without touching the session.
+        // `refreshAvailableModels`, which also refreshes the provider
+        // catalog and the live Prime Inference catalog in the background
+        // and caches them on disk. Fire the same refresh here, then keep
+        // the hourly cadence alive for the worker's lifetime (TS keeps a
+        // per-registry unref'd interval that calls `refreshAvailableModels`;
+        // the worker owns the loop here because its registries are
+        // per-command and short-lived). Fire-and-forget: failures keep the
+        // last-good snapshot, nothing surfaces into a session, and the
+        // active session model is never retargeted.
         let agent_dir = self.config.agent_dir.clone();
-        tokio::spawn(async move {
-            let auth = pa_core::auth::AuthStorage::create(&agent_dir);
-            let mut registry =
-                pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
-            let _ = registry.refresh_available_models().await;
-        });
+        if !self
+            .catalog_refresh_started
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            tokio::spawn(async move {
+                loop {
+                    let auth = pa_core::auth::AuthStorage::create(&agent_dir);
+                    let mut registry =
+                        pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
+                    let _ = registry.refresh_available_models().await;
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        pa_models::CATALOG_REFRESH_INTERVAL_MS,
+                    ))
+                    .await;
+                }
+            });
+        }
         self.work_notify.notify_one();
         response_success(
             None,
@@ -2630,6 +2650,14 @@ impl Worker {
     /// The session's telemetry finalizes first (TS dispose callback:
     /// `agent session ended` + one flush), bounded by the sink timeouts.
     async fn handle_shutdown(&self) -> DaemonResponse {
+        self.shutdown_sequence().await;
+        response_success(None, "shutdown", None)
+    }
+
+    /// The shared graceful-shutdown sequence (the `shutdown` command and
+    /// the shutdown signals both run it, TS `closeSession` over every
+    /// session before the runtime dispose).
+    pub(crate) async fn shutdown_sequence(&self) {
         {
             let mut core = self.core.lock().unwrap();
             core.shutdown_requested = true;
@@ -2661,7 +2689,6 @@ impl Worker {
             agent_engine.dispose_kernel().await;
         }
         self.engine.end_telemetry().await;
-        response_success(None, "shutdown", None)
     }
 
     /// Wait until no turn or compaction run is in flight (the awaited
@@ -3261,32 +3288,13 @@ impl Worker {
         let auth = pa_core::auth::AuthStorage::create(&agent_dir);
         let mut registry =
             pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
-        let available = registry.refresh_available_models().await;
-        let configured_providers: Vec<String> = {
-            let mut providers: Vec<String> = available
-                .iter()
-                .map(|model| model.provider.clone())
-                .collect();
-            providers.sort();
-            providers.dedup();
-            providers
-        };
-        let available_keys: std::collections::HashSet<String> = available
+        // `refreshModelCatalog` parity: the picker-open refresh (provider
+        // catalog + live entitlements), then the full catalog minus
+        // unauthorized private Prime Inference models.
+        let snapshot = registry.refresh_model_catalog().await;
+        let models: Vec<Value> = snapshot
+            .models
             .iter()
-            .map(|model| format!("{}/{}", model.provider, model.id))
-            .collect();
-        // The catalog keeps every model except private Prime Inference
-        // models the current credentials do not authorize.
-        let models: Vec<&pa_types::ai::Model> = registry
-            .get_all()
-            .iter()
-            .filter(|model| {
-                !pa_core::models::is_private_prime_inference_model(model)
-                    || available_keys.contains(&format!("{}/{}", model.provider, model.id))
-            })
-            .collect();
-        let models: Vec<Value> = models
-            .into_iter()
             .map(|model| serde_json::to_value(model).unwrap_or(Value::Null))
             .collect();
         response_success(
@@ -3294,7 +3302,7 @@ impl Worker {
             "get_model_catalog",
             Some(json!({
                 "models": models,
-                "configuredProviders": configured_providers,
+                "configuredProviders": snapshot.configured_providers,
             })),
         )
     }
@@ -4782,6 +4790,11 @@ pub async fn run_worker() -> Result<()> {
     // because workers re-present their identity (liveness watch + backoff).
     let registration = crate::registration::start(&config);
     let worker = Arc::new(Worker::new(config, registration));
+    // TS daemon-mode registers its shutdown-signal handlers after the
+    // listener binds; the worker registers before serving so a `prime
+    // kill` mid-run kills the tracked bash children with the same
+    // graceful sequence the `shutdown` command runs.
+    crate::worker_signals::register(Arc::clone(&worker));
     worker.serve().await
 }
 

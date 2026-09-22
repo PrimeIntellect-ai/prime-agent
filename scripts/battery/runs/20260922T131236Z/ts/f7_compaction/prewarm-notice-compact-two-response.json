@@ -1,0 +1,15 @@
+{
+ "id": "prewarm-notice-k2",
+ "type": "response",
+ "command": "compact",
+ "success": true,
+ "data": {
+  "summary": "the prewarm second compaction summary",
+  "firstKeptEntryId": "c3c76f8a",
+  "tokensBefore": 176,
+  "details": {
+   "readFiles": [],
+   "modifiedFiles": []
+  }
+ }
+}

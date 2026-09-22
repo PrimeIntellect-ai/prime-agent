@@ -1,0 +1,90 @@
+[
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: /compact shows the durable '\u25c6 Context compacted' summary row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: the Ctrl+O detail cycle expands the compaction summary block",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: the third Ctrl+O re-collapses the compaction summary block",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: crossing the compaction threshold auto-compacts and shows the summary row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: /compact shows the durable '\u25c6 Context compacted' summary row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: the Ctrl+O detail cycle expands the compaction summary block",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: the third Ctrl+O re-collapses the compaction summary block",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: crossing the compaction threshold auto-compacts and shows the summary row",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "manual-compact: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "manual-expanded: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ },
+ {
+  "flow": "f14_compact",
+  "category": "visual",
+  "gap": false,
+  "summary": "auto-compact: frames identical TS vs Rust (normalized)",
+  "evidence": "",
+  "expectedFail": null
+ }
+]

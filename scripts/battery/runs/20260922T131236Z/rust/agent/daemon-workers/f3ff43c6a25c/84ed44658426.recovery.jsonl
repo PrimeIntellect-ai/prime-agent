@@ -1,0 +1,6 @@
+{"activeSessionId":"84ed44658426","sessionId":"01a0c942-d04a-7688-9f79-32a4439fc710","sessionFile":"/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/sessions/01a0c942-d04a-7688-9f79-32a4439fc710.jsonl","busy":true,"operation":"create","recordedAt":"2026-09-22T13:16:34.327Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"84ed44658426","steering":["start the kernel and define notice_var"],"follow_up":[],"recorded_at":"2026-09-22T13:16:34.442Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"84ed44658426","steering":[],"follow_up":[],"recorded_at":"2026-09-22T13:16:42.886Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"84ed44658426","steering":["history turn for the summary"],"follow_up":[],"recorded_at":"2026-09-22T13:16:42.891Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"84ed44658426","steering":[],"follow_up":[],"recorded_at":"2026-09-22T13:16:43.110Z"}
+{"activeSessionId":"84ed44658426","sessionId":"01a0c942-d04a-7688-9f79-32a4439fc710","sessionFile":"/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/sessions/01a0c942-d04a-7688-9f79-32a4439fc710.jsonl","busy":false,"operation":"shutdown","recordedAt":"2026-09-22T13:17:59.979Z"}

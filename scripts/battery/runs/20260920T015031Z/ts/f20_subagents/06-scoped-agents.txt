@@ -1,0 +1,36 @@
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.9.5
+  ▗█▛ ▟██▙▄██▛ ▟▛         agents 0 running, 1 idle, 0 inactive
+  ▗▟▌ ▐███▛▘▗▄█▖          depth 1
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+← back · battery-f20 › subagents
+
+ >   Search sessions
+
+Session                       Model         Activity                                                           Cost  Age
+
+Idle (1)
+• f20-worker                  mock-1                                                                          $0.00   7s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+↑/↓ navigate   Enter/→ open   ← parent   Ctrl+N new

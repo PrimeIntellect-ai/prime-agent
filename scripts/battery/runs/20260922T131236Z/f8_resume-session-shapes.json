@@ -1,0 +1,28 @@
+{
+ "ts": {
+  "session": 15,
+  "model_change": 15,
+  "thinking_level_change": 15,
+  "service_tier_change": 15,
+  "session_state": 15,
+  "custom_message": 24,
+  "message": 70,
+  "session_info": 10,
+  "compaction": 10,
+  "agent_status": 1,
+  "custom": 4
+ },
+ "rust": {
+  "session": 15,
+  "model_change": 15,
+  "thinking_level_change": 15,
+  "service_tier_change": 15,
+  "session_state": 13,
+  "message": 70,
+  "custom_message": 12,
+  "session_info": 10,
+  "compaction": 10,
+  "agent_status": 1,
+  "custom": 4
+ }
+}

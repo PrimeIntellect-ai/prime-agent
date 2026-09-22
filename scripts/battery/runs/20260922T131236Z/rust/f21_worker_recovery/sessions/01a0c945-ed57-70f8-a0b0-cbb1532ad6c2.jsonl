@@ -1,0 +1,7 @@
+{"type":"session","version":3,"id":"01a0c945-ed57-70f8-a0b0-cbb1532ad6c2","timestamp":"2026-09-22T13:19:58.295Z","cwd":"/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/work","rlmDepth":0}
+{"type":"model_change","id":"153cb151","parentId":null,"timestamp":"2026-09-22T13:19:58.339Z","provider":"prime-inference","modelId":"mock-1"}
+{"type":"thinking_level_change","id":"cd41de50","parentId":"153cb151","timestamp":"2026-09-22T13:19:58.339Z","thinkingLevel":"off"}
+{"type":"service_tier_change","id":"3e4b5969","parentId":"cd41de50","timestamp":"2026-09-22T13:19:58.340Z","serviceTier":"default"}
+{"type":"session_state","id":"e82c79b8","parentId":"3e4b5969","timestamp":"2026-09-22T13:19:58.340Z","state":{"status":"active"}}
+{"type":"message","id":"f6d044a6","parentId":"e82c79b8","timestamp":"2026-09-22T13:19:59.135Z","message":{"role":"user","content":[{"type":"text","text":"hold the turn"}],"timestamp":1790083199135}}
+{"type":"message","id":"48132a56","parentId":"f6d044a6","timestamp":"2026-09-22T13:20:00.330Z","message":{"role":"assistant","content":[{"type":"text","text":""}],"api":"openai-completions","provider":"prime-inference","model":"mock-1","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"aborted","errorMessage":"Request was aborted","timestamp":1790083200329}}

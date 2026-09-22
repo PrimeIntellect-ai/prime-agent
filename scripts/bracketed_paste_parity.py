@@ -29,6 +29,25 @@ under a raw pty and prove the enhanced-key contract (audit Tier 1,
   - a clean double-Ctrl+C exit disables paste mode (`ESC[?2004l`) and
     resets modifyOtherKeys (`ESC[>4;0m`).
 
+The kitty sequence matrix (`kitty_matrix`) answers the `?u` probe the way a
+kitty-capable terminal does (`ESC[?1u`), so both binaries arm the protocol
+(`ESC[>7u`), then plays the raw byte streams of the remaining enhanced-keys
+decode matrix and byte-compares the editor state:
+
+  - press + repeat + release of one key (`CSI 97u`, `CSI 97;1:2u`,
+    `CSI 97;1:3u`): repeat behaves as the press, the release never lands
+    (TS tui.ts drops releases at dispatch) — the editor holds "aa";
+  - the kitty-printable dedup row (`stdin-buffer.ts:307`): a
+    duplicate-reporting terminal sends `CSI 64u` AND the raw `@` for ONE
+    keypress (Italian-style layouts, TS #3780) — the editor holds one `@`,
+    never `@@`;
+  - ctrl+shift+letter (`CSI 111:79;5u`): the shifted identity must not
+    leak a character into the editor;
+  - shift+enter over CSI-u (`CSI 13;2u`) inserts a newline (tui.input.newLine);
+  - a partial CSI-u sequence split across two writes (`ESC[10` + `5u`)
+    reassembles into one character (the StdinBuffer splitting row);
+  - teardown under kitty pops the flags (`ESC[<u`).
+
 tmux would swallow or re-shape the ?2004/kitty bytes (before 3.3 it strips
 OSC/CSI probes entirely), so like osc_parity.py this verifier drives both
 binaries through the scripted faux session under a raw pty and records
@@ -41,6 +60,7 @@ import argparse
 import json
 import os
 import pty
+import shutil
 import select
 import struct
 import subprocess
@@ -84,6 +104,34 @@ KITTY_CSI_U_ALTERNATES = [
     b"\x1b[61:43;2u",  # shift+= -> +
     b"\x1b[59:58;2u",  # shift+; -> :
 ]
+
+# The kitty sequence matrix: each stream is one terminal write (a real
+# keypress is one report), in order, so the editor state reads
+# "qaa@<newline>xyzi" by the Enter.
+# A kitty-capable terminal answers the `?u` query with its flags AND the
+# DA1 query with its device attributes. The Rust probe rides crossterm's
+# `supports_keyboard_enhancement`, which blocks reading the primary
+# device attributes after the flags response arrive — without the DA1
+# answer the probe thread parks forever holding crossterm's shared event
+# reader lock, and the whole app freezes. A real kitty terminal sends
+# both answers; the harness must too.
+KITTY_ANSWER = b"\x1b[?1u\x1b[?62;c"  # flags(1) + DA1 (VT220)
+KITTY_ENABLE = b"\x1b[>7u"  # the flags push both binaries write on the answer
+KITTY_POP = b"\x1b[<u"  # the flags pop both binaries write at teardown
+# press 'a', repeat 'a', release 'a' — the editor keeps "aa" (releases are
+# dropped at dispatch; repeats behave as presses).
+KITTY_PRESS_REPEAT_RELEASE = b"\x1b[97u\x1b[97;1:2u\x1b[97;1:3u"
+# The duplicate-reporting form (TS #3780): `CSI 64u` + the raw `@` is ONE
+# keypress; the dedup must keep a single `@`.
+KITTY_PRINTABLE_DUPLICATE = b"\x1b[64u@"
+# ctrl+shift+o (the shifted alternate form; the bound tree-filter key):
+# no character may leak into the editor.
+KITTY_CTRL_SHIFT_LETTER = b"\x1b[111:79;5u"
+# shift+enter over CSI-u: a newline in the editor, no submission.
+KITTY_SHIFT_ENTER = b"\x1b[13;2u"
+# A CSI-u sequence split across two writes: `ESC[10` + `5u` = `CSI 105u` = 'i'.
+KITTY_PARTIAL_1 = b"\x1b[10"
+KITTY_PARTIAL_2 = b"5u"
 
 FAUX_SCRIPT = {
     "engine": "faux",
@@ -164,8 +212,11 @@ def run_scenario(command, env_extra, cwd, kind, markers=True):
     capture = PtyCapture(command, env_extra, cwd)
     try:
         # Stage 0: startup. Paste mode on, the kitty query out, the
-        # fallback armed (nothing answers under a raw pty).
-        capture.pump(6)
+        # fallback armed (nothing answers under a raw pty). A fresh
+        # daemon attach can stretch under box load, so give it 10s
+        # (the fallback rides a 150ms timer and may land past this
+        # stage; it is checked over the first two stages).
+        capture.pump(10)
         # Stage 1: the scenario's input.
         if kind == "paste3":
             payload = "\r\n".join(PASTE_LINES)
@@ -196,6 +247,103 @@ def run_scenario(command, env_extra, cwd, kind, markers=True):
         return capture.stages
     finally:
         capture.close()
+
+def run_kitty_matrix(command, env_extra, cwd):
+    """Answer the kitty probe like a kitty-capable terminal, then play the
+    raw byte streams of the enhanced-keys decode matrix (one write each,
+    the shape a real terminal sends).
+
+    Both binaries arm the kitty protocol (`ESC[>7u`) on the answer; the
+    returned windows are the startup (through the answer), the editor
+    stage (the matrix streams), the turn (after Enter), and the exit (the
+    double Ctrl+C teardown).
+    """
+    capture = PtyCapture(command, env_extra, cwd)
+    try:
+        # Startup until the probe query appears, then answer it.
+        answered = False
+        startup = bytearray()
+        for _ in range(30):  # ~15s: a fresh daemon attach stretches under load
+            startup += capture.pump(0.5)
+            if KITTY_QUERY in startup:
+                capture.write(KITTY_ANSWER)
+                answered = True
+                break
+        startup += capture.pump(1)  # the answer settles (kitty enable)
+        # The matrix streams, one terminal write each.
+        input_stage = bytearray()
+        for stream, pause in [
+            (b"q", 0.4),
+            (KITTY_PRESS_REPEAT_RELEASE, 0.4),
+            (KITTY_PRINTABLE_DUPLICATE, 0.4),
+            (KITTY_CTRL_SHIFT_LETTER, 0.4),
+            (KITTY_SHIFT_ENTER, 0.4),
+            (b"xyz", 0.4),
+        ]:
+            capture.write(stream)
+            input_stage += capture.pump(pause)
+        # The split CSI-u: the two halves land within the TS StdinBuffer
+        # 10ms flush window (the shape a batched read produces); TS flushes
+        # an incomplete sequence as raw text when the gap exceeds it, so
+        # this cannot be a slow pump — a bare sleep, then the tail.
+        capture.write(KITTY_PARTIAL_1)
+        time.sleep(0.003)
+        capture.write(KITTY_PARTIAL_2)
+        input_stage += capture.pump(1.5)
+        # Enter submits the whole state; the scripted turn runs.
+        capture.write(b"\r")
+        turn = capture.pump(20)
+        # A clean double-Ctrl+C exit (teardown pops the kitty flags).
+        capture.write(b"\x03")
+        exit_bytes = capture.pump(1)
+        capture.write(b"\x03")
+        exit_bytes += capture.pump(4)
+        return {
+            "answered": answered,
+            "startup": bytes(startup),
+            "input": bytes(input_stage),
+            "turn": turn,
+            "exit": exit_bytes,
+        }
+    finally:
+        capture.close()
+
+
+def check_kitty_matrix(name, windows, binary):
+    """The kitty-matrix checks (per binary, editor state compared)."""
+    failures = []
+    whole = windows["startup"] + windows["input"] + windows["turn"] + windows["exit"]
+    input_stage = windows["input"]
+    post_enter = windows["turn"] + windows["exit"]
+
+    if not windows["answered"]:
+        failures.append("the kitty probe query never appeared on the pty")
+        return failures, whole
+    if KITTY_ENABLE not in whole:
+        failures.append(f"the binary never enabled kitty on the answer (no {KITTY_ENABLE!r})")
+
+    # The editor state after the matrix: "q" + "aa" (repeat = press, release
+    # dropped) + "@" (the dedup keeps exactly one) + newline + "xyz" + "i"
+    # (the split CSI-u reassembled). No submission before the Enter.
+    if b"qaa@" not in post_enter:
+        failures.append('the submitted message lost the matrix prefix "qaa@"')
+    if b"qaa@@" in post_enter:
+        failures.append("the kitty printable duplicate was not deduped (@@ submitted)")
+    if b"xyzi" not in post_enter:
+        failures.append("the editor lost the post-newline state or the split CSI-u char")
+    if b"@o" in post_enter or b"@O" in post_enter:
+        failures.append("ctrl+shift+letter leaked a character into the editor")
+    if WORKING_LABEL in input_stage or any(word.encode() in input_stage for word in SENTINEL_WORDS):
+        failures.append("a turn started before Enter — a matrix stream submitted on its own")
+    if not all(word.encode() in post_enter for word in SENTINEL_WORDS):
+        failures.append("the scripted turn never ran after Enter")
+
+    # Teardown under kitty pops the flags (terminal.ts stop parity).
+    if KITTY_POP not in windows["exit"]:
+        failures.append(f"kitty teardown never popped the flags (no {KITTY_POP!r})")
+    print(f"{name}: {len(whole)} bytes; kitty enable x{whole.count(KITTY_ENABLE)}")
+    return failures, whole
+
 
 def build_command(binary, sandbox, script_path):
     common = {
@@ -378,9 +526,23 @@ def run_tmux_scenario(binary, sandbox, script_path, shared_cwd):
     tmux("new-session", "-d", "-s", session, "-x", str(WIDTH), "-y", str(HEIGHT), "-c", shared_cwd)
     command, env = build_command(binary, sandbox, script_path)
     env["TERM"] = "xterm-256color"
+    # The pane process resolves PATH through the tmux SERVER's environment
+    # (a server started when another build was first on PATH plays the
+    # wrong binary), so the binary must be an absolute path here.
+    command = list(command)
+    command[0] = shutil.which(command[0]) or command[0]
     prefix = " ".join(f"{k}={v}" for k, v in env.items() if k != "TERM")
     tmux("send-keys", "-t", session, f"{prefix} {subprocess.list2cmdline(command)}", "Enter")
-    time.sleep(8)
+    # Wait for the TUI to own the pane before pasting (a fresh daemon attach
+    # stretches under box load; pasting into the shell or the splash loses
+    # the input). The editor footer's manage hint is the readiness marker.
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        pane = tmux("capture-pane", "-p", "-t", session).stdout
+        if "manage" in pane and ">" in pane:
+            break
+        time.sleep(1)
+    time.sleep(2)
 
     buf_file = os.path.join(os.path.dirname(script_path), "paste.txt")
     with open(buf_file, "w") as f:
@@ -395,6 +557,11 @@ def run_tmux_scenario(binary, sandbox, script_path, shared_cwd):
     for line in PASTE_LINES:
         if line not in pane:
             failures.append(f"the tmux paste never reached the editor ({line!r} missing)")
+    if failures:
+        print(f"tmux pane debug for {binary}:")
+        for row in pane.splitlines():
+            if row.strip():
+                print("  |", row[:110])
     if pane.count(PASTE_LINES[0]) != 1:
         failures.append(
             f"{PASTE_LINES[0]!r} appears {pane.count(PASTE_LINES[0])} times "
@@ -470,6 +637,18 @@ def main():
                 f"{binary}/shifted-range", stages, out_dir, binary,
                 "shifted_range", True, "-shifted",
             )
+            # The kitty sequence matrix (probe answered, editor state
+            # byte-compared through press/repeat/release, the dedup,
+            # ctrl+shift+letter, shift+enter, and a split CSI-u).
+            windows = run_kitty_matrix(command, env, shared_cwd)
+            matrix_failures, _ = check_kitty_matrix(
+                f"{binary}/kitty-matrix", windows, binary
+            )
+            failures[binary] += matrix_failures
+            with open(os.path.join(out_dir, f"{binary}-kitty-matrix-raw.bin"), "wb") as f:
+                f.write(
+                    windows["startup"] + windows["input"] + windows["turn"] + windows["exit"]
+                )
 
         if args.tmux:
             for binary in binaries:
@@ -491,8 +670,13 @@ def main():
                 "update with no per-line submissions (bracketed and "
                 "marker-less), collapse the 20-line paste to the indicator "
                 "and ship the full content at Enter, land the shifted-"
-                "printable range in both encodings, and submit the whole "
-                "block at Enter"
+                "printable range in both encodings, submit the whole "
+                "block at Enter, and — on the answered kitty probe — "
+                "enable the protocol, treat repeat as press and drop the "
+                "release, dedup the kitty-printable duplicate, keep "
+                "ctrl+shift+letter silent, insert the CSI-u shift+enter "
+                "newline, reassemble a CSI-u split across writes, and "
+                "pop the kitty flags at exit"
             )
         return 0 if ok else 1
     finally:

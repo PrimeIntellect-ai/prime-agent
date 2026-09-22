@@ -483,13 +483,16 @@ pub struct AgentObserveSummary {
     pub is_streaming: bool,
     pub is_compacting: bool,
     pub attached_clients: usize,
+    /// TS `AgentObserveAgentSummary.messageCount`: the roster row's live
+    /// message count, absent when the daemon's row does not carry one.
+    pub message_count: Option<u64>,
     pub queued_count: usize,
     pub is_session_active: bool,
 }
 
 impl AgentObserveSummary {
     fn to_value(&self) -> Value {
-        json!({
+        let mut value = json!({
             "activeSessionId": self.active_session_id,
             "sessionId": self.session_id,
             "sessionName": self.session_name,
@@ -502,7 +505,13 @@ impl AgentObserveSummary {
             "attachedClients": self.attached_clients,
             "queuedCount": self.queued_count,
             "isSessionActive": self.is_session_active,
-        })
+        });
+        // TS serializes `messageCount` only when the daemon's roster row
+        // carries one.
+        if let Some(message_count) = self.message_count {
+            value["messageCount"] = json!(message_count);
+        }
+        value
     }
 }
 
@@ -1122,5 +1131,74 @@ mod tests {
         assert_eq!(receipts.len(), 1);
         assert_eq!(receipts[0]["target"], "sib-1");
         assert_eq!(receipts[0]["error"], "peer unreachable");
+    }
+
+    struct RecordingObserveController;
+
+    impl AgentObserveController for RecordingObserveController {
+        async fn list_agents(&self) -> anyhow::Result<Vec<AgentObserveSummary>> {
+            Ok(vec![
+                AgentObserveSummary {
+                    active_session_id: Some("kid-1".to_string()),
+                    session_id: "sess-kid-1".to_string(),
+                    session_name: Some("dual".to_string()),
+                    relationship: Some(AgentFamilyRelationship::Child),
+                    runtime_kind: Some("subagent".to_string()),
+                    status: "running".to_string(),
+                    is_current: false,
+                    is_streaming: true,
+                    is_compacting: false,
+                    attached_clients: 0,
+                    message_count: Some(3),
+                    queued_count: 0,
+                    is_session_active: true,
+                },
+                AgentObserveSummary {
+                    session_id: "sess-bare".to_string(),
+                    status: "inactive".to_string(),
+                    is_current: false,
+                    is_streaming: false,
+                    is_compacting: false,
+                    attached_clients: 0,
+                    queued_count: 0,
+                    is_session_active: false,
+                    ..Default::default()
+                },
+            ])
+        }
+
+        async fn get_agent(&self, _target: &str) -> anyhow::Result<Option<AgentObserveSummary>> {
+            Ok(None)
+        }
+
+        async fn recent_messages(
+            &self,
+            _target: &str,
+            _limit: usize,
+            _max_chars: usize,
+        ) -> anyhow::Result<Vec<AgentObserveMessagePreview>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// The observe roster rows keep the daemon's message count (TS
+    /// `AgentObserveAgentSummary.messageCount`, serialized only when the
+    /// daemon's row carries one).
+    #[tokio::test]
+    async fn observe_host_handler_carries_the_message_count() {
+        let mut handlers = HostRequestHandlers::default();
+        register_agent_observe_host_handlers(
+            std::sync::Arc::new(RecordingObserveController),
+            &mut handlers,
+        );
+        let list = handlers.get("agent_observe.list").unwrap().clone();
+        let result = send_request(&list, json!({})).unwrap();
+        let agents = result["agents"].as_array().expect("agents");
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0]["messageCount"], json!(3));
+        assert!(
+            agents[1].get("messageCount").is_none(),
+            "an unknown count stays absent like TS: {agents:?}"
+        );
     }
 }

@@ -1,0 +1,50 @@
+## Summary
+
+Salvage of the dead term-enhanced-keys lane plus the key/paste parity finish. One surface: terminal input for the TUI.
+
+- **Bracketed paste enable (?2004)**: every TUI surface start writes ?2004h, teardown writes ?2004l (TS parity). Without this, tmux wrapped-paste markers never reach the reader and a 20-line paste lands as raw characters per line (the Kevin dogfood bug) — the collapse-marker editor path (handlePaste port, already on main) was unreachable.
+- **BurstPaste coalescer**: terminals/tmux configs without ?2004 deliver a paste as a burst of printable keys; the reader now coalesces a fast burst with a matching bracket into one UiInput::Paste, so the editor still sees one paste event (same collapse, one undo unit).
+- **Kitty keyboard protocol probe + modifyOtherKeys stance**: startup probes kitty CSI-u and arms the TS stance; every surface start also RESETS modifyOtherKeys mode 2, because crossterm 0.28 has no case for CSI 27;mods;key~ and drops the whole input buffer on the parse error (a sticky mode 2, armed by any other pane, loses every shift-modified printable). Divergence from TS (which arms the mode-2 fallback) documented in docs/FEATURE_PARITY.md.
+- **Shifted-printable decode fix**: a trailing separator in a key id (shift+=) previously split into empty segments and decoded to nothing (the editor dropped +); now decodes to the literal plus. Any literal + key id is covered.
+- **Alt-key labels**: platform-aware TS formatKeyPart labels (darwin "Option+" prefix instead of "alt+").
+- **Editor undo**: unit test that one undo step removes a whole paste (handlePaste pushes one undo snapshot) — no paste-internals change.
+- **Telemetry**: `tui enhanced keys` event (kitty/modifyOtherKeys booleans, primitives only), emitted at settle; row added to docs/telemetry-events.md.
+
+## Parity-diff evidence
+
+`python3 scripts/bracketed_paste_parity.py --tmux` on this branch (both binaries: TS on PATH and target/debug/prime-agent), run post-merge against current main:
+
+```
+ts/bracketed: 16476 bytes; ?2004h x1, ?2004l x1, kitty query x1
+ts/marker-less burst: 14053 bytes; ?2004h x1, ?2004l x1, kitty query x1
+ts/large-paste: 27335 bytes; ?2004h x1, ?2004l x1, kitty query x1
+ts/shifted-range: 12284 bytes; ?2004h x1, ?2004l x1, kitty query x1
+rust/bracketed: 9100 bytes; ?2004h x1, ?2004l x1, kitty query x1
+rust/marker-less burst: 8896 bytes; ?2004h x1, ?2004l x1, kitty query x1
+rust/large-paste: 15533 bytes; ?2004h x1, ?2004l x1, kitty query x1
+rust/shifted-range: 7964 bytes; ?2004h x1, ?2004l x1, kitty query x1
+ts/tmux pane: 36 rows
+rust/tmux pane: 36 rows
+PASS: both binaries bracket the paste (?2004h/l), keep their modifyOtherKeys stance (TS arms the mode-2 fallback, Rust resets it), land the 3-line paste as ONE editor update with no per-line submissions (bracketed and marker-less), collapse the 20-line paste to the indicator and ship the full content at Enter, land the shifted-printable range in both encodings, and submit the whole block at Enter
+```
+
+- Rendered output / interactive behavior: the 20-line paste collapses to `[paste #1 +20 lines]` in both binaries, bulk content never renders before send, Enter ships the full content; ESC typed elsewhere does not cancel a paste overlay; queued-steering invariant preserved.
+- Wire parity: escape-write counts identical (?2004h/l x1 each, kitty query x1); the modifyOtherKeys stance is the documented intentional divergence (crossterm 0.28 parse bug — see docs/FEATURE_PARITY.md row).
+- User-visible invariants: same input handled identically for bracketed, marker-less burst (tmux 3.2a), and the user-level tmux pane paste (36 rows both sides).
+
+## Ownership compliance
+
+- pa-tui owns terminal input (reader, enhanced_keys, keys, editor decode test); no crate boundary changes, no new deps.
+- pa-cli +20 lines: the CliInteractionTelemetry trait impl for the new `enhanced_keys` telemetry method (trait added on main side in the same merge).
+- No pa-daemon / pa-core / pa-types / pa-ai changes.
+
+## Merge gates
+
+- `cargo fmt --all --check` PASS; `cargo clippy --workspace --all-targets -- -D warnings` PASS.
+- `cargo test --workspace`: green except three known load-sensitive flakes (box shared with several concurrent lanes compiling): `acp_daemon_attached_cancels_mid_turn` (timeout waiting for the prompt response under load), `tui_prompts_queued_behind_a_turn_render_the_queue_strip`, `tui_big_streamed_turns_render_at_the_producer_rate`. Each re-verified green in isolation on this branch (acp cancel: 3/5 green isolated, 2 wedges only under heavy box load; the two tui tests green isolated in 31.8s). This branch touches no pa-daemon/pa-core code on the ACP path (verified by `git diff origin/main...HEAD`), so the acp flake is environmental.
+
+## Branding / preserved wire identifiers
+
+- Wire identifiers kept byte-compatible: `PI_PACKAGE_DIR`, kitty CSI-u / xterm `modifyOtherKeys` mode bytes, `?2004h/l` sequences, provider id `prime-inference` untouched. No user-visible "pi" naming introduced.
+
+Closes the Kevin dogfood: large pastes now collapse with an indicator instead of flooding the editor char-by-char.

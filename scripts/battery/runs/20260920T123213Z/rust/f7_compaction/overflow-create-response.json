@@ -1,0 +1,43 @@
+{
+ "command": "create",
+ "data": {
+  "activeSessionId": "3b9fe83c0765",
+  "activity": "idle",
+  "attachedClients": 0,
+  "created": "2026-09-20T12:32:24.667Z",
+  "cwd": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260920T123213Z/rust/work",
+  "hasRegisteredCronJob": false,
+  "id": "3b9fe83c0765",
+  "isBashRunning": false,
+  "isCompacting": false,
+  "isSessionActive": false,
+  "isStreaming": false,
+  "lastActivityAt": "2026-09-20T12:32:24.677Z",
+  "lifecycle": "resident",
+  "messageCount": 0,
+  "model": {
+   "id": "mock-1",
+   "name": "Mock 1",
+   "provider": "prime-inference",
+   "reasoning": false
+  },
+  "modified": "2026-09-20T12:32:24.677Z",
+  "rlmDepth": 0,
+  "runtimeKind": "top-level",
+  "sessionActions": {
+   "followUps": [],
+   "queuedCount": 0,
+   "steering": []
+  },
+  "sessionFile": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260920T123213Z/rust/agent/sessions/01a0becd-aa5b-717f-bbeb-a19cdf8f843c.jsonl",
+  "sessionId": "01a0becd-aa5b-717f-bbeb-a19cdf8f843c",
+  "sessionName": "battery-overflow",
+  "thinkingLevel": "off",
+  "unfinishedActionCount": 0,
+  "workerPid": 1091673,
+  "workerState": "ready"
+ },
+ "id": "oc1",
+ "success": true,
+ "type": "response"
+}

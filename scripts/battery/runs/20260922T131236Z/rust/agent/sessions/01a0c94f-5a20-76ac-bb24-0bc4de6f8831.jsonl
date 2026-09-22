@@ -1,0 +1,8 @@
+{"type":"session","version":3,"id":"01a0c94f-5a20-76ac-bb24-0bc4de6f8831","timestamp":"2026-09-22T13:30:15.968Z","cwd":"/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/work","rlmDepth":0}
+{"type":"model_change","id":"92e36a83","parentId":null,"timestamp":"2026-09-22T13:30:16.047Z","provider":"prime-inference","modelId":"mock-1"}
+{"type":"thinking_level_change","id":"4867c64d","parentId":"92e36a83","timestamp":"2026-09-22T13:30:16.047Z","thinkingLevel":"off"}
+{"type":"service_tier_change","id":"6b36ef60","parentId":"4867c64d","timestamp":"2026-09-22T13:30:16.047Z","serviceTier":"default"}
+{"type":"session_state","id":"b46d3413","parentId":"6b36ef60","timestamp":"2026-09-22T13:30:16.047Z","state":{"status":"active"}}
+{"type":"session_info","id":"8b3e93c9","parentId":"b46d3413","timestamp":"2026-09-22T13:30:16.051Z","name":"battery-f19"}
+{"type":"message","id":"210184b9","parentId":"8b3e93c9","timestamp":"2026-09-22T13:30:16.404Z","message":{"role":"user","content":[{"type":"text","text":"f19 seed turn"}],"timestamp":1790083816404}}
+{"type":"message","id":"d53e76b9","parentId":"210184b9","timestamp":"2026-09-22T13:30:16.748Z","message":{"role":"assistant","content":[{"type":"text","text":"f19 heartbeat fixture reply"}],"api":"openai-completions","provider":"prime-inference","model":"mock-1","responseId":"chatcmpl-battery","usage":{"input":20,"output":10,"cacheRead":80,"cacheWrite":0,"totalTokens":110,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1790083816693}}

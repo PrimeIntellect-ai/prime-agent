@@ -1,0 +1,123 @@
+{
+ "id": "a0",
+ "type": "response",
+ "command": "attach",
+ "success": true,
+ "data": {
+  "protocol": {
+   "name": "prime-agent.daemon",
+   "version": 7
+  },
+  "activeSessionId": "429231dd557e",
+  "snapshot": {
+   "activeSessionId": "429231dd557e",
+   "summary": {
+    "id": "429231dd557e",
+    "lifecycle": "draft",
+    "activity": "idle",
+    "isSessionActive": false,
+    "hasRegisteredCronJob": false,
+    "lastActivityAt": "2026-09-22T13:14:00.729Z",
+    "rlmDepth": 0,
+    "activeSessionId": "429231dd557e",
+    "sessionId": "01a0c940-786a-71ec-80f4-057cb99655ab",
+    "sessionFile": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/sessions/01a0c940-786a-71ec-80f4-057cb99655ab.jsonl",
+    "sessionName": "battery-side-questions",
+    "cwd": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/work",
+    "thinkingLevel": "off",
+    "isStreaming": false,
+    "isCompacting": false,
+    "isBashRunning": false,
+    "attachedClients": 1,
+    "messageCount": 0,
+    "sessionActions": {
+     "queuedCount": 0,
+     "steering": [],
+     "followUps": []
+    },
+    "created": "2026-09-22T13:14:00.682Z",
+    "modified": "2026-09-22T13:14:00.729Z",
+    "workerState": "ready",
+    "workerPid": 397394,
+    "model": {
+     "id": "mock-1",
+     "name": "Mock 1",
+     "provider": "prime-inference",
+     "reasoning": false
+    },
+    "runtimeKind": "top-level",
+    "unfinishedActionCount": 0
+   },
+   "state": {
+    "activeSessionId": "429231dd557e",
+    "cwd": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/work",
+    "model": {
+     "id": "mock-1",
+     "name": "Mock 1",
+     "provider": "prime-inference",
+     "reasoning": false
+    },
+    "thinkingLevel": "off",
+    "serviceTier": "default",
+    "availableThinkingLevels": [
+     "off"
+    ],
+    "isStreaming": false,
+    "isCompacting": false,
+    "isBashRunning": false,
+    "retryAttempt": 0,
+    "steeringMode": "one-at-a-time",
+    "followUpMode": "one-at-a-time",
+    "sessionFile": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/sessions/01a0c940-786a-71ec-80f4-057cb99655ab.jsonl",
+    "sessionId": "01a0c940-786a-71ec-80f4-057cb99655ab",
+    "sessionName": "battery-side-questions",
+    "sessionDir": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/sessions",
+    "leafId": "36b03577",
+    "autoCompactionEnabled": true,
+    "messageCount": 0,
+    "sessionActions": {
+     "queuedCount": 0,
+     "steering": [],
+     "followUps": []
+    },
+    "compactionCount": 0,
+    "goal": {
+     "active": false,
+     "status": "idle",
+     "tokensUsed": 0,
+     "timeUsedSeconds": 0,
+     "continuationsUsed": 0
+    },
+    "scopedModels": [],
+    "activeToolNames": []
+   },
+   "messages": [],
+   "lastEventSequence": 0,
+   "lastEventCursor": {
+    "generation": "4ecba3de15bb",
+    "sequence": 0
+   },
+   "children": []
+  },
+  "replay": {
+   "status": "complete",
+   "toSequence": 0,
+   "toCursor": {
+    "generation": "4ecba3de15bb",
+    "sequence": 0
+   }
+  },
+  "lastEventSequence": 0,
+  "lastEventCursor": {
+   "generation": "4ecba3de15bb",
+   "sequence": 0
+  },
+  "client": {
+   "id": "b0f85a0bf883",
+   "capabilities": [
+    "attach_snapshot",
+    "event_sequence"
+   ]
+  }
+ }
+}

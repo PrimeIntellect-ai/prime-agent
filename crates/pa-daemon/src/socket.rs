@@ -107,3 +107,45 @@ pub fn cleanup_socket_path(path: &Path, expected_identity: Option<SocketIdentity
 pub fn restrict_socket_path(path: &Path) {
     let _ = pa_core::platform::perms::restrict_file(path);
 }
+
+/// The pid of the process that owns a bound socket path - the listener a
+/// bind conflict is against. Reads the socket inode from `/proc/net/unix`
+/// and scans `/proc/*/fd` for an open handle to it, so an operator sees
+/// the holder immediately when a spawned worker dies on the bind. `None`
+/// when the kernel does not expose the tables (non-Linux) or no live
+/// process holds the socket.
+#[cfg(target_os = "linux")]
+pub fn socket_owner_pid(path: &Path) -> Option<u32> {
+    let wanted = path.to_string_lossy().to_string();
+    let inode = std::fs::read_to_string("/proc/net/unix")
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            if line.rsplit(' ').next() != Some(wanted.as_str()) {
+                return None;
+            }
+            line.split_whitespace().nth(6).map(str::to_string)
+        })?;
+    let marker = format!("socket:[{inode}]");
+    let proc = std::fs::read_dir("/proc").ok()?;
+    for entry in proc.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+            continue;
+        };
+        for fd in fds.flatten() {
+            if std::fs::read_link(fd.path()).ok().as_deref() == Some(std::path::Path::new(&marker))
+            {
+                return Some(pid);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn socket_owner_pid(_path: &Path) -> Option<u32> {
+    None
+}

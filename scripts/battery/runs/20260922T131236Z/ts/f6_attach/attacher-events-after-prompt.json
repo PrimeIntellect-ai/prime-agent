@@ -1,0 +1,570 @@
+[
+ {
+  "type": "session_event",
+  "activeSessionId": "f18ec153aa99",
+  "event": {
+   "type": "agent_start"
+  },
+  "meta": {
+   "id": "f18ec153aa99:1",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "f18ec153aa99",
+   "sequence": 1,
+   "cursor": {
+    "generation": "7b3a63af2c1d",
+    "sequence": 1
+   },
+   "emittedAt": "2026-09-22T13:14:21.378Z"
+  }
+ },
+ {
+  "type": "session_event",
+  "activeSessionId": "f18ec153aa99",
+  "event": {
+   "type": "turn_start"
+  },
+  "meta": {
+   "id": "f18ec153aa99:2",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "f18ec153aa99",
+   "sequence": 2,
+   "cursor": {
+    "generation": "7b3a63af2c1d",
+    "sequence": 2
+   },
+   "emittedAt": "2026-09-22T13:14:21.381Z"
+  }
+ },
+ {
+  "type": "session_event",
+  "activeSessionId": "f18ec153aa99",
+  "event": {
+   "type": "message_start",
+   "message": {
+    "role": "custom",
+    "customType": "harness_digest",
+    "content": "[harness-digest]\n\nThe persistent memories produced across this session so far:\n\n<harness_state>\n# Continual Harness State\n\nLocal continual harness entries belong to this Prime Agent session. Global continual harness entries persist across Prime Agent sessions.\nThe continual harness entries below are compact summaries, not full descriptions. Use them as routing/context hints; inspect or refine the underlying continual harness entry only when detail matters.\nDefault to local continual harness refinement for current task progress, temporary blockers, and session coordination. Use global continual harness refinement only for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.\nUse these continual harness prompt notes, memories, skills, and subagent specs when they are relevant. The base system prompt is immutable; prompt entries below are supplemental notes only.\n\nWhen to call `await refine.run()`: after a repeated failure, a reusable tactic emerges, a repeated delegation role should become a subagent spec, a repeated procedure should become a skill, a durable fact/preference should become a memory, a narrow behavioral policy should become a prompt addendum, a user corrects behavior that should persist locally or globally, validation shows a continual harness entry is wrong, or a skill/subagent/memory/prompt note should be created, updated, deleted, or rolled back. Keep `await refine.run()` continual harness edits small and evidence-backed.\n\nCall contract: read each installed Python skill's SKILL.md and call its documented module function in the Python REPL; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm.spawn('sub-task', name='worker')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries.\n\nprompt: 0\n\nmemory: 0\n\nskill: 0\n\nsubagent: 0\n\nNo saved harness entries yet.\n\nrecent refinements: 0\n</harness_state>",
+    "display": false,
+    "details": {
+     "digest": "# Continual Harness State\n\nLocal continual harness entries belong to this Prime Agent session. Global continual harness entries persist across Prime Agent sessions.\nThe continual harness entries below are compact summaries, not full descriptions. Use them as routing/context hints; inspect or refine the underlying continual harness entry only when detail matters.\nDefault to local continual harness refinement for current task progress, temporary blockers, and session coordination. Use global continual harness refinement only for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.\nUse these continual harness prompt notes, memories, skills, and subagent specs when they are relevant. The base system prompt is immutable; prompt entries below are supplemental notes only.\n\nWhen to call `await refine.run()`: after a repeated failure, a reusable tactic emerges, a repeated delegation role should become a subagent spec, a repeated procedure should become a skill, a durable fact/preference should become a memory, a narrow behavioral policy should become a prompt addendum, a user corrects behavior that should persist locally or globally, validation shows a continual harness entry is wrong, or a skill/subagent/memory/prompt note should be created, updated, deleted, or rolled back. Keep `await refine.run()` continual harness edits small and evidence-backed.\n\nCall contract: read each installed Python skill's SKILL.md and call its documented module function in the Python REPL; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm.spawn('sub-task', name='worker')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries.\n\nprompt: 0\n\nmemory: 0\n\nskill: 0\n\nsubagent: 0\n\nNo saved harness entries yet.\n\nrecent refinements: 0"
+    },
+    "timestamp": 1790082861329
+   }
+  },
+  "meta": {
+   "id": "f18ec153aa99:3",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "f18ec153aa99",
+   "sequence": 3,
+   "cursor": {
+    "generation": "7b3a63af2c1d",
+    "sequence": 3
+   },
+   "emittedAt": "2026-09-22T13:14:21.383Z"
+  }
+ },
+ {
+  "type": "session_event",
+  "activeSessionId": "f18ec153aa99",
+  "event": {
+   "type": "message_end",
+   "message": {
+    "role": "custom",
+    "customType": "harness_digest",
+    "content": "[harness-digest]\n\nThe persistent memories produced across this session so far:\n\n<harness_state>\n# Continual Harness State\n\nLocal continual harness entries belong to this Prime Agent session. Global continual harness entries persist across Prime Agent sessions.\nThe continual harness entries below are compact summaries, not full descriptions. Use them as routing/context hints; inspect or refine the underlying continual harness entry only when detail matters.\nDefault to local continual harness refinement for current task progress, temporary blockers, and session coordination. Use global continual harness refinement only for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.\nUse these continual harness prompt notes, memories, skills, and subagent specs when they are relevant. The base system prompt is immutable; prompt entries below are supplemental notes only.\n\nWhen to call `await refine.run()`: after a repeated failure, a reusable tactic emerges, a repeated delegation role should become a subagent spec, a repeated procedure should become a skill, a durable fact/preference should become a memory, a narrow behavioral policy should become a prompt addendum, a user corrects behavior that should persist locally or globally, validation shows a continual harness entry is wrong, or a skill/subagent/memory/prompt note should be created, updated, deleted, or rolled back. Keep `await refine.run()` continual harness edits small and evidence-backed.\n\nCall contract: read each installed Python skill's SKILL.md and call its documented module function in the Python REPL; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm.spawn('sub-task', name='worker')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries.\n\nprompt: 0\n\nmemory: 0\n\nskill: 0\n\nsubagent: 0\n\nNo saved harness entries yet.\n\nrecent refinements: 0\n</harness_state>",
+    "display": false,
+    "details": {
+     "digest": "# Continual Harness State\n\nLocal continual harness entries belong to this Prime Agent session. Global continual harness entries persist across Prime Agent sessions.\nThe continual harness entries below are compact summaries, not full descriptions. Use them as routing/context hints; inspect or refine the underlying continual harness entry only when detail matters.\nDefault to local continual harness refinement for current task progress, temporary blockers, and session coordination. Use global continual harness refinement only for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.\nUse these continual harness prompt notes, memories, skills, and subagent specs when they are relevant. The base system prompt is immutable; prompt entries below are supplemental notes only.\n\nWhen to call `await refine.run()`: after a repeated failure, a reusable tactic emerges, a repeated delegation role should become a subagent spec, a repeated procedure should become a skill, a durable fact/preference should become a memory, a narrow behavioral policy should become a prompt addendum, a user corrects behavior that should persist locally or globally, validation shows a continual harness entry is wrong, or a skill/subagent/memory/prompt note should be created, updated, deleted, or rolled back. Keep `await refine.run()` continual harness edits small and evidence-backed.\n\nCall contract: read each installed Python skill's SKILL.md and call its documented module function in the Python REPL; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm.spawn('sub-task', name='worker')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries.\n\nprompt: 0\n\nmemory: 0\n\nskill: 0\n\nsubagent: 0\n\nNo saved harness entries yet.\n\nrecent refinements: 0"
+    },
+    "timestamp": 1790082861329
+   }
+  },
+  "meta": {
+   "id": "f18ec153aa99:4",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "f18ec153aa99",
+   "sequence": 4,
+   "cursor": {
+    "generation": "7b3a63af2c1d",
+    "sequence": 4
+   },
+   "emittedAt": "2026-09-22T13:14:21.385Z"
+  }
+ },
+ {
+  "type": "session_event",
+  "activeSessionId": "f18ec153aa99",
+  "event": {
+   "type": "message_start",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "say something"
+     }
+    ],
+    "timestamp": 1790082861327
+   }
+  },
+  "meta": {
+   "id": "f18ec153aa99:5",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "f18ec153aa99",
+   "sequence": 5,
+   "cursor": {
+    "generation": "7b3a63af2c1d",
+    "sequence": 5
+   },
+   "emittedAt": "2026-09-22T13:14:21.387Z"
+  }
+ },
+ {
+  "type": "session_event",
+  "activeSessionId": "f18ec153aa99",
+  "event": {
+   "type": "message_end",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "say something"
+     }
+    ],
+    "timestamp": 1790082861327
+   }
+  },
+  "meta": {
+   "id": "f18ec153aa99:6",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "f18ec153aa99",
+   "sequence": 6,
+   "cursor": {
+    "generation": "7b3a63af2c1d",
+    "sequence": 6
+   },
+   "emittedAt": "2026-09-22T13:14:21.390Z"
+  }
+ },
+ {
+  "type": "session_event",
+  "activeSessionId": "f18ec153aa99",
+  "event": {
+   "type": "message_start",
+   "message": {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "text",
+      "text": "attach stream reply"
+     }
+    ],
+    "api": "openai-completions",
+    "provider": "prime-inference",
+    "model": "mock-1",
+    "usage": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "totalTokens": 0,
+     "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0
+     }
+    },
+    "stopReason": "stop",
+    "timestamp": 1790082861393
+   }
+  },
+  "meta": {
+   "id": "f18ec153aa99:7",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "f18ec153aa99",
+   "sequence": 7,
+   "cursor": {
+    "generation": "7b3a63af2c1d",
+    "sequence": 7
+   },
+   "emittedAt": "2026-09-22T13:14:21.472Z"
+  }
+ },
+ {
+  "type": "session_event",
+  "activeSessionId": "f18ec153aa99",
+  "event": {
+   "type": "message_update",
+   "message": {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "text",
+      "text": ""
+     }
+    ],
+    "api": "openai-completions",
+    "provider": "prime-inference",
+    "model": "mock-1",
+    "usage": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "totalTokens": 0,
+     "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0
+     }
+    },
+    "stopReason": "stop",
+    "timestamp": 1790082861393
+   },
+   "assistantMessageEvent": {
+    "type": "text_start",
+    "contentIndex": 0
+   }
+  },
+  "meta": {
+   "id": "f18ec153aa99:8",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "f18ec153aa99",
+   "sequence": 8,
+   "cursor": {
+    "generation": "7b3a63af2c1d",
+    "sequence": 8
+   },
+   "emittedAt": "2026-09-22T13:14:21.474Z"
+  }
+ },
+ {
+  "type": "session_event",
+  "activeSessionId": "f18ec153aa99",
+  "event": {
+   "type": "message_update",
+   "message": {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "text",
+      "text": "attach stream reply"
+     }
+    ],
+    "api": "openai-completions",
+    "provider": "prime-inference",
+    "model": "mock-1",
+    "usage": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "totalTokens": 0,
+     "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0
+     }
+    },
+    "stopReason": "stop",
+    "timestamp": 1790082861393
+   },
+   "assistantMessageEvent": {
+    "type": "text_delta",
+    "contentIndex": 0,
+    "delta": "attach stream reply"
+   }
+  },
+  "meta": {
+   "id": "f18ec153aa99:9",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "f18ec153aa99",
+   "sequence": 9,
+   "cursor": {
+    "generation": "7b3a63af2c1d",
+    "sequence": 9
+   },
+   "emittedAt": "2026-09-22T13:14:21.474Z"
+  }
+ },
+ {
+  "type": "session_event",
+  "activeSessionId": "f18ec153aa99",
+  "event": {
+   "type": "message_update",
+   "message": {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "text",
+      "text": "attach stream reply"
+     }
+    ],
+    "api": "openai-completions",
+    "provider": "prime-inference",
+    "model": "mock-1",
+    "usage": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "totalTokens": 0,
+     "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0
+     }
+    },
+    "stopReason": "stop",
+    "timestamp": 1790082861393
+   },
+   "assistantMessageEvent": {
+    "type": "text_end",
+    "contentIndex": 0,
+    "content": "attach stream reply"
+   }
+  },
+  "meta": {
+   "id": "f18ec153aa99:10",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "f18ec153aa99",
+   "sequence": 10,
+   "cursor": {
+    "generation": "7b3a63af2c1d",
+    "sequence": 10
+   },
+   "emittedAt": "2026-09-22T13:14:21.476Z"
+  }
+ },
+ {
+  "type": "session_event",
+  "activeSessionId": "f18ec153aa99",
+  "event": {
+   "type": "message_end",
+   "message": {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "text",
+      "text": "attach stream reply"
+     }
+    ],
+    "api": "openai-completions",
+    "provider": "prime-inference",
+    "model": "mock-1",
+    "usage": {
+     "input": 20,
+     "output": 10,
+     "cacheRead": 80,
+     "cacheWrite": 0,
+     "totalTokens": 110,
+     "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0
+     }
+    },
+    "stopReason": "stop",
+    "timestamp": 1790082861393,
+    "responseId": "chatcmpl-battery"
+   }
+  },
+  "meta": {
+   "id": "f18ec153aa99:11",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "f18ec153aa99",
+   "sequence": 11,
+   "cursor": {
+    "generation": "7b3a63af2c1d",
+    "sequence": 11
+   },
+   "emittedAt": "2026-09-22T13:14:21.478Z"
+  }
+ },
+ {
+  "type": "session_event",
+  "activeSessionId": "f18ec153aa99",
+  "event": {
+   "type": "turn_end",
+   "message": {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "text",
+      "text": "attach stream reply"
+     }
+    ],
+    "api": "openai-completions",
+    "provider": "prime-inference",
+    "model": "mock-1",
+    "usage": {
+     "input": 20,
+     "output": 10,
+     "cacheRead": 80,
+     "cacheWrite": 0,
+     "totalTokens": 110,
+     "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0
+     }
+    },
+    "stopReason": "stop",
+    "timestamp": 1790082861393,
+    "responseId": "chatcmpl-battery"
+   },
+   "toolResults": []
+  },
+  "meta": {
+   "id": "f18ec153aa99:12",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "f18ec153aa99",
+   "sequence": 12,
+   "cursor": {
+    "generation": "7b3a63af2c1d",
+    "sequence": 12
+   },
+   "emittedAt": "2026-09-22T13:14:21.481Z"
+  }
+ },
+ {
+  "type": "session_event",
+  "activeSessionId": "f18ec153aa99",
+  "event": {
+   "type": "agent_end",
+   "messages": [
+    {
+     "role": "custom",
+     "customType": "harness_digest",
+     "content": "[harness-digest]\n\nThe persistent memories produced across this session so far:\n\n<harness_state>\n# Continual Harness State\n\nLocal continual harness entries belong to this Prime Agent session. Global continual harness entries persist across Prime Agent sessions.\nThe continual harness entries below are compact summaries, not full descriptions. Use them as routing/context hints; inspect or refine the underlying continual harness entry only when detail matters.\nDefault to local continual harness refinement for current task progress, temporary blockers, and session coordination. Use global continual harness refinement only for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.\nUse these continual harness prompt notes, memories, skills, and subagent specs when they are relevant. The base system prompt is immutable; prompt entries below are supplemental notes only.\n\nWhen to call `await refine.run()`: after a repeated failure, a reusable tactic emerges, a repeated delegation role should become a subagent spec, a repeated procedure should become a skill, a durable fact/preference should become a memory, a narrow behavioral policy should become a prompt addendum, a user corrects behavior that should persist locally or globally, validation shows a continual harness entry is wrong, or a skill/subagent/memory/prompt note should be created, updated, deleted, or rolled back. Keep `await refine.run()` continual harness edits small and evidence-backed.\n\nCall contract: read each installed Python skill's SKILL.md and call its documented module function in the Python REPL; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm.spawn('sub-task', name='worker')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries.\n\nprompt: 0\n\nmemory: 0\n\nskill: 0\n\nsubagent: 0\n\nNo saved harness entries yet.\n\nrecent refinements: 0\n</harness_state>",
+     "display": false,
+     "details": {
+      "digest": "# Continual Harness State\n\nLocal continual harness entries belong to this Prime Agent session. Global continual harness entries persist across Prime Agent sessions.\nThe continual harness entries below are compact summaries, not full descriptions. Use them as routing/context hints; inspect or refine the underlying continual harness entry only when detail matters.\nDefault to local continual harness refinement for current task progress, temporary blockers, and session coordination. Use global continual harness refinement only for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.\nUse these continual harness prompt notes, memories, skills, and subagent specs when they are relevant. The base system prompt is immutable; prompt entries below are supplemental notes only.\n\nWhen to call `await refine.run()`: after a repeated failure, a reusable tactic emerges, a repeated delegation role should become a subagent spec, a repeated procedure should become a skill, a durable fact/preference should become a memory, a narrow behavioral policy should become a prompt addendum, a user corrects behavior that should persist locally or globally, validation shows a continual harness entry is wrong, or a skill/subagent/memory/prompt note should be created, updated, deleted, or rolled back. Keep `await refine.run()` continual harness edits small and evidence-backed.\n\nCall contract: read each installed Python skill's SKILL.md and call its documented module function in the Python REPL; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm.spawn('sub-task', name='worker')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries.\n\nprompt: 0\n\nmemory: 0\n\nskill: 0\n\nsubagent: 0\n\nNo saved harness entries yet.\n\nrecent refinements: 0"
+     },
+     "timestamp": 1790082861329
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "say something"
+      }
+     ],
+     "timestamp": 1790082861327
+    },
+    {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "attach stream reply"
+      }
+     ],
+     "api": "openai-completions",
+     "provider": "prime-inference",
+     "model": "mock-1",
+     "usage": {
+      "input": 20,
+      "output": 10,
+      "cacheRead": 80,
+      "cacheWrite": 0,
+      "totalTokens": 110,
+      "cost": {
+       "input": 0,
+       "output": 0,
+       "cacheRead": 0,
+       "cacheWrite": 0,
+       "total": 0
+      }
+     },
+     "stopReason": "stop",
+     "timestamp": 1790082861393,
+     "responseId": "chatcmpl-battery"
+    }
+   ]
+  },
+  "meta": {
+   "id": "f18ec153aa99:13",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "f18ec153aa99",
+   "sequence": 13,
+   "cursor": {
+    "generation": "7b3a63af2c1d",
+    "sequence": 13
+   },
+   "emittedAt": "2026-09-22T13:14:21.524Z"
+  }
+ },
+ {
+  "type": "session_status",
+  "activeSessionId": "f18ec153aa99",
+  "recap": "",
+  "meta": {
+   "id": "f18ec153aa99:14",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "activeSessionId": "f18ec153aa99",
+   "sequence": 14,
+   "cursor": {
+    "generation": "7b3a63af2c1d",
+    "sequence": 14
+   },
+   "emittedAt": "2026-09-22T13:14:23.485Z"
+  }
+ }
+]

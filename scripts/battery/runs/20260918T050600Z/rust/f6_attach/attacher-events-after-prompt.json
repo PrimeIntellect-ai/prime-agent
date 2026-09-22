@@ -1,0 +1,423 @@
+[
+ {
+  "activeSessionId": "f76a2337b410",
+  "event": {
+   "type": "agent_start"
+  },
+  "meta": {
+   "activeSessionId": "f76a2337b410",
+   "cursor": {
+    "generation": "fdd2a7867718",
+    "sequence": 1
+   },
+   "emittedAt": "2026-09-18T05:07:08.499Z",
+   "id": "f76a2337b410:1",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "sequence": 1
+  },
+  "type": "session_event"
+ },
+ {
+  "activeSessionId": "f76a2337b410",
+  "event": {
+   "type": "turn_start"
+  },
+  "meta": {
+   "activeSessionId": "f76a2337b410",
+   "cursor": {
+    "generation": "fdd2a7867718",
+    "sequence": 2
+   },
+   "emittedAt": "2026-09-18T05:07:08.499Z",
+   "id": "f76a2337b410:2",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "sequence": 2
+  },
+  "type": "session_event"
+ },
+ {
+  "activeSessionId": "f76a2337b410",
+  "event": {
+   "message": {
+    "content": [
+     {
+      "text": "say something",
+      "type": "text"
+     }
+    ],
+    "role": "user",
+    "timestamp": 1789708028512
+   },
+   "type": "message_start"
+  },
+  "meta": {
+   "activeSessionId": "f76a2337b410",
+   "cursor": {
+    "generation": "fdd2a7867718",
+    "sequence": 3
+   },
+   "emittedAt": "2026-09-18T05:07:08.516Z",
+   "id": "f76a2337b410:3",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "sequence": 3
+  },
+  "type": "session_event"
+ },
+ {
+  "activeSessionId": "f76a2337b410",
+  "event": {
+   "message": {
+    "content": [
+     {
+      "text": "say something",
+      "type": "text"
+     }
+    ],
+    "role": "user",
+    "timestamp": 1789708028512
+   },
+   "type": "message_end"
+  },
+  "meta": {
+   "activeSessionId": "f76a2337b410",
+   "cursor": {
+    "generation": "fdd2a7867718",
+    "sequence": 4
+   },
+   "emittedAt": "2026-09-18T05:07:08.516Z",
+   "id": "f76a2337b410:4",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "sequence": 4
+  },
+  "type": "session_event"
+ },
+ {
+  "activeSessionId": "f76a2337b410",
+  "event": {
+   "assistantMessageEvent": {
+    "type": "start"
+   },
+   "message": {
+    "api": "openai-completions",
+    "content": [],
+    "model": "mock-1",
+    "provider": "prime-inference",
+    "role": "assistant",
+    "stopReason": "stop",
+    "timestamp": 1789708028571,
+    "usage": {
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0,
+      "total": 0
+     },
+     "input": 0,
+     "output": 0,
+     "totalTokens": 0
+    }
+   },
+   "type": "message_start"
+  },
+  "meta": {
+   "activeSessionId": "f76a2337b410",
+   "cursor": {
+    "generation": "fdd2a7867718",
+    "sequence": 5
+   },
+   "emittedAt": "2026-09-18T05:07:08.598Z",
+   "id": "f76a2337b410:5",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "sequence": 5
+  },
+  "type": "session_event"
+ },
+ {
+  "activeSessionId": "f76a2337b410",
+  "event": {
+   "assistantMessageEvent": {
+    "type": "text_start"
+   },
+   "message": {
+    "api": "openai-completions",
+    "content": [
+     {
+      "text": "",
+      "type": "text"
+     }
+    ],
+    "model": "mock-1",
+    "provider": "prime-inference",
+    "responseId": "chatcmpl-battery",
+    "role": "assistant",
+    "stopReason": "stop",
+    "timestamp": 1789708028571,
+    "usage": {
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0,
+      "total": 0
+     },
+     "input": 0,
+     "output": 0,
+     "totalTokens": 0
+    }
+   },
+   "type": "message_update"
+  },
+  "meta": {
+   "activeSessionId": "f76a2337b410",
+   "cursor": {
+    "generation": "fdd2a7867718",
+    "sequence": 6
+   },
+   "emittedAt": "2026-09-18T05:07:08.598Z",
+   "id": "f76a2337b410:6",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "sequence": 6
+  },
+  "type": "session_event"
+ },
+ {
+  "activeSessionId": "f76a2337b410",
+  "event": {
+   "assistantMessageEvent": {
+    "delta": "attach stream reply",
+    "type": "text_delta"
+   },
+   "message": {
+    "api": "openai-completions",
+    "content": [
+     {
+      "text": "attach stream reply",
+      "type": "text"
+     }
+    ],
+    "model": "mock-1",
+    "provider": "prime-inference",
+    "responseId": "chatcmpl-battery",
+    "role": "assistant",
+    "stopReason": "stop",
+    "timestamp": 1789708028571,
+    "usage": {
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0,
+      "total": 0
+     },
+     "input": 0,
+     "output": 0,
+     "totalTokens": 0
+    }
+   },
+   "type": "message_update"
+  },
+  "meta": {
+   "activeSessionId": "f76a2337b410",
+   "cursor": {
+    "generation": "fdd2a7867718",
+    "sequence": 7
+   },
+   "emittedAt": "2026-09-18T05:07:08.598Z",
+   "id": "f76a2337b410:7",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "sequence": 7
+  },
+  "type": "session_event"
+ },
+ {
+  "activeSessionId": "f76a2337b410",
+  "event": {
+   "assistantMessageEvent": {
+    "type": "text_end"
+   },
+   "message": {
+    "api": "openai-completions",
+    "content": [
+     {
+      "text": "attach stream reply",
+      "type": "text"
+     }
+    ],
+    "model": "mock-1",
+    "provider": "prime-inference",
+    "responseId": "chatcmpl-battery",
+    "role": "assistant",
+    "stopReason": "stop",
+    "timestamp": 1789708028571,
+    "usage": {
+     "cacheRead": 80,
+     "cacheWrite": 0,
+     "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0,
+      "total": 0
+     },
+     "input": 20,
+     "output": 10,
+     "totalTokens": 110
+    }
+   },
+   "type": "message_update"
+  },
+  "meta": {
+   "activeSessionId": "f76a2337b410",
+   "cursor": {
+    "generation": "fdd2a7867718",
+    "sequence": 8
+   },
+   "emittedAt": "2026-09-18T05:07:08.598Z",
+   "id": "f76a2337b410:8",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "sequence": 8
+  },
+  "type": "session_event"
+ },
+ {
+  "activeSessionId": "f76a2337b410",
+  "event": {
+   "message": {
+    "api": "openai-completions",
+    "content": [
+     {
+      "text": "attach stream reply",
+      "type": "text"
+     }
+    ],
+    "model": "mock-1",
+    "provider": "prime-inference",
+    "responseId": "chatcmpl-battery",
+    "role": "assistant",
+    "stopReason": "stop",
+    "timestamp": 1789708028571,
+    "usage": {
+     "cacheRead": 80,
+     "cacheWrite": 0,
+     "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0,
+      "total": 0
+     },
+     "input": 20,
+     "output": 10,
+     "totalTokens": 110
+    }
+   },
+   "type": "message_end"
+  },
+  "meta": {
+   "activeSessionId": "f76a2337b410",
+   "cursor": {
+    "generation": "fdd2a7867718",
+    "sequence": 9
+   },
+   "emittedAt": "2026-09-18T05:07:08.606Z",
+   "id": "f76a2337b410:9",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "sequence": 9
+  },
+  "type": "session_event"
+ },
+ {
+  "activeSessionId": "f76a2337b410",
+  "event": {
+   "type": "turn_end"
+  },
+  "meta": {
+   "activeSessionId": "f76a2337b410",
+   "cursor": {
+    "generation": "fdd2a7867718",
+    "sequence": 10
+   },
+   "emittedAt": "2026-09-18T05:07:08.606Z",
+   "id": "f76a2337b410:10",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "sequence": 10
+  },
+  "type": "session_event"
+ },
+ {
+  "activeSessionId": "f76a2337b410",
+  "event": {
+   "type": "agent_end"
+  },
+  "meta": {
+   "activeSessionId": "f76a2337b410",
+   "cursor": {
+    "generation": "fdd2a7867718",
+    "sequence": 11
+   },
+   "emittedAt": "2026-09-18T05:07:08.606Z",
+   "id": "f76a2337b410:11",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "sequence": 11
+  },
+  "type": "session_event"
+ },
+ {
+  "activeSessionId": "f76a2337b410",
+  "meta": {
+   "activeSessionId": "f76a2337b410",
+   "cursor": {
+    "generation": "fdd2a7867718",
+    "sequence": 12
+   },
+   "emittedAt": "2026-09-18T05:07:10.620Z",
+   "id": "f76a2337b410:12",
+   "protocol": {
+    "name": "prime-agent.daemon",
+    "version": 7
+   },
+   "sequence": 12
+  },
+  "type": "session_status"
+ }
+]

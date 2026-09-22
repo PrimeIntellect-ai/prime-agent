@@ -303,6 +303,7 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
         &self,
         kitty: bool,
         modify_other_keys: bool,
+        mode: &'static str,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
             let Some(client) = self.client() else {
@@ -314,6 +315,7 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
                 "modify_other_keys",
                 serde_json::Value::from(modify_other_keys),
             );
+            properties.set("mode", serde_json::Value::from(mode));
             client.track("tui enhanced keys", properties);
             let _ = client.shutdown().await;
         })
@@ -327,6 +329,36 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
             let mut properties = pa_telemetry::base_properties("interactive");
             properties.set("outcome", serde_json::Value::from(outcome));
             client.track("tui suspend used", properties);
+            let _ = client.shutdown().await;
+        })
+    }
+
+    fn interrupt_issued(
+        &self,
+        target: &'static str,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let Some(client) = self.client() else {
+                return;
+            };
+            let mut properties = pa_telemetry::base_properties("interactive");
+            properties.set("target", serde_json::Value::from(target));
+            client.track("tui interrupt issued", properties);
+            let _ = client.shutdown().await;
+        })
+    }
+
+    fn signal_shutdown(
+        &self,
+        signal: &'static str,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let Some(client) = self.client() else {
+                return;
+            };
+            let mut properties = pa_telemetry::base_properties("interactive");
+            properties.set("signal", serde_json::Value::from(signal));
+            client.track("tui signal shutdown", properties);
             let _ = client.shutdown().await;
         })
     }

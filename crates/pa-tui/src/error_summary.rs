@@ -14,47 +14,10 @@ pub fn normalize_error_details(text: &str) -> String {
     unified.trim_end().to_string()
 }
 
-/// `strip-ansi`: remove CSI/OSC escape sequences.
+/// `stripAnsi`: remove every escape sequence (the exact TS utils.ts
+/// scanner — see `crate::ansi::strip_ansi`).
 pub fn strip_ansi(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '\u{1b}' {
-            out.push(c);
-            continue;
-        }
-        match chars.peek() {
-            Some('[') => {
-                chars.next();
-                for c in chars.by_ref() {
-                    // The sequence ends at its final byte (0x40..=0x7e).
-                    if ('@'..='~').contains(&c) {
-                        break;
-                    }
-                }
-            }
-            Some(']') => {
-                chars.next();
-                // OSC ends at BEL or ST (ESC backslash).
-                let mut last_was_esc = false;
-                for c in chars.by_ref() {
-                    if c == '\u{7}' {
-                        break;
-                    }
-                    if last_was_esc && c == '\\' {
-                        break;
-                    }
-                    last_was_esc = c == '\u{1b}';
-                }
-            }
-            // Two-character escape sequences.
-            Some(_) => {
-                chars.next();
-            }
-            None => {}
-        }
-    }
-    out
+    crate::ansi::strip_ansi(text)
 }
 
 /// `shouldCollapseErrorDetails`: multi-line errors collapse.

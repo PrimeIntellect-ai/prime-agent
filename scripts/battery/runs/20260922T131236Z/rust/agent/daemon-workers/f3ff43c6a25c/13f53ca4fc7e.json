@@ -1,0 +1,45 @@
+{
+  "version": 2,
+  "workerId": "13f53ca4fc7e",
+  "pid": 447063,
+  "socketPath": "/tmp/vbat20260922T131236Z-rust/prime-agent-1000/worker-f3ff43c6a25c-13f53ca4fc7e.sock",
+  "recoveryJournalPath": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/daemon-workers/f3ff43c6a25c/13f53ca4fc7e.recovery.jsonl",
+  "supervisorSocketPath": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/daemon.sock",
+  "authenticationToken": "00cc0eae-806f-4d0a-9439-d494ec11bdd7",
+  "workerInstanceId": "f1f07b43-e8b4-44bc-a3a1-723cd05e8832",
+  "rootActiveSessionId": "13f53ca4fc7e",
+  "ownerClientId": "03a8947ea23b",
+  "rootSessionId": "01a0c952-6834-7575-a67b-9cc8f8d8559c",
+  "sessionFile": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/session-artifacts/01a0c952-06df-72cd-9300-d7e77534c18c/sub-094deeeb/01a0c952-6834-7575-a67b-9cc8f8d8559c.jsonl",
+  "sessionDir": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/session-artifacts/01a0c952-06df-72cd-9300-d7e77534c18c/sub-094deeeb",
+  "createdAt": "2026-09-22T13:33:35.988Z",
+  "updatedAt": "2026-09-22T13:33:36.342Z",
+  "lifecycle": "ready",
+  "createCommand": {
+    "sessionPath": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/session-artifacts/01a0c952-06df-72cd-9300-d7e77534c18c/sub-094deeeb/01a0c952-6834-7575-a67b-9cc8f8d8559c.jsonl",
+    "cwd": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/work",
+    "sessionDir": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/session-artifacts/01a0c952-06df-72cd-9300-d7e77534c18c/sub-094deeeb",
+    "name": "f20-worker",
+    "provider": "prime-inference",
+    "model": "mock-1",
+    "rlmDepth": 1,
+    "rlmMaxDepth": 2,
+    "parentSessionPath": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/sessions/01a0c952-06df-72cd-9300-d7e77534c18c.jsonl",
+    "rlmChildId": "sub-094deeeb",
+    "runtimeMetadata": {
+      "kind": "subagent",
+      "rlmChildId": "sub-094deeeb",
+      "parentActiveSessionId": "22b8f3975ec7",
+      "rlmDepth": 1,
+      "createdAt": 1790084014896,
+      "parentSessionId": "01a0c952-06df-72cd-9300-d7e77534c18c",
+      "parentSessionFile": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/sessions/01a0c952-06df-72cd-9300-d7e77534c18c.jsonl",
+      "prompt": "f20 child task: reply with the fixture summary",
+      "model": {
+        "provider": "prime-inference",
+        "modelId": "mock-1"
+      }
+    }
+  },
+  "consecutiveFailures": 0
+}

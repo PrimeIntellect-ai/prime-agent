@@ -1,0 +1,36 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+                          Heartbeats
+                          1 heartbeat. Select a heartbeat to manage.
+
+
+                          f19 heartbeat ping instruction                                active
+                          Created by you · battery-f19 · every 10s · steer
+
+
+                          Esc close
+
+
+
+
+
+
+
+
+
+
+
+
+
+

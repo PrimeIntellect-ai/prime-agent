@@ -227,6 +227,7 @@ pub(crate) struct SessionUi {
     pending_snapshot: Option<Vec<ChatEntry>>,
     /// Snapshot labels (model) for the next rebuild.
     pending_model: Option<String>,
+    pending_model_provider: Option<String>,
     /// Snapshot queue state for the next rebuild (attach re-sync).
     pending_queue: Option<crate::queued::QueuedMessages>,
     /// The parked-message browse state (TS `QueueSelection`): which queued
@@ -467,6 +468,7 @@ impl SessionUi {
             next_image_marker_id: 1,
             pending_snapshot: None,
             pending_model: None,
+            pending_model_provider: None,
             pending_queue: None,
             queue_selection: crate::queued::QueueSelection::default(),
             context: None,
@@ -666,6 +668,7 @@ impl SessionUi {
         self.heartbeat_catalog.clear();
         self.spawn_heartbeat_refresh();
         self.pending_model = reconstructed.model_id;
+        self.pending_model_provider = reconstructed.model_provider;
         self.last_assistant_text = reconstructed
             .chat
             .iter()
@@ -848,6 +851,7 @@ impl SessionUi {
         }
         if let Some(model) = self.pending_model.take() {
             view.chrome.model_id = Some(model);
+            view.chrome.model_provider = self.pending_model_provider.take();
         }
         view.queued = self.pending_queue.take().unwrap_or_default();
         // A rebuilt view starts from the snapshot's queue: any browse
@@ -1375,13 +1379,12 @@ impl SessionUi {
     /// startup catalog; unknown models are assumed capable (the daemon
     /// re-checks against the resolved model anyway).
     fn model_supports_images(&self, view: &AgentView) -> bool {
-        let Some(model_id) = view.chrome.model_id.as_deref() else {
-            return true;
-        };
-        let Some(model) = self.model_catalog.iter().find(|model| model.id == model_id) else {
-            return true;
-        };
-        model.input.contains(&pa_types::ai::ModelInput::Image)
+        match self.current_catalog_model(view) {
+            Some(model) => model.input.contains(&pa_types::ai::ModelInput::Image),
+            // Unknown models are assumed capable (the daemon re-checks
+            // against the resolved model anyway).
+            None => true,
+        }
     }
 
     /// Submit a prompt (the Enter path). The user message arrives back as a
@@ -3600,8 +3603,7 @@ impl SessionUi {
     /// The catalog entry for the current model (the `/fast` eligibility
     /// check needs the provider and api, not just the id).
     fn current_model_entry(&self, view: &AgentView) -> Option<&pa_types::ai::Model> {
-        let model_id = view.chrome.model_id.as_deref()?;
-        self.model_catalog.iter().find(|model| model.id == model_id)
+        self.current_catalog_model(view)
     }
 
     /// Recompute the `/fast` autocomplete filter (TS
@@ -5173,15 +5175,23 @@ impl SessionUi {
         }
     }
 
-    /// The session's current model, matched against the picker catalog (the
-    /// daemon state reports the id; the catalog entry supplies the
-    /// provider).
-    fn current_model(&self, view: &AgentView) -> Option<CurrentModel> {
+    /// The session's current model's catalog entry: the TS
+    /// `modelsAreEqual` key (provider plus id) — live-catalog ids repeat
+    /// across providers, so a reported provider disambiguates.
+    fn current_catalog_model<'s>(&'s self, view: &AgentView) -> Option<&'s pa_types::ai::Model> {
         let model_id = view.chrome.model_id.as_deref()?;
-        let model = self
-            .model_catalog
-            .iter()
-            .find(|model| model.id == model_id)?;
+        match view.chrome.model_provider.as_deref() {
+            Some(provider) => self
+                .model_catalog
+                .iter()
+                .find(|model| model.provider == provider && model.id == model_id),
+            None => self.model_catalog.iter().find(|model| model.id == model_id),
+        }
+    }
+
+    /// The picker's `current` key ([`Self::current_catalog_model`]).
+    fn current_model(&self, view: &AgentView) -> Option<CurrentModel> {
+        let model = self.current_catalog_model(view)?;
         Some(CurrentModel {
             provider: model.provider.clone(),
             model_id: model.id.clone(),
@@ -5406,13 +5416,18 @@ impl SessionUi {
             )
             .await;
         if let Ok(data) = state {
-            let model_id = data
-                .get("model")
+            let model = data.get("model");
+            let model_id = model
                 .and_then(|model| model.get("id"))
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .unwrap_or_else(|| picked_model_id.to_string());
+            let model_provider = model
+                .and_then(|model| model.get("provider"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
             view.chrome.model_id = Some(model_id);
+            view.chrome.model_provider = model_provider;
             self.dirty = true;
         }
     }
@@ -5434,6 +5449,143 @@ impl SessionUi {
                 .await;
             if let Err(error) = result {
                 let _ = notes.send(format!("the abort failed: {error:#}"));
+            }
+        });
+    }
+
+    /// TS `interruptOrClearInput`: the interrupt key's fire-and-forget
+    /// abort ladder. Every branch checks its own live state, spawns its
+    /// request off the UI loop (a failure surfaces later as a transcript
+    /// note), and reports its `tui interrupt issued` adoption event — the
+    /// primitive target enum only, never any content. Shared by the Ctrl+C
+    /// interrupt and the Escape arm-and-interrupt.
+    fn interrupt_or_clear_input(&mut self, view: &mut AgentView) {
+        // A running side question is aborted first (its failure reported
+        // through the note channel, unlike the silent pane-close abort);
+        // the pane stays mounted and renders the cancelled turn when the
+        // run's terminal event streams back.
+        if self.active_side_question_id.is_some() {
+            self.abort_side_question();
+            self.track_interrupt("side_question");
+        }
+        // TS `getRetryAttempt() > 0`: a retry countdown is in flight (the
+        // loader shows it); `abortRetry` stops the retry without
+        // aborting the turn behind it.
+        if view.retry.is_some() {
+            self.abort_retry();
+            self.track_interrupt("retry");
+        }
+        if view.compaction.is_some() {
+            // The compaction loader is up (TS `isAgentCompacting()`): the
+            // interrupt cancels the compaction run and its branch summary
+            // only — the agent is not streaming, so no turn abort goes out,
+            // exactly like the TS interrupt key.
+            self.abort_compaction();
+            self.abort_branch_summary();
+            self.track_interrupt("compaction");
+            self.track_interrupt("branch_summary");
+        } else if self.turn_active {
+            // TS fires `void abortAndSendQueued()` and reports nothing on
+            // success — the aborted assistant row is the visible outcome
+            // (a failed request surfaces through the note channel).
+            self.abort_turn();
+            self.track_interrupt("stream");
+        }
+        // A running user-bash command aborts the same way (TS
+        // `interruptOrClearInput` fires `void abortBash()`): the
+        // settled run reports cancelled through its bash_end.
+        if self.user_bash_running {
+            self.abort_user_bash();
+            self.track_interrupt("bash");
+        }
+    }
+
+    /// TS `hasInterruptibleWork` (the states this client tracks): the
+    /// arm decision for the Escape repeat — the second press opens the
+    /// tree while work is interruptible or the editor is empty, and
+    /// clears the input otherwise.
+    fn has_interruptible_work(&self, view: &AgentView) -> bool {
+        self.turn_active
+            || self.user_bash_running
+            || view.retry.is_some()
+            || view.compaction.is_some()
+            || self.active_side_question_id.is_some()
+    }
+
+    /// One interrupt target fired (`tui interrupt issued`): a primitive
+    /// enum only, fire-and-forget like the other adoption events — the
+    /// keypress never waits on the telemetry flush.
+    fn track_interrupt(&self, target: &'static str) {
+        if let Some(telemetry) = self.telemetry.clone() {
+            tokio::spawn(async move {
+                telemetry.interrupt_issued(target).await;
+            });
+        }
+    }
+
+    /// Abort a running side question off the UI loop (the report-error
+    /// variant TS `interruptOrClearInput` fires): the pane stays mounted;
+    /// a failure surfaces as a background note.
+    fn abort_side_question(&self) {
+        let Some(side_question_id) = self.active_side_question_id.clone() else {
+            return;
+        };
+        let client = self.client.clone();
+        let active_session_id = self.active_session_id.clone();
+        let notes = self.notes.clone();
+        tokio::spawn(async move {
+            if let Err(error) = client
+                .request_ok(DaemonCommand::AbortSideQuestion {
+                    id: None,
+                    active_session_id,
+                    side_question_id,
+                    rest: Default::default(),
+                })
+                .await
+            {
+                let _ = notes.send(format!("the side question abort failed: {error:#}"));
+            }
+        });
+    }
+
+    /// Stop an in-flight retry off the UI loop (TS
+    /// `interruptOrClearInput` fires `void abortRetry()` when the retry
+    /// attempt is live): the retry stops without aborting the turn.
+    fn abort_retry(&self) {
+        let client = self.client.clone();
+        let active_session_id = self.active_session_id.clone();
+        let notes = self.notes.clone();
+        tokio::spawn(async move {
+            let result = client
+                .request_ok(DaemonCommand::AbortRetry {
+                    id: None,
+                    active_session_id,
+                    rest: Default::default(),
+                })
+                .await;
+            if let Err(error) = result {
+                let _ = notes.send(format!("the retry abort failed: {error:#}"));
+            }
+        });
+    }
+
+    /// Abort the in-flight branch summary off the UI loop (TS fires
+    /// `void abortBranchSummary()` next to the compaction abort — the
+    /// summary is part of the compaction run's tree navigation).
+    fn abort_branch_summary(&self) {
+        let client = self.client.clone();
+        let active_session_id = self.active_session_id.clone();
+        let notes = self.notes.clone();
+        tokio::spawn(async move {
+            let result = client
+                .request_ok(DaemonCommand::AbortBranchSummary {
+                    id: None,
+                    active_session_id,
+                    rest: Default::default(),
+                })
+                .await;
+            if let Err(error) = result {
+                let _ = notes.send(format!("the branch summary abort failed: {error:#}"));
             }
         });
     }
@@ -5766,12 +5918,19 @@ impl SessionUi {
                 self.dirty = true;
                 return Ok(());
             }
-            let action = if self.turn_active || view.editor.get_text().trim().is_empty() {
-                "tree"
-            } else {
-                "clear"
-            };
+            let action =
+                if self.has_interruptible_work(view) || view.editor.get_text().trim().is_empty() {
+                    "tree"
+                } else {
+                    "clear"
+                };
             self.arm_escape_repeat(action);
+            // TS `handleEscape` arms the repeat and then interrupts: the
+            // same Escape press aborts whatever is interruptible — the
+            // stream, a retry, a compaction, a user-bash run (the arm only
+            // decides the *next* press's action).
+            self.interrupt_or_clear_input(view);
+            self.dirty = true;
             return Ok(());
         }
         if view.editor.keybindings().matches(&id, "app.exit") && view.editor.get_text().is_empty() {
@@ -5801,45 +5960,9 @@ impl SessionUi {
                 *running = false;
                 return Ok(());
             }
-            // TS `interruptOrClearInput`: a running side question is
-            // aborted first (its failure reported through the note
-            // channel, unlike the silent pane-close abort); the pane stays
-            // mounted and renders the cancelled turn when the run's
-            // terminal event streams back.
-            if let Some(side_question_id) = self.active_side_question_id.clone() {
-                let client = self.client.clone();
-                let active_session_id = self.active_session_id.clone();
-                let notes = self.notes.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = client
-                        .request_ok(DaemonCommand::AbortSideQuestion {
-                            id: None,
-                            active_session_id,
-                            side_question_id,
-                            rest: Default::default(),
-                        })
-                        .await
-                    {
-                        let _ = notes.send(format!("the side question abort failed: {error:#}"));
-                    }
-                });
-            }
-            if view.compaction.is_some() {
-                // The compaction loader is up (TS `isAgentCompacting()`):
-                // the interrupt cancels the compaction run only — the agent
-                // is not streaming, so no turn abort goes out, exactly like
-                // the TS interrupt key.
-                self.abort_compaction();
-            } else if self.turn_active {
-                self.abort_turn();
-                self.note("aborting the current turn", view);
-            }
-            // A running user-bash command aborts the same way (TS
-            // `interruptOrClearInput` fires `void abortBash()`): the
-            // settled run reports cancelled through its bash_end.
-            if self.user_bash_running {
-                self.abort_user_bash();
-            }
+            // TS `handleInterruptKey` -> `interruptOrClearInput`: the
+            // interrupt key's abort ladder, then the exit hint.
+            self.interrupt_or_clear_input(view);
             self.show_ctrl_c_hint();
             self.dirty = true;
             return Ok(());
@@ -6909,7 +7032,40 @@ impl SessionUi {
         }
         if !streaming {
             let open = self.streaming_index.take();
-            self.finalize_assistant_error(message, &tool_calls, open, view);
+            let mut error = crate::snapshot::assistant_error_row(message, &tool_calls);
+            if let Some(error) = error.as_mut().filter(|error| error.aborted) {
+                // TS `message_end` (aborted): the live row always carries
+                // the working elapsed and names the pending retry attempt
+                // ("Operation aborted · 4s" / "Aborted after 2 retry
+                // attempts · 1m 05s"); the pending cards share the same
+                // text. The replay path (`assistant_value_to_entries`)
+                // keeps the stored errorMessage instead, exactly like TS's
+                // transcript rebuild.
+                let elapsed = view
+                    .working_since
+                    .map(|since| {
+                        format!(
+                            " · {}",
+                            crate::chat::format_working_elapsed(since.elapsed().as_secs())
+                        )
+                    })
+                    .unwrap_or_default();
+                error.text = match view.retry.as_ref().map(|retry| retry.attempt) {
+                    Some(attempt) => format!(
+                        "Aborted after {attempt} retry attempt{}{elapsed}",
+                        if attempt > 1 { "s" } else { "" }
+                    ),
+                    None => format!("Operation aborted{elapsed}"),
+                };
+                error.error_text = error.text.clone();
+            }
+            if let Some(error) = &error {
+                // TS `message_end` (aborted/error): every pending tool
+                // card gets the error result, then the pending state
+                // resets — no card keeps its spinner after the run died.
+                crate::snapshot::settle_pending_tool_cards(&error.error_text, view);
+            }
+            self.finalize_assistant_error(error, open, view);
         }
     }
 
@@ -6924,12 +7080,11 @@ impl SessionUi {
     /// previous reply (TS `AssistantMessageComponent.rebuild`).
     fn finalize_assistant_error(
         &mut self,
-        message: &Value,
-        tool_calls: &[(String, String, Value)],
+        error: Option<crate::snapshot::AssistantErrorRow>,
         open: Option<usize>,
         view: &mut AgentView,
     ) {
-        let Some(error) = crate::snapshot::assistant_error_row(message, tool_calls) else {
+        let Some(error) = error else {
             return;
         };
         self.turn_error_shown = true;
@@ -6979,6 +7134,12 @@ impl SessionUi {
             .position(|entry| matches!(entry, ChatEntry::Tool(card) if card.id == tool_call_id));
         if let Some(index) = card_index {
             if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
+                // A card settled by the abort keeps its error text: the
+                // pending state reset with the dead run (TS finds no
+                // component in `pendingTools` for the late frame).
+                if card.aborted {
+                    return;
+                }
                 card.result = Some(result);
                 card.result_partial = partial;
                 if !partial {

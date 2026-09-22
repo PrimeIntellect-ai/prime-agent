@@ -578,6 +578,10 @@ fn summaries_from_roster(sessions: Vec<Value>) -> Vec<AgentObserveSummary> {
                     .get("attachedClients")
                     .and_then(Value::as_u64)
                     .unwrap_or_default() as usize,
+                // The supervisor's roster row carries the live message
+                // count (TS `AgentObserveAgentSummary.messageCount`); saved
+                // rows keep their persisted count.
+                message_count: session.get("messageCount").and_then(Value::as_u64),
                 queued_count: queued,
                 is_session_active: session
                     .get("isSessionActive")
@@ -1068,5 +1072,31 @@ mod controller_tests {
         assert_eq!(delivery["sender"]["sessionName"], "alpha");
         assert_eq!(delivery["sender"]["runtimeKind"], "top-level");
         assert_eq!(delivery["sender"]["clientId"], "agent");
+    }
+
+    /// The observe summaries keep the roster rows' live message count (TS
+    /// `AgentObserveAgentSummary.messageCount`): a roster row that carries
+    /// one reports it; a row without the field stays absent.
+    #[test]
+    fn observe_summaries_keep_the_roster_message_count() {
+        let summaries = summaries_from_roster(vec![
+            json!({
+                "activeSessionId": "aaa111",
+                "sessionId": "sess-a",
+                "sessionName": "alpha",
+                "runtimeKind": "top-level",
+                "messageCount": 7,
+            }),
+            json!({
+                "activeSessionId": "bbb222",
+                "sessionId": "sess-b",
+                "sessionName": "beta",
+                "runtimeKind": "subagent",
+            }),
+        ]);
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].message_count, Some(7));
+        assert_eq!(summaries[0].active_session_id.as_deref(), Some("aaa111"));
+        assert_eq!(summaries[1].message_count, None);
     }
 }

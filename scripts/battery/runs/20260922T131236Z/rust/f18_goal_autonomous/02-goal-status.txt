@@ -1,0 +1,36 @@
+                                                      battery-f18  $0.00
+
+
+  /goal f18 parity objective: land the battery flows
+
+
+  Goal active: f18 parity objective: land the battery flows
+
+
+ Goal: f18 parity objective: land the battery flows
+
+ Goal continuation · f18 parity objective: land the battery flows
+
+ f18 goal fixture reply
+
+
+  /goal pause
+
+
+  Goal paused: f18 parity objective: land the battery flows
+
+
+ Goal paused: Paused by user
+
+
+  /goal
+
+
+  Goal paused: f18 parity objective: land the battery flows
+
+
+                                                                                      Collapsed mode (Ctrl+O to expand)
+
+ >
+
+← manage                                                                            Goal paused (0s) · mock-1 · 110 (0%)

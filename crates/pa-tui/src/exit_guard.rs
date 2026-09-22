@@ -32,6 +32,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use pa_types::platform::kill_tracked_detached_children;
 
 /// The double-press window (TS `EXIT_HINT_DURATION_MS`): a Ctrl+C pair is
 /// two presses at most this far apart.
@@ -240,18 +241,66 @@ fn spawn_watchdog(state: Arc<GuardState>) {
     }
 }
 
-/// Force-quit right now: restore the terminal best-effort and exit the
-/// process with code 0 (the user asked to close the TUI; the exit is
-/// deliberate, not a crash).
+/// Force-quit right now: restore the terminal best-effort, report the
+/// stalled shutdown, and exit the process with code 0 (the user asked to
+/// close the TUI; the exit is deliberate, not a crash).
 fn force_quit() -> ! {
-    restore_terminal_best_effort();
+    let _ = restore_terminal_best_effort();
+    eprintln!("Prime Agent: shutdown stalled; forced exit.");
     std::process::exit(0)
+}
+
+/// Leave the process right now with `code`, restoring the terminal
+/// best-effort but printing nothing (TS signal handlers exit quietly):
+/// used by the shutdown-signal fallback paths, where the exit is the
+/// signal's own expected outcome.
+pub(crate) fn force_quit_with_code(code: i32) -> ! {
+    let _ = restore_terminal_best_effort();
+    std::process::exit(code)
+}
+
+/// Exit without a terminal restore: the terminal is gone (a dead pty, or
+/// SIGHUP closing it), and restore sequences would write back onto the
+/// dead device and re-trigger the error (TS `emergencyTerminalExit` kills
+/// the tracked detached children and exits 129; the TUI and extension
+/// cleanup are skipped by design for the same reason). The exit code is
+/// 128+1, the conventional SIGHUP death code TS reports.
+pub(crate) fn emergency_terminal_exit() -> ! {
+    kill_tracked_detached_children();
+    std::process::exit(129)
+}
+
+/// A write-error class meaning the terminal device is gone (TS
+/// `isDeadTerminalError` over `DEAD_TERMINAL_ERROR_CODES`: EIO, EPIPE,
+/// ENOTCONN). A paint error of this class takes the emergency exit; other
+/// errors propagate normally. EIO maps to no stable `ErrorKind` (it reads
+/// as `Other`), so it is matched by its raw errno.
+pub(crate) fn is_dead_terminal_error(error: &anyhow::Error) -> bool {
+    /// `errno.h` `EIO` on the supported Unix targets.
+    const EIO: i32 = 5;
+    fn is_dead_io(io_error: &std::io::Error) -> bool {
+        matches!(
+            io_error.kind(),
+            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::NotConnected
+        ) || io_error.raw_os_error() == Some(EIO)
+    }
+    // `downcast_ref` walks anyhow's context layers; the chain scan
+    // covers a source deeper than the wrapped error.
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(is_dead_io)
+        || error.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(is_dead_io)
+        })
 }
 
 /// The minimal terminal restore that cannot block meaningfully: cooked
 /// mode, leave the alternate screen, show the cursor, flush. No transcript
 /// flush, no daemon I/O — anything that could block is skipped by design.
-fn restore_terminal_best_effort() {
+/// Returns the stdout handle so the caller can append its own last word.
+fn restore_terminal_best_effort() -> std::io::Stdout {
     use std::io::Write;
     let mut out = std::io::stdout();
     // The enhanced-key modes release with the terminal (TS `stop`):
@@ -261,7 +310,7 @@ fn restore_terminal_best_effort() {
     let _ = crossterm::execute!(out, crossterm::terminal::LeaveAlternateScreen);
     let _ = crossterm::execute!(out, crossterm::cursor::Show);
     let _ = out.flush();
-    eprintln!("Prime Agent: shutdown stalled; forced exit.");
+    out
 }
 
 #[cfg(test)]
@@ -412,5 +461,28 @@ mod tests {
             guard.state.force_deadline_ms.load(Ordering::SeqCst),
             u64::MAX
         );
+    }
+
+    #[test]
+    fn dead_terminal_errors_classify_by_the_ts_errno_set() {
+        // TS `DEAD_TERMINAL_ERROR_CODES`: EIO, EPIPE, ENOTCONN.
+        assert!(is_dead_terminal_error(&anyhow::anyhow!(
+            std::io::Error::from_raw_os_error(5)
+        )));
+        assert!(is_dead_terminal_error(&anyhow::anyhow!(
+            std::io::Error::from(std::io::ErrorKind::BrokenPipe)
+        )));
+        assert!(is_dead_terminal_error(&anyhow::anyhow!(
+            std::io::Error::from(std::io::ErrorKind::NotConnected)
+        )));
+        // A wrapped cause classifies the same way (a paint error carries
+        // the io error in its chain).
+        let wrapped = anyhow::anyhow!("paint failed").context(std::io::Error::from_raw_os_error(5));
+        assert!(is_dead_terminal_error(&wrapped));
+        // Other write errors stay ordinary errors.
+        assert!(!is_dead_terminal_error(&anyhow::anyhow!(
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+        )));
+        assert!(!is_dead_terminal_error(&anyhow::anyhow!("no terminal")));
     }
 }

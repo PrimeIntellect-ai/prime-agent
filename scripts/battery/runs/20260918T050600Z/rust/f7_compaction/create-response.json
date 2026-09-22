@@ -1,0 +1,37 @@
+{
+ "command": "create",
+ "data": {
+  "activeSessionId": "2ccccdc027ec",
+  "activity": "idle",
+  "attachedClients": 0,
+  "created": "2026-09-18T05:07:16.980Z",
+  "cwd": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260918T050600Z/rust/work",
+  "hasRegisteredCronJob": false,
+  "id": "2ccccdc027ec",
+  "isBashRunning": false,
+  "isCompacting": false,
+  "isSessionActive": false,
+  "isStreaming": false,
+  "lastActivityAt": "2026-09-18T05:07:17.012Z",
+  "lifecycle": "resident",
+  "messageCount": 0,
+  "modified": "2026-09-18T05:07:17.012Z",
+  "rlmDepth": 0,
+  "runtimeKind": "top-level",
+  "sessionActions": {
+   "followUps": [],
+   "queuedCount": 0,
+   "steering": []
+  },
+  "sessionFile": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260918T050600Z/rust/agent/sessions/01a0b2e9-6b74-756b-a80d-eb06ccf5b2eb.jsonl",
+  "sessionId": "01a0b2e9-6b74-756b-a80d-eb06ccf5b2eb",
+  "sessionName": "battery-compact",
+  "thinkingLevel": "off",
+  "unfinishedActionCount": 0,
+  "workerPid": 1015886,
+  "workerState": "ready"
+ },
+ "id": "c1",
+ "success": true,
+ "type": "response"
+}

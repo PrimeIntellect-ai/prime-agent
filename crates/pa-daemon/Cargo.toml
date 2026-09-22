@@ -10,6 +10,7 @@ pa-types = { path = "../pa-types" }
 pa-core = { path = "../pa-core" }
 pa-agent = { path = "../pa-agent" }
 pa-ai = { path = "../pa-ai" }
+pa-models = { path = "../pa-models" }
 pa-telemetry = { path = "../pa-telemetry" }
 anyhow = { workspace = true }
 futures = { workspace = true }

@@ -1,0 +1,56 @@
+[
+ {
+  "type": "assistant_error",
+  "overflow": true
+ },
+ {
+  "type": "assistant_error",
+  "overflow": true
+ },
+ {
+  "type": "compaction_start",
+  "reason": "overflow"
+ },
+ {
+  "type": "compaction_end",
+  "reason": "overflow",
+  "willRetry": true,
+  "hasResult": true,
+  "errorMessage": null,
+  "errorSeverity": null
+ },
+ {
+  "type": "assistant_error",
+  "overflow": true
+ },
+ {
+  "type": "assistant_error",
+  "overflow": true
+ },
+ {
+  "type": "compaction_outcome",
+  "content": "Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.",
+  "details": {
+   "reason": "overflow",
+   "outcome": "failed"
+  },
+  "display": true
+ },
+ {
+  "type": "compaction_outcome",
+  "content": "Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.",
+  "details": {
+   "reason": "overflow",
+   "outcome": "failed"
+  },
+  "display": true
+ },
+ {
+  "type": "compaction_end",
+  "reason": "overflow",
+  "willRetry": false,
+  "hasResult": false,
+  "errorMessage": "Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.",
+  "errorSeverity": null
+ }
+]

@@ -1,0 +1,19 @@
+{
+ "argv": [
+  "/home/ubuntu/.local/share/prime-agent/releases/0.9.5-linux-x64-bc4b0ed791d1e8b3b5d6a95249a60306d9579fc0d6038e5d7d82f068d81f008d/prime-agent",
+  "-p",
+  "--daemon-socket",
+  "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/daemon.sock",
+  "--provider",
+  "prime-inference",
+  "--model",
+  "mock-1",
+  "--offline",
+  "Run the tool"
+ ],
+ "exit_code": 0,
+ "stdout": "tool turn done\n",
+ "stderr": "",
+ "duration_s": 28.78,
+ "timeout": false
+}

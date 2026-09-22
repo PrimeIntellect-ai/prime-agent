@@ -1,0 +1,6 @@
+{"activeSessionId":"1e70a567cf64","busy":true,"operation":"create","recordedAt":"2026-09-20T03:26:55.829Z","sessionFile":"/tmp/auto-compact-battery/20260920T032552Z/20260920T032554Z/rust/agent/sessions/01a0bcda-4342-779f-b44e-e6cf2add5b95.jsonl","sessionId":"01a0bcda-4342-779f-b44e-e6cf2add5b95"}
+{"active_session_id":"1e70a567cf64","follow_up":[],"recorded_at":"2026-09-20T03:26:55.846Z","steering":["f14 auto seed turn"],"type":"queue_snapshot","version":1}
+{"active_session_id":"1e70a567cf64","follow_up":[],"recorded_at":"2026-09-20T03:26:55.895Z","steering":[],"type":"queue_snapshot","version":1}
+{"active_session_id":"1e70a567cf64","follow_up":[],"recorded_at":"2026-09-20T03:27:03.472Z","steering":["f14 threshold crossing turn"],"type":"queue_snapshot","version":1}
+{"active_session_id":"1e70a567cf64","follow_up":[],"recorded_at":"2026-09-20T03:27:03.568Z","steering":[],"type":"queue_snapshot","version":1}
+{"activeSessionId":"1e70a567cf64","busy":false,"operation":"shutdown","recordedAt":"2026-09-20T03:27:09.008Z","sessionFile":"/tmp/auto-compact-battery/20260920T032552Z/20260920T032554Z/rust/agent/sessions/01a0bcda-4342-779f-b44e-e6cf2add5b95.jsonl","sessionId":"01a0bcda-4342-779f-b44e-e6cf2add5b95"}

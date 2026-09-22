@@ -1,0 +1,1915 @@
+pa-daemon client connection error: Broken pipe (os error 32)
+› setting up python kernel (one-time, ~30s)…
+rebuilding kernel venv
+Python 3.11 is already installed
+Using CPython 3.11.16
+Creating virtual environment with seed packages at: /home/ubuntu/.prime/agent/kernel-venv
+ + packaging==26.3
+ + pip==26.2.1
+ + setuptools==84.0.0
+ + wheel==0.48.0
+Activate with: source /home/ubuntu/.prime/agent/kernel-venv/bin/activate
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 50 packages in 67ms
+   Building prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+      Built prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+Prepared 1 package in 387ms
+Installed 50 packages in 105ms
+ + annotated-types==0.8.0
+ + anyio==4.15.1
+ + attrs==26.1.0
+ + beautifulsoup4==4.15.0
+ + certifi==2026.7.22
+ + cffi==2.1.1
+ + charset-normalizer==3.5.1
+ + click==8.5.0
+ + cryptography==50.0.1
+ + dill==0.4.1
+ + docstring-parser==0.18.0
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpcore2==2.13.0
+ + httpx==0.28.1
+ + httpx2==2.13.0
+ + idna==3.20
+ + jsonschema==4.26.0
+ + jsonschema-specifications==2025.9.1
+ + lxml==6.1.3
+ + mcp==2.2.0
+ + mcp-types==2.2.0
+ + numpy==2.4.6
+ + opentelemetry-api==1.44.0
+ + pandas==3.0.6
+ + prime-agent-runtime==0.1.0 (from file:///home/ubuntu/prime-agent-rs/prime-agent-runtime)
+ + pycparser==3.0
+ + pydantic==2.13.5
+ + pydantic-core==2.46.5
+ + pyjwt==2.14.0
+ + python-dateutil==2.9.0.post0
+ + python-dotenv==1.2.3
+ + python-multipart==0.0.32
+ + pyyaml==6.0.3
+ + referencing==0.37.0
+ + requests==2.34.2
+ + rpds-py==2026.6.3
+ + scipy==1.17.1
+ + six==1.17.0
+ + soupsieve==2.9.2
+ + sse-starlette==3.4.11
+ + starlette==1.6.0
+ + tomli==2.4.1
+ + truststore==0.10.4
+ + typeguard==4.6.0
+ + typing-extensions==4.16.0
+ + typing-inspection==0.4.4
+ + tyro==1.0.16
+ + urllib3==2.8.0
+ + uvicorn==0.53.0
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+      Built agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+Prepared 1 package in 374ms
+Installed 1 package in 0.71ms
+ + agent-message==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-message)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 2ms
+   Building agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+      Built agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+Prepared 1 package in 611ms
+Installed 1 package in 0.78ms
+ + agent-observe==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-observe)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 34 packages in 149ms
+   Building prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+      Built prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+Prepared 1 package in 353ms
+Installed 2 packages in 5ms
+ + pillow==12.3.0
+ + prime-agent-skill-attach-image==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/attach-image)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 17ms
+   Building compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+      Built compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+Prepared 1 package in 380ms
+Installed 1 package in 0.61ms
+ + compact==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/compact)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 10ms
+   Building edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+      Built edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+Prepared 1 package in 432ms
+Installed 1 package in 4ms
+ + edit==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/edit)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 16ms
+   Building goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+      Built goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+Prepared 1 package in 823ms
+Installed 1 package in 0.64ms
+ + goal==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/goal)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+      Built refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+Prepared 1 package in 482ms
+Installed 1 package in 0.77ms
+ + refine==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/refine)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+      Built rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+Prepared 1 package in 378ms
+Installed 1 package in 0.67ms
+ + rlm-heartbeat==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 36 packages in 282ms
+   Building prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+      Built prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+Prepared 1 package in 409ms
+Installed 1 package in 0.85ms
+ + prime-agent-skill-websearch==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/websearch)
+✓ ready
+✓ ready
+› setting up python kernel (one-time, ~30s)…
+rebuilding kernel venv
+Python 3.11 is already installed
+Using CPython 3.11.16
+Creating virtual environment with seed packages at: /home/ubuntu/.prime/agent/kernel-venv
+ + packaging==26.3
+ + pip==26.2.1
+ + setuptools==84.0.0
+ + wheel==0.48.0
+Activate with: source /home/ubuntu/.prime/agent/kernel-venv/bin/activate
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 50 packages in 73ms
+   Building prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+      Built prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+Prepared 1 package in 368ms
+Installed 50 packages in 92ms
+ + annotated-types==0.8.0
+ + anyio==4.15.1
+ + attrs==26.1.0
+ + beautifulsoup4==4.15.0
+ + certifi==2026.7.22
+ + cffi==2.1.1
+ + charset-normalizer==3.5.1
+ + click==8.5.0
+ + cryptography==50.0.1
+ + dill==0.4.1
+ + docstring-parser==0.18.0
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpcore2==2.13.0
+ + httpx==0.28.1
+ + httpx2==2.13.0
+ + idna==3.20
+ + jsonschema==4.26.0
+ + jsonschema-specifications==2025.9.1
+ + lxml==6.1.3
+ + mcp==2.2.0
+ + mcp-types==2.2.0
+ + numpy==2.4.6
+ + opentelemetry-api==1.44.0
+ + pandas==3.0.6
+ + prime-agent-runtime==0.1.0 (from file:///home/ubuntu/prime-agent-rs/prime-agent-runtime)
+ + pycparser==3.0
+ + pydantic==2.13.5
+ + pydantic-core==2.46.5
+ + pyjwt==2.14.0
+ + python-dateutil==2.9.0.post0
+ + python-dotenv==1.2.3
+ + python-multipart==0.0.32
+ + pyyaml==6.0.3
+ + referencing==0.37.0
+ + requests==2.34.2
+ + rpds-py==2026.6.3
+ + scipy==1.17.1
+ + six==1.17.0
+ + soupsieve==2.9.2
+ + sse-starlette==3.4.11
+ + starlette==1.6.0
+ + tomli==2.4.1
+ + truststore==0.10.4
+ + typeguard==4.6.0
+ + typing-extensions==4.16.0
+ + typing-inspection==0.4.4
+ + tyro==1.0.16
+ + urllib3==2.8.0
+ + uvicorn==0.53.0
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 6ms
+   Building agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+      Built agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+Prepared 1 package in 549ms
+Installed 1 package in 0.69ms
+ + agent-message==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-message)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 14ms
+   Building agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+      Built agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+Prepared 1 package in 518ms
+Installed 1 package in 0.69ms
+ + agent-observe==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-observe)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 34 packages in 177ms
+   Building prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+      Built prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+Prepared 1 package in 399ms
+Installed 2 packages in 3ms
+ + pillow==12.3.0
+ + prime-agent-skill-attach-image==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/attach-image)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 5ms
+   Building compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+      Built compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+Prepared 1 package in 419ms
+Installed 1 package in 0.67ms
+ + compact==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/compact)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 6ms
+   Building edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+      Built edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+Prepared 1 package in 357ms
+Installed 1 package in 0.83ms
+ + edit==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/edit)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 12ms
+   Building goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+      Built goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+Prepared 1 package in 414ms
+Installed 1 package in 0.71ms
+ + goal==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/goal)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 20ms
+   Building refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+      Built refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+Prepared 1 package in 386ms
+Installed 1 package in 0.75ms
+ + refine==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/refine)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+      Built rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+Prepared 1 package in 582ms
+Installed 1 package in 0.68ms
+ + rlm-heartbeat==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 36 packages in 181ms
+   Building prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+      Built prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+Prepared 1 package in 471ms
+Installed 1 package in 0.91ms
+ + prime-agent-skill-websearch==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/websearch)
+✓ ready
+› setting up python kernel (one-time, ~30s)…
+rebuilding kernel venv
+Python 3.11 is already installed
+Using CPython 3.11.16
+Creating virtual environment with seed packages at: /home/ubuntu/.prime/agent/kernel-venv
+ + packaging==26.3
+ + pip==26.2.1
+ + setuptools==84.0.0
+ + wheel==0.48.0
+Activate with: source /home/ubuntu/.prime/agent/kernel-venv/bin/activate
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 50 packages in 39ms
+   Building prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+      Built prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+Prepared 1 package in 482ms
+Installed 50 packages in 156ms
+ + annotated-types==0.8.0
+ + anyio==4.15.1
+ + attrs==26.1.0
+ + beautifulsoup4==4.15.0
+ + certifi==2026.7.22
+ + cffi==2.1.1
+ + charset-normalizer==3.5.1
+ + click==8.5.0
+ + cryptography==50.0.1
+ + dill==0.4.1
+ + docstring-parser==0.18.0
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpcore2==2.13.0
+ + httpx==0.28.1
+ + httpx2==2.13.0
+ + idna==3.20
+ + jsonschema==4.26.0
+ + jsonschema-specifications==2025.9.1
+ + lxml==6.1.3
+ + mcp==2.2.0
+ + mcp-types==2.2.0
+ + numpy==2.4.6
+ + opentelemetry-api==1.44.0
+ + pandas==3.0.6
+ + prime-agent-runtime==0.1.0 (from file:///home/ubuntu/prime-agent-rs/prime-agent-runtime)
+ + pycparser==3.0
+ + pydantic==2.13.5
+ + pydantic-core==2.46.5
+ + pyjwt==2.14.0
+ + python-dateutil==2.9.0.post0
+ + python-dotenv==1.2.3
+ + python-multipart==0.0.32
+ + pyyaml==6.0.3
+ + referencing==0.37.0
+ + requests==2.34.2
+ + rpds-py==2026.6.3
+ + scipy==1.17.1
+ + six==1.17.0
+ + soupsieve==2.9.2
+ + sse-starlette==3.4.11
+ + starlette==1.6.0
+ + tomli==2.4.1
+ + truststore==0.10.4
+ + typeguard==4.6.0
+ + typing-extensions==4.16.0
+ + typing-inspection==0.4.4
+ + tyro==1.0.16
+ + urllib3==2.8.0
+ + uvicorn==0.53.0
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+      Built agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+Prepared 1 package in 650ms
+Installed 1 package in 0.72ms
+ + agent-message==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-message)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 13ms
+   Building agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+      Built agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+Prepared 1 package in 492ms
+Installed 1 package in 0.72ms
+ + agent-observe==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-observe)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 34 packages in 159ms
+   Building prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+      Built prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+Prepared 1 package in 425ms
+Installed 2 packages in 3ms
+ + pillow==12.3.0
+ + prime-agent-skill-attach-image==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/attach-image)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 15ms
+   Building compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+      Built compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+Prepared 1 package in 486ms
+Installed 1 package in 0.67ms
+ + compact==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/compact)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 12ms
+   Building edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+      Built edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+Prepared 1 package in 428ms
+Installed 1 package in 0.90ms
+ + edit==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/edit)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 6ms
+   Building goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+      Built goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+Prepared 1 package in 407ms
+Installed 1 package in 0.70ms
+ + goal==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/goal)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 5ms
+   Building refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+      Built refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+Prepared 1 package in 676ms
+Installed 1 package in 0.64ms
+ + refine==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/refine)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+      Built rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+Prepared 1 package in 397ms
+Installed 1 package in 0.65ms
+ + rlm-heartbeat==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 36 packages in 148ms
+   Building prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+      Built prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+Prepared 1 package in 536ms
+Installed 1 package in 0.84ms
+ + prime-agent-skill-websearch==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/websearch)
+✓ ready
+› setting up python kernel (one-time, ~30s)…
+rebuilding kernel venv
+Python 3.11 is already installed
+Using CPython 3.11.16
+Creating virtual environment with seed packages at: /home/ubuntu/.prime/agent/kernel-venv
+ + packaging==26.3
+ + pip==26.2.1
+ + setuptools==84.0.0
+ + wheel==0.48.0
+Activate with: source /home/ubuntu/.prime/agent/kernel-venv/bin/activate
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 50 packages in 39ms
+   Building prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+      Built prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+Prepared 1 package in 515ms
+Installed 50 packages in 152ms
+ + annotated-types==0.8.0
+ + anyio==4.15.1
+ + attrs==26.1.0
+ + beautifulsoup4==4.15.0
+ + certifi==2026.7.22
+ + cffi==2.1.1
+ + charset-normalizer==3.5.1
+ + click==8.5.0
+ + cryptography==50.0.1
+ + dill==0.4.1
+ + docstring-parser==0.18.0
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpcore2==2.13.0
+ + httpx==0.28.1
+ + httpx2==2.13.0
+ + idna==3.20
+ + jsonschema==4.26.0
+ + jsonschema-specifications==2025.9.1
+ + lxml==6.1.3
+ + mcp==2.2.0
+ + mcp-types==2.2.0
+ + numpy==2.4.6
+ + opentelemetry-api==1.44.0
+ + pandas==3.0.6
+ + prime-agent-runtime==0.1.0 (from file:///home/ubuntu/prime-agent-rs/prime-agent-runtime)
+ + pycparser==3.0
+ + pydantic==2.13.5
+ + pydantic-core==2.46.5
+ + pyjwt==2.14.0
+ + python-dateutil==2.9.0.post0
+ + python-dotenv==1.2.3
+ + python-multipart==0.0.32
+ + pyyaml==6.0.3
+ + referencing==0.37.0
+ + requests==2.34.2
+ + rpds-py==2026.6.3
+ + scipy==1.17.1
+ + six==1.17.0
+ + soupsieve==2.9.2
+ + sse-starlette==3.4.11
+ + starlette==1.6.0
+ + tomli==2.4.1
+ + truststore==0.10.4
+ + typeguard==4.6.0
+ + typing-extensions==4.16.0
+ + typing-inspection==0.4.4
+ + tyro==1.0.16
+ + urllib3==2.8.0
+ + uvicorn==0.53.0
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 40ms
+   Building agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+      Built agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+Prepared 1 package in 690ms
+Installed 1 package in 0.71ms
+ + agent-message==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-message)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 8ms
+   Building agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+      Built agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+Prepared 1 package in 427ms
+Installed 1 package in 0.68ms
+ + agent-observe==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-observe)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 34 packages in 137ms
+   Building prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+      Built prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+Prepared 1 package in 477ms
+Installed 2 packages in 3ms
+ + pillow==12.3.0
+ + prime-agent-skill-attach-image==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/attach-image)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 43ms
+   Building compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+      Built compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+Prepared 1 package in 589ms
+Installed 1 package in 0.68ms
+ + compact==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/compact)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 8ms
+   Building edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+      Built edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+Prepared 1 package in 361ms
+Installed 1 package in 1ms
+ + edit==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/edit)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 10ms
+   Building goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+      Built goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+Prepared 1 package in 370ms
+Installed 1 package in 0.71ms
+ + goal==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/goal)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 11ms
+   Building refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+      Built refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+Prepared 1 package in 442ms
+Installed 1 package in 0.76ms
+ + refine==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/refine)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 11ms
+   Building rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+      Built rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+Prepared 1 package in 445ms
+Installed 1 package in 0.71ms
+ + rlm-heartbeat==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 36 packages in 140ms
+   Building prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+      Built prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+Prepared 1 package in 367ms
+Installed 1 package in 0.92ms
+ + prime-agent-skill-websearch==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/websearch)
+✓ ready
+✓ ready
+✓ ready
+pa-daemon worker connection error: Connection reset by peer (os error 104)
+pa-daemon worker connection error: Connection reset by peer (os error 104)
+pa-daemon worker connection error: Connection reset by peer (os error 104)
+pa-daemon client connection error: Broken pipe (os error 32)
+› setting up python kernel (one-time, ~30s)…
+rebuilding kernel venv
+Python 3.11 is already installed
+Using CPython 3.11.16
+Creating virtual environment with seed packages at: /home/ubuntu/.prime/agent/kernel-venv
+ + packaging==26.3
+ + pip==26.2.1
+ + setuptools==84.0.0
+ + wheel==0.48.0
+Activate with: source /home/ubuntu/.prime/agent/kernel-venv/bin/activate
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 50 packages in 34ms
+   Building prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+      Built prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+Prepared 1 package in 426ms
+Installed 50 packages in 163ms
+ + annotated-types==0.8.0
+ + anyio==4.15.1
+ + attrs==26.1.0
+ + beautifulsoup4==4.15.0
+ + certifi==2026.7.22
+ + cffi==2.1.1
+ + charset-normalizer==3.5.1
+ + click==8.5.0
+ + cryptography==50.0.1
+ + dill==0.4.1
+ + docstring-parser==0.18.0
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpcore2==2.13.0
+ + httpx==0.28.1
+ + httpx2==2.13.0
+ + idna==3.20
+ + jsonschema==4.26.0
+ + jsonschema-specifications==2025.9.1
+ + lxml==6.1.3
+ + mcp==2.2.0
+ + mcp-types==2.2.0
+ + numpy==2.4.6
+ + opentelemetry-api==1.44.0
+ + pandas==3.0.6
+ + prime-agent-runtime==0.1.0 (from file:///home/ubuntu/prime-agent-rs/prime-agent-runtime)
+ + pycparser==3.0
+ + pydantic==2.13.5
+ + pydantic-core==2.46.5
+ + pyjwt==2.14.0
+ + python-dateutil==2.9.0.post0
+ + python-dotenv==1.2.3
+ + python-multipart==0.0.32
+ + pyyaml==6.0.3
+ + referencing==0.37.0
+ + requests==2.34.2
+ + rpds-py==2026.6.3
+ + scipy==1.17.1
+ + six==1.17.0
+ + soupsieve==2.9.2
+ + sse-starlette==3.4.11
+ + starlette==1.6.0
+ + tomli==2.4.1
+ + truststore==0.10.4
+ + typeguard==4.6.0
+ + typing-extensions==4.16.0
+ + typing-inspection==0.4.4
+ + tyro==1.0.16
+ + urllib3==2.8.0
+ + uvicorn==0.53.0
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 19ms
+   Building agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+      Built agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+Prepared 1 package in 482ms
+Installed 1 package in 0.75ms
+ + agent-message==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-message)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 17ms
+   Building agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+      Built agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+Prepared 1 package in 421ms
+Installed 1 package in 0.72ms
+ + agent-observe==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-observe)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 34 packages in 358ms
+   Building prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+      Built prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+Prepared 1 package in 438ms
+Installed 2 packages in 4ms
+ + pillow==12.3.0
+ + prime-agent-skill-attach-image==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/attach-image)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 18ms
+   Building compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+      Built compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+Prepared 1 package in 576ms
+Installed 1 package in 0.67ms
+ + compact==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/compact)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 23ms
+   Building edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+      Built edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+Prepared 1 package in 396ms
+Installed 1 package in 0.88ms
+ + edit==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/edit)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 4ms
+   Building goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+      Built goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+Prepared 1 package in 581ms
+Installed 1 package in 0.71ms
+ + goal==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/goal)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+      Built refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+Prepared 1 package in 667ms
+Installed 1 package in 0.75ms
+ + refine==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/refine)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 15ms
+   Building rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+      Built rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+Prepared 1 package in 393ms
+Installed 1 package in 0.75ms
+ + rlm-heartbeat==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 36 packages in 114ms
+   Building prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+      Built prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+Prepared 1 package in 401ms
+Installed 1 package in 0.87ms
+ + prime-agent-skill-websearch==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/websearch)
+✓ ready
+pa-daemon: auto-refinement after compaction failed: Refiner did not return a JSON object
+› setting up python kernel (one-time, ~30s)…
+rebuilding kernel venv
+Python 3.11 is already installed
+Using CPython 3.11.16
+Creating virtual environment with seed packages at: /home/ubuntu/.prime/agent/kernel-venv
+ + packaging==26.3
+ + pip==26.2.1
+ + setuptools==84.0.0
+ + wheel==0.48.0
+Activate with: source /home/ubuntu/.prime/agent/kernel-venv/bin/activate
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 50 packages in 88ms
+   Building prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+      Built prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+Prepared 1 package in 688ms
+Installed 50 packages in 108ms
+ + annotated-types==0.8.0
+ + anyio==4.15.1
+ + attrs==26.1.0
+ + beautifulsoup4==4.15.0
+ + certifi==2026.7.22
+ + cffi==2.1.1
+ + charset-normalizer==3.5.1
+ + click==8.5.0
+ + cryptography==50.0.1
+ + dill==0.4.1
+ + docstring-parser==0.18.0
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpcore2==2.13.0
+ + httpx==0.28.1
+ + httpx2==2.13.0
+ + idna==3.20
+ + jsonschema==4.26.0
+ + jsonschema-specifications==2025.9.1
+ + lxml==6.1.3
+ + mcp==2.2.0
+ + mcp-types==2.2.0
+ + numpy==2.4.6
+ + opentelemetry-api==1.44.0
+ + pandas==3.0.6
+ + prime-agent-runtime==0.1.0 (from file:///home/ubuntu/prime-agent-rs/prime-agent-runtime)
+ + pycparser==3.0
+ + pydantic==2.13.5
+ + pydantic-core==2.46.5
+ + pyjwt==2.14.0
+ + python-dateutil==2.9.0.post0
+ + python-dotenv==1.2.3
+ + python-multipart==0.0.32
+ + pyyaml==6.0.3
+ + referencing==0.37.0
+ + requests==2.34.2
+ + rpds-py==2026.6.3
+ + scipy==1.17.1
+ + six==1.17.0
+ + soupsieve==2.9.2
+ + sse-starlette==3.4.11
+ + starlette==1.6.0
+ + tomli==2.4.1
+ + truststore==0.10.4
+ + typeguard==4.6.0
+ + typing-extensions==4.16.0
+ + typing-inspection==0.4.4
+ + tyro==1.0.16
+ + urllib3==2.8.0
+ + uvicorn==0.53.0
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 6ms
+   Building agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+      Built agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+Prepared 1 package in 505ms
+Installed 1 package in 0.68ms
+ + agent-message==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-message)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 20ms
+   Building agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+      Built agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+Prepared 1 package in 719ms
+Installed 1 package in 0.68ms
+ + agent-observe==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-observe)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 34 packages in 165ms
+   Building prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+      Built prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+Prepared 1 package in 546ms
+Installed 2 packages in 3ms
+ + pillow==12.3.0
+ + prime-agent-skill-attach-image==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/attach-image)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 8ms
+   Building compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+      Built compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+Prepared 1 package in 425ms
+Installed 1 package in 0.67ms
+ + compact==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/compact)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 20ms
+   Building edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+      Built edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+Prepared 1 package in 766ms
+Installed 1 package in 0.83ms
+ + edit==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/edit)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 4ms
+   Building goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+      Built goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+Prepared 1 package in 701ms
+Installed 1 package in 0.75ms
+ + goal==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/goal)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 36ms
+   Building refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+      Built refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+Prepared 1 package in 673ms
+Installed 1 package in 0.71ms
+ + refine==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/refine)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 3ms
+   Building rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+      Built rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+Prepared 1 package in 655ms
+Installed 1 package in 0.70ms
+ + rlm-heartbeat==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 36 packages in 151ms
+   Building prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+      Built prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+Prepared 1 package in 645ms
+Installed 1 package in 0.82ms
+ + prime-agent-skill-websearch==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/websearch)
+✓ ready
+✓ ready
+› setting up python kernel (one-time, ~30s)…
+rebuilding kernel venv
+Python 3.11 is already installed
+Using CPython 3.11.16
+Creating virtual environment with seed packages at: /home/ubuntu/.prime/agent/kernel-venv
+ + packaging==26.3
+ + pip==26.2.1
+ + setuptools==84.0.0
+ + wheel==0.48.0
+Activate with: source /home/ubuntu/.prime/agent/kernel-venv/bin/activate
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 50 packages in 145ms
+   Building prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+      Built prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+Prepared 1 package in 818ms
+Installed 50 packages in 154ms
+ + annotated-types==0.8.0
+ + anyio==4.15.1
+ + attrs==26.1.0
+ + beautifulsoup4==4.15.0
+ + certifi==2026.7.22
+ + cffi==2.1.1
+ + charset-normalizer==3.5.1
+ + click==8.5.0
+ + cryptography==50.0.1
+ + dill==0.4.1
+ + docstring-parser==0.18.0
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpcore2==2.13.0
+ + httpx==0.28.1
+ + httpx2==2.13.0
+ + idna==3.20
+ + jsonschema==4.26.0
+ + jsonschema-specifications==2025.9.1
+ + lxml==6.1.3
+ + mcp==2.2.0
+ + mcp-types==2.2.0
+ + numpy==2.4.6
+ + opentelemetry-api==1.44.0
+ + pandas==3.0.6
+ + prime-agent-runtime==0.1.0 (from file:///home/ubuntu/prime-agent-rs/prime-agent-runtime)
+ + pycparser==3.0
+ + pydantic==2.13.5
+ + pydantic-core==2.46.5
+ + pyjwt==2.14.0
+ + python-dateutil==2.9.0.post0
+ + python-dotenv==1.2.3
+ + python-multipart==0.0.32
+ + pyyaml==6.0.3
+ + referencing==0.37.0
+ + requests==2.34.2
+ + rpds-py==2026.6.3
+ + scipy==1.17.1
+ + six==1.17.0
+ + soupsieve==2.9.2
+ + sse-starlette==3.4.11
+ + starlette==1.6.0
+ + tomli==2.4.1
+ + truststore==0.10.4
+ + typeguard==4.6.0
+ + typing-extensions==4.16.0
+ + typing-inspection==0.4.4
+ + tyro==1.0.16
+ + urllib3==2.8.0
+ + uvicorn==0.53.0
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+      Built agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+Prepared 1 package in 457ms
+Installed 1 package in 0.91ms
+ + agent-message==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-message)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+      Built agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+Prepared 1 package in 562ms
+Installed 1 package in 0.73ms
+ + agent-observe==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-observe)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 34 packages in 250ms
+   Building prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+      Built prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+Prepared 1 package in 388ms
+Installed 2 packages in 3ms
+ + pillow==12.3.0
+ + prime-agent-skill-attach-image==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/attach-image)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+      Built compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+Prepared 1 package in 511ms
+Installed 1 package in 0.69ms
+ + compact==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/compact)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 7ms
+   Building edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+      Built edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+Prepared 1 package in 1.17s
+Installed 1 package in 0.84ms
+ + edit==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/edit)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 51ms
+   Building goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+      Built goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+Prepared 1 package in 570ms
+Installed 1 package in 1ms
+ + goal==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/goal)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 9ms
+   Building refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+      Built refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+Prepared 1 package in 400ms
+Installed 1 package in 0.73ms
+ + refine==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/refine)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 6ms
+   Building rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+      Built rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+Prepared 1 package in 645ms
+Installed 1 package in 0.67ms
+ + rlm-heartbeat==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 36 packages in 115ms
+   Building prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+      Built prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+Prepared 1 package in 560ms
+Installed 1 package in 0.81ms
+ + prime-agent-skill-websearch==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/websearch)
+✓ ready
+pa-daemon: requested refinement failed: Local harness refinement requires a persisted session; use global refinement instead.
+› setting up python kernel (one-time, ~30s)…
+rebuilding kernel venv
+Python 3.11 is already installed
+Using CPython 3.11.16
+Creating virtual environment with seed packages at: /home/ubuntu/.prime/agent/kernel-venv
+ + packaging==26.3
+ + pip==26.2.1
+ + setuptools==84.0.0
+ + wheel==0.48.0
+Activate with: source /home/ubuntu/.prime/agent/kernel-venv/bin/activate
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 50 packages in 56ms
+   Building prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+      Built prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+Prepared 1 package in 598ms
+Installed 50 packages in 120ms
+ + annotated-types==0.8.0
+ + anyio==4.15.1
+ + attrs==26.1.0
+ + beautifulsoup4==4.15.0
+ + certifi==2026.7.22
+ + cffi==2.1.1
+ + charset-normalizer==3.5.1
+ + click==8.5.0
+ + cryptography==50.0.1
+ + dill==0.4.1
+ + docstring-parser==0.18.0
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpcore2==2.13.0
+ + httpx==0.28.1
+ + httpx2==2.13.0
+ + idna==3.20
+ + jsonschema==4.26.0
+ + jsonschema-specifications==2025.9.1
+ + lxml==6.1.3
+ + mcp==2.2.0
+ + mcp-types==2.2.0
+ + numpy==2.4.6
+ + opentelemetry-api==1.44.0
+ + pandas==3.0.6
+ + prime-agent-runtime==0.1.0 (from file:///home/ubuntu/prime-agent-rs/prime-agent-runtime)
+ + pycparser==3.0
+ + pydantic==2.13.5
+ + pydantic-core==2.46.5
+ + pyjwt==2.14.0
+ + python-dateutil==2.9.0.post0
+ + python-dotenv==1.2.3
+ + python-multipart==0.0.32
+ + pyyaml==6.0.3
+ + referencing==0.37.0
+ + requests==2.34.2
+ + rpds-py==2026.6.3
+ + scipy==1.17.1
+ + six==1.17.0
+ + soupsieve==2.9.2
+ + sse-starlette==3.4.11
+ + starlette==1.6.0
+ + tomli==2.4.1
+ + truststore==0.10.4
+ + typeguard==4.6.0
+ + typing-extensions==4.16.0
+ + typing-inspection==0.4.4
+ + tyro==1.0.16
+ + urllib3==2.8.0
+ + uvicorn==0.53.0
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 9ms
+   Building agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+      Built agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+Prepared 1 package in 505ms
+Installed 1 package in 0.77ms
+ + agent-message==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-message)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 6ms
+   Building agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+      Built agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+Prepared 1 package in 552ms
+Installed 1 package in 0.74ms
+ + agent-observe==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-observe)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 34 packages in 293ms
+   Building prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+      Built prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+Prepared 1 package in 1.05s
+Installed 2 packages in 3ms
+ + pillow==12.3.0
+ + prime-agent-skill-attach-image==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/attach-image)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 43ms
+   Building compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+      Built compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+Prepared 1 package in 1.23s
+Installed 1 package in 0.68ms
+ + compact==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/compact)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 24ms
+   Building edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+      Built edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+Prepared 1 package in 1.09s
+Installed 1 package in 0.82ms
+ + edit==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/edit)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 18ms
+   Building goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+      Built goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+Prepared 1 package in 1.58s
+Installed 1 package in 0.73ms
+ + goal==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/goal)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 34ms
+   Building refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+      Built refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+Prepared 1 package in 1.92s
+Installed 1 package in 1ms
+ + refine==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/refine)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 35ms
+   Building rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+      Built rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+Prepared 1 package in 1.32s
+Installed 1 package in 6ms
+ + rlm-heartbeat==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 36 packages in 281ms
+   Building prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+      Built prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+Prepared 1 package in 545ms
+Installed 1 package in 0.82ms
+ + prime-agent-skill-websearch==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/websearch)
+✓ ready
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 19ms
+   Building agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+      Built agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+Prepared 1 package in 840ms
+Uninstalled 1 package in 0.35ms
+Installed 1 package in 0.62ms
+ - agent-message==0.1.0 (from file:///home/ubuntu/lane-worktrees/tui-polish/skills/agent-message)
+ + agent-message==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-message)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 15ms
+   Building agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+      Built agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+Prepared 1 package in 816ms
+Uninstalled 1 package in 0.58ms
+Installed 1 package in 0.65ms
+ - agent-observe==0.1.0 (from file:///home/ubuntu/lane-worktrees/tui-polish/skills/agent-observe)
+ + agent-observe==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-observe)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 34 packages in 218ms
+   Building prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+      Built prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+Prepared 1 package in 583ms
+Uninstalled 1 package in 0.45ms
+Installed 1 package in 0.97ms
+ - prime-agent-skill-attach-image==0.1.0 (from file:///home/ubuntu/lane-worktrees/tui-polish/skills/attach-image)
+ + prime-agent-skill-attach-image==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/attach-image)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 8ms
+   Building compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+      Built compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+Prepared 1 package in 425ms
+Uninstalled 1 package in 0.44ms
+Installed 1 package in 0.74ms
+ - compact==0.1.0 (from file:///home/ubuntu/lane-worktrees/tui-polish/skills/compact)
+ + compact==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/compact)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 12ms
+   Building edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+      Built edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+Prepared 1 package in 513ms
+Uninstalled 1 package in 0.46ms
+Installed 1 package in 1ms
+ - edit==0.1.0 (from file:///home/ubuntu/lane-worktrees/tui-polish/skills/edit)
+ + edit==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/edit)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 9ms
+   Building goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+      Built goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+Prepared 1 package in 624ms
+Uninstalled 1 package in 0.38ms
+Installed 1 package in 0.67ms
+ - goal==0.1.0 (from file:///home/ubuntu/lane-worktrees/tui-polish/skills/goal)
+ + goal==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/goal)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 2ms
+   Building refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+      Built refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+Prepared 1 package in 824ms
+Uninstalled 1 package in 0.69ms
+Installed 1 package in 0.71ms
+ - refine==0.1.0 (from file:///home/ubuntu/lane-worktrees/tui-polish/skills/refine)
+ + refine==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/refine)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 7ms
+   Building rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+      Built rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+Prepared 1 package in 499ms
+Uninstalled 1 package in 0.35ms
+Installed 1 package in 0.70ms
+ - rlm-heartbeat==0.1.0 (from file:///home/ubuntu/lane-worktrees/tui-polish/skills/rlm-heartbeat)
+ + rlm-heartbeat==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 36 packages in 187ms
+   Building prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+      Built prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+Prepared 1 package in 732ms
+Uninstalled 1 package in 0.42ms
+Installed 1 package in 0.86ms
+ - prime-agent-skill-websearch==0.1.0 (from file:///home/ubuntu/lane-worktrees/tui-polish/skills/websearch)
+ + prime-agent-skill-websearch==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/websearch)
+✓ ready
+› setting up python kernel (one-time, ~30s)…
+rebuilding kernel venv
+Python 3.11 is already installed
+Using CPython 3.11.16
+Creating virtual environment with seed packages at: /home/ubuntu/.prime/agent/kernel-venv
+ + packaging==26.3
+ + pip==26.2.1
+ + setuptools==84.0.0
+ + wheel==0.48.0
+Activate with: source /home/ubuntu/.prime/agent/kernel-venv/bin/activate
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 50 packages in 47ms
+   Building prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+      Built prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+Prepared 1 package in 469ms
+Installed 50 packages in 166ms
+ + annotated-types==0.8.0
+ + anyio==4.15.1
+ + attrs==26.1.0
+ + beautifulsoup4==4.15.0
+ + certifi==2026.7.22
+ + cffi==2.1.1
+ + charset-normalizer==3.5.1
+ + click==8.5.0
+ + cryptography==50.0.1
+ + dill==0.4.1
+ + docstring-parser==0.18.0
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpcore2==2.13.0
+ + httpx==0.28.1
+ + httpx2==2.13.0
+ + idna==3.20
+ + jsonschema==4.26.0
+ + jsonschema-specifications==2025.9.1
+ + lxml==6.1.3
+ + mcp==2.2.0
+ + mcp-types==2.2.0
+ + numpy==2.4.6
+ + opentelemetry-api==1.44.0
+ + pandas==3.0.6
+ + prime-agent-runtime==0.1.0 (from file:///home/ubuntu/prime-agent-rs/prime-agent-runtime)
+ + pycparser==3.0
+ + pydantic==2.13.5
+ + pydantic-core==2.46.5
+ + pyjwt==2.14.0
+ + python-dateutil==2.9.0.post0
+ + python-dotenv==1.2.3
+ + python-multipart==0.0.32
+ + pyyaml==6.0.3
+ + referencing==0.37.0
+ + requests==2.34.2
+ + rpds-py==2026.6.3
+ + scipy==1.17.1
+ + six==1.17.0
+ + soupsieve==2.9.2
+ + sse-starlette==3.4.11
+ + starlette==1.6.0
+ + tomli==2.4.1
+ + truststore==0.10.4
+ + typeguard==4.6.0
+ + typing-extensions==4.16.0
+ + typing-inspection==0.4.4
+ + tyro==1.0.16
+ + urllib3==2.8.0
+ + uvicorn==0.53.0
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 21ms
+   Building agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+      Built agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+Prepared 1 package in 395ms
+Installed 1 package in 0.72ms
+ + agent-message==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-message)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 11ms
+   Building agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+      Built agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+Prepared 1 package in 759ms
+Installed 1 package in 0.69ms
+ + agent-observe==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-observe)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 34 packages in 250ms
+   Building prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+      Built prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+Prepared 1 package in 677ms
+Installed 2 packages in 11ms
+ + pillow==12.3.0
+ + prime-agent-skill-attach-image==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/attach-image)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 78ms
+   Building compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+      Built compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+Prepared 1 package in 1.50s
+Installed 1 package in 0.77ms
+ + compact==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/compact)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 5ms
+   Building edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+      Built edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+Prepared 1 package in 1.13s
+Installed 1 package in 0.96ms
+ + edit==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/edit)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 10ms
+   Building goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+      Built goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+Prepared 1 package in 674ms
+Installed 1 package in 0.75ms
+ + goal==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/goal)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 7ms
+   Building refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+      Built refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+Prepared 1 package in 558ms
+Installed 1 package in 0.70ms
+ + refine==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/refine)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+      Built rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+Prepared 1 package in 976ms
+Installed 1 package in 0.70ms
+ + rlm-heartbeat==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 36 packages in 177ms
+   Building prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+      Built prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+Prepared 1 package in 720ms
+Installed 1 package in 1ms
+ + prime-agent-skill-websearch==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/websearch)
+✓ ready
+› setting up python kernel (one-time, ~30s)…
+rebuilding kernel venv
+Python 3.11 is already installed
+Using CPython 3.11.16
+Creating virtual environment with seed packages at: /home/ubuntu/.prime/agent/kernel-venv
+ + packaging==26.3
+ + pip==26.2.1
+ + setuptools==84.0.0
+ + wheel==0.48.0
+Activate with: source /home/ubuntu/.prime/agent/kernel-venv/bin/activate
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 50 packages in 106ms
+   Building prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+      Built prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+Prepared 1 package in 1.44s
+Installed 50 packages in 182ms
+ + annotated-types==0.8.0
+ + anyio==4.15.1
+ + attrs==26.1.0
+ + beautifulsoup4==4.15.0
+ + certifi==2026.7.22
+ + cffi==2.1.1
+ + charset-normalizer==3.5.1
+ + click==8.5.0
+ + cryptography==50.0.1
+ + dill==0.4.1
+ + docstring-parser==0.18.0
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpcore2==2.13.0
+ + httpx==0.28.1
+ + httpx2==2.13.0
+ + idna==3.20
+ + jsonschema==4.26.0
+ + jsonschema-specifications==2025.9.1
+ + lxml==6.1.3
+ + mcp==2.2.0
+ + mcp-types==2.2.0
+ + numpy==2.4.6
+ + opentelemetry-api==1.44.0
+ + pandas==3.0.6
+ + prime-agent-runtime==0.1.0 (from file:///home/ubuntu/prime-agent-rs/prime-agent-runtime)
+ + pycparser==3.0
+ + pydantic==2.13.5
+ + pydantic-core==2.46.5
+ + pyjwt==2.14.0
+ + python-dateutil==2.9.0.post0
+ + python-dotenv==1.2.3
+ + python-multipart==0.0.32
+ + pyyaml==6.0.3
+ + referencing==0.37.0
+ + requests==2.34.2
+ + rpds-py==2026.6.3
+ + scipy==1.17.1
+ + six==1.17.0
+ + soupsieve==2.9.2
+ + sse-starlette==3.4.11
+ + starlette==1.6.0
+ + tomli==2.4.1
+ + truststore==0.10.4
+ + typeguard==4.6.0
+ + typing-extensions==4.16.0
+ + typing-inspection==0.4.4
+ + tyro==1.0.16
+ + urllib3==2.8.0
+ + uvicorn==0.53.0
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 7ms
+   Building agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+      Built agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+Prepared 1 package in 935ms
+Installed 1 package in 0.70ms
+ + agent-message==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-message)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 67ms
+   Building agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+      Built agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+Prepared 1 package in 3.83s
+Installed 1 package in 0.75ms
+ + agent-observe==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-observe)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 34 packages in 868ms
+   Building prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+      Built prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+Prepared 1 package in 1.08s
+Installed 2 packages in 3ms
+ + pillow==12.3.0
+ + prime-agent-skill-attach-image==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/attach-image)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 42ms
+   Building compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+      Built compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+Prepared 1 package in 1.29s
+Installed 1 package in 0.70ms
+ + compact==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/compact)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 3ms
+   Building edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+      Built edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+Prepared 1 package in 1.37s
+Installed 1 package in 0.91ms
+ + edit==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/edit)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 25ms
+   Building goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+      Built goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+Prepared 1 package in 408ms
+Installed 1 package in 0.92ms
+ + goal==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/goal)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 21ms
+   Building refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+      Built refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+Prepared 1 package in 1.00s
+Installed 1 package in 0.70ms
+ + refine==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/refine)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 21ms
+   Building rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+      Built rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+Prepared 1 package in 1.09s
+Installed 1 package in 0.67ms
+ + rlm-heartbeat==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 36 packages in 240ms
+   Building prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+      Built prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+Prepared 1 package in 972ms
+Installed 1 package in 0.93ms
+ + prime-agent-skill-websearch==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/websearch)
+✓ ready
+› setting up python kernel (one-time, ~30s)…
+rebuilding kernel venv
+Python 3.11 is already installed
+Using CPython 3.11.16
+Creating virtual environment with seed packages at: /home/ubuntu/.prime/agent/kernel-venv
+ + packaging==26.3
+ + pip==26.2.1
+ + setuptools==84.0.0
+ + wheel==0.48.0
+Activate with: source /home/ubuntu/.prime/agent/kernel-venv/bin/activate
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 50 packages in 79ms
+   Building prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+      Built prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+Prepared 1 package in 1.08s
+Installed 50 packages in 180ms
+ + annotated-types==0.8.0
+ + anyio==4.15.1
+ + attrs==26.1.0
+ + beautifulsoup4==4.15.0
+ + certifi==2026.7.22
+ + cffi==2.1.1
+ + charset-normalizer==3.5.1
+ + click==8.5.0
+ + cryptography==50.0.1
+ + dill==0.4.1
+ + docstring-parser==0.18.0
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpcore2==2.13.0
+ + httpx==0.28.1
+ + httpx2==2.13.0
+ + idna==3.20
+ + jsonschema==4.26.0
+ + jsonschema-specifications==2025.9.1
+ + lxml==6.1.3
+ + mcp==2.2.0
+ + mcp-types==2.2.0
+ + numpy==2.4.6
+ + opentelemetry-api==1.44.0
+ + pandas==3.0.6
+ + prime-agent-runtime==0.1.0 (from file:///home/ubuntu/prime-agent-rs/prime-agent-runtime)
+ + pycparser==3.0
+ + pydantic==2.13.5
+ + pydantic-core==2.46.5
+ + pyjwt==2.14.0
+ + python-dateutil==2.9.0.post0
+ + python-dotenv==1.2.3
+ + python-multipart==0.0.32
+ + pyyaml==6.0.3
+ + referencing==0.37.0
+ + requests==2.34.2
+ + rpds-py==2026.6.3
+ + scipy==1.17.1
+ + six==1.17.0
+ + soupsieve==2.9.2
+ + sse-starlette==3.4.11
+ + starlette==1.6.0
+ + tomli==2.4.1
+ + truststore==0.10.4
+ + typeguard==4.6.0
+ + typing-extensions==4.16.0
+ + typing-inspection==0.4.4
+ + tyro==1.0.16
+ + urllib3==2.8.0
+ + uvicorn==0.53.0
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 12ms
+   Building agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+      Built agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+Prepared 1 package in 787ms
+Installed 1 package in 0.66ms
+ + agent-message==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-message)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 9ms
+   Building agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+      Built agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+Prepared 1 package in 654ms
+Installed 1 package in 0.67ms
+ + agent-observe==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-observe)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 34 packages in 394ms
+   Building prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+      Built prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+Prepared 1 package in 1.03s
+Installed 2 packages in 4ms
+ + pillow==12.3.0
+ + prime-agent-skill-attach-image==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/attach-image)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 45ms
+   Building compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+      Built compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+Prepared 1 package in 425ms
+Installed 1 package in 0.62ms
+ + compact==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/compact)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 5ms
+   Building edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+      Built edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+Prepared 1 package in 529ms
+Installed 1 package in 0.82ms
+ + edit==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/edit)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+      Built goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+Prepared 1 package in 447ms
+Installed 1 package in 0.66ms
+ + goal==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/goal)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 4ms
+   Building refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+      Built refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+Prepared 1 package in 453ms
+Installed 1 package in 0.73ms
+ + refine==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/refine)
+› setting up python kernel (one-time, ~30s)…
+rebuilding kernel venv
+Python 3.11 is already installed
+Using CPython 3.11.16
+Creating virtual environment with seed packages at: /home/ubuntu/.prime/agent/kernel-venv
+ + packaging==26.3
+ + pip==26.2.1
+ + setuptools==84.0.0
+ + wheel==0.48.0
+Activate with: source /home/ubuntu/.prime/agent/kernel-venv/bin/activate
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 50 packages in 34ms
+   Building prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+      Built prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+Prepared 1 package in 703ms
+Installed 50 packages in 135ms
+ + annotated-types==0.8.0
+ + anyio==4.15.1
+ + attrs==26.1.0
+ + beautifulsoup4==4.15.0
+ + certifi==2026.7.22
+ + cffi==2.1.1
+ + charset-normalizer==3.5.1
+ + click==8.5.0
+ + cryptography==50.0.1
+ + dill==0.4.1
+ + docstring-parser==0.18.0
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpcore2==2.13.0
+ + httpx==0.28.1
+ + httpx2==2.13.0
+ + idna==3.20
+ + jsonschema==4.26.0
+ + jsonschema-specifications==2025.9.1
+ + lxml==6.1.3
+ + mcp==2.2.0
+ + mcp-types==2.2.0
+ + numpy==2.4.6
+ + opentelemetry-api==1.44.0
+ + pandas==3.0.6
+ + prime-agent-runtime==0.1.0 (from file:///home/ubuntu/prime-agent-rs/prime-agent-runtime)
+ + pycparser==3.0
+ + pydantic==2.13.5
+ + pydantic-core==2.46.5
+ + pyjwt==2.14.0
+ + python-dateutil==2.9.0.post0
+ + python-dotenv==1.2.3
+ + python-multipart==0.0.32
+ + pyyaml==6.0.3
+ + referencing==0.37.0
+ + requests==2.34.2
+ + rpds-py==2026.6.3
+ + scipy==1.17.1
+ + six==1.17.0
+ + soupsieve==2.9.2
+ + sse-starlette==3.4.11
+ + starlette==1.6.0
+ + tomli==2.4.1
+ + truststore==0.10.4
+ + typeguard==4.6.0
+ + typing-extensions==4.16.0
+ + typing-inspection==0.4.4
+ + tyro==1.0.16
+ + urllib3==2.8.0
+ + uvicorn==0.53.0
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 5ms
+   Building agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+      Built agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+Prepared 1 package in 665ms
+Installed 1 package in 0.71ms
+ + agent-message==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-message)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 7ms
+   Building agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+      Built agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+Prepared 1 package in 408ms
+Installed 1 package in 0.66ms
+ + agent-observe==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-observe)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 34 packages in 267ms
+   Building prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+      Built prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+Prepared 1 package in 462ms
+Installed 2 packages in 5ms
+ + pillow==12.3.0
+ + prime-agent-skill-attach-image==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/attach-image)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 8ms
+   Building compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+      Built compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+Prepared 1 package in 784ms
+Installed 1 package in 0.73ms
+ + compact==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/compact)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+      Built edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+Prepared 1 package in 432ms
+Installed 1 package in 0.94ms
+ + edit==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/edit)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+      Built goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+Prepared 1 package in 356ms
+Installed 1 package in 0.67ms
+ + goal==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/goal)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 2ms
+   Building refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+      Built refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+Prepared 1 package in 396ms
+Installed 1 package in 0.75ms
+ + refine==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/refine)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 3ms
+   Building rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+      Built rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+Prepared 1 package in 591ms
+Installed 1 package in 0.74ms
+ + rlm-heartbeat==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 36 packages in 222ms
+   Building prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+      Built prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+Prepared 1 package in 527ms
+Installed 1 package in 1ms
+ + prime-agent-skill-websearch==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/websearch)
+✓ ready
+› setting up python kernel (one-time, ~30s)…
+rebuilding kernel venv
+Python 3.11 is already installed
+Using CPython 3.11.16
+Creating virtual environment with seed packages at: /home/ubuntu/.prime/agent/kernel-venv
+ + packaging==26.3
+ + pip==26.2.1
+ + setuptools==84.0.0
+ + wheel==0.48.0
+Activate with: source /home/ubuntu/.prime/agent/kernel-venv/bin/activate
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 50 packages in 78ms
+   Building prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+      Built prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+Prepared 1 package in 778ms
+Installed 50 packages in 122ms
+ + annotated-types==0.8.0
+ + anyio==4.15.1
+ + attrs==26.1.0
+ + beautifulsoup4==4.15.0
+ + certifi==2026.7.22
+ + cffi==2.1.1
+ + charset-normalizer==3.5.1
+ + click==8.5.0
+ + cryptography==50.0.1
+ + dill==0.4.1
+ + docstring-parser==0.18.0
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpcore2==2.13.0
+ + httpx==0.28.1
+ + httpx2==2.13.0
+ + idna==3.20
+ + jsonschema==4.26.0
+ + jsonschema-specifications==2025.9.1
+ + lxml==6.1.3
+ + mcp==2.2.0
+ + mcp-types==2.2.0
+ + numpy==2.4.6
+ + opentelemetry-api==1.44.0
+ + pandas==3.0.6
+ + prime-agent-runtime==0.1.0 (from file:///home/ubuntu/prime-agent-rs/prime-agent-runtime)
+ + pycparser==3.0
+ + pydantic==2.13.5
+ + pydantic-core==2.46.5
+ + pyjwt==2.14.0
+ + python-dateutil==2.9.0.post0
+ + python-dotenv==1.2.3
+ + python-multipart==0.0.32
+ + pyyaml==6.0.3
+ + referencing==0.37.0
+ + requests==2.34.2
+ + rpds-py==2026.6.3
+ + scipy==1.17.1
+ + six==1.17.0
+ + soupsieve==2.9.2
+ + sse-starlette==3.4.11
+ + starlette==1.6.0
+ + tomli==2.4.1
+ + truststore==0.10.4
+ + typeguard==4.6.0
+ + typing-extensions==4.16.0
+ + typing-inspection==0.4.4
+ + tyro==1.0.16
+ + urllib3==2.8.0
+ + uvicorn==0.53.0
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 13ms
+   Building agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+      Built agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+Prepared 1 package in 508ms
+Installed 1 package in 0.79ms
+ + agent-message==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-message)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+      Built agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+Prepared 1 package in 670ms
+Installed 1 package in 0.65ms
+ + agent-observe==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-observe)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 34 packages in 305ms
+   Building prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+      Built prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+Prepared 1 package in 547ms
+Installed 2 packages in 3ms
+ + pillow==12.3.0
+ + prime-agent-skill-attach-image==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/attach-image)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 6ms
+   Building compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+      Built compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+Prepared 1 package in 535ms
+Installed 1 package in 0.65ms
+ + compact==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/compact)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 4ms
+   Building edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+      Built edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+Prepared 1 package in 897ms
+Installed 1 package in 0.86ms
+ + edit==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/edit)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 17ms
+   Building goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+      Built goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+Prepared 1 package in 822ms
+Installed 1 package in 0.71ms
+ + goal==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/goal)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 3ms
+   Building refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+      Built refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+Prepared 1 package in 546ms
+Installed 1 package in 0.78ms
+ + refine==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/refine)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 7ms
+   Building rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+      Built rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+Prepared 1 package in 587ms
+Installed 1 package in 0.67ms
+ + rlm-heartbeat==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 36 packages in 241ms
+   Building prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+      Built prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+Prepared 1 package in 876ms
+Installed 1 package in 0.93ms
+ + prime-agent-skill-websearch==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/websearch)
+✓ ready
+› setting up python kernel (one-time, ~30s)…
+rebuilding kernel venv
+Python 3.11 is already installed
+Using CPython 3.11.16
+Creating virtual environment with seed packages at: /home/ubuntu/.prime/agent/kernel-venv
+ + packaging==26.3
+ + pip==26.2.1
+ + setuptools==84.0.0
+ + wheel==0.48.0
+Activate with: source /home/ubuntu/.prime/agent/kernel-venv/bin/activate
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 50 packages in 128ms
+   Building prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+      Built prime-agent-runtime @ file:///home/ubuntu/prime-agent-rs/prime-agent-runtime
+Prepared 1 package in 1.14s
+Installed 50 packages in 448ms
+ + annotated-types==0.8.0
+ + anyio==4.15.1
+ + attrs==26.1.0
+ + beautifulsoup4==4.15.0
+ + certifi==2026.7.22
+ + cffi==2.1.1
+ + charset-normalizer==3.5.1
+ + click==8.5.0
+ + cryptography==50.0.1
+ + dill==0.4.1
+ + docstring-parser==0.18.0
+ + h11==0.16.0
+ + httpcore==1.0.9
+ + httpcore2==2.13.0
+ + httpx==0.28.1
+ + httpx2==2.13.0
+ + idna==3.20
+ + jsonschema==4.26.0
+ + jsonschema-specifications==2025.9.1
+ + lxml==6.1.3
+ + mcp==2.2.0
+ + mcp-types==2.2.0
+ + numpy==2.4.6
+ + opentelemetry-api==1.44.0
+ + pandas==3.0.6
+ + prime-agent-runtime==0.1.0 (from file:///home/ubuntu/prime-agent-rs/prime-agent-runtime)
+ + pycparser==3.0
+ + pydantic==2.13.5
+ + pydantic-core==2.46.5
+ + pyjwt==2.14.0
+ + python-dateutil==2.9.0.post0
+ + python-dotenv==1.2.3
+ + python-multipart==0.0.32
+ + pyyaml==6.0.3
+ + referencing==0.37.0
+ + requests==2.34.2
+ + rpds-py==2026.6.3
+ + scipy==1.17.1
+ + six==1.17.0
+ + soupsieve==2.9.2
+ + sse-starlette==3.4.11
+ + starlette==1.6.0
+ + tomli==2.4.1
+ + truststore==0.10.4
+ + typeguard==4.6.0
+ + typing-extensions==4.16.0
+ + typing-inspection==0.4.4
+ + tyro==1.0.16
+ + urllib3==2.8.0
+ + uvicorn==0.53.0
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 9ms
+   Building agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+      Built agent-message @ file:///home/ubuntu/prime-agent-rs/skills/agent-message
+Prepared 1 package in 1.47s
+Installed 1 package in 0.68ms
+ + agent-message==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-message)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 68ms
+   Building agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+      Built agent-observe @ file:///home/ubuntu/prime-agent-rs/skills/agent-observe
+Prepared 1 package in 1.12s
+Installed 1 package in 0.76ms
+ + agent-observe==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/agent-observe)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 34 packages in 453ms
+   Building prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+      Built prime-agent-skill-attach-image @ file:///home/ubuntu/prime-agent-rs/skills/attach-image
+Prepared 1 package in 815ms
+Installed 2 packages in 16ms
+ + pillow==12.3.0
+ + prime-agent-skill-attach-image==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/attach-image)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 33ms
+   Building compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+      Built compact @ file:///home/ubuntu/prime-agent-rs/skills/compact
+Prepared 1 package in 1.13s
+Installed 1 package in 3ms
+ + compact==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/compact)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 20ms
+   Building edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+      Built edit @ file:///home/ubuntu/prime-agent-rs/skills/edit
+Prepared 1 package in 679ms
+Installed 1 package in 1ms
+ + edit==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/edit)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 4ms
+   Building goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+      Built goal @ file:///home/ubuntu/prime-agent-rs/skills/goal
+Prepared 1 package in 1.45s
+Installed 1 package in 0.72ms
+ + goal==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/goal)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 1ms
+   Building refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+      Built refine @ file:///home/ubuntu/prime-agent-rs/skills/refine
+Prepared 1 package in 1.42s
+Installed 1 package in 0.68ms
+ + refine==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/refine)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 1 package in 16ms
+   Building rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+      Built rlm-heartbeat @ file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat
+Prepared 1 package in 1.01s
+Installed 1 package in 0.78ms
+ + rlm-heartbeat==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/rlm-heartbeat)
+Using Python 3.11.16 environment at: /home/ubuntu/.prime/agent/kernel-venv
+Resolved 36 packages in 263ms
+   Building prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+      Built prime-agent-skill-websearch @ file:///home/ubuntu/prime-agent-rs/skills/websearch
+Prepared 1 package in 909ms
+Installed 1 package in 0.87ms
+ + prime-agent-skill-websearch==0.1.0 (from file:///home/ubuntu/prime-agent-rs/skills/websearch)
+✓ ready
+› setting up python kernel (one-time, ~30s)…
+rebuilding kernel venv
+✓ ready

@@ -1,0 +1,282 @@
+[
+ {
+  "flow": "f1_launch",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: first interactive prompt answered by the mock provider",
+  "evidence": ""
+ },
+ {
+  "flow": "f1_launch",
+  "category": "protocol",
+  "gap": false,
+  "summary": "ts: interactive model flags are authoritative (request model: mock-1)",
+  "evidence": ""
+ },
+ {
+  "flow": "f1_launch",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: first interactive prompt answered by the mock provider",
+  "evidence": ""
+ },
+ {
+  "flow": "f1_launch",
+  "category": "protocol",
+  "gap": false,
+  "summary": "rust: interactive model flags are authoritative (request model: mock-1)",
+  "evidence": ""
+ },
+ {
+  "flow": "f1_launch",
+  "category": "visual",
+  "gap": false,
+  "summary": "first-run splash + trace-sharing notice rendered and answerable on both sides (fresh install)",
+  "evidence": ""
+ },
+ {
+  "flow": "f2_prompt",
+  "category": "behavior",
+  "gap": false,
+  "summary": "print-mode stdout identical: 'battery hello from mock'",
+  "evidence": ""
+ },
+ {
+  "flow": "f2_prompt",
+  "category": "protocol",
+  "gap": true,
+  "summary": "system prompt: rust prompt does not match the layered shape (expected '# prime-agent harness' static core, mandatory-rules layer, skills inventory, dynamic tail; raw prompts in protocol-request-diff.txt)",
+  "evidence": "protocol-request-diff.txt"
+ },
+ {
+  "flow": "f3_tool",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: ipython tool call executed and output captured",
+  "evidence": ""
+ },
+ {
+  "flow": "f3_tool",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: ipython tool call executed and output captured",
+  "evidence": ""
+ },
+ {
+  "flow": "f3_tool",
+  "category": "protocol",
+  "gap": false,
+  "summary": "session entry type sets match (['custom_message', 'message', 'model_change', 'service_tier_change', 'session', 'session_state', 'thinking_level_change'])",
+  "evidence": ""
+ },
+ {
+  "flow": "f4_commands",
+  "category": "visual",
+  "gap": false,
+  "summary": "ts: '/' shows a slash-command menu",
+  "evidence": ""
+ },
+ {
+  "flow": "f4_commands",
+  "category": "visual",
+  "gap": false,
+  "summary": "rust: '/' shows a slash-command menu",
+  "evidence": ""
+ },
+ {
+  "flow": "f5_side_questions",
+  "category": "protocol",
+  "gap": false,
+  "summary": "ts: start_side_question answered via mock with side_question_event stream",
+  "evidence": ""
+ },
+ {
+  "flow": "f5_side_questions",
+  "category": "protocol",
+  "gap": false,
+  "summary": "rust: start_side_question answered via mock with side_question_event stream",
+  "evidence": ""
+ },
+ {
+  "flow": "f5_side_questions",
+  "category": "protocol",
+  "gap": false,
+  "summary": "post-turn status-line request issued by both sides (ts=3, rust=2 requests, model qwen/qwen3-30b-a3b-instruct-2507)",
+  "evidence": ""
+ },
+ {
+  "flow": "f6_attach",
+  "category": "protocol",
+  "gap": false,
+  "summary": "ts: wire attach returned a snapshot (data keys: ['activeSessionId', 'client', 'lastEventCursor', 'lastEventSequence', 'protocol', 'replay', 'snapshot'])",
+  "evidence": ""
+ },
+ {
+  "flow": "f6_attach",
+  "category": "protocol",
+  "gap": false,
+  "summary": "ts: attached client received 14 events during the turn",
+  "evidence": ""
+ },
+ {
+  "flow": "f6_attach",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: CLI 'attach' opened the session in tmux (frame captured)",
+  "evidence": ""
+ },
+ {
+  "flow": "f6_attach",
+  "category": "protocol",
+  "gap": false,
+  "summary": "rust: wire attach returned a snapshot (data keys: ['activeSessionId', 'client', 'lastEventCursor', 'lastEventSequence', 'protocol', 'replay', 'snapshot'])",
+  "evidence": ""
+ },
+ {
+  "flow": "f6_attach",
+  "category": "protocol",
+  "gap": false,
+  "summary": "rust: attached client received 12 events during the turn",
+  "evidence": ""
+ },
+ {
+  "flow": "f6_attach",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: CLI 'attach' opened the session in tmux (frame captured)",
+  "evidence": ""
+ },
+ {
+  "flow": "f6_attach",
+  "category": "protocol",
+  "gap": false,
+  "summary": "attach event sequences match (12 projected events, in order; harness-digest custom pairs and turn_end/agent_end payloads are out of scope here \u2014 documented model-surface diffs, see PORTING-NOTES)",
+  "evidence": ""
+ },
+ {
+  "flow": "f7_compaction",
+  "category": "protocol",
+  "gap": false,
+  "summary": "ts: daemon 'compact' succeeded: {\"summary\": \"pre-compaction reply 6\", \"firstKeptEntryId\": \"069b3b75\", \"tokensBefore\": 110, \"details\": {\"readFiles\": [], \"modifiedFiles\": []}}",
+  "evidence": ""
+ },
+ {
+  "flow": "f7_compaction",
+  "category": "protocol",
+  "gap": false,
+  "summary": "rust: daemon 'compact' succeeded: {\"firstKeptEntryId\": \"57e61151\", \"summary\": \"pre-compaction reply 6\", \"tokensBefore\": 110}",
+  "evidence": ""
+ },
+ {
+  "flow": "f8_resume",
+  "category": "behavior",
+  "gap": false,
+  "summary": "print '-c' refuses a session active in the daemon on both sides: 618c2b720ee6 (ts) vs 2ccccdc027ec (rust)",
+  "evidence": ""
+ },
+ {
+  "flow": "f8_resume",
+  "category": "protocol",
+  "gap": false,
+  "summary": "session entry type sets match (['compaction', 'custom_message', 'message', 'model_change', 'service_tier_change', 'session', 'session_info', 'session_state', 'thinking_level_change'])",
+  "evidence": ""
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "behavior",
+  "gap": true,
+  "summary": "ts: 'f9 inactive prompt' is not grouped under the Inactive section (sections: {\"Running\": [\"\\u25c7 battery-f9-busy             mock-1                                                                          $0.00   1s\"], \"Idle\": [\"\\u2022 battery-f9-idle             mock-1                                                                          $0.00   7s\", \"\\u2191/\\u2193 navigate   Enter/\\u2192 open   Ctrl+N new\"]})",
+  "evidence": "ts/f9_agents_view/01-agents-view-120x36.txt"
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: opening the Running row attached to the live session and its in-flight reply rendered",
+  "evidence": ""
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: agents view groups the roster into Running/Idle/Inactive sections with the scripted sessions in place",
+  "evidence": ""
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: opening the Running row attached to the live session and its in-flight reply rendered",
+  "evidence": ""
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "visual",
+  "gap": true,
+  "summary": "agents view frames differ at 120x36 (see frame-diff-120x36.txt)",
+  "evidence": "ts/f9_agents_view/frame-diff-120x36.txt"
+ },
+ {
+  "flow": "f9_agents_view",
+  "category": "visual",
+  "gap": false,
+  "summary": "agents view frames identical at 220x50 (normalized: paths, ids, ages)",
+  "evidence": ""
+ },
+ {
+  "flow": "f10_perf",
+  "category": "perf",
+  "gap": false,
+  "summary": "ts: cold startup to interactive-ready median 4.657s over 3 launches (first frame median 4.612s); typing latency median 53.5ms, p95 76.5ms over 75 keystrokes",
+  "evidence": ""
+ },
+ {
+  "flow": "f10_perf",
+  "category": "perf",
+  "gap": false,
+  "summary": "rust: cold startup to interactive-ready median 0.320s over 3 launches (first frame median 0.320s); typing latency median 49.3ms, p95 63.4ms over 75 keystrokes",
+  "evidence": ""
+ },
+ {
+  "flow": "f10_perf",
+  "category": "perf",
+  "gap": false,
+  "summary": "startup: rust 0.320s vs ts 4.657s cold-ready median (ratio 0.07, threshold 1.5)",
+  "evidence": ""
+ },
+ {
+  "flow": "f10_perf",
+  "category": "perf",
+  "gap": false,
+  "summary": "typing: rust p95 63.4ms vs ts p95 76.5ms keystroke-to-render (ratio 0.83, threshold 1.5)",
+  "evidence": ""
+ },
+ {
+  "flow": "f10_perf",
+  "category": "perf",
+  "gap": false,
+  "summary": "rust binary measured: /home/ubuntu/prime-agent-rs/target/release/prime-agent (119.5MB, release posture)",
+  "evidence": ""
+ },
+ {
+  "flow": "f11_provider_failure",
+  "category": "behavior",
+  "gap": false,
+  "summary": "ts: provider failure surfaces (retry banner + 4 error row(s))",
+  "evidence": ""
+ },
+ {
+  "flow": "f11_provider_failure",
+  "category": "behavior",
+  "gap": false,
+  "summary": "rust: provider failure surfaces (retry banner + 4 error row(s))",
+  "evidence": ""
+ },
+ {
+  "flow": "f11_provider_failure",
+  "category": "visual",
+  "gap": false,
+  "summary": "provider-failure rendering parity: 4 error row(s) on both sides",
+  "evidence": ""
+ }
+]

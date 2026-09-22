@@ -1,0 +1,20 @@
+{
+ "argv": [
+  "prime-agent",
+  "-p",
+  "--daemon-socket",
+  "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260918T050600Z/ts/daemon.sock",
+  "--provider",
+  "prime-inference",
+  "--model",
+  "mock-1",
+  "--offline",
+  "-c",
+  "Continue this session"
+ ],
+ "exit_code": 1,
+ "stdout": "",
+ "stderr": "Error: Session is already active in 618c2b720ee6: /home/ubuntu/prime-agent-rs/scripts/battery/runs/20260918T050600Z/ts/agent/sessions/01a0b2e9-65c5-774a-862b-d7307f54f48a.jsonl\n",
+ "duration_s": 1.26,
+ "timeout": false
+}

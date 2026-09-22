@@ -1,0 +1,6 @@
+{"activeSessionId":"5351ae86f5e4","busy":true,"operation":"create","recordedAt":"2026-09-20T17:35:31.764Z","sessionFile":"/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260920T173524Z-abort/rust/agent/sessions/01a0bfe3-2d9c-7679-b6ca-2ed8cb52e1eb.jsonl","sessionId":"01a0bfe3-2d9c-7679-b6ca-2ed8cb52e1eb"}
+{"active_session_id":"5351ae86f5e4","follow_up":[],"recorded_at":"2026-09-20T17:35:31.814Z","steering":["abort parity seed turn"],"type":"queue_snapshot","version":1}
+{"active_session_id":"5351ae86f5e4","follow_up":[],"recorded_at":"2026-09-20T17:35:31.885Z","steering":["abort parity crossing turn"],"type":"queue_snapshot","version":1}
+{"active_session_id":"5351ae86f5e4","follow_up":[],"recorded_at":"2026-09-20T17:35:31.886Z","steering":["abort parity crossing turn"],"type":"queue_snapshot","version":1}
+{"active_session_id":"5351ae86f5e4","follow_up":[],"recorded_at":"2026-09-20T17:35:32.090Z","steering":[],"type":"queue_snapshot","version":1}
+{"activeSessionId":"5351ae86f5e4","busy":false,"operation":"shutdown","recordedAt":"2026-09-20T17:35:36.090Z","sessionFile":"/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260920T173524Z-abort/rust/agent/sessions/01a0bfe3-2d9c-7679-b6ca-2ed8cb52e1eb.jsonl","sessionId":"01a0bfe3-2d9c-7679-b6ca-2ed8cb52e1eb"}

@@ -8,6 +8,7 @@
 //! native process queries on Windows later. Adding a platform means adding an
 //! implementation - call sites never branch on `cfg` themselves.
 
+pub mod detached_children;
 pub mod dirs;
 pub mod identity;
 pub mod process;
@@ -15,6 +16,10 @@ pub mod transport;
 #[cfg(windows)]
 pub(crate) mod windows_pipe;
 
+pub use detached_children::{
+    kill_process_group_or_pid, kill_tracked_detached_children, track_detached_child_pid,
+    untrack_detached_child_pid,
+};
 pub use dirs::{agent_dir, home_dir};
 pub use identity::socket_identity;
 pub use process::{

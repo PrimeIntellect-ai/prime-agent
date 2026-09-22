@@ -1,0 +1,3 @@
+
+{"version":1,"type":"received","key":"[\"cd44691a154a\",\"sd\"]","clientId":"cd44691a154a","commandId":"sd","commandType":"shutdown","recordedAt":"2026-09-18T05:08:50.627Z"}
+{"version":1,"type":"result","key":"[\"cd44691a154a\",\"sd\"]","response":{"id":"sd","type":"response","command":"shutdown","success":true},"recordedAt":"2026-09-18T05:08:50.629Z"}

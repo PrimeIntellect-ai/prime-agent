@@ -1,0 +1,7 @@
+{
+ "command": "prompt_and_wait",
+ "error": "Provider rejected the request (400): prompt is too long: 213462 tokens > 200000 maximum",
+ "id": "op1",
+ "success": false,
+ "type": "response"
+}

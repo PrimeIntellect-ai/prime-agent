@@ -1,0 +1,3 @@
+{"activeSessionId":"13f53ca4fc7e","sessionId":"01a0c952-6834-7575-a67b-9cc8f8d8559c","sessionFile":"/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/agent/session-artifacts/01a0c952-06df-72cd-9300-d7e77534c18c/sub-094deeeb/01a0c952-6834-7575-a67b-9cc8f8d8559c.jsonl","busy":true,"operation":"create","recordedAt":"2026-09-22T13:33:36.330Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"13f53ca4fc7e","steering":["f20 child task: reply with the fixture summary"],"follow_up":[],"recorded_at":"2026-09-22T13:33:36.699Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"13f53ca4fc7e","steering":[],"follow_up":[],"recorded_at":"2026-09-22T13:33:37.431Z"}

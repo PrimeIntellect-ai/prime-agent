@@ -106,54 +106,13 @@ pub fn kill_pid(_pid: i32, _signal: Signal) -> bool {
     false
 }
 
-/// Kill a process and all its children: the process group first (bash()
-/// children run detached in a new group), then the bare pid as fallback.
-/// Returns true when either signal was delivered (TS `killProcessTree`).
-#[cfg(unix)]
-pub fn kill_process_group_or_pid(pid: i32) -> bool {
-    if pid <= 0 {
-        return false;
-    }
-    unsafe {
-        if libc::kill(-pid, libc::SIGKILL) == 0 {
-            return true;
-        }
-    }
-    unsafe { libc::kill(pid, libc::SIGKILL) == 0 }
-}
-
-/// Windows: `taskkill /F /T /PID <pid>` from the absolute System32 path -
-/// the hardened TS tree-kill (`killOrphanProcess`; a bare `taskkill` name
-/// could resolve a planted CWD executable). The tree is walked via the
-/// parent-child relationship, so the detached-group flags of
-/// [`set_new_process_group`] are irrelevant here. True only when taskkill
-/// exited 0, the same proof TS's `result.status === 0` requires.
-#[cfg(windows)]
-pub fn kill_process_group_or_pid(pid: i32) -> bool {
-    if pid <= 0 {
-        return false;
-    }
-    let system_root =
-        std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from("C:\\Windows"));
-    let taskkill = std::path::Path::new(&system_root)
-        .join("System32")
-        .join("taskkill.exe");
-    let mut command = Command::new(&taskkill);
-    command
-        .args(["/F", "/T", "/PID", &pid.to_string()])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    set_no_window(&mut command);
-    command.status().is_ok_and(|status| status.success())
-}
-
-#[cfg(not(any(unix, windows)))]
-pub fn kill_process_group_or_pid(_pid: i32) -> bool {
-    // No tree-kill mechanism; the kill stays unproven, the conservative
-    // answer callers act on.
-    false
-}
+// The tree-kill primitive moved down to pa-types
+// (`platform::detached_children`): the interactive client's
+// shutdown-signal registry lives there (pa-tui depends on pa-types alone),
+// and pa-core's tracking spawn sites and that registry must share the one
+// `killProcessTree` implementation. Re-exported so every existing
+// `platform::process::kill_process_group_or_pid` call site is unchanged.
+pub use pa_types::platform::detached_children::kill_process_group_or_pid;
 
 /// Cheap `kill(pid, 0)` existence probe; counts zombies as existing.
 #[cfg(unix)]

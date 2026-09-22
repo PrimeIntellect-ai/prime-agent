@@ -1,0 +1,5 @@
+{"type":"session","version":3,"id":"01a0c944-eddd-77d5-9f0e-6f4f7f3cc0bb","timestamp":"2026-09-22T13:18:52.893Z","cwd":"/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/rust/work","rlmDepth":0}
+{"type":"model_change","id":"6fd41e58","parentId":null,"timestamp":"2026-09-22T13:18:52.964Z","provider":"prime-inference","modelId":"mock-1"}
+{"type":"thinking_level_change","id":"648d2f31","parentId":"6fd41e58","timestamp":"2026-09-22T13:18:52.964Z","thinkingLevel":"off"}
+{"type":"service_tier_change","id":"6f4596af","parentId":"648d2f31","timestamp":"2026-09-22T13:18:52.966Z","serviceTier":"default"}
+{"type":"session_state","id":"f9163ab8","parentId":"6f4596af","timestamp":"2026-09-22T13:18:52.966Z","state":{"status":"active"}}

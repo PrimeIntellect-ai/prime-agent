@@ -1,0 +1,26 @@
+{
+  "version": 2,
+  "workerId": "710c72a714ea",
+  "pid": 415296,
+  "processStartId": "proc:26476040",
+  "socketPath": "/tmp/vbat20260922T131236Z-ts/prime-agent-1000/worker-a000c9c1f00f-710c72a714ea.sock",
+  "recoveryJournalPath": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/agent/daemon-workers/a000c9c1f00f/710c72a714ea.recovery.jsonl",
+  "orphanProcessJournalPath": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/agent/daemon-workers/a000c9c1f00f/710c72a714ea.orphans.jsonl",
+  "supervisorSocketPath": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/daemon.sock",
+  "authenticationToken": "UxDPFWuJ5ZXNZjsjgzwuJooVyyuXAqF5K2W1w6pr8KI",
+  "workerInstanceId": "afea5c41-1d13-4794-9e0a-b4a06debd895",
+  "rootActiveSessionId": "099b4617bce0",
+  "rootSessionId": "01a0c947-2be9-7608-bf82-b95ef29a7897",
+  "sessionFile": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/agent/sessions/01a0c947-2be9-7608-bf82-b95ef29a7897.jsonl",
+  "sessionDir": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/agent/sessions",
+  "createdAt": "2026-09-22T13:21:19.221Z",
+  "updatedAt": "2026-09-22T13:51:53.722Z",
+  "lifecycle": "ready",
+  "createCommand": {
+    "type": "create",
+    "sessionPath": "/home/ubuntu/prime-agent-rs/scripts/battery/runs/20260922T131236Z/ts/agent/sessions/01a0c947-2be9-7608-bf82-b95ef29a7897.jsonl"
+  },
+  "consecutiveFailures": 0,
+  "stopRequestedAt": "2026-09-22T13:51:53.722Z",
+  "archiveOnStop": true
+}
