@@ -58,7 +58,7 @@ export function buildPrimeInferenceModels(
 			if (controls.thinkingFormat) compat.thinkingFormat = controls.thinkingFormat;
 			else delete compat.thinkingFormat;
 		}
-		const thinkingLevelMap = controls?.thinkingLevelMap ?? template?.thinkingLevelMap;
+		const thinkingLevelMap = controls ? controls.thinkingLevelMap : template?.thinkingLevelMap;
 		// Anthropic models cache with explicit breakpoints, not automatic
 		// server-side prefix caching; cacheControlFormat makes the provider add
 		// anthropic-style cache_control markers for these entries. The catalog

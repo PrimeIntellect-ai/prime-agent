@@ -18482,6 +18482,7 @@ export const MODELS = {
 			baseUrl: "https://api.pinference.ai/api/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
+			thinkingLevelMap: {"xhigh":"xhigh","minimal":null,"max":"max"},
 			input: ["text"],
 			cost: {
 				input: 5,

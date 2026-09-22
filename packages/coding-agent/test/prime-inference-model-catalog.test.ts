@@ -102,8 +102,6 @@ describe("Prime Inference model catalog", () => {
 		).toBeUndefined();
 	});
 
-	// Declared reasoning parameters rebuild thinking levels and compat over
-	// stale templates; exact map values live in the pi-ai controls tests.
 	it.each([
 		{
 			name: "effort route",
@@ -126,6 +124,13 @@ describe("Prime Inference model catalog", () => {
 			supportsReasoningEffort: undefined,
 			map: { high: "high" },
 		},
+		{
+			name: "reasoning-free route drops the stale template",
+			entry: () => ({ ...entry("qwen/qwen3-coder"), supportedParameters: ["max_tokens"] }),
+			thinkingFormat: undefined,
+			supportsReasoningEffort: false,
+			map: undefined,
+		},
 	])("$name", ({ entry: makeEntry, ...expected }) => {
 		const liveEntry = makeEntry();
 		const template = model(liveEntry.id);
@@ -133,7 +138,8 @@ describe("Prime Inference model catalog", () => {
 		const [live] = buildPrimeInferenceModels([stale], [liveEntry], { minimumModels: 0 }) ?? [];
 		expect(live?.compat?.thinkingFormat).toBe(expected.thinkingFormat);
 		expect(live?.compat?.supportsReasoningEffort).toBe(expected.supportsReasoningEffort);
-		expect(live?.thinkingLevelMap).toMatchObject(expected.map);
+		if (expected.map) expect(live?.thinkingLevelMap).toMatchObject(expected.map);
+		else expect(live?.thinkingLevelMap).toBeUndefined();
 	});
 
 	test("gives new live models the conservative default compat plus declared controls", () => {

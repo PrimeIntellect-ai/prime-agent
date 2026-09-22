@@ -21,9 +21,8 @@ export interface PrimeInferenceCatalogEntry {
 
 /**
  * Reasoning request controls derived from a live Prime Inference catalog entry.
- * The gateway validates reasoning values per route (verified live 2026-09-21:
- * z-ai/glm-5.3 rejects undeclared efforts with 400, and rejects `none` while
- * `mandatory` is true), so only declared values are ever sent.
+ * The gateway validates reasoning values per route and rejects undeclared
+ * efforts, so only declared values are ever sent.
  */
 export interface PrimeInferenceReasoningControls {
 	/** Whether the route accepts a top-level `reasoning_effort` parameter. */
@@ -68,12 +67,12 @@ export function getPrimeInferenceReasoningControls(
 	const supportsReasoningEffort = includes.has("reasoning_effort");
 	const mandatory = entry.reasoningMandatory === true;
 	let thinkingLevelMap: ThinkingLevelMap | undefined;
-	if (entry.reasoningEfforts) {
+	if (supportsReasoningEffort && entry.reasoningEfforts) {
+		// Efforts are only addressable through reasoning_effort; without that
+		// parameter the route falls through to the reasoning-object toggle.
 		thinkingLevelMap = {
-			// Mandatory routes reject every disable form (live-verified: glm-5.3
-			// returns 400 for both `reasoning_effort: "none"` and
-			// `reasoning: {enabled: false}`); non-mandatory effort routes accept
-			// "none" as the disable value even when they do not list it.
+			// Mandatory routes cannot disable reasoning; non-mandatory effort
+			// routes accept "none" as the disable value even when they do not list it.
 			off: mandatory ? null : "none",
 		};
 		for (const level of REASONING_EFFORT_LEVELS) {

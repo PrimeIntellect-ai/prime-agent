@@ -256,10 +256,9 @@ function isGemma4Model(modelId: string): boolean {
 }
 
 function applyThinkingLevelMetadata(model: Model<any>): void {
-	// Prime Inference thinking levels come from the live route catalog (or
-	// OpenRouter for routes that report no parameters); family heuristics would
-	// override route-verified values with unverified guesses.
-	if (model.provider === "prime-inference") return;
+	// Prime Inference routes with catalog- or OpenRouter-derived thinking
+	// levels skip the family heuristics; routes without live data keep them.
+	if (model.provider === "prime-inference" && model.thinkingLevelMap) return;
 	if (
 		(model.api === "openai-responses" || model.api === "azure-openai-responses") &&
 		model.id.startsWith("gpt-5")
@@ -594,11 +593,11 @@ function createPrimeInferenceModel(
 		else delete compat.thinkingFormat;
 	} else if (openRouter?.supportsReasoningEffort === false) {
 		// No live declarations: fall back to OpenRouter metadata, whose `reasoning`
-		// object shape the gateway also accepts (live-verified 2026-09-21).
+		// object shape the gateway also accepts.
 		compat.supportsReasoningEffort = false;
 		if (!compat.thinkingFormat) compat.thinkingFormat = "openrouter";
 	}
-	const thinkingLevelMap = controls?.thinkingLevelMap ?? openRouter?.thinkingLevelMap;
+	const thinkingLevelMap = controls ? controls.thinkingLevelMap : openRouter?.thinkingLevelMap;
 	return {
 		id: entry.id,
 		...(PRIME_INFERENCE_FEATURED_MODELS.has(entry.id.toLowerCase()) ? { featured: true } : {}),
