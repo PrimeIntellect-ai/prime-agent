@@ -1184,6 +1184,56 @@ describe("ModelRegistry", () => {
 	});
 });
 
+describe("subagent Prime Inference discovery", () => {
+	test("finds a newly fetched public Prime Inference model without opening the picker", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-subagent-models-"));
+		try {
+			const auth = AuthStorage.create(join(directory, "auth.json"));
+			auth.set("prime-inference", { type: "api_key", key: "prime-key" });
+			const registry = ModelRegistry.create(auth, join(directory, "models.json"));
+			const bundled = getModels("prime-inference") as Model<"openai-completions">[];
+			const entries = bundled.map((model) => ({
+				id: model.id,
+				display_name: model.name,
+				pricing: { input_usd_per_mtok: model.cost.input, output_usd_per_mtok: model.cost.output },
+				specs: {
+					context_window: model.contextWindow,
+					max_output_tokens: model.maxTokens,
+					modalities: { input: model.input, output: ["text"] },
+					supports_reasoning: model.reasoning,
+				},
+			}));
+			entries.push({
+				id: "test/new-public-model",
+				display_name: "New public model",
+				pricing: { input_usd_per_mtok: 1, output_usd_per_mtok: 2 },
+				specs: {
+					context_window: 200_000,
+					max_output_tokens: 20_000,
+					modalities: { input: ["text"], output: ["text"] },
+					supports_reasoning: false,
+				},
+			});
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL | Request) =>
+					String(input).includes("api.pinference.ai/api/v1/models")
+						? new Response(JSON.stringify({ object: "list", data: entries }))
+						: new Response("not found", { status: 404 }),
+				),
+			);
+			expect(
+				(await registry.getExecutableModels()).some(
+					(model) => model.provider === "prime-inference" && model.id === "test/new-public-model",
+				),
+			).toBe(true);
+		} finally {
+			vi.unstubAllGlobals();
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+});
+
 describe("issue #702 codex model discovery client version", () => {
 	const originalFetch = globalThis.fetch;
 	let codexTempDir: string;

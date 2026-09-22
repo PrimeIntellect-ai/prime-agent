@@ -1234,7 +1234,10 @@ export class ModelRegistry {
 	async getExecutableModels(): Promise<Model<Api>[]> {
 		this.startCatalogRefreshTimer();
 		await this.refreshProviderCatalog(false);
-		await this.runSerializedEntitlementRefresh(() => this.refreshPrivatePrimeInferenceAuthorization());
+		// Subagent discovery must start the same credential-scoped Prime Inference
+		// refresh as the picker, even when no picker has opened in this session.
+		await this.refreshAvailableModels();
+		await this.waitForPendingModelRefreshes(5_000);
 		const availableModels = this.getAvailable();
 		const codexModels = availableModels.filter((model) => model.provider === "openai-codex");
 		if (codexModels.length === 0) {
