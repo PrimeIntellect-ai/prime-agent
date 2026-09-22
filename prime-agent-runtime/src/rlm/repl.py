@@ -769,6 +769,7 @@ def _snapshot_state(
                         skipped.append({"name": name, "reason": "deleted during snapshot"})
                         continue
                     encoded = name.encode("utf-8")
+                    # Record header: 4-byte name length + 8-byte blob length, plus the name itself.
                     budget = max_bytes - total - 12 - len(encoded)
                     # Prune mode measures at the full per-variable cap: only that cap decides
                     # pruned-ness, and the write always re-measures — in-place mutation
