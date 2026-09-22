@@ -860,6 +860,7 @@ def _revive_with_live_globals(
     memo[id(value)] = rebound
     if backfill is not None:
         for name, dep in value.__globals__.items():
+            # Snapshots never save _-prefixed or skip-listed names; backfill must not smuggle them past that policy.
             if name in ns or name.startswith("_") or name in _ALWAYS_SKIP or name in _RESTORE_SKIP:
                 continue
             backfill.append((name, _revive_with_live_globals(dep, ns, backfill, memo)))
