@@ -34,6 +34,17 @@ PROTOCOL_VERSION = 3
 DEFAULT_SNAPSHOT_MAX_BYTES = 256 * 1024 * 1024
 DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES = 16 * 1024 * 1024
 
+# Stream writes must fit one protocol frame: the host buffers whole lines
+# before its per-execution truncation, and raw fd writes already arrive as
+# 64 KiB pump chunks.
+_STREAM_FRAME_TEXT_CAP = 64 * 1024
+# The host truncates results at a smaller per-execution maxChars, so this only
+# bounds a pathological repr in transit.
+_RESULT_TEXT_CAP = 1_048_576
+_RESULT_TRUNCATION_MARKER = f"\n[... result truncated at {_RESULT_TEXT_CAP} characters ...]"
+# Oversized display payloads fail the cell instead of wedging host memory.
+_DISPLAY_PAYLOAD_CAP = 16 * 1024 * 1024
+
 # Names the session bootstrap re-creates on every start; never snapshotted.
 _ALWAYS_SKIP = {"rlm", "mcp", "bash", "asyncio", "In", "Out", "get_ipython", "exit", "quit", "open"}
 # IPython-injected names that may appear in a snapshot payload; never restored.
@@ -97,9 +108,11 @@ def emit(data: dict[str, Any]) -> None:
     # Strict-dumps validation: default allow_nan=True would let NaN/Infinity
     # serialize as non-JSON text and tear the host's protocol framing (a
     # non-serializable value already raises in _send before any bytes are
-    # written, so NaN is the only corruption vector). Payloads are small, so
-    # the throwaway serialization here is cheap; _send re-serializes.
-    json.dumps(data, allow_nan=False)
+    # written, so NaN is the only corruption vector). The encoded length
+    # enforces the display frame cap; _send re-serializes.
+    encoded = json.dumps(data, allow_nan=False)
+    if len(encoded) > _DISPLAY_PAYLOAD_CAP:
+        raise ValueError(f"display payload exceeds the {_DISPLAY_PAYLOAD_CAP}-character frame cap")
     _send({"event": "display", "id": _current_cell.get(), "data": data})
 
 
@@ -295,13 +308,24 @@ class _TaggedWriter(io.TextIOBase):
     def __init__(self, stream: str, fallback_fd: int) -> None:
         self._stream = stream
         self._fallback_fd = fallback_fd
+        # Keeps one write()'s frames contiguous under concurrent writers.
+        self._frame_lock = threading.Lock()
         self._buffer = _TaggedBuffer(fallback_fd)
 
     def write(self, text: str) -> int:
         if not isinstance(text, str):
             raise TypeError(f"write() argument must be str, not {type(text).__name__}")
         if text:
-            _send({"event": self._stream, "id": _current_cell.get(), "text": text})
+            cell_id = _current_cell.get()
+            with self._frame_lock:
+                for start in range(0, len(text), _STREAM_FRAME_TEXT_CAP):
+                    _send(
+                        {
+                            "event": self._stream,
+                            "id": cell_id,
+                            "text": text[start : start + _STREAM_FRAME_TEXT_CAP],
+                        }
+                    )
         return len(text)
 
     def flush(self) -> None:
@@ -592,6 +616,8 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
                     result_text = repr(value)
                 except BaseException as exc:  # noqa: BLE001 - a broken __repr__ is a cell error
                     status, error = "error", _error_event(cell_id, exc)
+            if result_text is not None and len(result_text) > _RESULT_TEXT_CAP:
+                result_text = result_text[:_RESULT_TEXT_CAP] + _RESULT_TRUNCATION_MARKER
             _drain_output()
         finally:
             # Close the interrupt window before the protocol sends so a

@@ -24,6 +24,7 @@ import {
 	summaryForUnifiedRecord,
 } from "../src/modes/agents-view/agents-view-state.js";
 import * as agentRoster from "../src/modes/daemon/agent-roster.js";
+import { DaemonSocketClosedError } from "../src/modes/daemon/daemon-client.js";
 import {
 	type AgentsViewScopeFrame,
 	aggregateSessionHeartbeats,
@@ -2180,6 +2181,34 @@ describe("#502 agents view catalog refresh races", () => {
 			vi.restoreAllMocks();
 			vi.useRealTimers();
 		}
+	});
+
+	test("an update-restart close polls without relaunching the daemon", async () => {
+		const recoverDaemon = vi.fn(async () => undefined);
+		const client = {
+			hello: { protocol: { version: 3 } },
+			supportsServerCapability: () => true,
+			reconnect: vi.fn(async () => {}),
+		};
+		const harness = {
+			...refreshHarness(),
+			stopped: false,
+			client,
+			options: { reconnectTimeoutMs: 10_000, recoverDaemon },
+			requireClient: () => client,
+			rosterStore: { attach: vi.fn(async () => true), summaries: () => [] },
+			refreshHeartbeats: vi.fn(async () => true),
+			armSavedSearchFetch: vi.fn(),
+		};
+		const reconnectClient =
+			privateMethod<(this: typeof harness, reconnectingClient: unknown, initialError: unknown) => Promise<void>>(
+				"reconnectClient",
+			);
+		// The update-restart coordinator owns the relaunch: this loop only polls.
+		await reconnectClient.call(harness, client, new DaemonSocketClosedError("/tmp/prime-agent.sock", "update"));
+		expect(recoverDaemon).not.toHaveBeenCalled();
+		await reconnectClient.call(harness, client, new Error("Daemon socket closed"));
+		expect(recoverDaemon).toHaveBeenCalled();
 	});
 
 	test("a pending saved scan cannot overwrite daemon shutdown status", async () => {

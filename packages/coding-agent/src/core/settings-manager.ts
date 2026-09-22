@@ -5,7 +5,7 @@ import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
 import { writeFileAtomicSync } from "../utils/atomic-file.js";
-import type { ProviderWaitPolicy } from "./provider-retry.js";
+import { MAX_PROVIDER_PAUSE_MS, type ProviderWaitPolicy } from "./provider-retry.js";
 
 const RECENT_MODELS_LIMIT = 20;
 export const DEFAULT_IDLE_EVICTION_MINUTES = 90;
@@ -35,6 +35,9 @@ export interface ProviderWaitSettings {
 	maxDelayMs?: number; // default: 300000 (per-ping ceiling, 5m)
 	maxAttempts?: number; // default: 30 (abort bound: max pings)
 	maxWaitMs?: number; // default: 900000 (abort bound: max total wait, 15m)
+	pauseUntilReset?: boolean; // default: true - park quota-blocked sessions until the provider-reported reset
+	maxPauseMs?: number; // default: 86400000 (abort bound: max single park, 24h; clamped to 7d)
+	maxParks?: number; // default: 8 (abort bound: max parks per quota episode)
 }
 
 export interface ProviderRetrySettings {
@@ -221,6 +224,13 @@ export interface Settings {
 	 * Default: none - requests never silently switch models.
 	 */
 	providerBackupModel?: string;
+	/**
+	 * Model ("provider/model-id" or a bare model id) that serves turns
+	 * attaching images when the session model does not accept image input.
+	 * Default: none - image turns on a text-only model fail with a
+	 * configuration hint instead of silently dropping the images.
+	 */
+	imageModel?: string;
 	autonomous?: AutonomousSettings;
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows)
 	quietStartup?: boolean;
@@ -247,6 +257,8 @@ export interface Settings {
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
+	/** Log per-request provider timing phases to the diagnostic log. Default: false */
+	requestTiming?: boolean;
 }
 
 export interface AgentTracesSettings {
@@ -1087,6 +1099,11 @@ export class SettingsManager {
 			maxDelayMs: bound(wait?.maxDelayMs, 300_000),
 			maxAttempts: bound(wait?.maxAttempts, 30),
 			maxWaitMs: bound(wait?.maxWaitMs, 900_000),
+			pauseUntilReset: wait?.pauseUntilReset ?? true,
+			// Very large parks are clamped to MAX_PROVIDER_PAUSE_MS instead of
+			// silently waiting weeks for a stale reset.
+			maxPauseMs: Math.min(bound(wait?.maxPauseMs, 86_400_000), MAX_PROVIDER_PAUSE_MS),
+			maxParks: bound(wait?.maxParks, 8),
 		};
 	}
 
@@ -1094,6 +1111,14 @@ export class SettingsManager {
 		// Parsed settings are only cast to Settings; a non-string JSON value
 		// (e.g. 123) must behave as unset, never throw into the retry path.
 		const reference = this.settings.providerBackupModel;
+		if (typeof reference !== "string") return undefined;
+		return reference.trim() ? reference.trim() : undefined;
+	}
+
+	getImageModel(): string | undefined {
+		// Same shape as providerBackupModel: malformed values behave as unset
+		// and the image-turn refusal names the setting instead.
+		const reference = this.settings.imageModel;
 		if (typeof reference !== "string") return undefined;
 		return reference.trim() ? reference.trim() : undefined;
 	}
@@ -1343,6 +1368,10 @@ export class SettingsManager {
 
 	getBlockImages(): boolean {
 		return this.settings.images?.blockImages ?? false;
+	}
+
+	getRequestTiming(): boolean {
+		return this.settings.requestTiming ?? false;
 	}
 
 	setBlockImages(blocked: boolean): void {
