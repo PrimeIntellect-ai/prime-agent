@@ -4570,7 +4570,7 @@ describe("daemon worker supervisor monitoring", () => {
 	it("rejects update prepare when a resident worker is recovering or disconnected", async () => {
 		const requestWorker = vi.fn();
 		const worker = {
-			descriptor: { workerId: "resident-1", lifecycle: "recovering" },
+			descriptor: { workerId: "resident-1", rootActiveSessionId: "blocked-root", lifecycle: "recovering" },
 			client: undefined,
 		};
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
@@ -4579,7 +4579,9 @@ describe("daemon worker supervisor monitoring", () => {
 			prepareUpdateRestartFenced(): Promise<unknown>;
 		};
 
-		await expect(supervisor.prepareUpdateRestartFenced()).rejects.toThrow(/resident-1.*recovering.*disconnected/);
+		await expect(supervisor.prepareUpdateRestartFenced()).rejects.toThrow(
+			/resident-1.*recovering.*disconnected.*blocked-root/,
+		);
 		expect(requestWorker).not.toHaveBeenCalled();
 	});
 
