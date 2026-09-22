@@ -1,0 +1,1 @@
+- Added a frame-by-frame parity test proving a converted cloud session emits the same session event sequence as an equivalent local session for identical scripted turns, with streaming_state as the only cloud-only frame.

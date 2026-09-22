@@ -14,7 +14,7 @@ import type {
 import { DirectCloudService, type DirectCloudServiceOptions } from "../src/core/cloud/direct-cloud-service.js";
 import type { CloudEvent, CloudInferenceRequest } from "../src/core/cloud/protocol.js";
 import { CloudResultStore } from "../src/core/cloud/result-import.js";
-import { type CustomEntry, parseSessionEntries } from "../src/core/session-manager.js";
+import { type CustomEntry, parseSessionEntries, SessionManager } from "../src/core/session-manager.js";
 import { CloudInferenceBroker } from "../src/modes/daemon/cloud-inference-broker.js";
 import {
 	CloudSessionRegistry,
@@ -31,6 +31,7 @@ import {
 	seedPrimeInferenceGuestAuth,
 	startGuestDaemon,
 } from "./cloud-support.js";
+import { createFauxRuntimeFactory } from "./fixtures/cloud-guest-daemon-fixture.js";
 
 /**
  * Strict fake-transport e2e for the supervisor-owned cloud session registry:
@@ -318,6 +319,54 @@ function buildRegistry(
  * Drains the event loop until the observable settles: registry attachments,
  * mirror ticks, and socket frames all complete across turns, never a clock.
  */
+/** One normalized session-event frame for the parity diff. */
+interface ParityFrame {
+	type: string;
+	role?: string;
+	contentTypes?: string[];
+	toolName?: string;
+	isError?: boolean;
+	hasUsage?: boolean;
+}
+
+type ParityEvent = Record<string, unknown> & { type: string };
+
+/** Normalize a session event to its semantic frame; volatile fields never ride. */
+function parityFrame(event: ParityEvent): ParityFrame {
+	const message = event.message as { role?: string; content?: Array<{ type: string }>; usage?: unknown } | undefined;
+	switch (event.type) {
+		case "message_start":
+		case "message_update":
+		case "message_end": {
+			const frame: ParityFrame = { type: event.type, role: message?.role };
+			if (Array.isArray(message?.content)) frame.contentTypes = message.content.map((block) => block.type);
+			if (event.type === "message_end") frame.hasUsage = message?.usage !== undefined;
+			return frame;
+		}
+		case "tool_execution_start":
+		case "tool_execution_update":
+		case "tool_execution_end":
+			return {
+				type: event.type,
+				toolName: event.toolName as string | undefined,
+				...(event.isError !== undefined ? { isError: event.isError as boolean } : {}),
+			};
+		default:
+			return { type: event.type };
+	}
+}
+
+/** Records normalized frames from a session event stream. */
+function parityRecorder() {
+	const frames: ParityFrame[] = [];
+	return {
+		frames,
+		onEvent(event: ParityEvent): void {
+			frames.push(parityFrame(event));
+		},
+	};
+}
+
 async function waitFor(predicate: () => boolean, timeoutMs = 20_000, what = "condition"): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	for (;;) {
@@ -1123,6 +1172,85 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 			await new Promise((resolve) => setImmediate(resolve));
 		}
 	});
+
+	it("emits the same session event frames as a local session for the same scripted turns", async () => {
+		const root = cloudTemp("cloud-parity-");
+		const guestSessionId = "sess_parity_frames";
+		const daemon = await startGuestDaemon(root, 1, guestSessionId);
+		const scripted = [
+			{ prompt: "say alpha", response: "alpha" },
+			{ prompt: "say omega", response: "omega" },
+		];
+
+		// LOCAL side: a real AgentSession through the same runtime factory the
+		// guest uses, subscribed to its event stream.
+		const local = parityRecorder();
+		const manager = SessionManager.create(root, join(root, "local-sessions"));
+		const runtime = await createFauxRuntimeFactory({
+			cwd: root,
+			agentDir: join(root, "local-agent"),
+			sessionManager: manager,
+		});
+		runtime.session.subscribe((event) => local.onEvent(event as unknown as ParityEvent));
+		for (const step of scripted) {
+			queueFauxResponse(root, step.response);
+			await runtime.session.promptAndWait(step.prompt);
+		}
+
+		// CLOUD side: the registry drives the in-process guest daemon with the
+		// same faux responses; the supervisor writeSessionEvent fan-out is the
+		// cloud frame source.
+		const cloud = parityRecorder();
+		const harness = buildRegistry(root, join(root, "guest.sock"), {
+			writeSessionEvent: (activeSessionId, event, meta) => {
+				cloud.onEvent(event as unknown as ParityEvent);
+				return false;
+			},
+		});
+		try {
+			const info = await harness.registry.convertSession({ cwd: root, sessionId: guestSessionId });
+			const record = harness.store.get(info.sessionId)!;
+			for (const step of scripted) {
+				queueFauxResponse(root, step.response);
+				const target = harness.registry.resolveActive(record.activeSessionId!)!;
+				const settled = await harness.registry.handleSessionCommand(
+					{ type: "prompt_and_wait", activeSessionId: record.activeSessionId!, message: step.prompt },
+					target,
+				);
+				expect(settled.success).toBe(true);
+			}
+		} finally {
+			await harness.registry.dispose();
+			await daemon.stop().catch(() => undefined);
+		}
+
+		// Frame diff: streaming_state is the cloud-only allow-list; everything
+		// else must match the local frames exactly, in order.
+		const localNormalized = local.frames.map((frame) => JSON.stringify(frame));
+		const cloudNormalized = cloud.frames
+			.filter((frame) => frame.type !== "streaming_state")
+			.map((frame) => JSON.stringify(frame));
+		// Both sides must have recorded a full, non-trivial turn sequence;
+		// an empty diff would prove nothing.
+		for (const side of [
+			["local", local.frames],
+			["cloud", cloud.frames],
+		] as const) {
+			const types = side[1].map((frame) => frame.type);
+			for (const required of [
+				"agent_start",
+				"turn_start",
+				"message_start",
+				"message_update",
+				"message_end",
+				"agent_end",
+				"turn_end",
+			]) {
+				expect(types, `${side[0]} side is missing ${required}`).toContain(required);
+			}
+		}
+		expect(cloudNormalized).toEqual(localNormalized);
+	}, 120_000);
 
 	it("refuses prompts against a disconnected session with actionable guidance", async () => {
 		const root = temp();
