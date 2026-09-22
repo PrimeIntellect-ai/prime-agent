@@ -27,6 +27,7 @@ import {
 	type Model,
 	registerApiProvider,
 	type StreamOptions,
+	type ToolCall,
 } from "@earendil-works/pi-ai";
 import { AgentSession } from "../../src/core/agent-session.js";
 import type { CreateAgentSessionRuntimeFactory } from "../../src/core/agent-session-runtime.js";
@@ -101,6 +102,28 @@ function emitStep(stream: AssistantMessageEventStream, message: AssistantMessage
 				type: "thinking_end",
 				contentIndex: index,
 				content: block.thinking,
+				partial: { ...partial },
+			});
+		}
+		if (block?.type === "toolCall") {
+			const call = block as { id: string; name: string; arguments: Record<string, unknown> };
+			const encoded = JSON.stringify(call.arguments);
+			partial.content = [
+				...partial.content,
+				{ type: "toolCall", id: call.id, name: call.name, arguments: "" } as unknown as ToolCall,
+			];
+			stream.push({ type: "toolcall_start", contentIndex: index, partial: { ...partial } });
+			(partial.content[index] as unknown as { type: "toolCall"; arguments: string }).arguments = encoded;
+			stream.push({
+				type: "toolcall_delta",
+				contentIndex: index,
+				delta: encoded,
+				partial: { ...partial },
+			});
+			stream.push({
+				type: "toolcall_end",
+				contentIndex: index,
+				toolCall: { type: "toolCall", id: call.id, name: call.name, arguments: call.arguments },
 				partial: { ...partial },
 			});
 		}

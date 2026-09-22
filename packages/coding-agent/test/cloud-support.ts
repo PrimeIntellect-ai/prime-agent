@@ -64,6 +64,15 @@ export function cloudTemp(prefix = "cloud-test-"): string {
 // --- faux provider response queue ---------------------------------------------
 
 /** Queue one AssistantMessage step the in-process faux provider will pop. */
+/** Queue a raw faux response step (full AssistantMessage shape, e.g. a tool-call turn). */
+export function queueFauxResponseStep(root: string, step: Record<string, unknown>): void {
+	const responsesPath = join(root, "responses.jsonl");
+	process.env.PRIME_AGENT_TEST_FAUX_RESPONSES = responsesPath;
+	delete process.env.PRIME_AGENT_TEST_FAUX_ECHO;
+	const existing = existsSync(responsesPath) ? readFileSync(responsesPath, "utf8") : "";
+	writeFileSync(responsesPath, `${existing}${JSON.stringify(step)}\n`, { mode: 0o600 });
+}
+
 export function queueFauxResponse(root: string, text: string): void {
 	const responsesPath = join(root, "responses.jsonl");
 	process.env.PRIME_AGENT_TEST_FAUX_RESPONSES = responsesPath;

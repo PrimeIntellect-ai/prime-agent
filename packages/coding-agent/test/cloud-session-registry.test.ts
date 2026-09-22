@@ -27,6 +27,7 @@ import {
 	CLOUD_TEST_BRIDGE_TOKEN,
 	cloudTemp,
 	queueFauxResponse,
+	queueFauxResponseStep,
 	RecordingTunnelTransport,
 	seedPrimeInferenceGuestAuth,
 	startGuestDaemon,
@@ -1177,9 +1178,36 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 		const root = cloudTemp("cloud-parity-");
 		const guestSessionId = "sess_parity_frames";
 		const daemon = await startGuestDaemon(root, 1, guestSessionId);
-		const scripted = [
-			{ prompt: "say alpha", response: "alpha" },
-			{ prompt: "say omega", response: "omega" },
+		const scripted: Array<{ prompt: string; text?: string; step?: Record<string, unknown> }> = [
+			{ prompt: "say alpha", text: "alpha" },
+			{ prompt: "say omega", text: "omega" },
+			{
+				prompt: "run the echo tool",
+				step: {
+					role: "assistant",
+					content: [
+						{ type: "text", text: "calling bash" },
+						{
+							type: "toolCall",
+							id: "call-parity-1",
+							name: "bash",
+							arguments: { command: "echo hi" },
+						},
+					],
+					api: "faux",
+					provider: "faux",
+					timestamp: Date.now(),
+					stopReason: "toolUse",
+					usage: {
+						input: 3,
+						output: 5,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 8,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+				},
+			},
 		];
 
 		// LOCAL side: a real AgentSession through the same runtime factory the
@@ -1193,7 +1221,8 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 		});
 		runtime.session.subscribe((event) => local.onEvent(event as unknown as ParityEvent));
 		for (const step of scripted) {
-			queueFauxResponse(root, step.response);
+			if (step.step !== undefined) queueFauxResponseStep(root, step.step);
+			else queueFauxResponse(root, step.text ?? "");
 			await runtime.session.promptAndWait(step.prompt);
 		}
 
@@ -1211,7 +1240,8 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 			const info = await harness.registry.convertSession({ cwd: root, sessionId: guestSessionId });
 			const record = harness.store.get(info.sessionId)!;
 			for (const step of scripted) {
-				queueFauxResponse(root, step.response);
+				if (step.step !== undefined) queueFauxResponseStep(root, step.step);
+				else queueFauxResponse(root, step.text ?? "");
 				const target = harness.registry.resolveActive(record.activeSessionId!)!;
 				const settled = await harness.registry.handleSessionCommand(
 					{ type: "prompt_and_wait", activeSessionId: record.activeSessionId!, message: step.prompt },
@@ -1242,6 +1272,8 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 				"turn_start",
 				"message_start",
 				"message_update",
+				"tool_execution_start",
+				"tool_execution_end",
 				"message_end",
 				"agent_end",
 				"turn_end",
