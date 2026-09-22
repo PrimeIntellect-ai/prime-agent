@@ -124,6 +124,67 @@ export function sessionSummaryFromRosterEntry(entry: WorkerRosterEntry | AgentRo
 	};
 }
 
+// View-specific labels for the shared activity branch table below.
+export interface SessionActivityOptions {
+	/** Label for a row with an armed heartbeat (the agents view adds a live countdown). */
+	heartbeatLabel: string;
+	/** Fallback when no branch fires (the agents view says "needs input"; the table leaves the cell empty). */
+	idleLabel: string;
+	/**
+	 * View-specific branch between the runtime flags and the tail. Only the agents
+	 * view serves action labels; roster rows carry an empty sessionActions snapshot,
+	 * so the sessions table passes none.
+	 */
+	sessionAction?: (summary: SessionSummary) => string | undefined;
+}
+
+// One activity branch table shared by the agents view status label and the
+// sessions table activity column, so a state added here serves both surfaces.
+// Callers keep only what they own: statusLabel and lastHeardFromAt are the
+// agents view's first branches but separate columns in the table.
+export function sessionActivityDetail(summary: SessionSummary, options: SessionActivityOptions): string {
+	// A non-ready worker cannot report fresh runtime flags; its state is the row's story.
+	// The statusLabel guard is inert for the agents view (it returns statusLabel first);
+	// the table keeps the ledger mark in its own status column instead.
+	if (summary.statusLabel === undefined && summary.workerState !== undefined && summary.workerState !== "ready") {
+		return summary.workerState;
+	}
+	if (summary.isCompacting) {
+		return "compacting";
+	}
+	if (summary.isStreaming) {
+		return summary.isRunningTools ? "running tools" : "thinking";
+	}
+	// Tool/bash activity classifies the session as running; the label must agree
+	// with that section instead of claiming the session needs input.
+	if (summary.isRunningTools === true) {
+		return "running tools";
+	}
+	if (summary.isBashRunning === true) {
+		return "running bash";
+	}
+	const sessionAction = options.sessionAction?.(summary);
+	if (sessionAction !== undefined) {
+		return sessionAction;
+	}
+	if (summary.lifecycle === "archived") {
+		return "archived";
+	}
+	if (summary.hasActiveHeartbeat) {
+		return options.heartbeatLabel;
+	}
+	if (summary.runtimeKind === "subagent" && summary.repliedSinceTask) {
+		return "replied";
+	}
+	if (summary.activity === "working") {
+		return "classifying";
+	}
+	if (summary.taskState === "error") {
+		return "error";
+	}
+	return summary.taskState === "completed" ? "completed" : options.idleLabel;
+}
+
 export type AgentRosterMutation = { type: "write"; agentId: string } | { type: "delete"; agentId: string };
 
 // Supervisor-owned roster store; write() classifies once and its file index converges seed and worker keys.

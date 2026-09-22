@@ -19,7 +19,12 @@ import {
 	formatAgentSessionNameUnavailable,
 	isAgentSessionMessage,
 } from "../src/core/agent-messages.js";
-import { AgentSession } from "../src/core/agent-session.js";
+import {
+	AgentSession,
+	compactRlmText,
+	RLM_CHILD_UPDATE_MIN_INTERVAL_MS,
+	type RlmChildAgentSnapshot,
+} from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import type { LoadExtensionsResult } from "../src/core/extensions/index.js";
 import { type HostRequestHandler, type HostRequestHandlers, ReplKernelManager } from "../src/core/kernel/index.js";
@@ -105,6 +110,7 @@ interface InspectableRlmRun {
 	error?: string;
 	abandonedForQuiescence?: boolean;
 	activity?: { kind: string };
+	lastStreamedUpdateMonotonicAt?: number;
 	progressNotes: string[];
 	emitUpdate?: () => void;
 	publication?: { promise: Promise<void>; resolve(): void; reject(error: Error): void };
@@ -991,6 +997,33 @@ describe("AgentSession rlm recursion", () => {
 		await root.waitForRlmQuiescence();
 		expect(suppressed).toBe(true);
 		expect(terminalNotices(root)).toHaveLength(0);
+	});
+
+	it("skips rlm_child_update re-emission for streamed deltas that change no observable state", async () => {
+		const { root, hostedChild: child, releaseStartup } = createStartupGatedRoot();
+		child.agent.streamFn = () => createAssistantMessageEventStream(); // held open: no terminal event
+		await root.runRlmChild("stream one long answer", { name: "saturating-worker" });
+		releaseStartup();
+		const run = [...(root as unknown as InspectableRlmSession)._activeRlmChildRuns.values()][0]!;
+		await run.publication!.promise;
+		const childUpdates: RlmChildAgentSnapshot[] = [];
+		root.subscribe((event) => event.type === "rlm_child_update" && childUpdates.push(event.child));
+		const emit = (child as unknown as { _emit(event: unknown): void })._emit.bind(child);
+		for (const l of [50, 200, 210, 220]) {
+			// Hold the streamed-delta window open on every delta: this case pins the
+			// observable-state dedup, while coalescing inside one window is covered by
+			// the rlm-progress-notes cases.
+			run.lastStreamedUpdateMonotonicAt = performance.now() - RLM_CHILD_UPDATE_MIN_INTERVAL_MS - 1;
+			emit({ type: "message_start", message: assistantMessage("w".repeat(l)) });
+		}
+		// The preview keeps only the 160-char message tail, so both deltas past the cap
+		// reproduce the previous preview byte for byte and emit nothing.
+		expect(childUpdates.map((snapshot) => snapshot.answerPreview)).toEqual([
+			compactRlmText("w".repeat(50)),
+			compactRlmText("w".repeat(160)),
+		]);
+		emit({ type: "agent_end", messages: [] }); // a real change (the activity) emits again
+		expect(childUpdates.at(-1)?.activity).toBeUndefined();
 	});
 
 	it("does not inject a terminal notice when a parent follow-up resets reply state after a reply", async () => {

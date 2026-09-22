@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import {
 	type Api,
@@ -113,6 +113,7 @@ export function readCachedPrimeInferenceModels(
 
 function writeCache(cachePath: string, value: unknown): void {
 	try {
+		mkdirSync(dirname(cachePath), { recursive: true });
 		writeFileAtomicSync(cachePath, JSON.stringify(value), { mode: 0o600 });
 	} catch {
 		// The bundled catalog remains available when the cache cannot be persisted.

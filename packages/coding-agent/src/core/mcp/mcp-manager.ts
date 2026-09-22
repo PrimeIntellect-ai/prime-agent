@@ -5,7 +5,7 @@
 import { join } from "node:path";
 import { registerBuiltinMcpOAuthProviders } from "@earendil-works/pi-ai/mcp";
 import { registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/pi-ai/oauth";
-import { getAgentDir, getCatalogCacheDir, getMcpCacheDir } from "../../config.js";
+import { getAgentDir, getMcpCacheDir } from "../../config.js";
 import type { AuthStorage } from "../auth-storage.js";
 import type { McpServerConfig } from "../settings-manager.js";
 import type { AcpMcpServerConfig } from "./acp-mcp-types.js";
@@ -138,9 +138,7 @@ export class McpManager {
 		this.probeConnection = options.probeConnection;
 		this.noBackgroundVerification = options.noBackgroundVerification ?? false;
 		this.unsubscribeRemoteMcpServiceCatalogChange = onRemoteMcpServiceCatalogChange(() => this.refresh());
-		void refreshRemoteMcpServiceCatalog(join(getCatalogCacheDir(), "mcp-service-catalog.v2.json"), false).catch(
-			() => {},
-		);
+		void refreshRemoteMcpServiceCatalog(join(getMcpCacheDir(), "mcp-service-catalog.v2.json"), false).catch(() => {});
 		this.refresh();
 	}
 

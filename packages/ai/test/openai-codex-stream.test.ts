@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ResponseStreamEvent } from "openai/resources/responses/responses.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { supportsFastMode } from "../src/models.js";
+import { clampServiceTier, supportsFastMode } from "../src/models.js";
 import {
 	getOpenAICodexWebSocketDebugStats,
 	resetOpenAICodexWebSocketDebugStats,
@@ -1610,6 +1610,7 @@ describe("fast mode", () => {
 		{ provider: "openai-codex", id: "gpt-5.4", api: "openai-codex-responses" as Api, supported: true },
 		{ provider: "openai-codex", id: "gpt-5.5", api: "openai-codex-responses" as Api, supported: true },
 		{ provider: "openai-codex", id: "gpt-5.6-luna", api: "openai-codex-responses" as Api, supported: true },
+		{ provider: "openai-codex", id: "gpt-6-astra", api: "openai-codex-responses" as Api, supported: true },
 		{ provider: "openai-codex", id: "gpt-5.3-codex", api: "openai-codex-responses" as Api, supported: false },
 		{ provider: "openai-codex", id: "gpt-5.4-mini", api: "openai-codex-responses" as Api, supported: false },
 		{ provider: "openai", id: "gpt-5.1", api: "openai-responses" as Api, supported: false },
@@ -1624,5 +1625,24 @@ describe("fast mode", () => {
 		expect(buildBaseOptions(fastModeModel(provider, "gpt-5.5", api), { serviceTier: "priority" }).serviceTier).toBe(
 			"priority",
 		);
+	});
+
+	it.each([
+		{ provider: "openai", id: "gpt-5.5", api: "openai-responses", tier: "flex", expected: "flex" },
+		{
+			provider: "openrouter",
+			id: "anthropic-claude-opus-5",
+			api: "openai-completions",
+			tier: "flex",
+			expected: "flex",
+		},
+		{ provider: "openai-codex", id: "gpt-5.5", api: "openai-codex-responses", tier: "flex", expected: "default" },
+		{ provider: "groq", id: "llama-4", api: "openai-completions", tier: "flex", expected: "default" },
+		{ provider: "groq", id: "llama-4", api: "openai-completions", tier: "default", expected: "default" },
+		{ provider: "openai", id: "gpt-4o", api: "openai-responses", tier: "scale", expected: "scale" },
+		{ provider: "no", id: "model", api: undefined, tier: "priority", expected: "default" },
+	] as const)("clamps $tier to $expected for $provider/$id", ({ provider, id, api, tier, expected }) => {
+		const model = api ? fastModeModel(provider, id, api) : undefined;
+		expect(clampServiceTier(model, tier)).toBe(expected);
 	});
 });

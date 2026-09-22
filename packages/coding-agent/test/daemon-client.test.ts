@@ -6,6 +6,7 @@ import {
 	DAEMON_PROTOCOL_VERSION,
 	DAEMON_SCHEMA_REVISION,
 } from "../src/modes/daemon/daemon-protocol.js";
+import { DaemonWorkerClient } from "../src/modes/daemon/daemon-worker-client.js";
 import { listDaemonHeartbeats } from "../src/modes/daemon/heartbeat-catalog.js";
 
 const netMock = vi.hoisted(() => {
@@ -1040,6 +1041,23 @@ async function captureRejection(promise: Promise<void>): Promise<Error> {
 	}
 	throw new Error("Expected daemon client connect attempt to reject");
 }
+
+describe("DaemonWorkerClient", () => {
+	it("drops the socket reference when the connect attempt fails, so the client can retry", async () => {
+		netMock.sockets.length = 0;
+		const client = new DaemonWorkerClient("/tmp/prime-agent-worker-missing.sock");
+
+		const firstAttempt = captureRejection(client.connect());
+		netMock.sockets[0]!.emit("error", new Error("worker connect failed"));
+		await expect(firstAttempt).resolves.toMatchObject({ message: "worker connect failed" });
+		expect(client.isConnected).toBe(false);
+
+		const secondAttempt = captureRejection(client.connect());
+		expect(netMock.sockets).toHaveLength(2);
+		netMock.sockets[1]!.emit("error", new Error("retry reached socket"));
+		await expect(secondAttempt).resolves.toMatchObject({ message: "retry reached socket" });
+	});
+});
 
 describe("daemon heartbeat catalog", () => {
 	it("waits for the daemon hello before checking heartbeat capabilities", async () => {

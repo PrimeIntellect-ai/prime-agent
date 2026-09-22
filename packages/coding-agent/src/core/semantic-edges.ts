@@ -114,7 +114,26 @@ function mintId(): string {
 	return randomUUID().replaceAll("-", "");
 }
 
-/** Content hash of one turn call body; Idempotency-Key reuse is only safe for a byte-identical retry. */
+function digestRaw(value: string): string {
+	return createHash("sha256").update(value).digest("hex");
+}
+
+function digestJson(value: unknown): string {
+	return digestRaw(JSON.stringify(value));
+}
+
+/** Bump when the fingerprinted material or its serialization changes, so fingerprints never compare across versions. */
+const TURN_BODY_FINGERPRINT_VERSION = 1;
+
+/**
+ * Fingerprint of one turn call body: the recorder reuses a parked retry's Idempotency-Key only for an equal
+ * fingerprint. It hashes a bounded subset (model, options, system-prompt digest, message count, last-message
+ * digest, tools digest) so the full body (0.1-1+ MB near the context window) is never re-serialized per request;
+ * earlier messages are deliberately not covered — the fingerprint only gates parked-retry ID reuse within one
+ * retry window, where steering appends change the message count and compaction changes the recorder epoch.
+ *
+ * @param toolsDigest memoized digest of JSON.stringify(context.tools), computed here when omitted.
+ */
 export function hashTurnBody(
 	model: { provider: string; id: string },
 	context: {
@@ -129,20 +148,24 @@ export function hashTurnBody(
 		maxTokens?: number;
 		serviceTier?: unknown;
 	},
+	toolsDigest?: string,
 ): string {
+	const lastMessage = context.messages.length > 0 ? context.messages[context.messages.length - 1] : undefined;
 	return createHash("sha256")
 		.update(
 			JSON.stringify({
+				version: TURN_BODY_FINGERPRINT_VERSION,
 				provider: model.provider,
 				model: model.id,
-				systemPrompt: context.systemPrompt,
-				messages: context.messages,
-				tools: context.tools,
 				reasoning: options?.reasoning,
 				thinkingBudgets: options?.thinkingBudgets,
 				temperature: options?.temperature,
 				maxTokens: options?.maxTokens,
 				serviceTier: options?.serviceTier,
+				systemPromptDigest: context.systemPrompt === undefined ? undefined : digestRaw(context.systemPrompt),
+				messageCount: context.messages.length,
+				lastMessageDigest: lastMessage === undefined ? undefined : digestJson(lastMessage),
+				toolsDigest: context.tools === undefined ? undefined : (toolsDigest ?? digestJson(context.tools)),
 			}),
 		)
 		.digest("hex");
@@ -538,8 +561,26 @@ export function unwrapSemanticEdgeStreamFn(streamFn: StreamFn): StreamFn {
  */
 export function wrapStreamFnWithSemanticEdges(streamFn: StreamFn, recorder: SemanticEdgeRecorder): StreamFn {
 	const inner = unwrapSemanticEdgeStreamFn(streamFn);
+	// Tool schemas are usually stable across a session's requests, so the digest is memoized by element identity;
+	// a tool mutated in place keeps the stale digest — replace the object to change tools.
+	let memoizedTools: { elements: unknown[]; digest: string } | undefined;
+	const toolsDigestFor = (tools: unknown[] | undefined): string | undefined => {
+		if (tools === undefined) {
+			return undefined;
+		}
+		if (
+			memoizedTools &&
+			memoizedTools.elements.length === tools.length &&
+			memoizedTools.elements.every((tool, index) => tool === tools[index])
+		) {
+			return memoizedTools.digest;
+		}
+		const digest = digestJson(tools);
+		memoizedTools = { elements: tools, digest };
+		return digest;
+	};
 	const wrapped: StreamFn = (model, context, options) => {
-		const requestId = recorder.startTurnRequest(hashTurnBody(model, context, options));
+		const requestId = recorder.startTurnRequest(hashTurnBody(model, context, options, toolsDigestFor(context.tools)));
 		if (requestId === undefined) {
 			return inner(model, context, options);
 		}

@@ -264,8 +264,8 @@ describe("runtime session option resolution", () => {
 			createRlmHeartbeat: () => {
 				throw new Error("not used");
 			},
-			updateRlmHeartbeat: () => undefined,
-			deleteRlmHeartbeat: () => undefined,
+			updateRlmHeartbeat: async () => undefined,
+			deleteRlmHeartbeat: async () => undefined,
 		};
 
 		const resolved = resolveRuntimeSessionOptions(

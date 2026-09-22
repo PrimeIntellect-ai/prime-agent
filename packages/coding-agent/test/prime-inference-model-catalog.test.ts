@@ -91,7 +91,7 @@ describe("Prime Inference model catalog", () => {
 	test("caches valid responses and falls back to the cache when the fetch fails", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-models-"));
 		directories.push(directory);
-		const cachePath = join(directory, "cache.json");
+		const cachePath = join(directory, "models", "cache.json");
 		const bundled = [model("vendor/model")];
 		const fetched = await refreshPrimeInferenceModels(cachePath, bundled, {
 			fetchFn: vi.fn(async () => response(payloadEntry("vendor/model"))),

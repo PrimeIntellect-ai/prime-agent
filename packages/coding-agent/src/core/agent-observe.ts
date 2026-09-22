@@ -1,11 +1,17 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AgentFamilyRelationship } from "./agent-messages.js";
+import type { AgentFamilyRelationship, AgentFamilyStatus } from "./agent-messages.js";
 
 export const AGENT_OBSERVE_SKILL_NAME = "agent-observe";
 /** Shared cap for the message previews carried by roster rows. */
 export const AGENT_OBSERVE_PREVIEW_MAX_CHARS = 240;
 export const AGENT_OBSERVE_IMPORT_NAME = "agent_observe";
 export const ORCHESTRATION_HEARTBEAT_SKILL_NAME = "orchestration-heartbeat";
+
+/**
+ * What a resident session is doing right now. Separate axis from the family
+ * lifecycle in `status`, which every row carries.
+ */
+export type AgentObserveActivity = "tool" | "model" | "compacting" | "busy" | "user" | "idle";
 
 export interface AgentObserveAgentSummary {
 	/** Absent for family members that have no live session in this daemon. */
@@ -16,7 +22,9 @@ export interface AgentObserveAgentSummary {
 	relationship?: AgentFamilyRelationship;
 	runtimeKind?: "top-level" | "subagent";
 	cwd?: string;
-	status: string;
+	status: AgentFamilyStatus;
+	/** Absent for family members that have no live session in this daemon. */
+	activity?: AgentObserveActivity;
 	isCurrent: boolean;
 	isStreaming: boolean;
 	isCompacting: boolean;

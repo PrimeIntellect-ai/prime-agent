@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => ({
 	reapCalls: [] as Array<[boolean, boolean]>,
 	shutdownCalls: [] as Array<[boolean, boolean]>,
 	mcpCommands: [] as string[][],
+	incidentCalls: [] as Array<Record<string, string | undefined>>,
+	incidentWindows: [] as Array<{ sinceMs: number; untilMs: number } | undefined>,
 }));
 
 vi.mock("../src/cli/daemon-command.js", () => ({
@@ -38,6 +40,14 @@ vi.mock("../src/core/settings-manager.js", () => ({
 	},
 }));
 
+vi.mock("../src/cli/incident.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../src/cli/incident.js")>()),
+	runIncident: async (options: Record<string, string | undefined>, window?: { sinceMs: number; untilMs: number }) => {
+		mocks.incidentCalls.push(options);
+		mocks.incidentWindows.push(window);
+	},
+}));
+
 vi.mock("../src/cli/daemon-ps.js", () => ({
 	runPs: async (json: boolean) => {
 		mocks.psCalls.push(json);
@@ -51,6 +61,7 @@ vi.mock("../src/cli/daemon-ps.js", () => ({
 }));
 
 import { INTERNAL_RUNTIME_COMMAND_MARKER } from "../src/cli/args.js";
+import { formatTopLevelHelp } from "../src/cli/command-registry.js";
 import { DAEMON_UPDATE_RESTART_COORDINATOR_FLAG } from "../src/cli/daemon-update-restart.js";
 import { handlePublicCommand } from "../src/cli/public-command.js";
 
@@ -62,6 +73,8 @@ describe("public command routing", () => {
 		mocks.reapCalls.length = 0;
 		mocks.shutdownCalls.length = 0;
 		mocks.mcpCommands.length = 0;
+		mocks.incidentCalls.length = 0;
+		mocks.incidentWindows.length = 0;
 		process.exitCode = undefined;
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		vi.spyOn(console, "error").mockImplementation(() => {});
@@ -120,6 +133,10 @@ describe("public command routing", () => {
 		[
 			["list", "--all", "--json"],
 			["daemon", "list", "--all", "--json"],
+		],
+		[
+			["sessions", "--all", "--json"],
+			["daemon", "sessions", "--all", "--json"],
 		],
 		[
 			["stop", "worker", "--daemon-socket", "/tmp/custom-daemon.sock"],
@@ -334,6 +351,11 @@ describe("public command routing", () => {
 		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("Unknown command: install"));
 	});
 
+	it("shows sessions usage in command help", async () => {
+		await expect(handlePublicCommand(["help", "sessions"])).resolves.toMatchObject({ handled: true });
+		expect(console.log).toHaveBeenCalledWith(expect.stringContaining("prime-agent sessions [--all] [--json]"));
+	});
+
 	it("separates Prime Agent updates from package updates", async () => {
 		await handlePublicCommand(["update", "--force"]);
 		await handlePublicCommand(["package", "update"]);
@@ -483,5 +505,62 @@ describe("public command routing", () => {
 
 		expect(process.exitCode).toBe(1);
 		expect(mocks.daemonCommands).toEqual([]);
+	});
+
+	it("routes the incident command with parsed window options", async () => {
+		await expect(
+			handlePublicCommand(["incident", "--since", "20:02", "--until=21:00", "--session", "abc"]),
+		).resolves.toEqual({
+			handled: true,
+			args: [],
+			explicitAgentsView: false,
+		});
+		expect(mocks.incidentCalls).toEqual([{ since: "20:02", until: "21:00", session: "abc" }]);
+		expect(process.exitCode).toBeUndefined();
+	});
+
+	it("resolves the incident window once and passes it to runIncident", async () => {
+		vi.useFakeTimers();
+		// Just before UTC midnight: a second resolution later would land on the
+		// next day and render a different window for relative HH:MM bounds.
+		vi.setSystemTime(new Date("2026-09-16T23:59:59.900Z"));
+		try {
+			await handlePublicCommand(["incident", "--since", "23:00", "--until", "23:30"]);
+			expect(mocks.incidentCalls).toEqual([{ since: "23:00", until: "23:30" }]);
+			expect(mocks.incidentWindows).toEqual([
+				{ sinceMs: Date.parse("2026-09-16T23:00:00.000Z"), untilMs: Date.parse("2026-09-16T23:30:00.000Z") },
+			]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("rejects unknown incident options with usage guidance", async () => {
+		await expect(handlePublicCommand(["incident", "--json"])).resolves.toMatchObject({ handled: true });
+		expect(process.exitCode).toBe(1);
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("Unknown option for incident: --json"));
+		expect(mocks.incidentCalls).toEqual([]);
+	});
+
+	it("rejects an incident window where until precedes since with usage guidance", async () => {
+		await expect(
+			handlePublicCommand(["incident", "--since", "2026-09-10T20:30", "--until", "2026-09-10T20:00"]),
+		).resolves.toMatchObject({ handled: true });
+		expect(process.exitCode).toBe(1);
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("--until must be after --since."));
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Run "prime-agent help incident" for usage.'));
+		expect(mocks.incidentCalls).toEqual([]);
+	});
+
+	it("rejects a bad incident time with usage guidance", async () => {
+		await expect(handlePublicCommand(["incident", "--since", "yesterday"])).resolves.toMatchObject({ handled: true });
+		expect(process.exitCode).toBe(1);
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Invalid time for --since: "yesterday"'));
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Run "prime-agent help incident" for usage.'));
+		expect(mocks.incidentCalls).toEqual([]);
+	});
+
+	it("shows incident in the top-level command list", () => {
+		expect(formatTopLevelHelp()).toContain("incident");
 	});
 });

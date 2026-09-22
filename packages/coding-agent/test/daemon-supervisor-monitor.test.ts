@@ -252,6 +252,7 @@ function createSupervisorSnapshotState() {
 		pendingReplacementSnapshots: new WeakMap<object, Map<string, unknown>>(),
 		pendingRosterChanged: new Set<string>(),
 		publishedRosterIds: new Set<string>(),
+		publishedRosterJson: new Map<string, string>(),
 		pendingRosterRemoved: new Set<string>(),
 		rosterPushScheduled: false,
 	};
@@ -518,6 +519,8 @@ describe("daemon worker supervisor monitoring", () => {
 				removedAgentIds: new Map(),
 				snapshotPending: false,
 			},
+			rosterFlushScheduled: false,
+			rosterDirtyAgentIds: new Set(),
 			shuttingDown: false,
 			clearSupervisorAvailabilityCheck: vi.fn(),
 			scheduleSupervisorFenceCheck: vi.fn(),
@@ -4233,7 +4236,7 @@ describe("daemon worker supervisor monitoring", () => {
 		return { supervisor, log };
 	}
 
-	it("marks each busy worker session interrupted independently", async () => {
+	it("marks each busy worker session interrupted independently, even when one notice is refused", async () => {
 		// A stale pid whose journaled start id no longer matches is left alone.
 		const { root, worker } = recoveryFixture({
 			sessions: [
@@ -4242,7 +4245,7 @@ describe("daemon worker supervisor monitoring", () => {
 			],
 			orphan: { pid: 987_654, processStartId: "reused-process" },
 		});
-		const markInterrupted = vi.fn(async () => undefined);
+		const markInterrupted = vi.fn().mockRejectedValueOnce(new Error("session file is gone"));
 		const kill = vi.spyOn(process, "kill").mockReturnValue(true);
 		const { supervisor } = recoverySupervisor(worker, { markInterrupted });
 

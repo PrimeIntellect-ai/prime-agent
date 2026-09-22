@@ -18,7 +18,15 @@ from pydantic import ValidationError
 from cli import completed_report, main, validate_completion, workflow_source
 from controller import Canceled, Controller, cleanup, labels
 from github import TITLE, GitHub
-from report import MARKER, METRICS, RUNTIME_METRICS, TRANSPORT_METRICS, UI_METRICS, comparison, render
+from report import (
+    MARKER,
+    METRICS,
+    RUNTIME_METRICS,
+    TRANSPORT_METRICS,
+    UI_METRICS,
+    comparison,
+    render,
+)
 from schema import (
     UI_METRIC_KEYS,
     Config,
@@ -186,8 +194,10 @@ class ReportTests(unittest.TestCase):
         report.pr_head.metrics["install"] = observations(2.0, 2.0)
         report.pr_head.metrics["bundle"] = []
         text = render(report)
+        unchanged = len(METRICS) + len(RUNTIME_METRICS) + len(TRANSPORT_METRICS) - 4
         self.assertIn(
-            "**Overall: 1 regressed · 1 improved · 14 no clear change · 1 incomplete · "
+            "**Overall: 1 regressed · 1 improved · "
+            f"{unchanged} no clear change · 1 incomplete · "
             f"{len(UI_METRICS) + 1} unavailable.**",
             text,
         )
