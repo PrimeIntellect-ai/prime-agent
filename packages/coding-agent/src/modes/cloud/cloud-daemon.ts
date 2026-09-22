@@ -652,14 +652,18 @@ export class CloudGuestDaemon {
 	}
 
 	private onSessionEvent(state: ActiveSessionState, event: Record<string, unknown> & { type: string }): void {
-		// Ephemeral live frame: bounded canonical JSON, dropped (not truncated)
-		// past the wire bound because durable state lives in session_entry.
+		// Ephemeral live frame: bounded canonical JSON. Completion-carrying
+		// events (tool_execution_end, agent_end) and streamed partials are
+		// trimmed to a bounded tail rather than dropped: the UI depends on the
+		// completion signal, and the full payload already lives in the durable
+		// session_entry mirror.
+		const liveEvent = trimSessionEventForWire(event);
 		try {
 			this.protocol.appendEvent({
 				kind: "session_event",
 				recordedAt: new Date().toISOString(),
 				sessionId: state.runtime.session.sessionId,
-				event,
+				event: liveEvent,
 			});
 		} catch {
 			// Oversized live frames are dropped; the durable entry mirror still
@@ -2022,6 +2026,81 @@ function failed(error: string): CloudProtocolDispatchResult {
 
 function failure(error: unknown): CloudProtocolDispatchResult {
 	return { state: "failed", error: (error instanceof Error ? error.message : String(error)).slice(0, 2000) };
+}
+
+/**
+ * Bound a live session event for the 128 KiB ephemeral wire frame.
+ *
+ * Completion-carrying events must survive the wire even when their payloads
+ * are huge: the interactive UI completes tool components on
+ * `tool_execution_end` and ends turns on `agent_end`, so dropping either
+ * leaves the UI stuck mid-turn. Trim the unbounded payload fields to a tail
+ * instead; the full result remains in the durable session_entry mirror.
+ */
+const CLOUD_WIRE_EVENT_TEXT_TAIL_CHARS = 16_384;
+
+function trimWireText(value: string): string {
+	if (value.length <= CLOUD_WIRE_EVENT_TEXT_TAIL_CHARS) return value;
+	return `[output truncated for live streaming; full result follows in the transcript]\n${value.slice(-CLOUD_WIRE_EVENT_TEXT_TAIL_CHARS)}`;
+}
+
+function trimWireContentBlocks(blocks: unknown): unknown {
+	if (!Array.isArray(blocks)) return blocks;
+	return blocks.map((block) => {
+		if (block === null || typeof block !== "object") return block;
+		const record = block as Record<string, unknown>;
+		if (typeof record.text === "string") {
+			return { ...record, text: trimWireText(record.text) };
+		}
+		return record;
+	});
+}
+
+export function trimSessionEventForWire(event: Record<string, unknown> & { type: string }): Record<string, unknown> & {
+	type: string;
+} {
+	const trimPayload = (payload: unknown): Record<string, unknown> | undefined => {
+		if (payload === null || typeof payload !== "object") return undefined;
+		const record = payload as Record<string, unknown>;
+		if (Array.isArray(record.content)) {
+			const anyOversize = record.content.some((block) => {
+				if (block === null || typeof block !== "object") return false;
+				const text = (block as Record<string, unknown>).text;
+				return typeof text === "string" && text.length > CLOUD_WIRE_EVENT_TEXT_TAIL_CHARS;
+			});
+			if (!anyOversize) return undefined;
+			return { ...record, content: trimWireContentBlocks(record.content) };
+		}
+		return undefined;
+	};
+	const clones: Record<string, unknown> = { ...event };
+	let trimmed = false;
+	const payloadFields: [string, string][] = [
+		["tool_execution_end", "result"],
+		["tool_execution_update", "partialResult"],
+		["agent_end", "message"],
+	];
+	for (const [type, field] of payloadFields) {
+		if (event.type === type) {
+			const payload = trimPayload(clones[field]);
+			if (payload !== undefined) {
+				clones[field] = payload;
+				trimmed = true;
+			}
+		}
+	}
+	if (event.type === "agent_end" && Array.isArray(clones.toolResults)) {
+		const trimmedResults = (clones.toolResults as Array<Record<string, unknown>>).map((entry) => {
+			const payload = trimPayload(entry.result);
+			return payload === undefined ? entry : { ...entry, result: payload };
+		});
+		if (trimmedResults.some((entry, index) => entry !== (clones.toolResults as unknown[])[index])) {
+			clones.toolResults = trimmedResults;
+			trimmed = true;
+		}
+	}
+	if (!trimmed) return event;
+	return clones as Record<string, unknown> & { type: string };
 }
 
 function emptySnapshotState(cwd: string): CloudSessionState {

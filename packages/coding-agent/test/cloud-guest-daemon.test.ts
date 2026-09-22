@@ -10,7 +10,7 @@ import {
 	cloudRequestDigest,
 	parseCloudMessage,
 } from "../src/core/cloud/protocol.js";
-import { CloudGuestDaemon, parseCloudDaemonEnv } from "../src/modes/cloud/cloud-daemon.js";
+import { CloudGuestDaemon, parseCloudDaemonEnv, trimSessionEventForWire } from "../src/modes/cloud/cloud-daemon.js";
 import { CloudProtocolServer, type CloudProtocolServerCallbacks } from "../src/modes/cloud/cloud-protocol-server.js";
 import { cloudTemp } from "./cloud-support.js";
 import { createFauxRuntimeFactory } from "./fixtures/cloud-guest-daemon-fixture.js";
@@ -1427,5 +1427,56 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 		} finally {
 			await server.stop().catch(() => undefined);
 		}
+	});
+});
+
+describe("live session event wire trimming", () => {
+	it("trims oversized tool_execution_end payloads to a bounded tail instead of dropping the event", () => {
+		const hugeText = `${"x".repeat(200_000)}\nfinal line`;
+		const event = {
+			type: "tool_execution_end",
+			toolCallId: "call-1",
+			toolName: "ipython",
+			result: { content: [{ type: "text", text: hugeText }], details: { status: "ok" } },
+			isError: false,
+		};
+		const trimmed = trimSessionEventForWire(event as never) as unknown as {
+			type: string;
+			result: { content: Array<{ type: string; text: string }> };
+		};
+		expect(trimmed.type).toBe("tool_execution_end");
+		const text = trimmed.result.content.find((block) => block.type === "text")?.text ?? "";
+		expect(text.length).toBeLessThan(200_000);
+		expect(text).toContain("final line");
+		expect(text).toContain("full result follows in the transcript");
+
+		// Small events pass through untouched.
+		const small = {
+			type: "tool_execution_end",
+			toolCallId: "call-2",
+			toolName: "ipython",
+			result: { content: [{ type: "text", text: "42" }] },
+			isError: false,
+		};
+		expect(trimSessionEventForWire(small as never)).toBe(small);
+	});
+
+	it("trims agent_end message and tool result payloads for the wire", () => {
+		const hugeText = `${"y".repeat(180_000)}\ntail`;
+		const event = {
+			type: "agent_end",
+			message: { role: "assistant", content: [{ type: "text", text: hugeText }] },
+			toolResults: [{ result: { content: [{ type: "text", text: hugeText }] } }],
+		};
+		const trimmed = trimSessionEventForWire(event as never) as unknown as {
+			message: { content: Array<{ type: string; text: string }> };
+			toolResults: Array<{ result: { content: Array<{ type: string; text: string }> } }>;
+		};
+		expect(
+			trimmed.message.content.find((block) => block.type === "text")?.text?.length ?? 0,
+		).toBeLessThan(180_000);
+		expect(
+			trimmed.toolResults[0]?.result.content.find((block) => block.type === "text")?.text?.length ?? 0,
+		).toBeLessThan(180_000);
 	});
 });

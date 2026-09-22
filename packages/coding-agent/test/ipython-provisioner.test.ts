@@ -433,6 +433,32 @@ describe("IpythonKernelProvisioner", () => {
 		expect(setWorkingMessage).toHaveBeenLastCalledWith(undefined);
 	});
 
+	it("reports growing output snapshots per streamed chunk so line counts do not flicker", async () => {
+		const execute = vi.fn<KernelClient["execute"]>().mockImplementation(async (_code, callbacks) => {
+			callbacks?.onStream?.("line 1\n", "stdout");
+			callbacks?.onStream?.("line 2\n", "stdout");
+			return okExecuteResult();
+		});
+		const manager = { execute } as unknown as KernelClient;
+		const ensure = vi.fn(async () => manager);
+		const kill = vi.fn(async () => {});
+		const provisioner = { ensure, kill } as unknown as IpythonKernelProvisioner;
+		const tool = createIpythonToolDefinition(tempDir, { provisioner });
+
+		const updates: string[] = [];
+		const onUpdate = (partial: { content: Array<{ type: string; text?: string }> }) => {
+			updates.push(partial.content.find((block) => block.type === "text")?.text ?? "");
+		};
+		await tool.execute("tool-call", { code: "x = 1" }, undefined, onUpdate, {} as ExtensionContext);
+
+		expect(updates.length).toBe(2);
+		// Replace-semantics snapshots: each update contains the accumulated
+		// output so far, never just the latest chunk.
+		expect(updates[0]).toContain("line 1");
+		expect(updates[1]).toContain("line 1");
+		expect(updates[1]).toContain("line 2");
+	});
+
 	it("does not delete the on-disk snapshot (the kernel survives compaction)", async () => {
 		const snapshotDir = join(tempDir, "artifacts");
 		const provisioner = new IpythonKernelProvisioner(tempDir, { snapshotDir });

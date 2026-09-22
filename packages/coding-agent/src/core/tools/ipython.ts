@@ -20,6 +20,7 @@ import {
 } from "../kernel/index.js";
 import { manifestPathIn, type RestoreResult, snapshotPathIn } from "../kernel/state-snapshot.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
+import { OutputAccumulator } from "./output-accumulator.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 
 const RLM_BOOTSTRAP_HEADER_CODE = `
@@ -704,6 +705,7 @@ export function createIpythonToolDefinition(
 			};
 
 			try {
+				const streamAccumulator = new OutputAccumulator({ tempFilePrefix: "pi-ipython-partial" });
 				const { result: r, kernelRestarted } = await executeWithBusyKernelChoice(
 					provisioner,
 					reportStartupProgress,
@@ -711,8 +713,12 @@ export function createIpythonToolDefinition(
 					params.code,
 					signal,
 					(chunk) => {
+						// Partial results are replace-semantics snapshots on the
+						// UI side; report a growing tail so streamed line counts
+						// tick up instead of flickering with chunk sizes.
+						streamAccumulator.append(Buffer.from(chunk, "utf8"));
 						onUpdate?.({
-							content: [{ type: "text", text: chunk }],
+							content: [{ type: "text", text: streamAccumulator.snapshot().content }],
 							details: { status: "ok" },
 						});
 					},

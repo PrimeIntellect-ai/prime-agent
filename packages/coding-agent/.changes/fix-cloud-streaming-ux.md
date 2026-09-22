@@ -1,0 +1,2 @@
+- Fixed tool call streaming line counts flickering: streamed ipython partial results now report a growing output snapshot instead of just the latest chunk.
+- Fixed cloud tool calls stuck on "waiting for output" after completion: oversized completion events (tool_execution_end, agent_end) are now trimmed to a bounded tail instead of being dropped past the live frame size limit, while the full result remains in the durable transcript.
