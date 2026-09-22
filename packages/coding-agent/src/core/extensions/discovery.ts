@@ -4,13 +4,15 @@ import { toPosixPath } from "../../utils/paths.js";
 import { addIgnoreRules, createIgnoreMatcher } from "../ignore-rules.js";
 
 interface PiExtensionManifest {
-	extensions?: string[];
+	extensions?: unknown;
 }
 
 function readManifestExtensions(packageJsonPath: string): string[] | undefined {
 	try {
 		const pkg = JSON.parse(readFileSync(packageJsonPath, "utf-8")) as { pi?: PiExtensionManifest };
-		return pkg.pi?.extensions;
+		const declared = pkg.pi?.extensions;
+		if (!Array.isArray(declared)) return undefined;
+		return declared.filter((entry) => typeof entry === "string");
 	} catch {
 		return undefined;
 	}

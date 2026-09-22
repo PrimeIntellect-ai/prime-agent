@@ -103,12 +103,16 @@ describe("extensions discovery", () => {
 			expected: ["my-package/custom.ts"],
 		},
 		{
-			name: "package.json without pi field falls back to index.ts",
+			name: "package.json with an absent or unusable pi field does not stop discovery",
 			setup: () => {
 				write("my-package/index.ts");
 				write("my-package/package.json", JSON.stringify({ name: "my-package", version: "1.0.0" }));
+				write("malformed-package/index.ts");
+				write("malformed-package/package.json", JSON.stringify({ pi: { extensions: "index.ts" } }));
+				write("invalid-element-package/index.ts");
+				write("invalid-element-package/package.json", JSON.stringify({ pi: { extensions: [7] } }));
 			},
-			expected: ["my-package/index.ts"],
+			expected: ["invalid-element-package/index.ts", "malformed-package/index.ts", "my-package/index.ts"],
 		},
 		{
 			name: "package.json paths that do not exist are skipped",
