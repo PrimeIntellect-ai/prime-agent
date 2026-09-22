@@ -897,7 +897,12 @@ describe("AgentSession retry and event characterization", () => {
 	};
 	const wakeQuotaProbe = (harness: Harness): (() => Promise<AssistantMessage>) => {
 		const turn = assistantTurns(harness);
-		return () => fireQuotaWake(harness).then(turn);
+		const internals = harness.session as unknown as QuotaParkInternals;
+		return async () => {
+			const message = await fireQuotaWake(harness).then(turn);
+			await internals._agentEventQueue;
+			return message;
+		};
 	};
 
 	const readQuotaWakeJob = (harness: Harness, jobId: string | undefined) =>
@@ -972,8 +977,8 @@ describe("AgentSession retry and event characterization", () => {
 
 		const store = AgentCronJobStore.forSessionArtifacts();
 		store.registerSessionArtifact(harness.sessionManager.getSessionId(), artifactDir);
-		const [dispatch] = store.claimDue(new Date(Date.now() + 60_000));
-		store.recordDispatchResult(dispatch!.id, { outcome: "ran" });
+		const [dispatch] = await store.claimDue(new Date(Date.now() + 60_000));
+		await store.recordDispatchResult(dispatch!.id, { outcome: "ran" });
 		await fireQuotaWake(harness);
 		expect([quotaPark(harness)?.waking, harness.faux.state.callCount]).toEqual([true, 1]);
 		expect(readQuotaWakeJob(harness, jobId)?.status).toBe("completed");
@@ -990,6 +995,7 @@ describe("AgentSession retry and event characterization", () => {
 		const aborted = assistantTurns(abortedHarness);
 		await fireQuotaWake(abortedHarness);
 		expect((await aborted()).stopReason).toBe("aborted");
+		await (abortedHarness.session as unknown as QuotaParkInternals)._agentEventQueue;
 		const reArmed = quotaPark(abortedHarness);
 		expect([reArmed?.waking, (reArmed?.resumeAtMs ?? 0) > parkedAtMs]).toEqual([false, true]);
 
@@ -1063,7 +1069,7 @@ describe("AgentSession retry and event characterization", () => {
 			restarted.sessionManager.getSessionId(),
 			restarted.sessionManager.getSessionArtifactDir()!,
 		);
-		store.cancel(quotaPark(restarted)!.jobId!);
+		await store.cancel(quotaPark(restarted)!.jobId!);
 		await restarted.session.navigateTree(lastUserEntryId(restarted));
 		await restarted.session.navigateTree(restarted.sessionManager.getLeafId()!);
 		expect(restarted.session.isQuotaParked).toBe(false);
