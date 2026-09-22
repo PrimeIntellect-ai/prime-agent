@@ -384,6 +384,6 @@ every push to `main`.
 - Activation (operator step, after the lane merges): `make activate-workflows`
   from a workflow-scoped machine (Kevin's Mac) moves the file to
   `.github/workflows/continuous.yml` and pushes main. Post-activation
-  verification: `gh workflow list --repo kevinjosethomas/prime-agent-rs`
+  verification: `gh workflow list --repo PrimeIntellect-ai/prime-agent`
   shows `continuous` (and `release`) active; the next push to `main` publishes
   the first `continuous` release.
