@@ -920,6 +920,7 @@ def _restore_state(
         for name, value in prepared.items():
             ns[name] = value
         for name, value in backfill:
+            # prepared names already sit in ns here: a restored value always beats backfill.
             if name not in ns:
                 ns[name] = value
         # Publish while still parked: a later KeyboardInterrupt into this task finds the committed result (see _handle_state).
