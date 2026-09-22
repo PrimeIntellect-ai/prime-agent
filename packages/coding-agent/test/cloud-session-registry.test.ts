@@ -915,6 +915,38 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 		}
 	});
 
+	it("refuses prompts against a disconnected session with actionable guidance", async () => {
+		const root = temp();
+		const guestSessionId = "sess_disconnected_prompt";
+		const daemon = await startGuestDaemon(root, 1, guestSessionId);
+		const harness = buildRegistry(root, join(root, "guest.sock"));
+		try {
+			const info = await harness.registry.convertSession({ cwd: root, sessionId: guestSessionId });
+			const record = harness.store.get(info.sessionId)!;
+			const target = harness.registry.resolveActive(record.activeSessionId!)!;
+			await waitFor(
+				() => harness.registry.resolveActive(record.activeSessionId!)!.summary.execution !== undefined,
+				10_000,
+				"target ready",
+			);
+
+			// Simulate a dead tunnel: stop the attachment so requireConnected
+			// refuses, and the refusal names the recovery commands.
+			await harness.registry.stopAttachment(record.sessionId);
+			const refused = await harness.registry.handleSessionCommand(
+				{ type: "prompt", activeSessionId: record.activeSessionId!, message: "never runs" },
+				target,
+			);
+			expect(refused.success).toBe(false);
+			const error = String((refused as { error?: unknown }).error);
+			expect(error).toContain("/cloud reprovision");
+			expect(error).toContain("/cloud stop");
+		} finally {
+			await harness.registry.dispose();
+			await daemon.stop().catch(() => undefined);
+		}
+	});
+
 	it("translates the normal session command surface onto cloud commands", async () => {
 		const root = cloudTemp("cloud-session-registry-test-");
 		const guestSessionId = "sess_translate_me";

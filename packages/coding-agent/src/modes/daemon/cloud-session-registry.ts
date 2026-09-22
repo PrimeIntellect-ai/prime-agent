@@ -1382,6 +1382,13 @@ export class CloudSessionRegistry {
 		this.pushSpawnTaskUpdate(session, this.spawnTaskAlreadyAdmitted(session) ? "running" : "queued");
 	}
 
+	/** Stop one session's tunnel attachment; prompts refuse until it reconnects. */
+	async stopAttachment(sessionId: string): Promise<void> {
+		const session = this.sessions.get(sessionId);
+		if (session === undefined) return;
+		await session.attachment.stop();
+	}
+
 	/** Stop every attachment and close shadows; used on supervisor shutdown. */
 	async dispose(): Promise<void> {
 		this.disposed = true;
@@ -2212,7 +2219,9 @@ export class CloudSessionRegistry {
 
 	private async requireConnected(session: CloudResidentSession, action: string): Promise<void> {
 		if (!session.attachment.attached) {
-			throw new Error(`Cloud session is not connected; cannot ${action} until the tunnel reconnects`);
+			throw new Error(
+				`Cloud session is not connected, so it cannot ${action} right now. The tunnel to its sandbox reconnects automatically. If it stays disconnected, run /cloud reprovision to revive the session on a fresh sandbox (workspace changes not yet imported are lost), or /cloud stop to release it.`,
+			);
 		}
 	}
 

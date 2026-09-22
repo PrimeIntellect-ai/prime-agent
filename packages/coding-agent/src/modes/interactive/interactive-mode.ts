@@ -12298,6 +12298,16 @@ export class InteractiveMode {
 		if (session.lastError && session.status !== "failed") {
 			lines.push(`Last error: ${session.lastError}`);
 		}
+		if (session.status === "running" && session.connectivity !== "connected") {
+			lines.push(
+				session.connectivity === "reconnecting"
+					? "Reconnecting automatically; prompts resume once the tunnel is back. If it stays down: /cloud reprovision (fresh sandbox, unimported changes lost) or /cloud stop."
+					: "Disconnected: /cloud reprovision revives the session on a fresh sandbox (unimported changes lost); /cloud stop releases it.",
+			);
+		}
+		if (session.status === "lost") {
+			lines.push("/cloud reprovision revives this session on a fresh sandbox.");
+		}
 		return lines.join("\n");
 	}
 

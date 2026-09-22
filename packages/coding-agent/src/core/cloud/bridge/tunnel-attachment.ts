@@ -95,6 +95,8 @@ export interface CloudTunnelAttachmentOptions {
 	maxReconnectDelayMs?: number;
 	/** Check tunnel liveness after this many consecutive failed attempts. */
 	checkTunnelAfterFailures?: number;
+	/** Consecutive-failure bound before the attachment gives up reconnecting. */
+	maxConsecutiveFailures?: number;
 	/** Wait for a submit receipt before reporting the command as queued. */
 	submitWaitMs?: number;
 	/** Injectable sleep for tests. */
@@ -141,6 +143,7 @@ export class CloudTunnelAttachment {
 	private stopped = false;
 	private terminal = false;
 	private consecutiveFailures = 0;
+	private readonly maxConsecutiveFailures: number;
 	private wake: (() => void) | undefined;
 
 	constructor(options: CloudTunnelAttachmentOptions) {
@@ -154,6 +157,7 @@ export class CloudTunnelAttachment {
 			throw new Error("maxReconnectDelayMs must not be smaller than reconnectDelayMs");
 		}
 		this.checkTunnelAfterFailures = positiveInt(options.checkTunnelAfterFailures ?? 3, "checkTunnelAfterFailures");
+		this.maxConsecutiveFailures = positiveInt(options.maxConsecutiveFailures ?? 120, "maxConsecutiveFailures");
 		this.submitWaitMs = positiveInt(options.submitWaitMs ?? 20_000, "submitWaitMs");
 		this.sleepFn = options.sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 	}
@@ -272,6 +276,16 @@ export class CloudTunnelAttachment {
 				this.callbacks.onAttachmentError(`tunnel attachment failed: ${errorMessage(error)}`);
 				if (this.consecutiveFailures % this.checkTunnelAfterFailures === 0 && !(await this.probeTunnelAlive())) {
 					this.callbacks.onTerminal("the tunnel registration is gone; steering is unavailable");
+					return;
+				}
+				if (this.consecutiveFailures >= this.maxConsecutiveFailures) {
+					// The registration is alive but the guest bridge never
+					// accepts the upgrade: retrying further keeps the session in
+					// an endless reconnecting limbo. Give up honestly so the
+					// user sees the state and can reprovision.
+					this.callbacks.onTerminal(
+						`the tunnel could not be re-established after ${this.consecutiveFailures} attempts; the sandbox bridge is unreachable`,
+					);
 					return;
 				}
 			}

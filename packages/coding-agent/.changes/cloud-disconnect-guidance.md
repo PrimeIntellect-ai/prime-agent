@@ -1,0 +1,2 @@
+- Clarified what to do when a cloud session is not connected: the prompt error and /cloud status now name the automatic reconnect and the /cloud reprovision and /cloud stop recovery paths.
+- Cloud tunnels now give up reconnecting after a bounded number of consecutive failures and report an unreachable sandbox bridge honestly, instead of retrying forever in a reconnecting limbo.

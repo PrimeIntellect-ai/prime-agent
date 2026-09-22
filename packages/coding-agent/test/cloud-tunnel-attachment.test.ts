@@ -105,7 +105,7 @@ function makeCallbacks(overrides: Partial<CloudTunnelAttachmentCallbacks> = {}):
 function makeAttachment(
 	transport: CloudTunnelTransport,
 	callbacks: CloudTunnelAttachmentCallbacks,
-	options: { reconnectDelayMs?: number } = {},
+	options: { reconnectDelayMs?: number; maxConsecutiveFailures?: number } = {},
 ): CloudTunnelAttachment {
 	return new CloudTunnelAttachment({
 		sessionId: "sess_att_1",
@@ -116,6 +116,9 @@ function makeAttachment(
 		maxReconnectDelayMs: 20,
 		checkTunnelAfterFailures: 2,
 		submitWaitMs: 500,
+		...(options.maxConsecutiveFailures !== undefined
+			? { maxConsecutiveFailures: options.maxConsecutiveFailures }
+			: {}),
 		sleepFn: async () => {},
 	});
 }
@@ -356,6 +359,24 @@ describe("CloudTunnelAttachment", () => {
 		expect(onTerminal).toHaveBeenCalled();
 		expect(onTerminal).toHaveBeenCalledWith(expect.stringContaining("registration is gone"));
 		expect(attachment.pendingCount).toBe(0);
+		await attachment.stop();
+	});
+
+	it("gives up reconnecting honestly when the guest bridge stays unreachable", async () => {
+		const transport = new FakeTransport();
+		transport.failuresBeforeSuccess = Number.POSITIVE_INFINITY;
+		const onTerminal = vi.fn();
+		const callbacks = makeCallbacks({
+			checkTunnelAlive: vi.fn(async () => true),
+			onTerminal,
+		});
+		const attachment = makeAttachment(transport, callbacks, { maxConsecutiveFailures: 5 });
+		attachment.start();
+		for (let tick = 0; tick < 40 && onTerminal.mock.calls.length === 0; tick++) {
+			await vi.advanceTimersByTimeAsync(50);
+		}
+		expect(onTerminal).toHaveBeenCalledWith(expect.stringContaining("could not be re-established after 5 attempts"));
+		expect(attachment.attached).toBe(false);
 		await attachment.stop();
 	});
 
