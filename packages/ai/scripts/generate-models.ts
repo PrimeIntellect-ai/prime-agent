@@ -2052,6 +2052,72 @@ async function generateModels() {
 		});
 	}
 
+	// Pin the shipped Kimi For Coding rows. models.dev split the retired
+	// kimi-for-coding section into kimi-code-plan-global (api.kimi.ai) and
+	// kimi-code-plan-cn, both re-registered as OpenAI-compatible deployments
+	// that do not match this provider's verified Anthropic-messages surface on
+	// api.kimi.com/coding. Keep the existing rows until the provider is
+	// migrated to one of the new deployments with verified request shapes.
+	const kimiCodingModels: Model<"anthropic-messages">[] = [
+		{
+			id: "k3",
+			name: "Kimi K3",
+			api: "anthropic-messages",
+			provider: "kimi-coding",
+			baseUrl: "https://api.kimi.com/coding",
+			headers: { ...KIMI_STATIC_HEADERS },
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1048576,
+			maxTokens: 131072,
+		},
+		{
+			id: "k3-256k",
+			name: "Kimi K3-256K",
+			api: "anthropic-messages",
+			provider: "kimi-coding",
+			baseUrl: "https://api.kimi.com/coding",
+			headers: { ...KIMI_STATIC_HEADERS },
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262144,
+			maxTokens: 131072,
+		},
+		{
+			id: "kimi-for-coding",
+			name: "Kimi K2.7 Code",
+			api: "anthropic-messages",
+			provider: "kimi-coding",
+			baseUrl: "https://api.kimi.com/coding",
+			headers: { ...KIMI_STATIC_HEADERS },
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262144,
+			maxTokens: 32768,
+		},
+		{
+			id: "kimi-for-coding-highspeed",
+			name: "Kimi For Coding HighSpeed",
+			api: "anthropic-messages",
+			provider: "kimi-coding",
+			baseUrl: "https://api.kimi.com/coding",
+			headers: { ...KIMI_STATIC_HEADERS },
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262144,
+			maxTokens: 32768,
+		},
+	];
+	for (const kimiModel of kimiCodingModels) {
+		if (!allModels.some((m) => m.provider === "kimi-coding" && m.id === kimiModel.id)) {
+			allModels.push(kimiModel);
+		}
+	}
+
 	// Add missing Mistral Medium 3.5 model until models.dev includes it
 	if (!allModels.some(m => m.provider === "mistral" && m.id === "mistral-medium-3.5")) {
 		allModels.push({

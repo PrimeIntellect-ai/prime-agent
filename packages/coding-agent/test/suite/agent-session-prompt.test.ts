@@ -1004,6 +1004,40 @@ describe("Harness digest at cold boundaries", () => {
 		};
 	}
 
+	it("delivers a diagnostic digest instead of crashing on a malformed global entry", async () => {
+		// Regression for the fleet-wide incident: one entry with list content in
+		// the global store bricked all child spawn creation via the digest crash.
+		const agentDir = isolatedAgentDir("pi-digest-malformed");
+		mkdirSync(join(agentDir, "harness"), { recursive: true });
+		writeFileSync(
+			join(agentDir, "harness", "harness_state.json"),
+			'{"schema":1,"entries":{"prompt":{},"skill":{},"subagent":{},"memory":{"broken_memory":{"id":"broken_memory","kind":"memory","title":"Breaking memory","content":["one string"],"path":"arc","scope":"global","version":1},"valid_memory":{"id":"valid_memory","kind":"memory","title":"Valid memory","content":"Worktree workflow notes.","path":"general","scope":"global","version":1}}},"refinements":[{"id":"refine_bad","trigger":["not a string"],"changes":[],"evidence":"","outcome":""},null,"RAWLEAK-5f1e",{"id":null,"trigger":"t","changes":["update memory:m"]},{"id":"bad_changes","trigger":"t","changes":[7]}]}',
+		);
+
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("hi")]);
+		await harness.session.prompt("hello");
+
+		const digests = digestMessages(harness);
+		expect(digests).toHaveLength(1);
+		const digest = getMessageText(digests[0]);
+		expect(digest).toContain("harness: skipped malformed entry broken_memory (content not a string)");
+		expect(digest).toContain("harness: skipped malformed refinement event refine_bad (trigger not a string)");
+		expect(digest).toContain("harness: skipped malformed refinement event null (event not an object)");
+		// Non-object elements are labeled by type only: the raw value must not leak.
+		expect(digest).toContain("harness: skipped malformed refinement event a string (event not an object)");
+		expect(digest).not.toContain("RAWLEAK-5f1e");
+		// Non-string ids and non-string change elements are skipped by type label, not rendered.
+		expect(digest).toContain("harness: skipped malformed refinement event a object id (id not a string)");
+		expect(digest).toContain(
+			"harness: skipped malformed refinement event bad_changes (changes contain a non-string)",
+		);
+		expect(digest).toContain("[global:valid_memory]");
+		// The malformed content itself must never leak into the digest.
+		expect(digest).not.toContain("one string");
+	});
+
 	it("skips digest re-delivery on resume when only query terms drifted and the state is unchanged", async () => {
 		// Hermetic store: the ambient developer harness would crowd the ranked window.
 		isolatedAgentDir("pi-digest-resume");
@@ -1045,5 +1079,28 @@ describe("Harness digest at cold boundaries", () => {
 		)._harnessDigestWithFingerprint().digest;
 		expect(HARNESS_DIGEST_PREFIX + freshDigest + HARNESS_DIGEST_SUFFIX).not.toBe(getMessageText(after[0]));
 		resumed.session.dispose();
+	});
+
+	it("appends a fresh digest on resume after disk state changed, replacing the old copy", async () => {
+		// Empty global store: digest content must reflect only the local test entry.
+		// The unchanged-disk resume dedupe is pinned by the fingerprint test above.
+		isolatedAgentDir("pi-digest-agent");
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("hi")]);
+		await harness.session.prompt("hello");
+		const sessionFile = harness.sessionManager.getSessionFile();
+		harness.session.dispose();
+
+		const localDir = getLocalHarnessStateDir(harness.sessionManager.getSessionArtifactDir());
+		const state = loadHarnessState(localDir, "local");
+		seedMemory(state, "resume_test_memory", "Resume test memory", "Written between resumes.");
+		saveHarnessState(localDir!, state);
+
+		const resumedStale = await createHarness({ existingSessionFile: sessionFile });
+		harnesses.push(resumedStale);
+		const digests = digestMessages(resumedStale);
+		expect(digests).toHaveLength(1); // the fresh digest replaced the stale copy instead of stacking
+		expect(getMessageText(digests[0])).toContain("[local:resume_test_memory] Resume test memory");
 	});
 });
