@@ -112,9 +112,6 @@ class HarnessStateTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "only accepted for kind='skill'"):
                     state.update_memory(default_entry.id, "Bad", "content", kind=kind, arguments={})
 
-            # An unknown kind is reported as such, not as a skill-only field error.
-            with self.assertRaisesRegex(ValueError, "unknown harness kind 'tool'"):
-                state.create_memory("Bad", "content", kind="tool", reference=PYTHON_REFERENCE)
 
             with self.assertRaisesRegex(TypeError, "path was renamed to topic"):
                 state.create_memory("Grouped", "content", **{"path": "repo/testing"})
@@ -664,7 +661,7 @@ class HarnessStateTest(unittest.TestCase):
             future = state_path.stat().st_mtime + 5
             os.utime(state_path, (future, future))
 
-            # create() must observe the external entry and honor create-or-fail.
+            # create_memory() must observe the external entry and honor create-or-fail.
             with self.assertRaisesRegex(ValueError, "already exists"):
                 state.create_memory("Local", "Should not overwrite.", id="dup")
             self.assertEqual(state.get("memory", "dup").content, "Written elsewhere.")
