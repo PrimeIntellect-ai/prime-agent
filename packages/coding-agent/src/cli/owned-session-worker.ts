@@ -398,7 +398,13 @@ export async function runOwnedSessionWorkerFrontend(
 		// child so its close event drives that fallout instead of waiting
 		// indefinitely on a worker that can no longer accept commands.
 		child.stdin?.on("error", (error) => {
-			if ((error as NodeJS.ErrnoException).code === "EPIPE") {
+			// Guard like forwardSignal: an exited child's pid may have been
+			// reassigned, so never signal after its exit.
+			if (
+				(error as NodeJS.ErrnoException).code === "EPIPE" &&
+				child.exitCode === null &&
+				child.signalCode === null
+			) {
 				child.kill("SIGKILL");
 			}
 		});
@@ -482,10 +488,16 @@ export async function runOwnedSessionWorkerFrontend(
 				child.disconnect();
 			}
 			reapWorkerResources(workerPid);
+			// Buffered commands never started, so they replay instead of
+			// failing whenever recovery can run; count them like written ones
+			// so a worker death still routes through the recovery path.
 			const rpcCrashed =
 				profile === "rpc" &&
 				!terminating &&
-				(exit.code !== 0 || exit.signal !== null || pendingRpcCommands.size > 0);
+				(exit.code !== 0 ||
+					exit.signal !== null ||
+					pendingRpcCommands.size > 0 ||
+					bufferedRpcInput.some((prepared) => prepared.pending !== undefined));
 			const workerExitCode = rpcCrashed && exit.code === 0 ? 1 : exit.code;
 			if (Date.now() - workerStartedAt >= 60_000) {
 				recoveryAttempt = 0;
