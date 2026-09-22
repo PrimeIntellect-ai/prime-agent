@@ -36,6 +36,21 @@ export type RefinementKind = "prompt" | "memory" | "skill" | "subagent";
 export type RefinementAction = "create" | "update" | "delete";
 export type HarnessScope = "local" | "global";
 
+/**
+ * Provenance for read-only harness entries mounted from an installed Prime Agent
+ * package. `source` is the sanitized configured package source (never a local
+ * filesystem path), `file` is the entry's path relative to the package root, and
+ * `revision` identifies the installed package revision when discoverable.
+ */
+export interface PackageHarnessProvenance {
+	origin: "package";
+	source: string;
+	scope: "user" | "project" | "temporary";
+	file: string;
+	revision?: string;
+	readOnly: true;
+}
+
 export interface HarnessEntry {
 	id: string;
 	kind: RefinementKind;
@@ -50,6 +65,7 @@ export interface HarnessEntry {
 	created_at: string;
 	updated_at: string;
 	version: number;
+	provenance?: PackageHarnessProvenance;
 }
 
 export interface HarnessRefinementEvent {
@@ -146,7 +162,8 @@ Continual harness components:
 Scope and persistence policy:
 - The default editable continual harness store is local to the current Prime Agent session. Use it for session-specific progress, active task state, current-run coordination notes, temporary blockers, and project facts that should not affect other sessions.
 - A caller may explicitly request global refinement. Global edits must be stable cross-session lessons, durable user preferences, reusable skills/subagents, or tool/environment facts that should affect future sessions.
-- Entry ids in the harness overview may carry a display-only \`local:\` or \`global:\` prefix. Always use the bare id (no prefix) in edits.
+- Entry ids in the harness overview may carry a display-only \`local:\`, \`global:\`, or \`package:\` prefix. Always use the bare id (no prefix) in edits.
+- Package entries (\`package:\` prefix) are read-only runtime overlays mounted from installed Prime Agent packages. Never propose update or delete edits for them. A create edit with the same kind and bare id is allowed when an editable local or global override is genuinely justified.
 - All edits in one refinement apply only to the requested scope's store. During a local refinement, global entries are read-only context: never propose update or delete edits for them; create a local entry instead when a session-specific override is genuinely needed.
 - Project/workspace-specific lessons may be persisted globally only when the title, path, or content explicitly names the project/workspace and the lesson is likely to be reused in future sessions for that project. Prefer local edits when the lesson only belongs in the current conversation.
 - Use memory for declarative facts and preferences, skill for repeatable procedures exposed as Python calls, prompt for narrow behavioral policy addendums, and subagent for reusable delegation roles.
@@ -366,9 +383,13 @@ export function loadHarnessState(
 	return state;
 }
 
-export function mergeHarnessStates(globalState: HarnessState, localState?: HarnessState): HarnessState {
+export function mergeHarnessStates(
+	globalState: HarnessState,
+	localState?: HarnessState,
+	packageState?: HarnessState,
+): HarnessState {
 	const merged = emptyHarnessState();
-	merged.schema = Math.max(globalState.schema, localState?.schema ?? 1);
+	merged.schema = Math.max(globalState.schema, localState?.schema ?? 1, packageState?.schema ?? 1);
 	for (const kind of Object.keys(merged.entries) as RefinementKind[]) {
 		for (const [id, entry] of Object.entries(globalState.entries[kind])) {
 			const cloned = cloneEntry(entry)!;
@@ -379,6 +400,15 @@ export function mergeHarnessStates(globalState: HarnessState, localState?: Harne
 			const scopedEntry = { ...cloned, scope: normalizeHarnessScope(cloned.scope, "local") };
 			const mergedId = merged.entries[kind][id] ? `${scopedEntry.scope}:${id}` : id;
 			merged.entries[kind][mergedId] = scopedEntry;
+		}
+		// Read-only package overlays rank below every editable entry: an editable
+		// local/global entry with the same (kind, id) shadows the package entry.
+		const editableIds = new Set(Object.values(merged.entries[kind]).map((entry) => entry.id));
+		for (const [id, entry] of Object.entries(packageState?.entries[kind] ?? {})) {
+			if (editableIds.has(entry.id)) {
+				continue;
+			}
+			merged.entries[kind][id] = cloneEntry(entry)!;
 		}
 	}
 	merged.refinements = [...globalState.refinements, ...(localState?.refinements ?? [])];
@@ -496,6 +526,26 @@ function compactText(text: string, maxLength: number): string {
 		return normalized;
 	}
 	return `${normalized.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function harnessEntryLabel(entry: HarnessEntry): string {
+	return entry.provenance?.origin === "package" ? `package:${entry.id}` : `${entry.scope ?? "global"}:${entry.id}`;
+}
+
+/** Version digits are bounded so package-controlled values cannot bloat the digest. */
+function harnessVersionText(version: number): string {
+	const rendered = String(version);
+	return rendered.length > 12 ? rendered.slice(0, 12) : rendered;
+}
+
+/** Prompt-visible provenance for package overlays; renders no local filesystem paths. */
+function packageProvenanceText(entry: HarnessEntry, maxLength: number): string {
+	const provenance = entry.provenance;
+	if (provenance?.origin !== "package") {
+		return "";
+	}
+	const revision = provenance.revision ? ` rev=${compactText(provenance.revision, maxLength)}` : "";
+	return ` [read-only package; scope=${provenance.scope}; source=${compactText(provenance.source, maxLength)}${revision}; file=${compactText(provenance.file, maxLength)}]`;
 }
 
 /** Notice body in digest notation: trigger line plus applied edits as `action kind [scope:id] title: content`; rollbacks print via their rollback summaries. */
@@ -666,7 +716,8 @@ export function formatHarnessStateForPrompt(
 	const lines = [
 		"# Continual Harness State",
 		"",
-		"Local continual harness entries belong to this Prime Agent session. Global continual harness entries persist across Prime Agent sessions.",
+		"Local continual harness entries belong to this Prime Agent session. Global continual harness entries persist across Prime Agent sessions. Package continual harness entries are read-only overlays mounted from installed Prime Agent packages; they update or disappear with the package and are never copied into editable harness state.",
+		"Never update or delete a package entry with `/refine`; create an editable local or global entry with the same kind and id to override one. Package provenance lists the configured source, install scope, and package-relative file.",
 		"The continual harness entries below are compact summaries, not full descriptions. Use them as routing/context hints; inspect or refine the underlying continual harness entry only when detail matters.",
 		"Default to local continual harness refinement for current task progress, temporary blockers, and session coordination. Use global continual harness refinement only for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.",
 		"Use these continual harness prompt notes, memories, skills, and subagent specs when they are relevant. The base system prompt is immutable; prompt entries below are supplemental notes only.",
@@ -688,14 +739,18 @@ export function formatHarnessStateForPrompt(
 	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
 		// The ranked corpus is the kind's own entries: they compete for the
 		// same top-k slots, so document frequency discounts terms ubiquitous
-		// within the kind rather than across unrelated kinds.
+		// within the kind rather than across unrelated kinds. Package overlays
+		// rank above their own-kind competition (the package's provenance wins ties).
 		const ranked = Object.values(state.entries[kind]);
 		const idf = queryTerms !== undefined && queryTerms.size > 0 ? harnessQueryTermIdf(ranked, queryTerms) : undefined;
-		const entries = ranked.sort((a, b) =>
-			queryTerms !== undefined && queryTerms.size > 0
-				? compareRankedHarnessEntries(a, b, queryTerms, idf)
-				: [a.path, a.title, a.id].join("\0").localeCompare([b.path, b.title, b.id].join("\0")),
-		);
+		const entries = ranked.sort((a, b) => {
+			const packageRank = Number(a.provenance?.origin === "package") - Number(b.provenance?.origin === "package");
+			if (packageRank !== 0) return packageRank;
+			if (queryTerms !== undefined && queryTerms.size > 0) {
+				return compareRankedHarnessEntries(a, b, queryTerms, idf);
+			}
+			return [a.path, a.title, a.id].join("\0").localeCompare([b.path, b.title, b.id].join("\0"));
+		});
 		totalEntries += entries.length;
 		// Render subagent specs as a task-shaped roster the model can match against — the
 		// analogue of Claude Code's agent-type menu — rather than a bare count. In
@@ -725,7 +780,10 @@ export function formatHarnessStateForPrompt(
 					? ` ref=${compactText(JSON.stringify(entry.reference), maxContentLength)}`
 					: "";
 			lines.push(
-				`- [${entry.scope ?? "global"}:${entry.id}] ${entry.title} (${entry.path}, v${entry.version})${referenceText}${argumentsText}: ${compactText(
+				`- [${harnessEntryLabel(entry)}] ${compactText(entry.title, maxContentLength)} (${compactText(
+					entry.path,
+					maxContentLength,
+				)}, v${harnessVersionText(entry.version)})${referenceText}${argumentsText}${packageProvenanceText(entry, maxContentLength)}: ${compactText(
 					entry.content,
 					maxContentLength,
 				)}`,
@@ -769,8 +827,10 @@ export function formatHarnessStateForPrompt(
  * cold boundaries can skip digest re-delivery with a state comparison instead
  * of a rendered-text comparison that query-term relevance keeps invalidating.
  *
- * Covered: entry identity and content (entry order is normalized away, as is
- * the call contract on non-skill entries, which the formatter never prints),
+ * Covered: entry identity, content, and package provenance (entry order is
+ * normalized away, as is the call contract on non-skill entries, which the
+ * formatter never prints; provenance participates because the label and the
+ * provenance line render from it),
  * plus the render flags and each refinement's printed fields in stored order
  * (a malformed event's printed fields are its skip-line label and reason),
  * since the formatter renders a positional newest tail. The shell-examples
@@ -798,6 +858,9 @@ export function harnessDigestFingerprint(
 			path: entry.path,
 			version: entry.version,
 			content: entry.content,
+			// The label and provenance line render from provenance, so a
+			// package update that only changes provenance re-renders the digest.
+			provenance: entry.provenance,
 			// Only skills render the kernel call contract, so another kind can
 			// change these fields without changing a single digest byte.
 			reference: entry.kind === "skill" ? entry.reference : undefined,
@@ -853,7 +916,7 @@ function overviewForPrompt(state: HarnessState): string {
 					? ` ref=${JSON.stringify(entry.reference).slice(0, 240)}`
 					: "";
 			lines.push(
-				`- [${entry.scope ?? "global"}:${entry.id}] ${entry.title} (${entry.path}, v${entry.version})${referenceText}${argumentsText}: ${content}`,
+				`- [${harnessEntryLabel(entry)}] ${compactText(entry.title, 240)} (${compactText(entry.path, 240)}, v${harnessVersionText(entry.version)})${referenceText}${argumentsText}${packageProvenanceText(entry, 240)}: ${content}`,
 			);
 		}
 		if (entries.length > 40) {
@@ -1055,7 +1118,14 @@ function validateEdit(edit: RefinementEdit, computedId?: string): string | undef
 export function applyRefinementProposal(
 	state: HarnessState,
 	proposal: RefinementProposal,
-	options: { id: string; rollbackOf?: string; scope?: HarnessScope; baselineState?: HarnessState },
+	options: {
+		id: string;
+		rollbackOf?: string;
+		scope?: HarnessScope;
+		baselineState?: HarnessState;
+		/** Read-only package overlay state; update/delete edits against its ids are rejected. */
+		packageState?: HarnessState;
+	},
 ): RefinementResult {
 	const appliedEdits: AppliedRefinementEdit[] = [];
 	const proposalModifiedKeys = new Set<string>();
@@ -1070,6 +1140,22 @@ export function applyRefinementProposal(
 
 		const records = state.entries[edit.kind];
 		const before = cloneEntry(records[id]);
+		// Package harness entries are read-only overlays: they never exist in the
+		// editable store, so an update/delete that finds no editable entry but a
+		// package one is a refused mutation, not a missing entry.
+		if (
+			!before &&
+			options.packageState?.entries[edit.kind][id] &&
+			(edit.action === "update" || edit.action === "delete")
+		) {
+			appliedEdits.push({
+				...edit,
+				id,
+				applied: false,
+				error: "package harness entry is read-only; create an editable same-kind, same-id override instead",
+			});
+			continue;
+		}
 		const entryKey = `${edit.kind}:${id}`;
 		const baseline = cloneEntry(options.baselineState?.entries[edit.kind][id]);
 		if (
@@ -1245,8 +1331,8 @@ export async function planRefinement(
 
 	const conversationText = serializeConversation(convertToLlm(messages)).slice(-80_000);
 	const scopeInstruction = options.global
-		? "Requested refinement scope: global. Only propose stable cross-session continual harness edits, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts that should affect future Prime Agent sessions. Do not persist session-only progress, temporary blockers, or current-run coordination globally."
-		: "Requested refinement scope: local. Prefer local continual harness edits for current task progress, temporary blockers, current-run coordination, and project facts that are not clearly reusable across Prime Agent sessions. Global entries in the overview are read-only context: do not propose update or delete edits for them; create a local entry instead if an override is needed.";
+		? "Requested refinement scope: global. Only propose stable cross-session continual harness edits, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts that should affect future Prime Agent sessions. Do not persist session-only progress, temporary blockers, or current-run coordination globally. Package entries in the overview are read-only: create a global same-kind, same-id override instead of updating or deleting a package entry."
+		: "Requested refinement scope: local. Prefer local continual harness edits for current task progress, temporary blockers, current-run coordination, and project facts that are not clearly reusable across Prime Agent sessions. Global entries in the overview are read-only context, and package entries are also read-only: do not propose update or delete edits for them; create a local same-kind, same-id entry instead if an override is needed.";
 	const buildPrompt = (conversation: string): string =>
 		[
 			`<current_harness_state>\n${overviewForPrompt(state)}\n</current_harness_state>`,

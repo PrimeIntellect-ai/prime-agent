@@ -328,6 +328,37 @@ export default function(pi: ExtensionAPI) {
 			expect(runner.getToolDefinition("duplicate-tool")?.description).toBe("explicit tool");
 		});
 	});
+
+	describe("package harness overlays", () => {
+		// test-policy: allow explicit-test-timeout -- real resource-loader reload does file and package-resolution I/O in a temp root
+		it("should mount harness overlays from CLI extension packages", { timeout: 10_000 }, async () => {
+			const packageDir = join(tempDir, "cli-harness-package");
+			mkdirSync(join(packageDir, "harness", "memory"), { recursive: true });
+			writeFileSync(
+				join(packageDir, "package.json"),
+				JSON.stringify({ name: "cli-harness-package", pi: { harness: ["./harness"] } }),
+			);
+			writeFileSync(
+				join(packageDir, "harness", "memory", "reviewer.json"),
+				JSON.stringify({ kind: "memory", id: "reviewer", title: "reviewer title", content: "reviewer content" }),
+			);
+
+			const loader = new DefaultResourceLoader({
+				cwd,
+				agentDir,
+				additionalExtensionPaths: [packageDir],
+			});
+			await loader.reload();
+
+			const harness = loader.getHarness();
+			expect(harness.diagnostics).toEqual([]);
+			expect(harness.state.entries.memory.reviewer?.provenance).toMatchObject({
+				origin: "package",
+				scope: "temporary",
+				file: "harness/memory/reviewer.json",
+			});
+		});
+	});
 });
 
 describe("settings reload regressions", () => {

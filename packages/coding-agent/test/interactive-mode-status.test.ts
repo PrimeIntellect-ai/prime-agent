@@ -1,9 +1,10 @@
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
-import { Container } from "@earendil-works/pi-tui";
+import { type AutocompleteProvider, CombinedAutocompleteProvider, Container } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
+import type { AutocompleteProviderFactory } from "../src/core/extensions/types.js";
 import { emptyGoalState } from "../src/core/goals.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
 import { InProcessAgentConnection } from "../src/modes/agent-connection/in-process-agent-connection.js";
@@ -12,10 +13,14 @@ import type {
 	AgentConnectionExtensionUiResponse,
 	AgentConnectionModel,
 	AgentConnectionModelCatalog,
+	AgentConnectionResourceDiagnostic,
+	AgentConnectionResourceSnapshot,
 	AgentConnectionSessionContext,
 	AgentConnectionSnapshot,
+	AgentConnectionSourceInfo,
 	AgentConnectionState,
 } from "../src/modes/agent-connection/types.js";
+import { AgentMessageComponent } from "../src/modes/interactive/components/agent-message.js";
 import type { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import { QueueSelection } from "../src/modes/interactive/queue-selection.js";
@@ -23,6 +28,16 @@ import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 function renderAll(container: Container, width = 120): string {
 	return container.children.flatMap((child) => child.render(width)).join("\n");
+}
+
+function normalizeRenderedOutput(container: Container, width = 220): string {
+	return renderAll(container, width)
+		.replace(/\u001b\[[0-9;]*m/g, "")
+		.replace(/\\/g, "/")
+		.split("\n")
+		.map((line) => line.replace(/\s+$/g, ""))
+		.join("\n")
+		.trim();
 }
 
 function createDeferred<T>(): {
@@ -154,6 +169,11 @@ async function renderMessages(
 		options,
 	);
 }
+
+type ExtensionFixture = {
+	path: string;
+	sourceInfo?: AgentConnectionSourceInfo;
+};
 
 describe("InteractiveMode.renderSessionContext", () => {
 	beforeAll(() => {
@@ -1279,5 +1299,341 @@ describe("InteractiveMode Fast mode concurrency", () => {
 
 		expect(context.patchConnectionState).not.toHaveBeenCalled();
 		expect(context.showStatus).not.toHaveBeenCalled();
+	});
+});
+
+describe("InteractiveMode.setToolsExpanded", () => {
+	function createExpansionFakeThis(chatChildren: unknown[]): any {
+		const fakeThis: any = {
+			toolOutputExpanded: false,
+			editDiffsExpanded: false,
+			hideThinkingBlock: true,
+			pendingBashComponents: [],
+			customHeader: undefined,
+			builtInHeader: { setExpanded: vi.fn() },
+			chatContainer: { children: chatChildren },
+			ui: {
+				requestRender: vi.fn(),
+				requestRenderPreservingViewport: vi.fn(),
+				isFullscreen: vi.fn().mockReturnValue(false),
+			},
+		};
+		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+		return fakeThis;
+	}
+
+	test("applies expansion state to the active header and chat entries", () => {
+		const chatChild = { setExpanded: vi.fn() };
+		const fakeThis = createExpansionFakeThis([chatChild]);
+
+		fakeThis.setToolsExpanded(true);
+
+		expect(fakeThis.toolOutputExpanded).toBe(true);
+		expect(fakeThis.builtInHeader.setExpanded).toHaveBeenCalledWith(true);
+		expect(chatChild.setExpanded).toHaveBeenCalledWith(true);
+		// Expansion keeps the user anchored, so it uses the viewport-preserving path.
+		expect(fakeThis.ui.requestRenderPreservingViewport).toHaveBeenCalledTimes(1);
+	});
+
+	test("keeps agent message notices visible and reveals bodies only with all output", () => {
+		const toolChild = { setExpanded: vi.fn() };
+		const ipythonChild = { setExpanded: vi.fn(), setEditDiffsExpanded: vi.fn() };
+		const messageChild = new AgentMessageComponent({
+			role: "custom",
+			customType: "agent_message",
+			content: "Ping.",
+			display: true,
+			details: { id: "agentmsg_split", message: "Ping." },
+			timestamp: 123,
+		});
+		const fakeThis = createExpansionFakeThis([toolChild, ipythonChild, messageChild]);
+
+		expect(messageChild.render(80).join("\n")).toContain("Agent message received");
+		expect(messageChild.render(80).join("\n")).not.toContain("Ping.");
+		fakeThis.toggleToolOutputExpansion();
+		expect(messageChild.render(80).join("\n")).toContain("Agent message received");
+		expect(messageChild.render(80).join("\n")).not.toContain("Ping.");
+		expect(toolChild.setExpanded).toHaveBeenLastCalledWith(false);
+		expect(ipythonChild.setExpanded).toHaveBeenLastCalledWith(false);
+
+		fakeThis.toggleToolOutputExpansion();
+		expect(messageChild.render(80).join("\n")).toContain("Ping.");
+		expect(toolChild.setExpanded).toHaveBeenLastCalledWith(true);
+		expect(ipythonChild.setExpanded).toHaveBeenLastCalledWith(true);
+
+		fakeThis.toggleToolOutputExpansion();
+		expect(messageChild.render(80).join("\n")).toContain("Agent message received");
+		expect(messageChild.render(80).join("\n")).not.toContain("Ping.");
+		expect(toolChild.setExpanded).toHaveBeenLastCalledWith(false);
+		expect(ipythonChild.setExpanded).toHaveBeenLastCalledWith(false);
+	});
+
+	test("cycles from overview through details and all back to overview", () => {
+		const child = { setExpanded: vi.fn(), setEditDiffsExpanded: vi.fn() };
+		const fakeThis = createExpansionFakeThis([child]);
+
+		fakeThis.toggleToolOutputExpansion();
+
+		expect(fakeThis.editDiffsExpanded).toBe(true);
+		expect(fakeThis.hideThinkingBlock).toBe(false);
+		expect(fakeThis.toolOutputExpanded).toBe(false);
+		expect(child.setEditDiffsExpanded).toHaveBeenCalledWith(true);
+		expect(child.setExpanded).toHaveBeenCalledWith(false);
+
+		fakeThis.toggleToolOutputExpansion();
+
+		expect(fakeThis.editDiffsExpanded).toBe(true);
+		expect(fakeThis.hideThinkingBlock).toBe(false);
+		expect(fakeThis.toolOutputExpanded).toBe(true);
+		expect(child.setEditDiffsExpanded).toHaveBeenLastCalledWith(true);
+		expect(child.setExpanded).toHaveBeenLastCalledWith(true);
+
+		fakeThis.toggleToolOutputExpansion();
+
+		expect(fakeThis.editDiffsExpanded).toBe(false);
+		expect(fakeThis.hideThinkingBlock).toBe(true);
+		expect(fakeThis.toolOutputExpanded).toBe(false);
+		expect(child.setEditDiffsExpanded).toHaveBeenLastCalledWith(false);
+		expect(child.setExpanded).toHaveBeenLastCalledWith(false);
+	});
+});
+
+describe("InteractiveMode.createExtensionUIContext setTheme", () => {
+	test("persists theme changes to settings manager", () => {
+		initTheme("dark");
+
+		let currentTheme = "dark";
+		const settingsManager = {
+			getTheme: vi.fn(() => currentTheme),
+			setTheme: vi.fn((theme: string) => {
+				currentTheme = theme;
+			}),
+		};
+		const fakeThis: any = {
+			session: { settingsManager },
+			settingsManager,
+			ui: { requestRender: vi.fn() },
+		};
+
+		const uiContext = (InteractiveMode as any).prototype.createExtensionUIContext.call(fakeThis);
+		const result = uiContext.setTheme("light");
+
+		expect(result.success).toBe(true);
+		expect(settingsManager.setTheme).toHaveBeenCalledWith("light");
+		expect(currentTheme).toBe("light");
+		expect(fakeThis.ui.requestRender).toHaveBeenCalledTimes(1);
+	});
+
+	test("does not persist invalid theme names", () => {
+		initTheme("dark");
+
+		const settingsManager = {
+			getTheme: vi.fn(() => "dark"),
+			setTheme: vi.fn(),
+		};
+		const fakeThis: any = {
+			session: { settingsManager },
+			settingsManager,
+			ui: { requestRender: vi.fn() },
+		};
+
+		const uiContext = (InteractiveMode as any).prototype.createExtensionUIContext.call(fakeThis);
+		const result = uiContext.setTheme("__missing_theme__");
+
+		expect(result.success).toBe(false);
+		expect(settingsManager.setTheme).not.toHaveBeenCalled();
+		expect(fakeThis.ui.requestRender).not.toHaveBeenCalled();
+	});
+});
+
+describe("InteractiveMode.createExtensionUIContext addAutocompleteProvider", () => {
+	test("stores wrapper factories and rebuilds autocomplete immediately", () => {
+		const wrapper: AutocompleteProviderFactory = (current) => current;
+		const fakeThis = {
+			autocompleteProviderWrappers: [] as AutocompleteProviderFactory[],
+			setupAutocompleteProvider: vi.fn(),
+		};
+
+		const uiContext = (InteractiveMode as any).prototype.createExtensionUIContext.call(fakeThis);
+		uiContext.addAutocompleteProvider(wrapper);
+
+		expect(fakeThis.autocompleteProviderWrappers).toEqual([wrapper]);
+		expect(fakeThis.setupAutocompleteProvider).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("InteractiveMode.setupAutocompleteProvider", () => {
+	test("stacks wrapper factories over a fresh base provider", () => {
+		const defaultEditor = { setAutocompleteProvider: vi.fn() };
+		const customEditor = { setAutocompleteProvider: vi.fn() };
+		const calls: string[] = [];
+
+		const wrap1: AutocompleteProviderFactory = (current): AutocompleteProvider => ({
+			async getSuggestions(lines, cursorLine, cursorCol, options) {
+				calls.push("getSuggestions:wrap1");
+				return current.getSuggestions(lines, cursorLine, cursorCol, options);
+			},
+			applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+				calls.push("applyCompletion:wrap1");
+				return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+			},
+			shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
+				calls.push("shouldTrigger:wrap1");
+				return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true;
+			},
+		});
+		const wrap2: AutocompleteProviderFactory = (current): AutocompleteProvider => ({
+			async getSuggestions(lines, cursorLine, cursorCol, options) {
+				calls.push("getSuggestions:wrap2");
+				return current.getSuggestions(lines, cursorLine, cursorCol, options);
+			},
+			applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+				calls.push("applyCompletion:wrap2");
+				return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+			},
+			shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
+				calls.push("shouldTrigger:wrap2");
+				return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true;
+			},
+		});
+
+		const fakeThis = {
+			createBaseAutocompleteProvider: () => new CombinedAutocompleteProvider([], "/tmp/project", undefined),
+			defaultEditor,
+			editor: customEditor,
+			autocompleteProviderWrappers: [wrap1, wrap2],
+		};
+
+		(InteractiveMode as any).prototype.setupAutocompleteProvider.call(fakeThis);
+
+		expect(defaultEditor.setAutocompleteProvider).toHaveBeenCalledTimes(1);
+		expect(customEditor.setAutocompleteProvider).toHaveBeenCalledTimes(1);
+		const provider = defaultEditor.setAutocompleteProvider.mock.calls[0]?.[0] as AutocompleteProvider;
+		expect(provider).toBe(customEditor.setAutocompleteProvider.mock.calls[0]?.[0]);
+		expect(provider.shouldTriggerFileCompletion?.(["foo"], 0, 3)).toBe(true);
+		expect(calls).toEqual(["shouldTrigger:wrap2", "shouldTrigger:wrap1"]);
+	});
+});
+
+describe("InteractiveMode.showLoadedResources", () => {
+	beforeAll(() => {
+		initTheme("dark");
+	});
+
+	function createShowLoadedResourcesThis(options: {
+		quietStartup: boolean;
+		verbose?: boolean;
+		toolOutputExpanded?: boolean;
+		cwd?: string;
+		contextFiles?: Array<{ path: string; content?: string }>;
+		extensions?: ExtensionFixture[];
+		skills?: Array<{ filePath: string; name: string }>;
+		skillDiagnostics?: AgentConnectionResourceDiagnostic[];
+		harnessDiagnostics?: AgentConnectionResourceDiagnostic[];
+		useRealScopeGroups?: boolean;
+		useRealDiagnostics?: boolean;
+	}) {
+		const connectionResourceSnapshot: AgentConnectionResourceSnapshot = {
+			contextFiles: (options.contextFiles ?? []).map((contextFile) => ({ path: contextFile.path })),
+			skills: options.skills ?? [],
+			prompts: [],
+			extensions: options.extensions ?? [],
+			themes: [],
+			diagnostics: {
+				skills: options.skillDiagnostics ?? [],
+				prompts: [],
+				extensions: [],
+				themes: [],
+				harness: options.harnessDiagnostics ?? [],
+			},
+		};
+		const extensionRunner = {
+			getCommandDiagnostics: () => [],
+			getShortcutDiagnostics: () => [],
+		};
+		const fakeThis: any = {
+			options: { verbose: options.verbose ?? false },
+			toolOutputExpanded: options.toolOutputExpanded ?? false,
+			chatContainer: new Container(),
+			settingsManager: {
+				getQuietStartup: () => options.quietStartup,
+			},
+			sessionManager: {
+				getCwd: () => options.cwd ?? "/tmp/project",
+			},
+			connectionResourceSnapshot,
+			extensionRunner,
+			formatDisplayPath: (p: string) => (InteractiveMode as any).prototype.formatDisplayPath.call(fakeThis, p),
+			formatExtensionDisplayPath: (p: string) =>
+				(InteractiveMode as any).prototype.formatExtensionDisplayPath.call(fakeThis, p),
+			formatContextPath: (p: string) => (InteractiveMode as any).prototype.formatContextPath.call(fakeThis, p),
+			getCurrentCwd: () => options.cwd ?? "/tmp/project",
+			getStartupExpansionState: () => (InteractiveMode as any).prototype.getStartupExpansionState.call(fakeThis),
+			buildScopeGroups: () => [],
+			formatScopeGroups: () => "resource-list",
+			isPackageSource: (sourceInfo?: AgentConnectionSourceInfo) =>
+				(InteractiveMode as any).prototype.isPackageSource.call(fakeThis, sourceInfo),
+			getShortPath: (p: string, sourceInfo?: AgentConnectionSourceInfo) =>
+				(InteractiveMode as any).prototype.getShortPath.call(fakeThis, p, sourceInfo),
+			getCompactPathLabel: (p: string, sourceInfo?: AgentConnectionSourceInfo) =>
+				(InteractiveMode as any).prototype.getCompactPathLabel.call(fakeThis, p, sourceInfo),
+			getCompactPackageSourceLabel: (sourceInfo?: AgentConnectionSourceInfo) =>
+				(InteractiveMode as any).prototype.getCompactPackageSourceLabel.call(fakeThis, sourceInfo),
+			getCompactExtensionLabel: (p: string, sourceInfo?: AgentConnectionSourceInfo) =>
+				(InteractiveMode as any).prototype.getCompactExtensionLabel.call(fakeThis, p, sourceInfo),
+			getCompactDisplayPathSegments: (p: string) =>
+				(InteractiveMode as any).prototype.getCompactDisplayPathSegments.call(fakeThis, p),
+			getCompactNonPackageExtensionLabel: (
+				p: string,
+				index: number,
+				allPaths: Array<{ path: string; segments: string[] }>,
+			) => (InteractiveMode as any).prototype.getCompactNonPackageExtensionLabel.call(fakeThis, p, index, allPaths),
+			getCompactExtensionLabels: (extensions: ExtensionFixture[]) =>
+				(InteractiveMode as any).prototype.getCompactExtensionLabels.call(fakeThis, extensions),
+			formatDiagnostics: () => "diagnostics",
+			getBuiltInCommandConflictDiagnostics: () => [],
+		};
+
+		if (options.useRealDiagnostics) {
+			fakeThis.formatDiagnostics = (
+				diagnostics: readonly AgentConnectionResourceDiagnostic[],
+				sourceInfos: Map<string, AgentConnectionSourceInfo>,
+			) => (InteractiveMode as any).prototype.formatDiagnostics.call(fakeThis, diagnostics, sourceInfos);
+		}
+
+		if (options.useRealScopeGroups) {
+			fakeThis.getScopeGroup = (sourceInfo?: AgentConnectionSourceInfo) =>
+				(InteractiveMode as any).prototype.getScopeGroup.call(fakeThis, sourceInfo);
+			fakeThis.buildScopeGroups = (items: Array<{ path: string; sourceInfo?: AgentConnectionSourceInfo }>) =>
+				(InteractiveMode as any).prototype.buildScopeGroups.call(fakeThis, items);
+			fakeThis.formatScopeGroups = (groups: unknown, formatOptions: unknown) =>
+				(InteractiveMode as any).prototype.formatScopeGroups.call(fakeThis, groups, formatOptions);
+		}
+
+		return fakeThis;
+	}
+
+	test("shows package harness diagnostics in status output", () => {
+		const fakeThis = createShowLoadedResourcesThis({
+			quietStartup: true,
+			harnessDiagnostics: [
+				{
+					type: "collision",
+					message: "package harness memory:shared collision; keeping project-package",
+				},
+			],
+			useRealDiagnostics: true,
+		});
+
+		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
+			force: false,
+			showDiagnosticsWhenQuiet: true,
+		});
+
+		const output = normalizeRenderedOutput(fakeThis.chatContainer, 100);
+		expect(output).toMatchInlineSnapshot(`
+"[Harness conflicts]
+  package harness memory:shared collision; keeping project-package"
+`);
 	});
 });
