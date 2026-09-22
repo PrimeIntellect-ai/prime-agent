@@ -7,8 +7,8 @@ import { formatSessionDisplayId } from "../modes/daemon/daemon-session-id.js";
 import type { SessionSummary } from "../modes/daemon/daemon-session-list.js";
 import { formatSessionAge, formatTable } from "./daemon-list-format.js";
 
-// Display-width cap for free-text cells (recaps, error text) so one long line
-// never stretches the row; wide glyphs count as their terminal columns.
+// Display-width cap for free-text cells (names, recaps, error text) so one
+// long line never stretches the row; wide glyphs count as their terminal columns.
 const MAX_CELL_CHARS = 60;
 
 // C0/C1 controls that stripAnsi misses and whitespace compaction cannot remove.
@@ -28,7 +28,7 @@ type SessionsRow = {
  */
 export function formatSessionsTable(sessions: readonly SessionSummary[], nowMs = Date.now()): string {
 	const rows = sortSessionsForTable(sessions).map((summary) => ({
-		name: sessionNameCell(summary),
+		name: truncateCell(sessionNameCell(summary)),
 		status: sessionsStatusLabel(summary),
 		activity: truncateCell(sessionActivityCell(summary)),
 		// lastHeardFromAt is the supervisor's staleness mark, served only when a
