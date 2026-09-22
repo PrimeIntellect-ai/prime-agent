@@ -1,7 +1,18 @@
 # AGENTS.md
 
-Development rules for prime-agent-rs. Adapted from the Prime Agent (TS) repo rules.
+Development rules for Prime Agent (Rust) on PrimeIntellect-ai/prime-agent, branch `rust`.
+Adapted from the Prime Agent (TS) repo rules.
 Every contributor (human or agent) must read this before working on this repo.
+
+## Repository
+
+- The repo is PrimeIntellect-ai/prime-agent; the Rust implementation lives on the `rust` branch
+  (the personal kevinjosethomas/prime-agent-rs repo is archived for provenance).
+- PRs go to the org repo with base `rust`:
+  `gh pr create --repo PrimeIntellect-ai/prime-agent --base rust`.
+- CI runs on the org's billing: `.github/workflows/continuous.yml` + `release.yml` on the
+  `rust` branch.
+- Parity ground truth is unchanged: the TS checkout at ~/prime-agent (read-only).
 
 ## Style and structure
 
@@ -35,7 +46,7 @@ Every contributor (human or agent) must read this before working on this repo.
 - If you change dependencies (`Cargo.toml`), regenerate/commit `Cargo.lock` in the same change.
 - If a change starts forcing edits across many crate internals, stop and fix the boundary instead.
 - Cache-prefix stability is first-class: never adopt a pattern without checking its effect on the
-  cacheable prompt prefix (see MISSION.md; cross-check against ~/codex).
+  cacheable prompt prefix (cross-check against ~/codex).
 
 ## Tests
 
@@ -49,8 +60,9 @@ Every contributor (human or agent) must read this before working on this repo.
 ## Merge gates
 
 - `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
-  `cargo test --workspace` must pass before every merge. Run `make check` (same gates; the GitHub
-  token lacks `workflow` scope, so CI is local/PR-review enforced until then).
+  `cargo test --workspace` must pass before every merge. Run `make check` — the local mirror of
+  the same gates; CI runs on the org's billing (`.github/workflows/continuous.yml` + `release.yml`
+  on the `rust` branch).
 - **Parity-diff evidence is a merge gate** (the port's definition, not optional polish): every PR
   that touches a user-visible surface must include a "parity-diff evidence" section in its
   description showing the TS-binary comparison for what it changed: (1) rendered output —

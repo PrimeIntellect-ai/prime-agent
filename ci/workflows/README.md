@@ -57,6 +57,6 @@ the binary: the tarball carries a `package.json` manifest and `prime-agent
 --version` reports `<version>-continuous.<sha>`. It needs no secrets beyond
 the job token (`contents: write` on the publish job only). Install steps for
 coworkers are in the top-level README.md ("Continuous builds"). Verify after
-promotion: `gh workflow list --repo kevinjosethomas/prime-agent-rs` shows
+promotion: `gh workflow list --repo PrimeIntellect-ai/prime-agent` shows
 `continuous` and `release` active; the next push to `main` publishes the
 first `continuous` release.
