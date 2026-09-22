@@ -88,7 +88,7 @@ describe("formatSessionsTable", () => {
 		["newline in name", { sessionName: "sneaky\nagent" }, row("sneaky agent", "idle", "")],
 		["ansi in name", { sessionName: "\u001B[31mansi\u001B[39m agent" }, row("ansi agent", "idle", "")],
 		["control chars in name", { sessionName: "beep\u0007 agent" }, row("beep agent", "idle", "")],
-		// Names are free-text cells too: the row cap keeps one long name from stretching every row.
+		["blank name", { sessionName: "\u0007", id: LONG_ID }, row("fc10e9f8380f", "idle", "")],
 		["long name cap", { sessionName: "n".repeat(200) }, row(`${"n".repeat(59)}…`, "idle", "")],
 		["heartbeat", { hasActiveHeartbeat: true }, row("s", "idle", "heartbeat")],
 		["ignores queued actions", { sessionActions: { ...BASE.sessionActions, queuedCount: 2 } }, row("s", "idle", "")],

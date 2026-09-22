@@ -43,10 +43,11 @@ export function formatSessionsTable(sessions: readonly SessionSummary[], nowMs =
 	return formatTable(["name", "status", "activity", "last heard", "error", "usage"], rows, formatSessionsCell);
 }
 
-// Names are user-provided; the display-id fallback is not. Both share the
-// free-text sanitizer.
+// Names are user-provided; sanitize them and fall back to the display id when
+// sanitizing leaves nothing (a name of only control characters had no
+// identifier to show).
 function sessionNameCell(summary: SessionSummary): string {
-	return compactCellText(summary.sessionName ?? formatSessionDisplayId(summary.id));
+	return compactCellText(summary.sessionName) || formatSessionDisplayId(summary.id);
 }
 
 // Failures first, then recovering/running, then idle, then everything else.
