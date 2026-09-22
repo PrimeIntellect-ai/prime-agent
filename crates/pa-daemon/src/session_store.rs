@@ -223,17 +223,16 @@ impl SessionFile {
         path
     }
 
-    /// The leaf-to-root walk with ghost-parent gaps bridged (TS
-    /// `getBranch` semantics over a file the TS never produces): when an
-    /// entry's parent id is missing from the file, continue from the
-    /// previous entry in file order — the single writer's persisted leaf
-    /// when the missing id was minted. The strict [`Self::branch`] stays
-    /// the model-facing truth (a gap really truncates the rebuilt
-    /// context); this walk serves the cumulative usage accounting
-    /// (`get_session_stats`, the /context totals), which must not zero out
-    /// the session's real spend because of one lost write. Forks are
-    /// unaffected: they resolve by parent id, and only a MISSING parent
-    /// bridges.
+    /// The leaf-to-root walk with ghost-parent gaps bridged: files written
+    /// before `persist_entry` became write-first can carry a parent id that
+    /// was minted but never persisted; the walk continues from the previous
+    /// entry in file order (the writer's persisted leaf at the time). The
+    /// strict [`Self::branch`] stays the model-facing truth (a gap really
+    /// truncates the rebuilt context); this walk serves the cumulative
+    /// usage accounting (`get_session_stats`, the /context totals), which
+    /// must not zero out the session's real spend because of one lost
+    /// write. Forks are unaffected: they resolve by parent id, and only a
+    /// missing parent bridges.
     pub fn branch_bridged(&self) -> Vec<&SessionEntry> {
         let mut positions: Vec<usize> = Vec::new();
         let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -505,12 +504,9 @@ impl SessionFile {
     /// Append one entry line to the file, rewriting first when the file is
     /// missing. The entry joins the in-memory index only after the write
     /// succeeds: a failed write leaves the store exactly as it was, so the
-    /// next append parents to the last PERSISTED entry instead of a ghost
-    /// id that never reached the file. (Indexing first created ghosts: the
-    /// caller best-effort paths swallow the error, the ghost stayed the
-    /// in-memory leaf, and the next successful append wrote an entry whose
-    /// parent id does not exist — every later `branch()` walk truncated at
-    /// the gap, zeroing the session stats and the /context usage totals.)
+    /// next append parents to the last persisted entry, never an id that
+    /// is absent from the file (which would truncate every later
+    /// `branch()` walk at the gap).
     pub fn persist_entry(&mut self, entry_type: &str, fields: Value) -> Result<String> {
         let entry = SessionEntry::new(entry_type, self.leaf_id.clone(), &self.index_map(), fields);
         let id = entry.id.clone();
@@ -893,11 +889,9 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A failed append leaves no ghost entry: the in-memory index only
-    /// adopts entries the file accepted, so the next append parents to the
-    /// last PERSISTED entry instead of an id that never reached the file —
-    /// the corruption that truncated every later `branch()` walk (the
-    /// zeroed /context and /session stats on real daemon sessions).
+    /// A failed append leaves the store unchanged: the in-memory index
+    /// only adopts entries the file accepted, so the next append parents
+    /// to the last persisted entry and the reloaded file stays walkable.
     #[test]
     fn failed_persist_keeps_the_store_walkable() {
         let dir = temp_dir();

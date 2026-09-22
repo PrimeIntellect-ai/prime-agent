@@ -70,19 +70,21 @@ impl Worker {
     /// over the persisted branch (own usage excludes child usage
     /// attributions; the usage walk bridges ghost-parent gaps so one lost
     /// append cannot zero the session's real spend) — and the children are
-    /// the live RLM roster plus every persisted child session dir under
-    /// the session's artifact tree (TS live runs + resident children +
+    /// the live RLM roster plus every persisted child session dir under the
+    /// session's artifact tree (TS live runs + resident children +
     /// `loadContextTreeChildrenFromDisk`): idle, settled, and
     /// restart-orphaned subagents all appear, with their real usage and
     /// recursive grandchildren. A live child's node is read from its
     /// session file (the TS disk-fallback shape; the id, label, and status
     /// come from the live registry, the fresher sources for a running
-    /// child).
+    /// child), and ids tombstoned in the RLM ledger stay hidden. The disk
+    /// walk and registry reads are blocking I/O: they run on the blocking
+    /// pool, never the runtime worker.
     pub(crate) async fn handle_get_context_tree(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("get_context_tree") {
             return response;
         }
-        let (branch, all_entries, label, context_usage, session_file) = {
+        let (branch, all_entries, label, context_usage, session_id, session_file) = {
             let core = self.core.lock().unwrap();
             let store = core.store.as_ref();
             // Owned copies: the branch borrows the store, which the core
@@ -101,8 +103,19 @@ impl Worker {
             let context_usage = store.and_then(|store| {
                 crate::session_stats::store_context_usage(store, self.engine.model_context_window())
             });
+            // The artifact tree is keyed by the agent dir and the durable
+            // session id (`child_session_dir`'s own addressing), not by the
+            // session file's location.
+            let session_id = store.map(|store| store.session_id().to_string());
             let session_file = store.map(|store| store.path.clone());
-            (branch, all_entries, label, context_usage, session_file)
+            (
+                branch,
+                all_entries,
+                label,
+                context_usage,
+                session_id,
+                session_file,
+            )
         };
         let (own_usage, total_usage) = match (&branch, &all_entries) {
             (Some(branch), Some(entries)) => compute_own_and_total_usage(branch, entries),
@@ -114,49 +127,84 @@ impl Worker {
                 "id": model.get("id")?,
             }))
         });
-        let registry = worker_model_registry(&self.config.agent_dir);
         let snapshots = self.engine.rlm_child_snapshots().await;
-        let mut live_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut children: Vec<Value> = Vec::with_capacity(snapshots.len());
-        for child in &snapshots {
-            let id = child.get("id").and_then(Value::as_str).map(str::to_string);
-            if let Some(id) = &id {
-                live_ids.insert(id.clone());
+        let agent_dir = self.config.agent_dir.clone();
+        // The blocking walk: registry + ledger + artifact-tree reads.
+        let walk = tokio::task::spawn_blocking(move || {
+            let registry = worker_model_registry(&agent_dir);
+            let artifacts_root = crate::context_tree_children::session_artifacts_dir(&agent_dir);
+            // User-deleted subagents stay hidden: ids tombstoned in this
+            // session's RLM ledger edges never load from disk (the TS
+            // in-memory guard is its restart-behavior; the ledger is the
+            // durable authority here). Unreadable ledgers degrade to no
+            // filtering, never a failed tree.
+            let mut skip_ids: std::collections::HashSet<String> = snapshots
+                .iter()
+                .filter_map(|child| child.get("id").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect();
+            if let Some(session_file) = &session_file {
+                let sessions_dir = agent_dir.join("sessions");
+                let ledger =
+                    crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
+                if let Ok(edges) = ledger.edges(true) {
+                    let parent_key = crate::lease::canonical_session_path(session_file);
+                    for edge in edges {
+                        if edge.deleted.is_some()
+                            && crate::lease::canonical_session_path(std::path::Path::new(
+                                &edge.parent,
+                            )) == parent_key
+                        {
+                            skip_ids.insert(edge.child_id.clone());
+                        }
+                    }
+                }
             }
-            // TS: `run.session?.getContextTree() ?? loadContextTreeChildFromDisk(...)`
-            // — the node carries the child's real usage and its recursive
-            // grandchildren; the registry supplies the fresher identity.
-            let mut node = child
-                .get("sessionDir")
-                .and_then(Value::as_str)
-                .and_then(|dir| {
-                    crate::context_tree_children::load_context_tree_child(
-                        std::path::Path::new(dir),
-                        &registry,
-                    )
-                })
-                .unwrap_or_else(|| {
-                    json!({
-                        "ownUsage": empty_usage(),
-                        "totalUsage": empty_usage(),
-                        "children": [],
+            let mut children: Vec<Value> = Vec::with_capacity(snapshots.len());
+            for child in &snapshots {
+                // TS: `run.session?.getContextTree() ?? loadContextTreeChildFromDisk(...)`
+                // — the node carries the child's real usage and its
+                // recursive grandchildren; the registry supplies the
+                // fresher identity.
+                let mut node = child
+                    .get("sessionDir")
+                    .and_then(Value::as_str)
+                    .and_then(|dir| {
+                        crate::context_tree_children::load_context_tree_child(
+                            &artifacts_root,
+                            std::path::Path::new(dir),
+                            &registry,
+                        )
                     })
-                });
-            node["id"] = id.map(Value::String).unwrap_or(Value::Null);
-            node["label"] = child.get("label").cloned().unwrap_or(Value::Null);
-            node["status"] = child.get("status").cloned().unwrap_or(Value::Null);
-            children.push(node);
-        }
-        if let Some(artifact_dir) = session_file
-            .as_deref()
-            .and_then(crate::context_tree_children::session_artifact_dir)
-        {
-            children.extend(crate::context_tree_children::load_context_tree_children(
-                &artifact_dir,
-                &registry,
-                &live_ids,
-            ));
-        }
+                    .unwrap_or_else(|| {
+                        json!({
+                            "ownUsage": empty_usage(),
+                            "totalUsage": empty_usage(),
+                            "children": [],
+                        })
+                    });
+                node["id"] = child.get("id").cloned().unwrap_or(Value::Null);
+                node["label"] = child.get("label").cloned().unwrap_or(Value::Null);
+                node["status"] = child.get("status").cloned().unwrap_or(Value::Null);
+                children.push(node);
+            }
+            if let Some(session_id) = &session_id {
+                children.extend(crate::context_tree_children::load_context_tree_children(
+                    &artifacts_root,
+                    session_id,
+                    &registry,
+                    &skip_ids,
+                ));
+            }
+            children
+        });
+        let children = match walk.await {
+            Ok(children) => children,
+            Err(error) => {
+                eprintln!("context tree walk failed: {error:#}");
+                Vec::new()
+            }
+        };
         let mut tree = json!({
             "id": "root",
             "label": label,
@@ -626,11 +674,15 @@ mod tests {
     /// `get_context_tree` surfaces the persisted child sessions under the
     /// session's artifact tree (idle, settled, and restart-orphaned
     /// subagents all appear, with their real usage and recursive
-    /// grandchildren — TS `loadContextTreeChildrenFromDisk`).
+    /// grandchildren — TS `loadContextTreeChildrenFromDisk`). The artifact
+    /// tree is keyed by the worker's agent dir and the durable session id,
+    /// exactly where `child_session_dir` writes; a session file outside
+    /// the agent dir must not change that.
     #[tokio::test]
     async fn get_context_tree_lists_persisted_children() {
         let root = std::env::temp_dir().join(format!("pa-worker-ct-{}", uuid::Uuid::new_v4()));
-        let sessions = root.join("sessions");
+        let agent_dir = root.join("agent");
+        let sessions = agent_dir.join("sessions");
         std::fs::create_dir_all(&sessions).unwrap();
         let session_id = "01a0ct-1111-2222-3333-444444444444";
         let session_file = sessions.join(format!("{session_id}.jsonl"));
@@ -649,30 +701,24 @@ mod tests {
         .collect::<Vec<_>>()
         .join("\n");
         std::fs::write(&session_file, content).unwrap();
-        // One settled child (with a grandchild) under the artifact tree.
-        let artifacts = root.join("session-artifacts").join(session_id);
-        let child_dir = artifacts.join("sub-003f741a");
-        let grandchild_dir = child_dir.join("sub-00aa00aa");
-        std::fs::create_dir_all(&grandchild_dir).unwrap();
-        let child_session = |stop: &str| {
-            json!({
-                "role": "assistant",
-                "content": [{ "type": "text", "text": "done" }],
-                "provider": "prime-inference", "model": "internal/glm-5.3-fast",
-                "stopReason": stop,
-                "usage": {
-                    "input": 10, "output": 5, "cacheRead": 0, "cacheWrite": 0,
-                    "totalTokens": 15,
-                    "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0 },
-                },
-            })
-        };
-        let write_child = |dir: &std::path::Path, session: &str, stop: &str| {
-            let lines = [
-                json!({"type": "session", "version": 3, "id": session, "timestamp": "2026-09-22T00:00:00.000Z", "cwd": "/tmp"}),
+        // The artifact tree lives under the worker's agent dir (the writer's
+        // addressing): one settled child with a grandchild in the child's own
+        // sibling tree.
+        let artifacts = agent_dir.join("session-artifacts");
+        let child_session = "01a0child-1111-2222-3333-4444444444";
+        let grandchild_session = "01a0grand-1111-2222-3333-4444444444";
+        let write_child = |stop: &str| {
+            [
                 json!({"type": "message", "id": "c1", "parentId": null, "timestamp": "2026-09-22T00:00:01.000Z", "message": {"role": "user", "content": "fix the login bug"}}),
-                json!({"type": "message", "id": "c2", "parentId": "c1", "timestamp": "2026-09-22T00:00:02.000Z", "message": child_session(stop)}),
+                json!({"type": "message", "id": "c2", "parentId": "c1", "timestamp": "2026-09-22T00:00:02.000Z", "message": {"role": "assistant", "content": [{ "type": "text", "text": "done" }], "provider": "prime-inference", "model": "internal/glm-5.3-fast", "stopReason": stop, "usage": {"input": 10, "output": 5, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 15, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}}}),
+            ]
+        };
+        let write_session = |dir: &std::path::Path, session: &str, stop: &str| {
+            std::fs::create_dir_all(dir).unwrap();
+            let mut lines = vec![
+                json!({"type": "session", "version": 3, "id": session, "timestamp": "2026-09-22T00:00:00.000Z", "cwd": "/tmp"}),
             ];
+            lines.extend(write_child(stop));
             std::fs::write(
                 dir.join(format!("{session}.jsonl")),
                 lines
@@ -683,12 +729,32 @@ mod tests {
             )
             .unwrap();
         };
-        write_child(&child_dir, "01a0child-1111-2222-3333-4444444444", "stop");
-        write_child(
-            &grandchild_dir,
-            "01a0grand-1111-2222-3333-4444444444",
-            "stop",
-        );
+        let child_dir = artifacts.join(session_id).join("sub-003f741a");
+        write_session(&child_dir, child_session, "stop");
+        let grandchild_dir = artifacts.join(child_session).join("sub-00aa00aa");
+        write_session(&grandchild_dir, grandchild_session, "stop");
+        // A second child the user deleted: the ledger tombstone must keep it
+        // out of the tree.
+        let deleted_dir = artifacts.join(session_id).join("sub-deadbeef");
+        let deleted_session = "01a0dead-1111-2222-3333-4444444444";
+        write_session(&deleted_dir, deleted_session, "stop");
+        let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions, |_| {});
+        ledger
+            .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+                child_id: "sub-deadbeef".to_string(),
+                parent: session_file.display().to_string(),
+                child: deleted_dir.display().to_string(),
+                depth: 1,
+                name: "deleted-child".to_string(),
+            })
+            .unwrap();
+        ledger
+            .append_delete(
+                "sub-deadbeef",
+                &deleted_dir.display().to_string(),
+                crate::rlm_ledger::RlmLedgerDeleteReason::User,
+            )
+            .unwrap();
 
         let worker = created_worker_at(&root, &session_file).await;
         let response = worker
@@ -708,7 +774,7 @@ mod tests {
         assert_eq!(
             children.len(),
             1,
-            "the persisted child appears: {children:?}"
+            "the persisted child appears, the deleted one stays hidden: {children:?}"
         );
         let child = &children[0];
         assert_eq!(child["id"], json!("sub-003f741a"));
