@@ -1,0 +1,1 @@
+- Added local brokering of cloud-session model calls: the daemon now answers the sandbox's inference requests from the user's local model catalog, streaming responses back over the tunnel and recording their usage on the session's context meter.

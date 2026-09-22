@@ -1,8 +1,8 @@
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { createConnection } from "node:net";
+import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import { type Api, fauxAssistantMessage, type Model, registerFauxProvider } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudSessionStore } from "../src/core/cloud/cloud-session-store.js";
 import type {
@@ -12,9 +12,10 @@ import type {
 	CloudDelegationWorkspaceTransfer,
 } from "../src/core/cloud/delegation-orchestrator.js";
 import { DirectCloudService, type DirectCloudServiceOptions } from "../src/core/cloud/direct-cloud-service.js";
-import type { CloudEvent } from "../src/core/cloud/protocol.js";
+import type { CloudEvent, CloudInferenceRequest } from "../src/core/cloud/protocol.js";
 import { CloudResultStore } from "../src/core/cloud/result-import.js";
 import { type CustomEntry, parseSessionEntries } from "../src/core/session-manager.js";
+import { CloudInferenceBroker } from "../src/modes/daemon/cloud-inference-broker.js";
 import {
 	CloudSessionRegistry,
 	type CloudSessionRegistryCallbacks,
@@ -95,6 +96,10 @@ function buildRegistry(
 		writeSessionEvent?: CloudSessionRegistryCallbacks["writeSessionEvent"];
 		/** Lowers the turn-start window for honest-failure tests. */
 		turnStartTimeoutMs?: number;
+		/** Wires the brokered-inference hook (the supervisor's broker). */
+		onInferenceRequest?: (request: CloudInferenceRequest) => Promise<void>;
+		/** Lowers the attachment submit wait for brokered-flow tests. */
+		submitWaitMs?: number;
 	} = {},
 ): RegistryHarness {
 	const stateDirectory = join(root, "cloud");
@@ -270,9 +275,10 @@ function buildRegistry(
 		transport,
 		bridgeToken: CLOUD_TEST_BRIDGE_TOKEN,
 		reconnectDelayMs: 50,
-		submitWaitMs: 5_000,
+		submitWaitMs: options.submitWaitMs ?? 5_000,
 		...(options.turnStartTimeoutMs === undefined ? {} : { turnStartTimeoutMs: options.turnStartTimeoutMs }),
 		...(options.resolveModel === undefined ? {} : { resolveModel: options.resolveModel }),
+		...(options.onInferenceRequest === undefined ? {} : { onInferenceRequest: options.onInferenceRequest }),
 		artifactResolver: {
 			fetch: async () => {
 				throw new Error("no artifacts expected in this suite");
@@ -878,6 +884,121 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 		} finally {
 			await harness.registry.dispose().catch(() => undefined);
 			await daemon.stop().catch(() => undefined);
+		}
+	});
+
+	it("brokers a guest inference request through the wired local broker and records its usage", async () => {
+		const root = cloudTemp("cloud-session-registry-test-");
+		const guestSessionId = "sess_broker_e2e";
+		const registration = registerFauxProvider({ models: [{ id: "faux-1", contextWindow: 100_000 }] });
+		registration.setResponses([fauxAssistantMessage("brokered answer")]);
+		// A fake guest bridge: it answers hello with a snapshot and lets the
+		// test push frames onto the attachment's connection.
+		const server: Server = createServer();
+		const sockets = new Set<Socket>();
+		const received: Array<Record<string, unknown>> = [];
+		const guestSocket = join(root, "broker-guest.sock");
+		server.on("connection", (socket: Socket) => {
+			sockets.add(socket);
+			let buffer = "";
+			socket.on("data", (chunk: Buffer) => {
+				buffer += chunk.toString("utf8");
+				for (;;) {
+					const newline = buffer.indexOf("\n");
+					if (newline < 0) break;
+					const line = buffer.slice(0, newline);
+					buffer = buffer.slice(newline + 1);
+					if (line.length === 0) continue;
+					try {
+						const parsed = JSON.parse(line) as Record<string, unknown>;
+						received.push(parsed);
+						if (parsed.type === "hello") {
+							socket.write(
+								`${JSON.stringify({
+									type: "snapshot",
+									sessionId: guestSessionId,
+									generation: 1,
+									cursor: { generation: 1, sequence: 0 },
+									status: "idle",
+									state: { cwd: root, modelId: "faux/faux-1", queuedCommandIds: [] },
+									events: [],
+								})}\n`,
+							);
+						}
+					} catch {
+						// A non-JSON line is not this test's concern.
+					}
+				}
+			});
+			socket.on("close", () => sockets.delete(socket));
+		});
+		await new Promise<void>((resolve) => server.listen(guestSocket, resolve));
+		let broker: CloudInferenceBroker | undefined;
+		const harness = buildRegistry(root, guestSocket, {
+			resolveModel: (model) =>
+				model.provider === "faux" && model.modelId === "faux-1"
+					? (registration.getModel("faux-1") as Model<Api>)
+					: undefined,
+			submitWaitMs: 50,
+			onInferenceRequest: (request) => broker!.runRequest(request),
+		});
+		broker = new CloudInferenceBroker({
+			resolveModel: (selector) =>
+				selector.provider === "faux" ? (registration.getModel(selector.modelId) as Model<Api>) : undefined,
+			sendFrame: (frame) => harness.registry.sendInferenceFrame(frame),
+			onUsage: (sessionId, remoteSessionId, usage) =>
+				harness.registry.recordBrokeredUsage(sessionId, remoteSessionId, usage),
+		});
+		try {
+			const info = await harness.registry.convertSession({
+				cwd: root,
+				sessionId: guestSessionId,
+				model: "faux/faux-1",
+			});
+			const record = harness.store.get(info.sessionId)!;
+			expect(record.observedLifecycle).toBe("running");
+			// The attachment is live once the fake bridge answered hello.
+			await waitFor(() => received.some((frame) => frame.type === "subscribe"));
+			sockets.forEach((socket) => {
+				socket.write(
+					`${JSON.stringify({
+						type: "inference_request",
+						sessionId: info.sessionId,
+						remoteSessionId: info.sessionId,
+						requestId: "req_e2e_1",
+						model: { provider: "faux", modelId: "faux-1" },
+						payload: {
+							messages: [{ role: "user", content: "say it", timestamp: 1 }],
+							options: { systemPrompt: "You are a test assistant." },
+						},
+					})}\n`,
+				);
+			});
+			await waitFor(() =>
+				received.some((frame) => frame.type === "inference_end" && frame.requestId === "req_e2e_1"),
+			);
+			// Events streamed in order before the terminal end frame.
+			const inference = received.filter(
+				(frame) => typeof frame.type === "string" && frame.type.startsWith("inference_"),
+			);
+			expect(inference.at(-1)).toMatchObject({ type: "inference_end", requestId: "req_e2e_1" });
+			expect(inference.slice(0, -1).every((frame) => frame.type === "inference_event")).toBe(true);
+			expect(inference.length).toBeGreaterThan(2);
+			// Brokered usage is locally accounted, so the cloud row's context
+			// meter covers brokered models exactly like mirrored ones.
+			const target = harness.registry.resolveActive(record.activeSessionId!)!;
+			const stats = await harness.registry.handleSessionCommand(
+				{ type: "get_session_stats", activeSessionId: record.activeSessionId! },
+				target,
+			);
+			const tokens = (stats as { data?: { tokens?: { input: number; output: number } } }).data?.tokens;
+			expect(tokens?.input ?? 0).toBeGreaterThan(0);
+			expect(tokens?.output ?? 0).toBeGreaterThan(0);
+		} finally {
+			await harness.registry.dispose().catch(() => undefined);
+			registration.unregister();
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+			for (const socket of sockets) socket.destroy();
 		}
 	});
 });

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { type Api, getSupportedThinkingLevels, type Model } from "@earendil-works/pi-ai";
+import { type Api, getSupportedThinkingLevels, type Model, type Usage } from "@earendil-works/pi-ai";
 import {
 	AGENT_MESSAGE_SOURCE,
 	type AgentFamilyRelationship,
@@ -37,6 +37,10 @@ import {
 	type CloudCommandRequest,
 	type CloudEvent,
 	type CloudFamilyRow,
+	type CloudInferenceEnd,
+	type CloudInferenceError,
+	type CloudInferenceEvent,
+	type CloudInferenceRequest,
 	type CloudRosterRow,
 	type CloudSessionStatus,
 	isTerminalCloudCommandState,
@@ -175,6 +179,11 @@ export interface CloudSessionRegistryOptions {
 	 * authoritative model objects a local session reports.
 	 */
 	resolveModel?: (model: { provider?: string; modelId: string }) => Model<Api> | undefined;
+	/**
+	 * Run one guest brokered-inference request through the daemon's local
+	 * model catalog; supplied by the supervisor's CloudInferenceBroker.
+	 */
+	onInferenceRequest?: (request: CloudInferenceRequest) => Promise<void>;
 }
 
 /** One addressable cloud row: the root session or a remote descendant. */
@@ -1311,6 +1320,44 @@ export class CloudSessionRegistry {
 	}
 
 	// ---------------------------------------------------------------------------
+	// Brokered inference (guest model calls through the local catalog)
+	// ---------------------------------------------------------------------------
+
+	/**
+	 * Route one brokered-inference response frame to the session's live tunnel
+	 * attachment. False when the session is gone or no connection rides the
+	 * tunnel; the guest's request then times out on its side.
+	 */
+	sendInferenceFrame(frame: CloudInferenceEvent | CloudInferenceEnd | CloudInferenceError): boolean {
+		const session = this.sessions.get(frame.sessionId);
+		if (session === undefined) return false;
+		return session.attachment.sendInferenceResponse(frame);
+	}
+
+	/**
+	 * Accumulate one brokered request's usage into the mirrored totals for
+	 * its remote session, so contextUsage and stats cover brokered models
+	 * exactly like directly-resolved ones. Guest usage events stay
+	 * authoritative: they overwrite the accumulated totals when they arrive.
+	 */
+	recordBrokeredUsage(sessionId: string, remoteSessionId: string, usage: Usage): void {
+		const session = this.sessions.get(sessionId);
+		if (session === undefined) return;
+		const totals = session.usageBySession.get(remoteSessionId) ?? {
+			inputTokens: 0,
+			outputTokens: 0,
+			cachedTokens: 0,
+			requests: 0,
+		};
+		totals.inputTokens += usage.input;
+		totals.outputTokens += usage.output;
+		totals.cachedTokens += usage.cacheRead;
+		totals.requests += 1;
+		session.usageBySession.set(remoteSessionId, totals);
+		this.publishRosterRows(session);
+	}
+
+	// ---------------------------------------------------------------------------
 	// Recovery and disposal
 	// ---------------------------------------------------------------------------
 
@@ -1457,6 +1504,7 @@ export class CloudSessionRegistry {
 
 	private createAttachment(session: CloudResidentSession): CloudTunnelAttachment {
 		const eventsDirectory = join(this.options.stateDirectory, "events", session.sessionId);
+		const onInferenceRequest = this.options.onInferenceRequest;
 		return new CloudTunnelAttachment({
 			sessionId: session.sessionId,
 			generation: session.record.generation,
@@ -1525,6 +1573,9 @@ export class CloudSessionRegistry {
 					this.service.tunnelSecretStore.delete(session.sessionId);
 					this.updateConnectivity(session, "disconnected");
 				},
+				...(onInferenceRequest !== undefined
+					? { onInferenceRequest: (request: CloudInferenceRequest) => onInferenceRequest(request) }
+					: {}),
 			},
 		});
 	}

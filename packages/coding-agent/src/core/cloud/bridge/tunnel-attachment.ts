@@ -1,15 +1,21 @@
 import { randomUUID } from "node:crypto";
 import {
+	CLOUD_MAX_ERROR_CHARS,
+	CLOUD_MAX_MESSAGE_BYTES,
 	CLOUD_PROTOCOL_VERSION,
 	type CloudCommandReceipt,
 	type CloudCommandRequest,
 	type CloudEvent,
+	type CloudInferenceEnd,
+	type CloudInferenceError,
+	type CloudInferenceEvent,
 	type CloudMessage,
 	type CloudSessionId,
 	cloudRequestDigest,
 	cloudRequestProblem,
 	newCloudClientId,
 	parseCloudMessage,
+	serializeCloudMessage,
 } from "../protocol.js";
 import type { CloudTunnelConnection, CloudTunnelTransport } from "./tunnel-transport.js";
 
@@ -83,6 +89,11 @@ export interface CloudTunnelAttachmentCallbacks {
 	onAttachmentError(message: string): void;
 	/** The tunnel is unrecoverable; the supervisor stops itself. */
 	onTerminal(reason: string): void;
+	/**
+	 * Run one guest brokered-inference request against the local model
+	 * catalog; responses ride back through `sendInferenceResponse`.
+	 */
+	onInferenceRequest?(request: Extract<CloudMessage, { type: "inference_request" }>): Promise<void>;
 }
 
 export interface CloudTunnelAttachmentOptions {
@@ -435,6 +446,33 @@ export class CloudTunnelAttachment {
 			this.connection?.close("event mirroring failed");
 			return;
 		}
+		if (value.type === "inference_request") {
+			const run = this.callbacks.onInferenceRequest;
+			if (run === undefined) {
+				this.sendInferenceResponse({
+					type: "inference_error",
+					sessionId: value.sessionId,
+					requestId: value.requestId,
+					error: "brokered inference is not available on this tunnel attachment",
+				});
+				return;
+			}
+			try {
+				await run(value);
+			} catch (error) {
+				// The broker answers its own failures with inference_error
+				// frames; this is the safety net, and the wire stays open.
+				const reason = `brokered inference failed: ${errorMessage(error)}`.slice(0, CLOUD_MAX_ERROR_CHARS);
+				this.callbacks.onAttachmentError(reason);
+				this.sendInferenceResponse({
+					type: "inference_error",
+					sessionId: value.sessionId,
+					requestId: value.requestId,
+					error: reason,
+				});
+			}
+			return;
+		}
 		// The bridge never sends hello, subscribe, submit, get_command, or ack.
 		this.callbacks.onAttachmentError(`tunnel bridge sent an unexpected message type: ${value.type}`);
 	}
@@ -450,6 +488,33 @@ export class CloudTunnelAttachment {
 			}),
 		);
 		this.subscribed = true;
+	}
+
+	/**
+	 * Write one brokered-inference response frame to the live connection.
+	 * False when no connection rides the tunnel or the frame cannot be
+	 * serialized inside the protocol bounds; the guest's request then times
+	 * out on its side. An end frame that exceeds the bound still answers
+	 * with a bounded error instead of a silent timeout.
+	 */
+	sendInferenceResponse(frame: CloudInferenceEvent | CloudInferenceEnd | CloudInferenceError): boolean {
+		if (this.connection === undefined) return false;
+		try {
+			this.connection.send(serializeCloudMessage(frame));
+			return true;
+		} catch (error) {
+			if (frame.type === "inference_end") {
+				return this.sendInferenceResponse({
+					type: "inference_error",
+					sessionId: frame.sessionId,
+					requestId: frame.requestId,
+					error: `inference response exceeds the ${CLOUD_MAX_MESSAGE_BYTES}-byte frame bound: ${
+						error instanceof Error ? error.message : String(error)
+					}`.slice(0, CLOUD_MAX_ERROR_CHARS),
+				});
+			}
+			return false;
+		}
 	}
 
 	private async importEvents(events: readonly CloudEvent[]): Promise<void> {

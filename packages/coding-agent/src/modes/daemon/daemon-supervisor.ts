@@ -91,6 +91,7 @@ import {
 	type WorkerRosterEntry,
 	workerRosterEntryFromSummary,
 } from "./agent-roster.js";
+import { CloudInferenceBroker } from "./cloud-inference-broker.js";
 import {
 	CloudSessionRegistry,
 	type CloudSessionRegistryCallbacks,
@@ -893,6 +894,8 @@ export class DaemonSupervisor {
 	private rosterWatchdogTimer?: ReturnType<typeof setInterval>;
 	/** Supervisor-owned cloud session registry; undefined when cloud is unconfigured. */
 	private cloudRegistry?: CloudSessionRegistry;
+	/** Supervisor-owned broker for guest model calls; constructed on first request. */
+	private cloudInferenceBroker?: CloudInferenceBroker;
 	private cloudModelCatalog?: ModelRegistry;
 	/** Guards the one in-flight private-model catalog refresh for cloud rows. */
 	private cloudModelCatalogRefreshed = false;
@@ -4887,8 +4890,32 @@ export class DaemonSupervisor {
 			// Cloud rows report the same authoritative model objects a local
 			// session does: the supervisor's catalog resolves them.
 			resolveModel: (model) => this.resolveCloudModel(model),
+			// Guest model calls broker through the local catalog; the broker
+			// is lazy, so a daemon without cloud traffic never builds it.
+			onInferenceRequest: (request) => this.cloudBroker().runRequest(request),
 		});
 		return this.cloudRegistry;
+	}
+
+	/**
+	 * The supervisor-owned broker serving guest inference requests from the
+	 * user's local model catalog and credentials; lazy like the cloud
+	 * registry and sharing its model catalog.
+	 */
+	private cloudBroker(): CloudInferenceBroker {
+		this.cloudInferenceBroker ??= new CloudInferenceBroker({
+			resolveModel: (selector) => this.resolveCloudModel(selector),
+			// Responses route back through the registry to the attachment of
+			// the session that received the request; a reconnected tunnel
+			// drops them and the guest's request times out.
+			sendFrame: (frame) => this.cloudRegistry?.sendInferenceFrame(frame),
+			resolveAuth: (model) => this.modelCatalog().getApiKeyAndHeaders(model),
+			onUsage: (sessionId, remoteSessionId, usage) =>
+				this.cloudRegistry?.recordBrokeredUsage(sessionId, remoteSessionId, usage),
+			timeoutMs: this.settingsManager.getProviderRetrySettings().timeoutMs,
+			log: (message) => this.log(message),
+		});
+		return this.cloudInferenceBroker;
 	}
 
 	/** The supervisor's model catalog; answers cloud bootstrap reads. */
@@ -8170,6 +8197,7 @@ export class DaemonSupervisor {
 		await this.runCleanupStep("cloud registry", async () => {
 			await this.cloudRegistry?.dispose();
 			this.cloudRegistry = undefined;
+			this.cloudInferenceBroker = undefined;
 		});
 		await this.runCleanupStep("daemon catalog", () => this.catalog.stop());
 		await this.runCleanupStep("daemon server", () => serverClosed);
