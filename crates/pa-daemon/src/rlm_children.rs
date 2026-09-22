@@ -62,9 +62,9 @@ const RUNTIME_METADATA_PROMPT_MAX: usize = 4096;
 const WATCH_WAIT_SLICE_MS: u64 = 60_000;
 /// Re-poll cadence after a wait slice ends without a settled child.
 const WATCH_POLL_INTERVAL_MS: u64 = 2_000;
-/// Log persistent worker unavailability without abandoning the child: the
-/// supervisor can restart later, and roster reads never poll the worker.
-const WATCH_UNREACHABLE_LOG_INTERVAL: u32 = 150;
+/// Consecutive failed worker polls before settling an unreachable child as
+/// errored; roster reads must never attempt their own worker recovery.
+const WATCH_MAX_UNREACHABLE_POLLS: u32 = 150;
 /// The parent identity children are spawned from: recursion bounds, the
 /// inherited model selector and thinking level, and the parent session's
 /// persistence identity.
@@ -465,7 +465,11 @@ impl SupervisorChildSessionsInner {
     /// Fire the settle hook off-thread (the settle sites run inside
     /// watcher tasks; the hook owns its own scheduling).
     pub(crate) fn fire_settle_hook(&self) {
-        let hook = self.settle_hook.lock().expect("settle hook lock").clone();
+        let hook = self
+            .settle_hook
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         if let Some(hook) = hook {
             std::thread::spawn(move || hook());
         }
@@ -858,11 +862,18 @@ impl SupervisorChildSessionsInner {
                 Ok(_) => unreachable_polls = 0,
                 Err(_) => {
                     unreachable_polls += 1;
-                    if unreachable_polls >= WATCH_UNREACHABLE_LOG_INTERVAL {
-                        eprintln!(
-                            "pa-daemon: RLM child settle watcher is waiting for unreachable child {active_session_id}"
-                        );
-                        unreachable_polls = 0;
+                    if unreachable_polls >= WATCH_MAX_UNREACHABLE_POLLS {
+                        {
+                            let mut state = record.lock().await;
+                            if state.closed_by_parent || state.notice_delivered {
+                                return;
+                            }
+                            state.settled_status = Some("error");
+                            state.error = Some("Child worker unreachable".to_string());
+                        }
+                        self.deliver_settle_notice(record).await;
+                        self.fire_settle_hook();
+                        return;
                     }
                 }
             }

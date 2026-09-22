@@ -101,13 +101,20 @@ impl SupervisorLink {
     /// Send one request over an independent connection. Once a command is
     /// written it is never retried; only a failed write can reconnect once.
     pub async fn request(&self, command: Value, timeout: Duration) -> Result<DaemonResponse> {
-        let mut client = self.connect().await?;
-        match client.request(command.clone(), timeout).await {
-            Err(error) if error.downcast_ref::<LinkWriteFailed>().is_some() => {
-                self.connect().await?.request(command, timeout).await
+        // Include connect and the supervisor hello in the caller's deadline:
+        // a socket that accepts but never greets must not stall this request.
+        let deadline = tokio::time::Instant::now() + timeout;
+        tokio::time::timeout_at(deadline, async {
+            let mut client = self.connect().await?;
+            match client.request(command.clone(), timeout).await {
+                Err(error) if error.downcast_ref::<LinkWriteFailed>().is_some() => {
+                    self.connect().await?.request(command, timeout).await
+                }
+                outcome => outcome,
             }
-            outcome => outcome,
-        }
+        })
+        .await
+        .map_err(|_| LinkTimeout)?
     }
 
     /// Consume the supervisor hello and hand back a live client.
@@ -213,6 +220,28 @@ mod tests {
             assert_eq!(response["accepted"], true);
         }
         waiting.await.unwrap().unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unanswered_supervisor_hello_respects_request_deadline() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("sup.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+        let link = SupervisorLink::new(socket);
+        let started = tokio::time::Instant::now();
+        let result = link
+            .request(
+                json!({ "type": "list_agent_peers" }),
+                Duration::from_millis(20),
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_millis(100));
         server.await.unwrap();
     }
 

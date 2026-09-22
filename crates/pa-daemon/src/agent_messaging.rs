@@ -65,28 +65,26 @@ const PEER_TICKET_TIMEOUT_MS: u64 = 5_000;
 async fn roster_summaries(
     link: &Arc<crate::supervisor_link::SupervisorLink>,
     worker_token: &str,
-) -> Vec<Value> {
+) -> anyhow::Result<Vec<Value>> {
     // TS uses the supervisor's pushed in-memory peer roster, not `list`
-    // (which refreshes every worker serially). An unavailable supervisor
-    // fails open so local child addressing remains usable.
-    let Ok(data) = link
+    // (which refreshes every worker serially). Surface an unavailable
+    // supervisor instead of silently claiming the caller has no siblings.
+    let data = link
         .request_success(
             json!({ "type": "list_agent_peers", "workerToken": worker_token }),
             std::time::Duration::from_secs(5),
         )
-        .await
-    else {
-        return Vec::new();
-    };
-    data.get("peers")
+        .await?;
+    Ok(data
+        .get("peers")
         .and_then(Value::as_array)
         .cloned()
-        .unwrap_or_default()
+        .unwrap_or_default())
 }
 
 impl AgentMessageController for LinkAgentMessageController {
     async fn family(&self) -> anyhow::Result<Vec<AgentFamilyMember>> {
-        let sessions = roster_summaries(&self.link, &self.worker_token).await;
+        let sessions = roster_summaries(&self.link, &self.worker_token).await?;
         // The parent identity (subagent summaries carry their parent's
         // live and persisted ids); a top-level session has none.
         let parent = self.parent_identity();
@@ -430,48 +428,27 @@ fn receipt_from_wire(data: &Value, input: AgentMessageSendInput) -> Option<Agent
     })
 }
 
-/// `agent_observe.*` controller for daemon workers: the roster via the
-/// supervisor's `list` command, message previews via `get_messages`.
+/// `agent_observe.*` controller for daemon workers: the pushed supervisor
+/// peer roster for snapshots, and `get_messages` for transcript previews.
 pub(crate) struct LinkAgentObserveController {
     link: Arc<SupervisorLink>,
+    worker_token: String,
 }
 
 impl LinkAgentObserveController {
-    pub(crate) fn new(link: Arc<SupervisorLink>) -> Self {
-        LinkAgentObserveController { link }
+    pub(crate) fn new(link: Arc<SupervisorLink>, worker_token: String) -> Self {
+        LinkAgentObserveController { link, worker_token }
     }
 }
 
 impl AgentObserveController for LinkAgentObserveController {
     async fn list_agents(&self) -> anyhow::Result<Vec<AgentObserveSummary>> {
-        let data = self
-            .link
-            .request_success(
-                json!({ "type": "list" }),
-                std::time::Duration::from_secs(30),
-            )
-            .await?;
-        let sessions = data
-            .get("sessions")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        let sessions = roster_summaries(&self.link, &self.worker_token).await?;
         Ok(summaries_from_roster(sessions))
     }
 
     async fn get_agent(&self, target: &str) -> anyhow::Result<Option<AgentObserveSummary>> {
-        let data = self
-            .link
-            .request_success(
-                json!({ "type": "list" }),
-                std::time::Duration::from_secs(30),
-            )
-            .await?;
-        let sessions = data
-            .get("sessions")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        let sessions = roster_summaries(&self.link, &self.worker_token).await?;
         Ok(summaries_from_roster(sessions).into_iter().find(|summary| {
             summary.active_session_id.as_deref() == Some(target)
                 || summary.session_id == target
