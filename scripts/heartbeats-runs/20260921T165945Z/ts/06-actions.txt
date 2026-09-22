@@ -1,0 +1,36 @@
+
+
+
+
+
+
+
+
+
+
+
+                          agent hb
+                          agent heartbeat check instruction
+
+                          Created by agent · heartbeats-verifier · active · every 30m · ste...
+
+
+                          Pause heartbeat
+                          Stop deliveries until resumed
+
+                          Stop heartbeat
+                          Permanently remove this heartbeat
+
+
+                          ← back  Esc close
+
+
+
+
+
+
+
+
+
+
+

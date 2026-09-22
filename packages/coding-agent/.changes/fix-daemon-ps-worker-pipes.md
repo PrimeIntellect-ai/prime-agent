@@ -1,1 +1,0 @@
-- Classified Windows worker named pipes as worker sockets in `prime-agent ps`, so worker pipes are no longer listed as daemons.

@@ -1,0 +1,46 @@
+[package]
+name = "pa-ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Provider APIs, model registry, and streaming for Prime Agent."
+
+[dependencies]
+pa-types = { path = "../pa-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
+# `http2` enables ALPN-negotiated HTTP/2 for providers whose TS transport
+# speaks it (bedrock); every other provider stays pinned to HTTP/1.1 via the
+# shared client's `http1_only()`.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    "gzip",
+    "http2",
+] }
+# h2/bytes: the bedrock cleartext transport speaks h2c prior-knowledge HTTP/2
+# directly (the TS default transport — the AWS SDK's NodeHttp2Handler — is
+# http2 there); the same version the graph resolves for reqwest/hyper.
+h2 = { version = "0.4", features = ["stream"] }
+bytes = "1"
+regex = "1"
+rand = "0.8"
+base64 = "0.22"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+rsa = { version = "0.9", features = ["sha2"] }
+url = "2"
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+http = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+# Wire tests only: the WS handshake accept key (SHA-1 of key + GUID); the
+# same version the graph resolves for tokio-tungstenite's rustls chain.
+sha1 = "0.10"

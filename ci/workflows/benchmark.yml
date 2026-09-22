@@ -1,0 +1,65 @@
+# Perf benchmark wave: TS-vs-Rust differential with a regression gate.
+#
+# Staged under ci/workflows/ with the other workflow files (the dev box
+# token has no `workflow` scope — see ci/workflows/README.md; promotion is
+# a plain `git mv` into .github/workflows/). Runnable locally two ways:
+#   - the local mirror:   make perf-wave
+#   - via act:            act -W ci/workflows/benchmark.yml
+# The job shells out to scripts/battery/ci_perf_wave.sh, which creates a
+# fresh Prime sandbox, installs both binaries there, runs the wave, gates
+# it against scripts/battery/perf-baseline.json, and tears the sandbox down.
+name: benchmark
+
+on:
+  pull_request:
+    paths:
+      - "crates/pa-core/**"
+      - "crates/pa-tui/**"
+      - "crates/pa-daemon/**"
+      - "scripts/battery/perf_wave.py"
+      - "scripts/battery/batterylib.py"
+      - "scripts/battery/perf.py"
+      - "scripts/battery/perf_gate.py"
+      - "scripts/battery/perf-baseline.json"
+      - ".github/workflows/benchmark.yml"
+  schedule:
+    - cron: "0 3 * * *" # nightly 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  perf-wave:
+    # Self-hosted: the job shells out to the `prime` sandbox CLI, so the
+    # runner only needs network + the CLI, not the benchmarks themselves.
+    runs-on: [self-hosted, prime-sandbox]
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the TS-vs-Rust perf wave (fresh sandbox)
+        run: scripts/battery/ci_perf_wave.sh
+        env:
+          PRIME_BENCH_TRIALS: "5"
+
+      - name: Upload wave evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-wave-results
+          path: scripts/battery/runs/perf-wave-*/
+
+      - name: Regression report
+        if: always()
+        run: |
+          RUN_DIR=$(ls -1dt scripts/battery/runs/perf-wave-* | head -1)
+          {
+            echo "# Perf wave results"
+            echo
+            echo '```'
+            cat "$RUN_DIR/results.json"
+            echo '```'
+            echo
+            echo "Gate: $(python3 scripts/battery/perf_gate.py --results "$RUN_DIR/results.json" && echo PASS || echo REGRESSION)"
+          } >> "$GITHUB_STEP_SUMMARY"

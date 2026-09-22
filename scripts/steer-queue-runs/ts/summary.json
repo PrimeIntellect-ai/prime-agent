@@ -1,0 +1,50 @@
+[
+ {
+  "side": "ts",
+  "ok": true,
+  "summary": "session A's kernel cell started",
+  "evidence": ""
+ },
+ {
+  "side": "ts",
+  "ok": true,
+  "summary": "session A parked a steer behind its busy turn",
+  "evidence": ""
+ },
+ {
+  "side": "ts",
+  "ok": true,
+  "summary": "session B admitted its own prompt",
+  "evidence": ""
+ },
+ {
+  "side": "ts",
+  "ok": true,
+  "summary": "session A aborted mid-cell",
+  "evidence": ""
+ },
+ {
+  "side": "ts",
+  "ok": true,
+  "summary": "session B's own turn ran to completion despite A's abort",
+  "evidence": ""
+ },
+ {
+  "side": "ts",
+  "ok": true,
+  "summary": "session A's aborted turn settled",
+  "evidence": ""
+ },
+ {
+  "side": "ts",
+  "ok": true,
+  "summary": "the resume steer admitted on A",
+  "evidence": ""
+ },
+ {
+  "side": "ts",
+  "ok": true,
+  "summary": "A's parked steer survived the abort and delivered after the resume",
+  "evidence": ""
+ }
+]

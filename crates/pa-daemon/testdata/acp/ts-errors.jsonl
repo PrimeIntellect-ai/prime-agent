@@ -1,0 +1,15 @@
+{"scenario": "errors", "direction": "out", "frame": {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1, "clientCapabilities": {}, "clientInfo": {"name": "differential-capture", "title": "Differential Capture", "version": "0.0.1"}}}}
+{"scenario": "errors", "direction": "in", "frame": {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": false, "promptCapabilities": {"image": true, "embeddedContext": true}, "mcpCapabilities": {"http": true}, "sessionCapabilities": {"close": {}}}, "agentInfo": {"name": "prime-agent", "title": "Prime Agent", "version": "0.9.5"}, "_meta": {"ai.primeintellect.prime-agent": {}}}}}
+{"scenario": "errors", "direction": "out", "frame": {"jsonrpc": "2.0", "id": 2, "method": "session/prompt", "params": {"sessionId": "bogus-session", "prompt": [{"type": "text", "text": "hi"}]}}}
+{"scenario": "errors", "direction": "in", "frame": {"jsonrpc": "2.0", "id": 2, "error": {"code": -32603, "message": "Internal error", "data": {"details": "Unknown ACP session: bogus-session"}}}}
+{"scenario": "errors", "direction": "out", "frame": {"jsonrpc": "2.0", "id": 3, "method": "session/close", "params": {"sessionId": "bogus-session"}}}
+{"scenario": "errors", "direction": "in", "frame": {"jsonrpc": "2.0", "id": 3, "error": {"code": -32603, "message": "Internal error", "data": {"details": "Unknown ACP session: bogus-session"}}}}
+{"scenario": "errors", "direction": "out", "frame": {"jsonrpc": "2.0", "id": 4, "method": "session/new", "params": {"cwd": "/tmp/acp-capture-ts", "mcpServers": []}}}
+{"scenario": "errors", "direction": "in", "frame": {"jsonrpc": "2.0", "id": 4, "result": {"sessionId": "9183f267-ab2b-4a90-8a75-08d279b77ec7"}}}
+{"scenario": "errors", "direction": "out", "frame": {"jsonrpc": "2.0", "id": 5, "method": "session/new", "params": {"cwd": "/tmp/acp-capture-ts", "mcpServers": []}}}
+{"scenario": "errors", "direction": "in", "frame": {"jsonrpc": "2.0", "id": 5, "error": {"code": -32603, "message": "Internal error", "data": {"details": "prime-agent ACP mode hosts one session per connection; start another prime-agent process for a second session"}}}}
+{"scenario": "errors", "direction": "out", "frame": {"jsonrpc": "2.0", "id": 6, "method": "unknown/method", "params": {}}}
+{"scenario": "errors", "direction": "in", "frame": {"jsonrpc": "2.0", "id": 6, "error": {"code": -32601, "message": "\"Method not found\": unknown/method", "data": {"method": "unknown/method"}}}}
+{"scenario": "errors", "direction": "out", "frame": {"jsonrpc": "2.0", "id": 7, "method": "session/close", "params": {"sessionId": "9183f267-ab2b-4a90-8a75-08d279b77ec7"}}}
+{"scenario": "errors", "direction": "in", "frame": {"jsonrpc": "2.0", "id": 7, "result": {}}}
+{"scenario": "errors", "direction": "meta", "frame": {"exitCode": 0, "stderr": "Warning: (startup session lookup, global settings) ENOTDIR: not a directory, rmdir '/home/ubuntu/.prime/agent/settings.json.lock'\n"}}

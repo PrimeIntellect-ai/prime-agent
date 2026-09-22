@@ -1,0 +1,207 @@
+# Release pipeline for Prime Agent (Rust).
+#
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RELEASE_VERSION: ${{ github.ref_name }}
+
+jobs:
+  tag-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
+        with:
+          toolchain: "1.98.1"
+      - name: Validate tag matches workspace version
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF_TYPE}" == "tag" ]] || { echo "ref is not a tag"; exit 1; }
+          tag_ver="${GITHUB_REF_NAME#v}"
+          cargo_ver="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
+          [[ "${tag_ver}" == "${cargo_ver}" ]]             || { echo "tag v${tag_ver} does not match Cargo.toml ${cargo_ver}"; exit 1; }
+          echo "tag and workspace version agree (${tag_ver})"
+
+  build:
+    needs: tag-check
+    name: build-${{ matrix.target }}
+    runs-on: ${{ matrix.runs-on }}
+    permissions:
+      contents: read
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runs-on: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runs-on: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            runs-on: macos-14
+          - target: x86_64-apple-darwin
+            runs-on: macos-15-intel  # macos-13 is retired; this is the Intel runner now
+          # Windows ships when the platform trait impls land:
+          # - target: x86_64-pc-windows-msvc
+          #   runs-on: windows-2022
+    env:
+      # AppleDouble resource forks must not leak into the archive; the
+      # assembler additionally enforces plain-file payloads.
+      COPYFILE_DISABLE: "1"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
+        with:
+          toolchain: "1.98.1"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build (release, locked)
+        run: cargo build --release --locked --target ${{ matrix.target }} -j 4
+      - name: "Livecheck gate: --version prints the tag version"
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/prime-agent"
+          out="$("${bin}" --version)"
+          [[ "${out}" == "${RELEASE_VERSION#v}" ]]             || { echo "binary reports '${out}', expected '${RELEASE_VERSION#v}'"; exit 1; }
+      - name: Assemble tarball + checksums + manifest
+        run: |
+          set -euo pipefail
+          python3 scripts/release/assemble_artifacts.py \
+            --repo-root . \
+            --version "${RELEASE_VERSION#v}" \
+            --target "${{ matrix.target }}" \
+            --binary "target/${{ matrix.target }}/release/prime-agent" \
+            --out-dir "target/${{ matrix.target }}/dist"
+          cat "target/${{ matrix.target }}/dist/manifest.json"
+      - name: Upload artifacts
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: artifacts-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/dist/prime-agent-*
+            target/${{ matrix.target }}/dist/SHA256SUMS
+            target/${{ matrix.target }}/dist/manifest.json
+          if-no-files-found: error
+
+  promote:
+    needs: build
+    name: promotion gate -> release attach
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+    timeout-minutes: 30
+    steps:
+      # The promotion stage receives ONLY built artifacts. No checkout of the
+      # source into this job's build path, no rebuild, no publish tokens.
+      - name: Download all build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: incoming
+      - name: Verify hash continuity (artifacts match build-job manifests)
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, hashlib, pathlib, sys
+          incoming = pathlib.Path("incoming")
+          failures = []
+          for entry_dir in sorted(p for p in incoming.iterdir() if p.is_dir()):
+              manifest_path = entry_dir / "manifest.json"
+              manifest = json.loads(manifest_path.read_text())
+              for b in manifest["binaries"]:
+                  tar = entry_dir / b["file"]
+                  if not tar.is_file():
+                      failures.append(f"{b['file']}: missing")
+                      continue
+                  digest = hashlib.sha256(tar.read_bytes()).hexdigest()
+                  if digest != b["sha256"]:
+                      failures.append(f"{b['file']}: sha256 mismatch")
+          if failures:
+              sys.exit("hash continuity failed:\n" + "\n".join(failures))
+          print(f"hash continuity verified for all archives")
+          PY
+      - name: Merge per-target manifests + SHA256SUMS
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, pathlib, tarfile
+          incoming = pathlib.Path("incoming")
+          merged, sums, version = [], [], None
+          for entry_dir in sorted(p for p in incoming.iterdir() if p.is_dir()):
+              manifest = json.loads((entry_dir / "manifest.json").read_text())
+              version = manifest["version"]
+              merged.extend(manifest["binaries"])
+              sums.extend(line for line in
+                          (entry_dir / "SHA256SUMS").read_text().splitlines()
+                          if line.strip())
+          merged.sort(key=lambda b: b["file"])
+          sums.sort(key=lambda line: line.split(None, 1)[1])
+          out = pathlib.Path("release-out")
+          out.mkdir()
+          (out / "manifest.json").write_text(
+              json.dumps({"version": version, "binaries": merged}, indent=2) + "\n")
+          (out / "SHA256SUMS").write_text("\n".join(sums) + "\n")
+          for entry_dir in (p for p in incoming.iterdir() if p.is_dir()):
+              for tar in sorted(entry_dir.glob("prime-agent-*.tar.gz")):
+                  (out / tar.name).hardlink_to(tar)
+          # Unpack each tarball so the SBOM covers the unpacked artifact tree
+          # (syft does not unpack tar.gz archives itself); keyed by the target
+          # triple from each build job's manifest.
+          for b in merged:
+              unpacked = pathlib.Path("release-unpacked") / b["target"]
+              unpacked.mkdir(parents=True)
+              with tarfile.open(out / b["file"]) as tar:
+                  tar.extractall(unpacked, filter="data")
+          PY
+          ls -la release-out release-unpacked
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+      - name: Generate SPDX SBOM per target (unpacked artifact tree)
+        run: |
+          set -euo pipefail
+          for dir in release-unpacked/*/; do
+            target="$(basename "${dir}")"
+            syft "dir:${dir}" -o "spdx-json=release-out/sbom-spdx-${RELEASE_VERSION#v}-${target}.json"
+          done
+          ls -la release-out/sbom-spdx-*
+      # [reserved] Apple notarization step goes here once certificates land:
+      # sign + notarize each darwin tarball's inner binary before attach.
+      - name: Attest build provenance (SLSA)
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: |
+            release-out/prime-agent-*.tar.gz
+      - name: Attach to GitHub release
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          fail_on_unmatched_files: true
+          files: |
+            release-out/prime-agent-*.tar.gz
+            release-out/SHA256SUMS
+            release-out/manifest.json
+            release-out/sbom-spdx-*.json

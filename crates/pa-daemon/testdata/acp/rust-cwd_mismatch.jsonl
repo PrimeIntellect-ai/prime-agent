@@ -1,0 +1,7 @@
+{"scenario": "cwd_mismatch", "direction": "out", "frame": {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1, "clientCapabilities": {}, "clientInfo": {"name": "differential-capture", "title": "Differential Capture", "version": "0.0.1"}}}}
+{"scenario": "cwd_mismatch", "direction": "in", "frame": {"id": 1, "jsonrpc": "2.0", "result": {"_meta": {"ai.primeintellect.prime-agent": {}}, "agentCapabilities": {"loadSession": false, "mcpCapabilities": {"http": true}, "promptCapabilities": {"embeddedContext": true, "image": true}, "sessionCapabilities": {"close": {}}}, "agentInfo": {"name": "prime-agent", "title": "Prime Agent", "version": "0.1.0"}, "protocolVersion": 1}}}
+{"scenario": "cwd_mismatch", "direction": "out", "frame": {"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {"cwd": "/tmp", "mcpServers": []}}}
+{"scenario": "cwd_mismatch", "direction": "in", "frame": {"id": 2, "jsonrpc": "2.0", "result": {"_meta": {"ai.primeintellect.prime-agent": {"cwd": {"actual": "/tmp/acp-capture-rust4", "requested": "/tmp"}}}, "sessionId": "61a4d27b-59b8-44e5-9c58-76e0e38a74c8"}}}
+{"scenario": "cwd_mismatch", "direction": "out", "frame": {"jsonrpc": "2.0", "id": 3, "method": "session/close", "params": {"sessionId": "61a4d27b-59b8-44e5-9c58-76e0e38a74c8"}}}
+{"scenario": "cwd_mismatch", "direction": "in", "frame": {"id": 3, "jsonrpc": "2.0", "result": {}}}
+{"scenario": "cwd_mismatch", "direction": "meta", "frame": {"exitCode": 0, "stderr": ""}}

@@ -1,0 +1,52 @@
+[
+  {
+    "job": {
+      "id": "a1edc23e-9974-4201-a0d6-3f7595b1f368",
+      "status": "active",
+      "source": "heartbeat",
+      "runtimeKind": "top-level",
+      "deliveryMode": "steer",
+      "activeSessionId": "b6d528dd888d",
+      "sessionId": "01a0c4e9-4d1d-7377-9aa6-22c8e3fa8766",
+      "sessionFile": "/home/ubuntu/lane-worktrees/heartbeats-menu/scripts/heartbeats-runs/20260921T170018Z/ts/agent/sessions/01a0c4e9-4d1d-7377-9aa6-22c8e3fa8766.jsonl",
+      "cwd": "/home/ubuntu/lane-worktrees/heartbeats-menu/scripts/heartbeats-runs/20260921T170018Z/ts/work",
+      "prompt": "user heartbeat ping instruction",
+      "schedule": {
+        "kind": "interval",
+        "expression": "every 30m",
+        "intervalMs": 1800000
+      },
+      "createdAt": "2026-09-21T17:00:19.285Z",
+      "updatedAt": "2026-09-21T17:00:19.285Z",
+      "nextRunAt": "2026-09-21T17:30:19.285Z",
+      "runCount": 0
+    },
+    "sessionName": "heartbeats-verifier",
+    "firstMessage": "verifier seed turn"
+  },
+  {
+    "job": {
+      "id": "6bf0e7f4-9e82-48bb-bcea-b318427ea501",
+      "status": "paused",
+      "source": "rlm_heartbeat",
+      "runtimeKind": "top-level",
+      "deliveryMode": "steer",
+      "activeSessionId": "b6d528dd888d",
+      "sessionId": "01a0c4e9-4d1d-7377-9aa6-22c8e3fa8766",
+      "sessionFile": "/home/ubuntu/lane-worktrees/heartbeats-menu/scripts/heartbeats-runs/20260921T170018Z/ts/agent/sessions/01a0c4e9-4d1d-7377-9aa6-22c8e3fa8766.jsonl",
+      "cwd": "/home/ubuntu/lane-worktrees/heartbeats-menu/scripts/heartbeats-runs/20260921T170018Z/ts/work",
+      "label": "agent hb",
+      "prompt": "agent heartbeat check instruction",
+      "schedule": {
+        "kind": "interval",
+        "expression": "every 30m",
+        "intervalMs": 1800000
+      },
+      "createdAt": "2026-09-21T17:00:25.401Z",
+      "updatedAt": "2026-09-21T17:00:33.077Z",
+      "runCount": 0
+    },
+    "sessionName": "heartbeats-verifier",
+    "firstMessage": "verifier seed turn"
+  }
+]

@@ -1,0 +1,1376 @@
+//! The headless print runtime: single-shot prompt -> answer over the pa-core
+//! session engine with a real pa-ai provider. Port of the text-mode half of
+//! modes/print-mode.ts wired onto `create_session` (the Rust engine facade).
+
+use std::sync::Arc;
+
+use pa_agent::types::Model as AgentModel;
+use pa_core::session::discovery::{
+    find_most_recent_session_for_cwd, resolve_session_path, ResolvedSession, SessionSelectorError,
+};
+use pa_types::ai::Model;
+
+use crate::headless_autonomous::{autonomous_runtime_config, HeadlessAutonomous};
+use crate::mode::{AppMode, MissingSubsystem, RunOptions};
+use pa_core::session_engine::provider_adapter::{
+    json_round_trip, map_thinking_level, real_stream_fn,
+};
+
+/// The runtime: implements the print (text) mode against the merged session
+/// engine. Modes not wired here still report their typed missing subsystem.
+pub struct PrintRuntime;
+
+impl crate::mode::Runtime for PrintRuntime {
+    fn run(&self, options: &RunOptions) -> Result<i32, MissingSubsystem> {
+        // `model list` takes the full runtime path in every mode and exits
+        // (TS main: listModels runs after session assembly, before any mode
+        // transport, and exits 0).
+        if options.list_models.is_some() {
+            return match crate::list_models::run(options) {
+                Ok(code) => Ok(code),
+                Err(message) => {
+                    eprintln!("Error: {message}");
+                    Ok(1)
+                }
+            };
+        }
+        match options.app_mode {
+            // Runtime failures print themselves and exit non-zero; the typed
+            // MissingSubsystem channel stays reserved for unwired subsystems.
+            AppMode::Print => match run_print_mode(options) {
+                Ok(code) => Ok(code),
+                Err(message) => {
+                    eprintln!("Error: {message}");
+                    Ok(1)
+                }
+            },
+            AppMode::Json => match run_print_mode(options) {
+                Ok(code) => Ok(code),
+                Err(message) => {
+                    eprintln!("Error: {message}");
+                    Ok(1)
+                }
+            },
+            // The interactive TUI attaches through the daemon (spawning a
+            // supervisor when none is running); the daemon mode runs the
+            // supervisor in-process. Runtime failures print themselves and
+            // exit non-zero, so the typed channel stays for unwired modes.
+            AppMode::Interactive => match crate::interactive_mode::run_interactive_mode(options) {
+                Ok(code) => Ok(code),
+                Err(error) => {
+                    eprintln!("Error: {error:#}");
+                    Ok(1)
+                }
+            },
+            AppMode::Daemon => {
+                match crate::daemon_mode::run_daemon_mode(options.daemon_socket.as_deref()) {
+                    Ok(code) => Ok(code),
+                    Err(error) => {
+                        eprintln!("Error: {error:#}");
+                        Ok(1)
+                    }
+                }
+            }
+            // ACP mode: a thin JSON-RPC stdio transport over the same
+            // in-process session engine the print mode uses.
+            AppMode::Acp => match run_acp_mode(options) {
+                Ok(code) => Ok(code),
+                Err(error) => {
+                    eprintln!("Error: {error:#}");
+                    Ok(1)
+                }
+            },
+            AppMode::Rpc => Err(MissingSubsystem::SessionEngine),
+        }
+    }
+}
+
+/// The ACP headless mode: build the in-process session engine the same way
+/// the print mode does, then serve the ACP JSON-RPC surface over stdio until
+/// the client disconnects.
+fn run_acp_mode(options: &RunOptions) -> Result<i32, String> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    rt.block_on(acp_mode_main(options))
+}
+
+async fn acp_mode_main(options: &RunOptions) -> Result<i32, String> {
+    // TS `shouldUseDaemonClient` is true for the ACP mode: the daemon is
+    // the preferred transport, and the in-process engine stays the
+    // fallback when no daemon can be reached or served.
+    if let Some(exit_code) = try_daemon_attached_acp(options).await {
+        return Ok(exit_code);
+    }
+    let config = &options.config;
+    let engine = build_headless_engine_parts(options).await?;
+    let exit_code = pa_daemon::acp::run_acp_mode(pa_daemon::acp::AcpOptions {
+        engine: std::sync::Arc::new(engine.engine),
+        actual_cwd: config.cwd.clone(),
+        product_version: crate::config::version().to_string(),
+        model: Some(engine.model),
+        api_key: engine.api_key,
+        agent_dir: config.agent_dir.clone(),
+        autonomous_config: options
+            .config
+            .autonomous
+            .as_ref()
+            .map(autonomous_runtime_config),
+    })
+    .await
+    .map_err(|error| format!("{error:#}"))?;
+    Ok(exit_code)
+}
+
+/// Try the daemon-attached ACP transport: ensure a supervisor is
+/// listening (spawning one detached, TS daemon-launch semantics), then
+/// serve the ACP surface over a client-owned daemon session. `None` means
+/// the daemon path is unavailable and the in-process engine serves the
+/// connection instead (the failure is logged to stderr, never stdout).
+async fn try_daemon_attached_acp(options: &RunOptions) -> Option<i32> {
+    if std::env::var_os("PRIME_AGENT_FAUX_SCRIPT").is_some() {
+        return None;
+    }
+    let socket_path = options
+        .daemon_socket
+        .clone()
+        .map(|socket| crate::config::expand_tilde_path(&socket))
+        .unwrap_or_else(pa_daemon::socket::default_daemon_socket_path);
+    let cwd = options.config.cwd.clone();
+    let result = async {
+        crate::interactive_mode::ensure_daemon_running(&socket_path, &cwd)
+            .await
+            .map_err(|error| format!("{error:#}"))?;
+        let config = &options.config;
+        // The daemon worker resolves model auth from its own agent dir;
+        // the composition only carries the selection flags.
+        pa_daemon::acp::daemon::run_daemon_attached_acp_mode(
+            pa_daemon::acp::daemon::DaemonAcpOptions {
+                socket_path,
+                actual_cwd: config.cwd.clone(),
+                product_version: crate::config::version().to_string(),
+                provider: config.provider.clone(),
+                model: config.model.clone(),
+                api_key: None,
+            },
+        )
+        .await
+        .map_err(|error| format!("{error:#}"))
+    }
+    .await;
+    match result {
+        Ok(code) => Some(code),
+        Err(error) => {
+            eprintln!(
+                "prime-agent: daemon-attached ACP unavailable, using in-process mode: {error}"
+            );
+            None
+        }
+    }
+}
+
+fn run_print_mode(options: &RunOptions) -> Result<i32, String> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    rt.block_on(print_mode_main(options))
+}
+
+async fn print_mode_main(options: &RunOptions) -> Result<i32, String> {
+    let headless = build_headless_engine(options).await?;
+    let engine = std::sync::Arc::new(headless.engine);
+    // The CLI `--goal` seed (TS constructor seeding): a fresh root branch
+    // starts the goal and queues its continuation context as the first
+    // turn's leading row; a resumed or already-seeded branch keeps its
+    // persisted goal. Depth 0 only — the print session is a root session
+    // (TS main.ts gates `initialGoal` on `rlmDepth === 0` the same way).
+    if let Some(goal) = &options.config.initial_goal {
+        engine
+            .seed_initial_goal(&goal.objective, goal.token_budget.map(u64::from))
+            .await
+            .map_err(|error| format!("{error:#}"))?;
+    }
+    run_prompts_and_emit(&engine, &headless.model, headless.api_key.clone(), options).await
+}
+
+/// Assemble the in-process session engine for a headless run: model
+/// resolution, session persistence, and the engine facade. The faux-script
+/// seam (`PRIME_AGENT_FAUX_SCRIPT`) drives the same assembly without the
+/// network; verification harness only, never set by the product.
+/// The assembled headless engine plus the model and request auth it runs
+/// on, so host transports can drive session-command executors
+/// (compact/refine) with the session's own model.
+struct HeadlessEngine {
+    engine: pa_core::session_engine::engine::SessionEngine,
+    model: Model,
+    api_key: Option<String>,
+}
+
+async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEngine, String> {
+    let config = &options.config;
+    if let Ok(script) = std::env::var("PRIME_AGENT_FAUX_SCRIPT") {
+        return build_faux_engine_parts(options, &script).await;
+    }
+
+    // Model registry: composed catalog + models.json with real auth.
+    let auth = pa_core::auth::AuthStorage::create(&config.agent_dir);
+    let mut registry =
+        pa_core::models::ModelRegistry::create(auth, config.agent_dir.join("models.json"));
+    registry.load_private_authorization_from_cache();
+    let model = select_model(
+        &mut registry,
+        config.provider.as_deref(),
+        config.model.as_deref(),
+    )?;
+
+    // Resolve request auth once (single-shot mode).
+    let resolved = registry.get_api_key_and_headers(&model, model.headers.as_ref());
+
+    let stream_fn = real_stream_fn(resolved.api_key.clone(), model.clone());
+    let agent_model: AgentModel = json_round_trip(&model).ok_or("model conversion failed")?;
+
+    let session_manager = if options.session.no_session {
+        None
+    } else {
+        Some(build_session_manager(options)?)
+    };
+
+    // Telemetry (TS `installAgentTelemetry` parity for headless sessions):
+    // the CLI's env/settings opt-out decides; enabled sessions resolve the
+    // configured sinks. Depth 0 only, enforced by the engine.
+    let telemetry = (!config.telemetry_disabled).then(|| {
+        let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
+        pa_core::session_engine::telemetry::TelemetryWiring {
+            client: pa_core::session_engine::telemetry::build_client(&settings, &config.agent_dir),
+            execution_mode: Some("print".to_string()),
+            now: None,
+        }
+    });
+    let engine = pa_core::session_engine::engine::create_session(
+        pa_core::session_engine::engine::SessionEngineConfig {
+            cron_store: None,
+            telemetry,
+            cwd: config.cwd.clone(),
+            agent_dir: config.agent_dir.clone(),
+            mcp_manager: None,
+            model: Some(agent_model),
+            thinking_level: Some(resolve_thinking_level(config, &model)),
+            stream_fn: Some(stream_fn),
+            tools: builtin_tools(&config.cwd),
+            custom_system_prompt: config.system_prompt.clone(),
+            prompt_guidelines: config.append_system_prompt.clone(),
+            generic_mcp_servers: vec![],
+            allow_recursion: None,
+            session_manager,
+            extra_host_handlers: None,
+            conversation_log_path: None,
+            additional_skill_paths: config
+                .skills
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+            additional_prompt_paths: config
+                .prompt_templates
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+            extra_builtin_skill_overrides: vec![],
+            rlm_subagent_host: None,
+            rlm_depth: None,
+            model_info: Some(model.clone()),
+            cli_extension_sources: config
+                .extensions
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+            extension_tool_allow_list: config.tools.clone(),
+            // TS print/headless sessions build through the same
+            // `createDefaultRuntimeFactory` runtime (prewarmIpythonKernel:
+            // true), so the kernel boots in the background at creation;
+            // the engine's depth-0 gate matches the TS session's.
+            prewarm_ipython_kernel: Some(true),
+            queued_goal_context_purge: None,
+            queued_steering_probe: None,
+        },
+    )
+    .await
+    .map_err(|error| format!("{error:#}"))?;
+    Ok(HeadlessEngine {
+        engine,
+        model,
+        api_key: resolved.api_key,
+    })
+}
+
+/// The engine alone (callers that do not drive session commands).
+async fn build_headless_engine(options: &RunOptions) -> Result<HeadlessEngine, String> {
+    build_headless_engine_parts(options).await
+}
+
+/// The session header line: the session file's `type: "session"` entry in
+/// the TS wire shape and field order (`getSessionHeader` ->
+/// `JSON.stringify`), so a fresh run reports the same identity row the TS
+/// json stream leads with.
+async fn session_header_json(
+    engine: &pa_core::session_engine::engine::SessionEngine,
+) -> Option<String> {
+    let persistence = engine.session.shared_persistence();
+    let session = persistence.lock().await;
+    let header = session.get_header()?;
+    // The TS field order, optional fields only when present.
+    let mut object = serde_json::Map::new();
+    let field = |map: &mut serde_json::Map<String, serde_json::Value>,
+                 key: &str,
+                 value: Option<serde_json::Value>| {
+        if let Some(value) = value {
+            map.insert(key.to_string(), value);
+        }
+    };
+    field(&mut object, "type", Some(serde_json::json!("session")));
+    field(
+        &mut object,
+        "version",
+        header.version.map(serde_json::Value::from),
+    );
+    field(&mut object, "id", Some(serde_json::json!(header.id)));
+    field(
+        &mut object,
+        "timestamp",
+        Some(serde_json::json!(header.timestamp)),
+    );
+    field(&mut object, "cwd", Some(serde_json::json!(header.cwd)));
+    field(
+        &mut object,
+        "parentSession",
+        header
+            .parent_session
+            .as_ref()
+            .map(|parent| serde_json::json!(parent)),
+    );
+    field(
+        &mut object,
+        "rlmDepth",
+        header.rlm_depth.map(serde_json::Value::from),
+    );
+    field(
+        &mut object,
+        "git",
+        header
+            .git
+            .as_ref()
+            .map(|git| serde_json::to_value(git).unwrap_or(serde_json::Value::Null)),
+    );
+    Some(serde_json::Value::Object(object).to_string())
+}
+
+/// The wire shape of one streaming delta (the TS `AssistantMessageEvent`
+/// as the daemon wire carries it: `partial` dropped — the partial
+/// assistant message rides the event's `message` field already). Terminal
+/// `start`/`done`/`error` events never ride a `message_update` (the loop
+/// emits `message_start`/`message_end` for those), so they map to `None`.
+fn assistant_message_event_json(
+    event: &pa_agent::stream::AssistantMessageEvent,
+) -> Option<serde_json::Value> {
+    use pa_agent::stream::AssistantMessageEvent as StreamEvent;
+    Some(match event {
+        StreamEvent::TextStart { content_index, .. } => serde_json::json!({
+            "type": "text_start",
+            "contentIndex": content_index,
+        }),
+        StreamEvent::TextDelta {
+            content_index,
+            delta,
+            ..
+        } => serde_json::json!({
+            "type": "text_delta",
+            "contentIndex": content_index,
+            "delta": delta,
+        }),
+        StreamEvent::TextEnd {
+            content_index,
+            content,
+            ..
+        } => serde_json::json!({
+            "type": "text_end",
+            "contentIndex": content_index,
+            "content": content,
+        }),
+        StreamEvent::ThinkingStart { content_index, .. } => serde_json::json!({
+            "type": "thinking_start",
+            "contentIndex": content_index,
+        }),
+        StreamEvent::ThinkingDelta {
+            content_index,
+            delta,
+            ..
+        } => serde_json::json!({
+            "type": "thinking_delta",
+            "contentIndex": content_index,
+            "delta": delta,
+        }),
+        StreamEvent::ThinkingEnd {
+            content_index,
+            partial,
+            ..
+        } => serde_json::json!({
+            "type": "thinking_end",
+            "contentIndex": content_index,
+            "content": thinking_block_text(partial, *content_index),
+        }),
+        StreamEvent::ToolCallStart { content_index, .. } => serde_json::json!({
+            "type": "toolcall_start",
+            "contentIndex": content_index,
+        }),
+        StreamEvent::ToolCallDelta {
+            content_index,
+            delta,
+            ..
+        } => serde_json::json!({
+            "type": "toolcall_delta",
+            "contentIndex": content_index,
+            "delta": delta,
+        }),
+        StreamEvent::ToolCallEnd {
+            content_index,
+            tool_call,
+            ..
+        } => {
+            // The TS tool-call block carries its `type: "toolCall"` tag in
+            // the event payload.
+            let mut value = serde_json::json!({
+                "type": "toolCall",
+                "id": tool_call.id,
+                "name": tool_call.name,
+                "arguments": tool_call.arguments,
+            });
+            if let Some(signature) = &tool_call.thought_signature {
+                value["thoughtSignature"] = serde_json::json!(signature);
+            }
+            serde_json::json!({
+                "type": "toolcall_end",
+                "contentIndex": content_index,
+                "toolCall": value,
+            })
+        }
+        StreamEvent::Start { .. } | StreamEvent::Done { .. } | StreamEvent::Error { .. } => {
+            return None;
+        }
+    })
+}
+
+/// The thinking text of one partial message block (the loop's thinking-end
+/// event drops the content when the pa-ai event crosses the crate
+/// boundary; the partial still carries the accumulated text).
+fn thinking_block_text(
+    partial: &pa_agent::types::AssistantMessage,
+    content_index: usize,
+) -> String {
+    partial
+        .content
+        .get(content_index)
+        .map(|block| match block {
+            pa_agent::types::AssistantContent::Thinking(thinking) => thinking.thinking.clone(),
+            _ => String::new(),
+        })
+        .unwrap_or_default()
+}
+
+/// Serialize one loop event to the TS session_event wire shape.
+fn agent_event_json(event: &pa_agent::types::AgentEvent) -> Option<String> {
+    use pa_agent::types::AgentEvent;
+    fn message_value(value: &pa_agent::types::AgentMessage) -> serde_json::Value {
+        json_round_trip(value).unwrap_or(serde_json::Value::Null)
+    }
+    let value = match event {
+        AgentEvent::AgentStart => serde_json::json!({ "type": "agent_start" }),
+        AgentEvent::AgentEnd { messages } => serde_json::json!({
+            "type": "agent_end",
+            "messages": messages.iter().map(message_value).collect::<Vec<_>>(),
+        }),
+        AgentEvent::TurnStart => serde_json::json!({ "type": "turn_start" }),
+        AgentEvent::TurnEnd {
+            message,
+            tool_results,
+        } => serde_json::json!({
+            "type": "turn_end",
+            "message": message_value(message),
+            "toolResults": tool_results.iter().map(|r| json_round_trip(r).unwrap_or(serde_json::Value::Null)).collect::<Vec<_>>(),
+        }),
+        AgentEvent::MessageStart { message: m } => serde_json::json!({
+            "type": "message_start",
+            "message": message_value(m),
+        }),
+        AgentEvent::MessageUpdate {
+            message,
+            assistant_message_event,
+        } => {
+            // The TS wire carries the slimmed delta event (the daemon drops
+            // the nested `partial` copy; `message` already carries it).
+            let delta = assistant_message_event_json(assistant_message_event)?;
+            serde_json::json!({
+                "type": "message_update",
+                "message": message_value(message),
+                "assistantMessageEvent": delta,
+            })
+        }
+        AgentEvent::MessageEnd { message: m } => serde_json::json!({
+            "type": "message_end",
+            "message": message_value(m),
+        }),
+        AgentEvent::ToolExecutionStart {
+            tool_call_id,
+            tool_name,
+            args,
+        } => serde_json::json!({
+            "type": "tool_execution_start",
+            "toolCallId": tool_call_id,
+            "toolName": tool_name,
+            "args": args,
+        }),
+        AgentEvent::ToolExecutionUpdate {
+            tool_call_id,
+            tool_name,
+            args,
+            partial_result,
+        } => serde_json::json!({
+            "type": "tool_execution_update",
+            "toolCallId": tool_call_id,
+            "toolName": tool_name,
+            "args": args,
+            "partialResult": json_round_trip(partial_result).unwrap_or(serde_json::Value::Null),
+        }),
+        AgentEvent::ToolExecutionEnd {
+            tool_call_id,
+            tool_name,
+            result,
+            ..
+        } => serde_json::json!({
+            "type": "tool_execution_end",
+            "toolCallId": tool_call_id,
+            "toolName": tool_name,
+            "result": json_round_trip(result).unwrap_or(serde_json::Value::Null),
+        }),
+    };
+    Some(value.to_string())
+}
+
+fn select_model(
+    registry: &mut pa_core::models::ModelRegistry,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Result<Model, String> {
+    let available: Vec<Model> = registry.get_available().into_iter().cloned().collect();
+    let Some(model_name) = model else {
+        // No model selection: prefer the registry's featured default.
+        let all: Vec<Model> = registry.get_all().to_vec();
+        if let Some(default) = pa_core::models::find_preferred_default_model(&available) {
+            return Ok(default.clone());
+        }
+        return all.first().cloned().ok_or_else(|| {
+            "No models available. Check your installation or add models to models.json.".to_string()
+        });
+    };
+    let resolved = pa_core::models::resolve_cli_model(provider, model_name, &available);
+    if let Some(error) = resolved.error {
+        return Err(error);
+    }
+    resolved
+        .model
+        .ok_or_else(|| "No matching model found.".to_string())
+}
+
+/// Resolve the session thinking level with the sdk.ts `createAgentSession`
+/// order: the CLI flag, then the settings default, then "medium" — always
+/// clamped to what the model supports.
+fn resolve_thinking_level(
+    config: &crate::mode::RuntimeConfig,
+    model: &Model,
+) -> pa_agent::types::ThinkingLevel {
+    use pa_types::ai::ModelThinkingLevel;
+    let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
+    let requested = config
+        .thinking
+        .or_else(|| {
+            settings
+                .get_default_thinking_level()
+                .map(pa_core::settings::ThinkingLevelSetting::model_level)
+        })
+        // TS `DEFAULT_THINKING_LEVEL`.
+        .unwrap_or(ModelThinkingLevel::Medium);
+    let clamped = pa_ai::models::clamp_thinking_level(model, requested);
+    map_thinking_level(clamped)
+}
+
+/// Build the session manager for a headless run, mirroring the flag order of
+/// TS `createSessionManager` (noSession -> fork -> resume -> continue ->
+/// create). `--no-session` never reaches here: the caller passes `None` to
+/// the engine, which builds the in-memory manager itself.
+fn build_session_manager(
+    options: &RunOptions,
+) -> Result<pa_core::session::manager::SessionManager, String> {
+    use pa_core::session::manager::SessionManager;
+    let cwd = options.config.cwd.clone();
+    if let Some(selector) = &options.session.fork {
+        // TS print mode forks through SessionManager.forkFrom; the Rust port
+        // does not implement fork yet, so fail loudly instead of silently
+        // starting an unrelated fresh session.
+        let _ = selector;
+        return Err("--fork is not supported in print mode yet".to_string());
+    }
+    let session_dir = options
+        .session
+        .session_dir
+        .clone()
+        .unwrap_or_else(|| options.config.agent_dir.join("sessions"));
+    // main.ts `explicitCwdOverride`: with --cwd, the flag's directory wins
+    // over the stored session cwd on resume.
+    let explicit_cwd_override = options.session.cwd_from_flag.then_some(cwd.as_path());
+    if let Some(selector) = &options.session.resume {
+        let resolved =
+            resolve_session_path(selector, &cwd, &session_dir).map_err(render_selector_error)?;
+        return match resolved {
+            ResolvedSession::Path(path) | ResolvedSession::Local(path) => {
+                assert_session_not_active_in_daemon(options.daemon_socket.as_deref(), &path)?;
+                open_session_file(&path, &session_dir, &cwd, explicit_cwd_override)
+            }
+            ResolvedSession::Global {
+                path: _,
+                cwd: session_cwd,
+            } => {
+                // Print mode has no fork prompt; mirror the TS non-TTY path.
+                Err(format!(
+                    "session {selector} belongs to a different project ({}). Pass --fork {selector} to use it here, or run from that project's directory.",
+                    session_cwd.display()
+                ))
+            }
+        };
+    }
+    if options.session.continue_recent {
+        let most_recent = find_most_recent_session_for_cwd(&session_dir, &cwd);
+        return match most_recent {
+            Some(path) => {
+                assert_session_not_active_in_daemon(options.daemon_socket.as_deref(), &path)?;
+                open_session_file(&path, &session_dir, &cwd, explicit_cwd_override)
+            }
+            None => Ok(SessionManager::persisted(&cwd, &session_dir)),
+        };
+    }
+    Ok(SessionManager::persisted(&cwd, &session_dir))
+}
+
+/// Open a session file with the TS `SessionManager.open` cwd semantics: an
+/// explicit `--cwd` override wins, else the header's cwd, falling back to the
+/// process cwd for unreadable or new files. Resumed sessions keep the
+/// missing-cwd guard from main.ts.
+/// Guard the TS print path: `-c`/`-r` refuse to open a session file that a
+/// live daemon worker already hosts (`SessionAlreadyActiveError`, raised by
+/// the TS supervisor's create ownership check). The Rust print path runs
+/// in-process, so the guard probes the daemon's live roster first; when no
+/// daemon answers, the open proceeds like a TS run without a daemon.
+fn assert_session_not_active_in_daemon(
+    socket_path: Option<&str>,
+    session_path: &std::path::Path,
+) -> Result<(), String> {
+    let socket = crate::interactive_mode::resolve_socket_path(socket_path);
+    let Ok(mut client) = crate::daemon_client::DaemonClient::connect(&socket) else {
+        return Ok(());
+    };
+    let list = client
+        .request(pa_types::daemon::DaemonCommand::List {
+            id: None,
+            all: None,
+            cwd: None,
+            session_dir: None,
+            include_client_owned: None,
+            rest: Default::default(),
+        })
+        .map_err(|error| format!("Could not check active sessions: {error:#}"))?;
+    if !list.success {
+        return Ok(());
+    }
+    let target = pa_daemon::lease::canonical_session_path(session_path);
+    for row in list
+        .data
+        .and_then(|data| data.get("sessions").cloned())
+        .and_then(|sessions| sessions.as_array().cloned())
+        .unwrap_or_default()
+    {
+        let Some(file) = row.get("sessionFile").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if pa_daemon::lease::canonical_session_path(std::path::Path::new(file)) != target {
+            continue;
+        }
+        let active_session_id = row
+            .get("activeSessionId")
+            .or_else(|| row.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        return Err(format!(
+            "Session is already active in {active_session_id}: {}",
+            target.display()
+        ));
+    }
+    Ok(())
+}
+
+fn open_session_file(
+    path: &std::path::Path,
+    session_dir: &std::path::Path,
+    fallback_cwd: &std::path::Path,
+    explicit_cwd_override: Option<&std::path::Path>,
+) -> Result<pa_core::session::manager::SessionManager, String> {
+    let session_cwd = explicit_cwd_override
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| {
+            let header = pa_core::session::manager::read_session_header(path);
+            header
+                .filter(|header| !header.cwd.is_empty())
+                .map(|header| std::path::PathBuf::from(&header.cwd))
+                .unwrap_or_else(|| fallback_cwd.to_path_buf())
+        });
+    let manager = pa_core::session::manager::SessionManager::open(&session_cwd, session_dir, path);
+    // main.ts getMissingSessionCwdIssue: a session stored against a deleted
+    // directory must not silently continue somewhere else.
+    if !manager.get_cwd().exists() {
+        let session_file = manager
+            .get_session_file()
+            .map(|path| format!("\nSession file: {}", path.display()))
+            .unwrap_or_default();
+        return Err(format!(
+            "Stored session working directory does not exist: {}{session_file}\nCurrent working directory: {}",
+            manager.get_cwd().display(),
+            fallback_cwd.display()
+        ));
+    }
+    Ok(manager)
+}
+
+/// Render a selector failure with the main.ts formatting: the error message
+/// plus the browse hint.
+fn render_selector_error(error: SessionSelectorError) -> String {
+    format!(
+        "{}.{}\nOpen prime-agent and press left-arrow to browse sessions.",
+        error.message(),
+        error.suggestion().unwrap_or_default()
+    )
+}
+
+/// Model tools for the print runtime: `ipython` only (the TS product exposes
+/// only the REPL tool to the model; `bash` and `edit` live in the kernel).
+/// The engine adds the kernel-backed `ipython` tool itself.
+fn builtin_tools(_cwd: &std::path::Path) -> Vec<Arc<dyn pa_agent::types::AgentTool>> {
+    Vec::new()
+}
+
+/// Admit prompts, stream json events when requested, and decide the exit code
+/// from the headless terminal result plus the autonomous gate contract.
+/// Shared by the real and faux paths. The turn-boundary compaction checks
+/// (the overflow compact-and-retry arm, the requested compaction/refinement
+/// consumption, and the threshold arm) run through
+/// [`crate::print_boundary::TurnBoundary`] at every prompt's quiescent
+/// boundaries. The autonomous continuation loop rides the agent's
+/// natural-turn-end hook (the TS in-run shape: continuations churn inside
+/// the one prompt wait with no run boundary between them); a held
+/// threshold continuation drains through the boundary pair, and a stop
+/// surfaces only through the headless exit contract (TS: no row, no
+/// stream frame).
+async fn run_prompts_and_emit(
+    engine: &std::sync::Arc<pa_core::session_engine::engine::SessionEngine>,
+    model: &Model,
+    api_key: Option<String>,
+    options: &RunOptions,
+) -> Result<i32, String> {
+    let json_mode = options.app_mode == AppMode::Json;
+    let mut unsubscribe: Option<pa_agent::agent::Subscription> = None;
+    if json_mode {
+        if let Some(header) = session_header_json(engine).await {
+            println!("{header}");
+        }
+        unsubscribe = Some(
+            engine
+                .session
+                .agent()
+                .subscribe(|event, _signal| {
+                    Box::pin(async move {
+                        if let Some(json) = agent_event_json(&event) {
+                            println!("{json}");
+                        }
+                        Ok(())
+                    })
+                })
+                .await,
+        );
+    }
+    // The goal continuation surface (the #252 residue): the usage
+    // accounting publishes `goal_update` frames, the in-loop hook runs an
+    // active goal's continuations inside the same agent run (the TS
+    // `getContinuationMessages` seam), and the driver drains the queued
+    // turns (the budget-limit steer, the threshold-held continuation) as
+    // this invocation's follow-up runs. Wired in every output mode — the
+    // loop runs identically in text mode, only silently.
+    let goal = std::sync::Arc::new(crate::print_goal::PrintGoalSurface::new(json_mode));
+    goal.seed_publish_baseline(engine).await;
+    let goal_accounting = goal.wire_accounting(engine, engine.session.agent()).await;
+    // The autonomous run (the verifier/eval composition seam): the CLI
+    // flags enable it, a no-flag session starts disabled and `/autonomous`
+    // rewrites it live. Per-message accounting runs against the one shared
+    // state, and the composed in-run continuation hook drives both the
+    // CLI-flag run and the flipped session state (TS: the continuation rides
+    // the agent loop's natural-turn-end hook, in-run).
+    let autonomous = std::sync::Arc::new(match options.config.autonomous.as_ref() {
+        Some(config) => HeadlessAutonomous::from_cli(config, &options.config.cwd),
+        None => HeadlessAutonomous::disabled(&options.config.cwd),
+    });
+    let accounting = autonomous.wire_accounting(engine.session.agent()).await;
+    // The composed natural-turn-end hook (TS `_getContinuationMessages`):
+    // the goal arm first (exclusive priority), the autonomous arm on the
+    // fall-through, the boundary gates shared (queued input, a requested
+    // compaction, the threshold arm's held continuation).
+    crate::print_autonomous::wire_continuation_hook(
+        engine,
+        engine.session.agent(),
+        model,
+        &goal,
+        &autonomous,
+    );
+    let global_harness_dir =
+        pa_core::refinement::get_global_harness_state_dir(&options.config.agent_dir);
+    let mut boundary = crate::print_boundary::TurnBoundary::new(json_mode);
+    // The autonomous runtime state the session-command executor mutates —
+    // the run's own shared state (the session always carries one, TS
+    // `createAgentSession`), so `/autonomous` rewrites the state the hook,
+    // the accounting, and the exit contract read.
+    let autonomous_state = autonomous.state_handle();
+    // A failed session command rejects the prompt wait (TS print-mode's
+    // catch): the raw error prints to stderr and the run exits 1 without
+    // the later prompts or the terminal selection.
+    let mut command_failure: Option<String> = None;
+    'prompts: for prompt in options
+        .initial_message
+        .iter()
+        .chain(options.messages.iter())
+    {
+        // Session commands (TS `_normalizeSubmission`'s `sessionCommand`
+        // arm) never reach the model loop: the pre-turn boundary stays
+        // theirs to skip and the prompt's turn never exists.
+        if let Some(command) = engine.session.classify_session_command(prompt) {
+            let execution = crate::print_session_command::execute_prompt_session_command(
+                engine,
+                &goal,
+                model,
+                api_key.clone(),
+                global_harness_dir.clone(),
+                &autonomous_state,
+                &command,
+            )
+            .await;
+            if let Some(error) = execution.error {
+                command_failure = Some(error);
+                break 'prompts;
+            }
+            // A `/goal` start (or resume) scheduled its continuation as
+            // queued session input: the prompt wait drains it inside the
+            // same wait, as the queued turn with its action frames.
+            if let Some(continuation) = execution.continuation_message {
+                goal.run_session_command_continuation(
+                    engine,
+                    &mut boundary,
+                    model,
+                    api_key.clone(),
+                    global_harness_dir.clone(),
+                    &continuation,
+                )
+                .await?;
+            }
+            // The same queue drain a settled turn gets: held continuations
+            // and armed steers run as this prompt's follow-up turns.
+            goal.drive_boundary(
+                engine,
+                &mut boundary,
+                model,
+                api_key.clone(),
+                global_harness_dir.clone(),
+            )
+            .await?;
+            continue;
+        }
+        // The pre-turn boundary (TS `_runPreTurnCompaction`, the full
+        // `_checkCompaction` pass): an aborted trailing turn drops pending
+        // requests, a stale overflow error from a previous run gets its
+        // recovery attempt, and a resumed context above the reserve
+        // headroom (or a pending model request) compacts before the
+        // admitted prompt runs on the compacted context.
+        boundary
+            .run_pre_turn(engine, model, api_key.clone())
+            .await?;
+        engine
+            .session
+            .prompt(prompt, Default::default())
+            .await
+            .map_err(|error| format!("{error:#}"))?;
+        engine.session.agent().wait_for_idle().await;
+        // The settled-turn boundary (TS `agent_end`): the overflow
+        // compact-and-retry arm, the turn-boundary requests the kernel
+        // scheduled mid-turn (`compact.run` / `refine.run`), and the
+        // threshold arm. The outcomes persist in the session entries the
+        // terminal result reads.
+        boundary
+            .run_at_settled_turn(engine, model, api_key.clone(), global_harness_dir.clone())
+            .await?;
+        // The goal boundary's queue drain: the threshold-held continuation
+        // (minted ahead of the boundary's compaction) and the budget-limit
+        // steer (armed at the crossing turn's message end) run as this
+        // invocation's follow-up turns, each crossing the same boundary
+        // pair; a turn that still ends in a terminal error fails an active
+        // goal once the arms could not save it (TS
+        // `_finishGoalForTerminalAssistantMessage` at `agent_end`, after
+        // `_checkCompaction`).
+        let goal_owns_boundary = goal
+            .drive_boundary(
+                engine,
+                &mut boundary,
+                model,
+                api_key.clone(),
+                global_harness_dir.clone(),
+            )
+            .await?;
+        // The autonomous arm runs only when the goal does not own the
+        // boundary (TS `_getContinuationMessages`: the goal arm takes
+        // exclusive priority; autonomous is never consulted while a goal
+        // is active).
+        if !goal_owns_boundary {
+            // The held threshold continuation drains as this invocation's
+            // follow-up turn (TS's queued `followUp` admission); its own
+            // natural end churns the in-run hook again. The stop surfaces
+            // only through the headless exit contract (TS: no row, no
+            // stream frame).
+            autonomous
+                .drive_boundary(
+                    engine,
+                    &mut boundary,
+                    model,
+                    api_key.clone(),
+                    global_harness_dir.clone(),
+                )
+                .await
+                .map_err(|error| format!("{error:#}"))?;
+        }
+    }
+    goal_accounting.unsubscribe().await;
+    accounting.unsubscribe().await;
+    if let Some(subscription) = unsubscribe {
+        subscription.unsubscribe().await;
+    }
+    // The rejected prompt wait (TS print-mode's catch): print the raw
+    // command error to stderr and exit 1 — no later prompts ran, the
+    // terminal selection is skipped, and the disposal drain still runs.
+    if let Some(error) = command_failure {
+        eprintln!("{error}");
+        boundary
+            .drain_compact_auto_refine_at_disposal(engine, model, api_key, global_harness_dir)
+            .await;
+        return Ok(1);
+    }
+    let state = engine.session.agent().state().await;
+    let messages: Vec<pa_types::session::AgentMessage> =
+        state.messages.iter().filter_map(json_round_trip).collect();
+    let result = pa_core::session_engine::headless::select_headless_terminal_result(&messages);
+    // The TS print-mode exit contract (modes/print-mode.ts): json mode
+    // never derives the exit code from the terminal selection — the event
+    // stream carries everything, and only the autonomous gates (or a thrown
+    // error) exit non-zero. Text mode prints the primary message (an error
+    // primary to stderr with exit 1, a settled answer to stdout) and the
+    // trailing compaction-outcome disclosures to stderr. A run with no
+    // terminal message — e.g. an overflow turn dropped by the
+    // compact-and-retry recovery whose outcome row is the only surface —
+    // prints nothing and leaves the exit code to the outcome rows.
+    let mut exit_code = 0;
+    if !json_mode {
+        if let Some(primary) = result.primary {
+            if let Some(stderr) = primary.stderr_text(&mut exit_code) {
+                eprintln!("{stderr}");
+            }
+            if exit_code == 0 {
+                if let Some(text) = primary.stdout_text() {
+                    println!("{text}");
+                }
+            }
+        }
+        for outcome in result.compaction_outcomes {
+            eprintln!("{}", outcome.content);
+            if outcome.outcome == "failed" {
+                exit_code = 1;
+            }
+        }
+    }
+    // The TS print-mode autonomous contract applies to both output modes.
+    if let Some(stderr) = autonomous.exit_stderr().await {
+        eprintln!("{stderr}");
+        exit_code = 1;
+    }
+    // The TS disposal order: print mode returns its exit code first, then
+    // the connection teardown disposes the session — which drains a
+    // compact-trigger auto-refine that no later boundary consumed (TS
+    // `dispose`: "a serialized compaction can finish without another model
+    // turn"). The event subscription is already gone at this point, so the
+    // round's surface stays off the stream; the durable rows and the
+    // harness state persist.
+    boundary
+        .drain_compact_auto_refine_at_disposal(engine, model, api_key, global_harness_dir)
+        .await;
+    Ok(exit_code)
+}
+
+/// The faux-script engine: identical session assembly, scripted provider.
+async fn build_faux_engine_parts(
+    options: &RunOptions,
+    script: &str,
+) -> Result<HeadlessEngine, String> {
+    let config = &options.config;
+    let script: serde_json::Value = serde_json::from_str(script)
+        .map_err(|error| format!("invalid PRIME_AGENT_FAUX_SCRIPT: {error}"))?;
+    // Response entries: a plain string answers with fixed text;
+    // `{"systemPrompt": true}` answers with the request's system prompt
+    // (binary-level verification of session assembly; never used by the
+    // product); any other object goes through the shared faux-script
+    // parser the daemon worker seam uses — `{"text": ...}`,
+    // `{"content": [...]}` blocks (thinking, text, tool calls), and the
+    // scripted `stopReason`/`errorMessage`/`delayMs` fields the
+    // overflow-recovery harnesses script provider error turns with.
+    let response_steps: Vec<pa_ai::faux::FauxResponseStep> = script
+        .get("responses")
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| match entry {
+                    serde_json::Value::String(text) => Ok(pa_ai::faux::FauxResponseStep::Message(
+                        pa_ai::faux::faux_assistant_text_message(
+                            text,
+                            pa_ai::faux::FauxAssistantMessageOptions::default(),
+                        ),
+                    )),
+                    serde_json::Value::Object(map)
+                        if map.get("systemPrompt").and_then(serde_json::Value::as_bool)
+                            == Some(true) =>
+                    {
+                        Ok(pa_ai::faux::FauxResponseStep::Factory(std::sync::Arc::new(
+                            |context, _options, _call, _model| {
+                                Ok(pa_ai::faux::faux_assistant_text_message(
+                                    context.system_prompt.as_deref().unwrap_or_default(),
+                                    pa_ai::faux::FauxAssistantMessageOptions::default(),
+                                ))
+                            },
+                        )))
+                    }
+                    serde_json::Value::Object(_) => {
+                        pa_ai::faux::script::parse_faux_script(&serde_json::json!({
+                            "responses": [entry]
+                        }))
+                        .map(|parsed| {
+                            let mut steps = parsed.responses.into_iter();
+                            let first = steps
+                                .next()
+                                .expect("an object entry parses into one response step");
+                            debug_assert!(steps.next().is_none());
+                            first
+                        })
+                        .map_err(|error| error.to_string())
+                    }
+                    _ => Ok(pa_ai::faux::FauxResponseStep::Message(
+                        pa_ai::faux::faux_assistant_text_message(
+                            "",
+                            pa_ai::faux::FauxAssistantMessageOptions::default(),
+                        ),
+                    )),
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .ok_or_else(|| "PRIME_AGENT_FAUX_SCRIPT requires a responses array".to_string())??;
+    // The same faux-script model contract as the daemon worker seam: a
+    // `reasoning` model makes the harness script thinking-capable turns so
+    // thinking-level resolution can be verified without the network.
+    let reasoning = script
+        .get("reasoning")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    // The script pins the context window (the TS faux-extension contract):
+    // threshold/overflow verifiers size it to the probe they run.
+    let context_window = script
+        .get("contextWindow")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(100_000);
+    let registration =
+        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+            models: Some(vec![pa_ai::faux::FauxModelDefinition {
+                id: "faux-1".to_string(),
+                name: Some("Faux Model".to_string()),
+                reasoning: Some(reasoning),
+                input: Some(vec![pa_types::ai::ModelInput::Text]),
+                cost: None,
+                context_window: Some(context_window),
+                max_tokens: Some(4_096),
+            }]),
+            ..Default::default()
+        });
+    registration.set_responses(response_steps);
+    let model = registration.get_model();
+    let agent_model = json_round_trip(&model).ok_or("model conversion failed")?;
+    let stream_fn = real_stream_fn(None, model.clone());
+    // The faux path shares the session-manager wiring (persist / --no-session
+    // / --resume / --continue) with the real provider path so binary-level
+    // tests can verify persistence without the network.
+    let session_manager = if options.session.no_session {
+        None
+    } else {
+        Some(build_session_manager(options)?)
+    };
+    let engine = pa_core::session_engine::engine::create_session(
+        pa_core::session_engine::engine::SessionEngineConfig {
+            cron_store: None,
+            // Faux verification harness: no product telemetry.
+            telemetry: None,
+            cwd: config.cwd.clone(),
+            agent_dir: config.agent_dir.clone(),
+            mcp_manager: None,
+            model: Some(agent_model),
+            thinking_level: Some(resolve_thinking_level(config, &model)),
+            stream_fn: Some(stream_fn),
+            tools: builtin_tools(&config.cwd),
+            custom_system_prompt: config.system_prompt.clone(),
+            prompt_guidelines: config.append_system_prompt.clone(),
+            generic_mcp_servers: vec![],
+            allow_recursion: None,
+            session_manager,
+            extra_host_handlers: None,
+            conversation_log_path: None,
+            additional_skill_paths: vec![],
+            additional_prompt_paths: vec![],
+            extra_builtin_skill_overrides: vec![],
+            rlm_subagent_host: None,
+            rlm_depth: None,
+            model_info: Some(model.clone()),
+            cli_extension_sources: config
+                .extensions
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+            extension_tool_allow_list: config.tools.clone(),
+            // The faux engine is a Rust-only verification harness, not a
+            // product surface: no background kernel boot in tests.
+            prewarm_ipython_kernel: None,
+            queued_goal_context_purge: None,
+            queued_steering_probe: None,
+        },
+    )
+    .await
+    .map_err(|error| format!("{error:#}"))?;
+    Ok(HeadlessEngine {
+        engine,
+        model,
+        api_key: None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pa_agent::stream::AssistantMessageEvent;
+    use pa_agent::types::{
+        AgentEvent, AssistantContent, AssistantMessage, TextContent, ToolCall, Usage,
+    };
+
+    /// A minimal partial assistant message (the faux wire fields).
+    fn partial(content: Vec<AssistantContent>) -> AssistantMessage {
+        AssistantMessage {
+            content,
+            api: "faux".to_string(),
+            provider: "faux".to_string(),
+            model: "faux-1".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: Usage::zero(),
+            stop_reason: pa_agent::types::StopReason::Stop,
+            error_message: None,
+            stop_reason_raw: None,
+            timestamp: 0,
+        }
+    }
+
+    /// The wire shapes of the streaming deltas (TS `AssistantMessageEvent`
+    /// as the daemon wire carries it — no nested `partial` copy).
+    #[test]
+    fn assistant_message_event_wire_shapes_match_ts() {
+        let message = partial(Vec::new());
+        let cases: Vec<(AssistantMessageEvent, serde_json::Value)> = vec![
+            (
+                AssistantMessageEvent::TextStart {
+                    content_index: 0,
+                    partial: message.clone(),
+                },
+                serde_json::json!({"type": "text_start", "contentIndex": 0}),
+            ),
+            (
+                AssistantMessageEvent::TextDelta {
+                    content_index: 0,
+                    delta: "first reply".to_string(),
+                    partial: message.clone(),
+                },
+                serde_json::json!({
+                    "type": "text_delta",
+                    "contentIndex": 0,
+                    "delta": "first reply",
+                }),
+            ),
+            (
+                AssistantMessageEvent::TextEnd {
+                    content_index: 0,
+                    content: "first reply".to_string(),
+                    partial: message.clone(),
+                },
+                serde_json::json!({
+                    "type": "text_end",
+                    "contentIndex": 0,
+                    "content": "first reply",
+                }),
+            ),
+            (
+                AssistantMessageEvent::ThinkingStart {
+                    content_index: 1,
+                    partial: message.clone(),
+                },
+                serde_json::json!({"type": "thinking_start", "contentIndex": 1}),
+            ),
+            (
+                AssistantMessageEvent::ThinkingDelta {
+                    content_index: 1,
+                    delta: "think".to_string(),
+                    partial: message.clone(),
+                },
+                serde_json::json!({
+                    "type": "thinking_delta",
+                    "contentIndex": 1,
+                    "delta": "think",
+                }),
+            ),
+            (
+                AssistantMessageEvent::ThinkingEnd {
+                    content_index: 1,
+                    partial: partial(vec![
+                        AssistantContent::Text(TextContent {
+                            text: "answer".to_string(),
+                            text_signature: None,
+                        }),
+                        AssistantContent::Thinking(pa_agent::types::ThinkingContent {
+                            thinking: "the reasoning".to_string(),
+                            thinking_signature: None,
+                            redacted: None,
+                        }),
+                    ]),
+                },
+                serde_json::json!({
+                    "type": "thinking_end",
+                    "contentIndex": 1,
+                    "content": "the reasoning",
+                }),
+            ),
+            (
+                AssistantMessageEvent::ToolCallStart {
+                    content_index: 0,
+                    partial: message.clone(),
+                },
+                serde_json::json!({"type": "toolcall_start", "contentIndex": 0}),
+            ),
+            (
+                AssistantMessageEvent::ToolCallDelta {
+                    content_index: 0,
+                    delta: r#"{"code""#.to_string(),
+                    partial: message.clone(),
+                },
+                serde_json::json!({
+                    "type": "toolcall_delta",
+                    "contentIndex": 0,
+                    "delta": "{\"code\"",
+                }),
+            ),
+            (
+                AssistantMessageEvent::ToolCallEnd {
+                    content_index: 0,
+                    tool_call: ToolCall {
+                        id: "call-1".to_string(),
+                        name: "ipython".to_string(),
+                        arguments: serde_json::json!({"code": "1 + 1"}),
+                        thought_signature: None,
+                    },
+                    partial: message.clone(),
+                },
+                serde_json::json!({
+                    "type": "toolcall_end",
+                    "contentIndex": 0,
+                    "toolCall": {
+                        "type": "toolCall",
+                        "id": "call-1",
+                        "name": "ipython",
+                        "arguments": {"code": "1 + 1"},
+                    },
+                }),
+            ),
+        ];
+        for (event, expected) in cases {
+            assert_eq!(
+                assistant_message_event_json(&event).as_ref(),
+                Some(&expected),
+                "wire shape of {:?}",
+                event
+            );
+        }
+        // Terminal events never ride a message_update.
+        assert!(assistant_message_event_json(&AssistantMessageEvent::Start {
+            partial: message.clone(),
+        })
+        .is_none());
+        assert!(assistant_message_event_json(&AssistantMessageEvent::Done {
+            reason: pa_agent::types::StopReason::Stop,
+            message: message.clone(),
+        })
+        .is_none());
+        assert!(assistant_message_event_json(&AssistantMessageEvent::Error {
+            reason: pa_agent::types::StopReason::Error,
+            error: message,
+        })
+        .is_none());
+    }
+
+    /// The `message_update` event wraps the partial message plus the slim
+    /// delta, in the TS field order.
+    #[test]
+    fn message_update_event_json_wraps_the_partial_and_delta() {
+        let message = partial(vec![AssistantContent::Text(TextContent {
+            text: "first reply".to_string(),
+            text_signature: None,
+        })]);
+        let event = AgentEvent::MessageUpdate {
+            message: pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::Assistant(
+                message.clone(),
+            )),
+            assistant_message_event: Box::new(AssistantMessageEvent::TextDelta {
+                content_index: 0,
+                delta: "first reply".to_string(),
+                partial: message,
+            }),
+        };
+        let json = agent_event_json(&event).expect("a message_update json line");
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["type"], "message_update");
+        assert_eq!(value["message"]["role"], "assistant");
+        assert_eq!(value["message"]["content"][0]["text"], "first reply");
+        assert_eq!(
+            value["assistantMessageEvent"],
+            serde_json::json!({"type": "text_delta", "contentIndex": 0, "delta": "first reply"})
+        );
+    }
+}

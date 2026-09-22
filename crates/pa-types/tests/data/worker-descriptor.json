@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "workerId": "X",
+  "pid": 0,
+  "processStartId": "X",
+  "socketPath": "X",
+  "recoveryJournalPath": "X",
+  "orphanProcessJournalPath": "X",
+  "supervisorSocketPath": "X",
+  "authenticationToken": "X",
+  "workerInstanceId": "X",
+  "rootActiveSessionId": "X",
+  "rootSessionId": "X",
+  "sessionFile": "X",
+  "createdAt": "2026-09-16T02:10:02.900Z",
+  "updatedAt": "2026-09-16T02:39:55.640Z",
+  "lifecycle": "ready",
+  "createCommand": {
+    "type": "create",
+    "sessionPath": "/home/ubuntu/.prime/agent/sessions/01a0a7fa-6fda-75dc-8c7b-e3e00614a6f6.jsonl"
+  },
+  "consecutiveFailures": 0
+}

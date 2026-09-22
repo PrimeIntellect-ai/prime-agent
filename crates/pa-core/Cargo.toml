@@ -1,0 +1,44 @@
+[package]
+name = "pa-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Session engine: tools, skills, prompts, kernel, subagents, settings."
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+pa-types.workspace = true
+pa-ai.workspace = true
+pa-models = { path = "../pa-models" }
+pa-agent.workspace = true
+pa-telemetry.workspace = true
+base64 = "0.22"
+fancy-regex = "0.14"
+libc = "0.2"
+nix = { version = "0.29", features = ["signal", "process", "user", "fs", "dir"] }
+tokio-util = "0.7"
+uuid = { version = "1", features = ["v4", "v7"] }
+sha2 = "0.10"
+getrandom = "0.3"
+url = "2"
+hmac = "0.12"
+globset = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+tar = "0.4"
+flate2 = "1"
+unicode-normalization = "0.1"
+serde_yaml = "0.9"
+ignore = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[test]]
+name = "golden_system_prompt"
+path = "tests/golden/system_prompt.rs"

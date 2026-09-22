@@ -1,0 +1,55 @@
+{
+ "piShape": {
+  "appendEntry": "function",
+  "events": "object",
+  "exec": "function",
+  "getActiveTools": "function",
+  "getAllTools": "function",
+  "getCommands": "function",
+  "getFlag": "function",
+  "getSessionName": "function",
+  "getThinkingLevel": "function",
+  "on": "function",
+  "registerCommand": "function",
+  "registerFlag": "function",
+  "registerMessageRenderer": "function",
+  "registerProvider": "function",
+  "registerShortcut": "function",
+  "registerTool": "function",
+  "sendMessage": "function",
+  "sendUserMessage": "function",
+  "setActiveTools": "function",
+  "setLabel": "function",
+  "setModel": "function",
+  "setSessionName": "function",
+  "setThinkingLevel": "function",
+  "unregisterProvider": "function"
+ },
+ "registered": [
+  {
+   "name": "diffhello",
+   "label": "Diff Hello",
+   "description": "A differential greeting tool",
+   "promptSnippet": "  - diffhello: says hello differently",
+   "promptGuidelines": [
+    "Always greet via diffhello before answering."
+   ],
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "name": {
+      "type": "string",
+      "description": "Name to greet"
+     }
+    },
+    "required": [
+     "name"
+    ]
+   },
+   "executionMode": "sequential"
+  },
+  {
+   "description": "Greet differentially"
+  }
+ ]
+}

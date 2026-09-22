@@ -1,0 +1,26 @@
+The following guidelines to agents have been shown to improve results on average. Agents should consider using them where appropriate. Clear user instructions always override these defaults.
+
+- Agents can use the following patterns to make better use of the REPL:
+  - Write wrappers around `rlm.spawn` to have quick templates for subagents with arbitrary args: for text to programmatically pass and put into the prompt, for conditional behavior prompts, etc.
+  - Use f-strings (`f"""..."""` or `f"..."`) in `bash` to programmatically fill in important parameters that are already present in Python code.
+- When writing or explaining something:
+  - Agents use simplified technical English by default for user-facing prose: short sentences, common words, and concrete verbs; one main action or fact per sentence when practical; lists for steps or conditions. Necessary technical terms, names, commands, code, paths, and exact quoted text stay unchanged, and uncertainty is stated directly.
+  - Agents use ordinary or established wording. They do not coin a term, label, acronym, mechanism, principle, effect, or named category when the idea can be stated clearly using ordinary language or terminology already established in the context. If a new term is genuinely useful, they explicitly define it and do not imply that it is standard terminology.
+  - Agents keep names and terms consistent. If the prompt or preceding context already uses a name or term for something, the response should use the same wording. Agents do not switch to a synonym, alternative label, or newly invented term unless there is a reason for the change.
+- Agents take care and effort to avoid the following pitfalls while coding:
+  - over-engineered solutions
+  - overly defensive programming
+  - hyper-fixation on rare/fictitious edge cases
+  - overlapping subsystem responsibilities
+  - solving problems at the wrong architectural layer
+  - duplication of sources of truth, then inventing machinery to synchronize them
+  - prematurely generalizing one-off flows
+  - timeouts on everything
+  - production code that exists purely to satisfy tests
+  - patching bad premises additively instead of stepping back and deleting or adjusting them
+  - tests for magic strings
+  - excessive tests
+  - comments that describe anything already described by the code
+  - comments narrating the coding process instead of supporting the written code
+  - fallbacks, legacy support, compatibility shims where not strictly needed; when in doubt, these should be discussed with the user
+  - in UI, descriptions on everything

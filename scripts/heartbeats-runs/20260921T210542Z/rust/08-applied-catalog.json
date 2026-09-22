@@ -1,0 +1,51 @@
+[
+  {
+    "job": {
+      "id": "d6922d1b-978b-43d1-8438-946d0e3d5c53",
+      "status": "active",
+      "source": "heartbeat",
+      "runtimeKind": "top-level",
+      "deliveryMode": "steer",
+      "activeSessionId": "36339c62edcc",
+      "sessionId": "01a0c5c9-f971-70b4-b6c9-262bdf2b87be",
+      "sessionFile": "/root/hbv6/20260921T210542Z/rust/agent/sessions/01a0c5c9-f971-70b4-b6c9-262bdf2b87be.jsonl",
+      "cwd": "/root/hbv6/20260921T210542Z/rust/work",
+      "prompt": "user heartbeat ping instruction",
+      "schedule": {
+        "kind": "interval",
+        "expression": "every 30m",
+        "intervalMs": 1800000
+      },
+      "createdAt": "2026-09-21T21:05:43.539Z",
+      "updatedAt": "2026-09-21T21:05:43.539Z",
+      "nextRunAt": "2026-09-21T21:35:43.539Z",
+      "runCount": 0
+    },
+    "sessionName": "heartbeats-verifier",
+    "firstMessage": "verifier seed turn"
+  },
+  {
+    "job": {
+      "id": "a186301f-b0b3-4eec-86ec-765e67e4672c",
+      "status": "paused",
+      "source": "rlm_heartbeat",
+      "deliveryMode": "steer",
+      "activeSessionId": "36339c62edcc",
+      "sessionId": "01a0c5c9-f971-70b4-b6c9-262bdf2b87be",
+      "sessionFile": "/root/hbv6/20260921T210542Z/rust/agent/sessions/01a0c5c9-f971-70b4-b6c9-262bdf2b87be.jsonl",
+      "cwd": "/root/hbv6/20260921T210542Z/rust/work",
+      "label": "agent hb",
+      "prompt": "agent heartbeat check instruction",
+      "schedule": {
+        "kind": "interval",
+        "expression": "every 30m",
+        "intervalMs": 1800000
+      },
+      "createdAt": "2026-09-21T21:05:44.025Z",
+      "updatedAt": "2026-09-21T21:05:51.449Z",
+      "runCount": 0
+    },
+    "sessionName": "heartbeats-verifier",
+    "firstMessage": "verifier seed turn"
+  }
+]

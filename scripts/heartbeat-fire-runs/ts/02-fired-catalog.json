@@ -1,0 +1,29 @@
+[
+  {
+    "job": {
+      "id": "89608760-0332-4575-b842-20771d6c8c98",
+      "status": "active",
+      "source": "rlm_heartbeat",
+      "runtimeKind": "top-level",
+      "deliveryMode": "steer",
+      "activeSessionId": "0f673d7d862d",
+      "sessionId": "01a0c5da-c327-72be-89c5-905d51187775",
+      "sessionFile": "/home/ubuntu/lane-worktrees/hb-fire/scripts/heartbeat-fire-runs/ts/agent/sessions/01a0c5da-c327-72be-89c5-905d51187775.jsonl",
+      "cwd": "/home/ubuntu/lane-worktrees/hb-fire/scripts/heartbeat-fire-runs/ts/work",
+      "label": "hb-fire",
+      "prompt": "agent heartbeat fire probe instruction",
+      "schedule": {
+        "kind": "interval",
+        "expression": "every 30s",
+        "intervalMs": 30000
+      },
+      "createdAt": "2026-09-21T21:24:08.560Z",
+      "updatedAt": "2026-09-21T21:24:38.593Z",
+      "nextRunAt": "2026-09-21T21:25:08.560Z",
+      "runCount": 1,
+      "lastRunAt": "2026-09-21T21:24:38.593Z"
+    },
+    "sessionName": "hb-fire-verifier",
+    "firstMessage": "verifier seed turn"
+  }
+]

@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pa-telemetry",
+    "crates/pa-types",
+    "crates/pa-ai",
+    "crates/pa-models",
+    "crates/pa-agent",
+    "crates/pa-core",
+    "crates/pa-daemon",
+    "crates/pa-tui",
+    "crates/pa-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+# preserve_order: serde_json::Map keeps insertion order (IndexMap) so every
+# wire/durable JSON surface serializes in construction order — the JS object
+# model the TS daemon and session files byte-emit. Without it the Map is a
+# BTreeMap and every Value-built frame re-sorts its keys alphabetically,
+# diverging from the TS byte stream (e.g. compaction `details` order).
+serde_json = { version = "1", features = ["preserve_order"] }
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+tracing = { version = "0.1", features = ["attributes"] }
+pa-telemetry = { path = "crates/pa-telemetry" }
+pa-types = { path = "crates/pa-types" }
+pa-ai = { path = "crates/pa-ai" }
+pa-agent = { path = "crates/pa-agent" }
+thiserror = "2"
+futures = "0.3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+# Shipping posture, pinned: symbols kept (the TS binary ships unstripped too),
+# thin LTO plus 4 codegen units for cross-crate inlining in the hot render
+# path, line tables so release backtraces stay actionable.
+[profile.release]
+lto = "thin"
+codegen-units = 4
+debug = "line-tables-only"
+strip = false

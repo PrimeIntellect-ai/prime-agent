@@ -1,0 +1,131 @@
+{
+  "_source": "Live TS daemon (prime-agent 0.9.5, protocol 7, schema 28) at /tmp/prime-agent-1000/daemon.sock. Read-only capture: attach + detach with a chunked_snapshot client, 2026-09-16. Recorded by hand from the captured records; message contents redacted.",
+  "attachCommand": {
+    "type": "attach",
+    "capabilities": [
+      "attach_snapshot",
+      "event_sequence",
+      "slim_attach",
+      "chunked_snapshot"
+    ]
+  },
+  "eventSequence": [
+    "response",
+    "session_snapshot_begin",
+    "session_snapshot_chunk",
+    "session_snapshot_end"
+  ],
+  "attachResponse": {
+    "dataKeys": [
+      "protocol",
+      "activeSessionId",
+      "snapshot",
+      "replay",
+      "lastEventSequence",
+      "lastEventCursor",
+      "client",
+      "snapshotStream"
+    ],
+    "snapshotKeys": [
+      "activeSessionId",
+      "summary",
+      "state",
+      "messages",
+      "lastEventSequence",
+      "lastEventCursor",
+      "children"
+    ],
+    "snapshotMessages": [],
+    "topLevelMessagesOmitted": true,
+    "clientCapabilitiesEcho": [
+      "attach_snapshot",
+      "event_sequence",
+      "slim_attach",
+      "chunked_snapshot"
+    ],
+    "snapshotStream": {
+      "messageCountIsSummaryMessageCount": true,
+      "targetChunkBytes": 524288
+    }
+  },
+  "begin": {
+    "keys": [
+      "type",
+      "activeSessionId",
+      "snapshotId",
+      "snapshot",
+      "messageCount",
+      "targetChunkBytes",
+      "purpose"
+    ],
+    "purpose": "attach",
+    "snapshotIsHeaderWithoutTranscript": true,
+    "targetChunkBytes": 524288,
+    "snapshotIdFormat": "{activeSessionId}-{generation}-{sequence}"
+  },
+  "chunk": {
+    "keys": [
+      "type",
+      "activeSessionId",
+      "snapshotId",
+      "index",
+      "messages"
+    ],
+    "indexStartsAtZero": true,
+    "indicesAreSequential": true
+  },
+  "end": {
+    "keys": [
+      "type",
+      "activeSessionId",
+      "snapshotId",
+      "chunkCount",
+      "lastEventSequence",
+      "lastEventCursor"
+    ],
+    "chunkCountIsRecordCount": true,
+    "lastEventCursorMatchesAttachResponse": true
+  },
+  "smallSession": {
+    "activeSessionId": "01a0ab56-9b2d-77ac-9915-cbc8e3b3a486",
+    "messageCount": 10,
+    "chunkCount": 1,
+    "snapshotId": "01a0ab56-9b2d-77ac-9915-cbc8e3b3a486-af37f9555325-0",
+    "lastEventCursor": {
+      "generation": "af37f9555325",
+      "sequence": 0
+    },
+    "reassembledEqualsLegacyFullSnapshotMessages": true
+  },
+  "largeSession": {
+    "activeSessionId": "d3ad819c5e92",
+    "messageCount": 2219,
+    "chunkCount": 5,
+    "chunkIndices": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "chunkMessageCounts": [
+      441,
+      445,
+      473,
+      465,
+      395
+    ],
+    "snapshotId": "d3ad819c5e92-427baf366601-567",
+    "lastEventCursor": {
+      "generation": "427baf366601",
+      "sequence": 567
+    }
+  },
+  "legacyClient": {
+    "noCapabilityAttachEchoesDefaultCapabilities": [
+      "attach_snapshot",
+      "event_sequence"
+    ],
+    "noCapabilityAttachIsSlim": true
+  }
+}

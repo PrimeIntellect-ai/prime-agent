@@ -1,0 +1,24 @@
+[package]
+name = "pa-models"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Live model catalog: fetch, no-cold-start chain, transport pinning, Prime Inference."
+
+[dependencies]
+pa-ai = { path = "../pa-ai" }
+pa-types = { path = "../pa-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { version = "0.1", features = ["attributes"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+] }
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

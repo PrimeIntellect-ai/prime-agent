@@ -1,0 +1,182 @@
+{
+  "group": "preview",
+  "caseCount": 16,
+  "cases": [
+    {
+      "input": "npm run test -- --watch",
+      "bash": {
+        "language": "bash",
+        "text": "npm test -- --watch"
+      },
+      "ipython": {
+        "language": "python",
+        "text": "npm run test -- --watch"
+      }
+    },
+    {
+      "input": "git add -A && git commit -m x",
+      "bash": {
+        "language": "bash",
+        "text": "git commit -m x"
+      },
+      "ipython": {
+        "language": "python",
+        "text": "git add -A && git commit -m x"
+      }
+    },
+    {
+      "input": "python3 <<'EOF'\nprint('hello')\nEOF",
+      "bash": {
+        "language": "python",
+        "text": "print('hello')"
+      },
+      "ipython": {
+        "language": "python",
+        "text": "python3 <<'EOF'"
+      }
+    },
+    {
+      "input": "%%bash\ncd sub && make",
+      "bash": {
+        "language": "bash",
+        "text": "make"
+      },
+      "ipython": {
+        "language": "bash",
+        "text": "make"
+      }
+    },
+    {
+      "input": "curl -s https://api.example.com/v1 -H 'Authorization: Bearer abc123def456'",
+      "bash": {
+        "language": "bash",
+        "text": "curl -s https://api.example.com/v1 -H 'Authorization: Bearer <r…"
+      },
+      "ipython": {
+        "language": "python",
+        "text": "curl -s https://api.example.com/v1 -H 'Authorization: Bearer <r…"
+      }
+    },
+    {
+      "input": "cd sub && make",
+      "bash": {
+        "language": "bash",
+        "text": "make"
+      },
+      "ipython": {
+        "language": "python",
+        "text": "cd sub && make"
+      }
+    },
+    {
+      "input": "uv run python3 -m pytest tests/x.rs",
+      "bash": {
+        "language": "bash",
+        "text": "pytest tests/x.rs"
+      },
+      "ipython": {
+        "language": "python",
+        "text": "uv run python3 -m pytest tests/x.rs"
+      }
+    },
+    {
+      "input": "tee -a out.log",
+      "bash": {
+        "language": "bash",
+        "text": "append out.log"
+      },
+      "ipython": {
+        "language": "python",
+        "text": "tee -a out.log"
+      }
+    },
+    {
+      "input": "API_TOKEN = \"abc123\"\nrequests.get(\"https://example.com\", headers={\"Authorization\": \"Bearer sk-live-0123456789\"})",
+      "bash": {
+        "language": "bash",
+        "text": "requests.get(\"https://example.com\", headers={\"Authorization\": \"…"
+      },
+      "ipython": {
+        "language": "python",
+        "text": "requests.get(\"https://example.com\", headers={\"Authorization\": \"…"
+      }
+    },
+    {
+      "input": "python3 -c \"import base64; print(base64.b64encode(b'0123456789'*12))\"",
+      "bash": {
+        "language": "bash",
+        "text": "print(base64.b64encode(b'0123456789'*12))\""
+      },
+      "ipython": {
+        "language": "python",
+        "text": "python3 -c \"import base64; print(base64.b64encode(b'0123456789'…"
+      }
+    },
+    {
+      "input": "cat data.bin",
+      "bash": {
+        "language": "bash",
+        "text": "cat data.bin"
+      },
+      "ipython": {
+        "language": "python",
+        "text": "cat data.bin"
+      }
+    },
+    {
+      "input": "echo qwertyuiopasdfghjklzxcvbnm1234567890QWERTYUIOPASDFGHJKLZXCVBNM+/0987654321qazwsxedcrfvtgbyhnujmikolp",
+      "bash": {
+        "language": "bash",
+        "text": "echo <blob>"
+      },
+      "ipython": {
+        "language": "python",
+        "text": "echo <blob>"
+      }
+    },
+    {
+      "input": "for i in $(ls /very/long/path/with/many/components/here); do echo processing $i; done",
+      "bash": {
+        "language": "bash",
+        "text": "done"
+      },
+      "ipython": {
+        "language": "python",
+        "text": "for i in $(ls /very/long/path/with/many/components/here); do ec…"
+      }
+    },
+    {
+      "input": "from pathlib import Path\nout = Path('out.txt')\nout.write_text('hello')\nimport subprocess\nsubprocess.run('git status', shell=True)",
+      "bash": {
+        "language": "bash",
+        "text": "subprocess.run('git status', shell=True)"
+      },
+      "ipython": {
+        "language": "python",
+        "text": "out.write_text('hello')"
+      }
+    },
+    {
+      "input": "print('just printing')",
+      "bash": {
+        "language": "bash",
+        "text": "print('just printing')"
+      },
+      "ipython": {
+        "language": "python",
+        "text": "print('just printing')"
+      }
+    },
+    {
+      "input": "%%bash\necho in-bash-cell",
+      "bash": {
+        "language": "bash",
+        "text": "echo in-bash-cell"
+      },
+      "ipython": {
+        "language": "bash",
+        "text": "echo in-bash-cell"
+      }
+    }
+  ]
+}

@@ -1,266 +1,143 @@
-# Development Rules
+# AGENTS.md
 
-## Conversational Style
+Development rules for Prime Agent (Rust) on PrimeIntellect-ai/prime-agent, branch `rust`.
+Adapted from the Prime Agent (TS) repo rules.
+Every contributor (human or agent) must read this before working on this repo.
 
-- No fluff or cheerful filler text
-- Keep answers short and concise
-- No emojis in commits, issues, PR comments, or code
-- Technical prose only, be kind but direct (e.g., "Thanks @user" not "Thanks so much @user!")
+## Repository
 
-## Code Quality
+- The repo is PrimeIntellect-ai/prime-agent; the Rust implementation lives on the `rust` branch
+  (the personal kevinjosethomas/prime-agent-rs repo is archived for provenance).
+- PRs go to the org repo with base `rust`:
+  `gh pr create --repo PrimeIntellect-ai/prime-agent --base rust`.
+- CI runs on the org's billing: `.github/workflows/continuous.yml` + `release.yml` on the
+  `rust` branch.
+- Parity ground truth is unchanged: the TS checkout at ~/prime-agent (read-only).
 
-- Read files in full before making wide-ranging changes, before editing files you have not already fully inspected, and when the user asks you to investigate or audit something. Do not rely only on search snippets for broad changes.
-- Don't be too verbose with comments in the code. Only write comments when there is serious ambiguity
-- No `any` types unless absolutely necessary
-- Check node_modules for external API type definitions instead of guessing
-- **NEVER use inline imports** - no `await import("./foo.js")`, no `import("pkg").Type` in type positions, no dynamic imports for types. Always use standard top-level imports.
-- NEVER remove or downgrade code to fix type errors from outdated dependencies; upgrade the dependency instead
-- Always ask before removing functionality or code that appears to be intentional
-- Do not preserve backward compatibility unless the user explicitly asks for it
-- Never hardcode key checks with, eg. `matchesKey(keyData, "ctrl+x")`. All keybindings must be configurable. Add default to matching object (`DEFAULT_EDITOR_KEYBINDINGS` or `DEFAULT_APP_KEYBINDINGS`)
-- NEVER modify `packages/ai/src/models.generated.ts` directly. Update `packages/ai/scripts/generate-models.ts` instead.
+## Style and structure
 
-## Commands
+- Workspace crates are prefixed `pa-`. See ARCHITECTURE.md for the hard ownership rules: one owned
+  area per crate, pa-types is the only shared crate, cycle-free dependency direction,
+  minimal public APIs, no god-modules.
+- Prefer private modules with an explicitly exported public crate API. Internals are `pub(crate)`.
+- Avoid large modules. Target Rust modules under 500 LoC excluding tests. Past ~800 LoC, put new
+  functionality in a new module unless there is a strong documented reason not to. Be hardest on
+  high-touch orchestration files (session engine, daemon supervisor, TUI app): those attract
+  unrelated changes, so split early.
+- When extracting code from a large module, move the related tests and docs with it so invariants
+  stay close to the owning code.
+- Inline format args: always prefer `format!("{x}")` over positional.
+- Collapse if statements per clippy::collapsible_if.
+- Prefer method references over closures per clippy::redundant_closure_for_method_calls.
+- Make `match` statements exhaustive; avoid wildcard arms.
+- New traits need doc comments explaining their role and how implementations are expected to behave.
+- No opaque positional `bool`/`Option` parameters (`foo(false)` is unreadable). Prefer enums,
+  named methods, or newtypes. If you must pass an opaque literal by position, use an exact
+  `/*param_name*/` comment matching the callee signature.
+- Prefer native RPITIT trait methods with explicit `Send` bounds
+  (`fn foo(&self) -> impl Future<Output = T> + Send;`) over `#[async_trait]` or
+  `#[allow(async_fn_in_trait)]`. Implementations may use `async fn` when they satisfy the contract.
+- No single-use helper methods. Do not create a helper referenced only once.
+- Instrument async work at the definition (`#[tracing::instrument(...)]`), not with
+  `.instrument(...)` at call sites. Check whether the callee is already instrumented first.
 
-- After code changes (not documentation changes): `npm run check` (get full output, no tail). Fix all errors, warnings, and infos before committing.
-- Note: `npm run check` does not run tests.
-- NEVER run: `npm run dev`, `npm run build`, `npm test`
-- Only run specific tests if user instructs: `npx tsx ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts`
-- Run tests from the package root, not the repo root.
-- If you create or modify a test file, you MUST run that test file and iterate until it passes.
-- When writing tests, run them, identify issues in either the test or implementation, and iterate until fixed.
-- For `packages/coding-agent/test/suite/`, use `test/suite/harness.ts` plus the faux provider. Do not use real provider APIs, real API keys, or paid tokens.
-## Testing Policy
+## Change hygiene
 
-- `npm run check:test-policy` is required. Never weaken it or add a broad exclusion. A platform exception must use `// test-policy: allow <rule> -- <specific reason>` immediately above one expression, and CI must run that test on a supported platform.
-- A test must fail when the behavior it covers is broken. Temporarily revert or stub the production behavior to prove the failure. If the test still passes, delete it.
-- Test observable behavior at process boundaries, durable formats, concurrency/ordering, crash recovery, and load. Do not assert a mock's own return value, private implementation steps, or exact rendered copy unless that text is a protocol contract.
-- CI tests must be unconditional and self-contained. Do not use live provider APIs, real credentials, paid tokens, `.skip`, `.skipIf`, `.runIf`, `.todo`, `.only`, environment-gated early returns, or optional assertions. Put manual live-provider probes outside the CI test suite.
-- Never use runner retries or retry-to-green wrappers. Every failed attempt counts as a failure. Fix the race or delete the test.
-- Never use a fixed sleep, real-time delay, polling loop, or larger timeout as a readiness signal. Await a concrete event or deferred promise, use a fake clock, or expose the missing completion signal. A timer may only bound failure; it must not make the test pass.
-- Tests using subprocesses, sockets, concurrency, or shared process state must bind port `0`, use unique temporary paths, restore environment/cwd/globals/fake timers, and close every resource in `finally`.
-- Run every modified test file directly. For concurrency, process, timer, or ordering changes, also run the focused suite repeatedly with multiple shuffle seeds. Stop on the first failure; repeated runs are evidence, never retries.
-- A change may not add more lines of test than source. A test-only change must delete at least as many test lines as it adds.
-- Regressions go in the existing suite for the module that broke, with the issue number in the test name. Never create one file per issue. One test file per source module; repeated cases belong in an `it.each` table.
-- Deleting code deletes its tests. A flaky test is made deterministic or deleted, never skipped or retried.
+- If you change dependencies (`Cargo.toml`), regenerate/commit `Cargo.lock` in the same change.
+- If a change starts forcing edits across many crate internals, stop and fix the boundary instead.
+- Cache-prefix stability is first-class: never adopt a pattern without checking its effect on the
+  cacheable prompt prefix (cross-check against ~/codex).
 
-## Daemon Protocol Changes
+## Tests
 
-- Classify every daemon command, event, and response-shape change as backward-compatible, capability-gated, or incompatible.
-- Add optional features behind a negotiated server capability. Clients must check the capability before sending the command or depending on the event.
-- Bump `DAEMON_PROTOCOL_VERSION` for incompatible changes or when startup begins requiring behavior an older daemon cannot provide.
-- Update `DAEMON_SCHEMA_REVISION`, the command/event compatibility maps, and both new-client/old-daemon and old-client/new-daemon tests for every wire change.
-- Optional daemon metadata and UI features must degrade locally. They must not prevent the agent, session attachment, or interactive startup from working.
-- Never make a new daemon command part of startup without a protocol or capability gate.
+- Prefer whole-object equality comparisons over field-by-field checks.
+- Do not add tests for statically defined values.
+- Do not add negative tests for logic that was removed.
+- Verifiers over self-assessment: tmux user-level tests, differential tests against the TS binary
+  on PATH, golden corpora replayed against real captured data. No lane merges without its verifier
+  passing, rerun by the reviewer where feasible.
 
-## Dependencies
+## Merge gates
 
-- A 7-day minimum release age applies to all dependency updates: `.npmrc` sets `min-release-age=7` and `.github/dependabot.yml` uses a matching `cooldown`. Never bypass it for routine updates.
-- Enforcement requires npm >= 11.10; older npm silently ignores the setting, so use a current npm when updating dependencies.
-- For an urgent security patch younger than 7 days, override explicitly: `npm install --min-release-age=0 <pkg>`.
+- `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace` must pass before every merge. Run `make check` — the local mirror of
+  the same gates; CI runs on the org's billing (`.github/workflows/continuous.yml` + `release.yml`
+  on the `rust` branch).
+- **Parity-diff evidence is a merge gate** (the port's definition, not optional polish): every PR
+  that touches a user-visible surface must include a "parity-diff evidence" section in its
+  description showing the TS-binary comparison for what it changed: (1) rendered output —
+  frame-diff vs the TS binary (extend `scripts/visual_parity.py` or the specific harness); 
+  (2) interactive behavior — the same input handled identically (keys, mouse, timing); 
+  (3) wire parity — byte-compare the TS daemon's traffic for protocol changes; (4) user-visible
+  invariants — every user action produces the same visible reaction as TS (`/compact` shows
+  started+completed; `/model` shows the selector; a refinement shows its decoration). A feature
+  that "works" but was never diffed against the TS binary does not pass review. If TS shows it,
+  Rust shows it identically; if Rust shows something TS does not, that is also a parity bug.
+- PRs must state ownership compliance (crate README scope/non-goals/public API, dependency
+  direction).
 
-## GitHub Workflow
+## Adoption telemetry
 
-When creating issues:
+Every user-visible feature ships its adoption telemetry event in the same PR as the feature:
+the event name + properties are added to `docs/telemetry-events.md` (schema versioned), and a
+seam emits it from day one. Telemetry properties never carry prompt, session, or file content
+(primitives only; see `pa-telemetry` and the privacy contract in `docs/telemetry-design.md`).
 
-- Add `pkg:*` labels to indicate which package(s) the issue affects
-  - Available labels: `pkg:agent`, `pkg:ai`, `pkg:coding-agent`, `pkg:tui`
-- If an issue spans multiple packages, add all relevant labels
+## Branding
 
-When posting issue/PR comments:
+The product is Prime Agent - we are not a pi fork. Scrub "pi"/"pi-mono"/"pi-ai"/
+"Prime Intellect"-style naming from all user-visible surfaces (docs, READMEs,
+CLI help text, error messages, splash/onboarding strings, keybinding hints, TUI
+labels, and code comments that quote user-facing strings); brand everything
+Prime Agent. Audit with a repo-wide grep and classify every hit (user-visible
+vs wire-internal vs comment) before scrubbing, and list the preserved wire
+identifiers in the PR body so the reviewer can verify none were wrongly scrubbed.
 
-- Write the full comment to a temp file and use `gh issue comment --body-file` or `gh pr comment --body-file`
-- Never pass multi-line markdown directly via `--body` in shell commands
-- Preview the exact comment text before posting
-- Post exactly one final comment unless the user explicitly asks for multiple comments
-- If a comment is malformed, delete it immediately, then post one corrected comment
-- Keep comments concise, technical, and in the user's tone
+EXPLICIT EXCEPTION: wire-protocol identifiers that must stay byte-compatible with the TS product (e.g. the PI_PACKAGE_DIR env var, settings keys, provider IDs like prime-inference, harness _meta namespaces like ai.primeintellect.prime-agent, lockfile names) stay until/unless the TS side renames them — PARITY BEATS BRANDING ON THE WIRE.
 
-When closing issues via commit:
 
-- Include `fixes #<number>` or `closes #<number>` in the commit message
-- This automatically closes the issue when the commit is merged
 
-## PR Workflow
+## Surface contract (must not change)
 
-- Analyze PRs without pulling locally first
-- If the user approves: create a feature branch, pull PR, rebase on main, apply adjustments, commit, merge into main, push, close PR, and leave a comment in the user's tone
-- We work in feature branches until everything is according to the user's requirements. Never merge PRs by yourself.
+- Tools exposed to the model: `bash`, `edit`, `ipython` (internal helpers: `rename`, `stdout`).
+- RLM kernel API in the persistent Python REPL: `rlm.spawn/find_models/collect/list_subagents/delete_subagent/create_session/progress_note`, `rlm.harness` CRUD, `agent_message.send`, `agent_observe`, `compact`, `goal`, `refine`, `attach_image`, skills (markdown + Python) per the skill contract in the base system prompt.
+- System prompt structure: layered — cache-stable static layer files (core harness description with the full API surface, mandatory usage rules, opinionated guidelines, per-model map) followed by one dynamic tail (packages, project context, skills inventory, MCP servers, environment, session role); the harness digest stays a separate `[harness-digest]` user message. `prime-agent prompt` dumps the assembled prompt with its layer breakdown.
+- CLI shape: `prime-agent` with the same commands/flags as the TS product; headless modes (RPC/daemon/session-worker) with identical behavior.
 
-## Testing Prime Agent Interactive Mode with tmux
+## Crates
 
-To test Prime Agent's TUI in a controlled terminal environment:
+| crate | role |
+|---|---|
+| `pa-types` | shared wire & domain types, protocol messages |
+| `pa-telemetry` | event schema, queueing/batching, sinks |
+| `pa-ai` | providers, model registry, streaming |
+| `pa-models` | live model catalog: fetch, no-cold-start chain, transport pinning |
+| `pa-agent` | agent loop |
+| `pa-core` | session engine: tools, skills, prompts, compaction, refinement, kernel/RLM manager, subagents, session manager, settings |
+| `pa-daemon` | supervisor + per-session worker processes, wire protocol, cloud sandbox attach |
+| `pa-tui` | terminal UI (ratatui) |
+| `pa-cli` | binary `prime-agent` |
 
-```bash
-# Create tmux session with specific dimensions
-tmux new-session -d -s prime-agent-test -x 80 -y 24
+Dependency direction (hard rule, cycle-free, enforced in Cargo.toml and at review):
 
-# Start Prime Agent from source
-tmux send-keys -t prime-agent-test "cd /Users/kevin/pi/prime-agent && ./prime-agent.sh" Enter
-
-# Wait for startup, then capture output
-sleep 3 && tmux capture-pane -t prime-agent-test -p
-
-# Send input
-tmux send-keys -t prime-agent-test "your prompt here" Enter
-
-# Send special keys
-tmux send-keys -t prime-agent-test Escape
-tmux send-keys -t prime-agent-test C-o  # ctrl+o
-
-# Cleanup
-tmux kill-session -t prime-agent-test
+```
+pa-types  <-- shared vocabulary, nothing else is shared
+pa-telemetry <-- telemetry library; depends on no workspace crate
+pa-ai (providers/registry)
+pa-models (catalog) --> depends on pa-ai
+pa-agent (agent loop) --> depends on pa-ai, pa-types
+pa-core (session engine) --> depends on pa-agent, pa-ai, pa-types, pa-telemetry
+pa-daemon (supervisor/workers) --> depends on pa-core
+pa-tui (terminal UI) --> depends on pa-types, pa-core (session wire)
+pa-cli (binary) --> depends on everything, the composition root
 ```
 
-You, yourself, are often running into a tmux session, so be careful when killing tmux sessions. Lots of other processes can be running on different tmux sessions/
+## Reliability model
 
-## Changelog
+- The daemon is a supervisor: it spawns one worker process per active session instead of hosting sessions in-process. Workers are supervised, restarted with backoff, and sessions persist on disk (append-only JSONL, same layout as `~/.prime/agent/sessions`) so reattach works even if the supervisor restarts.
+- No stubs, no `todo!()`, no swallowed errors (`anyhow` bubbling to UI is fine).
 
-Location: `packages/<pkg>/.changes/<slug>.md` (one fragment file per PR per touched package)
+## References
 
-### Format
-
-Do NOT edit `packages/*/CHANGELOG.md` directly. Instead, add a fragment file `packages/<pkg>/.changes/<slug>.md` (slug = kebab-case, branch- or ticket-derived, e.g. `eng-1234-fix-resize.md`) containing exactly the bullet line(s) for the change. Bullets are plain `- ...` lines with no `### Added` / `### Changed` / `### Fixed` / `### Removed` subsections — one bullet per change, written as a short sentence starting with a past-tense verb (Added, Changed, Fixed, Removed). Keep each bullet to one line; describe the user-visible change, not the implementation. The release script folds fragments into the release section of CHANGELOG.md and deletes them.
-
-Example fragment (`packages/coding-agent/.changes/eng-1234-effort-command.md`):
-
-```markdown
-- Added `/effort` to set the reasoning level, with autocomplete for the levels the current model supports.
-```
-
-### Rules
-
-- One fragment file per PR per touched package; a fragment may contain multiple bullets
-- NEVER modify already-released version sections in CHANGELOG.md (e.g., `## [0.2.1]`) — each is immutable once released
-- Purely internal changes may opt out via the `no-changelog` PR label
-
-### Attribution
-
-- **Internal changes (from issues)**: `Fixed foo bar ([#123](https://github.com/PrimeIntellect-ai/prime-agent/issues/123))`
-- **External contributions**: `Added feature X ([#456](https://github.com/PrimeIntellect-ai/prime-agent/pull/456) by [@username](https://github.com/username))`
-
-## Adding a New LLM Provider (packages/ai)
-
-Adding a new provider requires changes across multiple files:
-
-### 1. Core Types (`packages/ai/src/types.ts`)
-
-- Add API identifier to `Api` type union (e.g., `"bedrock-converse-stream"`)
-- Create options interface extending `StreamOptions`
-- Add mapping to `ApiOptionsMap`
-- Add provider name to `KnownProvider` type union
-
-### 2. Provider Implementation (`packages/ai/src/providers/`)
-
-Create provider file exporting:
-
-- `stream<Provider>()` function returning `AssistantMessageEventStream`
-- `streamSimple<Provider>()` for `SimpleStreamOptions` mapping
-- Provider-specific options interface
-- Message/tool conversion functions
-- Response parsing emitting standardized events (`text`, `tool_call`, `thinking`, `usage`, `stop`)
-
-### 3. Provider Exports and Lazy Registration
-
-- Add a package subpath export in `packages/ai/package.json` pointing at `./dist/providers/<provider>.js`
-- Add `export type` re-exports in `packages/ai/src/index.ts` for provider option types that should remain available from the root entry
-- Register the provider in `packages/ai/src/providers/register-builtins.ts` via lazy loader wrappers, do not statically import provider implementation modules there
-- Add credential detection in `packages/ai/src/env-api-keys.ts`
-
-### 4. Model Generation (`packages/ai/scripts/generate-models.ts`)
-
-- Add logic to fetch/parse models from provider source
-- Map to standardized `Model` interface
-
-### 5. Tests (`packages/ai/test/`)
-
-- Always add the provider to `stream.test.ts` with at least one representative model, even if it reuses an existing API implementation such as `openai-completions`.
-- Add the provider to the broader provider matrix where applicable: `tokens.test.ts`, `abort.test.ts`, `empty.test.ts`, `context-overflow.test.ts`, `image-limits.test.ts`, `unicode-surrogate.test.ts`, `tool-call-without-result.test.ts`, `image-tool-result.test.ts`, `total-tokens.test.ts`, `cross-provider-handoff.test.ts`.
-- For `cross-provider-handoff.test.ts`, add at least one provider/model pair. If the provider exposes multiple model families (for example GPT and Claude), add at least one pair per family.
-- For non-standard auth, create utility (e.g., `bedrock-utils.ts`) with credential detection.
-
-### 6. Coding Agent (`packages/coding-agent/`)
-
-- `src/core/model-resolver.ts`: Add default model ID to `defaultModelPerProvider`
-- `src/core/provider-display-names.ts`: Add API-key login display name so `/login` and related UI show the provider for built-in API-key auth.
-- `src/cli/args.ts`: Add env var documentation
-- `README.md`: Add provider setup instructions
-- `docs/providers.md`: Add setup instructions, env var, and `auth.json` key
-
-### 7. Documentation
-
-- `packages/ai/README.md`: Add to providers table, document options/auth, add env vars
-- `packages/ai/.changes/<slug>.md`: Add a changelog fragment (see Changelog above)
-
-## Releasing
-
-**Lockstep versioning**: All packages always share the same version number. Every release updates all packages together.
-
-**Version semantics** (no major releases):
-
-- `patch`: Bug fixes and new features
-- `minor`: API breaking changes
-
-### Steps
-
-1. **Check fragments**: Ensure all changes since last release have fragment files in `packages/<pkg>/.changes/`
-
-2. **Run release script**:
-   ```bash
-   npm run release:patch    # Fixes and additions
-   npm run release:minor    # API breaking changes
-   ```
-
-The script handles: version bump, folding `.changes/` fragments into the release section, commit, tag, and publish.
-
-## **CRITICAL** Git Rules for Parallel Agents **CRITICAL**
-
-Multiple agents may work on different files in the same worktree simultaneously. You MUST follow these rules:
-
-### Committing
-
-- **ONLY commit files YOU changed in THIS session**
-- ALWAYS include `fixes #<number>` or `closes #<number>` in the commit message when there is a related issue or PR
-- NEVER use `git add -A` or `git add .` - these sweep up changes from other agents
-- ALWAYS use `git add <specific-file-paths>` listing only files you modified
-- Before committing, run `git status` and verify you are only staging YOUR files
-- Track which files you created/modified/deleted during the session
-- It is always fine to include `packages/ai/src/models.generated.ts` in a commit alongside the actual files you want to commit
-
-### Forbidden Git Operations
-
-These commands can destroy other agents' work:
-
-- `git reset --hard` - destroys uncommitted changes
-- `git checkout .` - destroys uncommitted changes
-- `git clean -fd` - deletes untracked files
-- `git stash` - stashes ALL changes including other agents' work
-- `git add -A` / `git add .` - stages other agents' uncommitted work
-- `git commit --no-verify` - bypasses required checks and is never allowed
-
-### Safe Workflow
-
-```bash
-# 1. Check status first
-git status
-
-# 2. Add ONLY your specific files
-git add packages/ai/src/providers/transform-messages.ts
-git add packages/ai/.changes/eng-1234-fix-resize.md
-
-# 3. Commit
-git commit -m "fix(ai): description"
-
-# 4. Push (pull --rebase if needed, but NEVER reset/checkout)
-git pull --rebase && git push
-```
-
-### If Rebase Conflicts Occur
-
-- Resolve conflicts in YOUR files only
-- If conflict is in a file you didn't modify, abort and ask the user
-- NEVER force push
-
-### User override
-
-If the user instructions conflict with rules set out here, ask for confirmation that they want to override the rules. Only then execute their instructions.
+- `docs/` contains the design documents (the parity battery, the installer CI, the extensions runner, the model surface, the session engine port, the completion matrix, the keybindings).
+- `docs/FEATURE_PARITY.md` is the exhaustive interactive-mode audit: every TS component walked and verified against the Rust implementation.

@@ -1,0 +1,33 @@
+[package]
+name = "pa-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The prime-agent binary."
+
+[dependencies]
+pa-types = { path = "../pa-types" }
+pa-core = { path = "../pa-core" }
+pa-ai = { path = "../pa-ai" }
+pa-agent = { path = "../pa-agent" }
+pa-daemon = { path = "../pa-daemon" }
+pa-tui = { path = "../pa-tui" }
+pa-telemetry = { path = "../pa-telemetry" }
+uuid = { version = "1", features = ["v4", "v7"] }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "prime-agent"
+path = "src/main.rs"
+
+[dev-dependencies]
+tempfile = "3"
+base64 = "0.22"
+libc = "0.2"
+futures = { workspace = true }
+crossterm = "0.28"
+nix = { version = "0.29", features = ["term", "signal", "fs"] }
+url = "2"

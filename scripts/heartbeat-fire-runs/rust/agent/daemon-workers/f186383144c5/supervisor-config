@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "socketPath": "/home/ubuntu/lane-worktrees/hb-fire/scripts/heartbeat-fire-runs/rust/daemon.sock",
+  "defaultSessionDir": "/home/ubuntu/lane-worktrees/hb-fire/scripts/heartbeat-fire-runs/rust/agent/sessions"
+}

@@ -1,0 +1,53 @@
+[
+  {
+    "job": {
+      "id": "07e1e9d2-8a2d-4abd-a50d-20d650eeca37",
+      "status": "active",
+      "source": "heartbeat",
+      "runtimeKind": "top-level",
+      "deliveryMode": "steer",
+      "activeSessionId": "3d985e69dce5",
+      "sessionId": "01a0c4e8-d25e-77ef-8f2d-a807e9add380",
+      "sessionFile": "/home/ubuntu/lane-worktrees/heartbeats-menu/scripts/heartbeats-runs/20260921T165945Z/ts/agent/sessions/01a0c4e8-d25e-77ef-8f2d-a807e9add380.jsonl",
+      "cwd": "/home/ubuntu/lane-worktrees/heartbeats-menu/scripts/heartbeats-runs/20260921T165945Z/ts/work",
+      "prompt": "user heartbeat ping instruction",
+      "schedule": {
+        "kind": "interval",
+        "expression": "every 30m",
+        "intervalMs": 1800000
+      },
+      "createdAt": "2026-09-21T16:59:47.788Z",
+      "updatedAt": "2026-09-21T16:59:47.788Z",
+      "nextRunAt": "2026-09-21T17:29:47.788Z",
+      "runCount": 0
+    },
+    "sessionName": "heartbeats-verifier",
+    "firstMessage": "verifier seed turn"
+  },
+  {
+    "job": {
+      "id": "4f327415-8d7b-4634-bf84-2770799927c8",
+      "status": "active",
+      "source": "rlm_heartbeat",
+      "runtimeKind": "top-level",
+      "deliveryMode": "steer",
+      "activeSessionId": "3d985e69dce5",
+      "sessionId": "01a0c4e8-d25e-77ef-8f2d-a807e9add380",
+      "sessionFile": "/home/ubuntu/lane-worktrees/heartbeats-menu/scripts/heartbeats-runs/20260921T165945Z/ts/agent/sessions/01a0c4e8-d25e-77ef-8f2d-a807e9add380.jsonl",
+      "cwd": "/home/ubuntu/lane-worktrees/heartbeats-menu/scripts/heartbeats-runs/20260921T165945Z/ts/work",
+      "label": "agent hb",
+      "prompt": "agent heartbeat check instruction",
+      "schedule": {
+        "kind": "interval",
+        "expression": "every 30m",
+        "intervalMs": 1800000
+      },
+      "createdAt": "2026-09-21T16:59:52.280Z",
+      "updatedAt": "2026-09-21T16:59:52.280Z",
+      "nextRunAt": "2026-09-21T17:29:52.280Z",
+      "runCount": 0
+    },
+    "sessionName": "heartbeats-verifier",
+    "firstMessage": "verifier seed turn"
+  }
+]

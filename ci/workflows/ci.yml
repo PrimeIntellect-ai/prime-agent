@@ -1,0 +1,119 @@
+# CI gates for the prime-agent Rust rewrite.
+#
+# This workflow is byte-final but staged at ci/workflows/ (not .github/workflows/)
+# because the dev box's GitHub token has no `workflow` scope; see
+# ci/workflows/README.md for the promotion step. It is INERT until then. The same
+# gates run locally via:
+#   make check   (fmt + clippy + test)
+#   make deny    (cargo-deny advisories + licenses)
+#
+# PR and push builds are strictly read-only: `contents: read` and
+# persist-credentials: false. No secrets, no publish capability.
+# Third-party action SHAs below were resolved from the tags via the GitHub API
+# (or taken from ~/codex's own verified pins, its AGENTS.md being the template
+# for this repo's governance).
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
+        with:
+          toolchain: "1.98.1"
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
+        with:
+          toolchain: "1.98.1"
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # The lockfile is committed; a dirty worktree here means Cargo.toml
+      # changed without its lockfile in the same PR.
+      - run: cargo build --locked --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  # Windows-readiness gates (docs/windows-readiness.md): the cfg-hygiene
+  # verifier the win-audit lane established, now at the stronger -D warnings
+  # level, plus the real Windows runner the platform units target. The cross
+  # job type-checks every crate (including the cfg(windows) implementations
+  # and the Windows-only tests) for x86_64-pc-windows-gnu; ring's C needs a
+  # cross compiler even for check builds.
+  windows-cross:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
+        with:
+          toolchain: "1.98.1"
+          targets: x86_64-pc-windows-gnu
+          components: clippy
+      - name: Install the mingw-w64 cross toolchain (ring C for the target)
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: windows-cross
+      - run: cargo check --locked --workspace --target x86_64-pc-windows-gnu --all-targets
+      - run: cargo clippy --locked --workspace --target x86_64-pc-windows-gnu --all-targets -- -D warnings
+
+  # The real Windows runner: portable tests plus the Windows-only platform
+  # tests (named pipes, process identity, locks mtime probe, shell ordering).
+  # Linux-only e2e verifiers are `#![cfg(unix)]`-gated and skip here.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
+        with:
+          toolchain: "1.98.1"
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: windows
+      - run: cargo build --locked --workspace
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
+        with:
+          toolchain: "1.98.1"
+      - name: Run cargo-deny (advisories + licenses)
+        uses: EmbarkStudios/cargo-deny-action@82eb9f621fbc699dd0918f3ea06864c14cc84246 # v2

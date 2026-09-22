@@ -1,0 +1,11 @@
+{"scenario": "mcp_replace", "direction": "out", "frame": {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1, "clientCapabilities": {}, "clientInfo": {"name": "differential-capture", "title": "Differential Capture", "version": "0.0.1"}}}}
+{"scenario": "mcp_replace", "direction": "in", "frame": {"id": 1, "jsonrpc": "2.0", "result": {"_meta": {"ai.primeintellect.prime-agent": {}}, "agentCapabilities": {"loadSession": false, "mcpCapabilities": {"http": true}, "promptCapabilities": {"embeddedContext": true, "image": true}, "sessionCapabilities": {"close": {}}}, "agentInfo": {"name": "prime-agent", "title": "Prime Agent", "version": "0.1.0"}, "protocolVersion": 1}}}
+{"scenario": "mcp_replace", "direction": "out", "frame": {"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {"cwd": "/tmp/acp-capture-rust4", "mcpServers": [{"name": "capture-stdio", "type": "stdio", "command": "cat", "args": [], "env": []}]}}}
+{"scenario": "mcp_replace", "direction": "in", "frame": {"id": 2, "jsonrpc": "2.0", "result": {"sessionId": "192ef47e-c903-426a-b632-89542f7fa04d"}}}
+{"scenario": "mcp_replace", "direction": "out", "frame": {"jsonrpc": "2.0", "id": 3, "method": "session/close", "params": {"sessionId": "192ef47e-c903-426a-b632-89542f7fa04d"}}}
+{"scenario": "mcp_replace", "direction": "in", "frame": {"id": 3, "jsonrpc": "2.0", "result": {}}}
+{"scenario": "mcp_replace", "direction": "out", "frame": {"jsonrpc": "2.0", "id": 4, "method": "session/new", "params": {"cwd": "/tmp/acp-capture-rust4", "mcpServers": [{"name": "replacement-stdio", "type": "stdio", "command": "cat", "args": [], "env": []}]}}}
+{"scenario": "mcp_replace", "direction": "in", "frame": {"id": 4, "jsonrpc": "2.0", "result": {"sessionId": "18d674d6-46a6-4fd5-b9a8-b5ff913927e3"}}}
+{"scenario": "mcp_replace", "direction": "out", "frame": {"jsonrpc": "2.0", "id": 5, "method": "session/close", "params": {"sessionId": "18d674d6-46a6-4fd5-b9a8-b5ff913927e3"}}}
+{"scenario": "mcp_replace", "direction": "in", "frame": {"id": 5, "jsonrpc": "2.0", "result": {}}}
+{"scenario": "mcp_replace", "direction": "meta", "frame": {"exitCode": 0, "stderr": ""}}

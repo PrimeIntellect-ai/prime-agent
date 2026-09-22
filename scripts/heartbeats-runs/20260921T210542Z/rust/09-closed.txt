@@ -1,0 +1,36 @@
+                                                  heartbeats-verifier  $0.00
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.1.0
+  ▗█▛ ▟██▙▄██▛ ▟▛         model mock-1
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd ~/hbv6/20260921T210542Z/rust/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+  verifier seed turn
+
+
+ heartbeats verifier seed reply
+
+
+  create the agent heartbeat
+
+
+ ✓ python · await rlm_heartbeat.create( · ↑ 7 ↓ 1 lines · 3ms
+
+ agent heartbeat created
+
+
+
+
+
+
+
+
+                                                                                      Collapsed mode (Ctrl+O to expand)
+
+ >
+
+← manage                                                            2 heartbeats · 1 paused (Ctrl+R) · mock-1 · 110 (0%)

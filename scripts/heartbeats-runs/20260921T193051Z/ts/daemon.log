@@ -1,0 +1,3 @@
+Prime Agent daemon supervisor 28bf4d17-d0a8-4557-833c-d6102e723dba listening on /home/ubuntu/lane-worktrees/heartbeats-menu/scripts/heartbeats-runs/20260921T193051Z/ts/daemon.sock
+Session worker a11636d00ef2 stderr: Prime Agent daemon listening on /tmp/hbv20260921T193051Z-ts/prime-agent-1000/worker-2be8cfc8e2f4-a11636d00ef2.sock
+Session worker a11636d00ef2 stderr: shutting down (exit 0); closing 0 active session(s)

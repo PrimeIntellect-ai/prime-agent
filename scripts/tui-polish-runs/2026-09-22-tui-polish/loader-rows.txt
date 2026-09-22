@@ -1,0 +1,4 @@
+===== ts normalized loader rows
+'\x1b[49m \x1b[38;2;124;111;175m<SPIN>\x1b[39m \x1b[38;2;161;161;170mThinking · <T> · <DIR> <TOK> tokens'
+===== rust normalized loader rows
+'\x1b[49m \x1b[38;2;124;111;175m<SPIN>\x1b[39m \x1b[38;2;161;161;170mThinking · <T> · <DIR> <TOK> tokens'

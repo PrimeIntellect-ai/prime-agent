@@ -1,0 +1,6 @@
+{"activeSessionId":"36339c62edcc","sessionId":"01a0c5c9-f971-70b4-b6c9-262bdf2b87be","sessionFile":"/root/hbv6/20260921T210542Z/rust/agent/sessions/01a0c5c9-f971-70b4-b6c9-262bdf2b87be.jsonl","busy":true,"operation":"create","recordedAt":"2026-09-21T21:05:43.316Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"36339c62edcc","steering":["verifier seed turn"],"follow_up":[],"recorded_at":"2026-09-21T21:05:43.373Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"36339c62edcc","steering":[],"follow_up":[],"recorded_at":"2026-09-21T21:05:43.536Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"36339c62edcc","steering":["create the agent heartbeat"],"follow_up":[],"recorded_at":"2026-09-21T21:05:43.543Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"36339c62edcc","steering":[],"follow_up":[],"recorded_at":"2026-09-21T21:05:44.111Z"}
+{"activeSessionId":"36339c62edcc","sessionId":"01a0c5c9-f971-70b4-b6c9-262bdf2b87be","sessionFile":"/root/hbv6/20260921T210542Z/rust/agent/sessions/01a0c5c9-f971-70b4-b6c9-262bdf2b87be.jsonl","busy":false,"operation":"shutdown","recordedAt":"2026-09-21T21:05:55.136Z"}

@@ -1,0 +1,2176 @@
+//! Attach/snapshot reconstruction: wire data from the daemon (slim attach
+//! results, streamed session events) folded into UI transcript items.
+//!
+//! Daemon message payloads are raw JSON (`Value`): the session engine owns
+//! their evolution, and the TUI renders what arrives. Message decoding is
+//! therefore lenient — it accepts plain-string content and content-block
+//! arrays, with or without explicit block `type` tags, covering the shapes
+//! the scripted harness and the real engine both emit.
+
+use crate::chat::{AssistantMessage, ChatEntry, MessageBlock, ToolCallCard};
+use pa_types::daemon::{DaemonEventCursor, DaemonReplayInfo};
+use serde::Deserialize;
+use serde_json::Value;
+use std::collections::HashMap;
+
+/// The slim attach result: the `data` object of a successful `attach`
+/// response (`createAttachResult` wire shape).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachData {
+    pub active_session_id: String,
+    /// Slim attach carries summary/state/messages inside the snapshot.
+    pub snapshot: Value,
+    #[serde(default)]
+    pub replay: Option<DaemonReplayInfo>,
+    #[serde(default)]
+    pub last_event_sequence: Option<u64>,
+    #[serde(default)]
+    pub last_event_cursor: Option<DaemonEventCursor>,
+    #[serde(default)]
+    pub client: Option<AttachClient>,
+}
+
+/// Client block echoed back by attach.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachClient {
+    pub id: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+/// A reconstructed attach: view-ready chat entries plus identity labels.
+#[derive(Debug, Clone, Default)]
+pub struct Reconstructed {
+    pub chat: Vec<ChatEntry>,
+    /// Current model id (`state.model.id`), when the session reports one.
+    pub model_id: Option<String>,
+    /// Session display name.
+    pub session_name: Option<String>,
+    /// Session id of the persisted session file.
+    pub session_id: String,
+    /// The session's goal state (`state.goal`), when the snapshot reports
+    /// one (TS `snapshot.ts: goal: session.goalState`).
+    pub goal: Option<pa_types::goal::GoalState>,
+    pub last_event_sequence: u64,
+    /// The queued input parked behind the run (`state.sessionActions`) so an
+    /// attach re-syncs the queue strip (TS re-reads the queue after
+    /// subscribe because a `session_action_update` in the gap is lost).
+    pub queued: crate::queued::QueuedMessages,
+    /// The session's effective service tier (`state.serviceTier`), the
+    /// `/fast` toggle's baseline.
+    pub service_tier: Option<String>,
+}
+
+impl Reconstructed {
+    /// Fold one raw message into the chat entries. A `toolResult` message
+    /// does not add a row: it completes the pending tool card its
+    /// `toolCallId` refers to (the TS transcript replay updates the pending
+    /// tool component instead of rendering a new row).
+    pub fn push_message(&mut self, message: &Value) {
+        if let Some(result) = tool_result_message_view(message) {
+            apply_tool_result(&mut self.chat, result);
+            return;
+        }
+        self.chat.extend(message_value_to_entries(message));
+    }
+}
+
+/// A decoded `toolResult` transcript message: the id of the tool call it
+/// completes plus the result view rendered on the matching card.
+struct ToolResultReplay {
+    tool_call_id: String,
+    view: crate::chat::ToolResultView,
+}
+
+/// Decode a `role: "toolResult"` message into its replay view; `None` for
+/// any other message.
+fn tool_result_message_view(message: &Value) -> Option<ToolResultReplay> {
+    if message.get("role").and_then(Value::as_str) != Some("toolResult") {
+        return None;
+    }
+    Some(ToolResultReplay {
+        tool_call_id: message
+            .get("toolCallId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        view: crate::chat::ToolResultView {
+            content: message
+                .get("content")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            details: message.get("details").cloned().unwrap_or(Value::Null),
+            is_error: message
+                .get("isError")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        },
+    })
+}
+
+/// Complete the first pending tool card matching `result`'s tool call id
+/// (the TS `renderedPendingTools` replay: results land on the card, never
+/// as a new transcript row).
+fn apply_tool_result(chat: &mut [ChatEntry], result: ToolResultReplay) {
+    let ToolResultReplay { tool_call_id, view } = result;
+    for entry in chat.iter_mut() {
+        if let ChatEntry::Tool(card) = entry {
+            if card.id == tool_call_id && card.result.is_none() {
+                card.started = true;
+                // Replayed cards never saw the live execution: the timing
+                // collapses to the rebuild instant, so the bash `Took` row
+                // renders the same `0.0s` the TS component does on replay.
+                let now = std::time::Instant::now();
+                card.started_at = Some(now);
+                card.ended_at = Some(now);
+                card.result = Some(view);
+                card.result_partial = false;
+                return;
+            }
+        }
+    }
+}
+
+/// Replay a whole transcript: map every message to its rows, then fold
+/// `toolResult` messages onto the pending tool cards their ids refer to.
+/// Card ids are unique, so one id-to-index map replaces the per-result
+/// card scan (a replay-scale fold stays linear).
+/// TS `orderMessagesForTranscript`: the wire context is summary-first for
+/// the model, but the transcript presents the compaction summary at its
+/// chronological boundary — after the retained messages
+/// (`retainedMessageCount`), before anything appended after the
+/// compaction. A missing count falls back to the timestamp split (TS
+/// compatibility for pre-count summaries).
+fn order_messages_for_transcript(messages: &[Value]) -> Vec<&Value> {
+    let Some(summary_index) = messages.iter().position(|message| {
+        message.get("role").and_then(Value::as_str) == Some("compactionSummary")
+    }) else {
+        return messages.iter().collect();
+    };
+    let summary = &messages[summary_index];
+    let mut rest: Vec<&Value> = messages
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != summary_index)
+        .map(|(_, message)| message)
+        .collect();
+    let boundary = match summary.get("retainedMessageCount").and_then(Value::as_u64) {
+        Some(retained) => (retained as usize).min(rest.len()),
+        None => {
+            let summary_timestamp = summary.get("timestamp").and_then(Value::as_f64);
+            let retained = rest
+                .iter()
+                .filter(|message| {
+                    message.get("timestamp").and_then(Value::as_f64) < summary_timestamp
+                })
+                .count();
+            retained.min(rest.len())
+        }
+    };
+    rest.insert(boundary, summary);
+    rest
+}
+
+pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
+    let ordered = order_messages_for_transcript(messages);
+    let mut chat: Vec<ChatEntry> = Vec::new();
+    let mut tool_results: Vec<ToolResultReplay> = Vec::new();
+    let mut card_index: HashMap<String, usize> = HashMap::new();
+    for message in ordered {
+        if let Some(result) = tool_result_message_view(message) {
+            tool_results.push(result);
+            continue;
+        }
+        let first_new = chat.len();
+        chat.extend(message_value_to_entries(message));
+        for (offset, entry) in chat[first_new..].iter().enumerate() {
+            if let ChatEntry::Tool(card) = entry {
+                card_index
+                    .entry(card.id.clone())
+                    .or_insert(first_new + offset);
+            }
+        }
+    }
+    for ToolResultReplay { tool_call_id, view } in tool_results {
+        let Some(index) = card_index.get(&tool_call_id).copied() else {
+            continue;
+        };
+        if let Some(ChatEntry::Tool(card)) = chat.get_mut(index) {
+            if card.result.is_none() {
+                card.started = true;
+                // Replayed cards never saw the live execution: the timing
+                // collapses to the rebuild instant, so the bash `Took` row
+                // renders the same `0.0s` the TS component does on replay.
+                let now = std::time::Instant::now();
+                card.started_at = Some(now);
+                card.ended_at = Some(now);
+                card.result = Some(view);
+                card.result_partial = false;
+            }
+        }
+    }
+    chat
+}
+
+/// Reconstruct the view state from slim attach data.
+pub fn reconstruct(attach: &AttachData) -> Reconstructed {
+    let snapshot = &attach.snapshot;
+    let messages = snapshot
+        .get("messages")
+        .and_then(Value::as_array)
+        .map(|messages| transcript_to_entries(messages))
+        .unwrap_or_default();
+    let state = snapshot.get("state");
+    let model_id = state
+        .and_then(|state| state.get("model"))
+        .and_then(model_id_value);
+    let session_name = state
+        .and_then(|state| state.get("sessionName"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let session_id = state
+        .and_then(|state| state.get("sessionId"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let last_event_sequence = snapshot
+        .get("lastEventSequence")
+        .and_then(Value::as_u64)
+        .or(attach.last_event_sequence)
+        .unwrap_or_default();
+    let goal = state
+        .and_then(|state| state.get("goal"))
+        .and_then(|goal| serde_json::from_value::<pa_types::goal::GoalState>(goal.clone()).ok());
+    let actions = state.and_then(|state| state.get("sessionActions")).cloned();
+    let queued = crate::queued::QueuedMessages {
+        steering: actions
+            .as_ref()
+            .map(|a| queue_lane(a, "steering"))
+            .unwrap_or_default(),
+        follow_ups: actions
+            .as_ref()
+            .map(|a| queue_lane(a, "followUps"))
+            .unwrap_or_default(),
+    };
+
+    let service_tier = state
+        .and_then(|state| state.get("serviceTier"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Reconstructed {
+        chat: messages,
+        model_id,
+        session_name,
+        session_id,
+        goal,
+        last_event_sequence,
+        queued,
+        service_tier,
+    }
+}
+
+/// One lane of a `sessionActions` wire value: the preview strings in order.
+fn queue_lane(actions: &Value, key: &str) -> Vec<String> {
+    actions
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The model id from a `state.model` wire value (`{id, provider}` or a
+/// display string).
+fn model_id_value(model: &Value) -> Option<String> {
+    match model {
+        Value::String(label) => Some(label.clone()),
+        Value::Object(map) => map.get("id").and_then(Value::as_str).map(str::to_string),
+        _ => None,
+    }
+}
+
+/// Parse attach data out of a successful attach/create response payload.
+pub fn attach_data_from_response(data: &Value) -> anyhow::Result<AttachData> {
+    serde_json::from_value(data.clone()).map_err(|error| {
+        anyhow::anyhow!("the daemon returned an unrecognizable attach result: {error}")
+    })
+}
+
+/// One live session event decoded for the transcript (the `event` field of
+/// `session_event` frames, matching the worker's event vocabulary).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TurnUpdate {
+    /// `agent_start` / `turn_start`.
+    TurnStarted,
+    /// `session_info_changed`: the session display name (cleared when the
+    /// event carries none).
+    SessionInfoChanged { name: Option<String> },
+    /// `service_tier_changed`: the session's effective service tier.
+    ServiceTierChanged { tier: String },
+    /// `message_start` with a user message.
+    UserMessage(String),
+    /// `message_start`/`message_update`/`message_end` with an assistant
+    /// message (raw wire value); `streaming` distinguishes in-flight from
+    /// final.
+    AssistantMessage {
+        message: Value,
+        streaming: bool,
+        stream_event: Option<Value>,
+    },
+    /// `tool_execution_start`: a tool call began executing.
+    ToolExecutionStart {
+        tool_call_id: String,
+        tool_name: String,
+        args: Value,
+    },
+    /// `tool_execution_update`: a partial tool result.
+    ToolExecutionUpdate {
+        tool_call_id: String,
+        partial: Value,
+    },
+    /// `tool_execution_end`: the final tool result.
+    ToolExecutionEnd {
+        tool_call_id: String,
+        result: Value,
+        is_error: bool,
+    },
+    /// `turn_end`, with the turn error string when the turn failed.
+    TurnEnded { error: Option<String> },
+    /// A `custom`-role message the transcript renders (session-command
+    /// echo/result rows, or the malformed-notice fallback).
+    CustomRow(ChatEntry),
+    /// `auto_retry_start`: a provider failure is being retried after
+    /// `delay_ms` (TS retry loader countdown). A `Backup` reason is a
+    /// provider-failover switch: the failed turn re-routes to
+    /// `backup_model` ("provider/model-id") immediately.
+    AutoRetryStart {
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        error_message: String,
+        reason: RetryStartReason,
+    },
+    /// `auto_retry_end`: the retry loop settled; `final_error` is set when
+    /// the retries were exhausted; `restored_model` is the primary model
+    /// restored after a failover switch succeeded.
+    AutoRetryEnd {
+        success: bool,
+        attempt: u32,
+        final_error: Option<String>,
+        restored_model: Option<String>,
+    },
+    /// `agent_end`: the prompt queue drained.
+    Idle,
+    /// `compaction_start`: a compaction run began (TS compaction loader).
+    CompactionStart {
+        /// Why the compaction runs (`manual`/`requested`/`overflow`/`threshold`).
+        reason: String,
+        /// `/compact <instructions>` focus guidance.
+        custom_instructions: Option<String>,
+    },
+    /// `compaction_end`: the compaction settled. Success carries the result
+    /// (summary + token counts); skip/failure carries the error message and
+    /// its severity (TS shows those for `manual` runs).
+    CompactionEnd {
+        /// Why the compaction ran.
+        reason: String,
+        /// The TS `CompactionResult` on success.
+        result: Option<Value>,
+        /// `/compact <instructions>` focus guidance (the event payload).
+        custom_instructions: Option<String>,
+        /// `true` when the run was cancelled.
+        aborted: bool,
+        /// The skip/failure message.
+        error_message: Option<String>,
+        /// `warning` or `error`.
+        error_severity: Option<String>,
+    },
+    /// `goal_update`: the session goal state changed (raw wire `goal`
+    /// payload; the session view owns announcement and tray rendering).
+    GoalUpdate(Value),
+    /// `session_action_update`: the queue projection changed (a message
+    /// parked behind the run, was delivered, or was cleared).
+    QueueUpdated {
+        steering: Vec<String>,
+        follow_ups: Vec<String>,
+    },
+    /// `bash_start` (the user-bash slot, TS `!command`): a command run
+    /// outside the model loop; `transient` marks a side-conversation run
+    /// that renders only in the owning client's pane.
+    BashStart {
+        command: String,
+        exclude_from_context: bool,
+        transient: bool,
+        run_id: Option<String>,
+    },
+    /// `bash_output` (the user-bash slot): one streamed output chunk.
+    BashOutput { chunk: String },
+    /// `bash_end` (the user-bash slot): the settled run.
+    BashEnd {
+        exit_code: Option<i64>,
+        cancelled: bool,
+        truncated: bool,
+        full_output_path: Option<String>,
+        error_message: Option<String>,
+        transient: bool,
+        run_id: Option<String>,
+    },
+    /// Other state churn: the footer status only.
+    StatusUpdate,
+}
+
+/// Why one `auto_retry_start` fired (the TS wire `reason` field).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetryStartReason {
+    /// Ordinary quick retry on the current provider.
+    Quick,
+    /// Provider-failover switch: the failed turn re-routes to
+    /// `backup_model` ("provider/model-id").
+    Backup { backup_model: String },
+}
+
+/// Decode the `event` payload of a `session_event` frame.
+pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
+    match event.get("type").and_then(Value::as_str)? {
+        "compaction_start" => Some(TurnUpdate::CompactionStart {
+            reason: event
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("manual")
+                .to_string(),
+            custom_instructions: event
+                .get("customInstructions")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        }),
+        "compaction_end" => Some(TurnUpdate::CompactionEnd {
+            reason: event
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("manual")
+                .to_string(),
+            result: event
+                .get("result")
+                .cloned()
+                .filter(|value| !value.is_null()),
+            custom_instructions: event
+                .get("customInstructions")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            aborted: event
+                .get("aborted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            error_message: event
+                .get("errorMessage")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            error_severity: event
+                .get("errorSeverity")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        }),
+        "agent_start" | "turn_start" => Some(TurnUpdate::TurnStarted),
+        // `session_info_changed { name }` (TS `session.setSessionName`):
+        // every attached client re-reads the session display name.
+        "session_info_changed" => Some(TurnUpdate::SessionInfoChanged {
+            name: event
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        }),
+        // `service_tier_changed { serviceTier }` (TS fast-mode toggle):
+        // the client patches its connection state (the `/fast` status
+        // reads the tier from it).
+        "service_tier_changed" => Some(TurnUpdate::ServiceTierChanged {
+            tier: event
+                .get("serviceTier")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        }),
+        "turn_end" => Some(TurnUpdate::TurnEnded {
+            error: event
+                .get("error")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        }),
+        "agent_end" => Some(TurnUpdate::Idle),
+        "message_start" | "message_update" | "message_end" => {
+            let message = event.get("message")?.clone();
+            let event_type = event.get("type").and_then(Value::as_str);
+            let streaming = event_type != Some("message_end");
+            match message.get("role").and_then(Value::as_str) {
+                // User messages carry the full payload on start; the
+                // message_end twin of the same row must not re-render it
+                // (TS interactive ignores user message_end frames), and
+                // only a partial user frame would be a protocol anomaly.
+                Some("user")
+                    if event_type == Some("message_update")
+                        || event_type == Some("message_end") =>
+                {
+                    Some(TurnUpdate::StatusUpdate)
+                }
+                Some("user") => Some(match user_display_text(&message) {
+                    Some(text) => TurnUpdate::UserMessage(text),
+                    // Nothing to show (an empty user message is a protocol
+                    // anomaly): the transcript does not grow a blank row.
+                    None => TurnUpdate::StatusUpdate,
+                }),
+                Some("assistant") => Some(TurnUpdate::AssistantMessage {
+                    message,
+                    streaming,
+                    stream_event: event.get("assistantMessageEvent").cloned(),
+                }),
+                // Custom rows arrive as a message_start + message_end pair
+                // carrying the same payload; only the start adds the row.
+                Some("custom") if event_type == Some("message_start") => {
+                    custom_row_update(&message)
+                }
+                Some("custom") => Some(TurnUpdate::StatusUpdate),
+                _ => Some(TurnUpdate::StatusUpdate),
+            }
+        }
+        "tool_execution_start" => Some(TurnUpdate::ToolExecutionStart {
+            tool_call_id: event
+                .get("toolCallId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            tool_name: event
+                .get("toolName")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            args: event.get("args").cloned().unwrap_or(Value::Null),
+        }),
+        "tool_execution_update" => Some(TurnUpdate::ToolExecutionUpdate {
+            tool_call_id: event
+                .get("toolCallId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            partial: event.get("partialResult").cloned().unwrap_or(Value::Null),
+        }),
+        "tool_execution_end" => Some(TurnUpdate::ToolExecutionEnd {
+            tool_call_id: event
+                .get("toolCallId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            result: event.get("result").cloned().unwrap_or(Value::Null),
+            is_error: event
+                .get("isError")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        }),
+        "auto_retry_start" => Some(TurnUpdate::AutoRetryStart {
+            attempt: event
+                .get("attempt")
+                .and_then(Value::as_u64)
+                .unwrap_or_default() as u32,
+            max_attempts: event
+                .get("maxAttempts")
+                .and_then(Value::as_u64)
+                .unwrap_or_default() as u32,
+            delay_ms: event
+                .get("delayMs")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            error_message: event
+                .get("errorMessage")
+                .and_then(Value::as_str)
+                .unwrap_or("Unknown error")
+                .to_string(),
+            reason: match event.get("reason").and_then(Value::as_str) {
+                Some("backup") => RetryStartReason::Backup {
+                    backup_model: event
+                        .get("backupModel")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string(),
+                },
+                _ => RetryStartReason::Quick,
+            },
+        }),
+        "auto_retry_end" => Some(TurnUpdate::AutoRetryEnd {
+            success: event
+                .get("success")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            attempt: event
+                .get("attempt")
+                .and_then(Value::as_u64)
+                .unwrap_or_default() as u32,
+            final_error: event
+                .get("finalError")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            restored_model: event
+                .get("restoredModel")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        }),
+        "goal_update" => Some(TurnUpdate::GoalUpdate(
+            event.get("goal").cloned().unwrap_or(Value::Null),
+        )),
+        "session_action_update" => {
+            let actions = event.get("actions").cloned().unwrap_or(Value::Null);
+            Some(TurnUpdate::QueueUpdated {
+                steering: queue_lane(&actions, "steering"),
+                follow_ups: queue_lane(&actions, "followUps"),
+            })
+        }
+        // `bash_start` (TS `runUserBash` emits before the process runs):
+        // the identity fields ride the same frame (`transient` marks a
+        // side-conversation run, `runId` matches the owning client).
+        "bash_start" => Some(TurnUpdate::BashStart {
+            command: event
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            exclude_from_context: event
+                .get("excludeFromContext")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            transient: event
+                .get("transient")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            run_id: event
+                .get("runId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        }),
+        "bash_output" => Some(TurnUpdate::BashOutput {
+            chunk: event
+                .get("chunk")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        }),
+        "bash_end" => Some(TurnUpdate::BashEnd {
+            exit_code: event.get("exitCode").and_then(Value::as_i64),
+            cancelled: event
+                .get("cancelled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            truncated: event
+                .get("truncated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            full_output_path: event
+                .get("fullOutputPath")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            error_message: event
+                .get("errorMessage")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            transient: event
+                .get("transient")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            run_id: event
+                .get("runId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        }),
+
+        // Queue churn and unknown events only affect the status line.
+        _ => Some(TurnUpdate::StatusUpdate),
+    }
+}
+
+/// The loader note from a `tool_execution_update` partial result, if the
+/// tool owns one. The python-kernel bootstrap reports its startup stages as
+/// partial results with `details.status = "starting"` (TS `reportStartupProgress`),
+/// the same payload TS also hands its extension UI as the working message
+/// (TS `setWorkingMessage`), so the loader row mirrors the stage text. `None`
+/// leaves any current note untouched: streamed cell output reports `ok`,
+/// which is not a note change.
+pub fn working_message_from_update(partial: &Value) -> Option<String> {
+    let status = partial
+        .get("details")
+        .and_then(|details| details.get("status"))
+        .and_then(Value::as_str);
+    if status != Some("starting") {
+        return None;
+    }
+    partial
+        .get("content")
+        .and_then(Value::as_array)?
+        .iter()
+        .find_map(|block| {
+            (block.get("type") == Some(&Value::String("text".to_string())))
+                .then(|| block.get("text"))
+                .flatten()
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|text| !text.is_empty())
+}
+
+/// Decode one `custom`-role wire message into its transcript update: the
+/// session-command echo and result rows render as slash rows; a custom type
+/// matching either shape with an invalid payload renders the malformed
+/// notice; everything else (and non-display rows) renders nothing.
+fn custom_row_update(message: &Value) -> Option<TurnUpdate> {
+    let entries = custom_message_entries(message);
+    match entries.first() {
+        Some(entry) => Some(TurnUpdate::CustomRow(entry.clone())),
+        None => Some(TurnUpdate::StatusUpdate),
+    }
+}
+
+/// The transcript entries for one `custom`-role message: the custom-type
+/// dispatch lives in [`crate::custom_message::custom_message_entries`]
+/// (every entry type maps to its TS component).
+pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
+    crate::custom_message::custom_message_entries(message)
+}
+
+/// The user-message display text (TS `conversation-components`' user
+/// branch): the text blocks joined, or the `[image]` placeholder when the
+/// message carries content but no text (an image-only prompt), or `None`
+/// for a message with nothing to show.
+pub fn user_display_text(message: &Value) -> Option<String> {
+    let text = message_text(message);
+    if !text.is_empty() {
+        return Some(text);
+    }
+    match message.get("content") {
+        Some(Value::String(content)) if !content.is_empty() => Some("[image]".to_string()),
+        Some(Value::Array(blocks)) if !blocks.is_empty() => Some("[image]".to_string()),
+        _ => None,
+    }
+}
+
+/// Concatenated text of a raw daemon message (string or block content).
+pub fn message_text(message: &Value) -> String {
+    match message.get("content") {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .filter_map(block_text)
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => String::new(),
+    }
+}
+
+/// Text of one content block: tagged text blocks and the engine's untagged
+/// `{"text": ...}` form. Adjacent fragments of one message concatenate
+/// without separators, like the TS message rendering.
+fn block_text(block: &Value) -> Option<String> {
+    match block {
+        Value::Object(_) => block
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        Value::String(text) => Some(text.clone()),
+        _ => None,
+    }
+}
+
+/// Fold one raw message into chat entries. Assistant messages expand into a
+/// message component (ordered text/thinking blocks) plus one card per tool
+/// call, in content order.
+pub fn message_value_to_entries(message: &Value) -> Vec<ChatEntry> {
+    let role = message
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match role {
+        // TS `addMessageToChat`'s user case: a text that IS a skill block
+        // renders the skill-invocation card (+ the trailing argument text
+        // as its own user block); every other text renders the user block.
+        "user" => user_display_text(message)
+            .map(|text| {
+                crate::custom_message::skill_invocation_entries(&text)
+                    .unwrap_or_else(|| vec![ChatEntry::User { text }])
+            })
+            .unwrap_or_default(),
+        "assistant" => assistant_value_to_entries(message),
+        "custom" => custom_message_entries(message),
+        "compactionSummary" => compaction_summary_entries(message),
+        // Other roles (tool results, bookkeeping) have no rendering here:
+        // live tool results arrive as tool_execution events instead.
+        _ => Vec::new(),
+    }
+}
+
+/// The compaction summary row (TS `CompactionSummaryMessageComponent`) from
+/// its wire message: `summary`, `tokensBefore`, and the optional
+/// `customInstructions` that focused it.
+fn compaction_summary_entries(message: &Value) -> Vec<ChatEntry> {
+    let summary = message
+        .get("summary")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    vec![ChatEntry::CompactionSummary {
+        summary,
+        tokens_before: message
+            .get("tokensBefore")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        custom_instructions: message
+            .get("customInstructions")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }]
+}
+
+/// Fold one streamed tool call into the live transcript (TS
+/// `getOrCreatePendingToolComponent` without its async deferral).
+///
+/// A provider announces a tool call before its function name streams in:
+/// the wire `toolCall` block first arrives with an empty `name`, and later
+/// `message_update` frames fill it. A card is therefore only created once
+/// the call is identifiable (`id` non-empty) and named; a card created
+/// earlier would carry the empty name forever (no later event corrects it),
+/// fall through to the generic panel, and render the raw arguments JSON
+/// instead of the tool's own card. An existing card refreshes from the
+/// latest frame — the newest streamed name and arguments win (TS builds the
+/// component against the latest streaming call).
+pub fn apply_streamed_tool_card(
+    view: &mut crate::view::AgentView,
+    id: &str,
+    name: &str,
+    args: &Value,
+) {
+    if id.is_empty() || name.is_empty() {
+        return;
+    }
+    let card_index = view
+        .chat
+        .iter()
+        .position(|entry| matches!(entry, ChatEntry::Tool(card) if card.id == id));
+    match card_index {
+        Some(index) => {
+            if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
+                card.name = name.to_string();
+                card.args = args.clone();
+            }
+            view.mark_entry_stale(index);
+        }
+        None => view.push_entry(ChatEntry::Tool(Box::new(ToolCallCard {
+            id: id.to_string(),
+            name: name.to_string(),
+            args: args.clone(),
+            started: false,
+            ..Default::default()
+        }))),
+    }
+}
+
+/// `tool_execution_start` folded into the live transcript: mark the matching
+/// card running, or create it when the assistant-message frames have not
+/// arrived yet. The daemon-reported tool name is authoritative — it
+/// backfills a card still carrying an empty streamed name, so the card
+/// routes to its tool-specific renderer (TS creates missing components with
+/// `event.toolName`).
+pub fn apply_tool_execution_start(
+    view: &mut crate::view::AgentView,
+    tool_call_id: &str,
+    tool_name: &str,
+    args: Value,
+) {
+    let card_index = view
+        .chat
+        .iter()
+        .position(|entry| matches!(entry, ChatEntry::Tool(card) if card.id == tool_call_id));
+    if let Some(index) = card_index {
+        if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
+            card.started = true;
+            card.started_at = Some(std::time::Instant::now());
+            if card.name.is_empty() && !tool_name.is_empty() {
+                card.name = tool_name.to_string();
+            }
+            if !args.is_null() {
+                card.args = args;
+            }
+            view.mark_entry_stale(index);
+        }
+        return;
+    }
+    view.push_entry(ChatEntry::Tool(Box::new(ToolCallCard {
+        id: tool_call_id.to_string(),
+        name: tool_name.to_string(),
+        args,
+        started: true,
+        started_at: Some(std::time::Instant::now()),
+        ..Default::default()
+    })));
+}
+
+/// The failure row a failed assistant message renders (TS
+/// `AssistantMessageComponent.rebuild`): an abort always shows, a provider
+/// `error` only when the message carries no tool calls (their cards carry
+/// the failure then). `None` for settled messages.
+pub struct AssistantErrorRow {
+    /// The rendered row text (provider errors carry the `Error: ` prefix).
+    pub text: String,
+    /// `stopReason: "aborted"` (drives the tool-call trailing spacer).
+    pub aborted: bool,
+}
+
+/// Decode a failed assistant message's error row (TS `createErrorComponent`
+/// inputs); `None` for settled messages.
+pub fn assistant_error_row(
+    message: &Value,
+    tool_calls: &[(String, String, Value)],
+) -> Option<AssistantErrorRow> {
+    let stop_reason = message.get("stopReason").and_then(Value::as_str);
+    match stop_reason {
+        Some("aborted") => Some(AssistantErrorRow {
+            text: message
+                .get("errorMessage")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty() && *text != "Request was aborted")
+                .unwrap_or("Operation aborted")
+                .to_string(),
+            aborted: true,
+        }),
+        Some("error") if tool_calls.is_empty() => Some(AssistantErrorRow {
+            text: format!(
+                "Error: {}",
+                message
+                    .get("errorMessage")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or("Unknown error")
+            ),
+            aborted: false,
+        }),
+        _ => None,
+    }
+}
+
+/// Decode an assistant wire message into a message component plus tool cards.
+pub fn assistant_value_to_entries(message: &Value) -> Vec<ChatEntry> {
+    let (blocks, tool_calls) = assistant_message_parts(message);
+    // TS `AssistantMessageComponent.rebuild`: an abort renders its error row
+    // inside the message; a provider error renders only without tool calls
+    // (their cards carry the failure). The component exists for every
+    // assistant message (`message_start` creates one), so a content-less
+    // failed provider attempt still folds into its own error row (TS
+    // `buildConversationComponents` pushes the component unconditionally).
+    let error = assistant_error_row(message, &tool_calls);
+    if blocks.is_empty() && tool_calls.is_empty() && error.is_none() {
+        return Vec::new();
+    }
+    let mut entries = Vec::new();
+    if !blocks.is_empty() || error.is_some() {
+        entries.push(ChatEntry::Assistant(Box::new(AssistantMessage {
+            blocks,
+            has_tool_calls: !tool_calls.is_empty(),
+            streaming: false,
+            error: error.as_ref().map(|row| row.text.clone()),
+            aborted: error.as_ref().is_some_and(|row| row.aborted),
+        })));
+    }
+    for (id, name, args) in tool_calls {
+        entries.push(ChatEntry::Tool(Box::new(ToolCallCard {
+            id,
+            name,
+            args,
+            started: false,
+            ..Default::default()
+        })));
+    }
+    entries
+}
+
+/// The ordered visible blocks (thinking, text) and tool calls of one
+/// assistant wire message.
+pub fn assistant_message_parts(
+    message: &Value,
+) -> (Vec<MessageBlock>, Vec<(String, String, Value)>) {
+    let mut blocks = Vec::new();
+    let mut tool_calls = Vec::new();
+    match message.get("content") {
+        Some(Value::String(text)) => {
+            if !text.is_empty() {
+                blocks.push(MessageBlock::Text(text.clone()));
+            }
+        }
+        Some(Value::Array(array)) => {
+            for block in array {
+                let block_type = block.get("type").and_then(Value::as_str);
+                match block_type {
+                    Some("thinking") => {
+                        let thinking = block.get("thinking").and_then(Value::as_str);
+                        if let Some(thinking) = thinking.filter(|text| !text.trim().is_empty()) {
+                            blocks.push(MessageBlock::Thinking(thinking.to_string()));
+                        }
+                    }
+                    Some("text") => {
+                        let text = block.get("text").and_then(Value::as_str);
+                        if let Some(text) = text.filter(|text| !text.trim().is_empty()) {
+                            blocks.push(MessageBlock::Text(text.to_string()));
+                        }
+                    }
+                    Some("toolCall") => {
+                        tool_calls.push((
+                            block
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            block
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            block.get("arguments").cloned().unwrap_or(Value::Null),
+                        ));
+                    }
+                    None => {
+                        // Untagged text blocks (the scripted engine's form).
+                        let text = block.get("text").and_then(Value::as_str);
+                        if let Some(text) = text.filter(|text| !text.is_empty()) {
+                            blocks.push(MessageBlock::Text(text.to_string()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    (blocks, tool_calls)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::StatusKind;
+    use serde_json::json;
+
+    fn test_view() -> crate::view::AgentView {
+        crate::view::AgentView::new(crate::theme::Theme::builtin(
+            "prime",
+            crate::theme::ColorMode::TrueColor,
+        ))
+    }
+
+    fn card_of(view: &crate::view::AgentView) -> Option<&ToolCallCard> {
+        view.chat.iter().find_map(|entry| match entry {
+            ChatEntry::Tool(card) => Some(card.as_ref()),
+            _ => None,
+        })
+    }
+
+    fn rendered_card_text(view: &crate::view::AgentView) -> Vec<String> {
+        let Some(card) = card_of(view) else {
+            return Vec::new();
+        };
+        crate::tool_card::render_tool_card(
+            card,
+            0,
+            crate::chat::Detail::Overview,
+            &view.theme,
+            100,
+            true,
+        )
+        .iter()
+        .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+        .collect()
+    }
+
+    #[test]
+    fn image_only_user_message_shows_the_image_placeholder() {
+        let message = json!({
+            "role": "user",
+            "content": [
+                { "type": "image", "data": "QUJD", "mimeType": "image/png" }
+            ]
+        });
+        assert_eq!(user_display_text(&message), Some("[image]".to_string()));
+        assert_eq!(
+            message_value_to_entries(&message),
+            vec![ChatEntry::User {
+                text: "[image]".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_skill_block_user_message_decodes_to_the_card() {
+        // TS `addMessageToChat`'s user case: the persisted user message
+        // that carried a skill invocation parses into the card + the
+        // trailing argument text, never the raw block.
+        let message = json!({
+            "role": "user",
+            "content": "<skill name=\"websearch\" location=\"/s/SKILL.md\">\nRun one query.\n</skill>\n\nfind parity tuis"
+        });
+        let entries = message_value_to_entries(&message);
+        assert!(
+            matches!(
+                entries.as_slice(),
+                [
+                    ChatEntry::SkillInvocation(card),
+                    ChatEntry::User { text }
+                ] if card.name == "websearch"
+                    && card.content == "Run one query."
+                    && text == "find parity tuis"
+            ),
+            "entries: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn user_message_with_text_and_image_keeps_the_text() {
+        let message = json!({
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "look at this" },
+                { "type": "image", "data": "QUJD", "mimeType": "image/png" }
+            ]
+        });
+        assert_eq!(
+            user_display_text(&message),
+            Some("look at this".to_string())
+        );
+    }
+
+    #[test]
+    fn empty_user_message_renders_no_entry() {
+        let message = json!({ "role": "user", "content": [] });
+        assert_eq!(user_display_text(&message), None);
+        assert!(message_value_to_entries(&message).is_empty());
+    }
+
+    /// The live wire shape that broke the ipython card: a provider announces
+    /// the tool call before the function name streams in (the openai-style
+    /// toolcall-start frame carries the block unnamed), so the first
+    /// `message_update` frame has an empty `name`. The card must not freeze
+    /// on that frame — the named frame routes it to the ipython renderer and
+    /// the collapsed line shows the code preview, not the raw arguments
+    /// JSON.
+    /// TS `orderMessagesForTranscript`: the wire context is summary-first
+    /// for the model, but the transcript presents the summary at its
+    /// chronological boundary — after the retained messages
+    /// (`retainedMessageCount`), before anything appended after the
+    /// compaction.
+    #[test]
+    fn transcript_presents_the_summary_after_the_retained_tail() {
+        let messages = vec![
+            json!({
+                "role": "compactionSummary", "summary": "the story",
+                "retainedMessageCount": 2, "tokensBefore": 12, "timestamp": 30u64
+            }),
+            json!({"role": "user", "content": "second turn", "timestamp": 20u64}),
+            json!({"role": "assistant", "content": "kept intact", "timestamp": 25u64}),
+            json!({
+                "role": "custom", "customType": "session_slash_command",
+                "content": "/compact focus on the goal", "display": true, "timestamp": 40u64,
+                "details": { "command": {
+                    "name": "compact",
+                    "args": "focus on the goal",
+                    "text": "/compact focus on the goal"
+                } }
+            }),
+        ];
+        let entries = transcript_to_entries(&messages);
+        let order: Vec<String> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                ChatEntry::User { .. } => Some("user".to_string()),
+                ChatEntry::Assistant { .. } => Some("assistant".to_string()),
+                ChatEntry::CompactionSummary { .. } => Some("summary".to_string()),
+                ChatEntry::SlashCommand { .. } => Some("slash".to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(order, ["user", "assistant", "summary", "slash"]);
+    }
+
+    #[test]
+    fn unnamed_streamed_tool_call_renders_code_once_named() {
+        let mut view = test_view();
+        apply_streamed_tool_card(&mut view, "call-1", "", &json!({ "code": "fibonacci(23)" }));
+        assert!(
+            card_of(&view).is_none(),
+            "a call without a streamed name renders no card yet"
+        );
+        apply_streamed_tool_card(
+            &mut view,
+            "call-1",
+            "ipython",
+            &json!({ "code": "fibonacci(23)" }),
+        );
+        let card = card_of(&view).expect("the named frame creates the card");
+        assert_eq!(card.name, "ipython");
+        assert!(card.args.get("code").is_some(), "args stream into the card");
+        let rows = rendered_card_text(&view);
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("python") && row.contains("fibonacci(23)")),
+            "the ipython card renders the code preview: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .all(|row| !row.contains("\"code\"") && !row.contains('{')),
+            "the raw arguments JSON must not render: {rows:?}"
+        );
+    }
+
+    /// The latest streamed frame wins on an existing card (TS builds the
+    /// pending component against the latest streaming call), so a card that
+    /// somehow kept an empty name picks the name up from the next frame.
+    #[test]
+    fn existing_card_refreshes_name_and_args_from_latest_frame() {
+        let mut view = test_view();
+        view.push_entry(ChatEntry::Tool(Box::new(ToolCallCard {
+            id: "call-1".into(),
+            name: String::new(),
+            args: Value::Null,
+            ..Default::default()
+        })));
+        apply_streamed_tool_card(&mut view, "call-1", "ipython", &json!({ "code": "x = 1" }));
+        let card = card_of(&view).expect("the streamed frame finds the card");
+        assert_eq!(card.name, "ipython");
+        assert_eq!(card.args.get("code"), Some(&json!("x = 1")));
+    }
+
+    /// `tool_execution_start` reports the actual tool name ("ipython" on
+    /// the wire today); it backfills a card still unnamed and creates the
+    /// card when the message frames have not arrived yet.
+    #[test]
+    fn tool_execution_start_reports_the_tool_name() {
+        let mut view = test_view();
+        view.push_entry(ChatEntry::Tool(Box::new(ToolCallCard {
+            id: "call-1".into(),
+            name: String::new(),
+            args: Value::Null,
+            ..Default::default()
+        })));
+        apply_tool_execution_start(
+            &mut view,
+            "call-1",
+            "ipython",
+            json!({ "code": "print('hi')" }),
+        );
+        let card = card_of(&view).expect("the start event finds the card");
+        assert_eq!(card.name, "ipython");
+        assert!(card.started, "the start event marks execution started");
+
+        let mut fresh = test_view();
+        apply_tool_execution_start(
+            &mut fresh,
+            "call-2",
+            "ipython",
+            json!({ "code": "fibonacci(23)" }),
+        );
+        let rows = rendered_card_text(&fresh);
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("python") && row.contains("fibonacci(23)")),
+            "a card created from the start event renders the code preview: {rows:?}"
+        );
+    }
+
+    fn slim_attach() -> Value {
+        json!({
+            "protocol": { "name": "prime-agent.daemon", "version": 7 },
+            "activeSessionId": "abc123def456",
+            "snapshot": {
+                "activeSessionId": "abc123def456",
+                "summary": { "id": "abc123def456", "cwd": "/tmp" },
+                "state": {
+                    "activeSessionId": "abc123def456",
+                    "cwd": "/tmp",
+                    "sessionId": "0199-sess",
+                    "sessionName": "my session",
+                    "model": null,
+                    "thinkingLevel": "default",
+                    "serviceTier": "auto",
+                    "isStreaming": false,
+                    "isCompacting": false,
+                    "retryAttempt": 0,
+                    "steeringMode": "all",
+                    "followUpMode": "all",
+                    "autoCompactionEnabled": false,
+                    "messageCount": 2,
+                    "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
+                    "compactionCount": 0,
+                    "goal": null,
+                    "scopedModels": [],
+                    "activeToolNames": [],
+                },
+                "messages": [
+                    { "role": "user", "content": "hello", "timestamp": 1 },
+                    { "role": "assistant", "content": "hi there", "provider": "scripted", "model": "faux-1", "usage": { "input": 120, "output": 8 }, "timestamp": 2 },
+                ],
+                "lastEventSequence": 9,
+                "lastEventCursor": { "generation": "g", "sequence": 9 },
+                "children": [],
+            },
+            "replay": { "status": "complete", "toSequence": 9, "toCursor": { "generation": "g", "sequence": 9 } },
+            "lastEventSequence": 9,
+            "lastEventCursor": { "generation": "g", "sequence": 9 },
+            "client": { "id": "c1", "capabilities": ["attach_snapshot", "event_sequence", "slim_attach"] },
+        })
+    }
+
+    #[test]
+    fn reconstructs_slim_attach() {
+        let data = attach_data_from_response(&slim_attach()).unwrap();
+        assert_eq!(data.active_session_id, "abc123def456");
+        let view = reconstruct(&data);
+        assert_eq!(view.chat.len(), 2);
+        assert!(matches!(&view.chat[0], ChatEntry::User { text } if text == "hello"));
+        assert!(matches!(&view.chat[1], ChatEntry::Assistant(m) if m.blocks
+            == vec![MessageBlock::Text("hi there".to_string())]));
+        assert_eq!(view.session_id, "0199-sess");
+        assert_eq!(view.session_name.as_deref(), Some("my session"));
+        assert_eq!(view.last_event_sequence, 9);
+    }
+
+    #[test]
+    fn reconstructs_the_queue_from_session_actions() {
+        let mut attach = slim_attach();
+        attach["snapshot"]["state"]["sessionActions"] = json!({
+            "queuedCount": 2,
+            "steering": ["turn right"],
+            "followUps": ["then summarize"],
+        });
+        let data = attach_data_from_response(&attach).unwrap();
+        let view = reconstruct(&data);
+        assert_eq!(
+            view.queued,
+            crate::queued::QueuedMessages {
+                steering: vec!["turn right".to_string()],
+                follow_ups: vec!["then summarize".to_string()],
+            },
+            "an attach re-syncs the queue strip from the snapshot"
+        );
+    }
+
+    #[test]
+    fn decodes_the_user_bash_event_triple() {
+        // The `!command` lane (TS `runUserBash`): bash_start carries the
+        // command and identity, bash_output one chunk, bash_end the
+        // settled outcome — all decoded whole-object.
+        let start = event_to_update(&json!({
+            "type": "bash_start",
+            "command": "echo hi",
+            "excludeFromContext": false,
+        }))
+        .expect("a bash start");
+        assert_eq!(
+            start,
+            TurnUpdate::BashStart {
+                command: "echo hi".to_string(),
+                exclude_from_context: false,
+                transient: false,
+                run_id: None,
+            }
+        );
+        let side_start = event_to_update(&json!({
+            "type": "bash_start",
+            "command": "echo pane",
+            "excludeFromContext": true,
+            "transient": true,
+            "runId": "run-1",
+        }))
+        .expect("a transient bash start");
+        assert_eq!(
+            side_start,
+            TurnUpdate::BashStart {
+                command: "echo pane".to_string(),
+                exclude_from_context: true,
+                transient: true,
+                run_id: Some("run-1".to_string()),
+            }
+        );
+        assert_eq!(
+            event_to_update(&json!({ "type": "bash_output", "chunk": "hi\n" })),
+            Some(TurnUpdate::BashOutput {
+                chunk: "hi\n".to_string()
+            })
+        );
+        assert_eq!(
+            event_to_update(&json!({
+                "type": "bash_end",
+                "exitCode": 0,
+                "cancelled": false,
+                "truncated": false,
+            })),
+            Some(TurnUpdate::BashEnd {
+                exit_code: Some(0),
+                cancelled: false,
+                truncated: false,
+                full_output_path: None,
+                error_message: None,
+                transient: false,
+                run_id: None,
+            })
+        );
+    }
+
+    #[test]
+    fn decodes_session_action_update_as_the_queue_projection() {
+        let update = event_to_update(&json!({
+            "type": "session_action_update",
+            "actions": {
+                "queuedCount": 1,
+                "steering": [],
+                "followUps": ["queued follow-up"],
+            },
+        }))
+        .expect("a queue update");
+        assert_eq!(
+            update,
+            TurnUpdate::QueueUpdated {
+                steering: vec![],
+                follow_ups: vec!["queued follow-up".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn decodes_auto_retry_events() {
+        let start = event_to_update(&json!({
+            "type": "auto_retry_start",
+            "attempt": 1,
+            "maxAttempts": 2,
+            "delayMs": 50,
+            "errorMessage": "provider down",
+        }))
+        .expect("retry start maps");
+        assert_eq!(
+            start,
+            TurnUpdate::AutoRetryStart {
+                attempt: 1,
+                max_attempts: 2,
+                delay_ms: 50,
+                error_message: "provider down".to_string(),
+                reason: RetryStartReason::Quick,
+            }
+        );
+        let backup = event_to_update(&json!({
+            "type": "auto_retry_start",
+            "attempt": 3,
+            "maxAttempts": 5,
+            "delayMs": 0,
+            "errorMessage": "provider down",
+            "reason": "backup",
+            "backupModel": "prime-inference/glm-5.3",
+        }))
+        .expect("backup switch maps");
+        assert_eq!(
+            backup,
+            TurnUpdate::AutoRetryStart {
+                attempt: 3,
+                max_attempts: 5,
+                delay_ms: 0,
+                error_message: "provider down".to_string(),
+                reason: RetryStartReason::Backup {
+                    backup_model: "prime-inference/glm-5.3".to_string()
+                },
+            }
+        );
+        let end = event_to_update(&json!({
+            "type": "auto_retry_end",
+            "success": false,
+            "attempt": 2,
+            "finalError": "provider down",
+        }))
+        .expect("retry end maps");
+        assert_eq!(
+            end,
+            TurnUpdate::AutoRetryEnd {
+                success: false,
+                attempt: 2,
+                final_error: Some("provider down".to_string()),
+                restored_model: None,
+            }
+        );
+        let settled = event_to_update(&json!({
+            "type": "auto_retry_end",
+            "success": true,
+            "attempt": 2,
+            "restoredModel": "prime-inference/glm-5.3",
+        }))
+        .expect("retry success maps");
+        assert_eq!(
+            settled,
+            TurnUpdate::AutoRetryEnd {
+                success: true,
+                attempt: 2,
+                final_error: None,
+                restored_model: Some("prime-inference/glm-5.3".to_string()),
+            }
+        );
+    }
+
+    /// The python-kernel bootstrap's `starting` partials carry the loader
+    /// note (the same stage text TS hands `setWorkingMessage`); streamed
+    /// `ok` output and non-text payloads do not.
+    #[test]
+    fn loader_note_comes_from_starting_partials_only() {
+        let booting = json!({
+            "content": [
+                { "type": "text", "text": "\u{203a} setting up python kernel (one-time, ~30s)\u{2026}" }
+            ],
+            "details": { "status": "starting" },
+        });
+        assert_eq!(
+            working_message_from_update(&booting).as_deref(),
+            Some("\u{203a} setting up python kernel (one-time, ~30s)\u{2026}")
+        );
+        let streamed = json!({
+            "content": [{ "type": "text", "text": "visual parity ok" }],
+            "details": { "status": "ok" },
+        });
+        assert_eq!(working_message_from_update(&streamed), None);
+        let no_text = json!({
+            "content": [],
+            "details": { "status": "starting" },
+        });
+        assert_eq!(working_message_from_update(&no_text), None);
+    }
+
+    #[test]
+    fn failed_assistant_message_end_maps_final() {
+        let update = event_to_update(&json!({
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "stopReason": "error",
+                "errorMessage": "Provider server error",
+                "content": [],
+            },
+        }))
+        .expect("failed message_end maps");
+        match update {
+            TurnUpdate::AssistantMessage {
+                streaming, message, ..
+            } => {
+                assert!(!streaming, "message_end is final");
+                assert_eq!(message["stopReason"], "error");
+            }
+            other => panic!("unexpected update: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_block_content() {
+        let items = message_value_to_entries(&json!({
+            "role": "user",
+            "content": [{ "text": "hello " }, { "text": "world" }],
+        }));
+        assert_eq!(
+            items,
+            vec![ChatEntry::User {
+                text: "hello world".to_string()
+            }]
+        );
+        let items = message_value_to_entries(&json!({
+            "role": "assistant",
+            "content": [
+                { "type": "thinking", "thinking": "hmm" },
+                { "type": "text", "text": "working" },
+                { "type": "toolCall", "id": "t1", "name": "bash", "arguments": { "command": "ls" } },
+            ],
+        }));
+        assert_eq!(items.len(), 2);
+        assert!(matches!(
+            &items[0],
+            ChatEntry::Assistant(m) if m.blocks.len() == 2 && m.has_tool_calls
+        ));
+        assert!(matches!(&items[1], ChatEntry::Tool(card) if card.name == "bash"));
+    }
+
+    #[test]
+    fn decodes_streamed_events() {
+        let user = event_to_update(&json!({
+            "type": "message_start",
+            "message": { "role": "user", "content": "go" },
+        }))
+        .unwrap();
+        assert_eq!(user, TurnUpdate::UserMessage("go".to_string()));
+        let partial = event_to_update(&json!({
+            "type": "message_update",
+            "message": { "role": "assistant", "content": "work" },
+        }))
+        .unwrap();
+        assert!(matches!(
+            &partial,
+            TurnUpdate::AssistantMessage { message, streaming: true, .. } if message["content"] == "work"
+        ));
+        let final_message = event_to_update(&json!({
+            "type": "message_end",
+            "message": { "role": "assistant", "content": "done" },
+        }))
+        .unwrap();
+        assert!(matches!(
+            &final_message,
+            TurnUpdate::AssistantMessage { message, streaming: false, .. } if message["content"] == "done"
+        ));
+        let ended = event_to_update(&json!({ "type": "turn_end" })).unwrap();
+        assert_eq!(ended, TurnUpdate::TurnEnded { error: None });
+        let failed = event_to_update(&json!({ "type": "turn_end", "error": "boom" })).unwrap();
+        assert_eq!(
+            failed,
+            TurnUpdate::TurnEnded {
+                error: Some("boom".to_string())
+            }
+        );
+        assert_eq!(
+            event_to_update(&json!({ "type": "agent_end" })),
+            Some(TurnUpdate::Idle)
+        );
+    }
+
+    #[test]
+    fn session_command_rows_decode_once() {
+        let echo = json!({
+            "type": "message_start",
+            "message": {
+                "role": "custom",
+                "customType": "session_slash_command",
+                "content": "/goal ship it",
+                "display": true,
+                "details": { "command": { "name": "goal", "args": "ship it", "text": "/goal ship it" } },
+            },
+        });
+        assert_eq!(
+            event_to_update(&echo),
+            Some(TurnUpdate::CustomRow(ChatEntry::SlashCommand {
+                text: "/goal ship it".to_string()
+            }))
+        );
+        // The closing frame of the pair must not duplicate the row.
+        let end = json!({
+            "type": "message_end",
+            "message": echo["message"].clone(),
+        });
+        assert_eq!(event_to_update(&end), Some(TurnUpdate::StatusUpdate));
+
+        let result = json!({
+            "type": "message_start",
+            "message": {
+                "role": "custom",
+                "customType": "session_slash_command_result",
+                "content": "Goal active: ship it",
+                "display": true,
+                "details": {
+                    "command": { "name": "goal", "args": "ship it", "text": "/goal ship it" },
+                    "success": true, "severity": "info",
+                },
+            },
+        });
+        assert_eq!(
+            event_to_update(&result),
+            Some(TurnUpdate::CustomRow(ChatEntry::SlashCommandResult {
+                content: "Goal active: ship it".to_string()
+            }))
+        );
+    }
+
+    #[test]
+    fn session_command_rows_respect_display_and_shape() {
+        // Non-display rows (the refine result) render nothing.
+        let hidden = json!({
+            "role": "custom",
+            "customType": "session_slash_command_result",
+            "content": "Refined continual harness state: 1 edit applied.",
+            "display": false,
+        });
+        assert!(custom_message_entries(&hidden).is_empty());
+        // Unknown displayed custom types render the generic box (the TS
+        // live dispatch fallthrough; harness digests persist with
+        // display=false and render nothing).
+        let other = json!({
+            "role": "custom",
+            "customType": "harness_digest",
+            "content": "digest",
+            "display": true,
+        });
+        assert!(matches!(
+            custom_message_entries(&other).as_slice(),
+            [ChatEntry::CustomPanel(_)]
+        ));
+        // A command row without command details renders the malformed
+        // notice (TS `isSessionSlashCommandMessage` fallback).
+        let malformed = json!({
+            "role": "custom",
+            "customType": "session_slash_command",
+            "content": "/goal",
+            "display": true,
+            "details": {},
+        });
+        assert_eq!(
+            custom_message_entries(&malformed),
+            vec![ChatEntry::User {
+                text: "[Malformed session command message]".to_string()
+            }]
+        );
+    }
+
+    /// A transcript with tool calls replays the way the TS attach does: the
+    /// assistant's tool card stays pending until the matching
+    /// `role: "toolResult"` message completes it; orphan results render
+    /// nothing.
+    #[test]
+    fn transcript_replay_completes_tool_cards() {
+        let transcript = [
+            json!({ "role": "user", "content": "run it", "timestamp": 1 }),
+            json!({
+                "role": "assistant",
+                "content": [
+                    { "type": "text", "text": "calling" },
+                    { "type": "toolCall", "id": "call-1", "name": "ipython", "arguments": {"code": "1"} },
+                ],
+                "provider": "faux", "model": "faux-1",
+                "usage": { "input": 10, "output": 2 }, "stopReason": "toolUse",
+                "timestamp": 2,
+            }),
+            json!({
+                "role": "toolResult",
+                "toolCallId": "call-1",
+                "toolName": "ipython",
+                "content": [{ "type": "text", "text": "42" }],
+                "details": { "durationMs": 3, "status": "ok" },
+                "isError": false,
+                "timestamp": 3,
+            }),
+            json!({
+                "role": "toolResult",
+                "toolCallId": "orphan",
+                "toolName": "ipython",
+                "content": [{ "type": "text", "text": "no card" }],
+                "isError": false,
+                "timestamp": 4,
+            }),
+            json!({
+                "role": "assistant",
+                "content": [{ "type": "text", "text": "done" }],
+                "provider": "faux", "model": "faux-1",
+                "usage": { "input": 10, "output": 2 }, "stopReason": "stop",
+                "timestamp": 5,
+            }),
+        ];
+        let chat = transcript_to_entries(&transcript);
+        // user row, assistant text, tool card, final assistant text.
+        assert_eq!(chat.len(), 4, "chat: {chat:?}");
+        let Some(ChatEntry::Tool(card)) = chat.get(2) else {
+            panic!("tool card at index 2: {chat:?}");
+        };
+        assert!(card.started);
+        assert!(!card.result_partial);
+        let result = card.result.as_ref().expect("result replayed");
+        assert_eq!(
+            result.content,
+            vec![json!({ "type": "text", "text": "42" })]
+        );
+        assert_eq!(result.details, json!({ "durationMs": 3, "status": "ok" }));
+        assert!(!result.is_error);
+    }
+
+    /// A pending card (result absent) replays with no result, like a turn
+    /// still in flight when the session was last persisted.
+    #[test]
+    fn transcript_replay_keeps_pending_cards_without_results() {
+        let transcript = [
+            json!({ "role": "user", "content": "run it", "timestamp": 1 }),
+            json!({
+                "role": "assistant",
+                "content": [
+                    { "type": "toolCall", "id": "call-1", "name": "ipython", "arguments": {} },
+                ],
+                "provider": "faux", "model": "faux-1",
+                "usage": { "input": 10, "output": 2 }, "stopReason": "toolUse",
+                "timestamp": 2,
+            }),
+        ];
+        let chat = transcript_to_entries(&transcript);
+        let Some(ChatEntry::Tool(card)) = chat.get(1) else {
+            panic!("tool card at index 1: {chat:?}");
+        };
+        assert!(!card.started);
+        assert!(card.result.is_none());
+    }
+
+    /// `Reconstructed::push_message` folds a late `toolResult` message onto
+    /// the card an earlier chunk added (streamed snapshot reassembly).
+    #[test]
+    fn push_message_completes_pending_tool_card() {
+        let mut reconstructed = Reconstructed::default();
+        reconstructed.push_message(&json!({
+            "role": "assistant",
+            "content": [
+                { "type": "toolCall", "id": "call-1", "name": "ipython", "arguments": {} },
+            ],
+            "provider": "faux", "model": "faux-1",
+            "usage": { "input": 10, "output": 2 }, "stopReason": "toolUse",
+            "timestamp": 2,
+        }));
+        reconstructed.push_message(&json!({
+            "role": "toolResult",
+            "toolCallId": "call-1",
+            "toolName": "ipython",
+            "content": [{ "type": "text", "text": "out" }],
+            "isError": true,
+            "timestamp": 3,
+        }));
+        assert_eq!(reconstructed.chat.len(), 1);
+        let Some(ChatEntry::Tool(card)) = reconstructed.chat.first() else {
+            panic!("single tool card: {:?}", reconstructed.chat);
+        };
+        let result = card.result.as_ref().expect("result applied");
+        assert!(result.is_error);
+        assert_eq!(
+            result.content,
+            vec![json!({ "type": "text", "text": "out" })]
+        );
+    }
+
+    /// A provider-failure turn replays like the TS transcript: the healthy
+    /// exchange renders once, and every failed retry attempt folds into its
+    /// own error row (TS `buildConversationComponents` pushes one component
+    /// per assistant message, even a content-less failure).
+    #[test]
+    fn transcript_replay_stacks_provider_failure_rows() {
+        let failed_attempt = |timestamp: u64| {
+            json!({
+                "role": "assistant",
+                "content": [],
+                "provider": "prime-inference", "model": "mock-1",
+                "stopReason": "error",
+                "errorMessage": "Connection error.",
+                "timestamp": timestamp,
+            })
+        };
+        let transcript = [
+            json!({ "role": "user", "content": "hello", "timestamp": 1 }),
+            json!({
+                "role": "assistant",
+                "content": [{ "type": "text", "text": "battery hello from mock" }],
+                "provider": "prime-inference", "model": "mock-1",
+                "usage": { "input": 10, "output": 2 }, "stopReason": "stop",
+                "timestamp": 2,
+            }),
+            json!({ "role": "user", "content": "again", "timestamp": 3 }),
+            failed_attempt(4),
+            failed_attempt(5),
+            failed_attempt(6),
+        ];
+        let chat = transcript_to_entries(&transcript);
+        // One user + reply, one user, then one entry per failed attempt.
+        assert_eq!(chat.len(), 6, "chat: {chat:?}");
+        let replies: Vec<&crate::chat::AssistantMessage> = chat
+            .iter()
+            .filter_map(|entry| match entry {
+                ChatEntry::Assistant(message) => Some(message.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(replies.len(), 4);
+        assert_eq!(
+            replies[0].blocks,
+            vec![MessageBlock::Text("battery hello from mock".to_string())]
+        );
+        assert!(replies[0].error.is_none(), "the healthy reply stays clean");
+        for row in &replies[1..] {
+            assert!(row.blocks.is_empty());
+            assert_eq!(
+                row.error.as_deref(),
+                Some("Error: Connection error."),
+                "each failed attempt stacks its own error row"
+            );
+            assert!(!row.aborted);
+        }
+    }
+
+    /// An aborted assistant message folds into its abort row even when the
+    /// message streamed no content (TS renders the abort row always).
+    #[test]
+    fn transcript_replay_renders_contentless_abort() {
+        let transcript = [
+            json!({ "role": "user", "content": "hello", "timestamp": 1 }),
+            json!({
+                "role": "assistant",
+                "content": [],
+                "provider": "faux", "model": "faux-1",
+                "stopReason": "aborted",
+                "timestamp": 2,
+            }),
+        ];
+        let chat = transcript_to_entries(&transcript);
+        assert_eq!(chat.len(), 2, "chat: {chat:?}");
+        let Some(ChatEntry::Assistant(message)) = chat.get(1) else {
+            panic!("abort row: {chat:?}");
+        };
+        assert!(message.blocks.is_empty());
+        assert_eq!(message.error.as_deref(), Some("Operation aborted"));
+        assert!(message.aborted);
+    }
+
+    #[test]
+    fn decodes_compaction_events() {
+        // The start pair (TS `AgentSession.compact` event).
+        assert_eq!(
+            event_to_update(&json!({
+                "type": "compaction_start",
+                "reason": "manual",
+                "customInstructions": "focus on the goal",
+            })),
+            Some(TurnUpdate::CompactionStart {
+                reason: "manual".to_string(),
+                custom_instructions: Some("focus on the goal".to_string()),
+            })
+        );
+        assert_eq!(
+            event_to_update(&json!({ "type": "compaction_start", "reason": "manual" })),
+            Some(TurnUpdate::CompactionStart {
+                reason: "manual".to_string(),
+                custom_instructions: None,
+            })
+        );
+        // Success carries the client-facing result.
+        assert_eq!(
+            event_to_update(&json!({
+                "type": "compaction_end",
+                "reason": "manual",
+                "result": { "summary": "s", "firstKeptEntryId": "e1", "tokensBefore": 12 },
+                "aborted": false,
+                "willRetry": false,
+                "customInstructions": "focus",
+            })),
+            Some(TurnUpdate::CompactionEnd {
+                reason: "manual".to_string(),
+                result: Some(
+                    json!({ "summary": "s", "firstKeptEntryId": "e1", "tokensBefore": 12 })
+                ),
+                custom_instructions: Some("focus".to_string()),
+                aborted: false,
+                error_message: None,
+                error_severity: None,
+            })
+        );
+        // A skip carries the warning message; the result stays absent.
+        assert_eq!(
+            event_to_update(&json!({
+                "type": "compaction_end",
+                "reason": "manual",
+                "aborted": false,
+                "willRetry": false,
+                "errorMessage": "Session is too short to compact",
+                "errorSeverity": "warning",
+            })),
+            Some(TurnUpdate::CompactionEnd {
+                reason: "manual".to_string(),
+                result: None,
+                custom_instructions: None,
+                aborted: false,
+                error_message: Some("Session is too short to compact".to_string()),
+                error_severity: Some("warning".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn transcript_replay_renders_the_compaction_outcome_row() {
+        // A skipped auto-compaction warns (TS `CompactionOutcomeMessageComponent`).
+        let items = message_value_to_entries(&json!({
+            "role": "custom",
+            "customType": "compaction_outcome",
+            "content": "Auto-compaction skipped: not enough context",
+            "display": true,
+            "details": { "reason": "threshold", "outcome": "skipped" },
+        }));
+        assert_eq!(
+            items,
+            vec![ChatEntry::Status {
+                text: "Auto-compaction skipped: not enough context".to_string(),
+                kind: StatusKind::Warning,
+            }]
+        );
+        // A failed overflow recovery errors.
+        let items = message_value_to_entries(&json!({
+            "role": "custom",
+            "customType": "compaction_outcome",
+            "content": "Context overflow recovery failed: boom",
+            "display": true,
+            "details": { "reason": "overflow", "outcome": "failed" },
+        }));
+        assert!(matches!(
+            &items[0],
+            ChatEntry::Status { kind: StatusKind::Error, text }
+                if text == "Context overflow recovery failed: boom"
+        ));
+        // A cancelled compaction errors too (TS: only `skipped` warns).
+        let items = message_value_to_entries(&json!({
+            "role": "custom",
+            "customType": "compaction_outcome",
+            "content": "Compaction cancelled",
+            "display": true,
+            "details": { "reason": "threshold", "outcome": "cancelled" },
+        }));
+        assert!(matches!(
+            &items[0],
+            ChatEntry::Status { kind: StatusKind::Error, text }
+                if text == "Compaction cancelled"
+        ));
+        // An envelope TS `isCompactionOutcomeMessage` rejects renders the
+        // malformed notice (invalid reason and outcome both).
+        for details in [
+            json!({ "reason": "manual", "outcome": "skipped" }),
+            json!({ "reason": "threshold", "outcome": "compacted" }),
+            json!({}),
+        ] {
+            let items = message_value_to_entries(&json!({
+                "role": "custom",
+                "customType": "compaction_outcome",
+                "content": "text",
+                "display": true,
+                "details": details,
+            }));
+            assert_eq!(
+                items,
+                vec![ChatEntry::Status {
+                    text: "[Malformed compaction outcome message]".to_string(),
+                    kind: StatusKind::Error,
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn transcript_replay_renders_the_compaction_summary() {
+        // The attach snapshot's `role: "compactionSummary"` message (the
+        // session store's fold) renders the summary row with its fields.
+        let items = message_value_to_entries(&json!({
+            "role": "compactionSummary",
+            "summary": "the story so far",
+            "tokensBefore": 1234,
+            "retainedMessageCount": 2,
+            "customInstructions": "tests",
+            "timestamp": 1,
+        }));
+        assert_eq!(items.len(), 1);
+        assert!(matches!(
+            &items[0],
+            ChatEntry::CompactionSummary { summary, tokens_before, custom_instructions }
+            if summary == "the story so far"
+                && *tokens_before == 1234
+                && custom_instructions.as_deref() == Some("tests")
+        ));
+    }
+
+    /// A settled content-less assistant message renders nothing (TS: the
+    /// component's rows are empty and spacing stays `hidden`).
+    #[test]
+    fn transcript_replay_skips_contentless_settled_messages() {
+        let items = message_value_to_entries(&json!({
+            "role": "assistant",
+            "content": [],
+            "stopReason": "stop",
+        }));
+        assert_eq!(items, Vec::new());
+        // A provider error beside tool calls renders no message row either:
+        // the cards carry the failure.
+        let items = message_value_to_entries(&json!({
+            "role": "assistant",
+            "content": [
+                { "type": "toolCall", "id": "t1", "name": "bash", "arguments": { "command": "ls" } },
+            ],
+            "stopReason": "error",
+            "errorMessage": "Connection error.",
+        }));
+        assert_eq!(items.len(), 1);
+        assert!(matches!(&items[0], ChatEntry::Tool(card) if card.name == "bash"));
+    }
+
+    /// A `goal_update` event decodes to the wire goal payload (the session
+    /// view owns announcement and tray rendering).
+    #[test]
+    fn goal_update_decodes_the_goal_payload() {
+        let update = event_to_update(&json!({
+            "type": "goal_update",
+            "goal": {
+                "active": false,
+                "status": "complete",
+                "goalId": "g-1",
+                "objective": "ship it",
+                "tokensUsed": 120,
+                "timeUsedSeconds": 3,
+                "continuationsUsed": 2,
+                "lastReason": "Goal achieved"
+            }
+        }))
+        .unwrap();
+        let TurnUpdate::GoalUpdate(goal) = update else {
+            panic!("expected a goal update");
+        };
+        let goal: pa_types::goal::GoalState = serde_json::from_value(goal).unwrap();
+        assert_eq!(goal.status, pa_types::goal::GoalStatus::Complete);
+        assert_eq!(goal.objective.as_deref(), Some("ship it"));
+        assert_eq!(goal.last_reason.as_deref(), Some("Goal achieved"));
+    }
+
+    /// The attach snapshot's `state.goal` rehydrates with the session (TS
+    /// `snapshot.ts: goal: session.goalState`); a null goal stays absent.
+    #[test]
+    fn attach_snapshot_carries_the_goal_state() {
+        let attach = json!({
+            "protocol": { "name": "prime-agent.daemon", "version": 7 },
+            "activeSessionId": "abc123def456",
+            "snapshot": {
+                "activeSessionId": "abc123def456",
+                "summary": { "id": "abc123def456", "cwd": "/tmp" },
+                "state": {
+                    "activeSessionId": "abc123def456",
+                    "cwd": "/tmp",
+                    "sessionId": "0199-sess",
+                    "model": null,
+                    "thinkingLevel": "default",
+                    "serviceTier": "auto",
+                    "isStreaming": false,
+                    "isCompacting": false,
+                    "retryAttempt": 0,
+                    "steeringMode": "all",
+                    "followUpMode": "all",
+                    "autoCompactionEnabled": false,
+                    "messageCount": 0,
+                    "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
+                    "compactionCount": 0,
+                    "goal": {
+                        "active": true,
+                        "status": "active",
+                        "objective": "keep shipping",
+                        "tokensUsed": 10,
+                        "timeUsedSeconds": 1,
+                        "continuationsUsed": 0
+                    },
+                    "scopedModels": [],
+                    "activeToolNames": []
+                },
+                "messages": [],
+                "lastEventSequence": 3,
+                "lastEventCursor": { "generation": 1, "sequence": 3 }
+            },
+            "lastEventSequence": 3
+        });
+        let data = attach_data_from_response(&attach).unwrap();
+        let reconstructed = reconstruct(&data);
+        let goal = reconstructed.goal.expect("snapshot goal");
+        assert_eq!(goal.status, pa_types::goal::GoalStatus::Active);
+        assert_eq!(goal.objective.as_deref(), Some("keep shipping"));
+    }
+}

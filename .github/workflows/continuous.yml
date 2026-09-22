@@ -1,0 +1,85 @@
+# Continuous build pipeline for Prime Agent (Rust).
+#
+# Builds the 4-target release matrix on every push to `main` or `rust` and
+# uploads the tarballs as workflow artifacts (downloadable from the run page).
+# Does NOT create tags or releases — the org repo's release history stays
+# owned by the merged product's release workflow (release.yml).
+# No Rust toolchain needed on the consumer side: the kernel runtime sidecar
+# ships inside every tarball.
+#
+name: continuous
+
+on:
+  push:
+    branches:
+      - main
+      - rust
+
+permissions: {}
+
+concurrency:
+  group: continuous-main
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: build-${{ matrix.target }}
+    runs-on: ${{ matrix.runs-on }}
+    permissions:
+      contents: read
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runs-on: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runs-on: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            runs-on: macos-14
+          - target: x86_64-apple-darwin
+            runs-on: macos-15-intel  # macos-13 is retired; this is the Intel runner now
+    env:
+      # AppleDouble resource forks must not leak into the archive; the
+      # assembler additionally enforces plain-file payloads.
+      COPYFILE_DISABLE: "1"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
+        with:
+          toolchain: "1.98.1"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build (release, locked)
+        run: cargo build --release --locked --target ${{ matrix.target }} -j 4
+      - name: Assemble tarball + checksums + manifest (commit-stamped)
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
+          [[ -n "${version}" ]] || { echo "could not read the workspace version"; exit 1; }
+          python3 scripts/release/assemble_artifacts.py \
+            --repo-root . \
+            --version "${version}" \
+            --target "${{ matrix.target }}" \
+            --sha "${GITHUB_SHA}" \
+            --binary "target/${{ matrix.target }}/release/prime-agent" \
+            --out-dir "target/${{ matrix.target }}/dist"
+          cat "target/${{ matrix.target }}/dist/manifest.json"
+      - name: Upload artifacts
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: artifacts-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/dist/prime-agent-*
+            target/${{ matrix.target }}/dist/SHA256SUMS
+            target/${{ matrix.target }}/dist/manifest.json
+          if-no-files-found: error

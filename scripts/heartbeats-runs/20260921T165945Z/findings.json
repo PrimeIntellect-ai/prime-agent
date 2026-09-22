@@ -1,0 +1,68 @@
+[
+  {
+    "side": "ts",
+    "ok": true,
+    "summary": "seed turn ran",
+    "evidence": ""
+  },
+  {
+    "side": "ts",
+    "ok": true,
+    "summary": "user heartbeat set through the wire",
+    "evidence": ""
+  },
+  {
+    "side": "ts",
+    "ok": true,
+    "summary": "agent heartbeat turn ran",
+    "evidence": ""
+  },
+  {
+    "side": "ts",
+    "ok": true,
+    "summary": "wire catalog lists the user and agent heartbeat",
+    "evidence": "02-wire-catalog.json"
+  },
+  {
+    "side": "ts",
+    "ok": true,
+    "summary": "/heartbeats renders the list with both heartbeats",
+    "evidence": "04-opened.txt"
+  },
+  {
+    "side": "ts",
+    "ok": false,
+    "summary": "down moves the inline selection",
+    "evidence": "05-navigated.txt"
+  },
+  {
+    "side": "ts",
+    "ok": true,
+    "summary": "enter opens the action pane with the TS actions",
+    "evidence": "06-actions.txt"
+  },
+  {
+    "side": "ts",
+    "ok": true,
+    "summary": "applying the action returns to the list with the paused status",
+    "evidence": "07-applied.txt"
+  },
+  {
+    "side": "ts",
+    "ok": true,
+    "summary": "the pause reached the daemon catalog",
+    "evidence": "08-applied-catalog.json"
+  },
+  {
+    "side": "ts",
+    "ok": true,
+    "summary": "escape closes the view (the transcript returns)",
+    "evidence": "09-closed.txt"
+  },
+  {
+    "side": "ts",
+    "ok": true,
+    "summary": "the tray heartbeat label renders after close",
+    "evidence": "09-closed.txt"
+  }
+]

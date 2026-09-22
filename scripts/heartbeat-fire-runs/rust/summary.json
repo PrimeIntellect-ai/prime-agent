@@ -1,0 +1,56 @@
+[
+  {
+    "side": "rust",
+    "ok": true,
+    "summary": "seed turn ran",
+    "evidence": ""
+  },
+  {
+    "side": "rust",
+    "ok": true,
+    "summary": "agent heartbeat turn ran",
+    "evidence": ""
+  },
+  {
+    "side": "rust",
+    "ok": true,
+    "summary": "catalog lists the agent heartbeat",
+    "evidence": ""
+  },
+  {
+    "side": "rust",
+    "ok": true,
+    "summary": "created job is active and unrun",
+    "evidence": ""
+  },
+  {
+    "side": "rust",
+    "ok": true,
+    "summary": "created job runCount is 0",
+    "evidence": ""
+  },
+  {
+    "side": "rust",
+    "ok": true,
+    "summary": "the heartbeat fired within the interval (runCount >= 1, runCount=1)",
+    "evidence": "02-fired-catalog.json"
+  },
+  {
+    "side": "rust",
+    "ok": true,
+    "summary": "the fire stamped lastRunAt",
+    "evidence": ""
+  },
+  {
+    "side": "rust",
+    "ok": true,
+    "summary": "the fire rolled nextRunAt past the boundary",
+    "evidence": ""
+  },
+  {
+    "side": "rust",
+    "ok": true,
+    "summary": "the fired prompt landed in the session transcript",
+    "evidence": "03-transcript-hit.txt"
+  }
+]

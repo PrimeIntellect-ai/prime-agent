@@ -1,47 +1,4 @@
-node_modules/
-dist/
-*.log
-.DS_Store
-*.tsbuildinfo
-# packages/*/node_modules/
-packages/*/dist/
-packages/*/dist-chrome/
-packages/*/dist-firefox/
-*.cpuprofile
 
-# Environment
-.env
-.prime/
-
-# Editor files
-.vscode/
-.zed/
-.idea/
-.claude/
-*.swp
-*.swo
-*~
-
-# Package specific
-.npm/
-coverage/
-.nyc_output/
-.pi_config/
-tui-debug.log
-compaction-results/
-.opencode/
-syntax.jsonl
-out.jsonl
-pi-*.html
-out.html
-packages/coding-agent/binaries/
-packages/coding-agent/release/
-todo.md
-plans/
-.prime/agent/
-collect.sh
-.kernel-venv/
-.worktrees/
-
+/target
+/bin/
 __pycache__/
-*.pyc

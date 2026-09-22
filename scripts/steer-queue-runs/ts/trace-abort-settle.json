@@ -1,0 +1,927 @@
+[
+ {
+  "type": "agent_start"
+ },
+ {
+  "type": "turn_start"
+ },
+ {
+  "type": "message_start",
+  "message": {
+   "role": "custom",
+   "customType": "harness_digest",
+   "content": "[harness-digest]\n\nThe persistent memories produced across this session so far:\n\n<harness_state>\n# Continual Harness State\n\nLocal continual harness entries belong to this Prime Agent session. Global continual harness entries persist across Prime Agent sessions.\nThe continual harness entries below are compact summaries, not full descriptions. Use them as routing/context hints; inspect or refine the underlying continual harness entry only when detail matters.\nDefault to local continual harness refinement for current task progress, temporary blockers, and session coordination. Use global continual harness refinement only for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.\nUse these continual harness prompt notes, memories, skills, and subagent specs when they are relevant. The base system prompt is immutable; prompt entries below are supplemental notes only.\n\nWhen to call `await refine.run()`: after a repeated failure, a reusable tactic emerges, a repeated delegation role should become a subagent spec, a repeated procedure should become a skill, a durable fact/preference should become a memory, a narrow behavioral policy should become a prompt addendum, a user corrects behavior that should persist locally or globally, validation shows a continual harness entry is wrong, or a skill/subagent/memory/prompt note should be created, updated, deleted, or rolled back. Keep `await refine.run()` continual harness edits small and evidence-backed.\n\nCall contract: read each installed Python skill's SKILL.md and call its documented module function in the Python REPL; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm.spawn('sub-task', name='worker')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries.\n\nprompt: 0\n\nmemory: 0\n\nskill: 0\n\nsubagent: 0\n\nNo saved harness entries yet.\n\nrecent refinements: 0\n</harness_state>",
+   "display": false,
+   "details": {
+    "digest": "# Continual Harness State\n\nLocal continual harness entries belong to this Prime Agent session. Global continual harness entries persist across Prime Agent sessions.\nThe continual harness entries below are compact summaries, not full descriptions. Use them as routing/context hints; inspect or refine the underlying continual harness entry only when detail matters.\nDefault to local continual harness refinement for current task progress, temporary blockers, and session coordination. Use global continual harness refinement only for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.\nUse these continual harness prompt notes, memories, skills, and subagent specs when they are relevant. The base system prompt is immutable; prompt entries below are supplemental notes only.\n\nWhen to call `await refine.run()`: after a repeated failure, a reusable tactic emerges, a repeated delegation role should become a subagent spec, a repeated procedure should become a skill, a durable fact/preference should become a memory, a narrow behavioral policy should become a prompt addendum, a user corrects behavior that should persist locally or globally, validation shows a continual harness entry is wrong, or a skill/subagent/memory/prompt note should be created, updated, deleted, or rolled back. Keep `await refine.run()` continual harness edits small and evidence-backed.\n\nCall contract: read each installed Python skill's SKILL.md and call its documented module function in the Python REPL; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm.spawn('sub-task', name='worker')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries.\n\nprompt: 0\n\nmemory: 0\n\nskill: 0\n\nsubagent: 0\n\nNo saved harness entries yet.\n\nrecent refinements: 0"
+   },
+   "timestamp": 1790061281239
+  }
+ },
+ {
+  "type": "message_end",
+  "message": {
+   "role": "custom",
+   "customType": "harness_digest",
+   "content": "[harness-digest]\n\nThe persistent memories produced across this session so far:\n\n<harness_state>\n# Continual Harness State\n\nLocal continual harness entries belong to this Prime Agent session. Global continual harness entries persist across Prime Agent sessions.\nThe continual harness entries below are compact summaries, not full descriptions. Use them as routing/context hints; inspect or refine the underlying continual harness entry only when detail matters.\nDefault to local continual harness refinement for current task progress, temporary blockers, and session coordination. Use global continual harness refinement only for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.\nUse these continual harness prompt notes, memories, skills, and subagent specs when they are relevant. The base system prompt is immutable; prompt entries below are supplemental notes only.\n\nWhen to call `await refine.run()`: after a repeated failure, a reusable tactic emerges, a repeated delegation role should become a subagent spec, a repeated procedure should become a skill, a durable fact/preference should become a memory, a narrow behavioral policy should become a prompt addendum, a user corrects behavior that should persist locally or globally, validation shows a continual harness entry is wrong, or a skill/subagent/memory/prompt note should be created, updated, deleted, or rolled back. Keep `await refine.run()` continual harness edits small and evidence-backed.\n\nCall contract: read each installed Python skill's SKILL.md and call its documented module function in the Python REPL; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm.spawn('sub-task', name='worker')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries.\n\nprompt: 0\n\nmemory: 0\n\nskill: 0\n\nsubagent: 0\n\nNo saved harness entries yet.\n\nrecent refinements: 0\n</harness_state>",
+   "display": false,
+   "details": {
+    "digest": "# Continual Harness State\n\nLocal continual harness entries belong to this Prime Agent session. Global continual harness entries persist across Prime Agent sessions.\nThe continual harness entries below are compact summaries, not full descriptions. Use them as routing/context hints; inspect or refine the underlying continual harness entry only when detail matters.\nDefault to local continual harness refinement for current task progress, temporary blockers, and session coordination. Use global continual harness refinement only for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.\nUse these continual harness prompt notes, memories, skills, and subagent specs when they are relevant. The base system prompt is immutable; prompt entries below are supplemental notes only.\n\nWhen to call `await refine.run()`: after a repeated failure, a reusable tactic emerges, a repeated delegation role should become a subagent spec, a repeated procedure should become a skill, a durable fact/preference should become a memory, a narrow behavioral policy should become a prompt addendum, a user corrects behavior that should persist locally or globally, validation shows a continual harness entry is wrong, or a skill/subagent/memory/prompt note should be created, updated, deleted, or rolled back. Keep `await refine.run()` continual harness edits small and evidence-backed.\n\nCall contract: read each installed Python skill's SKILL.md and call its documented module function in the Python REPL; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm.spawn('sub-task', name='worker')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries.\n\nprompt: 0\n\nmemory: 0\n\nskill: 0\n\nsubagent: 0\n\nNo saved harness entries yet.\n\nrecent refinements: 0"
+   },
+   "timestamp": 1790061281239
+  }
+ },
+ {
+  "type": "message_start",
+  "message": {
+   "role": "user",
+   "content": [
+    {
+     "type": "text",
+     "text": "three tools prompt the queue drives"
+    }
+   ],
+   "timestamp": 1790061281238
+  }
+ },
+ {
+  "type": "message_end",
+  "message": {
+   "role": "user",
+   "content": [
+    {
+     "type": "text",
+     "text": "three tools prompt the queue drives"
+    }
+   ],
+   "timestamp": 1790061281238
+  }
+ },
+ {
+  "type": "message_start",
+  "message": {
+   "role": "assistant",
+   "content": [],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "usage": {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 0,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790061281298
+  }
+ },
+ {
+  "type": "message_update",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "toolCall",
+     "id": "call_battery_1",
+     "name": "ipython",
+     "arguments": {},
+     "partialArgs": "{\"code\": \"import time\\nopen('wedge-started','w').write('1')\\ntime.sl",
+     "streamIndex": 0
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "usage": {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 0,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790061281298
+  },
+  "assistantMessageEvent": {
+   "type": "toolcall_start",
+   "contentIndex": 0
+  }
+ },
+ {
+  "type": "message_update",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "toolCall",
+     "id": "call_battery_1",
+     "name": "ipython",
+     "arguments": {
+      "code": "import time\nopen('wedge-started','w').write('1')\ntime.sleep(300)\nopen('wedge-finished','w').write('1')\nprint('cell done')"
+     },
+     "partialArgs": "{\"code\": \"import time\\nopen('wedge-started','w').write('1')\\ntime.sl",
+     "streamIndex": 0
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "usage": {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 0,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790061281298
+  },
+  "assistantMessageEvent": {
+   "type": "toolcall_delta",
+   "contentIndex": 0,
+   "delta": ""
+  }
+ },
+ {
+  "type": "message_update",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "toolCall",
+     "id": "call_battery_1",
+     "name": "ipython",
+     "arguments": {
+      "code": "import time\nopen('wedge-started','w').write('1')\ntime.sleep(300)\nopen('wedge-finished','w').write('1')\nprint('cell done')"
+     },
+     "partialArgs": "{\"code\": \"import time\\nopen('wedge-started','w').write('1')\\ntime.sl",
+     "streamIndex": 0
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "usage": {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 0,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790061281298
+  },
+  "assistantMessageEvent": {
+   "type": "toolcall_delta",
+   "contentIndex": 0,
+   "delta": "{\"code\": \"import time\\nopen('wedge-started','w').write('1')\\ntime.sl"
+  }
+ },
+ {
+  "type": "message_update",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "toolCall",
+     "id": "call_battery_1",
+     "name": "ipython",
+     "arguments": {
+      "code": "import time\nopen('wedge-started','w').write('1')\ntime.sleep(300)\nopen('wedge-finished','w').write('1')\nprint('cell done')"
+     },
+     "partialArgs": "{\"code\": \"import time\\nopen('wedge-started','w').write('1')\\ntime.sl",
+     "streamIndex": 0
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "usage": {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 0,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790061281298
+  },
+  "assistantMessageEvent": {
+   "type": "toolcall_delta",
+   "contentIndex": 0,
+   "delta": "eep(300)\\nopen('wedge-finished','w').write('1')\\nprint('cell done')\"}"
+  }
+ },
+ {
+  "type": "message_update",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "toolCall",
+     "id": "call_battery_1",
+     "name": "ipython",
+     "arguments": {
+      "code": "import time\nopen('wedge-started','w').write('1')\ntime.sleep(300)\nopen('wedge-finished','w').write('1')\nprint('cell done')"
+     }
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "usage": {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 0,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790061281298
+  },
+  "assistantMessageEvent": {
+   "type": "toolcall_end",
+   "contentIndex": 0,
+   "toolCall": {
+    "type": "toolCall",
+    "id": "call_battery_1",
+    "name": "ipython",
+    "arguments": {
+     "code": "import time\nopen('wedge-started','w').write('1')\ntime.sleep(300)\nopen('wedge-finished','w').write('1')\nprint('cell done')"
+    }
+   }
+  }
+ },
+ {
+  "type": "message_end",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "toolCall",
+     "id": "call_battery_1",
+     "name": "ipython",
+     "arguments": {
+      "code": "import time\nopen('wedge-started','w').write('1')\ntime.sleep(300)\nopen('wedge-finished','w').write('1')\nprint('cell done')"
+     }
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "usage": {
+    "input": 20,
+    "output": 10,
+    "cacheRead": 80,
+    "cacheWrite": 0,
+    "totalTokens": 110,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790061281298,
+   "responseId": "chatcmpl-battery"
+  }
+ },
+ {
+  "type": "tool_execution_start",
+  "toolCallId": "call_battery_1",
+  "toolName": "ipython",
+  "args": {
+   "code": "import time\nopen('wedge-started','w').write('1')\ntime.sleep(300)\nopen('wedge-finished','w').write('1')\nprint('cell done')"
+  }
+ },
+ {
+  "type": "tool_execution_update",
+  "toolCallId": "call_battery_1",
+  "toolName": "ipython",
+  "args": {
+   "code": "import time\nopen('wedge-started','w').write('1')\ntime.sleep(300)\nopen('wedge-finished','w').write('1')\nprint('cell done')"
+  },
+  "partialResult": {
+   "content": [
+    {
+     "type": "text",
+     "text": "Starting Python kernel..."
+    }
+   ],
+   "details": {
+    "status": "starting"
+   }
+  }
+ },
+ {
+  "type": "tool_execution_update",
+  "toolCallId": "call_battery_1",
+  "toolName": "ipython",
+  "args": {
+   "code": "import time\nopen('wedge-started','w').write('1')\ntime.sleep(300)\nopen('wedge-finished','w').write('1')\nprint('cell done')"
+  },
+  "partialResult": {
+   "content": [
+    {
+     "type": "text",
+     "text": "Warning: Python skills unavailable in PRIME_AGENT_KERNEL_PYTHON and will be disabled: refine (refine)"
+    }
+   ],
+   "details": {
+    "status": "starting"
+   }
+  }
+ },
+ {
+  "type": "tool_execution_update",
+  "toolCallId": "call_battery_1",
+  "toolName": "ipython",
+  "args": {
+   "code": "import time\nopen('wedge-started','w').write('1')\ntime.sleep(300)\nopen('wedge-finished','w').write('1')\nprint('cell done')"
+  },
+  "partialResult": {
+   "content": [
+    {
+     "type": "text",
+     "text": "Restoring Python state..."
+    }
+   ],
+   "details": {
+    "status": "starting"
+   }
+  }
+ },
+ {
+  "type": "tool_execution_update",
+  "toolCallId": "call_battery_1",
+  "toolName": "ipython",
+  "args": {
+   "code": "import time\nopen('wedge-started','w').write('1')\ntime.sleep(300)\nopen('wedge-finished','w').write('1')\nprint('cell done')"
+  },
+  "partialResult": {
+   "content": [
+    {
+     "type": "text",
+     "text": "Preparing Python runtime..."
+    }
+   ],
+   "details": {
+    "status": "starting"
+   }
+  }
+ },
+ {
+  "type": "tool_execution_end",
+  "toolCallId": "call_battery_1",
+  "toolName": "ipython",
+  "result": {
+   "content": [
+    {
+     "type": "text",
+     "text": "Request was aborted"
+    }
+   ],
+   "details": {}
+  },
+  "isError": true
+ },
+ {
+  "type": "message_start",
+  "message": {
+   "role": "toolResult",
+   "toolCallId": "call_battery_1",
+   "toolName": "ipython",
+   "content": [
+    {
+     "type": "text",
+     "text": "Request was aborted"
+    }
+   ],
+   "details": {},
+   "isError": true,
+   "timestamp": 1790061283602
+  }
+ },
+ {
+  "type": "message_end",
+  "message": {
+   "role": "toolResult",
+   "toolCallId": "call_battery_1",
+   "toolName": "ipython",
+   "content": [
+    {
+     "type": "text",
+     "text": "Request was aborted"
+    }
+   ],
+   "details": {},
+   "isError": true,
+   "timestamp": 1790061283602
+  }
+ },
+ {
+  "type": "turn_end",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "toolCall",
+     "id": "call_battery_1",
+     "name": "ipython",
+     "arguments": {
+      "code": "import time\nopen('wedge-started','w').write('1')\ntime.sleep(300)\nopen('wedge-finished','w').write('1')\nprint('cell done')"
+     }
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "usage": {
+    "input": 20,
+    "output": 10,
+    "cacheRead": 80,
+    "cacheWrite": 0,
+    "totalTokens": 110,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790061281298,
+   "responseId": "chatcmpl-battery"
+  },
+  "toolResults": [
+   {
+    "role": "toolResult",
+    "toolCallId": "call_battery_1",
+    "toolName": "ipython",
+    "content": [
+     {
+      "type": "text",
+      "text": "Request was aborted"
+     }
+    ],
+    "details": {},
+    "isError": true,
+    "timestamp": 1790061283602
+   }
+  ]
+ },
+ {
+  "type": "agent_end",
+  "messages": [
+   {
+    "role": "custom",
+    "customType": "harness_digest",
+    "content": "[harness-digest]\n\nThe persistent memories produced across this session so far:\n\n<harness_state>\n# Continual Harness State\n\nLocal continual harness entries belong to this Prime Agent session. Global continual harness entries persist across Prime Agent sessions.\nThe continual harness entries below are compact summaries, not full descriptions. Use them as routing/context hints; inspect or refine the underlying continual harness entry only when detail matters.\nDefault to local continual harness refinement for current task progress, temporary blockers, and session coordination. Use global continual harness refinement only for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.\nUse these continual harness prompt notes, memories, skills, and subagent specs when they are relevant. The base system prompt is immutable; prompt entries below are supplemental notes only.\n\nWhen to call `await refine.run()`: after a repeated failure, a reusable tactic emerges, a repeated delegation role should become a subagent spec, a repeated procedure should become a skill, a durable fact/preference should become a memory, a narrow behavioral policy should become a prompt addendum, a user corrects behavior that should persist locally or globally, validation shows a continual harness entry is wrong, or a skill/subagent/memory/prompt note should be created, updated, deleted, or rolled back. Keep `await refine.run()` continual harness edits small and evidence-backed.\n\nCall contract: read each installed Python skill's SKILL.md and call its documented module function in the Python REPL; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm.spawn('sub-task', name='worker')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries.\n\nprompt: 0\n\nmemory: 0\n\nskill: 0\n\nsubagent: 0\n\nNo saved harness entries yet.\n\nrecent refinements: 0\n</harness_state>",
+    "display": false,
+    "details": {
+     "digest": "# Continual Harness State\n\nLocal continual harness entries belong to this Prime Agent session. Global continual harness entries persist across Prime Agent sessions.\nThe continual harness entries below are compact summaries, not full descriptions. Use them as routing/context hints; inspect or refine the underlying continual harness entry only when detail matters.\nDefault to local continual harness refinement for current task progress, temporary blockers, and session coordination. Use global continual harness refinement only for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.\nUse these continual harness prompt notes, memories, skills, and subagent specs when they are relevant. The base system prompt is immutable; prompt entries below are supplemental notes only.\n\nWhen to call `await refine.run()`: after a repeated failure, a reusable tactic emerges, a repeated delegation role should become a subagent spec, a repeated procedure should become a skill, a durable fact/preference should become a memory, a narrow behavioral policy should become a prompt addendum, a user corrects behavior that should persist locally or globally, validation shows a continual harness entry is wrong, or a skill/subagent/memory/prompt note should be created, updated, deleted, or rolled back. Keep `await refine.run()` continual harness edits small and evidence-backed.\n\nCall contract: read each installed Python skill's SKILL.md and call its documented module function in the Python REPL; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm.spawn('sub-task', name='worker')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries.\n\nprompt: 0\n\nmemory: 0\n\nskill: 0\n\nsubagent: 0\n\nNo saved harness entries yet.\n\nrecent refinements: 0"
+    },
+    "timestamp": 1790061281239
+   },
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "three tools prompt the queue drives"
+     }
+    ],
+    "timestamp": 1790061281238
+   },
+   {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "toolCall",
+      "id": "call_battery_1",
+      "name": "ipython",
+      "arguments": {
+       "code": "import time\nopen('wedge-started','w').write('1')\ntime.sleep(300)\nopen('wedge-finished','w').write('1')\nprint('cell done')"
+      }
+     }
+    ],
+    "api": "openai-completions",
+    "provider": "prime-inference",
+    "model": "mock-1",
+    "usage": {
+     "input": 20,
+     "output": 10,
+     "cacheRead": 80,
+     "cacheWrite": 0,
+     "totalTokens": 110,
+     "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0
+     }
+    },
+    "stopReason": "stop",
+    "timestamp": 1790061281298,
+    "responseId": "chatcmpl-battery"
+   },
+   {
+    "role": "toolResult",
+    "toolCallId": "call_battery_1",
+    "toolName": "ipython",
+    "content": [
+     {
+      "type": "text",
+      "text": "Request was aborted"
+     }
+    ],
+    "details": {},
+    "isError": true,
+    "timestamp": 1790061283602
+   }
+  ]
+ },
+ {
+  "type": "session_action_update",
+  "actions": {
+   "queuedCount": 1,
+   "steering": [
+    "resume the session please"
+   ],
+   "followUps": []
+  }
+ },
+ {
+  "type": "session_action_update",
+  "actions": {
+   "queuedCount": 0,
+   "steering": [],
+   "followUps": [],
+   "active": {
+    "kind": "turn",
+    "phase": "preparing",
+    "label": "resume the session please"
+   }
+  }
+ },
+ {
+  "type": "session_action_update",
+  "actions": {
+   "queuedCount": 0,
+   "steering": [],
+   "followUps": [],
+   "active": {
+    "kind": "turn",
+    "phase": "committing",
+    "label": "resume the session please"
+   }
+  }
+ },
+ {
+  "type": "agent_start"
+ },
+ {
+  "type": "session_action_update",
+  "actions": {
+   "queuedCount": 0,
+   "steering": [],
+   "followUps": [],
+   "active": {
+    "kind": "turn",
+    "phase": "running",
+    "label": "resume the session please"
+   }
+  }
+ },
+ {
+  "type": "turn_start"
+ },
+ {
+  "type": "message_start",
+  "message": {
+   "role": "user",
+   "content": [
+    {
+     "type": "text",
+     "text": "resume the session please"
+    }
+   ],
+   "timestamp": 1790061287022
+  }
+ },
+ {
+  "type": "message_end",
+  "message": {
+   "role": "user",
+   "content": [
+    {
+     "type": "text",
+     "text": "resume the session please"
+    }
+   ],
+   "timestamp": 1790061287022
+  }
+ },
+ {
+  "type": "message_start",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "the cell completed"
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "usage": {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 0,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790061287070
+  }
+ },
+ {
+  "type": "message_update",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": ""
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "usage": {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 0,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790061287070
+  },
+  "assistantMessageEvent": {
+   "type": "text_start",
+   "contentIndex": 0
+  }
+ },
+ {
+  "type": "message_update",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "the cell completed"
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "usage": {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 0,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790061287070
+  },
+  "assistantMessageEvent": {
+   "type": "text_delta",
+   "contentIndex": 0,
+   "delta": "the cell completed"
+  }
+ },
+ {
+  "type": "message_update",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "the cell completed"
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "usage": {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 0,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790061287070
+  },
+  "assistantMessageEvent": {
+   "type": "text_end",
+   "contentIndex": 0,
+   "content": "the cell completed"
+  }
+ },
+ {
+  "type": "message_end",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "the cell completed"
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "usage": {
+    "input": 20,
+    "output": 10,
+    "cacheRead": 80,
+    "cacheWrite": 0,
+    "totalTokens": 110,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790061287070,
+   "responseId": "chatcmpl-battery"
+  }
+ },
+ {
+  "type": "turn_end",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "the cell completed"
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "usage": {
+    "input": 20,
+    "output": 10,
+    "cacheRead": 80,
+    "cacheWrite": 0,
+    "totalTokens": 110,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790061287070,
+   "responseId": "chatcmpl-battery"
+  },
+  "toolResults": []
+ },
+ {
+  "type": "agent_end",
+  "messages": [
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "resume the session please"
+     }
+    ],
+    "timestamp": 1790061287022
+   },
+   {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "text",
+      "text": "the cell completed"
+     }
+    ],
+    "api": "openai-completions",
+    "provider": "prime-inference",
+    "model": "mock-1",
+    "usage": {
+     "input": 20,
+     "output": 10,
+     "cacheRead": 80,
+     "cacheWrite": 0,
+     "totalTokens": 110,
+     "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0
+     }
+    },
+    "stopReason": "stop",
+    "timestamp": 1790061287070,
+    "responseId": "chatcmpl-battery"
+   }
+  ]
+ },
+ {
+  "type": "session_action_update",
+  "actions": {
+   "queuedCount": 0,
+   "steering": [],
+   "followUps": []
+  }
+ }
+]

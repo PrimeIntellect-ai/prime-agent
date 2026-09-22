@@ -1,0 +1,25 @@
+{
+ "version": 2,
+ "workerId": "X",
+ "pid": 0,
+ "socketPath": "X",
+ "recoveryJournalPath": "X",
+ "supervisorSocketPath": "X",
+ "authenticationToken": "X",
+ "workerInstanceId": "X",
+ "rootActiveSessionId": "X",
+ "ownerClientId": "X",
+ "rootSessionId": "X",
+ "sessionFile": "X",
+ "sessionDir": "X",
+ "createdAt": "2026-09-16T20:21:28.420Z",
+ "updatedAt": "2026-09-16T20:21:28.490Z",
+ "lifecycle": "ready",
+ "createCommand": {
+  "type": "create",
+  "sessionPath": "X",
+  "cwd": "X",
+  "sessionDir": "X"
+ },
+ "consecutiveFailures": 0
+}

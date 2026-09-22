@@ -1,0 +1,235 @@
+{
+ "run": "perf-wave-20260921",
+ "recorded": "2026-09-21",
+ "note": "Rust-side medians from the fresh TS-vs-Rust wave (see BENCHMARKS.md); the gate flags a fresh rust metric >10% worse than these.",
+ "results": {
+  "startup_typing": {
+   "ts": {
+    "ready_s_median": 1.539,
+    "first_frame_s_median": 1.511,
+    "typing_ms_median": 41.1,
+    "typing_ms_p95": 63.3,
+    "typing_samples": 125,
+    "launches": 5
+   },
+   "rust": {
+    "ready_s_median": 0.332,
+    "first_frame_s_median": 0.332,
+    "typing_ms_median": 39.5,
+    "typing_ms_p95": 82.1,
+    "typing_samples": 125,
+    "launches": 5
+   }
+  },
+  "idle_rss": {
+   "ts": {
+    "total_mb_median": 998.3,
+    "by_role_kb_median": {
+     "daemon": 507992,
+     "interactive": 258360,
+     "kernel": 41532,
+     "other": 214608
+    },
+    "trials": 3
+   },
+   "rust": {
+    "total_mb_median": 165.5,
+    "by_role_kb_median": {
+     "daemon": 32952,
+     "interactive": 42548,
+     "kernel": 42288,
+     "worker": 43132
+    },
+    "trials": 3
+   }
+  },
+  "load_rss": {
+   "ts": {
+    "total_mb": 2830.8,
+    "by_role_kb": {
+     "daemon": 1571884,
+     "other": 224584,
+     "interactive": 978632,
+     "kernel": 123632
+    },
+    "panes_settled": 3
+   },
+   "rust": {
+    "total_mb": 784.0,
+    "by_role_kb": {
+     "daemon": 32176,
+     "other": 11792,
+     "interactive": 136932,
+     "worker": 516196,
+     "kernel": 105756
+    },
+    "panes_settled": 3
+   }
+  },
+  "resume": {
+   "ts": {
+    "ready_s_median": 1.45,
+    "corpus_rows": 1078,
+    "launches": 5
+   },
+   "rust": {
+    "ready_s_median": 0.683,
+    "corpus_rows": 1078,
+    "launches": 5
+   }
+  },
+  "kernel_spawn": {
+   "ts": {
+    "create_to_first_cell_s_cold_median": 0.789,
+    "create_to_first_cell_s_trials": [
+     {
+      "create_s": 0.491,
+      "first_cell_s": 7.297
+     },
+     {
+      "create_s": 0.45,
+      "first_cell_s": 0.789
+     },
+     {
+      "create_s": 0.482,
+      "first_cell_s": 0.909
+     },
+     {
+      "create_s": 0.519,
+      "first_cell_s": 0.603
+     },
+     {
+      "create_s": 0.519,
+      "first_cell_s": 0.598
+     }
+    ],
+    "prompt_to_first_cell_s_warm_median": 0.051500000000000004,
+    "warm_trials": [
+     0.224,
+     0.05,
+     0.031,
+     0.053,
+     0.053
+    ]
+   },
+   "rust": {
+    "create_to_first_cell_s_cold_median": 0.696,
+    "create_to_first_cell_s_trials": [
+     {
+      "create_s": 0.11,
+      "first_cell_s": 7.205
+     },
+     {
+      "create_s": 0.105,
+      "first_cell_s": 0.711
+     },
+     {
+      "create_s": 0.128,
+      "first_cell_s": 0.696
+     },
+     {
+      "create_s": 0.128,
+      "first_cell_s": 0.692
+     },
+     {
+      "create_s": 0.133,
+      "first_cell_s": 0.684
+     }
+    ],
+    "prompt_to_first_cell_s_warm_median": 0.0495,
+    "warm_trials": [
+     0.113,
+     0.04,
+     0.051,
+     0.061,
+     0.048
+    ]
+   }
+  },
+  "streaming": {
+   "ts": {
+    "settle_s_median": 1.4849999999999999,
+    "tokens_per_s_est": 7668.0,
+    "turns": [
+     1.15,
+     1.82
+    ]
+   },
+   "rust": {
+    "settle_s_median": 0.6900000000000001,
+    "tokens_per_s_est": 16503.0,
+    "turns": [
+     0.93,
+     0.45
+    ]
+   },
+   "_exit_code": 0
+  },
+  "compaction": {
+   "ts": {
+    "compact_s_median": 0.045,
+    "grown_turns": 40,
+    "trials": [
+     0.045,
+     0.049,
+     0.045,
+     0.042,
+     0.044
+    ]
+   },
+   "rust": {
+    "compact_s_median": 0.054,
+    "grown_turns": 40,
+    "trials": [
+     0.051,
+     0.053,
+     0.061,
+     0.054,
+     0.057
+    ]
+   }
+  },
+  "export": {
+   "ts": {
+    "export_s_median": 0.28,
+    "html_bytes_median": 866859,
+    "trials": [
+     0.248,
+     0.286,
+     0.28,
+     0.308,
+     0.258
+    ]
+   },
+   "rust": {
+    "export_s_median": 0.036,
+    "html_bytes_median": 866847,
+    "trials": [
+     0.037,
+     0.035,
+     0.036,
+     0.039,
+     0.035
+    ]
+   }
+  },
+  "daemon_overhead": {
+   "ts": {
+    "delta_kb_median": 3386992,
+    "per_session_kb_median": 338699,
+    "trials": [
+     3367436,
+     3406548
+    ]
+   },
+   "rust": {
+    "delta_kb_median": 1039850,
+    "per_session_kb_median": 103985,
+    "trials": [
+     1059744,
+     1019956
+    ]
+   }
+  }
+ }
+}

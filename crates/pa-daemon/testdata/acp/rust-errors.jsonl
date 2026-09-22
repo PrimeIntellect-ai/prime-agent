@@ -1,0 +1,15 @@
+{"scenario": "errors", "direction": "out", "frame": {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1, "clientCapabilities": {}, "clientInfo": {"name": "differential-capture", "title": "Differential Capture", "version": "0.0.1"}}}}
+{"scenario": "errors", "direction": "in", "frame": {"id": 1, "jsonrpc": "2.0", "result": {"_meta": {"ai.primeintellect.prime-agent": {}}, "agentCapabilities": {"loadSession": false, "mcpCapabilities": {"http": true}, "promptCapabilities": {"embeddedContext": true, "image": true}, "sessionCapabilities": {"close": {}}}, "agentInfo": {"name": "prime-agent", "title": "Prime Agent", "version": "0.1.0"}, "protocolVersion": 1}}}
+{"scenario": "errors", "direction": "out", "frame": {"jsonrpc": "2.0", "id": 2, "method": "session/prompt", "params": {"sessionId": "bogus-session", "prompt": [{"type": "text", "text": "hi"}]}}}
+{"scenario": "errors", "direction": "in", "frame": {"error": {"code": -32603, "data": {"details": "Unknown ACP session: bogus-session"}, "message": "Internal error"}, "id": 2, "jsonrpc": "2.0"}}
+{"scenario": "errors", "direction": "out", "frame": {"jsonrpc": "2.0", "id": 3, "method": "session/close", "params": {"sessionId": "bogus-session"}}}
+{"scenario": "errors", "direction": "in", "frame": {"error": {"code": -32603, "data": {"details": "Unknown ACP session: bogus-session"}, "message": "Internal error"}, "id": 3, "jsonrpc": "2.0"}}
+{"scenario": "errors", "direction": "out", "frame": {"jsonrpc": "2.0", "id": 4, "method": "session/new", "params": {"cwd": "/tmp/acp-capture-rust4", "mcpServers": []}}}
+{"scenario": "errors", "direction": "in", "frame": {"id": 4, "jsonrpc": "2.0", "result": {"sessionId": "574e0a80-e829-4928-9ad8-5c64f514afbd"}}}
+{"scenario": "errors", "direction": "out", "frame": {"jsonrpc": "2.0", "id": 5, "method": "session/new", "params": {"cwd": "/tmp/acp-capture-rust4", "mcpServers": []}}}
+{"scenario": "errors", "direction": "in", "frame": {"error": {"code": -32603, "data": {"details": "prime-agent ACP mode hosts one session per connection; start another prime-agent process for a second session"}, "message": "Internal error"}, "id": 5, "jsonrpc": "2.0"}}
+{"scenario": "errors", "direction": "out", "frame": {"jsonrpc": "2.0", "id": 6, "method": "unknown/method", "params": {}}}
+{"scenario": "errors", "direction": "in", "frame": {"error": {"code": -32601, "data": {"method": "unknown/method"}, "message": "\"Method not found\": unknown/method"}, "id": 6, "jsonrpc": "2.0"}}
+{"scenario": "errors", "direction": "out", "frame": {"jsonrpc": "2.0", "id": 7, "method": "session/close", "params": {"sessionId": "574e0a80-e829-4928-9ad8-5c64f514afbd"}}}
+{"scenario": "errors", "direction": "in", "frame": {"id": 7, "jsonrpc": "2.0", "result": {}}}
+{"scenario": "errors", "direction": "meta", "frame": {"exitCode": 0, "stderr": ""}}

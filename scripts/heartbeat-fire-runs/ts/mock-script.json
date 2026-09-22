@@ -1,0 +1,1 @@
+{"responses": [{"toolCall": {"name": "ipython", "arguments": {"code": "import rlm_heartbeat\nhb = await rlm_heartbeat.create(\n    'agent heartbeat fire probe instruction',\n    interval='every 30s',\n    label='hb-fire',\n)\nprint('created', hb['id'])"}}}, {"text": "agent heartbeat created"}]}

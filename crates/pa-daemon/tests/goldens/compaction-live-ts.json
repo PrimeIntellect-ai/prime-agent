@@ -1,0 +1,93 @@
+{
+ "_comment": "Compaction goldens captured read-only from the live TS daemon (prime-agent 0.9.5, protocol 7, schema 28) at /tmp/prime-agent-1000/daemon.sock on 2026-09-16. Scratch sessions used, killed after capture.",
+ "compact": {
+  "successResponse": {
+   "command": "compact",
+   "success": true,
+   "dataKeys": [
+    "summary",
+    "firstKeptEntryId",
+    "tokensBefore",
+    "details"
+   ]
+  },
+  "skippedError": "Session is too short to compact — try again once it grows",
+  "abortedError": "Compaction cancelled",
+  "unknownSessionError": "Unknown active session: no-such-session",
+  "dataSample": {
+   "summary": "## Goal\nNo substantive development task exists in this session. The entire conversation is a repeated loop: the user sends the same message asking the assistant to (1) not call tools, (2) reply with t...[+1645 chars]",
+   "firstKeptEntryId": "8991d36d",
+   "tokensBefore": 25424,
+   "details": {
+    "readFiles": [],
+    "modifiedFiles": []
+   }
+  }
+ },
+ "compactionStartEvent": {
+  "type": "compaction_start",
+  "reason": "manual",
+  "customInstructions": "Emphasize the number 42."
+ },
+ "compactionEndSuccess": {
+  "type": "compaction_end",
+  "reason": "manual",
+  "result": {
+   "summary": "## Goal\nNo substantive development task exists in this session. The entire conversation is a repeated loop: the user sends the same message asking the assistant to (1) not call tools, (2) reply with t...[+1645 chars]",
+   "firstKeptEntryId": "8991d36d",
+   "tokensBefore": 25424,
+   "details": {
+    "readFiles": [],
+    "modifiedFiles": []
+   }
+  },
+  "aborted": false,
+  "willRetry": false,
+  "customInstructions": "Emphasize the number 42."
+ },
+ "compactionEndAborted": {
+  "type": "compaction_end",
+  "reason": "manual",
+  "aborted": true,
+  "willRetry": false,
+  "errorSeverity": "error"
+ },
+ "compactionEndSkipped": {
+  "type": "compaction_end",
+  "reason": "manual",
+  "aborted": false,
+  "willRetry": false,
+  "errorMessage": "Session is too short to compact — try again once it grows",
+  "errorSeverity": "warning",
+  "customInstructions": "Emphasize the number 42."
+ },
+ "abortCompactionResponse": {
+  "command": "abort_compaction",
+  "success": true,
+  "data": null
+ },
+ "setAutoCompactionResponse": {
+  "command": "set_auto_compaction",
+  "success": true,
+  "data": null
+ },
+ "stateDuringCompaction": {
+  "isCompacting": true,
+  "activity": "working",
+  "isSessionActive": true
+ },
+ "compactionEntryFields": [
+  "type",
+  "id",
+  "parentId",
+  "timestamp",
+  "summary",
+  "firstKeptEntryId",
+  "tokensBefore",
+  "details",
+  "fromHook",
+  "customInstructions",
+  "usage",
+  "harnessDigest"
+ ]
+}

@@ -1,0 +1,36 @@
+                                                  heartbeats-verifier  $0.00
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent v0.1.0
+  ▗█▛ ▟██▙▄██▛ ▟▛         model mock-1
+  ▗▟▌ ▐███▛▘▗▄█▖          cwd ~/hbv6/20260921T210542Z/rust/work
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+  verifier seed turn
+
+
+ heartbeats verifier seed reply
+
+
+  create the agent heartbeat
+
+
+ ✓ python · await rlm_heartbeat.create( · ↑ 7 ↓ 1 lines · 3ms
+
+ agent heartbeat created
+
+                                                                                      Collapsed mode (Ctrl+O to expand)
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Heartbeats
+  2 heartbeats. Select a heartbeat to manage.
+
+  user heartbeat ping instruction                                                                                 active
+    Created by you · heartbeats-verifier · every 30m · steer
+› agent hb                                                                                                        active
+    Created by agent · heartbeats-verifier · every 30m · steer
+
+  Created by agent · heartbeats-verifier · active · every 30m · steer · next 2026-09-21 21:35 · 0 runs
+
+  Esc close
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

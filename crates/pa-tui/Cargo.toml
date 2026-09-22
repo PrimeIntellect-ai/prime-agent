@@ -1,0 +1,31 @@
+[package]
+name = "pa-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Terminal UI for Prime Agent."
+
+[dependencies]
+pa-types = { path = "../pa-types" }
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
+crossterm = "0.28"
+unicode-width = "0.2"
+unicode-segmentation = "1"
+fancy-regex = "0.14"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
+anyhow = "1"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net", "process"] }
+
+[[bin]]
+name = "pa-tui-replay"
+path = "src/bin/pa-tui-replay.rs"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+{
+ "providers": {
+  "prime-inference": {
+   "api": "openai-completions",
+   "baseUrl": "http://127.0.0.1:34151/v1",
+   "apiKey": "sk-battery",
+   "models": [
+    {
+     "id": "mock-1",
+     "name": "Mock 1",
+     "api": "openai-completions",
+     "baseUrl": "http://127.0.0.1:34151/v1",
+     "contextWindow": 128000,
+     "maxTokens": 4096
+    }
+   ]
+  }
+ }
+}

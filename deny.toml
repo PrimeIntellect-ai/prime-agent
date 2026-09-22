@@ -1,0 +1,62 @@
+# cargo-deny configuration for the prime-agent Rust workspace.
+# Runs in CI (ci.yml) and locally via `make deny`.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+# Fail the build on any reachable vulnerability or withdrawn advisory.
+yanked = "deny"
+# Triaged exceptions — every entry must carry a reason and a review date;
+# a landed fix upstream means the entry is removed instead of silenced.
+ignore = [
+  # Marvin Attack timing sidechannel in rsa; no patch exists upstream
+  # (RustCrypto/RSA#626 tracks it). `rsa` is currently a dead dependency in
+  # pa-ai (declared, never referenced); no signing path executes it, so no
+  # timing oracle exists. Reviewed 2026-09-17; drop rsa (pa-ai lane) or
+  # re-triage when rsa publishes a fix.
+  { id = "RUSTSEC-2023-0071", reason = "unpatched upstream; rsa is an unused pa-ai dep, no signing path executes it (reviewed 2026-09-17)" },
+  # `paste` proc-macro is unmaintained; pulled by ratatui (build-time only,
+  # no vulnerable code path). Reviewed 2026-09-17; revisit when ratatui
+  # drops the dep.
+  { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro via ratatui, build-time only (reviewed 2026-09-17)" },
+]
+
+[licenses]
+version = 2
+# Deny-by-default; the allowlist below is the exact set carried by the
+# dependency graph (verified with `cargo deny check licenses`).
+# The exact set carried by the dependency graph (verified with
+# `cargo deny check licenses`); unmatched entries are removed on bump.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "ISC",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "0BSD",
+  "Zlib",
+  "Unicode-3.0",
+  "CDLA-Permissive-2.0",
+]
+# Development-only tools are not shipped; we keep the graph tight instead of
+# adding private/exceptions stanzas.
+
+[bans]
+# Multiple versions of a crate are allowed (few genuine duplicates exist and
+# cargo resolves them fine); duplicates and wildcards are surfaced instead.
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+# Everything must come from crates.io or vendored path dependencies.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

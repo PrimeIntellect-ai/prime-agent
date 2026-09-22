@@ -1,0 +1,82 @@
+//! Session supervisor, worker processes, and wire protocol for Prime Agent.
+//!
+//! Ported from the TypeScript daemon: `modes/daemon/*`, `modes/session-worker/*`,
+//! `core/session-manager.ts`, and `core/session-lease.ts`. The supervisor hosts
+//! no sessions: it spawns one worker process per active session, supervises
+//! restarts with backoff, and routes clients. Sessions persist as append-only
+//! JSONL under `<agent-dir>/sessions/` using the same layout as the TS product.
+
+pub mod acp;
+pub mod agent_engine;
+pub mod agent_message_broadcast;
+pub mod agent_message_ingest;
+pub mod agent_messaging;
+pub(crate) mod agent_roster;
+mod auto_compaction;
+mod autonomous_continuation;
+pub mod branch_navigation;
+mod compact_autorefine;
+pub mod compaction;
+mod compaction_outcome;
+pub mod descriptor;
+pub mod engine;
+pub mod framing;
+mod goal_continuation;
+pub(crate) mod goal_state_persist;
+pub mod input_pause_lease;
+pub mod journal;
+pub mod lease;
+pub mod mcp_connections;
+pub mod mcp_login;
+pub(crate) mod messaging;
+pub(crate) mod model_switch;
+mod overflow_compaction;
+pub mod ownership;
+pub mod paths;
+pub(crate) mod peer;
+pub(crate) mod peer_client;
+pub(crate) mod peer_tickets;
+pub mod platform;
+pub mod prompt_admission;
+pub mod protocol;
+pub(crate) mod queue_commands;
+pub mod registration;
+pub(crate) mod registry;
+pub mod rlm_child_model;
+pub mod rlm_children;
+pub mod rlm_ledger;
+pub(crate) mod rlm_roster;
+pub mod rlm_surface;
+pub(crate) mod saved_session_commands;
+pub(crate) mod scheduled_jobs;
+pub(crate) mod scheduling_catalog;
+pub(crate) mod session_archive;
+pub(crate) mod session_catalog;
+pub(crate) mod session_commands;
+pub(crate) mod session_custom;
+pub mod session_export;
+pub mod session_input_pause;
+pub mod session_navigation;
+pub mod session_stats;
+pub mod session_store;
+pub mod session_tree;
+pub(crate) mod setting_switches;
+pub mod side_question;
+pub mod snapshot_stream;
+pub mod socket;
+pub(crate) mod state_getters;
+pub mod status_line;
+pub(crate) mod streaming;
+pub mod supervisor;
+pub mod supervisor_link;
+pub(crate) mod supervisor_lost;
+pub(crate) mod supervisor_parent_death;
+pub(crate) mod supervisor_roster;
+pub mod types;
+pub(crate) mod update_prepare;
+pub(crate) mod update_restore;
+pub(crate) mod update_roster;
+pub(crate) mod update_stop;
+pub(crate) mod user_bash;
+pub mod util;
+pub mod worker;

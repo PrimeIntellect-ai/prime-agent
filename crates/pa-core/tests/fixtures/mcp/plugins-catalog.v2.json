@@ -1,0 +1,2288 @@
+{
+	"version": 2,
+	"counts": {
+		"total": 68,
+		"http": 68,
+		"httpTemplate": 0,
+		"sse": 0,
+		"stdio": 0,
+		"ready": 57,
+		"requiresSetup": 11,
+		"metadataReviewed": 2,
+		"oauthStrategy": 5,
+		"apiKeyStrategy": 10,
+		"readinessOauthReady": 57,
+		"readinessUserSetup": 11,
+		"readinessPrimeRestricted": 0,
+		"readinessUnknown": 0
+	},
+	"entries": [
+		{
+			"server": "airtable",
+			"service": "airtable",
+			"label": "Airtable",
+			"url": "https://mcp.airtable.com/mcp",
+			"description": "Bring operational data and context into the flow of your ChatGPT conversations. You can ask questions, create and update records, and analyze your data\u2014all through conversation. Use the data in Airtable as input to the work you\u2019re doing in ChatGPT, like building a landing page using content you\u2019ve organized in Airtable. Make quick updates to Airtable without leaving the chat. Airtable for ChatGPT is ideal anytime you need quick access to structured internal data to inform your conversation.\n\nAirtable's App connects ChatGPT directly to your Airtable bases, so you can ask questions, create and update records, and analyze your data\u2014all through conversation",
+			"category": "Productivity",
+			"publisher": "Airtable",
+			"homepage": "https://airtable.com",
+			"privacyUrl": "https://www.airtable.com/company/privacy",
+			"supportUrl": "https://support.airtable.com/docs/contacting-airtable-support",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.airtable.com/mcp"
+			},
+			"auth": {
+				"strategy": "oauth",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			],
+			"oauth": {
+				"kind": "oauth"
+			}
+		},
+		{
+			"server": "aiven",
+			"service": "aiven",
+			"label": "Aiven",
+			"url": "https://mcp.aiven.live/mcp",
+			"publisher": "Aiven",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.aiven.live/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "amplitude",
+			"service": "amplitude",
+			"label": "Amplitude",
+			"url": "https://mcp.amplitude.com/mcp",
+			"publisher": "Amplitude",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.amplitude.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "apollo",
+			"service": "apollo-io",
+			"label": "Apollo.io",
+			"url": "https://mcp.apollo.io/mcp",
+			"publisher": "Apollo.io",
+			"aliases": [
+				"apollo-io"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.apollo.io/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "appwrite",
+			"service": "appwrite",
+			"label": "Appwrite",
+			"url": "https://mcp.appwrite.io/",
+			"publisher": "Appwrite",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.appwrite.io/"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "atlassian",
+			"service": "atlassian",
+			"label": "Atlassian",
+			"url": "https://mcp.atlassian.com/v2/mcp",
+			"publisher": "Atlassian",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.atlassian.com/v2/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "atlassian-rovo",
+			"service": "atlassian-rovo",
+			"label": "Atlassian Rovo",
+			"url": "https://mcp.atlassian.com/v1/mcp/authv2",
+			"description": "Manage Jira and Confluence fast",
+			"category": "Productivity",
+			"homepage": "https://www.atlassian.com",
+			"privacyUrl": "https://www.atlassian.com/legal/privacy-policy",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.atlassian.com/v1/mcp/authv2"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "aws-devops-agent",
+			"service": "amazon-web-services",
+			"label": "AWS Agents for DevSecOps",
+			"url": "https://connect.aidevops.us-east-1.api.aws/mcp",
+			"publisher": "Amazon Web Services",
+			"aliases": [
+				"amazon-web-services",
+				"aws-agents-for-devsecops"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://connect.aidevops.us-east-1.api.aws/mcp"
+			},
+			"auth": {
+				"strategy": "api_key",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "paste your AWS DevSecOps agent token (DEVOPS_AGENT_TOKEN)",
+				"fields": [
+					{
+						"id": "DEVOPS_AGENT_TOKEN",
+						"label": "DEVOPS_AGENT_TOKEN",
+						"description": "Environment variable DEVOPS_AGENT_TOKEN",
+						"required": true,
+						"kind": "bearer-token"
+					}
+				],
+				"readiness": "user-setup",
+				"requirement": "bearer-token"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "canva",
+			"service": "canva",
+			"label": "Canva",
+			"url": "https://mcp.canva.com/mcp",
+			"description": "Bring your Canva design workflow into Codex and create, refine, and review designs through natural conversation.\nAvailable skills:\nResize for social media: Adapt a design for Facebook, Instagram, and LinkedIn in one step.\nBulk create: Generate multiple designs from spreadsheet data using a brand template.\nEdit designs: Update text, media, and formatting, or reposition and resize elements.\nGet design feedback: Receive structured feedback on visual hierarchy, layout, readability, consistency, and accessibility.\nImplement feedback: Review comment threads and apply clear, actionable changes.\nBrand check: Check colors, fonts, logo usage, and copy against your Brand Kit.\nOnce installed, describe what you want in plain language or invoke Canva directly with @Canva.\nTry prompts like:\n- @Canva, resize this design for social media.\n- @Canva, create designs from this spreadsheet using my brand template.\n- @Canva, update the headline in this design.\n- @Canva, review this design\u2019s visual hierarchy and readability.\n- @Canva, implement the feedback in the comment threads.\n- @Canva, check this design against my Brand Kit.\n\nRequirements: Connect your Canva account to use the plugin. Bulk Create requires an eligible Canva Enterprise plan.\n\nWant to take a more hands-on approach? Instantly open your design in Canva\u2019s powerful editor for the final touches.",
+			"category": "Creativity",
+			"publisher": "Canva",
+			"homepage": "https://www.canva.com",
+			"privacyUrl": "https://www.canva.com/policies/privacy-policy/",
+			"supportUrl": "https://www.canva.com/help/contact-us/",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.canva.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "catalyst-by-zoho",
+			"service": "zoho-catalyst",
+			"label": "Zoho Catalyst",
+			"url": "https://catalyst.zohomcp.com/mcp/message",
+			"publisher": "Zoho Catalyst",
+			"aliases": [
+				"zoho-catalyst"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://catalyst.zohomcp.com/mcp/message"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "circleback",
+			"service": "circleback",
+			"label": "Circleback",
+			"url": "https://circleback.ai/api/mcp",
+			"publisher": "Circleback",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://circleback.ai/api/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "clickhouse",
+			"service": "clickhouse",
+			"label": "ClickHouse",
+			"url": "https://mcp.clickhouse.cloud/mcp",
+			"publisher": "ClickHouse",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.clickhouse.cloud/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "clickup",
+			"service": "clickup",
+			"label": "ClickUp",
+			"url": "https://mcp.clickup.com/mcp",
+			"description": "Turn Codex into your ClickUp command center.",
+			"category": "Productivity",
+			"homepage": "https://clickup.com",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.clickup.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "cloudflare-api",
+			"service": "cloudflare",
+			"label": "Cloudflare",
+			"url": "https://mcp.cloudflare.com/mcp",
+			"description": "Cloudflare platform plugin with curated skills for Workers, Wrangler, and Agents SDK plus the official Cloudflare API MCP server.",
+			"category": "Developer Tools",
+			"publisher": "Cloudflare",
+			"homepage": "https://workers.cloudflare.com/",
+			"privacyUrl": "https://www.cloudflare.com/privacypolicy/",
+			"aliases": [
+				"cloudflare"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.cloudflare.com/mcp"
+			},
+			"auth": {
+				"strategy": "oauth",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			],
+			"oauth": {
+				"kind": "oauth"
+			}
+		},
+		{
+			"server": "cloudinary-analysis",
+			"service": "cloudinary",
+			"label": "Cloudinary Analysis",
+			"url": "https://analysis.mcp.cloudinary.com/mcp",
+			"publisher": "Cloudinary",
+			"aliases": [
+				"cloudinary"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://analysis.mcp.cloudinary.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "cloudinary-asset-mgmt",
+			"service": "cloudinary",
+			"label": "Cloudinary Asset Management",
+			"url": "https://asset-management.mcp.cloudinary.com/mcp",
+			"publisher": "Cloudinary",
+			"aliases": [
+				"cloudinary",
+				"cloudinary-asset-management"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://asset-management.mcp.cloudinary.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "cloudinary-env-config",
+			"service": "cloudinary",
+			"label": "Cloudinary Environment Config",
+			"url": "https://environment-config.mcp.cloudinary.com/mcp",
+			"publisher": "Cloudinary",
+			"aliases": [
+				"cloudinary",
+				"cloudinary-environment-config"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://environment-config.mcp.cloudinary.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "cloudinary-smd",
+			"service": "cloudinary",
+			"label": "Cloudinary Structured Metadata",
+			"url": "https://structured-metadata.mcp.cloudinary.com/mcp",
+			"publisher": "Cloudinary",
+			"aliases": [
+				"cloudinary",
+				"cloudinary-structured-metadata"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://structured-metadata.mcp.cloudinary.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "codspeed",
+			"service": "codspeed",
+			"label": "CodSpeed",
+			"url": "https://mcp.codspeed.io/mcp",
+			"publisher": "CodSpeed",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.codspeed.io/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "dropbox",
+			"service": "dropbox",
+			"label": "Dropbox",
+			"url": "https://mcp.dropbox.com/mcp",
+			"description": "The Dropbox plugin for ChatGPT connects your Dropbox files directly to ChatGPT. You can access files, save ChatGPT-generated content to Dropbox, and create sharing links without switching tools. Everything respects your existing Dropbox permissions, and ChatGPT only works with files you already have access to.",
+			"category": "Productivity",
+			"homepage": "https://www.dropbox.com",
+			"privacyUrl": "https://www.dropbox.com/privacy",
+			"supportUrl": "https://www.dropbox.com/get_help",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.dropbox.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "expo",
+			"service": "expo",
+			"label": "Expo",
+			"url": "https://mcp.expo.dev/mcp",
+			"publisher": "Expo",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.expo.dev/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "fullstory",
+			"service": "fullstory",
+			"label": "Fullstory",
+			"url": "https://api.fullstory.com/mcp/fullstory",
+			"publisher": "Fullstory",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://api.fullstory.com/mcp/fullstory"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "gc-ai",
+			"service": "gc-ai",
+			"label": "GC AI",
+			"url": "https://app.gc.ai/api/mcp",
+			"publisher": "GC AI",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://app.gc.ai/api/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "github",
+			"service": "github",
+			"label": "GitHub",
+			"url": "https://api.githubcopilot.com/mcp/",
+			"description": "Inspect repositories, triage pull requests and issues, debug CI, and publish changes through a hybrid GitHub connector and CLI workflow.",
+			"category": "Developer Tools",
+			"publisher": "GitHub",
+			"homepage": "https://github.com/",
+			"privacyUrl": "https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://api.githubcopilot.com/mcp/"
+			},
+			"auth": {
+				"strategy": "api_key",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "paste a GitHub personal access token (GITHUB_PAT_TOKEN or GITHUB_PERSONAL_ACCESS_TOKEN)",
+				"fields": [
+					{
+						"id": "GITHUB_PAT_TOKEN",
+						"label": "GITHUB_PAT_TOKEN",
+						"description": "Environment variable GITHUB_PAT_TOKEN",
+						"required": true,
+						"kind": "bearer-token",
+						"credentialSet": "github-pat"
+					},
+					{
+						"id": "GITHUB_PERSONAL_ACCESS_TOKEN",
+						"label": "GITHUB_PERSONAL_ACCESS_TOKEN",
+						"description": "Environment variable GITHUB_PERSONAL_ACCESS_TOKEN",
+						"required": true,
+						"kind": "bearer-token",
+						"credentialSet": "github-pat"
+					}
+				],
+				"readiness": "user-setup",
+				"requirement": "bearer-token"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "grafana-cloud",
+			"service": "grafana",
+			"label": "Grafana",
+			"url": "https://mcp.grafana.com/mcp",
+			"publisher": "Grafana",
+			"aliases": [
+				"grafana",
+				"grafana-cloud-mcp"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.grafana.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "granola",
+			"service": "granola",
+			"label": "Granola",
+			"url": "https://mcp.granola.ai/mcp",
+			"description": "Granola MCP connects your meeting history to ChatGPT so your assistant can pull real context from past conversations while you work.\n\nUse MCP when you're already working on something bigger:\n\n-   Writing PRDs or proposals: Pull customer feedback, stakeholder input, and decisions from relevant meetings directly into your draft\n    \n-   Building presentations or reports: Combine insights from multiple conversations with your other research and data\n    \n-   Coding with context: Give your AI the project background, requirements, and technical decisions discussed in planning meetings\n    \n-   Strategic analysis: Merge meeting insights with documents, data, and other sources for comprehensive analysis\n    \nHow it works:\n\nYour AI assistant can search your Granola meetings by topic, person, company, or timeframe - then cite specific conversations in its responses. No more switching tabs to find \"what the customer said\" or \"when we decided that.\"\n\nThe difference:\n\nInstead of copy-pasting meeting notes into prompts, your AI pulls exactly what it needs from your meeting history automatically. You stay focused on the work, not the research or context.",
+			"category": "Productivity",
+			"homepage": "https://www.granola.ai",
+			"privacyUrl": "https://help.granola.ai/article/privacy-policy",
+			"supportUrl": "https://help.granola.ai/",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.granola.ai/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "greptile",
+			"service": "greptile",
+			"label": "Greptile",
+			"url": "https://api.greptile.com/mcp",
+			"publisher": "Greptile",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://api.greptile.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "higgsfield",
+			"service": "higgsfield",
+			"label": "Higgsfield",
+			"url": "https://mcp.higgsfield.ai/mcp",
+			"description": "Generate images and videos from a text prompt or your own photo. Turn a product shot into a video ad, restyle a photo, animate a still, or build a two-minute narrated explainer. Every major image and video model in one place.",
+			"category": "Creativity",
+			"homepage": "https://higgsfield.ai",
+			"privacyUrl": "https://higgsfield.ai/privacy-policy",
+			"supportUrl": "https://discord.com/invite/higgsfield",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.higgsfield.ai/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "honeycomb",
+			"service": "honeycomb",
+			"label": "Honeycomb",
+			"url": "https://mcp.honeycomb.io/mcp",
+			"publisher": "Honeycomb",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.honeycomb.io/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "hostinger",
+			"service": "hostinger",
+			"label": "Hostinger",
+			"url": "https://mcp.hostinger.com",
+			"publisher": "Hostinger",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.hostinger.com"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "hunter",
+			"service": "hunter-io",
+			"label": "Hunter.io",
+			"url": "https://mcp.hunter.io/mcp",
+			"publisher": "Hunter.io",
+			"aliases": [
+				"hunter-io"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.hunter.io/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "intercom",
+			"service": "intercom",
+			"label": "Intercom",
+			"url": "https://mcp.intercom.com/mcp",
+			"publisher": "Intercom",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.intercom.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "linear",
+			"service": "linear",
+			"label": "Linear",
+			"url": "https://mcp.linear.app/mcp",
+			"description": "Search, create and update Linear issues, projects, and initiatives. Draft PRDs, write updates, analyze customer requests, and keep plans up to date \u2014 all from within ChatGPT",
+			"category": "Productivity",
+			"publisher": "Linear",
+			"homepage": "https://linear.app/",
+			"privacyUrl": "https://linear.app/privacy",
+			"supportUrl": "https://linear.app/contact",
+			"aliases": [
+				"linear-app"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.linear.app/mcp"
+			},
+			"auth": {
+				"strategy": "oauth",
+				"clientRegistration": "dynamic"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "metadata-reviewed"
+			},
+			"legacyBuiltin": true,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			],
+			"oauth": {
+				"kind": "oauth"
+			}
+		},
+		{
+			"server": "logfire",
+			"service": "pydantic-logfire",
+			"label": "Pydantic Logfire",
+			"url": "https://logfire-us.pydantic.dev/mcp",
+			"publisher": "Pydantic Logfire",
+			"aliases": [
+				"pydantic-logfire"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://logfire-us.pydantic.dev/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "lovable",
+			"service": "lovable",
+			"label": "Lovable",
+			"url": "https://mcp.lovable.dev/?src=cc-plugin",
+			"publisher": "Lovable",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.lovable.dev/?src=cc-plugin"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "mapbox",
+			"service": "mapbox",
+			"label": "Mapbox",
+			"url": "https://mcp.mapbox.com/mcp",
+			"publisher": "Mapbox",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.mapbox.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "mapbox-devkit",
+			"service": "mapbox",
+			"label": "Mapbox DevKit",
+			"url": "https://mcp-devkit.mapbox.com/mcp",
+			"publisher": "Mapbox",
+			"aliases": [
+				"mapbox"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp-devkit.mapbox.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "mercadopago",
+			"service": "mercado-pago",
+			"label": "Mercado Pago",
+			"url": "https://mcp.mercadopago.com/mcp",
+			"publisher": "Mercado Pago",
+			"aliases": [
+				"mcp",
+				"mercado-pago"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.mercadopago.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "neon",
+			"service": "neon",
+			"label": "Neon",
+			"url": "https://mcp.neon.tech/mcp",
+			"publisher": "Neon",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.neon.tech/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "netlify",
+			"service": "netlify",
+			"label": "Netlify",
+			"url": "https://netlify-mcp.netlify.app/mcp",
+			"description": "Official Netlify MCP server (hosted, streamable HTTP). Authorizes via OAuth on first connection \u2014 the agent is prompted to sign in to Netlify; no token or local install required. Lets the agent create and manage Netlify projects, deploys, and environment variables.",
+			"publisher": "Netlify",
+			"aliases": [
+				"netlify-skills"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://netlify-mcp.netlify.app/mcp"
+			},
+			"auth": {
+				"strategy": "oauth",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			],
+			"oauth": {
+				"kind": "oauth"
+			}
+		},
+		{
+			"server": "newrelic",
+			"service": "new-relic",
+			"label": "New Relic",
+			"url": "https://mcp.newrelic.com/mcp/",
+			"publisher": "New Relic",
+			"aliases": [
+				"new-relic"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.newrelic.com/mcp/"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "notion",
+			"service": "notion",
+			"label": "Notion",
+			"url": "https://mcp.notion.com/mcp",
+			"description": "Notion workflows for implementation planning, research synthesis, meeting preparation, and knowledge capture.",
+			"category": "Productivity",
+			"publisher": "Notion",
+			"homepage": "https://www.notion.so/",
+			"privacyUrl": "https://www.notion.com/help/privacy",
+			"aliases": [
+				"notion-workspace"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.notion.com/mcp"
+			},
+			"auth": {
+				"strategy": "oauth",
+				"clientRegistration": "dynamic"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "metadata-reviewed"
+			},
+			"legacyBuiltin": true,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			],
+			"oauth": {
+				"kind": "oauth"
+			}
+		},
+		{
+			"server": "pagerduty",
+			"service": "pagerduty",
+			"label": "PagerDuty",
+			"url": "https://mcp.pagerduty.com/mcp",
+			"publisher": "PagerDuty",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.pagerduty.com/mcp"
+			},
+			"auth": {
+				"strategy": "api_key",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "paste your PagerDuty API key (PAGERDUTY_API_KEY)",
+				"fields": [
+					{
+						"id": "PAGERDUTY_API_KEY",
+						"label": "PAGERDUTY_API_KEY",
+						"description": "Environment variable PAGERDUTY_API_KEY",
+						"required": true,
+						"kind": "bearer-token"
+					}
+				],
+				"readiness": "user-setup",
+				"requirement": "bearer-token"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "posthog",
+			"service": "posthog",
+			"label": "PostHog",
+			"url": "https://mcp.posthog.com/mcp",
+			"description": "PostHog gives your AI agent direct access to your product analytics, feature flags, experiments, error tracking, surveys, logs, and LLM analytics. Ask questions about your data, create insights, toggle feature flags, analyze errors, search docs, and more \u2014 all from chat.",
+			"category": "Data & Analytics",
+			"publisher": "PostHog",
+			"homepage": "https://posthog.com",
+			"privacyUrl": "https://posthog.com/privacy",
+			"supportUrl": "https://posthog.com/support",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.posthog.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "postman",
+			"service": "postman",
+			"label": "Postman",
+			"url": "https://mcp.postman.com/mcp",
+			"publisher": "Postman",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.postman.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "prisma",
+			"service": "prisma",
+			"label": "Prisma",
+			"url": "https://mcp.prisma.io/mcp",
+			"publisher": "Prisma",
+			"aliases": [
+				"prisma-remote"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.prisma.io/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "railway",
+			"service": "railway",
+			"label": "Railway",
+			"url": "https://mcp.railway.com",
+			"publisher": "Railway",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.railway.com"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "resend",
+			"service": "resend",
+			"label": "Resend",
+			"url": "https://mcp.resend.com/mcp",
+			"publisher": "Resend",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.resend.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "revenuecat",
+			"service": "revenuecat",
+			"label": "RevenueCat",
+			"url": "https://mcp.revenuecat.ai/mcp",
+			"publisher": "RevenueCat",
+			"aliases": [
+				"rc"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.revenuecat.ai/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "rootly",
+			"service": "rootly",
+			"label": "Rootly",
+			"url": "https://mcp.rootly.com/mcp",
+			"publisher": "Rootly",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.rootly.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "sanity",
+			"service": "sanity",
+			"label": "Sanity",
+			"url": "https://mcp.sanity.io",
+			"publisher": "Sanity",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.sanity.io"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "sentry",
+			"service": "sentry",
+			"label": "Sentry",
+			"url": "https://mcp.sentry.dev/mcp",
+			"description": "Inspect recent issues and events in Sentry from Codex.",
+			"category": "Developer Tools",
+			"publisher": "Sentry",
+			"homepage": "https://sentry.io/",
+			"privacyUrl": "https://sentry.io/privacy/",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.sentry.dev/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "shippo",
+			"service": "shippo",
+			"label": "Shippo",
+			"url": "https://mcp.shippo.com",
+			"publisher": "Shippo",
+			"aliases": [
+				"shippo-mcp"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.shippo.com"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "sonatype-guide",
+			"service": "sonatype-guide",
+			"label": "Sonatype Guide",
+			"url": "https://mcp.guide.sonatype.com/mcp",
+			"publisher": "Sonatype Guide",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.guide.sonatype.com/mcp"
+			},
+			"auth": {
+				"strategy": "api_key",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "paste your Sonatype Guide token (SONATYPE_GUIDE_TOKEN)",
+				"fields": [
+					{
+						"id": "SONATYPE_GUIDE_TOKEN",
+						"label": "SONATYPE_GUIDE_TOKEN",
+						"description": "Environment variable SONATYPE_GUIDE_TOKEN",
+						"required": true,
+						"kind": "bearer-token"
+					}
+				],
+				"readiness": "user-setup",
+				"requirement": "bearer-token"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "stripe",
+			"service": "stripe",
+			"label": "Stripe",
+			"url": "https://mcp.stripe.com",
+			"description": "Develop your payments integration faster with the ability to create products, prices, and payment links directly in ChatGPT. Run your business from ChatGPT with the ability to retrieve and manage payments, subscriptions, invoices, refunds, disputes, and customers. Build and debug your payment integration quicker than ever by searching the Stripe documentation and getting integration recommendations without needing to leave ChatGPT.",
+			"category": "Finance",
+			"publisher": "Stripe",
+			"homepage": "https://stripe.com",
+			"privacyUrl": "https://stripe.com/privacy",
+			"supportUrl": "https://support.stripe.com",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.stripe.com"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "valtown",
+			"service": "val-town",
+			"label": "Val Town",
+			"url": "https://api.val.town/v3/mcp",
+			"publisher": "Val Town",
+			"aliases": [
+				"val-town"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://api.val.town/v3/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "vanta",
+			"service": "vanta",
+			"label": "Vanta (US)",
+			"url": "https://mcp.vanta.com/mcp",
+			"publisher": "Vanta",
+			"aliases": [
+				"vanta-mcp-plugin",
+				"vanta-us"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.vanta.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "vanta-aus",
+			"service": "vanta",
+			"label": "Vanta (Australia)",
+			"url": "https://mcp.aus.vanta.com/mcp",
+			"publisher": "Vanta",
+			"aliases": [
+				"vanta",
+				"vanta-australia",
+				"vanta-mcp-plugin"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.aus.vanta.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "vanta-eu",
+			"service": "vanta",
+			"label": "Vanta (EU)",
+			"url": "https://mcp.eu.vanta.com/mcp",
+			"publisher": "Vanta",
+			"aliases": [
+				"vanta",
+				"vanta-mcp-plugin"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.eu.vanta.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "wix",
+			"service": "wix",
+			"label": "Wix",
+			"url": "https://mcp.wix.com/mcp",
+			"publisher": "Wix",
+			"aliases": [
+				"wix-mcp"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.wix.com/mcp"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "zapier",
+			"service": "zapier",
+			"label": "Zapier",
+			"url": "https://mcp.zapier.com/api/v1/connect",
+			"publisher": "Zapier",
+			"aliases": [],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.zapier.com/api/v1/connect"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "ready",
+				"readiness": "oauth-ready"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "zoom",
+			"service": "zoom",
+			"label": "Zoom",
+			"url": "https://mcp.zoom.us/mcp/zoom/streamable",
+			"publisher": "Zoom",
+			"aliases": [
+				"zoom-mcp",
+				"zoom-plugin"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.zoom.us/mcp/zoom/streamable"
+			},
+			"auth": {
+				"strategy": "api_key",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "paste your Zoom access token (ZOOM_MCP_ACCESS_TOKEN)",
+				"fields": [
+					{
+						"id": "ZOOM_MCP_ACCESS_TOKEN",
+						"label": "ZOOM_MCP_ACCESS_TOKEN",
+						"description": "Environment variable ZOOM_MCP_ACCESS_TOKEN",
+						"required": true,
+						"kind": "bearer-token"
+					}
+				],
+				"readiness": "user-setup",
+				"requirement": "bearer-token"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "zoom-canvas",
+			"service": "zoom",
+			"label": "Zoom Canvas",
+			"url": "https://mcp.zoom.us/mcp/canvas/streamable",
+			"publisher": "Zoom",
+			"aliases": [
+				"zoom",
+				"zoom-canvas-mcp",
+				"zoom-plugin"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.zoom.us/mcp/canvas/streamable"
+			},
+			"auth": {
+				"strategy": "api_key",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "paste your Zoom Canvas access token (ZOOM_CANVAS_MCP_ACCESS_TOKEN)",
+				"fields": [
+					{
+						"id": "ZOOM_CANVAS_MCP_ACCESS_TOKEN",
+						"label": "ZOOM_CANVAS_MCP_ACCESS_TOKEN",
+						"description": "Environment variable ZOOM_CANVAS_MCP_ACCESS_TOKEN",
+						"required": true,
+						"kind": "bearer-token"
+					}
+				],
+				"readiness": "user-setup",
+				"requirement": "bearer-token"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "zoom-chat",
+			"service": "zoom",
+			"label": "Zoom Chat",
+			"url": "https://mcp.zoom.us/mcp/chat/streamable",
+			"publisher": "Zoom",
+			"aliases": [
+				"zoom",
+				"zoom-chat-mcp",
+				"zoom-plugin"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.zoom.us/mcp/chat/streamable"
+			},
+			"auth": {
+				"strategy": "api_key",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "paste your Zoom Chat access token (ZOOM_CHAT_MCP_ACCESS_TOKEN)",
+				"fields": [
+					{
+						"id": "ZOOM_CHAT_MCP_ACCESS_TOKEN",
+						"label": "ZOOM_CHAT_MCP_ACCESS_TOKEN",
+						"description": "Environment variable ZOOM_CHAT_MCP_ACCESS_TOKEN",
+						"required": true,
+						"kind": "bearer-token"
+					}
+				],
+				"readiness": "user-setup",
+				"requirement": "bearer-token"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "zoom-meetings",
+			"service": "zoom",
+			"label": "Zoom Meetings",
+			"url": "https://mcp.zoom.us/mcp/meeting/streamable",
+			"description": "Smart meeting insights from Zoom",
+			"category": "Communication",
+			"publisher": "Zoom",
+			"homepage": "https://zoom.us",
+			"privacyUrl": "https://zoom.us/privacy",
+			"aliases": [
+				"zoom",
+				"zoom-meetings-mcp",
+				"zoom-plugin"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.zoom.us/mcp/meeting/streamable"
+			},
+			"auth": {
+				"strategy": "unknown",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "paste your Zoom Meetings access token (ZOOM_MEETINGS_MCP_ACCESS_TOKEN)",
+				"fields": [
+					{
+						"id": "ZOOM_MEETINGS_MCP_ACCESS_TOKEN",
+						"label": "ZOOM_MEETINGS_MCP_ACCESS_TOKEN",
+						"description": "Environment variable ZOOM_MEETINGS_MCP_ACCESS_TOKEN",
+						"required": true,
+						"kind": "bearer-token"
+					}
+				],
+				"readiness": "user-setup",
+				"requirement": "bearer-token"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "zoom-revenue-accelerator",
+			"service": "zoom",
+			"label": "Zoom Revenue Accelerator",
+			"url": "https://mcp.zoom.us/mcp/revenue_accelerator/streamable",
+			"publisher": "Zoom",
+			"aliases": [
+				"zoom",
+				"zoom-plugin",
+				"zoom-revenue-accelerator-mcp"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.zoom.us/mcp/revenue_accelerator/streamable"
+			},
+			"auth": {
+				"strategy": "api_key",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "paste your Zoom Revenue Accelerator access token (ZOOM_REVENUE_ACCELERATOR_MCP_ACCESS_TOKEN)",
+				"fields": [
+					{
+						"id": "ZOOM_REVENUE_ACCELERATOR_MCP_ACCESS_TOKEN",
+						"label": "ZOOM_REVENUE_ACCELERATOR_MCP_ACCESS_TOKEN",
+						"description": "Environment variable ZOOM_REVENUE_ACCELERATOR_MCP_ACCESS_TOKEN",
+						"required": true,
+						"kind": "bearer-token"
+					}
+				],
+				"readiness": "user-setup",
+				"requirement": "bearer-token"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "zoom-tasks",
+			"service": "zoom",
+			"label": "Zoom Tasks",
+			"url": "https://mcp.zoom.us/mcp/tasks/streamable",
+			"publisher": "Zoom",
+			"aliases": [
+				"zoom",
+				"zoom-plugin",
+				"zoom-tasks-mcp"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.zoom.us/mcp/tasks/streamable"
+			},
+			"auth": {
+				"strategy": "api_key",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "paste your Zoom Tasks access token (ZOOM_TASKS_MCP_ACCESS_TOKEN)",
+				"fields": [
+					{
+						"id": "ZOOM_TASKS_MCP_ACCESS_TOKEN",
+						"label": "ZOOM_TASKS_MCP_ACCESS_TOKEN",
+						"description": "Environment variable ZOOM_TASKS_MCP_ACCESS_TOKEN",
+						"required": true,
+						"kind": "bearer-token"
+					}
+				],
+				"readiness": "user-setup",
+				"requirement": "bearer-token"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		},
+		{
+			"server": "zoom-whiteboard",
+			"service": "zoom",
+			"label": "Zoom Whiteboard",
+			"url": "https://mcp.zoom.us/mcp/whiteboard/streamable",
+			"publisher": "Zoom",
+			"aliases": [
+				"zoom",
+				"zoom-plugin",
+				"zoom-whiteboard-mcp"
+			],
+			"transport": {
+				"type": "http",
+				"url": "https://mcp.zoom.us/mcp/whiteboard/streamable"
+			},
+			"auth": {
+				"strategy": "api_key",
+				"clientRegistration": "unknown"
+			},
+			"setup": {
+				"status": "requires-setup",
+				"reason": "paste your Zoom Whiteboard access token (ZOOM_WHITEBOARD_MCP_ACCESS_TOKEN)",
+				"fields": [
+					{
+						"id": "ZOOM_WHITEBOARD_MCP_ACCESS_TOKEN",
+						"label": "ZOOM_WHITEBOARD_MCP_ACCESS_TOKEN",
+						"description": "Environment variable ZOOM_WHITEBOARD_MCP_ACCESS_TOKEN",
+						"required": true,
+						"kind": "bearer-token"
+					}
+				],
+				"readiness": "user-setup",
+				"requirement": "bearer-token"
+			},
+			"verification": {
+				"status": "unverified"
+			},
+			"legacyBuiltin": false,
+			"provenance": [
+				{
+					"source": "prime"
+				}
+			]
+		}
+	]
+}

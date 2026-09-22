@@ -137,33 +137,6 @@ class ReplTest(unittest.TestCase):
         print(f"\n[startup] spawn -> ready: {self.ready_ms:.0f} ms")
         self.assertLess(self.ready_ms, 500)
 
-    def test_import_rlm_defers_the_event_loop_stack(self):
-        # `import rlm` is the pre-ready boot path: the event loop stack must load
-        # after the ready event, not during package import, and serving must keep
-        # it resident.
-        env = {**os.environ, "PYTHONPATH": SRC + os.pathsep + os.environ.get("PYTHONPATH", "")}
-        code = "import rlm, sys; assert 'asyncio' not in sys.modules and 'secrets' not in sys.modules"
-        subprocess.run([sys.executable, "-c", code], env=env, check=True, timeout=30)
-        events = self.repl.execute("serving", "import sys\n'asyncio' in sys.modules")
-        self.assertEqual(one(events, "result")["text"], "True")
-
-    def test_sigint_during_the_deferred_boot_stays_fatal(self):
-        # A fake `asyncio` parks the kernel inside the post-ready deferred
-        # import. The fifo open below returns only once the kernel is parked in
-        # that window, where an early _sigint_handler install swallowed the
-        # Ctrl-C, so only the default handler may be in charge there.
-        with tempfile.TemporaryDirectory() as tmp:
-            park = os.path.join(tmp, "deferred-boot-park")
-            os.mkfifo(park)
-            with open(os.path.join(tmp, "asyncio.py"), "w") as fake_asyncio:
-                fake_asyncio.write(f"import os\nos.read(os.open({park!r}, os.O_RDONLY), 1)\n")
-            repl = ReplProcess(env={"PYTHONPATH": tmp + os.pathsep + SRC})
-            self.addCleanup(repl.close)
-            self.assertEqual(repl.ready()[0]["event"], "ready")
-            with open(park, "wb"):
-                os.kill(repl.proc.pid, signal.SIGINT)
-                self.assertNotEqual(repl.proc.wait(timeout=10), 0)
-
     def test_result_echo(self):
         events = self.repl.execute("a", "1+1")
         self.assertEqual(one(events, "result")["text"], "2")
@@ -406,16 +379,19 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(error["ename"], "KeyboardInterrupt")
         self.assertEqual(one(events, "done")["status"], "error")
 
-    def test_stdout_buffer_write_surfaces_as_null_and_rejects_int(self):
-        # Libraries write bytes via sys.stdout.buffer: the tagged writer exposes a
-        # working buffer whose bytes surface (null-attributed) before done, and it
-        # raises TypeError for ints (bytes(5) would emit five NULs).
+    def test_stdout_buffer_write_works_and_surfaces_as_null(self):
+        # Libraries write bytes via sys.stdout.buffer; the tagged writer must
+        # expose a working buffer whose bytes surface (null-attributed) before done.
         events = self.repl.execute(
             "bufw", "import sys\nsys.stdout.buffer.write(b'buffer-bytes\\n')\nsys.stdout.buffer.flush()"
         )
+        self.assertEqual(one(events, "done")["status"], "ok")
         buffered = next(e for e in events if e.get("event") == "stdout" and "buffer-bytes" in e["text"])
         self.assertIsNone(buffered["id"])
         self.assertLess(events.index(buffered), events.index(one(events, "done")))
+
+    def test_stdout_buffer_write_rejects_int(self):
+        # A real stdout.buffer raises TypeError for ints; bytes(5) would emit five NULs.
         events = self.repl.execute("bufint", "import sys\nsys.stdout.buffer.write(5)")
         self.assertEqual(one(events, "error")["ename"], "TypeError")
         self.assertEqual(one(events, "done")["status"], "error")
@@ -640,6 +616,51 @@ class ReplTest(unittest.TestCase):
             self.assertEqual(one(events, "result")["text"], "42")
             self.assertEqual(fresh.shutdown(), 0)
 
+    def test_stdin_eof_flushes_final_snapshot(self):
+        # Host death (EOF, no shutdown request) must persist the namespace
+        # tail that postdates the last explicit snapshot.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "kernel-state.dill")
+            manifest_path = os.path.join(tmp, "kernel-state.json")
+            self.assertEqual(one(self.repl.execute("s1", "x = 1"), "done")["status"], "ok")
+            self.repl.send({"type": "snapshot", "id": "s2", "path": path, "manifest_path": manifest_path})
+            self.assertEqual(one(self.repl.until_done("s2"), "done")["status"], "ok")
+            self.assertEqual(one(self.repl.execute("s3", "x = 42"), "done")["status"], "ok")
+            assert self.repl.proc.stdin is not None
+            self.repl.proc.stdin.close()
+            self.assertEqual(self.repl.proc.wait(timeout=10), 0)
+
+            fresh = ReplProcess()
+            self.addCleanup(fresh.close)
+            fresh.ready()
+            fresh.send({"type": "restore", "id": "r1", "path": path})
+            self.assertEqual(one(fresh.until_done("r1"), "done")["status"], "ok")
+            events = fresh.execute("r2", "x")
+            self.assertEqual(one(events, "result")["text"], "42")
+
+    def test_stdin_eof_without_prior_snapshot_keeps_payload(self):
+        # Until this process committed a snapshot of its own, an EOF must
+        # not overwrite the on-disk payload with a namespace the host never
+        # considered durable (e.g. a restore that failed to run).
+        import dill
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "kernel-state.dill")
+            with open(path, "wb") as fh:
+                dill.dump({"x": dill.dumps(7)}, fh)
+            self.assertEqual(one(self.repl.execute("s1", "x = 999"), "done")["status"], "ok")
+            assert self.repl.proc.stdin is not None
+            self.repl.proc.stdin.close()
+            self.assertEqual(self.repl.proc.wait(timeout=10), 0)
+
+            fresh = ReplProcess()
+            self.addCleanup(fresh.close)
+            fresh.ready()
+            fresh.send({"type": "restore", "id": "r1", "path": path})
+            self.assertEqual(one(fresh.until_done("r1"), "done")["status"], "ok")
+            events = fresh.execute("r2", "x")
+            self.assertEqual(one(events, "result")["text"], "7")
+
     def test_restore_skips_ipython_injected_names(self):
         import dill
 
@@ -729,21 +750,6 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(one(follow, "result")["text"], "2")
         self.assertEqual(one(follow, "done")["status"], "ok")
 
-    def test_large_write_ships_bounded_stream_frames(self):
-        events = self.repl.execute("chunk", "import sys\nsys.stdout.write('x' * 300_000)")
-        frames = [e["text"] for e in events if e.get("event") == "stdout"]
-        self.assertEqual("".join(frames), "x" * 300_000)
-        self.assertTrue(all(len(frame) <= 65536 for frame in frames))
-
-    def test_oversized_repr_and_display_payloads_are_capped(self):
-        code = "class C:\n    def __repr__(self):\n        return 'x' * 3_000_000\nC()"
-        events = self.repl.execute("big-repr", code)
-        expected = "x" * 1_048_576 + "\n[... result truncated at 1048576 characters ...]"
-        self.assertEqual(one(events, "result")["text"], expected)
-        events = self.repl.execute("emit-big", "from rlm.repl import emit\nemit({'text/plain': 'x' * 17_000_000})")
-        self.assertEqual(one(events, "error")["ename"], "ValueError")
-        self.assertEqual(one(events, "done")["status"], "error")
-
     def test_bash_integration(self):
         events = self.repl.execute(
             "sh1", "from rlm import bash\nresult = await bash('echo repl-bash')\nresult.output.strip()"
@@ -813,10 +819,6 @@ class ReplTest(unittest.TestCase):
                 reply_ok(self.repl, notice)
                 read = self.repl.execute(f"withdraw-{label}-read", read_code)
                 self.assertIn(f"withdrawn-{label}", one(read, "result")["text"])
-                # The withdrawal must ship ahead of the reading cell's done, or the
-                # notice is delivered as a stale turn-boundary notice instead.
-                kinds = [event.get("event") for event in read]
-                self.assertLess(kinds.index("host_request"), kinds.index("done"))
                 request = wait_for_host_request(self.repl, read)
                 self.assertEqual(
                     request["data"], {"type": "bash.consumed", "pid": pid, "command": command}
@@ -1191,7 +1193,7 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(one(events, "result")["text"], "'alive'")
 
     def test_list_names(self):
-        self.repl.execute("ln1", "alpha = 1\ndef helper(n):\n    return n\n_hidden = 2\nrlm = object()\nglobals()[1] = 2")
+        self.repl.execute("ln1", "alpha = 1\ndef helper(n):\n    return n\n_hidden = 2\nrlm = object()")
         self.repl.send({"type": "list_names", "id": "ln2"})
         done = one(self.repl.until_done("ln2"), "done")
         self.assertEqual(done["status"], "ok")
@@ -1199,8 +1201,31 @@ class ReplTest(unittest.TestCase):
         self.assertIn("helper", done["names"])
         self.assertNotIn("_hidden", done["names"])
         self.assertNotIn("rlm", done["names"])
-        self.assertNotIn(1, done["names"])
         self.assertEqual(done["names"], sorted(done["names"]))
+
+    def test_mcp_status_without_servers(self):
+        self.repl.send({"type": "mcp_status", "id": "ms1", "servers": []})
+        done = one(self.repl.until_done("ms1"), "done")
+        self.assertEqual(done["status"], "ok")
+        self.assertEqual(done["connections"], [])
+
+    def test_mcp_status_requires_a_server_list(self):
+        self.repl.send({"type": "mcp_status", "id": "ms2", "servers": "fixture-echo"})
+        events = self.repl.until_done("ms2")
+        self.assertEqual(one(events, "done")["status"], "error")
+        self.assertIn("mcp_status", one(events, "error")["evalue"])
+        events = self.repl.execute("ms3", "'alive'")
+        self.assertEqual(one(events, "result")["text"], "'alive'")
+
+    def test_list_names_skips_non_string_keys(self):
+        self.repl.execute("lnk1", "globals()[1] = 1\nbeta = 2")
+        self.repl.send({"type": "list_names", "id": "lnk2"})
+        done = one(self.repl.until_done("lnk2"), "done")
+        self.assertEqual(done["status"], "ok")
+        self.assertIn("beta", done["names"])
+        self.assertNotIn(1, done["names"])
+        events = self.repl.execute("lnk3", "'alive'")
+        self.assertEqual(one(events, "result")["text"], "'alive'")
 
     def test_host_request_round_trip(self):
         code = "\n".join(
@@ -1284,6 +1309,11 @@ class ReplTest(unittest.TestCase):
         )
         self.assertEqual(one(events, "done")["status"], "error")
 
+    def test_host_reply_for_unknown_id_dropped(self):
+        self.repl.send({"type": "host_reply", "id": "no-such-request", "data": {"status": "ok"}})
+        events = self.repl.execute("ok", "'alive'")
+        self.assertEqual(one(events, "result")["text"], "'alive'")
+
     def test_host_request_cancelled_cell_drops_pending_future(self):
         code = "\n".join(
             [
@@ -1322,6 +1352,9 @@ class ReplTest(unittest.TestCase):
         self.assertEqual(display["id"], "det")
         self.assertEqual(display["data"], {"text/plain": "late"})
 
+    def test_shutdown_clean_exit(self):
+        self.assertEqual(self.repl.shutdown(), 0)
+
     def test_shutdown_after_mcp_import_exits_cleanly(self):
         events = self.repl.execute("mcp-import", "import rlm.mcp")
         self.assertEqual(one(events, "done")["status"], "ok")
@@ -1338,6 +1371,64 @@ class ReplTest(unittest.TestCase):
         request = self.repl.read_event()
         while request.get("event") != "host_request":
             request = self.repl.read_event()
+
+    def test_owner_death_kills_orphan_kernel(self):
+        # A kernel must never outlive its owner process. The owner here is a
+        # short-lived wrapper that names itself via the same env var the host
+        # always sets (PRIME_AGENT_KERNEL_OWNER_PID); it exits while the kernel
+        # keeps an open stdin (the write end is held by this test), so the EOF
+        # path cannot be what stops it: only the owner watchdog can.
+        with tempfile.TemporaryDirectory() as tmp:
+            wrapper = os.path.join(tmp, "owner_wrapper.py")
+            with open(wrapper, "w") as fh:
+                fh.write(
+                    "import os, subprocess, sys\n"
+                    "kernel_stdin = int(sys.argv[1])\n"
+                    "kernel_env = {**os.environ}\n"
+                    "kernel_env['PRIME_AGENT_KERNEL_OWNER_PID'] = str(os.getpid())\n"
+                    "kernel_env.pop('PYTHONPATH', None)\n"
+                    "proc = subprocess.Popen(\n"
+                    "    [sys.executable, '-m', 'rlm.repl'],\n"
+                    "    stdin=kernel_stdin,\n"
+                    "    stdout=None,\n"
+                    "    stderr=subprocess.DEVNULL,\n"
+                    "    pass_fds=(kernel_stdin,),\n"
+                    "    env=kernel_env,\n"
+                    ")\n"
+                    "print(proc.pid, flush=True)\n"
+                )
+            read_fd, write_fd = os.pipe()
+            env = {
+                **os.environ,
+                "PYTHONPATH": SRC + os.pathsep + os.environ.get("PYTHONPATH", ""),
+            }
+            # Hermeticity: an ambient PRIME_AGENT_KERNEL_OWNER_PID (this test
+            # itself may run inside a product kernel) would pin the watchdog
+            # to a live host pid instead of the wrapper this test controls.
+            env.pop("PRIME_AGENT_KERNEL_OWNER_PID", None)
+            owner = subprocess.Popen(
+                [sys.executable, wrapper, str(read_fd)],
+                stdout=subprocess.PIPE,
+                text=True,
+                env=env,
+                pass_fds=(read_fd,),
+            )
+            try:
+                kernel_pid = int(owner.stdout.readline().strip())
+                owner.wait(timeout=10)
+                deadline = time.monotonic() + 15.0
+                exited = False
+                while time.monotonic() < deadline:
+                    try:
+                        os.kill(kernel_pid, 0)
+                    except ProcessLookupError:
+                        exited = True
+                        break
+                    time.sleep(0.2)
+                self.assertTrue(exited, "orphan kernel must exit after its owner dies")
+            finally:
+                os.close(write_fd)
+                os.close(read_fd)
 
     def test_stdin_eof_with_pending_host_request_exits(self):
         self._start_pending_host_request()
@@ -2222,6 +2313,11 @@ class SnapshotPairConsistencyTest(unittest.TestCase):
         self.assertLessEqual(result["bytes"], cap)
         with open(self.path, "rb") as fh:
             self.assertEqual(list(dill.load(fh)), ["a"])
+
+    def test_zero_size_cap_writes_no_empty_payload_overhead(self):
+        result = self._snap({}, max_bytes=0, max_variable_bytes=0)
+        self.assertEqual(result, {"error": "write failed: snapshot exceeds aggregate snapshot size cap"})
+        self.assertEqual(os.listdir(self.dir), [])
 
     def test_manifest_write_failure_preserves_prior_pair(self):
         old_payload, old_manifest = self._old_pair()

@@ -1,0 +1,37 @@
+[package]
+name = "pa-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Session supervisor, worker processes, and wire protocol."
+
+[dependencies]
+pa-types = { path = "../pa-types" }
+pa-core = { path = "../pa-core" }
+pa-agent = { path = "../pa-agent" }
+pa-ai = { path = "../pa-ai" }
+pa-telemetry = { path = "../pa-telemetry" }
+anyhow = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+sha2 = "0.10"
+regex = "1"
+uuid = { version = "1", features = ["v4", "v7"] }
+
+[dev-dependencies]
+filetime = "0.2"
+tempfile = "3"
+url = "2"
+# `test-util` (tokio time pause) is test-only: the mutation-drain latch test
+# drives real timeouts through the paused clock.
+tokio = { workspace = true, features = ["test-util"] }
+
+[[bin]]
+name = "pa-daemon"
+path = "src/main.rs"
+
+[lints]
+workspace = true

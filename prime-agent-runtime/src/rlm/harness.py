@@ -10,7 +10,6 @@ Execution still belongs to Prime Agent's TypeScript host and the existing
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import stat
@@ -201,119 +200,17 @@ _ENTRY_FIELDS = {field.name for field in fields(HarnessEntry)}
 _REFINEMENT_FIELDS = {field.name for field in fields(RefinementEvent)}
 
 
-def _validate_python_skill_reference(reference: dict[str, Any] | None, entry_name: str = "") -> dict[str, Any]:
-    # Rejections name the entry so the caller can repair the right skill; the
-    # suffix keeps the historical message text greppable.
-    prefix = f"skill entry {entry_name!r} rejected: " if entry_name else ""
-
-    def reject(message: str) -> None:
-        raise ValueError(f"{prefix}{message}")
-
+def _validate_python_skill_reference(reference: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(reference, dict):
-        reject("skill entries require a Python reference")
+        raise ValueError("skill entries require a Python reference")
     normalized = dict(reference)
     if normalized.get("type") != "python":
-        reject("skill reference.type must be 'python'")
+        raise ValueError("skill reference.type must be 'python'")
     if not any(isinstance(normalized.get(key), str) and normalized[key] for key in ("import", "python_import")):
-        reject("skill reference requires a Python import")
+        raise ValueError("skill reference requires a Python import")
     if not any(isinstance(normalized.get(key), str) and normalized[key] for key in ("callable", "call_pattern")):
-        reject("skill reference requires a callable or call_pattern")
+        raise ValueError("skill reference requires a callable or call_pattern")
     return normalized
-
-
-def _type_name(value: Any) -> str:
-    if isinstance(value, list):
-        return "a list"
-    if value == "":
-        return "an empty string"
-    return type(value).__name__
-
-
-def _describe_entry(id: Any, title: Any) -> str:
-    """Best available entry name for rejection messages."""
-    if isinstance(id, str) and id:
-        return id
-    if isinstance(title, str) and title:
-        return title
-    return "<unnamed>"
-
-
-def _require_text(kind: str, entry_name: str, field: str, value: Any) -> None:
-    if not isinstance(value, str) or not value:
-        raise ValueError(
-            f"{kind} entry {entry_name!r} rejected: {field} must be a non-empty string, got {_type_name(value)}"
-        )
-
-
-def _require_optional_text(kind: str, entry_name: str, field: str, value: Any) -> None:
-    if value is not None:
-        _require_text(kind, entry_name, field, value)
-
-
-def _require_optional_record(kind: str, entry_name: str, field: str, value: Any) -> None:
-    if value is not None and not isinstance(value, dict):
-        raise ValueError(
-            f"{kind} entry {entry_name!r} rejected: {field} must be a dict when provided, got {_type_name(value)}"
-        )
-
-
-def _validate_entry_shape(
-    kind: str,
-    entry_id: Any,
-    title: Any,
-    content: Any,
-    *,
-    path: Any,
-    reference: Any,
-    arguments: Any,
-    metadata: Any,
-    source: Any,
-    existing: "HarnessEntry | None",
-) -> None:
-    """Reject an invalid harness entry before anything is persisted.
-
-    Every create/update/upsert write funnels through here, so a malformed
-    entry (content as a list, title as a number) fails with an actionable
-    error naming the entry and the field instead of being saved and later
-    crashing the host digest that renders every session's system prompt.
-    """
-    entry_name = _describe_entry(entry_id, title)
-    _require_text(kind, entry_name, "id", entry_id)
-    _require_text(kind, entry_name, "title", title)
-    _require_text(kind, entry_name, "content", content)
-    _require_optional_text(kind, entry_name, "path", path)
-    _require_optional_record(kind, entry_name, "reference", reference)
-    _require_optional_record(kind, entry_name, "arguments", arguments)
-    _require_optional_record(kind, entry_name, "metadata", metadata)
-    _require_text(kind, entry_name, "source", source)
-    if kind == "skill":
-        if reference is None:
-            # A new skill without a Python reference is invalid; an update that
-            # omits it preserves the existing reference instead.
-            if existing is None:
-                raise ValueError(f"skill entry {entry_name!r} rejected: skill entries require a Python reference")
-        else:
-            _validate_python_skill_reference(reference, entry_name)
-
-
-def _validate_refinement_event(trigger: Any, changes: Any, *, evidence: Any, outcome: Any) -> None:
-    """Reject a refinement event whose persisted shape would break the digest."""
-    if not isinstance(trigger, str) or not trigger:
-        raise ValueError(f"refinement event rejected: trigger must be a non-empty string, got {_type_name(trigger)}")
-    if isinstance(changes, str):
-        if not changes:
-            raise ValueError("refinement event rejected: changes must be a non-empty string or a list of strings")
-    elif isinstance(changes, list):
-        if not all(isinstance(change, str) and change for change in changes):
-            raise ValueError("refinement event rejected: changes must be a list of non-empty strings")
-    else:
-        raise ValueError(
-            f"refinement event rejected: changes must be a string or a list of strings, got {_type_name(changes)}"
-        )
-    if not isinstance(evidence, str):
-        raise ValueError(f"refinement event rejected: evidence must be a string when provided, got {_type_name(evidence)}")
-    if not isinstance(outcome, str):
-        raise ValueError(f"refinement event rejected: outcome must be a string when provided, got {_type_name(outcome)}")
 
 
 class HarnessState:
@@ -555,27 +452,8 @@ class HarnessState:
         if kind not in self.entries:
             raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
 
-        # Guard before the id slug and the dict lookup: a non-string title or a
-        # non-string id (falsy ids included, which the slug fallback would
-        # silently collapse) must fail with a clear rejection, not an
-        # AttributeError inside slug normalization or a TypeError from the lookup.
-        _require_text(kind, _describe_entry(id, title), "title", title)
-        if id is not None:
-            _require_text(kind, _describe_entry(id, title), "id", id)
         entry_id = id or _slug(title, kind)
         existing = self.entries[kind].get(entry_id)
-        _validate_entry_shape(
-            kind,
-            entry_id,
-            title,
-            content,
-            path=path,
-            reference=reference,
-            arguments=arguments,
-            metadata=metadata,
-            source=source,
-            existing=existing,
-        )
         if existing:
             existing.title = title
             existing.content = content
@@ -679,9 +557,6 @@ class HarnessState:
         self._sync_from_disk()
         if kind not in self.entries:
             raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
-        _require_text(kind, _describe_entry(id, title), "title", title)
-        if id is not None:
-            _require_text(kind, _describe_entry(id, title), "id", id)
         entry_id = id or _slug(title, kind)
         if entry_id in self.entries[kind]:
             raise ValueError(f"{kind} entry {entry_id!r} already exists")
@@ -729,7 +604,6 @@ class HarnessState:
         self._sync_from_disk()
         if kind not in self.entries:
             raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
-        _require_text(kind, _describe_entry(id, title), "id", id)
         if id not in self.entries[kind]:
             raise ValueError(f"{kind} entry {id!r} does not exist")
         return self._upsert(
@@ -821,7 +695,7 @@ class HarnessState:
             content,
             id=id,
             path=path,
-            reference=_validate_python_skill_reference(reference, _describe_entry(id, title)),
+            reference=_validate_python_skill_reference(reference),
             arguments=arguments,
             metadata=metadata,
             global_=global_,
@@ -844,9 +718,7 @@ class HarnessState:
         # Only validate a reference when one is supplied; omitting it preserves the
         # existing reference (see _upsert) rather than forcing every title/content-only
         # update to re-send the full Python reference.
-        validated_reference = (
-            _validate_python_skill_reference(reference, _describe_entry(id, title)) if reference is not None else None
-        )
+        validated_reference = _validate_python_skill_reference(reference) if reference is not None else None
         return self.update(
             "skill",
             id,
@@ -907,11 +779,6 @@ class HarnessState:
             return target.record_refinement(trigger, changes, evidence=evidence, outcome=outcome, id=id)
         self._ensure_local_writable()
         self._sync_from_disk()
-        _validate_refinement_event(trigger, changes, evidence=evidence, outcome=outcome)
-        if id is not None and (not isinstance(id, str) or not id):
-            raise ValueError(
-                f"refinement event rejected: id must be a non-empty string when provided, got {_type_name(id)}"
-            )
         event_id = id or f"refine_{len(self.refinements) + 1:04d}"
         normalized_changes = [changes] if isinstance(changes, str) else list(changes)
         event = RefinementEvent(
@@ -1003,10 +870,7 @@ class HarnessState:
         """Return harness entries ranked by weighted term overlap with *query*.
 
         Terms are scored against an entry's title, content, path, and id;
-        matches in more distinct fields count more. Each matched term is
-        discounted by its document frequency across the ranked corpus
-        (tf-idf style, ``weight * log(1 + N / df)``), so a rare,
-        distinctive term outranks terms present in most entries.
+        matches in more distinct fields count more.
         """
         if target := self._global_target(global_, kwargs):
             return target.search(query, kind=kind, limit=limit)
@@ -1019,37 +883,20 @@ class HarnessState:
         if not terms:
             return []
 
-        entries = self.list(kind, **kwargs) if kind is not None else self.list(None, **kwargs)
-
-        # Document frequency per term over the ranked corpus: a term in
-        # every entry weighs log(2), a term in one entry of N weighs
-        # log(1 + N), so rare distinctive terms outrank ubiquitous ones.
-        matches: dict[str, int] = {term: 0 for term in terms}
-        for entry in entries:
-            title = entry.title.lower()
-            content = entry.content.lower()
-            path_and_id = f"{entry.path} {entry.id}".lower()
-            for term in terms:
-                if term in title or term in content or term in path_and_id:
-                    matches[term] += 1
-        term_idf = {
-            term: math.log(1 + len(entries) / count)
-            for term, count in matches.items()
-            if count > 0
-        }
-
         def score(entry: HarnessEntry) -> float:
             title = entry.title.lower()
             content = entry.content.lower()
             path_and_id = f"{entry.path} {entry.id}".lower()
             total = 0.0
-            for term, idf in term_idf.items():
+            for term in terms:
                 fields = (1 if term in title else 0) + (1 if term in content else 0) + (
                     1 if term in path_and_id else 0
                 )
                 if fields:
-                    total += idf * (1 + (fields - 1) * 0.5)
+                    total += 1 + (fields - 1) * 0.5
             return total
+
+        entries = self.list(kind, **kwargs) if kind is not None else self.list(None, **kwargs)
 
         def recency(entry: HarnessEntry) -> str:
             return entry.updated_at if isinstance(entry.updated_at, str) else ""

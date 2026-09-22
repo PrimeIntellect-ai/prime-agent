@@ -1,0 +1,36 @@
+
+
+
+
+
+
+
+
+
+
+
+
+                          Heartbeats
+                          2 heartbeats. Select a heartbeat to manage.
+
+
+                          user heartbeat ping instruction                               active
+                          Created by you · heartbeats-verifier · every 30m · steer
+
+                          agent hb                                                      active
+                          Created by agent · heartbeats-verifier · every 30m · steer
+
+
+                          Esc close
+
+
+
+
+
+
+
+
+
+
+
+

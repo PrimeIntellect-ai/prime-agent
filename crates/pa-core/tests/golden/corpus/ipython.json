@@ -1,0 +1,179 @@
+{
+  "group": "ipython",
+  "caseCount": 7,
+  "cases": [
+    {
+      "name": "stdout-stderr-result-ordering",
+      "code": "print('out')",
+      "ctxMode": "none",
+      "mockResults": [
+        {
+          "status": "ok",
+          "stdout": "out\n",
+          "stderr": "err\n",
+          "durationMs": 123,
+          "result": "42"
+        }
+      ],
+      "provisionerCalls": {
+        "ensure": 1,
+        "execute": 1,
+        "kill": 0
+      },
+      "result": {
+        "ok": true,
+        "isError": false,
+        "outputText": "out\n\nerr\n\n42"
+      }
+    },
+    {
+      "name": "error-status-traceback",
+      "code": "1/0",
+      "ctxMode": "none",
+      "mockResults": [
+        {
+          "status": "error",
+          "stdout": "before\n",
+          "stderr": "",
+          "error": {
+            "ename": "ZeroDivisionError",
+            "evalue": "division by zero",
+            "traceback": [
+              "Traceback (most recent call last):",
+              "  File ...: division by zero"
+            ]
+          },
+          "durationMs": 5
+        }
+      ],
+      "provisionerCalls": {
+        "ensure": 1,
+        "execute": 1,
+        "kill": 0
+      },
+      "result": {
+        "ok": true,
+        "isError": true,
+        "outputText": "before\n\nTraceback (most recent call last):\n  File ...: division by zero"
+      }
+    },
+    {
+      "name": "empty-output",
+      "code": "x = 1",
+      "ctxMode": "none",
+      "mockResults": [
+        {
+          "status": "ok",
+          "stdout": "",
+          "stderr": "",
+          "durationMs": 123
+        }
+      ],
+      "provisionerCalls": {
+        "ensure": 1,
+        "execute": 1,
+        "kill": 0
+      },
+      "result": {
+        "ok": true,
+        "isError": false,
+        "outputText": ""
+      }
+    },
+    {
+      "name": "background-output",
+      "code": "import time; time.sleep(0.01)",
+      "ctxMode": "none",
+      "mockResults": [
+        {
+          "status": "ok",
+          "stdout": "x",
+          "stderr": "",
+          "durationMs": 123,
+          "backgroundOutput": "late output\nfrom background"
+        }
+      ],
+      "provisionerCalls": {
+        "ensure": 1,
+        "execute": 1,
+        "kill": 0
+      },
+      "result": {
+        "ok": true,
+        "isError": false,
+        "outputText": "x\n[background output (unattributed)]\nlate output\nfrom background"
+      }
+    },
+    {
+      "name": "aborted-status",
+      "code": "import time; time.sleep(10)",
+      "ctxMode": "none",
+      "mockResults": [
+        {
+          "status": "aborted",
+          "stdout": "partial output",
+          "stderr": "",
+          "durationMs": 123
+        }
+      ],
+      "provisionerCalls": {
+        "ensure": 1,
+        "execute": 1,
+        "kill": 0
+      },
+      "result": {
+        "ok": true,
+        "isError": true,
+        "outputText": "partial output"
+      }
+    },
+    {
+      "name": "busy-then-cancel-no-ui",
+      "code": "print('never')",
+      "ctxMode": "none",
+      "mockResults": [
+        {
+          "thrown": "KernelBusyAfterInterruptError",
+          "message": "The Python kernel is still running the previously interrupted cell. Wait and try again, or kill the kernel to start fresh."
+        }
+      ],
+      "provisionerCalls": {
+        "ensure": 1,
+        "execute": 1,
+        "kill": 0
+      },
+      "result": {
+        "ok": false,
+        "isError": true,
+        "error": "The Python kernel is still running the previously interrupted cell. Wait and try again, or kill the kernel to start fresh."
+      }
+    },
+    {
+      "name": "busy-then-kill-restart-notice",
+      "code": "print('after restart')",
+      "ctxMode": "ui-kill",
+      "mockResults": [
+        {
+          "thrown": "KernelBusyAfterInterruptError",
+          "message": "The Python kernel is still running the previously interrupted cell. Wait and try again, or kill the kernel to start fresh."
+        },
+        {
+          "status": "ok",
+          "stdout": "after restart\n",
+          "stderr": "",
+          "durationMs": 123
+        }
+      ],
+      "provisionerCalls": {
+        "ensure": 2,
+        "execute": 2,
+        "kill": 1
+      },
+      "result": {
+        "ok": true,
+        "isError": false,
+        "outputText": "<ipython_kernel_reset>\nThe Python kernel was restarted after a previous interrupted cell kept running. Variables, imports, async tasks, and open resources from before the restart are no longer available; recreate them before using them.\n</ipython_kernel_reset>\n\nafter restart\n"
+      }
+    }
+  ]
+}

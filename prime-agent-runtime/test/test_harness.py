@@ -362,59 +362,6 @@ class HarnessStateTest(unittest.TestCase):
                     arguments={},
                 )
 
-    def test_rejects_invalid_entry_fields_before_persisting(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            state_path = Path(temp_dir) / "harness_state.json"
-            state = HarnessState(state_path)
-            state.create_memory("Valid", "seed content", id="valid_entry")
-            seeded = state_path.read_text(encoding="utf-8")
-
-            for label, kwargs, message in [
-                ("content list", dict(title="T", content=["one string"]), "content must be a non-empty string, got a list"),
-                ("title list", dict(title=["T"], content="c"), "title must be a non-empty string, got a list"),
-                ("empty title", dict(title="", content="c"), "title must be a non-empty string, got an empty string"),
-                ("numeric id", dict(title="T", content="c", id=7), "id must be a non-empty string, got int"),
-                ("unhashable list id", dict(title="T", content="c", id=["x"]), "id must be a non-empty string, got a list"),
-                ("falsy numeric id", dict(title="Zero", content="c", id=0), "id must be a non-empty string, got int"),
-                ("numeric path", dict(title="T", content="c", path=7), "path must be a non-empty string, got int"),
-                ("list metadata", dict(title="T", content="c", metadata=["m"]), "metadata must be a dict when provided, got a list"),
-            ]:
-                with self.subTest(case=f"create {label}"):
-                    with self.assertRaisesRegex(ValueError, message):
-                        state.create_memory(**kwargs)
-            with self.subTest(case="subagent with list content"):
-                with self.assertRaisesRegex(ValueError, "content must be a non-empty string, got a list"):
-                    state.create_subagent("T", ["one string"])
-            with self.subTest(case="skill create without a reference"):
-                with self.assertRaisesRegex(ValueError, "skill entries require a Python reference"):
-                    state.create("skill", "Skill", "content", id="orphan_skill")
-            with self.subTest(case="skill reference as a list"):
-                with self.assertRaisesRegex(
-                    ValueError, "skill entry 'Skill' rejected: skill entries require a Python reference"
-                ):
-                    state.create_skill("Skill", "content", reference=["bad"])
-            with self.subTest(case="update with list content"):
-                with self.assertRaisesRegex(ValueError, "content must be a non-empty string, got a list"):
-                    state.update_memory("valid_entry", "Valid", ["one string"])
-                self.assertEqual(state_path.read_text(encoding="utf-8"), seeded)
-            with self.subTest(case="invalid refinement events"):
-                for label, kwargs, message in [
-                    ("trigger list", dict(trigger=["t"], changes="ok"), "trigger must be a non-empty string, got a list"),
-                    ("event id list", dict(trigger="t", changes="ok", id=["x"]), "id must be a non-empty string when provided, got a list"),
-                    ("changes int", dict(trigger="t", changes=7), "changes must be a string or a list of strings, got int"),
-                    ("mixed changes", dict(trigger="t", changes=["ok", 2]), "changes must be a list of non-empty strings"),
-                    ("evidence list", dict(trigger="t", changes="ok", evidence=["e"]), "evidence must be a string"),
-                    ("outcome int", dict(trigger="t", changes="ok", outcome=7), "outcome must be a string"),
-                ]:
-                    with self.subTest(case=label):
-                        with self.assertRaisesRegex(ValueError, message):
-                            state.record_refinement(**kwargs)
-
-            reloaded = HarnessState(state_path)
-            self.assertEqual([entry.id for entry in reloaded.list("memory")], ["valid_entry"])
-            self.assertEqual(reloaded.refinements, [])
-            self.assertIsNone(reloaded.get("skill", "orphan_skill"))
-
     def test_load_tolerates_corrupt_or_non_object_state(self) -> None:
         for payload in ("not json at all", "null", "[]", '"a string"', "123"):
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -1187,26 +1134,4 @@ class HarnessSearchTest(unittest.TestCase):
                 state.search(42)
             with self.assertRaises(TypeError):
                 state.search("worktree", limit=0)
-
-    def test_search_discounts_common_terms_and_keeps_frequency_ties(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            state = HarnessState(Path(temp_dir) / "harness_state.json")
-
-            # An empty corpus scores nothing, and a lone entry (N=1, df=1 -> log(2)) still scores.
-            self.assertEqual(state.search("session"), [])
-            state.create_memory("Session notes", "Session signal.", id="solo")
-            self.assertEqual([entry.id for entry in state.search("session")], ["solo"])
-            state.entries["memory"]["solo"].updated_at = "2026-07-01T00:00:00+00:00"
-
-            # Equal frequency discounts every match alike, so recency still orders them: id order
-            # alone would put aa_older first.
-            for entry_id, day in (("aa_older", "08-01"), ("zz_newer", "09-01")):
-                state.create_memory("Session notes", "Same session signal.", id=entry_id)
-                state.entries["memory"][entry_id].updated_at = f"2026-{day}T00:00:00+00:00"
-            self.assertEqual([entry.id for entry in state.search("session")], ["zz_newer", "aa_older", "solo"])
-
-            # "session" matches 3 of 4 (log(1 + 4/3)), "quantum" 1 of 4 (log(1 + 4)): rare ranks first.
-            state.create_memory("Quantum note", "Only quantum annealing matters once.", id="rare")
-            state.entries["memory"]["rare"].updated_at = "2026-07-01T00:00:00+00:00"
-            self.assertEqual([entry.id for entry in state.search("session quantum")], ["rare", "zz_newer", "aa_older", "solo"])
 

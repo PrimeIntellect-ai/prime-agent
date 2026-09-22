@@ -1,0 +1,400 @@
+{
+  "group": "edit",
+  "caseCount": 16,
+  "cases": [
+    {
+      "name": "unique-replacement",
+      "files": {
+        "file.txt": "alpha\nbeta\ngamma\ndelta\n"
+      },
+      "fixture": [],
+      "applyPrepareArguments": false,
+      "input": {
+        "path": "file.txt",
+        "edits": [
+          {
+            "oldText": "beta",
+            "newText": "BETA"
+          }
+        ]
+      },
+      "result": {
+        "ok": true,
+        "text": "Successfully replaced 1 block(s) in file.txt.",
+        "details": {
+          "diff": " 1 alpha\n-2 beta\n+2 BETA\n 3 gamma\n 4 delta",
+          "firstChangedLine": 2
+        }
+      },
+      "finalContent": "alpha\nBETA\ngamma\ndelta\n"
+    },
+    {
+      "name": "two-edits",
+      "files": {
+        "file.txt": "alpha\nbeta\ngamma\ndelta\n"
+      },
+      "fixture": [],
+      "applyPrepareArguments": false,
+      "input": {
+        "path": "file.txt",
+        "edits": [
+          {
+            "oldText": "alpha",
+            "newText": "ALPHA"
+          },
+          {
+            "oldText": "gamma",
+            "newText": "GAMMA"
+          }
+        ]
+      },
+      "result": {
+        "ok": true,
+        "text": "Successfully replaced 2 block(s) in file.txt.",
+        "details": {
+          "diff": "-1 alpha\n+1 ALPHA\n 2 beta\n-3 gamma\n+3 GAMMA\n 4 delta",
+          "firstChangedLine": 1
+        }
+      },
+      "finalContent": "ALPHA\nbeta\nGAMMA\ndelta\n"
+    },
+    {
+      "name": "not-found",
+      "files": {
+        "file.txt": "alpha\nbeta\ngamma\ndelta\n"
+      },
+      "fixture": [],
+      "applyPrepareArguments": false,
+      "input": {
+        "path": "file.txt",
+        "edits": [
+          {
+            "oldText": "missing",
+            "newText": "x"
+          }
+        ]
+      },
+      "result": {
+        "ok": false,
+        "error": "Could not find the exact text in file.txt. The old text must match exactly including all whitespace and newlines."
+      },
+      "finalContent": "alpha\nbeta\ngamma\ndelta\n"
+    },
+    {
+      "name": "ambiguous",
+      "files": {
+        "file.txt": "repeat\nmiddle\nrepeat\n"
+      },
+      "fixture": [],
+      "applyPrepareArguments": false,
+      "input": {
+        "path": "file.txt",
+        "edits": [
+          {
+            "oldText": "repeat",
+            "newText": "x"
+          }
+        ]
+      },
+      "result": {
+        "ok": false,
+        "error": "Found 2 occurrences of the text in file.txt. The text must be unique. Please provide more context to make it unique."
+      },
+      "finalContent": "repeat\nmiddle\nrepeat\n"
+    },
+    {
+      "name": "overlapping-edits",
+      "files": {
+        "file.txt": "abcdef\n"
+      },
+      "fixture": [],
+      "applyPrepareArguments": false,
+      "input": {
+        "path": "file.txt",
+        "edits": [
+          {
+            "oldText": "abcd",
+            "newText": "X"
+          },
+          {
+            "oldText": "cdef",
+            "newText": "Y"
+          }
+        ]
+      },
+      "result": {
+        "ok": false,
+        "error": "edits[0] and edits[1] overlap in file.txt. Merge them into one edit or target disjoint regions."
+      },
+      "finalContent": "abcdef\n"
+    },
+    {
+      "name": "file-not-found",
+      "files": {},
+      "fixture": [],
+      "applyPrepareArguments": false,
+      "input": {
+        "path": "missing.txt",
+        "edits": [
+          {
+            "oldText": "a",
+            "newText": "b"
+          }
+        ]
+      },
+      "result": {
+        "ok": false,
+        "error": "Could not edit file: missing.txt. Error code: ENOENT."
+      },
+      "finalContent": null
+    },
+    {
+      "name": "empty-edits",
+      "files": {
+        "file.txt": "alpha\nbeta\ngamma\ndelta\n"
+      },
+      "fixture": [],
+      "applyPrepareArguments": false,
+      "input": {
+        "path": "file.txt",
+        "edits": []
+      },
+      "result": {
+        "ok": false,
+        "error": "Edit tool input is invalid. edits must contain at least one replacement."
+      },
+      "finalContent": "alpha\nbeta\ngamma\ndelta\n"
+    },
+    {
+      "name": "legacy-oldText-newText",
+      "files": {
+        "file.txt": "alpha\nbeta\ngamma\ndelta\n"
+      },
+      "fixture": [],
+      "applyPrepareArguments": true,
+      "input": {
+        "path": "file.txt",
+        "oldText": "beta",
+        "newText": "BETA"
+      },
+      "preparedInput": {
+        "path": "file.txt",
+        "edits": [
+          {
+            "oldText": "beta",
+            "newText": "BETA"
+          }
+        ]
+      },
+      "result": {
+        "ok": true,
+        "text": "Successfully replaced 1 block(s) in file.txt.",
+        "details": {
+          "diff": " 1 alpha\n-2 beta\n+2 BETA\n 3 gamma\n 4 delta",
+          "firstChangedLine": 2
+        }
+      },
+      "finalContent": "alpha\nBETA\ngamma\ndelta\n"
+    },
+    {
+      "name": "edits-as-json-string",
+      "files": {
+        "file.txt": "alpha\nbeta\ngamma\ndelta\n"
+      },
+      "fixture": [],
+      "applyPrepareArguments": true,
+      "input": {
+        "path": "file.txt",
+        "edits": "[{\"oldText\":\"beta\",\"newText\":\"BETA\"}]"
+      },
+      "preparedInput": {
+        "path": "file.txt",
+        "edits": [
+          {
+            "oldText": "beta",
+            "newText": "BETA"
+          }
+        ]
+      },
+      "result": {
+        "ok": true,
+        "text": "Successfully replaced 1 block(s) in file.txt.",
+        "details": {
+          "diff": " 1 alpha\n-2 beta\n+2 BETA\n 3 gamma\n 4 delta",
+          "firstChangedLine": 2
+        }
+      },
+      "finalContent": "alpha\nBETA\ngamma\ndelta\n"
+    },
+    {
+      "name": "bom-file",
+      "files": {
+        "file.txt": "﻿hello world\nsecond line\n"
+      },
+      "fixture": [],
+      "applyPrepareArguments": false,
+      "input": {
+        "path": "file.txt",
+        "edits": [
+          {
+            "oldText": "world",
+            "newText": "planet"
+          }
+        ]
+      },
+      "result": {
+        "ok": true,
+        "text": "Successfully replaced 1 block(s) in file.txt.",
+        "details": {
+          "diff": "-1 hello world\n+1 hello planet\n 2 second line",
+          "firstChangedLine": 1
+        }
+      },
+      "finalContent": "﻿hello planet\nsecond line\n"
+    },
+    {
+      "name": "crlf-file",
+      "files": {
+        "file.txt": "line1\r\nline2\r\nline3\r\n"
+      },
+      "fixture": [],
+      "applyPrepareArguments": false,
+      "input": {
+        "path": "file.txt",
+        "edits": [
+          {
+            "oldText": "line2",
+            "newText": "LINE2"
+          }
+        ]
+      },
+      "result": {
+        "ok": true,
+        "text": "Successfully replaced 1 block(s) in file.txt.",
+        "details": {
+          "diff": " 1 line1\n-2 line2\n+2 LINE2\n 3 line3",
+          "firstChangedLine": 2
+        }
+      },
+      "finalContent": "line1\r\nLINE2\r\nline3\r\n"
+    },
+    {
+      "name": "fuzzy-trailing-whitespace",
+      "files": {
+        "file.txt": "alpha   \nbeta\nkeep  \n"
+      },
+      "fixture": [],
+      "applyPrepareArguments": false,
+      "input": {
+        "path": "file.txt",
+        "edits": [
+          {
+            "oldText": "alpha\n",
+            "newText": "ALPHA\n"
+          }
+        ]
+      },
+      "result": {
+        "ok": true,
+        "text": "Successfully replaced 1 block(s) in file.txt.",
+        "details": {
+          "diff": "-1 alpha\n+1 ALPHA\n 2 beta\n 3 keep",
+          "firstChangedLine": 1
+        }
+      },
+      "finalContent": "ALPHA\nbeta\nkeep\n"
+    },
+    {
+      "name": "fuzzy-smart-quotes",
+      "files": {
+        "file.txt": "it’s a “test” line\n"
+      },
+      "fixture": [],
+      "applyPrepareArguments": false,
+      "input": {
+        "path": "file.txt",
+        "edits": [
+          {
+            "oldText": "it's a \"test\" line",
+            "newText": "plain quotes"
+          }
+        ]
+      },
+      "result": {
+        "ok": true,
+        "text": "Successfully replaced 1 block(s) in file.txt.",
+        "details": {
+          "diff": "-1 it's a \"test\" line\n+1 plain quotes",
+          "firstChangedLine": 1
+        }
+      },
+      "finalContent": "plain quotes\n"
+    },
+    {
+      "name": "empty-oldtext",
+      "files": {
+        "file.txt": "alpha\nbeta\ngamma\ndelta\n"
+      },
+      "fixture": [],
+      "applyPrepareArguments": false,
+      "input": {
+        "path": "file.txt",
+        "edits": [
+          {
+            "oldText": "",
+            "newText": "x"
+          }
+        ]
+      },
+      "result": {
+        "ok": false,
+        "error": "oldText must not be empty in file.txt."
+      },
+      "finalContent": "alpha\nbeta\ngamma\ndelta\n"
+    },
+    {
+      "name": "no-change",
+      "files": {
+        "file.txt": "alpha\nbeta\ngamma\ndelta\n"
+      },
+      "fixture": [],
+      "applyPrepareArguments": false,
+      "input": {
+        "path": "file.txt",
+        "edits": [
+          {
+            "oldText": "beta",
+            "newText": "beta"
+          }
+        ]
+      },
+      "result": {
+        "ok": false,
+        "error": "No changes made to file.txt. The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected."
+      },
+      "finalContent": "alpha\nbeta\ngamma\ndelta\n"
+    },
+    {
+      "name": "directory-path",
+      "files": {},
+      "fixture": [
+        "mkdir -p adir"
+      ],
+      "applyPrepareArguments": false,
+      "input": {
+        "path": "adir",
+        "edits": [
+          {
+            "oldText": "a",
+            "newText": "b"
+          }
+        ]
+      },
+      "result": {
+        "ok": false,
+        "error": "EISDIR: illegal operation on a directory, read"
+      },
+      "finalContent": null
+    }
+  ]
+}

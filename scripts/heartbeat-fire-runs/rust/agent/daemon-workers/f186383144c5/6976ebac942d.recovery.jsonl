@@ -1,0 +1,7 @@
+{"activeSessionId":"6976ebac942d","sessionId":"01a0c5da-30de-765e-8f59-5bb56234b693","sessionFile":"/home/ubuntu/lane-worktrees/hb-fire/scripts/heartbeat-fire-runs/rust/agent/sessions/01a0c5da-30de-765e-8f59-5bb56234b693.jsonl","busy":true,"operation":"create","recordedAt":"2026-09-21T21:23:26.077Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"6976ebac942d","steering":["verifier seed turn"],"follow_up":[],"recorded_at":"2026-09-21T21:23:26.113Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"6976ebac942d","steering":[],"follow_up":[],"recorded_at":"2026-09-21T21:23:26.279Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"6976ebac942d","steering":["create the agent heartbeat"],"follow_up":[],"recorded_at":"2026-09-21T21:23:26.284Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"6976ebac942d","steering":[],"follow_up":[],"recorded_at":"2026-09-21T21:23:26.462Z"}
+{"version":1,"type":"queue_snapshot","active_session_id":"6976ebac942d","steering":[],"follow_up":[],"recorded_at":"2026-09-21T21:23:56.552Z"}
+{"activeSessionId":"6976ebac942d","sessionId":"01a0c5da-30de-765e-8f59-5bb56234b693","sessionFile":"/home/ubuntu/lane-worktrees/hb-fire/scripts/heartbeat-fire-runs/rust/agent/sessions/01a0c5da-30de-765e-8f59-5bb56234b693.jsonl","busy":false,"operation":"shutdown","recordedAt":"2026-09-21T21:23:56.927Z"}
