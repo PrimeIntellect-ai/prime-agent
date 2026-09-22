@@ -115,7 +115,9 @@ def test_offline_verified_grader_requires_all_expected_tests() -> None:
         offline_swebench_grader.grade(config, "pytest failed before collecting tests")
 
 
-def test_patch_collection_uses_trusted_base_and_keeps_all_git_states(tmp_path: Path) -> None:
+def test_patch_collection_uses_trusted_base_and_keeps_all_git_states(
+    tmp_path: Path,
+) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
@@ -154,6 +156,59 @@ def test_patch_collection_uses_trusted_base_and_keeps_all_git_states(tmp_path: P
     assert not (clone / "deleted.txt").exists()
     assert (clone / "binary.bin").read_bytes() == b"changed\x00binary"
     assert (clone / "untracked.txt").read_text() == "untracked\n"
+
+
+def test_patch_collection_overrides_candidate_diff_prefix_config(
+    tmp_path: Path,
+) -> None:
+    """A candidate that rewrites its repo's diff prefix config must not escape the filter.
+
+    git config diff.srcPrefix/diff.dstPrefix (or diff.mnemonicPrefix) in the solver
+    sandbox would make plain git diff emit headers like "diff --git i/... j/...",
+    whose sections filter_test_control cannot attribute to a path. The collect
+    command must pin the a/ and b/ prefixes itself.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True)
+    (repo / "src.py").write_text("x = 1\n")
+    tests = repo / "tests"
+    tests.mkdir()
+    (tests / "test_x.py").write_text("def test_x():\n    assert 1 == 1\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+    # Candidate tampers with the test and rewrites the diff prefixes it will be
+    # collected with.
+    (tests / "test_x.py").write_text("def test_x():\n    assert 1 == 2\n")
+    (repo / "src.py").write_text("x = 2\n")
+    subprocess.run(["git", "config", "diff.srcPrefix", "i/"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "diff.dstPrefix", "j/"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "diff.mnemonicPrefix", "true"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "diff.noprefix", "true"], cwd=repo, check=True)
+
+    task = tmp_path / "task/tests"
+    task.mkdir(parents=True)
+    (task / "config.json").write_text(json.dumps({"base_commit": base}))
+    command = verified_verifier.patch_collect_command(task.parent)
+    pins = [
+        "-c diff.srcPrefix=a/",
+        "-c diff.dstPrefix=b/",
+        "-c diff.mnemonicPrefix=false",
+        "-c diff.noprefix=false",
+    ]
+    assert all(pin in command for pin in pins)
+    subprocess.run(command.split(" && ", 1)[1], cwd=repo, check=True, shell=True)
+    patch = Path("/tmp/prime-agent.patch").read_text()
+    assert "diff --git a/tests/test_x.py b/tests/test_x.py" in patch
+
+    filtered = verified_verifier.filter_test_control(patch)
+    assert "x = 2" in filtered
+    assert "assert 1 == 2" not in filtered
 
 
 def test_verified_test_rewrite_handles_pinned_install_variants() -> None:
@@ -214,13 +269,18 @@ def labeled_event() -> dict:
         "pull_request": {
             "number": 2306,
             "state": "open",
-            "base": {"sha": "b" * 40, "repo": {"full_name": "PrimeIntellect-ai/prime-agent"}},
+            "base": {
+                "sha": "b" * 40,
+                "repo": {"full_name": "PrimeIntellect-ai/prime-agent"},
+            },
             "head": {"sha": "c" * 40, "repo": {"full_name": "contributor/prime-agent"}},
         },
     }
 
 
-def test_task_runtime_credentials_are_removed_before_sandbox_creation(tmp_path: Path) -> None:
+def test_task_runtime_credentials_are_removed_before_sandbox_creation(
+    tmp_path: Path,
+) -> None:
     harbor = tmp_path / "verifiers/v1/tasksets/harbor/taskset.py"
     harbor.parent.mkdir(parents=True)
     harbor.write_text(
@@ -233,7 +293,13 @@ def test_task_runtime_credentials_are_removed_before_sandbox_creation(tmp_path: 
     task.data = SimpleNamespace(
         env={
             name: "secret"
-            for name in ("PRIME_API_KEY", "PRIME_SANDBOX_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "HF_TOKEN")
+            for name in (
+                "PRIME_API_KEY",
+                "PRIME_SANDBOX_API_KEY",
+                "GITHUB_TOKEN",
+                "GH_TOKEN",
+                "HF_TOKEN",
+            )
         }
         | {"SAFE": "value"}
     )
@@ -366,7 +432,8 @@ def test_scored_model_timeout_is_an_outcome_but_incomplete_trace_fails() -> None
     transient_provider_failure.errors = [transient_error]
     with pytest.raises(ValueError, match="complete trace or model outcome"):
         evaluate.trace_record(
-            SimpleNamespace(traces=[transient_provider_failure], errors=[], ok=False), "suite"
+            SimpleNamespace(traces=[transient_provider_failure], errors=[], ok=False),
+            "suite",
         )
     mixed_failure = fake_trace(ok=False, timeout=True)
     mixed_failure.rewards = {}
@@ -416,7 +483,11 @@ def test_model_failure_without_reported_usage_records_zero_tokens() -> None:
     failure.errors = [provider_error]
     record = evaluate.trace_record(SimpleNamespace(traces=[failure], errors=[], ok=False), "suite")
     assert record["model_failure"] is True
-    assert (record["uncached_input_tokens"], record["cached_input_tokens"], record["output_tokens"]) == (
+    assert (
+        record["uncached_input_tokens"],
+        record["cached_input_tokens"],
+        record["output_tokens"],
+    ) == (
         0,
         0,
         0,
@@ -503,7 +574,10 @@ def paired(base_resolved: int = 10, head_resolved: int = 10, head_multiplier: in
         "model": "internal/glm-5.3-fast",
         "started_at": 1.0,
         "finished_at": 2.0,
-        "sides": {"base": tasks(base_resolved), "head": tasks(head_resolved, head_multiplier)},
+        "sides": {
+            "base": tasks(base_resolved),
+            "head": tasks(head_resolved, head_multiplier),
+        },
     }
 
 
@@ -544,6 +618,102 @@ def test_report_fails_drastic_quality_or_efficiency_regression() -> None:
     markdown, verdict = report.render(efficiency, request())
     assert verdict == "fail"
     assert "Cumulative task time reached 2.00x base without more resolutions." in markdown
+
+
+def _baseline_v2(harness: str, label: str, resolved: int = 0, measured: bool = False) -> dict:
+    return {
+        "harness": harness,
+        "label": label,
+        "tasksets": {
+            "swebench-verified": {
+                "resolved": resolved if measured else 0,
+                "tasks": 15,
+                "uncached_input_tokens": 100 if measured else 0,
+                "cached_input_tokens": 1000 if measured else 0,
+                "output_tokens": 10 if measured else 0,
+                "measured": measured,
+            },
+            "swebench-pro": {
+                "resolved": resolved if measured else 0,
+                "tasks": 8,
+                "uncached_input_tokens": 100 if measured else 0,
+                "cached_input_tokens": 1000 if measured else 0,
+                "output_tokens": 10 if measured else 0,
+                "measured": measured,
+            },
+            "scaleswe": {
+                "resolved": resolved if measured else 0,
+                "tasks": 5,
+                "uncached_input_tokens": 100 if measured else 0,
+                "cached_input_tokens": 1000 if measured else 0,
+                "output_tokens": 10 if measured else 0,
+                "measured": measured,
+            },
+        },
+        "model_failures": 0,
+        "e2e_seconds": 100.0 if measured else 0.0,
+        "measured_at": "2026-09-18T00:00:00Z" if measured else "1970-01-01T00:00:00Z",
+        "source": "test fixture" if measured else "Pending measurement run",
+    }
+
+
+def _baselines_doc(measured_harness: str | None = None) -> dict:
+    return {
+        "schema_version": 2,
+        "description": "Static harness baselines on the 28-task Short SWE suite",
+        "model": "internal/glm-5.3-fast",
+        "baselines": [
+            _baseline_v2(h, label, resolved=3, measured=(h == measured_harness))
+            for h, label in report.HARNESS_LABELS.items()
+        ],
+    }
+
+
+def test_harness_baselines_file_holds_the_pinned_schema() -> None:
+    document = json.loads((EVAL_ROOT / "harness-baselines.json").read_text())
+    assert document["schema_version"] == 2
+    assert set(b["harness"] for b in document["baselines"]) == set(report.HARNESS_LABELS)
+    for entry in document["baselines"]:
+        assert set(entry["tasksets"]) == set(report.TASKSET_SIZES)
+    validated = report.validate_baselines(document)
+    assert set(validated) == set(report.HARNESS_LABELS)
+
+
+def test_report_renders_the_harness_baselines_section() -> None:
+    result = paired(base_resolved=16, head_resolved=18)
+    text, verdict = report.render(result, request())
+    assert "Harness baselines" in text
+    assert verdict == "pass"
+
+
+def test_unmeasured_baselines_render_placeholders() -> None:
+    doc = _baselines_doc(measured_harness=None)
+    assert report.validate_baselines(doc)
+
+
+def test_measured_baselines_render_numbers_and_never_change_the_verdict() -> None:
+    doc = _baselines_doc(measured_harness="pi-coding-harness")
+    validated = report.validate_baselines(doc)
+    assert "pi-coding-harness" in validated
+    regression = report.compare(
+        {
+            "resolved": 10,
+            "model_failures": 0,
+            "uncached_input_tokens": 100,
+            "cached_input_tokens": 1000,
+            "output_tokens": 50,
+            "e2e_seconds": 10.0,
+        },
+        {
+            "resolved": 1,
+            "model_failures": 0,
+            "uncached_input_tokens": 100,
+            "cached_input_tokens": 1000,
+            "output_tokens": 50,
+            "e2e_seconds": 10.0,
+        },
+    )
+    assert regression, "regression gates are independent of baselines"
 
 
 def open_directories(source: Path, destination: Path) -> tuple[int, int]:
@@ -659,3 +829,167 @@ def test_compare_gates_positive_totals_over_a_zero_base() -> None:
     }
     findings = report.compare(base, head)
     assert findings, "positive totals over a zero base must gate"
+
+
+# --- filter_test_control tests ---
+
+
+class TestFilterTestControl:
+    """Execution tests for the candidate patch filter."""
+
+    def _diff(self, a: str, b: str) -> str:
+        return (
+            f"diff --git a/{a} b/{b}\n"
+            f"index 1234567..89abcde 100644\n"
+            f"--- a/{a}\n"
+            f"+++ b/{b}\n"
+            f"@@ -1 +1 @@\n+x = 1\n"
+        )
+
+    @pytest.mark.parametrize(
+        "a,b,kept",
+        [
+            ("src/module.py", "src/module.py", True),
+            ("tests/conftest.py", "tests/helpers.py", False),
+            ("src/util.py", "tests/conftest.py", False),
+            ("src/none.py", "tests/conftest.py", False),
+            ("pyproject.toml", "pyproject.toml", False),
+            ("tests/test_foo.py", "tests/test_foo.py", False),
+            ("tests/helpers.py", "tests/helpers.py", False),
+            ("src/mod.py", "tests/__init__.py", False),
+            ("pkg/tests/fixture.py", "pkg/tests/fixture.py", False),
+        ],
+    )
+    def test_filter_paths(self, a: str, b: str, kept: bool) -> None:
+        from scripts.evals.short_swe.verified_verifier import filter_test_control
+
+        result = filter_test_control(self._diff(a, b))
+        assert bool(result) == kept
+
+    def test_bytes_and_str_match(self) -> None:
+        from scripts.evals.short_swe.verified_verifier import filter_test_control
+
+        patch = self._diff("src/lib.py", "src/lib.py")
+        assert filter_test_control(patch) == filter_test_control(patch.encode())
+
+    def test_headerless_rejected_and_oversize_capped(self) -> None:
+        from scripts.evals.short_swe.verified_verifier import (
+            MAX_PATCH_BYTES,
+            filter_test_control,
+        )
+
+        with pytest.raises(RuntimeError, match="no diff --git header"):
+            filter_test_control("--- a/x\n+++ b/x\n@@ -1 +1 @@\n+x\n")
+        with pytest.raises(RuntimeError, match="exceeds"):
+            filter_test_control(b"x" * (MAX_PATCH_BYTES + 1))
+
+    def test_unattributable_header_rejected(self) -> None:
+        """Headers without both a/ and b/ tokens fail closed instead of being kept.
+
+        git config diff.srcPrefix/diff.dstPrefix can produce these; keeping the
+        section (as an older version of the filter did) would smuggle test-control
+        edits into the verifier.
+        """
+        from scripts.evals.short_swe.verified_verifier import filter_test_control
+
+        for header in (
+            "diff --git i/tests/conftest.py j/tests/conftest.py\n",
+            "diff --git a/tests/conftest.py j/tests/conftest.py\n",
+            "diff --git i/tests/conftest.py b/tests/conftest.py\n",
+            "diff --git tests/conftest.py tests/conftest.py\n",
+        ):
+            patch = header + (
+                "index 1234567..89abcde 100644\n"
+                "--- i/tests/conftest.py\n"
+                "+++ j/tests/conftest.py\n"
+                "@@ -1 +1 @@\n"
+                "+assert True\n"
+            )
+            with pytest.raises(RuntimeError, match="no a/ or b/ path"):
+                filter_test_control(patch)
+
+    def test_empty_and_multi_file(self) -> None:
+        from scripts.evals.short_swe.verified_verifier import filter_test_control
+
+        assert filter_test_control(b"") == ""
+        mixed = self._diff("src/lib.py", "src/lib.py") + self._diff("s.py", "tests/conftest.py")
+        result = filter_test_control(mixed)
+        assert "src/lib.py" in result and "conftest" not in result
+
+    def test_traditional_section_riding_kept_section_dropped(self) -> None:
+        """git apply parses traditional ---/+++ sections after a kept git-header section.
+
+        They must route through TEST_CONTROL on their own paths, not ride the
+        preceding section's attribution.
+        """
+        from scripts.evals.short_swe.verified_verifier import filter_test_control
+
+        patch = (
+            self._diff("src/keep.py", "src/keep.py")
+            + "--- a/testing/test_helpers.py\n"
+            + "+++ b/testing/test_helpers.py\n"
+            + "@@ -1,1 +1,1 @@\n"
+            + "-old\n"
+            + "+new\n"
+        )
+        result = filter_test_control(patch)
+        assert "keep.py" in result and "new" not in result
+
+    def test_traditional_section_kept_when_source_path(self) -> None:
+        from scripts.evals.short_swe.verified_verifier import filter_test_control
+
+        patch = (
+            self._diff("src/keep.py", "src/keep.py")
+            + "--- a/src/trad.py\n"
+            + "+++ b/src/trad.py\n"
+            + "@@ -1,1 +1,1 @@\n"
+            + "-old\n"
+            + "+new\n"
+        )
+        result = filter_test_control(patch)
+        assert "keep.py" in result and "new" in result
+        # The +++ header line is kept too: git apply needs it.
+        assert "+++ b/src/trad.py" in result
+
+    def test_fake_count_in_hunk_context_cannot_inflate_hunk_lines(self) -> None:
+        from scripts.evals.short_swe.verified_verifier import filter_test_control
+
+        patch = (
+            "diff --git a/src/keep.py b/src/keep.py\n"
+            "@@ -1,1 +1,1 @@ ctx +9,9 @@ tail\n"
+            "+x\n"
+            "--- a/testing/test_helpers.py\n"
+            "+++ b/testing/test_helpers.py\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-old\n"
+            "+new\n"
+        )
+        result = filter_test_control(patch)
+        assert "keep.py" in result and "new" not in result
+
+    def test_hunk_removed_line_three_dash_test_path_is_content(self) -> None:
+        from scripts.evals.short_swe.verified_verifier import filter_test_control
+
+        patch = "diff --git a/src/keep.py b/src/keep.py\n@@ -1,3 +1,2 @@\n old\n--- a/tests/foo.py\n+new\n"
+        result = filter_test_control(patch)
+        assert "--- a/tests/foo.py" in result and "new" in result
+
+    def test_hunk_body_dashdash_is_content(self) -> None:
+        from scripts.evals.short_swe.verified_verifier import filter_test_control
+
+        patch = "diff --git a/src/keep.py b/src/keep.py\n@@ -1,3 +1,2 @@\n---- a/tricky.py\n+plus\n"
+        result = filter_test_control(patch)
+        assert "---- a/tricky.py" in result and "plus" in result
+
+    def test_quoted_traditional_path_test_control(self) -> None:
+        from scripts.evals.short_swe.verified_verifier import filter_test_control
+
+        patch = (
+            self._diff("src/keep.py", "src/keep.py")
+            + '--- "a/tests/weird name.py"\n'
+            + '+++ "b/tests/weird name.py"\n'
+            + "@@ -1 +1 @@\n"
+            + "+x\n"
+        )
+        result = filter_test_control(patch)
+        assert "keep.py" in result and "weird" not in result

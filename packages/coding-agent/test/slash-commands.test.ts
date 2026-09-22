@@ -40,6 +40,8 @@ describe("slash command aliases", () => {
 		expect(builtinSlashCommandTakesArgument("thinking")).toBe(builtinSlashCommandTakesArgument("effort"));
 		expect(builtinSlashCommandTakesArgument("clear")).toBe(false);
 		expect(builtinSlashCommandTakesArgument("new")).toBe(true);
+		expect(BUILTIN_SLASH_COMMANDS.find((c) => c.name === "speed")?.argumentHint).toBe("[on|off]");
+		expect(BUILTIN_SLASH_COMMANDS.find((c) => c.name === "speed")?.takesArgument).toBe(true);
 	});
 
 	test("parses /new names, prompts, and option errors", () => {

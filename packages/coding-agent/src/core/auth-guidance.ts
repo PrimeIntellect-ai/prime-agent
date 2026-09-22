@@ -44,6 +44,31 @@ export function formatAuthenticationFailedMessage(provider: string): string {
 	);
 }
 
+/**
+ * Image-attaching turns on a model without image input must not silently drop
+ * the images: name the session model, the setting, and the alternatives so the
+ * user can act immediately.
+ */
+export function formatImageModelRequiredMessage(sessionModelId: string): string {
+	return [
+		`This turn attaches images, but the selected model (${sessionModelId}) does not accept image input.`,
+		"",
+		"Pick one:",
+		`- Switch the session model to an image-capable one with /model, or`,
+		`- Set imageModel in settings.json to an image-capable model ("provider/model-id" or a bare id), e.g. "anthropic/claude-sonnet-4-5"`,
+		"",
+		"Then resend the message. Without it the request would silently drop the images.",
+	].join("\n");
+}
+
+export function formatImageModelUnusableMessage(reference: string): string {
+	return [
+		`imageModel "${reference}" could not be resolved to an available, image-capable, authenticated model.`,
+		"",
+		"Fix the imageModel setting (settings.json) or authenticate the provider, then resend the message.",
+	].join("\n");
+}
+
 export function isLikelyAuthenticationError(message: string): boolean {
 	return (
 		/\b(401|403)\b/i.test(message) ||
