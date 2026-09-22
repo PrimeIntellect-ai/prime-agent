@@ -100,10 +100,11 @@ export function readCachedPrimeInferenceModels(
 	for (const candidate of candidates) {
 		if (!existsSync(candidate)) continue;
 		try {
-			return buildPrimeInferenceModels(
+			const models = buildPrimeInferenceModels(
 				bundledModels,
 				parsePrimeInferenceModelCatalog(JSON.parse(readFileSync(candidate, "utf8")) as unknown),
 			);
+			if (models) return models;
 		} catch {
 			// Try the next candidate location.
 		}

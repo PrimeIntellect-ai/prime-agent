@@ -239,6 +239,8 @@ describe("model catalog exporter merge", () => {
 					cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
 					contextWindow: 128000,
 					maxTokens: 8192,
+					headers: { Authorization: "must-not-leak" },
+					unknownCatalogField: true,
 				},
 			],
 			[
@@ -258,6 +260,7 @@ describe("model catalog exporter merge", () => {
 
 		for (const record of result.models) {
 			expect(record).not.toHaveProperty("headers");
+			expect(record).not.toHaveProperty("unknownCatalogField");
 		}
 		expect(result.summary).toEqual({
 			updated: 1,

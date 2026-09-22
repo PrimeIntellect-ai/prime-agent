@@ -24,13 +24,13 @@ function freezeCatalog(value: unknown): void {
 	Object.freeze(value);
 }
 
-export function createBundledModelCatalog(
+function createBundledModelCatalog(
 	providerCatalog: unknown,
 	primeModels: readonly Model<"openai-completions">[] = getModels("prime-inference"),
 ): ModelCatalogV1 {
 	return parseModelCatalog(
 		createModelCatalog([
-			...parseProviderModelCatalog(parseModelCatalog(providerCatalog), installedModels),
+			...parseProviderModelCatalog(providerCatalog, installedModels),
 			...primeModels.filter((model) => !isPrivatePrimeInferenceModelId(model.id)),
 		]),
 	);

@@ -6,6 +6,7 @@ import { parse as parseYaml } from "yaml";
 import { fileURLToPath } from "url";
 import { COPILOT_CLIENT_HEADERS } from "../src/copilot-client-version.js";
 import { getOpenRouterReasoningCapabilities } from "../src/openrouter-reasoning.js";
+import { parseModelCatalog } from "../src/model-catalog.js";
 import {
 	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
 	CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
@@ -2265,7 +2266,7 @@ export function mergeProviderModelsForCatalog(
 			throw new Error(`Whitelisted model id ${id} is missing from both upstream and the committed provider file`);
 		}
 		notInUpstreamIds.push(id);
-		nextModels.push(existing);
+		nextModels.push(sanitizeExistingCatalogModel(existing));
 	}
 
 	const delistedIds = existingModels.filter((model) => !admittedSet.has(model.id)).map((model) => model.id);
@@ -2285,11 +2286,20 @@ export function mergeProviderModelsForCatalog(
 	};
 }
 
+const CATALOG_MODEL_KEYS = new Set([
+	"id", "name", "api", "provider", "baseUrl", "reasoning", "thinkingLevelMap",
+	"input", "cost", "contextWindow", "maxTokens", "featured", "compat",
+]);
+
+function sanitizeExistingCatalogModel(existing: CatalogModelRecord): CatalogModelRecord {
+	return Object.fromEntries(Object.entries(existing).filter(([key]) => CATALOG_MODEL_KEYS.has(key))) as CatalogModelRecord;
+}
+
 function mergeExistingCatalogModel(existing: CatalogModelRecord, collected: Model<Api>): CatalogModelRecord {
 	const collectedRecord = collected as unknown as Record<string, unknown>;
 	const next: Record<string, unknown> = {};
 	const seenKeys = new Set<string>();
-	for (const [key, value] of Object.entries(existing)) {
+	for (const [key, value] of Object.entries(sanitizeExistingCatalogModel(existing))) {
 		seenKeys.add(key);
 		if (!REFRESH_METADATA_KEYS.includes(key as (typeof REFRESH_METADATA_KEYS)[number])) {
 			next[key] = value;
@@ -2539,7 +2549,7 @@ export async function syncCatalog(catalogDir: string): Promise<number> {
 			if (existing.length === 0) {
 				throw new Error(`${provider} upstream sync failed and no committed models/catalog.v1.json entries exist to keep`);
 			}
-			nextModels.push(...existing);
+			nextModels.push(...existing.map(sanitizeExistingCatalogModel));
 			summaries.push({
 				provider,
 				updated: 0,
@@ -2573,6 +2583,7 @@ export async function syncCatalog(catalogDir: string): Promise<number> {
 	}
 
 	const nextCatalog: CatalogEnvelope = { schemaVersion: 1, models: nextModels };
+	parseModelCatalog(nextCatalog);
 	const manifest = buildAdmissionManifest(nextCatalog.models);
 	writeCanonicalJson(catalogPath, nextCatalog);
 	writeCanonicalJson(manifestPath, manifest);

@@ -871,6 +871,7 @@ export class ModelRegistry {
 	 * return from the disk/bundled fallback immediately and refresh in the background.
 	 */
 	async refreshAvailableModels(): Promise<Model<Api>[]> {
+		this.startCatalogRefreshTimer();
 		return this.runSerializedEntitlementRefresh(async () => {
 			const previousPrivateModelIds = new Set(this.authorizedPrivatePrimeInferenceModelIds);
 			const previousTeamId = this.authorizedPrivatePrimeInferenceTeamId;
