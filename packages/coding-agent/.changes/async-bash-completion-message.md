@@ -1,2 +1,0 @@
-- Added steering Shell messages when background kernel `bash()` process groups finish so agents can inspect results at the next safe turn boundary without interrupting running tools.
-- Kept sessions resident while background shell process groups run and completion delivery is pending.

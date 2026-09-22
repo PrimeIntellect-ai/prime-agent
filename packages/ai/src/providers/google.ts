@@ -36,6 +36,7 @@ import {
 	mapToolChoice,
 	retainThoughtSignature,
 } from "./google-shared.js";
+import { withOpenCodeHeaders } from "./opencode-headers.js";
 import { buildBaseOptions } from "./simple-options.js";
 
 export interface GoogleOptions extends StreamOptions {
@@ -77,7 +78,7 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
-			const client = createClient(model, apiKey, options?.headers);
+			const client = createClient(model, apiKey, options?.headers, options?.sessionId);
 			let params = buildParams(model, context, options);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
@@ -324,14 +325,16 @@ function createClient(
 	model: Model<"google-generative-ai">,
 	apiKey?: string,
 	optionsHeaders?: Record<string, string>,
+	sessionId?: string,
 ): GoogleGenAI {
 	const httpOptions: { baseUrl?: string; apiVersion?: string; headers?: Record<string, string> } = {};
 	if (model.baseUrl) {
 		httpOptions.baseUrl = model.baseUrl;
 		httpOptions.apiVersion = ""; // baseUrl already includes version path, don't append
 	}
-	if (model.headers || optionsHeaders) {
-		httpOptions.headers = { ...model.headers, ...optionsHeaders };
+	const headers = withOpenCodeHeaders(model.provider, sessionId, { ...model.headers, ...optionsHeaders });
+	if (Object.keys(headers).length > 0) {
+		httpOptions.headers = headers;
 	}
 
 	return new GoogleGenAI({

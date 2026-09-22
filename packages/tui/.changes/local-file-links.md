@@ -1,1 +1,0 @@
-- Added support for opening file links from the fullscreen terminal UI.

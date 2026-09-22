@@ -1,0 +1,1 @@
+- Fixed inline pickers drawing two stacked separator rules when an empty placeholder child preceded the search box, which also cost the list a visible row.

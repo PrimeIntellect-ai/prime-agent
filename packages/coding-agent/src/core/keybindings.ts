@@ -19,11 +19,9 @@ export interface AppKeybindings {
 	"app.suspend": true;
 	"app.model.select": true;
 	"app.model.toggleScope": true;
-	"app.configuration.previousTab": true;
+	"app.model.cycleForward": true;
+	"app.model.cycleBackward": true;
 	"app.tools.expand": true;
-	"app.messages.expand": true;
-	"app.edits.expand": true;
-	"app.thinking.toggle": true;
 	"app.subagents.focus": true;
 	"app.heartbeats.open": true;
 	"app.heartbeats.openSelected": true;
@@ -48,7 +46,6 @@ export interface AppKeybindings {
 	"app.agents.delete": true;
 	"app.agents.program": true;
 	"app.agents.rename": true;
-	"app.agents.inactiveCollapse": true;
 	"app.agents.expand": true;
 	"app.tree.foldOrUp": true;
 	"app.tree.unfoldOrDown": true;
@@ -88,19 +85,9 @@ export const KEYBINDINGS = {
 	},
 	"app.model.select": { defaultKeys: "ctrl+l", description: "Open model selector" },
 	"app.model.toggleScope": { defaultKeys: "alt+s", description: "Toggle model selector scope" },
-	"app.configuration.previousTab": { defaultKeys: "shift+tab", description: "Select previous configuration tab" },
-	"app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle tool output", defaultKeyScope: "editor" },
-	"app.messages.expand": {
-		defaultKeys: "ctrl+p",
-		description: "Toggle agent message expansion",
-		defaultKeyScope: "editor",
-	},
-	"app.edits.expand": { defaultKeys: "ctrl+j", description: "Toggle edit diffs", defaultKeyScope: "editor" },
-	"app.thinking.toggle": {
-		defaultKeys: "ctrl+t",
-		description: "Toggle thinking blocks",
-		defaultKeyScope: "editor",
-	},
+	"app.model.cycleForward": { defaultKeys: "alt+m", description: "Cycle to the next scoped model" },
+	"app.model.cycleBackward": { defaultKeys: "shift+alt+m", description: "Cycle to the previous scoped model" },
+	"app.tools.expand": { defaultKeys: "ctrl+o", description: "Cycle conversation detail", defaultKeyScope: "editor" },
 	"app.subagents.focus": {
 		defaultKeys: "alt+a",
 		description: "Open child agents",
@@ -161,7 +148,6 @@ export const KEYBINDINGS = {
 	"app.agents.delete": { defaultKeys: "ctrl+x", description: "Stop or delete selected agent" },
 	"app.agents.program": { defaultKeys: "ctrl+o", description: "Show the program that spawned subagents" },
 	"app.agents.rename": { defaultKeys: "ctrl+r", description: "Rename selected agent session" },
-	"app.agents.inactiveCollapse": { defaultKeys: "alt+i", description: "Show or hide inactive sessions" },
 	"app.agents.expand": { defaultKeys: "alt+right", description: "Expand or collapse selected agent subagents" },
 	"app.tree.foldOrUp": {
 		defaultKeys: ["ctrl+left", "alt+left"],
@@ -273,7 +259,6 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	suspend: "app.suspend",
 	selectModel: "app.model.select",
 	expandTools: "app.tools.expand",
-	toggleThinking: "app.thinking.toggle",
 	focusSubagents: "app.subagents.focus",
 	externalEditor: "app.editor.external",
 	followUp: "app.message.followUp",

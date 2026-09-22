@@ -1,8 +1,9 @@
-import { Container, type Focusable, fuzzyFilter, getKeybindings, Spacer, TruncatedText } from "@earendil-works/pi-tui";
+import { Container, type Focusable, fuzzyFilter, getKeybindings, TruncatedText } from "@earendil-works/pi-tui";
 import type { PrimeTeam } from "../../../core/prime-inference-auth.js";
 import { theme } from "../theme/theme.js";
 import {
 	getMenuListLayout,
+	inlineMenuPanelTopRuleRows,
 	MenuList,
 	MenuPanel,
 	MenuRow,
@@ -26,6 +27,8 @@ export class PrimeTeamSelectorComponent extends Container implements Focusable {
 	private filteredOptions: PrimeTeamOption[];
 	private selectedIndex = 0;
 	private searchQuery = "";
+	/** Rows the inline MenuPanel draws above its children (separator rule). */
+	private topRuleRows = 0;
 	private _focused = false;
 	private listLayout = getMenuListLayout({
 		preferredVisibleItems: PREFERRED_VISIBLE_TEAMS,
@@ -47,12 +50,13 @@ export class PrimeTeamSelectorComponent extends Container implements Focusable {
 		this.filteredOptions = this.allOptions;
 
 		const panel = new MenuPanel({
-			title: "Prime Team",
+			title: "Select a Prime Team:",
 			subtitle: "Choose which account pays for Prime Inference usage.",
+			inline: true,
 		});
 		this.addChild(panel);
 
-		this.searchInput = new MenuSearchInput("Search teams");
+		this.searchInput = new MenuSearchInput("Search teams", true);
 		this.searchInput.onSubmit = () => {
 			const selected = this.filteredOptions[this.selectedIndex];
 			if (selected) {
@@ -60,10 +64,14 @@ export class PrimeTeamSelectorComponent extends Container implements Focusable {
 			}
 		};
 		panel.addChild(this.searchInput);
-		panel.addChild(new Spacer(1));
 
-		this.listContainer = new MenuList({ compact: () => this.listLayout.compact });
+		this.listContainer = new MenuList({ compact: () => this.listLayout.compact, inline: true });
 		panel.addChild(this.listContainer);
+		// The inline panel opens with its separator rule; budget it.
+		this.topRuleRows = inlineMenuPanelTopRuleRows({
+			title: "Select a Prime Team:",
+			subtitle: "Choose which account pays for Prime Inference usage.",
+		});
 		this.filterOptions("");
 	}
 
@@ -130,6 +138,7 @@ export class PrimeTeamSelectorComponent extends Container implements Focusable {
 					secondary: this.getSecondary(option),
 					meta: this.getMeta(option),
 					selected: i === this.selectedIndex,
+					inline: true,
 				}),
 			);
 		}
@@ -194,7 +203,7 @@ export class PrimeTeamSelectorComponent extends Container implements Focusable {
 			getRows: this.viewport.getRows,
 			preferredVisibleItems: PREFERRED_VISIBLE_TEAMS,
 			totalItems: this.filteredOptions.length,
-			reservedRows: TEAM_LIST_RESERVED_ROWS,
+			reservedRows: TEAM_LIST_RESERVED_ROWS + this.topRuleRows,
 			comfortableItemRows: 3,
 			compactItemRows: 2,
 			scrollIndicatorRows: TEAM_SCROLL_INDICATOR_ROWS,

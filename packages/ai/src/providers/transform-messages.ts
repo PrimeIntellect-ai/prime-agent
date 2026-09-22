@@ -194,6 +194,9 @@ export function transformMessages<TApi extends Api>(
 
 			result.push(msg);
 		} else if (msg.role === "toolResult") {
+			if (!pendingToolCalls.some((toolCall) => toolCall.id === msg.toolCallId)) {
+				continue;
+			}
 			existingToolResultIds.add(msg.toolCallId);
 			result.push(msg);
 		} else if (msg.role === "user") {

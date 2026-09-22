@@ -1,0 +1,1 @@
+- Changed the session catalog scan to count tool-result (and extension-role) message entries from their serialized header instead of parsing their payloads, cutting the CPU a cold scan spends on transcripts whose tool output dwarfs everything else.

@@ -133,7 +133,7 @@ class RenewableRegistryRecord {
 	constructor(
 		private readonly registryDir: string,
 		refreshMs: number,
-		private readonly renewUnderGuard: () => void,
+		private readonly renewUnderGuard: () => boolean,
 		private readonly createLostError: () => Error,
 	) {
 		this.refreshTimer = setInterval(() => {
@@ -153,19 +153,21 @@ class RenewableRegistryRecord {
 	}
 
 	private async performRenew(): Promise<void> {
-		try {
-			await withDaemonSupervisorRegistryGuard(this.registryDir, () => {
-				// stop() may have completed while this call waited on the guard;
-				// a stopped record must never be rewritten to disk.
-				if (this.stopped || this.lost) {
-					throw this.createLostError();
-				}
-				this.renewUnderGuard();
-			});
-		} catch (error) {
+		// A guard or filesystem failure means the record could not be read, not that another process
+		// took it; retiring the lease on that would strand a holder that still owns its record, so
+		// only a renew that observes a missing or foreign record is terminal.
+		const held = await withDaemonSupervisorRegistryGuard(this.registryDir, () => {
+			// stop() may have completed while this call waited on the guard;
+			// a stopped record must never be rewritten to disk.
+			if (this.stopped || this.lost) {
+				return false;
+			}
+			return this.renewUnderGuard();
+		});
+		if (!held) {
 			this.lost = true;
 			clearInterval(this.refreshTimer);
-			throw error;
+			throw this.createLostError();
 		}
 	}
 
@@ -267,23 +269,26 @@ class DaemonShutdownAdmission {
 		await this.renewal.assertOrRenew();
 	}
 
-	private renewUnderGuard(): void {
+	private renewUnderGuard(): boolean {
 		const path = shutdownAdmissionPath(this.registryDir);
 		const current = readShutdownAdmission(path);
+		// An elapsed lease is not loss. The refresh timer cannot fire while this process blocks its
+		// event loop in the synchronous `ps`/`lsof`/`ss` scans that shutdown runs, so a late renew
+		// re-arms a record that is still ours; only another process replacing it ends the admission.
 		if (
 			!current ||
 			current.token !== this.record.token ||
 			current.pid !== this.record.pid ||
 			current.processStartId !== this.record.processStartId ||
-			Date.parse(current.expiresAt) <= Date.now() ||
 			!matchesExactProcessIdentity(this.record)
 		) {
-			throw new DaemonShutdownAdmissionError("Daemon shutdown admission was lost");
+			return false;
 		}
 		const now = Date.now();
 		this.record.updatedAt = new Date(now).toISOString();
 		this.record.expiresAt = new Date(now + SHUTDOWN_ADMISSION_LEASE_MS).toISOString();
 		writeJsonAtomically(path, this.record);
+		return true;
 	}
 
 	async release(): Promise<void> {
@@ -526,6 +531,65 @@ function isOwnerProcessAlive(pid: number): boolean {
 	return true;
 }
 
+/**
+ * Socket paths of the supervisors registered under `agentDir`, read straight
+ * from the registry record each daemon writes for itself. Callers use this to
+ * tell their own state root's daemons apart from daemons that belong to another
+ * HOME, agent dir, or socket dir on the same machine.
+ *
+ * Read-only and lock-free on purpose: records are written rename-atomically so a
+ * torn read is impossible, and a momentarily stale answer only affects discovery,
+ * never ownership.
+ *
+ * Daemons started before the registry moved out of the socket dir only have
+ * records in the legacy location, so that registry is read too (unless the
+ * caller overrides the registry). A record whose agent dir cannot be
+ * canonicalized (permissions, replaced paths, corrupt records) is skipped
+ * instead of aborting discovery for every other record.
+ */
+export function listDaemonSupervisorSocketPathsForAgentDir(
+	agentDir: string,
+	registryDir?: string,
+	legacyRegistryDir: string | undefined = registryDir === undefined ? legacyDaemonSupervisorRegistryDir() : undefined,
+): string[] {
+	let canonicalAgentDir: string;
+	try {
+		canonicalAgentDir = canonicalizeFilesystemPath(agentDir);
+	} catch {
+		return [];
+	}
+	const directories = ownerDirectoriesForDiscovery(registryDir ?? defaultDaemonSupervisorRegistryDir());
+	if (legacyRegistryDir) {
+		directories.push(...ownerDirectoriesForDiscovery(legacyRegistryDir));
+	}
+	const socketPaths: string[] = [];
+	for (const directory of directories) {
+		const owner = readOwnerRecord(directory);
+		if (!owner) {
+			continue;
+		}
+		let canonicalOwnerAgentDir: string;
+		try {
+			canonicalOwnerAgentDir = canonicalizeFilesystemPath(owner.agentDir);
+		} catch {
+			continue;
+		}
+		if (canonicalOwnerAgentDir === canonicalAgentDir) {
+			socketPaths.push(normalizeSocketPath(owner.socketPath));
+		}
+	}
+	return socketPaths;
+}
+
+/** Non-mutating registry listing: discovery must never reclaim abandoned directories. */
+function ownerDirectoriesForDiscovery(registryDir: string): string[] {
+	try {
+		return listOwnerDirectories(registryDir);
+	} catch {
+		return [];
+	}
+}
+
 export async function assertDaemonSupervisorOwnerCurrent(
 	owner: {
 		generation: string;
@@ -585,9 +649,15 @@ export async function acquireDaemonShutdownAdmission(): Promise<DaemonShutdownAd
 	}
 }
 
+/**
+ * Read-only probe: reclaiming here would let a bystander delete the record of a live holder whose
+ * lease merely elapsed, so only acquireDaemonShutdownAdmission removes an abandoned admission.
+ */
 export async function isDaemonShutdownAdmissionActive(): Promise<boolean> {
 	const registryDir = defaultDaemonSupervisorRegistryDir();
-	return withDaemonSupervisorRegistryGuard(registryDir, () => readActiveShutdownAdmission(registryDir) !== undefined);
+	return withDaemonSupervisorRegistryGuard(registryDir, () =>
+		shutdownAdmissionIsActive(readShutdownAdmission(shutdownAdmissionPath(registryDir))),
+	);
 }
 
 export async function persistDaemonStartupFenceFromOwner(
@@ -901,13 +971,17 @@ function readStartupFence(path: string): DaemonStartupFenceRecord | undefined {
 	}
 }
 
+function shutdownAdmissionIsActive(admission: DaemonShutdownAdmissionRecord | undefined): boolean {
+	return admission !== undefined && Date.parse(admission.expiresAt) > Date.now() && isProcessIdentityAlive(admission);
+}
+
 function readActiveShutdownAdmission(registryDir: string): DaemonShutdownAdmissionRecord | undefined {
 	const path = shutdownAdmissionPath(registryDir);
 	const admission = readShutdownAdmission(path);
 	if (!admission) {
 		return undefined;
 	}
-	if (Date.parse(admission.expiresAt) > Date.now() && isProcessIdentityAlive(admission)) {
+	if (shutdownAdmissionIsActive(admission)) {
 		return admission;
 	}
 	rmSync(path, { force: true });

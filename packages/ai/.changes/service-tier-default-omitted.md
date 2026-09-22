@@ -1,1 +1,0 @@
-- Fixed GitHub Copilot requests to omit unsupported service tiers while preserving explicit tiers for other providers, and corrected Anthropic cache-write pricing when streaming usage changes.

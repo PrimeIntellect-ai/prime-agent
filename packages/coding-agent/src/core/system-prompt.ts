@@ -3,7 +3,7 @@
  */
 
 import { buildChildAgentDoctrine, buildRlmPrompt, buildSubagentGuidance } from "./prompts/index.js";
-import { formatHarnessStateForPrompt, type HarnessState, REFINE_SKILL_NAME } from "./refinement/index.js";
+import { REFINE_SKILL_NAME } from "./refinement/index.js";
 import { formatSkillsForPrompt, getPythonSkillRuntimeInfo, type Skill } from "./skills.js";
 
 export interface BuildSystemPromptOptions {
@@ -31,8 +31,6 @@ export interface BuildSystemPromptOptions {
 	rlmDepth?: number;
 	/** Human-readable parent name or id for child communication doctrine. */
 	rlmParentAgent?: string;
-	/** Global harness state to inject as compact persistent context. */
-	harnessState?: HarnessState;
 	/** Enabled user-configured servers available through the generic kernel MCP API. */
 	genericMcpServers?: string[];
 }
@@ -49,7 +47,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		contextFiles: providedContextFiles,
 		skills: providedSkills,
 		allowRecursion,
-		harnessState,
 	} = options;
 	const promptCwd = cwd.replace(/\\/g, "/");
 	const promptMessagesPath = (messagesPath ?? "not persisted").replace(/\\/g, "/");
@@ -66,7 +63,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const skills = providedSkills ?? [];
 	const tools = selectedTools ?? ["ipython"];
 	const hasIpython = tools.includes("ipython");
-	const hasBash = tools.includes("bash");
 	const visibleSkills = skills.filter((skill) => !skill.disableModelInvocation);
 	const visiblePythonSkillImportNames = getPythonSkillRuntimeInfo(visibleSkills).map((skill) => skill.importName);
 	const hasRefineSkill = visibleSkills.some((skill) => skill.name === REFINE_SKILL_NAME);
@@ -105,10 +101,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			prompt += `\n\n${childDoctrine}`;
 		}
 
-		if (harnessState) {
-			prompt += `\n\n${formatHarnessStateForPrompt(harnessState, { includeIpythonExamples: hasIpython, includeShellExamples: hasBash, includeRefineExamples: hasIpython && hasRefineSkill })}`;
-		}
-
 		if (genericMcpSection) {
 			prompt += `\n\n${genericMcpSection}`;
 		}
@@ -130,9 +122,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		parentAgent: options.rlmParentAgent,
 	});
 
-	// Appended AFTER the trained buildRlmPrompt prefix, and before the harness-state
-	// menu, so the model reads when/why to delegate and then sees the concrete subagent
-	// specs it can match against — the same ordering as Claude Code's Agent tool.
+	// Appended AFTER the trained buildRlmPrompt prefix: delegation doctrine precedes the subagent specs delivered via the harness digest.
 	if ((allowRecursion ?? true) && hasIpython) {
 		const visiblePythonSkillNames = new Set(
 			getPythonSkillRuntimeInfo(visibleSkills).map((skill) => skill.importName),
@@ -142,10 +132,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			hasAgentMessage: visiblePythonSkillNames.has("agent_message"),
 			hasAgentObserve: visiblePythonSkillNames.has("agent_observe"),
 		})}`;
-	}
-
-	if (harnessState) {
-		prompt += `\n\n${formatHarnessStateForPrompt(harnessState, { includeIpythonExamples: hasIpython, includeShellExamples: hasBash, includeRefineExamples: hasIpython && hasRefineSkill })}`;
 	}
 
 	if (genericMcpSection) {

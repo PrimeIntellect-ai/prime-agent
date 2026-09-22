@@ -1,1 +1,0 @@
-- Table cell selection markers no longer crash the renderer when cell content contains a lone UTF-16 surrogate; the surrogate is replaced before encoding.

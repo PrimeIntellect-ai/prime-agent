@@ -389,7 +389,7 @@ const { session } = await createAgentSession({
   model: opus,
   thinkingLevel: "medium", // off, minimal, low, medium, high, xhigh, max
   
-  // Models for cycling (Ctrl+P in interactive mode)
+  // Models for cycling (Alt+M in interactive mode)
   scopedModels: [
     { model: opus, thinkingLevel: "high" },
     { model: haiku, thinkingLevel: "off" },

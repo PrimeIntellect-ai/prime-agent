@@ -1,1 +1,0 @@
-- Changed authentication failure classification to require structured evidence. Permission denials now stop retries without marking provider credentials stale.

@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.9.5] - 2026-09-15
+
+- Kept slash-command completion separate from execution so Tab and partial Enter complete without submitting.
+- Fixed the argument separator when completing extension commands with custom argument suggestions.
+- Fixed the follow-output hint shifting horizontally while scrolling over tabs or wide characters.
+- Sped up transcript rendering on image-capable terminals: a cell-size response now re-renders only image components instead of invalidating every component cache.
+- Sped up width calculations for plain text when rendering long transcripts.
+- Fixed deep markdown headings to render as formatted headings at all six levels instead of dumping raw `#` prefixes for H3-H6: h1 stays bold+underlined, h2/h3 are bold, h4 is bold+italic, and h5/h6 are italic, all in the heading color ([ENG-6159](https://linear.app/primeintellect/issue/ENG-6159)).
+- Fullscreen frames can pin a component above the scrolling transcript: the viewport composes header, window, and dock rows and maps mouse selection, dock click targets, and the follow hint through the header offset.
+
+## [0.9.4] - 2026-09-08
+
+- Table cell selection markers no longer crash the renderer when cell content contains a lone UTF-16 surrogate; the surrogate is replaced before encoding.
+- Fixed console windows flashing on Windows from background path-completion and open-link spawns. ([Discussion #1461](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1461))
+- Fixed raw multiline terminal paste being handled as separate key events.
+- Added source-line coordinates to editor layout lines and `styleDisplayText()` so subclasses can style wrapped or scrolled text against exact source offsets.
+- Added support for opening file links from the fullscreen terminal UI.
+- Added a base URL option for resolving relative Markdown links ([#2108](https://github.com/PrimeIntellect-ai/prime-agent/issues/2108)).
+- Fixed Windows drive paths in Markdown links to open as file URLs ([#2108](https://github.com/PrimeIntellect-ai/prime-agent/issues/2108)).
+
 ## [0.9.0] - 2026-09-01
 
 - Add an optional `transform` hook to `Markdown` so callers can rewrite markdown with the exact content width before rendering.

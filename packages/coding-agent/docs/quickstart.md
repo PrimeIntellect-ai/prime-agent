@@ -7,13 +7,13 @@ This page gets you from install to a useful first Prime Agent session.
 Install the latest stable release on Linux or macOS:
 
 ```bash
-curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
+curl --proto '=https' --proto-redir '=https' -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 ```
 
 To try the latest beta built from `main`:
 
 ```bash
-curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh -s -- beta
+curl --proto '=https' --proto-redir '=https' -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh -s -- beta
 ```
 
 Both commands fetch versioned Prime Agent release artifacts and install the `prime-agent` command. The inherited npm workspace identifiers in the source tree are not the public install path.
@@ -77,7 +77,7 @@ Prime Agent runs in your current working directory and can modify files there. U
 
 ## Recursive Subagents
 
-Recursive subagents are a built-in Prime Agent capability. The model spawns independent work from the Python REPL with `await rlm("subtask")`; each call returns at admission with a child handle and never returns the answer. Children send requested results as explicit `agent_message` replies to the parent or write them to files. Child agents use the same TypeScript agent runtime, providers, tools, skills, and session machinery as the parent.
+Recursive subagents are a built-in Prime Agent capability. The model spawns independent work from the Python REPL with `await rlm.spawn("subtask", name="worker")`; each call returns at admission with a child handle and never returns the answer. Children send requested results as explicit `agent_message` replies to the parent or write them to files. Child agents use the same TypeScript agent runtime, providers, tools, skills, and session machinery as the parent.
 
 You can prompt the model to use that capability directly:
 
@@ -131,7 +131,7 @@ The command output is sent to the model. Use `!!command` to run a command withou
 
 ### Switch Models
 
-Use `/model` or Ctrl+L to choose a model. Use `/effort` to set the reasoning level. Use Ctrl+P / Shift+Ctrl+P to cycle through scoped models.
+Use `/model` or Ctrl+L to choose a model. Use `/effort` to set the reasoning level. Use Alt+M / Shift+Alt+M to cycle through scoped models when configured, or all available models otherwise.
 
 ### Continue Later
 

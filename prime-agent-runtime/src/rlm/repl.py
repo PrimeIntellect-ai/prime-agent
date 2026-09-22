@@ -8,7 +8,6 @@ next to this file. Cells execute with top-level await in one persistent
 from __future__ import annotations
 
 import ast
-import asyncio
 import codecs
 import contextvars
 import ctypes
@@ -20,7 +19,6 @@ import os
 import platform
 import signal
 import sys
-import tempfile
 import threading
 import time
 import traceback
@@ -36,6 +34,17 @@ PROTOCOL_VERSION = 3
 DEFAULT_SNAPSHOT_MAX_BYTES = 256 * 1024 * 1024
 DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES = 16 * 1024 * 1024
 
+# Stream writes must fit one protocol frame: the host buffers whole lines
+# before its per-execution truncation, and raw fd writes already arrive as
+# 64 KiB pump chunks.
+_STREAM_FRAME_TEXT_CAP = 64 * 1024
+# The host truncates results at a smaller per-execution maxChars, so this only
+# bounds a pathological repr in transit.
+_RESULT_TEXT_CAP = 1_048_576
+_RESULT_TRUNCATION_MARKER = f"\n[... result truncated at {_RESULT_TEXT_CAP} characters ...]"
+# Oversized display payloads fail the cell instead of wedging host memory.
+_DISPLAY_PAYLOAD_CAP = 16 * 1024 * 1024
+
 # Names the session bootstrap re-creates on every start; never snapshotted.
 _ALWAYS_SKIP = {"rlm", "mcp", "bash", "asyncio", "In", "Out", "get_ipython", "exit", "quit", "open"}
 # IPython-injected names that may appear in a snapshot payload; never restored.
@@ -49,6 +58,8 @@ _serve_task: asyncio.Task[Any] | None = None
 
 class _CellExecution:
     def __init__(self) -> None:
+        import asyncio
+
         self.finished = asyncio.Event()
         self.owner: asyncio.Task[Any] | None = None
 
@@ -97,9 +108,11 @@ def emit(data: dict[str, Any]) -> None:
     # Strict-dumps validation: default allow_nan=True would let NaN/Infinity
     # serialize as non-JSON text and tear the host's protocol framing (a
     # non-serializable value already raises in _send before any bytes are
-    # written, so NaN is the only corruption vector). Payloads are small, so
-    # the throwaway serialization here is cheap; _send re-serializes.
-    json.dumps(data, allow_nan=False)
+    # written, so NaN is the only corruption vector). The encoded length
+    # enforces the display frame cap; _send re-serializes.
+    encoded = json.dumps(data, allow_nan=False)
+    if len(encoded) > _DISPLAY_PAYLOAD_CAP:
+        raise ValueError(f"display payload exceeds the {_DISPLAY_PAYLOAD_CAP}-character frame cap")
     _send({"event": "display", "id": _current_cell.get(), "data": data})
 
 
@@ -114,6 +127,16 @@ def current_cell_completion_context() -> tuple[asyncio.Event, asyncio.Task[Any] 
     if execution is None:
         return None
     return execution.finished, execution.owner
+
+
+def active_cell_task() -> asyncio.Task[Any] | None:
+    """The cell body task executing right now, or None between cells (global
+    state, not the cell contextvar — detached tasks keep stale context copies)."""
+    import asyncio
+
+    with _interrupt_lock:
+        task = _active["task"]
+    return task if isinstance(task, asyncio.Task) and not task.done() else None
 
 
 async def host_request(data: dict[str, Any]) -> dict[str, Any]:
@@ -285,13 +308,24 @@ class _TaggedWriter(io.TextIOBase):
     def __init__(self, stream: str, fallback_fd: int) -> None:
         self._stream = stream
         self._fallback_fd = fallback_fd
+        # Keeps one write()'s frames contiguous under concurrent writers.
+        self._frame_lock = threading.Lock()
         self._buffer = _TaggedBuffer(fallback_fd)
 
     def write(self, text: str) -> int:
         if not isinstance(text, str):
             raise TypeError(f"write() argument must be str, not {type(text).__name__}")
         if text:
-            _send({"event": self._stream, "id": _current_cell.get(), "text": text})
+            cell_id = _current_cell.get()
+            with self._frame_lock:
+                for start in range(0, len(text), _STREAM_FRAME_TEXT_CAP):
+                    _send(
+                        {
+                            "event": self._stream,
+                            "id": cell_id,
+                            "text": text[start : start + _STREAM_FRAME_TEXT_CAP],
+                        }
+                    )
         return len(text)
 
     def flush(self) -> None:
@@ -323,6 +357,10 @@ def _consume_task_exception(task: asyncio.Task[Any]) -> None:
 
 
 def _sigint_handler(signum: int, frame: types.FrameType | None) -> None:
+    # asyncio loads by the time any task can be active (main() imports it), so
+    # this is a cached sys.modules hit even inside the signal handler.
+    import asyncio
+
     global _handoff_interrupted
     task = _active["task"]
     # No lock (the main thread may hold it): the rid equality revalidates the
@@ -521,6 +559,8 @@ async def _run_codes(codes: list[types.CodeType], ns: dict[str, Any]) -> Any:
 
 async def _run_guarded(task: asyncio.Task[Any], rid: str) -> tuple[str, Any, dict[str, Any] | None]:
     """Await a request task; returns (status, value, error event or None)."""
+    import asyncio
+
     with _interrupt_lock:
         _active["interrupted"] = False
         _active["rid"] = rid
@@ -576,6 +616,8 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
                     result_text = repr(value)
                 except BaseException as exc:  # noqa: BLE001 - a broken __repr__ is a cell error
                     status, error = "error", _error_event(cell_id, exc)
+            if result_text is not None and len(result_text) > _RESULT_TEXT_CAP:
+                result_text = result_text[:_RESULT_TEXT_CAP] + _RESULT_TRUNCATION_MARKER
             _drain_output()
         finally:
             # Close the interrupt window before the protocol sends so a
@@ -636,6 +678,7 @@ def _snapshot_state(
     committed: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     import datetime
+    import tempfile
 
     try:
         import dill
@@ -843,6 +886,8 @@ def _restore_state(
 
 async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
     """Run snapshot/restore as an interruptible task and reply in the done event."""
+    import asyncio
+
     rid = req["id"]
     committed: list[dict[str, Any]] = []
 
@@ -1165,15 +1210,25 @@ def main() -> None:
     user_module.__dict__["__builtins__"] = __builtins__
     sys.modules["__main__"] = user_module
 
+    _send({"event": "ready", "protocol": PROTOCOL_VERSION, "python": platform.python_version()})
+
+    # The event-loop stack (asyncio plus its ssl, concurrent.futures, and
+    # logging imports) is the heaviest part of this module's boot chain; load
+    # it after the ready event so kernel startup stays lean. The loop, reader
+    # thread, and serve task all come up here before the host's first request
+    # can be served, and every function that references asyncio runs only
+    # after this point.
+    import asyncio
     _loop = asyncio.new_event_loop()
     asyncio.set_event_loop(_loop)
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-    signal.signal(signal.SIGINT, _sigint_handler)
     threading.Thread(target=_read_requests, args=(stdin_fd, queue), daemon=True).start()
 
-    _send({"event": "ready", "protocol": PROTOCOL_VERSION, "python": platform.python_version()})
-
     _serve_task = _loop.create_task(_serve(queue, user_module.__dict__))
+    # _sigint_handler has no task to target before serving starts, so installing
+    # it earlier would silently swallow a Ctrl-C during this boot window; the
+    # default handler must stay in charge until the loop and serve task exist.
+    signal.signal(signal.SIGINT, _sigint_handler)
     # A KeyboardInterrupt escaping a cell or background task stops
     # run_until_complete; the interrupt is already recorded, so resume serving.
     while not _serve_task.done():

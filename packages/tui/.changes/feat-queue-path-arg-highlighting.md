@@ -1,1 +1,0 @@
-- Added source-line coordinates to editor layout lines and `styleDisplayText()` so subclasses can style wrapped or scrolled text against exact source offsets.

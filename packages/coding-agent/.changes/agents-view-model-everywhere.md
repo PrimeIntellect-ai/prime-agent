@@ -1,1 +1,0 @@
-- Changed the agents view to show the model label on every session row, not only on subagent rows.

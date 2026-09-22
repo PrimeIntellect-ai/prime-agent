@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.9.5] - 2026-09-15
+
+- Changed the build to compile from the committed model catalog instead of refetching it; run `npm run generate-models` explicitly to refresh `models.generated.ts`.
+- Fixed OpenCode Zen and Go requests to identify Prime Agent and send the conversation ID across all supported adapters, including when prompt caching is disabled.
+- Fixed orphaned tool results in provider history after aborted or errored assistant turns.
+- Fixed detection of LiteLLM context-limit errors when input plus requested output exceed the model's context window.
+- Added log sink configuration to the Bedrock provider entry so bundled consumers can preserve structured diagnostics.
+- Fixed budget-based Claude requests sending thinking budgets below the provider minimum when the output limit is small.
+- Added xAI subscription device-code authentication and Responses support for all bundled Grok tool models while preserving API-key access.
+- Fixed codex websocket sessions repeatedly failing after a stale cached previous_response_id: the continuation chain is now connection-scoped (a reconnected connection always resends the full context), and a previous_response_not_found failure drops the cached chain and retries once with the full request body, re-anchoring on the successful response.
+- Removed the mcp service catalog, audit tooling, and generic oauth login engine (revert of #2256; the work will be relanded separately).
+
+## [0.9.4] - 2026-09-08
+
+- Fixed GitHub Copilot requests to omit unsupported service tiers while preserving explicit tiers for other providers, and corrected Anthropic cache-write pricing when streaming usage changes.
+- Changed authentication failure classification to require structured evidence. Permission denials now stop retries without marking provider credentials stale.
+- Removed SDK-internal provider retries (OpenAI, Azure, Anthropic, Bedrock, Codex): providers make a single attempt and report a structured failure so the agent's own retry loop owns every retry.
+- Added the server-requested Retry-After delay to structured stream-failure diagnostics.
+- Added structured stream-failure diagnostics to the OpenAI-completions and Codex providers, including friendly messages for Codex nested usage-limit error payloads.
+- Removed the `maxRetries` and `maxRetryDelayMs` stream options.
+- Added live Prime Inference model names, pricing, limits, modalities, and reasoning support to the bundled catalog.
+
 ## [0.9.3] - 2026-09-06
 
 - Added GPT-6 Astra to the Codex/ChatGPT OAuth catalog with its mandatory-reasoning effort levels, and bumped the Codex discovery client version to 0.153.4 so account discovery lists it (reported by endcycles and api-moose in discussion #2062).

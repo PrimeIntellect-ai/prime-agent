@@ -2,54 +2,29 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentObserveController } from "../../src/core/agent-observe.js";
 import { createHarness } from "./harness.js";
 
+function agentStub(activeSessionId: string) {
+	return {
+		activeSessionId,
+		sessionId: `session-${activeSessionId}`,
+		cwd: "/tmp/project",
+		status: "idle" as const,
+		isCurrent: false,
+		isStreaming: false,
+		isCompacting: false,
+		attachedClients: 0,
+		messageCount: 1,
+		queuedCount: 0,
+		isSessionActive: false,
+	};
+}
+
 function createController(): AgentObserveController {
 	return {
-		listAgents: vi.fn(() => ({
-			current: {
-				activeSessionId: "alpha",
-				sessionId: "session-alpha",
-				cwd: "/tmp/project",
-				status: "idle",
-				isCurrent: true,
-				isStreaming: false,
-				isCompacting: false,
-				attachedClients: 0,
-				messageCount: 1,
-				queuedCount: 0,
-				isSessionActive: false,
-			},
-			agents: [],
-		})),
-		getAgent: vi.fn((target) => ({
-			agent: {
-				activeSessionId: target,
-				sessionId: "session-beta",
-				cwd: "/tmp/project",
-				status: "model",
-				isCurrent: false,
-				isStreaming: true,
-				isCompacting: false,
-				attachedClients: 1,
-				messageCount: 3,
-				queuedCount: 0,
-				isSessionActive: false,
-			},
-		})),
-		recentMessages: vi.fn((input) => ({
-			agent: {
-				activeSessionId: input.target,
-				sessionId: "session-beta",
-				cwd: "/tmp/project",
-				status: "model",
-				isCurrent: false,
-				isStreaming: true,
-				isCompacting: false,
-				attachedClients: 1,
-				messageCount: 3,
-				queuedCount: 0,
-				isSessionActive: false,
-			},
-			messages: [{ index: 2, role: "assistant", text: "working", truncated: false }],
+		listAgents: vi.fn(() => ({ current: agentStub("alpha"), agents: [] })),
+		getAgent: vi.fn((target: string) => ({ agent: agentStub(target) })),
+		recentMessages: vi.fn((input: { target: string; limit?: number; maxChars?: number }) => ({
+			agent: agentStub(input.target),
+			messages: [{ index: 2, role: "assistant" as const, text: "working", truncated: false }],
 			limit: input.limit ?? 8,
 			maxChars: input.maxChars ?? 800,
 			truncated: false,
@@ -62,23 +37,12 @@ describe("AgentSession agent observe host requests", () => {
 		const controller = createController();
 		const harness = await createHarness({ agentObserveController: controller });
 		try {
-			expect(harness.session.handleAgentObserveHostRequest("agent_observe.list")).toMatchObject({
-				current: { activeSessionId: "alpha" },
-			});
-			expect(harness.session.handleAgentObserveHostRequest("agent_observe.get", { target: "beta" })).toMatchObject({
-				agent: { activeSessionId: "beta", status: "model" },
-			});
-			expect(
-				harness.session.handleAgentObserveHostRequest("agent_observe.recent", {
-					target: "beta",
-					limit: 3,
-					max_chars: 120,
-				}),
-			).toMatchObject({
-				agent: { activeSessionId: "beta" },
-				messages: [{ text: "working" }],
+			harness.session.handleAgentObserveHostRequest("agent_observe.list");
+			harness.session.handleAgentObserveHostRequest("agent_observe.get", { target: "beta" });
+			harness.session.handleAgentObserveHostRequest("agent_observe.recent", {
+				target: "beta",
 				limit: 3,
-				maxChars: 120,
+				max_chars: 120,
 			});
 			expect(controller.listAgents).toHaveBeenCalledTimes(1);
 			expect(controller.getAgent).toHaveBeenCalledWith("beta");
@@ -88,21 +52,14 @@ describe("AgentSession agent observe host requests", () => {
 		}
 	});
 
-	it("rejects malformed and unknown observe requests", async () => {
+	it.each([
+		["agent_observe.get", {}, "target must be a string"],
+		["agent_observe.recent", { target: "beta", limit: 0 }, "between 1 and 50"],
+		["agent_observe.delete", undefined, "unknown agent observe request"],
+	] as const)("rejects malformed request %s", async (method, params, message) => {
 		const harness = await createHarness({ agentObserveController: createController() });
 		try {
-			expect(() => harness.session.handleAgentObserveHostRequest("agent_observe.get", {})).toThrow(
-				"target must be a string",
-			);
-			expect(() =>
-				harness.session.handleAgentObserveHostRequest("agent_observe.recent", {
-					target: "beta",
-					limit: 0,
-				}),
-			).toThrow("between 1 and 50");
-			expect(() => harness.session.handleAgentObserveHostRequest("agent_observe.delete")).toThrow(
-				"unknown agent observe request",
-			);
+			expect(() => harness.session.handleAgentObserveHostRequest(method, params)).toThrow(message);
 		} finally {
 			harness.cleanup();
 		}

@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
 import { getAgentDir } from "../../config.js";
 import { realpathIfPresentSync, writeFileAtomicSync } from "../../utils/atomic-file.js";
@@ -9,6 +10,7 @@ import { serializeConversation } from "../compaction/utils.js";
 import { convertToLlm } from "../messages.js";
 import { completeWithProviderRetry, type ProviderRetryPolicy } from "../provider-retry.js";
 import type { CustomEntry } from "../session-manager.js";
+import { getAuxiliaryThinkingLevel } from "../thinking-levels.js";
 
 export const REFINEMENT_CUSTOM_TYPE = "prime-agent.refinement";
 
@@ -18,6 +20,17 @@ const REFINEMENT_HISTORY_FILE_NAME = "refinements.jsonl";
 const DEFAULT_OVERVIEW_ENTRY_LIMIT = 6;
 const DEFAULT_OVERVIEW_REFINEMENT_LIMIT = 5;
 const DEFAULT_OVERVIEW_CONTENT_LIMIT = 180;
+
+/**
+ * Bump when the fingerprinted material or its canonical serialization changes,
+ * so fingerprints minted under different versions never compare equal.
+ * Normalizing a render-ignored flag out of the material does not need a
+ * bump: fingerprint equality still implies identical renders (with IPython
+ * examples off the normalization is a no-op; with them on, equality means
+ * the shell flag was already false, i.e. identical renders), so equality
+ * across the change is render-safe.
+ */
+const HARNESS_DIGEST_FINGERPRINT_VERSION = 1;
 
 export type RefinementKind = "prompt" | "memory" | "skill" | "subagent";
 export type RefinementAction = "create" | "update" | "delete";
@@ -128,7 +141,7 @@ Continual harness components:
 - prompt: supplemental prompt notes only. The base system prompt is immutable and MUST NOT be rewritten.
 - memory: durable facts, decisions, failures, preferences, and outcomes.
 - skill: installed Python REPL skill. Skill create/update edits MUST include a \`reference\` object with \`{"type":"python"}\`, a Python import, and a callable or call pattern; they also MUST include an \`arguments\` object describing accepted inputs, required fields, defaults, and constraints. Use \`{}\` for \`arguments\` only when the Python callable truly needs no external inputs. Include the RLM-native call form \`await <skill_import>(...)\`.
-- subagent: reusable delegation specs, including purpose, instructions, and when to invoke. Include the RLM-native call form: compose a concise task prompt and spawn with \`handle = await rlm("sub-task")\`; admission returns immediately with \`rlm_child_id\`, \`name\`, \`session_dir\`, and \`model\`, never the child's answer. Results arrive only through explicit \`agent_message\` replies or files; children reply with \`await agent_message.send(message, receiver_role="parent")\`. Use \`await rlm.list_subagents()\` to recover direct child handles and \`await agent_message.send(..., receiver_role="child", receiver_name=handle.name)\` for follow-ups. Do not invent wrappers like \`run_subagent(...)\`.
+- subagent: reusable delegation specs, including purpose, instructions, and when to invoke. Include the RLM-native call form: compose a concise task prompt and spawn with \`handle = await rlm.spawn("sub-task", name="worker")\`; admission returns immediately with \`rlm_child_id\`, \`name\`, \`session_dir\`, and \`model\`, never the child's answer. Results arrive only through explicit \`agent_message\` replies or files; children reply with \`await agent_message.send(message, receiver_role="parent")\`. Use \`await rlm.list_subagents()\` to recover direct child handles and \`await agent_message.send(..., receiver_role="child", receiver_name=handle.name)\` for follow-ups. Do not invent wrappers like \`run_subagent(...)\`.
 
 Scope and persistence policy:
 - The default editable continual harness store is local to the current Prime Agent session. Use it for session-specific progress, active task state, current-run coordination notes, temporary blockers, and project facts that should not affect other sessions.
@@ -177,24 +190,59 @@ Return JSON only:
   "instructions": "optional concise instructions for /refine if shouldRefine is true"
 }`;
 
-/**
- * Output budgets are derived from the selected model instead of fixed literals.
- * /refine input scales with harness size (entry overview, refinement history, and
- * the trajectory slice), so a constant output cap silently truncates exactly the
- * large multi-edit proposals that matter most. Math.min keeps small models honest.
- */
+// These caps apply only with reasoning off; thinking and JSON otherwise share the model's output budget.
 const REFINEMENT_MAX_OUTPUT_TOKENS = 32_000;
 const AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS = 4_096;
+const REFINEMENT_CONTEXT_OVERHEAD_TOKENS = 1_024;
 
 const TRUNCATED_JSON_ERROR =
 	"the model stopped before completing its JSON object. This usually means the output budget was exhausted; retry with a smaller request.";
 
-function refinementMaxOutputTokens(model: Model<any>): number {
-	return Math.min(model.maxTokens, REFINEMENT_MAX_OUTPUT_TOKENS);
+function refinementInputTokenBound(text: string): number {
+	// One token per UTF-8 byte bounds byte-based tokenizers, including dense or unusual text.
+	return Buffer.byteLength(text, "utf8");
 }
 
-function autoRefineReviewMaxOutputTokens(model: Model<any>): number {
-	return Math.min(model.maxTokens, AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS);
+function refinementRequest(
+	model: Model<Api>,
+	systemPrompt: string,
+	conversationText: string,
+	buildPrompt: (conversation: string) => string,
+	outputReserve: number,
+): { model: Model<Api>; userPrompt: string } {
+	const systemReserve = refinementInputTokenBound(systemPrompt) + REFINEMENT_CONTEXT_OVERHEAD_TOKENS;
+	const inputBudget =
+		model.contextWindow - Math.min(model.maxTokens, outputReserve, Math.floor(model.contextWindow / 2));
+	let userPrompt = buildPrompt(conversationText);
+	if (systemReserve + refinementInputTokenBound(userPrompt) > inputBudget && conversationText.length > 0) {
+		const promptForLength = (length: number): string => {
+			let start = conversationText.length - length;
+			const first = conversationText.charCodeAt(start);
+			if (first >= 0xdc00 && first <= 0xdfff) start++;
+			return buildPrompt(
+				`[Earlier conversation omitted to fit the model context.]\n${conversationText.slice(start)}`,
+			);
+		};
+		let low = 0;
+		let high = conversationText.length;
+		while (low < high) {
+			const length = Math.ceil((low + high) / 2);
+			if (systemReserve + refinementInputTokenBound(promptForLength(length)) <= inputBudget) low = length;
+			else high = length - 1;
+		}
+		userPrompt = promptForLength(low);
+	}
+	const maxTokens = Math.min(
+		model.maxTokens,
+		model.contextWindow - systemReserve - refinementInputTokenBound(userPrompt),
+	);
+	if (maxTokens <= 0) {
+		throw new Error(
+			"Refinement prompt leaves no room for output in the model's context window; retry with a smaller request.",
+		);
+	}
+	// Bound the request's model ceiling too: some adapters add thinking tokens before clamping to it.
+	return { model: { ...model, maxTokens }, userPrompt };
 }
 
 function now(): string {
@@ -215,7 +263,9 @@ function emptyHarnessState(): HarnessState {
 }
 
 function slug(raw: string, fallback: string): string {
-	const normalized = raw
+	// A malformed value (for example a non-string title) cannot be normalized; resolve
+	// to the fallback so apply-time validation can still reject the edit by id.
+	const normalized = (typeof raw === "string" ? raw : fallback)
 		.trim()
 		.toLowerCase()
 		.replace(/[^a-z0-9]+/g, "_")
@@ -404,12 +454,194 @@ export function mergeRefinementHistory(
 	return [...byId.values()];
 }
 
+/** Why a persisted harness entry cannot be rendered safely: the field whose
+ * stored type violates the entry contract (write paths reject these shapes).
+ * Render paths skip such entries with a diagnostic instead of throwing, so one
+ * corrupt entry (from an older build or a hand-edited store) can never break
+ * session creation by crashing the harness digest. */
+export function harnessEntryMalformation(entry: HarnessEntry): string | undefined {
+	if (typeof entry.content !== "string") return "content not a string";
+	if (typeof entry.title !== "string") return "title not a string";
+	return undefined;
+}
+
+/** Same contract for refinement events: the digest renders id, trigger, changes,
+ * and outcome with string operations, so a non-string id or trigger, non-array
+ * changes, non-string change elements, or non-string outcome must be skipped
+ * with a diagnostic rather than crash the digest or render junk. */
+export function harnessRefinementMalformation(event: HarnessRefinementEvent): string | undefined {
+	if (typeof event !== "object" || event === null) return "event not an object";
+	if (typeof event.id !== "string") return "id not a string";
+	if (typeof event.trigger !== "string") return "trigger not a string";
+	if (!Array.isArray(event.changes)) return "changes not an array";
+	if (!event.changes.every((change) => typeof change === "string")) return "changes contain a non-string";
+	if (event.outcome !== undefined && typeof event.outcome !== "string") return "outcome not a string";
+	return undefined;
+}
+
+/** Bounded label for a skipped malformed refinement event. Non-object elements
+ * and invalid ids are labeled by type, never by value: a corrupt store element
+ * must not inject arbitrary unbounded text into every session's prompt digest. */
+function malformedRefinementEventLabel(event: HarnessRefinementEvent): string {
+	if (event === null) return "null";
+	if (typeof event === "undefined") return "undefined";
+	if (typeof event !== "object") return `a ${typeof event}`;
+	if (Array.isArray(event)) return "an array";
+	return typeof event.id === "string" ? event.id : `a ${typeof event.id} id`;
+}
+
 function compactText(text: string, maxLength: number): string {
 	const normalized = text.replace(/\s+/g, " ").trim();
 	if (normalized.length <= maxLength) {
 		return normalized;
 	}
 	return `${normalized.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+/** Notice body in digest notation: trigger line plus applied edits as `action kind [scope:id] title: content`; rollbacks print via their rollback summaries. */
+export function formatRefinementNoticeBody(result: RefinementResult): string {
+	const lines = [compactText(result.summary, DEFAULT_OVERVIEW_CONTENT_LIMIT)];
+	for (const edit of result.appliedEdits) {
+		if (!edit.applied) continue;
+		const entry = edit.after ?? edit.before;
+		const scope = entry?.scope ?? result.scope ?? "local";
+		const malformation = entry ? harnessEntryMalformation(entry) : undefined;
+		lines.push(
+			`- ${edit.action} ${edit.kind} [${scope}:${edit.id}] ${malformation ? edit.id : (entry?.title ?? edit.id)}: ${compactText(
+				malformation ? "" : (entry?.content ?? ""),
+				DEFAULT_OVERVIEW_CONTENT_LIMIT,
+			)}${malformation ? ` (skipped malformed entry: ${malformation})` : ""}`,
+		);
+	}
+	return lines.join("\n");
+}
+
+/**
+ * Query terms for relevance-ranked harness digests: term -> weight.
+ * Built by the caller from task signal (goal objective, recent
+ * messages). The ranking is weighted term overlap over the entry's
+ * searchable fields, discounted per term by document frequency in the
+ * ranked corpus, so rare distinctive terms outweigh ubiquitous ones.
+ */
+export type HarnessQueryTerms = Map<string, number>;
+
+/** Lowercase a possibly malformed persisted field. */
+function searchableField(value: unknown): string {
+	return typeof value === "string" ? value.toLowerCase() : "";
+}
+
+/** CJK ideographs, kana, and Hangul: scripts that do not mark word
+ * boundaries with spaces. */
+const CJK_TERM_RANGES =
+	"\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af" +
+	"\u{20000}-\u{2a6df}\u{2a700}-\u{2b73f}\u{2b740}-\u{2b81f}" +
+	"\u{2b820}-\u{2ceaf}\u{2ceb0}-\u{2ebef}\u{2ebf0}-\u{2ee5f}" +
+	"\u{2f800}-\u{2fa1f}\u{30000}-\u{3134f}\u{31350}-\u{323af}\u{323b0}-\u{3347f}";
+const CJK_TERM_PATTERN = new RegExp(`[${CJK_TERM_RANGES}]`, "u");
+const CJK_TERM_SPLIT = new RegExp(`[${CJK_TERM_RANGES}]+|[^${CJK_TERM_RANGES}]+`, "gu");
+
+/**
+ * Tokenize text into lowercase query terms for harness relevance ranking.
+ * Letters, digits, and combining marks of any script form terms; punctuation only
+ * separate them, so a query like `worktree?` never ranks entries by their
+ * question marks. CJK runs carry no spaces between words, so each run
+ * becomes overlapping bigrams: `修复登录` yields 修复/复登/登录 and still
+ * matches an entry containing 登录故障. Each distinct term is returned once.
+ */
+export function harnessQueryTerms(text: string): string[] {
+	const terms: string[] = [];
+	// \p{M} keeps combining marks inside their run so mark-heavy scripts
+	// spell whole words (Devanagari किताब stays one run).
+	for (const run of text.toLowerCase().match(/[\p{L}\p{N}\p{M}]+/gu) ?? []) {
+		// Runs break only at CJK boundaries: accented Latin stays whole
+		// (naïve) while spacing-free CJK is cut from adjacent words.
+		for (const segment of run.match(CJK_TERM_SPLIT) ?? []) {
+			if (CJK_TERM_PATTERN.test(segment)) {
+				// Code points, not UTF-16 units, keep astral ideographs whole.
+				const chars = Array.from(segment);
+				if (chars.length === 1) terms.push(segment);
+				else for (let i = 0; i < chars.length - 1; i += 1) terms.push(chars[i] + chars[i + 1]);
+			} else if (segment.length >= 4) {
+				// Short runs are noise (the, and, ids) and are dropped.
+				terms.push(segment);
+			}
+		}
+	}
+	return [...new Set(terms)];
+}
+
+/**
+ * Inverse document frequency per query term over the entries being
+ * ranked: `log(1 + documents / matches)`. A term present in every entry
+ * still weighs `log(2)`, while a term in one entry of N weighs
+ * `log(1 + N)`, so rare distinctive terms outrank ubiquitous ones.
+ * Terms matching no entry are absent (they cannot score anything).
+ */
+export function harnessQueryTermIdf(entries: HarnessEntry[], terms: HarnessQueryTerms): Map<string, number> {
+	const idf = new Map<string, number>();
+	if (terms.size === 0) return idf;
+	let documents = 0;
+	const matches = new Map<string, number>();
+	for (const entry of entries) {
+		documents += 1;
+		const title = searchableField(entry.title);
+		const content = searchableField(entry.content);
+		const identifier = `${searchableField(entry.path)} ${searchableField(entry.id)}`;
+		for (const term of terms.keys()) {
+			if (title.includes(term) || content.includes(term) || identifier.includes(term)) {
+				matches.set(term, (matches.get(term) ?? 0) + 1);
+			}
+		}
+	}
+	for (const [term, documentFrequency] of matches) {
+		idf.set(term, Math.log(1 + documents / documentFrequency));
+	}
+	return idf;
+}
+
+/**
+ * Score one harness entry against query terms: weighted term overlap,
+ * with each matched term's weight discounted by its document frequency
+ * in the ranked corpus (`idf`; a missing map weights every term at 1).
+ */
+export function scoreHarnessEntryForQuery(
+	entry: HarnessEntry,
+	terms: HarnessQueryTerms,
+	idf?: Map<string, number>,
+): number {
+	if (terms.size === 0) return 0;
+	const title = searchableField(entry.title);
+	const content = searchableField(entry.content);
+	const identifier = `${searchableField(entry.path)} ${searchableField(entry.id)}`;
+	let score = 0;
+	for (const [term, weight] of terms) {
+		// One match per field counts once per term: coverage over distinct
+		// fields matters more than repetition inside a single field. Path
+		// and id form a single identifier slot: the id is often embedded in
+		// the path, so matching both is one signal, not two.
+		let fields = 0;
+		if (title.includes(term)) fields += 1;
+		if (content.includes(term)) fields += 1;
+		if (identifier.includes(term)) fields += 1;
+		if (fields > 0) {
+			score += weight * (idf?.get(term) ?? 1) * (1 + (fields - 1) * 0.5);
+		}
+	}
+	return score;
+}
+
+function compareRankedHarnessEntries(
+	a: HarnessEntry,
+	b: HarnessEntry,
+	terms: HarnessQueryTerms,
+	idf?: Map<string, number>,
+): number {
+	const scoreDifference = scoreHarnessEntryForQuery(b, terms, idf) - scoreHarnessEntryForQuery(a, terms, idf);
+	if (scoreDifference !== 0) return scoreDifference;
+	// Equal scores tie on stable identifier order (path, title, id), so
+	// touching unrelated entries never reshuffles equal-score siblings and the
+	// rendered digest keeps a stable prefix for provider prompt-cache reuse.
+	return [a.path, a.title, a.id].join("\0").localeCompare([b.path, b.title, b.id].join("\0"));
 }
 
 export function formatHarnessStateForPrompt(
@@ -421,6 +653,9 @@ export function formatHarnessStateForPrompt(
 		includeIpythonExamples?: boolean;
 		includeShellExamples?: boolean;
 		includeRefineExamples?: boolean;
+		/** Select entries by relevance to these terms instead of
+		 * alphabetical order. */
+		queryTerms?: HarnessQueryTerms;
 	} = {},
 ): string {
 	const maxEntriesPerKind = options.maxEntriesPerKind ?? DEFAULT_OVERVIEW_ENTRY_LIMIT;
@@ -441,17 +676,25 @@ export function formatHarnessStateForPrompt(
 			: "When to refine the continual harness: after a repeated failure, a reusable tactic emerges, a repeated delegation role should become a subagent spec, a repeated procedure should become a skill, a durable fact/preference should become a memory, a narrow behavioral policy should become a prompt addendum, a user corrects behavior that should persist locally or globally, validation shows a continual harness entry is wrong, or a skill/subagent/memory/prompt note should be created, updated, deleted, or rolled back. Keep continual harness edits small and evidence-backed.",
 		"",
 		includeIpythonExamples
-			? "Call contract: read each installed Python skill's SKILL.md and call its documented module function in the Python REPL; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm('sub-task')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries."
+			? "Call contract: read each installed Python skill's SKILL.md and call its documented module function in the Python REPL; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm.spawn('sub-task', name='worker')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries."
 			: options.includeShellExamples
 				? "Call contract: use installed skills as shell commands when available (for example `<skill_import> ...`). Continual harness entries are routing/context hints only in sessions without the Python REPL; do not use Python `await`, `asyncio`, or `rlm` examples unless the prompt also documents a Python kernel."
 				: "Call contract: continual harness entries are routing/context hints only in sessions without the Python REPL or shell access; do not use Python `await`, `asyncio`, `rlm`, or shell skill commands unless the prompt also documents those interfaces.",
 		"",
 	];
 
+	const queryTerms = options.queryTerms;
 	let totalEntries = 0;
 	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
-		const entries = Object.values(state.entries[kind]).sort((a, b) =>
-			[a.path, a.title, a.id].join("\0").localeCompare([b.path, b.title, b.id].join("\0")),
+		// The ranked corpus is the kind's own entries: they compete for the
+		// same top-k slots, so document frequency discounts terms ubiquitous
+		// within the kind rather than across unrelated kinds.
+		const ranked = Object.values(state.entries[kind]);
+		const idf = queryTerms !== undefined && queryTerms.size > 0 ? harnessQueryTermIdf(ranked, queryTerms) : undefined;
+		const entries = ranked.sort((a, b) =>
+			queryTerms !== undefined && queryTerms.size > 0
+				? compareRankedHarnessEntries(a, b, queryTerms, idf)
+				: [a.path, a.title, a.id].join("\0").localeCompare([b.path, b.title, b.id].join("\0")),
 		);
 		totalEntries += entries.length;
 		// Render subagent specs as a task-shaped roster the model can match against — the
@@ -459,12 +702,20 @@ export function formatHarnessStateForPrompt(
 		// REPL sessions, include the native `rlm` invocation hint.
 		if (kind === "subagent" && entries.length > 0 && includeIpythonExamples) {
 			lines.push(
-				`${kind}: ${entries.length} (invoke a spec by turning it into a concise task prompt and spawning with \`await rlm('<task>')\`; admission returns a child handle, never the answer)`,
+				`${kind}: ${entries.length} (invoke a spec by turning it into a concise task prompt and spawning with \`await rlm.spawn('<task>', name='<worker>')\`; admission returns a child handle, never the answer)`,
 			);
 		} else {
 			lines.push(`${kind}: ${entries.length}`);
 		}
+		if (queryTerms !== undefined && queryTerms.size > 0 && entries.length > maxEntriesPerKind) {
+			lines.push("(entries ranked by relevance to the current task; see harness.search)");
+		}
 		for (const entry of entries.slice(0, maxEntriesPerKind)) {
+			const malformation = harnessEntryMalformation(entry);
+			if (malformation) {
+				lines.push(`harness: skipped malformed entry ${entry.id} (${malformation})`);
+				continue;
+			}
 			const argumentsText =
 				entry.kind === "skill" && Object.keys(entry.arguments).length > 0
 					? ` args=${compactText(JSON.stringify(entry.arguments), maxContentLength)}`
@@ -493,6 +744,13 @@ export function formatHarnessStateForPrompt(
 
 	lines.push(`recent refinements: ${state.refinements.length}`);
 	for (const event of state.refinements.slice(-maxRefinements)) {
+		const malformation = harnessRefinementMalformation(event);
+		if (malformation) {
+			lines.push(
+				`harness: skipped malformed refinement event ${malformedRefinementEventLabel(event)} (${malformation})`,
+			);
+			continue;
+		}
 		const changes = event.changes.length > 0 ? event.changes.join(", ") : "no applied edits";
 		const outcome = event.outcome ? `; outcome: ${compactText(event.outcome, maxContentLength)}` : "";
 		lines.push(`- [${event.id}] ${compactText(event.trigger, maxContentLength)}: ${changes}${outcome}`);
@@ -505,12 +763,86 @@ export function formatHarnessStateForPrompt(
 	return lines.join("\n").trim();
 }
 
+/**
+ * Stable fingerprint of the harness material a digest renders. Equal states
+ * (per the fields the digest actually prints) produce equal fingerprints, so
+ * cold boundaries can skip digest re-delivery with a state comparison instead
+ * of a rendered-text comparison that query-term relevance keeps invalidating.
+ *
+ * Covered: entry identity and content (entry order is normalized away, as is
+ * the call contract on non-skill entries, which the formatter never prints),
+ * plus the render flags and each refinement's printed fields in stored order
+ * (a malformed event's printed fields are its skip-line label and reason),
+ * since the formatter renders a positional newest tail. The shell-examples
+ * flag participates only when IPython examples are not rendered: the formatter
+ * never reads it then, so it is normalized out of the fingerprint to keep an
+ * unchanged digest fresh. Excluded: `metadata`, `source`, and the invisible
+ * `created_at`/`updated_at` bookkeeping, and relevance query terms (the
+ * digest stays frozen per delivery; see `compareRankedHarnessEntries`).
+ */
+export function harnessDigestFingerprint(
+	state: HarnessState,
+	renderFlags: {
+		includeIpythonExamples: boolean;
+		includeShellExamples: boolean;
+		includeRefineExamples: boolean;
+	},
+): string {
+	const entries = (Object.keys(state.entries) as RefinementKind[])
+		.flatMap((kind) => Object.values(state.entries[kind]))
+		.map((entry) => ({
+			scope: entry.scope ?? "global",
+			kind: entry.kind,
+			id: entry.id,
+			title: entry.title,
+			path: entry.path,
+			version: entry.version,
+			content: entry.content,
+			// Only skills render the kernel call contract, so another kind can
+			// change these fields without changing a single digest byte.
+			reference: entry.kind === "skill" ? entry.reference : undefined,
+			arguments: entry.kind === "skill" ? entry.arguments : undefined,
+		}))
+		.sort((a, b) => [a.scope, a.kind, a.id].join("\0").localeCompare([b.scope, b.kind, b.id].join("\0")));
+	// Refinements keep their stored order: the formatter renders the newest
+	// tail of the array, so an order-only change renders differently and must
+	// not reuse the previous digest.
+	const refinements = state.refinements.map((event) => {
+		const malformation = harnessRefinementMalformation(event);
+		// A malformed event renders as a skip line (label + reason), not its
+		// fields, so that pair is the fingerprint material for it: fingerprint
+		// equality implies identical renders, corrupted stores included.
+		if (malformation !== undefined) {
+			return { malformed: malformation, label: malformedRefinementEventLabel(event) };
+		}
+		return { id: event.id, trigger: event.trigger, changes: event.changes, outcome: event.outcome };
+	});
+	// The formatter renders the shell call-contract only when IPython examples
+	// are absent, so the shell flag cannot change the digest while IPython
+	// examples take precedence; fingerprint only the flags the render reads.
+	const effectiveRenderFlags = renderFlags.includeIpythonExamples
+		? { ...renderFlags, includeShellExamples: false }
+		: renderFlags;
+	const material = JSON.stringify({
+		version: HARNESS_DIGEST_FINGERPRINT_VERSION,
+		renderFlags: effectiveRenderFlags,
+		entries,
+		refinements,
+	});
+	return createHash("sha256").update(material).digest("hex");
+}
+
 function overviewForPrompt(state: HarnessState): string {
 	const lines: string[] = [];
 	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
 		const entries = Object.values(state.entries[kind]);
 		lines.push(`${kind}: ${entries.length}`);
 		for (const entry of entries.slice(0, 40)) {
+			const malformation = harnessEntryMalformation(entry);
+			if (malformation) {
+				lines.push(`- harness: skipped malformed entry ${entry.id} (${malformation})`);
+				continue;
+			}
 			const content = entry.content.replace(/\s+/g, " ").slice(0, 240);
 			const argumentsText =
 				entry.kind === "skill" && Object.keys(entry.arguments).length > 0
@@ -671,6 +1003,27 @@ function validateEdit(edit: RefinementEdit, computedId?: string): string | undef
 	}
 	if (edit.action !== "delete" && (!edit.title || !edit.content)) {
 		return `${edit.action} requires title and content`;
+	}
+	if (edit.id !== undefined && (typeof edit.id !== "string" || edit.id.length === 0)) {
+		return `${edit.action} requires id to be a non-empty string when provided`;
+	}
+	if (edit.path !== undefined && (typeof edit.path !== "string" || edit.path.length === 0)) {
+		return `${edit.action} requires path to be a non-empty string when provided`;
+	}
+	if (
+		edit.action !== "delete" &&
+		(typeof edit.title !== "string" || typeof edit.content !== "string" || !edit.title || !edit.content)
+	) {
+		return `${edit.action} requires title and content to be non-empty strings`;
+	}
+	if (edit.reference !== undefined && objectRecord(edit.reference) === undefined) {
+		return `${edit.action} requires reference to be an object when provided`;
+	}
+	if (edit.arguments !== undefined && objectRecord(edit.arguments) === undefined) {
+		return `${edit.action} requires arguments to be an object when provided`;
+	}
+	if (edit.metadata !== undefined && objectRecord(edit.metadata) === undefined) {
+		return `${edit.action} requires metadata to be an object when provided`;
 	}
 	if (edit.action !== "delete" && edit.kind === "skill" && edit.arguments === undefined) {
 		return `${edit.action} skill requires arguments`;
@@ -873,6 +1226,7 @@ export async function planRefinement(
 	headers?: Record<string, string>,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
+	sessionId?: string,
 ): Promise<RefinementPlan> {
 	const id = generateRefinementId();
 	if (options.rollbackId) {
@@ -893,32 +1247,44 @@ export async function planRefinement(
 	const scopeInstruction = options.global
 		? "Requested refinement scope: global. Only propose stable cross-session continual harness edits, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts that should affect future Prime Agent sessions. Do not persist session-only progress, temporary blockers, or current-run coordination globally."
 		: "Requested refinement scope: local. Prefer local continual harness edits for current task progress, temporary blockers, current-run coordination, and project facts that are not clearly reusable across Prime Agent sessions. Global entries in the overview are read-only context: do not propose update or delete edits for them; create a local entry instead if an override is needed.";
-	const userPrompt = [
-		`<current_harness_state>\n${overviewForPrompt(state)}\n</current_harness_state>`,
-		`<refinement_history>\n${historyForPrompt(history)}\n</refinement_history>`,
-		`<conversation>\n${conversationText}\n</conversation>`,
-		`<scope_policy>\n${scopeInstruction}\n</scope_policy>`,
-		options.instructions ? `<user_refine_instructions>\n${options.instructions}\n</user_refine_instructions>` : "",
-		"Return only JSON edits. If no useful edit is justified, return an empty edits array with a rationale.",
-	]
-		.filter(Boolean)
-		.join("\n\n");
+	const buildPrompt = (conversation: string): string =>
+		[
+			`<current_harness_state>\n${overviewForPrompt(state)}\n</current_harness_state>`,
+			`<refinement_history>\n${historyForPrompt(history)}\n</refinement_history>`,
+			`<conversation>\n${conversation}\n</conversation>`,
+			`<scope_policy>\n${scopeInstruction}\n</scope_policy>`,
+			options.instructions ? `<user_refine_instructions>\n${options.instructions}\n</user_refine_instructions>` : "",
+			"Return only JSON edits. If no useful edit is justified, return an empty edits array with a rationale.",
+		]
+			.filter(Boolean)
+			.join("\n\n");
+	const reasoning = getAuxiliaryThinkingLevel(model, thinkingLevel);
+	const { model: requestModel, userPrompt } = refinementRequest(
+		model,
+		REFINEMENT_SYSTEM_PROMPT,
+		conversationText,
+		buildPrompt,
+		reasoning === "off" ? REFINEMENT_MAX_OUTPUT_TOKENS : model.maxTokens,
+	);
+	const maxTokens =
+		reasoning === "off" ? Math.min(requestModel.maxTokens, REFINEMENT_MAX_OUTPUT_TOKENS) : requestModel.maxTokens;
 
-	// /refine requires a parseable JSON object in the final text. Some reasoning-capable
-	// OpenAI-compatible models can spend the response on visible thinking and return no
-	// final text, which makes otherwise successful daemon /refine calls fail parsing.
-	// Keep the refinement request non-reasoning regardless of the interactive session
-	// thinking level so the model uses its output budget for the JSON object.
-	void thinkingLevel;
 	const response = await completeWithProviderRetry(
 		() =>
 			completeSimple(
-				model,
+				requestModel,
 				{
 					systemPrompt: REFINEMENT_SYSTEM_PROMPT,
 					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 				},
-				{ maxTokens: refinementMaxOutputTokens(model), signal, apiKey, headers },
+				{
+					reasoning,
+					maxTokens,
+					signal,
+					apiKey,
+					headers,
+					sessionId,
+				},
 			),
 		{ policy: options.retry, signal },
 	);
@@ -961,35 +1327,53 @@ export async function reviewAutoRefine(
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
 	retry?: ProviderRetryPolicy,
+	sessionId?: string,
 ): Promise<AutoRefineReview> {
 	const conversationText = serializeConversation(convertToLlm(messages)).slice(-40_000);
-	const userPrompt = [
-		`<trigger>
+	const buildPrompt = (conversation: string): string =>
+		[
+			`<trigger>
 ${context.reason}; ${context.turnsSinceLastReview} assistant turns since last auto-refine review
 </trigger>`,
-		`<current_harness_state>
+			`<current_harness_state>
 ${overviewForPrompt(state)}
 </current_harness_state>`,
-		`<refinement_history>
+			`<refinement_history>
 ${historyForPrompt(history)}
 </refinement_history>`,
-		`<conversation>
-${conversationText}
+			`<conversation>
+${conversation}
 </conversation>`,
-		"Return shouldRefine=true when the trajectory contains evidence useful to this session's future turns. Prefer local harness edits for current task progress, temporary blockers, and current-run coordination. Ask for global refinement only for durable cross-session lessons or explicitly project-qualified facts likely to be reused in future sessions.",
-	].join("\n\n");
-	// Auto-refine review requires parseable JSON. Keep it non-reasoning so
-	// reasoning-capable models use final text budget for the JSON object.
-	void thinkingLevel;
+			"Return shouldRefine=true when the trajectory contains evidence useful to this session's future turns. Prefer local harness edits for current task progress, temporary blockers, and current-run coordination. Ask for global refinement only for durable cross-session lessons or explicitly project-qualified facts likely to be reused in future sessions.",
+		].join("\n\n");
+	const reasoning = getAuxiliaryThinkingLevel(model, thinkingLevel);
+	const { model: requestModel, userPrompt } = refinementRequest(
+		model,
+		AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
+		conversationText,
+		buildPrompt,
+		reasoning === "off" ? AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS : model.maxTokens,
+	);
+	const maxTokens =
+		reasoning === "off"
+			? Math.min(requestModel.maxTokens, AUTO_REFINE_REVIEW_MAX_OUTPUT_TOKENS)
+			: requestModel.maxTokens;
 	const response = await completeWithProviderRetry(
 		() =>
 			completeSimple(
-				model,
+				requestModel,
 				{
 					systemPrompt: AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
 					messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 				},
-				{ maxTokens: autoRefineReviewMaxOutputTokens(model), signal, apiKey, headers },
+				{
+					reasoning,
+					maxTokens,
+					signal,
+					apiKey,
+					headers,
+					sessionId,
+				},
 			),
 		{ policy: retry, signal },
 	);
@@ -1016,8 +1400,20 @@ export async function refineHarness(
 	headers?: Record<string, string>,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
+	sessionId?: string,
 ): Promise<RefinementResult> {
-	const plan = await planRefinement(messages, state, history, model, apiKey, options, headers, signal, thinkingLevel);
+	const plan = await planRefinement(
+		messages,
+		state,
+		history,
+		model,
+		apiKey,
+		options,
+		headers,
+		signal,
+		thinkingLevel,
+		sessionId,
+	);
 	return applyRefinementProposal(state, plan.proposal, {
 		id: plan.id,
 		rollbackOf: plan.rollbackOf,

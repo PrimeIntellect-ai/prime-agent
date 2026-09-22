@@ -168,6 +168,8 @@ export interface MarkdownTheme {
 export interface MarkdownOptions {
 	/** Transform source Markdown before parsing, with the exact width available for content. */
 	transform?: (markdown: string, availableWidth: number) => string;
+	/** Base URL for relative link targets. Directory URLs must end with a slash. */
+	baseUrl?: string;
 }
 
 interface InlineStyleContext {
@@ -425,7 +427,6 @@ export class Markdown implements Component {
 		switch (token.type) {
 			case "heading": {
 				const headingLevel = token.depth;
-				const headingPrefix = `${"#".repeat(headingLevel)} `;
 
 				// Build a heading-specific style context so inline tokens (codespan, bold, etc.)
 				// restore heading styling after their own ANSI resets instead of falling back to
@@ -433,6 +434,10 @@ export class Markdown implements Component {
 				let headingStyleFn: (text: string) => string;
 				if (headingLevel === 1) {
 					headingStyleFn = (text: string) => this.theme.heading(this.theme.bold(this.theme.underline(text)));
+				} else if (headingLevel >= 5) {
+					headingStyleFn = (text: string) => this.theme.heading(this.theme.italic(text));
+				} else if (headingLevel === 4) {
+					headingStyleFn = (text: string) => this.theme.heading(this.theme.bold(this.theme.italic(text)));
 				} else {
 					headingStyleFn = (text: string) => this.theme.heading(this.theme.bold(text));
 				}
@@ -443,8 +448,7 @@ export class Markdown implements Component {
 				};
 
 				const headingText = this.renderInlineTokens(token.tokens || [], headingStyleContext);
-				const styledHeading = headingLevel >= 3 ? headingStyleFn(headingPrefix) + headingText : headingText;
-				lines.push(styledHeading);
+				lines.push(headingText);
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after headings (unless space token follows)
 				}
@@ -610,19 +614,24 @@ export class Markdown implements Component {
 				case "link": {
 					const linkText = this.renderInlineTokens(token.tokens || [], resolvedStyleContext);
 					const styledLink = this.theme.link(this.theme.underline(linkText));
+					// A Windows drive letter is a file path, not a URL scheme.
+					const target = token.href.replace(/^([a-z]:[\\/])/i, "file:///$1");
+					const href =
+						!target.startsWith("#") &&
+						(this.options.baseUrl || target !== token.href) &&
+						URL.canParse(target, this.options.baseUrl)
+							? new URL(target, this.options.baseUrl).href
+							: target;
+					const linkedText = hyperlink(styledLink, href);
 					if (getCapabilities().hyperlinks) {
-						// OSC 8: render as a clickable hyperlink. The URL is not printed inline,
-						// so we always show only the link text regardless of whether it matches href.
-						result += hyperlink(styledLink, token.href) + stylePrefix;
+						result += linkedText + stylePrefix;
 					} else {
-						// Compare raw token.text (not styled) against href for the equality check.
-						// For mailto: links strip the prefix (autolinked emails use text="foo@bar.com"
-						// but href="mailto:foo@bar.com").
+						// Keep the visible URL fallback while letting fullscreen hit testing open the label.
 						const hrefForComparison = token.href.startsWith("mailto:") ? token.href.slice(7) : token.href;
 						if (token.text === token.href || token.text === hrefForComparison) {
-							result += styledLink + stylePrefix;
+							result += linkedText + stylePrefix;
 						} else {
-							result += styledLink + this.theme.linkUrl(` (${token.href})`) + stylePrefix;
+							result += linkedText + this.theme.linkUrl(` (${token.href})`) + stylePrefix;
 						}
 					}
 					break;

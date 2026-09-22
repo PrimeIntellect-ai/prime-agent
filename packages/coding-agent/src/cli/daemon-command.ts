@@ -295,6 +295,11 @@ async function runOpen(parsed: ParsedDaemonClientCommand): Promise<void> {
 		if (!isLiveSessionSummary(data)) {
 			throw new Error("Daemon returned an invalid create response");
 		}
+		if (parsed.json) {
+			// Machine-readable open has no terminal to attach; match create's --json shape.
+			printJson(data);
+			return;
+		}
 		await runAttach(client, data.activeSessionId);
 	} finally {
 		client.close();
@@ -797,6 +802,10 @@ async function runCreate(client: DaemonClient, args: string[], json: boolean): P
 }
 
 async function runAttach(client: DaemonClient, activeSessionId: string): Promise<void> {
+	if (!process.stdin.isTTY) {
+		// The attach terminal reads stdin; without a TTY it would hang forever.
+		throw new Error("attach requires an interactive terminal (pass --json for machine-readable attach)");
+	}
 	const terminal = new DaemonAttachTerminal(client, activeSessionId);
 	await terminal.run();
 }
