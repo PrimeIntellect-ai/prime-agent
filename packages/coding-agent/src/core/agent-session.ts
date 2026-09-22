@@ -11907,6 +11907,14 @@ export class AgentSession {
 			run.abort = noopRlmChildAbort;
 			run.unsubscribe = undefined;
 			run.session = undefined;
+			if (run.detachedDeletion) {
+				// Tombstones only need the label (derived from prompt) and the last
+				// progress note to build the cancelled collect envelope. Strip the
+				// full values so a long-lived parent with many deletions does not
+				// accumulate unbounded memory.
+				run.prompt = rlmChildLabel(run.prompt);
+				run.progressNotes = run.progressNotes.slice(-1);
+			}
 		}
 	}
 
