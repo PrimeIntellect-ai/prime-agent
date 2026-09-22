@@ -11,7 +11,7 @@
  * compiled Bun binary), keyed off the __PI_BUNDLED__ define below, so extension
  * imports of pi packages share the bundle's module instances.
  */
-import { chmodSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,6 +30,15 @@ try {
 }
 
 rmSync(outdir, { recursive: true, force: true });
+
+const missingCatalogAssets = ["models.bundled.json", "mcp-services.bundled.json"].filter(
+	(file) => !existsSync(join(packageDir, "dist", file)),
+);
+if (missingCatalogAssets.length > 0) {
+	console.warn(
+		`Skipping bundled catalog asset embedding; missing ${missingCatalogAssets.join(", ")}. Runtime will use compiled fallbacks and remote cache refresh.`,
+	);
+}
 
 const result = await build({
 	entryPoints: {

@@ -1,7 +1,6 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getModel } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -11,6 +10,7 @@ import { createAgentSession } from "../../../src/core/sdk.js";
 import { SessionManager } from "../../../src/core/session-manager.js";
 import { SettingsManager } from "../../../src/core/settings-manager.js";
 import { createAllToolDefinitions } from "../../../src/core/tools/index.js";
+import { getCodingAgentFixtureModel } from "../../fixture-models.js";
 
 const legacyBashExtension = (pi: ExtensionAPI) => {
 	pi.on("session_start", () => {
@@ -71,7 +71,7 @@ describe("regression #4428: remove legacy pi-mono built-in tools", () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir,
-			model: getModel("anthropic", "claude-sonnet-5")!,
+			model: getCodingAgentFixtureModel("anthropic", "claude-sonnet-5"),
 			settingsManager,
 			sessionManager: SessionManager.inMemory(tempDir),
 			resourceLoader,

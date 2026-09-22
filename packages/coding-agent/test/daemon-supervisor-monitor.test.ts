@@ -252,6 +252,7 @@ function createSupervisorSnapshotState() {
 		pendingReplacementSnapshots: new WeakMap<object, Map<string, unknown>>(),
 		pendingRosterChanged: new Set<string>(),
 		publishedRosterIds: new Set<string>(),
+		publishedRosterJson: new Map<string, string>(),
 		pendingRosterRemoved: new Set<string>(),
 		rosterPushScheduled: false,
 	};

@@ -536,6 +536,27 @@ export function getCustomThemesDir(): string {
 	return join(getAgentDir(), "themes");
 }
 
+/**
+ * Directory for fetched-catalog caches (provider models, MCP services,
+ * default-model pointer, Prime Inference model cache). Derived state only —
+ * never user-owned config like auth.json, settings.json, models.json, or
+ * mcp-connections.json. Caches are non-authoritative: losing them costs one
+ * cold fetch, nothing else.
+ */
+export function getCatalogCacheDir(): string {
+	return join(getAgentDir(), "catalog");
+}
+
+/** Model catalog caches: provider catalog snapshot + Prime Inference model cache. */
+export function getModelCacheDir(): string {
+	return join(getAgentDir(), "models");
+}
+
+/** MCP service catalog cache. */
+export function getMcpCacheDir(): string {
+	return join(getAgentDir(), "mcp");
+}
+
 /** Directory where daemon and client diagnostic logs are written (e.g. ~/.prime/agent/logs/). */
 export function getLogsDir(): string {
 	return join(getAgentDir(), "logs");

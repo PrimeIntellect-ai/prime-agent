@@ -6,7 +6,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
-import { getModel, type OAuthCredentials, type OAuthProvider } from "@earendil-works/pi-ai";
+import type { OAuthCredentials, OAuthProvider } from "@earendil-works/pi-ai";
 import { getOAuthApiKey } from "@earendil-works/pi-ai/oauth";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
@@ -19,6 +19,7 @@ import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import type { Skill } from "../src/core/skills.js";
 import { createIpythonTool } from "../src/index.js";
+import { getCodingAgentFixtureModel } from "./fixture-models.js";
 
 /**
  * API key for authenticated tests. Tests using this should be wrapped in
@@ -237,7 +238,7 @@ export function createTestSession(options: TestSessionOptions = {}): TestSession
 	const tempDir = join(tmpdir(), `pi-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 	mkdirSync(tempDir, { recursive: true });
 
-	const model = getModel("anthropic", "claude-sonnet-4-5")!;
+	const model = getCodingAgentFixtureModel("anthropic", "claude-sonnet-4-5");
 	const agent = new Agent({
 		getApiKey: () => API_KEY,
 		initialState: {

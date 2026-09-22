@@ -4,11 +4,19 @@
 // connection records; no secrets ever leave this module.
 
 import { timingSafeEqual } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { LocalCatalogLoadResult, McpServiceEntry, McpServiceSetupField } from "@earendil-works/pi-ai/mcp";
-import { createMcpOAuthProvider, loadLocalServiceCatalog, SERVICE_CATALOG } from "@earendil-works/pi-ai/mcp";
+import {
+	createMcpOAuthProvider,
+	loadLocalServiceCatalog,
+	parseMcpServiceCatalogFile,
+	SERVICE_CATALOG,
+} from "@earendil-works/pi-ai/mcp";
+import { getPackageDir, isBunBinary } from "../../config.js";
 import type { AuthCredential, AuthStorage } from "../auth-storage.js";
+import { CatalogCache } from "../model-catalog-cache.js";
 import type { McpServerConfig } from "../settings-manager.js";
 import { MCP_PROBE_ERRORS, probeMcpEndpoint } from "./connection-probe.js";
 import type { McpConnectionRecord, McpConnectionStore } from "./connection-store.js";
@@ -155,6 +163,82 @@ function mapCatalogEntry(entry: McpServiceEntry, localSource: boolean): McpServi
 	};
 }
 
+export const REMOTE_MCP_SERVICE_CATALOG_URL =
+	"https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent-catalog/main/plugins/catalog.v2.json";
+const PACKAGED_MCP_SERVICE_CATALOG_FILE = "mcp-services.bundled.json";
+const remoteMcpListeners = new Set<() => void>();
+const remoteMcpCaches = new Map<string, CatalogCache<readonly McpServiceEntry[]>>();
+let remoteMcpLoadedFromBundle: readonly McpServiceEntry[] | undefined;
+
+function packagedMcpCatalogPath(): string {
+	const packageDir = getPackageDir();
+	const source = !isBunBinary && existsSync(join(packageDir, "src"));
+	return source
+		? resolve(packageDir, "catalog", PACKAGED_MCP_SERVICE_CATALOG_FILE)
+		: resolve(packageDir, ...(isBunBinary ? [] : ["dist"]), PACKAGED_MCP_SERVICE_CATALOG_FILE);
+}
+
+function loadBundledRemoteMcpCatalog(): readonly McpServiceEntry[] {
+	if (remoteMcpLoadedFromBundle) return remoteMcpLoadedFromBundle;
+	try {
+		const path = packagedMcpCatalogPath();
+		if (existsSync(path)) {
+			remoteMcpLoadedFromBundle = Object.freeze(
+				parseMcpServiceCatalogFile(JSON.parse(readFileSync(path, "utf8"))).entries,
+			);
+			return remoteMcpLoadedFromBundle;
+		}
+	} catch {
+		// Fall back to the tiny compiled legacy catalog.
+	}
+	remoteMcpLoadedFromBundle = SERVICE_CATALOG;
+	return remoteMcpLoadedFromBundle;
+}
+
+function getRemoteMcpCache(cachePath?: string): CatalogCache<readonly McpServiceEntry[]> | undefined {
+	if (!cachePath) return undefined;
+	let cache = remoteMcpCaches.get(cachePath);
+	if (!cache) {
+		// Historical cache locations (beside the agent files, and the intermediate
+		// "catalog" directory) remain readable so upgrading never costs a cold fetch.
+		const legacy = [
+			join(dirname(cachePath), "..", basename(cachePath)),
+			join(dirname(cachePath), "..", "catalog", basename(cachePath)),
+		];
+		cache = new CatalogCache(
+			REMOTE_MCP_SERVICE_CATALOG_URL,
+			cachePath,
+			(payload) => Object.freeze(parseMcpServiceCatalogFile(payload).entries),
+			legacy,
+		);
+		remoteMcpCaches.set(cachePath, cache);
+	}
+	return cache;
+}
+
+export function onRemoteMcpServiceCatalogChange(listener: () => void): () => void {
+	remoteMcpListeners.add(listener);
+	return () => remoteMcpListeners.delete(listener);
+}
+
+export function refreshRemoteMcpServiceCatalog(
+	cachePath?: string,
+	force = false,
+): Promise<readonly McpServiceEntry[] | undefined> {
+	const cache = getRemoteMcpCache(cachePath);
+	if (!cache) return Promise.resolve(loadBundledRemoteMcpCatalog());
+	const before = cache.get("public");
+	return cache.refresh("public", { force }).then((entries) => {
+		if (entries && entries !== before) for (const listener of remoteMcpListeners) listener();
+		return entries;
+	});
+}
+
+function currentRemoteMcpEntries(cachePath?: string): readonly McpServiceEntry[] {
+	const cache = getRemoteMcpCache(cachePath);
+	return cache?.get("public") ?? loadBundledRemoteMcpCatalog();
+}
+
 const MAX_TOTAL_CATALOG_ENTRIES = 500;
 
 /** Expand a leading ~ in a declared source path; other spellings pass through. */
@@ -175,6 +259,7 @@ function expandSourcePath(rawPath: string): string {
  */
 export function resolveMcpServiceCatalog(options: {
 	localSources?: readonly string[];
+	remoteCachePath?: string;
 	loadLocal?: typeof loadLocalServiceCatalog;
 	/**
 	 * Existing connection records. A record whose service came from an optional
@@ -187,9 +272,9 @@ export function resolveMcpServiceCatalog(options: {
 	const loadLocal = options.loadLocal ?? loadLocalServiceCatalog;
 	const diagnostics: string[] = [];
 	const byId = new Map<string, McpServiceDescriptor>();
-	const addEntry = (entry: McpServiceEntry, localSource: boolean): void => {
+	const addEntry = (entry: McpServiceEntry, localSource: boolean, reportDuplicate = true): void => {
 		if (byId.has(entry.server)) {
-			diagnostics.push(`Duplicate MCP service id "${entry.server}"; the first source wins.`);
+			if (reportDuplicate) diagnostics.push(`Duplicate MCP service id "${entry.server}"; the first source wins.`);
 			return;
 		}
 		byId.set(entry.server, mapCatalogEntry(entry, localSource));
@@ -220,6 +305,10 @@ export function resolveMcpServiceCatalog(options: {
 			addEntry(entry, true);
 		}
 	}
+	for (const entry of currentRemoteMcpEntries(options.remoteCachePath)) {
+		addEntry(entry, false, false);
+	}
+	if (options.remoteCachePath) void refreshRemoteMcpServiceCatalog(options.remoteCachePath, false).catch(() => {});
 	// Durable pins: records of services the catalog no longer defines.
 	for (const record of options.records ?? []) {
 		if (byId.has(record.serviceId)) continue;
@@ -276,10 +365,17 @@ export function resolveMcpServiceCatalog(options: {
 export function defaultServiceCatalogProvider(
 	localSources?: readonly string[] | (() => readonly string[]),
 	records?: readonly McpConnectionRecord[] | (() => readonly McpConnectionRecord[]),
+	remoteCachePath?: string | (() => string | undefined),
 ): McpServiceCatalogProvider {
 	const getSources = typeof localSources === "function" ? localSources : () => localSources ?? [];
 	const getRecords = typeof records === "function" ? records : () => records ?? [];
-	return () => resolveMcpServiceCatalog({ localSources: getSources(), records: getRecords() }).descriptors;
+	const getRemoteCachePath = typeof remoteCachePath === "function" ? remoteCachePath : () => remoteCachePath;
+	return () =>
+		resolveMcpServiceCatalog({
+			localSources: getSources(),
+			records: getRecords(),
+			remoteCachePath: getRemoteCachePath(),
+		}).descriptors;
 }
 
 /**
@@ -289,8 +385,9 @@ export function defaultServiceCatalogProvider(
 export function resolveServiceCatalogWithDiagnostics(
 	localSources?: readonly string[],
 	records?: readonly McpConnectionRecord[],
+	remoteCachePath?: string,
 ): McpCatalogResolution {
-	return resolveMcpServiceCatalog({ localSources, records });
+	return resolveMcpServiceCatalog({ localSources, records, remoteCachePath });
 }
 
 /** Reserved definitions keep one canonical owner across UI and dispatch. */

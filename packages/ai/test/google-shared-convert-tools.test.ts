@@ -1,7 +1,6 @@
 import type * as GoogleGenAi from "@google/genai";
 import type { GenerateContentParameters } from "@google/genai";
 import { describe, expect, it, vi } from "vitest";
-import { getModel } from "../src/models.js";
 import {
 	convertMessages,
 	convertTools,
@@ -10,6 +9,7 @@ import {
 } from "../src/providers/google-shared.js";
 import { streamSimpleGoogleVertex } from "../src/providers/google-vertex.js";
 import type { Context, Model, Tool } from "../src/types.js";
+import { getFixtureModel } from "./fixture-models.js";
 
 vi.mock("@google/genai", async (importOriginal) => {
 	const actual = await importOriginal<typeof GoogleGenAi>();
@@ -376,28 +376,26 @@ describe("google-shared image tool result routing", () => {
 });
 
 describe("Google Vertex thinking budget payload", () => {
-	const stableFlashLite = getModel("google-vertex", "gemini-2.5-flash-lite");
+	const stableFlashLite = getFixtureModel<"google-vertex">("google-vertex", "gemini-2.5-flash-lite");
+	const previewFlashLite = getFixtureModel<"google-vertex">("google-vertex", "gemini-2.5-flash-lite-preview");
 
-	it.each([stableFlashLite, { ...stableFlashLite, id: "gemini-2.5-flash-lite-preview" }])(
-		"uses the supported minimal budget for $id",
-		async (model) => {
-			let capturedPayload: GenerateContentParameters | undefined;
-			await streamSimpleGoogleVertex(
-				model,
-				{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
-				{
-					apiKey: "fake-key",
-					reasoning: "minimal",
-					onPayload: (payload) => {
-						capturedPayload = payload as GenerateContentParameters;
-						return payload;
-					},
+	it.each([stableFlashLite, previewFlashLite])("uses the supported minimal budget for $id", async (model) => {
+		let capturedPayload: GenerateContentParameters | undefined;
+		await streamSimpleGoogleVertex(
+			model,
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: "fake-key",
+				reasoning: "minimal",
+				onPayload: (payload) => {
+					capturedPayload = payload as GenerateContentParameters;
+					return payload;
 				},
-			).result();
+			},
+		).result();
 
-			expect(capturedPayload?.config?.thinkingConfig).toEqual({ includeThoughts: true, thinkingBudget: 512 });
-		},
-	);
+		expect(capturedPayload?.config?.thinkingConfig).toEqual({ includeThoughts: true, thinkingBudget: 512 });
+	});
 });
 
 describe("Google thinking detection (thoughtSignature)", () => {

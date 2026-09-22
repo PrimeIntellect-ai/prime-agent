@@ -103,12 +103,16 @@ describe("extensions discovery", () => {
 			expected: ["my-package/custom.ts"],
 		},
 		{
-			name: "package.json without pi field falls back to index.ts",
+			name: "package.json with an absent or unusable pi field does not stop discovery",
 			setup: () => {
 				write("my-package/index.ts");
 				write("my-package/package.json", JSON.stringify({ name: "my-package", version: "1.0.0" }));
+				write("malformed-package/index.ts");
+				write("malformed-package/package.json", JSON.stringify({ pi: { extensions: "index.ts" } }));
+				write("invalid-element-package/index.ts");
+				write("invalid-element-package/package.json", JSON.stringify({ pi: { extensions: [7] } }));
 			},
-			expected: ["my-package/index.ts"],
+			expected: ["invalid-element-package/index.ts", "malformed-package/index.ts", "my-package/index.ts"],
 		},
 		{
 			name: "package.json paths that do not exist are skipped",
@@ -148,6 +152,26 @@ describe("extensions discovery", () => {
 		);
 	});
 
+	it("resolves a symlink named like a file through the entry point of its target directory", async () => {
+		const targetDir = path.join(tempDir, "target");
+		fs.mkdirSync(targetDir, { recursive: true });
+		fs.writeFileSync(path.join(targetDir, "index.ts"), extensionCode);
+		fs.symlinkSync(targetDir, path.join(extensionsDir, "foo.ts"), "dir");
+		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+		expect(result.errors).toHaveLength(0);
+		expect(result.extensions.map((extension) => path.relative(extensionsDir, extension.path))).toEqual([
+			path.join("foo.ts", "index.ts"),
+		]);
+	});
+
+	it("silently skips a symlink whose target does not exist", async () => {
+		write("kept.ts");
+		fs.symlinkSync(path.join(tempDir, "missing.ts"), path.join(extensionsDir, "broken.ts"));
+		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+		expect(result.errors).toHaveLength(0);
+		expect(result.extensions.map((extension) => path.relative(extensionsDir, extension.path))).toEqual(["kept.ts"]);
+	});
+
 	it.each([
 		{
 			name: "code that fails to load",
@@ -176,6 +200,18 @@ describe("extensions discovery", () => {
 		expect(result.errors).toHaveLength(1);
 		expect(result.errors[0].path).toContain(file);
 		if (error) expect(result.errors[0].error).toContain(error);
+	});
+
+	it("skips extensions excluded by the ignore files of the extensions directory", async () => {
+		write("kept.ts");
+		write("skipped.ts");
+		write("ignored-package/index.ts");
+		write(".gitignore", "skipped.ts\nignored-package/\n");
+
+		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+
+		expect(result.errors).toHaveLength(0);
+		expect(result.extensions.map((extension) => path.relative(extensionsDir, extension.path))).toEqual(["kept.ts"]);
 	});
 
 	it("loads explicitly configured paths outside the extensions directory", async () => {

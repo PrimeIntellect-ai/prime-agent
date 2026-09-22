@@ -15,6 +15,7 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { assembleBinaryArchives } from "./assemble-release-archives.mjs";
+import { validateBundledCatalogDir } from "../packages/coding-agent/scripts/catalog-assets.mjs";
 import { manifestV1Platforms } from "./release-platforms.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -152,6 +153,7 @@ function requireBuiltPackage(packageDir) {
 	if (!existsSync(dist)) {
 		throw new Error(`Missing ${dist}. Run npm run build before packing a release.`);
 	}
+	if (packageDir === "coding-agent") validateBundledCatalogDir(dist);
 }
 
 function copyIfExists(source, target) {

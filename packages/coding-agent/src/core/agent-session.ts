@@ -27,13 +27,14 @@ import type {
 	UserMessage,
 } from "@earendil-works/pi-ai";
 import {
+	clampServiceTier,
 	clampThinkingLevel,
 	cleanupSessionResources,
 	getSupportedThinkingLevels,
 	isContextOverflow,
 	modelsAreEqual,
 	resetApiProviders,
-	supportsFastMode,
+	supportsServiceTier,
 } from "@earendil-works/pi-ai";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
@@ -109,7 +110,9 @@ import {
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
 	compact,
+	estimateBranchSummaryRequestTokens,
 	estimateContextTokens,
+	estimateSummaryRequestTokens,
 	generateBranchSummary,
 	prepareCompaction,
 	serializeConversation,
@@ -402,6 +405,9 @@ export interface RlmChildAgentSnapshot {
 	activityStaleMs?: number;
 	error?: string;
 }
+
+/** The observable state rlm_child_update events dedup on. */
+type RlmChildStableSnapshot = Omit<RlmChildAgentSnapshot, "lastActivityAt" | "activityStaleMs">;
 
 export type CompactionReason = "manual" | "threshold" | "overflow" | "requested";
 
@@ -1029,6 +1035,8 @@ type AutonomousRuntimeSnapshot = Pick<
 interface RlmChildRun {
 	id: string;
 	prompt: string;
+	/** rlmChildLabel(prompt), computed once: the prompt never changes. */
+	label: string;
 	sessionName: string;
 	sessionDir: string;
 	model: Model<Api>;
@@ -1078,7 +1086,7 @@ interface RlmChildRun {
 	completeDeletion?: () => Promise<void>;
 	reportDeletionCleanupFailure?: (error: unknown) => Promise<void>;
 	emitUpdate?: () => void;
-	lastEmittedUpdate?: string;
+	lastEmittedUpdate?: RlmChildStableSnapshot;
 	/** Monotonic time of the last streamed-delta emit; other event kinds still emit at once. */
 	lastStreamedUpdateMonotonicAt?: number;
 	unsubscribe?: () => void;
@@ -1350,6 +1358,39 @@ export function rlmChildLabel(prompt: string): string {
 	return prompt.replace(/\s+/g, " ").trim() || "child agent";
 }
 
+/** `satisfies` makes a field without a compare entry a compile error, not a silently suppressed rlm_child_update. */
+const RLM_CHILD_STABLE_SNAPSHOT_KEYS = Object.keys({
+	id: true,
+	parentId: true,
+	activeSessionId: true,
+	sessionName: true,
+	model: true,
+	label: true,
+	status: true,
+	durationMs: true,
+	answerPreview: true,
+	toolUseCount: true,
+	tokenCount: true,
+	recap: true,
+	sessionDir: true,
+	activity: true,
+	repliedSinceTask: true,
+	progressNote: true,
+	error: true,
+} satisfies Record<keyof RlmChildStableSnapshot, true>) as (keyof RlmChildStableSnapshot)[];
+
+/** Fields are primitives except activity, compared by value because each delta assigns a fresh activity object. */
+function rlmChildStableFieldsEqual(a: RlmChildStableSnapshot, b: RlmChildStableSnapshot): boolean {
+	for (const key of RLM_CHILD_STABLE_SNAPSHOT_KEYS) {
+		if (key === "activity") {
+			if (a.activity?.kind !== b.activity?.kind || a.activity?.toolName !== b.activity?.toolName) return false;
+		} else if (a[key] !== b[key]) {
+			return false;
+		}
+	}
+	return true;
+}
+
 /**
  * Record a tracked child activity on both clocks: lastActivityAt stays
  * wall-clock ms for snapshots, and its monotonic twin bounds staleness so a
@@ -1487,11 +1528,8 @@ export class AgentSession {
 
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
-	private _lastSessionActionSnapshot: SessionActionSnapshot = {
-		queuedCount: 0,
-		steering: [],
-		followUps: [],
-	};
+	/** Serialized last-emitted queue snapshot, so a mutation pays one stringify, not two. */
+	private _lastSessionActionSnapshot = JSON.stringify({ queuedCount: 0, steering: [], followUps: [] });
 	private _agentEventQueue: Promise<void> = Promise.resolve();
 
 	/** Session-owned actions. Items are never fed into Agent.steer/followUp. */
@@ -2055,8 +2093,9 @@ export class AgentSession {
 
 	private _emitQueueUpdate(): void {
 		const actions = this.getSessionActionSnapshot();
-		if (JSON.stringify(actions) === JSON.stringify(this._lastSessionActionSnapshot)) return;
-		this._lastSessionActionSnapshot = actions;
+		const serialized = JSON.stringify(actions);
+		if (serialized === this._lastSessionActionSnapshot) return;
+		this._lastSessionActionSnapshot = serialized;
 		this._emit({ type: "session_action_update", actions });
 	}
 
@@ -8483,16 +8522,19 @@ export class AgentSession {
 
 	setServiceTier(serviceTier: ServiceTier): void {
 		const effectiveServiceTier = this._getEffectiveServiceTier(serviceTier);
-		const preferenceChanged = effectiveServiceTier !== this._serviceTierPreference;
+		const preferenceChanged = serviceTier !== this._serviceTierPreference;
 		const effectiveTierChanged = effectiveServiceTier !== this.agent.state.serviceTier;
 		if (!preferenceChanged && !effectiveTierChanged) {
 			return;
 		}
-		this._serviceTierPreference = effectiveServiceTier;
+		// The preference and the session entry keep the REQUESTED tier (only the
+		// active state clamps), so switching to or resuming on a capable model
+		// re-activates it instead of a clamped "default" shadowing it.
+		this._serviceTierPreference = serviceTier;
 		if (preferenceChanged) {
-			this.sessionManager.appendServiceTierChange(effectiveServiceTier);
-			if (this.model && supportsFastMode(this.model)) {
-				this.settingsManager.setDefaultServiceTier(effectiveServiceTier);
+			this.sessionManager.appendServiceTierChange(serviceTier);
+			if (this.model && supportsServiceTier(this.model, serviceTier)) {
+				this.settingsManager.setDefaultServiceTier(serviceTier);
 			}
 		}
 		if (effectiveTierChanged) {
@@ -8505,7 +8547,7 @@ export class AgentSession {
 	}
 
 	private _getEffectiveServiceTier(serviceTier: ServiceTier): ServiceTier {
-		return serviceTier === "priority" && (!this.model || !supportsFastMode(this.model)) ? "default" : serviceTier;
+		return clampServiceTier(this.model, serviceTier);
 	}
 
 	private _getServiceTierForModelSwitch(): ServiceTier {
@@ -8830,6 +8872,24 @@ export class AgentSession {
 			if (extensionCompaction) {
 				({ summary, firstKeptEntryId, tokensBefore, details, usage } = extensionCompaction);
 			} else {
+				// Compaction fires at context peak, and the summarizer runs with its own
+				// prompt prefix (a different system prompt, no tools), so it cannot hit
+				// the session's cached prefix: on the session model the summary re-reads
+				// its whole input at peak price, and on OpenAI-style providers it rides
+				// the session's prompt_cache_key with a divergent prefix, depressing
+				// hit rates. Route summaries to the auxiliary model when one is configured.
+				const summarization = (await this._resolveAuxiliaryModel(
+					"compaction summary",
+					{ model, apiKey, headers },
+					// The summary request serializes the whole conversation, so a
+					// smaller auxiliary window must fall back to the session model
+					// instead of failing over-limit and stranding the context.
+					estimateSummaryRequestTokens(preparation, customInstructions),
+				)) ?? {
+					model,
+					apiKey,
+					headers,
+				};
 				// Each summary wire call gets its own request ID: split turns send two
 				// different bodies, and one Idempotency-Key must never cover both. A slice
 				// that succeeds on the wire stays uncommitted until the compaction itself
@@ -8840,10 +8900,10 @@ export class AgentSession {
 				): Promise<T> => {
 					const requestId = this._semanticEdges.startCompactionRequest(semanticCompaction.compactionId);
 					if (requestId === undefined) {
-						return call(headers);
+						return call(summarization.headers);
 					}
 					try {
-						const result = await call({ ...headers, ...modelRequestHeaders(requestId) });
+						const result = await call({ ...summarization.headers, ...modelRequestHeaders(requestId) });
 						// A slice resolving after a sibling's rejection already settled the
 						// compaction would push into a drained list and stay in-flight forever.
 						if (compactionSettled) {
@@ -8859,12 +8919,15 @@ export class AgentSession {
 				};
 				({ summary, firstKeptEntryId, tokensBefore, details, usage } = await compact(
 					preparation,
-					model,
-					apiKey,
-					headers,
+					summarization.model,
+					summarization.apiKey,
+					summarization.headers,
 					customInstructions,
 					signal,
-					this.thinkingLevel,
+					// Summarizing is transcription, not reasoning: no thinking level is
+					// requested, so the summary call stays cheap and cannot trip an invalid
+					// reasoning effort for the summary model.
+					undefined,
 					summaryCall,
 					providerRetryPolicy(this.settingsManager),
 					this.sessionId,
@@ -9374,23 +9437,36 @@ export class AgentSession {
 	}
 
 	/**
-	 * Refinement passes (review and planning) run with their own prompts, so
-	 * issuing them on the session model evicts the provider's prefix-cache entry
-	 * for the session and forces a full context re-read on the next session
-	 * request. Route them to the configured auxiliary model when it is set and
-	 * usable; fall back to the session model otherwise.
+	 * Background LLM passes (refinement review and planning, compaction summaries,
+	 * branch summaries) run with their own prompts, so they cannot hit the
+	 * session's cached prefix: on the session model they re-read their whole input
+	 * at peak price, and on OpenAI-style providers a divergent prefix riding the
+	 * session's prompt_cache_key depresses hit rates. Route them to the configured
+	 * auxiliary model when it is set and usable; fall back to the session model
+	 * otherwise.
+	 *
+	 * Callers that already resolved the session request auth pass it as
+	 * `fallback` so the fallback path reuses it instead of resolving again.
 	 */
-	private async _resolveRefinementModel(): Promise<
-		{ model: Model<Api>; apiKey: string; headers?: Record<string, string> } | undefined
-	> {
+	private async _resolveAuxiliaryModel(
+		purpose: string,
+		fallback?: { model: Model<Api>; apiKey: string; headers?: Record<string, string> },
+		requiredContextTokens?: number,
+	): Promise<{ model: Model<Api>; apiKey: string; headers?: Record<string, string> } | undefined> {
 		const sessionModel = this.model;
 		if (!sessionModel) {
-			return undefined;
+			return fallback;
 		}
-		const selector = this.settingsManager.getAuxiliaryModel()?.trim().toLowerCase();
-		if (!selector || `${sessionModel.provider}/${sessionModel.id}`.toLowerCase() === selector) {
+		const resolveSessionAuth = async () => {
+			if (fallback) {
+				return fallback;
+			}
 			const { apiKey, headers, requestModel } = await this._getRequiredRequestAuth(sessionModel);
 			return { model: requestModel, apiKey, headers };
+		};
+		const selector = this.settingsManager.getAuxiliaryModel()?.trim().toLowerCase();
+		if (!selector || `${sessionModel.provider}/${sessionModel.id}`.toLowerCase() === selector) {
+			return await resolveSessionAuth();
 		}
 		try {
 			const model = (await this._authenticatedRlmModels()).find(
@@ -9400,13 +9476,27 @@ export class AgentSession {
 				throw new Error(`model "${selector}" is unavailable, unauthenticated, or expired`);
 			}
 			const { apiKey, headers, requestModel } = await this._getRequiredRequestAuth(model);
+			// Callers that know the size of the request they will issue pass it in:
+			// an auxiliary model whose context window cannot hold that request
+			// fails over-limit on the wire (e.g. a compaction summary covering the
+			// whole conversation), leaving the caller unable to make progress. A
+			// known window that is too small routes to the session model through the
+			// warning below; an unknown window (<= 0) keeps the routing as-is
+			// rather than guessing. The throw lands in the catch, whose logging
+			// stays selector-only (CodeQL js/clear-text-logging).
+			if (
+				requiredContextTokens !== undefined &&
+				requestModel.contextWindow > 0 &&
+				requestModel.contextWindow < requiredContextTokens
+			) {
+				throw new Error("auxiliary model context window is too small for the request");
+			}
 			return { model: requestModel, apiKey, headers };
 		} catch {
 			// Error details from the auth stack can embed credential material, so only
 			// the selector is logged (CodeQL js/clear-text-logging).
-			console.warn(`Warning: auxiliaryModel "${selector}" unusable for refinement; using the session model.`);
-			const { apiKey, headers, requestModel } = await this._getRequiredRequestAuth(sessionModel);
-			return { model: requestModel, apiKey, headers };
+			console.warn(`Warning: auxiliaryModel "${selector}" unusable for ${purpose}; using the session model.`);
+			return await resolveSessionAuth();
 		}
 	}
 
@@ -9414,7 +9504,7 @@ export class AgentSession {
 		if (this._autoRefineReviewer) {
 			return this._autoRefineReviewer(context, signal);
 		}
-		const refinementModel = await this._resolveRefinementModel();
+		const refinementModel = await this._resolveAuxiliaryModel("refinement");
 		if (!refinementModel) {
 			return { shouldRefine: false, rationale: "No model selected." };
 		}
@@ -9777,7 +9867,7 @@ export class AgentSession {
 			throw new Error(formatNoModelSelectedMessage());
 		}
 
-		const refinementModel = await this._resolveRefinementModel();
+		const refinementModel = await this._resolveAuxiliaryModel("refinement");
 		if (!refinementModel) {
 			throw new Error(formatNoModelSelectedMessage());
 		}
@@ -11154,8 +11244,7 @@ export class AgentSession {
 			model: options.model,
 			thinkingLevel:
 				options.thinkingLevel ?? (clampThinkingLevel(options.model, this.thinkingLevel) as ThinkingLevel),
-			serviceTier:
-				this.serviceTier === "priority" && !supportsFastMode(options.model) ? "default" : this.serviceTier,
+			serviceTier: this._serviceTierPreference,
 			scopedModels: [...this._scopedModels],
 			activeToolNames: this.getActiveToolNames(),
 			allowedToolNames: this._allowedToolNames ? [...this._allowedToolNames] : undefined,
@@ -11198,7 +11287,7 @@ export class AgentSession {
 				systemPrompt: "",
 				model: options.model,
 				thinkingLevel: options.thinkingLevel,
-				serviceTier: options.serviceTier,
+				serviceTier: clampServiceTier(options.model, options.serviceTier),
 				tools: [],
 			},
 			convertToLlm: this.agent.convertToLlm,
@@ -11219,6 +11308,7 @@ export class AgentSession {
 			agent: childAgent,
 			sessionManager: childSessionManager,
 			settingsManager: this.settingsManager,
+			serviceTierPreference: options.serviceTier,
 			cwd: this._cwd,
 			agentDir: this._agentDir,
 			scopedModels: options.scopedModels,
@@ -12103,17 +12193,14 @@ export class AgentSession {
 		};
 	}
 
-	private _rlmChildSnapshotForRun(
-		run: RlmChildRun,
-		child = run.session ?? this._rlmChildSessions.get(run.id)?.session,
-	): RlmChildAgentSnapshot {
+	private _rlmChildStableSnapshotForRun(run: RlmChildRun, child: AgentSession | undefined): RlmChildStableSnapshot {
 		const model = child?.model ?? run.model;
 		return {
 			id: run.id,
 			parentId: this._rlmParentNodeId,
 			sessionName: child?.sessionName ?? run.sessionName,
 			model: `${model.provider}/${model.id}`,
-			label: rlmChildLabel(run.prompt),
+			label: run.label,
 			status: run.status,
 			durationMs: run.durationMs,
 			answerPreview: run.answerPreview,
@@ -12124,9 +12211,18 @@ export class AgentSession {
 			activity: run.activity,
 			repliedSinceTask: child?._repliedToParentSinceTask,
 			progressNote: run.progressNotes.at(-1),
+			error: run.error,
+		};
+	}
+
+	private _rlmChildSnapshotForRun(
+		run: RlmChildRun,
+		child = run.session ?? this._rlmChildSessions.get(run.id)?.session,
+	): RlmChildAgentSnapshot {
+		return {
+			...this._rlmChildStableSnapshotForRun(run, child),
 			lastActivityAt: run.lastActivityAt,
 			activityStaleMs: rlmActivityStaleMs(run.status, run.activity, run.lastActivityAt, run.lastActivityMonotonicAt),
-			error: run.error,
 		};
 	}
 
@@ -12633,6 +12729,7 @@ export class AgentSession {
 		const run: RlmChildRun = {
 			id: childNodeId,
 			prompt,
+			label: rlmChildLabel(prompt),
 			sessionName,
 			sessionDir: childSessionDir,
 			model: modelSelection.model,
@@ -12655,17 +12752,18 @@ export class AgentSession {
 		this._activeRlmChildRuns.set(run.id, run);
 		this._unsettledRlmChildRuns.add(run);
 		const emitChildUpdate = () => {
-			const child = this._rlmChildSnapshotForRun(run);
 			// Dedup compares observable child state, not clock-derived fields:
 			// lastActivityAt advances on every streamed token delta and
 			// activityStaleMs is recomputed on each snapshot build, so including
 			// either would re-emit on every delta once answerPreview saturates its
-			// cap. Emitted snapshots still carry both fields fresh.
-			const { lastActivityAt: _lastActivityAt, activityStaleMs: _activityStaleMs, ...stable } = child;
-			const serialized = JSON.stringify(stable);
-			if (serialized === run.lastEmittedUpdate) return;
-			run.lastEmittedUpdate = serialized;
-			this._emit({ type: "rlm_child_update", child });
+			// cap. Streamed deltas would otherwise pay a snapshot build plus a serialization
+			// each; only a detected change builds the fresh snapshot, which carries both clock fields.
+			const child = run.session ?? this._rlmChildSessions.get(run.id)?.session;
+			const next = this._rlmChildStableSnapshotForRun(run, child);
+			if (run.lastEmittedUpdate && rlmChildStableFieldsEqual(run.lastEmittedUpdate, next)) return;
+			// next holds run.activity by reference; safe because activity objects are replaced, never mutated.
+			run.lastEmittedUpdate = next;
+			this._emit({ type: "rlm_child_update", child: this._rlmChildSnapshotForRun(run, child) });
 		};
 		run.emitUpdate = emitChildUpdate;
 		emitChildUpdate();
@@ -14519,10 +14617,33 @@ export class AgentSession {
 			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
 				const { apiKey, headers, requestModel: model } = await this._getRequiredRequestAuth(this.model!);
 				const branchSummarySettings = this.settingsManager.getBranchSummarySettings();
-				const result = await generateBranchSummary(entriesToSummarize, {
+				// Branch summary fires at a tree-navigation context boundary, and the
+				// summarizer runs with its own prompt prefix (SUMMARIZATION_SYSTEM_PROMPT
+				// plus the <conversation> wrapper), so it cannot hit the session's cached
+				// prefix: on the session model the summary re-reads the whole branch at
+				// peak price. Route it to the auxiliary model when one is configured.
+				const summarization = (await this._resolveAuxiliaryModel(
+					"branch summary",
+					{ model, apiKey, headers },
+					// The estimator sizes the request the session model would issue for
+					// the branch being left. A smaller auxiliary window must fall back
+					// rather than truncate away branch context or fail over-limit and
+					// strand the navigation.
+					estimateBranchSummaryRequestTokens(entriesToSummarize, {
+						contextWindow: model.contextWindow,
+						reserveTokens: branchSummarySettings.reserveTokens,
+						customInstructions,
+						replaceInstructions,
+					}),
+				)) ?? {
 					model,
 					apiKey,
 					headers,
+				};
+				const result = await generateBranchSummary(entriesToSummarize, {
+					model: summarization.model,
+					apiKey: summarization.apiKey,
+					headers: summarization.headers,
 					signal: this._branchSummaryAbortController.signal,
 					sessionId: this.sessionId,
 					customInstructions,
@@ -14800,7 +14921,7 @@ export class AgentSession {
 					children: [],
 				}),
 				id: run.id,
-				label: rlmChildLabel(run.prompt),
+				label: run.label,
 				status: run.status,
 			});
 		}

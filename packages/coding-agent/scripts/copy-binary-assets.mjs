@@ -1,6 +1,7 @@
 import { cpSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { validateBundledCatalogDir } from "./catalog-assets.mjs";
 
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const root = resolve(packageDir, "../..");
@@ -29,6 +30,8 @@ export const binaryAssets = [
 	"docs",
 	"examples",
 	"photon_rs_bg.wasm",
+	"models.bundled.json",
+	"mcp-services.bundled.json",
 ];
 
 function includeBinaryAsset(source) {
@@ -53,6 +56,8 @@ export function copyBinaryAssets(destination) {
 		docs: join(packageDir, "docs"),
 		examples: join(packageDir, "examples"),
 		"photon_rs_bg.wasm": join(root, "node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm"),
+		"models.bundled.json": join(packageDir, "dist/models.bundled.json"),
+		"mcp-services.bundled.json": join(packageDir, "dist/mcp-services.bundled.json"),
 	};
 	for (const [name, source] of Object.entries(sources)) {
 		const target = join(destination, name);
@@ -72,6 +77,7 @@ export function copyBinaryAssets(destination) {
 
 export function validateBinaryAssets(directory) {
 	for (const name of binaryAssets) lstatSync(join(directory, name));
+	validateBundledCatalogDir(directory);
 	for (const name of [
 		"prime-agent-runtime/pyproject.toml",
 		"prime-agent-runtime/src/rlm/repl.py",

@@ -652,6 +652,7 @@ function makeWorker(workerId: string, overrides: Partial<WorkerFixture> = {}): W
 
 interface SupervisorFixture {
 	workers: Map<string, WorkerFixture>;
+	flushRosterUpdates(): void;
 	consumeWorkerRosterDelta(worker: WorkerFixture, payload: Buffer): void;
 	handleList(
 		client: object,
@@ -667,6 +668,7 @@ interface SupervisorFixture {
 		get(agentId: string): AgentRosterEntry | undefined;
 		has(agentId: string): boolean;
 		values(): IterableIterator<AgentRosterEntry>;
+		delete(agentId: string): void;
 	};
 	refreshWorkerSummaries: ReturnType<typeof vi.fn>;
 }
@@ -679,6 +681,7 @@ function makeSupervisor(workers: WorkerFixture[], extra: Record<string, unknown>
 		catalog: { list: vi.fn(async () => []) },
 		pendingRosterChanged: new Set(),
 		publishedRosterIds: new Set(),
+		publishedRosterJson: new Map(),
 		pendingRosterRemoved: new Set(),
 		rosterPushScheduled: false,
 		refreshWorkerSummaries: vi.fn(async () => {}),
@@ -727,6 +730,25 @@ function rosterDelta(entries: WorkerRosterEntry[], removedAgentIds?: string[], s
 }
 
 describe("supervisor roster ledger", () => {
+	it("broadcasts a roster row only when its published content changes", () => {
+		const write = vi.fn();
+		const client = { rosterSubscribed: true };
+		const supervisor = makeSupervisor([], { rosterPushScheduled: true, write, clients: new Set([client]) }); // flushes below run explicitly
+		const row = (a?: boolean) =>
+			workerRosterEntryFromSummary(summary({ id: "r", sessionId: "r", isSessionActive: a }));
+		const writeAndFlush = (a?: boolean) => supervisor.writeRosterEntry(row(a)) && supervisor.flushRosterUpdates();
+		writeAndFlush();
+		writeAndFlush();
+		expect(write.mock.calls).toHaveLength(1);
+		writeAndFlush(true);
+		expect(write.mock.calls).toHaveLength(2);
+		supervisor.roster().delete("r");
+		supervisor.flushRosterUpdates();
+		expect(write.mock.calls[2]?.[1]).toMatchObject({ removed: ["r"] });
+		writeAndFlush(true); // an identical re-add republishes: the removal dropped the baseline
+		expect(write.mock.calls).toHaveLength(4);
+	});
+
 	it("serves list from the ledger with zero worker round-trips and exact busy counts", async () => {
 		const visible = makeWorker("visible");
 		const owned = makeWorker("owned", {

@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { NATIVE_PLATFORMS } from "../src/utils/native-installation.js";
 
@@ -173,6 +174,10 @@ describe("release signature command", () => {
 function binaryAssets(directory: string, binary: Buffer): void {
 	mkdirSync(directory, { recursive: true });
 	writeFileSync(join(directory, "prime-agent"), binary, { mode: 0o755 });
+	const packageDir = dirname(dirname(fileURLToPath(import.meta.url)));
+	for (const asset of ["models.bundled.json", "mcp-services.bundled.json"]) {
+		copyFileSync(join(packageDir, "dist", asset), join(directory, asset));
+	}
 	for (const name of [
 		"install.sh",
 		"README.md",

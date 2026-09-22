@@ -10,8 +10,8 @@
  * The loader rejects anything that would let a local file masquerade as
  * trusted: provenance may only claim the `user` source, `legacyBuiltin` and
  * `metadata-reviewed` review status cannot be self-asserted, audit-derived
- * `setup.readiness`, `auth.alternatives` and `auth.metadata` evidence cannot be
- * self-asserted, and ids colliding with bundled catalog entries are refused
+ * `setup.readiness` evidence cannot be self-asserted, and ids colliding with
+ * bundled catalog entries are refused
  * (no silent override/rebind of built-ins). Errors are visible and bounded: they name the file, entry index
  * and problem category, and never echo raw input values (a malformed URL or
  * JSON may carry secrets). How local entries interact with `mcpServers`
@@ -142,17 +142,11 @@ export function loadLocalServiceCatalog(filePath: string): LocalCatalogLoadResul
 				`${at} (${entry.server}): local entries cannot claim "${entry.verification.status}"; local sources are always unverified`,
 			);
 		}
-		// Audit-derived readiness, alternatives and metadata evidence are Prime
-		// assessments; a local file cannot self-assert them. setup.requirement stays
+		// Audit-derived readiness is a Prime assessment; setup.requirement stays
 		// allowed as honest self-description of the user's own service.
 		if (entry.setup.readiness !== undefined) {
 			throw new Error(
 				`${at} (${entry.server}): local entries cannot claim setup.readiness "${entry.setup.readiness}"; readiness is a Prime audit assessment`,
-			);
-		}
-		if (entry.auth.alternatives !== undefined || entry.auth.metadata !== undefined) {
-			throw new Error(
-				`${at} (${entry.server}): local entries cannot carry auth.alternatives or auth.metadata; they are Prime audit evidence`,
 			);
 		}
 		if (seenLocal.has(entry.server)) {

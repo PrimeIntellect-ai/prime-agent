@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getModel } from "../src/models.js";
 import { streamOpenAICompletions } from "../src/providers/openai-completions.js";
 import type { CacheRetention, Context, Model, Usage } from "../src/types.js";
+import { getFixtureModel } from "./fixture-models.js";
 
 interface CacheControl {
 	type: "ephemeral";
@@ -117,23 +118,23 @@ describe("openai-completions cacheControlFormat", () => {
 		{ name: "model compat opts in", model: () => customModel({ cacheControlFormat: "anthropic" }), ttl: undefined },
 		{
 			name: "OpenRouter Anthropic route",
-			model: () => getModel("openrouter", "anthropic/claude-sonnet-4"),
+			model: () => getFixtureModel<"openai-completions">("openrouter", "anthropic/claude-sonnet-4"),
 			ttl: undefined,
 		},
 		{
 			name: "Prime Inference Anthropic route",
-			model: () => getModel("prime-inference", "anthropic/claude-fable-5"),
+			model: () => getModel("prime-inference", "anthropic/claude-fable-5")!,
 			ttl: undefined,
 		},
 		{
 			name: "Prime Inference Anthropic route with long retention",
-			model: () => getModel("prime-inference", "anthropic/claude-fable-5"),
+			model: () => getModel("prime-inference", "anthropic/claude-fable-5")!,
 			retention: "long" as const,
 			ttl: "1h",
 		},
 		{
 			name: "OpenRouter Anthropic route with long retention",
-			model: () => getModel("openrouter", "anthropic/claude-sonnet-4"),
+			model: () => getFixtureModel<"openai-completions">("openrouter", "anthropic/claude-sonnet-4"),
 			retention: "long" as const,
 			ttl: "1h",
 		},
@@ -160,7 +161,7 @@ describe("openai-completions cacheControlFormat", () => {
 	it.each([
 		{
 			name: "a non-Anthropic Prime Inference model",
-			model: () => getModel("prime-inference", "openai/gpt-5.6-sol"),
+			model: () => getModel("prime-inference", "openai/gpt-5.6-sol")!,
 			retention: undefined,
 		},
 		{
@@ -177,7 +178,7 @@ describe("openai-completions cacheControlFormat", () => {
 	});
 
 	it("advances the cache marker to the trailing tool result", async () => {
-		const model = getModel("prime-inference", "anthropic/claude-haiku-4.5");
+		const model = getModel("prime-inference", "anthropic/claude-haiku-4.5")!;
 		const now = Date.now();
 		const params = await capturePayload(model, undefined, [
 			{ role: "user", content: "Read the file", timestamp: now },
