@@ -8784,10 +8784,11 @@ export class AgentSession {
 				({ summary, firstKeptEntryId, tokensBefore, details, usage } = extensionCompaction);
 			} else {
 				// Compaction fires at context peak, and the summarizer runs with its own
-				// prompt prefix, so issuing the summary on the session model evicts the
-				// provider's prefix-cache entry for the session: an aborted compaction
-				// leaves the context unchanged but the next turn re-reads all of it.
-				// Route summaries to the auxiliary model when one is configured.
+				// prompt prefix (a different system prompt, no tools), so it cannot hit
+				// the session's cached prefix: on the session model the summary re-reads
+				// its whole input at peak price, and on OpenAI-style providers it rides
+				// the session's prompt_cache_key with a divergent prefix, depressing
+				// hit rates. Route summaries to the auxiliary model when one is configured.
 				const summarization = (await this._resolveAuxiliaryModel(
 					"compaction summary",
 					{ model, apiKey, headers },
@@ -9348,11 +9349,12 @@ export class AgentSession {
 
 	/**
 	 * Background LLM passes (refinement review and planning, compaction summaries,
-	 * branch summaries) run with their own prompts, so issuing them on the session
-	 * model evicts the provider's prefix-cache entry for the session and forces a
-	 * full context re-read on the next session request. Route them to the
-	 * configured auxiliary model when it is set and usable; fall back to the
-	 * session model otherwise.
+	 * branch summaries) run with their own prompts, so they cannot hit the
+	 * session's cached prefix: on the session model they re-read their whole input
+	 * at peak price, and on OpenAI-style providers a divergent prefix riding the
+	 * session's prompt_cache_key depresses hit rates. Route them to the configured
+	 * auxiliary model when it is set and usable; fall back to the session model
+	 * otherwise.
 	 *
 	 * Callers that already resolved the session request auth pass it as
 	 * `fallback` so the fallback path reuses it instead of resolving again.
@@ -14286,10 +14288,9 @@ export class AgentSession {
 				const branchSummarySettings = this.settingsManager.getBranchSummarySettings();
 				// Branch summary fires at a tree-navigation context boundary, and the
 				// summarizer runs with its own prompt prefix (SUMMARIZATION_SYSTEM_PROMPT
-				// plus the <conversation> wrapper), so issuing it on the session model
-				// evicts the provider's prefix-cache entry for the session and re-reads
-				// the whole context at peak price. Route it to the auxiliary model when
-				// one is configured.
+				// plus the <conversation> wrapper), so it cannot hit the session's cached
+				// prefix: on the session model the summary re-reads the whole branch at
+				// peak price. Route it to the auxiliary model when one is configured.
 				const summarization = (await this._resolveAuxiliaryModel(
 					"branch summary",
 					{ model, apiKey, headers },

@@ -201,8 +201,11 @@ export interface Settings {
 	recentModels?: string[]; // "provider/id" keys, most-recently-used first
 	// "provider/id" for background LLM passes (refinement review and planning,
 	// compaction summaries, branch summaries); unset falls back to the session
-	// model. Routing these to a different model keeps their different prompt
-	// prefixes from evicting the session's provider prefix-cache entry.
+	// model. These passes use their own prompt prefixes, so they can never hit
+	// the session's cached prefix: on the session model they re-read their whole
+	// input at peak price, and on OpenAI-style providers a divergent prefix
+	// riding the session's prompt_cache_key depresses hit rates. Routing them
+	// to a different model moves those calls off the session model.
 	auxiliaryModel?: string;
 	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	defaultServiceTier?: ServiceTier;
