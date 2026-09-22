@@ -2689,16 +2689,12 @@ impl Supervisor {
                 summaries
             }
             _ => {
-                // The worker pushes each live summary into the roster. Read
-                // that cache rather than querying every worker serially.
-                self.roster
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .entries()
-                    .into_iter()
-                    .filter(|entry| entry.worker_id.is_some())
-                    .map(|entry| entry.summary)
-                    .collect()
+                // Live residents of this supervisor.
+                let mut summaries = Vec::new();
+                for resident in self.registry.list().await {
+                    summaries.push(self.worker_summary(&resident).await);
+                }
+                summaries
             }
         };
         response_success(
