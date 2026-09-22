@@ -106,8 +106,8 @@ describe("MCP catalog eligibility (authoritative real-data regressions)", () => 
 		// The sweep must actually cover the strategies Bugbot found divergent: real api_key rows and real unknown rows.
 		// none+ready is asserted to be exactly zero TODAY so catalog drift forces a conscious update here. Post-2026-09-16
 		// single-credential cut: 68 rows (57 one-click DCR, 11 one-paste user-setup), of which 10 are api_key strategy and
-		// 53 unknown. The thresholds below stay where they were — the cuts removed 6 api_key rows, 1 oauth row, and no
-		// unknown rows.
+		// 53 unknown; the 2026-09-17 pinned-client decision added Slack as one-click row 69. The thresholds below stay
+		// where they were — the cuts removed 6 api_key rows, 1 oauth row, and no unknown rows.
 		expect(descriptors.length).toBeGreaterThan(50);
 		expect(descriptors.filter((d) => d.authStrategy === "api_key").length).toBeGreaterThanOrEqual(10);
 		expect(descriptors.filter((d) => d.authStrategy === "unknown").length).toBeGreaterThanOrEqual(50);

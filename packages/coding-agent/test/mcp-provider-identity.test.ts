@@ -103,6 +103,32 @@ describe("ENG-6108 OAuth client identity wiring", () => {
 		]);
 	});
 
+	it("factory uses the catalog-pinned client when settings has none; a settings client id overrides it", () => {
+		createConfiguredMcpProvider({
+			server: "slack",
+			url: "https://mcp.slack.com/mcp",
+			pinnedClientId: "1601185624273.8899143856786",
+			pinnedCallbackPort: 3118,
+		});
+		createConfiguredMcpProvider({
+			server: "slack-own-app",
+			url: "https://mcp.slack.com/mcp",
+			identity: { clientId: "my-client" },
+			pinnedClientId: "1601185624273.8899143856786",
+			pinnedCallbackPort: 3118,
+		});
+		expect(providerConfigs()).toEqual([
+			{
+				server: "slack",
+				url: "https://mcp.slack.com/mcp",
+				clientId: "1601185624273.8899143856786",
+				clientRegistration: "pre-registered",
+				callbackPort: 3118,
+			},
+			{ server: "slack-own-app", url: "https://mcp.slack.com/mcp", clientId: "my-client" },
+		]);
+	});
+
 	// Manager registration failing closed on a missing secret env is the SAME resolver invariant pinned in
 	// mcp-service-catalog.test.ts ("a configured secret env that is missing resolves to the explicit empty string"): the
 	// manager passes the resolved identity straight to the factory pinned above.
@@ -159,20 +185,24 @@ describe("ENG-6108 OAuth client identity wiring", () => {
 		]);
 	});
 
-	it("a guarded settings login registers staged and real ids with the IDENTICAL identity", async () => {
+	// Minimal offline InteractiveMode double: fake settings + a login flow that stages a credential.
+	function fakeInteractiveMode(options: {
+		access: string;
+		endpoint: string;
+		servers: Record<string, McpServerConfig>;
+	}) {
 		const authStorage = AuthStorage.inMemory();
-		const store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
 		const fake = {
-			mcpConnectionStore: store,
+			mcpConnectionStore: McpConnectionStore.open(join(tempDir, "mcp-connections.json")),
 			modelRegistry: { authStorage },
 			createAuthFlows: () => ({
 				runMcpLogin: async (serverId: string) => {
 					authStorage.set(`mcp:${serverId}`, {
 						type: "oauth",
-						access: "identity-credential",
+						access: options.access,
 						refresh: "r",
 						expires: Date.now() + 3600_000,
-						endpoint: "https://mcp.acme.test/mcp",
+						endpoint: options.endpoint,
 					});
 					return { status: "success" };
 				},
@@ -184,18 +214,21 @@ describe("ENG-6108 OAuth client identity wiring", () => {
 			isAgentStreaming: () => false,
 			isAgentCompacting: () => false,
 			handleReloadCommand: vi.fn(async () => true),
-			settingsManager: {
-				getGlobalMcpServers: () => ({ acme: IDENTITY_CONFIG }),
-				getMcpCatalogSources: () => [],
-			},
-			uiServices: { settingsManager: { getGlobalMcpServers: () => ({ acme: IDENTITY_CONFIG }) } },
-		} as unknown as Record<string, unknown>;
+			settingsManager: { getGlobalMcpServers: () => options.servers, getMcpCatalogSources: () => [] },
+			uiServices: { settingsManager: { getGlobalMcpServers: () => options.servers } },
+		};
 		Object.setPrototypeOf(fake, InteractiveMode.prototype);
-		await (
-			fake as unknown as {
-				connectMcpAccountByName: (name: string) => Promise<{ resolved: boolean; result: { status: string } }>;
-			}
-		).connectMcpAccountByName.call(fake, "acme");
+		return fake as unknown as {
+			connectMcpAccountByName: (name: string) => Promise<{ resolved: boolean; result: { status: string } }>;
+		};
+	}
+
+	it("a guarded settings login registers staged and real ids with the IDENTICAL identity", async () => {
+		await fakeInteractiveMode({
+			access: "identity-credential",
+			endpoint: "https://mcp.acme.test/mcp",
+			servers: { acme: IDENTITY_CONFIG },
+		}).connectMcpAccountByName("acme");
 
 		const staged = providerConfigs().find(
 			(config) => typeof config.server === "string" && config.server.includes("--"),
@@ -213,6 +246,32 @@ describe("ENG-6108 OAuth client identity wiring", () => {
 				clientMetadataUrl: "https://mcp.acme.test/.well-known/client-metadata",
 				scopes: "read write",
 			});
+		}
+	});
+
+	it("a guarded login on the pinned catalog slack stages and registers the IDENTICAL pinned identity", async () => {
+		// No settings entry for slack: the catalog's pinned published client is the identity.
+		await fakeInteractiveMode({
+			access: "pinned-credential",
+			endpoint: "https://mcp.slack.com/mcp",
+			servers: {},
+		}).connectMcpAccountByName("slack");
+
+		const staged = providerConfigs().find(
+			(config) => typeof config.server === "string" && config.server.includes("--"),
+		);
+		const real = providerConfigs().find((config) => config.server === "slack");
+		expect(staged).toBeDefined();
+		expect(real).toBeDefined();
+		// The pinned identity lands byte-identically on both sites, as the manager's refresh registration resolves it.
+		for (const config of [staged, real]) {
+			expect(config).toMatchObject({
+				url: "https://mcp.slack.com/mcp",
+				clientId: "1601185624273.8899143856786",
+				clientRegistration: "pre-registered",
+				callbackPort: 3118,
+			});
+			expect(config).not.toHaveProperty("clientSecret");
 		}
 	});
 });

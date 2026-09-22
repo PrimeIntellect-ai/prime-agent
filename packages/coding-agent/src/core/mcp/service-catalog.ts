@@ -94,6 +94,10 @@ export interface McpServiceDescriptor {
 	metadataReviewed: boolean;
 	/** Advisory client-registration capability mirrored from the catalog (shapes engine error guidance only). */
 	clientRegistration?: "dynamic" | "pre-registered" | "unknown";
+	/** Catalog-pinned published OAuth client id (secret-less public client; settings identity wins over it). */
+	pinnedClientId?: string;
+	/** Catalog-pinned OAuth callback port; part of the pinned client's redirect-URI contract. */
+	pinnedCallbackPort?: number;
 	/** Reviewed upstream scope hints; joined into the engine's requested scopes when present. */
 	reviewedScopes?: string[];
 	/** True for pre-catalog legacy built-ins; their ids stay reserved. */
@@ -147,6 +151,8 @@ function mapCatalogEntry(entry: McpServiceEntry, localSource: boolean): McpServi
 		},
 		metadataReviewed: entry.verification?.status === "metadata-reviewed",
 		...(entry.auth.clientRegistration ? { clientRegistration: entry.auth.clientRegistration } : {}),
+		...(entry.oauth?.clientId !== undefined ? { pinnedClientId: entry.oauth.clientId } : {}),
+		...(entry.oauth?.callbackPort !== undefined ? { pinnedCallbackPort: entry.oauth.callbackPort } : {}),
 		...(entry.auth.reviewedScopes !== undefined && entry.auth.reviewedScopes.length > 0
 			? { reviewedScopes: [...entry.auth.reviewedScopes] }
 			: {}),
@@ -603,8 +609,8 @@ export function resolveMcpOAuthIdentity(config: McpServerConfig | undefined): Mc
  * provider here so the identity resolved at LOGIN time is byte-identical to
  * the one used at REFRESH time — the engine pins client identity on the
  * stored credential and refuses mismatches, so a drifting factory would break
- * refresh spuriously. Settings identity wins over catalog scope hints; a
- * catalog NEVER supplies secrets.
+ * refresh spuriously. Settings identity wins over catalog scope hints and the
+ * catalog-pinned published client id; a catalog NEVER supplies secrets.
  */
 export function createConfiguredMcpProvider(options: {
 	server: string;
@@ -613,9 +619,19 @@ export function createConfiguredMcpProvider(options: {
 	identity?: McpOAuthIdentity;
 	/** Reviewed catalog scope hints; used only when no settings scopes exist. */
 	reviewedScopes?: readonly string[];
+	/** Catalog-pinned published client id (secret-less public client); settings identity wins over it. */
+	pinnedClientId?: string;
+	/** Catalog-pinned callback port; part of the pinned client's redirect-URI contract. */
+	pinnedCallbackPort?: number;
 	clientRegistration?: "dynamic" | "pre-registered" | "unknown";
 }): ReturnType<typeof createMcpOAuthProvider> {
 	const identity = options.identity ?? {};
+	// Settings identity wins over the catalog-pinned published client id: a user
+	// who registered their own app overrides the pinned one. The pinned callback
+	// port belongs to the pinned client's redirect-URI contract, so it applies
+	// only while the pinned id is the one in use.
+	const pinnedInUse = identity.clientId === undefined && options.pinnedClientId !== undefined;
+	const clientId = identity.clientId ?? options.pinnedClientId;
 	const scopes =
 		identity.scopes !== undefined
 			? identity.scopes.join(" ")
@@ -626,11 +642,18 @@ export function createConfiguredMcpProvider(options: {
 		server: options.server,
 		...(options.label !== undefined ? { label: options.label } : {}),
 		url: options.url,
-		...(identity.clientId !== undefined ? { clientId: identity.clientId } : {}),
+		...(clientId !== undefined ? { clientId } : {}),
 		...(identity.clientSecret !== undefined ? { clientSecret: identity.clientSecret } : {}),
 		...(identity.clientMetadataUrl !== undefined ? { clientMetadataUrl: identity.clientMetadataUrl } : {}),
 		...(scopes !== undefined ? { scopes } : {}),
-		...(options.clientRegistration !== undefined ? { clientRegistration: options.clientRegistration } : {}),
+		...(pinnedInUse
+			? {
+					clientRegistration: "pre-registered" as const,
+					...(options.pinnedCallbackPort !== undefined ? { callbackPort: options.pinnedCallbackPort } : {}),
+				}
+			: options.clientRegistration !== undefined
+				? { clientRegistration: options.clientRegistration }
+				: {}),
 	});
 }
 

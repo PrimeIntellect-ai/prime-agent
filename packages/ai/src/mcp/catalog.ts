@@ -506,18 +506,40 @@ export function validateMcpServiceEntry(entry: unknown): McpServiceEntry {
 			fail(entryId, "oauth is only allowed on oauth-strategy entries");
 		}
 		const scopes = typeof entry.oauth.scopes === "string" ? entry.oauth.scopes : undefined;
-		const clientId = typeof entry.oauth.clientId === "string" ? entry.oauth.clientId : undefined;
-		if (clientId !== undefined) {
-			fail(entryId, "catalog entries must not carry OAuth client ids");
+		// A pinned published client id (a pre-registered secret-less public client, e.g.
+		// Slack's harness client) is valid catalog data; secrets stay rejected outright.
+		let clientId: string | undefined;
+		if (entry.oauth.clientId !== undefined) {
+			if (typeof entry.oauth.clientId !== "string" || entry.oauth.clientId === "") {
+				fail(entryId, "oauth.clientId must be a non-empty string");
+			}
+			clientId = entry.oauth.clientId;
 		}
-		// Secrets fail loudly instead of silently dropping (symmetric with the client-id rejection).
+		let callbackPort: number | undefined;
+		if (entry.oauth.callbackPort !== undefined) {
+			if (
+				typeof entry.oauth.callbackPort !== "number" ||
+				!Number.isInteger(entry.oauth.callbackPort) ||
+				entry.oauth.callbackPort < 1 ||
+				entry.oauth.callbackPort > 65535
+			) {
+				fail(entryId, "oauth.callbackPort must be an integer between 1 and 65535");
+			}
+			callbackPort = entry.oauth.callbackPort;
+		}
+		// Secrets fail loudly instead of silently dropping (never catalog data).
 		const rawOauth = entry.oauth as Record<string, unknown>;
 		for (const secretKey of ["clientSecret", "client_secret"]) {
 			if (rawOauth[secretKey] !== undefined) {
 				fail(entryId, "catalog entries must not carry OAuth client secrets");
 			}
 		}
-		oauth = { kind: "oauth", ...(scopes !== undefined ? { scopes } : {}) };
+		oauth = {
+			kind: "oauth",
+			...(scopes !== undefined ? { scopes } : {}),
+			...(clientId !== undefined ? { clientId } : {}),
+			...(callbackPort !== undefined ? { callbackPort } : {}),
+		};
 	}
 
 	if (!Array.isArray(entry.aliases)) fail(entryId, "aliases must be an array");
@@ -658,6 +680,7 @@ export function registerBuiltinMcpOAuthProviders(): void {
 				url: entry.url,
 				scopes: entry.oauth.scopes,
 				clientId: entry.oauth.clientId,
+				callbackPort: entry.oauth.callbackPort,
 			}),
 		);
 	}

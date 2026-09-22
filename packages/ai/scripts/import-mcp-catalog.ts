@@ -8,11 +8,17 @@
  *   - `packages/ai/mcp-catalog/import-report.json` (reviewable merge report)
  *
  * The import is offline, deterministic and side-effect free: no plugin code is
- * executed, no network/auth is performed, and upstream OAuth client identities
- * or secrets are never copied into the output. Fixtures preserve upstream
- * configs verbatim (including placeholders and branded client ids) so that the
- * stripping and dedup rules below stay reproducible and testable; the emitted
- * catalog must contain none of them.
+ * executed and no network/auth is performed. Upstream OAuth client secrets are
+ * never copied into the output; upstream client IDs are copied ONLY in the
+ * pinned published-client shape — a client id published TOGETHER with its
+ * callback port by the provider's own plugin repo (2026-09-17 decision: Slack's
+ * slackapi/slack-mcp-plugin harness client) is a pre-registered secret-less
+ * PUBLIC client meant for third-party harness reuse, so it ships pinned on the
+ * entry and classifies one-click. A branded id WITHOUT the published callback
+ * port is a foreign registered app (e.g. OpenAI's own Slack app) and stays
+ * blocked. Fixtures preserve upstream configs verbatim (including placeholders
+ * and branded client ids) so that the stripping and dedup rules below stay
+ * reproducible and testable; no other upstream identity ever ships.
  *
  * Zero-app shipping policy (2026-09-14 product decision): Prime maintains ZERO
  * provider OAuth apps, so the catalog advertises only what works self-serve —
@@ -60,7 +66,13 @@ export interface SourceServerDef {
 	args?: string[];
 	env?: Record<string, string>;
 	headers?: Record<string, string>;
-	oauth?: { client_id?: string; client_secret?: string; clientId?: string; [k: string]: unknown };
+	oauth?: {
+		client_id?: string;
+		client_secret?: string;
+		clientId?: string;
+		callbackPort?: number;
+		[k: string]: unknown;
+	};
 	oauth_resource?: string;
 	scopes?: string[];
 	bearer_token_env_var?: string;
@@ -355,7 +367,8 @@ export interface CatalogEntry {
 	setup: CatalogSetup;
 	verification: { status: "metadata-reviewed" | "unverified" };
 	legacyBuiltin: boolean;
-	oauth?: { kind: "oauth" };
+	/** Pinned published client identity (secret-less public client); secrets never ship. */
+	oauth?: { kind: "oauth"; clientId?: string; callbackPort?: number };
 	provenance: CatalogProvenance[];
 	homepage?: string;
 	docsUrl?: string;
@@ -515,6 +528,10 @@ interface AuthEvidence {
 	apiKey: boolean;
 	blocks: string[];
 	fields: CatalogSetupField[];
+	/** Pinned published harness client id (id + callback port published by the provider's own repo). */
+	pinnedClientId?: string;
+	/** The pinned client's registered callback port (its redirect-URI contract). */
+	pinnedCallbackPort?: number;
 }
 
 interface RemoteRecord {
@@ -568,13 +585,23 @@ function recordAuth(server: SourceServerDef, pluginPlaceholders: boolean): AuthE
 	if (oauth) {
 		evidence.oauth = true;
 		const clientId = (oauth.client_id ?? oauth.clientId) as string | undefined;
+		const callbackPort = typeof oauth.callbackPort === "number" ? oauth.callbackPort : undefined;
 		const issue = classifyOauthClientId(clientId);
 		if (issue === "placeholder") {
 			evidence.blocks.push("upstream OAuth config contains client-id placeholders");
-		} else if (issue === "branded") {
-			evidence.blocks.push("upstream config carries a provider-branded OAuth client id that must not be reused");
 		} else if (issue === "claude-specific") {
 			evidence.blocks.push("upstream config relies on a Claude-specific OAuth client identity");
+		} else if (issue === "branded" && callbackPort !== undefined) {
+			// A client id published TOGETHER with its callback port by the provider's
+			// own plugin repo (Slack's slackapi/slack-mcp-plugin harness client) is a
+			// pre-registered secret-less public client meant for third-party harness
+			// reuse: pin it for the built entry instead of blocking it. Ids without the
+			// published callback port stay branded and blocked — a foreign registered
+			// app id must never be reused.
+			evidence.pinnedClientId = clientId;
+			evidence.pinnedCallbackPort = callbackPort;
+		} else if (issue === "branded") {
+			evidence.blocks.push("upstream config carries a provider-branded OAuth client id that must not be reused");
 		}
 		if (oauth.client_secret) {
 			evidence.blocks.push("upstream OAuth config contains client-secret placeholders");
@@ -757,14 +784,16 @@ function standardOauthEvidenceCoherent(result: AuditResult): boolean {
 	// The engine POSTs an anonymous registration to the advertised endpoint when
 	// no client credentials are configured; a live recorded rejection means the
 	// advertised DCR is gated and the standard flow fails — fail closed, the
-	// same honest class as DCR-less providers (Slack, HubSpot).
+	// same honest class as DCR-less providers (HubSpot; Slack reaches one-click
+	// only through the separate pinned-client path in applyAuditEvidence).
 	if (advertisedRegistrationGated(as)) return false;
 	// The engine's PRM validation uses the component comparison (root-approved
 	// audience policy): the document's resource must match the exact endpoint
 	// (canonical form) OR the exact origin, root-slash normalized. Anything
 	// else fails closed — e.g. a resource that keeps the path but drops the
 	// query string never matches (LogRocket), and DCR-less providers never
-	// become oauth-ready regardless (Slack, HubSpot).
+	// become oauth-ready through THIS path (HubSpot; Slack's one-click path is
+	// the pinned-client carve-out in applyAuditEvidence, not the standard flow).
 	if (result.protectedResource.engineVisible === "available") return !audienceMismatched(result);
 	// No valid PRM document anywhere. oauth-ready via the origin-AS fallback
 	// requires the engine to actually REACH that fallback: no followed pointer
@@ -809,6 +838,21 @@ export function evidenceSupportsUserRegisteredOauth(result: AuditResult): boolea
 		!tokenAuthMethodsSupportPublicClient(methods) &&
 		tokenAuthMethodsSupportConfiguredClient(methods)
 	);
+}
+
+/**
+ * Catalog mirror of the engine's pinned-client carve-out (oauth.ts login): a
+ * catalog-pinned pre-registered client id is an explicit vouch for the app's
+ * client type, so one-click readiness is decided by the POSITIVELY advertised
+ * PKCE S256 evidence and NOT by the AS's global token_endpoint_auth_methods
+ * list — the pinned public client authenticates by PKCE, not client auth (live
+ * evidence: Slack MCP, confidential-only advertisement, one-click via the
+ * provider-published harness client). Without advertised S256 there is no
+ * public-client PKCE path, and the entry does NOT classify one-click (honest
+ * demotion).
+ */
+export function evidenceSupportsPinnedClientOauth(result: AuditResult): boolean {
+	return result.authorizationServer.evidence?.pkceS256 === true;
 }
 
 /** The engine's canonicalResource rule: bare origins collapse, paths and searches stay. */
@@ -981,7 +1025,13 @@ function applyAuditEvidence(built: BuiltEntry[], audit: AuditFile | undefined, o
 			// authorization server advertises only secret-bearing methods
 			// demotes honestly to the user-setup OAuth path (the user's own
 			// registered app, zero-app compliant); everything else stays
-			// unknown.
+			// unknown. A catalog-pinned client id skips the global
+			// auth-method gate entirely (the pinned id vouches for the
+			// client type; only advertised PKCE S256 decides).
+			if (entry.oauth?.clientId && evidenceSupportsPinnedClientOauth(result)) {
+				entry.setup.readiness = "oauth-ready";
+				continue;
+			}
 			if (evidenceSupportsStandardOauth(result)) {
 				entry.setup.readiness = "oauth-ready";
 				continue;
@@ -1532,6 +1582,19 @@ function buildHttpEntry(
 	}
 	const strategy = authStrategy(union);
 	const fields = dedupeFields(union.fields);
+	// One pinned published client per entry: conflicting pinned ids across merged
+	// records are a deterministic import failure, never a silent pick.
+	const pinned = records.find((record) => record.auth.pinnedClientId !== undefined);
+	if (
+		pinned &&
+		records.some(
+			(record) => record.auth.pinnedClientId !== undefined && record.auth.pinnedClientId !== pinned.auth.pinnedClientId,
+		)
+	) {
+		throw new Error(
+			`conflicting pinned OAuth client ids for ${override?.id ?? deriveId(identity.plugin, identity.serverName)}`,
+		);
+	}
 	const providers = records
 		.map((record) => record.provider)
 		.filter((provider): provider is string => !!provider);
@@ -1564,7 +1627,9 @@ function buildHttpEntry(
 		],
 		publisher,
 		transport: { type: "http", url: identity.url },
-		auth: { strategy, clientRegistration: override?.clientRegistration ?? "unknown" },
+		// A pinned published client is pre-registered by definition (the id exists
+		// before login; the engine never registers dynamically).
+		auth: { strategy, clientRegistration: override?.clientRegistration ?? (pinned ? "pre-registered" : "unknown") },
 		setup: requiresSetup
 			? {
 					status: "requires-setup",
@@ -1578,7 +1643,17 @@ function buildHttpEntry(
 		homepage: records.map((record) => record.homepage).find((value): value is string => !!value),
 		privacyUrl: records.map((record) => record.privacyUrl).find((value): value is string => !!value),
 		supportUrl: records.map((record) => record.supportUrl).find((value): value is string => !!value),
-		...(strategy === "oauth" ? { oauth: { kind: "oauth" } } : {}),
+		...(strategy === "oauth"
+			? {
+					oauth: {
+						kind: "oauth" as const,
+						...(pinned?.auth.pinnedClientId !== undefined ? { clientId: pinned.auth.pinnedClientId } : {}),
+						...(pinned?.auth.pinnedCallbackPort !== undefined
+							? { callbackPort: pinned.auth.pinnedCallbackPort }
+							: {}),
+					},
+				}
+			: {}),
 	};
 	if (records.length > 1 || templates.length > 0) {
 		const sources = records

@@ -1,0 +1,1 @@
+- Added one-click Slack MCP: catalog services carrying a pinned published OAuth client id connect through the standard one-click flow with login and refresh resolving the same pinned identity; settings-supplied app credentials still take precedence over the pinned client.

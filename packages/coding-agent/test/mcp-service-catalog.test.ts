@@ -1047,13 +1047,12 @@ describe("resolveMcpServiceCatalog", () => {
 });
 
 describe("/mcp and /plugins picker row counts", () => {
-	it("ships exactly 68 catalog services after the ENG-6108 single-credential cut", () => {
-		// The live /mcp picker counter read /77 against the earlier shipped 75: the extra rows are installed connections
-		// pinned from records (below), never catalog growth or duplicated rows. The 2026-09-16 token-only cut dropped 5
-		// more non-pasteable survivors (CockroachDB Cloud, Dynatrace, Sourcegraph, PayPal Sandbox, Render), and the
-		// single-credential cut dropped the two named-header pairs (Datadog, Cloudinary MediaFlows). Pin the shipped length
-		// so silent re-growth changes the counter loudly.
-		expect(SERVICE_CATALOG.length).toBe(68);
+	it("ships exactly 69 catalog services after the single-credential cut plus the pinned Slack entry", () => {
+		// The live /mcp picker counter read /77 against the earlier shipped 75: the extra rows are installed
+		// connections pinned from records (below), never catalog growth. The 2026-09-16 token-only and
+		// single-credential cuts dropped 7 entries; the 2026-09-17 pinned-client decision added Slack back
+		// as the one-click published-harness-client entry. Pin the shipped length so silent re-growth is loud.
+		expect(SERVICE_CATALOG.length).toBe(69);
 	});
 
 	it("counts rows as the shipped catalog plus pinned installed connections — unique, no off-by-N", () => {
