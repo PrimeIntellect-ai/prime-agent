@@ -148,6 +148,26 @@ describe("extensions discovery", () => {
 		);
 	});
 
+	it("resolves a symlink named like a file through the entry point of its target directory", async () => {
+		const targetDir = path.join(tempDir, "target");
+		fs.mkdirSync(targetDir, { recursive: true });
+		fs.writeFileSync(path.join(targetDir, "index.ts"), extensionCode);
+		fs.symlinkSync(targetDir, path.join(extensionsDir, "foo.ts"), "dir");
+		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+		expect(result.errors).toHaveLength(0);
+		expect(result.extensions.map((extension) => path.relative(extensionsDir, extension.path))).toEqual([
+			path.join("foo.ts", "index.ts"),
+		]);
+	});
+
+	it("silently skips a symlink whose target does not exist", async () => {
+		write("kept.ts");
+		fs.symlinkSync(path.join(tempDir, "missing.ts"), path.join(extensionsDir, "broken.ts"));
+		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+		expect(result.errors).toHaveLength(0);
+		expect(result.extensions.map((extension) => path.relative(extensionsDir, extension.path))).toEqual(["kept.ts"]);
+	});
+
 	it.each([
 		{
 			name: "code that fails to load",
