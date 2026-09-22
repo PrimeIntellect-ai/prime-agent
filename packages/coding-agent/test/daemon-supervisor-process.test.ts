@@ -812,7 +812,7 @@ describe("daemon supervisor resident workers", () => {
 			throw new Error("Fixture session did not persist");
 		}
 		const cronStore = new AgentCronJobStore(getCronJobsPath(agentDir));
-		const heartbeat = cronStore.createHeartbeat({
+		const heartbeat = await cronStore.createHeartbeat({
 			activeSessionId: "old-active-session",
 			sessionId: sessionManager.getSessionId(),
 			sessionFile,
@@ -863,7 +863,7 @@ describe("daemon supervisor resident workers", () => {
 			throw new Error("Fixture session did not persist");
 		}
 		const cronStore = new AgentCronJobStore(getCronJobsPath(agentDir));
-		const heartbeat = cronStore.createHeartbeat({
+		const heartbeat = await cronStore.createHeartbeat({
 			activeSessionId: "deleted-worker",
 			sessionId: sessionManager.getSessionId(),
 			sessionFile,

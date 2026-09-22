@@ -360,7 +360,7 @@ describe("update restart queue recovery over the daemon RPC boundary (issue #425
 		const activeSessionId = "restored-active";
 		const persistedStore = AgentCronJobStore.forSessionArtifacts();
 		persistedStore.registerSessionArtifact(harness.session.sessionId, artifactDir);
-		const heartbeat = persistedStore.createHeartbeat({
+		const heartbeat = await persistedStore.createHeartbeat({
 			activeSessionId,
 			sessionId: harness.session.sessionId,
 			sessionFile,
@@ -376,8 +376,8 @@ describe("update restart queue recovery over the daemon RPC boundary (issue #425
 		vi.useFakeTimers();
 		internals.cronScheduler.start();
 		try {
-			internals.registerCronStoreForState(state);
-			internals.rebindCronJobsToState(state);
+			await internals.registerCronStoreForState(state);
+			await internals.rebindCronJobsToState(state);
 			await internals.cronScheduler.runDue();
 			expect(internals.cronStore.list().find((job) => job.id === heartbeat.id)?.runCount).toBe(1);
 

@@ -415,9 +415,9 @@ describe("AuthStorage", () => {
 
 		describe("caching", () => {
 			test.each([
-				{ name: "successful command runs once per process and across instances", fails: false },
-				{ name: "failed command is cached, never retried", fails: true },
-			])("$name", async ({ fails }) => {
+				{ name: "successful command runs once per process and across instances", fails: false, runs: 1 },
+				{ name: "failed command is retried on every lookup", fails: true, runs: 3 },
+			])("$name", async ({ fails, runs }) => {
 				const counterFile = join(tempDir, "counter");
 				writeFileSync(counterFile, "0");
 				const counterPath = toShPath(counterFile);
@@ -434,12 +434,12 @@ describe("AuthStorage", () => {
 				const expected = fails ? undefined : "key-value";
 				await expect(authStorage.getApiKey("anthropic")).resolves.toBe(expected);
 				await expect(authStorage.getApiKey("anthropic")).resolves.toBe(expected);
-				// A second instance shares the process-wide command cache.
+				// A second instance shares the process-wide cache of successful commands.
 				await expect(AuthStorage.create(authJsonPath).getApiKey("anthropic")).resolves.toBe(expected);
 				// Distinct commands are cached under distinct keys.
 				await expect(authStorage.getApiKey("openai")).resolves.toBe("key-openai");
 
-				expect(parseInt(readFileSync(counterFile, "utf-8").trim(), 10)).toBe(1);
+				expect(parseInt(readFileSync(counterFile, "utf-8").trim(), 10)).toBe(runs);
 			});
 
 			test("environment variables are not cached (changes are picked up)", async () => {

@@ -214,6 +214,8 @@ export interface DaemonAgentConnectionOptions {
 	sendClientEnv?: boolean;
 	/** Advertise support for interactive extension dialogs. */
 	supportsExtensionUi?: boolean;
+	/** Attaching opts the client into heartbeats_changed pushes without a scheduled-job command (ACP). */
+	tracksHeartbeats?: boolean;
 	/** Dispose the connection by stopping its hidden worker instead of detaching. */
 	ownedSession?: boolean;
 	/** Fresh runtime context used only if the owned worker must be relaunched. */
@@ -457,6 +459,7 @@ export class DaemonAgentConnection implements AgentConnection {
 					"slim_attach",
 					"chunked_snapshot",
 					...(this.options.ownedSession ? (["client_owned_sessions"] as const) : []),
+					...(this.options.tracksHeartbeats ? (["heartbeat_catalog"] as const) : []),
 				],
 				env: this.options.sendClientEnv ? collectDaemonClientEnv() : undefined,
 				launchEnv: this.options.ownedSession ? collectDaemonLaunchEnv() : undefined,
@@ -1613,6 +1616,7 @@ export class DaemonAgentConnection implements AgentConnection {
 					"slim_attach",
 					"chunked_snapshot",
 					...(this.options.ownedSession ? (["client_owned_sessions"] as const) : []),
+					...(this.options.tracksHeartbeats ? (["heartbeat_catalog"] as const) : []),
 				],
 				env: this.options.sendClientEnv ? collectDaemonClientEnv() : undefined,
 				launchEnv: this.options.ownedSession ? collectDaemonLaunchEnv() : undefined,
@@ -1759,6 +1763,7 @@ export class DaemonAgentConnection implements AgentConnection {
 			connection = await DaemonAgentConnection.attach(watchClient, activeSessionId, {
 				closeClientOnDispose: false,
 				directTransport: false,
+				tracksHeartbeats: this.options.tracksHeartbeats,
 			});
 		} catch {
 			return undefined;
