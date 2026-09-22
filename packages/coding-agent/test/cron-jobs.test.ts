@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { lock } from "proper-lockfile";
@@ -347,95 +347,6 @@ describe("AgentCronJobStore", () => {
 		expect(store.nextActiveRunAt()?.toISOString()).toBe("2026-01-01T12:35:00.000Z");
 	});
 
-	it("preserves concurrent cron store writes when a stale snapshot is written", async () => {
-		const store = new AgentCronJobStore(makeStorePath(tempDirs));
-		const first = await store.create({
-			activeSessionId: "active-1",
-			sessionId: "session-1",
-			sessionFile: "/tmp/session.jsonl",
-			cwd: "/tmp/project",
-			scheduleText: "in 1h",
-			prompt: "first",
-			now: start,
-		});
-		const staleSnapshot = [first];
-		const second = await store.create({
-			activeSessionId: "active-1",
-			sessionId: "session-1",
-			sessionFile: "/tmp/session.jsonl",
-			cwd: "/tmp/project",
-			scheduleText: "in 2h",
-			prompt: "second",
-			now: new Date("2026-01-01T12:35:00.000Z"),
-		});
-
-		await writeJobsForTest(store, staleSnapshot);
-
-		expect(store.list()).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({ id: first.id, prompt: "first" }),
-				expect.objectContaining({ id: second.id, prompt: "second" }),
-			]),
-		);
-	});
-
-	it("keeps newer cron store state when a stale snapshot is written", async () => {
-		const store = new AgentCronJobStore(makeStorePath(tempDirs));
-		const heartbeat = await store.createHeartbeat({
-			activeSessionId: "active-1",
-			sessionId: "session-1",
-			sessionFile: "/tmp/session.jsonl",
-			cwd: "/tmp/project",
-			scheduleText: "every 5m",
-			prompt: "check on me",
-			now: start,
-		});
-		await store.pauseHeartbeat("active-1", new Date("2026-01-01T12:35:00.000Z"));
-
-		await writeJobsForTest(store, [heartbeat]);
-
-		expect(store.getHeartbeat("active-1")).toMatchObject({
-			id: heartbeat.id,
-			status: "paused",
-			updatedAt: "2026-01-01T12:35:00.000Z",
-		});
-	});
-
-	it("preserves session-artifact dispatches when a stale snapshot is written", async () => {
-		const root = makeTempDir(tempDirs);
-		const artifactDir = join(root, "session-artifacts", "session-1");
-		const artifactPath = join(artifactDir, SESSION_SCHEDULED_JOBS_FILENAME);
-		const writer = AgentCronJobStore.forSessionArtifacts();
-		const dispatcher = AgentCronJobStore.forSessionArtifacts();
-		writer.registerSessionArtifact("session-1", artifactDir);
-		dispatcher.registerSessionArtifact("session-1", artifactDir);
-		const heartbeat = await writer.createHeartbeat({
-			activeSessionId: "active-1",
-			sessionId: "session-1",
-			sessionFile: join(root, "sessions", "session-1.jsonl"),
-			cwd: root,
-			scheduleText: "every 10s",
-			prompt: "check progress",
-			now: start,
-		});
-		const staleCancellation = {
-			...heartbeat,
-			status: "cancelled" as const,
-			nextRunAt: undefined,
-			updatedAt: "2026-01-01T12:34:20.000Z",
-		};
-
-		expect(await dispatcher.claimDue(new Date("2026-01-01T12:34:10.000Z"))).toHaveLength(1);
-		await writeJobsForTest(writer, [staleCancellation]);
-
-		const state = JSON.parse(readFileSync(artifactPath, "utf8")) as {
-			jobs: AgentCronJob[];
-			dispatches: Array<{ jobId: string }>;
-		};
-		expect(state.jobs).toContainEqual(expect.objectContaining({ id: heartbeat.id, status: "cancelled" }));
-		expect(state.dispatches).toContainEqual(expect.objectContaining({ jobId: heartbeat.id }));
-	});
-
 	it("keeps one persistent heartbeat per active session", async () => {
 		const store = new AgentCronJobStore(makeStorePath(tempDirs));
 		const first = await store.createHeartbeat({
@@ -459,6 +370,64 @@ describe("AgentCronJobStore", () => {
 
 		expect(store.getHeartbeat("active-1")).toMatchObject({ id: second.id, prompt: "continue the work" });
 		expect(store.list().find((job) => job.id === first.id)).toMatchObject({ status: "cancelled" });
+	});
+
+	it("keeps one heartbeat when two creates for a session overlap", async () => {
+		const root = makeTempDir(tempDirs);
+		const store = AgentCronJobStore.forSessionArtifacts();
+		store.registerSessionArtifact("session-1", join(root, "artifacts", "session-1"));
+		const input = {
+			activeSessionId: "active-1",
+			sessionId: "session-1",
+			sessionFile: "/tmp/session.jsonl",
+			cwd: "/tmp/project",
+			scheduleText: "every 5m",
+		};
+		await Promise.all([
+			store.createHeartbeat({ ...input, prompt: "first", now: start }),
+			store.createHeartbeat({ ...input, prompt: "second", now: new Date("2026-01-01T12:35:00.000Z") }),
+		]);
+
+		expect(
+			store
+				.list()
+				.map((job) => job.status)
+				.sort(),
+		).toEqual(["active", "cancelled"]);
+	});
+
+	it("keeps a claimed dispatch with its job when another catalog write lands", async () => {
+		const root = makeTempDir(tempDirs);
+		const store = AgentCronJobStore.forSessionArtifacts();
+		store.registerSessionArtifact("session-1", join(root, "artifacts", "session-1"));
+		const heartbeat = await store.createHeartbeat({
+			activeSessionId: "active-1",
+			sessionId: "session-1",
+			sessionFile: "/tmp/session.jsonl",
+			cwd: "/tmp/project",
+			scheduleText: "every 10s",
+			prompt: "check progress",
+			now: start,
+		});
+		const oneShot = await store.create({
+			activeSessionId: "active-2",
+			sessionId: "session-1",
+			sessionFile: "/tmp/session.jsonl",
+			cwd: "/tmp/project",
+			scheduleText: "in 1h",
+			prompt: "one shot",
+			now: start,
+		});
+
+		const [dispatch] = await store.claimDue(new Date("2026-01-01T12:34:10.000Z"));
+		if (!dispatch) throw new Error("Expected heartbeat dispatch");
+		await store.cancel(oneShot.id);
+
+		expect(store.getClaimedJob(heartbeat.id)).toBeDefined();
+		expect(await store.recordDispatchResult(dispatch.id, { outcome: "ran" })).toMatchObject({
+			id: heartbeat.id,
+			runCount: 1,
+		});
 	});
 
 	it("defaults heartbeats to steer delivery and persists an explicit follow_up opt-out", async () => {
@@ -1352,6 +1321,36 @@ describe("AgentCronScheduler", () => {
 		expect(recovered.getClaimedJob(heartbeat.id)).toBeUndefined();
 		expect(recovered.getDueJob(heartbeat.id, new Date("2026-01-01T12:34:11.000Z"))).toBeUndefined();
 	});
+
+	it("retries a failed startup recovery before the next claim instead of skipping the stale dispatch", async () => {
+		vi.useFakeTimers();
+		try {
+			const store = new AgentCronJobStore(makeStorePath(tempDirs));
+			const heartbeat = await store.createHeartbeat({
+				activeSessionId: "active-1",
+				sessionId: "session-1",
+				sessionFile: "/tmp/session.jsonl",
+				cwd: "/tmp/project",
+				scheduleText: "every 10s",
+				prompt: "check progress",
+				now: start,
+			});
+			await store.claimDue(new Date("2026-01-01T12:34:10.000Z"));
+			vi.spyOn(store, "recoverInterruptedDispatches").mockRejectedValueOnce(new Error("store busy"));
+			const runJob = vi.fn(async () => undefined);
+			const scheduler = new AgentCronScheduler(store, { now: () => new Date("2026-01-01T12:34:30.000Z"), runJob });
+			scheduler.start();
+
+			await expect(scheduler.runDue(new Date("2026-01-01T12:34:30.000Z"))).rejects.toThrow("store busy");
+			expect(store.getClaimedJob(heartbeat.id)).toBeDefined();
+
+			expect(await scheduler.runDue(new Date("2026-01-01T12:34:30.000Z"))).toBe(1);
+			expect(runJob).toHaveBeenCalledOnce();
+			scheduler.stop();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });
 
 describe("shouldDeferHeartbeatCronJob", () => {
@@ -1503,14 +1502,6 @@ describe("heartbeat delivery mode", () => {
 		expect(resolveHeartbeatStreamingBehavior("follow_up")).toBe("followUp");
 	});
 });
-
-async function writeJobsForTest(store: AgentCronJobStore, jobs: readonly AgentCronJob[]): Promise<void> {
-	await (
-		store as unknown as {
-			writeJobs(jobs: readonly AgentCronJob[]): Promise<void>;
-		}
-	).writeJobs(jobs);
-}
 
 function makeStorePath(tempDirs: string[]): string {
 	const dir = makeTempDir(tempDirs);

@@ -1140,12 +1140,11 @@ export class DaemonSupervisor {
 
 	/**
 	 * Targeted single-flight refresh of one worker: frames and lists join the
-	 * in-flight pass; a mid-refresh frame queues one trailing pass.
+	 * in-flight pass.
 	 */
 	private refreshWorkerHeartbeatSnapshot(worker: ResidentWorker): Promise<void> {
 		const inFlight = worker.heartbeatSnapshotRefresh;
 		if (inFlight) {
-			worker.heartbeatSnapshotRefreshQueued = true;
 			return inFlight;
 		}
 		const refresh = this.runWorkerHeartbeatSnapshotRefresh(worker);
@@ -1243,11 +1242,7 @@ export class DaemonSupervisor {
 		let current = info;
 		const visited = new Set([canonicalSessionPath(current.path)]);
 		while (true) {
-			try {
-				if (this.findWorkerBySessionFile(current.path)) return undefined;
-			} catch {
-				return undefined;
-			}
+			if (this.sessionFileCovered(current.path)) return undefined;
 			if (!current.parentSessionPath) break;
 			const parent = infoByPath.get(canonicalSessionPath(current.parentSessionPath));
 			if (!parent || visited.has(canonicalSessionPath(parent.path))) break;
@@ -1285,7 +1280,12 @@ export class DaemonSupervisor {
 
 	/** The reporting worker's tree is resident, so no passive-row recompute is needed. */
 	private onWorkerHeartbeatsChanged(worker: ResidentWorker): void {
-		void this.refreshWorkerHeartbeatSnapshot(worker).catch(() => undefined);
+		if (worker.heartbeatSnapshotRefresh) {
+			// The in-flight pass may have been answered before this change; run one more.
+			worker.heartbeatSnapshotRefreshQueued = true;
+		} else {
+			void this.refreshWorkerHeartbeatSnapshot(worker).catch(() => undefined);
+		}
 		this.notifyHeartbeatsChanged();
 	}
 
@@ -2727,7 +2727,16 @@ export class DaemonSupervisor {
 							passive.info.id,
 							getSessionArtifactPathForFile(resolve(passive.info.path), passive.info.id),
 						);
-						const heartbeat = await store.manageHeartbeat(command.activeSessionId, command.jobId, command.action);
+						// Re-checked under the artifact lock; a covered session falls through to the worker forward below.
+						const heartbeat = await store.manageHeartbeat(
+							command.activeSessionId,
+							command.jobId,
+							command.action,
+							new Date(),
+							() =>
+								!this.sessionFileCovered(passive.rootSessionFile) &&
+								!this.sessionFileCovered(passive.info.path),
+						);
 						if (heartbeat) {
 							this.onPassiveScheduledJobMutated(heartbeat);
 							return success(command.id, "heartbeat_manage", { heartbeat });
@@ -5366,6 +5375,15 @@ export class DaemonSupervisor {
 		});
 	}
 
+	/** Ambiguous residency counts as covered: never treat a contested session as passive. */
+	private sessionFileCovered(sessionFile: string, exclude?: ResidentWorker): boolean {
+		try {
+			return this.findWorkerBySessionFile(sessionFile, exclude) !== undefined;
+		} catch {
+			return true;
+		}
+	}
+
 	private findWorkerBySessionFile(sessionFile: string, exclude?: ResidentWorker): ResidentWorker | undefined {
 		const target = canonicalSessionPath(sessionFile);
 		const targetEntry = this.roster().bySessionFile(target);
@@ -7206,13 +7224,10 @@ export class DaemonSupervisor {
 			}
 		}
 		// A worker covering any tree member owns its stores again; a stale intent must not kill new schedules.
-		for (const { sessionFile } of sessions) {
-			try {
-				if (this.findWorkerBySessionFile(sessionFile, exclude)) return;
-			} catch {
-				return;
-			}
-		}
+		const cancelStillWanted = (): boolean =>
+			(stillWanted === undefined || stillWanted()) &&
+			sessions.every(({ sessionFile }) => !this.sessionFileCovered(sessionFile, exclude));
+		if (!cancelStillWanted()) return;
 		let registered = false;
 		for (const { sessionId, sessionFile } of sessions) {
 			const artifactDir = getSessionArtifactPathForFile(sessionFile, sessionId);
@@ -7221,18 +7236,9 @@ export class DaemonSupervisor {
 			registered = true;
 		}
 		if (!registered) return;
-		// Re-checked in the same synchronous turn as the walk: a promotion committed during the family read keeps its schedules.
-		if (stillWanted && !stillWanted()) return;
 		for (const { sessionFile } of sessions) {
-			// Each cancel yields on a lock, so a promotion can commit between cancels;
-			// re-check intent and coverage so a stale intent never kills a live worker's schedules.
-			if (stillWanted && !stillWanted()) return;
-			try {
-				if (this.findWorkerBySessionFile(sessionFile, exclude)) return;
-			} catch {
-				return;
-			}
-			await store.cancelJobsForSession({ sessionFile });
+			if (!cancelStillWanted()) return;
+			await store.cancelJobsForSession({ sessionFile }, new Date(), cancelStillWanted);
 		}
 	}
 

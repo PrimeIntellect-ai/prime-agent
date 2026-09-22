@@ -1,8 +1,9 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { lock } from "proper-lockfile";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentCronJobStore } from "../src/core/cron-jobs.js";
+import { AgentCronJobStore, SESSION_SCHEDULED_JOBS_FILENAME } from "../src/core/cron-jobs.js";
 import { type SessionInfo, SessionManager } from "../src/core/session-manager.js";
 import type { DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
 import { type DaemonCommand, type DaemonResponse, failure, success } from "../src/modes/daemon/daemon-protocol.js";
@@ -380,6 +381,30 @@ describe("daemon supervisor heartbeat aggregation", () => {
 		expect(target.heartbeatSnapshot).toEqual([]);
 	});
 
+	it("lets concurrent lists join one refresh without queuing a trailing pass", async () => {
+		const supervisor = createSupervisorHarness();
+		const target = worker("ready");
+		supervisor.workers.set("target", target);
+		let release = () => {};
+		const firstAnswer = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let forwards = 0;
+		supervisor.forwardToWorker = vi.fn(async (_worker, command) => {
+			if (++forwards === 1) await firstAnswer;
+			return success(command.id, command.type, { heartbeats: [{ job: { id: "heartbeat-1" } }] });
+		});
+
+		const lists = ["list-1", "list-2"].map((id) =>
+			supervisor.handleCommand({} as DaemonSocketClient, { id, type: "heartbeats_list" }),
+		);
+		await flushAsyncWork();
+		release();
+		await Promise.all(lists);
+
+		expect(supervisor.forwardToWorker).toHaveBeenCalledOnce();
+	});
+
 	it("refreshes only the reporting worker, coalesces frames, ages out, and never serves a stale snapshot", async () => {
 		vi.useFakeTimers();
 		try {
@@ -531,6 +556,58 @@ describe("daemon supervisor passive scheduled-jobs snapshot", () => {
 			(paused as { data?: { heartbeats?: Array<{ job: { id: string; status: string } }> } }).data?.heartbeats,
 		).toMatchObject([{ job: { id: job.id, status: "paused" } }]);
 		expect(family).toHaveBeenCalledTimes(1);
+	});
+
+	it("forwards a manage to the worker that became resident while the passive write waited for the lock", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-passive-"));
+		tempDirs.push(directory);
+		const supervisor = createSupervisorHarness(directory);
+		const manager = SessionManager.create(directory, join(directory, "sessions"));
+		manager.newSession();
+		manager.flushNow();
+		const store = AgentCronJobStore.forSessionArtifacts();
+		store.registerSessionArtifact(manager.getSessionId(), manager.getSessionArtifactDir()!);
+		const job = await store.createHeartbeat({
+			activeSessionId: manager.getSessionId(),
+			sessionId: manager.getSessionId(),
+			sessionFile: manager.getSessionFile()!,
+			cwd: directory,
+			scheduleText: "every 1h",
+			prompt: "continue",
+		});
+		await supervisor.handleCommand({} as DaemonSocketClient, { id: "list-1", type: "heartbeats_list" });
+		const covering = {
+			descriptor: {
+				workerId: "worker-1",
+				lifecycle: "ready",
+				sessionFile: manager.getSessionFile(),
+				createCommand: { sessionPath: manager.getSessionFile() },
+			},
+		} as never;
+		supervisor.findWorkerForClient = vi.fn(async () => ({ worker: covering }));
+		supervisor.forwardToWorker = vi.fn(async (_worker, command) =>
+			success(command.id, command.type, { heartbeat: { ...job, status: "paused" } }),
+		);
+		const jobsPath = join(manager.getSessionArtifactDir()!, SESSION_SCHEDULED_JOBS_FILENAME);
+		const release = await lock(jobsPath, { realpath: false, lockfilePath: `${jobsPath}.lock`, stale: 30_000 });
+
+		const managed = supervisor.handleCommand({} as DaemonSocketClient, {
+			id: "manage-1",
+			type: "heartbeat_manage",
+			activeSessionId: manager.getSessionId(),
+			jobId: job.id,
+			action: "pause",
+		});
+		await flushAsyncWork();
+		supervisor.workers.set("worker-1", covering);
+		await release();
+
+		await expect(managed).resolves.toMatchObject({ success: true });
+		expect(supervisor.forwardToWorker).toHaveBeenCalledWith(
+			covering,
+			expect.objectContaining({ type: "heartbeat_manage", jobId: job.id }),
+		);
+		expect(store.list().map((candidate) => candidate.status)).toEqual(["active"]);
 	});
 });
 

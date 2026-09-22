@@ -177,6 +177,20 @@ function heartbeatCatalogSignature(jobs: readonly AgentCronJob[]): string {
 	);
 }
 
+function isLiveHeartbeatFor(job: AgentCronJob, activeSessionId: string): boolean {
+	return (
+		job.activeSessionId === activeSessionId &&
+		job.source === "heartbeat" &&
+		(job.status === "active" || job.status === "paused")
+	);
+}
+
+function latestHeartbeat(jobs: readonly AgentCronJob[], activeSessionId: string): AgentCronJob | undefined {
+	return jobs
+		.filter((job) => isLiveHeartbeatFor(job, activeSessionId))
+		.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0];
+}
+
 export class AgentCronJobStore {
 	private readonly sessionArtifactFiles = new Map<string, string>();
 	private readonly heartbeatChangeListeners = new Set<() => void>();
@@ -258,7 +272,7 @@ export class AgentCronJobStore {
 			nextRunAt: parsed.nextRunAt.toISOString(),
 			runCount: 0,
 		};
-		await this.writeJobs([...this.readJobs(), job]);
+		await this.writeJobs((jobs) => ({ jobs: [...jobs, job], result: undefined }));
 		return job;
 	}
 
@@ -276,45 +290,36 @@ export class AgentCronJobStore {
 		cwd: string;
 	}): Promise<AgentCronJob[]> {
 		const targetSessionFile = resolve(input.sessionFile);
-		const reboundJobs: AgentCronJob[] = [];
-		const jobs = this.readJobs().map((job) => {
-			if (job.activeSessionId !== input.activeSessionId && resolve(job.sessionFile) !== targetSessionFile) {
-				return job;
-			}
-			if (
-				job.activeSessionId === input.activeSessionId &&
-				job.sessionId === input.sessionId &&
-				resolve(job.sessionFile) === targetSessionFile &&
-				job.cwd === input.cwd
-			) {
-				return job;
-			}
-			const rebound = {
-				...job,
-				activeSessionId: input.activeSessionId,
-				sessionId: input.sessionId,
-				sessionFile: input.sessionFile,
-				cwd: input.cwd,
-			};
-			reboundJobs.push(rebound);
-			return rebound;
+		return this.writeJobs((jobs) => {
+			const reboundJobs: AgentCronJob[] = [];
+			const next = jobs.map((job) => {
+				if (job.activeSessionId !== input.activeSessionId && resolve(job.sessionFile) !== targetSessionFile) {
+					return job;
+				}
+				if (
+					job.activeSessionId === input.activeSessionId &&
+					job.sessionId === input.sessionId &&
+					resolve(job.sessionFile) === targetSessionFile &&
+					job.cwd === input.cwd
+				) {
+					return job;
+				}
+				const rebound = {
+					...job,
+					activeSessionId: input.activeSessionId,
+					sessionId: input.sessionId,
+					sessionFile: input.sessionFile,
+					cwd: input.cwd,
+				};
+				reboundJobs.push(rebound);
+				return rebound;
+			});
+			return { jobs: next, result: reboundJobs };
 		});
-		if (reboundJobs.length > 0) {
-			await this.writeJobs(jobs);
-		}
-		return reboundJobs;
 	}
 
 	getHeartbeat(activeSessionId: string): AgentCronJob | undefined {
-		return this.readJobs()
-			.filter((job) => {
-				return (
-					job.activeSessionId === activeSessionId &&
-					job.source === "heartbeat" &&
-					(job.status === "active" || job.status === "paused")
-				);
-			})
-			.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0];
+		return latestHeartbeat(this.readJobs(), activeSessionId);
 	}
 
 	getLatestHeartbeat(activeSessionId: string): AgentCronJob | undefined {
@@ -329,16 +334,6 @@ export class AgentCronJobStore {
 		if (parsed.schedule.kind === "once") {
 			throw new Error("Heartbeat schedule must be recurring");
 		}
-		const existing = this.readJobs().map((job) => {
-			if (
-				job.activeSessionId === input.activeSessionId &&
-				job.source === "heartbeat" &&
-				(job.status === "active" || job.status === "paused")
-			) {
-				return { ...job, status: "cancelled" as const, nextRunAt: undefined, updatedAt: now.toISOString() };
-			}
-			return job;
-		});
 		const prompt = input.prompt.trim();
 		if (!prompt) {
 			throw new Error("Heartbeat instruction cannot be empty");
@@ -362,7 +357,17 @@ export class AgentCronJobStore {
 			nextRunAt: parsed.nextRunAt.toISOString(),
 			runCount: 0,
 		};
-		await this.writeJobs([...existing, job]);
+		await this.writeJobs((jobs) => ({
+			jobs: [
+				...jobs.map((job) =>
+					isLiveHeartbeatFor(job, input.activeSessionId)
+						? { ...job, status: "cancelled" as const, nextRunAt: undefined, updatedAt: nowIso }
+						: job,
+				),
+				job,
+			],
+			result: undefined,
+		}));
 		return job;
 	}
 
@@ -409,7 +414,7 @@ export class AgentCronJobStore {
 			nextRunAt: parsed.nextRunAt.toISOString(),
 			runCount: 0,
 		};
-		await this.writeJobs([...this.readJobs(), job]);
+		await this.writeJobs((jobs) => ({ jobs: [...jobs, job], result: undefined }));
 		return job;
 	}
 
@@ -426,169 +431,165 @@ export class AgentCronJobStore {
 		},
 	): Promise<AgentCronJob | undefined> {
 		const now = update.now ?? new Date();
-		let updated: AgentCronJob | undefined;
-		let matchedRlmHeartbeat = false;
-		const jobs = this.readJobs().map((job) => {
-			if (job.id !== id || job.activeSessionId !== activeSessionId || job.source !== "rlm_heartbeat") {
-				return job;
-			}
-			matchedRlmHeartbeat = true;
-			if (job.status === "cancelled" || job.status === "completed") {
-				return job;
-			}
-			let nextJob: AgentCronJob = { ...job };
-			if (update.label !== undefined) {
-				nextJob = { ...nextJob, label: normalizeOptionalLabel(update.label) };
-			}
-			if (update.deliveryMode !== undefined) {
-				nextJob = { ...nextJob, deliveryMode: update.deliveryMode };
-			}
-			if (update.prompt !== undefined) {
-				const prompt = update.prompt.trim();
-				if (!prompt) {
-					throw new Error("RLM heartbeat instruction cannot be empty");
+		const updated = await this.writeJobs((jobs) => {
+			let updated: AgentCronJob | undefined;
+			const next = jobs.map((job) => {
+				if (job.id !== id || job.activeSessionId !== activeSessionId || job.source !== "rlm_heartbeat") {
+					return job;
 				}
-				nextJob = { ...nextJob, prompt };
-			}
-			if (update.scheduleText !== undefined) {
-				const parsed = parseAgentCronSchedule(update.scheduleText, now);
-				if (parsed.schedule.kind === "once") {
-					throw new Error("RLM heartbeat schedule must be recurring");
+				if (job.status === "cancelled" || job.status === "completed") {
+					return job;
 				}
-				nextJob =
-					nextJob.status === "paused"
-						? withoutNextRunAt({ ...nextJob, schedule: parsed.schedule })
-						: { ...nextJob, schedule: parsed.schedule, nextRunAt: parsed.nextRunAt.toISOString() };
-			}
-			if (update.status === "pause") {
-				nextJob = withoutNextRunAt({ ...nextJob, status: "paused" });
-			} else if (update.status === "resume") {
-				const nextRunAt = nextRunAtForSchedule(nextJob.schedule, now);
-				if (!nextRunAt) {
-					throw new Error("RLM heartbeat schedule must be recurring");
+				let nextJob: AgentCronJob = { ...job };
+				if (update.label !== undefined) {
+					nextJob = { ...nextJob, label: normalizeOptionalLabel(update.label) };
 				}
-				nextJob = { ...nextJob, status: "active", nextRunAt: nextRunAt.toISOString() };
-			}
-			updated = { ...nextJob, updatedAt: now.toISOString() };
-			return updated;
+				if (update.deliveryMode !== undefined) {
+					nextJob = { ...nextJob, deliveryMode: update.deliveryMode };
+				}
+				if (update.prompt !== undefined) {
+					const prompt = update.prompt.trim();
+					if (!prompt) {
+						throw new Error("RLM heartbeat instruction cannot be empty");
+					}
+					nextJob = { ...nextJob, prompt };
+				}
+				if (update.scheduleText !== undefined) {
+					const parsed = parseAgentCronSchedule(update.scheduleText, now);
+					if (parsed.schedule.kind === "once") {
+						throw new Error("RLM heartbeat schedule must be recurring");
+					}
+					nextJob =
+						nextJob.status === "paused"
+							? withoutNextRunAt({ ...nextJob, schedule: parsed.schedule })
+							: { ...nextJob, schedule: parsed.schedule, nextRunAt: parsed.nextRunAt.toISOString() };
+				}
+				if (update.status === "pause") {
+					nextJob = withoutNextRunAt({ ...nextJob, status: "paused" });
+				} else if (update.status === "resume") {
+					const nextRunAt = nextRunAtForSchedule(nextJob.schedule, now);
+					if (!nextRunAt) {
+						throw new Error("RLM heartbeat schedule must be recurring");
+					}
+					nextJob = { ...nextJob, status: "active", nextRunAt: nextRunAt.toISOString() };
+				}
+				updated = { ...nextJob, updatedAt: now.toISOString() };
+				return updated;
+			});
+			return { jobs: next, result: updated };
 		});
-		if (matchedRlmHeartbeat && updated) {
-			await this.writeJobs(jobs);
-		}
 		return updated;
 	}
 
 	async deleteRlmHeartbeat(activeSessionId: string, id: string, now = new Date()): Promise<AgentCronJob | undefined> {
-		let deleted: AgentCronJob | undefined;
-		const jobs = this.readJobs().map((job) => {
-			if (job.id !== id || job.activeSessionId !== activeSessionId || job.source !== "rlm_heartbeat") {
-				return job;
-			}
-			deleted = withoutNextRunAt({ ...job, status: "cancelled", updatedAt: now.toISOString() });
-			return deleted;
+		const deleted = await this.writeJobs((jobs) => {
+			let deleted: AgentCronJob | undefined;
+			const next = jobs.map((job) => {
+				if (job.id !== id || job.activeSessionId !== activeSessionId || job.source !== "rlm_heartbeat") {
+					return job;
+				}
+				deleted = withoutNextRunAt({ ...job, status: "cancelled", updatedAt: now.toISOString() });
+				return deleted;
+			});
+			return { jobs: next, result: deleted };
 		});
-		if (deleted) {
-			await this.writeJobs(jobs);
-		}
 		return deleted;
 	}
 
 	async cancelRlmHeartbeatsForSession(activeSessionId: string, now = new Date()): Promise<AgentCronJob[]> {
-		const cancelled: AgentCronJob[] = [];
-		const jobs = this.readJobs().map((job) => {
-			if (
-				job.activeSessionId !== activeSessionId ||
-				job.source !== "rlm_heartbeat" ||
-				(job.status !== "active" && job.status !== "paused")
-			) {
-				return job;
-			}
-			const cancelledJob = withoutNextRunAt({ ...job, status: "cancelled", updatedAt: now.toISOString() });
-			cancelled.push(cancelledJob);
-			return cancelledJob;
+		return this.writeJobs((jobs) => {
+			const cancelled: AgentCronJob[] = [];
+			const next = jobs.map((job) => {
+				if (
+					job.activeSessionId !== activeSessionId ||
+					job.source !== "rlm_heartbeat" ||
+					(job.status !== "active" && job.status !== "paused")
+				) {
+					return job;
+				}
+				const cancelledJob = withoutNextRunAt({ ...job, status: "cancelled", updatedAt: now.toISOString() });
+				cancelled.push(cancelledJob);
+				return cancelledJob;
+			});
+			return { jobs: next, result: cancelled };
 		});
-		if (cancelled.length > 0) {
-			await this.writeJobs(jobs);
-		}
-		return cancelled;
 	}
 
 	async cancelJobsForSession(
 		input: { activeSessionId?: string; sessionId?: string; sessionFile?: string },
 		now = new Date(),
+		/** Re-evaluated with the state locked; false leaves the catalog unchanged and returns no result. */
+		stillWanted?: () => boolean,
 	): Promise<AgentCronJob[]> {
 		const targetSessionFile = input.sessionFile ? resolve(input.sessionFile) : undefined;
-		const cancelled: AgentCronJob[] = [];
-		const jobs = this.readJobs().map((job) => {
-			const matches =
-				(input.activeSessionId !== undefined && job.activeSessionId === input.activeSessionId) ||
-				(input.sessionId !== undefined && job.sessionId === input.sessionId) ||
-				(targetSessionFile !== undefined && resolve(job.sessionFile) === targetSessionFile);
-			if (!matches || (job.status !== "active" && job.status !== "paused")) {
-				return job;
+		return this.writeJobs((jobs) => {
+			if (stillWanted && !stillWanted()) {
+				return { jobs, result: [] };
 			}
-			const cancelledJob = withoutNextRunAt({ ...job, status: "cancelled", updatedAt: now.toISOString() });
-			cancelled.push(cancelledJob);
-			return cancelledJob;
+			const cancelled: AgentCronJob[] = [];
+			const next = jobs.map((job) => {
+				const matches =
+					(input.activeSessionId !== undefined && job.activeSessionId === input.activeSessionId) ||
+					(input.sessionId !== undefined && job.sessionId === input.sessionId) ||
+					(targetSessionFile !== undefined && resolve(job.sessionFile) === targetSessionFile);
+				if (!matches || (job.status !== "active" && job.status !== "paused")) {
+					return job;
+				}
+				const cancelledJob = withoutNextRunAt({ ...job, status: "cancelled", updatedAt: now.toISOString() });
+				cancelled.push(cancelledJob);
+				return cancelledJob;
+			});
+			return { jobs: next, result: cancelled };
 		});
-		if (cancelled.length > 0) {
-			await this.writeJobs(jobs);
-		}
-		return cancelled;
 	}
 
 	async pauseHeartbeat(activeSessionId: string, now = new Date()): Promise<AgentCronJob | undefined> {
-		let paused: AgentCronJob | undefined;
-		const current = this.getHeartbeat(activeSessionId);
-		if (!current) {
-			return undefined;
-		}
-		const jobs = this.readJobs().map((job) => {
-			if (job.id !== current.id) {
-				return job;
+		const paused = await this.writeJobs((jobs) => {
+			const current = latestHeartbeat(jobs, activeSessionId);
+			if (!current) {
+				return { jobs, result: undefined };
 			}
-			paused = { ...job, status: "paused", nextRunAt: undefined, updatedAt: now.toISOString() };
-			return paused;
+			const paused = { ...current, status: "paused" as const, nextRunAt: undefined, updatedAt: now.toISOString() };
+			return { jobs: jobs.map((job) => (job.id === current.id ? paused : job)), result: paused };
 		});
-		await this.writeJobs(jobs);
 		return paused;
 	}
 
 	async resumeHeartbeat(activeSessionId: string, now = new Date()): Promise<AgentCronJob | undefined> {
-		let resumed: AgentCronJob | undefined;
-		const current = this.getHeartbeat(activeSessionId);
-		if (!current) {
-			return undefined;
-		}
-		const nextRunAt = nextRunAtForSchedule(current.schedule, now);
-		if (!nextRunAt) {
-			throw new Error("Heartbeat schedule must be recurring");
-		}
-		const jobs = this.readJobs().map((job) => {
-			if (job.id !== current.id) {
-				return job;
+		const resumed = await this.writeJobs((jobs) => {
+			const current = latestHeartbeat(jobs, activeSessionId);
+			if (!current) {
+				return { jobs, result: undefined };
 			}
-			resumed = { ...job, status: "active", nextRunAt: nextRunAt.toISOString(), updatedAt: now.toISOString() };
-			return resumed;
+			const nextRunAt = nextRunAtForSchedule(current.schedule, now);
+			if (!nextRunAt) {
+				throw new Error("Heartbeat schedule must be recurring");
+			}
+			const resumed = {
+				...current,
+				status: "active" as const,
+				nextRunAt: nextRunAt.toISOString(),
+				updatedAt: now.toISOString(),
+			};
+			return { jobs: jobs.map((job) => (job.id === current.id ? resumed : job)), result: resumed };
 		});
-		await this.writeJobs(jobs);
 		return resumed;
 	}
 
 	async clearHeartbeat(activeSessionId: string, now = new Date()): Promise<AgentCronJob | undefined> {
-		let cleared: AgentCronJob | undefined;
-		const current = this.getHeartbeat(activeSessionId);
-		if (!current) {
-			return undefined;
-		}
-		const jobs = this.readJobs().map((job) => {
-			if (job.id !== current.id) {
-				return job;
+		const cleared = await this.writeJobs((jobs) => {
+			const current = latestHeartbeat(jobs, activeSessionId);
+			if (!current) {
+				return { jobs, result: undefined };
 			}
-			cleared = { ...job, status: "cancelled", nextRunAt: undefined, updatedAt: now.toISOString() };
-			return cleared;
+			const cleared = {
+				...current,
+				status: "cancelled" as const,
+				nextRunAt: undefined,
+				updatedAt: now.toISOString(),
+			};
+			return { jobs: jobs.map((job) => (job.id === current.id ? cleared : job)), result: cleared };
 		});
-		await this.writeJobs(jobs);
 		return cleared;
 	}
 
@@ -597,114 +598,119 @@ export class AgentCronJobStore {
 		id: string,
 		action: AgentHeartbeatManagementAction,
 		now = new Date(),
+		/** Re-evaluated with the state locked; false leaves the catalog unchanged and returns no result. */
+		stillWanted?: () => boolean,
 	): Promise<AgentCronJob | undefined> {
-		let updated: AgentCronJob | undefined;
-		const jobs = this.readJobs().map((job) => {
-			if (job.id !== id || job.activeSessionId !== activeSessionId || !isHeartbeatCronJob(job)) {
-				return job;
+		const updated = await this.writeJobs((jobs) => {
+			if (stillWanted && !stillWanted()) {
+				return { jobs, result: undefined };
 			}
-			if (job.status === "cancelled" || job.status === "completed") {
-				return job;
-			}
-			if (action === "pause") {
-				updated = withoutNextRunAt({ ...job, status: "paused", updatedAt: now.toISOString() });
+			let updated: AgentCronJob | undefined;
+			const next = jobs.map((job) => {
+				if (job.id !== id || job.activeSessionId !== activeSessionId || !isHeartbeatCronJob(job)) {
+					return job;
+				}
+				if (job.status === "cancelled" || job.status === "completed") {
+					return job;
+				}
+				if (action === "pause") {
+					updated = withoutNextRunAt({ ...job, status: "paused", updatedAt: now.toISOString() });
+					return updated;
+				}
+				if (action === "stop") {
+					updated = withoutNextRunAt({ ...job, status: "cancelled", updatedAt: now.toISOString() });
+					return updated;
+				}
+				const nextRunAt = nextRunAtForSchedule(job.schedule, now);
+				if (!nextRunAt) {
+					throw new Error("Heartbeat schedule must be recurring");
+				}
+				updated = {
+					...job,
+					status: "active",
+					nextRunAt: nextRunAt.toISOString(),
+					updatedAt: now.toISOString(),
+				};
 				return updated;
-			}
-			if (action === "stop") {
-				updated = withoutNextRunAt({ ...job, status: "cancelled", updatedAt: now.toISOString() });
-				return updated;
-			}
-			const nextRunAt = nextRunAtForSchedule(job.schedule, now);
-			if (!nextRunAt) {
-				throw new Error("Heartbeat schedule must be recurring");
-			}
-			updated = {
-				...job,
-				status: "active",
-				nextRunAt: nextRunAt.toISOString(),
-				updatedAt: now.toISOString(),
-			};
-			return updated;
+			});
+			return { jobs: next, result: updated };
 		});
-		if (updated) {
-			await this.writeJobs(jobs);
-		}
 		return updated;
 	}
 
 	async cancel(id: string, now = new Date()): Promise<AgentCronJob | undefined> {
-		let cancelled: AgentCronJob | undefined;
-		const jobs = this.readJobs().map((job) => {
-			if (job.id !== id || job.status === "cancelled") {
-				return job;
-			}
-			cancelled = { ...job, status: "cancelled", nextRunAt: undefined, updatedAt: now.toISOString() };
-			return cancelled;
+		const cancelled = await this.writeJobs((jobs) => {
+			let cancelled: AgentCronJob | undefined;
+			const next = jobs.map((job) => {
+				if (job.id !== id || job.status === "cancelled") {
+					return job;
+				}
+				cancelled = { ...job, status: "cancelled", nextRunAt: undefined, updatedAt: now.toISOString() };
+				return cancelled;
+			});
+			return { jobs: next, result: cancelled };
 		});
-		if (cancelled) {
-			await this.writeJobs(jobs);
-		}
 		return cancelled;
 	}
 
 	async recordRunResult(id: string, result: { now?: Date; error?: unknown }): Promise<AgentCronJob | undefined> {
 		const now = result.now ?? new Date();
-		let updated: AgentCronJob | undefined;
-		const jobs = this.readJobs().map((job) => {
-			if (job.id !== id) {
-				return job;
-			}
-			if (job.status !== "active") {
-				updated = job;
-				return job;
-			}
-			const lastError = result.error === undefined ? undefined : errorMessage(result.error);
-			const nextRunAt =
-				job.schedule.kind === "cron"
-					? nextRunAtForSchedule(job.schedule, new Date(now.getTime() + 1))
-					: job.schedule.kind === "interval"
-						? nextRunAtForSchedule(job.schedule, now)
-						: undefined;
-			updated = {
-				...job,
-				status: job.schedule.kind === "once" ? "completed" : "active",
-				nextRunAt: nextRunAt?.toISOString(),
-				lastRunAt: now.toISOString(),
-				lastError,
-				runCount: job.runCount + 1,
-				updatedAt: now.toISOString(),
-			};
-			return updated;
+		const updated = await this.writeJobs((jobs) => {
+			let updated: AgentCronJob | undefined;
+			const next = jobs.map((job) => {
+				if (job.id !== id) {
+					return job;
+				}
+				if (job.status !== "active") {
+					updated = job;
+					return job;
+				}
+				const lastError = result.error === undefined ? undefined : errorMessage(result.error);
+				const nextRunAt =
+					job.schedule.kind === "cron"
+						? nextRunAtForSchedule(job.schedule, new Date(now.getTime() + 1))
+						: job.schedule.kind === "interval"
+							? nextRunAtForSchedule(job.schedule, now)
+							: undefined;
+				updated = {
+					...job,
+					status: job.schedule.kind === "once" ? "completed" : "active",
+					nextRunAt: nextRunAt?.toISOString(),
+					lastRunAt: now.toISOString(),
+					lastError,
+					runCount: job.runCount + 1,
+					updatedAt: now.toISOString(),
+				};
+				return updated;
+			});
+			return { jobs: next, result: updated };
 		});
-		if (updated) {
-			await this.writeJobs(jobs);
-		}
 		return updated;
 	}
 
 	async recordSkipResult(id: string, result: { now?: Date }): Promise<AgentCronJob | undefined> {
 		const now = result.now ?? new Date();
-		let updated: AgentCronJob | undefined;
-		const jobs = this.readJobs().map((job) => {
-			if (job.id !== id) {
-				return job;
-			}
-			if (job.status !== "active") {
-				updated = job;
-				return job;
-			}
-			const nextRunAt = nextRunAtForSchedule(job.schedule, now);
-			updated = {
-				...job,
-				nextRunAt: nextRunAt?.toISOString(),
-				lastSkippedAt: now.toISOString(),
-				updatedAt: now.toISOString(),
-			};
-			return updated;
+		const updated = await this.writeJobs((jobs) => {
+			let updated: AgentCronJob | undefined;
+			const next = jobs.map((job) => {
+				if (job.id !== id) {
+					return job;
+				}
+				if (job.status !== "active") {
+					updated = job;
+					return job;
+				}
+				const nextRunAt = nextRunAtForSchedule(job.schedule, now);
+				updated = {
+					...job,
+					nextRunAt: nextRunAt?.toISOString(),
+					lastSkippedAt: now.toISOString(),
+					updatedAt: now.toISOString(),
+				};
+				return updated;
+			});
+			return { jobs: next, result: updated };
 		});
-		if (updated) {
-			await this.writeJobs(jobs);
-		}
 		return updated;
 	}
 
@@ -885,70 +891,63 @@ export class AgentCronJobStore {
 	}
 
 	/**
-	 * Merges across the registered artifacts, locking only the paths whose state the
-	 * write can change, so a mutation of one session locks only that session's path.
+	 * Recomputes the mutation from the state read under the changed paths' locks (all
+	 * paths when the probe changes nothing). The mutator must be pure apart from its
+	 * return value; only the locked pass's result is returned.
 	 */
-	private async writeJobs(jobs: readonly AgentCronJob[]): Promise<void> {
+	private async writeJobs<T>(
+		mutate: (current: readonly AgentCronJob[]) => { jobs: readonly AgentCronJob[]; result: T },
+	): Promise<T> {
 		const previousHeartbeats = heartbeatCatalogSignature(this.readJobs());
+		let result: T;
 		if (this.sessionArtifactMode) {
-			const registeredSessionIds = new Set(this.sessionArtifactFiles.keys());
-			const unregistered = jobs.find((job) => !registeredSessionIds.has(job.sessionId));
-			if (unregistered) {
-				throw new Error(`Cron job ${unregistered.id} targets an unregistered session artifact`);
-			}
-			// Phase one (lock-free): the merge is pure, so recomputing under the locks is safe.
-			const snapshotBySessionId = new Map(
-				[...this.sessionArtifactFiles].map(([sessionId, path]) => [
-					sessionId,
-					roundTripJobsState(this.readState(path)),
-				]),
-			);
-			const mergedSnapshot = mergeJobsStates(snapshotBySessionId, jobs);
-			const changedPaths = new Set<string>();
-			for (const [sessionId, path] of this.sessionArtifactFiles) {
-				const current = snapshotBySessionId.get(sessionId);
-				if (current && JSON.stringify(current) !== JSON.stringify(mergedSnapshot.get(sessionId))) {
-					changedPaths.add(path);
+			const apply = (currentBySessionId: ReadonlyMap<string, CronJobsState>) => {
+				const mutation = mutate([...currentBySessionId.values()].flatMap((state) => state.jobs));
+				const unregistered = mutation.jobs.find((job) => !this.sessionArtifactFiles.has(job.sessionId));
+				if (unregistered) {
+					throw new Error(`Cron job ${unregistered.id} targets an unregistered session artifact`);
 				}
-			}
-			await withCronJobsStateLocks([...changedPaths], () => {
-				const currentBySessionId = new Map(
-					[...this.sessionArtifactFiles].map(([sessionId, path]) => [sessionId, this.readState(path)]),
+				const next = partitionJobsStates(currentBySessionId, mutation.jobs);
+				const changedSessionIds = [...this.sessionArtifactFiles.keys()].filter(
+					(sessionId) => JSON.stringify(currentBySessionId.get(sessionId)) !== JSON.stringify(next.get(sessionId)),
 				);
-				const merged = mergeJobsStates(currentBySessionId, jobs);
-				// A concurrent writer must not make an unprobed path changeable: fail closed.
-				for (const [sessionId, path] of this.sessionArtifactFiles) {
-					if (changedPaths.has(path)) continue;
-					const current = currentBySessionId.get(sessionId);
-					if (current && JSON.stringify(current) !== JSON.stringify(merged.get(sessionId))) {
+				return { mutation, next, changedSessionIds };
+			};
+			const readAll = () =>
+				new Map([...this.sessionArtifactFiles].map(([sessionId, path]) => [sessionId, this.readState(path)]));
+			const probe = apply(readAll());
+			// Empty probe: lock every path, as mutateStates does.
+			const lockedSessionIds =
+				probe.changedSessionIds.length > 0 ? probe.changedSessionIds : [...this.sessionArtifactFiles.keys()];
+			const pathsToLock = lockedSessionIds.map((sessionId) => this.sessionArtifactFiles.get(sessionId)!);
+			const lockedSessionIdSet = new Set(lockedSessionIds);
+			result = await withCronJobsStateLocks(pathsToLock, () => {
+				const { mutation, next, changedSessionIds } = apply(readAll());
+				for (const sessionId of changedSessionIds) {
+					// A concurrent writer must not make an unlocked path changeable: fail closed.
+					if (!lockedSessionIdSet.has(sessionId)) {
 						throw new Error(`Cron jobs state changed concurrently for session ${sessionId}`);
 					}
+					this.writeState(this.sessionArtifactFiles.get(sessionId)!, next.get(sessionId)!);
 				}
-				for (const [sessionId, path] of this.sessionArtifactFiles) {
-					if (!changedPaths.has(path)) continue;
-					const current = currentBySessionId.get(sessionId) ?? { jobs: [], dispatches: [] };
-					const nextState = merged.get(sessionId);
-					if (nextState && JSON.stringify(current) !== JSON.stringify(nextState)) {
-						this.writeState(path, nextState);
-					}
-				}
+				return mutation.result;
 			});
-			if (heartbeatCatalogSignature(this.readJobs()) !== previousHeartbeats) {
-				this.notifyHeartbeatChange();
-			}
-			return;
+		} else {
+			const path = this.requireFilePath();
+			result = await withCronJobsStateLocks([path], () => {
+				const current = this.readState(path);
+				const mutation = mutate(current.jobs);
+				const next: CronJobsState = { jobs: [...mutation.jobs], dispatches: current.dispatches };
+				if (JSON.stringify(next) !== JSON.stringify(current)) {
+					this.writeState(path, next);
+				}
+				return mutation.result;
+			});
 		}
-		const path = this.requireFilePath();
-		await withCronJobsStateLocks([path], () => {
-			const current = this.readState(path);
-			this.writeState(path, {
-				jobs: mergeFreshJobs(current.jobs, jobs),
-				dispatches: current.dispatches,
-			});
-		});
 		if (heartbeatCatalogSignature(this.readJobs()) !== previousHeartbeats) {
 			this.notifyHeartbeatChange();
 		}
+		return result;
 	}
 
 	private notifyHeartbeatChange(): void {
@@ -1008,8 +1007,8 @@ export class AgentCronScheduler {
 	private stopped = true;
 	private hasStarted = false;
 	private readonly dispatchLanes = new Map<string, Promise<void>>();
-	/** Startup dispatch recovery; claims wait for it before touching any state. */
-	private initialRecovery?: Promise<void>;
+	/** Set once startup recovery landed; a failed recovery is retried by the next claim instead of being skipped. */
+	private recovered = false;
 
 	constructor(
 		private readonly store: AgentCronJobStore,
@@ -1018,23 +1017,9 @@ export class AgentCronScheduler {
 
 	start(): void {
 		this.stopped = false;
-		if (!this.hasStarted) {
-			this.hasStarted = true;
-			// Claims must wait: a stale dispatch record still on disk would make claimDue skip a due job once.
-			this.initialRecovery = this.store
-				.recoverInterruptedDispatches(this.now())
-				// A failed startup recovery surfaces again on the next claim; it must not strand the scheduler.
-				.catch(() => undefined)
-				.then(() => undefined)
-				.finally(() => {
-					this.initialRecovery = undefined;
-					if (!this.stopped) {
-						this.scheduleNext();
-					}
-				});
-			return;
-		}
-		this.scheduleNext();
+		this.hasStarted = true;
+		// A stale dispatch record would make claimDue skip a due job, so the first claim recovers first.
+		this.scheduleNext(this.recovered ? undefined : 0);
 	}
 
 	stop(): void {
@@ -1056,15 +1041,15 @@ export class AgentCronScheduler {
 		if (this.running || (this.stopped && this.hasStarted)) {
 			return 0;
 		}
-		// Waiting for the initial recovery also serializes a claim that raced start().
-		await this.initialRecovery;
-		if (this.running || (this.stopped && this.hasStarted)) {
-			return 0;
-		}
 		this.running = true;
 		const dispatches: Array<{ dispatch: AgentCronDispatch; endDispatch?: () => void }> = [];
 		let claimedDispatches: AgentCronDispatch[] | undefined;
 		try {
+			if (this.hasStarted && !this.recovered) {
+				await this.store.recoverInterruptedDispatches(this.now());
+				this.recovered = true;
+				if (this.stopped) return 0;
+			}
 			claimedDispatches = await this.store.claimDue(now, this.now());
 			for (const dispatch of claimedDispatches) {
 				dispatches.push({ dispatch, endDispatch: this.hooks.beginDispatch?.(dispatch) });
@@ -1818,43 +1803,21 @@ function recoverInterruptedInState(
 	});
 }
 
-/**
- * The pure merge a full-list write performs across the registered paths; returns
- * the next state per session id so callers can compare per path.
- */
-function mergeJobsStates(
+/** Partitions the next catalog by session id; each dispatch record follows its job's artifact. */
+function partitionJobsStates(
 	currentBySessionId: ReadonlyMap<string, CronJobsState>,
 	jobs: readonly AgentCronJob[],
 ): Map<string, CronJobsState> {
-	const incomingById = new Map(jobs.map((job) => [job.id, job]));
-	const mergedJobsBySessionId = new Map<string, AgentCronJob[]>();
-	for (const [sessionId, current] of currentBySessionId) {
-		const retained = current.jobs.filter((job) => {
-			const incoming = incomingById.get(job.id);
-			return incoming === undefined || incoming.sessionId === sessionId;
-		});
-		mergedJobsBySessionId.set(
-			sessionId,
-			mergeFreshJobs(
-				retained,
-				jobs.filter((job) => job.sessionId === sessionId),
-			),
-		);
-	}
-	const sessionIdByJobId = new Map(
-		[...mergedJobsBySessionId].flatMap(([sessionId, sessionJobs]) =>
-			sessionJobs.map((job) => [job.id, sessionId] as const),
-		),
-	);
+	const sessionIdByJobId = new Map(jobs.map((job) => [job.id, job.sessionId] as const));
 	const dispatches = [...currentBySessionId.values()].flatMap((state) => state.dispatches);
-	const merged = new Map<string, CronJobsState>();
+	const next = new Map<string, CronJobsState>();
 	for (const sessionId of currentBySessionId.keys()) {
-		merged.set(sessionId, {
-			jobs: mergedJobsBySessionId.get(sessionId) ?? [],
+		next.set(sessionId, {
+			jobs: jobs.filter((job) => job.sessionId === sessionId),
 			dispatches: dispatches.filter((dispatch) => sessionIdByJobId.get(dispatch.jobId) === sessionId),
 		});
 	}
-	return merged;
+	return next;
 }
 
 function mergeFreshJobs(currentJobs: readonly AgentCronJob[], nextJobs: readonly AgentCronJob[]): AgentCronJob[] {

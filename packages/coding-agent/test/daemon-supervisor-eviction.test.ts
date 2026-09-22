@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { lock } from "proper-lockfile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getSessionsDir } from "../src/config.js";
 import { type AgentCronJob, AgentCronJobStore, SESSION_SCHEDULED_JOBS_FILENAME } from "../src/core/cron-jobs.js";
@@ -1147,6 +1148,31 @@ describe("daemon supervisor scheduled-session wake", () => {
 		expect(root.store.list().map((job) => job.status)).toEqual(["cancelled"]);
 		expect(child.store.list().map((job) => job.status)).toEqual(["active"]);
 		cancel.mockRestore();
+	});
+
+	it("keeps schedules when a worker covers the tree while the cancel waits for the artifact lock", async () => {
+		const supervisor = makeSupervisor();
+		const root = makeScheduledSessionFile("locked-root");
+		await armHeartbeat(root.store, "locked-root", root.sessionFile, now);
+		supervisor.rlmSpawnLedgerInstance = {
+			family: vi.fn(async () => [makeSavedInfo(root.sessionFile, "locked-root")]),
+			liveEdges: vi.fn(async () => []),
+		};
+		const jobsPath = join(
+			getSessionArtifactPathForFile(root.sessionFile, "locked-root"),
+			SESSION_SCHEDULED_JOBS_FILENAME,
+		);
+		const release = await lock(jobsPath, { realpath: false, lockfilePath: `${jobsPath}.lock`, stale: 30_000 });
+
+		const cancel = supervisor.cancelScheduledJobsForSessionTree("locked-root", root.sessionFile);
+		await settleAsyncWork();
+		const resident = makeWorker("late-worker", []);
+		resident.descriptor.sessionFile = root.sessionFile;
+		supervisor.workers.set("late-worker", resident);
+		await release();
+		await cancel;
+
+		expect(root.store.list().map((job) => job.status)).toEqual(["active"]);
 	});
 
 	it("keeps the tombstoned descriptor after a failed ephemeral cancel so the next boot finishes it", async () => {
