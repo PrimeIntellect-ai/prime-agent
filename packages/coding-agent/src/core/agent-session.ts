@@ -8836,7 +8836,7 @@ export class AgentSession {
 					signal,
 					// Summarizing is transcription, not reasoning: no thinking level is
 					// requested, so the summary call stays cheap and cannot trip an invalid
-					// reasoning effort for the summary model (supersedes #3438).
+					// reasoning effort for the summary model.
 					undefined,
 					summaryCall,
 					providerRetryPolicy(this.settingsManager),
