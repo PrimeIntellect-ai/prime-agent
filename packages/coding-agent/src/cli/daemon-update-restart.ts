@@ -122,6 +122,9 @@ export function buildDaemonUpdateRestartReport(status: DaemonUpdateRestartStatus
 	const report: DaemonUpdateRestartReport = { info: [], warnings: [] };
 	if (status.phase === "failed") {
 		report.warnings.push(`Updated, but could not restart the daemon (${status.message ?? "unknown error"}).`);
+		report.warnings.push(
+			"The daemon still runs the previous version; run `prime-agent shutdown`, then run `prime-agent` to restart and apply the update.",
+		);
 	}
 	if (status.phase !== "complete" && status.phase !== "failed") {
 		return report;

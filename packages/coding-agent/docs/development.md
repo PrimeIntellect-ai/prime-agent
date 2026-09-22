@@ -68,6 +68,33 @@ Do not resolve packaged assets directly from `__dirname`.
 
 The hidden `/debug` command writes `~/.prime/agent/prime-agent-debug.log` with rendered TUI lines, their visible widths, and the current agent messages. Daemon, worker, client, and provider diagnostic logs live under `~/.prime/agent/logs/`.
 
+### Request timing
+
+When the UI sits in `Waiting` for a long time before the first model output appears, request timing shows what that wait is made of. Enable it with `PI_REQUEST_TIMING=1` in the environment (restart the daemon so worker processes inherit it) or `"requestTiming": true` in settings.json (applies to sessions opened after the change). Each agent-loop provider request then logs its phase timeline to `~/.prime/agent/logs/agent.jsonl` under the component `coding-agent.request-timing`. One-shot completion calls outside the agent loop (compaction, branch-summary, and refinement requests) use a separate path and are not logged:
+
+```bash
+grep '"coding-agent.request-timing"' ~/.prime/agent/logs/agent.jsonl | tail -5
+```
+
+Phases per request, in order. Each entry carries the gap it closed (`phaseMs`) and the elapsed time since turn dispatch (`totalMs`); `prompt-built` fires before the request has model or session fields, so correlate it with the later entries by `requestSeq`. If a provider never reports a phase (for example `request-sent` when no payload hook runs), that delta is simply omitted:
+
+| Phase | Meaning | A long gap here means |
+|-------|---------|----------------------|
+| `prompt-built` | Turn dispatched, prompt message array built | Client-side prompt build is slow |
+| `request-sent` | Payload handed to the provider client | Client-side request build (auth, params, extension payload hooks, the `requestBytes` serialization) is slow |
+| `first-byte` | HTTP response headers received (`requestBytes`: serialized request body size in UTF-8 bytes) | Upload of the request body plus provider TTFB (prefill, prompt-cache miss, queueing) |
+| `first-token` | First streamed content block (what clears `Waiting`) | Stream parse delay; usually near zero |
+| `stream-done` | Terminal event, with the summary below | Slow full stream |
+
+The final entry (`msg: "request timing summary"`) carries every delta it measured: `phases.dispatchToPromptBuiltMs`, `promptBuiltToRequestSentMs`, `requestSentToFirstByteMs`, `firstByteToFirstTokenMs`, `firstTokenToStreamDoneMs`, plus `contextEntries`, `requestBytes`, `sessionId`, the final `usage`, and an `outcome` (`done`, `aborted` for an early stop such as a user cancel, or `failed` when the provider failed before or during the stream).
+
+Reading it for a slow large-context turn:
+
+- Large `promptBuiltToRequestSentMs` — the client is slow. Both phases before the request leaves are client-side.
+- Large `requestSentToFirstByteMs` with a normal TTFT on the inference dashboard — the time is spent on the wire or inside inference before the dashboard's TTFT timer starts: uploading a multi-MB request body on a slow uplink, provider queueing, or prefilling an uncached prompt. `requestBytes` shows how much had to be uploaded.
+- Prompt-cache miss check — the summary's `usage.cacheRead` near 0 with `cacheWrite` close to the full prompt size means the provider re-prefilled the whole context instead of reading its prompt cache. `sessionId` is the cache key the client sends for OpenAI-family providers (session-affinity headers and `prompt_cache_key`); Anthropic instead caches the message prefix, so watch `cacheRead`/`cacheWrite` there.
+- Every retry re-issues the turn and gets a fresh request sequence number (`requestSeq`), so a silent retry loop shows up as several request timelines plus the usual auto-retry status.
+
 Useful service commands:
 
 ```bash

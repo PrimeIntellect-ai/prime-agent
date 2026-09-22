@@ -18,12 +18,26 @@ Edit directly or use `/settings` for common options.
 | `defaultProvider` | string | - | Default provider (e.g., `"anthropic"`, `"openai"`) |
 | `defaultModel` | string | - | Default model ID |
 | `subagentDefaultModel` | string | - | Model selector (`"provider/id"`) used when `rlm.spawn` does not pin a model; unset inherits the parent model |
+| `imageModel` | string | none | Model (`"provider/model-id"` or a bare id) that serves turns attaching images when the session model does not accept image input |
 | `defaultThinkingLevel` | string | `"medium"` | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level |
 
 `subagentDefaultModel` applies only to spawned subagents whose `rlm.spawn` call omits `model=`. An explicit `model=` per spawn always wins, and an unset setting keeps the inherit-parent behavior. If the configured default is unavailable, unauthenticated, or expired, the spawn fails with that error instead of silently falling back.
 
 When `defaultThinkingLevel` is unset, new sessions start at `"medium"` reasoning, clamped to the levels each model supports.
+
+`imageModel` routes image turns on text-only session or subagent models. When a
+turn attaches images and the selected model has no image input, that turn (and
+its retries and post-compaction continuations) is served by the configured
+image-capable model instead; the session model selection stays unchanged, and
+the routed assistant messages record the model that served them. Later
+image-free turns return to the session model, where images already in the
+transcript appear as "(image omitted: model does not support images)"
+placeholders. With no `imageModel` set (default), image turns on a text-only
+model fail with an actionable error instead of silently dropping the images:
+switch the session model with `/model` or configure `imageModel`. Set
+`images.blockImages: true` to drop images everywhere instead of routing or
+refusing.
 
 ### Autonomous Runs
 
@@ -194,6 +208,9 @@ When a provider requests a retry delay longer than `retry.provider.maxRetryDelay
 | `retry.provider.waitForUsage.maxDelayMs` | number | `300000` | Per-ping ceiling (5m) |
 | `retry.provider.waitForUsage.maxAttempts` | number | `30` | Abort bound: maximum recovery pings |
 | `retry.provider.waitForUsage.maxWaitMs` | number | `900000` | Abort bound: maximum total wait (15m) |
+| `retry.provider.waitForUsage.pauseUntilReset` | boolean | `true` | Park quota-blocked sessions until the provider-reported reset instead of dying mid-task |
+| `retry.provider.waitForUsage.maxPauseMs` | number | `86400000` | Abort bound: maximum single park (24h; clamped to 7d) |
+| `retry.provider.waitForUsage.maxParks` | number | `8` | Abort bound: maximum parks per quota episode |
 | `providerBackupModel` | string | none | Backup model ("provider/model-id" or bare id) used while the primary is quota-blocked or unavailable |
 
 The wait loop runs under the `retry.enabled` master switch: with retries
@@ -211,6 +228,23 @@ status line, and both abort bounds (`maxAttempts`, `maxWaitMs`) are hard stops:
 waits never hang. When a reported reset time exceeds `maxWaitMs`, the wait gives
 up immediately with an informative error instead of pinging pointlessly — raise
 `maxWaitMs` to wait out long subscription windows.
+
+When `pauseUntilReset` is on (the default) and such a reset is reported — e.g.
+the ChatGPT-plan "Try again in ~7272 min" 429 — the session does not die
+mid-task: it parks. The turn ends cleanly with a "parked until ..." status, the
+park/resume transitions are recorded in the session log, and one durable
+one-shot scheduled job (visible via `/cron`) wakes the session at the reset
+time — or sooner when `maxPauseMs` caps the park. While parked the session
+itself makes no model calls. The wake delivers an
+in-context marker telling the model the pause happened and to continue the
+interrupted task; that turn's single model call probes the quota. If the quota
+is back, the task resumes with its context. If not, the session re-parks with
+the newly reported reset, bounded by `maxPauseMs` per park and `maxParks` per
+quota episode; when the budget is spent, it aborts exactly like the bounded
+wait it replaced. Parks apply at the session level (subagents included), only
+for quota failures with a provider-reported reset, and only when no backup
+model took over; a `maxPauseMs` above 7 days is clamped. Set
+`pauseUntilReset: false` to keep the pre-park behavior of failing immediately.
 
 `providerBackupModel` routes failed turns to a user-defined backup model
 instead of waiting while the primary is quota-blocked or unavailable. It is
@@ -235,13 +269,22 @@ available, authenticated model, the bounded wait runs instead.
         "baseDelayMs": 1000,
         "maxDelayMs": 300000,
         "maxAttempts": 30,
-        "maxWaitMs": 900000
+        "maxWaitMs": 900000,
+        "pauseUntilReset": true,
+        "maxPauseMs": 86400000,
+        "maxParks": 8
       }
     }
   },
   "providerBackupModel": "anthropic/claude-opus-4-7"
 }
 ```
+
+### Diagnostics
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `requestTiming` | boolean | `false` | Log per-request provider timing phases to the diagnostic log (see [Development: Request timing](development.md#request-timing)); `PI_REQUEST_TIMING=1` also enables it |
 
 ### Message Delivery
 

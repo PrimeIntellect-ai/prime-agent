@@ -1,0 +1,1 @@
+- Fixed unclear blocked-update warnings: the refusal now names the blocking session, and the report now says to run `prime-agent shutdown`, then run `prime-agent` to restart and apply the update.

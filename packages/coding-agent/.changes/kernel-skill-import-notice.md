@@ -1,0 +1,1 @@
+- Added a session-start `[python-skills-unavailable]` notice when a pre-imported Python skill fails to import into the kernel. The report names each failed skill import and its import error so the model learns before its first call instead of from the unavailable-skill placeholder, in both the TUI and headless sessions.

@@ -246,7 +246,8 @@ def test_launch_stops_created_evaluations_when_a_spawn_fails(tmp_path: Path, mon
 
 def test_hosted_budgets_fit_the_github_job_limit(monkeypatch) -> None:
     workflow = (ROOT / ".github" / "workflows" / "behavioral-evals.yml").read_text()
-    job_limit = int(re.search(r"\n    timeout-minutes: (\d+)", workflow).group(1))
+    evaluate = workflow[workflow.find("  evaluate:") :]
+    job_limit = int(re.search(r"\n    timeout-minutes: (\d+)", evaluate).group(1))
     assert hosted_eval.GITHUB_JOB_LIMIT_MINUTES == job_limit
     assert f"BEHAVIORAL_JOB_DEADLINE_EPOCH=$(( $(date +%s) + {job_limit} * 60 ))" in workflow
     # The per-evaluation cap plus the collection reserve have to fit inside the job limit.
