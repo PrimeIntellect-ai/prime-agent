@@ -1,1 +1,0 @@
-- Changed the build to compile from the committed model catalog instead of refetching it; run `npm run generate-models` explicitly to refresh `models.generated.ts`.

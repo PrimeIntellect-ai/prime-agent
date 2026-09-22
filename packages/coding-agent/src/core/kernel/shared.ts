@@ -51,6 +51,8 @@ export interface KernelManagerOptions {
 	env?: Record<string, string>;
 	sessionId?: string;
 	hostHandlers?: HostRequestHandlers;
+	/** Fires when the last live background bash() handle settles (its activity track empties or the kernel tears down). */
+	onBackgroundWorkSettled?: () => void;
 	pythonSkills?: readonly KernelPythonSkill[];
 	/** Persist/revive the user namespace across kernel restarts and session resume. */
 	snapshot?: KernelSnapshotConfig;

@@ -3,10 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerFauxProvider } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ENV_AGENT_DIR } from "../src/config.js";
 import { AGENT_MESSAGE_SKILL_NAME, type AgentSessionMessageController } from "../src/core/agent-messages.js";
 import { AGENT_OBSERVE_SKILL_NAME, type AgentObserveController } from "../src/core/agent-observe.js";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
+import { McpConnectionStore } from "../src/core/mcp/connection-store.js";
+import { McpManager } from "../src/core/mcp/mcp-manager.js";
+import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { createSyntheticSourceInfo } from "../src/core/source-info.js";
@@ -28,6 +32,34 @@ describe("createAgentSessionFromServices", () => {
 		}
 	});
 
+	it("enables CLI login reuse only for default services storage", async () => {
+		const tempDir = join(tmpdir(), `pi-default-services-auth-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+		cleanupPaths.push(tempDir);
+		vi.stubEnv("HOME", tempDir);
+		vi.stubEnv(ENV_AGENT_DIR, "");
+		const injected = AuthStorage.inMemory();
+		for (const options of [{}, { agentDir: join(tempDir, "custom") }, { authStorage: injected }]) {
+			const services = await createAgentSessionServices({
+				cwd: tempDir,
+				...options,
+				telemetryDisabled: true,
+				resourceLoaderOptions: {
+					noExtensions: true,
+					noSkills: true,
+					noPromptTemplates: true,
+					noThemes: true,
+					noContextFiles: true,
+				},
+			});
+			expect(services.modelRegistry.authStorage).toBe(services.authStorage);
+			expect(services.authStorage.getPrimeCliConfigPath()).toBe(
+				"agentDir" in options || "authStorage" in options ? undefined : join(tempDir, ".prime", "config.json"),
+			);
+			if ("authStorage" in options) expect(services.authStorage).toBe(injected);
+		}
+	});
+
 	it("shows the telemetry disclosure independently of the Herdr reporter", async () => {
 		vi.stubEnv("DO_NOT_TRACK", "0");
 		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
@@ -35,6 +67,7 @@ describe("createAgentSessionFromServices", () => {
 		mkdirSync(tempDir, { recursive: true });
 		cleanupPaths.push(tempDir);
 		const settingsManager = SettingsManager.inMemory();
+		settingsManager.setOnboardingShown(true);
 
 		const services = await createAgentSessionServices({
 			cwd: tempDir,
@@ -46,6 +79,54 @@ describe("createAgentSessionFromServices", () => {
 
 		expect(services.diagnostics).toContainEqual(
 			expect.objectContaining({ type: "info", message: expect.stringContaining("pseudonymous usage") }),
+		);
+		expect(settingsManager.getTelemetryNoticeShown()).toBe(true);
+	});
+
+	it("defers the telemetry disclosure on a first interactive launch", async () => {
+		vi.stubEnv("DO_NOT_TRACK", "0");
+		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
+		const tempDir = join(tmpdir(), `pi-session-telemetry-first-run-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+		cleanupPaths.push(tempDir);
+		// A settings profile that has never seen onboarding: the notice would land
+		// on the welcome screen, so it waits for the next launch.
+		const settingsManager = SettingsManager.inMemory();
+
+		const services = await createAgentSessionServices({
+			cwd: tempDir,
+			agentDir: tempDir,
+			settingsManager,
+			noBuiltinHerdrReporter: true,
+			deferTelemetryNoticeForOnboarding: true,
+			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
+		});
+
+		expect(services.diagnostics).not.toContainEqual(
+			expect.objectContaining({ message: expect.stringContaining("pseudonymous usage") }),
+		);
+		expect(settingsManager.getTelemetryNoticeShown()).toBe(false);
+	});
+
+	it("discloses telemetry immediately for sessions that never onboard", async () => {
+		vi.stubEnv("DO_NOT_TRACK", "0");
+		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
+		const tempDir = join(tmpdir(), `pi-session-telemetry-headless-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+		cleanupPaths.push(tempDir);
+		// No onboarding will run here, so holding the notice back would hide it forever.
+		const settingsManager = SettingsManager.inMemory();
+
+		const services = await createAgentSessionServices({
+			cwd: tempDir,
+			agentDir: tempDir,
+			settingsManager,
+			noBuiltinHerdrReporter: true,
+			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
+		});
+
+		expect(services.diagnostics).toContainEqual(
+			expect.objectContaining({ message: expect.stringContaining("pseudonymous usage") }),
 		);
 		expect(settingsManager.getTelemetryNoticeShown()).toBe(true);
 	});
@@ -107,6 +188,18 @@ describe("createAgentSessionFromServices", () => {
 	});
 
 	it("advertises enabled generic MCP servers and refreshes the prompt on reload", async () => {
+		/**
+		 * The enabled-generic-servers line: user-declared servers plus per-account
+		 * records; a catalog entry appears only when it is explicitly public
+		 * no-auth AND setup-ready (credential-free dispatch — api_key and
+		 * requires-setup rows fail closed). The exact catalog contents evolve, so
+		 * the contract pins WHICH servers appear, not the full list.
+		 */
+		const enabledServersLine = (prompt: string): string => {
+			const match = prompt.match(/Enabled generic MCP servers: ([^\n]*)\./);
+			return match?.[1] ?? "";
+		};
+
 		const tempDir = join(tmpdir(), `pi-session-mcp-prompt-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		const projectDir = join(tempDir, "project");
 		const agentDir = join(tempDir, "agent");
@@ -153,7 +246,8 @@ describe("createAgentSessionFromServices", () => {
 			expect(initialPrompt).toContain(
 				"Generic MCP connections are accessed through the pre-imported Python `mcp` object in the Python REPL, not as top-level native tool namespaces or installed Python skills.",
 			);
-			expect(initialPrompt).toContain("Enabled generic MCP servers: `filesystem`, `zebra`.");
+			// Zero none+ready catalog rows exist today, so the enabled line is exactly the user-declared servers.
+			expect(enabledServersLine(initialPrompt)).toBe("`filesystem`, `zebra`");
 			expect(initialPrompt).toContain('await mcp.list_tools("filesystem")');
 			expect(initialPrompt).toContain('await mcp.call_tool("filesystem", "<tool>", arguments)');
 			for (const hidden of [
@@ -186,7 +280,7 @@ describe("createAgentSessionFromServices", () => {
 				],
 				"owner-a",
 			);
-			expect(session.systemPrompt).toContain("Enabled generic MCP servers: `filesystem`, `zebra`.");
+			expect(enabledServersLine(session.systemPrompt)).toBe("`filesystem`, `zebra`");
 			expect(session.systemPrompt).not.toContain('await mcp.list_tools("task")');
 			expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["mcp_list_tools_task", "mcp_call_task"]));
 			expect(session.systemPrompt).not.toContain("task-secret");
@@ -203,7 +297,7 @@ describe("createAgentSessionFromServices", () => {
 			expect(execute).toHaveBeenCalledOnce();
 			expect(execute.mock.calls[0]?.[0]).toContain("await _prime_mcp.reload(_prime_mcp_name)");
 			expect(execute.mock.calls[0]?.[0]).toContain('["task"]');
-			expect(session.systemPrompt).toContain("Enabled generic MCP servers: `filesystem`, `zebra`.");
+			expect(enabledServersLine(session.systemPrompt)).toBe("`filesystem`, `zebra`");
 			expect(session.getAllTools().map((tool) => tool.name)).not.toContain("mcp_call_task");
 			expect(session.getActiveToolNames()).not.toContain("mcp_call_task");
 
@@ -212,10 +306,106 @@ describe("createAgentSessionFromServices", () => {
 			await settingsManager.flush();
 			await session.reload();
 
-			expect(session.systemPrompt).toContain("Enabled generic MCP servers: `added`, `zebra`.");
+			expect(enabledServersLine(session.systemPrompt)).toBe("`added`, `zebra`");
 			expect(session.systemPrompt).toContain('await mcp.list_tools("added")');
 			expect(session.systemPrompt).not.toContain('await mcp.list_tools("filesystem")');
 			expect(session.systemPrompt).not.toContain("new-secret");
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("ENG-6108: activates a verified catalog connection in the live conversation after /plugins login", async () => {
+		// A /plugins login must become usable in the current (daemon-backed) conversation without a restart: credentials
+		// land in the shared credential store, the connection is verified with a real MCP handshake (token presence alone
+		// is never Connected), and the session reload the picker triggers rebuilds the system prompt and serves the catalog
+		// service through the generic mcp route.
+		const tempDir = join(
+			tmpdir(),
+			`pi-session-catalog-activation-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+		);
+		mkdirSync(tempDir, { recursive: true });
+		cleanupPaths.push(tempDir);
+		const faux = registerFauxProvider({ provider: "faux-eng6108" });
+		unregisters.push(() => faux.unregister());
+		const authStorage = AuthStorage.inMemory();
+		const store = McpConnectionStore.open(join(tempDir, "mcp-connections.json"));
+		// Pin a minimal catalog: this exercises connect-then-activate, not the merged catalog's breadth.
+		const mcpManager = new McpManager({
+			authStorage,
+			connectionStore: store,
+			getServiceCatalog: () => [
+				{
+					serviceId: "notion",
+					label: "Notion",
+					aliases: [],
+					transport: { type: "http", url: "https://mcp.notion.com/mcp" },
+					authStrategy: "oauth",
+					setup: { status: "ready" },
+					metadataReviewed: true,
+					legacyBuiltin: true,
+				},
+			],
+			noBackgroundVerification: true,
+			probeConnection: async () => ({ ok: true, toolCount: 3 }),
+		});
+		const model = faux.getModel();
+		const modelRegistry = ModelRegistry.inMemory(authStorage);
+		modelRegistry.registerProvider(model.provider, {
+			baseUrl: model.baseUrl,
+			apiKey: "faux-key",
+			api: faux.api,
+			models: faux.models.map((registeredModel) => ({
+				id: registeredModel.id,
+				name: registeredModel.name,
+				api: registeredModel.api,
+				reasoning: registeredModel.reasoning,
+				input: registeredModel.input,
+				cost: registeredModel.cost,
+				contextWindow: registeredModel.contextWindow,
+				maxTokens: registeredModel.maxTokens,
+				baseUrl: registeredModel.baseUrl,
+			})),
+		});
+		const services = await createAgentSessionServices({
+			cwd: tempDir,
+			agentDir: join(tempDir, "agent"),
+			authStorage,
+			settingsManager: SettingsManager.inMemory(),
+			modelRegistry,
+			mcpManager,
+			telemetryDisabled: true,
+			noBuiltinHerdrReporter: true,
+			resourceLoaderOptions: { noExtensions: true },
+		});
+		const { session } = await createAgentSessionFromServices({
+			services,
+			sessionManager: SessionManager.inMemory(),
+			model,
+		});
+		try {
+			expect(session.agent.state.systemPrompt).not.toContain("Enabled generic MCP servers");
+			expect(services.mcpManager.getDisabledBuiltinSkillOverrides()).toContain("-notion/SKILL.md");
+
+			// The /plugins connect flow, minus the UI: browser OAuth writes the
+			// shared credential, then the host verifies with a real handshake.
+			authStorage.set("mcp:notion", {
+				type: "oauth",
+				access: "notion-access",
+				refresh: "notion-refresh",
+				expires: Date.now() + 3600_000,
+				endpoint: "https://mcp.notion.com/mcp",
+			});
+			const record = await services.mcpManager.verifyConnection("notion");
+			expect(record.status).toBe("connected");
+
+			// The picker triggers the same session reload the interactive client performs: the prompt now
+			// advertises the service and the authored skill override clears.
+			await session.reload();
+			const promptAfter = session.agent.state.systemPrompt;
+			expect(promptAfter).toContain("Enabled generic MCP servers");
+			expect(promptAfter).toContain('await mcp.list_tools("notion")');
+			expect(services.mcpManager.getDisabledBuiltinSkillOverrides()).not.toContain("-notion/SKILL.md");
 		} finally {
 			session.dispose();
 		}

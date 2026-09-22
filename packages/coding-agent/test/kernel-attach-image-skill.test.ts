@@ -57,7 +57,7 @@ describe("attach-image skill over the kernel host bridge", () => {
 		expect(blocks).toEqual([{ type: "image", data: PNG_BASE64, mimeType: "image/png" }]);
 	});
 
-	it("compresses large attached images before storing them in the tool result", { retry: 1 }, async () => {
+	it("compresses large attached images before storing them in the tool result", async () => {
 		const imagePath = join(tempDir, "large.png");
 
 		provisioner = new IpythonKernelProvisioner(tempDir, {
@@ -82,7 +82,7 @@ print(await attach_image(${JSON.stringify(imagePath)}))
 		expect(result.attachments?.[0]?.data.length).toBeLessThanOrEqual(350_000);
 	});
 
-	it("reports when compressed animated images are flattened to their first frame", { retry: 1 }, async () => {
+	it("reports when compressed animated images are flattened to their first frame", async () => {
 		const imagePath = join(tempDir, "animated.gif");
 
 		provisioner = new IpythonKernelProvisioner(tempDir, {
@@ -271,5 +271,84 @@ print("done")
 		expect(result.status).toBe("error");
 		expect(result.stderr).toContain("attachment dropped");
 		expect(result.attachments).toBeUndefined();
+	});
+});
+
+describe("agent-observe skill over the kernel host bridge", () => {
+	let tempDir: string;
+	let provisioner: IpythonKernelProvisioner | undefined;
+
+	beforeEach(() => {
+		tempDir = join(tmpdir(), `pi-agent-observe-skill-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(tempDir, { recursive: true });
+	});
+
+	afterEach(async () => {
+		await provisioner?.dispose();
+		provisioner = undefined;
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("routes list/get/recent over the host bridge and validates argument types locally", async () => {
+		const requests: Array<{ type: string; payload: Record<string, unknown> }> = [];
+		const record = (type: string, payload: Record<string, unknown>) => {
+			requests.push({ type, payload });
+		};
+		const packagePath = join(getBundledSkillsDir(), "agent-observe");
+		const skill: PythonSkillRuntimeInfo = {
+			name: "agent-observe",
+			importName: "agent_observe",
+			packagePath,
+			pyprojectPath: join(packagePath, "pyproject.toml"),
+		};
+		provisioner = new IpythonKernelProvisioner(tempDir, {
+			pythonSkills: [skill],
+			hostHandlers: {
+				"agent_observe.list": async (payload) => {
+					record("agent_observe.list", payload);
+					return { agents: [{ activeSessionId: "alpha" }, { activeSessionId: "beta" }] };
+				},
+				"agent_observe.get": async (payload) => {
+					record("agent_observe.get", payload);
+					return { agent: { activeSessionId: payload.target, status: "model" } };
+				},
+				"agent_observe.recent": async (payload) => {
+					record("agent_observe.recent", payload);
+					return { messages: [{ index: 1, role: "assistant", text: "working", truncated: false }] };
+				},
+			},
+		});
+
+		const manager = await provisioner.ensure();
+		const result = await manager.execute(`
+import json
+agents = await agent_observe.list_agents()
+agent = await agent_observe.get_agent("beta")
+recent = await agent_observe.recent_messages("beta", limit=3, max_chars=120)
+try:
+    await agent_observe.get_agent(123)
+except TypeError as error:
+    print(f"TypeError: {error}")
+print(json.dumps({"agents": agents, "agent": agent, "recent": recent}, sort_keys=True))
+`);
+
+		expect(result.status).toBe("ok");
+		const lines = result.stdout.trim().split("\n");
+		expect(lines[0]).toBe("TypeError: target must be str, got int");
+		const output = JSON.parse(lines[1]);
+		expect(output.agents.agents).toHaveLength(2);
+		expect(output.agent.agent).toMatchObject({ activeSessionId: "beta", status: "model" });
+		expect(output.recent.messages).toEqual([{ index: 1, role: "assistant", text: "working", truncated: false }]);
+		expect(requests.map((request) => request.type)).toEqual([
+			"agent_observe.list",
+			"agent_observe.get",
+			"agent_observe.recent",
+		]);
+		expect(requests[2].payload).toMatchObject({
+			type: "agent_observe.recent",
+			target: "beta",
+			limit: 3,
+			max_chars: 120,
+		});
 	});
 });

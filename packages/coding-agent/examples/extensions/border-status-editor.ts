@@ -75,31 +75,31 @@ export default function (pi: ExtensionAPI) {
 	let activeTui: TUI | undefined;
 	const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-	const stopSpinner = () => {
+	const stopSpinner = (ctx: ExtensionContext) => {
 		if (spinnerTimer) {
-			clearInterval(spinnerTimer);
+			ctx.clearInterval(spinnerTimer);
 			spinnerTimer = undefined;
 		}
 	};
 
-	pi.on("agent_start", () => {
+	pi.on("agent_start", (_event, ctx) => {
 		isWorking = true;
-		stopSpinner();
-		spinnerTimer = setInterval(() => {
+		stopSpinner(ctx);
+		spinnerTimer = ctx.setInterval(() => {
 			spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
 			activeTui?.requestRender();
 		}, 80);
 		activeTui?.requestRender();
 	});
 
-	pi.on("agent_end", () => {
+	pi.on("agent_end", (_event, ctx) => {
 		isWorking = false;
-		stopSpinner();
+		stopSpinner(ctx);
 		activeTui?.requestRender();
 	});
 
-	pi.on("session_shutdown", () => {
-		stopSpinner();
+	pi.on("session_shutdown", (_event, ctx) => {
+		stopSpinner(ctx);
 		activeTui = undefined;
 	});
 

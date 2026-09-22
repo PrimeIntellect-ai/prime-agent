@@ -1,6 +1,16 @@
-import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@earendil-works/pi-ai";
+import {
+	type AssistantMessage,
+	type AssistantMessageEvent,
+	EventStream,
+	type FauxProviderRegistration,
+	fauxAssistantMessage,
+	getModel,
+	registerFauxProvider,
+	type ToolResultMessage,
+	type UserMessage,
+} from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	Agent,
 	type AgentContext,
@@ -9,6 +19,7 @@ import {
 	type AgentTool,
 	agentLoop,
 } from "../src/index.js";
+import { calculateTool } from "./utils/calculate.js";
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
 	constructor() {
@@ -723,5 +734,147 @@ describe("Agent", () => {
 
 		await agent.prompt("hello");
 		expect(receivedServiceTier).toBe("priority");
+	});
+});
+
+describe("Agent integration with the faux provider", () => {
+	const registrations: FauxProviderRegistration[] = [];
+
+	function createFauxRegistration(options: Parameters<typeof registerFauxProvider>[0] = {}): FauxProviderRegistration {
+		const registration = registerFauxProvider(options);
+		registrations.push(registration);
+		return registration;
+	}
+
+	function textOf(message: AssistantMessage | ToolResultMessage): string {
+		return message.content
+			.filter((block) => block.type === "text")
+			.map((block) => block.text)
+			.join("\n");
+	}
+
+	afterEach(() => {
+		while (registrations.length > 0) registrations.pop()?.unregister();
+	});
+
+	it("streams a prompt through the provider to a settled assistant message", async () => {
+		const faux = createFauxRegistration();
+		faux.setResponses([fauxAssistantMessage("4")]);
+		const agent = new Agent({
+			initialState: {
+				systemPrompt: "Keep responses concise.",
+				model: faux.getModel(),
+				thinkingLevel: "off",
+				tools: [],
+			},
+		});
+
+		await agent.prompt("What is 2+2? Answer with just the number.");
+
+		expect(agent.state.isStreaming).toBe(false);
+		expect(agent.state.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+		const assistantMessage = agent.state.messages[1];
+		if (assistantMessage.role !== "assistant") throw new Error("Expected assistant message");
+		expect(textOf(assistantMessage)).toContain("4");
+	});
+
+	it("aborts mid-stream and records the aborted stop reason", async () => {
+		const faux = createFauxRegistration({ tokensPerSecond: 20, tokenSize: { min: 2, max: 2 } });
+		faux.setResponses([
+			fauxAssistantMessage(
+				"one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen",
+			),
+		]);
+		const agent = new Agent({
+			initialState: {
+				systemPrompt: "You are a helpful assistant.",
+				model: faux.getModel(),
+				thinkingLevel: "off",
+				tools: [],
+			},
+		});
+
+		let aborted = false;
+		agent.subscribe((event) => {
+			if (!aborted && event.type === "message_update" && event.message.role === "assistant") {
+				aborted = true;
+				agent.abort();
+			}
+		});
+		await agent.prompt("Count slowly from 1 to 20.");
+
+		expect(agent.state.isStreaming).toBe(false);
+		const lastMessage = agent.state.messages[agent.state.messages.length - 1];
+		if (lastMessage.role !== "assistant") throw new Error("Expected assistant message");
+		expect(lastMessage.stopReason).toBe("aborted");
+		expect(lastMessage.errorMessage).toBeDefined();
+		expect(agent.state.errorMessage).toBe(lastMessage.errorMessage);
+	});
+
+	it("continues from a restored tool result", async () => {
+		const faux = createFauxRegistration();
+		const model = faux.getModel();
+		faux.setResponses([fauxAssistantMessage("The answer is 8.")]);
+		const agent = new Agent({
+			initialState: {
+				systemPrompt: "State the answer after a calculation result.",
+				model,
+				thinkingLevel: "off",
+				tools: [calculateTool],
+			},
+		});
+		const usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const userMessage: UserMessage = {
+			role: "user",
+			content: [{ type: "text", text: "What is 5 + 3?" }],
+			timestamp: Date.now(),
+		};
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "text", text: "Let me calculate that." },
+				{ type: "toolCall", id: "calc-1", name: "calculate", arguments: { expression: "5 + 3" } },
+			],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage,
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		};
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "calc-1",
+			toolName: "calculate",
+			content: [{ type: "text", text: "5 + 3 = 8" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		agent.state.messages = [userMessage, assistantMessage, toolResult];
+
+		await agent.continue();
+
+		expect(agent.state.isStreaming).toBe(false);
+		expect(agent.state.messages.length).toBeGreaterThanOrEqual(4);
+		const lastMessage = agent.state.messages[agent.state.messages.length - 1];
+		if (lastMessage.role !== "assistant") throw new Error("Expected assistant message");
+		expect(textOf(lastMessage)).toContain("8");
+	});
+
+	it("refuses to continue without a continuable tail message", async () => {
+		const faux = createFauxRegistration();
+		const agent = new Agent({ initialState: { systemPrompt: "Test", model: faux.getModel() } });
+
+		await expect(agent.continue()).rejects.toMatchObject({
+			code: "nothing-to-continue",
+			message: "No messages to continue from",
+		});
 	});
 });

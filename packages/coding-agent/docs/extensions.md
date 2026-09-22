@@ -327,7 +327,7 @@ user sends another prompt ◄─────────────────
   ├─► session_before_tree (can cancel or customize)
   └─► session_tree
 
-/model or Ctrl+P (model selection/cycling)
+/model or Alt+M (model selection/cycling)
   ├─► thinking_level_select (if model change changes/clamps thinking level)
   └─► model_select
 
@@ -411,7 +411,7 @@ Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `
 
 #### session_before_compact / session_compact
 
-Fired on compaction. See [compaction.md](compaction.md) for details.
+Fired on compaction. See [compaction.md](compaction.md) for details. `branchEntries` is a read-only snapshot of the active branch taken before compaction, so it does not include entries appended while your handler runs and must not be mutated.
 
 ```typescript
 pi.on("session_before_compact", async (event, ctx) => {
@@ -669,7 +669,7 @@ Header availability depends on provider and transport. Providers that abstract H
 
 #### model_select
 
-Fired when the model changes via `/model` command, model cycling (`Ctrl+P`), or session restore.
+Fired when the model changes via `/model` command, model cycling (`Alt+M`), or session restore.
 
 ```typescript
 pi.on("model_select", async (event, ctx) => {
@@ -1002,6 +1002,20 @@ Returns Prime Agent's current system prompt string.
 pi.on("before_agent_start", (event, ctx) => {
   const prompt = ctx.getSystemPrompt();
   console.log(`System prompt length: ${prompt.length}`);
+});
+```
+
+### ctx.setTimeout() / ctx.setInterval()
+
+Host-owned timers for scheduling extension work. Unlike the raw globals, a throwing (or rejecting) callback is reported through the extension error boundary instead of crashing the process, and all pending timers are cancelled automatically when the extension host unloads (session dispose, reload, or replacement). Handles work with `ctx.clearTimeout()` / `ctx.clearInterval()`.
+
+Raw global `setTimeout`/`setInterval` are unsupported for scheduling extension work: an uncaught error in a global timer callback can kill the whole process (including daemon session workers), and nothing cancels them on unload.
+
+```typescript
+pi.on("session_start", (_event, ctx) => {
+  const timer = ctx.setInterval(() => pollSomething(), 2000);
+  // Optional: unload cancels it automatically, or clear it yourself:
+  // ctx.clearInterval(timer);
 });
 ```
 
@@ -2187,7 +2201,7 @@ For more control (e.g., to distinguish timeout from user cancel), use `AbortSign
 
 ```typescript
 const controller = new AbortController();
-const timeoutId = setTimeout(() => controller.abort(), 5000);
+const timeoutId = ctx.setTimeout(() => controller.abort(), 5000);
 
 const confirmed = await ctx.ui.confirm(
   "Timed Confirmation",
@@ -2195,7 +2209,7 @@ const confirmed = await ctx.ui.confirm(
   { signal: controller.signal }
 );
 
-clearTimeout(timeoutId);
+ctx.clearTimeout(timeoutId);
 
 if (confirmed) {
   // User confirmed

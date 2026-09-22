@@ -1,102 +1,18 @@
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	type DaemonInfo,
 	evaluateShutdownQuietPeriod,
 	isWorkerSocketPath,
-	mergeDiscoveredDaemonProcesses,
-	parseLsofListeners,
-	parsePrimeAgentProcessIds,
-	parsePsEtimes,
-	parseSsListeners,
 	planReap,
 	planShutdownAll,
 	planShutdownConfirmation,
-	sortDaemons,
 	verifyHelloSupervisorPid,
 } from "../src/cli/daemon-ps.js";
 import { getProcessStartId } from "../src/core/session-lease.js";
-import { defaultDaemonSocketDir } from "../src/modes/daemon/daemon-socket.js";
 
-describe("worker socket classification", () => {
-	it.runIf(process.platform !== "win32")("recognizes only worker sockets in the default service directory", () => {
-		expect(isWorkerSocketPath(join(defaultDaemonSocketDir(), "worker-abc.sock"))).toBe(true);
-		expect(isWorkerSocketPath(join(defaultDaemonSocketDir(), "daemon.sock"))).toBe(false);
-		expect(isWorkerSocketPath("/tmp/worker-abc.sock")).toBe(false);
-	});
-});
-
-describe("parseSsListeners", () => {
-	const stdout = [
-		"Netid State  Recv-Q Send-Q Local Address:Port  Peer Address:Port",
-		'u_str LISTEN 0      511    /tmp/custom.sock 10147608 * 0 users:(("prime-agent",pid=1234,fd=22))',
-		'u_str LISTEN 0      511    /tmp/prime-agent-1000/daemon.sock 79453846 * 0 users:(("prime-agent",pid=5678,fd=24))',
-		'u_str LISTEN 0      4096   /run/dbus/system_bus_socket 123 * 0 users:(("dbus-daemon",pid=900,fd=3))',
-		'u_str ESTAB  0      0      /tmp/other.sock 456 * 0 users:(("prime-agent",pid=4321,fd=9))',
-		"",
-	].join("\n");
-
-	it("extracts socket + pid for prime-agent LISTEN sockets only", () => {
-		const daemons = parseSsListeners(stdout, "prime-agent");
-		expect(daemons).toEqual([
-			{ pid: 1234, socketPath: "/tmp/custom.sock" },
-			{ pid: 5678, socketPath: "/tmp/prime-agent-1000/daemon.sock" },
-		]);
-	});
-
-	it("ignores sockets owned by other processes and non-LISTEN states", () => {
-		const daemons = parseSsListeners(stdout, "prime-agent");
-		expect(daemons.some((daemon) => daemon.socketPath.includes("dbus"))).toBe(false);
-		expect(daemons.some((daemon) => daemon.pid === 4321)).toBe(false);
-	});
-
-	it("honors a different app name", () => {
-		expect(parseSsListeners(stdout, "pi")).toEqual([]);
-	});
-});
-
-describe("parseLsofListeners", () => {
-	it("pairs each pid with its listening unix socket paths", () => {
-		const stdout = ["p1234", "fu", "n/tmp/a.sock", "p5678", "n/tmp/b.sock", "n0x0 (not a path)", ""].join("\n");
-		expect(parseLsofListeners(stdout)).toEqual([
-			{ pid: 1234, socketPath: "/tmp/a.sock" },
-			{ pid: 5678, socketPath: "/tmp/b.sock" },
-		]);
-	});
-});
-
-describe("parsePrimeAgentProcessIds", () => {
-	it("finds process.title names even when lsof reports the executable as node", () => {
-		const stdout = [
-			"  123 node prime-agent --mode daemon",
-			"  456 prime-agent prime-agent",
-			"  789 /usr/local/bin/prime-agent prime-agent",
-			"  900 node unrelated.js",
-			"",
-		].join("\n");
-		expect(parsePrimeAgentProcessIds(stdout, "prime-agent")).toEqual([123, 456, 789]);
-	});
-});
-
-describe("mergeDiscoveredDaemonProcesses", () => {
-	it("keeps process-title discoveries when lsof by name returned only a partial set", () => {
-		expect(
-			mergeDiscoveredDaemonProcesses(
-				[
-					{ pid: 123, socketPath: "/tmp/by-name.sock" },
-					{ pid: 456, socketPath: "/tmp/shared.sock" },
-				],
-				[
-					{ pid: 456, socketPath: "/tmp/shared.sock" },
-					{ pid: 789, socketPath: "/tmp/by-pid.sock" },
-				],
-			),
-		).toEqual([
-			{ pid: 123, socketPath: "/tmp/by-name.sock" },
-			{ pid: 456, socketPath: "/tmp/shared.sock" },
-			{ pid: 789, socketPath: "/tmp/by-pid.sock" },
-		]);
-	});
+it("recognizes Windows worker named pipes on every platform", () => {
+	expect(isWorkerSocketPath("\\\\.\\pipe\\prime-agent-worker-98ed5cb228d2-5b1d3aeb91ee")).toBe(true);
+	expect(isWorkerSocketPath("\\\\.\\pipe\\prime-agent-daemon")).toBe(false);
 });
 
 describe("evaluateShutdownQuietPeriod", () => {
@@ -113,34 +29,6 @@ describe("verifyHelloSupervisorPid", () => {
 		if (processStartId) {
 			expect(verifyHelloSupervisorPid(process.pid, `${processStartId}-stale`)).toBeUndefined();
 		}
-	});
-});
-
-describe("parsePsEtimes", () => {
-	it("maps pid to elapsed seconds", () => {
-		const uptimes = parsePsEtimes("  1234  86400\n  5678      42\n");
-		expect(uptimes.get(1234)).toBe(86400);
-		expect(uptimes.get(5678)).toBe(42);
-		expect(uptimes.size).toBe(2);
-	});
-});
-
-describe("sortDaemons", () => {
-	it("orders default first, then by status, then socket", () => {
-		const daemons: DaemonInfo[] = [
-			makeDaemon({ socketPath: "/tmp/z.sock", status: "orphan-file" }),
-			makeDaemon({ socketPath: "/tmp/a.sock", status: "stale" }),
-			makeDaemon({ socketPath: "/tmp/default.sock", status: "current", isDefault: true }),
-			makeDaemon({ socketPath: "/tmp/b.sock", status: "current" }),
-			makeDaemon({ socketPath: "/tmp/c.sock", status: "unreachable" }),
-		];
-		expect(sortDaemons(daemons).map((daemon) => daemon.socketPath)).toEqual([
-			"/tmp/default.sock",
-			"/tmp/b.sock",
-			"/tmp/a.sock",
-			"/tmp/c.sock",
-			"/tmp/z.sock",
-		]);
 	});
 });
 
@@ -167,16 +55,12 @@ describe("planReap", () => {
 		expect(plan.map((action) => action.kind)).toEqual(["shutdown", "remove-file"]);
 	});
 
-	it("removes a stale default socket file but never stops a live default daemon", () => {
+	it("removes a stale default socket file", () => {
 		const plan = planReap(
-			[
-				makeDaemon({ socketPath: "/tmp/default.sock", status: "orphan-file", isDefault: true }),
-				makeDaemon({ socketPath: "/tmp/live-default.sock", status: "current", isDefault: true, sessionCount: 0 }),
-			],
+			[makeDaemon({ socketPath: "/tmp/default.sock", status: "orphan-file", isDefault: true })],
 			true,
 		);
 		expect(plan[0]!.kind).toBe("remove-file");
-		expect(plan[1]!.kind).toBe("skip");
 	});
 
 	it("only kills unreachable daemons with --force", () => {

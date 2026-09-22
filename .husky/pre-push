@@ -1,0 +1,5 @@
+#!/bin/sh
+# Pre-push hook, run by git for every push (husky activates it after `npm ci`).
+# The guard rules, the escape hatch, and the worktree install one-liner
+# (git config core.hooksPath .husky) are documented in scripts/pre-push-guard.sh.
+exec sh "$(dirname "$0")/../scripts/pre-push-guard.sh" "$@"

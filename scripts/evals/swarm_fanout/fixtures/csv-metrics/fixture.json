@@ -1,0 +1,54 @@
+{
+  "name": "csv-metrics",
+  "artifact": "combined-index.md",
+  "shards": [
+    {
+      "file": "metrics-01.csv",
+      "worker": "worker-metrics-01",
+      "question": "What is the maximum value of the cpu column?",
+      "expected": 85
+    },
+    {
+      "file": "metrics-02.csv",
+      "worker": "worker-metrics-02",
+      "question": "What is the total of the latency_ms column over rows with cpu >= 90?",
+      "expected": 37
+    },
+    {
+      "file": "metrics-03.csv",
+      "worker": "worker-metrics-03",
+      "question": "How many rows have memory > 80?",
+      "expected": 3
+    },
+    {
+      "file": "metrics-04.csv",
+      "worker": "worker-metrics-04",
+      "question": "What is the total of the latency_ms column over all rows?",
+      "expected": 287
+    },
+    {
+      "file": "metrics-05.csv",
+      "worker": "worker-metrics-05",
+      "question": "How many rows have cpu >= 90?",
+      "expected": 1
+    },
+    {
+      "file": "metrics-06.csv",
+      "worker": "worker-metrics-06",
+      "question": "What is the total of the memory column over all rows?",
+      "expected": 746
+    },
+    {
+      "file": "metrics-07.csv",
+      "worker": "worker-metrics-07",
+      "question": "What is the maximum memory among rows with latency_ms < 10?",
+      "expected": 72
+    },
+    {
+      "file": "metrics-08.csv",
+      "worker": "worker-metrics-08",
+      "question": "What is the total of the cpu column over rows with memory >= 50?",
+      "expected": 485
+    }
+  ]
+}

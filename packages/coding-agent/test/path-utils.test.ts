@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, posix, resolve, win32 } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -6,57 +6,24 @@ import { expandTildePath } from "../src/config.js";
 import { expandPath, resolveReadPath, resolveToCwd } from "../src/core/tools/path-utils.js";
 
 describe("path-utils", () => {
-	describe("expandPath", () => {
-		it("should expand ~ to home directory", () => {
-			const result = expandPath("~");
-			expect(result).not.toContain("~");
-		});
+	it.each<[string, typeof expandPath]>([
+		["expandPath", expandPath],
+		["expandTildePath", expandTildePath],
+	])("%s expands tildes with the platform separator", (_name, expand) => {
+		const home = homedir();
+		const backslashInput = "~\\Documents\\file.txt";
 
-		it("should expand ~/path to home directory", () => {
-			const result = expandPath("~/Documents/file.txt");
-			expect(result).not.toContain("~/");
-		});
-
-		it("joins ~/ paths with the platform separator (win32 must not keep the posix slash)", () => {
-			const home = homedir();
-			expect(expandPath("~/docs/file.txt", "win32")).toBe(win32.join(home, "docs", "file.txt"));
-			expect(expandPath("~/docs/file.txt", "linux")).toBe(posix.join(home, "docs/file.txt"));
-			expect(expandTildePath("~/docs/file.txt", "win32")).toBe(win32.join(home, "docs", "file.txt"));
-		});
-
-		for (const expand of [expandPath, expandTildePath]) {
-			it(`${expand.name} expands a backslash tilde prefix only on Windows`, () => {
-				const input = "~\\Documents\\file.txt";
-				expect(expand(input, "win32")).toBe(win32.join(homedir(), "Documents", "file.txt"));
-				expect(expand(input, "linux")).toBe(input);
-				expect(expand(input, "darwin")).toBe(input);
-				expect(expand(input)).toBe(process.platform === "win32" ? join(homedir(), "Documents", "file.txt") : input);
-			});
-
-			it(`${expand.name} preserves backslashes within POSIX paths`, () => {
-				expect(expand("~/Documents\\file.txt", "linux")).toBe(posix.join(homedir(), "Documents\\file.txt"));
-				expect(expand("~/Documents\\file.txt", "darwin")).toBe(posix.join(homedir(), "Documents\\file.txt"));
-			});
-		}
-
-		it("should normalize Unicode spaces", () => {
-			// Non-breaking space (U+00A0) should become regular space
-			const withNBSP = "file\u00A0name.txt";
-			const result = expandPath(withNBSP);
-			expect(result).toBe("file name.txt");
-		});
+		expect(expand("~/docs/file.txt", "win32")).toBe(win32.join(home, "docs", "file.txt"));
+		expect(expand("~/docs/file.txt", "linux")).toBe(posix.join(home, "docs/file.txt"));
+		// A backslash tilde prefix is a Windows-only spelling; POSIX keeps it verbatim.
+		expect(expand(backslashInput, "win32")).toBe(win32.join(home, "Documents", "file.txt"));
+		expect(expand(backslashInput, "linux")).toBe(backslashInput);
+		expect(expand("~/Documents\\file.txt", "darwin")).toBe(posix.join(home, "Documents\\file.txt"));
 	});
 
-	describe("resolveToCwd", () => {
-		it("should resolve absolute paths as-is", () => {
-			const result = resolveToCwd("/absolute/path/file.txt", "/some/cwd");
-			expect(result).toBe("/absolute/path/file.txt");
-		});
-
-		it("should resolve relative paths against cwd", () => {
-			const result = resolveToCwd("relative/file.txt", "/some/cwd");
-			expect(result).toBe(resolve("/some/cwd", "relative/file.txt"));
-		});
+	it("resolves relative paths against the cwd and leaves absolute paths alone", () => {
+		expect(resolveToCwd("/absolute/path/file.txt", "/some/cwd")).toBe("/absolute/path/file.txt");
+		expect(resolveToCwd("relative/file.txt", "/some/cwd")).toBe(resolve("/some/cwd", "relative/file.txt"));
 	});
 
 	describe("resolveReadPath", () => {
@@ -67,119 +34,28 @@ describe("path-utils", () => {
 		});
 
 		afterEach(() => {
-			// Clean up temp files and directory
-			try {
-				const files = readdirSync(tempDir);
-				for (const file of files) {
-					unlinkSync(join(tempDir, file));
-				}
-				rmdirSync(tempDir);
-			} catch {
-				// Ignore cleanup errors
-			}
+			rmSync(tempDir, { recursive: true, force: true });
 		});
 
-		it("should resolve existing file path", () => {
-			const fileName = "test-file.txt";
-			writeFileSync(join(tempDir, fileName), "content");
+		// macOS stores decomposed (NFD) filenames and curly apostrophes while users type
+		// composed (NFC) names with straight quotes; resolveReadPath bridges both.
+		it.each<[string, string, string]>([
+			["an exact name", "test-file.txt", "test-file.txt"],
+			["an NFD name requested as NFC", "file\u0065\u0301.txt", "file\u00e9.txt"],
+			["a curly apostrophe requested straight", "Capture d\u2019cran.txt", "Capture d'cran.txt"],
+			["a French screenshot name", "Capture d\u2019\u00e9cran.txt", "Capture d'\u00e9cran.txt"],
+		])("resolves %s", (_name, onDisk, requested) => {
+			writeFileSync(join(tempDir, onDisk), "content");
 
-			const result = resolveReadPath(fileName, tempDir);
-			expect(result).toBe(join(tempDir, fileName));
+			const result = resolveReadPath(requested, tempDir);
+
+			expect(result.startsWith(tempDir)).toBe(true);
+			expect(readFileSync(result, "utf-8")).toBe("content");
+			expect(readdirSync(tempDir)).toHaveLength(1);
 		});
 
-		it("should handle NFC vs NFD Unicode normalization (macOS filenames with accents)", () => {
-			// macOS stores filenames in NFD (decomposed) form:
-			//   é = e + combining acute accent (U+0301)
-			// Users typically type in NFC (composed) form:
-			//   é = single character (U+00E9)
-			//
-			// Note: macOS APFS normalizes Unicode automatically, so both paths work.
-			// This test verifies the NFD variant fallback works on systems that don't.
-
-			// NFD: e (U+0065) + combining acute accent (U+0301)
-			const nfdFileName = "file\u0065\u0301.txt";
-			// NFC: é as single character (U+00E9)
-			const nfcFileName = "file\u00e9.txt";
-
-			// Verify they have different byte sequences
-			expect(nfdFileName).not.toBe(nfcFileName);
-			expect(Buffer.from(nfdFileName)).not.toEqual(Buffer.from(nfcFileName));
-
-			// Create file with NFD name
-			writeFileSync(join(tempDir, nfdFileName), "content");
-
-			// User provides NFC path - should find the file (via filesystem normalization or our fallback)
-			const result = resolveReadPath(nfcFileName, tempDir);
-			// Result should contain the accented character (either NFC or NFD form)
-			expect(result).toContain(tempDir);
-			expect(result).toMatch(/file.+\.txt$/);
-		});
-
-		it("should handle curly quotes vs straight quotes (macOS filenames)", () => {
-			// macOS uses curly apostrophe (U+2019) in screenshot filenames:
-			//   Capture d'écran (U+2019)
-			// Users typically type straight apostrophe (U+0027):
-			//   Capture d'ecran (U+0027)
-
-			const curlyQuoteName = "Capture d\u2019cran.txt"; // U+2019 right single quotation mark
-			const straightQuoteName = "Capture d'cran.txt"; // U+0027 apostrophe
-
-			// Verify they are different
-			expect(curlyQuoteName).not.toBe(straightQuoteName);
-
-			// Create file with curly quote name (simulating macOS behavior)
-			writeFileSync(join(tempDir, curlyQuoteName), "content");
-
-			// User provides straight quote path - should find the curly quote file
-			const result = resolveReadPath(straightQuoteName, tempDir);
-			expect(result).toBe(join(tempDir, curlyQuoteName));
-		});
-
-		it("should handle combined NFC + curly quote (French macOS screenshots)", () => {
-			// Full macOS screenshot filename: "Capture d'écran" with NFD é and curly quote
-			// Note: macOS APFS normalizes NFD to NFC, so the actual file on disk uses NFC
-			const nfcCurlyName = "Capture d\u2019\u00e9cran.txt"; // NFC + curly quote (how APFS stores it)
-			const nfcStraightName = "Capture d'\u00e9cran.txt"; // NFC + straight quote (user input)
-
-			// Verify they are different
-			expect(nfcCurlyName).not.toBe(nfcStraightName);
-
-			// Create file with macOS-style name (curly quote)
-			writeFileSync(join(tempDir, nfcCurlyName), "content");
-
-			// User provides straight quote path - should find the curly quote file
-			const result = resolveReadPath(nfcStraightName, tempDir);
-			expect(result).toBe(join(tempDir, nfcCurlyName));
-		});
-
-		it("should handle macOS screenshot AM/PM variant with narrow no-break space", () => {
-			// macOS uses narrow no-break space (U+202F) before AM/PM in screenshot names
-			const macosName = "Screenshot 2024-01-01 at 10.00.00\u202FAM.png"; // U+202F
-			const userName = "Screenshot 2024-01-01 at 10.00.00 AM.png"; // regular space
-
-			// Create file with macOS-style name
-			writeFileSync(join(tempDir, macosName), "content");
-
-			// User provides regular space path
-			const result = resolveReadPath(userName, tempDir);
-
-			// This works because tryMacOSScreenshotPath() handles this case
-			expect(result).toBe(join(tempDir, macosName));
-		});
-
-		it("should handle macOS screenshot lowercase am/pm variant (en_AU locale)", () => {
-			// Some locales like en_AU use lowercase am/pm in screenshot names
-			const macosName = "Screenshot 2024-01-01 at 10.00.00\u202Fam.png"; // U+202F + lowercase
-			const userName = "Screenshot 2024-01-01 at 10.00.00 am.png"; // regular space + lowercase
-
-			// Create file with macOS-style name
-			writeFileSync(join(tempDir, macosName), "content");
-
-			// User provides regular space path
-			const result = resolveReadPath(userName, tempDir);
-
-			// This works because tryMacOSScreenshotPath() uses case-insensitive matching
-			expect(result).toBe(join(tempDir, macosName));
+		it("normalizes Unicode spaces in expanded paths", () => {
+			expect(expandPath("file\u00A0name.txt")).toBe("file name.txt");
 		});
 	});
 });

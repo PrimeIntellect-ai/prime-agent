@@ -1,6 +1,10 @@
 import assert from "node:assert";
 import { beforeEach, describe, it } from "node:test";
+import { isMouseSequence, isWheelDown, isWheelUp, parseSgrMouseEvent } from "../src/mouse.js";
 import { StdinBuffer } from "../src/stdin-buffer.js";
+import { getCellDimensions, resetCapabilitiesCache, setCellDimensions } from "../src/terminal-image.js";
+import { type Component, TUI } from "../src/tui.js";
+import { VirtualTerminal } from "./virtual-terminal.js";
 
 describe("StdinBuffer", () => {
 	let buffer: StdinBuffer;
@@ -498,6 +502,145 @@ describe("StdinBuffer", () => {
 			await wait(15);
 
 			assert.deepStrictEqual(emittedSequences, []);
+		});
+	});
+});
+
+describe("SGR mouse reports", () => {
+	const cases: Array<{
+		sequence: string;
+		expected: ReturnType<typeof parseSgrMouseEvent>;
+		wheel?: "up" | "down";
+	}> = [
+		{
+			sequence: "\x1b[<64;10;5M",
+			expected: { button: 64, x: 10, y: 5, press: true, motion: false, shift: false, alt: false, ctrl: false },
+			wheel: "up",
+		},
+		{
+			sequence: "\x1b[<65;1;1M",
+			expected: { button: 65, x: 1, y: 1, press: true, motion: false, shift: false, alt: false, ctrl: false },
+			wheel: "down",
+		},
+		{
+			// button 84 = wheel up (64) + shift (4) + ctrl (16); modifier bits are stripped from the button
+			sequence: "\x1b[<84;3;7M",
+			expected: { button: 64, x: 3, y: 7, press: true, motion: false, shift: true, alt: false, ctrl: true },
+			wheel: "up",
+		},
+		{
+			sequence: "\x1b[<0;5;5M",
+			expected: { button: 0, x: 5, y: 5, press: true, motion: false, shift: false, alt: false, ctrl: false },
+		},
+		{
+			sequence: "\x1b[<0;5;5m",
+			expected: { button: 0, x: 5, y: 5, press: false, motion: false, shift: false, alt: false, ctrl: false },
+		},
+		{
+			// motion bit (32) is reported separately from the button
+			sequence: "\x1b[<32;5;5M",
+			expected: { button: 0, x: 5, y: 5, press: true, motion: true, shift: false, alt: false, ctrl: false },
+		},
+		{ sequence: "\x1b[A", expected: null },
+		{ sequence: "a", expected: null },
+		{ sequence: "\x1b[<64;10M", expected: null },
+	];
+
+	for (const testCase of cases) {
+		it(`parses ${JSON.stringify(testCase.sequence)}`, () => {
+			const event = parseSgrMouseEvent(testCase.sequence);
+			assert.deepStrictEqual(event, testCase.expected);
+			if (event) {
+				assert.strictEqual(isWheelUp(event), testCase.wheel === "up");
+				assert.strictEqual(isWheelDown(event), testCase.wheel === "down");
+			}
+		});
+	}
+
+	it("matches SGR and legacy mouse reports", () => {
+		assert.strictEqual(isMouseSequence("\x1b[<64;10;5M"), true);
+		assert.strictEqual(isMouseSequence("\x1b[M   "), true);
+		assert.strictEqual(isMouseSequence("\x1b[A"), false);
+	});
+
+	for (const [name, chunks, expected] of [
+		["an SGR report split across chunks", ["\x1b", "[<64", ";20;5M"], "\x1b[<64;20;5M"],
+		["a DECRPM mouse-probe response split across chunks", ["\x1b[?1006;", "2$y"], "\x1b[?1006;2$y"],
+	] as const) {
+		it(`assembles ${name}`, () => {
+			const buffer = new StdinBuffer({ timeout: 10 });
+			const received: string[] = [];
+			buffer.on("data", (sequence) => received.push(sequence));
+			try {
+				for (const chunk of chunks) buffer.process(chunk);
+				assert.deepStrictEqual(received, [expected]);
+			} finally {
+				buffer.destroy();
+			}
+		});
+	}
+});
+
+describe("TUI cell size replies", () => {
+	class InputRecorder implements Component {
+		readonly inputs: string[] = [];
+
+		render(): string[] {
+			return [""];
+		}
+
+		handleInput(data: string): void {
+			this.inputs.push(data);
+		}
+
+		invalidate(): void {}
+	}
+
+	function withImageTerminal(fn: (terminal: VirtualTerminal, recorder: InputRecorder) => void): void {
+		const saved = {
+			TERM_PROGRAM: process.env.TERM_PROGRAM,
+			TERM: process.env.TERM,
+			GHOSTTY_RESOURCES_DIR: process.env.GHOSTTY_RESOURCES_DIR,
+		};
+		process.env.TERM_PROGRAM = "ghostty";
+		delete process.env.TERM;
+		delete process.env.GHOSTTY_RESOURCES_DIR;
+		resetCapabilitiesCache();
+		setCellDimensions({ widthPx: 9, heightPx: 18 });
+
+		const terminal = new VirtualTerminal(80, 24);
+		const tui = new TUI(terminal);
+		const recorder = new InputRecorder();
+		tui.setFocus(recorder);
+		tui.start();
+		try {
+			fn(terminal, recorder);
+		} finally {
+			tui.stop();
+			for (const [key, value] of Object.entries(saved)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	}
+
+	it("forwards a bare escape even though a cell size query was sent at startup", () => {
+		withImageTerminal((terminal, recorder) => {
+			terminal.sendInput("\x1b");
+			assert.deepStrictEqual(recorder.inputs, ["\x1b"]);
+		});
+	});
+
+	it("consumes a cell size reply without swallowing later user input", () => {
+		withImageTerminal((terminal, recorder) => {
+			terminal.sendInput("\x1b[6;20;10t");
+			assert.deepStrictEqual(recorder.inputs, []);
+			assert.deepStrictEqual(getCellDimensions(), { widthPx: 10, heightPx: 20 });
+
+			terminal.sendInput("q");
+			assert.deepStrictEqual(recorder.inputs, ["q"]);
 		});
 	});
 });

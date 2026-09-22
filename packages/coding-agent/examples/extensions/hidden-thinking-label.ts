@@ -1,21 +1,21 @@
 /**
  * Hidden Thinking Label Extension
  *
- * Demonstrates `ctx.ui.setHiddenThinkingLabel()` for customizing the label shown
- * when thinking blocks are hidden.
+ * Legacy example for the deprecated `ctx.ui.setHiddenThinkingLabel()` hook.
+ * The hook has no effect: thinking is now displayed without a heading.
  *
  * Usage:
  *   pi --extension examples/extensions/hidden-thinking-label.ts
  *
  * Test:
  *   1. Load this extension
- *   2. Hide thinking blocks with Ctrl+T
+ *   2. Press Ctrl+O once to show thinking and file diffs
  *   3. Ask for something that produces reasoning output
- *   4. The collapsed thinking block label will show the custom text
+ *   4. Thinking remains unlabeled; this extension does not change its rendering
  *
  * Commands:
- *   /thinking-label <text>   Set a custom hidden thinking label
- *   /thinking-label          Reset to the default label
+ *   /thinking-label <text>   Exercise the deprecated hook (no visible effect)
+ *   /thinking-label          Exercise the deprecated reset (no visible effect)
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -34,20 +34,20 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("thinking-label", {
-		description: "Set the hidden thinking label. Use without args to reset.",
+		description: "Legacy thinking-label hook (no visible effect).",
 		handler: async (args, ctx) => {
 			const nextLabel = args.trim();
 
 			if (!nextLabel) {
 				label = DEFAULT_LABEL;
 				ctx.ui.setHiddenThinkingLabel();
-				ctx.ui.notify(`Hidden thinking label reset to: ${DEFAULT_LABEL}`);
+				ctx.ui.notify("Thinking labels are no longer displayed; resetting the legacy label has no effect.");
 				return;
 			}
 
 			label = nextLabel;
 			ctx.ui.setHiddenThinkingLabel(label);
-			ctx.ui.notify(`Hidden thinking label set to: ${label}`);
+			ctx.ui.notify("Thinking labels are no longer displayed; setting the legacy label has no effect.");
 		},
 	});
 }

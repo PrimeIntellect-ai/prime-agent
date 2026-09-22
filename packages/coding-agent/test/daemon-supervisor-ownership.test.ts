@@ -9,6 +9,8 @@ import {
 	acquireDaemonShutdownAdmission,
 	acquireDaemonSupervisorOwnership,
 	assertDaemonSupervisorOwnerCurrent,
+	isDaemonShutdownAdmissionActive,
+	listDaemonSupervisorSocketPathsForAgentDir,
 	persistDaemonStartupFenceFromOwner,
 } from "../src/modes/daemon/daemon-supervisor-ownership.js";
 import * as childProcessModule from "../src/utils/child-process.js";
@@ -143,6 +145,57 @@ describe("daemon supervisor ownership registry", () => {
 		await legacyOwner.release();
 	});
 
+	it("lists supervisor sockets from the legacy registry for the same agent dir", async () => {
+		const paths = createPaths();
+		const legacyDir = join(paths.root, "legacy-registry");
+		const legacyOwner = await acquireDaemonSupervisorOwnership({
+			agentDir: paths.agentDir,
+			appVersion: "test",
+			descriptorDir: paths.descriptorDir,
+			generation: "legacy-discovery-owner",
+			registryDir: legacyDir,
+			socketPath: paths.socketPath,
+		});
+
+		// The pre-move record keeps the daemon discoverable by the state root
+		// that owns the agent dir; the current registry alone has nothing.
+		expect(listDaemonSupervisorSocketPathsForAgentDir(paths.agentDir, paths.registryDir)).toEqual([]);
+		expect(listDaemonSupervisorSocketPathsForAgentDir(paths.agentDir, paths.registryDir, legacyDir)).toEqual([
+			legacyOwner.record.socketPath,
+		]);
+
+		// The legacy registry scopes by agent dir exactly like the current one.
+		expect(
+			listDaemonSupervisorSocketPathsForAgentDir(join(paths.root, "other-agent"), paths.registryDir, legacyDir),
+		).toEqual([]);
+
+		await legacyOwner.release();
+	});
+
+	it("skips records whose agent dir cannot be canonicalized instead of aborting discovery", async () => {
+		const paths = createPaths();
+		const owner = await acquire(paths, "discovery-owner");
+		const brokenDir = join(paths.registryDir, "broken.owner");
+		mkdirSync(brokenDir, { recursive: true, mode: 0o700 });
+		// A valid record shape whose agent dir path can no longer be canonicalized
+		// (ENOTDIR under /dev/null): one stale record must not hide the others.
+		const broken = {
+			...owner.record,
+			token: "broken-token",
+			generation: "broken-owner",
+			agentDir: "/dev/null/agent",
+			socketPath: join(paths.root, "broken.sock"),
+		};
+		writeFileSync(join(brokenDir, "owner.json"), `${JSON.stringify(broken, null, 2)}\n`);
+
+		expect(listDaemonSupervisorSocketPathsForAgentDir(paths.agentDir, paths.registryDir)).toEqual([
+			owner.record.socketPath,
+		]);
+		expect(listDaemonSupervisorSocketPathsForAgentDir("/dev/null/agent", paths.registryDir)).toEqual([]);
+
+		await owner.release();
+	});
+
 	it("legacy registry reads never reclaim abandoned legacy directories", async () => {
 		const paths = createPaths();
 		const legacyDir = join(paths.root, "legacy-registry");
@@ -254,6 +307,74 @@ describe("daemon supervisor ownership registry", () => {
 		await expect(pending).rejects.toMatchObject({ code: "daemon_shutdown_in_progress" });
 		await releasing;
 		expect(existsSync(admissionPath)).toBe(false);
+	});
+
+	it("re-arms a shutdown admission whose lease elapsed while the holder blocked its event loop", async () => {
+		const paths = createPaths();
+		mkdirSync(paths.registryDir, { recursive: true, mode: 0o700 });
+		process.env[registryDirEnv] = paths.registryDir;
+		vi.useFakeTimers();
+		try {
+			const admission = await acquireDaemonShutdownAdmission();
+			const admissionPath = join(paths.registryDir, "shutdown-admission.json");
+			const record = readJson(admissionPath);
+			vi.setSystemTime(Date.parse(record.expiresAt as string) + 1);
+
+			await admission.assertOrRenew();
+
+			const renewed = readJson(admissionPath);
+			expect(renewed.token).toBe(record.token);
+			expect(Date.parse(renewed.expiresAt as string)).toBeGreaterThan(Date.now());
+			await admission.release();
+			expect(existsSync(admissionPath)).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("keeps a live holder's elapsed admission on disk when another process only probes it", async () => {
+		const paths = createPaths();
+		mkdirSync(paths.registryDir, { recursive: true, mode: 0o700 });
+		process.env[registryDirEnv] = paths.registryDir;
+		vi.useFakeTimers();
+		try {
+			const admission = await acquireDaemonShutdownAdmission();
+			const admissionPath = join(paths.registryDir, "shutdown-admission.json");
+			const record = readJson(admissionPath);
+			vi.setSystemTime(Date.parse(record.expiresAt as string) + 1);
+
+			expect(await isDaemonShutdownAdmissionActive()).toBe(false);
+			expect(existsSync(admissionPath)).toBe(true);
+			expect(readJson(admissionPath).token).toBe(record.token);
+
+			await admission.assertOrRenew();
+			expect(await isDaemonShutdownAdmissionActive()).toBe(true);
+			await admission.release();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("keeps a shutdown admission after a renew that could not read the record", async () => {
+		const paths = createPaths();
+		mkdirSync(paths.registryDir, { recursive: true, mode: 0o700 });
+		process.env[registryDirEnv] = paths.registryDir;
+		const admission = await acquireDaemonShutdownAdmission();
+		const admissionPath = join(paths.registryDir, "shutdown-admission.json");
+		const bytes = readFileSync(admissionPath, "utf8");
+		writeFileSync(admissionPath, "{ truncated");
+
+		const readFailure = await admission
+			.assertOrRenew()
+			.then(() => undefined)
+			.catch((error: unknown) => error as Error & { code?: string });
+		if (!readFailure) throw new Error("assertOrRenew resolved despite an unreadable record");
+		expect(readFailure.code).toBeUndefined();
+
+		writeFileSync(admissionPath, bytes);
+		await admission.assertOrRenew();
+		expect(readJson(admissionPath).token).toBe((JSON.parse(bytes) as OwnerRecord).token);
+		await admission.release();
 	});
 
 	it("disambiguates never-acquired from lost-on-disk ownership errors", async () => {

@@ -1,0 +1,1 @@
+- Added a pre-push guard hook that refuses mirror-like pushes and remote branch deletions to real GitHub remotes, with an opt-out via PRIME_AGENT_ALLOW_MIRROR_PUSH=1.
