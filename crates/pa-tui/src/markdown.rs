@@ -596,6 +596,13 @@ fn render_block(
 
 /// Inline rendering: bold, italic, strikethrough, code, links.
 pub fn render_inline(text: &str, style: &MarkdownStyle) -> Line {
+    render_inline_ctx(text, style, false)
+}
+
+/// `in_link` mirrors marked's `lexer.state.inLink`: set while a link
+/// label's tokens are produced, and the gfm bare-url rule is skipped
+/// inside one (the angle `autolink` rule is not).
+fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
     let mut spans: Vec<Span> = Vec::new();
     let bytes: Vec<char> = text.chars().collect();
     let mut buf = String::new();
@@ -604,6 +611,13 @@ pub fn render_inline(text: &str, style: &MarkdownStyle) -> Line {
     let mut bold = false;
     let mut italic = false;
     let strike = false;
+    // The bare-url email alternative only exists when the line carries an
+    // `@` at all; the gate keeps the per-position regex attempts rare.
+    let line_has_at = bytes.contains(&'@');
+    // `bare_candidate` gates every autolink attempt on the literal prefix
+    // the marked rules require, so the attempt regexes only ever run on
+    // actual urls/emails - plain text (even `history history ...` floods
+    // of `h` starts) never reaches the regex or the tail-string copy.
 
     macro_rules! flush {
         () => {
@@ -669,8 +683,8 @@ pub fn render_inline(text: &str, style: &MarkdownStyle) -> Line {
                     // the link color is shadowed by the body color applied
                     // inside the label, and the underline wrapper never
                     // reaches the wire. `m` carries the emphasis context.
-                    let href = crate::hyperlinks::rewrite_drive_path(&url);
-                    let mut label_spans = render_inline(&label, style);
+                    let href = crate::hyperlinks::resolve_link_href(&url);
+                    let mut label_spans = render_inline_ctx(&label, style, true);
                     for s in label_spans.iter_mut() {
                         s.style = s.style.add_modifier(m);
                     }
@@ -731,7 +745,7 @@ pub fn render_inline(text: &str, style: &MarkdownStyle) -> Line {
                 flush!();
                 if doubled {
                     bold = !bold;
-                    let mut inner_spans = render_inline(&inner, style);
+                    let mut inner_spans = render_inline_ctx(&inner, style, in_link);
                     for s in inner_spans.iter_mut() {
                         s.style = s.style.add_modifier(style.bold);
                     }
@@ -739,7 +753,7 @@ pub fn render_inline(text: &str, style: &MarkdownStyle) -> Line {
                     bold = !bold;
                 } else {
                     italic = !italic;
-                    let mut inner_spans = render_inline(&inner, style);
+                    let mut inner_spans = render_inline_ctx(&inner, style, in_link);
                     for s in inner_spans.iter_mut() {
                         s.style = s.style.add_modifier(style.italic);
                     }
@@ -755,7 +769,7 @@ pub fn render_inline(text: &str, style: &MarkdownStyle) -> Line {
                 let inner: String = bytes[i + 2..close].iter().collect();
                 if !inner.trim().is_empty() {
                     flush!();
-                    let mut inner_spans = render_inline(&inner, style);
+                    let mut inner_spans = render_inline_ctx(&inner, style, in_link);
                     for s in inner_spans.iter_mut() {
                         s.style = s.style.add_modifier(style.strikethrough);
                     }
@@ -765,6 +779,51 @@ pub fn render_inline(text: &str, style: &MarkdownStyle) -> Line {
                 }
             }
         }
+        // marked inline `autolink` (angle form) then `url` (gfm bare
+        // links): the last two inline rules, tried once every other
+        // construct failed at this position. The two rules are disjoint on
+        // their first character, so the order collapses to this split.
+        let autolink_hit = if c == '<' {
+            autolink_token_at(&bytes, i, true)
+        } else if !in_link && crate::autolink::bare_candidate(&bytes, i, line_has_at) {
+            autolink_token_at(&bytes, i, false)
+        } else {
+            None
+        };
+        if let Some(token) = autolink_hit {
+            flush!();
+            // The token carries one plain text token, so the label is a
+            // single body-colored run carrying the current emphasis (the
+            // theme.link/underline wrapper never reaches the wire in the
+            // deployed binary, like explicit link labels).
+            let mut m = Modifier::empty();
+            if bold {
+                m |= style.bold;
+            }
+            if italic {
+                m |= style.italic;
+            }
+            let label = Span::styled(token.text.clone(), base.add_modifier(m));
+            if crate::hyperlinks::hyperlinks_enabled() {
+                // OSC 8: the label is clickable, the URL never printed
+                // inline (TS `hyperlink()`).
+                let href = crate::hyperlinks::resolve_link_href(&token.href);
+                let mut content = label.content;
+                content.insert_str(0, &crate::hyperlinks::osc8_open(&href));
+                content.push_str(crate::hyperlinks::OSC8_CLOSE);
+                spans.push(Span::styled(content, label.style));
+            } else {
+                spans.push(label);
+                // Legacy form: the URL shows after the label unless the
+                // label already is it (mailto stripped), TS token.href.
+                let comparison = token.href.strip_prefix("mailto:").unwrap_or(&token.href);
+                if token.text != token.href && token.text != comparison {
+                    spans.push(Span::styled(format!(" ({})", token.href), style.link_url));
+                }
+            }
+            i += token.raw.chars().count();
+            continue;
+        }
         buf.push(c);
         i += 1;
     }
@@ -773,6 +832,22 @@ pub fn render_inline(text: &str, style: &MarkdownStyle) -> Line {
         spans.push(Span::raw(""));
     }
     spans
+}
+
+/// Run the marked autolink rules on the text starting at char index `i`
+/// (`angle` selects the `<...>` rule, otherwise the gfm bare-url rule).
+/// Returns the token; the caller advances by its `raw` char count.
+fn autolink_token_at(
+    bytes: &[char],
+    i: usize,
+    angle: bool,
+) -> Option<crate::autolink::AutolinkToken> {
+    let rest: String = bytes[i..].iter().collect();
+    if angle {
+        crate::autolink::angle_token(&rest)
+    } else {
+        crate::autolink::bare_token(&rest)
+    }
 }
 
 fn find_closing(chars: &[char], from: usize, delim: char, len: usize) -> Option<usize> {
@@ -1223,6 +1298,163 @@ mod tests {
         let drive = render_inline("[c:\\src](c:\\src)", &style);
         let joined: String = drive.iter().map(|s| s.content.as_str()).collect();
         assert!(joined.contains("file:///c:/src"), "drive path: {joined}");
+        crate::hyperlinks::set_hyperlinks_override(None);
+    }
+
+    #[test]
+    fn bare_url_autolinks_osc8() {
+        crate::hyperlinks::set_hyperlinks_override(Some(true));
+        let style = MarkdownStyle::default();
+        let spans = render_inline("see https://x.dev/a?b=1 now", &style);
+        let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+        assert_eq!(
+            joined,
+            format!(
+                "see {}https://x.dev/a?b=1{} now",
+                crate::hyperlinks::osc8_open("https://x.dev/a?b=1"),
+                crate::hyperlinks::OSC8_CLOSE
+            )
+        );
+        // The label is one zero-width-wrapped run; the URL never prints
+        // twice and no legacy suffix appears.
+        assert_eq!(str_width(&joined), str_width("see https://x.dev/a?b=1 now"));
+        crate::hyperlinks::set_hyperlinks_override(None);
+    }
+
+    #[test]
+    fn bare_url_autolink_trims_trailing_punctuation() {
+        crate::hyperlinks::set_hyperlinks_override(Some(false));
+        let style = MarkdownStyle::default();
+        // Trailing punctuation is backpedaled out of the link and stays in
+        // the text stream.
+        let spans = render_inline("go to https://x.dev/pull/182. now", &style);
+        let texts: Vec<&str> = spans.iter().map(|s| s.content.as_str()).collect();
+        assert_eq!(texts, vec!["go to ", "https://x.dev/pull/182", ". now"]);
+        // Balanced paren groups survive; the peeled trailing run re-renders
+        // so the visible row is unchanged.
+        let spans = render_inline("(see https://x.dev/a(b)) ok", &style);
+        let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+        assert_eq!(joined, "(see https://x.dev/a(b)) ok");
+        // A comma separates the link from the sentence tail.
+        let spans = render_inline("(visit https://x.dev/page, thanks)", &style);
+        let texts: Vec<&str> = spans.iter().map(|s| s.content.as_str()).collect();
+        assert_eq!(texts, vec!["(visit ", "https://x.dev/page", ", thanks)"]);
+        crate::hyperlinks::set_hyperlinks_override(None);
+    }
+
+    #[test]
+    fn bare_url_autolink_forms() {
+        crate::hyperlinks::set_hyperlinks_override(Some(false));
+        let style = MarkdownStyle::default();
+        let joined = |md: &str| -> String {
+            render_inline(md, &style)
+                .iter()
+                .map(|s| s.content.as_str())
+                .collect()
+        };
+        // ftp and case-insensitive schemes link; uppercase targets pass
+        // through unresolved (target == token href, like TS).
+        assert_eq!(joined("ftp://files.x.io/x"), "ftp://files.x.io/x");
+        assert_eq!(joined("HTTPS://UPPER.COM/PATH"), "HTTPS://UPPER.COM/PATH");
+        // A bare url starts mid-word, like marked's text-rule break.
+        assert_eq!(
+            joined("midhttps://word.com/break"),
+            "midhttps://word.com/break"
+        );
+        // Entity-ish runs survive the backpedal.
+        assert_eq!(joined("https://x.dev/a&#39;b"), "https://x.dev/a&#39;b");
+        // Explicit links win over the bare rule at the same position.
+        assert_eq!(joined("[https://x.dev](https://x.dev)"), "https://x.dev");
+        // Two links in one line tokenize independently.
+        assert_eq!(
+            joined("https://x.dev, and https://y.dev; done"),
+            "https://x.dev, and https://y.dev; done"
+        );
+        // Not an email: only the domain-shaped tail links.
+        assert_eq!(
+            joined("not an email: @host, a@b, x@y.z"),
+            "not an email: @host, a@b, x@y.z"
+        );
+        crate::hyperlinks::set_hyperlinks_override(None);
+    }
+
+    #[test]
+    fn www_autolink_gains_scheme_and_legacy_suffix() {
+        // Legacy form: token.text != token.href for a www autolink, so the
+        // resolved href shows after the label (TS legacy branch).
+        crate::hyperlinks::set_hyperlinks_override(Some(false));
+        let style = MarkdownStyle::default();
+        let spans = render_inline("www.example.com/path", &style);
+        let texts: Vec<&str> = spans.iter().map(|s| s.content.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["www.example.com/path", " (http://www.example.com/path)"]
+        );
+        crate::hyperlinks::set_hyperlinks_override(None);
+    }
+
+    #[test]
+    fn email_autolinks_with_mailto_href() {
+        // Legacy form: the mailto-stripped href equals the label, so no
+        // suffix prints (autolinked emails).
+        crate::hyperlinks::set_hyperlinks_override(Some(false));
+        let style = MarkdownStyle::default();
+        let spans = render_inline("mail foo.bar+baz@example.co.uk ok", &style);
+        let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+        assert_eq!(joined, "mail foo.bar+baz@example.co.uk ok");
+        // OSC 8 form: the href carries mailto:.
+        crate::hyperlinks::set_hyperlinks_override(Some(true));
+        let spans = render_inline("mail foo@example.co.uk ok", &style);
+        let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+        assert_eq!(
+            joined,
+            format!(
+                "mail {}foo@example.co.uk{} ok",
+                crate::hyperlinks::osc8_open("mailto:foo@example.co.uk"),
+                crate::hyperlinks::OSC8_CLOSE
+            )
+        );
+        crate::hyperlinks::set_hyperlinks_override(None);
+    }
+
+    #[test]
+    fn angle_autolinks_become_links() {
+        crate::hyperlinks::set_hyperlinks_override(Some(true));
+        let style = MarkdownStyle::default();
+        // The brackets are consumed; the label is the inner target.
+        let spans = render_inline("x <https://angle.dev/a> y", &style);
+        let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+        assert_eq!(
+            joined,
+            format!(
+                "x {}https://angle.dev/a{} y",
+                crate::hyperlinks::osc8_open("https://angle.dev/a"),
+                crate::hyperlinks::OSC8_CLOSE
+            )
+        );
+        // Angle email: href gains mailto:.
+        let spans = render_inline("<foo.bar@example.org>", &style);
+        let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+        assert_eq!(
+            joined,
+            format!(
+                "{}foo.bar@example.org{}",
+                crate::hyperlinks::osc8_open("mailto:foo.bar@example.org"),
+                crate::hyperlinks::OSC8_CLOSE
+            )
+        );
+        crate::hyperlinks::set_hyperlinks_override(None);
+    }
+
+    #[test]
+    fn bare_url_is_not_autolinked_inside_a_link_label() {
+        // marked's state.inLink guard: the gfm url rule does not run while
+        // a link label is tokenized, so the inner url stays plain text.
+        crate::hyperlinks::set_hyperlinks_override(Some(false));
+        let style = MarkdownStyle::default();
+        let spans = render_inline("[see https://in.dev/x](https://out.dev/y)", &style);
+        let texts: Vec<&str> = spans.iter().map(|s| s.content.as_str()).collect();
+        assert_eq!(texts, vec!["see https://in.dev/x", " (https://out.dev/y)"]);
         crate::hyperlinks::set_hyperlinks_override(None);
     }
 

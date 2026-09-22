@@ -1390,6 +1390,7 @@ dependencies = [
  "unicode-properties",
  "unicode-segmentation",
  "unicode-width 0.2.0",
+ "url",
 ]
 
 [[package]]

@@ -13,6 +13,7 @@ unicode-width = "0.2"
 unicode-properties = "0.1"
 unicode-segmentation = "1"
 fancy-regex = "0.14"
+url = "2"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }

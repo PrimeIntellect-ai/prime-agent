@@ -58,6 +58,28 @@ pub fn rewrite_drive_path(url: &str) -> String {
     }
 }
 
+/// TS `markdown.ts` `case "link"` href resolution: drive-path rewrite,
+/// then a WHATWG `new URL()` pass. The deployed interactive renderer
+/// always sets `options.baseUrl` (`assistant-message.ts` derives it from
+/// the session cwd), so every non-fragment target that parses is emitted
+/// through `new URL(target, baseUrl).href`: absolute urls canonicalize
+/// (a bare host gains its `/`, the scheme and host lower-case), drive
+/// paths re-canonicalize their `file:///` form. WhatWG parsing with no
+/// base only succeeds for absolute urls, so relative targets pass
+/// through raw here - the one documented gap: resolving them against the
+/// session cwd needs cwd plumbing the markdown pipeline does not carry,
+/// and no battery covers a relative link target.
+pub fn resolve_link_href(token_href: &str) -> String {
+    let target = rewrite_drive_path(token_href);
+    if target.starts_with('#') {
+        return target;
+    }
+    match url::Url::parse(&target) {
+        Ok(parsed) => parsed.to_string(),
+        Err(_) => target,
+    }
+}
+
 /// The env-based hyperlink-capability gate (TS `detectCapabilities`):
 /// hyperlinks are enabled only in terminals positively known to implement
 /// OSC 8, forced off under tmux/screen (which swallow the sequences by
@@ -439,6 +461,27 @@ mod tests {
 
     fn line(text: &str) -> Line {
         vec![Span::raw(text)]
+    }
+
+    #[test]
+    fn resolve_link_href_canonicalizes_parseable_targets() {
+        // The deployed renderer always sets baseUrl, so every parseable
+        // non-fragment href goes through `new URL().href`: hosts gain a
+        // trailing `/`, scheme and host lower-case, drive paths
+        // re-canonicalize. Unparseable targets and fragments pass raw.
+        assert_eq!(
+            resolve_link_href("https://x.dev/a?b=1"),
+            "https://x.dev/a?b=1"
+        );
+        assert_eq!(resolve_link_href("https://bare.dev"), "https://bare.dev/");
+        assert_eq!(
+            resolve_link_href("HTTPS://UPPER.COM/PATH"),
+            "https://upper.com/PATH"
+        );
+        assert_eq!(resolve_link_href("mailto:a@b.dev"), "mailto:a@b.dev");
+        assert_eq!(resolve_link_href("c:\\src"), "file:///c:/src");
+        assert_eq!(resolve_link_href("see docs"), "see docs");
+        assert_eq!(resolve_link_href("#section"), "#section");
     }
 
     #[test]
