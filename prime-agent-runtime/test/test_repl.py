@@ -726,6 +726,11 @@ class ReplTest(unittest.TestCase):
         self._snapshot_restore("bp", code, self.enterContext(tempfile.TemporaryDirectory()))
         self.assertEqual(one(self.repl.execute("bp4", "G = 2\nentry()[0]"), "result")["text"], "2")
 
+    def test_restore_revives_functions_inside_containers_pr2471(self):
+        code = "G = 1\ndef reader():\n    return G\ncallbacks = [reader]\nhandlers = {'read': reader}\npair = (reader,)"
+        self._snapshot_restore("ct", code, self.enterContext(tempfile.TemporaryDirectory()))
+        self.assertEqual(one(self.repl.execute("ct4", "G = 2\n(callbacks[0](), handlers['read'](), pair[0]())"), "result")["text"], "(2, 2, 2)")
+
     def test_snapshot_prune_oversized(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "kernel-state.dill")

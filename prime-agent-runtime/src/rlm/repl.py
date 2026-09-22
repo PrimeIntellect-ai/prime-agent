@@ -883,6 +883,24 @@ def _revive_with_live_globals(
         rebuilt_partial = functools.partial(rebuilt, *args, **keywords)
         rebuilt_partial.__dict__.update(value.__dict__)
         return memo.setdefault(id(value), rebuilt_partial)
+    atoms = (int, float, str, bytes, bool, type(None))
+    # dill loads __main__.__dict__ by reference, so a saved globals() IS the live ns: never walk it.
+    if value is ns:
+        return value
+    if isinstance(value, (list, dict)):
+        # Memoized before recursing and revived in place: cycles and identity come for free.
+        # Skipping atoms keeps the walk over million-element containers near dill.loads cost.
+        memo[id(value)] = value
+        for key, item in enumerate(value) if isinstance(value, list) else value.items():
+            revived = item if type(item) in atoms else revive(item)
+            if revived is not item:
+                value[key] = revived
+        return value
+    if type(value) is tuple:
+        items = tuple(item if type(item) in atoms else revive(item) for item in value)
+        if all(new is old for new, old in zip(items, value)):
+            return value
+        return memo.setdefault(id(value), items)
     if not isinstance(value, types.FunctionType) or value.__module__ != "__main__":
         return value
     # Defaults and cell contents are revived only after the rebound function is memoized, so a
