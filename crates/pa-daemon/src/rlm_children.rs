@@ -62,10 +62,9 @@ const RUNTIME_METADATA_PROMPT_MAX: usize = 4096;
 const WATCH_WAIT_SLICE_MS: u64 = 60_000;
 /// Re-poll cadence after a wait slice ends without a settled child.
 const WATCH_POLL_INTERVAL_MS: u64 = 2_000;
-/// Consecutive unreachable polls before the watcher gives up (the child's
-/// worker may be restarting; a permanently unreachable child ends the
-/// watch without a notice instead of spinning forever).
-const WATCH_MAX_UNREACHABLE_POLLS: u32 = 150;
+/// Log persistent worker unavailability without abandoning the child: the
+/// supervisor can restart later, and roster reads never poll the worker.
+const WATCH_UNREACHABLE_LOG_INTERVAL: u32 = 150;
 /// The parent identity children are spawned from: recursion bounds, the
 /// inherited model selector and thinking level, and the parent session's
 /// persistence identity.
@@ -859,11 +858,11 @@ impl SupervisorChildSessionsInner {
                 Ok(_) => unreachable_polls = 0,
                 Err(_) => {
                     unreachable_polls += 1;
-                    if unreachable_polls >= WATCH_MAX_UNREACHABLE_POLLS {
+                    if unreachable_polls >= WATCH_UNREACHABLE_LOG_INTERVAL {
                         eprintln!(
-                            "pa-daemon: RLM child settle watcher gave up on an unreachable child {active_session_id}"
+                            "pa-daemon: RLM child settle watcher is waiting for unreachable child {active_session_id}"
                         );
-                        return;
+                        unreachable_polls = 0;
                     }
                 }
             }
