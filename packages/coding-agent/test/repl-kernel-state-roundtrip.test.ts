@@ -205,8 +205,7 @@ describeIfKernel("repl kernel state snapshot round-trip (real runtime)", { tags:
 		try {
 			expect((await reader.restoreState())?.restored).toContain("restored_var");
 			vi.useFakeTimers();
-			// Production order: the execute schedules the debounced auto-snapshot,
-			// then the arm marks the restored namespace as fresh.
+			// Production order: the execute schedules the debounced snapshot, then the arm.
 			await reader.execute("pass");
 			reader.markRestoredNamespaceFresh();
 			const statBefore = statSync(manifestPath);
@@ -216,15 +215,13 @@ describeIfKernel("repl kernel state snapshot round-trip (real runtime)", { tags:
 			expect(statSync(manifestPath).mtimeMs).toBe(statBefore.mtimeMs);
 			expect(statSync(manifestPath).size).toBe(statBefore.size);
 
-			// A user cell completing after the arm must snapshot normally again.
 			await reader.execute("user_var = 7");
 			await vi.advanceTimersByTimeAsync(300);
 			await reader.listNamespaceNames();
 			const manifestAfter = JSON.parse(readFileSync(manifestPath, "utf8")) as { savedNames: string[] };
 			expect(manifestAfter.savedNames).toEqual(expect.arrayContaining(["restored_var", "user_var"]));
 
-			// A failed restore must arm too, or the debounced auto-snapshot clobbers
-			// the on-disk copy with a skills-only payload.
+			// A failed restore must arm too, or the debounced auto-snapshot clobbers the on-disk copy.
 			writeFileSync(snapshotPath, "not-a-snapshot");
 			expect(await reader.restoreState()).toBeNull();
 			await reader.execute("pass");
@@ -247,12 +244,9 @@ describeIfKernel("repl kernel state snapshot round-trip (real runtime)", { tags:
 			snapshot: { path: failPath, manifestPath: join(failDir, "session.json") },
 		});
 		try {
-			// An unloadable payload fails into the same performRestore branch a
-			// timed-out restore takes: the namespace never got the saved state.
+			// An unloadable payload takes the same failed-restore branch as a timeout.
 			writeFileSync(failPath, "not-a-snapshot");
 			expect(await manager.restoreState()).toBeNull();
-			// The final flush must not overwrite the on-disk payload with an empty
-			// snapshot.
 			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 			expect(readFileSync(failPath, "utf8")).toBe("not-a-snapshot");
 			expect(existsSync(join(failDir, "session.json"))).toBe(false);

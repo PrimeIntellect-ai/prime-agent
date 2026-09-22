@@ -574,10 +574,6 @@ export class IpythonKernelProvisioner {
 					throw new Error(`Failed to initialize rlm runtime in the Python kernel:\n${details}`);
 				}
 				if (snapshotExisted) {
-					// A restore ran against the existing snapshot files. The bootstrap's
-					// own auto-snapshot would rewrite the restored namespace — or, when the
-					// restore failed or timed out, clobber the healthy on-disk copy with a
-					// skills-only payload. Arm the one-shot skip either way.
 					m.markRestoredNamespaceFresh();
 				}
 				// Broken skills stay importable-looking placeholders; report them so the

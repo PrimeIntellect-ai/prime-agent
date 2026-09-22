@@ -84,7 +84,6 @@ const KERNEL_STDERR_LOG_DIR_MODE = 0o700;
 // Owner-only file bits; kernel stderr can carry exception payloads.
 const KERNEL_STDERR_LOG_MODE = 0o600;
 
-/** Manifest stat for the post-restore snapshot skip; null when the file is missing. */
 function manifestStatOf(path: string): { mtimeMs: number; size: number } | null {
 	try {
 		const stat = statSync(path);
@@ -236,11 +235,9 @@ export class ReplKernelManager {
 	private pendingRebootstrap = false;
 	/** Restore the saved namespace on that fresh start too (false when the snapshot itself is the declared culprit). */
 	private pendingRestore = false;
-	/** Bumped by every settled request; the post-restore snapshot skip compares against it. */
 	private completedExecutions = 0;
-	/** Manifest stat captured before the last non-repair restore attempt; arming basis for the skip. */
+	/** Tri-state: undefined = no non-repair restore attempted yet, null = manifest was missing at that attempt. */
 	private restoredManifestStat?: { mtimeMs: number; size: number } | null;
-	/** Armed one-shot skip of the redundant post-restore auto-snapshot. */
 	private restoredNamespaceSkip?: {
 		manifestStat: { mtimeMs: number; size: number } | null;
 		completedExecutions: number;
@@ -1637,18 +1634,12 @@ export class ReplKernelManager {
 		return this.performRestore(false);
 	}
 
-	/**
-	 * Repair restores bypass the repair gate and are bounded so a stalled kernel cannot wedge
-	 * it; ordinary restores are bounded too (a restore deserializes everything a snapshot
-	 * serializes, so a wedged kernel must not stall start() forever).
-	 */
+	/** Repair restores bypass the repair gate and are bounded so a stalled kernel cannot wedge it. */
 	private async performRestore(protocolRepair: boolean): Promise<RestoreResult | null> {
 		const cfg = this.options.snapshot;
 		if (!cfg) return null;
-		// Stat before the attempt: a restore never touches the manifest, and a failed
-		// or timed-out restore must still leave the stat for the arming below. A
-		// repair attempt (like the reprovision retry after a failed first restore)
-		// keeps the non-repair stat as the arming basis.
+		// Before the attempt, so a failed or timed-out restore still arms the skip;
+		// repair retries (reprovision after a failed first restore) keep the non-repair stat.
 		if (!protocolRepair) this.restoredManifestStat = manifestStatOf(cfg.manifestPath);
 		try {
 			const r = await this.enqueueRequest(
@@ -1661,9 +1652,7 @@ export class ReplKernelManager {
 				this.appendKernelDiagnostic(
 					`state restore ${r.status === "aborted" ? "timed out" : "failed"}: ${r.error?.evalue ?? r.stderr}`,
 				);
-				// The namespace never received the saved state, so the restore stays
-				// pending: the dispose guard must keep treating the on-disk payload as
-				// the fresher copy, and the next request gets one bounded retry.
+				// The namespace never got the saved state, so the on-disk payload must stay the fresher copy.
 				if (!protocolRepair) this.pendingRestore = true;
 				return null;
 			}
@@ -1681,12 +1670,10 @@ export class ReplKernelManager {
 	}
 
 	/**
-	 * Arm the one-shot skip of the post-restore auto-snapshot. On a successful restore
-	 * the snapshot the post-restore bootstrap execute scheduled would rewrite identical
-	 * content; on a failed or timed-out one it would clobber the healthy on-disk copy
-	 * with a skills-only payload. Call after that bootstrap succeeds — its own completed
-	 * execution must not defeat the arm. Any later settled execution or manifest change
-	 * disarms the skip.
+	 * Arm the one-shot post-restore snapshot skip: the bootstrap-scheduled snapshot would
+	 * rewrite identical content, or after a failed restore clobber the healthy on-disk
+	 * copy with a skills-only payload. Call after the bootstrap succeeds — its own
+	 * settled execution must not defeat the arm.
 	 */
 	markRestoredNamespaceFresh(): void {
 		if (this.restoredManifestStat === undefined) return; // no attempted non-repair restore to match
@@ -1727,7 +1714,6 @@ export class ReplKernelManager {
 		}
 	}
 
-	/** One-shot: nothing settled since the restore armed it and the manifest on disk is unchanged. */
 	private consumeRestoredSnapshotSkip(): boolean {
 		const skip = this.restoredNamespaceSkip;
 		this.restoredNamespaceSkip = undefined; // one-shot: consumed whether or not it fires

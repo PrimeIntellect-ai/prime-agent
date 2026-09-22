@@ -683,8 +683,7 @@ class ReplTest(unittest.TestCase):
             self.assertEqual(one(events, "result")["text"], "False")
 
     def test_prune_measures_the_current_value_2478(self):
-        # A def redefinition or an in-place shrink after the earlier oversized
-        # skip: the prune must reserialize the current value, never a stale size.
+        # Redefinition or in-place shrink after an oversized skip: prune must re-measure.
         for cell in ("def big(): pass", "big.clear()"):
             with self.subTest(cell=cell):
                 with tempfile.TemporaryDirectory() as tmp:
@@ -2132,8 +2131,7 @@ class SnapshotTempCleanupTest(unittest.TestCase):
             real_dump = dill.dump
 
             def interrupted_dump(value, fh):
-                # The single-pass payload write dumps one variable at a time into
-                # the staged temp; interrupt mid-dump, after partial bytes landed.
+                # Interrupt mid-dump, after partial bytes landed in the staged temp.
                 fh.write(b"partial")
                 raise KeyboardInterrupt
 
@@ -2428,7 +2426,6 @@ class SnapshotPairConsistencyTest(unittest.TestCase):
                 self.assertEqual(sorted(os.listdir(d)), sorted([payload_name, manifest_name]))
 
     def test_each_variable_serialized_once_and_payload_is_not_a_pickle(self):
-        # The v2 payload writes one serialization pass per variable.
         import dill
 
         from rlm.repl import _SNAPSHOT_MAGIC
@@ -2443,12 +2440,12 @@ class SnapshotPairConsistencyTest(unittest.TestCase):
         with mock.patch.object(dill, "dump", counting_dump):
             result = self._snap({"a": 1, "b": 2, "c": 3})
         self.assertEqual(result["saved"], ["a", "b", "c"])
-        self.assertEqual(dumped, [1, 2, 3])  # one dill pass per variable, no re-dump
+        self.assertEqual(dumped, [1, 2, 3])
         self.assertEqual(result["bytes"], os.path.getsize(self.path))
         with open(self.path, "rb") as fh:
             self.assertEqual(fh.read(len(_SNAPSHOT_MAGIC)), _SNAPSHOT_MAGIC)
             with self.assertRaises(Exception):
-                dill.load(fh)  # the framed v2 payload is not a pickle
+                dill.load(fh)
 
 
 class OwnerWatchdogTest(unittest.TestCase):

@@ -34,10 +34,8 @@ PROTOCOL_VERSION = 3
 DEFAULT_SNAPSHOT_MAX_BYTES = 256 * 1024 * 1024
 DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES = 16 * 1024 * 1024
 
-# v2 snapshot payload header: plain ASCII, never a pickle start, so _restore_state
-# can sniff it apart from legacy (single dill-pickled dict) payloads. The payload
-# after the header is self-delimiting records: 4-byte little-endian name length,
-# the utf-8 name, an 8-byte little-endian blob length, then the dill blob.
+# Plain ASCII, never a pickle start: _restore_state sniffs it to tell v2 framed
+# payloads from legacy (single dill-pickled dict) ones.
 _SNAPSHOT_MAGIC = b"PRIME-AGENT-KERNEL-SNAPSHOT-V2\n"
 
 # Stream writes must fit one protocol frame: the host buffers whole lines
@@ -675,12 +673,8 @@ class _CappedWriter:
 
 
 def _read_snapshot_records(fh: Any) -> dict[str, bytes]:
-    """Parse a v2 payload's self-delimiting records, positioned after the magic.
-
-    Framing damage is a corrupt snapshot: it surfaces as a restore error, never
-    a partial namespace. Length fields are bounds-checked against the file size
-    before their reads, so a corrupt header cannot force a huge allocation.
-    """
+    """Framing damage is a corrupt snapshot: a restore error, never a partial namespace.
+    Length fields are bounds-checked before their reads, so a corrupt header cannot force a huge allocation."""
     fh.seek(0, os.SEEK_END)
     size = fh.tell()
     fh.seek(len(_SNAPSHOT_MAGIC))
@@ -762,11 +756,9 @@ def _snapshot_state(
                 return {"error": "write failed: snapshot exceeds aggregate snapshot size cap"}
             fh, tmp = stage_temp(path, "wb")
             with fh:
-                # Single pass: each variable is dill-serialized exactly once, into
-                # one bounded buffer, and its record is streamed into the same
-                # staged temp file. The record header (4+8 bytes plus the name)
-                # is charged against the aggregate cap up front, so a completed
-                # record can never overflow it and no prefix re-dump is needed.
+                # Single pass: each variable is dill-serialized exactly once, streamed
+                # into the staged temp. The record header is charged against the aggregate
+                # cap up front, so a completed record can never overflow it (no prefix re-dump).
                 total = fh.write(_SNAPSHOT_MAGIC)
                 for name in list(ns.keys()):
                     if name.startswith("_") or name in _ALWAYS_SKIP:
@@ -778,11 +770,9 @@ def _snapshot_state(
                         continue
                     encoded = name.encode("utf-8")
                     budget = max_bytes - total - 12 - len(encoded)
-                    # Prune mode measures at the full per-variable cap, so only that
-                    # cap decides pruned-ness; the aggregate budget then gates the
-                    # write. A destructive prune always re-measures: only the current
-                    # value's size can prove it oversized, and in-place mutation
-                    # defeats any name-based tracking of an earlier dump.
+                    # Prune mode measures at the full per-variable cap: only that cap decides
+                    # pruned-ness, and the write always re-measures — in-place mutation
+                    # defeats any name-based size tracking from an earlier dump.
                     limit = max_variable_bytes if prune_oversized else min(max_variable_bytes, budget)
                     buffer = io.BytesIO()
                     try:
@@ -879,8 +869,7 @@ def _restore_state(
             if fh.read(len(_SNAPSHOT_MAGIC)) == _SNAPSHOT_MAGIC:
                 payload = _read_snapshot_records(fh)
             else:
-                # Legacy payload: one dill-pickled dict of per-name blobs. Old
-                # snapshot files on disk must keep restoring.
+                # Legacy: one dill-pickled dict; old snapshot files must keep restoring.
                 fh.seek(0)
                 payload = dill.load(fh)
     except Exception as err:  # noqa: BLE001 - a corrupt snapshot yields an empty restore
