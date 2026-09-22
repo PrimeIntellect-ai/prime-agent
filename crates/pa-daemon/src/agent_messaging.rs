@@ -428,27 +428,48 @@ fn receipt_from_wire(data: &Value, input: AgentMessageSendInput) -> Option<Agent
     })
 }
 
-/// `agent_observe.*` controller for daemon workers: the pushed supervisor
-/// peer roster for snapshots, and `get_messages` for transcript previews.
+/// `agent_observe.*` controller for daemon workers: message previews and
+/// full session summaries from the supervisor.
 pub(crate) struct LinkAgentObserveController {
     link: Arc<SupervisorLink>,
-    worker_token: String,
 }
 
 impl LinkAgentObserveController {
-    pub(crate) fn new(link: Arc<SupervisorLink>, worker_token: String) -> Self {
-        LinkAgentObserveController { link, worker_token }
+    pub(crate) fn new(link: Arc<SupervisorLink>) -> Self {
+        LinkAgentObserveController { link }
     }
 }
 
 impl AgentObserveController for LinkAgentObserveController {
     async fn list_agents(&self) -> anyhow::Result<Vec<AgentObserveSummary>> {
-        let sessions = roster_summaries(&self.link, &self.worker_token).await?;
+        let data = self
+            .link
+            .request_success(
+                json!({ "type": "list" }),
+                std::time::Duration::from_secs(30),
+            )
+            .await?;
+        let sessions = data
+            .get("sessions")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         Ok(summaries_from_roster(sessions))
     }
 
     async fn get_agent(&self, target: &str) -> anyhow::Result<Option<AgentObserveSummary>> {
-        let sessions = roster_summaries(&self.link, &self.worker_token).await?;
+        let data = self
+            .link
+            .request_success(
+                json!({ "type": "list" }),
+                std::time::Duration::from_secs(30),
+            )
+            .await?;
+        let sessions = data
+            .get("sessions")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         Ok(summaries_from_roster(sessions).into_iter().find(|summary| {
             summary.active_session_id.as_deref() == Some(target)
                 || summary.session_id == target
@@ -503,7 +524,7 @@ impl AgentObserveController for LinkAgentObserveController {
     }
 }
 
-/// Project the supervisor's cached peer roster into observation summaries.
+/// Flatten the supervisor's full `list` rows into observation summaries.
 fn summaries_from_roster(sessions: Vec<Value>) -> Vec<AgentObserveSummary> {
     sessions
         .into_iter()
@@ -520,7 +541,8 @@ fn summaries_from_roster(sessions: Vec<Value>) -> Vec<AgentObserveSummary> {
                 _ => None,
             };
             let queued = session
-                .get("unfinishedActionCount")
+                .get("sessionActions")
+                .and_then(|actions| actions.get("queuedCount"))
                 .and_then(Value::as_u64)
                 .unwrap_or_default() as usize;
             AgentObserveSummary {
@@ -541,7 +563,7 @@ fn summaries_from_roster(sessions: Vec<Value>) -> Vec<AgentObserveSummary> {
                     .map(str::to_string),
                 relationship,
                 runtime_kind: Some(runtime_kind),
-                status: if session.get("status").and_then(Value::as_str) == Some("idle") {
+                status: if session.get("activity").and_then(Value::as_str) == Some("idle") {
                     "inactive".to_string()
                 } else {
                     "running".to_string()

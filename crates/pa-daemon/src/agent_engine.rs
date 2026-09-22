@@ -845,10 +845,7 @@ impl AgentSessionEngine {
             Arc::clone(&self.own_summary),
             self.children.clone(),
         ));
-        let observer = Arc::new(LinkAgentObserveController::new(
-            Arc::clone(&self.link),
-            config.worker_token.clone(),
-        ));
+        let observer = Arc::new(LinkAgentObserveController::new(Arc::clone(&self.link)));
         let mut handlers = HostRequestHandlers::default();
         register_agent_message_host_handlers(sender, &mut handlers);
         register_agent_observe_host_handlers(observer, &mut handlers);
