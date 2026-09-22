@@ -112,7 +112,6 @@ class HarnessStateTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "only accepted for kind='skill'"):
                     state.update_memory(default_entry.id, "Bad", "content", kind=kind, arguments={})
 
-
             with self.assertRaisesRegex(TypeError, "path was renamed to topic"):
                 state.create_memory("Grouped", "content", **{"path": "repo/testing"})
 
