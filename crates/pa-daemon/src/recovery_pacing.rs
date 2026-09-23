@@ -9,36 +9,42 @@
 //! commands) for the whole pass. This module bounds that fan-out with a
 //! small fixed cap while keeping every job off the serving path.
 
+use futures::StreamExt;
+
 /// The maximum number of descriptors the boot adoption pass works on at
 /// once. An adoption is mostly a socket connect, at most one relaunch
 /// spawn; a small cap keeps the pass steady without serializing it.
 pub(crate) const ADOPTION_CONCURRENCY: usize = 4;
 
-/// Run background jobs with bounded concurrency: one task per job, at
-/// most `limit` running at once. The pass stays fully concurrent with
-/// the accept loop and control-plane commands; only the jobs' own
-/// fan-out is bounded. Returns when every job has finished (a panicked
-/// job settles with its JoinError, like the previous unbounded fan-out).
+/// Run background jobs with bounded concurrency: at most `limit` tasks
+/// alive at once, the next job spawned only when one finishes (a huge
+/// descriptor directory must not materialize a task and a JoinHandle
+/// per job before the cap ever applies). The pass stays fully
+/// concurrent with the accept loop and control-plane commands; only the
+/// jobs' own fan-out is bounded. Returns when every job has finished
+/// (a panicked job settles with its JoinError, like the previous
+/// unbounded fan-out, and the freed slot spawns the next job).
 pub(crate) async fn run_bounded<F, Fut>(jobs: Vec<F>, limit: usize)
 where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
-    let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(limit.max(1)));
-    let mut tasks = Vec::with_capacity(jobs.len());
-    for job in jobs {
-        let permits = std::sync::Arc::clone(&permits);
-        tasks.push(tokio::spawn(async move {
-            let permit = permits
-                .acquire_owned()
-                .await
-                .expect("the recovery semaphore is never closed");
-            job().await;
-            drop(permit);
-        }));
+    let limit = limit.max(1);
+    let mut jobs = jobs.into_iter().peekable();
+    if jobs.peek().is_none() {
+        return;
     }
-    for task in tasks {
-        let _ = task.await;
+    let mut in_flight = futures::stream::FuturesUnordered::new();
+    loop {
+        while in_flight.len() < limit && jobs.peek().is_some() {
+            let job = jobs.next().expect("peeked");
+            in_flight.push(tokio::spawn(async move {
+                job().await;
+            }));
+        }
+        if in_flight.next().await.is_none() {
+            return;
+        }
     }
 }
 

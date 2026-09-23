@@ -173,18 +173,26 @@ impl RestoreProgress {
     /// continuation treatment (§10.5) stays queued: the pass settles it
     /// right before it routes the restart-continuation prompt, so a woken
     /// client's prompt cannot land ahead of the required continuation.
-    /// Idempotent; a no-op for a selector no in-flight pass owns.
+    /// The skip is still settle progress — the generation bump keeps the
+    /// other waiters' quiet budgets re-armed (a healthy adoption of
+    /// streaming rows must not look idle) — but the row's own waiters
+    /// stay parked until the pass reaches it. Idempotent; a no-op for a
+    /// selector no in-flight pass owns.
     pub(crate) fn settle_adopted(&self, selector: &str) {
         {
             let mut state = self.state.lock().unwrap();
             let Some(target) = restore_target_mut(&mut state.targets, selector) else {
                 return;
             };
-            if target.needs_continuation || target.settled {
+            if target.settled {
                 return;
             }
-            target.settled = true;
-            state.settled_generation += 1;
+            if target.needs_continuation {
+                state.settled_generation += 1;
+            } else {
+                target.settled = true;
+                state.settled_generation += 1;
+            }
         }
         self.notify.notify_waiters();
     }
@@ -877,6 +885,42 @@ mod tests {
         // The pass's own settle is unconditional: it wakes the
         // continuation row's waiters the moment the pass reaches it,
         // right before it routes the restart-continuation prompt.
+        progress.settle_target("a-1", None);
+        assert!(tokio::time::timeout(tick, queued_a).await.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_continuation_skip_is_still_progress_for_the_other_waiters() {
+        let mut roster = two_row_roster();
+        roster.sessions[0].should_resume = true;
+        roster.sessions[0].in_flight.streaming = true;
+        roster.sessions[1].should_resume = true;
+        roster.sessions[1].in_flight.streaming = true;
+        let progress = std::sync::Arc::new(RestoreProgress::new());
+        progress.begin(Some(&roster));
+        let waiter = |progress: &std::sync::Arc<RestoreProgress>, selector: &str| {
+            let progress = std::sync::Arc::clone(progress);
+            let selector = selector.to_string();
+            tokio::spawn(async move { progress.wait_for_settle_target(&selector).await })
+        };
+        let mut queued_a = waiter(&progress, "a-1");
+        let tick = std::time::Duration::from_millis(1);
+        assert!(tokio::time::timeout(tick, &mut queued_a).await.is_err());
+        // Quiet for 110s, then an adoption brings a continuation row up:
+        // that row's settle is skipped (its waiters stay parked for the
+        // pass's continuation) but still counts as progress, re-arming
+        // this waiter's quiet budget.
+        tokio::time::advance(std::time::Duration::from_secs(110)).await;
+        progress.settle_adopted("durable-b");
+        // Past the original absolute deadline: only the re-arm keeps the
+        // waiter queued, and its own row is still owned (still pending
+        // its continuation prompt).
+        tokio::time::advance(std::time::Duration::from_secs(30)).await;
+        assert!(
+            tokio::time::timeout(tick, &mut queued_a).await.is_err(),
+            "the skipped settle did not re-arm the other waiters"
+        );
+        // The pass settles the row itself: the waiter wakes.
         progress.settle_target("a-1", None);
         assert!(tokio::time::timeout(tick, queued_a).await.is_ok());
     }

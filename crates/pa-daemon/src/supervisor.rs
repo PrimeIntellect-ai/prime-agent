@@ -2627,7 +2627,21 @@ impl Supervisor {
             descriptor.lifecycle = DaemonWorkerLifecycle::Ready;
             let _ = persist_worker(&resident.descriptor_path, &descriptor);
         }
-        let durable_session_id = registration.session_id.clone();
+        // The registration's durable id is optional on the wire: a
+        // re-registering worker that does not report it still owns its
+        // persisted descriptor, whose session-file stem addresses the
+        // same roster row.
+        let durable_session_id = match registration.session_id.clone() {
+            Some(session_id) => Some(session_id),
+            None => resident
+                .descriptor
+                .lock()
+                .await
+                .session_file
+                .as_deref()
+                .and_then(|file| Path::new(file).file_stem())
+                .map(|stem| stem.to_string_lossy().to_string()),
+        };
         let record = self.registry.record_registration(registration).await;
         // A restore pass that owns this session's roster row can settle it
         // now (spec §10.4): the live worker serves the row's waiters
