@@ -380,7 +380,7 @@ fn a_detached_bash_completion_wakes_the_idle_session_across_a_supervisor_restart
 
     // First generation: the session starts the detached watcher and goes
     // idle (the turn settles while `sleep 12` keeps running).
-    let supervisor = spawn_daemon(&socket, &agent_dir, Some(&kernel_python));
+    let mut supervisor = spawn_daemon(&socket, &agent_dir, Some(&kernel_python));
     let mut client = Client::connect(&socket);
     let (active_id, session_id) = create_session(&mut client, "c1", &dir, &agent_dir);
     let started = client.request(
