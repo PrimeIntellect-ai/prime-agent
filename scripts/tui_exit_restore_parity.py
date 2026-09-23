@@ -532,6 +532,15 @@ def scenario_runs(side, label):
     return True
 
 
+def true_count(facts):
+    """A nonzero `workers_found` read: the count arrives as a JSON int or
+    a string depending on the capture path; `None` reads as zero."""
+    try:
+        return int(facts.get("workers_found") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def gate_facts(key, facts):
     """The failure list for one scenario run (the `before` side records
     its failures as the pre-fix evidence; only ts/rust gate the exit)."""
@@ -551,6 +560,15 @@ def gate_facts(key, facts):
             failures.append(f"{key}:prompt-not-back")
         if str(facts.get("alt_on_while_running")) != "1":
             failures.append(f"{key}:alt-not-on-while-running")
+        if label == "wedge":
+            # The watchdog contract is the scenario's point: the loop was
+            # parked (workers were found and stopped) and the force quit
+            # fired — an ordinary quit path or a missed deadline must not
+            # pass for it.
+            if facts.get("workers_found") is not true_count(facts):
+                failures.append(f"{key}:no-workers-to-wedge")
+            if facts.get("force_exited") is not True:
+                failures.append(f"{key}:force-quit-did-not-fire")
     if facts.get("alternate_on_after") != "0":
         failures.append(f"{key}:alt-on={facts.get('alternate_on_after')}")
     if facts.get("stty_matches_sane") is not True:
@@ -585,7 +603,10 @@ def main():
 
     sides = args.sides.split(",") if args.sides else ["ts", "rust"]
     if "ts" in sides:
-        ts_identity.assert_ts_side_is_the_ts_product(ts_bin=TS_BIN)
+        # The identity guard gets the binaries THIS run executes: the ts
+        # side must be the deployed TS product, checked against the rust
+        # build the harness actually drives (not the module default).
+        ts_identity.assert_ts_side_is_the_ts_product(ts_bin=TS_BIN, rust_bin=RUST_BIN)
     all_scenarios = [
         "quit",
         "quit-slash",

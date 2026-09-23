@@ -1578,11 +1578,20 @@ pub async fn run_agents_view(
     // `?` between the surface mount and the tail teardown must not hand
     // the shell a terminal still in TUI state); the restore is
     // idempotent, so the failed-roster release below costing a second
-    // pass only re-emits the two unconditional tail bytes.
-    match run_agents_view_surface(options, ui, link).await {
+    // pass only re-emits the two unconditional tail bytes. The headless
+    // view never owned the terminal, and a terminal-mode error that fired
+    // before this surface mounted must not tear down whatever the caller
+    // had up (the roster-link failure runs its own release inside the
+    // surface fn when the pane was handed over already in TUI state).
+    let owns_terminal = matches!(ui, AgentsViewUiMode::Terminal);
+    let surface_mounted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mounted = std::sync::Arc::clone(&surface_mounted);
+    match run_agents_view_surface(options, ui, link, mounted).await {
         Ok(run) => Ok(run),
         Err(error) => {
-            crate::exit_restore::restore_terminal();
+            if owns_terminal && surface_mounted.load(std::sync::atomic::Ordering::SeqCst) {
+                crate::exit_restore::restore_terminal();
+            }
             Err(error)
         }
     }
@@ -1592,6 +1601,7 @@ async fn run_agents_view_surface(
     options: AgentsViewOptions,
     ui: AgentsViewUiMode,
     link: Option<AgentsViewLink>,
+    surface_mounted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<AgentsViewRun> {
     crossterm::style::force_color_output(true);
     // The connection and its first snapshot precede every surface state:
@@ -1626,6 +1636,7 @@ async fn run_agents_view_surface(
     // unwind-guard contract the session surface arms).
     let _surface_restore = crate::exit_restore::SurfaceRestore::armed();
     let mut renderer = Renderer::setup(ui, ui_tx.clone(), exit_guard.clone())?;
+    surface_mounted.store(true, std::sync::atomic::Ordering::SeqCst);
     // The first frame renders from the live roster the moment the surface
     // mounts (TS `applySessionList(this.rosterStore.summaries(), true)`
     // before its first `requestRender`): the saved-catalog fetch below

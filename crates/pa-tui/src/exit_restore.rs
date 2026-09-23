@@ -66,19 +66,27 @@ pub(crate) fn restore_terminal() {
     #[cfg(test)]
     RESTORE_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let mut out = std::io::stdout();
-    if !out.is_terminal() {
-        return;
-    }
     crate::enhanced_keys::release_for_exit();
-    crate::enhanced_keys::drain_for_exit(&mut out);
-    let _ = crate::mouse_tracking::disable(&mut out);
-    let _ = crate::enhanced_keys::disable(&mut out);
-    // The unconditional leave: the restore is the last line of defense,
-    // so it must not trust the ownership flag (a surface that mounted the
-    // screen outside the module — a partial restore, a desynced flag —
-    // would otherwise keep the alt buffer up past the process death).
-    crate::altscreen::force_leave(&mut out);
-    terminal_release_tail(&mut out);
+    if out.is_terminal() {
+        crate::enhanced_keys::drain_for_exit(&mut out);
+        let _ = crate::mouse_tracking::disable(&mut out);
+        let _ = crate::enhanced_keys::disable(&mut out);
+        // The unconditional leave: the restore is the last line of defense,
+        // so it must not trust the ownership flag (a surface that mounted the
+        // screen outside the module — a partial restore, a desynced flag —
+        // would otherwise keep the alt buffer up past the process death).
+        crate::altscreen::force_leave(&mut out);
+        let _ = out.write_all(SYNC_OUTPUT_OFF);
+        let _ = out.write_all(SGR_RESET);
+        let _ = crossterm::execute!(out, crossterm::cursor::Show);
+    }
+    // The raw-mode release and the cooked verification run regardless of a
+    // redirected stdout (`prime-agent >capture`): raw mode lives on the
+    // controlling tty, not on stdout — skipping the termios restoration
+    // there would hand the shell a raw tty with no repair.
+    let _ = crossterm::terminal::disable_raw_mode();
+    let _ = report_cooked_repair();
+    let _ = out.flush();
 }
 
 /// The shared exit tail: synchronized output off, SGR reset, cursor show,
@@ -92,12 +100,26 @@ pub(crate) fn terminal_release_tail(out: &mut Stdout) {
     let _ = out.write_all(SGR_RESET);
     let _ = crossterm::execute!(out, crossterm::cursor::Show);
     let _ = crossterm::terminal::disable_raw_mode();
+    let _ = report_cooked_repair();
+    let _ = out.flush();
+}
+
+/// The repair notice goes through a fallible write: `eprintln!` panics
+/// when stderr is gone, and a panic inside the unwind guard's restore
+/// would abort the process mid-restore — exactly when the terminal is
+/// half-handed-back.
+fn report_cooked_repair() -> std::io::Result<()> {
     if pa_types::platform::terminal::ensure_cooked_tty()
         == pa_types::platform::terminal::TtyCooked::Repaired
     {
-        eprintln!("Prime Agent: repaired a raw terminal left by a previous run.");
+        use std::io::Write;
+        writeln!(
+            std::io::stderr(),
+            "Prime Agent: repaired a raw terminal left by a previous run."
+        )
+    } else {
+        Ok(())
     }
-    let _ = out.flush();
 }
 
 /// Fire the exit restore when a TUI surface unwinds: a panic between the

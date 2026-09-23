@@ -594,6 +594,8 @@ def main():
 
     failures = []
     for key, facts in results.items():
+        if facts.get("skipped"):
+            continue  # the loud /proc skip: recorded, never gated
         side, label = key.split(":")
         if label.startswith("left-"):
             if facts.get("shutdown_stalled"):

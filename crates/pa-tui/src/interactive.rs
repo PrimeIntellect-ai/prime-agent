@@ -640,10 +640,16 @@ pub async fn run_interactive(
     // restore (the mode gates it — the distinction the headless e2e
     // binaries observe, not `restore_terminal`'s pipe no-op).
     let owns_terminal = matches!(ui, UiMode::Terminal);
-    match run_interactive_surface(options, ui).await {
+    // A terminal-mode error that fired BEFORE this surface mounted (the
+    // daemon connection refused at the top) must not tear down whatever
+    // the CALLER had up: the restore runs only once this run's surface
+    // actually mounted.
+    let surface_mounted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mounted = std::sync::Arc::clone(&surface_mounted);
+    match run_interactive_surface(options, ui, mounted).await {
         Ok(outcome) => Ok(outcome),
         Err(error) => {
-            if owns_terminal {
+            if owns_terminal && surface_mounted.load(std::sync::atomic::Ordering::SeqCst) {
                 crate::exit_restore::restore_terminal();
             }
             Err(error)
@@ -654,6 +660,7 @@ pub async fn run_interactive(
 async fn run_interactive_surface(
     options: InteractiveOptions,
     ui: UiMode,
+    surface_mounted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<InteractiveOutcome> {
     // The TS theme emits raw ANSI color codes regardless of NO_COLOR; match
     // that so the same terminal renders the same frames either way.
@@ -725,6 +732,7 @@ async fn run_interactive_surface(
     // would live on with a half-restored surface).
     let _surface_restore = crate::exit_restore::SurfaceRestore::armed();
     let mut renderer = Renderer::setup(ui, ui_tx, exit_guard.clone(), options.fullscreen_mouse)?;
+    surface_mounted.store(true, std::sync::atomic::Ordering::SeqCst);
     if !headless {
         // TS `ui.start()` renders once before the session loads: the first
         // frame is the startup chrome (banner, editor, tray). The model
