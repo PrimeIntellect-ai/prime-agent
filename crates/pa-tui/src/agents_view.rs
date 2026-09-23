@@ -471,13 +471,7 @@ impl AgentsViewMode {
                     && row.summary.get("sessionId").and_then(Value::as_str) == Some(anchor)
             }) {
                 self.selected = index;
-                self.anchor_selection_pending = false;
-                // The loading hint belongs to the wait alone: the anchor
-                // landing drops it so the status line returns to the
-                // flow's own notice instead of a stale loading message.
-                if self.status.as_deref() == Some(ANCHOR_LOADING_HINT) {
-                    self.status = None;
-                }
+                self.end_anchor_wait();
             }
         }
         self.rows = rows;
@@ -536,6 +530,7 @@ impl AgentsViewMode {
     /// which must never override it.
     fn move_selection(&mut self, delta: isize) {
         self.anchor_selection_pending = false;
+        self.clear_anchor_loading_hint();
         let selectable: Vec<usize> = self
             .rows
             .iter()
@@ -569,6 +564,23 @@ impl AgentsViewMode {
     /// appears, and any direction key cancels the wait for an explicit
     /// manual pick. A scoped view never lists its anchor (the scope root
     /// is excluded), so its wait never resolves — it keeps the open.
+    /// End the entry anchor's wait (the anchor row landed).
+    fn end_anchor_wait(&mut self) {
+        self.anchor_selection_pending = false;
+        self.clear_anchor_loading_hint();
+    }
+
+    /// The loading hint belongs to the wait alone: ending the wait by
+    /// either arm (the anchor landing or the user's first move) drops it
+    /// so the status line returns to the flow's own notice — the error
+    /// catalog-failure message included — instead of a stale loading
+    /// message.
+    fn clear_anchor_loading_hint(&mut self) {
+        if self.status.as_deref() == Some(ANCHOR_LOADING_HINT) {
+            self.status = None;
+        }
+    }
+
     fn open_selected(&mut self) {
         if self.anchor_selection_pending && self.options.scope.is_none() {
             self.status = Some(ANCHOR_LOADING_HINT.to_string());
@@ -2016,6 +2028,16 @@ mod tests {
         assert!(
             mode.status.is_none(),
             "the anchor landing drops the loading hint"
+        );
+        // The user's first move ends the wait the same way: the hint it
+        // left behind clears too.
+        mode.anchor_selection_pending = true;
+        mode.status = Some(ANCHOR_LOADING_HINT.to_string());
+        mode.handle_key("down");
+        assert!(!mode.anchor_selection_pending);
+        assert!(
+            mode.status.is_none(),
+            "the canceling move drops the loading hint as well"
         );
         mode.handle_key("enter");
         let opened = mode.opened.expect("the anchored row opens");
