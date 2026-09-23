@@ -281,7 +281,8 @@ class Side:
         self.findings.append(finding)
         self.all_findings.append(finding)
         (self.out / "all-findings.json").write_text(json.dumps(self.all_findings, indent=1))
-        print(f"[{'ok  ' if ok else 'FAIL'}] {self.name}: {summary}")
+        suffix = f" :: {evidence[:240]}" if (not ok and evidence) else ""
+        print(f"[{'ok  ' if ok else 'FAIL'}] {self.name}: {summary}{suffix}")
 
     def evidence(self, name: str, text: str) -> None:
         (self.out / name).write_text(text)
