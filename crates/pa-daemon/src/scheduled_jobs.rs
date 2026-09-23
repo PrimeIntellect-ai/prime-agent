@@ -358,15 +358,28 @@ impl ScheduledJobs {
             return;
         }
         let key = format!("heartbeat:{}", job.id);
-        let mut core = self
-            .hooks
-            .core
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        core.steering
-            .retain(|item| item.queue_key.as_deref() != Some(key.as_str()));
-        core.follow_up
-            .retain(|item| item.queue_key.as_deref() != Some(key.as_str()));
+        {
+            let mut core = self
+                .hooks
+                .core
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            core.steering
+                .retain(|item| item.queue_key.as_deref() != Some(key.as_str()));
+            core.follow_up
+                .retain(|item| item.queue_key.as_deref() != Some(key.as_str()));
+        }
+        // Same settle as the other withdrawals: the mutation withdrew a
+        // queued fire, so the verdict and the snapshot must not keep the
+        // fire's admission busy=true (a revive would replay the deleted
+        // heartbeat's prompt from the stale snapshot).
+        crate::worker::checkpoint_queue_recovery(
+            &self.hooks.recovery,
+            &self.hooks.core,
+            crate::worker::QueueCheckpoint::Settle {
+                operation: "queue_purged",
+            },
+        );
     }
 }
 

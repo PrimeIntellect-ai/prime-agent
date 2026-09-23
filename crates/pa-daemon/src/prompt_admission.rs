@@ -610,11 +610,20 @@ impl Worker {
     /// controller aborts before the admission commits, so the prompt never
     /// runs).
     pub(crate) fn drop_queued_admitted_prompt(&self, admission_id: &str) {
-        let mut core = self.core.lock().unwrap();
-        core.steering
-            .retain(|item| item.admission_id.as_deref() != Some(admission_id));
-        core.follow_up
-            .retain(|item| item.admission_id.as_deref() != Some(admission_id));
+        {
+            let mut core = self.core.lock().unwrap();
+            core.steering
+                .retain(|item| item.admission_id.as_deref() != Some(admission_id));
+            core.follow_up
+                .retain(|item| item.admission_id.as_deref() != Some(admission_id));
+        }
+        // The cancelled rows leave the lanes: settle the verdict so the
+        // drop cannot leave the admission's busy=true (or its snapshot
+        // rows) promising a revive work that was cancelled. A drop with
+        // other rows still queued stays busy — that work is real.
+        self.checkpoint_queue(crate::worker::QueueCheckpoint::Settle {
+            operation: "queue_dropped",
+        });
     }
 
     /// `cancel_prompt_admission` (the worker arm the supervisor forwards

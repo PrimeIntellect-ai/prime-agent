@@ -1022,19 +1022,37 @@ impl Worker {
                 let autonomous_sink: crate::agent_engine::AutonomousAdmission = {
                     let sink_core = Arc::clone(&sink_core);
                     let sink_notify = Arc::clone(&sink_notify);
+                    let sink_recovery = Arc::clone(&recovery);
                     std::sync::Arc::new(move |text| {
-                        admit_autonomous_follow_up(&sink_core, &sink_notify, text);
+                        admit_autonomous_follow_up(&sink_recovery, &sink_core, &sink_notify, text);
                     })
                 };
                 concrete.set_autonomous_admission(autonomous_sink);
                 let purge_core = Arc::clone(&core);
+                let purge_recovery = Arc::clone(&recovery);
                 let autonomous_purge: std::sync::Arc<dyn Fn() + Send + Sync> =
                     std::sync::Arc::new(move || {
-                        let mut core = purge_core.lock().unwrap();
-                        core.follow_up
-                            .retain(|item| item.queue_key.as_deref() != Some(AUTONOMOUS_QUEUE_KEY));
-                        core.steering
-                            .retain(|item| item.queue_key.as_deref() != Some(AUTONOMOUS_QUEUE_KEY));
+                        {
+                            let mut core = purge_core.lock().unwrap();
+                            core.follow_up.retain(|item| {
+                                item.queue_key.as_deref() != Some(AUTONOMOUS_QUEUE_KEY)
+                            });
+                            core.steering.retain(|item| {
+                                item.queue_key.as_deref() != Some(AUTONOMOUS_QUEUE_KEY)
+                            });
+                        }
+                        // The withdraw settles the verdict: `/autonomous
+                        // off` dropping the last queued row must not
+                        // leave its admission busy=true promising a revive
+                        // work that was withdrawn (and the snapshot must
+                        // not keep replaying the withdrawn row).
+                        checkpoint_queue_recovery(
+                            &purge_recovery,
+                            &purge_core,
+                            QueueCheckpoint::Settle {
+                                operation: "queue_purged",
+                            },
+                        );
                     });
                 concrete.set_autonomous_queue_purge(autonomous_purge);
                 let probe_core = Arc::clone(&core);
@@ -1047,17 +1065,38 @@ impl Worker {
                 let sink_core = Arc::clone(&core);
                 let sink_events = events.clone();
                 let sink_notify = Arc::clone(&work_notify);
+                let sink_recovery = Arc::clone(&recovery);
                 let sink: crate::engine::GoalAdmissionSink = Arc::new(move |work| {
-                    admit_goal_follow_up(&sink_core, &sink_events, &sink_notify, work);
+                    admit_goal_follow_up(
+                        &sink_recovery,
+                        &sink_core,
+                        &sink_events,
+                        &sink_notify,
+                        work,
+                    );
                 });
                 // TS `_clearQueuedGoalContexts`: withdraw queued minted
                 // goal-context turns (the pause/clear/start commands and
                 // the kernel's `goal.complete`).
                 let purge_core = Arc::clone(&core);
+                let purge_recovery = Arc::clone(&recovery);
                 let queue_purge: std::sync::Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-                    let mut core = purge_core.lock().unwrap();
-                    core.steering.retain(|item| !is_goal_context_item(item));
-                    core.follow_up.retain(|item| !is_goal_context_item(item));
+                    {
+                        let mut core = purge_core.lock().unwrap();
+                        core.steering.retain(|item| !is_goal_context_item(item));
+                        core.follow_up.retain(|item| !is_goal_context_item(item));
+                    }
+                    // Same settle as the autonomous withdraw: the
+                    // withdrawal must refresh the verdict (and the
+                    // snapshot) so a pause/clear cannot leave busy=true
+                    // over withdrawn rows.
+                    checkpoint_queue_recovery(
+                        &purge_recovery,
+                        &purge_core,
+                        QueueCheckpoint::Settle {
+                            operation: "queue_purged",
+                        },
+                    );
                 });
                 concrete.set_goal_admission(probe, sink, queue_purge);
             }
@@ -3659,6 +3698,15 @@ impl Worker {
                                 forced_batch: false,
                             });
                         }
+                        // The admission checkpoint (busy=true): the
+                        // post-compaction continuation is admitted while
+                        // the session is idle, so without this record a
+                        // kill before the turn's settle would park it on
+                        // a plain boot (the runner records nothing at
+                        // pickup).
+                        self.checkpoint_queue(QueueCheckpoint::Admitted {
+                            operation: "follow_up_queued",
+                        });
                     }
                 }
                 // The resume site: clears the suspension and wakes the
@@ -4707,6 +4755,7 @@ pub(crate) fn emit_worker_event_with(
 /// admission): the runner wakes, the item runs as its own queue item after
 /// the current run settles.
 pub(crate) fn admit_autonomous_follow_up(
+    recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
     work_notify: &Arc<Notify>,
     text: String,
@@ -4727,10 +4776,24 @@ pub(crate) fn admit_autonomous_follow_up(
             forced_batch: false,
         });
     }
+    // The admission checkpoint (busy=true): an injected continuation
+    // admitted while idle (after the previous settle) is undelivered
+    // live work the journal must prove — the runner records nothing at
+    // pickup, so a kill between this admission and the turn's settle
+    // would otherwise read as idle and park the continuation on a
+    // plain boot.
+    checkpoint_queue_recovery(
+        recovery,
+        core,
+        QueueCheckpoint::Admitted {
+            operation: "follow_up_queued",
+        },
+    );
     work_notify.notify_waiters();
 }
 
 pub(crate) fn admit_goal_follow_up(
+    recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
     core: &Arc<Mutex<SessionCore>>,
     events: &Arc<EventPump>,
     work_notify: &Arc<Notify>,
@@ -4775,6 +4838,20 @@ pub(crate) fn admit_goal_follow_up(
             Lane::FollowUp => core.follow_up.push_back(item),
         }
     }
+    // The admission checkpoint (busy=true, TS's queue strings by lane):
+    // a minted follow-up admitted while idle is undelivered live work
+    // the journal must prove until its turn settles (same gap as the
+    // autonomous continuation above).
+    checkpoint_queue_recovery(
+        recovery,
+        core,
+        QueueCheckpoint::Admitted {
+            operation: match lane {
+                Lane::Steering => "steer_queued",
+                Lane::FollowUp => "follow_up_queued",
+            },
+        },
+    );
     // `resumeIfIdle`: the runner re-checks the queue at its loop head, so
     // the minted turn runs as the next admitted turn.
     work_notify.notify_one();
@@ -9789,5 +9866,123 @@ mod replacement_gate_tests {
             "a failed open never restores the failed path: {log:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod recovery_verdict_tests {
+    use super::*;
+
+    fn worker_with_journal() -> Arc<Worker> {
+        let dir = std::env::temp_dir().join(format!("pa-worker-verdict-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = WorkerConfig {
+            socket_path: dir.join("worker.sock"),
+            supervisor_socket_path: PathBuf::new(),
+            token: "token".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "target-session".to_string(),
+            agent_dir: dir.join("agent"),
+            recovery_journal_path: dir.join("recovery.jsonl"),
+            telemetry_disabled: None,
+            script: Some(json!({ "responses": ["ack"] })),
+        };
+        let worker = Arc::new(Worker::new(config, None));
+        // The journal is opened in `serve()`; tests open it directly so the
+        // checkpoints have the same durable sink as production.
+        *worker.recovery.lock().unwrap() =
+            Some(WorkerRecoveryJournal::open(&worker.config.recovery_journal_path).unwrap());
+        worker
+    }
+
+    async fn created_worker_with_journal() -> Arc<Worker> {
+        let worker = worker_with_journal();
+        let created = worker
+            .dispatch(
+                "create",
+                &json!({ "noSession": true, "cwd": "/tmp", "name": "target" }),
+            )
+            .await;
+        assert!(created.success, "create failed: {created:?}");
+        worker
+    }
+
+    fn latest_record(worker: &Worker) -> crate::journal::WorkerRecoveryRecord {
+        WorkerRecoveryJournal::read_latest(&worker.config.recovery_journal_path)
+            .unwrap()
+            .into_iter()
+            .find(|record| record.active_session_id == "target-session")
+            .expect("session record")
+    }
+
+    /// An idle-time injected continuation is journal busy evidence: the
+    /// admission (not the pickup) proves the work, so a plain boot revives
+    /// the worker to deliver it.
+    #[tokio::test]
+    async fn idle_time_injected_admission_is_busy_evidence() {
+        let worker = created_worker_with_journal().await;
+        // Settle first: the create record's busy=true must not mask the
+        // admission's verdict.
+        worker.dispatch("clear_queue", &json!({})).await;
+        assert!(
+            !WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
+            "the settled session proves nothing"
+        );
+        let notify = Arc::new(Notify::new());
+        admit_autonomous_follow_up(
+            &worker.recovery,
+            &worker.core,
+            &notify,
+            "continue the mission".to_string(),
+        );
+        assert!(
+            WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
+            "the injected admission is live work"
+        );
+        let latest = latest_record(&worker);
+        assert_eq!(latest.operation, "follow_up_queued");
+        let (steering, follow_up) = WorkerRecoveryJournal::read_queue_snapshot(
+            &worker.config.recovery_journal_path,
+            "target-session",
+        )
+        .unwrap()
+        .expect("the admission flushed its snapshot");
+        assert!(steering.is_empty(), "steering: {steering:?}");
+        assert_eq!(follow_up[0].message, "continue the mission");
+        let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+    }
+
+    /// Dropping a cancelled admission settles the verdict: the cancelled
+    /// rows leave no busy evidence and no replayable snapshot.
+    #[tokio::test]
+    async fn cancelled_admission_drop_settles_the_verdict() {
+        let worker = created_worker_with_journal().await;
+        worker.dispatch("clear_queue", &json!({})).await;
+        let admitted = worker
+            .dispatch("prompt", &json!({ "admissionId": "a1", "message": "go" }))
+            .await;
+        assert!(admitted.success, "prompt failed: {admitted:?}");
+        assert!(
+            WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
+            "the admitted prompt is live work"
+        );
+        worker.drop_queued_admitted_prompt("a1");
+        assert!(
+            !WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
+            "the dropped rows leave no busy evidence"
+        );
+        let latest = latest_record(&worker);
+        assert_eq!(latest.operation, "queue_dropped");
+        let (steering, follow_up) = WorkerRecoveryJournal::read_queue_snapshot(
+            &worker.config.recovery_journal_path,
+            "target-session",
+        )
+        .unwrap()
+        .expect("the drop flushed its snapshot");
+        assert!(
+            steering.is_empty() && follow_up.is_empty(),
+            "lanes: {steering:?} {follow_up:?}"
+        );
+        let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
     }
 }
