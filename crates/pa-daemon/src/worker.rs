@@ -1818,6 +1818,13 @@ impl Worker {
         if !no_session {
             if let Some(path) = &session_path {
                 if path.exists() {
+                    // The engine owns the file from the restore on (the
+                    // store below opens the same path; the later
+                    // `set_session_file` is idempotent): the create-config
+                    // selection that follows resolves against the restored
+                    // decision — the create-time thinking clamp reads the
+                    // pinned model, not the cold-catalog default.
+                    self.engine.set_session_file(path.clone());
                     self.engine.restore_session_model(path).await;
                 }
             }

@@ -468,7 +468,12 @@ impl TreeNavigation {
             let mut core = self.core.lock().unwrap();
             core.store = Some(forked);
         }
-        self.engine.set_session_file(new_path);
+        self.engine.set_session_file(new_path.clone());
+        // TS re-restores the forked session's saved model at its runtime
+        // recreation (`createRuntime` -> `createAgentSession`): the fork
+        // resolves to the model its own file pins, not the previous
+        // session's (an explicit flag still wins inside).
+        self.engine.restore_session_model(&new_path).await;
         // A replacement flow retires the runtime first, so the rebuild
         // parks on the fresh, unbuilt session: its first build seeds the
         // goal state from the moved branch's own rows (the TS

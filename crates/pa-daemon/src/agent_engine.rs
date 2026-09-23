@@ -107,6 +107,22 @@ pub(crate) struct GoalRuntimeHandles {
         std::sync::Arc<tokio::sync::Mutex<pa_core::session::manager::SessionManager>>,
 }
 
+/// The session-model restore decision for one session file (TS
+/// `createAgentSession`'s restored-from-session step): the model the
+/// session's file pins, computed once at the create/replace seam through
+/// the bounded catalog-readiness wait, or the on-the-record fallback when
+/// the window missed (TS `modelFallbackMessage`). Scoped to
+/// `session_file`: the resolution consults it only while the engine owns
+/// that file, so a replacement flow recomputes its own instead of
+/// silently keeping the previous session's pin.
+#[derive(Clone)]
+struct RestoredSessionModel {
+    session_file: std::path::PathBuf,
+    /// `None` when the restore missed after the readiness window.
+    model: Option<(String, String)>,
+    fallback_message: Option<String>,
+}
+
 /// A [`SessionEngine`] running real agent turns.
 pub struct AgentSessionEngine {
     pub(crate) runtime: crate::async_safe_runtime::AsyncSafeRuntime,
@@ -163,11 +179,16 @@ pub struct AgentSessionEngine {
     /// (create config or worker env) and is re-bound when a session's create
     /// command carries explicit wire flags.
     selection: std::sync::RwLock<EngineModelSelection>,
-    /// TS `modelFallbackMessage`: set when a revived session's saved model
-    /// could not be restored after the catalog-readiness window and the
-    /// startup chain owns the session — the fallback is on the record
-    /// (never silent), published on the session summary.
-    model_fallback_message: std::sync::Mutex<Option<String>>,
+    /// TS `createAgentSession`'s restored-from-session decision, scoped to
+    /// the session file it was computed for: a revived session's saved
+    /// model (or, after a missed restore window, the on-the-record
+    /// fallback message — TS `modelFallbackMessage`). Computed once per
+    /// file at the create/replace seam (the bounded readiness wait) and
+    /// consulted by every unflagged resolution; a replacement flow that
+    /// moves the worker onto another file recomputes its own (TS
+    /// re-restores at every session boot), and an explicit create flag
+    /// wins end-to-end (the decision is never consulted).
+    restored_model: std::sync::Mutex<Option<RestoredSessionModel>>,
     /// The session's resolved effective thinking level, computed once when
     /// the create command adopts the selection and reused afterwards.
     /// Resolved at create time (before any turn) so summary/state polls
@@ -429,7 +450,7 @@ impl AgentSessionEngine {
             autonomous_boundary: std::sync::Mutex::new(None),
             session_file,
             selection: std::sync::RwLock::new(selection),
-            model_fallback_message: std::sync::Mutex::new(None),
+            restored_model: std::sync::Mutex::new(None),
             effective_thinking: std::sync::RwLock::new(None),
             service_tier: std::sync::RwLock::new(None),
             session: tokio::sync::Mutex::new(None),
@@ -838,37 +859,61 @@ impl AgentSessionEngine {
             pa_core::models::SESSION_MODEL_RESTORE_READINESS_TIMEOUT_MS,
         )
         .await;
-        let Some(restored) = restored else {
-            // The TS `modelFallbackMessage`: the restore miss is on the
-            // record — the startup chain owns the session, and the
-            // summary publishes what happened (never silent).
-            let fallback = self.startup_chain_model(&registry);
-            let message = match &fallback {
-                Some(fallback) => format!(
-                    "Could not restore model {provider}/{model_id}. Using {}/{}",
-                    fallback.provider, fallback.id
-                ),
-                None => format!("Could not restore model {provider}/{model_id}"),
-            };
-            eprintln!("{message}");
-            *self
-                .model_fallback_message
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(message);
-            return;
+        let (model, fallback_message) = match restored {
+            Some(restored) => (Some((restored.provider, restored.id)), None),
+            None => {
+                // The TS `modelFallbackMessage`: the restore miss is on the
+                // record — the startup chain owns the session, and the
+                // summary publishes what happened (never silent).
+                let fallback = self.startup_chain_model(&registry);
+                let message = match &fallback {
+                    Some(fallback) => format!(
+                        "Could not restore model {provider}/{model_id}. Using {}/{}",
+                        fallback.provider, fallback.id
+                    ),
+                    None => format!("Could not restore model {provider}/{model_id}"),
+                };
+                eprintln!("{message}");
+                (None, Some(message))
+            }
         };
-        // Pin the restored model into the selection (TS createAgentSession
-        // holds the restored model as the session's model): the create-time
-        // thinking clamp, the prewarm build, and every turn resolve this
-        // selection first, so the revived session keeps running on the
-        // model its file pins instead of silently drifting to the
-        // featured default.
-        self.configure_model(EngineModelSelection {
-            provider: Some(restored.provider),
-            model: Some(restored.id),
-            api_key: None,
-            thinking: None,
+        *self
+            .restored_model
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(RestoredSessionModel {
+            session_file: session_path.to_path_buf(),
+            model,
+            fallback_message,
         });
+    }
+
+    /// The restored-from-session resolution for the engine's current
+    /// session file (TS `createAgentSession`'s restored-from-session
+    /// step): a decision computed for this file resolves its pinned model
+    /// through the same exact-match path a flagged selection takes — a
+    /// catalog flap rebuilds the private route template on the same id
+    /// (`build_fallback_model`), never silently drifting to the featured
+    /// default. A decision for another file (a replacement flow that has
+    /// not recomputed yet) is ignored.
+    fn restored_model_resolution(
+        &self,
+        registry: &pa_core::models::ModelRegistry,
+    ) -> Option<Model> {
+        let decision = self
+            .restored_model
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()?;
+        let (provider, model_id) = decision.model?;
+        let current = self
+            .session_file
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()?;
+        if decision.session_file != current {
+            return None;
+        }
+        pa_core::models::resolve_cli_model(Some(&provider), &model_id, registry.get_all()).model
     }
 
     /// Resolve the model through the composed registry.
@@ -883,11 +928,13 @@ impl AgentSessionEngine {
         registry.load_private_authorization_from_cache();
         let selection = self.current_selection();
         let Some(model_name) = selection.model.as_deref() else {
-            // No flagged model: the TS `createAgentSession` startup chain —
+            // No flagged model: the restored-from-session decision comes
+            // first (TS `createAgentSession`), then the startup chain —
             // the saved settings default, then the featured default, then
-            // the first available model. A restored session model has
-            // already been pinned into the selection by the create-time
-            // restore (see [`Self::restore_session_model`]).
+            // the first available model.
+            if let Some(model) = self.restored_model_resolution(&registry) {
+                return Ok(model);
+            }
             let Some(model) = self.startup_chain_model(&registry) else {
                 anyhow::bail!(
                     "No models available. Check your installation or add models to models.json."
@@ -1624,12 +1671,22 @@ impl SessionEngine for AgentSessionEngine {
 
     /// TS `modelFallbackMessage`: the non-silent record of a revived
     /// session's model falling back to the startup chain after the
-    /// readiness window missed. Published on the session summary.
+    /// readiness window missed. Published on the session summary while
+    /// the engine owns the file the decision was computed for.
     fn model_fallback_message(&self) -> Option<String> {
-        self.model_fallback_message
+        let decision = self
+            .restored_model
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+            .clone()?;
+        let current = self
+            .session_file
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()?;
+        (decision.session_file == current)
+            .then(|| decision.fallback_message)
+            .flatten()
     }
 
     /// The `compact` command path (TS `compact()`'s background
@@ -6656,6 +6713,7 @@ pub(crate) mod tests {
         install_loopback_catalog(&agent_dir, &server);
         let path = session_file_pinning_private_model(dir.path());
         let engine = restore_test_engine(dir.path(), None, None);
+        engine.set_session_file(path.clone());
 
         // The premise — the silent fallback the race produced: the cold
         // registry holds only the compiled entries, so the unflagged
@@ -6667,7 +6725,8 @@ pub(crate) mod tests {
         assert_eq!(server.request_count(), 0, "the cold resolution never fetches");
 
         // The create-time restore: the readiness window covers the fetch,
-        // the pinned model restores and pins into the selection.
+        // the pinned model restores and every later unflagged resolution
+        // runs on it.
         engine.restore_session_model(&path).await;
         let restored = engine.resolve_registry_model().expect("restored resolution");
         assert_eq!(restored.provider, "prime-inference");
@@ -6692,6 +6751,7 @@ pub(crate) mod tests {
         install_loopback_catalog(&agent_dir, &server);
         let path = session_file_pinning_private_model(dir.path());
         let engine = restore_test_engine(dir.path(), None, None);
+        engine.set_session_file(path.clone());
 
         engine.restore_session_model(&path).await;
         assert_eq!(
@@ -6714,6 +6774,7 @@ pub(crate) mod tests {
         write_custom_provider_models_json(&agent_dir, "http://127.0.0.1:9");
         let path = session_file_pinning_private_model(dir.path());
         let engine = restore_test_engine(dir.path(), Some("battery"), Some("mock-1"));
+        engine.set_session_file(path.clone());
 
         engine.restore_session_model(&path).await;
         let resolved = engine.resolve_registry_model().expect("flagged resolution");
@@ -6743,11 +6804,60 @@ pub(crate) mod tests {
         session.set_path(path.clone());
         session.rewrite().unwrap();
         let engine = restore_test_engine(dir.path(), None, None);
+        engine.set_session_file(path.clone());
 
         engine.restore_session_model(&path).await;
         assert!(engine.model_fallback_message().is_none());
         let resolved = engine.resolve_registry_model().expect("startup chain");
         assert_eq!(resolved.id, "z-ai/glm-5.3");
+    }
+
+    /// The restore decision is scoped to the file it was computed for: a
+    /// replacement flow that moves the worker onto another file without
+    /// recomputing keeps the startup chain — the previous session's pin
+    /// never silently overrides the moved-to session (TS re-restores at
+    /// every session boot).
+    #[tokio::test]
+    async fn a_restore_decision_is_scoped_to_its_session_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        write_prime_auth(&agent_dir);
+        let pi = pi_payload();
+        let layer_a = serde_json::json!({ "schemaVersion": 1, "models": [] }).to_string();
+        let server = MockCatalogServer::start(vec![
+            catalog_ok_json(&layer_a),
+            catalog_ok_json(&pi),
+            catalog_ok_json(&pi),
+        ])
+        .await;
+        install_loopback_catalog(&agent_dir, &server);
+        let pinned = session_file_pinning_private_model(dir.path());
+        let engine = restore_test_engine(dir.path(), None, None);
+        engine.set_session_file(pinned.clone());
+        engine.restore_session_model(&pinned).await;
+        let restored = engine.resolve_registry_model().expect("restored resolution");
+        assert_eq!(restored.id, "internal/glm-5.3-fast");
+
+        // The worker moves onto another file (a replacement flow that has
+        // not recomputed yet): the decision for the old file no longer
+        // applies — the startup chain owns the resolution again.
+        let mut other = crate::session_store::SessionFile::create(
+            dir.path().to_str().unwrap_or("/tmp"),
+            None,
+            0,
+        );
+        let other_path = dir
+            .path()
+            .join(crate::session_store::session_file_name(other.session_id()));
+        other.set_path(other_path.clone());
+        other.rewrite().unwrap();
+        engine.set_session_file(other_path);
+        let moved = engine.resolve_registry_model().expect("moved resolution");
+        assert_eq!(moved.id, "z-ai/glm-5.3");
+        assert!(
+            engine.model_fallback_message().is_none(),
+            "the old file's decision does not leak into the moved-to session"
+        );
     }
 
     #[test]
