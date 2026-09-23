@@ -87,7 +87,7 @@ const IMAGE_MODEL_REFERENCE_PROBLEM_MESSAGES: Record<ImageModelReferenceProblem,
 	// /login: the model exists with working auth and only the available list is
 	// missing it.
 	"not-available": (reference) =>
-		`"${reference}" is not available to this session, so it cannot serve image turns. Its provider is authenticated, but the model is missing from the available model list (a private Prime Inference model the team is not entitled to, for example). Pick an available image model with /model.`,
+		`"${reference}" is not available to this session, so it cannot serve image turns. Its provider is authenticated, but the model is missing from the available model list (a private Prime Inference model the team is not entitled to, for example). Pick an available image model with /image-model <model>.`,
 };
 
 export function formatImageModelReferenceRejectedMessage(
