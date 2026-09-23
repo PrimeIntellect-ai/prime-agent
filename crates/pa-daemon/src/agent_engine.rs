@@ -975,11 +975,19 @@ impl AgentSessionEngine {
             model,
             fallback_message,
         });
-        // The reset dropped the thinking cache against the dropped
-        // selection; the decision is on the record now, so resolve the
-        // level against the model this session actually runs on (the
-        // restored pin, or the startup chain after a missed window) —
-        // TS `createAgentSession` clamps after the model resolution.
+        // The decision is on the record now, so the level must resolve
+        // against the model this session actually runs on (the restored
+        // pin, or the startup chain after a missed window) — TS
+        // `createAgentSession` resolves the model first and clamps the
+        // thinking level against it. A concurrent summary/roster read may
+        // have populated the cache against the startup chain while the
+        // restore was still awaiting: drop the cache once more so the
+        // post-decision resolution wins for every later reader (the reset
+        // dropped it too, but the window in between is concurrent).
+        *self
+            .effective_thinking
+            .write()
+            .expect("effective thinking lock") = None;
         let _ = self.effective_thinking();
     }
 
