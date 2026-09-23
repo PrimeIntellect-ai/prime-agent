@@ -336,11 +336,17 @@ impl SessionFile {
             .and_then(|depth| u32::try_from(depth).ok())
     }
 
-    /// Walk the leaf-to-root entry path (the active branch).
+    /// Walk the leaf-to-root entry path (the active branch). A corrupt
+    /// file can hold a parent cycle; the walk must terminate anyway (the
+    /// same guard `build_session_context` has).
     pub fn branch(&self) -> Vec<&SessionEntry> {
         let mut path = Vec::new();
+        let mut visited = std::collections::HashSet::new();
         let mut current = self.leaf_id.as_deref().and_then(|id| self.entry(id));
         while let Some(entry) = current {
+            if !visited.insert(entry.id.as_str()) {
+                break;
+            }
             if let Some(window) = &self.window {
                 let index = self.by_id[&entry.id];
                 if index < window.loaded_entries && !window.retained_ids.contains(&entry.id) {
@@ -1160,6 +1166,34 @@ mod tests {
             Some(("p", "m"))
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A corrupt file can hold a parent cycle; the branch walk must
+    /// terminate anyway (the same guard `build_session_context` has). The
+    /// session-model restore reads the branch through this walk, so a
+    /// cyclic file would otherwise hang the create's blocking task.
+    #[test]
+    fn a_cyclic_parent_chain_terminates_the_branch_walk() {
+        let mut session = SessionFile::create("/tmp", None, 0);
+        session.append_message(json!({"role": "user", "content": "a", "timestamp": 1u64}));
+        session.append_message(json!({"role": "user", "content": "b", "timestamp": 2u64}));
+        // Forge the cycle: the two entries point at each other.
+        let first = session.entries[0].id.clone();
+        let second = session.entries[1].id.clone();
+        session.entries[0].parent_id = Some(second.clone());
+        session.entries[1].parent_id = Some(first);
+        let branch = session.branch();
+        assert!(
+            branch.len() <= 2,
+            "the cyclic walk terminates: {:?}",
+            branch
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        // The root-to-leaf typed walk (the restore's reader) terminates too.
+        let typed = session.branch_file_entries();
+        assert!(typed.len() <= 2, "branch_file_entries terminates");
     }
 
     /// The persisted thinking level (`thinking_level_change`): the last

@@ -1832,6 +1832,7 @@ impl Worker {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let name = payload.get("name").and_then(Value::as_str);
+        let flagged_model = payload.get("model").and_then(Value::as_str).is_some();
         // TS createAgentSession's restored-from-session step: a revived
         // session (an existing session file — scheduled wake, update
         // restore, worker relaunch) restores the model its file pins
@@ -1843,21 +1844,6 @@ impl Worker {
         // priority over the saved session model): the restore is skipped
         // entirely, so a flagged create never eats the readiness window or
         // records a fallback that would not be used.
-        let flagged_model = payload.get("model").and_then(Value::as_str).is_some();
-        if !no_session && !flagged_model {
-            if let Some(path) = &session_path {
-                if path.exists() {
-                    // The engine owns the file from the restore on (the
-                    // store below opens the same path; the later
-                    // `set_session_file` is idempotent): the create-config
-                    // selection that follows resolves against the restored
-                    // decision — the create-time thinking clamp reads the
-                    // pinned model, not the cold-catalog default.
-                    self.engine.set_session_file(path.clone());
-                    self.engine.restore_session_model(path).await;
-                }
-            }
-        }
         // Explicit model flags from the create config are authoritative for
         // this worker's session runtime config (TS runtime-config
         // propagation): the engine rebinds its selection instead of
@@ -1981,6 +1967,20 @@ impl Worker {
                 };
                 match loaded {
                     Ok(mut opened) => {
+                        // The engine owns the file from here on (the open
+                        // succeeded): the session-model restore binds the
+                        // engine and records its decision only for a path
+                        // this worker actually opened — a failed open (a
+                        // held lease, an unreadable file) never leaks the
+                        // binding into a later create's session. The
+                        // create's own flags were folded before this; a
+                        // flagged create still skips the restore (an
+                        // explicit model wins end-to-end, TS
+                        // `options.model`).
+                        self.engine.set_session_file(path.clone());
+                        if !flagged_model {
+                            self.engine.restore_session_model(path).await;
+                        }
                         let restored = opened.restored_settings();
                         // TS createAgentSession restores the session
                         // file's saved thinking level when the create
@@ -8317,6 +8317,45 @@ mod replacement_gate_tests {
             log.iter().filter(|e| e.starts_with("rebuild")).count(),
             2,
             "both replacements rebuilt: {log:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed existing-session `create` (a held lease, an unreadable
+    /// file) must never bind the engine to the failed path: the
+    /// session-model restore runs only after the file opened, so a later
+    /// create on a different session never resolves against the failed
+    /// path's model or records it in its creation prefix.
+    #[tokio::test]
+    async fn a_failed_existing_session_create_never_binds_the_engine() {
+        let dir =
+            std::env::temp_dir().join(format!("pa-create-bind-{}-{}", std::process::id(), line!()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let worker = recording_worker(&dir, std::sync::Arc::clone(&events));
+
+        // An unreadable "session file" (a directory at the path): the
+        // existing-session arm fails its windowed open.
+        let held = dir.join("held.jsonl");
+        std::fs::create_dir_all(&held).expect("directory at the session path");
+
+        let failed = worker
+            .dispatch(
+                "create",
+                &json!({ "sessionPath": held.to_string_lossy(), "cwd": "/tmp" }),
+            )
+            .await;
+        assert!(
+            !failed.success,
+            "the unreadable path must fail the create: {failed:?}"
+        );
+
+        // The engine never bound to the failed path: no restore ran for
+        // it.
+        let log = events.lock().unwrap().clone();
+        assert!(
+            log.iter().all(|event| !event.starts_with("restore-enter")),
+            "a failed open never restores the failed path: {log:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

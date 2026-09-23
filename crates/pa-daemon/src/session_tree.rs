@@ -267,10 +267,16 @@ impl SessionFile {
     }
 
     /// The root-to-`leaf_id` entry path (None when the leaf is unknown).
+    /// The root-to-leaf path, guarded against a corrupt parent cycle
+    /// (like `SessionFile::branch` and `build_session_context`).
     fn branch_path_entries(&self, leaf_id: &str) -> Option<Vec<SessionEntry>> {
         let mut path = Vec::new();
+        let mut visited = std::collections::HashSet::new();
         let mut current = self.entry(leaf_id).cloned();
         while let Some(entry) = current {
+            if !visited.insert(entry.id.clone()) {
+                break;
+            }
             current = entry
                 .parent_id
                 .as_deref()
