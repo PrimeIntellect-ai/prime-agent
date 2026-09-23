@@ -968,6 +968,17 @@ class Battery:
             B.tmux_send(session, "run the slow main task")
             busy = B.tmux_wait_text(session, "Waiting", timeout=30)
             side.evidence(flow, "20-midturn-busy.txt", busy)
+            if "Waiting" not in busy:
+                # The main turn never parked on its delayed reply: a /btw now
+                # would run against an idle session and pass spuriously.
+                self.record(
+                    flow,
+                    "behavior",
+                    f"{side.name}: the main turn never reached the waiting state, so the mid-turn /btw run could not be exercised",
+                    evidence=side.root / flow / "20-midturn-busy.txt",
+                )
+                B.tmux_kill(session)
+                continue
             # /btw mid-turn: the pane opens on the thinking state and must
             # render the streamed answer while the main turn is still
             # waiting.
