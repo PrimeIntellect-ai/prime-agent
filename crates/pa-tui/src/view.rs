@@ -1243,10 +1243,13 @@ impl AgentView {
             .len()
             .min(height.saturating_sub(FULLSCREEN_MIN_TRANSCRIPT_ROWS));
         let cropped = dock.len().saturating_sub(dock_height);
-        // The hardware cursor rides the dock's rows: a front crop shifts it
-        // down by the cropped count, so the reported cursor stays on the
-        // editor's cursor row at every height.
-        self.dock_cursor = self.dock_cursor.map(|(row, col)| (row + cropped, col));
+        // The hardware cursor rides the dock's rows: a front crop removes
+        // the first `cropped` rows, so the editor's cursor sits that many
+        // rows closer to the displayed dock's start — subtract, or the
+        // reported cursor lands below the editor at every cropped height.
+        self.dock_cursor = self
+            .dock_cursor
+            .map(|(row, col)| (row.saturating_sub(cropped), col));
         let dock: Vec<Line> = if dock.len() > dock_height {
             dock[dock.len() - dock_height..].to_vec()
         } else {
