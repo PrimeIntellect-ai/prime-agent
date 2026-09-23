@@ -383,12 +383,14 @@ fn handle_metadata(
             .and_then(Value::as_u64)
             .unwrap_or(0);
         // TS `totalTokens || input + output`: an explicitly reported zero is
-        // falsy, so only a positive reported total is kept.
+        // falsy, so only a positive reported total is kept. The sum
+        // saturates — TS doubles never wrap, and a Rust u64 must not
+        // panic (debug) or wrap to a wrong total (release).
         output.usage.total_tokens = usage
             .get("totalTokens")
             .and_then(Value::as_u64)
             .filter(|total| *total > 0)
-            .unwrap_or(output.usage.input + output.usage.output);
+            .unwrap_or(output.usage.input.saturating_add(output.usage.output));
         calculate_cost(model, &mut output.usage, None);
     }
 }

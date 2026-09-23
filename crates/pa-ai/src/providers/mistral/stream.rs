@@ -497,12 +497,14 @@ impl MistralStreamState {
             output.usage.cache_read = 0;
             output.usage.cache_write = 0;
             // TS `totalTokens || input + output`: an explicitly reported zero
-            // is falsy, so only a positive reported total is kept.
+            // is falsy, so only a positive reported total is kept. The sum
+            // saturates — TS doubles never wrap, and a Rust u64 must not
+            // panic (debug) or wrap to a wrong total (release).
             output.usage.total_tokens = usage
                 .get("total_tokens")
                 .and_then(Value::as_u64)
                 .filter(|total| *total > 0)
-                .unwrap_or(input + completion);
+                .unwrap_or(input.saturating_add(completion));
             calculate_cost(model, &mut output.usage, None);
         }
 
