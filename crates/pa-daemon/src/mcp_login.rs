@@ -341,7 +341,7 @@ mod tests {
             !ui.progress.lock().unwrap().is_empty(),
             "the login narrated its steps through the UI"
         );
-        let auth_urls = ui.auth_urls.lock().unwrap();
+        let auth_urls = ui.auth_urls.lock().unwrap().clone();
         assert_eq!(
             auth_urls.len(),
             1,
