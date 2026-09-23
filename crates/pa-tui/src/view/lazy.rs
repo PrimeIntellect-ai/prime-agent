@@ -419,7 +419,8 @@ impl AgentView {
             Detail::All => 2,
         };
         let entry = &self.chat[index];
-        let preceded_by_tool = index > 0 && matches!(self.chat[index - 1], ChatEntry::Tool(_));
+        // TS `precededByToolActivity` = the compact set (see layout pass).
+        let preceded_by_tool = index > 0 && self.is_compact_neighbor(&self.chat[index - 1]);
         let spacing = self.entry_spacing(index, entry, index == 0, preceded_by_tool);
         if self.entry_cacheable(entry) {
             if let Some(layout) = &self.entry_layout[index][detail] {

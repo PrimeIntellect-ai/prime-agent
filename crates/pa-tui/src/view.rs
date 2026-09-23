@@ -41,15 +41,6 @@ enum SpacingContent {
     Hidden,
 }
 
-/// TS `isCompactAgentMessageNeighbor`: agent messages, tool calls, and
-/// shell completions render flush against each other.
-fn is_compact_neighbor(entry: &ChatEntry) -> bool {
-    matches!(
-        entry,
-        ChatEntry::Tool(_) | ChatEntry::AgentMessage(_) | ChatEntry::ShellCompletion(_)
-    )
-}
-
 /// A `/share` gist upload in flight (TS `BorderedLoader` with
 /// `CancellableLoader`): the spinner "Creating gist..." rows that replace
 /// the editor while `gh gist create` runs.
@@ -229,6 +220,20 @@ pub struct AgentView {
 }
 
 impl AgentView {
+    /// TS `isCompactAgentMessageNeighbor`: agent messages, tool calls (the
+    /// ipython cells included), bash executions, and shell completions
+    /// render flush against each other — the set both the leading-space
+    /// scan and `precededByToolActivity` compact decisions use.
+    pub(super) fn is_compact_neighbor(&self, entry: &ChatEntry) -> bool {
+        matches!(
+            entry,
+            ChatEntry::Tool(_)
+                | ChatEntry::AgentMessage(_)
+                | ChatEntry::ShellCompletion(_)
+                | ChatEntry::BashExecution(_)
+        )
+    }
+
     pub fn new(theme: Theme) -> Self {
         Self {
             theme,
@@ -632,9 +637,12 @@ impl AgentView {
                             continue;
                         }
                         SpacingContent::Visible => {
-                            // TS `hasTrailingSpace` on the visible body.
+                            // TS `hasTrailingSpace` on the visible body
+                            // (`precededByToolActivity` is the full compact
+                            // set: a tool call, agent message, bash
+                            // execution, or shell completion).
                             let preceded_by_tool =
-                                idx > 0 && matches!(&self.chat[idx - 1], ChatEntry::Tool(_));
+                                idx > 0 && self.is_compact_neighbor(&self.chat[idx - 1]);
                             if tool_separator
                                 || message.has_trailing_space(self.detail, preceded_by_tool)
                             {
@@ -648,13 +656,13 @@ impl AgentView {
                     }
                 }
                 preceding => {
-                    if tool_separator && !is_compact_neighbor(preceding) {
+                    if tool_separator && !self.is_compact_neighbor(preceding) {
                         return false;
                     }
                     if expanded {
                         return true;
                     }
-                    return !is_compact_neighbor(preceding);
+                    return !self.is_compact_neighbor(preceding);
                 }
             }
         }
@@ -2157,6 +2165,25 @@ mod tests {
         );
     }
 
+    fn user_row() -> ChatEntry {
+        ChatEntry::User {
+            text: "hello".to_string(),
+        }
+    }
+
+    /// A tool-carrying assistant whose only body is a thinking block: the
+    /// body hides in collapsed mode (TS `hideThinkingBlock`), so the
+    /// message's whole height rides the spacing decisions.
+    fn thinking_tool_assistant() -> ChatEntry {
+        ChatEntry::Assistant(Box::new(AssistantMessage {
+            blocks: vec![MessageBlock::Thinking("thinking body".to_string())],
+            has_tool_calls: true,
+            streaming: false,
+            error: None,
+            aborted: false,
+        }))
+    }
+
     fn agent_message_row() -> ChatEntry {
         ChatEntry::AgentMessage(Box::new(crate::custom_message::AgentMessageRow {
             direction: crate::custom_message::AgentMessageDirection::Received,
@@ -2308,6 +2335,125 @@ mod tests {
         let mut view = view_with(vec![user(), hidden_assistant(), agent_message_row()]);
         view.detail = Detail::Overview;
         assert!(view.conversation_leading(2, false));
+    }
+
+    /// TS `AgentMessageComponent` is a compact neighbor
+    /// (`isCompactAgentMessageNeighbor`): the hidden thinking of a
+    /// tool-carrying assistant after an agent message renders ZERO rows
+    /// — no leading spacer, no trailing tool separator — so the tool
+    /// card sits flush under the agent-message row (the collapsed
+    /// thinking never leaves a visual gap).
+    #[test]
+    fn hidden_thinking_after_an_agent_message_renders_zero_height() {
+        let mut view = view_with(vec![
+            user_row(),
+            agent_message_row(),
+            thinking_tool_assistant(),
+            settled_tool_card("c1"),
+        ]);
+        view.detail = Detail::Overview;
+        let text = transcript_text(&mut view, 80);
+        assert!(!text.contains("thinking body"), "collapsed hides thinking");
+        let lines: Vec<&str> = text.lines().collect();
+        let agent_row = lines
+            .iter()
+            .position(|line| line.contains("Agent message received"))
+            .expect("the agent-message row renders");
+        let card_row = lines
+            .iter()
+            .position(|line| line.contains("echo done"))
+            .expect("the tool card renders");
+        // Flush: the row directly above the card is the agent-message
+        // block's own last row, never the hidden thinking's trailing
+        // spacer (the pre-fix gap).
+        assert!(
+            agent_row < card_row,
+            "the card renders after the agent message:\n{text}"
+        );
+        assert!(
+            !lines[card_row - 1].trim().is_empty(),
+            "no blank between the agent message and the card:\n{text}"
+        );
+    }
+
+    /// A bash execution card is a compact neighbor like the tool cards
+    /// themselves: the hidden thinking between a `!` bash card and the
+    /// next tool call renders zero height (TS
+    /// `isCompactAgentMessageNeighbor` includes
+    /// `BashExecutionComponent`).
+    #[test]
+    fn hidden_thinking_after_a_bash_card_renders_zero_height() {
+        let mut view = view_with(vec![
+            user_row(),
+            ChatEntry::BashExecution(Box::new(crate::bash_card::BashExecutionCard {
+                id: "b1".to_string(),
+                command: "echo hi".to_string(),
+                excluded: false,
+                output_lines: vec!["hi".to_string()],
+                running: false,
+                exit_code: Some(0),
+                cancelled: false,
+                error_message: None,
+                truncated: false,
+                full_output_path: None,
+                suppress_leading_space: false,
+            })),
+            thinking_tool_assistant(),
+            settled_tool_card("c1"),
+        ]);
+        view.detail = Detail::Overview;
+        let text = transcript_text(&mut view, 80);
+        assert!(!text.contains("thinking body"), "collapsed hides thinking");
+        let lines: Vec<&str> = text.lines().collect();
+        let bash_row = lines
+            .iter()
+            .position(|line| line.contains("echo hi"))
+            .expect("the bash card renders");
+        let card_row = lines
+            .iter()
+            .position(|line| line.contains("echo done"))
+            .expect("the tool card renders");
+        // Flush: the row directly above the card is the bash card's own
+        // last row (its output/border), never a hidden-thinking spacer.
+        assert!(
+            bash_row < card_row,
+            "the card renders after the bash card:\n{text}"
+        );
+        assert!(
+            !lines[card_row - 1].trim().is_empty(),
+            "no blank between the bash card and the tool card:\n{text}"
+        );
+    }
+
+    /// A visible assistant body after a compact neighbor keeps its own
+    /// spacers (the collapsed fix only flattens the invisible body).
+    #[test]
+    fn a_visible_assistant_after_an_agent_message_keeps_its_spacers() {
+        let mut view = view_with(vec![
+            user_row(),
+            agent_message_row(),
+            ChatEntry::Assistant(Box::new(AssistantMessage {
+                blocks: vec![MessageBlock::Text("answer body".to_string())],
+                has_tool_calls: true,
+                streaming: false,
+                error: None,
+                aborted: false,
+            })),
+            settled_tool_card("c1"),
+        ]);
+        view.detail = Detail::Overview;
+        let text = transcript_text(&mut view, 80);
+        let lines: Vec<&str> = text.lines().collect();
+        let agent_row = lines
+            .iter()
+            .position(|line| line.contains("Agent message received"))
+            .expect("the agent-message row renders");
+        // The visible body leads with its blank, renders, and keeps the
+        // tool separator before the card (TS `hasTrailingSpace` with a
+        // visible body).
+        assert!(lines[agent_row + 1].trim().is_empty());
+        assert!(lines[agent_row + 2].contains("answer body"));
+        assert!(lines[agent_row + 3].trim().is_empty());
     }
 
     /// The custom rows render through the transcript path: the agent
