@@ -78,6 +78,7 @@ import {
 import {
 	addLoginGuidanceToAuthError,
 	formatAuthenticationFailedMessage,
+	formatBlockedImagesMessage,
 	formatImageModelReferenceRejectedMessage,
 	formatImageModelRequiredMessage,
 	formatImageModelUnusableMessage,
@@ -2967,6 +2968,27 @@ export class AgentSession {
 			if (childId) await this.deleteRlmSubagent(childId).catch(() => undefined);
 			rmSync(dir, { recursive: true, force: true });
 		}
+	}
+
+	/**
+	 * Why a delegated read left the images unread, as the message the skill
+	 * surfaces. The causes need different fixes: a setting that blocks images and
+	 * a configured image model that cannot serve them are the same two problems
+	 * the turn path names, so the skill must not report both of them as "pick an
+	 * image model".
+	 */
+	private _visionReadUnavailableMessage(): string {
+		const sessionModel = this.model;
+		if (this.settingsManager.getBlockImages()) {
+			return formatBlockedImagesMessage();
+		}
+		const reference = this._imageModelReference();
+		if (reference && sessionModel && !sessionModel.input.includes("image")) {
+			return formatImageModelUnusableMessage(reference);
+		}
+		return formatImageModelRequiredMessage(
+			sessionModel ? `${sessionModel.provider}/${sessionModel.id}` : "the session model",
+		);
 	}
 
 	/**
@@ -11397,12 +11419,7 @@ export class AgentSession {
 				try {
 					const reading = await this._readImagesWithVisionChild(question, images);
 					if (!reading) {
-						const sessionModel = this.model;
-						return {
-							error: formatImageModelRequiredMessage(
-								sessionModel ? `${sessionModel.provider}/${sessionModel.id}` : "the session model",
-							),
-						};
+						return { error: this._visionReadUnavailableMessage() };
 					}
 					const ignored =
 						droppedImages > 0

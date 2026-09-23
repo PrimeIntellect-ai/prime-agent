@@ -367,12 +367,12 @@ print(json.dumps({"agents": agents, "agent": agent, "recent": recent}, sort_keys
  * A session whose model cannot see images, pinned to an image model, with a
  * spied child runtime so no real child process runs.
  */
-function createTextOnlyImageSession(): {
+function createTextOnlyImageSession(settings: Record<string, unknown> = { imageModel: "claude-haiku-4-5" }): {
 	agentSession: AgentSession;
 	spawns: Array<{ prompt: string; kwargs: Record<string, unknown> }>;
 } {
 	const dir = mkdtempSync(join(tmpdir(), "pi-attach-image-session-"));
-	writeFileSync(join(dir, "settings.json"), JSON.stringify({ imageModel: "claude-haiku-4-5" }));
+	writeFileSync(join(dir, "settings.json"), JSON.stringify(settings));
 	const base = getCodingAgentFixtureModel("anthropic", "claude-opus-4-7");
 	const sessionModel = { ...base, id: "claude-opus-4-7-text-only", input: ["text"] } as typeof base;
 	const agent = new Agent({
@@ -511,5 +511,43 @@ except RuntimeError as error:
 		expect(result.stdout).toContain("/image-model <model>");
 		expect(result.stdout).not.toContain("does not support vision");
 		expect(result.attachments).toBeUndefined();
+	});
+
+	/**
+	 * The refusal the skill surfaces when the delegated read cannot run. The
+	 * skill turns any `error` into a RuntimeError, so the reason has to be the
+	 * real one: "pick an image model" is wrong when a model is already set.
+	 */
+	async function delegatedReadError(settings: Record<string, unknown>): Promise<string> {
+		const { agentSession } = createTextOnlyImageSession(settings);
+		session = agentSession;
+		sessionDir = agentSession.sessionManager.getCwd();
+		const handlers = (
+			agentSession as unknown as {
+				_createKernelHostHandlers(): Record<
+					string,
+					(payload: Record<string, unknown>) => Promise<Record<string, unknown>>
+				>;
+			}
+		)._createKernelHostHandlers();
+		const result = await handlers["vision.read"]!({
+			images: [{ mime_type: "image/png", data: PNG_BASE64 }],
+			question: "What does this image show?",
+		});
+		return String(result.error ?? "");
+	}
+
+	it("names the blocking setting when images.blockImages stops a delegated read", async () => {
+		const error = await delegatedReadError({ imageModel: "claude-haiku-4-5", images: { blockImages: true } });
+
+		expect(error).toContain("images.blockImages");
+		expect(error).not.toContain("Pick one:");
+	});
+
+	it("names the configured image model instead of asking for one when it cannot serve", async () => {
+		const error = await delegatedReadError({ imageModel: "openai/gpt-5.5" });
+
+		expect(error).toContain('imageModel "openai/gpt-5.5"');
+		expect(error).not.toContain("Pick one:");
 	});
 });
