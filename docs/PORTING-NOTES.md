@@ -1437,7 +1437,11 @@ equally frozen — `nextRun` 20:38Z passed, `runs: 0`, `lastRun: None`:
 a fresh registration's mutation wake cannot revive the dead machinery,
 so the death is in the worker's scheduler itself (the wedged-flag
 vector fits a fresh wake's spawn + silent no-op passes), not the old
-job's row. Two structural death vectors in
+job's row. (3) 2026-09-23T21:02Z, the controlled experiment: a fresh
+registration with a VERIFIED FUTURE `nextRunAt` (`8bb99814`, created
+21:01:37, due 21:02:00) never fired — at 21:02:47 the row still sat at
+its creation values (`updatedAt` 21:01:37, `runCount` 0, no claim). The
+store's write path is healthy; the claim/fire path is dead. Two structural death vectors in
 `pa-core/src/cron/scheduler.rs`, both hardened:
 
 - **The timer task died on the empty store** (`next_active_run_at() ==
