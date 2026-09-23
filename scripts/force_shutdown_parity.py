@@ -68,7 +68,9 @@ def env_for(sb):
 
 
 def pty_boot(binary, sb, seconds):
-    """Boot the TUI under a raw pty until its daemon is up, then exit."""
+    """Boot the TUI under a raw pty until its daemon socket binds (polled,
+    not fixed-time: a loaded machine can take many seconds to spawn the
+    daemon), then leave with a clean double-Ctrl+C."""
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", HEIGHT, WIDTH, 0, 0))
     env = env_for(sb)
@@ -80,12 +82,15 @@ def pty_boot(binary, sb, seconds):
     os.close(slave)
     deadline = time.time() + seconds
     while time.time() < deadline:
+        if os.path.exists(sock):
+            break
         r, _, _ = select.select([master], [], [], 0.2)
         if master in r:
             try:
                 os.read(master, 65536)
             except OSError:
                 break
+    time.sleep(2.0)
     os.write(master, b"\x03")
     time.sleep(1.0)
     os.write(master, b"\x03")
@@ -117,10 +122,25 @@ def normalize(text):
     return text
 
 
-def scenario(binary, base, name):
+def scenario(binary, base, name, attempts=2):
+    """One binary through the three scenarios. `attempts` rides the
+    environmental flakiness of a shared machine (a slow daemon spawn or a
+    TS-side admission race), never the compared outputs: every attempt
+    runs the full scenario and the first fully-clean one wins."""
+    results = {}
+    for attempt in range(attempts):
+        suffix = "" if attempt == 0 else f"-retry{attempt}"
+        results = scenario_once(binary, base, name + suffix)
+        if "boot" not in results and not results.get("errors"):
+            return results
+        results["attempt"] = attempt
+    return results
+
+
+def scenario_once(binary, base, name):
     sb = sandbox(os.path.join(base, name))
     results = {}
-    if not pty_boot(binary, sb, 10):
+    if not pty_boot(binary, sb, 30):
         results["boot"] = "daemon socket never appeared"
         return results
     # JSON mode against the live daemon.
@@ -128,12 +148,12 @@ def scenario(binary, base, name):
     results["json"] = {"code": code, "out": normalize(out.strip()), "err": normalize(err.strip())}
     # Text mode needs a fresh daemon.
     sb2 = sandbox(os.path.join(base, name + "2"))
-    if pty_boot(binary, sb2, 10):
+    if pty_boot(binary, sb2, 30):
         code, out, err = run_cli(binary, sb2, ["shutdown", "--force"])
         results["text"] = {"code": code, "out": normalize(out.strip())}
     # The confirmation error (JSON without --force, stdin not a TTY).
     sb3 = sandbox(os.path.join(base, name + "3"))
-    if pty_boot(binary, sb3, 10):
+    if pty_boot(binary, sb3, 30):
         code, out, err = run_cli(binary, sb3, ["shutdown", "--json"])
         results["confirm"] = {"code": code, "out": normalize(out.strip())}
         # The confirmation refusal is a pinned invariant (TS text, same
