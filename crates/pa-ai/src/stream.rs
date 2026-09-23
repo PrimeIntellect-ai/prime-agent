@@ -259,9 +259,7 @@ mod tests {
         // 250 exactly fit the 750-token text input; the schema's
         // serialized tokens leave less room than the budget requests,
         // so the budget clamps to exactly what is left.
-        let room = 1_000u64.saturating_sub(
-            (3_000 + serialized.chars().count() as u64).div_ceil(4),
-        );
+        let room = 1_000u64.saturating_sub((3_000 + serialized.chars().count() as u64).div_ceil(4));
         assert_eq!(options.max_tokens, Some(room));
         assert!(room > 0 && room < 250);
     }

@@ -5353,11 +5353,9 @@ pub(crate) mod tests {
         engine
             .runtime
             .block_on(async { engine.retire_session_runtime().await });
-        assert!(
-            engine
-                .runtime
-                .block_on(async { engine.session.lock().await.is_none() })
-        );
+        assert!(engine
+            .runtime
+            .block_on(async { engine.session.lock().await.is_none() }));
 
         // A demand seam before the replacement build (the prewarm has not
         // rebuilt yet) resolves the CURRENT model, never the retired
