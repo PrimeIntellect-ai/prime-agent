@@ -216,20 +216,24 @@ def main():
         agent_dir, target, marker = make_fixture(root, args.transcript_mb, args.children, args.child_mb)
         socket = os.path.join(root, "daemon.sock")
         daemon_log = open(os.path.join(root, "daemon.log"), "wb")
+        # open_cold covers the whole cold path: daemon startup and
+        # socket initialization included, on one monotonic clock - a
+        # regression before the socket appears must fail the budget
+        # too.
+        t0 = time.monotonic()
         daemon = subprocess.Popen(
             [args.bin, "--mode", "daemon", "--daemon-socket", socket],
             stdout=daemon_log, stderr=daemon_log, stdin=subprocess.DEVNULL,
             env=env(agent_dir), start_new_session=True,
         )
-        t0 = time.time()
         while not os.path.exists(socket):
-            if time.time() - t0 > 60:
+            if time.monotonic() - t0 > 60:
                 raise RuntimeError("daemon socket never appeared")
             time.sleep(0.05)
         bin_env = env(agent_dir)
-        t0 = time.monotonic()
         tmux("new-session", "-d", "-s", "bench", "-x", "200", "-y", "45", "-c", root,
-             "env", "PRIME_AGENT_CODING_AGENT_DIR=" + agent_dir, "TERM=xterm-256color",
+             "env", "-u", "PRIME_AGENT_SESSION_DIR",
+             "PRIME_AGENT_CODING_AGENT_DIR=" + agent_dir, "TERM=xterm-256color",
              args.bin, "--daemon-socket", socket, "--resume", target)
         results["open_cold_s"] = round(wait_for(
             lambda pane: SESSION_MARKER in pane, 90, "cold open session view", t0), 3)
