@@ -422,17 +422,22 @@ def check_cell(name: str, frame: str, report: list) -> bool:
         ok = False
     else:
         report.append(f"ok   {name}: row {row.strip()!r}")
-    hint = hint_line(frame)
     if "vanished" in name and ("uncached" not in name):
+        # The hint must sit in the VANISHED row's own detail block (the
+        # lines under the row, above the footer) — the same text anywhere
+        # else in the frame is not a pass.
+        block = lines_below_row(frame, row)
+        hint = next((line for line in block if line.strip() == HINT), "")
         if not hint:
-            report.append(f"FAIL {name}: the pinned hint is MISSING")
+            report.append(f"FAIL {name}: the pinned hint is MISSING from the row's detail block")
             return False
         if hint != HINT_LINE:
             report.append(f"FAIL {name}: hint line {hint!r} != {HINT_LINE!r}")
             ok = False
         else:
-            report.append(f"ok   {name}: hint line byte-exact {hint!r}")
+            report.append(f"ok   {name}: hint line byte-exact in the row's detail block")
     else:
+        hint = hint_line(frame)
         if hint:
             report.append(f"FAIL {name}: the hint must stay hidden, found {hint!r}")
             ok = False
