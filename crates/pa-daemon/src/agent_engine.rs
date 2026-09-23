@@ -1053,8 +1053,6 @@ impl AgentSessionEngine {
         pa_core::models::resolve_cli_model(Some(&provider), &model_id, registry.get_all()).model
     }
 
-    /// Resolve the model through the composed registry.
-
     /// Emit the daemon model-allowlist refusal's adoption event (schema
     /// v1 `model refused`) from any of this worker's enforcement seams.
     /// The telemetry binds to the engine's live cwd, so a session that
@@ -2054,6 +2052,14 @@ impl SessionEngine for AgentSessionEngine {
             let _ = self
                 .runtime
                 .block_on(core.session.set_model(&model, &provider, &model_id));
+        }
+        // The children registry's inherited parent model follows the
+        // switch (the build-time stamp alone would go stale): an inherited
+        // `rlm.spawn` resolves the model the session NOW runs, so the
+        // allowlist gate never refuses a stale selector the parent left
+        // behind.
+        if let Some(children) = &self.children {
+            children.set_model(format!("{}/{}", model.provider, model.id));
         }
         true
     }
@@ -7744,6 +7750,58 @@ pub(crate) mod tests {
         assert!(switched, "allowed switch proceeds");
         let model = engine.resolve_registry_model().expect("resolved model");
         assert_eq!(model.id, "mock-1");
+    }
+
+    /// A live model switch propagates to the children registry's parent
+    /// identity: an inherited `rlm.spawn` resolves the model the session
+    /// NOW runs. The build-time stamp alone would go stale after a
+    /// switch, so the allowlist gate would refuse a stale selector the
+    /// parent no longer runs once the allowlist drops it.
+    #[test]
+    fn switch_model_propagates_the_new_model_to_the_child_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        write_custom_provider_models_json(&agent_dir, "http://127.0.0.1:9");
+        let engine = AgentSessionEngine::new(AgentEngineConfig {
+            cwd: dir.path().to_path_buf(),
+            agent_dir,
+            provider: None,
+            model: None,
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: None,
+            faux_script: None,
+            supervisor_link: Some(SupervisorLinkConfig {
+                socket_path: dir.path().join("absent-supervisor.sock"),
+                active_session_id: "parent-live".to_string(),
+                worker_token: "test-token".to_string(),
+            }),
+            telemetry_disabled: Some(true),
+            cron_store: None,
+            queued_steering_probe: None,
+        })
+        .unwrap();
+        let children = engine
+            .children
+            .as_ref()
+            .expect("the supervisor link wires the children registry")
+            .clone();
+        // The pre-switch identity (the build-time stamp's shape): an
+        // older selector.
+        children.set_model("battery/mock-2".to_string());
+        let switched = engine.switch_model(EngineModelSelection {
+            provider: Some("battery".to_string()),
+            model: Some("mock-1".to_string()),
+            api_key: None,
+            thinking: None,
+        });
+        assert!(switched, "the switch proceeds without an allowlist");
+        assert_eq!(
+            children.parent_model().as_deref(),
+            Some("battery/mock-1"),
+            "an inherited spawn must resolve the switched-to model, not the stale build-time selector"
+        );
     }
 
     #[test]

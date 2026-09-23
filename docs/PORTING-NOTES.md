@@ -1190,7 +1190,10 @@ Semantics:
   contention, read, or parse failure) is an UNKNOWN policy, never an
   unrestricted one — every seam refuses loudly while unreadable
   (`DaemonAllowlist::Unreadable`), and the failover chain yields no
-  candidates.
+  candidates. A syntactically valid NON-OBJECT root (`[]`, `"bad"`) is a
+  corrupted document and fails closed the same way; the refusal
+  telemetry rides the typed pattern refusal only, never a fail-closed
+  error.
 - **Pattern grammar** = the `--models` CLI scope vocabulary, matched
   case-insensitively against the full selector `provider/model-id` and the
   bare id: a pattern with wildcards (`*`, `?`, `[`) globs; a plain pattern
@@ -1203,7 +1206,9 @@ Semantics:
      carries the refusal before any switch side effect;
   2. RLM child-model resolution (`rlm.spawn` and `rlm.create_session`,
      both `SupervisorChildSessions` paths) — an inherited parent model is
-     a resolution too, so an off-list parent fails the spawn loudly;
+     a resolution too, so an off-list parent fails the spawn loudly; the
+     registry's parent-model identity follows every live `switch_model`,
+     so the inherited selector is the model the session runs NOW;
   3. the worker's startup model chain (`AgentSessionEngine::
      resolve_registry_model`): the TS chain's fallbacks (settings default
      → featured default `z-ai/glm-5.3` → first available) can no longer

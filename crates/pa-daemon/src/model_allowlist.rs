@@ -44,21 +44,25 @@ pub(crate) fn load(cwd: &Path, agent_dir: &Path) -> DaemonAllowlist {
             // drops wrong-typed known fields to unset) fails closed: the
             // restriction was requested, so an unreadable shape is never an
             // unrestricted gate. Explicit `null` stays unset (TS parity).
-            let malformed =
-                settings
-                    .global_raw()
-                    .is_some_and(|raw| match raw.get("allowedModels") {
-                        None | Some(serde_json::Value::Null) => false,
-                        Some(value) => value
-                            .as_array()
-                            .is_none_or(|items| items.iter().any(|item| item.as_str().is_none())),
-                    });
-            if malformed {
-                DaemonAllowlist::Unreadable(
-                    "allowedModels is present but is not an array of strings".to_string(),
-                )
-            } else {
-                DaemonAllowlist::Unrestricted
+            // A syntactically valid NON-OBJECT root (`[]`, `"bad"`) is a
+            // corrupted document too: the guard fails closed rather than
+            // reading a policy out of a shapeless document.
+            let unreadable = settings.global_raw().and_then(|raw| {
+                if !raw.is_object() {
+                    return Some("the global settings document is not a JSON object".to_string());
+                }
+                let malformed = match raw.get("allowedModels") {
+                    None | Some(serde_json::Value::Null) => false,
+                    Some(value) => value
+                        .as_array()
+                        .is_none_or(|items| items.iter().any(|item| item.as_str().is_none())),
+                };
+                malformed
+                    .then(|| "allowedModels is present but is not an array of strings".to_string())
+            });
+            match unreadable {
+                Some(message) => DaemonAllowlist::Unreadable(message),
+                None => DaemonAllowlist::Unrestricted,
             }
         }
     }
@@ -295,6 +299,32 @@ mod tests {
             load(dir.path(), &agent_dir),
             DaemonAllowlist::Unrestricted
         ));
+    }
+
+    /// A syntactically valid NON-OBJECT global document (`[]`, `"bad"`)
+    /// is a corrupted settings document, not an absent key: the guard
+    /// fails closed (a shapeless document must never read as an
+    /// unrestricted policy).
+    #[test]
+    fn a_non_object_global_document_fails_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        for corrupted in ["[]", r#""bad""#, "42"] {
+            std::fs::write(agent_dir.join("settings.json"), corrupted).unwrap();
+            let state = load(dir.path(), &agent_dir);
+            assert!(
+                matches!(state, DaemonAllowlist::Unreadable(_)),
+                "{corrupted} must fail closed, got {state:?}"
+            );
+            // The gate refuses every resolution while the document is
+            // shapeless — never the typed pattern refusal.
+            let error = assert_allowed(&state, "prime-inference/mock-1").expect_err("closed");
+            assert!(
+                error.downcast_ref::<ModelAllowlistRefusal>().is_none(),
+                "fail-closed is not a pattern refusal"
+            );
+        }
     }
 
     #[tokio::test]

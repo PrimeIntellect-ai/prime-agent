@@ -323,6 +323,18 @@ impl SupervisorChildSessions {
             .rlm_max_depth
     }
 
+    /// The parent identity's model selector — the source an inherited
+    /// spawn resolves; the engine keeps it in step with every live model
+    /// change (the session build stamps it, a switch follows it).
+    pub fn parent_model(&self) -> Option<String> {
+        self.inner
+            .identity
+            .lock()
+            .expect("identity lock")
+            .model
+            .clone()
+    }
+
     /// Wire snapshots of the tracked children (TS
     /// `RlmChildAgentSnapshot`, the `get_rlm_children` response and the
     /// context-tree children): the child id, its live identity, label,
@@ -1200,10 +1212,6 @@ fn custom_message_text(message: &pa_types::session::CustomMessage) -> Option<Str
     }
 }
 
-/// Resolve the child model with the daemon `allowedModels` allowlist
-/// enforced (the parent's cwd scopes the settings read): a refusal fails
-/// the spawn/create_session loudly with the typed error and emits the
-/// `model refused` adoption event through the worker's shared client.
 /// Resolve the child model with the daemon `allowedModels` allowlist
 /// enforced (the parent's cwd scopes the settings read), refusing a model
 /// outside the allowlist loudly with the typed error and emitting the
