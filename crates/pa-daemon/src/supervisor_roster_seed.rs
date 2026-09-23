@@ -53,6 +53,7 @@ impl Supervisor {
         // revisits them).
         let roots = self.roster_seed_roots().await;
         let mut changed = Vec::new();
+        let mut retry = Vec::new();
         for edge in &edges {
             let parent = canonical_session_path(Path::new(&edge.parent));
             if !family_descends_from(&parent_by_child, &parent, &roots) {
@@ -61,14 +62,29 @@ impl Supervisor {
             let candidate = SeededRosterEntry::edge_only(edge);
             // The collision guards run BEFORE the hydration read (TS's
             // has/hasSessionFile order): a row the roster already holds
-            // never re-reads its transcript, whatever the family size.
-            if self.roster_row_present(&candidate) {
+            // never re-reads its transcript, whatever the family size -
+            // except an unhydrated seeded row, which stays a hydration
+            // candidate (its transcript gets one more read while the
+            // identity gate still protects the row; TS
+            // `hydrateSeededEntry`'s lazy retry, ported onto the arms
+            // that re-walk a family).
+            if let Some(existing) = self.roster_row_for_candidate(&candidate) {
+                if existing.seeded_cwd == Some(true) {
+                    retry.push(existing);
+                }
                 continue;
             }
             // Hydration reads one child at a time, outside the roster
             // lock and on the blocking pool (TS: a large ledger must
             // not fan out into concurrent reads).
             let candidate = candidate.hydrate().await;
+            // The hydrate awaited, so the roots are revalidated
+            // immediately before the write: a root that stopped during
+            // the read must not receive rows (its passivation already
+            // settled and never revisits seeded rows).
+            if !family_descends_from(&parent_by_child, &parent, &self.roster_seed_roots().await) {
+                continue;
+            }
             let mut roster = self.roster.lock().unwrap();
             // Re-check under the lock: the Rust seed runs beside live
             // workers (TS seeds before adoption), so a worker row can
@@ -81,6 +97,11 @@ impl Supervisor {
             changed.push(roster.write_seeded(candidate.summary, candidate.seeded_cwd));
         }
         self.push_roster_update(changed, Vec::new());
+        // Unhydrated seeded rows the guards found already rostered get
+        // their retry here, after the fresh rows: serial, one read per
+        // row, and a write-back only while the row is still the exact
+        // one that was snapshotted.
+        self.hydrate_seeded_rows(retry).await;
     }
 
     /// The boot seed task: `seed_roster_ledger` exactly once, in the
@@ -95,6 +116,34 @@ impl Supervisor {
         let supervisor = Arc::clone(self);
         tokio::spawn(async move {
             supervisor.seed_roster_ledger().await;
+        })
+    }
+
+    /// The registration seed: a worker that registers after the boot
+    /// seed (a supervisor restart's re-registration, a mid-tree
+    /// resume, a wakened ledger child) publishes its passive ledger
+    /// family in the background. TS reseeds the family when the
+    /// worker's first roster snapshot applies
+    /// (`applyWorkerRosterSnapshot`, which re-walks the worker's
+    /// family edges and writes the rows the delta did not claim), and
+    /// this port's workers push only their own summary, so the daemon
+    /// walks the family here instead - registration answers on the
+    /// client's open path, and the seed never blocks it.
+    pub(crate) fn spawn_roster_registration_seed(
+        self: &Arc<Self>,
+        root: &Path,
+    ) -> tokio::task::JoinHandle<()> {
+        let supervisor = Arc::clone(self);
+        let root = root.to_path_buf();
+        tokio::spawn(async move {
+            let seeded = supervisor.seed_roster_family_edges(&root).await;
+            if !seeded.is_empty() {
+                // TS awaits its family reseed's hydration reads
+                // (`applyWorkerRosterSnapshot`'s `hydratedSeedEntry`
+                // awaits); the joined task keeps the registration seed's
+                // work bounded to its own background budget.
+                let _ = supervisor.spawn_seeded_hydration(seeded).await;
+            }
         })
     }
 
@@ -117,11 +166,14 @@ impl Supervisor {
         Ok((edges, parent_by_child))
     }
 
-    /// Whether a seeded candidate's row is already rostered (TS
+    /// The seeded candidate's roster row when already present (TS
     /// `roster().has` + `hasSessionFile`): by agent id or session file.
-    fn roster_row_present(&self, candidate: &SeededRosterEntry) -> bool {
+    fn roster_row_for_candidate(&self, candidate: &SeededRosterEntry) -> Option<AgentRosterEntry> {
         let roster = self.roster.lock().unwrap();
-        roster.get(&candidate.agent_id).is_some() || roster.has_session_file(&candidate.child_file)
+        roster
+            .get(&candidate.agent_id)
+            .or_else(|| roster.by_session_file(&candidate.child_file))
+            .cloned()
     }
 
     /// The create path's family seed: a newly resident root (a resumed
@@ -129,9 +181,12 @@ impl Supervisor {
     /// descendants immediately from the ledger edges alone - TS
     /// `rosterEntryForSpawnLedgerEdge` rows with the dirname cwd and the
     /// `seededCwd` marker, zero transcript reads on the event path - and
-    /// returns the written rows for the bounded background hydration.
-    /// The duplicate guards match the boot seed's (by agent id and
-    /// session file), so a row only ever seeds once.
+    /// returns the written rows for the bounded background hydration,
+    /// plus any unhydrated seeded rows the walk re-found (their
+    /// transcripts get one more read through the same hydration; the
+    /// identity gate keeps a replaced row safe). The duplicate guards
+    /// match the boot seed's (by agent id and session file), so a row
+    /// only ever seeds once.
     pub(crate) async fn seed_roster_family_edges(
         self: &Arc<Self>,
         root: &Path,
@@ -149,6 +204,7 @@ impl Supervisor {
             }
         };
         let mut changed = Vec::new();
+        let mut retry = Vec::new();
         {
             let mut roster = self.roster.lock().unwrap();
             for edge in &edges {
@@ -157,15 +213,27 @@ impl Supervisor {
                     continue;
                 }
                 let candidate = SeededRosterEntry::edge_only(edge);
-                if roster.get(&candidate.agent_id).is_some()
-                    || roster.has_session_file(&candidate.child_file)
+                // Present rows never republish (TS has/hasSessionFile);
+                // an unhydrated seeded row stays a hydration candidate
+                // for the returned set - the walk that re-finds it also
+                // offers its transcript one more read.
+                if let Some(existing) = roster
+                    .get(&candidate.agent_id)
+                    .or_else(|| roster.by_session_file(&candidate.child_file))
                 {
+                    if existing.seeded_cwd == Some(true) {
+                        retry.push(existing.clone());
+                    }
                     continue;
                 }
                 changed.push(roster.write_seeded(candidate.summary, candidate.seeded_cwd));
             }
         }
         self.push_roster_update(changed.clone(), Vec::new());
+        // The returned hydration set: fresh rows first, then the
+        // unhydrated seeded rows found already rostered - the caller's
+        // bounded background hydration reads each once more.
+        changed.extend(retry);
         changed
     }
 
@@ -857,6 +925,109 @@ pub(crate) mod tests {
         assert_eq!(row.summary["model"]["provider"], "live");
         assert_eq!(row.summary["cwd"], "/the/live/cwd");
         assert_eq!(row.status, AgentRosterStatus::Running);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unhydrated seeded row is a hydration candidate on every walk
+    /// that re-finds it: a transcript that is unreadable at seed time
+    /// keeps the `seededCwd` marker, and the next family walk (a
+    /// registration seed, a create) offers the file one more read
+    /// without republishing the row. A replaced row never loses the
+    /// identity gate.
+    #[tokio::test]
+    async fn an_unhydrated_seeded_row_retries_on_the_next_family_walk() {
+        let (dir, supervisor, root_file, child_file) = roster_fixture().await;
+        let agent_dir = dir.join("agent");
+        append_family_edge(
+            &agent_dir,
+            &agent_dir.join("sessions"),
+            "sub-9",
+            &root_file,
+            &child_file,
+        );
+        let mut events = supervisor.events.subscribe();
+        // The child transcript does not exist yet: the family seed
+        // writes the edge-only row and the hydration keeps the marker.
+        let _ = std::fs::remove_file(&child_file);
+        let seeded = supervisor.seed_roster_family_edges(&root_file).await;
+        assert_eq!(seeded.len(), 1);
+        supervisor
+            .spawn_seeded_hydration(seeded)
+            .await
+            .expect("hydration task");
+        let row = roster_row_for_child(&supervisor, "sub-9");
+        assert_eq!(
+            row.seeded_cwd,
+            Some(true),
+            "the unreadable file keeps the marker"
+        );
+        let _ = drain_roster_pushes(&mut events);
+
+        // The transcript becomes readable: the next walk re-finds the
+        // unhydrated row and hands it to the hydration without
+        // republishing it.
+        write_display_file(&child_file, "/the/real/cwd");
+        let retry = supervisor.seed_roster_family_edges(&root_file).await;
+        assert_eq!(retry.len(), 1, "the marked row is the candidate");
+        assert!(
+            drain_roster_pushes(&mut events).is_empty(),
+            "a retry never republishes"
+        );
+        supervisor
+            .spawn_seeded_hydration(retry)
+            .await
+            .expect("hydration task");
+        let row = roster_row_for_child(&supervisor, "sub-9");
+        assert_eq!(row.seeded_cwd, None, "the retry hydrated the row");
+        assert_eq!(row.summary["cwd"], "/the/real/cwd");
+        assert_eq!(
+            row.summary["model"],
+            json!({ "provider": "p", "modelId": "m" })
+        );
+
+        // The now-hydrated row is not a candidate again.
+        let retry = supervisor.seed_roster_family_edges(&root_file).await;
+        assert!(retry.is_empty(), "a hydrated row never re-reads");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The registration seed: a worker that registers after the boot
+    /// seed publishes its passive ledger family in the background - the
+    /// row lands edge-only first, then the joined hydration fills its
+    /// durable display fields.
+    #[tokio::test]
+    async fn the_registration_seed_publishes_a_late_worker_family() {
+        let (dir, supervisor, root_file, child_file) = roster_fixture().await;
+        let agent_dir = dir.join("agent");
+        append_family_edge(
+            &agent_dir,
+            &agent_dir.join("sessions"),
+            "sub-9",
+            &root_file,
+            &child_file,
+        );
+        let mut events = supervisor.events.subscribe();
+
+        supervisor
+            .spawn_roster_registration_seed(&root_file)
+            .await
+            .expect("registration seed task");
+        let pushes = drain_roster_pushes(&mut events);
+        assert_eq!(
+            pushes.len(),
+            2,
+            "seed publish + hydration publish: {pushes:?}"
+        );
+        let row = roster_row_for_child(&supervisor, "sub-9");
+        assert_eq!(
+            row.seeded_cwd, None,
+            "the background hydration filled the row"
+        );
+        assert_eq!(row.summary["cwd"], "/the/real/cwd");
+        assert_eq!(
+            row.summary["model"],
+            json!({ "provider": "p", "modelId": "m" })
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

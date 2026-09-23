@@ -3346,6 +3346,24 @@ impl Supervisor {
         // Registration rebuilt the resident: refresh its roster entry from
         // the live worker so the roster reflects the re-registered state.
         self.refresh_roster_entry(&resident).await;
+        // A worker that registers after the boot seed (a supervisor
+        // restart's re-registration, a mid-tree resume, a wakened ledger
+        // child) publishes its passive ledger family in the background:
+        // TS reseeds the family when the worker's first roster snapshot
+        // applies (`applyWorkerRosterSnapshot`), and this port's workers
+        // push only their own summary, so the daemon walks the family
+        // here instead. Registration answers on the client's open path -
+        // the seed never blocks it.
+        let family_root = {
+            let descriptor = resident.descriptor.lock().await;
+            descriptor
+                .session_file
+                .clone()
+                .or_else(|| descriptor.create_command.session_path.clone())
+        };
+        if let Some(root) = family_root {
+            self.spawn_roster_registration_seed(Path::new(&root));
+        }
         response_success(
             Some(command_id),
             type_name,
@@ -3812,22 +3830,26 @@ impl Supervisor {
         {
             return Ok(summary);
         }
-        // TS daemon-supervisor.ts: only a `client_owned`-lifecycle create
-        // is client-owned (`ownerClientId = command.lifecycle ===
-        // "client_owned" ? clientId : undefined`). Every RLM child spawn
-        // declares `Resident`, so a spawned child never inherits the
-        // spawning client's ownership: passivation deletes an owned
-        // worker's rows, and a stopped child under a surviving root must
-        // passivate instead (the walk e2e asserts the seeded passive row
-        // survives the kill). Other creates keep the port's existing
-        // owner marking.
+        // TS daemon-supervisor.ts:3051 - only a `client_owned`-lifecycle
+        // create is client-owned (`ownerClientId = command.lifecycle ===
+        // "client_owned" ? clientId : undefined`); the TS client declares
+        // `resident` for every other session (main.ts `options.clientOwned
+        // ? "client_owned" : "resident"`), so an unspecified lifecycle is
+        // that same normal create and stays unowned. Ownership is the
+        // `client_owned` declaration alone: a normal create's live session
+        // stays visible to every client through the access gate
+        // (`assertWorkerAccessibleToClient`), and an RLM child spawn
+        // (always `Resident`) never inherits the spawning client's
+        // ownership - a stopped child under a surviving root passivates
+        // instead of dying with an owned registration (the walk e2e
+        // asserts the seeded passive row survives the kill).
         let create_lifecycle = match command {
             DaemonCommand::Create { lifecycle, .. } => *lifecycle,
             _ => None,
         };
         let owner_client_id = match create_lifecycle {
-            Some(DaemonSessionLifecycle::Resident) => None,
-            _ => Some(client_id),
+            Some(DaemonSessionLifecycle::ClientOwned) => Some(client_id),
+            _ => None,
         };
         let (resident, create_summary) = self.launch_worker(command, owner_client_id).await?;
         // The launch registered its worker (the registry insert precedes
