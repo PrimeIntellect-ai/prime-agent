@@ -160,6 +160,9 @@ def main():
     print(json.dumps(rust, indent=2))
 
     failures = []
+    for side, results in (("ts", ts), ("rust", rust)):
+        for error in results.get("errors", []):
+            failures.append(f"{side} side: {error}")
     for mode in ("json", "text", "confirm"):
         if mode not in ts or mode not in rust:
             failures.append(f"{mode} missing on one side")
