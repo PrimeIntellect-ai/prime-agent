@@ -1066,21 +1066,29 @@ impl AgentsViewMode {
             })
             .collect();
         let mut display: Vec<DisplayItem> = Vec::new();
-        for (section, count) in &counts {
-            if *count == 0 {
-                continue;
-            }
-            if !display.is_empty() {
-                display.push(DisplayItem::Spacer);
-            }
-            display.push(DisplayItem::Heading(*section));
-            let mut include = false;
-            for row in &self.rows {
-                if row.depth == 0 {
-                    include = row.kind == RowKind::Agent && row.section == *section;
+        // While a query is active the list is a ranked picker: one flat,
+        // relevance-ordered run of hits (per-row icons carry the status),
+        // not status section blocks. Without a query the sectioned
+        // layout stays TS-identical.
+        if !self.query.trim().is_empty() {
+            display.extend(self.rows.iter().map(DisplayItem::Row));
+        } else {
+            for (section, count) in &counts {
+                if *count == 0 {
+                    continue;
                 }
-                if include {
-                    display.push(DisplayItem::Row(row));
+                if !display.is_empty() {
+                    display.push(DisplayItem::Spacer);
+                }
+                display.push(DisplayItem::Heading(*section));
+                let mut include = false;
+                for row in &self.rows {
+                    if row.depth == 0 {
+                        include = row.kind == RowKind::Agent && row.section == *section;
+                    }
+                    if include {
+                        display.push(DisplayItem::Row(row));
+                    }
                 }
             }
         }

@@ -7,6 +7,7 @@
 pub mod activity_panel;
 pub mod agents_view;
 pub mod agents_view_forest;
+pub mod agents_view_search;
 pub mod agents_view_state;
 pub mod altscreen;
 pub mod ansi;
