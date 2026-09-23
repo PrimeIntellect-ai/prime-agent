@@ -412,7 +412,9 @@ mod tests {
         let mut sample = (*b"Num RefCount Protocol Flags Type St Inode Path\n\
 0000000047ecc27d: 00000002 00000000 00010000 0001 01  9703 /tmp/agent sandbox/daemon.sock\n")
             .to_vec();
-        sample.extend_from_slice(b"0000000047ecc280: 00000002 00000000 00010000 0001 01  9710 /tmp/agent/");
+        sample.extend_from_slice(
+            b"0000000047ecc280: 00000002 00000000 00010000 0001 01  9710 /tmp/agent/",
+        );
         sample.push(0xff);
         sample.extend_from_slice(b"\xff/daemon.sock\n");
         let listeners = parse_proc_net_unix(&sample);
