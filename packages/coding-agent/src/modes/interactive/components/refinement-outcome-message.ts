@@ -12,7 +12,7 @@ type EditFieldKey = (typeof EDIT_FIELDS)[number]["key"];
 const EDIT_FIELDS = [
 	{ key: "title", label: "Title" },
 	{ key: "content", label: "Description" },
-	{ key: "topic", label: "Topic" },
+	{ key: "path", label: "Path" },
 	{ key: "reference", label: "Reference" },
 	{ key: "arguments", label: "Arguments" },
 	{ key: "metadata", label: "Metadata" },
