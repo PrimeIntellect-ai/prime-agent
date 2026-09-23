@@ -175,11 +175,17 @@ impl GoalDriver {
             last_reason: None,
             last_error: None,
         };
+        let previous_anchor = self.accounting_started_at;
+        let previous_accounted = std::mem::take(&mut self.accounted_messages);
         self.accounting_started_at = Some(AccountingStartedAt(now));
-        self.accounted_messages.clear();
         // TS `_startGoal`: a fresh goal starts with no owed continuation.
         self.owed_continuation_for_rlm_work = false;
-        self.set_state(session, goal)?;
+        if let Err(error) = self.set_state(session, goal) {
+            // A failed start leaves the previous accounting intact.
+            self.accounting_started_at = previous_anchor;
+            self.accounted_messages = previous_accounted;
+            return Err(error);
+        }
         Ok(self.state.clone())
     }
 
@@ -210,15 +216,17 @@ impl GoalDriver {
             updated_at: Some(now_millis()),
             ..next
         });
+        let value = serde_json::to_value(&normalized)?;
+        session.append_custom_entry(GOAL_STATE_CUSTOM_TYPE, Some(value))?;
+        session.flush_now()?;
+        // Anchor accounting only once the state is durable: a failed resume
+        // must not start charging wall-clock against a paused goal.
         if normalized.status == GoalStatus::Active {
             self.accounting_started_at
                 .get_or_insert(AccountingStartedAt(now_millis()));
         } else {
             self.accounting_started_at = None;
         }
-        let value = serde_json::to_value(&normalized)?;
-        session.append_custom_entry(GOAL_STATE_CUSTOM_TYPE, Some(value))?;
-        session.flush_now()?;
         self.state = normalized;
         Ok(())
     }

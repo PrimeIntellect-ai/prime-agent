@@ -236,6 +236,9 @@ impl Worker {
         };
         let effective = effective_service_tier(Some(previous), fast_mode).unwrap_or(previous);
         if effective != previous {
+            // The engine's request slot must follow the clamp, or requests
+            // keep the previous tier after cycling to a model without it.
+            self.engine.configure_service_tier(Some(effective));
             self.emit_worker_event(json!({
                 "type": "service_tier_changed",
                 "serviceTier": service_tier_wire_name(effective),

@@ -50,15 +50,19 @@ impl AgentSessionEngine {
             })
         };
         if let Some(row) = row {
-            let row = match row {
-                Ok(row) => row,
+            // A failed durable row skips only the custom-message emit; the
+            // terminal `compaction_end` below still fires so clients that saw
+            // `compaction_start` never stay pending. `false` is reserved for
+            // emitter cancellation.
+            match row {
+                Ok(row) => {
+                    if !emit(EngineEvent::CustomMessage(custom_message_value(&row))) {
+                        return false;
+                    }
+                }
                 Err(error) => {
                     eprintln!("pa-daemon: compaction outcome persistence failed: {error:#}");
-                    return false;
                 }
-            };
-            if !emit(EngineEvent::CustomMessage(custom_message_value(&row))) {
-                return false;
             }
         }
         let (aborted, error_message, error_severity) = match outcome {

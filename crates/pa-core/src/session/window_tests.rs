@@ -190,6 +190,9 @@ fn stale_corrupt_and_replaced_cache_rebuild() {
     assert!(!stale.read_stats().cache_hit);
     assert_eq!(stale.context().thinking_level, "low ");
     std::fs::write(path.with_extension("window-cache.json"), "broken").unwrap();
+    // The live snapshot is still valid for the unchanged file; drop it so
+    // this open really exercises the corrupt on-disk sidecar.
+    super::super::window_cache::evict_live_snapshot(&path);
     assert!(
         !WindowedSessionStore::open(&path)
             .unwrap()

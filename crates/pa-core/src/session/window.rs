@@ -253,7 +253,9 @@ impl WindowedSessionStore {
                         | "agent_status"
                         | "git_state"
                         | "child_usage_attributed"
-                ))
+                ) || (meta.kind == "custom"
+                    && meta.custom_type.as_deref()
+                        == Some(crate::session_engine::refine::REFINEMENT_AUDIT_CUSTOM_TYPE)))
             {
                 metadata_entries.push(
                     String::from_utf8(line.clone())
@@ -413,6 +415,14 @@ impl WindowedSessionStore {
                         .is_some_and(|id| retained_ids.contains(id)) =>
                 {
                     latest.insert(format!("attribution:{}", value["targetId"]), index);
+                }
+                // Every refinement audit stays: refinement_history() is a
+                // complete list, not a latest-wins setting.
+                "custom"
+                    if value["customType"].as_str()
+                        == Some(crate::session_engine::refine::REFINEMENT_AUDIT_CUSTOM_TYPE) =>
+                {
+                    keep.insert(index);
                 }
                 _ => {}
             }
@@ -591,6 +601,23 @@ impl WindowedSessionStore {
     }
     /// Fold a newly persisted linear entry without hydrating historical bodies.
     pub fn append_entry(&mut self, entry: FileEntry) {
+        if let FileEntry::ChildUsageAttributed { payload, .. } = &entry {
+            // The full reader folds attributions at parse time; a live append
+            // must fold into the retained assistant copy too, or `context()`
+            // serves stale usage until reopen.
+            for retained in self.entries.iter_mut().rev() {
+                if retained.id() == Some(payload.target_id.as_str()) {
+                    if let FileEntry::Message {
+                        message: pa_types::session::AgentMessage::Assistant(assistant),
+                        ..
+                    } = retained
+                    {
+                        assistant.usage = payload.aggregate_usage;
+                    }
+                    break;
+                }
+            }
+        }
         update_snapshot(&mut self.snapshot, &entry);
         self.settings
             .thinking_level

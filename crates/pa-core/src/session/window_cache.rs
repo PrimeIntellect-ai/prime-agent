@@ -79,7 +79,11 @@ fn live_snapshots() -> &'static Mutex<HashMap<PathBuf, Snapshot>> {
 }
 
 pub(super) fn load(path: &Path, file: &File, stats: &mut WindowReadStats) -> Option<Snapshot> {
-    if let Some(snapshot) = live_snapshots().lock().ok()?.get(path).cloned() {
+    // Clone out of the guard before the staleness check: the `if let`
+    // scrutinee guard would live through the block and self-deadlock on
+    // the eviction re-lock.
+    let live = live_snapshots().lock().ok()?.get(path).cloned();
+    if let Some(snapshot) = live {
         if snapshot.version == 3 && snapshot.generation.valid(file, path).ok()? {
             stats.cache_bytes += serde_json::to_vec(&snapshot).ok()?.len() as u64;
             return Some(snapshot);
@@ -98,6 +102,14 @@ pub(super) fn load(path: &Path, file: &File, stats: &mut WindowReadStats) -> Opt
         .insert(path.to_owned(), snapshot.clone());
     Some(snapshot)
 }
+/// Drop the in-process snapshot so a test exercises the on-disk sidecar.
+#[cfg(test)]
+pub(super) fn evict_live_snapshot(path: &Path) {
+    if let Ok(mut snapshots) = live_snapshots().lock() {
+        snapshots.remove(path);
+    }
+}
+
 pub(super) fn save(path: &Path, snapshot: &Snapshot) -> io::Result<()> {
     let temp = path.with_extension(format!("window-cache-{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| {

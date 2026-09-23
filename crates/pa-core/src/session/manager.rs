@@ -492,8 +492,13 @@ impl SessionManager {
 
     fn active_branch_entries(&self) -> Vec<&FileEntry> {
         let mut branch = Vec::new();
+        let mut visited = std::collections::HashSet::new();
         let mut id = self.leaf_id.as_deref();
         while let Some(index) = id.and_then(|id| self.by_id.get(id)).copied() {
+            // A corrupt file can hold a parent cycle; opening must not hang.
+            if !visited.insert(index) {
+                break;
+            }
             let entry = &self.file_entries[index];
             branch.push(entry);
             id = entry.parent_id();
@@ -520,6 +525,55 @@ impl SessionManager {
                 .ok()
                 .map(crate::goals::normalize_goal_state)
         })
+    }
+
+    /// Newest `git_state` reachable without hydration: the loaded active
+    /// branch first, then the window's pre-boundary metadata (newest first).
+    pub(crate) fn latest_git_context(&self) -> Option<pa_types::session::GitContext> {
+        let on_branch = self.active_branch_entries().iter().rev().find_map(|entry| {
+            if let FileEntry::GitState { payload, .. } = entry {
+                Some(payload.git.clone())
+            } else {
+                None
+            }
+        });
+        if on_branch.is_some() {
+            return on_branch;
+        }
+        // metadata_entries is file order; the newest wins.
+        self.window
+            .as_ref()?
+            .metadata_entries()
+            .iter()
+            .rev()
+            .find_map(|line| match serde_json::from_str::<FileEntry>(line) {
+                Ok(FileEntry::GitState { payload, .. }) => Some(payload.git.clone()),
+                _ => None,
+            })
+    }
+
+    /// Newest agent status reachable without hydration (same order as
+    /// [`Self::latest_git_context`]).
+    pub(crate) fn latest_agent_status_entry(&self) -> Option<pa_types::session::AgentStatus> {
+        let on_branch = self.active_branch_entries().iter().rev().find_map(|entry| {
+            if let FileEntry::AgentStatus { payload, .. } = entry {
+                Some(payload.status.clone())
+            } else {
+                None
+            }
+        });
+        if on_branch.is_some() {
+            return on_branch;
+        }
+        self.window
+            .as_ref()?
+            .metadata_entries()
+            .iter()
+            .rev()
+            .find_map(|line| match serde_json::from_str::<FileEntry>(line) {
+                Ok(FileEntry::AgentStatus { payload, .. }) => Some(payload.status.clone()),
+                _ => None,
+            })
     }
 
     pub fn has_non_bootstrap_entries(&self) -> bool {
@@ -1204,13 +1258,6 @@ impl SessionManager {
                 )
             })
             .unwrap_or_else(|| panic!("Assistant message entry {target_id} not found"));
-        if let FileEntry::Message {
-            message: AgentMessage::Assistant(assistant),
-            ..
-        } = &mut self.file_entries[target_index]
-        {
-            assistant.usage = aggregate_usage;
-        }
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::ChildUsageAttributed {
@@ -1222,6 +1269,15 @@ impl SessionManager {
             },
             base,
         })?;
+        // Fold only after the durable append: a failed write must not leave
+        // phantom usage for a later rewrite to persist.
+        if let FileEntry::Message {
+            message: AgentMessage::Assistant(assistant),
+            ..
+        } = &mut self.file_entries[target_index]
+        {
+            assistant.usage = aggregate_usage;
+        }
         Ok(id)
     }
 

@@ -1937,7 +1937,17 @@ impl Worker {
                     rlm_depth.unwrap_or(0),
                 );
                 created.set_path(path.clone());
-                match crate::lease::acquire_runtime_session_lease(&path, &self.config.agent_dir) {
+                let acquired = {
+                    let path = path.clone();
+                    let agent_dir = self.config.agent_dir.clone();
+                    tokio::task::spawn_blocking(move || {
+                        crate::lease::acquire_runtime_session_lease(&path, &agent_dir)
+                    })
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .and_then(|lease| lease)
+                };
+                match acquired {
                     Ok(lease) => created.lease = Some(Arc::new(lease)),
                     Err(error) => {
                         return response_failure(None, "create", &error.to_string(), None)
@@ -1983,7 +1993,17 @@ impl Worker {
                 );
                 let path = session_dir.join(session_file_name(created.session_id()));
                 created.set_path(path.clone());
-                match crate::lease::acquire_runtime_session_lease(&path, &self.config.agent_dir) {
+                let acquired = {
+                    let path = path.clone();
+                    let agent_dir = self.config.agent_dir.clone();
+                    tokio::task::spawn_blocking(move || {
+                        crate::lease::acquire_runtime_session_lease(&path, &agent_dir)
+                    })
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .and_then(|lease| lease)
+                };
+                match acquired {
                     Ok(lease) => created.lease = Some(Arc::new(lease)),
                     Err(error) => {
                         return response_failure(None, "create", &error.to_string(), None)

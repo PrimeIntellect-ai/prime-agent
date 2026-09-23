@@ -99,7 +99,7 @@ impl SessionManager {
     }
 
     fn active_git_context(&self) -> Option<GitContext> {
-        if let Some(context) = self.walk_to_root_first_match("git_state") {
+        if let Some(context) = self.latest_git_context() {
             return Some(context);
         }
         match self.get_header() {
@@ -108,35 +108,9 @@ impl SessionManager {
         }
     }
 
-    /// Walk leaf-to-root on the active branch; first matching entry payload.
-    fn walk_to_root_first_match(&self, kind: &str) -> Option<GitContext> {
-        let mut current = self.get_leaf_id().map(str::to_string);
-        while let Some(id) = current {
-            let Some(entry) = self.get_entry_by_id(&id) else {
-                break;
-            };
-            if let FileEntry::GitState { payload, .. } = entry {
-                return Some(payload.git.clone());
-            }
-            current = entry.parent_id().map(str::to_string);
-        }
-        let _ = kind;
-        None
-    }
-
-    /// Latest agent status on the active branch (leaf-to-root walk).
+    /// Latest agent status on the active branch.
     pub fn get_latest_agent_status(&self) -> Option<AgentStatus> {
-        let mut current = self.get_leaf_id().map(str::to_string);
-        while let Some(id) = current {
-            let Some(entry) = self.get_entry_by_id(&id) else {
-                break;
-            };
-            if let FileEntry::AgentStatus { payload, .. } = entry {
-                return Some(payload.status.clone());
-            }
-            current = entry.parent_id().map(str::to_string);
-        }
-        None
+        self.latest_agent_status_entry()
     }
 
     pub fn append_custom_message_entry(
@@ -259,6 +233,7 @@ impl SessionManager {
         from_hook: Option<bool>,
         usage: Option<pa_types::ai::Usage>,
     ) -> std::io::Result<String> {
+        let previous_leaf = self.get_leaf_id().map(str::to_string);
         if let Some(branch_from_id) = branch_from_id {
             assert!(
                 self.get_entry_by_id(branch_from_id).is_some(),
@@ -270,7 +245,7 @@ impl SessionManager {
         }
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
-        self.append_entry(FileEntry::BranchSummary {
+        let appended = self.append_entry(FileEntry::BranchSummary {
             payload: pa_types::session::BranchSummaryEntry {
                 from_id: branch_from_id
                     .map(str::to_string)
@@ -281,7 +256,12 @@ impl SessionManager {
                 usage,
             },
             base,
-        })?;
+        });
+        if let Err(error) = appended {
+            // The move must not outlive the failed append.
+            self.set_leaf_id(previous_leaf.as_deref());
+            return Err(error);
+        }
         Ok(id)
     }
 }

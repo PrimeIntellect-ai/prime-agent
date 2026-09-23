@@ -930,17 +930,20 @@ impl TurnBoundary {
             .session
             .record_compaction_outcome(reason, outcome, message)
             .await;
-        let row = match row {
-            Ok(row) => row,
+        // A failed durable row skips only the row events; the terminal
+        // `compaction_end` below still fires so a streamed
+        // `compaction_start` never stays pending.
+        match row {
+            Ok(row) => {
+                if self.json_mode {
+                    let value = crate::headless_autonomous::custom_row_wire_value(&row);
+                    for event_type in ["message_start", "message_end"] {
+                        (self.sink)(&json!({ "type": event_type, "message": value }));
+                    }
+                }
+            }
             Err(error) => {
                 self.emit_json(json!({ "type": "error", "message": error.to_string() }));
-                return;
-            }
-        };
-        if self.json_mode {
-            let value = crate::headless_autonomous::custom_row_wire_value(&row);
-            for event_type in ["message_start", "message_end"] {
-                (self.sink)(&json!({ "type": event_type, "message": value }));
             }
         }
         let mut event = json!({
