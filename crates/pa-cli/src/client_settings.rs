@@ -185,8 +185,8 @@ impl ClientSettings for CliClientSettings {
         let channel = self.manager().ok()?.get_update_channel()?;
         Some(
             match channel {
-                pa_core::settings::types::UpdateChannel::Stable => "stable",
-                pa_core::settings::types::UpdateChannel::Nightly => "nightly",
+                pa_core::settings::UpdateChannel::Stable => "stable",
+                pa_core::settings::UpdateChannel::Nightly => "nightly",
             }
             .to_string(),
         )
@@ -194,8 +194,8 @@ impl ClientSettings for CliClientSettings {
 
     fn set_update_channel(&self, channel: &str) -> Result<()> {
         let channel = match channel {
-            "stable" => pa_core::settings::types::UpdateChannel::Stable,
-            "nightly" => pa_core::settings::types::UpdateChannel::Nightly,
+            "stable" => pa_core::settings::UpdateChannel::Stable,
+            "nightly" => pa_core::settings::UpdateChannel::Nightly,
             _ => anyhow::bail!("unknown update channel: {channel}"),
         };
         self.manager()?.set_update_channel(channel)
@@ -207,10 +207,10 @@ impl ClientSettings for CliClientSettings {
             .ok()
             .and_then(|manager| manager.get_update_channel())
             .map(|channel| match channel {
-                pa_core::settings::types::UpdateChannel::Stable => {
+                pa_core::settings::UpdateChannel::Stable => {
                     pa_core::update::version::UpdateChannel::Stable
                 }
-                pa_core::settings::types::UpdateChannel::Nightly => {
+                pa_core::settings::UpdateChannel::Nightly => {
                     pa_core::update::version::UpdateChannel::Nightly
                 }
             });

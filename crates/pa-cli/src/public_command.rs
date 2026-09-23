@@ -4,6 +4,8 @@ use crate::daemon_discovery;
 use std::collections::HashSet;
 
 use crate::args::{parse_args, INTERNAL_RUNTIME_COMMAND_MARKER};
+use std::io::IsTerminal as _;
+
 use crate::command_registry::{
     find_command_suggestion, format_command_help, format_top_level_help, get_child_command_specs,
     get_command_spec, is_help_command_request, public_command_names, REMOVED_COMMAND_NAMES,
@@ -652,8 +654,8 @@ fn run_update(args: &[String]) -> PublicCommandResult {
         })
         .map(|channel| {
             match channel {
-                pa_core::settings::types::UpdateChannel::Stable => "stable",
-                pa_core::settings::types::UpdateChannel::Nightly => "nightly",
+                pa_core::settings::UpdateChannel::Stable => "stable",
+                pa_core::settings::UpdateChannel::Nightly => "nightly",
             }
             .to_string()
         });
@@ -733,15 +735,12 @@ fn run_update(args: &[String]) -> PublicCommandResult {
                 let wire = flag_wire.unwrap_or_default();
                 if let Ok(cwd) = std::env::current_dir() {
                     let settings_channel = match wire {
-                        "nightly" => pa_core::settings::types::UpdateChannel::Nightly,
-                        _ => pa_core::settings::types::UpdateChannel::Stable,
+                        "nightly" => pa_core::settings::UpdateChannel::Nightly,
+                        _ => pa_core::settings::UpdateChannel::Stable,
                     };
-                    if let Ok(mut settings) =
-                        pa_core::settings::SettingsManager::create(&cwd, &agent_dir)
-                    {
-                        if settings.set_update_channel(settings_channel).is_ok() {
-                            println!("Updates now follow the {wire} channel.");
-                        }
+                    let mut settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
+                    if settings.set_update_channel(settings_channel).is_ok() {
+                        println!("Updates now follow the {wire} channel.");
                     }
                 }
             }
