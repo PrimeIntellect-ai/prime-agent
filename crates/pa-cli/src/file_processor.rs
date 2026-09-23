@@ -139,7 +139,7 @@ mod tests {
     fn missing_file_fails_with_the_ts_error() {
         let (_guard, dir) = temp_dir();
         let missing = dir.join("nope.txt").to_string_lossy().to_string();
-        let error = process_file_arguments(&[missing.clone()], &dir, true).unwrap_err();
+        let error = process_file_arguments(std::slice::from_ref(&missing), &dir, true).unwrap_err();
         assert_eq!(error.message, format!("Error: File not found: {missing}"));
     }
 
