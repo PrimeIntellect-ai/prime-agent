@@ -155,10 +155,14 @@ pub fn parse_event(line: &str) -> Result<Event, String> {
     // deep-cloning it out of `value` below. Other kinds and non-object lines
     // keep `Null`, and a missing field parses exactly as before.
     let data = match value.as_object_mut() {
-        Some(map) if matches!(
-            map.get("event").and_then(Value::as_str),
-            Some("display") | Some("host_request")
-        ) => map.remove("data").unwrap_or(Value::Null),
+        Some(map)
+            if matches!(
+                map.get("event").and_then(Value::as_str),
+                Some("display") | Some("host_request")
+            ) =>
+        {
+            map.remove("data").unwrap_or(Value::Null)
+        }
         _ => Value::Null,
     };
     let obj = value
@@ -203,10 +207,7 @@ pub fn parse_event(line: &str) -> Result<Event, String> {
                 .to_string();
             Ok(Event::Result { id, text })
         }
-        "display" => Ok(Event::Display {
-            id: id("id"),
-            data,
-        }),
+        "display" => Ok(Event::Display { id: id("id"), data }),
         "host_request" => {
             let rid =
                 id("id").ok_or_else(|| format!("host_request frame without id: {}", clip(line)))?;
@@ -339,23 +340,38 @@ mod tests {
         );
         assert_eq!(
             parse_event(r#"{"event":"stdout","id":"c1","text":"out"}"#).unwrap(),
-            Event::Stdout { id: Some("c1".into()), text: "out".into() }
+            Event::Stdout {
+                id: Some("c1".into()),
+                text: "out".into()
+            }
         );
         assert_eq!(
             parse_event(r#"{"event":"stdout","id":null,"text":"raw 🌸"}"#).unwrap(),
-            Event::Stdout { id: None, text: "raw 🌸".into() }
+            Event::Stdout {
+                id: None,
+                text: "raw 🌸".into()
+            }
         );
         assert_eq!(
             parse_event(r#"{"event":"stderr","text":"err"}"#).unwrap(),
-            Event::Stderr { id: None, text: "err".into() }
+            Event::Stderr {
+                id: None,
+                text: "err".into()
+            }
         );
         assert_eq!(
             parse_event(r#"{"event":"stderr","id":"c1","text":null}"#).unwrap(),
-            Event::Stderr { id: Some("c1".into()), text: String::new() }
+            Event::Stderr {
+                id: Some("c1".into()),
+                text: String::new()
+            }
         );
         assert_eq!(
             parse_event(r#"{"event":"result","id":"c1","text":"42"}"#).unwrap(),
-            Event::Result { id: "c1".into(), text: "42".into() }
+            Event::Result {
+                id: "c1".into(),
+                text: "42".into()
+            }
         );
         assert_eq!(
             parse_event(
@@ -402,27 +418,45 @@ mod tests {
         // missing, null, scalar, array, number, object.
         assert_eq!(
             parse_event(r#"{"event":"display","id":"c1"}"#).unwrap(),
-            Event::Display { id: Some("c1".into()), data: Value::Null }
+            Event::Display {
+                id: Some("c1".into()),
+                data: Value::Null
+            }
         );
         assert_eq!(
             parse_event(r#"{"event":"display","id":"c1","data":null}"#).unwrap(),
-            Event::Display { id: Some("c1".into()), data: Value::Null }
+            Event::Display {
+                id: Some("c1".into()),
+                data: Value::Null
+            }
         );
         assert_eq!(
             parse_event(r#"{"event":"display","id":null,"data":"scalar"}"#).unwrap(),
-            Event::Display { id: None, data: json!("scalar") }
+            Event::Display {
+                id: None,
+                data: json!("scalar")
+            }
         );
         assert_eq!(
             parse_event(r#"{"event":"display","id":null,"data":[1,2,3]}"#).unwrap(),
-            Event::Display { id: None, data: json!([1, 2, 3]) }
+            Event::Display {
+                id: None,
+                data: json!([1, 2, 3])
+            }
         );
         assert_eq!(
             parse_event(r#"{"event":"display","id":null,"data":123}"#).unwrap(),
-            Event::Display { id: None, data: json!(123) }
+            Event::Display {
+                id: None,
+                data: json!(123)
+            }
         );
         assert_eq!(
             parse_event(r#"{"event":"host_request","id":"hr1"}"#).unwrap(),
-            Event::HostRequest { id: "hr1".into(), data: Value::Null }
+            Event::HostRequest {
+                id: "hr1".into(),
+                data: Value::Null
+            }
         );
         assert_eq!(
             parse_event(
@@ -554,8 +588,14 @@ mod tests {
         ] {
             let display = display_frame(target.saturating_sub(120));
             let host = host_request_frame(((target - 60) / 85).max(1));
-            for (kind, frame) in [("display", display.as_str()), ("host_request", host.as_str())] {
-                assert_eq!(parse_event(frame).expect("valid fixture frame").kind(), kind);
+            for (kind, frame) in [
+                ("display", display.as_str()),
+                ("host_request", host.as_str()),
+            ] {
+                assert_eq!(
+                    parse_event(frame).expect("valid fixture frame").kind(),
+                    kind
+                );
                 for _ in 0..(iters / 20).max(1) {
                     let _ = black_box(parse_event(black_box(frame)));
                 }
