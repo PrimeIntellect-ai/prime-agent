@@ -93,6 +93,11 @@ pub struct RlmChildUsageAttributions {
     /// successor's adopted bases then carry the late batch's aggregate
     /// onward, so a post-rebuild chain never silently drops it.
     forward: std::sync::Mutex<Option<std::sync::Arc<RlmChildUsageAttributions>>>,
+    /// The producer this one replaced (a rebuild's successor consulting
+    /// the retired side for a registration the adoption copy raced): a
+    /// Weak back-pointer, so the handoff pair never keeps each other
+    /// alive.
+    fallback: std::sync::Mutex<Option<std::sync::Weak<RlmChildUsageAttributions>>>,
 }
 
 impl RlmChildUsageAttributions {
@@ -103,6 +108,7 @@ impl RlmChildUsageAttributions {
             children: std::sync::Mutex::new(HashMap::new()),
             telemetry: std::sync::Mutex::new(None),
             forward: std::sync::Mutex::new(None),
+            fallback: std::sync::Mutex::new(None),
         }
     }
 
@@ -118,8 +124,15 @@ impl RlmChildUsageAttributions {
     /// assistant row, and that row's usage becomes the aggregate base.
     /// No assistant row (a spawn outside a model turn) leaves the child
     /// unregistered — usage reports for it drop, exactly like TS folds
-    /// into `emptyUsage()` without a durable target.
+    /// into `emptyUsage()` without a durable target. A rebuild handed
+    /// observation over: the spawn registers on the successor (the same
+    /// file's last assistant row — the observation path is the
+    /// successor's).
     pub async fn register_spawn(&self, rlm_child_id: &str) {
+        if let Some(forward) = self.forward.lock().expect("rlm usage forward lock").clone() {
+            forward.register_spawn(rlm_child_id).await;
+            return;
+        }
         let target = {
             let session = self.session.lock().await;
             session
@@ -154,17 +167,24 @@ impl RlmChildUsageAttributions {
             forward.record_child_usage(report).await;
             return;
         }
-        let Some(target_id) = self
+        let target_id = match self
             .children
             .lock()
             .expect("rlm usage children lock")
             .get(&report.rlm_child_id)
             .cloned()
-        else {
-            // A spawn this engine never registered (the observation raced
-            // a session rebuild, or a retained child outlived its parent
-            // engine): no durable target, nothing to attribute.
-            return;
+        {
+            Some(target_id) => target_id,
+            None => match self.adopt_from_fallback(&report.rlm_child_id).await {
+                Some(target_id) => target_id,
+                None => {
+                    // A spawn this engine never registered (the
+                    // observation raced a session rebuild, or a retained
+                    // child outlived its parent engine): no durable
+                    // target, nothing to attribute.
+                    return;
+                }
+            },
         };
         let mut bases = self.bases.lock().await;
         for (origin, usage) in report.batches {
@@ -218,7 +238,22 @@ impl RlmChildUsageAttributions {
     /// drops the adopted registrations at the durable append (the same
     /// recoverable "no durable target" failure every unregistered report
     /// takes).
-    pub async fn adopt_registrations(self: &std::sync::Arc<Self>, retired: &Self) {
+    pub async fn adopt_registrations(self: &std::sync::Arc<Self>, retired: &std::sync::Arc<Self>) {
+        // The handoff goes FIRST: from here on, a spawn or report
+        // arriving on the retired producer forwards to the successor
+        // (the successor owns the observation path). Anything already in
+        // flight on the retired side holds the children/bases locks
+        // across its whole flow, so the copies below serialize with it —
+        // a late batch or registration is either already in the copied
+        // state or lands on the successor through the forward.
+        *retired.forward.lock().expect("rlm usage forward lock") =
+            Some(std::sync::Arc::clone(self));
+        // The successor can also consult the retired side for a
+        // registration the copy raced (a spawn that passed the retired
+        // forward check mid-handoff): a Weak back-pointer, so the pair
+        // never keeps each other alive.
+        *self.fallback.lock().expect("rlm usage fallback lock") =
+            Some(std::sync::Arc::downgrade(retired));
         {
             let retired_children = retired.children.lock().expect("rlm usage children lock");
             let mut children = self.children.lock().expect("rlm usage children lock");
@@ -233,12 +268,37 @@ impl RlmChildUsageAttributions {
         for (target_id, base) in retired_bases.iter() {
             bases.entry(target_id.clone()).or_insert_with(|| *base);
         }
-        // The handoff: reports still in flight on the retired sink land on
-        // the adopted chain — the forward is set after the bases copy, so
-        // every batch attributed before the swap is already carried by
-        // the adopted base, and a late one forwards onto it.
-        *retired.forward.lock().expect("rlm usage forward lock") =
-            Some(std::sync::Arc::clone(self));
+    }
+
+    /// A registration the adoption copy raced (a spawn that passed the
+    /// retired side's forward check mid-handoff and registered there):
+    /// the successor consults the retired producer through its Weak
+    /// back-pointer, adopts the target and the target's aggregate base,
+    /// and attributes from there — a child spawned across the handoff
+    /// never loses its report.
+    async fn adopt_from_fallback(&self, rlm_child_id: &str) -> Option<String> {
+        let fallback = self
+            .fallback
+            .lock()
+            .expect("rlm usage fallback lock")
+            .clone();
+        let fallback = fallback.and_then(std::sync::Weak::upgrade)?;
+        let target_id = {
+            let retired_children = fallback.children.lock().expect("rlm usage children lock");
+            retired_children.get(rlm_child_id).cloned()?
+        };
+        {
+            let mut children = self.children.lock().expect("rlm usage children lock");
+            children
+                .entry(rlm_child_id.to_string())
+                .or_insert_with(|| target_id.clone());
+        }
+        let mut retired_bases = fallback.bases.lock().await;
+        let mut bases = self.bases.lock().await;
+        if let Some(base) = retired_bases.get(&target_id) {
+            bases.entry(target_id.clone()).or_insert(*base);
+        }
+        Some(target_id)
     }
 
     /// Drop one child's registration: the child's final observation
@@ -528,6 +588,58 @@ mod tests {
             3,
             "the forgotten child's report drops"
         );
+        // A spawn racing the handoff on the retired side FORWARDS: the
+        // registration lands on the successor (the observation path is
+        // the successor's), and the successor's report attributes.
+        retired.register_spawn("sub-rebuild2").await;
+        assert!(
+            fresh
+                .children
+                .lock()
+                .expect("children lock")
+                .contains_key("sub-rebuild2"),
+            "the handoff-forwarded spawn registered on the successor"
+        );
+        fresh
+            .record_child_usage(RlmChildUsageReport {
+                rlm_child_id: "sub-rebuild2".to_string(),
+                batches: vec![(ChildUsageOrigin::SpawnTask, usage_block(2, 2, 0, 0, 4, 0.0))],
+            })
+            .await;
+        // A registration the adoption copy raced (a spawn that passed the
+        // retired side's forward check mid-handoff — simulated by
+        // inserting on the retired side directly): the successor's
+        // fallback consult adopts the target and the report still
+        // attributes.
+        let target_of_second = fresh
+            .children
+            .lock()
+            .expect("children lock")
+            .get("sub-rebuild2")
+            .cloned()
+            .expect("sub-rebuild2 registered on the successor");
+        let mut retired_children = retired.children.lock().expect("children lock");
+        retired_children.insert("sub-raced".to_string(), target_of_second);
+        drop(retired_children);
+        fresh
+            .record_child_usage(RlmChildUsageReport {
+                rlm_child_id: "sub-raced".to_string(),
+                batches: vec![(ChildUsageOrigin::SpawnTask, usage_block(3, 3, 0, 0, 6, 0.0))],
+            })
+            .await;
+        let rows_raced = file_rows(&manager).await;
+        let raced: Vec<&serde_json::Value> = rows_raced
+            .iter()
+            .filter(|row| row["type"] == "child_usage_attributed")
+            .collect();
+        assert_eq!(
+            raced.len(),
+            5,
+            "the forwarded spawn and the raced registration both attribute"
+        );
+        // The raced registration continues the SAME cumulative chain (the
+        // fallback adopted the target's base): 1,020 + 3 input.
+        assert_eq!(raced[4]["aggregateUsage"]["input"], 1_023);
     }
 
     /// Multiple children of one assistant row share the cumulative base

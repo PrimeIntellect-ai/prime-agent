@@ -1414,6 +1414,13 @@ impl SupervisorChildSessionsInner {
             self.command(&command, KILL_TIMEOUT_MS)
                 .await
                 .with_context(|| format!("kill RLM child \"{child_id}\""))?;
+            // Rows can land between the pre-kill capture and the kill
+            // reaching the worker (a settle racing the kill): the
+            // post-kill walk is the last observation, matching the close
+            // path — the cursor keeps it free of double-billing. The
+            // registration drops with the child.
+            self.emit_child_usage(record).await;
+            self.forget_child_usage(record).await;
             self.children
                 .lock()
                 .await
