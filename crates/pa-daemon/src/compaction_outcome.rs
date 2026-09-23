@@ -50,6 +50,13 @@ impl AgentSessionEngine {
             })
         };
         if let Some(row) = row {
+            let row = match row {
+                Ok(row) => row,
+                Err(error) => {
+                    eprintln!("pa-daemon: compaction outcome persistence failed: {error:#}");
+                    return false;
+                }
+            };
             if !emit(EngineEvent::CustomMessage(custom_message_value(&row))) {
                 return false;
             }

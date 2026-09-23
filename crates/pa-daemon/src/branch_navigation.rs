@@ -419,6 +419,12 @@ impl TreeNavigation {
                     let file = session_dir
                         .join(crate::session_store::session_file_name(forked.session_id()));
                     forked.set_path(file);
+                    if let Some(lease) = &store.lease {
+                        forked.lease =
+                            Some(lease.acquire_target(&forked.path).map_err(|error| {
+                                response_failure(None, "fork", &error.to_string(), None)
+                            })?);
+                    }
                     if let Err(error) = forked.rewrite() {
                         return Err(response_failure(None, "fork", &error.to_string(), None));
                     }

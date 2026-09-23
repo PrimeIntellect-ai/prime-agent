@@ -1472,23 +1472,18 @@ impl Worker {
     }
 
     pub(crate) async fn dispatch(&self, command_type: &str, payload: &Value) -> DaemonResponse {
-        // Attach reads use the complete compacted transcript. All other commands
-        // may inspect old entries or mutate history and need the full store.
-        if !matches!(
+        // Only operations that inspect or change historical branches need hydration.
+        // Cancellation is deliberately excluded: it must reach the live turn immediately.
+        if matches!(
             command_type,
-            "create"
-                | "attach"
-                | "detach"
-                | "get_state"
-                | "get_messages"
-                | "get_connection_state"
-                | "get_session_header"
-                | "get_session_stats"
-                | "get_queue"
-                | "get_model_catalog"
-                | "get_available_models"
-                | "heartbeats_list"
-                | "update_snapshot"
+            "get_session_tree"
+                | "get_context_tree"
+                | "get_user_messages_for_forking"
+                | "set_session_entry_label"
+                | "navigate_tree"
+                | "fork"
+                | "export_html"
+                | "export_jsonl"
         ) && self
             .core
             .lock()
@@ -1871,35 +1866,70 @@ impl Worker {
             .map(str::to_string);
 
         let mut store = match (&session_path, no_session) {
-            (Some(path), false) if path.exists() => match {
-                let path = path.clone();
-                tokio::task::spawn_blocking(move || SessionFile::open_windowed(&path))
+            (Some(path), false) if path.exists() => {
+                let loaded = {
+                    let path = path.clone();
+                    let agent_dir = self.config.agent_dir.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let lease = crate::lease::acquire_runtime_session_lease(&path, &agent_dir)?;
+                        let mut store = SessionFile::open_windowed(&path)?;
+                        store.lease = Some(Arc::new(lease));
+                        Ok(store)
+                    })
                     .await
                     .map_err(anyhow::Error::from)
                     .and_then(|result| result)
-            } {
-                Ok(mut opened) => {
-                    let append_start = opened.entries.len();
-                    append_creation_prefix(
-                        &mut opened,
-                        self.engine.as_ref(),
-                        &self.config.agent_dir,
-                        &cwd,
-                        false,
-                    );
-                    let _ = opened.append_session_state("active");
-                    let persisted = if opened.window.is_some() {
-                        opened.persist_appended(append_start)
-                    } else {
-                        opened.rewrite()
-                    };
-                    if let Err(error) = persisted {
-                        return response_failure(None, "create", &error.to_string(), None);
+                };
+                match loaded {
+                    Ok(mut opened) => {
+                        let restored = opened.restored_settings();
+                        let has_model_override =
+                            payload.get("provider").and_then(Value::as_str).is_some()
+                                || payload.get("model").and_then(Value::as_str).is_some();
+                        let (provider, model) = if has_model_override {
+                            (None, None)
+                        } else {
+                            restored.model.unzip()
+                        };
+                        self.engine.configure_model(EngineModelSelection {
+                            provider,
+                            model,
+                            api_key: None,
+                            thinking: requested_thinking.or_else(|| {
+                                opened
+                                    .has_thinking_level()
+                                    .then(|| {
+                                        pa_ai::models::thinking_level_from_str(
+                                            &restored.thinking_level,
+                                        )
+                                    })
+                                    .flatten()
+                            }),
+                        });
+                        let append_start = opened.entries.len();
+                        append_creation_prefix(
+                            &mut opened,
+                            self.engine.as_ref(),
+                            &self.config.agent_dir,
+                            &cwd,
+                            false,
+                        );
+                        let _ = opened.append_session_state("active");
+                        let persisted = if opened.window.is_some() {
+                            opened.persist_appended(append_start)
+                        } else {
+                            opened.rewrite()
+                        };
+                        if let Err(error) = persisted {
+                            return response_failure(None, "create", &error.to_string(), None);
+                        }
+                        opened
                     }
-                    opened
+                    Err(error) => {
+                        return response_failure(None, "create", &error.to_string(), None)
+                    }
                 }
-                Err(error) => return response_failure(None, "create", &error.to_string(), None),
-            },
+            }
             (Some(path), false) => {
                 let mut created = SessionFile::create(
                     &cwd,
@@ -1907,6 +1937,12 @@ impl Worker {
                     rlm_depth.unwrap_or(0),
                 );
                 created.set_path(path.clone());
+                match crate::lease::acquire_runtime_session_lease(&path, &self.config.agent_dir) {
+                    Ok(lease) => created.lease = Some(Arc::new(lease)),
+                    Err(error) => {
+                        return response_failure(None, "create", &error.to_string(), None)
+                    }
+                }
                 if let Err(error) = created.rewrite() {
                     return response_failure(None, "create", &error.to_string(), None);
                 }
@@ -1946,7 +1982,13 @@ impl Worker {
                     rlm_depth.unwrap_or(0),
                 );
                 let path = session_dir.join(session_file_name(created.session_id()));
-                created.set_path(path);
+                created.set_path(path.clone());
+                match crate::lease::acquire_runtime_session_lease(&path, &self.config.agent_dir) {
+                    Ok(lease) => created.lease = Some(Arc::new(lease)),
+                    Err(error) => {
+                        return response_failure(None, "create", &error.to_string(), None)
+                    }
+                }
                 if let Err(error) = created.rewrite() {
                     return response_failure(None, "create", &error.to_string(), None);
                 }
@@ -1979,6 +2021,9 @@ impl Worker {
                 return response_failure(None, "create", &error.to_string(), None);
             }
         }
+        let restored_tier = store
+            .has_service_tier()
+            .then(|| store.restored_settings().service_tier);
         // Restore the persisted queue snapshot (crash/respawn recovery) from
         // the worker recovery journal.
         let (steering, follow_up) = {
@@ -2014,6 +2059,8 @@ impl Worker {
                 settings.get_compaction_enabled(),
             )
         };
+        self.engine
+            .configure_service_tier(restored_tier.unwrap_or(Some(service_tier)));
         // The core lock stays inside this block: everything after it may
         // await (the schedule-catalog bind), and a std MutexGuard must
         // never ride an await point.
@@ -2026,7 +2073,7 @@ impl Worker {
             core.created = true;
             core.abort_requested = false;
             core.auto_compaction_enabled = auto_compaction_enabled;
-            core.service_tier = Some(service_tier);
+            core.service_tier = restored_tier.unwrap_or(Some(service_tier));
             core.steering_mode = steering_mode;
             core.follow_up_mode = follow_up_mode;
             core.scoped_models = Vec::new();
@@ -2784,6 +2831,14 @@ impl Worker {
             agent_engine.dispose_kernel().await;
         }
         self.engine.end_telemetry().await;
+        let lease = self
+            .core
+            .lock()
+            .unwrap()
+            .store
+            .as_mut()
+            .and_then(|store| store.lease.take());
+        drop(lease);
         response_success(None, "shutdown", None)
     }
 
@@ -3534,8 +3589,12 @@ impl Worker {
         {
             let mut core = self.core.lock().unwrap();
             if let Some(store) = core.store.as_mut() {
-                let _ = store.append_session_state("archived");
-                let _ = store.rewrite();
+                if let Err(error) = store.persist_entry(
+                    "session_state",
+                    json!({ "state": { "status": "archived" } }),
+                ) {
+                    return response_failure(None, "kill", &error.to_string(), None);
+                }
             }
             core.created = false;
         }
@@ -3586,6 +3645,14 @@ impl Worker {
         let active_session_id = self.core.lock().unwrap().active_session_id.clone();
         let _ = self.emit_session_closed(&active_session_id, DaemonSessionClosedReason::Killed);
         let _ = self.record_recovery(false, "killed");
+        let lease = self
+            .core
+            .lock()
+            .unwrap()
+            .store
+            .as_mut()
+            .and_then(|store| store.lease.take());
+        drop(lease);
         response_success(None, "kill", None)
     }
 
@@ -3599,8 +3666,9 @@ impl Worker {
         }
         let mut core = self.core.lock().unwrap();
         if let Some(store) = core.store.as_mut() {
-            let _ = store.append_session_info(name);
-            let _ = store.rewrite();
+            if let Err(error) = store.persist_entry("session_info", json!({ "name": name })) {
+                return response_failure(None, command, &error.to_string(), None);
+            }
         }
         let summary = self.summary_locked(&core);
         drop(core);
@@ -3672,12 +3740,7 @@ impl Worker {
             message_count: store.map(|s| s.message_count()).unwrap_or(0) as u32,
             session_actions: session_snapshot(core),
             compaction_count: store
-                .map(|s| {
-                    s.entries()
-                        .iter()
-                        .filter(|entry| entry.type_ == "compaction")
-                        .count() as u32
-                })
+                .map(|store| store.compaction_count() as u32)
                 .unwrap_or(0),
             goal: self.engine.goal_state_value(),
             scoped_models: core.scoped_models.clone(),
@@ -3866,14 +3929,8 @@ fn append_creation_prefix(
     cwd: &str,
     fresh: bool,
 ) {
-    let has_thinking_entry = store
-        .entries()
-        .iter()
-        .any(|entry| entry.type_ == "thinking_level_change");
-    let has_service_tier_entry = store
-        .entries()
-        .iter()
-        .any(|entry| entry.type_ == "service_tier_change");
+    let has_thinking_entry = store.has_thinking_level();
+    let has_service_tier_entry = store.has_service_tier();
     let thinking_level = engine
         .effective_thinking_level()
         .unwrap_or_else(|| "off".to_string());
@@ -4771,28 +4828,6 @@ impl TurnRunner {
                         || core.lock().unwrap().retry_abort_requested
                 }
             };
-            let hydration_path = core
-                .lock()
-                .unwrap()
-                .store
-                .as_ref()
-                .filter(|store| store.window.is_some())
-                .map(|store| store.path.clone());
-            if let Some(path) = hydration_path {
-                match SessionFile::open(&path) {
-                    Ok(full) => {
-                        let mut core = core.lock().unwrap();
-                        if let Some(store) = core.store.as_mut().filter(|store| store.path == path)
-                        {
-                            store.install_full_history(full);
-                        }
-                    }
-                    Err(error) => {
-                        emit(EngineEvent::Done(Err(error.to_string())));
-                        return;
-                    }
-                }
-            }
             // Restored next-turn rows ride this delivery (TS
             // `prefixMessages`): emitted before the accepted prompt, the
             // same durable-row path as in-turn custom rows.
@@ -5103,6 +5138,10 @@ fn compact_action_label(text: &str) -> String {
     let kept: String = compact.chars().take(MAX_CHARS - 3).collect();
     format!("{}...", kept.trim_end())
 }
+
+#[cfg(test)]
+#[path = "worker_resume_settings_tests.rs"]
+mod worker_resume_settings_tests;
 
 #[cfg(test)]
 mod update_snapshot_tests {

@@ -930,6 +930,13 @@ impl TurnBoundary {
             .session
             .record_compaction_outcome(reason, outcome, message)
             .await;
+        let row = match row {
+            Ok(row) => row,
+            Err(error) => {
+                self.emit_json(json!({ "type": "error", "message": error.to_string() }));
+                return;
+            }
+        };
         if self.json_mode {
             let value = crate::headless_autonomous::custom_row_wire_value(&row);
             for event_type in ["message_start", "message_end"] {

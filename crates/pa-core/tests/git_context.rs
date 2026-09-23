@@ -270,7 +270,7 @@ fn re_records_git_state_on_branch_without_it_on_active_path() {
     commit(repo.path(), "init");
 
     let mut manager = SessionManager::persisted(repo.path(), sessions.path());
-    let msg_id = manager.append_message(user("hi"));
+    let msg_id = manager.append_message(user("hi")).unwrap();
     commit(repo.path(), "second");
     assert!(manager.record_git_state_if_changed().is_some());
 

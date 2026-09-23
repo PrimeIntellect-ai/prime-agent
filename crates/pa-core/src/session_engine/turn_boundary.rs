@@ -222,7 +222,7 @@ impl TurnBoundaryRequests {
                     };
                     let usage = match requests.bound() {
                         Some(runtime) => {
-                            let entries = runtime.session.lock().await.get_all_entries().to_vec();
+                            let entries = runtime.session.lock().await.retained_entries().to_vec();
                             context_usage(&entries, runtime.context_window)
                         }
                         None => None,
@@ -272,7 +272,7 @@ impl TurnBoundaryRequests {
                     }
                     // TS `prepareCompaction`: only schedule a compaction
                     // that has history to summarize.
-                    let entries = runtime.session.lock().await.get_all_entries().to_vec();
+                    let entries = runtime.session.lock().await.retained_entries().to_vec();
                     if let Some(reason) =
                         compaction_request_skip_reason(&entries, keep_recent_tokens)
                     {

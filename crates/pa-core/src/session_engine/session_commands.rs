@@ -192,7 +192,10 @@ pub async fn execute_session_command(
     // session branch.
     let echo = session_command_echo_row(command);
     execution.push_message(echo.clone());
-    persist_rows(engine, std::iter::once(&echo)).await;
+    if let Err(error) = persist_rows(engine, std::iter::once(&echo)).await {
+        execution.error = Some(error);
+        return execution;
+    }
     // Telemetry adoption seam: builtin session commands carry their usage
     // event from the single dispatch point (canonical name only).
     if let Some(telemetry) = &engine.telemetry {
@@ -218,7 +221,9 @@ pub async fn execute_session_command(
     }
     // The echo row is already durable (persisted ahead of the command);
     // the result and status rows follow in order.
-    persist_rows(engine, execution.messages.iter().skip(1)).await;
+    if let Err(error) = persist_rows(engine, execution.messages.iter().skip(1)).await {
+        execution.error = Some(error);
+    }
     sync_live_context(engine).await;
     execution
 }
@@ -232,8 +237,7 @@ async fn sync_live_context(engine: &SessionEngine) {
     let session = engine.session.session_handle().clone();
     let rebuilt = {
         let session = session.lock().await;
-        let entries = session.get_all_entries();
-        crate::session::build_session_context(entries, session.get_leaf_id()).messages
+        session.active_context().messages
     };
     // The raw session messages (not the LLM view): custom rows keep their
     // wire identity in the live context, like TS's state push.
@@ -421,18 +425,21 @@ fn execute_autonomous(
 async fn persist_rows<'a>(
     engine: &SessionEngine,
     messages: impl Iterator<Item = &'a CustomMessage>,
-) {
+) -> Result<(), String> {
     let session = engine.session.session_handle().clone();
     let mut session = session.lock().await;
     for message in messages {
-        session.append_custom_message(
-            &message.custom_type,
-            message.content.clone(),
-            message.display,
-            message.details.clone(),
-        );
+        session
+            .append_custom_message(
+                &message.custom_type,
+                message.content.clone(),
+                message.display,
+                message.details.clone(),
+            )
+            .map_err(|error| error.to_string())?;
     }
-    session.flush_now();
+    session.flush_now().map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[cfg(test)]

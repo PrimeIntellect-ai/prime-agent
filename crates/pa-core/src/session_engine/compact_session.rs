@@ -239,7 +239,7 @@ pub async fn execute_compaction(
     session: &mut SessionManager,
     options: CompactOptions<'_>,
 ) -> anyhow::Result<CompactOutcome> {
-    let entries = session.get_all_entries().to_vec();
+    let entries = session.retained_entries().to_vec();
     let preparation = match prepare_compaction(&entries, options.settings.keep_recent_tokens) {
         Ok(preparation) => preparation,
         Err(skip) => return Ok(CompactOutcome::Skipped(skip.user_message())),
@@ -391,7 +391,7 @@ pub async fn execute_compaction(
     // `fromHook`, `customInstructions`, `usage`, and the `harnessDigest`
     // snapshot ride on the durable row alongside the summary, boundary,
     // and token count.
-    session.append_compaction(entry.clone());
+    session.append_compaction(entry.clone())?;
     Ok(CompactOutcome::Ran(Box::new(CompactRun {
         result,
         entry,
@@ -401,14 +401,13 @@ pub async fn execute_compaction(
 
 /// Rebuild the agent's message list after compaction (summary-first context).
 pub fn rebuilt_context_after_compaction(session: &SessionManager) -> Vec<Message> {
-    let entries = session.get_all_entries();
-    let context = crate::session::build_session_context(entries, session.get_leaf_id());
+    let context = session.active_context();
     to_llm_messages(&context.messages)
 }
 
 /// The cut computed for a session (test seam for decision verification).
 pub fn compute_cut(session: &SessionManager, keep_recent_tokens: u64) -> (CutPointResult, u64) {
-    let entries = session.get_all_entries();
+    let entries = session.retained_entries();
     let start = usize::from(matches!(entries.first(), Some(FileEntry::Header { .. })));
     let cut = find_cut_point(entries, start, entries.len(), keep_recent_tokens);
     let tokens = context_tokens(entries, session.get_leaf_id());
@@ -795,7 +794,7 @@ mod tests {
         // the custom row plus its reply.
         session.append_message(user("seed turn"));
         session.append_message(reply("seed reply"));
-        let kept_goal_row_id = goal_row(&mut session);
+        let kept_goal_row_id = goal_row(&mut session).unwrap();
         session.append_message(reply("goal reply"));
         let outcome = execute_compaction(
             &mut session,

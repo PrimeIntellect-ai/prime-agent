@@ -55,8 +55,10 @@ impl Worker {
                 if let Some(store) = core.store.as_mut() {
                     // TS `appendModelChange` records every switch, even to
                     // the current model.
-                    let _ = store.append_model_change(&provider, &model_id);
-                    let _ = store.rewrite();
+                    let _ = store.persist_entry(
+                        "model_change",
+                        serde_json::json!({ "provider": provider, "modelId": model_id }),
+                    );
                 }
                 core.cwd.clone()
             };
@@ -136,8 +138,10 @@ impl Worker {
             let cwd = {
                 let mut core = core.lock().unwrap();
                 if let Some(store) = core.store.as_mut() {
-                    let _ = store.append_thinking_level_change(&effective);
-                    let _ = store.rewrite();
+                    let _ = store.persist_entry(
+                        "thinking_level_change",
+                        serde_json::json!({ "thinkingLevel": effective }),
+                    );
                 }
                 core.cwd.clone()
             };
@@ -191,7 +195,6 @@ fn resolve_available_model(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn thinking_levels_wire_names_match_the_enum() {
@@ -211,7 +214,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join("models.json"),
-            json!({
+            serde_json::json!({
                 "providers": {
                     "prime-inference": {
                         "api": "openai-completions",

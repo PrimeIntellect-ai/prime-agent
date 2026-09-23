@@ -134,7 +134,7 @@ pub fn harness_digest_prompt_row(digest: &str, timestamp: u64) -> AgentMessage {
 pub fn persist_digest(
     session: &mut crate::session::manager::SessionManager,
     digest: &str,
-) -> String {
+) -> std::io::Result<String> {
     session.append_custom_message(
         super::headless::HARNESS_DIGEST_CUSTOM_TYPE,
         pa_types::ai::UserContent::Text(harness_digest_message_text(digest)),
@@ -439,7 +439,7 @@ mod tests {
     fn persisted_digest_round_trips() {
         let tmp = tempfile::tempdir().unwrap();
         let mut session = SessionManager::persisted(tmp.path(), &tmp.path().join("sessions"));
-        let id = persist_digest(&mut session, "digest body");
+        let id = persist_digest(&mut session, "digest body").unwrap();
         let _ = id;
         let entries = session.get_all_entries().to_vec();
         let FileEntry::CustomMessage { payload, .. } = &entries[1] else {

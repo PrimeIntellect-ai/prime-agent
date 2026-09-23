@@ -422,6 +422,132 @@ impl SessionManager {
         }
     }
 
+    /// Adopt a verified read-only window into an externally persisted manager.
+    pub fn adopt_window(&mut self, window: super::window::WindowedSessionStore) {
+        self.file_entries = window.entries().to_vec();
+        self.build_index();
+        self.leaf_id = Some(window.leaf_id().to_owned());
+        self.window = Some(window);
+    }
+
+    /// Capture a historical read request while locked; await it after releasing
+    /// the session mutex. Current unpersisted rows are merged into the snapshot.
+    pub fn history_snapshot(
+        &self,
+    ) -> impl std::future::Future<Output = anyhow::Result<Vec<FileEntry>>> + Send + 'static {
+        let path = self
+            .window
+            .as_ref()
+            .map(|window| window.source_path().to_owned());
+        let retained = self.file_entries.clone();
+        async move {
+            let Some(path) = path else {
+                return Ok(retained);
+            };
+            let mut entries = tokio::task::spawn_blocking(move || {
+                std::fs::read_to_string(path).map(|text| super::parse_session_entries(&text))
+            })
+            .await??;
+            let ids: std::collections::HashSet<String> = entries
+                .iter()
+                .filter_map(|entry| entry.id().map(str::to_owned))
+                .collect();
+            entries.extend(
+                retained
+                    .into_iter()
+                    .filter(|entry| entry.id().is_some_and(|id| !ids.contains(id))),
+            );
+            Ok(entries)
+        }
+    }
+
+    /// Loaded current-context records; not a whole-history view.
+    pub fn retained_entries(&self) -> &[FileEntry] {
+        &self.file_entries
+    }
+
+    pub fn has_thinking_level(&self) -> bool {
+        self.window
+            .as_ref()
+            .is_some_and(|window| window.has_thinking_level())
+            || self
+                .active_branch_entries()
+                .iter()
+                .any(|entry| matches!(entry, FileEntry::ThinkingLevelChange { .. }))
+    }
+
+    pub fn has_service_tier(&self) -> bool {
+        self.window
+            .as_ref()
+            .is_some_and(|window| window.has_service_tier())
+            || self
+                .active_branch_entries()
+                .iter()
+                .any(|entry| matches!(entry, FileEntry::ServiceTierChange { .. }))
+    }
+
+    fn active_branch_entries(&self) -> Vec<&FileEntry> {
+        let mut branch = Vec::new();
+        let mut id = self.leaf_id.as_deref();
+        while let Some(index) = id.and_then(|id| self.by_id.get(id)).copied() {
+            let entry = &self.file_entries[index];
+            branch.push(entry);
+            id = entry.parent_id();
+        }
+        branch.reverse();
+        branch
+    }
+
+    pub fn active_goal_state(&self) -> Option<crate::goals::GoalState> {
+        if let Some(window) = &self.window {
+            return window.goal_state().cloned();
+        }
+        self.active_branch_entries().iter().rev().find_map(|entry| {
+            let FileEntry::Custom { payload, .. } = entry else {
+                return None;
+            };
+            let data = payload.data.as_ref()?;
+            if payload.custom_type != crate::goals::GOAL_STATE_CUSTOM_TYPE
+                || !crate::goals::is_persisted_goal_state(data)
+            {
+                return None;
+            }
+            serde_json::from_value(data.clone())
+                .ok()
+                .map(crate::goals::normalize_goal_state)
+        })
+    }
+
+    pub fn has_non_bootstrap_entries(&self) -> bool {
+        self.window
+            .as_ref()
+            .is_some_and(|window| window.has_non_bootstrap_entries())
+            || self.file_entries.iter().any(|entry| {
+                !matches!(
+                    entry,
+                    FileEntry::Header { .. }
+                        | FileEntry::ModelChange { .. }
+                        | FileEntry::ThinkingLevelChange { .. }
+                        | FileEntry::ServiceTierChange { .. }
+                )
+            })
+    }
+
+    pub fn refinement_history(&self) -> Vec<crate::refinement::RefinementResult> {
+        let mut history = self.window.as_ref().map_or_else(Vec::new, |window| {
+            let entries: Vec<FileEntry> = window
+                .metadata_entries()
+                .iter()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect();
+            crate::session_engine::refine::session_refinement_history(&entries)
+        });
+        history.extend(crate::session_engine::refine::session_refinement_history(
+            &self.file_entries,
+        ));
+        history
+    }
+
     pub fn is_full_history(&self) -> bool {
         self.window.is_none()
     }
@@ -433,7 +559,17 @@ impl SessionManager {
             return Ok(());
         };
         window.ensure_full_history().await?;
-        let entries = window.entries().to_vec();
+        let mut entries = window.entries().to_vec();
+        let loaded_ids: std::collections::HashSet<String> = entries
+            .iter()
+            .filter_map(|entry| entry.id().map(str::to_owned))
+            .collect();
+        entries.extend(
+            self.file_entries
+                .iter()
+                .filter(|entry| entry.id().is_some_and(|id| !loaded_ids.contains(id)))
+                .cloned(),
+        );
         let leaf = self.leaf_id.clone();
         self.refresh_has_assistant_entry(&entries);
         self.file_entries = entries;
@@ -603,15 +739,21 @@ impl SessionManager {
     }
 
     fn rewrite_file(&mut self) {
+        if let Err(error) = self.try_rewrite_file() {
+            tracing::error!(%error, "session rewrite failed");
+        }
+    }
+
+    fn try_rewrite_file(&mut self) -> std::io::Result<()> {
         assert!(
             self.window.is_none(),
             "hydrate full session history before this operation"
         );
         let Some(session_file) = &self.session_file else {
-            return;
+            return Ok(());
         };
         if !self.persist {
-            return;
+            return Ok(());
         }
         let mut content = String::new();
         for (index, entry) in self.file_entries.iter().enumerate() {
@@ -622,10 +764,11 @@ impl SessionManager {
         }
         content.push('\n');
         if let Some(parent) = session_file.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent)?;
         }
-        let _ = atomic_write(session_file, &content);
+        atomic_write(session_file, &content)?;
         self.notify_persist_listeners();
+        Ok(())
     }
 
     fn notify_persist_listeners(&self) {
@@ -708,10 +851,27 @@ impl SessionManager {
     }
 
     pub fn get_session_name(&self) -> Option<String> {
-        assert!(
-            self.window.is_none(),
-            "hydrate full session history before this operation"
-        );
+        if let Some(window) = &self.window {
+            return self
+                .file_entries
+                .iter()
+                .rev()
+                .find_map(|entry| match entry {
+                    FileEntry::SessionInfo { payload, .. } => Some(payload.name.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| {
+                    window
+                        .metadata_entries()
+                        .iter()
+                        .rev()
+                        .find_map(|raw| match serde_json::from_str::<FileEntry>(raw).ok()? {
+                            FileEntry::SessionInfo { payload, .. } => Some(payload.name),
+                            _ => None,
+                        })
+                        .flatten()
+                });
+        }
         self.file_entries
             .iter()
             .rev()
@@ -723,15 +883,16 @@ impl SessionManager {
     }
 
     /// Force-write all in-memory entries immediately (pre-model durability).
-    pub fn flush_now(&mut self) {
+    pub fn flush_now(&mut self) -> std::io::Result<()> {
         if !self.persist || self.session_file.is_none() {
-            return;
+            return Ok(());
         }
         if self.flushed && self.session_file.as_ref().is_some_and(|path| path.exists()) {
-            return;
+            return Ok(());
         }
-        self.rewrite_file();
+        self.try_rewrite_file()?;
         self.flushed = true;
+        Ok(())
     }
 
     /// Materialize an in-memory session into a persisted file.
@@ -810,10 +971,8 @@ impl SessionManager {
     /// entry with the given chain, and re-indexes so the leaf is the last
     /// adopted entry. In-memory only — the caller owns any persistence.
     pub fn adopt_entries(&mut self, entries: Vec<FileEntry>) {
-        assert!(
-            self.window.is_none(),
-            "hydrate full session history before this operation"
-        );
+        // The caller supplies the complete selected branch after explicit navigation.
+        self.window = None;
         let header = self
             .file_entries
             .iter()
@@ -830,9 +989,9 @@ impl SessionManager {
         self.build_index();
     }
 
-    fn persist_entry(&mut self, index: usize) {
+    fn persist_entry(&mut self, index: usize) -> std::io::Result<()> {
         if !self.persist || self.session_file.is_none() {
-            return;
+            return Ok(());
         }
         let is_session_state_or_info = matches!(
             self.file_entries[index],
@@ -840,53 +999,35 @@ impl SessionManager {
         );
         if !self.has_assistant_entry && !is_session_state_or_info {
             self.flushed = false;
-            return;
+            return Ok(());
         }
         let file_exists = self.session_file.as_ref().is_some_and(|path| path.exists());
-        if !self.flushed || !file_exists {
+        if self.window.is_none() && (!self.flushed || !file_exists) {
             // Recover from the session file disappearing under a live session:
             // append would recreate a headerless stub.
-            self.rewrite_file();
+            self.try_rewrite_file()?;
             self.flushed = true;
         } else {
             let entry = serialize_entry(&self.file_entries[index]);
             if let Some(session_file) = &self.session_file {
-                if let Some(parent) = session_file.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                if let Ok(mut file) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(session_file)
-                {
-                    let mut line = entry.into_bytes();
-                    line.push(b'\n');
-                    // writeAll: loop until the whole line lands.
-                    while !line.is_empty() {
-                        match file.write(&line) {
-                            Ok(0) => break,
-                            Ok(written) => {
-                                line.drain(..written);
-                            }
-                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                            Err(_) => break,
-                        }
-                    }
-                }
+                let mut line = entry.into_bytes();
+                line.push(b'\n');
+                super::window::append_cached(
+                    session_file,
+                    &line,
+                    super::window::AppendOwnership::Unleased,
+                )?;
             }
             self.notify_persist_listeners();
         }
+        Ok(())
     }
 
-    pub(crate) fn append_entry(&mut self, entry: FileEntry) {
-        assert!(
-            self.window.is_none(),
-            "hydrate full session history before this operation"
-        );
-        self.file_entries.push(entry);
-        let index = self.file_entries.len() - 1;
+    pub(crate) fn append_entry(&mut self, entry: FileEntry) -> std::io::Result<()> {
+        let was_assistant = self.has_assistant_entry;
+        let was_flushed = self.flushed;
         if matches!(
-            self.file_entries[index],
+            entry,
             FileEntry::Message {
                 message: AgentMessage::Assistant(_),
                 ..
@@ -894,20 +1035,32 @@ impl SessionManager {
         ) {
             self.has_assistant_entry = true;
         }
-        if let Some(id) = self.file_entries[index].id().map(str::to_string) {
+        self.file_entries.push(entry);
+        let index = self.file_entries.len() - 1;
+        if let Err(error) = self.persist_entry(index) {
+            self.file_entries.pop();
+            self.has_assistant_entry = was_assistant;
+            self.flushed = was_flushed;
+            return Err(error);
+        }
+        let entry = self.file_entries[index].clone();
+        if let Some(window) = &mut self.window {
+            window.append_entry(entry.clone());
+        }
+        if let Some(id) = entry.id().map(str::to_string) {
             self.by_id.insert(id.clone(), index);
             self.leaf_id = Some(id);
         }
-        self.persist_entry(index);
+        Ok(())
     }
 
     pub(crate) fn next_base(&self) -> EntryBase {
-        assert!(
-            self.window.is_none(),
-            "hydrate full session history before this operation"
-        );
         EntryBase {
-            id: Some(generate_id(&self.by_id)),
+            id: Some(if self.window.is_some() {
+                uuid::Uuid::new_v4().to_string()
+            } else {
+                generate_id(&self.by_id)
+            }),
             parent_id: self.leaf_id.clone(),
             timestamp: Some(format_iso_now()),
             rest: pa_types::JsonMap::new(),
@@ -915,14 +1068,17 @@ impl SessionManager {
     }
 
     /// Append a conversation message; returns the new entry id.
-    pub fn append_message(&mut self, message: AgentMessage) -> String {
+    pub fn append_message(&mut self, message: AgentMessage) -> std::io::Result<String> {
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
-        self.append_entry(FileEntry::Message { message, base });
-        id
+        self.append_entry(FileEntry::Message { message, base })?;
+        Ok(id)
     }
 
-    pub fn append_thinking_level_change(&mut self, thinking_level: &str) -> String {
+    pub fn append_thinking_level_change(
+        &mut self,
+        thinking_level: &str,
+    ) -> std::io::Result<String> {
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::ThinkingLevelChange {
@@ -930,24 +1086,28 @@ impl SessionManager {
                 thinking_level: thinking_level.to_string(),
             },
             base,
-        });
-        id
+        })?;
+        Ok(id)
     }
 
     pub fn append_service_tier_change(
         &mut self,
         service_tier: Option<pa_types::ai::ServiceTier>,
-    ) -> String {
+    ) -> std::io::Result<String> {
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::ServiceTierChange {
             payload: pa_types::session::ServiceTierChangeEntry { service_tier },
             base,
-        });
-        id
+        })?;
+        Ok(id)
     }
 
-    pub fn append_model_change(&mut self, provider: &str, model_id: &str) -> String {
+    pub fn append_model_change(
+        &mut self,
+        provider: &str,
+        model_id: &str,
+    ) -> std::io::Result<String> {
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::ModelChange {
@@ -956,26 +1116,29 @@ impl SessionManager {
                 model_id: model_id.to_string(),
             },
             base,
-        });
-        id
+        })?;
+        Ok(id)
     }
 
     /// `appendCompaction`: persist the compaction record. The full typed
     /// payload is stored (TS keeps `details`, `fromHook`,
     /// `customInstructions`, `usage`, and `harnessDigest` on the durable
     /// row; later compactions and branch summarization read them back).
-    pub fn append_compaction(&mut self, payload: pa_types::session::CompactionEntry) -> String {
+    pub fn append_compaction(
+        &mut self,
+        payload: pa_types::session::CompactionEntry,
+    ) -> std::io::Result<String> {
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
-        self.append_entry(FileEntry::Compaction { payload, base });
-        id
+        self.append_entry(FileEntry::Compaction { payload, base })?;
+        Ok(id)
     }
 
     pub fn append_custom_entry(
         &mut self,
         custom_type: &str,
         data: Option<serde_json::Value>,
-    ) -> String {
+    ) -> std::io::Result<String> {
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::Custom {
@@ -985,8 +1148,8 @@ impl SessionManager {
                 rest: Default::default(),
             },
             base,
-        });
-        id
+        })?;
+        Ok(id)
     }
 
     /// Append a custom message entry (compaction/refine notices, prompts).
@@ -996,7 +1159,7 @@ impl SessionManager {
         content: pa_types::ai::UserContent,
         display: bool,
         details: Option<serde_json::Value>,
-    ) -> String {
+    ) -> std::io::Result<String> {
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::CustomMessage {
@@ -1008,8 +1171,8 @@ impl SessionManager {
                 rest: Default::default(),
             },
             base,
-        });
-        id
+        })?;
+        Ok(id)
     }
 
     /// Fold child usage into the target assistant message and record the
@@ -1020,7 +1183,7 @@ impl SessionManager {
         child_usage: pa_types::ai::Usage,
         aggregate_usage: pa_types::ai::Usage,
         origin: Option<ChildUsageOrigin>,
-    ) -> String {
+    ) -> std::io::Result<String> {
         let target_index = self
             .by_id
             .get(target_id)
@@ -1052,11 +1215,11 @@ impl SessionManager {
                 origin,
             },
             base,
-        });
-        id
+        })?;
+        Ok(id)
     }
 
-    pub fn append_session_info(&mut self, name: &str) -> String {
+    pub fn append_session_info(&mut self, name: &str) -> std::io::Result<String> {
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::SessionInfo {
@@ -1064,8 +1227,8 @@ impl SessionManager {
                 name: Some(name.trim().to_string()),
             },
             base,
-        });
-        id
+        })?;
+        Ok(id)
     }
 
     /// Look up an entry by id (file position index).
@@ -1125,7 +1288,7 @@ impl SessionManager {
         }
     }
 
-    pub fn append_session_state(&mut self, status: SessionStateStatus) -> String {
+    pub fn append_session_state(&mut self, status: SessionStateStatus) -> std::io::Result<String> {
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::SessionState {
@@ -1133,8 +1296,8 @@ impl SessionManager {
                 state: SessionState { status },
             },
             base,
-        });
-        id
+        })?;
+        Ok(id)
     }
 }
 

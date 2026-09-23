@@ -4,6 +4,7 @@ pub mod manager;
 pub mod manager_ext;
 pub mod tree;
 pub mod window;
+mod window_cache;
 
 use std::collections::HashMap;
 

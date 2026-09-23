@@ -180,7 +180,7 @@ impl AgentSession {
             .subscribe(move |event, _signal| {
                 let persistence = persistence.clone();
                 Box::pin(async move {
-                    persist_event(&persistence, event).await;
+                    persist_event(&persistence, event).await?;
                     Ok(())
                 })
             })
@@ -424,7 +424,7 @@ impl AgentSession {
         let kernel_state = match self.kernel_state.as_ref() {
             Some(probe) => {
                 ipython_state::sync_after_compaction(probe.as_ref(), &self.session, &self.agent)
-                    .await
+                    .await?
             }
             None => None,
         };
@@ -451,7 +451,7 @@ impl AgentSession {
         reason: crate::session_engine::messages::CompactionOutcomeReason,
         outcome: crate::session_engine::messages::CompactionOutcomeKind,
         content: &str,
-    ) -> pa_types::session::CustomMessage {
+    ) -> anyhow::Result<pa_types::session::CustomMessage> {
         let row = crate::session_engine::messages::create_compaction_outcome_message(
             content, reason, outcome,
         );
@@ -462,7 +462,7 @@ impl AgentSession {
                 row.content.clone(),
                 row.display,
                 row.details.clone(),
-            );
+            )?;
         }
         // TS pushes the row onto `agent.state.messages` after the append:
         // the live context owns the disclosure; the loop's converter filters
@@ -475,7 +475,7 @@ impl AgentSession {
             messages.push(loop_message);
             self.agent.set_messages(messages).await;
         }
-        row
+        Ok(row)
     }
 
     /// Rebuild the live loop context from a durable branch (TS
@@ -514,19 +514,21 @@ impl AgentSession {
         api_key: Option<String>,
         global_harness_dir: std::path::PathBuf,
     ) -> anyhow::Result<crate::refinement::RefinementResult> {
+        let snapshot = self.session.lock().await.history_snapshot();
+        let entries = snapshot.await?;
+        let messages: Vec<SessionAgentMessage> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                FileEntry::Message { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .collect();
         let result = {
             let mut session = self.session.lock().await;
-            let messages: Vec<SessionAgentMessage> = session
-                .get_all_entries()
-                .iter()
-                .filter_map(|entry| match entry {
-                    FileEntry::Message { message, .. } => Some(message.clone()),
-                    _ => None,
-                })
-                .collect();
             refine::execute_refinement(
                 &mut session,
                 &messages,
+                &entries,
                 &global_harness_dir,
                 model,
                 options,
@@ -769,9 +771,36 @@ impl AgentSession {
         self.session.lock().await.get_session_id().to_string()
     }
 
+    /// Restore a verified retained context without loading older transcript bodies.
+    pub async fn restore_windowed_context(
+        &self,
+        window: crate::session::window::WindowedSessionStore,
+    ) {
+        let messages = {
+            let mut session = self.session.lock().await;
+            session.adopt_window(window);
+            session.active_context().messages
+        };
+        self.agent
+            .set_messages(
+                messages
+                    .iter()
+                    .filter_map(session_message_to_loop)
+                    .collect(),
+            )
+            .await;
+    }
+
     /// Persisted entries (for UI resume and inspection).
     pub async fn entries(&self) -> Vec<FileEntry> {
-        self.session.lock().await.get_entries().to_vec()
+        self.session
+            .lock()
+            .await
+            .retained_entries()
+            .iter()
+            .filter(|entry| !matches!(entry, FileEntry::Header { .. }))
+            .cloned()
+            .collect()
     }
 
     /// Model change bookkeeping (mirrors appendModelChange). The resolved
@@ -789,7 +818,7 @@ impl AgentSession {
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         self.agent.set_model(wire).await;
         let mut session = self.session.lock().await;
-        session.append_model_change(provider, model_id);
+        session.append_model_change(provider, model_id)?;
         Ok(())
     }
 
@@ -797,16 +826,19 @@ impl AgentSession {
     pub async fn set_thinking_level(&self, level: ThinkingLevel) -> anyhow::Result<()> {
         self.agent.set_thinking_level(level).await;
         let mut session = self.session.lock().await;
-        session.append_thinking_level_change(&format!("{level:?}").to_lowercase());
+        session.append_thinking_level_change(&format!("{level:?}").to_lowercase())?;
         Ok(())
     }
 }
 
-async fn persist_event(session: &Arc<tokio::sync::Mutex<SessionManager>>, event: AgentEvent) {
+async fn persist_event(
+    session: &Arc<tokio::sync::Mutex<SessionManager>>,
+    event: AgentEvent,
+) -> std::io::Result<()> {
     match event {
         AgentEvent::MessageEnd { message, .. } => {
             let Some(session_message) = loop_message_to_session(&message) else {
-                return;
+                return Ok(());
             };
             let mut session = session.lock().await;
             match session_message {
@@ -816,10 +848,10 @@ async fn persist_event(session: &Arc<tokio::sync::Mutex<SessionManager>>, event:
                         custom.content.clone(),
                         custom.display,
                         custom.details.clone(),
-                    );
+                    )?;
                 }
                 other => {
-                    session.append_message(other);
+                    session.append_message(other)?;
                 }
             }
         }
@@ -833,6 +865,7 @@ async fn persist_event(session: &Arc<tokio::sync::Mutex<SessionManager>>, event:
         }
         _ => {}
     }
+    Ok(())
 }
 
 /// Convert a loop message to its persisted form via the shared wire shape.
@@ -1779,7 +1812,8 @@ mod compaction_outcome_tests {
                 CompactionOutcomeKind::Failed,
                 "Requested compaction failed: Summarization failed",
             )
-            .await;
+            .await
+            .unwrap();
         // The entry chain owns the row (context rebuilds read it).
         let entries = session.entries().await;
         let outcome_entries: Vec<_> = entries

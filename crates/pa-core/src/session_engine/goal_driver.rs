@@ -3,12 +3,12 @@
 //! (the `_goalState` half), with persistence via `thread_goal_state` custom
 //! entries and the branch-seed/reload rules.
 
-use pa_types::session::{CustomMessage, FileEntry};
+use pa_types::session::CustomMessage;
 
 use crate::goals::{
     create_goal_context_message, empty_goal_state, goal_token_delta_for_usage,
-    is_persisted_goal_state, normalize_goal_state, validate_goal_budget, validate_goal_objective,
-    GoalContextKind, GoalState, GoalStatus, GOAL_STATE_CUSTOM_TYPE,
+    normalize_goal_state, validate_goal_budget, validate_goal_objective, GoalContextKind,
+    GoalState, GoalStatus, GOAL_STATE_CUSTOM_TYPE,
 };
 use crate::session::manager::SessionManager;
 
@@ -83,20 +83,7 @@ impl GoalDriver {
     /// `_loadPersistedGoalState`: newest-first scan over the branch's
     /// custom entries; `emptyGoalState()` when no valid entry exists).
     pub fn latest_persisted_state(session: &SessionManager) -> GoalState {
-        for entry in session.get_all_entries().iter().rev() {
-            if let FileEntry::Custom { payload, .. } = entry {
-                if payload.custom_type == GOAL_STATE_CUSTOM_TYPE {
-                    if let Some(data) = &payload.data {
-                        if is_persisted_goal_state(data) {
-                            if let Ok(parsed) = serde_json::from_value::<GoalState>(data.clone()) {
-                                return normalize_goal_state(parsed);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        empty_goal_state()
+        session.active_goal_state().unwrap_or_else(empty_goal_state)
     }
 
     /// Reload the goal state from the session's current branch (TS
@@ -161,17 +148,7 @@ impl GoalDriver {
     /// Whether the branch may be seeded with an initial goal: only bootstrap
     /// entries (model/thinking changes) and no prior persisted goal.
     pub fn is_branch_seedable(session: &SessionManager) -> bool {
-        for entry in session.get_all_entries() {
-            match entry {
-                // Bootstrap entries (and the header line) do not block seeding.
-                FileEntry::Header { .. }
-                | FileEntry::ModelChange { .. }
-                | FileEntry::ThinkingLevelChange { .. }
-                | FileEntry::ServiceTierChange { .. } => continue,
-                _ => return false,
-            }
-        }
-        true
+        !session.has_non_bootstrap_entries()
     }
 
     /// Start a new goal (validates objective and budget).
@@ -202,17 +179,18 @@ impl GoalDriver {
         self.accounted_messages.clear();
         // TS `_startGoal`: a fresh goal starts with no owed continuation.
         self.owed_continuation_for_rlm_work = false;
-        self.set_state(session, goal);
+        self.set_state(session, goal)?;
         Ok(self.state.clone())
     }
 
     /// Clear the goal entirely (empty state).
-    pub fn clear(&mut self, session: &mut SessionManager) {
-        self.set_state(session, empty_goal_state());
+    pub fn clear(&mut self, session: &mut SessionManager) -> anyhow::Result<()> {
+        self.set_state(session, empty_goal_state())?;
         self.accounting_started_at = None;
         // TS `_clearGoal` routes through `_clearQueuedGoalContexts`, which
         // drops any owed continuation with the queued contexts.
         self.owed_continuation_for_rlm_work = false;
+        Ok(())
     }
 
     /// Time-used attribution: fold wall-clock time since accounting started.
@@ -227,7 +205,11 @@ impl GoalDriver {
         }
     }
 
-    fn set_state(&mut self, session: &mut SessionManager, next: GoalState) {
+    fn set_state(
+        &mut self,
+        session: &mut SessionManager,
+        next: GoalState,
+    ) -> anyhow::Result<()> {
         let normalized = normalize_goal_state(GoalState {
             updated_at: Some(now_millis()),
             ..next
@@ -238,11 +220,11 @@ impl GoalDriver {
         } else {
             self.accounting_started_at = None;
         }
-        if let Ok(value) = serde_json::to_value(&normalized) {
-            session.append_custom_entry(GOAL_STATE_CUSTOM_TYPE, Some(value));
-            session.flush_now();
-        }
+        let value = serde_json::to_value(&normalized)?;
+        session.append_custom_entry(GOAL_STATE_CUSTOM_TYPE, Some(value))?;
+        session.flush_now()?;
         self.state = normalized;
+        Ok(())
     }
 
     /// Account one assistant turn's usage. Double-counts are suppressed by
@@ -252,7 +234,7 @@ impl GoalDriver {
         session: &mut SessionManager,
         message_id: &str,
         usage: &pa_types::ai::Usage,
-    ) -> UsageOutcome {
+    ) -> anyhow::Result<UsageOutcome> {
         if self.state.status != GoalStatus::Active {
             return UsageOutcome::Ignored;
         }
@@ -513,6 +495,43 @@ mod tests {
             output,
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn compacted_goal_restore_and_mutation_do_not_hydrate_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("goal.jsonl");
+        let expected = GoalState {
+            active: true,
+            status: GoalStatus::Active,
+            goal_id: Some("goal".to_owned()),
+            objective: Some("finish work".to_owned()),
+            tokens_used: 17,
+            ..empty_goal_state()
+        };
+        let rows = [
+            serde_json::json!({"type":"session","version":3,"id":"s","cwd":"/tmp","timestamp":"2026-01-01T00:00:00Z"}),
+            serde_json::json!({"type":"custom","id":"goal","parentId":null,"customType":GOAL_STATE_CUSTOM_TYPE,"data":expected}),
+            serde_json::json!({"type":"message","id":"old","parentId":"goal","message":{"role":"user","content":"old history","timestamp":0}}),
+            serde_json::json!({"type":"message","id":"kept","parentId":"old","message":{"role":"user","content":"retained","timestamp":0}}),
+            serde_json::json!({"type":"compaction","id":"compact","parentId":"kept","summary":"summary","firstKeptEntryId":"kept","tokensBefore":1000}),
+            serde_json::json!({"type":"custom","id":"invalid","parentId":"compact","customType":GOAL_STATE_CUSTOM_TYPE,"data":{"active":true}}),
+        ];
+        let original: String = rows.iter().map(|row| format!("{row}\n")).collect();
+        std::fs::write(&path, &original).unwrap();
+        let mut session = SessionManager::open_windowed(dir.path(), dir.path(), &path)
+            .await
+            .unwrap();
+        assert!(!session.is_full_history());
+        assert!(!GoalDriver::is_branch_seedable(&session));
+        let mut driver = GoalDriver::load_persisted(&session);
+        assert_eq!(driver.state(), &expected);
+        driver.pause(&mut session, "pause");
+        assert_eq!(GoalDriver::load_persisted(&session).state(), driver.state());
+        assert!(!session.is_full_history());
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .starts_with(&original));
     }
 
     #[test]

@@ -192,7 +192,7 @@ pub fn load_refinement_history(
     global_harness_dir: &Path,
 ) -> Vec<RefinementResult> {
     let global = load_global_refinement_history(global_harness_dir);
-    let session_entries = session_refinement_history(session.get_all_entries());
+    let session_entries = session.refinement_history();
     crate::refinement::merge_refinement_history(&global, &session_entries)
 }
 
@@ -225,6 +225,7 @@ fn strip_display_prefixes(plan: RefinementPlan) -> RefinementPlan {
 pub async fn execute_refinement(
     session: &mut SessionManager,
     messages: &[AgentMessage],
+    historical_entries: &[FileEntry],
     global_harness_dir: &Path,
     model: &pa_types::ai::Model,
     options: &RefineOptions,
@@ -258,7 +259,9 @@ pub async fn execute_refinement(
         let local_state = load_harness_state(&local_harness_dir, HarnessScope::Local);
         merge_harness_states(&global_state, Some(&local_state))
     };
-    let history = load_refinement_history(session, global_harness_dir);
+    let global = load_global_refinement_history(global_harness_dir);
+    let session_history = session_refinement_history(historical_entries);
+    let history = crate::refinement::merge_refinement_history(&global, &session_history);
     // Baseline captured before the (slow) LLM pass, so concurrent kernel
     // writes are rejected instead of clobbered.
     let baseline_scope = options
@@ -302,7 +305,7 @@ pub async fn execute_refinement(
     session.append_custom_entry(
         REFINEMENT_AUDIT_CUSTOM_TYPE,
         Some(serde_json::to_value(&result)?),
-    );
+    )?;
     // Outcome for the TUI; notice for the model (only when edits applied).
     let outcome = create_refinement_outcome_message(&result);
     session.append_custom_message(
@@ -310,7 +313,7 @@ pub async fn execute_refinement(
         outcome.content.clone(),
         outcome.display,
         outcome.details.clone(),
-    );
+    )?;
     if result.applied_edits.iter().any(|edit| edit.applied) {
         let notice = create_refinement_notice_message(&result, source);
         session.append_custom_message(
@@ -318,7 +321,7 @@ pub async fn execute_refinement(
             notice.content.clone(),
             notice.display,
             notice.details.clone(),
-        );
+        )?;
     }
     Ok(result)
 }
@@ -350,25 +353,31 @@ impl AgentSession {
         // The review reads the same planning inputs the refinement run
         // plans against (TS `_reviewAutoRefine`: the live conversation,
         // `_loadMergedHarnessState`, `_loadRefinementHistory`).
-        let (messages, merged_state, history) = {
+        let (snapshot, merged_state, history) = {
             let session = self.session_handle().lock().await;
-            let messages: Vec<AgentMessage> = session
-                .get_all_entries()
-                .iter()
-                .filter_map(|entry| match entry {
-                    FileEntry::Message { message, .. } => Some(message.clone()),
-                    _ => None,
-                })
-                .collect();
             let local_state =
                 load_harness_state(&local_harness_state_dir(&session), HarnessScope::Local);
             let global_state = load_harness_state(&global_harness_dir, HarnessScope::Global);
             (
-                messages,
+                session.history_snapshot(),
                 merge_harness_states(&global_state, Some(&local_state)),
-                load_refinement_history(&session, &global_harness_dir),
+                load_global_refinement_history(&global_harness_dir),
             )
         };
+        // Refinement deliberately reviews historical messages, unlike ordinary
+        // turns. Await its snapshot after releasing the session mutex.
+        let entries = snapshot.await?;
+        let history = crate::refinement::merge_refinement_history(
+            &history,
+            &session_refinement_history(&entries),
+        );
+        let messages: Vec<AgentMessage> = entries
+            .into_iter()
+            .filter_map(|entry| match entry {
+                FileEntry::Message { message, .. } => Some(message),
+                _ => None,
+            })
+            .collect();
         let review = review_auto_refine(
             &messages,
             &merged_state,
@@ -599,6 +608,7 @@ Reviewer instructions: record it"
         let result = execute_refinement(
             &mut session,
             &[user_message("do a thing twice")],
+            &[],
             &global_dir,
             &test_model(),
             &RefineOptions::default(),
@@ -642,6 +652,7 @@ Reviewer instructions: record it"
         let result = execute_refinement(
             &mut session,
             &[user_message("x")],
+            &[],
             &global_dir,
             &test_model(),
             &RefineOptions {
@@ -665,6 +676,7 @@ Reviewer instructions: record it"
         // Rollback by id works through the merged history.
         let rolled = execute_refinement(
             &mut session,
+            &[],
             &[],
             &global_dir,
             &test_model(),

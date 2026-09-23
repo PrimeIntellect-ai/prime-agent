@@ -55,6 +55,7 @@ pub fn model_thinking_level(level: ThinkingLevel) -> pa_types::ai::ModelThinking
 pub struct ProviderTarget {
     pub api_key: Option<String>,
     pub model: Model,
+    pub service_tier: Option<pa_types::ai::ServiceTier>,
 }
 
 /// A real pa-ai provider stream adapter for the agent loop, reading its
@@ -64,12 +65,16 @@ pub struct ProviderTarget {
 pub fn switchable_stream_fn(target: Arc<std::sync::RwLock<Option<ProviderTarget>>>) -> StreamFn {
     Arc::new(
         move |_requested: AgentModel, context: LlmContext, options: StreamRequestOptions| {
-            let ProviderTarget { api_key, model } = target
+            let ProviderTarget {
+                api_key,
+                model,
+                service_tier,
+            } = target
                 .read()
                 .expect("provider target lock")
                 .clone()
                 .expect("provider target set before the first stream");
-            Box::pin(async move { stream_once(model, api_key, context, options) })
+            Box::pin(async move { stream_once(model, api_key, service_tier, context, options) })
         },
     )
 }
@@ -78,6 +83,7 @@ pub fn switchable_stream_fn(target: Arc<std::sync::RwLock<Option<ProviderTarget>
 fn stream_once(
     model: Model,
     api_key: Option<String>,
+    service_tier: Option<pa_types::ai::ServiceTier>,
     context: LlmContext,
     options: StreamRequestOptions,
 ) -> anyhow::Result<Box<dyn ModelStream>> {
@@ -106,7 +112,7 @@ fn stream_once(
             signal: Some(cancel.clone()),
             api_key,
             transport: None,
-            service_tier: None,
+            service_tier,
             cache_retention: None,
             session_id: options.session_id.clone(),
             on_payload: None,
@@ -148,6 +154,7 @@ pub fn real_stream_fn(api_key: Option<String>, model: Model) -> StreamFn {
     switchable_stream_fn(Arc::new(std::sync::RwLock::new(Some(ProviderTarget {
         api_key,
         model,
+        service_tier: None,
     }))))
 }
 
@@ -316,6 +323,55 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn live_target_service_tier_reaches_provider_and_reset() {
+        let registration =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                api: Some("restored-service-tier-test".to_owned()),
+                ..Default::default()
+            });
+        let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = received.clone();
+        let factory =
+            pa_ai::faux::FauxResponseStep::Factory(Arc::new(move |_, options, _, model| {
+                captured.lock().unwrap().push((
+                    model.id.clone(),
+                    options.and_then(|options| options.service_tier),
+                ));
+                Ok(pa_ai::faux::faux_assistant_text_message(
+                    "ok",
+                    Default::default(),
+                ))
+            }));
+        registration.set_responses(vec![factory.clone(), factory]);
+        let model = registration.get_model();
+        let target = Arc::new(std::sync::RwLock::new(Some(ProviderTarget {
+            api_key: None,
+            model: model.clone(),
+            service_tier: Some(pa_types::ai::ServiceTier::Priority),
+        })));
+        let stream_fn = switchable_stream_fn(target.clone());
+        for tier in [Some(pa_types::ai::ServiceTier::Priority), None] {
+            target.write().unwrap().as_mut().unwrap().service_tier = tier;
+            let mut stream = stream_fn(
+                AgentModel::unknown(),
+                LlmContext::default(),
+                StreamRequestOptions::default(),
+            )
+            .await
+            .unwrap();
+            stream.result().await.unwrap();
+        }
+        assert_eq!(
+            *received.lock().unwrap(),
+            vec![
+                (model.id.clone(), Some(pa_types::ai::ServiceTier::Priority)),
+                (model.id, None),
+            ]
+        );
+        registration.unregister();
+    }
+
     #[test]
     fn prompt_text_message_round_trips() {
         let message = pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::User(
@@ -416,6 +472,7 @@ mod tests {
         let target = Arc::new(std::sync::RwLock::new(Some(ProviderTarget {
             api_key: None,
             model: model.clone(),
+            service_tier: None,
         })));
         let stream_fn = switchable_stream_fn(target);
         let mut stream = stream_fn(

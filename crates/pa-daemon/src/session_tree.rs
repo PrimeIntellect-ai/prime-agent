@@ -230,6 +230,9 @@ impl SessionFile {
         // `createUniqueSessionFileTarget(this.getSessionDir())`.
         let file = session_dir.join(session_file_name(forked.session_id()));
         forked.set_path(file);
+        if let Some(lease) = &self.lease {
+            forked.lease = Some(lease.acquire_target(&forked.path)?);
+        }
 
         let mut used: HashMap<String, ()> = path_without_labels
             .iter()

@@ -58,7 +58,7 @@ impl SessionManager {
         summary: &str,
         task_state: Option<pa_types::session::AgentTaskState>,
         based_on_message_count: usize,
-    ) -> String {
+    ) -> std::io::Result<String> {
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::AgentStatus {
@@ -70,18 +70,18 @@ impl SessionManager {
                 },
             },
             base,
-        });
-        id
+        })?;
+        Ok(id)
     }
 
-    pub fn append_git_state(&mut self, git: GitContext) -> String {
+    pub fn append_git_state(&mut self, git: GitContext) -> std::io::Result<String> {
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::GitState {
             payload: GitStateEntry { git },
             base,
-        });
-        id
+        })?;
+        Ok(id)
     }
 
     /// Append git state when it changed on the active branch.
@@ -95,7 +95,7 @@ impl SessionManager {
                 return None;
             }
         }
-        Some(self.append_git_state(git))
+        self.append_git_state(git).ok()
     }
 
     fn active_git_context(&self) -> Option<GitContext> {
@@ -145,7 +145,7 @@ impl SessionManager {
         content: pa_types::ai::UserContent,
         display: bool,
         details: Option<serde_json::Value>,
-    ) -> String {
+    ) -> std::io::Result<String> {
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::CustomMessage {
@@ -157,12 +157,16 @@ impl SessionManager {
                 rest: Default::default(),
             },
             base,
-        });
-        id
+        })?;
+        Ok(id)
     }
 
     /// Append a label change for a target entry.
-    pub fn append_label_change(&mut self, target_id: &str, label: Option<&str>) -> String {
+    pub fn append_label_change(
+        &mut self,
+        target_id: &str,
+        label: Option<&str>,
+    ) -> std::io::Result<String> {
         assert!(
             self.get_entry_by_id(target_id).is_some(),
             "Entry {target_id} not found"
@@ -176,9 +180,9 @@ impl SessionManager {
                 label: label.map(str::to_string),
             },
             base,
-        });
+        })?;
         self.apply_label_entry(target_id, label, &timestamp);
-        id
+        Ok(id)
     }
 
     /// `getFlatTree`: every entry in file order with its active label and
@@ -254,7 +258,7 @@ impl SessionManager {
         details: Option<serde_json::Value>,
         from_hook: Option<bool>,
         usage: Option<pa_types::ai::Usage>,
-    ) -> String {
+    ) -> std::io::Result<String> {
         if let Some(branch_from_id) = branch_from_id {
             assert!(
                 self.get_entry_by_id(branch_from_id).is_some(),
@@ -277,8 +281,8 @@ impl SessionManager {
                 usage,
             },
             base,
-        });
-        id
+        })?;
+        Ok(id)
     }
 }
 
@@ -351,14 +355,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("sessions");
         let mut manager = SessionManager::persisted(tmp.path(), &dir);
-        let a = manager.append_message(user("first"));
-        let b = manager.append_message(assistant());
+        let a = manager.append_message(user("first")).unwrap();
+        let b = manager.append_message(assistant()).unwrap();
         assert_eq!(manager.get_branch(None).len(), 2);
         // Branch from a: the path is just [a].
         manager.branch(&a);
         assert_eq!(manager.get_branch(None).len(), 1);
         // Append after branching creates a sibling of b.
-        let summary_id = manager.branch_with_summary(Some(&a), "went back", None, None, None);
+        let summary_id = manager
+            .branch_with_summary(Some(&a), "went back", None, None, None)
+            .unwrap();
         assert!(manager.get_entry_by_id(&summary_id).is_some());
         // b still exists (sibling branch).
         assert!(manager.get_entry_by_id(&b).is_some());
@@ -380,19 +386,21 @@ mod tests {
     fn labels_and_status_on_active_branch() {
         let tmp = tempfile::tempdir().unwrap();
         let mut manager = SessionManager::in_memory(tmp.path());
-        let a = manager.append_message(user("first"));
-        let label_entry = manager.append_label_change(&a, Some("checkpoint"));
+        let a = manager.append_message(user("first")).unwrap();
+        let label_entry = manager.append_label_change(&a, Some("checkpoint")).unwrap();
         assert!(manager.get_entry_by_id(&label_entry).is_some());
         assert_eq!(manager.get_label(&a).as_deref(), Some("checkpoint"));
         // Clear the label.
         manager.append_label_change(&a, None);
         assert_eq!(manager.get_label(&a), None);
         // Agent status visible on the active branch.
-        let status_id = manager.append_agent_status(
-            "working",
-            Some(pa_types::session::AgentTaskState::NeedsInput),
-            3,
-        );
+        let status_id = manager
+            .append_agent_status(
+                "working",
+                Some(pa_types::session::AgentTaskState::NeedsInput),
+                3,
+            )
+            .unwrap();
         assert!(manager.get_entry_by_id(&status_id).is_some());
         let status = manager.get_latest_agent_status().unwrap();
         assert_eq!(status.summary, "working");

@@ -650,7 +650,11 @@ async fn end_compaction_unsuccessfully(
     engine
         .session
         .record_compaction_outcome(reason, outcome, message)
-        .await;
+        .await
+        .inspect_err(|error| {
+            eprintln!("pa-daemon: compaction outcome persistence failed: {error:#}")
+        })
+        .ok();
     publish_compaction_end(session, None).await;
 }
 

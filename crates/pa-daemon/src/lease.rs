@@ -246,6 +246,7 @@ impl SessionLease {
         {
             return;
         }
+        let _ = pa_core::session::window::flush_cache(&self.session_path);
         let _ = with_lease_guard(&self.directory, || {
             if let Ok(Some(owner)) = read_owner(&self.directory) {
                 if owner.token == self.token {
@@ -254,6 +255,45 @@ impl SessionLease {
             }
             Ok(())
         });
+    }
+}
+
+impl Drop for SessionLease {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+impl SessionLease {
+    pub(crate) fn acquire_target(&self, path: &Path) -> Result<std::sync::Arc<Self>> {
+        let agent_dir = self
+            .directory
+            .parent()
+            .and_then(Path::parent)
+            .expect("lease directory has agent root");
+        acquire_runtime_session_lease(path, agent_dir).map(std::sync::Arc::new)
+    }
+
+    pub(crate) fn append(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+        anyhow::ensure!(
+            !self.released.load(std::sync::atomic::Ordering::SeqCst)
+                && canonical_session_path(path) == self.session_path,
+            "session lease does not own append target"
+        );
+        with_lease_guard(&self.directory, || {
+            let owner = read_owner(&self.directory)?;
+            anyhow::ensure!(
+                owner.as_ref().is_some_and(|owner| owner.token == self.token)
+                    && !self.released.load(std::sync::atomic::Ordering::SeqCst),
+                "session lease lost ownership before append"
+            );
+            pa_core::session::window::append_cached(
+                path,
+                bytes,
+                pa_core::session::window::AppendOwnership::SessionLeaseHeld,
+            )?;
+            Ok(())
+        })
     }
 }
 
@@ -269,6 +309,14 @@ pub fn acquire_session_lease(
     if !leases_enabled() {
         return Ok(None);
     }
+    acquire_runtime_session_lease(session_path, agent_dir).map(Some)
+}
+
+/// Acquire mandatory runtime ownership before opening or writing a session.
+pub(crate) fn acquire_runtime_session_lease(
+    session_path: &Path,
+    agent_dir: &Path,
+) -> Result<SessionLease> {
     let canonical = canonical_session_path(session_path);
     let root = agent_dir.join("session-leases");
     fs::create_dir_all(&root)?;
@@ -296,12 +344,12 @@ pub fn acquire_session_lease(
             fs::write(&owner_path, serde_json::to_string_pretty(&owner)? + "\n")?;
             match fs::rename(&candidate, &directory) {
                 Ok(()) => {
-                    return Ok(Some(SessionLease {
+                    return Ok(SessionLease {
                         session_path: canonical.clone(),
                         directory: directory.clone(),
                         token,
                         released: std::sync::atomic::AtomicBool::new(false),
-                    }));
+                    });
                 }
                 Err(error) => {
                     let _ = fs::remove_dir_all(&candidate);
@@ -354,6 +402,75 @@ mod tests {
         let id = start.unwrap();
         assert!(id.starts_with("proc:") || id.starts_with("ps:"));
         assert!(get_process_start_id(0).is_none());
+    }
+
+    #[test]
+    fn runtime_lease_is_mandatory_and_shared_until_last_owner_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, "{}").unwrap();
+        let lease = std::sync::Arc::new(acquire_runtime_session_lease(&path, dir.path()).unwrap());
+        let shared = lease.clone();
+        assert!(acquire_runtime_session_lease(&path, dir.path()).is_err());
+        drop(lease);
+        assert!(acquire_runtime_session_lease(&path, dir.path()).is_err());
+        drop(shared);
+        let next = acquire_runtime_session_lease(&path, dir.path()).unwrap();
+        assert_eq!(next.session_path, canonical_session_path(&path));
+    }
+
+    #[test]
+    fn final_owner_token_check_allows_exactly_one_racing_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, "{}\n").unwrap();
+        let stale = acquire_runtime_session_lease(&path, dir.path()).unwrap();
+        let directory = stale.directory.clone();
+        let replacement = LeaseOwner {
+            version: 1,
+            token: "replacement".to_owned(),
+            pid: std::process::id(),
+            process_start_id: get_process_start_id(std::process::id()),
+            active_session_id: None,
+            session_path: canonical_session_path(&path).to_string_lossy().to_string(),
+            created_at: crate::util::now_iso(),
+        };
+        std::fs::write(
+            directory.join("owner.json"),
+            serde_json::to_string_pretty(&replacement).unwrap() + "\n",
+        )
+        .unwrap();
+        let winner = SessionLease {
+            session_path: canonical_session_path(&path),
+            directory,
+            token: replacement.token,
+            released: std::sync::atomic::AtomicBool::new(false),
+        };
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let path_a = path.clone();
+        let path_b = path.clone();
+        let barrier_a = barrier.clone();
+        let barrier_b = barrier.clone();
+        let stale = std::sync::Arc::new(stale);
+        let winner = std::sync::Arc::new(winner);
+        let stale_task = {
+            let stale = stale.clone();
+            std::thread::spawn(move || {
+                barrier_a.wait();
+                stale.append(&path_a, b"stale\n")
+            })
+        };
+        let winner_task = {
+            let winner = winner.clone();
+            std::thread::spawn(move || {
+                barrier_b.wait();
+                winner.append(&path_b, b"winner\n")
+            })
+        };
+        barrier.wait();
+        let results = [stale_task.join().unwrap(), winner_task.join().unwrap()];
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "{}\nwinner\n");
     }
 
     #[test]

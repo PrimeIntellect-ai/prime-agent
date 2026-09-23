@@ -22,7 +22,11 @@ use crate::session_store::SessionFile;
 /// entry — the caller keeps the fresh driver's empty state, exactly the
 /// TS fallthrough to `emptyGoalState()`.
 pub(crate) fn persisted_goal_state(path: Option<&Path>) -> Option<GoalState> {
-    let file = SessionFile::open(path?).ok()?;
+    let path = path?;
+    if let Ok(Some(window)) = pa_core::session::window::WindowedSessionStore::open(path) {
+        return window.goal_state().cloned();
+    }
+    let file = SessionFile::open(path).ok()?;
     file.branch()
         .iter()
         .rev()

@@ -435,6 +435,9 @@ pub trait SessionEngine: Send + Sync {
     /// (the scripted harness) ignore it.
     fn configure_model(&self, _selection: EngineModelSelection) {}
 
+    /// Set the session's resolved service-tier preference before the next request.
+    fn configure_service_tier(&self, _tier: Option<pa_types::ai::ServiceTier>) {}
+
     /// The effective thinking level for the session, as a wire name
     /// (`"off"`, `"minimal"`, ...): the create-config flag (else the
     /// settings default, else `"medium"`), clamped to the model's

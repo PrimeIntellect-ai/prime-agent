@@ -1,23 +1,33 @@
-//! Bounded reverse reads for compacted sessions. Older message bodies are not
-//! materialized; full-history consumers explicitly hydrate on a blocking worker.
+//! Generation-certified active session windows. Cold reads scan metadata to root;
+//! warm reads touch only the canonical header and the retained transcript suffix.
+//! JSONL remains authoritative; historical consumers explicitly hydrate.
 use std::collections::HashSet;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+use super::window_cache::{self, Generation, Snapshot};
+pub use super::window_cache::{append_cached, flush as flush_cache, AppendOwnership};
 use pa_types::session::{FileEntry, SessionHeader};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::{build_session_context, SessionContext};
 
 const CHUNK_BYTES: usize = 64 * 1024;
-const WINDOW_BYTES: u64 = 8 * 1024 * 1024;
-const SCAN_BYTES: u64 = 128 * 1024 * 1024;
-const DISPLAY_MESSAGES: usize = 100;
+/// Actual source read ranges and sidecar bytes for this open.
+#[derive(Default, Clone, Debug)]
+pub struct WindowReadStats {
+    pub jsonl_bytes: u64,
+    pub jsonl_ranges: Vec<(u64, u64)>,
+    pub cache_bytes: u64,
+    pub cache_hit: bool,
+}
 
 struct ReverseLines {
     file: std::fs::File,
     position: u64,
     pending: Vec<u8>,
+    reads: WindowReadStats,
+    line_start: u64,
 }
 
 impl ReverseLines {
@@ -27,6 +37,7 @@ impl ReverseLines {
             if let Some(index) = self.pending.iter().rposition(|byte| *byte == b'\n') {
                 let mut line = self.pending.split_off(index + 1);
                 self.pending.pop();
+                self.line_start = self.position + self.pending.len() as u64 + 1;
                 for piece in pieces.into_iter().rev() {
                     line.extend(piece);
                 }
@@ -38,6 +49,7 @@ impl ReverseLines {
             }
             pieces.push(std::mem::take(&mut self.pending));
             if self.position == 0 {
+                self.line_start = 0;
                 let line: Vec<u8> = pieces.into_iter().rev().flatten().collect();
                 return Ok((!line.is_empty()).then_some(line));
             }
@@ -46,6 +58,8 @@ impl ReverseLines {
             self.file.seek(SeekFrom::Start(self.position))?;
             self.pending.resize(count, 0);
             self.file.read_exact(&mut self.pending)?;
+            self.reads.jsonl_bytes += count as u64;
+            self.reads.jsonl_ranges.push((self.position, count as u64));
         }
     }
 }
@@ -58,6 +72,7 @@ struct Envelope {
     id: Option<String>,
     parent_id: Option<String>,
     message: Option<MessageMetadata>,
+    custom_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -65,7 +80,7 @@ struct MessageMetadata {
     role: String,
     provider: Option<String>,
     model: Option<String>,
-    usage: Option<pa_types::ai::Usage>,
+    usage: Option<serde_json::Value>,
     content: Option<MessageContentMetadata>,
 }
 
@@ -107,7 +122,7 @@ struct ContentMetadata {
 }
 
 /// Whole-branch accounting older than the retained suffix.
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct WindowStats {
     pub total_messages: u64,
     pub user_messages: u64,
@@ -118,6 +133,7 @@ pub struct WindowStats {
     pub output: u64,
     pub cache_read: u64,
     pub cache_write: u64,
+    #[serde(with = "super::window_cache::float_bits")]
     pub cost: f64,
 }
 
@@ -134,15 +150,24 @@ pub struct WindowedSessionStore {
     leaf_id: String,
     settings: SessionContext,
     full: bool,
+    snapshot: Snapshot,
+    reads: WindowReadStats,
 }
 
 impl WindowedSessionStore {
-    /// Return `None` for old schemas, missing boundaries, oversized windows,
-    /// or ambiguous ancestry so callers can use their ordinary full reader.
+    /// Return `None` for old schemas, torn rows, or ambiguous ancestry so callers
+    /// can use their ordinary full reader. No size or message-count admission cap.
     pub fn open(path: &Path) -> io::Result<Option<Self>> {
         let mut file = std::fs::File::open(path)?;
+        let generation = Generation::of(&file.metadata()?);
         let size = file.metadata()?.len();
-        if size == 0 || size > SCAN_BYTES {
+        let mut reads = WindowReadStats::default();
+        if let Some(snapshot) = window_cache::load(path, &file, &mut reads) {
+            if let Some(store) = Self::from_snapshot(path, &mut file, snapshot, reads.clone())? {
+                return Ok(Some(store));
+            }
+        }
+        if size == 0 {
             return Ok(None);
         }
         // Appending to an unterminated row would merge two JSON records.
@@ -153,10 +178,14 @@ impl WindowedSessionStore {
         if last[0] != b'\n' {
             return Ok(None);
         }
+        reads.jsonl_bytes += 1;
+        reads.jsonl_ranges.push((size - 1, 1));
         let mut reader = ReverseLines {
             file,
             position: size,
             pending: Vec::new(),
+            line_start: 0,
+            reads,
         };
         let mut retained = Vec::new();
         let mut raw_entries = Vec::new();
@@ -169,17 +198,21 @@ impl WindowedSessionStore {
         let mut leaf_id = None;
         let mut first_kept = None;
         let mut found_boundary = false;
-        let mut display_messages = 0;
+        let mut retained_start = 0;
+        let mut compaction_count = 0;
+        let mut non_bootstrap = false;
+        let mut goal = None;
         let mut window_done = false;
-        let mut scanned = 0;
         let mut seen = HashSet::new();
         let mut thinking = None;
         let mut tier = None;
         let mut model = None;
         let mut header = None;
         while let Some(line) = reader.next()? {
-            scanned += line.len() as u64 + 1;
-            let Ok(meta) = serde_json::from_slice::<Envelope>(&line) else {
+            let Ok(text) = std::str::from_utf8(&line) else {
+                return Ok(None);
+            };
+            let Ok(meta) = serde_json::from_str::<Envelope>(text) else {
                 return Ok(None);
             };
             if meta.kind == "session" {
@@ -194,6 +227,15 @@ impl WindowedSessionStore {
                 header = serde_json::from_slice::<FileEntry>(&line).ok();
                 break;
             }
+            if !matches!(
+                meta.kind.as_str(),
+                "model_change" | "thinking_level_change" | "service_tier_change"
+            ) {
+                non_bootstrap = true;
+            }
+            if meta.kind == "compaction" {
+                compaction_count += 1;
+            }
             if meta.kind == "message" {
                 message_count += 1;
                 if meta
@@ -203,7 +245,16 @@ impl WindowedSessionStore {
                 {
                     first_user_line = Some(line.clone());
                 }
-            } else if window_done && meta.kind != "custom_message" {
+            } else if window_done
+                && (matches!(
+                    meta.kind.as_str(),
+                    "session_info"
+                        | "session_state"
+                        | "agent_status"
+                        | "git_state"
+                        | "child_usage_attributed"
+                ))
+            {
                 metadata_entries.push(
                     String::from_utf8(line.clone())
                         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
@@ -239,11 +290,29 @@ impl WindowedSessionStore {
                                         as u64;
                                 }
                                 if let Some(usage) = &message.usage {
-                                    older_path_stats.input += usage.input;
-                                    older_path_stats.output += usage.output;
-                                    older_path_stats.cache_read += usage.cache_read;
-                                    older_path_stats.cache_write += usage.cache_write;
-                                    older_costs.push(usage.cost.total.as_f64());
+                                    older_path_stats.input += usage
+                                        .get("input")
+                                        .and_then(serde_json::Value::as_u64)
+                                        .unwrap_or_default();
+                                    older_path_stats.output += usage
+                                        .get("output")
+                                        .and_then(serde_json::Value::as_u64)
+                                        .unwrap_or_default();
+                                    older_path_stats.cache_read += usage
+                                        .get("cacheRead")
+                                        .and_then(serde_json::Value::as_u64)
+                                        .unwrap_or_default();
+                                    older_path_stats.cache_write += usage
+                                        .get("cacheWrite")
+                                        .and_then(serde_json::Value::as_u64)
+                                        .unwrap_or_default();
+                                    older_costs.push(
+                                        usage
+                                            .get("cost")
+                                            .and_then(|cost| cost.get("total"))
+                                            .and_then(serde_json::Value::as_f64)
+                                            .unwrap_or_default(),
+                                    );
                                 }
                             }
                             _ => {}
@@ -266,10 +335,13 @@ impl WindowedSessionStore {
             // older ancestry. Serde ignores old content without allocating it.
             let entry = if !window_done
                 || (on_path
-                    && matches!(
+                    && (matches!(
                         meta.kind.as_str(),
                         "model_change" | "thinking_level_change" | "service_tier_change"
-                    )) {
+                    ) || (goal.is_none()
+                        && meta.custom_type.as_deref()
+                            == Some(crate::goals::GOAL_STATE_CUSTOM_TYPE))))
+            {
                 match serde_json::from_slice::<FileEntry>(&line) {
                     Ok(entry) => Some(entry),
                     Err(_) => return Ok(None),
@@ -278,6 +350,9 @@ impl WindowedSessionStore {
                 None
             };
             if on_path {
+                if goal.is_none() {
+                    goal = entry.as_ref().and_then(valid_goal);
+                }
                 match entry.as_ref() {
                     Some(FileEntry::ThinkingLevelChange { payload, .. }) if thinking.is_none() => {
                         thinking = Some(payload.thinking_level.clone())
@@ -296,20 +371,15 @@ impl WindowedSessionStore {
                 if first_kept.as_deref() == Some(id) {
                     found_boundary = true;
                 }
-                if matches!(meta.kind.as_str(), "message" | "custom_message") {
-                    display_messages += 1;
-                }
             }
             if !window_done {
-                if scanned > WINDOW_BYTES {
-                    return Ok(None);
-                }
+                retained_start = reader.line_start;
                 retained.push(entry.expect("window entries parsed"));
                 raw_entries.push(
                     String::from_utf8(line)
                         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
                 );
-                window_done = found_boundary && display_messages >= DISPLAY_MESSAGES;
+                window_done = found_boundary;
             }
         }
         let Some(FileEntry::Header {
@@ -320,13 +390,39 @@ impl WindowedSessionStore {
         else {
             return Ok(None);
         };
-        if !found_boundary || expected.is_some() || !window_done {
+        if expected.is_some() {
             return Ok(None);
         }
         retained.push(header.expect("header checked"));
         retained.reverse();
         raw_entries.reverse();
         metadata_entries.reverse();
+        let retained_ids: HashSet<&str> = retained.iter().filter_map(FileEntry::id).collect();
+        let mut latest = std::collections::HashMap::new();
+        let mut keep = HashSet::new();
+        for (index, row) in metadata_entries.iter().enumerate() {
+            let value: serde_json::Value = serde_json::from_str(row)?;
+            let kind = value["type"].as_str().unwrap_or("");
+            match kind {
+                "session_info" | "session_state" | "agent_status" | "git_state" => {
+                    latest.insert(kind.to_owned(), index);
+                }
+                "child_usage_attributed"
+                    if value["targetId"]
+                        .as_str()
+                        .is_some_and(|id| retained_ids.contains(id)) =>
+                {
+                    latest.insert(format!("attribution:{}", value["targetId"]), index);
+                }
+                _ => {}
+            }
+        }
+        keep.extend(latest.into_values());
+        metadata_entries = metadata_entries
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, row)| keep.contains(&index).then_some(row))
+            .collect();
         older_path_stats.cost = older_costs
             .into_iter()
             .rev()
@@ -334,6 +430,36 @@ impl WindowedSessionStore {
         let first_user_message = first_user_line
             .and_then(|line| serde_json::from_slice::<serde_json::Value>(&line).ok())
             .and_then(|row| row.get("message").cloned());
+        let thinking_present = thinking.is_some();
+        let tier_present = tier.is_some();
+        let Some(leaf_id) = leaf_id else {
+            return Ok(None);
+        };
+        let snapshot = Snapshot {
+            version: 3,
+            generation: generation.clone(),
+            header: serde_json::to_string(&retained[0])?,
+            start: retained_start,
+            leaf: leaf_id.clone(),
+            thinking: thinking.clone().unwrap_or_else(|| "off".to_owned()),
+            thinking_present,
+            tier: tier.flatten(),
+            tier_present,
+            model: model.clone(),
+            metadata: metadata_entries.clone(),
+            message_count,
+            compaction_count,
+            stats: older_path_stats.clone(),
+            first_user: first_user_message.clone(),
+            goal,
+            non_bootstrap,
+        };
+        if !generation.valid(&reader.file, path)? {
+            return Ok(None);
+        }
+        // A disposable sidecar failure must never prevent opening the source.
+        let _ = window_cache::save(path, &snapshot);
+        apply_attributions(&mut retained, &metadata_entries);
         super::apply_child_usage_attributions(&mut retained);
         Ok(Some(Self {
             path: path.to_owned(),
@@ -343,7 +469,7 @@ impl WindowedSessionStore {
             message_count,
             older_path_stats,
             first_user_message,
-            leaf_id: leaf_id.expect("boundary requires leaf"),
+            leaf_id,
             settings: SessionContext {
                 messages: Vec::new(),
                 thinking_level: thinking.unwrap_or_else(|| "off".to_owned()),
@@ -351,7 +477,130 @@ impl WindowedSessionStore {
                 model,
             },
             full: false,
+            snapshot,
+            reads: reader.reads,
         }))
+    }
+
+    fn from_snapshot(
+        path: &Path,
+        file: &mut std::fs::File,
+        snapshot: Snapshot,
+        mut reads: WindowReadStats,
+    ) -> io::Result<Option<Self>> {
+        file.seek(SeekFrom::Start(0))?;
+        let mut header = Vec::new();
+        let mut byte = [0];
+        while file.read(&mut byte)? != 0 {
+            header.push(byte[0]);
+            if byte[0] == b'\n' {
+                break;
+            }
+        }
+        reads.jsonl_bytes += header.len() as u64;
+        reads.jsonl_ranges.push((0, header.len() as u64));
+        let Ok(canonical) = serde_json::from_slice::<FileEntry>(&header) else {
+            return Ok(None);
+        };
+        if serde_json::to_string(&canonical)? != snapshot.header
+            || snapshot.start < header.len() as u64
+            || snapshot.start > file.metadata()?.len()
+        {
+            return Ok(None);
+        }
+        file.seek(SeekFrom::Start(snapshot.start))?;
+        let mut suffix = String::new();
+        file.read_to_string(&mut suffix)?;
+        reads.jsonl_bytes += suffix.len() as u64;
+        reads
+            .jsonl_ranges
+            .push((snapshot.start, suffix.len() as u64));
+        let raw_entries: Vec<String> = suffix
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let mut entries = vec![canonical];
+        for line in &raw_entries {
+            let Ok(entry) = serde_json::from_str::<FileEntry>(line) else {
+                return Ok(None);
+            };
+            entries.push(entry);
+        }
+        if entries.last().and_then(FileEntry::id) != Some(snapshot.leaf.as_str())
+            || !snapshot.generation.valid(file, path)?
+        {
+            return Ok(None);
+        }
+        apply_attributions(&mut entries, &snapshot.metadata);
+        super::apply_child_usage_attributions(&mut entries);
+        reads.cache_hit = true;
+        Ok(Some(Self {
+            path: path.to_owned(),
+            entries,
+            raw_entries,
+            metadata_entries: snapshot.metadata.clone(),
+            message_count: snapshot.message_count,
+            older_path_stats: snapshot.stats.clone(),
+            first_user_message: snapshot.first_user.clone(),
+            leaf_id: snapshot.leaf.clone(),
+            settings: SessionContext {
+                messages: Vec::new(),
+                thinking_level: snapshot.thinking.clone(),
+                service_tier: snapshot.tier,
+                model: snapshot.model.clone(),
+            },
+            full: false,
+            snapshot,
+            reads,
+        }))
+    }
+    pub fn has_non_bootstrap_entries(&self) -> bool {
+        self.snapshot.non_bootstrap
+    }
+    pub fn refinement_history(&self) -> Vec<crate::refinement::RefinementResult> {
+        self.entries
+            .iter()
+            .cloned()
+            .filter_map(|entry| {
+                if let FileEntry::Custom { payload, .. } = entry {
+                    if payload.custom_type == "prime-agent.refinement" {
+                        return payload
+                            .data
+                            .and_then(|data| serde_json::from_value(data).ok());
+                    }
+                }
+                None
+            })
+            .collect()
+    }
+    pub fn read_stats(&self) -> &WindowReadStats {
+        &self.reads
+    }
+    pub fn compaction_count(&self) -> usize {
+        self.snapshot.compaction_count
+    }
+    pub fn goal_state(&self) -> Option<&crate::goals::GoalState> {
+        self.snapshot.goal.as_ref()
+    }
+    pub fn has_thinking_level(&self) -> bool {
+        self.snapshot.thinking_present
+    }
+    pub fn has_service_tier(&self) -> bool {
+        self.snapshot.tier_present
+    }
+    /// Fold a newly persisted linear entry without hydrating historical bodies.
+    pub fn append_entry(&mut self, entry: FileEntry) {
+        update_snapshot(&mut self.snapshot, &entry);
+        self.settings
+            .thinking_level
+            .clone_from(&self.snapshot.thinking);
+        self.settings.service_tier = self.snapshot.tier;
+        self.settings.model.clone_from(&self.snapshot.model);
+        if let Some(id) = entry.id() {
+            self.leaf_id = id.to_owned();
+        }
+        self.entries.push(entry);
     }
 
     /// Retained file-order entries, including the original header.
@@ -385,6 +634,10 @@ impl WindowedSessionStore {
 
     pub fn leaf_id(&self) -> &str {
         &self.leaf_id
+    }
+
+    pub fn source_path(&self) -> &Path {
+        &self.path
     }
 
     pub fn is_full_history(&self) -> bool {
@@ -423,180 +676,77 @@ impl WindowedSessionStore {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn fixture() -> String {
-        let mut rows = vec![
-            json!({"type":"session","id":"s","version":3,"cwd":"/tmp","timestamp":"2026-01-01T00:00:00Z"}),
-            json!({"type":"thinking_level_change","id":"settings","parentId":null,"thinkingLevel":"high"}),
-        ];
-        let mut parent = "settings".to_owned();
-        for i in 0..220 {
-            let id = format!("u{i}");
-            rows.push(json!({"type":"message","id":id,"parentId":parent,"message":{"role":"user","content":if i == 0 { "x".repeat(CHUNK_BYTES * 3) } else { format!("hello {i}") },"timestamp":0}}));
-            parent = id;
+fn valid_goal(entry: &FileEntry) -> Option<crate::goals::GoalState> {
+    let FileEntry::Custom { payload, .. } = entry else {
+        return None;
+    };
+    let data = payload.data.as_ref()?;
+    if payload.custom_type != crate::goals::GOAL_STATE_CUSTOM_TYPE
+        || !crate::goals::is_persisted_goal_state(data)
+    {
+        return None;
+    }
+    serde_json::from_value(data.clone())
+        .ok()
+        .map(crate::goals::normalize_goal_state)
+}
+fn apply_attributions(entries: &mut [FileEntry], metadata: &[String]) {
+    for row in metadata {
+        if let Ok(FileEntry::ChildUsageAttributed { payload, .. }) = serde_json::from_str(row) {
+            for entry in entries.iter_mut() {
+                if entry.id() == Some(payload.target_id.as_str()) {
+                    if let FileEntry::Message {
+                        message: pa_types::session::AgentMessage::Assistant(message),
+                        ..
+                    } = entry
+                    {
+                        message.usage = payload.aggregate_usage;
+                    }
+                }
+            }
         }
-        rows.push(json!({"type":"compaction","id":"compact","parentId":parent,"summary":"summary","firstKeptEntryId":"u210","tokensBefore":999}));
-        // A sibling compaction must not replace the one on the active path.
-        rows.push(json!({"type":"compaction","id":"sibling","parentId":"u0","summary":"wrong","firstKeptEntryId":"u0","tokensBefore":999}));
-        rows.push(json!({"type":"message","id":"leaf","parentId":"compact","message":{"role":"user","content":"latest","timestamp":0}}));
-        rows.into_iter().map(|row| row.to_string() + "\n").collect()
-    }
-
-    #[tokio::test]
-    async fn context_and_hydration_match_full_reader() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.jsonl");
-        let body = fixture();
-        std::fs::write(&path, &body).unwrap();
-        let full = super::super::parse_session_entries(&body);
-        let expected = build_session_context(&full, Some("leaf"));
-        let mut window = WindowedSessionStore::open(&path).unwrap().unwrap();
-        assert!(window.entries().len() < full.len());
-        let actual = window.context();
-        assert_eq!(
-            serde_json::to_vec(&actual.messages).unwrap(),
-            serde_json::to_vec(&expected.messages).unwrap()
-        );
-        assert_eq!(
-            (actual.thinking_level, actual.service_tier, actual.model),
-            (
-                expected.thinking_level,
-                expected.service_tier,
-                expected.model
-            )
-        );
-        window.ensure_full_history().await.unwrap();
-        assert_eq!(
-            serde_json::to_vec(window.entries()).unwrap(),
-            serde_json::to_vec(&full).unwrap()
-        );
-        assert_eq!(std::fs::read_to_string(path).unwrap(), body);
-    }
-
-    #[tokio::test]
-    async fn metadata_and_concurrent_disk_append_survive_hydration() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("metadata.jsonl");
-        let body = fixture();
-        std::fs::write(&path, &body).unwrap();
-        let mut store = WindowedSessionStore::open(&path).unwrap().unwrap();
-        assert_eq!(store.message_count(), 221);
-        assert_eq!(store.older_path_stats().user_messages, 121);
-        assert_eq!(
-            store.first_user_message().unwrap()["content"],
-            "x".repeat(CHUNK_BYTES * 3)
-        );
-        assert_eq!(store.metadata_entries().len(), 1);
-        let settings: serde_json::Value =
-            serde_json::from_str(&store.metadata_entries()[0]).unwrap();
-        assert_eq!(settings["thinkingLevel"], "high");
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap();
-        writeln!(file, "{}", json!({"type":"message","id":"appended","parentId":"leaf","message":{"role":"user","content":"new","timestamp":0}})).unwrap();
-        store.ensure_full_history().await.unwrap();
-        assert_eq!(store.leaf_id(), "leaf");
-        assert_eq!(store.entries().last().unwrap().id(), Some("appended"));
-        let expected =
-            super::super::parse_session_entries(&std::fs::read_to_string(&path).unwrap());
-        assert_eq!(
-            serde_json::to_vec(store.entries()).unwrap(),
-            serde_json::to_vec(&expected).unwrap()
-        );
-    }
-
-    #[tokio::test]
-    async fn manager_opens_window_then_hydrates_before_append() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("manager.jsonl");
-        let body = fixture();
-        std::fs::write(&path, &body).unwrap();
-        let mut manager =
-            super::super::manager::SessionManager::open_windowed(dir.path(), dir.path(), &path)
-                .await
-                .unwrap();
-        assert!(!manager.is_full_history());
-        let expected =
-            build_session_context(&super::super::parse_session_entries(&body), Some("leaf"));
-        assert_eq!(
-            serde_json::to_vec(&manager.active_context().messages).unwrap(),
-            serde_json::to_vec(&expected.messages).unwrap()
-        );
-        manager.ensure_full_history().await.unwrap();
-        manager.append_session_info("resumed");
-        let after = std::fs::read_to_string(&path).unwrap();
-        assert!(after.starts_with(&body));
-        let reopened = super::super::manager::SessionManager::open(dir.path(), dir.path(), &path);
-        assert_eq!(
-            serde_json::to_vec(manager.get_all_entries()).unwrap(),
-            serde_json::to_vec(reopened.get_all_entries()).unwrap()
-        );
-    }
-
-    #[test]
-    fn sparse_settings_and_sibling_changes_match_full_context() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.jsonl");
-        let mut rows: Vec<serde_json::Value> = fixture()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        rows[1]["parentId"] = json!("tier");
-        rows.insert(1, json!({"type":"model_change","id":"model","parentId":null,"provider":"openai","modelId":"gpt-test"}));
-        rows.insert(2, json!({"type":"service_tier_change","id":"tier","parentId":"model","serviceTier":"default"}));
-        rows.insert(rows.len() - 1, json!({"type":"thinking_level_change","id":"other-settings","parentId":"sibling","thinkingLevel":"low"}));
-        let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
-        std::fs::write(&path, &body).unwrap();
-        let expected =
-            build_session_context(&super::super::parse_session_entries(&body), Some("leaf"));
-        let actual = WindowedSessionStore::open(&path)
-            .unwrap()
-            .unwrap()
-            .context();
-        assert_eq!(
-            serde_json::to_vec(&actual.messages).unwrap(),
-            serde_json::to_vec(&expected.messages).unwrap()
-        );
-        assert_eq!(
-            (actual.thinking_level, actual.service_tier, actual.model),
-            (
-                expected.thinking_level,
-                expected.service_tier,
-                expected.model
-            )
-        );
-    }
-
-    #[test]
-    fn unterminated_session_uses_repair_fallback() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("torn.jsonl");
-        std::fs::write(&path, fixture().trim_end()).unwrap();
-        assert!(WindowedSessionStore::open(&path).unwrap().is_none());
-    }
-
-    #[test]
-    fn reverse_reader_preserves_long_lines_and_unterminated_tail() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("lines");
-        let long = "é".repeat(CHUNK_BYTES * 2);
-        let body = format!("first\n{long}\nlast");
-        std::fs::write(&path, &body).unwrap();
-        let mut reader = ReverseLines {
-            file: std::fs::File::open(path).unwrap(),
-            position: body.len() as u64,
-            pending: Vec::new(),
-        };
-        let mut lines = Vec::new();
-        while let Some(line) = reader.next().unwrap() {
-            lines.push(String::from_utf8(line).unwrap());
-        }
-        assert_eq!(lines, vec!["last".to_owned(), long, "first".to_owned()]);
     }
 }
+pub(super) fn update_snapshot(snapshot: &mut Snapshot, entry: &FileEntry) {
+    if !matches!(
+        entry,
+        FileEntry::Header { .. }
+            | FileEntry::ModelChange { .. }
+            | FileEntry::ThinkingLevelChange { .. }
+            | FileEntry::ServiceTierChange { .. }
+    ) {
+        snapshot.non_bootstrap = true;
+    }
+    if let Some(goal) = valid_goal(entry) {
+        snapshot.goal = Some(goal);
+    }
+    match entry {
+        FileEntry::ThinkingLevelChange { payload, .. } => {
+            snapshot.thinking = payload.thinking_level.clone();
+            snapshot.thinking_present = true;
+        }
+        FileEntry::ServiceTierChange { payload, .. } => {
+            snapshot.tier = payload.service_tier;
+            snapshot.tier_present = true;
+        }
+        FileEntry::ModelChange { payload, .. } => {
+            snapshot.model = Some((payload.provider.clone(), payload.model_id.clone()));
+        }
+        FileEntry::Message { message, .. } => {
+            snapshot.message_count += 1;
+            if let pa_types::session::AgentMessage::Assistant(message) = message {
+                snapshot.model = Some((message.provider.clone(), message.model.clone()));
+            }
+            if snapshot.first_user.is_none()
+                && matches!(message, pa_types::session::AgentMessage::User(_))
+            {
+                snapshot.first_user = serde_json::to_value(message).ok();
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+#[path = "window_tests.rs"]
+mod tests;
