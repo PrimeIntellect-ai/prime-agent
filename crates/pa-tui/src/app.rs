@@ -225,7 +225,11 @@ pub(crate) fn draw(
     // the cell paint (which strips them), then write the sequences at their
     // rows after the frame is painted.
     let emissions = view.take_osc_emissions(&frame);
-    terminal.draw(|f| {
+    // TS fullscreen paint brackets the row diff in synchronized output so
+    // terminals never display an intermediate, partly scrolled frame. A
+    // terminal without mode 2026 support ignores the two escape sequences.
+    crossterm::execute!(stdout(), terminal::BeginSynchronizedUpdate)?;
+    let painted = terminal.draw(|f| {
         let lines: Vec<ratatui::text::Line<'static>> =
             frame.iter().map(crate::markdown::to_ratatui_line).collect();
         f.render_widget(ratatui::text::Text::from(lines), frame_area);
@@ -234,9 +238,16 @@ pub(crate) fn draw(
                 f.set_cursor_position(ratatui::layout::Position::new(col as u16, row as u16));
             }
         }
-    })?;
-    emit_zone_markers(&emissions, cursor)?;
-    Ok(())
+    });
+    let markers = if painted.is_ok() {
+        emit_zone_markers(&emissions, cursor)
+    } else {
+        Ok(())
+    };
+    // Always release the terminal's pending update, including on paint errors.
+    crossterm::execute!(stdout(), terminal::EndSynchronizedUpdate)?;
+    painted?;
+    markers
 }
 
 /// Write OSC 133 zone-marker sequences at their frame rows. The sequences

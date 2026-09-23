@@ -108,8 +108,7 @@ per submission: session commands (`compact`, `refine`, `goal`,
 commands (`model`, `effort`, `tree`, `fork`, `clone`, `export`, `share`,
 `hotkeys`, `session`, `context`, `system-prompt`, `logs`, `changelog`,
 `mcp`, `heartbeats`, `nightly`, `plugins`, `speed`) emit from the
-interactive client at dispatch
-(TS `captureAgentCommandUsed`).
+interactive client at dispatch (TS `captureAgentCommandUsed`).
 
 | property | type | notes |
 |---|---|---|
