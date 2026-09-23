@@ -351,7 +351,7 @@ fn a_detached_bash_completion_wakes_the_idle_session_across_a_supervisor_restart
     let root = tempfile::TempDir::new().expect("temp dir");
     let dir = root.path().to_path_buf();
     let agent_dir = dir.join("agent");
-    let socket = dir.path().join("daemon.sock");
+    let socket = dir.join("daemon.sock");
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let url = spawn_mock(&NEXT);
     std::fs::write(
@@ -452,7 +452,7 @@ fn a_heartbeat_keeps_firing_across_a_supervisor_restart() {
     let root = tempfile::TempDir::new().expect("temp dir");
     let dir = root.path().to_path_buf();
     let agent_dir = dir.join("agent");
-    let socket = dir.path().join("stop.sock");
+    let socket = dir.join("stop.sock");
     let script = dir.join("faux.json");
     std::fs::write(
         &script,
