@@ -105,9 +105,20 @@ impl Toasts {
 /// Compose the toast block over the frame's top transcript rows: each
 /// toast replaces one row with its right-aligned message, so the overlay
 /// stays legible over whatever the transcript shows beneath it. Each
-/// entry carries its own style (the kind's theme color).
-pub fn overlay_toasts(frame: &mut [Line], start: usize, toasts: &[(String, Style)], width: usize) {
+/// entry carries its own style (the kind's theme color). Rows at or past
+/// `end` (the transcript window's last row + 1) stay untouched — a short
+/// window never lets the overlay run into the dock.
+pub fn overlay_toasts(
+    frame: &mut [Line],
+    start: usize,
+    end: usize,
+    toasts: &[(String, Style)],
+    width: usize,
+) {
     for (offset, (text, style)) in toasts.iter().enumerate() {
+        if start + offset >= end {
+            break;
+        }
         let Some(row) = frame.get_mut(start + offset) else {
             break;
         };
@@ -171,7 +182,7 @@ mod tests {
     fn the_overlay_writes_the_top_rows_right_aligned() {
         let mut frame = vec![vec![Span::raw("row")]; 6];
         let toasts = vec![("Copied the answer".to_string(), Style::default())];
-        overlay_toasts(&mut frame, 2, &toasts, 20);
+        overlay_toasts(&mut frame, 2, 6, &toasts, 20);
         let rendered: Vec<String> = frame
             .iter()
             .map(|line| {
@@ -194,7 +205,7 @@ mod tests {
             "a very long toast label that cannot fit".to_string(),
             Style::default(),
         )];
-        overlay_toasts(&mut frame, 0, &toasts, 10);
+        overlay_toasts(&mut frame, 0, 1, &toasts, 10);
         let rendered: String = frame[0]
             .iter()
             .map(|span| span.content.to_string())
@@ -213,7 +224,30 @@ mod tests {
             ("one".to_string(), Style::default()),
             ("two".to_string(), Style::default()),
         ];
-        overlay_toasts(&mut frame, 1, &toasts, 10);
+        overlay_toasts(&mut frame, 1, 2, &toasts, 10);
         assert!(frame[1].iter().any(|span| span.content.contains("two")));
+    }
+
+    /// The end bound keeps the overlay inside the transcript window: a
+    /// toast that would land on the dock's first row is omitted instead
+    /// (a short transcript never lets the stack spill into the editor).
+    #[test]
+    fn the_end_bound_never_spills_into_the_dock() {
+        let mut frame = vec![vec![Span::raw("row")]; 4];
+        let toasts = vec![
+            ("one".to_string(), Style::default()),
+            ("two".to_string(), Style::default()),
+            ("three".to_string(), Style::default()),
+        ];
+        // Transcript window: rows 1..3 (end 3); the third toast would be
+        // row 3 — the dock's first row — so only two overlay.
+        overlay_toasts(&mut frame, 1, 3, &toasts, 10);
+        assert!(frame[1].iter().any(|span| span.content.contains("one")));
+        assert!(frame[2].iter().any(|span| span.content.contains("two")));
+        assert!(
+            !frame[3].iter().any(|span| span.content.contains("three")),
+            "the dock row stays untouched: {:?}",
+            frame[3]
+        );
     }
 }

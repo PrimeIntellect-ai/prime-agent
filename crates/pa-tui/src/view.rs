@@ -1316,24 +1316,49 @@ impl AgentView {
         // The action toasts overlay the transcript window's top rows
         // (newest at the bottom of the stack), above the selection restyle
         // so the transient text stays legible.
+        // The action toasts overlay the transcript window's top rows
+        // (newest at the bottom of the stack), above the selection restyle
+        // so the transient text stays legible. The overlay never runs
+        // past the window's last row (a short transcript keeps the dock
+        // untouched) and sits out an in-progress selection drag: the
+        // transient overlay must never hide rows a drag is selecting —
+        // releasing over covered text could copy content that was not
+        // visible.
+        let selection_dragging = self.selection_drag_active();
         let now = std::time::Instant::now();
-        let toasts: Vec<(String, ratatui::style::Style)> = self
-            .toasts
-            .active(now)
-            .map(|(text, kind)| {
-                let color = match kind {
-                    crate::toast::ToastKind::Success => crate::theme::ThemeColor::Success,
-                    crate::toast::ToastKind::Info => crate::theme::ThemeColor::Accent,
-                    crate::toast::ToastKind::Warning => crate::theme::ThemeColor::Warning,
-                    crate::toast::ToastKind::Error => crate::theme::ThemeColor::Error,
-                };
-                (text.to_string(), self.theme.fg_style(color))
-            })
-            .collect();
+        let toasts: Vec<(String, ratatui::style::Style)> = if selection_dragging {
+            Vec::new()
+        } else {
+            self.toasts
+                .active(now)
+                .map(|(text, kind)| {
+                    let color = match kind {
+                        crate::toast::ToastKind::Success => crate::theme::ThemeColor::Success,
+                        crate::toast::ToastKind::Info => crate::theme::ThemeColor::Accent,
+                        crate::toast::ToastKind::Warning => crate::theme::ThemeColor::Warning,
+                        crate::toast::ToastKind::Error => crate::theme::ThemeColor::Error,
+                    };
+                    (text.to_string(), self.theme.fg_style(color))
+                })
+                .collect()
+        };
         if !toasts.is_empty() {
-            crate::toast::overlay_toasts(&mut frame, top_rows, &toasts, width);
+            crate::toast::overlay_toasts(
+                &mut frame,
+                top_rows,
+                top_rows + window_height,
+                &toasts,
+                width,
+            );
         }
         frame
+    }
+
+    /// Whether a mouse selection drag is in progress over the frame (the
+    /// toast overlay sits it out while one is: the selection must never
+    /// read rows the transient overlay covers).
+    fn selection_drag_active(&self) -> bool {
+        self.selection.is_dragging()
     }
 
     /// The `/share` loader rows (TS `BorderedLoader` + `CancellableLoader`):
