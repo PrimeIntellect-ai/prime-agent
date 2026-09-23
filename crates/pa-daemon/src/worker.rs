@@ -2089,8 +2089,12 @@ impl Worker {
         // arm writes no durable row. The row is identity-stamped with the
         // declaration (`declaredAt`): a replacement that persisted it and
         // died before the supervisor consumed the record replays the same
-        // declaration, and the rebuilt transcript already holding the
-        // exact row means this replay appends nothing.
+        // declaration. The dedup matches the row's fields alone — a
+        // worker that persisted its own cancelled row for the same run
+        // (its abort arm ran, then the worker died before its
+        // `compaction_end` reached the supervisor) carries the persist-
+        // time stamp, not the declaration, and the replay must recognize
+        // it instead of appending a second row for the one abort.
         let interrupted_compaction_requested = payload.get("interruptedCompaction").is_some();
         let interrupted_compaction = crate::compaction::interrupted_compaction_disclosure(payload);
         // The disclosure row's landing state for this replay: `true` when
@@ -2118,9 +2122,7 @@ impl Worker {
             if let Some(disclosure) = &interrupted_compaction {
                 if let Some(store) = core.store.as_mut() {
                     let already_disclosed = store.entries().iter().any(|entry| {
-                        entry.type_ == "custom_message"
-                            && entry.fields == disclosure.row
-                            && entry.timestamp == disclosure.declared_at
+                        entry.type_ == "custom_message" && entry.fields == disclosure.row
                     });
                     if !already_disclosed
                         && store

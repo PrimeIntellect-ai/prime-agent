@@ -1229,11 +1229,13 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A declaration-stamped entry is its own stable identity across a
-    /// reload: the create handler recognizes a disclosure row the previous
-    /// replacement already persisted (a crash between the persist and the
-    /// supervisor's record consumption replays the same declaration) and
-    /// appends nothing, while a different declaration stays distinct.
+    /// The replay's dedup predicate is the disclosure row's fields: the
+    /// create handler recognizes the exact row wherever it came from —
+    /// this replacement's own declaration-stamped persist, an earlier
+    /// crash-replay's identical row, or the dead worker's own abort arm
+    /// (the same fields carrying the worker's persist-time stamp) — and
+    /// appends nothing. A different disclosure (another reason or
+    /// outcome) stays distinct.
     #[test]
     fn declaration_stamped_entry_survives_reload_as_the_same_identity() {
         let dir = temp_dir();
@@ -1252,22 +1254,33 @@ mod tests {
             .unwrap();
 
         // The rebuilt transcript (a fresh open) holds the exact row: the
-        // replay's dedup predicate — same fields, same declaration stamp —
-        // matches, so the row is not appended twice.
+        // replay's fields-only dedup matches it — the declaration stamp
+        // and any other stamp alike — so the row is not appended twice.
         let loaded = SessionFile::open(&file).unwrap();
-        assert!(loaded.entries().iter().any(|entry| {
-            entry.type_ == "custom_message"
-                && entry.fields == disclosure
-                && entry.timestamp == declared_at
-        }));
+        let already_disclosed =
+            |entry: &SessionEntry| entry.type_ == "custom_message" && entry.fields == disclosure;
+        assert!(loaded.entries().iter().any(already_disclosed));
 
-        // A different declaration is a different identity: the row alone
-        // must not swallow it.
-        assert!(!loaded.entries().iter().any(|entry| {
-            entry.type_ == "custom_message"
-                && entry.fields == disclosure
-                && entry.timestamp != declared_at
-        }));
+        // The worker's own abort arm carries the same fields under its own
+        // persist-time stamp: still the same disclosure, still not a
+        // duplicate.
+        let mut with_own_row = SessionFile::open(&file).unwrap();
+        with_own_row
+            .persist_entry("custom_message", disclosure.clone())
+            .unwrap();
+        assert!(with_own_row.entries().iter().any(already_disclosed));
+
+        // A different disclosure (a failed run's row) stays distinct.
+        let failed = json!({
+            "customType": "compaction_outcome",
+            "content": "Compaction failed: Summarization failed",
+            "display": true,
+            "details": { "reason": "threshold", "outcome": "failed" },
+        });
+        assert!(!loaded
+            .entries()
+            .iter()
+            .any(|entry| entry.type_ == "custom_message" && entry.fields == failed));
         let _ = fs::remove_dir_all(&dir);
     }
 

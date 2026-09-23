@@ -372,10 +372,15 @@ impl crate::supervisor::Supervisor {
     /// declaration instead. An abort with no observed run probes the
     /// forward: an answering worker is the TS silent no-op, an unanswering
     /// one gets a fallback run so the client's loader still resolves.
+    /// A selector superseded by a worker replacement rebinds to the
+    /// session's current resident first (the stale-id rebind the generic
+    /// route applies to every client command — table-fast, so the
+    /// immediate acknowledgment holds).
     pub(crate) async fn handle_abort_compaction(
         self: &Arc<Self>,
         command: &pa_types::daemon::DaemonCommand,
         client_id: &str,
+        attached: &Arc<std::sync::Mutex<Vec<String>>>,
         command_id: &str,
         type_name: &str,
     ) -> (Vec<serde_json::Value>, bool) {
@@ -399,25 +404,36 @@ impl crate::supervisor::Supervisor {
         // in-flight restore pass for up to its full window, but the abort's
         // contract is the immediate acknowledgment. An unknown or
         // still-restoring session fails fast — the client's local recovery
-        // clears the loader on the failure.
+        // clears the loader on the failure. A superseded id still rebinds
+        // (the stale-id rebind the generic route applies to every client
+        // command): the lookup is table-fast and keeps the immediate-ack
+        // contract, and the abort reaches the session's CURRENT worker
+        // instead of failing while the compaction it meant to cancel keeps
+        // running on the replacement.
         let resident = match self.registry.resolve(&selector).await {
             Ok(resident) => resident,
-            Err(_) => {
-                let message = self
-                    .restore_failure_for(&selector)
-                    .unwrap_or_else(|| format!("Unknown active session: {selector}"));
-                return (
-                    vec![crate::protocol::response_line(
-                        &crate::protocol::response_failure(
-                            Some(command_id),
-                            type_name,
-                            &message,
-                            None,
-                        ),
-                    )],
-                    false,
-                );
-            }
+            Err(_) => match self.binding_target(&selector).await {
+                Some(resident) => {
+                    self.rebind_connection(&selector, &resident, attached).await;
+                    resident
+                }
+                None => {
+                    let message = self
+                        .restore_failure_for(&selector)
+                        .unwrap_or_else(|| format!("Unknown active session: {selector}"));
+                    return (
+                        vec![crate::protocol::response_line(
+                            &crate::protocol::response_failure(
+                                Some(command_id),
+                                type_name,
+                                &message,
+                                None,
+                            ),
+                        )],
+                        false,
+                    );
+                }
+            },
         };
         // The supervisor-visible token takes the abort even when the
         // worker cannot answer; the best-effort forward below is what a

@@ -2284,7 +2284,7 @@ impl Supervisor {
                 // worker must not turn the abort into its own 30s route
                 // timeout and a loader that never clears.
                 let client_id = effective_client_id.lock().unwrap().clone();
-                self.handle_abort_compaction(command, &client_id, &command_id, &type_name)
+                self.handle_abort_compaction(command, &client_id, attached, &command_id, &type_name)
                     .await
             }
             DaemonCommand::AcquireSessionInputPause { .. } => {
