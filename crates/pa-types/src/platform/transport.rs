@@ -10,7 +10,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 /// A full-duplex stream between a client and a daemon endpoint.
 ///
