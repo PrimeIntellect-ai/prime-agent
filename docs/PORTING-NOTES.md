@@ -1015,7 +1015,6 @@ TS reference: `packages/coding-agent/src/modes/interactive/interactive-mode.ts` 
   relay), relaunching with this run's args plus `--resume <sessionFile>`
   unless the invocation already selected a session.
 
-EAD
 ## The stop/delete lifecycle — kill cancels goals and heartbeats (lane deletion-lifecycle, 2026-09-23)
 
 Reference: the TS daemon-mode `closeSessionOnce(reason)` arms

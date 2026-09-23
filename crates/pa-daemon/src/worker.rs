@@ -3413,7 +3413,44 @@ impl Worker {
         true
     }
 
-EAD
+    /// TS `abortAndSendQueued` (agent-session.ts): abort the active run
+    /// and deliver every queued plain-user steering message together as
+    /// the next batched turn; abort-only when no armable steering sits
+    /// queued or the scheduler must stay parked (a held admission pause
+    /// or a pending shutdown — TS `canResume`). The follow-up lane never
+    /// merges in: it stays queued behind the delivered batch and drains
+    /// when the session goes idle. `steeringMode` is never changed.
+    ///
+    /// The `abort_and_send_queued` wire command (schema 29) and the
+    /// Ctrl+C trigger dispatch through this funnel (`handle_abort_and_send_queued`
+    /// below — the abort-parity lane's command surface, #2599).
+    pub(crate) fn abort_and_send_queued(&self) -> bool {
+        // TS `canResume`: no disposal in flight, no admission pause held —
+        // and the arm only fires in the send arm (`queuedSteering.length
+        // === 0 || !canResume` runs the plain `requestAbort()` without
+        // touching the armed set).
+        let can_resume =
+            !self.input_pauses.paused() && !self.core.lock().unwrap().shutdown_requested;
+        if !can_resume {
+            self.request_abort();
+            return false;
+        }
+        // TS `queuedSteering` + the arm: the visible plain-user steering
+        // rows carry the forced-batch flag; an empty (or all-injected)
+        // lane arms nothing and the abort below runs abort-only.
+        let armed = self.arm_forced_all_steering();
+        // TS runs `requestAbort()` in both arms (the suspension parks
+        // the queue), then arms + resumes only in the send arm: the
+        // resumed pump — not this funnel — owns the batch's delivery at
+        // the boundary.
+        self.request_abort();
+        if !armed {
+            return false;
+        }
+        self.resume_queued_input();
+        true
+    }
+
     /// TS `requestAbort()`: the abort funnel behind both abort commands
     /// (`abort` and `abort_and_send_queued`) - suspend queued-input
     /// admission, cancel the queue-invisible turn actions, abort the
@@ -3479,29 +3516,13 @@ EAD
     /// follow-ups when idle), like the TS resumed pump's
     /// next-turn-boundary-then-when-idle selection order.
     fn handle_abort_and_send_queued(&self) -> DaemonResponse {
-        // TS `queuedSteering`: the visible next-turn-boundary turn actions
-        // whose user row is not yet accepted. The steering lane holds
-        // exactly those (queue-visible user prompts; the follow-up lane
-        // is the separate when-idle policy TS never force-delivers).
-        let has_queued_steering = {
-            let core = self.core.lock().unwrap();
-            core.steering.iter().any(|item| item.queue_visible)
-        };
-        // TS `canResume`: no disposal in flight and no admission pause
-        // held (`_sessionInputAdmissionPauses`/`_queuedWorkPauses` fold
-        // into the port's pause table + shutdown flag).
-        let can_resume =
-            !self.input_pauses.paused() && !self.core.lock().unwrap().shutdown_requested;
-        // TS runs `requestAbort()` in both arms, then arms + resumes only
-        // in the send arm: `requestAbort()` parks the scheduler, and the
-        // resumed pump - not the arm - owns the queue's delivery at the
-        // boundary. The abort-only arm leaves the suspension set, so the
-        // parked queue survives untouched (`requestAbort()` + `return
-        // false`).
-        self.request_abort();
-        if has_queued_steering && can_resume {
-            self.resume_queued_input();
-        }
+        // The command is the TS `abortAndSendQueued` funnel (above): the
+        // arm classifies the visible plain-user steering rows, the abort
+        // parks the scheduler, and the resume - the send arm only - lets
+        // the pump deliver the armed batch as ONE co-delivered turn at
+        // the boundary (the abort-only arm leaves the suspension set, so
+        // the parked queue survives untouched).
+        self.abort_and_send_queued();
         response_success(None, "abort_and_send_queued", None)
     }
 
@@ -6437,7 +6458,36 @@ mod tests {
             ],
             "the parked queue never delivered in order: {texts:?}"
         );
+        // The one-batched-turn granularity (the steer-family lane's
+        // supersede of this test's original reply-granularity
+        // expectations): the two parked steers deliver as ONE co-delivered
+        // turn — a single `agent_start` for both rows and ONE assistant
+        // reply for the whole batch — exactly TS `abortAndSendQueued`'s
+        // armed batch (`_forcedAllSteeringActionIds` +
+        // `_startPreparedTurnActions`); the follow-up stays a turn of its
+        // own behind it.
         let events = session_events_since(&mut subscription);
+        let agent_starts = events
+            .iter()
+            .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_start"))
+            .count();
+        assert_eq!(
+            agent_starts, 3,
+            "the held turn, the steers' ONE batched turn, the follow-up's: {events:?}"
+        );
+        let replies: Vec<&Value> = events
+            .iter()
+            .filter(|event| {
+                event.get("type").and_then(Value::as_str) == Some("message_end")
+                    && event["message"]["role"] == "assistant"
+                    && event["message"].get("stopReason").and_then(Value::as_str) != Some("aborted")
+            })
+            .collect();
+        assert_eq!(
+            replies.len(),
+            3,
+            "one reply per turn - the steers' batch answers once, never per steer: {events:?}"
+        );
         assert!(
             events.iter().any(|event| {
                 event.get("type").and_then(Value::as_str) == Some("message_end")

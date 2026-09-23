@@ -1189,7 +1189,7 @@ impl SessionEngine for ScriptedEngine {
         // the primary — ahead of the single scripted reply.
         let mut batch_rows = Vec::new();
         for row in &request.batch {
-            let mut content = vec![json!(row.text)];
+            let mut content = vec![json!({ "type": "text", "text": row.text })];
             for image in &row.images {
                 let mut block = match serde_json::to_value(image) {
                     Ok(Value::Object(block)) => Value::Object(block),
