@@ -42,8 +42,12 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 /// Environment keys this box's own prime-agent worker sets; they must not leak
-/// into spawned daemons or their session workers.
-const SCRUB_ENV: [&str; 9] = [
+/// into spawned daemons or their session workers. `PI_PACKAGE_DIR` is
+/// scrubbed too: it overrides both binaries' package-manifest resolution,
+/// and a value pointing at the Rust checkout (where gate runners point it
+/// for kernel-runtime resolution) makes the TS CLI read a nonexistent
+/// `package.json` and exit before it can serve anything.
+const SCRUB_ENV: [&str; 10] = [
     "PRIME_AGENT_INTERNAL_DAEMON_WORKER",
     "PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN",
     "PRIME_AGENT_INTERNAL_DAEMON_WORKER_ACTIVE_SESSION_ID",
@@ -53,6 +57,7 @@ const SCRUB_ENV: [&str; 9] = [
     "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL",
     "PRIME_AGENT_INTERNAL_SESSION_LEASES",
     "PRIME_AGENT_INTERNAL_SESSION_LEASE_OWNER_ID",
+    "PI_PACKAGE_DIR",
 ];
 
 /// Locate the built `pa-daemon` binary next to this crate's `prime-agent`
@@ -623,6 +628,82 @@ fn cli_connect_error_matches_ts_golden() {
 }
 
 // ---------------------------------------------------------------------------
+// Schedule CLI usage surface: no daemon, validation fires first
+// ---------------------------------------------------------------------------
+
+/// The schedule commands' usage errors fire in the public router's
+/// validation, before any daemon request, and every valid invocation passes
+/// validation and reaches the connection attempt. The goldens are the TS
+/// binary's byte-identical output; `--daemon-socket` before the command
+/// rotates into the schedule operands, a shape the TS CLI rejects with the
+/// same usage error.
+#[test]
+fn schedule_usage_errors_and_valid_invocations() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(agent_dir.join("sessions")).expect("sessions dir");
+    let cli = PathBuf::from(env!("CARGO_BIN_EXE_prime-agent"));
+    let rotated_socket = dir.path().join("bogus.sock");
+    let rotated_socket = rotated_socket.to_str().expect("socket path");
+
+    let usage_shapes = [
+        (
+            vec!["schedule", "cancel"],
+            "Error: Usage: prime-agent schedule cancel <job-id>\n",
+        ),
+        (
+            vec!["schedule", "cancel", "a", "b"],
+            "Error: Usage: prime-agent schedule cancel <job-id>\n",
+        ),
+        (
+            vec!["schedule", "list", "--bogus-flag"],
+            "Error: Usage: prime-agent schedule list [--all] [agent] [--json]\n",
+        ),
+        (
+            vec!["--daemon-socket", rotated_socket, "schedule", "list"],
+            "Error: Usage: prime-agent schedule list [--all] [agent] [--json]\n",
+        ),
+        (
+            vec![
+                "--daemon-socket",
+                rotated_socket,
+                "schedule",
+                "cancel",
+                "id",
+            ],
+            "Error: Usage: prime-agent schedule cancel <job-id>\n",
+        ),
+    ];
+    for (args, golden) in usage_shapes {
+        let out = run_cli(&cli, dir.path(), &agent_dir, &args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert_eq!(stdout(&out), "", "{args:?}");
+        assert_eq!(stderr(&out), golden, "{args:?}");
+    }
+
+    // Valid invocations pass validation and fail only at the connection
+    // attempt (the temp TMPDIR holds no daemon socket): no usage message.
+    let valid_shapes = [
+        vec!["schedule", "list"],
+        vec!["schedule", "list", "--all"],
+        vec!["schedule", "list", "-a"],
+        vec!["schedule", "list", "--json"],
+        vec!["schedule", "list", "some-agent"],
+        vec!["schedule", "cancel", "fake-id"],
+        vec!["schedule", "cancel", "--json", "fake-id"],
+    ];
+    for args in valid_shapes {
+        let out = run_cli(&cli, dir.path(), &agent_dir, &args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let err = stderr(&out);
+        assert!(
+            err.starts_with("Error: Failed to connect to the Prime Agent daemon:"),
+            "{args:?}: {err}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TS differential: both CLIs against the same TS daemon
 // ---------------------------------------------------------------------------
 
@@ -642,12 +723,21 @@ fn ts_daemon_differential_cli_output() {
     // daemon must live on the default socket path under the temp TMPDIR.
     std::env::set_var("TMPDIR", dir.path());
     let socket = pa_daemon::socket::default_daemon_socket_path();
+    // The TS daemon does not create the socket's parent directory on bind
+    // (the Rust supervisor does), so the default-path socket needs the
+    // directory to exist before the TS daemon is spawned.
+    std::fs::create_dir_all(socket.parent().expect("socket parent")).expect("socket parent dir");
     let mut daemon_command = Command::new(&ts);
     daemon_command
         .arg("--mode")
         .arg("daemon")
         .arg("--daemon-socket")
         .arg(&socket)
+        // The TS CLI resolves its package manifest by walking up from the
+        // working directory and stops at the repository root; a Rust
+        // checkout has no package.json there, so the daemon must run from
+        // the scratch work dir (no manifest anywhere up the walk).
+        .current_dir(&work)
         .env("PRIME_AGENT_CODING_AGENT_DIR", &agent_dir)
         .env("TMPDIR", dir.path())
         .stdout(Stdio::null())
@@ -751,6 +841,90 @@ fn ts_daemon_differential_cli_output() {
         &["schedule", "list"],
         &["schedule", "list"],
         "schedule list after add",
+    );
+    compare(
+        &mut failures,
+        &["schedule", "list", "--all"],
+        &["schedule", "list", "--all"],
+        "schedule list --all",
+    );
+    compare(
+        &mut failures,
+        &["schedule", "list", "--json"],
+        &["schedule", "list", "--json"],
+        "schedule list --json",
+    );
+    // Cancel round-trip: the two adds above stored one job per CLI. Each
+    // CLI cancels one of them and both render the same receipt, then the
+    // same emptied list.
+    let ts_schedule_json = run_cli(&ts, dir.path(), &agent_dir, &["schedule", "list", "--json"]);
+    let job_ids: Vec<String> = serde_json::from_str::<Value>(&stdout(&ts_schedule_json))
+        .expect("schedule list json")
+        .get("jobs")
+        .and_then(Value::as_array)
+        .expect("jobs array")
+        .iter()
+        .map(|job| job["id"].as_str().expect("job id").to_string())
+        .collect();
+    assert_eq!(job_ids.len(), 2, "one stored job per CLI add");
+    compare(
+        &mut failures,
+        &["schedule", "cancel", job_ids[0].as_str()],
+        &["schedule", "cancel", job_ids[1].as_str()],
+        "schedule cancel",
+    );
+    compare(
+        &mut failures,
+        &["schedule", "list"],
+        &["schedule", "list"],
+        "schedule list after cancel",
+    );
+    // Usage parity: the errors fire in the public router's validation,
+    // before any daemon request, and both CLIs render them identically.
+    // `--daemon-socket` before the command rotates into the schedule
+    // operands; the TS CLI rejects that shape with the same usage error.
+    let socket_arg = socket.to_string_lossy().to_string();
+    compare(
+        &mut failures,
+        &["schedule", "cancel"],
+        &["schedule", "cancel"],
+        "schedule cancel without id",
+    );
+    compare(
+        &mut failures,
+        &["schedule", "cancel", "a", "b"],
+        &["schedule", "cancel", "a", "b"],
+        "schedule cancel with two ids",
+    );
+    compare(
+        &mut failures,
+        &["schedule", "list", "--bogus-flag"],
+        &["schedule", "list", "--bogus-flag"],
+        "schedule list unknown flag",
+    );
+    compare(
+        &mut failures,
+        &["--daemon-socket", socket_arg.as_str(), "schedule", "list"],
+        &["--daemon-socket", socket_arg.as_str(), "schedule", "list"],
+        "daemon-socket before schedule list",
+    );
+    compare(
+        &mut failures,
+        &[
+            "--daemon-socket",
+            socket_arg.as_str(),
+            "schedule",
+            "cancel",
+            "id",
+        ],
+        &[
+            "--daemon-socket",
+            socket_arg.as_str(),
+            "schedule",
+            "cancel",
+            "id",
+        ],
+        "daemon-socket before schedule cancel",
     );
     // TS stops the primary session, the Rust CLI stops the secondary one:
     // both must print the same golden output.
