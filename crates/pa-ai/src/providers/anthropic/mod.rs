@@ -221,12 +221,15 @@ pub(crate) fn get_cache_control(
     (retention, Some(CacheControl { ttl }))
 }
 
-/// Fable/Mythos models think every turn and reject an explicit
-/// `thinking: {type: "disabled"}` (and any sampling params) with a 400.
+/// Fable/Mythos models — and Claude Opus 5.5 — think every turn and reject an
+/// explicit `thinking: {type: "disabled"}` (and any sampling params) with a
+/// 400.
 pub(crate) fn is_always_on_adaptive_thinking_model(model_id: &str) -> bool {
     model_id.contains("fable-5")
         || model_id.contains("mythos-5")
         || model_id.contains("mythos-preview")
+        || model_id.contains("opus-5-5")
+        || model_id.contains("opus-5.5")
 }
 
 /// Check if a model supports adaptive thinking (Opus 4.6+, Sonnet 4.6+).
@@ -572,5 +575,26 @@ impl Provider for AnthropicMessagesProvider {
         options: Option<&SimpleStreamOptions>,
     ) -> AssistantMessageEventStream {
         stream_simple_anthropic(model, context, options)
+    }
+}
+
+#[cfg(test)]
+mod always_on_adaptive_thinking_tests {
+    use super::is_always_on_adaptive_thinking_model;
+
+    #[test]
+    fn always_on_models_reject_thinking_disabled_and_sampling_params() {
+        assert!(is_always_on_adaptive_thinking_model("claude-fable-5"));
+        assert!(is_always_on_adaptive_thinking_model("claude-mythos-5"));
+        assert!(is_always_on_adaptive_thinking_model("claude-opus-5-5"));
+        assert!(is_always_on_adaptive_thinking_model(
+            "anthropic/claude-opus-5.5"
+        ));
+    }
+
+    #[test]
+    fn optional_thinking_models_still_accept_disabled() {
+        assert!(!is_always_on_adaptive_thinking_model("claude-opus-5"));
+        assert!(!is_always_on_adaptive_thinking_model("claude-sonnet-5"));
     }
 }

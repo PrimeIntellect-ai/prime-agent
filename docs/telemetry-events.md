@@ -306,6 +306,19 @@ parked submission, not per rendered row).
 |---|---|---|
 | `lane` | string | `steering` (Enter while a turn runs) / `follow_up` (the follow-up key) |
 
+### `tui queue edited`
+
+A parked queued message was touched through the browse/edit affordance
+(adoption of queue editing, TS `QueueSelection`): selecting a parked
+message, re-queueing an edited one (moving its lane), deleting it with an
+empty edit, or reordering it with ctrl+alt+arrows. Emitted once per
+completed user action, and only when the mutation was applied; never
+carries the message text.
+
+| property | type | notes |
+|---|---|---|
+| `action` | string | `select` (a browse opened a selection) / `edit` (the edited text re-queued, possibly to the other lane) / `delete` (empty edit) / `reorder` (ctrl+alt+arrow move) |
+
 ### `tui suspend used`
 
 The run's first `app.suspend` cycle (default ctrl+z; adoption of the

@@ -106,6 +106,12 @@ pub trait InteractionTelemetry: Send + Sync {
     /// A submission parked in the follow-up queue behind a running turn:
     /// `lane` is `steering` (Enter) / `follow_up` (the follow-up key).
     fn queued_input(&self, lane: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    /// A parked message was edited through the queue browse (event
+    /// `tui queue edited`): `action` is `select` (a browse opened a
+    /// selection), `edit` (the edited text re-queued; empty text
+    /// deletes), `delete`, or `reorder` (ctrl+alt+arrow). Never carries
+    /// the message text.
+    fn queue_edited(&self, action: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// The run's first `app.suspend` cycle (`tui suspend used`): `outcome`
     /// is `resumed` (the SIGCONT continuation restored the terminal) /
     /// `failed` (the cycle errored).

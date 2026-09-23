@@ -126,6 +126,30 @@ pub(crate) fn drain(out: &mut Stdout) {
 const DRAIN_MAX: Duration = Duration::from_millis(1000);
 const DRAIN_IDLE: Duration = Duration::from_millis(50);
 
+/// Whether the kitty keyboard protocol is active (the probe answered).
+/// The key-id layer and the input reader use this to switch the TS
+/// mode-aware semantics: the LF mapping (`\n` is shift+enter under kitty,
+/// enter in legacy mode) and the kitty-printable dedup only apply while
+/// kitty events can actually arrive.
+pub(crate) fn kitty_active() -> bool {
+    KITTY_ACTIVE.load(Ordering::SeqCst)
+}
+
+/// Flip the kitty flag for unit tests of other modules (the id layer's
+/// mode-aware mappings and the reader's dedup read [`kitty_active`]);
+/// each test serializes through its own lock the way this module's state
+/// tests do.
+#[cfg(test)]
+pub(crate) fn set_kitty_active_for_tests(active: bool) {
+    KITTY_ACTIVE.store(active, Ordering::SeqCst);
+}
+
+/// The lock every test that flips the process-global enhanced-keys state
+/// holds (this module's state tests and the mode-aware mapping tests in
+/// `keys`/`input`).
+#[cfg(test)]
+pub(crate) static TEST_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The established modes once the probe settles: `(kitty, modify_other_keys)`.
 /// `None` while the probe is still running (or never started — the headless
 /// harness), so adoption telemetry can observe the outcome once. The second
@@ -238,7 +262,9 @@ mod tests {
 
     /// The state flags are process-global, so every test serializes
     /// through one lock (the mouse-tracking module's pattern).
-    static STATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn lock_state() -> std::sync::MutexGuard<'static, ()> {
+        TEST_STATE_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
 
     fn reset_state() {
         BRACKETED_PASTE_ACTIVE.store(false, Ordering::SeqCst);
@@ -248,7 +274,7 @@ mod tests {
 
     #[test]
     fn enable_disable_roundtrip_on_pipes_touches_no_state() {
-        let _lock = STATE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _lock = lock_state();
         reset_state();
         // stdout under `cargo test` is not a terminal: the harness keeps
         // plain pipes, so enable/disable record no state and probe nothing.
@@ -265,7 +291,7 @@ mod tests {
 
     #[test]
     fn settle_state_reports_the_established_modes() {
-        let _lock = STATE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _lock = lock_state();
         reset_state();
         KITTY_ACTIVE.store(true, Ordering::SeqCst);
         assert_eq!(settle_state(), Some((true, false)));

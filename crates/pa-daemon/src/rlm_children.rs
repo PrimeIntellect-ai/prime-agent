@@ -62,9 +62,8 @@ const RUNTIME_METADATA_PROMPT_MAX: usize = 4096;
 const WATCH_WAIT_SLICE_MS: u64 = 60_000;
 /// Re-poll cadence after a wait slice ends without a settled child.
 const WATCH_POLL_INTERVAL_MS: u64 = 2_000;
-/// Consecutive unreachable polls before the watcher gives up (the child's
-/// worker may be restarting; a permanently unreachable child ends the
-/// watch without a notice instead of spinning forever).
+/// Consecutive failed worker polls before settling an unreachable child as
+/// errored; roster reads must never attempt their own worker recovery.
 const WATCH_MAX_UNREACHABLE_POLLS: u32 = 150;
 /// The parent identity children are spawned from: recursion bounds, the
 /// inherited model selector and thinking level, and the parent session's
@@ -466,7 +465,11 @@ impl SupervisorChildSessionsInner {
     /// Fire the settle hook off-thread (the settle sites run inside
     /// watcher tasks; the hook owns its own scheduling).
     pub(crate) fn fire_settle_hook(&self) {
-        let hook = self.settle_hook.lock().expect("settle hook lock").clone();
+        let hook = self
+            .settle_hook
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         if let Some(hook) = hook {
             std::thread::spawn(move || hook());
         }
@@ -860,9 +863,16 @@ impl SupervisorChildSessionsInner {
                 Err(_) => {
                     unreachable_polls += 1;
                     if unreachable_polls >= WATCH_MAX_UNREACHABLE_POLLS {
-                        eprintln!(
-                            "pa-daemon: RLM child settle watcher gave up on an unreachable child {active_session_id}"
-                        );
+                        {
+                            let mut state = record.lock().await;
+                            if state.closed_by_parent || state.notice_delivered {
+                                return;
+                            }
+                            state.settled_status = Some("error");
+                            state.error = Some("Child worker unreachable".to_string());
+                        }
+                        self.deliver_settle_notice(record).await;
+                        self.fire_settle_hook();
                         return;
                     }
                 }
@@ -1330,12 +1340,10 @@ impl RlmSubagentHost for SupervisorChildSessions {
             let records = this.children.lock().await.clone();
             let mut entries = Vec::with_capacity(records.len());
             for record in &records {
-                this.refresh_record(record).await;
-                let entry = {
-                    let record = record.lock().await;
-                    SupervisorChildSessions::entry(&record)
-                };
-                entries.push(entry);
+                // The settle watcher owns worker refreshes. A roster read is a
+                // snapshot and must not queue behind a long supervisor request.
+                let record = record.lock().await;
+                entries.push(SupervisorChildSessions::entry(&record));
             }
             Ok(entries)
         })
@@ -1367,6 +1375,9 @@ impl RlmSubagentHost for SupervisorChildSessions {
             this.command(&command, KILL_TIMEOUT_MS)
                 .await
                 .with_context(|| format!("kill RLM child \"{target}\""))?;
+            // The watcher owns an Arc to this record; deleting the roster
+            // row alone cannot stop its polling loop.
+            record.lock().await.closed_by_parent = true;
             let entry = {
                 let record = record.lock().await;
                 SupervisorChildSessions::entry(&record)
@@ -1613,6 +1624,27 @@ mod watch_tests {
             })
             .await
             .expect("spawn must succeed against the fake supervisor")
+    }
+
+    #[tokio::test]
+    async fn roster_snapshot_does_not_wait_for_a_slow_child_worker() {
+        let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+        let (sessions, _kill_rx) =
+            sessions_with_fake_supervisor(follow_up_tx, 1_000, FakeKill::Success).await;
+        sessions
+            .push_test_child(RlmChildIdentity {
+                rlm_child_id: "child-id".to_string(),
+                active_session_id: "child-live".to_string(),
+                session_id: Some("child-file".to_string()),
+                session_name: "slow-child".to_string(),
+            })
+            .await;
+        let roster = tokio::time::timeout(Duration::from_millis(10), sessions.list_subagents())
+            .await
+            .expect("roster must not make a supervisor round trip")
+            .expect("roster snapshot");
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].status, "running");
     }
 
     /// A child that settles without replying delivers the no-reply terminal

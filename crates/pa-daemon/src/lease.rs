@@ -346,10 +346,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn process_start_id_reflects_proc() {
+    fn process_start_id_reflects_the_platform_ladder() {
+        // Linux answers from /proc (`proc:`); macOS/BSD from `ps lstart=`
+        // (`ps:`) - the same ladder TS `getProcessStartId` walks.
         let start = get_process_start_id(std::process::id());
         assert!(start.is_some());
-        assert!(start.unwrap().starts_with("proc:"));
+        let id = start.unwrap();
+        assert!(id.starts_with("proc:") || id.starts_with("ps:"));
         assert!(get_process_start_id(0).is_none());
     }
 
