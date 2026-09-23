@@ -607,6 +607,36 @@ state
     }
 
     #[test]
+    fn async_bash_completion_message_matches_the_ts_shape() {
+        // TS `createAsyncBashCompletionMessage`: the custom type, the
+        // `[bash-done pid:N exit:M]` header with the JSON-encoded
+        // command, display, and the `{pid, command, exitCode}` details.
+        let message =
+            create_async_bash_completion_message(4321, "sleep 12; echo RW_WAKE_DONE", 0, 1_000);
+        assert_eq!(message.custom_type, "async_bash_completion");
+        assert!(message.display);
+        assert_eq!(message.timestamp, 1_000);
+        assert_eq!(
+            message.content,
+            UserContent::Text(
+                "[bash-done pid:4321 exit:0]\n\nCommand: \"sleep 12; echo RW_WAKE_DONE\""
+                    .to_string()
+            )
+        );
+        let details = message.details.unwrap();
+        assert_eq!(details["pid"], 4321);
+        assert_eq!(details["command"], "sleep 12; echo RW_WAKE_DONE");
+        assert_eq!(details["exitCode"], 0);
+        // A nonzero exit and embedded quotes round the same shape.
+        let message = create_async_bash_completion_message(11, "echo \"done\" && exit 2", 2, 2_000);
+        assert_eq!(message.timestamp, 2_000);
+        assert!(matches!(message.content, UserContent::Text(text)
+            if text.starts_with("[bash-done pid:11 exit:2]\n\nCommand: \"echo \\\"done\\\" && exit 2\"")));
+        let details = message.details.unwrap();
+        assert_eq!(details["exitCode"], 2);
+    }
+
+    #[test]
     fn bash_execution_becomes_user_text() {
         let bash = AgentMessage::BashExecution(pa_types::session::BashExecutionMessage {
             command: "cargo test".to_string(),
