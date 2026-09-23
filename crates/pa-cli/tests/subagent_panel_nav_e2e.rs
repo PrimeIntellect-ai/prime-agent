@@ -215,7 +215,7 @@ fn session_options(
 }
 
 #[tokio::test]
-async fn down_arrow_focuses_the_panel_and_enter_drills_into_the_child() {
+async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
@@ -256,9 +256,9 @@ async fn down_arrow_focuses_the_panel_and_enter_drills_into_the_child() {
         .expect("append spawn edge");
 
     // Run 1 — the attached parent's main chat: Down at the end of the empty
-    // prompt focuses the activity dock, Enter opens the unified activity
-    // panel (the grouped list), and a second Enter on the selected
-    // subagent row opens the scoped agents view.
+    // prompt focuses the activity dock, and Enter opens the scoped agents
+    // view DIRECTLY (the operator's direct-navigation redesign — the
+    // grouped activity panel is gone, no intermediate step).
     let parent_options = session_options(
         &supervisor.socket,
         &session_dir,
@@ -278,11 +278,6 @@ async fn down_arrow_focuses_the_panel_and_enter_drills_into_the_child() {
                 crossterm::event::KeyCode::Enter,
                 crossterm::event::KeyModifiers::NONE,
             )),
-            pa_tui::interactive::HeadlessStep::WaitMs(300),
-            pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Enter,
-                crossterm::event::KeyModifiers::NONE,
-            )),
         ],
         width: 120,
         height: 36,
@@ -293,35 +288,32 @@ async fn down_arrow_focuses_the_panel_and_enter_drills_into_the_child() {
             .expect("parent session run");
 
     // The dock renders at attach as the one-line activity row (unfocused,
-    // hint-free by design; the first Enter opens the grouped list).
-    let attached = first_frame_of(&parent_run.frames, "1 subagent");
+    // hint-free by design; Enter is the direct launcher). The count is
+    // live-only (the operator's dead-registry fix): the passivated child
+    // is finished, so the segment reads zero live — the dock stays
+    // mounted and selectable because the child remains browsable history.
+    let attached = first_frame_of(&parent_run.frames, "subagent");
     assert!(
-        attached.contains("\u{25c6} 1 subagent"),
-        "the unfocused dock shows the live subagent count:\n{attached}"
+        attached.contains("\u{25c6} 0 subagents"),
+        "the unfocused dock shows the live-only subagent count:\n{attached}"
     );
-    // The first Enter opened the grouped list: the grouped row and the
-    // selected-detail pane.
-    let panel = frame_of(&parent_run.frames, "Subagents");
+    // The single Enter opened the scoped agents view directly: no
+    // grouped panel frame ever renders.
     assert!(
-        panel.contains("Activity"),
-        "the dock's Enter opens the unified activity panel:\n{panel}"
+        !parent_run
+            .frames
+            .iter()
+            .any(|frame| frame.contains("Activity")),
+        "the grouped activity panel never opens (the direct-navigation redesign)"
     );
-    // The restyled detail pane renders the selection's labeled sheet (a
-    // `status` pair), not a heading line.
-    assert!(
-        panel.contains("status"),
-        "the panel shows the selected row's labeled detail sheet:\n{panel}"
-    );
-    // The second Enter opened the scoped agents view (the selected
-    // subagent row's open action).
     assert!(
         parent_run.return_to_agents_view,
-        "Enter on the panel's subagent row hands the pane to the agents view"
+        "the dock's Enter hands the pane to the scoped agents view"
     );
     let scope = parent_run
         .agents_view_scope
         .clone()
-        .expect("the open came from the activity panel (scoped)");
+        .expect("the open came from the dock's direct navigation (scoped)");
 
     // Run 2 — the scoped agents view: the child lists as the root's direct
     // child, and Enter drills into its transcript.

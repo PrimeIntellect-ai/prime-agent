@@ -992,6 +992,8 @@ impl SessionUi {
         let dock = crate::chrome::ActivityDock {
             subagents: live,
             subagents_running: counts.running,
+            subagents_idle: counts.idle,
+            subagents_total: counts.total,
             heartbeats: self.heartbeat_catalog.len(),
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
             bash_running,
@@ -1032,10 +1034,10 @@ impl SessionUi {
     fn activity_selectable(&self, group: crate::chrome::ActivityGroup) -> bool {
         match group {
             crate::chrome::ActivityGroup::Subagents => {
-                // Live rows only: an all-dead roster keeps the group
-                // read-only (there is nothing to browse).
-                self.return_to_agents_view
-                    && self.subagent_counts.running + self.subagent_counts.idle > 0
+                // The group stays openable while any descendant exists
+                // (finished subagents are browsable history in the agents
+                // view); the dock's rendered count is live-only.
+                self.return_to_agents_view && self.subagent_counts.total > 0
             }
             crate::chrome::ActivityGroup::Heartbeats => !self.heartbeat_catalog.is_empty(),
             // Any catalogued bash row keeps the dock's bash group

@@ -12,7 +12,7 @@
 use serde_json::Value;
 
 use crate::keybindings::{format_key_text, KeybindingsManager};
-use crate::menu_panel::{hug_row, menu_list_layout};
+use crate::menu_panel::{hug_row, menu_list_layout, status_dot};
 use crate::theme::{Theme, ThemeColor};
 use crate::width::{str_width, truncate_line, wrap_text};
 use crate::{Line, Span};
@@ -599,9 +599,11 @@ impl Columns {
             .chain([str_width("PID")])
             .max()
             .unwrap_or(0);
+        // The status cell carries the operator's status dot beside the
+        // word (menu_panel::status_dot).
         let status = activities
             .iter()
-            .map(|activity| str_width(&activity.status))
+            .map(|activity| str_width(&activity.status) + 2)
             .chain([str_width("Status")])
             .max()
             .unwrap_or(0);
@@ -685,7 +687,8 @@ impl Columns {
             ),
         );
         row.push(Span::raw("  "));
-        row.push(theme.fg_span(status_color, activity.status.clone()));
+        let (dot, _) = status_dot(&activity.status);
+        row.push(theme.fg_span(status_color, format!("{dot} {}", activity.status)));
         hug_row(theme, row, self.content_width(), selected, width)
     }
 }

@@ -117,6 +117,20 @@ fn finish_menu_row(theme: &Theme, row: Line, width: usize, selected: bool) -> Li
     row
 }
 
+/// The status-dot vocabulary (the operator's 2026-09-23 directive; TS
+/// `subagent-summary-line`'s counts box `● running / ◐ idle /
+/// ○ inactive`): the filled circle rides the live states (running,
+/// active), the half circle the waiting ones (idle, paused), the open
+/// circle the dead ones. The glyph is the state at a glance; the
+/// surface's word rides beside it.
+pub(crate) fn status_dot(status: &str) -> (&'static str, ThemeColor) {
+    match status {
+        "running" | "active" => ("\u{25cf}", ThemeColor::Success),
+        "idle" | "paused" => ("\u{25d0}", ThemeColor::Warning),
+        _ => ("\u{25cb}", ThemeColor::Dim),
+    }
+}
+
 /// How far the selection hug trails past the text (TS
 /// `OnboardingChoiceComponent`'s `ROW_TRAILING`).
 pub(crate) const HUG_TRAILING: usize = 6;
