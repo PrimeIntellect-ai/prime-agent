@@ -322,35 +322,37 @@ fn forked_branch_entries(entries: Vec<FileEntry>) -> Vec<FileEntry> {
             }
         }
     }
-    let live_parent = |parent: &Option<String>| -> Option<String> {
-        let mut current = parent.clone();
-        let mut visited = std::collections::HashSet::new();
-        while let Some(id) = &current {
-            // A parent cycle inside malformed git_state rows must
-            // terminate: stop at the first id the walk repeats.
-            if !visited.insert(id.clone()) {
-                break;
-            }
-            match dropped_parent.get(id) {
-                Some(next) => current = next.clone(),
-                None => break,
-            }
-        }
-        current
-    };
+    // Resolve each dropped id to its nearest kept ancestor once — TS's
+    // `liveParent`, memoized: a parent chain shared by many children costs
+    // one walk total, and a parent cycle inside malformed git_state rows
+    // terminates at the first repeated id.
+    let mut resolved: HashMap<String, Option<String>> = HashMap::new();
+    for id in dropped_parent.keys().cloned().collect::<Vec<_>>() {
+        resolve_dropped_ancestor(&dropped_parent, &mut resolved, &id);
+    }
     entries
         .into_iter()
         .filter(|entry| !matches!(entry, FileEntry::Header { .. } | FileEntry::GitState { .. }))
         .map(|entry| {
-            let parent = live_parent(&entry.parent_id().map(str::to_string));
-            if entry.parent_id() == parent.as_deref() {
+            let parent = entry.parent_id().map(str::to_string);
+            let live = match &parent {
+                // A dropped parent re-links to its resolved kept ancestor
+                // (which may be None, re-rooting the entry); a kept parent
+                // stays.
+                Some(id) => match resolved.get(id) {
+                    Some(answer) => answer.clone(),
+                    None => parent.clone(),
+                },
+                None => None,
+            };
+            if entry.parent_id() == live.as_deref() {
                 return entry;
             }
             let mut value = serde_json::to_value(&entry).unwrap_or_default();
             if let serde_json::Value::Object(map) = &mut value {
                 map.insert(
                     "parentId".to_string(),
-                    match &parent {
+                    match &live {
                         Some(id) => serde_json::Value::from(id.clone()),
                         None => serde_json::Value::Null,
                     },
@@ -359,6 +361,55 @@ fn forked_branch_entries(entries: Vec<FileEntry>) -> Vec<FileEntry> {
             serde_json::from_value(value).unwrap_or_else(|_| entry)
         })
         .collect()
+}
+
+/// The nearest kept ancestor for one dropped git_state row: walk the
+/// dropped parents until an id that survives the fork (or a null parent),
+/// memoizing every node the walk passed so shared chains resolve once and
+/// cycles stop at the first repeated id.
+fn resolve_dropped_ancestor(
+    dropped_parent: &HashMap<String, Option<String>>,
+    resolved: &mut HashMap<String, Option<String>>,
+    start: &str,
+) -> Option<String> {
+    let mut path: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut current = Some(start.to_string());
+    while let Some(id) = current {
+        if let Some(answer) = resolved.get(&id) {
+            let answer = answer.clone();
+            for node in path {
+                resolved.insert(node, answer.clone());
+            }
+            return answer;
+        }
+        if !seen.insert(id.clone()) {
+            let answer = Some(id.clone());
+            for node in path {
+                resolved.insert(node, answer.clone());
+            }
+            return answer;
+        }
+        match dropped_parent.get(&id) {
+            Some(next) => {
+                path.push(id);
+                current = next.clone();
+            }
+            None => {
+                let answer = Some(id.clone());
+                for node in path {
+                    resolved.insert(node, answer.clone());
+                }
+                return answer;
+            }
+        }
+    }
+    // The chain ends at a null parent: every node on it re-links to the
+    // root.
+    for node in path {
+        resolved.insert(node, None);
+    }
+    None
 }
 
 /// The stateful session writer/reader.
@@ -448,7 +499,10 @@ impl SessionManager {
         target_cwd: &Path,
         session_dir: &Path,
     ) -> Result<Self, String> {
-        let mut entries = load_entries_from_file(source_path, true);
+        // Read-only: repairing would REWRITE the source (dropping a torn
+        // row mid-append into a live file); the copy just skips a torn
+        // tail like TS's `loadEntriesFromFile` (read + parse, no repair).
+        let mut entries = load_entries_from_file(source_path, false);
         if entries.is_empty() {
             return Err(format!(
                 "Cannot fork: source session file is empty or invalid: {}",
@@ -1878,6 +1932,30 @@ mod tests {
         let after = std::fs::read_to_string(&fork_file).unwrap();
         assert!(after.contains("follow up"), "appends extend the fork file");
         assert!(after.lines().count() > before.lines().count());
+    }
+
+    /// The fork is a read-only copy: a source with a torn tail (an
+    /// in-progress append by a live writer) is copied with the torn row
+    /// skipped, and the source file itself stays byte-identical — repairing
+    /// would rewrite (and truncate) the live source.
+    #[test]
+    fn fork_from_never_rewrites_the_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("torn.jsonl");
+        let content = "{\"type\":\"session\",\"id\":\"torn-head\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/tmp\"}\n{\"type\":\"custom\",\"customType\":\"kept\",\"data\":{},\"id\":\"keep1\",\"parentId\":null,\"timestamp\":\"2024-01-01T00:00:00.000Z\"}\n{\"type\":\"custo";
+        std::fs::write(&file, content).unwrap();
+        let target_dir = tmp.path().join("fork-sessions");
+        let forked = SessionManager::fork_from(&file, tmp.path(), &target_dir)
+            .expect("the torn tail is skipped, not fatal");
+        // The source is untouched, torn tail and all.
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), content);
+        let entries = forked.get_all_entries();
+        assert!(
+            entries.iter().any(|entry| entry.id() == Some("keep1")),
+            "the complete rows copied"
+        );
     }
 
     /// Malformed-but-parseable git_state parents can form a cycle (a's
