@@ -10,6 +10,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use pa_core::session_engine::agent_messaging::{
@@ -152,6 +153,12 @@ impl Lane {
 
 /// The TS `_assertSessionActionAdmissionAvailable` rejection while the
 /// queued-input pump is suspended (agent-session.ts).
+/// How long the close paths (`shutdown`, `kill`) wait for aborted side
+/// question runs to queue their terminal cancelled events before the
+/// process exits. The runs observe the abort within their 20ms pump tick
+/// and the stream teardown, so this is generous headroom, not a gate.
+const SIDE_QUESTION_SETTLE_TIMEOUT: Duration = Duration::from_secs(3);
+
 pub(crate) const QUEUED_INPUT_SUSPENDED: &str =
     "Cannot admit a session action while queued session input is suspended.";
 
@@ -2630,6 +2637,15 @@ impl Worker {
     /// The session's telemetry finalizes first (TS dispose callback:
     /// `agent session ended` + one flush), bounded by the sink timeouts.
     async fn handle_shutdown(&self) -> DaemonResponse {
+        // TS `shutdown` -> `closeSession` aborts the session's side questions
+        // per attached client before anything else closes, and each run's
+        // `done` chain writes its cancelled event while the client sockets
+        // are still open. Without this the restarted daemon never emits a
+        // terminal side_question_event, and the reattached client's pane
+        // wedges on a running turn no event will ever settle.
+        self.side_questions
+            .abort_all_and_settle(SIDE_QUESTION_SETTLE_TIMEOUT)
+            .await;
         {
             let mut core = self.core.lock().unwrap();
             core.shutdown_requested = true;
@@ -3383,7 +3399,9 @@ impl Worker {
     }
 
     async fn handle_kill(&self) -> DaemonResponse {
-        self.side_questions.abort_all();
+        self.side_questions
+            .abort_all_and_settle(SIDE_QUESTION_SETTLE_TIMEOUT)
+            .await;
         // TS `closeSessionOnce("killed")` cascades the close to the
         // session's resident children before the session's own archive
         // and dispose; a close failure is swallowed here exactly like the

@@ -1607,20 +1607,39 @@ impl SessionUi {
     /// upsert the turn into the pane; a terminal event for the active run
     /// releases the follow-up guard.
     fn apply_side_question_event(&mut self, event: &Value, view: &mut AgentView) {
-        let Some(pane) = view.side_pane.as_mut() else {
-            return;
-        };
-        let id = event.get("id").and_then(Value::as_str).unwrap_or_default();
+        let id = event
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         let status = event
             .get("status")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        if self.active_side_question_id.as_deref() == Some(id) && status != "running" {
+        if self.active_side_question_id.as_deref() == Some(id.as_str()) && status != "running" {
             self.active_side_question_id = None;
         }
+        let Some(pane) = view.side_pane.as_mut() else {
+            return;
+        };
+        // TS `handleSideQuestionEvent` gates the render update on the tracked
+        // turn (`event.id !== this.sideQuestionEvent?.id` returns early): the
+        // tracked turn is the latest one the daemon started (client-local
+        // notices never join it), so a late terminal event for a run whose
+        // turn was closed (esc mid-run) cannot ghost into a newer pane as a
+        // second turn.
+        let tracked = pane
+            .turns
+            .iter()
+            .rev()
+            .find(|turn| !turn.local)
+            .map(|turn| turn.id.as_str());
+        if tracked != Some(id.as_str()) {
+            return;
+        }
         pane.upsert(crate::side_question::SideQuestionTurn {
-            id: id.to_string(),
+            id,
             question: event
                 .get("question")
                 .and_then(Value::as_str)
