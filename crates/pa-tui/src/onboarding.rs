@@ -357,11 +357,15 @@ impl OnboardingChoice {
     /// Move the cursor `delta` rows (TS `move`): no wrap; `false` when the
     /// move would leave the list, so the caller skips the re-render.
     pub fn move_selection(&mut self, delta: isize) -> bool {
-        let next = self.selected as isize + delta;
-        if next < 0 || next as usize >= self.options.len() {
+        // The checked sum keeps a huge delta an out-of-range move (TS
+        // `next < 0 || next >= options.length`) instead of an overflow.
+        let Some(next) = self.selected.checked_add_signed(delta) else {
+            return false;
+        };
+        if next >= self.options.len() {
             return false;
         }
-        self.selected = next as usize;
+        self.selected = next;
         true
     }
 
@@ -796,5 +800,8 @@ mod tests {
         assert!(!choice.move_selection(1));
         assert!(choice.move_selection(-1));
         assert!(!choice.move_selection(-1));
+        // Extreme deltas stay out-of-range moves, never overflow panics.
+        assert!(!choice.move_selection(isize::MAX));
+        assert!(!choice.move_selection(isize::MIN));
     }
 }
