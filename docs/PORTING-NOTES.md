@@ -1423,9 +1423,37 @@ shape is exactly the re-adoption window).
   daemon worker; outside a worker there is no queue to admit into, and
   the TS CLI local session is not a Rust runtime shape).
 
+### The scheduled-fire arm: the cron scheduler's timer death (live evidence)
+
+The controller's live capture (2026-09-23T20:30Z): the governance
+session's `*/2` follow-up heartbeat (`bac7ba7a`) rows as ACTIVE in both
+registries (kernel `rlm_heartbeat.list` and daemon `cron_list`) with
+`nextRunAt` frozen at its 17:46 creation value and `runCount` 0 — the
+worker's scheduler never claimed it, across the 19:10-19:12 supervisor
+restart that re-adopted the (still-live) worker, and the session only
+woke on external nudges. Two structural death vectors in
+`pa-core/src/cron/scheduler.rs`, both hardened:
+
+- **The timer task died on the empty store** (`next_active_run_at() ==
+  None -> return`): a store whose active set emptied mid-life (every
+  job cancelled or completed) killed the timer task with no
+  replacement; a later mutation's `wake()` notified a `Notify` with no
+  waiter. The fix parks the task on the wake notify instead of exiting —
+  the TS `recomputeScheduledSessionWake` shape (every recompute arms a
+  fresh timer), so a parked timer always re-arms.
+- **The run-pass re-entrancy flag** (`running`) was set true with no
+  panic guard: a claim or dispatch that unwound wedged it at `true`,
+  silently no-oping every later pass while the timer kept spinning.
+  A drop guard resets it however the pass ends.
+
+Regression: `a_panicking_dispatch_does_not_wedge_the_run_pass` +
+`the_timer_parks_on_an_empty_store_and_re_arms_on_wake` (pa-core
+scheduler tests).
+
 ### Where the code lives
 
-- `pa-core`: `session_engine::messages` (the row builder + constants).
+- `pa-core`: `session_engine::messages` (the row builder + constants),
+  `cron::scheduler` (the park-instead-of-die timer + the run-pass guard).
 - `pa-daemon`: `bash_notices` (the handlers + validation), `engine`
   (the sink types), `agent_engine` (the fields + registration),
   `worker` (the sink wiring + `admit_bash_completion_notice`/

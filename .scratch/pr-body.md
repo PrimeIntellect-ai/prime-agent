@@ -21,6 +21,15 @@
 - **Revived workers** (the worker died after the notice queued): the admission's queue-snapshot checkpoint is busy evidence, so the adoption relaunches the worker and the create replay restores the lane — the queued notice delivers. (A command still running when its worker dies loses its kernel notice task entirely — TS parity: the notice task is kernel-process state.)
 - **Scheduled fires** (heartbeats): the worker's in-process scheduler keeps firing across the restart — verified by the e2e's heartbeat-across-restart variant. The supervisor's boot re-arm (`rearm_scheduled_wake`, #2592's gates) covers workerless saved sessions; the continuous `recomputeScheduledSessionWake` timer stays a recorded slice-5 scope cut (owned by the scheduled-wake family lane).
 
+### The scheduled-fire arm: the cron scheduler's timer death (live evidence)
+
+The controller's live capture (2026-09-23T20:30Z): the governance session's `*/2` follow-up heartbeat (`bac7ba7a`) rows as ACTIVE in both registries (kernel `rlm_heartbeat.list` and daemon `cron_list`) with `nextRunAt` frozen at its 17:46 creation value and `runCount` 0 — the worker's scheduler never claimed it, across the 19:10-19:12 supervisor restart that re-adopted the (still-live) worker; the session only woke on external nudges. Two structural death vectors in `pa-core/src/cron/scheduler.rs`, both hardened:
+
+- **The timer task died on the empty store** (`next_active_run_at() == None → return`): a store whose active set emptied mid-life killed the timer task with no replacement, and a later mutation's `wake()` notified a `Notify` with no waiter. The fix parks the task on the wake notify instead of exiting — the TS `recomputeScheduledSessionWake` shape (every recompute arms a fresh timer), so a parked timer always re-arms and an adopted worker's due fires survive.
+- **The run-pass re-entrancy flag** (`running`) had no panic guard: a claim or dispatch that unwound wedged it at `true`, silently no-oping every later pass while the timer kept spinning. A drop guard resets it however the pass ends.
+
+Regression: `a_panicking_dispatch_does_not_wedge_the_run_pass` + `the_timer_parks_on_an_empty_store_and_re_arms_on_wake` (pa-core scheduler tests).
+
 ### Verifiers
 - `crates/pa-daemon/tests/readoption_wake_e2e.rs` — the deterministic repro, both arms:
   - **The notify path:** a live-kernel session (mock OpenAI provider via models.json, `PA_E2E_KERNEL_PYTHON`) runs a real `bash()` cell (`sleep 12`), the turn settles, the supervisor is **killed -9 and relaunched** (the worker is re-adopted mid-bash-completion-wait), the watcher exits — and the wake asserts: the `async_bash_completion` row persists, the `[bash-done pid:N exit:M]` turn runs to its reply.
