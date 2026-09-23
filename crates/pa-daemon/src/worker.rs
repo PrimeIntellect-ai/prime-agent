@@ -5040,12 +5040,21 @@ pub(crate) fn withdraw_bash_completion_notice(
     let removed = {
         let mut core_guard = core.lock().unwrap();
         let before = core_guard.steering.len() + core_guard.follow_up.len();
-        core_guard
-            .steering
-            .retain(|item| !is_bash_completion_notice_for(item, &notice));
-        core_guard
-            .follow_up
-            .retain(|item| !is_bash_completion_notice_for(item, &notice));
+        // TS withdraws ONE row per read ("pid reuse can queue an
+        // identical key twice, and the read belongs to the older
+        // handle, which is the earlier notice"): the front-most match
+        // across the two lanes, never the whole set.
+        let mut withdrawn = false;
+        let mut withdraw_one = |item: &QueuedItem| {
+            if !withdrawn && is_bash_completion_notice_for(item, &notice) {
+                withdrawn = true;
+                false
+            } else {
+                true
+            }
+        };
+        core_guard.steering.retain(&mut withdraw_one);
+        core_guard.follow_up.retain(withdraw_one);
         before != core_guard.steering.len() + core_guard.follow_up.len()
     };
     if removed {

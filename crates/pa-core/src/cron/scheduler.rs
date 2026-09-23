@@ -153,6 +153,13 @@ impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
         // pass while the timer keeps spinning. The guard resets it on
         // the way out however the pass ends.
         let _running = RunningGuard(&self.running);
+        // Recover interrupted dispatches before claiming: a pass that
+        // unwound mid-fire (a panic, or the teardown abort) left its
+        // claimed dispatch on record — the next claim would mark the
+        // job skipped forever instead of retrying its next occurrence.
+        // The re-entrancy flag above serializes passes, so this can
+        // never recover another live pass's dispatch.
+        self.store.recover_interrupted_dispatches(now);
         let claimed = self.store.claim_due(now, self.hooks.now());
         let dispatches: Vec<PendingDispatch> = claimed
             .into_iter()
@@ -297,9 +304,21 @@ impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
     /// the notify with no waiter, and later wakes would reach nobody.
     async fn schedule_next(&self) {
         let mut timer = self.timer.lock().await;
-        if let Some(previous) = timer.take() {
-            previous.abort();
+        // A LIVE task is never aborted: the abort-after-claim stranded the
+        // claimed dispatch (its record stayed interrupted, and the next
+        // pass marked the job skipped instead of retrying), so a wake
+        // landing mid-pass lost that fire. The parked loop re-evaluates
+        // at its head on the notify, so the wake needs no respawn —
+        // spawn only when no task is alive. The explicit `stop` abort
+        // stays (teardown; the next `start` recovers the interrupted
+        // dispatches).
+        if let Some(previous) = timer.get_mut() {
+            if !previous.is_finished() {
+                self.core.wake.notify_waiters();
+                return;
+            }
         }
+        self.timer.take();
         let core = self.core.clone();
         let handle = tokio::spawn(async move {
             loop {
@@ -480,14 +499,14 @@ mod tests {
     }
 
     /// THE LIVE INCIDENT'S EXACT SHAPE: a catalog mutation whose wake
-    /// lands while a fire pass is in-flight aborts the timer task
-    /// mid-pass (`schedule_next` aborts the previous task; the abort
-    /// cancels the future at its await without running the pass's tail)
-    /// — the re-entrancy flag must reset through the guard's drop, or
-    /// every later pass silently no-ops forever (the governance
-    /// session's beats froze exactly here: the job was re-created from
-    /// inside a running beat, the mutation's wake aborted the in-flight
-    /// pass, and no later job ever fired).
+    /// lands while a fire pass is in-flight must not strand or wedge
+    /// the schedule. The pre-fix abort canceled the future at its await
+    /// without running the pass's tail, so the claimed dispatch stayed
+    /// interrupted and every later pass marked the job skipped instead
+    /// of retrying (the governance session's beats froze exactly here:
+    /// the job was re-created from inside a running beat). The live
+    /// task now consumes the wake at its loop head, and a pass-head
+    /// recovery un-sticks any interrupted claim.
     #[tokio::test]
     async fn a_mutation_wake_during_an_in_flight_pass_does_not_wedge_the_flag() {
         struct BlockingHooks {
@@ -498,10 +517,10 @@ mod tests {
             async fn run_job(&self, _job: &AgentCronJob) -> anyhow::Result<Option<&'static str>> {
                 self.runs.fetch_add(1, Ordering::SeqCst);
                 if self.block_first.swap(false, Ordering::SeqCst) {
-                    // The delivery parks (the fire's settle wait): the
-                    // pass is in-flight when the mutation's wake aborts
-                    // the timer task.
-                    std::future::pending::<()>().await;
+                    // The delivery holds (the fire's settle wait is
+                    // bounded in the real hooks): the pass is still
+                    // in-flight when the mutation's wake lands.
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 }
                 Ok(Some("ran"))
             }
