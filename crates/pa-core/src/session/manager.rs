@@ -1494,7 +1494,7 @@ mod tests {
         let mut manager = SessionManager::in_memory(Path::new("/tmp"));
         let mut previous = None;
         for _ in 0..1_000 {
-            let id = manager.append_custom_entry("test", None);
+            let id = manager.append_custom_entry("test", None).unwrap();
             let entry = manager.get_all_entries().last().unwrap();
             assert_eq!(entry.id(), Some(id.as_str()));
             assert_eq!(entry.parent_id(), previous.as_deref());

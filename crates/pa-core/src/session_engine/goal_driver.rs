@@ -177,6 +177,7 @@ impl GoalDriver {
         };
         let previous_anchor = self.accounting_started_at;
         let previous_accounted = std::mem::take(&mut self.accounted_messages);
+        let previous_owed = self.owed_continuation_for_rlm_work;
         self.accounting_started_at = Some(AccountingStartedAt(now));
         // TS `_startGoal`: a fresh goal starts with no owed continuation.
         self.owed_continuation_for_rlm_work = false;
@@ -184,6 +185,7 @@ impl GoalDriver {
             // A failed start leaves the previous accounting intact.
             self.accounting_started_at = previous_anchor;
             self.accounted_messages = previous_accounted;
+            self.owed_continuation_for_rlm_work = previous_owed;
             return Err(error);
         }
         Ok(self.state.clone())
@@ -242,7 +244,9 @@ impl GoalDriver {
         if self.state.status != GoalStatus::Active {
             return Ok(UsageOutcome::Ignored);
         }
-        if !self.accounted_messages.insert(message_id.to_string()) {
+        // The double-counting guard stays open until the state is durable:
+        // a failed persist must let the retry account this message again.
+        if self.accounted_messages.contains(message_id) {
             return Ok(UsageOutcome::Ignored);
         }
         let token_delta = goal_token_delta_for_usage(usage.input as i64, usage.output as i64);
@@ -254,25 +258,29 @@ impl GoalDriver {
         let budget_reached = next_goal
             .token_budget
             .is_some_and(|budget| next_goal.tokens_used >= budget);
-        if !budget_reached {
+        let outcome = if !budget_reached {
             self.set_state(session, next_goal)?;
-            return Ok(UsageOutcome::Accounted);
-        }
-        let token_budget = next_goal.token_budget;
-        let budget_reason = token_budget
-            .map(|budget| format!("Reached {budget} token goal budget"))
-            .unwrap_or_default();
-        self.set_state(
-            session,
-            GoalState {
-                active: false,
-                status: GoalStatus::BudgetLimited,
-                last_reason: Some(budget_reason),
-                last_error: None,
-                ..next_goal
-            },
-        )?;
-        Ok(UsageOutcome::BudgetReached)
+            UsageOutcome::Accounted
+        } else {
+            let token_budget = next_goal.token_budget;
+            let budget_reason = token_budget
+                .map(|budget| format!("Reached {budget} token goal budget"))
+                .unwrap_or_default();
+            self.set_state(
+                session,
+                GoalState {
+                    active: false,
+                    status: GoalStatus::BudgetLimited,
+                    last_reason: Some(budget_reason),
+                    last_error: None,
+                    ..next_goal
+                },
+            )?;
+            UsageOutcome::BudgetReached
+        };
+        // Account the message only after the durable write lands.
+        self.accounted_messages.insert(message_id.to_string());
+        Ok(outcome)
     }
 
     /// Pause the goal (no-op when not active).
@@ -280,9 +288,6 @@ impl GoalDriver {
         if self.state.status != GoalStatus::Active {
             return Ok(());
         }
-        // TS `_pauseGoal` routes through `_clearQueuedGoalContexts`, which
-        // drops any owed continuation with the queued contexts.
-        self.owed_continuation_for_rlm_work = false;
         let goal = self.with_accounted_wall_clock();
         self.set_state(
             session,
@@ -293,7 +298,13 @@ impl GoalDriver {
                 last_error: None,
                 ..goal
             },
-        )
+        )?;
+        // TS `_pauseGoal` routes through `_clearQueuedGoalContexts`, which
+        // drops any owed continuation with the queued contexts — after the
+        // durable write, so a failed persist keeps the previous goal's
+        // deferral exactly as it was.
+        self.owed_continuation_for_rlm_work = false;
+        Ok(())
     }
 
     /// Resume a paused/budget-limited goal. Returns the continuation context

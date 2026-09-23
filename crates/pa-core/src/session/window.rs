@@ -158,6 +158,13 @@ impl WindowedSessionStore {
     /// Return `None` for old schemas, torn rows, or ambiguous ancestry so callers
     /// can use their ordinary full reader. No size or message-count admission cap.
     pub fn open(path: &Path) -> io::Result<Option<Self>> {
+        // The generation certificate anchors on unix inode identity; a
+        // same-length replace is indistinguishable under the weak non-unix
+        // metadata, so windows never serves a windowed open — and must not
+        // pay the reverse scan first either: bail out before any reads.
+        if !cfg!(unix) {
+            return Ok(None);
+        }
         let mut file = std::fs::File::open(path)?;
         let generation = Generation::of(&file.metadata()?);
         let size = file.metadata()?.len();
@@ -557,22 +564,6 @@ impl WindowedSessionStore {
     }
     pub fn has_non_bootstrap_entries(&self) -> bool {
         self.snapshot.non_bootstrap
-    }
-    pub fn refinement_history(&self) -> Vec<crate::refinement::RefinementResult> {
-        self.entries
-            .iter()
-            .cloned()
-            .filter_map(|entry| {
-                if let FileEntry::Custom { payload, .. } = entry {
-                    if payload.custom_type == "prime-agent.refinement" {
-                        return payload
-                            .data
-                            .and_then(|data| serde_json::from_value(data).ok());
-                    }
-                }
-                None
-            })
-            .collect()
     }
     pub fn read_stats(&self) -> &WindowReadStats {
         &self.reads
