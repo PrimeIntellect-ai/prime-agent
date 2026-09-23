@@ -47,7 +47,7 @@ export type AuthenticationResult =
 export const BEDROCK_PROVIDER_ID = "amazon-bedrock";
 
 export const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING =
-	"Anthropic subscription auth is active. Prime Agent is a third-party harness: usage draws from extra usage and is billed per token, not your Claude plan limits, and Anthropic's terms reserve subscription auth for its own apps — using it here may violate them and can get your account restricted or banned. An Anthropic API key avoids the risk. Manage extra usage at https://claude.ai/settings/usage.";
+	"Anthropic subscription auth is active. Usage is billed per token from extra usage, not your plan limits; this may violate Anthropic's terms and risk an account ban. An Anthropic API key avoids the risk. Manage extra usage: https://claude.ai/settings/usage";
 
 function isAnthropicSubscriptionAuthKey(apiKey: string | undefined): boolean {
 	return typeof apiKey === "string" && apiKey.startsWith("sk-ant-oat");
