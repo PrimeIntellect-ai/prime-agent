@@ -52,8 +52,30 @@ jobs:
       production_version: ${{ steps.context.outputs.production_version }}
       publish_beta: ${{ steps.context.outputs.publish_beta }}
       publish_production: ${{ steps.context.outputs.publish_production }}
+      stale: ${{ steps.staleness.outputs.stale }}
     steps:
+      - name: Skip superseded push builds
+        id: staleness
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" != "push" ] || [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "Event is ${GITHUB_EVENT_NAME} on ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}; building as usual."
+            echo "stale=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          # Fail open: a tip-check hiccup must never skip a real release build.
+          latest_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_REF_NAME}" --jq .sha 2>/dev/null || echo "${GITHUB_SHA}")"
+          if [ "${latest_sha}" = "${GITHUB_SHA}" ]; then
+            echo "This commit is the tip of ${GITHUB_REF_NAME}; building."
+            echo "stale=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "${GITHUB_SHA} is superseded by ${latest_sha} on ${GITHUB_REF_NAME}; skipping the superseded build."
+            echo "stale=true" >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Checkout
+        if: steps.staleness.outputs.stale != 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
@@ -62,6 +84,7 @@ jobs:
 
       - name: Resolve release context
         id: context
+        if: steps.staleness.outputs.stale != 'true'
         env:
           BEFORE_SHA: ${{ github.event.before || '' }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -144,6 +167,7 @@ jobs:
 
   standalone:
     needs: release-context
+    if: needs.release-context.result == 'success' && needs.release-context.outputs.stale != 'true'
     uses: ./.github/workflows/standalone-binaries.yml
     with:
       build_ref: ${{ needs.release-context.outputs.build_ref }}
@@ -152,6 +176,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     needs: [release-context, standalone]
+    if: needs.release-context.result == 'success' && needs.release-context.outputs.stale != 'true'
     permissions:
       contents: read
     env:
@@ -293,6 +318,7 @@ jobs:
   validate-macos:
     name: Final release (${{ matrix.platform }})
     needs: [release-context, build]
+    if: needs.release-context.result == 'success' && needs.release-context.outputs.stale != 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -378,7 +404,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && needs.release-context.result == 'success' && needs.release-context.outputs.stale != 'true'
     runs-on: ubuntu-latest
     needs: [release-context, build, validate-macos]
     permissions:
