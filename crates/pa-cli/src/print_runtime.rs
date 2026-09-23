@@ -861,10 +861,13 @@ async fn run_prompts_and_emit(
     // catch): the raw error prints to stderr and the run exits 1 without
     // the later prompts or the terminal selection.
     let mut command_failure: Option<String> = None;
-    'prompts: for prompt in options
+    // The `@file` image attachments ride the initial prompt only (TS
+    // `initialImages`); the later CLI messages stay text.
+    'prompts: for (prompt, images) in options
         .initial_message
         .iter()
-        .chain(options.messages.iter())
+        .map(|prompt| (prompt, options.initial_images.clone()))
+        .chain(options.messages.iter().map(|prompt| (prompt, Vec::new())))
     {
         // Session commands (TS `_normalizeSubmission`'s `sessionCommand`
         // arm) never reach the model loop: the pre-turn boundary stays
@@ -921,7 +924,7 @@ async fn run_prompts_and_emit(
             .await?;
         engine
             .session
-            .prompt(prompt, Default::default())
+            .prompt_with_images(prompt, images, Default::default())
             .await
             .map_err(|error| format!("{error:#}"))?;
         engine.session.agent().wait_for_idle().await;

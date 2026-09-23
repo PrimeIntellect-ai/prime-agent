@@ -41,7 +41,7 @@ pub mod heartbeats_picker;
 pub mod hotkeys;
 pub mod hyperlinks;
 mod image_component;
-mod image_load;
+pub mod image_load;
 mod image_markers;
 pub mod info_commands;
 mod input;

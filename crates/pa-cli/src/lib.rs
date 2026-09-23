@@ -17,6 +17,7 @@ pub(crate) mod daemon_command;
 pub(crate) mod daemon_discovery;
 pub(crate) mod daemon_mode;
 pub(crate) mod daemon_session_list;
+pub(crate) mod file_processor;
 pub(crate) mod global_flags;
 pub(crate) mod headless_autonomous;
 pub(crate) mod initial_message;
@@ -222,8 +223,41 @@ fn main_impl(args: Vec<String>, runtime: &dyn mode::Runtime) -> Result<i32, Stri
         .or_else(|| pa_core::settings::SettingsManager::create(&cwd, &agent_dir).get_session_dir());
 
     let mut cli_messages = parsed.messages.clone();
-    let initial_message =
-        initial_message::build_initial_message(&mut cli_messages, None, None).initial_message;
+    // TS `readPipedStdin`: a piped (non-terminal) stdin joins the initial
+    // prompt; a terminal stdin is never read.
+    let stdin_content = if std::io::stdin().is_terminal() {
+        None
+    } else {
+        let mut buffer = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer).ok();
+        Some(buffer).filter(|content| !content.is_empty())
+    };
+    // TS `prepareInitialMessage`: `@file` arguments expand into text and
+    // image attachments for the initial prompt; the file blocks ride
+    // every mode's first message, the images the non-interactive prompt.
+    let (file_text, initial_images) = if parsed.file_args.is_empty() {
+        (None, Vec::new())
+    } else {
+        let auto_resize =
+            pa_core::settings::SettingsManager::create(&cwd, &agent_dir).get_image_auto_resize();
+        match file_processor::process_file_arguments(&parsed.file_args, &cwd, auto_resize) {
+            Ok(processed) => (
+                Some(processed.text).filter(|text| !text.is_empty()),
+                processed.images,
+            ),
+            Err(error) => {
+                // TS prints the failure through chalk on stderr and exits.
+                eprintln!("{}", error.message);
+                return Ok(1);
+            }
+        }
+    };
+    let initial_message = initial_message::build_initial_message(
+        &mut cli_messages,
+        file_text.as_deref(),
+        stdin_content.as_deref(),
+    )
+    .initial_message;
     let options = mode::RunOptions {
         app_mode,
         config: mode::runtime_config_from_args(
@@ -245,6 +279,7 @@ fn main_impl(args: Vec<String>, runtime: &dyn mode::Runtime) -> Result<i32, Stri
         },
         messages: cli_messages,
         initial_message,
+        initial_images,
         file_args: parsed.file_args.clone(),
         daemon_socket: parsed.daemon_socket.clone(),
         list_models: parsed.list_models,
