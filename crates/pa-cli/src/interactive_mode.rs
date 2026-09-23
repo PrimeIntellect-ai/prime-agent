@@ -1127,6 +1127,7 @@ mod tests {
             daemon_socket: None,
             list_models: None,
             initial_message: None,
+            initial_images: Vec::new(),
             verbose: false,
             offline: false,
             agents_view_requested: false,
