@@ -29,11 +29,14 @@
 //!    proof only while it is recent: the crash window is minutes, not
 //!    hours. A record older than
 //!    [`REVIVAL_BUSY_EVIDENCE_MAX_AGE_MS`] is residue of an era that
-//!    already ended (a prior crash/restore whose workers went on to
-//!    die or be stopped) — the 17:07 storm revived verify-matrix
-//!    children from five-hour-old journals. Update-kept roster rows are
-//!    exempt: the roster is this update's own point-in-time intent, so
-//!    its busy journals are not the evidence being trusted.
+//!    already ended, and a timestamp dated beyond
+//!    [`REVIVAL_CLOCK_SKEW_MS`] into the future is not freshness proof
+//!    either (clock rollback must not zero the age) — uncertainty
+//!    never revives. The stale evidence that caused the boot storms was
+//!    five-hour-old journals (a prior crash/restore whose workers went
+//!    on to die or be stopped). Update-kept roster rows are exempt: the
+//!    roster is this update's own point-in-time intent, so its busy
+//!    journals are not the evidence being trusted.
 
 use std::path::Path;
 
@@ -45,6 +48,14 @@ use pa_types::daemon::{DaemonWorkerDescriptor, DaemonWorkerLifecycle};
 /// Beyond the bound the session stays down and reopens through the next
 /// client create — the same recovery TS gives every dead worker.
 pub(crate) const REVIVAL_BUSY_EVIDENCE_MAX_AGE_MS: u64 = 30 * 60 * 1000;
+
+/// Freshness tolerates only this much wall-clock skew between the
+/// journal's writer and the boot reading it (two daemons on one shared
+/// agent dir can disagree slightly). A timestamp further in the
+/// future is not freshness proof: a clock rollback or a far-future
+/// stamp must not zero the age through `saturating_sub` — uncertainty
+/// never revives.
+pub(crate) const REVIVAL_CLOCK_SKEW_MS: u64 = 60 * 1000;
 
 /// One veto against relaunching a dead descriptor, with the park's log
 /// reason (the adoption telemetry stays counts-only; the reason lives in
@@ -119,8 +130,10 @@ pub(crate) fn revival_veto(
         // missing timestamp cannot prove freshness — uncertainty must not
         // revive a session (the same philosophy as `read_interrupted`).
         let recorded_at = busy_recorded_at?;
+        let now = crate::util::now_ms();
         let fresh = crate::util::iso_to_unix_ms(recorded_at).is_some_and(|at| {
-            crate::util::now_ms().saturating_sub(at) <= REVIVAL_BUSY_EVIDENCE_MAX_AGE_MS
+            at <= now.saturating_add(REVIVAL_CLOCK_SKEW_MS)
+                && now.saturating_sub(at) <= REVIVAL_BUSY_EVIDENCE_MAX_AGE_MS
         });
         if !fresh {
             return Some(RevivalVeto::StaleBusyEvidence {
@@ -241,6 +254,42 @@ mod tests {
         let veto = revival_veto(&agent_dir, &descriptor(Some(&file)), false, Some("when?"))
             .expect("uncertainty must not revive");
         assert!(matches!(veto, RevivalVeto::StaleBusyEvidence { .. }));
+    }
+
+    #[test]
+    fn a_future_dated_evidence_timestamp_vetoes_the_revival() {
+        let file = session_file(Some("active"));
+        // A far-future stamp (clock rollback or a bad write) must not
+        // zero the age through saturating_sub: uncertainty never revives.
+        let recorded_at = iso_from_unix_ms(now_ms() + 2 * 60 * 60 * 1000);
+        let agent_dir = agent_dir();
+        let veto = revival_veto(
+            &agent_dir,
+            &descriptor(Some(&file)),
+            false,
+            Some(&recorded_at),
+        )
+        .expect("a future stamp is not freshness proof");
+        assert!(matches!(veto, RevivalVeto::StaleBusyEvidence { .. }));
+    }
+
+    #[test]
+    fn evidence_within_the_clock_skew_bound_still_passes() {
+        let file = session_file(Some("active"));
+        // Two daemons on one store can disagree slightly; a stamp within
+        // the skew bound is still the fresh proof it claims to be.
+        let recorded_at = iso_from_unix_ms(now_ms() + 30 * 1000);
+        let agent_dir = agent_dir();
+        assert!(
+            revival_veto(
+                &agent_dir,
+                &descriptor(Some(&file)),
+                false,
+                Some(&recorded_at)
+            )
+            .is_none(),
+            "a small skew is tolerated"
+        );
     }
 
     #[test]
