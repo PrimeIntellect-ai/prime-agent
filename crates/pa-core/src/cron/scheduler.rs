@@ -1,5 +1,13 @@
 //! The cron scheduler: wake-timer loop, claim-due dispatch, per-session
 //! dispatch lanes. Port of the AgentCronScheduler half of core/cron-jobs.ts.
+//!
+//! Deviation from TS, documented: a failing job backs off. TS re-fires a job
+//! at its full cadence no matter how many consecutive fires fail (a dead
+//! model route re-fires every tick until the job is cancelled); this port
+//! stretches the next run past the schedule on consecutive failures (see
+//! [`FAILURE_BACKOFF_BASE_MS`]) and resets the stretch after a good run. A
+//! skipped fire (busy session, deferral) neither extends nor resets the
+//! streak.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -11,6 +19,23 @@ use tokio::sync::{Mutex, Notify};
 use super::store::{AgentCronDispatch, AgentCronJobStore, DispatchResultOptions};
 
 const MAX_TIMEOUT_MS: u64 = 2_147_483_647;
+
+/// The first consecutive-failure pause: 2 minutes.
+const FAILURE_BACKOFF_BASE_MS: u64 = 120_000;
+
+/// The backoff ceiling: a failing job still gets one fire per hour, so a
+/// recovered route (or a fixed session) is picked back up without a
+/// manual wake.
+const FAILURE_BACKOFF_CAP_MS: u64 = 3_600_000;
+
+/// The pause after `consecutive_failures` failed fires: `base * 2^(n-1)`
+/// capped at [`FAILURE_BACKOFF_CAP_MS`]. The first failure pauses 2m, the
+/// second 4m, then 8m, 16m, 32m, 1h.
+pub(crate) fn failure_backoff_ms(consecutive_failures: u32) -> u64 {
+    FAILURE_BACKOFF_BASE_MS
+        .saturating_mul(2u64.saturating_pow(consecutive_failures.saturating_sub(1)))
+        .min(FAILURE_BACKOFF_CAP_MS)
+}
 
 /// A claimed dispatch paired with its optional settle callback.
 type PendingDispatch = (AgentCronDispatch, Option<Box<dyn FnOnce() + Send>>);
@@ -49,6 +74,9 @@ pub struct SchedulerCore<H: AgentCronSchedulerHooks> {
     stopped: AtomicBool,
     has_started: AtomicBool,
     dispatch_lanes: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Consecutive failed fires per job id (the backoff streaks). A good
+    /// run clears its entry; a daemon restart starts every streak fresh.
+    failure_streaks: std::sync::Mutex<HashMap<String, u32>>,
     wake: Notify,
 }
 
@@ -62,6 +90,7 @@ impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
                 stopped: AtomicBool::new(true),
                 has_started: AtomicBool::new(false),
                 dispatch_lanes: Mutex::new(HashMap::new()),
+                failure_streaks: std::sync::Mutex::new(HashMap::new()),
                 wake: Notify::new(),
             }),
             timer: Mutex::new(None),
@@ -190,17 +219,29 @@ impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
             } else {
                 "ran"
             };
-            let error = run_error;
+            let failed = run_error.is_some();
             self.store
                 .record_dispatch_result(
                     &dispatch.id,
                     &DispatchResultOptions {
                         now: Some(self.hooks.now()),
                         outcome,
-                        error,
+                        error: run_error,
                     },
                 )
                 .ok();
+            // Backoff bookkeeping: a failed fire (recorded above as a run
+            // with an error) stretches the job's next run past its
+            // schedule; a good run clears the streak.
+            if failed {
+                let now = self.hooks.now();
+                let streak = self.note_run_failure(&dispatch.job.id);
+                let _ = self
+                    .store
+                    .defer_next_run(&dispatch.job.id, now + failure_backoff_ms(streak));
+            } else if outcome == "ran" {
+                self.clear_run_failure(&dispatch.job.id);
+            }
             run_result
         }
         .await;
@@ -208,6 +249,27 @@ impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
             end();
         }
         outcome
+    }
+
+    /// Count one more failed fire; returns the streak length.
+    fn note_run_failure(&self, job_id: &str) -> u32 {
+        let mut streaks = self
+            .failure_streaks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let count = streaks.entry(job_id.to_string()).or_insert(0);
+        *count = count.saturating_add(1);
+        *count
+    }
+
+    /// A fire ran without error: the job's next run goes back to its
+    /// schedule.
+    fn clear_run_failure(&self, job_id: &str) {
+        let mut streaks = self
+            .failure_streaks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        streaks.remove(job_id);
     }
 }
 
@@ -402,5 +464,119 @@ mod tests {
         let now = 1_700_000_000_000;
         let job = store.create(&input("tick", "every 10m", now)).unwrap();
         assert_eq!(job.schedule.kind, ScheduleKind::Interval);
+    }
+
+    #[test]
+    fn failure_backoff_doubles_then_caps() {
+        assert_eq!(failure_backoff_ms(1), 120_000);
+        assert_eq!(failure_backoff_ms(2), 240_000);
+        assert_eq!(failure_backoff_ms(3), 480_000);
+        assert_eq!(failure_backoff_ms(5), 1_920_000);
+        assert_eq!(failure_backoff_ms(6), 3_600_000);
+        assert_eq!(failure_backoff_ms(60), 3_600_000);
+    }
+
+    /// The failure backoff: consecutive failed fires stretch the job's
+    /// next run past its schedule (2m, 4m, ... capped at 1h) and record
+    /// the error; one good run resets the stretch. Without it, a dead
+    /// model route re-fires at the job's full cadence forever (the
+    /// dogfood incident: ~120 fires of a failing every-2m heartbeat).
+    #[tokio::test]
+    async fn consecutive_failures_back_off_the_next_run() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(AgentCronJobStore::new(dir.path().join("jobs.json")));
+        let start = 1_700_000_000_000;
+        let job = store.create(&input("tick", "every 1m", start)).unwrap();
+        let job_id = job.id.clone();
+        // First due moment: 60s after creation.
+        let t1 = start + 61_000;
+        let hooks = Arc::new(FailingHooks {
+            runs: Arc::new(AtomicUsize::new(0)),
+            error: std::sync::Mutex::new(Some("model route gone".to_string())),
+            now: std::sync::Mutex::new(t1),
+        });
+        let scheduler = AgentCronScheduler::new(store.clone(), hooks.clone());
+        // No `start()`: the timer task would race the explicit `run_due`
+        // calls below (both re-read the mutable clock), so this test
+        // drives the claim-dispatch-record loop directly.
+        // Failure 1: the schedule rolls next to t1 + 60s, the backoff
+        // raises it to t1 + 120s and the error lands on the job.
+        assert_eq!(scheduler.run_due().await.unwrap(), 1);
+        let job = store
+            .list()
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .expect("job kept");
+        assert_eq!(job.last_error.as_deref(), Some("model route gone"));
+        assert_eq!(job.run_count, 1);
+        assert_eq!(
+            crate::cron::parse_iso_millis(job.next_run_at.as_deref().unwrap()),
+            Some(t1 + failure_backoff_ms(1))
+        );
+        // Failure 2 (clock advanced past the deferred run): the pause
+        // doubles.
+        let t2 = t1 + failure_backoff_ms(1) + 1;
+        *hooks.now.lock().unwrap() = t2;
+        assert_eq!(scheduler.run_due().await.unwrap(), 1);
+        let job = store
+            .list()
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .expect("job kept");
+        assert_eq!(
+            crate::cron::parse_iso_millis(job.next_run_at.as_deref().unwrap()),
+            Some(t2 + failure_backoff_ms(2))
+        );
+        // A good run clears the streak: the next run goes back to the
+        // bare schedule...
+        let t3 = t2 + failure_backoff_ms(2) + 1;
+        *hooks.now.lock().unwrap() = t3;
+        *hooks.error.lock().unwrap() = None;
+        assert_eq!(scheduler.run_due().await.unwrap(), 1);
+        let job = store
+            .list()
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .expect("job kept");
+        assert_eq!(job.last_error, None);
+        assert_eq!(
+            crate::cron::parse_iso_millis(job.next_run_at.as_deref().unwrap()),
+            Some(t3 + 60_000)
+        );
+        // ...so the failure after it restarts at the base pause.
+        let t4 = t3 + 60_000 + 1;
+        *hooks.now.lock().unwrap() = t4;
+        *hooks.error.lock().unwrap() = Some("model route gone".to_string());
+        assert_eq!(scheduler.run_due().await.unwrap(), 1);
+        let job = store
+            .list()
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .expect("job kept");
+        assert_eq!(
+            crate::cron::parse_iso_millis(job.next_run_at.as_deref().unwrap()),
+            Some(t4 + failure_backoff_ms(1))
+        );
+    }
+
+    /// Hooks whose runs can fail on demand, over a controllable clock.
+    struct FailingHooks {
+        runs: Arc<AtomicUsize>,
+        error: std::sync::Mutex<Option<String>>,
+        now: std::sync::Mutex<u64>,
+    }
+
+    impl AgentCronSchedulerHooks for FailingHooks {
+        async fn run_job(&self, _job: &AgentCronJob) -> anyhow::Result<Option<&'static str>> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            let error = self.error.lock().unwrap().clone();
+            match error {
+                Some(message) => Err(anyhow::anyhow!(message)),
+                None => Ok(None),
+            }
+        }
+        fn now(&self) -> u64 {
+            *self.now.lock().unwrap()
+        }
     }
 }

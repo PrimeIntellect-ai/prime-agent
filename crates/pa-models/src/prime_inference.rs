@@ -93,6 +93,10 @@ struct WireItem {
     pricing: WirePricing,
     #[serde(default)]
     specs: WireSpecs,
+    /// Declared request parameters; `Some` without `"tools"` drops the
+    /// entry (capability filtering: a session always attaches tools).
+    #[serde(default)]
+    supported_parameters: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -173,6 +177,20 @@ pub fn parse_prime_inference_model_catalog(
         };
         if seen.insert(wire.id.clone(), ()).is_some() {
             return Err(format!("Duplicate Prime Inference model {}", wire.id));
+        }
+        // Capability filtering (documented deviation from the TS parser,
+        // which never reads this field): a model that declares its
+        // supported request parameters without "tools" can never serve a
+        // prime-agent turn — the session always attaches its tool set and
+        // the router answers `404 No endpoints found that support tool use`
+        // — so it never enters the selectable catalog. Entries without the
+        // field stay: no signal, historical behavior.
+        if wire
+            .supported_parameters
+            .as_ref()
+            .is_some_and(|parameters| !parameters.iter().any(|parameter| parameter == "tools"))
+        {
+            continue;
         }
         let name = wire
             .display_name
@@ -504,6 +522,24 @@ mod tests {
         assert_ne!(a, b);
         assert_ne!(a, c);
         assert_eq!(a.len(), 64, "hex sha256");
+    }
+
+    /// Capability filtering: a model that declares its supported request
+    /// parameters without "tools" can never serve a session (the router
+    /// answers 404 "No endpoints found that support tool use"), so it
+    /// never enters the catalog. Entries without the declaration stay.
+    #[test]
+    fn parse_filters_entries_without_tool_support() {
+        let mut with_tools = wire_entry("z-ai/glm-5.3", 1.0, 2.0);
+        with_tools["supported_parameters"] =
+            json!(["max_tokens", "temperature", "tools", "tool_choice"]);
+        let mut without_tools = wire_entry("meta-llama/Llama-3.2-1B-Instruct", 1.0, 2.0);
+        without_tools["supported_parameters"] = json!(["max_tokens", "temperature", "top_p"]);
+        let undeclared = wire_entry("qwen/qwen3.8-max", 1.0, 4.0);
+        let value = json!({"data": [with_tools, without_tools, undeclared]});
+        let entries = parse_prime_inference_model_catalog(&value, false).expect("entries");
+        let ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(ids, vec!["z-ai/glm-5.3", "qwen/qwen3.8-max"]);
     }
 
     #[test]

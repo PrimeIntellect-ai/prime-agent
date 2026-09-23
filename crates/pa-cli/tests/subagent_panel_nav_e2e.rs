@@ -306,9 +306,11 @@ async fn down_arrow_focuses_the_panel_and_enter_drills_into_the_child() {
         panel.contains("Activity"),
         "the dock's Enter opens the unified activity panel:\n{panel}"
     );
+    // The restyled detail pane renders the selection's labeled sheet (a
+    // `status` pair), not a heading line.
     assert!(
-        panel.contains("Selected"),
-        "the panel shows the selected-detail pane:\n{panel}"
+        panel.contains("status"),
+        "the panel shows the selected row's labeled detail sheet:\n{panel}"
     );
     // The second Enter opened the scoped agents view (the selected
     // subagent row's open action).

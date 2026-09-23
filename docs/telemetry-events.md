@@ -107,7 +107,8 @@ per submission: session commands (`compact`, `refine`, `goal`,
 `autonomous`) emit from the worker's session telemetry at execution; client
 commands (`model`, `effort`, `tree`, `fork`, `clone`, `export`, `share`,
 `hotkeys`, `session`, `context`, `system-prompt`, `logs`, `changelog`,
-`mcp`, `heartbeats`, `nightly`) emit from the interactive client at dispatch
+`mcp`, `heartbeats`, `nightly`, `plugins`, `speed`) emit from the
+interactive client at dispatch
 (TS `captureAgentCommandUsed`).
 
 | property | type | notes |

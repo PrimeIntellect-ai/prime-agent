@@ -339,10 +339,26 @@ impl SessionRegistry {
         &self,
         session_file: &str,
     ) -> Option<Arc<ResidentWorker>> {
+        self.list_by_session_file(session_file)
+            .await
+            .into_iter()
+            .next()
+    }
+
+    /// Every resident registered for one session file, insertion order
+    /// unspecified (TS `findWorkerBySessionFile`'s match loop, plural): a
+    /// replacement window can briefly hold the retiring and the incoming
+    /// worker over the same file, and the caller classifies the matches
+    /// (the create-reuse seam) instead of guessing one.
+    pub(crate) async fn list_by_session_file(
+        &self,
+        session_file: &str,
+    ) -> Vec<Arc<ResidentWorker>> {
         let target = std::path::Path::new(session_file)
             .canonicalize()
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or_else(|_| session_file.to_string());
+        let mut matches = Vec::new();
         for resident in self.list().await {
             let owned = resident
                 .descriptor
@@ -356,10 +372,10 @@ impl SessionRegistry {
                 .map(|path| path.to_string_lossy().to_string())
                 .unwrap_or(owned);
             if owned == target {
-                return Some(resident);
+                matches.push(resident);
             }
         }
-        None
+        matches
     }
 
     /// The resident whose durable authentication token matches (worker-

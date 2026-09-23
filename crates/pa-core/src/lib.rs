@@ -16,6 +16,10 @@ pub use tools::tool_definition::{
     ToolContentBlock, ToolDefinition, ToolExecutionResult, ToolUpdate, WrappedTool,
 };
 
+// Path-resolution helper the CLI's `@file` expansion shares with the
+// tools (cwd-relative resolve with the macOS filename variants).
+pub use tools::path_utils::resolve_read_path;
+
 // bash tool: definition + local/remote execution seam.
 pub use tools::bash::{
     create_bash_tool_definition, create_bash_tool_definition_with_options, BashOperations,
