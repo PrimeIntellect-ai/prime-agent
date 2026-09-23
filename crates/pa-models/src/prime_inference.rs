@@ -126,7 +126,7 @@ pub fn prime_inference_reasoning_controls(
             map.insert(
                 level,
                 efforts
-                    .contains(&level.wire_name())
+                    .contains(&level.wire_name().to_string())
                     .then(|| level.wire_name().to_string()),
             );
         }

@@ -148,8 +148,10 @@ pub(crate) fn build_params(
                     // disables reasoning.
                     if !off.is_some_and(|value| value.is_none()) {
                         if compat.supports_reasoning_effort {
-                            let off_value =
-                                off.and_then(|value| value.as_deref()).unwrap_or("none").to_string();
+                            let off_value = off
+                                .and_then(|value| value.as_deref())
+                                .unwrap_or("none")
+                                .to_string();
                             params.insert("reasoning".into(), json!({ "effort": off_value }));
                         } else {
                             params.insert("reasoning".into(), json!({ "enabled": false }));
@@ -178,8 +180,10 @@ pub(crate) fn build_params(
                     // null suppresses the disable; a missing key or map still
                     // sends the off value.
                     if !off.is_some_and(|value| value.is_none()) {
-                        let off_value =
-                            off.and_then(|value| value.as_deref()).unwrap_or("none").to_string();
+                        let off_value = off
+                            .and_then(|value| value.as_deref())
+                            .unwrap_or("none")
+                            .to_string();
                         params.insert("reasoning_effort".into(), json!(off_value));
                     }
                 }
