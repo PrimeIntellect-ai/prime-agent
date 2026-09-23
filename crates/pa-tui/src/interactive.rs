@@ -123,6 +123,10 @@ pub trait InteractionTelemetry: Send + Sync {
         kitty: bool,
         modify_other_keys: bool,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    /// The terminal hyperlink (OSC 8) capability resolved for the run
+    /// (event `tui hyperlinks`): `enabled` reports whether clickable link
+    /// rendering is active.
+    fn hyperlinks_active(&self, enabled: bool) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// The `!`/`!!` bash shortcut ran a command from the chat view (event
     /// `tui bash shortcut used`): `excluded` is the `!!` variant, and
     /// `side_conversation` marks a run inside a side-question pane.
@@ -756,6 +760,10 @@ pub async fn run_interactive(
     // The enhanced-key modes settle once (kitty answer or fallback) and
     // report one adoption event; headless runs hold pipes and never probe.
     let mut enhanced_keys_pending = renderer.is_terminal();
+    // The hyperlink capability is env-based and settles at run start (no
+    // probe round-trip like the kitty keyboard protocol); terminal runs
+    // report it once alongside the enhanced-key modes.
+    let mut hyperlinks_pending = renderer.is_terminal();
     // The frame scheduler (TS `requestRender` + `scheduleRender`): state
     // changes coalesce, and the loop paints at most one frame per
     // MIN_RENDER_INTERVAL_MS. `last_render_at` is `None` before the first
@@ -798,6 +806,18 @@ pub async fn run_interactive(
                 }
                 enhanced_keys_pending = false;
             }
+        }
+
+        // The OSC 8 hyperlink capability settles once per run with the
+        // terminal identity the paint backend binds to: one adoption event
+        // reports the gate (`tui hyperlinks`).
+        if hyperlinks_pending {
+            if let Some(telemetry) = &session.telemetry {
+                telemetry
+                    .hyperlinks_active(crate::hyperlinks::hyperlinks_enabled())
+                    .await;
+            }
+            hyperlinks_pending = false;
         }
 
         // Drain the whole queued input batch in this one iteration (TS

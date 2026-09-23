@@ -240,6 +240,16 @@ emitted once per client run when the kitty keyboard protocol answer lands).
 | `kitty` | boolean | the kitty keyboard protocol is active (flags `1\|2\|4`) |
 | `modify_other_keys` | boolean | always `false` in this port: the xterm modifyOtherKeys mode-2 fallback is never armed (crossterm cannot parse the resulting `CSI 27;mods;key~` sequences — the whole input buffer drops on the parse error, the shift-modified-printable bug class); every surface start instead resets the mode. The property keeps the TS event shape. |
 
+### `tui hyperlinks`
+
+The terminal hyperlink (OSC 8) capability resolved for an interactive run
+(adoption: emitted once per client run, terminal runs only — headless runs
+never paint a tty).
+
+| property | type | notes |
+|---|---|---|
+| `enabled` | boolean | clickable link rendering is active (the `detectCapabilities` gate: on in terminals positively known to implement OSC 8 — kitty/ghostty/wezterm/iTerm2/VS Code/Alacritty — and off under tmux/screen and in unknown terminals) |
+
 ### `tui image pasted`
 
 An image was pasted into the input editor from the clipboard and attached
