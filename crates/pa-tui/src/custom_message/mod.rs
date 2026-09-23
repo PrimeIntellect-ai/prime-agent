@@ -48,6 +48,11 @@ pub const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE: &str = "rlm_child_terminal_noti
 pub const ASYNC_BASH_COMPLETION_CUSTOM_TYPE: &str = "async_bash_completion";
 pub const COMPACTION_OUTCOME_CUSTOM_TYPE: &str = "compaction_outcome";
 pub const REFINEMENT_OUTCOME_CUSTOM_TYPE: &str = "refinement_outcome";
+/// The durable single-line outcome of one provider-retry episode (SANCTIONED
+/// DIVERGENCE, operator ruling 2026-09-23: one resolved/terminal row per
+/// episode instead of the per-attempt error rows TS keeps). Wire twin of
+/// `pa_core::session_engine::messages::PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE`.
+pub const PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE: &str = "provider_retry_outcome";
 
 // ---------------------------------------------------------------------------
 // Row payloads (carried by ChatEntry variants)
@@ -183,6 +188,19 @@ pub fn custom_message_entries(message: &Value) -> Vec<ChatEntry> {
             slash_row_entries(message, custom_type, &content, details)
         }
         COMPACTION_OUTCOME_CUSTOM_TYPE => vec![compaction_outcome_entry(message, details)],
+        PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE => {
+            // The ONE line a retry episode leaves in the chat: the row text
+            // the daemon carried (the live rows use the same text), the
+            // tone from the structured verdict.
+            vec![ChatEntry::Status {
+                text: content,
+                kind: if details.get("success").and_then(Value::as_bool) == Some(true) {
+                    crate::chat::StatusKind::Info
+                } else {
+                    crate::chat::StatusKind::Error
+                },
+            }]
+        }
         REFINEMENT_OUTCOME_CUSTOM_TYPE => refinement::refinement_outcome_entries(message, details),
         AGENT_MESSAGE_CUSTOM_TYPE => agent_message_entry(details).map_or_else(
             || vec![generic_panel_entry(custom_type, message)],
