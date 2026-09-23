@@ -131,7 +131,16 @@ def scenario(binary, base, name, attempts=2):
     for attempt in range(attempts):
         suffix = "" if attempt == 0 else f"-retry{attempt}"
         results = scenario_once(binary, base, name + suffix)
-        if "boot" not in results and not results.get("errors"):
+        clean = (
+            "boot" not in results
+            and not results.get("errors")
+            and results.get("json", {}).get("code") == 0
+            and results.get("json", {}).get("out")
+            and results.get("text", {}).get("code") == 0
+            and results.get("text", {}).get("out")
+            and results.get("confirm", {}).get("code") == 1
+        )
+        if clean:
             return results
         results["attempt"] = attempt
     return results
