@@ -44,8 +44,10 @@ pub fn activate(
         previous_target: current_target.to_string(),
         update_id: update_id.to_string(),
     };
-    std::fs::write(root.join(".activation-state"), state.render())
-        .with_context(|| format!("write {}", root.join(".activation-state").display()))?;
+    let state_path = root.join(".activation-state");
+    std::fs::write(&state_path, state.render())
+        .with_context(|| format!("write {}", state_path.display()))?;
+    pa_core::update::install::sync_directory(root)?;
     write_launcher(
         root,
         pa_core::update::install::PREVIOUS_LAUNCHER,
@@ -90,7 +92,11 @@ fn write_launcher(root: &Path, link: &str, target: &str) -> Result<()> {
         std::os::unix::fs::symlink(target, &temporary)
             .with_context(|| format!("stage the {link} launcher"))?;
         std::fs::rename(&temporary, &launcher)
-            .with_context(|| format!("point the {link} launcher at {target}"))
+            .with_context(|| format!("point the {link} launcher at {target}"))?;
+        if let Some(bin) = launcher.parent() {
+            pa_core::update::install::sync_directory(bin)?;
+        }
+        Ok(())
     }
     #[cfg(not(unix))]
     {
@@ -115,8 +121,10 @@ pub fn launcher_target(root: &Path, link: &str) -> Result<String> {
 /// parity): `--version` must print exactly `version`, `--help` must exit
 /// cleanly. Both run detached with a hard timeout.
 pub async fn validate_candidate(exe: &Path, version: &str) -> Result<()> {
-    let reported = probe(exe, &["--version"], PROBE_TIMEOUT).await?;
-    let reported = reported.trim();
+    // The release name and the binary it holds must agree: a directory
+    // claiming a version its binary does not report is an inconsistent
+    // release, never a candidate.
+    let reported = pa_core::update::download::binary_reported_version(exe).await?;
     if reported != version {
         anyhow::bail!("the staged binary reports version {reported:?}, expected {version:?}");
     }

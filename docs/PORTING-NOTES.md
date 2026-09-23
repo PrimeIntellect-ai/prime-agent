@@ -405,6 +405,52 @@ Reference: `docs/update-flow-state-machine.md` (§3/§4/§7/§9) over the TS
   commit/stop drivers are slices 2-3).
 
 
+## Update artifact selection + direct install hardening (2026-09-23)
+
+Reference: TS `version-check.ts` / `native-update.ts` / `native-installation.ts`
+over `docs/update-flow-state-machine.md` §4. Incident class (the
+`0.10.0-rust-64f66e3d` dogfood train installed over newer code, twice
+corrupting a Mach-O with in-place `cp` during manual installs):
+a hand-named release directory whose binary reports a different version, and
+same-base opaque build tags (`-rust-<gitsha>`) that semver orders by tag
+string — which is not build recency.
+
+- Divergences (recorded):
+  - The update baseline anchors on the release directory the RUNNING binary
+    occupies (`install::running_release`), and the active launcher must name
+    the same release. TS anchors the location the same way but keeps reading
+    the version from the launcher; a launcher that disagrees with the
+    running binary is an inconsistent installation and the Rust plan
+    refuses it outright instead of comparing against the launcher's version.
+    A running binary from an unparseable directory (`0.10.0-rust-<sha>`)
+    is refused as a baseline: the updater never plans "from" a version its
+    binary does not report.
+  - `is_release_update_candidate` refuses same-base candidates whose only
+    ordering evidence is an opaque alphanumeric build-tag comparison
+    (`0.10.0-rust-64f66e3d` vs `0.10.0-rust-4a8bcb15` decides by git-sha
+    string). Numbered nightly trains (`beta.1986.1` < `beta.1987.2`) keep
+    TS semantics; `--force` reinstalls explicitly.
+  - A tagged manifest version on the stable channel is refused (the stable
+    channel publishes untagged releases; TS would install such a version).
+  - `stage_archive` unpacks into `releases/.stage-*` scratch and renames
+    into place after the payload validates, and an existing release with
+    the same name is re-validated before reuse — a damaged or foreign
+    staging is never silently reactivated. The launcher repoint and the
+    `.activation-state` write fsync their directories.
+  - New CLI surface, no TS counterpart: `prime-agent update --archive
+    <path> --source <https-url>` stages a local payload (a release archive
+    or a payload directory) with the version probed from the payload
+    binary's `--version` output — never a hand-typed string — then runs the
+    same staged activation and coordinator rollback as a channel update.
+    The direct install requires the current launcher to already name a
+    valid release (the rollback boot depends on it) and copies the payload
+    into scratch before the atomic rename, so an in-place copy over a
+    running binary is structurally impossible.
+- Ownership: pa-core `update` (`version.rs` guards, `install.rs` anchor +
+  validation helpers, `download.rs` atomic staging + direct stage); pa-cli
+  `update_flow` (plan anchor + guards, the Direct plan arm) and
+  `public_command` (flag parse; the TUI `/update` surface stays TS parity).
+
 ## Update graceful stop + roster (slice 3, 2026-09-19)
 
 The TS-era worker prepare/commit/cancel frames (`worker_prepare_update`/

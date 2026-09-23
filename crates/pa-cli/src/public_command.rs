@@ -333,6 +333,115 @@ fn validate_schedule_args(args: &[String]) -> bool {
     true
 }
 
+/// The parsed `prime-agent update` invocation.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct UpdateInvocation {
+    force: bool,
+    rollback: bool,
+    channel: Option<pa_core::update::version::UpdateChannel>,
+    archive: Option<std::path::PathBuf>,
+    source: Option<String>,
+}
+
+/// Parse `update`'s options: the TS booleans plus the direct-install pair
+/// (`--archive <path>` with the required `--source <https-url>`). Returns
+/// `None` on a usage failure (already reported).
+fn parse_update_options(args: &[String]) -> Option<UpdateInvocation> {
+    let mut invocation = UpdateInvocation::default();
+    let mut index = 0;
+    let mut channel: Option<&str> = None;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--force" => invocation.force = true,
+            "--rollback" => invocation.rollback = true,
+            "--nightly" | "--stable" => {
+                if channel.is_some() && channel != Some(arg) {
+                    fail(
+                        "--nightly and --stable are exclusive.",
+                        Some("Pick one update channel.".to_string()),
+                    );
+                    return None;
+                }
+                channel = Some(arg);
+            }
+            "--archive" | "--source" => {
+                let value = match args.get(index + 1) {
+                    Some(value) if !value.starts_with('-') => value.clone(),
+                    _ => {
+                        fail(
+                            &format!("Missing value for {arg}."),
+                            Some(format!("Run \"{APP_NAME} help update\" for usage.")),
+                        );
+                        return None;
+                    }
+                };
+                if arg == "--archive" {
+                    invocation.archive = Some(std::path::PathBuf::from(value));
+                } else {
+                    invocation.source = Some(value);
+                }
+                index += 1;
+            }
+            other => {
+                fail(
+                    &format!("Unknown option for update: {other}"),
+                    Some(format!("Run \"{APP_NAME} help update\" for usage.")),
+                );
+                return None;
+            }
+        }
+        index += 1;
+    }
+    invocation.channel = match channel {
+        Some("--nightly") => Some(pa_core::update::version::UpdateChannel::Nightly),
+        Some("--stable") => Some(pa_core::update::version::UpdateChannel::Stable),
+        _ => None,
+    };
+    if invocation.archive.is_some() {
+        if invocation.rollback {
+            fail(
+                "--archive and --rollback are exclusive.",
+                Some("Run them separately.".to_string()),
+            );
+            return None;
+        }
+        if invocation.channel.is_some() {
+            fail(
+                "--archive ignores the channel flags.",
+                Some("A direct install does not resolve a channel.".to_string()),
+            );
+            return None;
+        }
+        if invocation.source.is_none() {
+            fail(
+                "--archive needs --source <https-url>.",
+                Some(
+                    "The install source is recorded in the release and future updates resolve from it."
+                        .to_string(),
+                ),
+            );
+            return None;
+        }
+        if !pa_core::update::install::install_source_is_valid(
+            invocation.source.as_deref().unwrap_or_default(),
+        ) {
+            fail(
+                "--source must be an http(s) URL.",
+                Some(format!("Run \"{APP_NAME} help update\" for usage.")),
+            );
+            return None;
+        }
+    } else if invocation.source.is_some() {
+        fail(
+            "--source is only valid with --archive.",
+            Some(format!("Run \"{APP_NAME} help update\" for usage.")),
+        );
+        return None;
+    }
+    Some(invocation)
+}
+
 fn parse_boolean_options(
     args: &[String],
     allowed: &[&str],
@@ -488,10 +597,23 @@ fn is_self_update_source(source: &str) -> bool {
 }
 
 fn run_update(args: &[String]) -> PublicCommandResult {
-    let has_legacy_self_target = args
+    // The direct-install values must never be mistaken for legacy update
+    // targets: the legacy scan runs over the args with the pair consumed,
+    // the parse below runs over the original argv.
+    let mut stripped: Vec<String> = Vec::with_capacity(args.len());
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--archive" || args[index] == "--source" {
+            index += 2;
+            continue;
+        }
+        stripped.push(args[index].clone());
+        index += 1;
+    }
+    let has_legacy_self_target = stripped
         .iter()
         .any(|arg| arg == "--self" || is_self_update_source(arg));
-    let has_legacy_package_target = args.iter().any(|arg| {
+    let has_legacy_package_target = stripped.iter().any(|arg| {
         arg == "--extensions"
             || arg == "--extension"
             || (!arg.starts_with('-') && !is_self_update_source(arg))
@@ -514,29 +636,15 @@ fn run_update(args: &[String]) -> PublicCommandResult {
             Some("Use \"prime-agent package update [source]\".".to_string()),
         );
     }
-    let Some(flags) = parse_boolean_options(
-        args,
-        &["--force", "--rollback", "--nightly", "--stable"],
-        "update",
-    ) else {
+    let Some(options) = parse_update_options(args) else {
         return handled_failed();
     };
-    let channel = if flags.contains("--nightly") && flags.contains("--stable") {
-        return fail(
-            "--nightly and --stable are exclusive.",
-            Some("Pick one update channel.".to_string()),
-        );
-    } else if flags.contains("--nightly") {
-        Some(pa_core::update::version::UpdateChannel::Nightly)
-    } else if flags.contains("--stable") {
-        Some(pa_core::update::version::UpdateChannel::Stable)
-    } else {
-        None
-    };
     let command_options = crate::update_flow::update_command::UpdateCommandOptions {
-        force: flags.contains("--force"),
-        rollback: flags.contains("--rollback"),
-        channel,
+        force: options.force,
+        rollback: options.rollback,
+        channel: options.channel,
+        archive: options.archive,
+        source: options.source,
     };
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -717,4 +825,70 @@ fn require_operand_count(
         None,
     );
     false
+}
+
+
+#[cfg(test)]
+mod update_options_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Option<UpdateInvocation> {
+        let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+        parse_update_options(&args)
+    }
+
+    #[test]
+    fn parses_the_ts_booleans() {
+        let invocation = parse(&["--force"]).unwrap();
+        assert!(invocation.force && !invocation.rollback);
+        assert_eq!(invocation.channel, None);
+        assert_eq!(invocation.archive, None);
+        let invocation = parse(&["--nightly"]).unwrap();
+        assert_eq!(
+            invocation.channel,
+            Some(pa_core::update::version::UpdateChannel::Nightly)
+        );
+        assert!(parse(&["--nightly", "--stable"]).is_none());
+        assert!(parse(&["--unknown"]).is_none());
+    }
+
+    #[test]
+    fn parses_the_direct_install_pair() {
+        let invocation = parse(&["--archive", "/tmp/payload", "--source", "https://example.com"])
+            .unwrap();
+        assert_eq!(
+            invocation.archive,
+            Some(std::path::PathBuf::from("/tmp/payload"))
+        );
+        assert_eq!(invocation.source.as_deref(), Some("https://example.com"));
+        // The source must be an http(s) URL and must not appear alone.
+        assert!(parse(&[
+            "--archive",
+            "/tmp/payload",
+            "--source",
+            "file:///tmp/payload"
+        ])
+        .is_none());
+        assert!(parse(&["--source", "https://example.com"]).is_none());
+        // The direct install is exclusive with the channel and rollback.
+        assert!(parse(&[
+            "--archive",
+            "/tmp/payload",
+            "--source",
+            "https://example.com",
+            "--nightly"
+        ])
+        .is_none());
+        assert!(parse(&[
+            "--archive",
+            "/tmp/payload",
+            "--source",
+            "https://example.com",
+            "--rollback"
+        ])
+        .is_none());
+        // A missing value fails.
+        assert!(parse(&["--archive"]).is_none());
+        assert!(parse(&["--archive", "--source"]).is_none());
+    }
 }

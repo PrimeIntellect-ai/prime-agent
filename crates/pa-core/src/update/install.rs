@@ -164,6 +164,57 @@ fn release_directory_name(link: &ReleaseLink) -> String {
     format!("{}-{}-{}", link.version, link.platform, link.sha256)
 }
 
+/// The release a running executable lives in: its release directory and the
+/// version parsed from the directory name. This is the updater's baseline
+/// anchor — the version the update decision compares against comes from the
+/// directory the RUNNING binary occupies, never from a launcher that can
+/// point elsewhere. A hand-named directory (`0.10.0-rust-<sha>` dogfood
+/// trains) fails the parse and is refused as a baseline, so the updater can
+/// never plan an update "from" a version its binary does not report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningRelease {
+    pub release_dir: PathBuf,
+    pub version: String,
+}
+
+pub fn running_release(executable: &Path) -> Result<RunningRelease> {
+    let resolved = executable
+        .canonicalize()
+        .with_context(|| format!("resolve {}", executable.display()))?;
+    let directory = resolved
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .map(|name| name.to_string_lossy().to_string())
+        .ok_or_else(|| anyhow!("{} does not live in a release directory", resolved.display()))?;
+    let version = release_version_of(&directory).ok_or_else(|| {
+        anyhow!(
+            "{} runs from release directory {directory:?}, which is not a managed release name (<version>-<platform>-<sha256>)",
+            resolved.display()
+        )
+    })?;
+    let release_dir = resolved
+        .parent()
+        .ok_or_else(|| anyhow!("{} has no parent directory", resolved.display()))?
+        .to_path_buf();
+    Ok(RunningRelease { release_dir, version })
+}
+
+/// Whether an install source is one the release layout accepts
+/// (`http://`/`https://`, the `validate_release_dir` read-side contract).
+pub fn install_source_is_valid(source: &str) -> bool {
+    let protocol = source.trim().split("://").next().unwrap_or_default();
+    protocol == "https" || protocol == "http"
+}
+
+/// fsync a directory so its entries survive a crash (staged releases and
+/// the launcher repoint must never reference an unwritten inode; a
+/// directory fd opened read-only accepts `sync_all` on POSIX platforms).
+pub fn sync_directory(path: &Path) -> Result<()> {
+    let dir = std::fs::File::open(path)?;
+    dir.sync_all()
+        .with_context(|| format!("fsync {}", path.display()))
+}
+
 /// The parsed shape of a launcher link target.
 struct ReleaseLink {
     version: String,
@@ -213,7 +264,7 @@ fn parse_release_link(target: &Path) -> Option<ReleaseLink> {
 
 /// Validate a release directory's payload and archive digest (TS
 /// `validateNativeInstallation`, Rust payload list).
-fn validate_release_dir(release_dir: &Path, archive_sha256: &str) -> Result<()> {
+pub(super) fn validate_release_dir(release_dir: &Path, archive_sha256: &str) -> Result<()> {
     for asset in RELEASE_ASSETS {
         let path = release_dir.join(asset);
         if !path.exists() {
@@ -233,8 +284,7 @@ fn validate_release_dir(release_dir: &Path, archive_sha256: &str) -> Result<()> 
     }
     let source = std::fs::read_to_string(release_dir.join(".install-source"))
         .with_context(|| format!("read the install source of {}", release_dir.display()))?;
-    let protocol = source.trim().split("://").next().unwrap_or_default();
-    if protocol != "https" && protocol != "http" {
+    if !install_source_is_valid(&source) {
         anyhow::bail!(
             "release {} has an invalid install source {source:?}",
             release_dir.display()
@@ -391,6 +441,33 @@ mod tests {
         fixture(root, PREVIOUS_LAUNCHER, "0.1.0", &old_sha);
         let rollback = read_rollback_installation(root).unwrap();
         assert_eq!(rollback.version(), "0.1.0");
+    }
+
+    #[test]
+    fn anchors_the_running_release_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let release = format!("0.1.0-linux-x64-{}", "a".repeat(64));
+        let release_dir = dir.path().join(&release);
+        std::fs::create_dir_all(&release_dir).unwrap();
+        let exe = release_dir.join("prime-agent");
+        std::fs::write(&exe, "binary").unwrap();
+        let running = running_release(&exe).unwrap();
+        assert_eq!(running.version, "0.1.0");
+        assert_eq!(running.release_dir, release_dir);
+        // A hand-named dogfood directory is not a managed release name.
+        let dogfood = dir.path().join("0.10.0-rust-64f66e3d");
+        std::fs::create_dir_all(&dogfood).unwrap();
+        let stray = dogfood.join("prime-agent");
+        std::fs::write(&stray, "binary").unwrap();
+        assert!(running_release(&stray).is_err());
+    }
+
+    #[test]
+    fn install_sources_must_be_http() {
+        assert!(install_source_is_valid("https://example.com"));
+        assert!(install_source_is_valid(" http://example.com "));
+        assert!(!install_source_is_valid("file:///tmp/payload"));
+        assert!(!install_source_is_valid("example.com"));
     }
 
     #[test]
