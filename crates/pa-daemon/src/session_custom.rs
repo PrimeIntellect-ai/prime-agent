@@ -159,9 +159,15 @@ impl Worker {
                     // a restored heartbeat keeps its `Heartbeat prompt:`
                     // queue row instead of falling back to the lane-labeled
                     // raw text.
+                    // TS truthiness (`...(recovered.payload.preview ? {
+                    // preview: recovered.payload.preview } : {})`):
+                    // an empty-string preview restores as `None`, so the
+                    // queue row falls back to the action's text instead of
+                    // rendering blank.
                     preview: payload
                         .get("preview")
                         .and_then(Value::as_str)
+                        .filter(|preview| !preview.is_empty())
                         .map(str::to_string),
                     message: payload
                         .get("text")
@@ -679,6 +685,54 @@ mod tests {
             // `recovered.queueKey`), so a later fire replaces it instead
             // of stacking.
             assert_eq!(item.queue_key.as_deref(), Some("heartbeat:hb-1"));
+        }
+
+        // TS truthiness: an empty-string preview restores as `None`, so
+        // the queue row falls back to the action's text (never a blank
+        // row).
+        let plain_text = "recover me";
+        let response = worker
+            .dispatch(
+                "restore_actions",
+                &json!({
+                    "activeSessionId": "custom-session",
+                    "snapshot": {
+                        "formatVersion": 1,
+                        "actions": [
+                            {
+                                "id": "a-plain",
+                                "source": "user",
+                                "delivery": "next_turn_boundary",
+                                "wake": "wake",
+                                "payload": {
+                                    "kind": "turn",
+                                    "text": plain_text,
+                                    "preview": "",
+                                    "records": [
+                                        {
+                                            "id": "a-plain-r1",
+                                            "role": "primary",
+                                            "message": { "role": "user", "content": plain_text },
+                                            "ownerActionId": "a-plain",
+                                        },
+                                    ],
+                                    "executionPolicy": { "preparation": {} },
+                                    "queueVisible": true,
+                                    "acceptedAgentMessage": false,
+                                    "acceptedBeforeCompletion": false,
+                                },
+                            },
+                        ],
+                    },
+                }),
+            )
+            .await;
+        assert!(response.success, "failed: {response:?}");
+        {
+            let core = worker.core.lock().unwrap();
+            let item = core.steering.back().expect("the empty-preview row");
+            assert_eq!(item.preview, None);
+            assert_eq!(item.message, plain_text);
         }
     }
 
