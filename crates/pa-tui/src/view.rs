@@ -2359,20 +2359,22 @@ mod tests {
             .iter()
             .position(|line| line.contains("Agent message received"))
             .expect("the agent-message row renders");
-        let card_row = lines
+        // The card's panel header is its FIRST row; the seam check must
+        // look above it, never inside the panel's own padding.
+        let header_row = lines
             .iter()
-            .position(|line| line.contains("echo done"))
-            .expect("the tool card renders");
-        // Flush: the row directly above the card is the agent-message
-        // block's own last row, never the hidden thinking's trailing
-        // spacer (the pre-fix gap).
+            .position(|line| line.contains("bash \u{b7} done"))
+            .expect("the tool card header renders");
+        // Flush: the row directly above the card header is the agent
+        // message block's own last row (its body), never the hidden
+        // thinking's trailing spacer (the pre-fix gap).
         assert!(
-            agent_row < card_row,
+            agent_row < header_row,
             "the card renders after the agent message:\n{text}"
         );
         assert!(
-            !lines[card_row - 1].trim().is_empty(),
-            "no blank between the agent message and the card:\n{text}"
+            lines[header_row - 1].contains("Agent message received"),
+            "the agent message header sits directly above the card header:\n{text}"
         );
     }
 
@@ -2409,19 +2411,20 @@ mod tests {
             .iter()
             .position(|line| line.contains("echo hi"))
             .expect("the bash card renders");
-        let card_row = lines
+        // The tool panel's header is its first row; the seam sits above it.
+        let header_row = lines
             .iter()
-            .position(|line| line.contains("echo done"))
-            .expect("the tool card renders");
-        // Flush: the row directly above the card is the bash card's own
-        // last row (its output/border), never a hidden-thinking spacer.
+            .position(|line| line.contains("bash \u{b7} done"))
+            .expect("the tool card header renders");
+        // Flush: the row directly above the tool card header is the bash
+        // card's own closing border, never a hidden-thinking spacer.
         assert!(
-            bash_row < card_row,
+            bash_row < header_row,
             "the card renders after the bash card:\n{text}"
         );
         assert!(
-            !lines[card_row - 1].trim().is_empty(),
-            "no blank between the bash card and the tool card:\n{text}"
+            lines[header_row - 1].contains("\u{2500}"),
+            "the bash card's border sits directly above the card header:\n{text}"
         );
     }
 
@@ -2448,12 +2451,14 @@ mod tests {
             .iter()
             .position(|line| line.contains("Agent message received"))
             .expect("the agent-message row renders");
-        // The visible body leads with its blank, renders, and keeps the
-        // tool separator before the card (TS `hasTrailingSpace` with a
-        // visible body).
-        assert!(lines[agent_row + 1].trim().is_empty());
-        assert!(lines[agent_row + 2].contains("answer body"));
-        assert!(lines[agent_row + 3].trim().is_empty());
+        // In overview the agent message renders its header alone; the
+        // visible assistant body then leads with its blank, renders, and
+        // keeps the tool separator before the card (TS `hasTrailingSpace`
+        // with a visible body).
+        assert!(lines[agent_row + 1].trim().is_empty(), "{text}");
+        assert!(lines[agent_row + 2].contains("answer body"), "{text}");
+        assert!(lines[agent_row + 3].trim().is_empty(), "{text}");
+        assert!(lines[agent_row + 4].contains("bash \u{b7} done"), "{text}");
     }
 
     /// The custom rows render through the transcript path: the agent
