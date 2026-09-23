@@ -21,13 +21,15 @@ use crate::session_store::{SessionEntry, SessionFile};
 /// compaction kept (the session reloads at the boundary, so the
 /// pre-boundary ancestry is gone from the active transcript; the
 /// saved-list rows and the `/context` totals stay whole-file cumulative
-/// on their own walks). The token/cost totals therefore walk every
-/// message entry from the latest compaction's `firstKeptEntryId`
-/// onward, in file order: a ghost-parent gap (one lost append) never
-/// drops spend the session really logged, and side-question subtrees
-/// inside the kept region count exactly as they do in TS's in-memory
-/// list. The summarizer's own usage rides the `compaction` entry, never
-/// a message, so it stays out of the active totals. `contextUsage`
+/// on their own walks). TS `buildSessionContext` walks the leaf-to-root
+/// PATH only, so the token/cost totals walk the ACTIVE BRANCH
+/// (gap-bridged: a ghost-parent gap — one lost append — never drops
+/// spend the session really logged) from the latest compaction's
+/// `firstKeptEntryId` onward: a `branch_to` that moved away from a fork
+/// leaves the abandoned sibling rows OUT of the rebuilt in-memory list,
+/// and a compaction sitting on that abandoned branch never bounds the
+/// active one. The summarizer's own usage rides the `compaction` entry,
+/// never a message, so it stays out of the active totals. `contextUsage`
 /// keeps the strict branch — the context estimate mirrors what the
 /// model actually sees.
 pub fn session_stats(store: &SessionFile, context_window: Option<u64>) -> Value {
@@ -106,33 +108,45 @@ pub fn session_stats(store: &SessionFile, context_window: Option<u64>) -> Value 
 }
 
 /// The messages TS `state.messages` holds after the latest compaction:
-/// every message entry from the boundary row (`firstKeptEntryId`) onward,
-/// in file order — without a compaction, every message entry.
+/// TS `buildSessionContext` walks the leaf-to-root PATH (the active
+/// branch only) and keeps the messages from the latest compaction's
+/// `firstKeptEntryId` onward — a sibling branch written after the
+/// boundary (a `branch_to` moved away from it) is NOT in the rebuilt
+/// in-memory list. The walk therefore follows the active branch,
+/// gap-bridged (a lost append must not drop spend the session really
+/// logged — the accounting bridge), restricted to the kept region; a
+/// compaction sitting off the active branch (one written on the branch
+/// that was moved away from) never bounds the active list, exactly like
+/// the TS path walk that only sees its own ancestry's compaction.
 fn kept_region_messages(store: &SessionFile) -> Vec<&Value> {
     let entries = store.entries();
-    // The latest compaction bounds the kept region; its `firstKeptEntryId`
-    // names the first row the post-compaction reload keeps. A torn write
-    // that lost the boundary row falls back to the compaction entry
-    // itself: the rows after it are the post-compaction transcript.
-    let boundary = entries
+    let chain = store.branch_bridged_positions();
+    // The latest compaction ON THE CHAIN bounds the kept region (TS
+    // `buildSessionContext` records the last compaction along its path);
+    // its `firstKeptEntryId` names the first row the post-compaction
+    // reload keeps. A torn write that lost the boundary row falls back to
+    // the compaction entry itself: the rows after it are the
+    // post-compaction transcript.
+    let boundary = chain
         .iter()
-        .rposition(|entry| entry.type_ == "compaction")
+        .rev()
+        .find(|position| entries[**position].type_ == "compaction")
         .map(|compaction| {
-            entries[compaction]
+            entries[**compaction]
                 .fields
                 .get("firstKeptEntryId")
                 .and_then(Value::as_str)
-                .and_then(|id| entries.iter().position(|entry| entry.id == id))
-                .unwrap_or(compaction)
+                .and_then(|id| chain.iter().find(|position| entries[**position].id == id))
+                .unwrap_or(*compaction)
         });
-    let region = match boundary {
-        Some(boundary) => &entries[boundary..],
-        None => entries,
-    };
-    region
+    chain
         .iter()
-        .filter(|entry| entry.type_ == "message")
-        .filter_map(|entry| entry.fields.get("message"))
+        .filter(|position| match boundary {
+            Some(boundary) => **position >= *boundary,
+            None => true,
+        })
+        .filter(|position| entries[**position].type_ == "message")
+        .filter_map(|position| entries[**position].fields.get("message"))
         .collect()
 }
 
@@ -623,10 +637,15 @@ mod tests {
 
     /// The compaction boundary in miniature: the pre-cut ancestry is spend
     /// the active stats must not report; the kept region — kept rows
-    /// before the compaction entry, a side-question subtree, and a
-    /// ghost-parent row whose parent was minted but never persisted — is
-    /// what they must. The summarizer's own usage rides the compaction
-    /// entry and stays out.
+    /// before the compaction entry and a ghost-parent row whose parent
+    /// was minted but never persisted — is what they must. The
+    /// side-question FORK (cm1/a4, chained from the same compaction row
+    /// the active line continues from) is spend the RELOADED active list
+    /// does not hold: TS `buildSessionContext` walks the leaf-to-root
+    /// path only, so a branch moved away from (and the forks it left
+    /// behind) stay out of the stats — their spend survives on the
+    /// whole-file surfaces (the saved rows, `/context`). The
+    /// summarizer's own usage rides the compaction entry and stays out.
     #[test]
     fn compaction_boundary_drops_the_pre_cut_ancestry() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -696,17 +715,97 @@ mod tests {
             "sessionFile": path.display().to_string(),
             "sessionId": "s1",
             "userMessages": 3,
-            "assistantMessages": 4,
+            "assistantMessages": 3,
             "toolCalls": 0,
             "toolResults": 0,
-            "totalMessages": 7,
-            "tokens": { "input": 40, "output": 20, "cacheRead": 0, "cacheWrite": 0, "total": 60 },
-            "cost": 1.5,
+            "totalMessages": 6,
+            "tokens": { "input": 30, "output": 15, "cacheRead": 0, "cacheWrite": 0, "total": 45 },
+            "cost": 1.0,
             // The strict branch truncates at the ghost parent, so the
             // context estimate anchors on the last row alone.
             "contextUsage": { "tokens": 15, "contextWindow": 1000, "percent": 1.5 },
         });
         assert_eq!(session_stats(&full, Some(1000)), expected);
         assert_eq!(session_stats(&windowed, Some(1000)), expected);
+    }
+
+    /// A compaction written on an ABANDONED branch never bounds the
+    /// active list: TS `buildSessionContext` records the last compaction
+    /// along its leaf-to-root path only, so the active line keeps its own
+    /// full history (and the fork's rows — including its compaction and
+    /// the fork's post-compaction spend — stay out of the active stats).
+    #[test]
+    fn an_abandoned_branchs_compaction_never_bounds_the_active_list() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("fork-compaction.jsonl");
+        let assistant = |id: &str, parent: Option<&str>, cost: f64| {
+            json!({
+                "type": "message", "id": id, "parentId": parent,
+                "timestamp": "2026-09-23T00:00:00.000Z",
+                "message": {
+                    "role": "assistant",
+                    "provider": "prime-inference", "model": "internal/glm-5.3-fast",
+                    "content": [{ "type": "text", "text": "hi" }],
+                    "stopReason": "stop",
+                    "usage": { "input": 10, "output": 5, "cacheRead": 0, "cacheWrite": 0,
+                               "totalTokens": 15, "cost": { "total": cost } },
+                },
+            })
+            .to_string()
+        };
+        let user = |id: &str, parent: Option<&str>| {
+            json!({
+                "type": "message", "id": id, "parentId": parent,
+                "timestamp": "2026-09-23T00:00:00.000Z",
+                "message": { "role": "user", "content": "hi" },
+            })
+            .to_string()
+        };
+        let lines = [
+            json!({"type": "session", "version": 3, "id": "s1", "timestamp": "2026-09-23T00:00:00.000Z", "cwd": "/tmp"}).to_string(),
+            user("u1", None),
+            assistant("a1", Some("u1"), 0.25),
+            user("u2", Some("a1")),
+            assistant("a2", Some("u2"), 0.25),
+            // An abandoned fork off u2: its rows AND its compaction sit in
+            // the file AFTER the fork point but BEFORE the active line
+            // continues.
+            user("x1", Some("a2")),
+            assistant("x2", Some("x1"), 0.25),
+            json!({
+                "type": "compaction", "id": "cx", "parentId": "x2",
+                "timestamp": "2026-09-23T00:00:00.000Z",
+                "summary": "fork summary", "firstKeptEntryId": "x1", "tokensBefore": 100,
+                "usage": { "input": 999, "output": 9, "cacheRead": 0, "cacheWrite": 0,
+                           "totalTokens": 1008, "cost": { "total": 0.75 } },
+            })
+            .to_string(),
+            // The active line continues from a2 (the fork was abandoned).
+            user("u3", Some("a2")),
+            assistant("a3", Some("u3"), 0.25),
+        ];
+        std::fs::write(
+            &path,
+            format!(
+                "{}
+",
+                lines.join(
+                    "
+"
+                )
+            ),
+        )
+        .unwrap();
+        let store = SessionFile::open(&path).unwrap();
+        let stats = session_stats(&store, None);
+        // The active branch keeps its own full history — the abandoned
+        // fork's compaction does not bound it (a file-order walk would
+        // drop u1..a2 from the "kept region" and count the fork's rows).
+        assert_eq!(stats["userMessages"], json!(3));
+        assert_eq!(stats["assistantMessages"], json!(3));
+        assert_eq!(stats["totalMessages"], json!(6));
+        assert_eq!(stats["tokens"]["input"], json!(30));
+        assert_eq!(stats["tokens"]["total"], json!(45));
+        assert_eq!(stats["cost"], json!(0.75));
     }
 }

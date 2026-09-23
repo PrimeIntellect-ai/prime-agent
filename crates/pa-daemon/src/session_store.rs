@@ -377,6 +377,16 @@ impl SessionFile {
     /// /context totals). Forks resolve by parent id; only a missing
     /// parent bridges.
     pub fn branch_bridged(&self) -> Vec<&SessionEntry> {
+        self.branch_bridged_positions()
+            .into_iter()
+            .map(|position| &self.entries[position])
+            .collect()
+    }
+
+    /// [`Self::branch_bridged`] as file positions — the accounting walks
+    /// (the compaction-kept region of `get_session_stats`) restrict the
+    /// chain by file position.
+    pub(crate) fn branch_bridged_positions(&self) -> Vec<usize> {
         let mut positions: Vec<usize> = Vec::new();
         let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
         let mut current = self
@@ -397,17 +407,16 @@ impl SessionFile {
             {
                 Some(parent) => Some(parent),
                 // A minted-but-never-persisted parent: bridge to the file
-                // predecessor. The first entry has none, so the walk ends
-                // there, exactly like a plain root.
-                None if entry.parent_id.is_some() => (position > 0).then_some(position - 1),
+                // predecessor (checked_sub: then_some is eager, so a
+                // position-zero bridge must not evaluate the subtraction).
+                // The first entry has none, so the walk ends there, exactly
+                // like a plain root.
+                None if entry.parent_id.is_some() => position.checked_sub(1),
                 None => None,
             };
         }
         positions.reverse();
         positions
-            .into_iter()
-            .map(|position| &self.entries[position])
-            .collect()
     }
 
     pub(crate) fn restored_settings(&self) -> pa_core::session::SessionContext {
