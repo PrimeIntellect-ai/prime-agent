@@ -388,8 +388,8 @@ impl ModelRegistry {
     /// Reload local state and refresh entitlements (live catalog + private
     /// auth). The chain refresh (the gated provider-catalog fetch + the
     /// credentialed Prime Inference fetch, TS `refreshProviderCatalog(false)`
-    /// + `refreshPrimeInferenceModels`) is awaited so the resolved catalog
-    /// reflects it as soon as the call returns.
+    /// plus `refreshPrimeInferenceModels`) is awaited so the resolved
+    /// catalog reflects it as soon as the call returns.
     pub async fn refresh_available_models(&mut self) -> Vec<Model> {
         let previous_ids = self.authorized_private_ids.clone();
         let previous_team = self.authorized_team_id.clone();
