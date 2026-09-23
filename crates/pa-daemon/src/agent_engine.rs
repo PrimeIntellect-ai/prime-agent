@@ -8091,7 +8091,7 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
     // The terminal `turn_end` frame follows the aborted row's message
     // pair (TS `turn_end` on an aborted turn): the aborted assistant
     // message is the payload, the tool-result list is empty, and the
-    // frame precedes the trailing `Done`.
+    // frame precedes the trailing `DoneAborted` settle.
     let turn_end_index = events
         .iter()
         .position(|event| {
@@ -8108,11 +8108,17 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
     };
     assert_eq!(message, &assistant, "the aborted row is the payload");
     assert!(tool_results.is_empty(), "the aborted turn ran no tools");
+    // The run's terminal settle is the structural aborted one
+    // (`DoneAborted`, the #2617 typed-settles rework): TS classifies the
+    // aborted settle structurally — an abort is not a failure, so the
+    // retry backoff never applies and the wire keeps its own
+    // `turn_end`/`agent_end` frames — not the generic `Done` variant this
+    // pin predates.
     let done_index = events
         .iter()
-        .position(|event| matches!(event, EngineEvent::Done(_)))
-        .expect("the run's trailing Done");
-    assert!(turn_end_index < done_index, "turn_end precedes the Done");
+        .position(|event| matches!(event, EngineEvent::DoneAborted))
+        .expect("the run's trailing DoneAborted settle");
+    assert!(turn_end_index < done_index, "turn_end precedes the settle");
     // The aborted run still ends with its `agent_end` (TS emits it on the
     // abort paths): the payload carries the run's whole message set with
     // the aborted row as the terminal message.
@@ -8122,7 +8128,7 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
         .expect("the aborted run's agent_end event");
     assert!(
         turn_end_index < agent_end_index && agent_end_index < done_index,
-        "agent_end sits between the turn_end and the Done: {events:?}"
+        "agent_end sits between the turn_end and the DoneAborted settle: {events:?}"
     );
     let EngineEvent::AgentEnd { messages } = &events[agent_end_index] else {
         unreachable!();
