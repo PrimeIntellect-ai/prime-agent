@@ -355,6 +355,7 @@ fn enter() -> KeyEvent {
     KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
 }
 
+#[derive(Debug)]
 struct RunOutcome {
     frames: Vec<String>,
     prompt_requests: Vec<Value>,

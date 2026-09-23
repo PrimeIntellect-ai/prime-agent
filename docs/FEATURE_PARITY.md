@@ -855,7 +855,7 @@ Method: every TS method in scope read in full; the Rust implementing code locate
 | interactive-mode.ts:7332 | killTrackedDetachedChildren (detached child kill) | MISSING | MISSING | signal-handlers |
 | interactive-mode.ts:7378 | handleCtrlZ suspend cycle (SIGTSTP/SIGCONT, SIGINT ignored) | crates/pa-tui/src/suspend.rs:56 + session_ui.rs:2771-2778 + interactive.rs:670-688 | MATCHES | — |
 | interactive-mode.ts:7271 | handleAgentsBack/requestAgentsView/returnToAgentsView | crates/pa-tui/src/session_ui.rs:2870-2884 + interactive.rs:1081-1094 | MATCHES | — |
-| interactive-mode.ts:7419 | handleFollowUp (alt+enter queues on follow-up lane) | crates/pa-tui/src/session_ui.rs:2938-2958 | MATCHES | — |
+| interactive-mode.ts:7718 | handleFollowUp (alt+enter: empty follow-up silent no-op, follow-up lane, same submit ladder as Enter) | crates/pa-tui/src/session_ui.rs:6608-6637 | MATCHES | — |
 | interactive-mode.ts:7462 | browseQueueSelection (alt+up/alt+down, draft stash) | crates/pa-tui/src/session_ui.rs:2992-3000 + crates/pa-tui/src/queued.rs:199-300 | MATCHES | — |
 | interactive-mode.ts:7480 | moveQueueSelection (ctrl+alt+arrows reorder + local mirror) | crates/pa-tui/src/session_ui.rs:3038-3077 | MATCHES | — |
 | interactive-mode.ts:7539 | applyQueueSelection (empty deletes, enter steers, failure restore) | crates/pa-tui/src/session_ui.rs:3083-3126 | MATCHES | — |
