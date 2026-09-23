@@ -74,7 +74,7 @@ const EXIT_STATS_TIMEOUT_MS: u64 = 500;
 
 /// How a submitted prompt travels to the session (TS `streamingBehavior`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SubmitBehavior {
+pub(crate) enum SubmitBehavior {
     /// Plain Enter: mid-turn input parks on the steering lane (TS "steer").
     Steer,
     /// The follow-up key (`alt+enter`): parks on the follow-up lane and
@@ -1688,8 +1688,15 @@ impl SessionUi {
 
     /// Submit a prompt (the Enter path). The user message arrives back as a
     /// `message_start` session event (no local echo), and prompts sent while
-    /// a turn is active queue on the daemon side.
-    pub(crate) async fn submit_prompt(&mut self, text: &str, view: &mut AgentView) -> Result<()> {
+    /// a turn is active queue on the daemon side. `behavior` selects the
+    /// lane (TS `handleFollowUp` routes the follow-up key through this
+    /// same ladder with the `followUp` behavior).
+    pub(crate) async fn submit_prompt(
+        &mut self,
+        text: &str,
+        behavior: SubmitBehavior,
+        view: &mut AgentView,
+    ) -> Result<()> {
         let text = text.trim();
         if text.is_empty() {
             return Ok(());
@@ -1750,7 +1757,7 @@ impl SessionUi {
         // TS `clearShortcutGuide`: every prompt submission dismisses the
         // `?` quick-shortcut guide (slash commands keep it).
         view.shortcut_guide = None;
-        self.send_prompt(text, SubmitBehavior::Steer, view).await
+        self.send_prompt(text, behavior, view).await
     }
 
     // ------------------------------------------------------------------
@@ -2177,6 +2184,18 @@ impl SessionUi {
                             self.rebuild_view(view, RebuildKind::Rebind);
                             continue;
                         }
+                    }
+                    if crate::daemon_client::is_daemon_rejection(&error) {
+                        // TS `onSubmit`'s prompt catch: the daemon answered
+                        // with a refusal for THIS request (admission, queue
+                        // capacity, a superseded session the rebind could
+                        // not recover, ...) — the connection is healthy, so
+                        // the `⚠ Error` row surfaces the refusal and the
+                        // draft returns to the editor; a refused prompt
+                        // never exits the UI.
+                        self.error_row(&rendered, view);
+                        view.editor.set_text(text);
+                        return Ok(());
                     }
                     return Err(anyhow!("{rendered}"));
                 }
@@ -6589,25 +6608,29 @@ impl SessionUi {
             }
         }
         // The follow-up key (TS `app.message.followUp`, default alt+enter):
-        // the same submit path as Enter, but the message parks on the
+        // the same submit ladder as Enter, but the message parks on the
         // follow-up lane and delivers when the run goes idle. While a
         // queued message is selected, the edit re-parks it there instead
-        // (TS `handleFollowUp`'s browsing branch).
+        // (TS `handleFollowUp`'s browsing branch). An empty follow-up is
+        // TS `handleFollowUp`'s silent no-op: never submitted, never
+        // dispatched to the daemon.
         if view
             .editor
             .keybindings()
             .matches(&id, "app.message.followUp")
         {
-            view.editor.submit();
-            for event in view.editor.take_events() {
-                if let crate::editor::EditorEvent::Submitted(text) = event {
-                    if self.queue_selection.is_browsing() {
-                        self.apply_queue_selection(&text, QueueLane::FollowUp, view)
-                            .await?;
-                    } else {
-                        view.editor.add_to_history(&text);
-                        self.send_prompt(&text, SubmitBehavior::FollowUp, view)
-                            .await?;
+            if self.queue_selection.is_browsing() || !view.editor.get_text().trim().is_empty() {
+                view.editor.submit();
+                for event in view.editor.take_events() {
+                    if let crate::editor::EditorEvent::Submitted(text) = event {
+                        if self.queue_selection.is_browsing() {
+                            self.apply_queue_selection(&text, QueueLane::FollowUp, view)
+                                .await?;
+                        } else {
+                            view.editor.add_to_history(&text);
+                            self.submit_prompt(&text, SubmitBehavior::FollowUp, view)
+                                .await?;
+                        }
                     }
                 }
             }
@@ -6649,7 +6672,8 @@ impl SessionUi {
                         .await?;
                 } else {
                     view.editor.add_to_history(&text);
-                    self.submit_prompt(&text, view).await?;
+                    self.submit_prompt(&text, SubmitBehavior::Steer, view)
+                        .await?;
                 }
             }
         }

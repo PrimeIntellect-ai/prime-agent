@@ -716,16 +716,51 @@ enum DirectRequestError {
     Wait(anyhow::Error),
 }
 
-/// Unwrap a settled response into its `data`, surfacing the daemon error
-/// string on failure.
+/// The daemon answered with `success: false` for one request: the daemon
+/// is alive and healthy — it refused THIS request ("Prompt cannot be
+/// empty", a queue/admission refusal, an unknown session selector, a
+/// model the allowlist refuses, ...). Rejections carry data about the
+/// request, never about the connection: the interactive loop renders
+/// them inline and keeps running, while transport failures (dead
+/// socket, timeout, closed connection) stay fatal.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RequestRejected {
+    /// Wire `type` of the refused command, for the rendered message.
+    pub command: String,
+    /// The daemon's raw error string.
+    pub message: String,
+}
+
+impl std::fmt::Display for RequestRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the daemon rejected the {} request: {}",
+            self.command, self.message
+        )
+    }
+}
+
+impl std::error::Error for RequestRejected {}
+
+/// Whether the error is (or wraps) a daemon refusal, not a transport
+/// failure: the daemon answered and refused the request itself.
+pub fn is_daemon_rejection(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<RequestRejected>().is_some())
+}
+
+/// Unwrap a settled response into its `data`, surfacing the daemon
+/// refusal as a typed [`RequestRejected`] on failure.
 fn response_data_or_error(name: &str, response: DaemonResponse) -> Result<Value> {
     if !response.success {
-        return Err(anyhow!(
-            "the daemon rejected the {name} request: {}",
-            response
+        return Err(anyhow::Error::new(RequestRejected {
+            command: name.to_string(),
+            message: response
                 .error
-                .unwrap_or_else(|| "unknown error".to_string())
-        ));
+                .unwrap_or_else(|| "unknown error".to_string()),
+        }));
     }
     Ok(response.data.unwrap_or(Value::Null))
 }
@@ -899,6 +934,38 @@ mod tests {
         assert!(error
             .to_string()
             .contains(socket.display().to_string().as_str()));
+        // A transport failure is never a rejection.
+        assert!(!is_daemon_rejection(&error));
+    }
+
+    #[test]
+    fn failed_response_is_a_typed_rejection() {
+        let response = DaemonResponse {
+            id: None,
+            command: "prompt".to_string(),
+            success: false,
+            data: None,
+            error: Some("Prompt cannot be empty".to_string()),
+            error_info: None,
+        };
+        let error = response_data_or_error("prompt", response).unwrap_err();
+        assert!(is_daemon_rejection(&error));
+        let rejection = error
+            .downcast_ref::<RequestRejected>()
+            .expect("typed rejection");
+        assert_eq!(rejection.command, "prompt");
+        assert_eq!(rejection.message, "Prompt cannot be empty");
+        // The rendered message is byte-identical to the pre-typed string.
+        assert_eq!(
+            rejection.to_string(),
+            "the daemon rejected the prompt request: Prompt cannot be empty"
+        );
+    }
+
+    #[test]
+    fn plain_errors_are_not_rejections() {
+        let error = anyhow!("the daemon connection is closed");
+        assert!(!is_daemon_rejection(&error));
     }
 
     /// A scripted worker socket for the direct-link tests: hello frame,

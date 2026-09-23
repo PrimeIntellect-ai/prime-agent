@@ -826,7 +826,9 @@ pub async fn run_interactive(
         }
     }
     if let Some(initial) = &options.initial_message {
-        session.submit_prompt(initial, &mut view).await?;
+        session
+            .submit_prompt(initial, crate::session_ui::SubmitBehavior::Steer, &mut view)
+            .await?;
     }
 
     let mut pending: VecDeque<UiInput> = VecDeque::new();
@@ -941,7 +943,20 @@ pub async fn run_interactive(
                         // TS stops the selection auto-scroll on every
                         // non-mouse input (`handleFullscreenInput`).
                         session.stop_selection_auto_scroll();
-                        session.handle_key(key, &mut view, &mut running).await?;
+                        match session.handle_key(key, &mut view, &mut running).await {
+                            Ok(()) => {}
+                            // A daemon refusal answered this key's request
+                            // (the connection stays healthy): the TS
+                            // `showError` row surfaces it and the loop keeps
+                            // running with the editor state preserved — a
+                            // refused request never exits the client.
+                            Err(error) if crate::daemon_client::is_daemon_rejection(&error) => {
+                                session.error_row(&format!("{error:#}"), &mut view);
+                            }
+                            // Everything else (dead socket, timeout,
+                            // protocol corruption) stays fatal.
+                            Err(error) => return Err(error),
+                        }
                         // TS `handleCtrlZ` (`app.suspend`, default ctrl+z):
                         // hand the terminal to the shell and stop the process
                         // group; execution continues here once the user
@@ -997,7 +1012,13 @@ pub async fn run_interactive(
                             if suspended {
                                 renderer.suspend(&mut view)?;
                             }
-                            let dispatched = session.submit_prompt(&command, &mut view).await;
+                            let dispatched = session
+                                .submit_prompt(
+                                    &command,
+                                    crate::session_ui::SubmitBehavior::Steer,
+                                    &mut view,
+                                )
+                                .await;
                             if suspended {
                                 renderer.resume()?;
                             }
@@ -1034,7 +1055,13 @@ pub async fn run_interactive(
                         if suspended {
                             renderer.suspend(&mut view)?;
                         }
-                        let dispatched = session.submit_prompt(&text, &mut view).await;
+                        let dispatched = session
+                            .submit_prompt(
+                                &text,
+                                crate::session_ui::SubmitBehavior::Steer,
+                                &mut view,
+                            )
+                            .await;
                         if suspended {
                             renderer.resume()?;
                         }
