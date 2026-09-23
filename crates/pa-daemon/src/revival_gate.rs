@@ -246,7 +246,6 @@ mod tests {
     #[test]
     fn a_kept_update_row_skips_the_freshness_bound() {
         let file = session_file(Some("active"));
-        let recorded_at = iso_from_unix_ms(now_ms() - 5 * 60 * 60 * 1000);
         let agent_dir = agent_dir();
         assert!(
             revival_veto(&agent_dir, &descriptor(Some(&file)), true, None).is_none(),

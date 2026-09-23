@@ -1035,7 +1035,6 @@ fn update_boot_revives_only_roster_kept_workers() {
 /// session file with an explicit `session_state` row.
 struct RevivalFixture {
     worker_id: String,
-    session_id: String,
     session_file: PathBuf,
     session_bytes: Vec<u8>,
 }
@@ -1123,7 +1122,6 @@ fn write_revival_fixture(
     .expect("write descriptor");
     RevivalFixture {
         worker_id,
-        session_id,
         session_file,
         session_bytes,
     }
