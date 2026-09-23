@@ -89,7 +89,10 @@ pub fn is_context_overflow_failure(message: &AssistantMessage, context_window: u
 /// The model router's tool-use rejection marker (observed on
 /// prime-inference as a 404 whose body the SDK surfaces verbatim:
 /// `404 No endpoints found that support tool use. Try disabling ...`).
-/// Matched case-insensitively against the user-facing failure text.
+/// Matched case-insensitively against the user-facing failure text,
+/// but only together with the classified 404 status: the text alone is
+/// provider-controllable and must never steer the retry policy on its
+/// own (a transient 5xx quoting the same words stays retryable).
 const UNSUPPORTED_TOOL_FAILURE_MARKER: &str = "no endpoints found that support tool use";
 
 /// A router rejection for a model that cannot serve tool use. Unlike the
@@ -97,11 +100,12 @@ const UNSUPPORTED_TOOL_FAILURE_MARKER: &str = "no endpoints found that support t
 /// permanent capability mismatch: every provider serving the same model
 /// rejects it identically, so it is never retried and never fails over.
 pub fn is_unsupported_tool_failure(message: &AssistantMessage) -> bool {
-    message.error_message.as_deref().is_some_and(|error| {
-        error
-            .to_ascii_lowercase()
-            .contains(UNSUPPORTED_TOOL_FAILURE_MARKER)
-    })
+    provider_stream_failure_status(message) == Some(404)
+        && message.error_message.as_deref().is_some_and(|error| {
+            error
+                .to_ascii_lowercase()
+                .contains(UNSUPPORTED_TOOL_FAILURE_MARKER)
+        })
 }
 
 /// The `details` payload of the `provider_stream_failure` diagnostic.
@@ -660,8 +664,11 @@ mod tests {
     }
 
     /// The router's tool-use rejection (the dogfood incident text) is
-    /// permanent, matched case-insensitively; a plain routing-blip 404
-    /// is not.
+    /// permanent, matched case-insensitively — but only together with
+    /// the classified 404 status: provider-controllable text alone
+    /// never steers the retry policy. A plain routing-blip 404 without
+    /// the marker stays transient, and a 5xx quoting the marker stays
+    /// retryable.
     #[test]
     fn unsupported_tool_rejections_are_terminal() {
         let mut unsupported = error_message(Some("invalid_request"), Some(404), None);
@@ -675,6 +682,17 @@ mod tests {
         let mut blip = error_message(Some("invalid_request"), Some(404), None);
         blip.error_message = Some("404 model route not found".to_string());
         assert!(!is_unsupported_tool_failure(&blip));
+        // The marker text without the 404 status is not a tool-capability
+        // rejection: a transient 5xx quoting the router's words stays
+        // retryable (the status gate keeps the text from steering the
+        // policy on its own).
+        let mut transient = error_message(Some("server_error"), Some(503), None);
+        transient.error_message = Some("503 No endpoints found that support tool use".to_string());
+        assert!(!is_unsupported_tool_failure(&transient));
+        // No classified status at all: same rule.
+        let mut unclassified = error_message(Some("server_error"), None, None);
+        unclassified.error_message = Some("No endpoints found that support tool use".to_string());
+        assert!(!is_unsupported_tool_failure(&unclassified));
         let empty = error_message(Some("server_error"), Some(500), None);
         assert!(!is_unsupported_tool_failure(&empty));
     }

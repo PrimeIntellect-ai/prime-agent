@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::worker::Lane;
-use crate::worker::{parse_prompt_images, Worker};
+use crate::worker::{parse_prompt_images, TurnSettle, Worker};
 
 /// TS `QueuedMessageLane`: wire names `"steering"` and `"followUp"`.
 fn wire_lane(value: Option<&Value>) -> Option<Lane> {
@@ -207,7 +207,7 @@ fn mutate_lane(
         "delete" => {
             if let Some(mut item) = lane.remove(index) {
                 if let Some(done) = item.done.take() {
-                    let _ = done.send(Err(deleted_message.to_string()));
+                    let _ = done.send(TurnSettle::Withdrawn(deleted_message.to_string()));
                 }
             }
         }
@@ -618,7 +618,9 @@ mod tests {
         let settled = done_rx.await.expect("deleted waiter settles");
         assert_eq!(
             settled,
-            Err("Queued prompt was deleted before delivery.".to_string())
+            crate::worker::TurnSettle::Withdrawn(
+                "Queued prompt was deleted before delivery.".to_string()
+            )
         );
     }
 

@@ -239,11 +239,11 @@ impl AgentCronSchedulerHooks for QueueHooks {
         )
         .await
         {
-            // The settle classifies the fire:
-            // - a settled turn is a run; a turn that settled with a real
-            //   error (a provider failure) still counts as a run (the
-            //   store bumps runCount and records lastError, the TS
-            //   recordRunResult-with-error shape) but the error
+            // The typed settle classifies the fire (never the
+            // provider-controllable error text):
+            // - a settled turn is a run; a failed turn still counts as
+            //   a run (the store bumps runCount and records lastError,
+            //   the TS recordRunResult-with-error shape) but the error
             //   propagates to the scheduler so its failure backoff
             //   stretches the next fire (documented deviation: TS
             //   re-fires per schedule regardless of failures);
@@ -254,12 +254,12 @@ impl AgentCronSchedulerHooks for QueueHooks {
             //   edit deleting the row) skips, the TS
             //   unrunnable-at-admission verdict: no runCount bump, no
             //   backoff.
-            Ok(Ok(Ok(()))) => Ok(None),
-            Ok(Ok(Err(error))) => match error.as_str() {
-                crate::worker::ABORTED_TURN_SETTLE_ERROR => Ok(None),
-                crate::worker::PROMPT_ABORTED_BEFORE_DELIVERY
-                | crate::worker::QUEUED_PROMPT_DELETED => Ok(Some("skipped")),
-                _ => Err(anyhow::anyhow!(error)),
+            Ok(Ok(settle)) => match settle {
+                crate::worker::TurnSettle::Completed | crate::worker::TurnSettle::Aborted => {
+                    Ok(None)
+                }
+                crate::worker::TurnSettle::Withdrawn(_) => Ok(Some("skipped")),
+                crate::worker::TurnSettle::Failed(error) => Err(anyhow::anyhow!(error)),
             },
             // The queued item was consumed without a settle handshake
             // (its waiter dropped — a runner that died mid-turn, or the
@@ -1213,10 +1213,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let session = write_active_session(&dir);
 
-        // Park one fire, settle it with `error`, and return the verdict.
+        // Park one fire, settle it with `settle`, and return the verdict.
         async fn settle_one(
             session: &(String, std::path::PathBuf),
-            error: &str,
+            settle: crate::worker::TurnSettle,
         ) -> anyhow::Result<Option<&'static str>> {
             let core = Arc::new(std::sync::Mutex::new(
                 crate::worker::SessionCore::test_core(None, "/w".to_string()),
@@ -1248,7 +1248,7 @@ mod tests {
                 };
                 if let Some(item) = popped {
                     let done = item.done.expect("a fire settles through done");
-                    let _ = done.send(Err(error.to_string()));
+                    let _ = done.send(settle.clone());
                     break;
                 }
                 assert!(std::time::Instant::now() < park_deadline, "never parked");
@@ -1260,28 +1260,47 @@ mod tests {
         // A provider failure surfaces: the scheduler records it and backs
         // off (the incident's 404).
         let failure = "404 No endpoints found that support tool use.".to_string();
-        let error = settle_one(&session, &failure)
+        let error = settle_one(&session, crate::worker::TurnSettle::Failed(failure.clone()))
             .await
             .expect_err("the failed settle surfaces");
         assert_eq!(error.to_string(), failure);
+        // A provider failure whose text happens to equal the abort wire
+        // text still fails (the typed settle never reads the text).
+        let sneaky = settle_one(
+            &session,
+            crate::worker::TurnSettle::Failed(crate::worker::ABORTED_TURN_SETTLE_ERROR.to_string()),
+        )
+        .await
+        .expect_err("provider text cannot masquerade as an abort");
+        assert_eq!(sneaky.to_string(), crate::worker::ABORTED_TURN_SETTLE_ERROR);
         // An aborted turn is a clean run.
         assert_eq!(
-            settle_one(&session, crate::worker::ABORTED_TURN_SETTLE_ERROR)
+            settle_one(&session, crate::worker::TurnSettle::Aborted)
                 .await
                 .expect("aborted turn"),
             None
         );
         // A withdrawn fire (queue edit delete, abort cancel) skips.
         assert_eq!(
-            settle_one(&session, crate::worker::QUEUED_PROMPT_DELETED)
-                .await
-                .expect("withdrawn fire"),
+            settle_one(
+                &session,
+                crate::worker::TurnSettle::Withdrawn(
+                    crate::worker::QUEUED_PROMPT_DELETED.to_string(),
+                ),
+            )
+            .await
+            .expect("withdrawn fire"),
             Some("skipped")
         );
         assert_eq!(
-            settle_one(&session, crate::worker::PROMPT_ABORTED_BEFORE_DELIVERY)
-                .await
-                .expect("abort-cancelled fire"),
+            settle_one(
+                &session,
+                crate::worker::TurnSettle::Withdrawn(
+                    crate::worker::PROMPT_ABORTED_BEFORE_DELIVERY.to_string(),
+                ),
+            )
+            .await
+            .expect("abort-cancelled fire"),
             Some("skipped")
         );
     }

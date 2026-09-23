@@ -265,22 +265,50 @@ pub(crate) fn restored_turn_policy(payload: &Value) -> TurnPolicy {
     }
 }
 
-/// The settle error of an aborted turn: the fire ran, but the model turn
-/// never produced an assistant message (a user abort, a queued-input
-/// suspension). Scheduled-fire bookkeeping records a clean run, the TS
-/// `promptHeartbeat` behavior (it resolves normally when the turn
-/// aborts; no `lastError`, no failure backoff).
+/// The wire text of an aborted turn's settle (the `turn_end` error frame
+/// and the waiting prompt's failure): the turn was aborted before an
+/// assistant message was produced (a user abort, a queued-input
+/// suspension).
 pub(crate) const ABORTED_TURN_SETTLE_ERROR: &str = "No response produced.";
 
-/// The settle error of a prompt cancelled before delivery (the
-/// queue-invisible abort path). A scheduled fire withdrawn this way
-/// records a skip, like the TS unrunnable-at-admission verdict.
+/// The wire text of a prompt cancelled before delivery (the
+/// queue-invisible abort path).
 pub(crate) const PROMPT_ABORTED_BEFORE_DELIVERY: &str = "Prompt aborted before delivery.";
 
-/// The settle error of a queued prompt deleted through a queue mutation
-/// (TS `QueuedMessageError` verbatim). A scheduled fire whose queued row
-/// the user deleted records a skip, not a failure.
+/// The wire text of a queued prompt deleted through a queue mutation (TS
+/// `QueuedMessageError` verbatim).
 pub(crate) const QUEUED_PROMPT_DELETED: &str = "Queued prompt was deleted before delivery.";
+
+/// The typed settle of one queued prompt, as the waiting caller's `done`
+/// channel carries it. The variants classify the settle without reading
+/// the (provider-controllable) error text: an aborted turn is not a
+/// provider failure, and a withdrawn prompt never ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TurnSettle {
+    /// The turn ran to its settle.
+    Completed,
+    /// The turn was aborted before an assistant message was produced.
+    Aborted,
+    /// The queued prompt was withdrawn before delivery (the abort
+    /// cancel, a queue edit deleting the row); the text is the
+    /// wire-facing reason.
+    Withdrawn(String),
+    /// The turn settled with an error; the text surfaces to the waiting
+    /// caller.
+    Failed(String),
+}
+
+impl TurnSettle {
+    /// The wire-facing failure text of the settle (`None` when the
+    /// settle is a success).
+    pub(crate) fn wire_error(&self) -> Option<String> {
+        match self {
+            TurnSettle::Completed => None,
+            TurnSettle::Aborted => Some(ABORTED_TURN_SETTLE_ERROR.to_string()),
+            TurnSettle::Withdrawn(text) | TurnSettle::Failed(text) => Some(text.clone()),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct QueuedItem {
@@ -310,7 +338,7 @@ pub(crate) struct QueuedItem {
     /// Images attached to the prompt (wire `images`: base64 payload plus
     /// mime type), admitted with the message as multimodal content.
     pub(crate) images: Vec<pa_agent::types::ImageContent>,
-    pub(crate) done: Option<oneshot::Sender<Result<(), String>>>,
+    pub(crate) done: Option<oneshot::Sender<TurnSettle>>,
     /// TS `payload.queueVisible`: the item shows in the queue projection
     /// and its delivery projects the active-action phase transitions
     /// (steer/follow-up lanes, agent-message deliveries, prompt-behind-work,
@@ -2833,8 +2861,10 @@ impl Worker {
             return response_success(None, "prompt", None);
         }
         match done_rx.await {
-            Ok(Ok(())) => response_success(None, "prompt_and_wait", None),
-            Ok(Err(error)) => response_failure(None, "prompt_and_wait", &error, None),
+            Ok(settle) => match settle.wire_error() {
+                None => response_success(None, "prompt_and_wait", None),
+                Some(error) => response_failure(None, "prompt_and_wait", &error, None),
+            },
             Err(_) => response_failure(None, "prompt_and_wait", "Prompt did not complete", None),
         }
     }
@@ -3564,7 +3594,9 @@ impl Worker {
                             let _ = self.prompt_admissions.cancel(id);
                         }
                         if let Some(done) = item.done {
-                            let _ = done.send(Err(PROMPT_ABORTED_BEFORE_DELIVERY.to_string()));
+                            let _ = done.send(TurnSettle::Withdrawn(
+                                PROMPT_ABORTED_BEFORE_DELIVERY.to_string(),
+                            ));
                         }
                     }
                 }
@@ -5157,11 +5189,9 @@ impl TurnRunner {
             .iter()
             .filter_map(|item| item.admission_id.clone())
             .collect();
-        let items_done: Vec<oneshot::Sender<Result<(), String>>> =
+        let items_done: Vec<oneshot::Sender<TurnSettle>> =
             items.into_iter().filter_map(|item| item.done).collect();
-        let turn_outcome = Arc::new(std::sync::Mutex::new(
-            None::<std::result::Result<(), String>>,
-        ));
+        let turn_outcome = Arc::new(std::sync::Mutex::new(None::<TurnSettle>));
         let turn_outcome_slot = Arc::clone(&turn_outcome);
         // Whether the engine surfaced any `agent_end` boundary this item
         // (each agent run ends with one — retried and continued runs
@@ -5236,6 +5266,7 @@ impl TurnRunner {
                         | EngineEvent::TurnEnd { .. }
                         | EngineEvent::AgentEnd { .. }
                         | EngineEvent::Done(_)
+                        | EngineEvent::DoneAborted
                 );
                 let mut core = core.lock().unwrap();
                 if core.abort_requested
@@ -5323,14 +5354,24 @@ impl TurnRunner {
                     }
                     _ => {}
                 }
-                let done_result = if let EngineEvent::Done(result) = &event {
-                    // The turn boundary releases RLM child prompt tasks
-                    // waiting on it (the parent's continuation request is
-                    // in flight before any child's first turn).
-                    engine.on_turn_done();
-                    Some(result.clone())
-                } else {
-                    None
+                let done_result = match &event {
+                    EngineEvent::Done(result) => {
+                        // The turn boundary releases RLM child prompt tasks
+                        // waiting on it (the parent's continuation request
+                        // is in flight before any child's first turn).
+                        engine.on_turn_done();
+                        Some(match result {
+                            Ok(()) => TurnSettle::Completed,
+                            Err(error) => TurnSettle::Failed(error.clone()),
+                        })
+                    }
+                    // The aborted settle carries its classification
+                    // structurally, not through the error text.
+                    EngineEvent::DoneAborted => {
+                        engine.on_turn_done();
+                        Some(TurnSettle::Aborted)
+                    }
+                    _ => None,
                 };
                 // One event may map to several wire frames (a custom row
                 // is a message_start + message_end pair).
@@ -5447,6 +5488,11 @@ impl TurnRunner {
                         vec![json!({ "type": "turn_end", "error": error })]
                     }
                     EngineEvent::Done(Err(_)) => Vec::new(),
+                    EngineEvent::DoneAborted if !engine_turn_ended => vec![json!({
+                        "type": "turn_end",
+                        "error": ABORTED_TURN_SETTLE_ERROR,
+                    })],
+                    EngineEvent::DoneAborted => Vec::new(),
                     EngineEvent::AutoRetryStart {
                         attempt,
                         max_attempts,
@@ -9117,7 +9163,11 @@ mod turn_stream_tests {
         let outcome = settled
             .expect("the waiting prompt never resolved")
             .expect("the waiter sender dropped without an outcome");
-        assert!(outcome.is_ok(), "the settled turn's outcome: {outcome:?}");
+        assert_eq!(
+            outcome,
+            TurnSettle::Completed,
+            "the settled turn's outcome: {outcome:?}"
+        );
         // The idle flip (and the queue projection after it) already
         // happened when the waiter resolved.
         {
