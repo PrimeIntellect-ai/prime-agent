@@ -16,10 +16,10 @@ use super::{migrate_to_current_version, parse_session_entries, CURRENT_SESSION_V
 /// A persist observer; must not break session writes (panics are contained).
 pub type SessionPersistListener = Box<dyn Fn(&Path) + Send + Sync>;
 
-fn generate_id(existing: &std::collections::HashSet<String>) -> String {
+fn generate_id(existing: &HashMap<String, usize>) -> String {
     for _ in 0..100 {
         let id = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
-        if !existing.contains(&id) {
+        if !existing.contains_key(&id) {
             return id;
         }
     }
@@ -800,7 +800,7 @@ impl SessionManager {
 
     pub(crate) fn next_base(&self) -> EntryBase {
         EntryBase {
-            id: Some(generate_id(&self.by_id.keys().cloned().collect())),
+            id: Some(generate_id(&self.by_id)),
             parent_id: self.leaf_id.clone(),
             timestamp: Some(format_iso_now()),
             rest: pa_types::JsonMap::new(),
@@ -1041,6 +1041,23 @@ fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_entry_ids_are_unique_and_link_to_previous_entry() {
+        let mut manager = SessionManager::in_memory(Path::new("/tmp"));
+        let mut previous = None;
+        for _ in 0..1_000 {
+            let id = manager.append_custom_entry("test", None);
+            let entry = manager.get_all_entries().last().unwrap();
+            assert_eq!(entry.id(), Some(id.as_str()));
+            assert_eq!(entry.parent_id(), previous.as_deref());
+            assert_eq!(id.len(), 8);
+            assert!(id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            previous = Some(id);
+        }
+        assert_eq!(manager.by_id.len(), 1_000);
+        assert_eq!(manager.get_leaf_id(), previous.as_deref());
+    }
 
     /// The durable compaction line is the full TS `CompactionEntry` record:
     /// `fromHook: false` is present (never a missing key), and the details
