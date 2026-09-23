@@ -248,10 +248,9 @@ async fn plan_direct(
         .archive
         .as_deref()
         .context("the direct install needs a release payload")?;
-    let source = options
-        .source
-        .as_deref()
-        .context("the direct install needs --source <https-url> (recorded as the release's install origin)")?;
+    let source = options.source.as_deref().context(
+        "the direct install needs --source <https-url> (recorded as the release's install origin)",
+    )?;
     if !pa_core::update::install::install_source_is_valid(source) {
         anyhow::bail!("--source must be an http(s) URL, not {source:?}.");
     }

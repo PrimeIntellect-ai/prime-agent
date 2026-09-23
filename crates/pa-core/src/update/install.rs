@@ -185,7 +185,12 @@ pub fn running_release(executable: &Path) -> Result<RunningRelease> {
         .parent()
         .and_then(|parent| parent.file_name())
         .map(|name| name.to_string_lossy().to_string())
-        .ok_or_else(|| anyhow!("{} does not live in a release directory", resolved.display()))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "{} does not live in a release directory",
+                resolved.display()
+            )
+        })?;
     let version = release_version_of(&directory).ok_or_else(|| {
         anyhow!(
             "{} runs from release directory {directory:?}, which is not a managed release name (<version>-<platform>-<sha256>)",
@@ -196,7 +201,10 @@ pub fn running_release(executable: &Path) -> Result<RunningRelease> {
         .parent()
         .ok_or_else(|| anyhow!("{} has no parent directory", resolved.display()))?
         .to_path_buf();
-    Ok(RunningRelease { release_dir, version })
+    Ok(RunningRelease {
+        release_dir,
+        version,
+    })
 }
 
 /// Whether an install source is one the release layout accepts

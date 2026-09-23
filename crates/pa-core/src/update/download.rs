@@ -167,7 +167,8 @@ pub fn stage_archive(
         }
         Ok(())
     });
-    let result = staged.and_then(|()| finish_staging(&staging, &release_dir, archive_sha256, install_source));
+    let result = staged
+        .and_then(|()| finish_staging(&staging, &release_dir, archive_sha256, install_source));
     let _ = std::fs::remove_dir_all(&staging);
     result.map(|()| release_dir)
 }
@@ -193,8 +194,8 @@ pub async fn stage_local_payload(
     let digest = if payload.is_dir() {
         release_tree_digest(&payload)?
     } else {
-        let bytes = std::fs::read(&payload)
-            .with_context(|| format!("read {}", payload.display()))?;
+        let bytes =
+            std::fs::read(&payload).with_context(|| format!("read {}", payload.display()))?;
         super::release::sha256_hex(&bytes)
     };
     let staging = fresh_staging(root)?;
@@ -271,12 +272,10 @@ fn existing_release(release_dir: &Path, archive_sha256: &str) -> Result<Option<P
 /// A fresh staging scratch directory under `releases/`.
 fn fresh_staging(root: &Path) -> Result<PathBuf> {
     let releases = root.join("releases");
-    std::fs::create_dir_all(&releases)
-        .with_context(|| format!("create {}", releases.display()))?;
+    std::fs::create_dir_all(&releases).with_context(|| format!("create {}", releases.display()))?;
     sweep_staging(&releases);
     let staging = releases.join(format!("{STAGING_PREFIX}{}", uuid::Uuid::now_v7().simple()));
-    std::fs::create_dir_all(&staging)
-        .with_context(|| format!("create {}", staging.display()))?;
+    std::fs::create_dir_all(&staging).with_context(|| format!("create {}", staging.display()))?;
     Ok(staging)
 }
 
@@ -297,8 +296,8 @@ fn unpack_archive_into(archive: &Path, staging: &Path) -> Result<()> {
 /// survive a crash.
 fn sync_release_tree(root: &Path) -> Result<()> {
     fn walk(directory: &Path, directories: &mut Vec<PathBuf>) -> Result<()> {
-        for entry in std::fs::read_dir(directory)
-            .with_context(|| format!("read {}", directory.display()))?
+        for entry in
+            std::fs::read_dir(directory).with_context(|| format!("read {}", directory.display()))?
         {
             let entry = entry?;
             let path = entry.path();
@@ -334,15 +333,12 @@ pub fn release_tree_digest(dir: &Path) -> Result<String> {
         digest.update(relative.as_bytes());
         digest.update(b"\0");
         let contents = match std::fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                std::fs::read_link(path)
-                    .with_context(|| format!("read the link at {}", path.display()))?
-                    .to_string_lossy()
-                    .as_bytes()
-                    .to_vec()
-            }
-            _ => std::fs::read(path)
-                .with_context(|| format!("read {}", path.display()))?,
+            Ok(metadata) if metadata.file_type().is_symlink() => std::fs::read_link(path)
+                .with_context(|| format!("read the link at {}", path.display()))?
+                .to_string_lossy()
+                .as_bytes()
+                .to_vec(),
+            _ => std::fs::read(path).with_context(|| format!("read {}", path.display()))?,
         };
         digest.update(super::release::sha256_hex(&contents).as_bytes());
         digest.update(b"\n");
@@ -355,9 +351,7 @@ fn collect_payload_entries(
     prefix: &str,
     files: &mut Vec<(String, PathBuf)>,
 ) -> Result<()> {
-    for entry in std::fs::read_dir(root)
-        .with_context(|| format!("read {}", root.display()))?
-    {
+    for entry in std::fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
         let relative = if prefix.is_empty() {
@@ -381,9 +375,7 @@ fn collect_payload_entries(
 /// target. The source stays untouched — the only in-place mutation this
 /// flow performs is the atomic rename of the staging directory itself.
 fn copy_payload_tree(from: &Path, to: &Path) -> Result<()> {
-    for entry in std::fs::read_dir(from)
-        .with_context(|| format!("read {}", from.display()))?
-    {
+    for entry in std::fs::read_dir(from).with_context(|| format!("read {}", from.display()))? {
         let entry = entry?;
         let name = entry.file_name();
         let source = entry.path();
@@ -520,9 +512,7 @@ mod tests {
         let binary = payload.join("prime-agent");
         std::fs::write(
             &binary,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo {version}; fi\nexit 0\n"
-            ),
+            format!("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo {version}; fi\nexit 0\n"),
         )
         .unwrap();
         make_executable(&binary).unwrap();
@@ -565,10 +555,9 @@ mod tests {
         assert_eq!(again_version, "9.9.9");
         // A changed payload stages under a different name (a new digest).
         std::fs::write(payload.join("README.md"), "changed").unwrap();
-        let (changed, _) =
-            stage_local_payload(&payload, &root, "https://example.com/tree/abc")
-                .await
-                .unwrap();
+        let (changed, _) = stage_local_payload(&payload, &root, "https://example.com/tree/abc")
+            .await
+            .unwrap();
         assert_ne!(changed, release_dir);
     }
 
@@ -581,10 +570,12 @@ mod tests {
         let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
         let mut tar = tar::Builder::new(encoder);
         for entry in ["prime-agent", "LICENSE", "README.md"] {
-            tar.append_path_with_name(payload.join(entry), entry).unwrap();
+            tar.append_path_with_name(payload.join(entry), entry)
+                .unwrap();
         }
         for dir_entry in ["prime-agent-runtime", "skills", "docs"] {
-            tar.append_dir_all(dir_entry, payload.join(dir_entry)).unwrap();
+            tar.append_dir_all(dir_entry, payload.join(dir_entry))
+                .unwrap();
         }
         let encoder = tar.into_inner().unwrap();
         encoder.finish().unwrap();
@@ -599,10 +590,9 @@ mod tests {
         let (archive, sha) = fixture_versioned_archive(dir.path(), "candidate.tar.gz", "1.2.3");
         let root = dir.path().join("install-root");
         std::fs::create_dir_all(&root).unwrap();
-        let (release_dir, version) =
-            stage_local_payload(&archive, &root, "https://example.com")
-                .await
-                .unwrap();
+        let (release_dir, version) = stage_local_payload(&archive, &root, "https://example.com")
+            .await
+            .unwrap();
         assert_eq!(version, "1.2.3");
         assert!(release_dir.ends_with(format!(
             "releases/1.2.3-{platform}-{sha}",
@@ -623,11 +613,9 @@ mod tests {
         let payload = fixture_payload(dir.path(), "payload", "not a version");
         let root = dir.path().join("install-root");
         std::fs::create_dir_all(&root).unwrap();
-        assert!(
-            stage_local_payload(&payload, &root, "https://example.com")
-                .await
-                .is_err()
-        );
+        assert!(stage_local_payload(&payload, &root, "https://example.com")
+            .await
+            .is_err());
     }
 
     #[test]

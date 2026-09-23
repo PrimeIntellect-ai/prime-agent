@@ -827,7 +827,6 @@ fn require_operand_count(
     false
 }
 
-
 #[cfg(test)]
 mod update_options_tests {
     use super::*;
@@ -854,8 +853,13 @@ mod update_options_tests {
 
     #[test]
     fn parses_the_direct_install_pair() {
-        let invocation = parse(&["--archive", "/tmp/payload", "--source", "https://example.com"])
-            .unwrap();
+        let invocation = parse(&[
+            "--archive",
+            "/tmp/payload",
+            "--source",
+            "https://example.com",
+        ])
+        .unwrap();
         assert_eq!(
             invocation.archive,
             Some(std::path::PathBuf::from("/tmp/payload"))

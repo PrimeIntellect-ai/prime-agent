@@ -127,12 +127,14 @@ pub async fn plan(
             );
         }
     }
-    let Some(release) =
-        latest_release(running.version.as_str(), channel, &base_url, MANIFEST_TIMEOUT)
-            .await
-            .with_context(|| {
-                "Could not resolve a compiled release. The installed version was kept."
-            })?
+    let Some(release) = latest_release(
+        running.version.as_str(),
+        channel,
+        &base_url,
+        MANIFEST_TIMEOUT,
+    )
+    .await
+    .with_context(|| "Could not resolve a compiled release. The installed version was kept.")?
     else {
         return Ok(UpdatePlan::Skipped {
             reason: "Could not resolve a compiled release; the installed version was kept."
@@ -150,11 +152,9 @@ pub async fn plan(
     // A tagged build is a train that was never promoted: the stable
     // channel publishes untagged releases, and installing a tagged version
     // over newer code is the obsolete-train incident (`--force` overrides).
-    let effective_channel = channel
-        .unwrap_or_else(|| resolve_update_channel(running.version.as_str(), None));
-    if !force
-        && effective_channel == UpdateChannel::Stable
-        && has_prerelease_tag(&release.version)
+    let effective_channel =
+        channel.unwrap_or_else(|| resolve_update_channel(running.version.as_str(), None));
+    if !force && effective_channel == UpdateChannel::Stable && has_prerelease_tag(&release.version)
     {
         return Ok(UpdatePlan::Skipped {
             reason: format!(
@@ -171,8 +171,7 @@ pub async fn plan(
             ),
         });
     }
-    if !force && !is_release_update_candidate(&release.version, running.version.as_str(), channel)
-    {
+    if !force && !is_release_update_candidate(&release.version, running.version.as_str(), channel) {
         return Ok(UpdatePlan::Skipped {
             reason: format!(
                 "No update candidate: the installed version {} is current.",

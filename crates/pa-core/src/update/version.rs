@@ -344,7 +344,10 @@ mod tests {
         ));
         // Different base versions are normal semver decisions, and an
         // untagged side is the TS channel-switch territory, not a shuffle.
-        assert!(!same_base_opaque_build_tag("0.10.1", "0.10.0-rust-64f66e3d"));
+        assert!(!same_base_opaque_build_tag(
+            "0.10.1",
+            "0.10.0-rust-64f66e3d"
+        ));
         assert!(!same_base_opaque_build_tag("0.10.0-beta.5", "0.10.0"));
         assert!(!same_base_opaque_build_tag("junk", "0.10.0-rust-64f66e3d"));
     }
