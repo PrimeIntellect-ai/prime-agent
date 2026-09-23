@@ -200,6 +200,24 @@ impl ClientSettings for CliClientSettings {
         };
         self.manager()?.set_update_channel(channel)
     }
+
+    fn effective_update_channel(&self, version: &str) -> String {
+        let preferred = self
+            .manager()
+            .ok()
+            .and_then(|manager| manager.get_update_channel())
+            .map(|channel| match channel {
+                pa_core::settings::types::UpdateChannel::Stable => {
+                    pa_core::update::version::UpdateChannel::Stable
+                }
+                pa_core::settings::types::UpdateChannel::Nightly => {
+                    pa_core::update::version::UpdateChannel::Nightly
+                }
+            });
+        pa_core::update::version::resolve_update_channel(version, preferred)
+            .wire_name()
+            .to_string()
+    }
 }
 
 #[cfg(test)]

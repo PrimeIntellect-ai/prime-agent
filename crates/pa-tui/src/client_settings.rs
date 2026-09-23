@@ -63,4 +63,10 @@ pub trait ClientSettings: Send + Sync {
     /// the running version).
     fn update_channel(&self) -> Option<String>;
     fn set_update_channel(&self, channel: &str) -> Result<()>;
+    /// The effective update channel for the running version (TS
+    /// `resolveUpdateChannel(version, getUpdateChannel())`), as its wire
+    /// name — pa-tui cannot reach the update flow's resolver, so the
+    /// composition root resolves it (a preferred channel wins, else the
+    /// version's prerelease infers).
+    fn effective_update_channel(&self, version: &str) -> String;
 }

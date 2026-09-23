@@ -2690,16 +2690,16 @@ impl SessionUi {
                 self.track_command_used("nightly");
                 let arg = resolved.args.trim().to_lowercase();
                 if arg == "status" {
-                    let preferred = self
-                        .client_settings
-                        .as_ref()
-                        .and_then(|settings| settings.update_channel());
-                    let channel = pa_core::update::version::resolve_update_channel(
-                        &view.chrome.version,
-                        preferred
-                            .as_deref()
-                            .and_then(pa_core::update::version::UpdateChannel::from_wire),
-                    );
+                    // The effective channel resolves through the
+                    // client-settings seam (pa-tui cannot reach the
+                    // update flow's resolver); a surface without the
+                    // seam never claims a channel.
+                    let Some(settings) = &self.client_settings else {
+                        self.note("/nightly is not available in this client yet", view);
+                        return Ok(());
+                    };
+                    let preferred = settings.update_channel();
+                    let channel = settings.effective_update_channel(&view.chrome.version);
                     let source = if preferred.is_some() {
                         "set in settings"
                     } else {
@@ -2707,8 +2707,7 @@ impl SessionUi {
                     };
                     self.note(
                         &format!(
-                            "Updates follow the {} channel ({source}). v{} installed.",
-                            channel.wire_name(),
+                            "Updates follow the {channel} channel ({source}). v{} installed.",
                             view.chrome.version
                         ),
                         view,

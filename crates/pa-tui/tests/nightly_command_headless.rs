@@ -1,9 +1,9 @@
 //! Headless e2e for the `/nightly` command (TS `interactive-mode.ts`
 //! 5455-5484): the status arm resolves the effective channel from the
 //! running version when no preferred channel is set, the usage error keeps
-//! the TS wording, and the off arm notes the stable pin (the settings seam
-//! is absent in the headless harness, so the pin's write is covered by the
-//! seam round-trip test instead).
+//! the TS wording, and the off arm pins the channel through the settings
+//! seam (a stub seam: the write lands in memory; the persisted wire form is
+//! covered by the pa-cli seam round-trip test).
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -165,6 +165,138 @@ fn attach_data(id: &str) -> Value {
     })
 }
 
+/// A minimal settings seam for the harness: every getter returns its TS
+/// default, writes succeed without persistence, and the channel pair
+/// resolves like the composition root (the version infers when unset).
+#[derive(Default)]
+struct StubSettings {
+    update_channel: std::sync::Mutex<Option<String>>,
+}
+
+impl pa_tui::client_settings::ClientSettings for StubSettings {
+    fn theme(&self) -> Option<String> {
+        None
+    }
+    fn set_theme(&self, _theme: &str) -> Result<()> {
+        Ok(())
+    }
+    fn fullscreen(&self) -> bool {
+        true
+    }
+    fn set_fullscreen(&self, _enabled: bool) -> Result<()> {
+        Ok(())
+    }
+    fn show_images(&self) -> bool {
+        true
+    }
+    fn set_show_images(&self, _enabled: bool) -> Result<()> {
+        Ok(())
+    }
+    fn clear_on_shrink(&self) -> bool {
+        false
+    }
+    fn set_clear_on_shrink(&self, _enabled: bool) -> Result<()> {
+        Ok(())
+    }
+    fn show_terminal_progress(&self) -> bool {
+        false
+    }
+    fn set_show_terminal_progress(&self, _enabled: bool) -> Result<()> {
+        Ok(())
+    }
+    fn image_auto_resize(&self) -> bool {
+        true
+    }
+    fn set_image_auto_resize(&self, _enabled: bool) -> Result<()> {
+        Ok(())
+    }
+    fn block_images(&self) -> bool {
+        false
+    }
+    fn set_block_images(&self, _blocked: bool) -> Result<()> {
+        Ok(())
+    }
+    fn enable_skill_commands(&self) -> bool {
+        true
+    }
+    fn set_enable_skill_commands(&self, _enabled: bool) -> Result<()> {
+        Ok(())
+    }
+    fn enable_builtin_skills(&self) -> bool {
+        true
+    }
+    fn set_enable_builtin_skills(&self, _enabled: bool) -> Result<()> {
+        Ok(())
+    }
+    fn show_hardware_cursor(&self) -> bool {
+        false
+    }
+    fn set_show_hardware_cursor(&self, _enabled: bool) -> Result<()> {
+        Ok(())
+    }
+    fn editor_padding_x(&self) -> u64 {
+        0
+    }
+    fn set_editor_padding_x(&self, _padding: u64) -> Result<()> {
+        Ok(())
+    }
+    fn autocomplete_max_visible(&self) -> u64 {
+        5
+    }
+    fn set_autocomplete_max_visible(&self, _max_visible: u64) -> Result<()> {
+        Ok(())
+    }
+    fn quiet_startup(&self) -> bool {
+        false
+    }
+    fn set_quiet_startup(&self, _quiet: bool) -> Result<()> {
+        Ok(())
+    }
+    fn idle_eviction_minutes(&self) -> String {
+        "90".to_string()
+    }
+    fn set_idle_eviction_minutes(&self, _value: &str) -> Result<()> {
+        Ok(())
+    }
+    fn mermaid_rendering_mode(&self) -> String {
+        "streaming".to_string()
+    }
+    fn set_mermaid_rendering_mode(&self, _mode: &str) -> Result<()> {
+        Ok(())
+    }
+    fn tree_filter_mode(&self) -> String {
+        "user-only".to_string()
+    }
+    fn set_tree_filter_mode(&self, _mode: &str) -> Result<()> {
+        Ok(())
+    }
+    fn warnings_anthropic_extra_usage(&self) -> bool {
+        true
+    }
+    fn set_warnings_anthropic_extra_usage(&self, _enabled: bool) -> Result<()> {
+        Ok(())
+    }
+    fn update_channel(&self) -> Option<String> {
+        *self.update_channel.lock().expect("channel lock")
+    }
+    fn set_update_channel(&self, channel: &str) -> Result<()> {
+        *self.update_channel.lock().expect("channel lock") = Some(channel.to_string());
+        Ok(())
+    }
+    fn effective_update_channel(&self, version: &str) -> String {
+        if let Some(channel) = self.update_channel() {
+            return channel;
+        }
+        // The inference TS resolveUpdateChannel applies: a -beta*
+        // prerelease reads nightly, anything else stable.
+        if version.contains("-beta") {
+            "nightly".to_string()
+        } else {
+            "stable".to_string()
+        }
+    }
+}
+
 fn options(socket: PathBuf) -> InteractiveOptions {
     InteractiveOptions {
         socket_path: socket,
@@ -197,7 +329,7 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         session_rlm_depth: None,
         prompt_stash: Default::default(),
         session_has_children: false,
-        client_settings: None,
+        client_settings: Some(std::sync::Arc::new(StubSettings::default())),
     }
 }
 
@@ -248,8 +380,8 @@ fn nightly_status_and_usage_error_render_the_ts_wording() {
     );
 }
 
-/// `/nightly off` renders the TS stable-pin note even without the settings
-/// seam (the write itself is covered by the seam round-trip test).
+/// `/nightly off` pins the channel through the settings seam and renders
+/// the TS stable-pin note.
 #[test]
 fn nightly_off_renders_the_stable_pin_note() {
     let steps = vec![
