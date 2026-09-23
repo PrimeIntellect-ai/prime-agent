@@ -379,6 +379,8 @@ mod tests {
                     prewarm_ipython_kernel: None,
                     queued_goal_context_purge: None,
                     queued_steering_probe: None,
+                    steering_mode: None,
+                    follow_up_mode: None,
                 },
             )
             .await

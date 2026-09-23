@@ -290,6 +290,12 @@ pub(crate) struct SessionUi {
     /// Rows of the most recent `/list` (for `/switch <n>`).
     list_rows: Vec<Value>,
     pub(crate) turn_active: bool,
+    /// The session's queue delivery mode (TS `steeringMode`, the state's
+    /// `steeringMode`): `all` delivers the queued steering prefix as one
+    /// batched turn at the boundary; `one-at-a-time` (the TS default) one
+    /// per turn. Cached at every connection-state read so the queued-input
+    /// adoption event reports the mode without a synchronous fetch.
+    pub(crate) steering_mode: String,
     /// The chat index of the assistant message still streaming.
     streaming_index: Option<usize>,
     /// The loader's token accounting (TS `AgentActivityTracker`), reported
@@ -584,6 +590,7 @@ impl SessionUi {
             cost_usd: None,
             list_rows: Vec::new(),
             turn_active: false,
+            steering_mode: "one-at-a-time".to_string(),
             streaming_index: None,
             working_tokens: LoaderTokenTracker::default(),
             turn_error_shown: false,
@@ -2179,8 +2186,13 @@ impl SessionUi {
                     SubmitBehavior::Steer => "steering",
                     SubmitBehavior::FollowUp => "follow_up",
                 };
+                // The queued-input adoption event carries the session's
+                // queue delivery mode (`tui input queued`'s
+                // `steering_mode`): exposure under batched delivery is
+                // the multi-steer batch feature's adoption signal.
+                let steering_mode = self.steering_mode.clone();
                 tokio::spawn(async move {
-                    telemetry.queued_input(lane).await;
+                    telemetry.queued_input(lane, steering_mode).await;
                 });
             }
         }
@@ -3467,12 +3479,12 @@ impl SessionUi {
             steering_mode: state
                 .get("steeringMode")
                 .and_then(Value::as_str)
-                .unwrap_or("all")
+                .unwrap_or("one-at-a-time")
                 .to_string(),
             follow_up_mode: state
                 .get("followUpMode")
                 .and_then(Value::as_str)
-                .unwrap_or("all")
+                .unwrap_or("one-at-a-time")
                 .to_string(),
             thinking_level: state
                 .get("thinkingLevel")
@@ -3692,6 +3704,11 @@ impl SessionUi {
                     view,
                 )
                 .await;
+                // The queue delivery mode changed (TS `setSteeringMode`
+                // applies live): refresh the cache the queued-input event
+                // reads, so a submission right after the switch reports
+                // the new mode.
+                let _ = self.connection_state(view).await;
             }
             "follow-up-mode" => {
                 self.daemon_switch(
@@ -4881,16 +4898,11 @@ impl SessionUi {
                 .unwrap_or_else(|| "Ctrl+C".to_string());
             return Some(format!("Press {key} again to exit"));
         }
-        let text = view.editor.get_expanded_text();
-        if !self.turn_active || text.trim().is_empty() {
-            return None;
-        }
-        let follow_up = self
-            .keybindings
-            .first_key("app.message.followUp")
-            .map(|key| crate::keybindings::format_key_text(&key))
-            .unwrap_or_default();
-        Some(format!("{follow_up} to queue message"))
+        streaming_tray_hint(
+            &self.keybindings,
+            self.turn_active,
+            &view.editor.get_expanded_text(),
+        )
     }
 
     /// One key press while the `/model` picker is open: Esc/Ctrl+C close
@@ -5884,7 +5896,16 @@ impl SessionUi {
             )
             .await
         {
-            Ok(data) => Some(data),
+            Ok(data) => {
+                // The queue delivery mode rides the state (TS
+                // `steeringMode`): cached here — every state read is the
+                // single refresh seam — so the queued-input adoption
+                // event reports the live mode without a fetch.
+                if let Some(mode) = data.get("steeringMode").and_then(Value::as_str) {
+                    self.steering_mode = mode.to_string();
+                }
+                Some(data)
+            }
             Err(error) => {
                 self.note(&format!("{error:#}"), view);
                 None
@@ -7864,6 +7885,26 @@ fn sorted_session_rows(mut sessions: Vec<Value>) -> Vec<Value> {
     sessions
 }
 
+/// The streaming follow-up hint (TS `getTrayOverrideLabel`'s streaming
+/// arm): `<followUp> to queue message` — the tray override while the agent
+/// streams and a draft sits in the editor (an empty draft or an idle
+/// session shows nothing; the Ctrl+C exit hint outranks it at the call
+/// site, TS `isCtrlCExitHintVisible()`'s early return).
+fn streaming_tray_hint(
+    keybindings: &crate::keybindings::KeybindingsManager,
+    turn_active: bool,
+    draft: &str,
+) -> Option<String> {
+    if !turn_active || draft.trim().is_empty() {
+        return None;
+    }
+    let follow_up = keybindings
+        .first_key("app.message.followUp")
+        .map(|key| crate::keybindings::format_key_text(&key))
+        .unwrap_or_default();
+    Some(format!("{follow_up} to queue message"))
+}
+
 /// TS `isBashRunning` guard's warning: the clear key (app.clear) cancels
 /// the running user command, spelled through the effective keybindings.
 fn already_running_warning(keybindings: &crate::keybindings::KeybindingsManager) -> String {
@@ -7966,6 +8007,51 @@ async fn create_session(
         .ok_or_else(|| anyhow!("the daemon did not report a session id for the new session"))
 }
 
+#[cfg(test)]
+mod streaming_tray_hint_tests {
+    use super::streaming_tray_hint;
+    use crate::keybindings::{KeybindingsConfig, KeybindingsManager};
+
+    /// TS `getTrayOverrideLabel`'s streaming arm: the follow-up hint names
+    /// the effective `app.message.followUp` key (the default is
+    /// alt+enter).
+    #[test]
+    fn the_hint_names_the_follow_up_key_over_a_draft() {
+        let kb = KeybindingsManager::new();
+        assert_eq!(
+            streaming_tray_hint(&kb, true, "a draft in the editor"),
+            Some("Alt+Enter to queue message".to_string()),
+            "the default binding renders the TS sentence"
+        );
+    }
+
+    /// TS `!this.isAgentStreaming() || !text.trim()` — an idle session or
+    /// an empty (whitespace-only) draft shows no hint.
+    #[test]
+    fn idle_or_empty_draft_shows_no_hint() {
+        let kb = KeybindingsManager::new();
+        assert_eq!(streaming_tray_hint(&kb, false, "draft"), None);
+        assert_eq!(streaming_tray_hint(&kb, true, ""), None);
+        assert_eq!(streaming_tray_hint(&kb, true, "   "), None);
+    }
+
+    /// A user-rebound follow-up key spells through the effective binding
+    /// (TS `keyText("app.message.followUp")`).
+    #[test]
+    fn the_hint_spells_a_rebound_follow_up_key() {
+        let mut config = KeybindingsConfig::new();
+        config.insert(
+            "app.message.followUp".to_string(),
+            vec!["ctrl+q".to_string()],
+        );
+        let kb = KeybindingsManager::with_user_bindings(config);
+        assert_eq!(
+            streaming_tray_hint(&kb, true, "draft"),
+            Some("Ctrl+Q to queue message".to_string()),
+            "the hint follows the effective binding"
+        );
+    }
+}
 #[cfg(test)]
 mod bash_bang_tests {
     use super::already_running_warning;

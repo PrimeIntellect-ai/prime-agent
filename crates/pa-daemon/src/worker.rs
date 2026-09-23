@@ -3394,6 +3394,11 @@ impl Worker {
     /// anything armed; an empty lane (or an all-injected one) arms nothing
     /// and the caller falls back to the plain abort (TS
     /// `queuedSteering.length === 0 || !canResume`).
+    // The caller is the `abort_and_send_queued` handler (schema 29), owned
+    // by the abort-parity lane per the fleet surface split: this branch
+    // precedes it, so the seam is lint-silenced until the rebase onto its
+    // head wires the call (the merged tree carries both).
+    #[allow(dead_code)]
     pub(crate) fn arm_forced_all_steering(&self) -> bool {
         let mut core = self.core.lock().unwrap();
         let armable = |item: &QueuedItem| {
@@ -4445,7 +4450,9 @@ fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<QueuedItem> 
     // with its flag, so the armed prefix exhausts itself).
     let forced = lane == Lane::Steering && core.forced_all_steering && first.forced_batch;
     let mut batch = vec![items.pop_front().expect("front checked")];
-    if lane == Lane::Steering && core.forced_all_steering && !forced
+    if lane == Lane::Steering
+        && core.forced_all_steering
+        && !forced
         && !items.iter().any(|item| item.forced_batch)
     {
         core.forced_all_steering = false;
@@ -4802,11 +4809,7 @@ impl TurnRunner {
     /// One delivery: a single item, or the batch the pump gathered (TS
     /// `_startPreparedTurnActions`): the first item anchors the turn and
     /// the rest ride as co-delivered user rows of the same run.
-    async fn run_turn(
-        &self,
-        engine: std::sync::Arc<dyn SessionEngine>,
-        items: Vec<QueuedItem>,
-    ) {
+    async fn run_turn(&self, engine: std::sync::Arc<dyn SessionEngine>, items: Vec<QueuedItem>) {
         let Some((first, batched)) = items.split_first() else {
             return;
         };
@@ -4896,10 +4899,8 @@ impl TurnRunner {
             .iter()
             .filter_map(|item| item.admission_id.clone())
             .collect();
-        let items_done: Vec<oneshot::Sender<Result<(), String>>> = items
-            .into_iter()
-            .filter_map(|item| item.done)
-            .collect();
+        let items_done: Vec<oneshot::Sender<Result<(), String>>> =
+            items.into_iter().filter_map(|item| item.done).collect();
         let turn_outcome = Arc::new(std::sync::Mutex::new(
             None::<std::result::Result<(), String>>,
         ));
@@ -7792,11 +7793,99 @@ mod tests {
         assert_eq!(follow_up[0].message, "follow-me");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// The forced-batch arming classification (TS `abortAndSendQueued`'s
+    /// `queuedSteering` filter): only the visible plain-user steering items
+    /// arm — queue-visible rows whose delivery record is a user message;
+    /// agent-message deliveries and injected custom rows never join, and an
+    /// empty (or all-injected) lane arms nothing.
+    #[tokio::test]
+    async fn forced_batch_arming_classifies_the_visible_plain_rows() {
+        let worker = created_dispatch_worker().await;
+        {
+            let mut core = worker.core.lock().unwrap();
+            core.steering.push_back(QueuedItem {
+                preview: None,
+                message: "steer one".to_string(),
+                custom_message: None,
+                agent_message: None,
+                queue_key: None,
+                admission_id: None,
+                images: Vec::new(),
+                done: None,
+                queue_visible: true,
+                policy: TurnPolicy::Queued,
+                forced_batch: false,
+            });
+            core.steering.push_back(QueuedItem {
+                preview: None,
+                message: "agent message row".to_string(),
+                custom_message: None,
+                agent_message: Some("agent message row".to_string()),
+                queue_key: None,
+                admission_id: None,
+                images: Vec::new(),
+                done: None,
+                queue_visible: true,
+                policy: TurnPolicy::Injected,
+                forced_batch: false,
+            });
+            core.steering.push_back(QueuedItem {
+                preview: None,
+                message: "injected custom row".to_string(),
+                custom_message: Some(json!({ "role": "custom", "customType": "x" })),
+                agent_message: None,
+                queue_key: None,
+                admission_id: None,
+                images: Vec::new(),
+                done: None,
+                queue_visible: true,
+                policy: TurnPolicy::Injected,
+                forced_batch: false,
+            });
+            core.steering.push_back(QueuedItem {
+                preview: None,
+                message: "steer two".to_string(),
+                custom_message: None,
+                agent_message: None,
+                queue_key: None,
+                admission_id: None,
+                images: Vec::new(),
+                done: None,
+                queue_visible: true,
+                policy: TurnPolicy::Queued,
+                forced_batch: false,
+            });
+        }
+        assert!(
+            worker.arm_forced_all_steering(),
+            "the armable rows exist: the arm fired"
+        );
+        {
+            let core = worker.core.lock().unwrap();
+            assert!(core.forced_all_steering, "the forced batch is armed");
+            let armed: Vec<bool> = core.steering.iter().map(|item| item.forced_batch).collect();
+            assert_eq!(
+                armed,
+                vec![true, false, false, true],
+                "only the visible plain-user rows armed: {armed:?}"
+            );
+        }
+        // A lane with nothing armable arms nothing.
+        worker.core.lock().unwrap().steering.clear();
+        assert!(
+            !worker.arm_forced_all_steering(),
+            "an empty lane arms nothing"
+        );
+        assert!(
+            !worker.core.lock().unwrap().forced_all_steering,
+            "still disarmed"
+        );
+    }
 }
 
 #[cfg(test)]
 mod turn_stream_tests {
-    use super::session_events_since;
     use super::*;
     use crate::engine::{
         CompactionOutcome, CompactionRequest, PromptRequest, SessionEngine, SideQuestionOutcome,
@@ -8072,6 +8161,21 @@ mod turn_stream_tests {
         running.abort();
     }
 
+    /// The session-event frames off the runner's event pump (the same
+    /// wire shape the outer tests' `session_events_since` collects).
+    fn runner_events(
+        subscription: &mut tokio::sync::broadcast::Receiver<Arc<OutboundFrame>>,
+    ) -> Vec<Value> {
+        let mut events = Vec::new();
+        while let Ok(frame) = subscription.try_recv() {
+            if frame.outbound_type == "session_event" {
+                if let Ok(outbound) = serde_json::from_slice::<Value>(&frame.payload) {
+                    events.push(outbound["event"].clone());
+                }
+            }
+        }
+        events
+    }
 
     /// A queued plain-prompt item for the pump tests.
     fn queued_prompt(message: &str, policy: TurnPolicy) -> QueuedItem {
@@ -8098,9 +8202,7 @@ mod turn_stream_tests {
         loop {
             {
                 let core = core.lock().unwrap();
-                let drained = core.steering.is_empty()
-                    && core.follow_up.is_empty()
-                    && !core.busy;
+                let drained = core.steering.is_empty() && core.follow_up.is_empty() && !core.busy;
                 if drained {
                     return;
                 }
@@ -8140,7 +8242,11 @@ mod turn_stream_tests {
                     .or_else(|| {
                         content
                             .as_array()
-                            .and_then(|parts| parts.iter().find(|part| part.get("type").and_then(Value::as_str) == Some("text")))
+                            .and_then(|parts| {
+                                parts.iter().find(|part| {
+                                    part.get("type").and_then(Value::as_str) == Some("text")
+                                })
+                            })
                             .and_then(|part| part.get("text"))
                             .and_then(Value::as_str)
                             .map(str::to_string)
@@ -8179,7 +8285,7 @@ mod turn_stream_tests {
         drain_pump(&core, &work_notify).await;
         running.abort();
 
-        let events = session_events_since(&mut subscription);
+        let events = runner_events(&mut subscription);
         let starts = events
             .iter()
             .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_start"))
@@ -8226,7 +8332,7 @@ mod turn_stream_tests {
         drain_pump(&core, &work_notify).await;
         running.abort();
 
-        let events = session_events_since(&mut subscription);
+        let events = runner_events(&mut subscription);
         let starts = events
             .iter()
             .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_start"))
@@ -8280,12 +8386,15 @@ mod turn_stream_tests {
         drain_pump(&core, &work_notify).await;
         running.abort();
 
-        let events = session_events_since(&mut subscription);
+        let events = runner_events(&mut subscription);
         let starts = events
             .iter()
             .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_start"))
             .count();
-        assert_eq!(starts, 2, "the armed batch runs as one turn, the late steer its own");
+        assert_eq!(
+            starts, 2,
+            "the armed batch runs as one turn, the late steer its own"
+        );
         let rows = delivered_rows(&events);
         assert_eq!(
             rows,
@@ -8327,7 +8436,7 @@ mod turn_stream_tests {
         drain_pump(&core, &work_notify).await;
         running.abort();
 
-        let events = session_events_since(&mut subscription);
+        let events = runner_events(&mut subscription);
         let starts = events
             .iter()
             .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_start"))
@@ -8370,7 +8479,7 @@ mod turn_stream_tests {
         drain_pump(&core, &work_notify).await;
         running.abort();
 
-        let events = session_events_since(&mut subscription);
+        let events = runner_events(&mut subscription);
         let starts = events
             .iter()
             .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_start"))

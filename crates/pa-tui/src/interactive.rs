@@ -106,8 +106,15 @@ pub trait InteractionTelemetry: Send + Sync {
     /// `tui image pasted`); `mime_type` is the attachment's sniffed format.
     fn image_pasted(&self, mime_type: &str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// A submission parked in the follow-up queue behind a running turn:
-    /// `lane` is `steering` (Enter) / `follow_up` (the follow-up key).
-    fn queued_input(&self, lane: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    /// `lane` is `steering` (Enter) / `follow_up` (the follow-up key);
+    /// `steering_mode` is the session's queue delivery mode (TS
+    /// `steeringMode`: `all` = batched delivery at the boundary,
+    /// `one-at-a-time` = one steer per turn).
+    fn queued_input(
+        &self,
+        lane: &'static str,
+        steering_mode: String,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// A parked message was edited through the queue browse (event
     /// `tui queue edited`): `action` is `select` (a browse opened a
     /// selection), `edit` (the edited text re-queued; empty text

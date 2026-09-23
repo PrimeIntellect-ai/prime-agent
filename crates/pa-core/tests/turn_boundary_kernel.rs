@@ -220,6 +220,8 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
     let engine = create_session(SessionEngineConfig {
         cron_store: None,
         queued_steering_probe: None,
+        steering_mode: None,
+        follow_up_mode: None,
         cwd: cwd.clone(),
         agent_dir,
         model: Some(model),

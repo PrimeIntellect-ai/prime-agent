@@ -4140,11 +4140,9 @@ impl AgentSessionEngine {
                         let options = pa_core::session_engine::PromptOptions {
                             batch: batch
                                 .iter()
-                                .map(|row| {
-                                    pa_core::session_engine::PromptBatchRow {
-                                        text: row.text.clone(),
-                                        images: row.images.clone(),
-                                    }
+                                .map(|row| pa_core::session_engine::PromptBatchRow {
+                                    text: row.text.clone(),
+                                    images: row.images.clone(),
                                 })
                                 .collect(),
                             ..Default::default()

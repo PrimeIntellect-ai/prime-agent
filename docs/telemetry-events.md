@@ -317,6 +317,7 @@ parked submission, not per rendered row).
 | property | type | notes |
 |---|---|---|
 | `lane` | string | `steering` (Enter while a turn runs) / `follow_up` (the follow-up key) |
+| `steering_mode` | string | the session's queue delivery mode at the submission (TS `steeringMode`): `all` = the parked steering prefix delivers as one batched turn at the boundary, `one-at-a-time` = one steer per turn — exposure under batched delivery is the multi-steer batch feature's adoption signal |
 
 ### `tui queue edited`
 
