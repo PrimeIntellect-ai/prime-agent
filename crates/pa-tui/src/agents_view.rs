@@ -549,7 +549,20 @@ impl AgentsViewMode {
     /// Open the selected row (TS `openSelected`): the summary row toggles
     /// its list, a nested child drills into its transcript with its
     /// ancestor chain, and a top-level agent opens its session.
+    ///
+    /// While the entry anchor still waits on its row (the saved catalog
+    /// streams in), the selection is the rebuild's default, not the
+    /// user's — opening it would confirm an arbitrary row (on a
+    /// continue-recent launch that can be an unrelated live session). The
+    /// open waits instead: the anchor lands the selection once its row
+    /// appears, and any direction key cancels the wait for an explicit
+    /// manual pick.
     fn open_selected(&mut self) {
+        if self.anchor_selection_pending {
+            self.status =
+                Some("Still loading sessions — press ↓ or ↑ to pick a session now.".to_string());
+            return;
+        }
         let Some(row) = self.rows.get(self.selected).cloned() else {
             return;
         };
@@ -1971,6 +1984,30 @@ mod tests {
         mode.rebuild_rows();
         assert_eq!(mode.rows[mode.selected].summary["sessionId"], "s2");
         assert!(!mode.anchor_selection_pending);
+    }
+
+    /// Enter during the anchor wait opens nothing (the default row is not
+    /// the user's choice); once the anchor row lands, Enter opens it.
+    #[test]
+    fn open_waits_out_the_entry_anchor() {
+        let mut mode = mode_with_anchor(
+            Some("s2"),
+            vec![roster_entry("s1", "idle", parent_summary("s1"))],
+        );
+        assert!(mode.anchor_selection_pending);
+        mode.handle_key("enter");
+        assert!(mode.opened.is_none(), "the default row did not open");
+        assert!(mode.status.is_some(), "the wait explains itself");
+        mode.roster
+            .push(roster_entry("s2", "idle", parent_summary("s2")));
+        mode.rebuild_rows();
+        assert!(!mode.anchor_selection_pending);
+        mode.handle_key("enter");
+        let opened = mode.opened.expect("the anchored row opens");
+        assert_eq!(
+            opened.selection,
+            SessionSelection::Attach("s2-live".to_string())
+        );
     }
 
     /// The first user move cancels the wait: the anchor never overrides an
