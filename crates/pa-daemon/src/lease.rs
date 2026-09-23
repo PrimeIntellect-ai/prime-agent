@@ -197,20 +197,95 @@ fn reclaim_stale(directory: &Path) -> bool {
     }
 }
 
+/// A guard older than this is stale and gets reclaimed (TS `stale: 5000`).
+const STALE_GUARD_AFTER: Duration = Duration::from_secs(5);
+
+/// Attempts before a fast guard acquisition surfaces its failure: the TS
+/// `withLeaseGuard` budget of 100 retries at ~12ms.
+const FAST_GUARD_ATTEMPTS: u32 = 100;
+
+/// Wait past the stale window, covering the retry cadence between a
+/// stale reclaim and the next acquisition attempt.
+const THROUGH_STALE_SLACK: Duration = Duration::from_millis(500);
+
+/// How long a guard acquisition waits for a foreign holder.
+#[derive(Clone, Copy)]
+enum GuardWait {
+    /// The fast budget. The release and append paths hold the guard only
+    /// for their own sub-millisecond bookkeeping, so a guard that stays
+    /// busy for longer belongs to a genuinely stuck peer and surfaces
+    /// as a failure instead of stalling the caller.
+    Fast,
+    /// Outlast the stale window: a holder killed mid-mutation (kill -9)
+    /// can never release its guard, so an acquisition on the create/open
+    /// path must survive until the stale reclaim instead of failing
+    /// while the reclaim is still seconds away.
+    ThroughStale,
+}
+
 /// Serialize lease-directory mutations with a guard directory lock.
-fn with_lease_guard<T>(directory: &Path, action: impl FnOnce() -> Result<T>) -> Result<T> {
+///
+/// The guard is a bare `<lease>.guard` directory: TS (`proper-lockfile`)
+/// reclaims a foreign guard by rmdir, so it must stay empty on every
+/// platform. The holder removes it when the action ends; a holder that
+/// dies mid-action leaves it behind, and only the `STALE_GUARD_AFTER`
+/// mtime window reclaims it (a bare guard carries no holder identity to
+/// consult). `GuardWait` picks whether an acquisition outlives that
+/// window - a fresh guard of a dead holder blocks a session open forever
+/// if the open gives up first.
+fn with_lease_guard<T>(
+    directory: &Path,
+    wait: GuardWait,
+    action: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     let guard = PathBuf::from(format!("{}.guard", directory.display()));
+    let deadline = match wait {
+        GuardWait::Fast => None,
+        GuardWait::ThroughStale => {
+            Some(std::time::Instant::now() + STALE_GUARD_AFTER + THROUGH_STALE_SLACK)
+        }
+    };
     let mut acquired = false;
-    for attempt in 0..100u32 {
+    let mut attempt = 0u32;
+    loop {
         match fs::create_dir(&guard) {
             Ok(()) => {
                 acquired = true;
                 break;
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Stale guard: a holder that died without cleanup.
-                if crate::paths::mtime_age(&guard).is_some_and(|age| age > Duration::from_secs(5)) {
-                    let _ = fs::remove_dir_all(&guard);
+                // Every contention consumes the budget, stale or not: a
+                // reclaim that keeps failing (permissions, or a peer
+                // re-creating the guard) must burn out like any other
+                // busy guard instead of spinning past the deadline.
+                attempt += 1;
+                let exhausted = match deadline {
+                    Some(deadline) => std::time::Instant::now() >= deadline,
+                    None => attempt >= FAST_GUARD_ATTEMPTS,
+                };
+                if exhausted {
+                    break;
+                }
+                // Stale guard: a holder that died without cleanup. The
+                // bare guard carries no holder identity (TS reclaims a
+                // foreign guard by rmdir, so it must stay empty), so the
+                // lease's owner is the stand-in: steal only when the
+                // owner is provably dead or the lease never finished
+                // acquiring. A live owner may hold the guard mid-append,
+                // and taking it would break the append's exactly-one-
+                // commit serialization; the one contender a dead owner
+                // still allows - another acquirer racing this one - is
+                // tolerated by acquire's own contention retries. A
+                // successful reclaim retries immediately; anything else
+                // falls through to the cadence so it stays paced.
+                if crate::paths::mtime_age(&guard).is_some_and(|age| age > STALE_GUARD_AFTER)
+                    && match read_owner(directory) {
+                        Ok(Some(owner)) => !owner_alive(&owner),
+                        Ok(None) => true,
+                        Err(_) => false,
+                    }
+                    && fs::remove_dir_all(&guard).is_ok()
+                {
                     continue;
                 }
                 std::thread::sleep(Duration::from_millis(10 + (attempt % 5) as u64));
@@ -247,7 +322,7 @@ impl SessionLease {
             return;
         }
         let _ = pa_core::session::window::flush_cache(&self.session_path);
-        let _ = with_lease_guard(&self.directory, || {
+        let _ = with_lease_guard(&self.directory, GuardWait::Fast, || {
             if let Ok(Some(owner)) = read_owner(&self.directory) {
                 if owner.token == self.token {
                     reclaim_stale(&self.directory);
@@ -280,7 +355,7 @@ impl SessionLease {
                 && canonical_session_path(path) == self.session_path,
             "session lease does not own append target"
         );
-        with_lease_guard(&self.directory, || {
+        with_lease_guard(&self.directory, GuardWait::Fast, || {
             let owner = read_owner(&self.directory)?;
             anyhow::ensure!(
                 owner
@@ -324,7 +399,11 @@ pub(crate) fn acquire_runtime_session_lease(
     fs::create_dir_all(&root)?;
     let directory = lease_directory(agent_dir, &canonical);
 
-    with_lease_guard(&directory, || {
+    // The open path outlasts the stale window: a guard left by a holder
+    // killed mid-mutation can never be released by its dead owner, and
+    // failing the relaunch while the stale reclaim is still seconds away
+    // would leave a kill -9'd session unrevivable for the whole window.
+    with_lease_guard(&directory, GuardWait::ThroughStale, || {
         for _ in 0..3 {
             let token = uuid::Uuid::new_v4().to_string();
             let candidate = directory.with_extension(format!(
@@ -496,6 +575,180 @@ mod tests {
         second.release();
         std::env::remove_var(SESSION_LEASES_ENABLED_ENV);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The state a kill -9 mid-mutation leaves behind: a lease owned by
+    /// a dead process plus a brand-new guard its dead holder can never
+    /// remove. The open path must wait out the stale window and reclaim
+    /// both instead of failing while the reclaim is still seconds away.
+    #[test]
+    fn create_path_outlasts_a_fresh_guard_of_a_dead_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, "{}\n").unwrap();
+        // `pid: 0` is provably dead through the same liveness ladder the
+        // reclaimer applies to real crashed holders.
+        let owner = LeaseOwner {
+            version: 1,
+            token: "dead-holder".to_owned(),
+            pid: 0,
+            process_start_id: get_process_start_id(0),
+            active_session_id: None,
+            session_path: canonical_session_path(&path).to_string_lossy().to_string(),
+            created_at: crate::util::now_iso(),
+        };
+        let directory = lease_directory(dir.path(), &canonical_session_path(&path));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("owner.json"),
+            serde_json::to_string_pretty(&owner).unwrap() + "\n",
+        )
+        .unwrap();
+        std::fs::create_dir(format!("{}.guard", directory.display())).unwrap();
+        let started = std::time::Instant::now();
+        let lease = acquire_runtime_session_lease(&path, dir.path()).unwrap();
+        // The guard was brand new: a fresh guard is never stolen early,
+        // so success proves the open waited out the stale window. The
+        // guard ages from its creation, a hair before `started`, so the
+        // bound allows that setup gap.
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= STALE_GUARD_AFTER - Duration::from_millis(250),
+            "the fresh guard was not waited out: {elapsed:?}"
+        );
+        // Generous ceiling: the reclaim fires right after the window, and
+        // only a scheduler stall between iterations can stretch the gap.
+        assert!(
+            elapsed < STALE_GUARD_AFTER + THROUGH_STALE_SLACK + Duration::from_secs(10),
+            "the stale reclaim overran its window: {elapsed:?}"
+        );
+        lease.release();
+    }
+
+    /// A guard past the stale window whose lease owner is alive is never
+    /// stolen: the open path waits out its deadline and fails instead of
+    /// breaking the live owner's append serialization (the bare guard
+    /// carries no identity, so the owner's liveness is all a steal can
+    /// consult).
+    #[cfg(unix)]
+    #[test]
+    fn stale_guard_of_a_live_owner_is_never_stolen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, "{}\n").unwrap();
+        let lease = acquire_runtime_session_lease(&path, dir.path()).unwrap();
+        let guard = format!("{}.guard", lease.directory.display());
+        std::fs::create_dir(&guard).unwrap();
+        let old = std::time::SystemTime::now() - STALE_GUARD_AFTER - Duration::from_secs(1);
+        std::fs::File::open(&guard)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let started = std::time::Instant::now();
+        let error = acquire_runtime_session_lease(&path, dir.path()).unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            error
+                .to_string()
+                .contains("Could not coordinate session lease"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            elapsed >= STALE_GUARD_AFTER,
+            "the wait was cut short: {elapsed:?}"
+        );
+        assert!(
+            elapsed < STALE_GUARD_AFTER + THROUGH_STALE_SLACK + Duration::from_secs(10),
+            "the wait overran its deadline: {elapsed:?}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&guard)
+                .unwrap()
+                .file_type()
+                .is_dir(),
+            "the live owner's guard was stolen"
+        );
+        std::fs::remove_dir(&guard).unwrap();
+        lease.release();
+    }
+
+    /// A stale-guard reclaim whose removal keeps failing must burn the
+    /// budget instead of spinning past it on immediate retries.
+    #[cfg(unix)]
+    #[test]
+    fn stale_guard_reclaim_failure_stays_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, "{}\n").unwrap();
+        // A dead owner (pid 0) whose guard reads stale but can never be
+        // reclaimed: `remove_dir_all` on a plain file fails on every
+        // retry, root included, so the open must pace itself out.
+        let owner = LeaseOwner {
+            version: 1,
+            token: "dead-holder".to_owned(),
+            pid: 0,
+            process_start_id: get_process_start_id(0),
+            active_session_id: None,
+            session_path: canonical_session_path(&path).to_string_lossy().to_string(),
+            created_at: crate::util::now_iso(),
+        };
+        let directory = lease_directory(dir.path(), &canonical_session_path(&path));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("owner.json"),
+            serde_json::to_string_pretty(&owner).unwrap() + "\n",
+        )
+        .unwrap();
+        let guard = format!("{}.guard", directory.display());
+        std::fs::write(&guard, b"stale").unwrap();
+        let old = std::time::SystemTime::now() - STALE_GUARD_AFTER - Duration::from_secs(1);
+        std::fs::File::open(&guard)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let started = std::time::Instant::now();
+        let error = acquire_runtime_session_lease(&path, dir.path()).unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            error
+                .to_string()
+                .contains("Could not coordinate session lease"),
+            "unexpected open error: {error}"
+        );
+        assert!(
+            elapsed < STALE_GUARD_AFTER + THROUGH_STALE_SLACK + Duration::from_secs(2),
+            "the failed reclaim outlived its deadline: {elapsed:?}"
+        );
+        std::fs::remove_file(&guard).unwrap();
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    /// The append path keeps the fast budget: a fresh foreign guard
+    /// fails the append promptly instead of stalling the turn for the
+    /// whole stale window.
+    #[test]
+    fn append_fails_fast_behind_a_fresh_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, "{}\n").unwrap();
+        let lease = acquire_runtime_session_lease(&path, dir.path()).unwrap();
+        let guard = format!("{}.guard", lease.directory.display());
+        std::fs::create_dir(&guard).unwrap();
+        let started = std::time::Instant::now();
+        let error = lease.append(&path, b"blocked\n").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Could not coordinate session lease"),
+            "unexpected append error: {error}"
+        );
+        assert!(
+            started.elapsed() < STALE_GUARD_AFTER,
+            "append waited out the stale window: {:?}",
+            started.elapsed()
+        );
+        std::fs::remove_dir(&guard).unwrap();
+        lease.release();
     }
 
     #[test]
