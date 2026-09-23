@@ -59,4 +59,8 @@ pub trait ClientSettings: Send + Sync {
     /// `warnings.anthropicExtraUsage` (TS default true).
     fn warnings_anthropic_extra_usage(&self) -> bool;
     fn set_warnings_anthropic_extra_usage(&self, enabled: bool) -> Result<()>;
+    /// `updateChannel` (`stable`/`nightly`; unset infers the channel from
+    /// the running version).
+    fn update_channel(&self) -> Option<String>;
+    fn set_update_channel(&self, channel: &str) -> Result<()>;
 }

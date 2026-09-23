@@ -2603,6 +2603,73 @@ impl SessionUi {
                 self.track_command_used("traces");
                 self.handle_traces_command(resolved, view).await?;
             }
+            // `/nightly [on|off|status]` (TS `interactive-mode.ts`
+            // 5455-5484): status resolves the effective channel,
+            // off/stable pins the settings channel to stable, and on (or
+            // bare) hands a `--self --nightly` update to the same parked
+            // plan `/update` builds (the update command owns the nightly
+            // warning, the channel switch, and the relaunch).
+            "nightly" => {
+                self.track_command_used("nightly");
+                let arg = resolved.args.trim().to_lowercase();
+                if arg == "status" {
+                    let preferred = self
+                        .client_settings
+                        .as_ref()
+                        .and_then(|settings| settings.update_channel());
+                    let channel = pa_core::update::version::resolve_update_channel(
+                        &view.chrome.version,
+                        preferred
+                            .as_deref()
+                            .and_then(pa_core::update::version::UpdateChannel::from_wire),
+                    );
+                    let source = if preferred.is_some() {
+                        "set in settings"
+                    } else {
+                        "inferred from the running version"
+                    };
+                    self.note(
+                        &format!(
+                            "Updates follow the {} channel ({source}). v{} installed.",
+                            channel.wire_name(),
+                            view.chrome.version
+                        ),
+                        view,
+                    );
+                    return Ok(());
+                }
+                if arg == "off" || arg == "stable" {
+                    if let Some(settings) = &self.client_settings {
+                        if let Err(error) = settings.set_update_channel("stable") {
+                            self.error_row(&format!("{error:#}"), view);
+                            return Ok(());
+                        }
+                    }
+                    self.note(
+                        "Updates now follow the stable channel. Run /update to install the latest stable release.",
+                        view,
+                    );
+                    return Ok(());
+                }
+                if !arg.is_empty() && arg != "on" {
+                    self.error_row("Usage: /nightly [on|off|status]", view);
+                    return Ok(());
+                }
+                if self.turn_active {
+                    self.note_as(
+                        "Wait for the current work to finish before updating.",
+                        StatusKind::Warning,
+                        view,
+                    );
+                    return Ok(());
+                }
+                let plan = crate::update_command::parse_update_args(&[
+                    "--self".to_string(),
+                    "--nightly".to_string(),
+                ]);
+                view.editor.set_text("");
+                self.pending_update = Some(plan);
+            }
             // `/update [source|--self|--extensions|--extension <source>
             // |--force|--rollback|--nightly|--stable]` (TS
             // `handleUpdateCommand`): the busy guard, then the child

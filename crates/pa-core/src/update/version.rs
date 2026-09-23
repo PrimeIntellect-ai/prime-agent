@@ -165,6 +165,24 @@ impl UpdateChannel {
             Self::Nightly => "beta.json",
         }
     }
+
+    /// The channel's wire name (the TS `UpdateChannel` string values).
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Nightly => "nightly",
+        }
+    }
+
+    /// Parse the wire name; an unknown value reads as unset (a preferred
+    /// channel then infers from the running version).
+    pub fn from_wire(wire: &str) -> Option<Self> {
+        match wire {
+            "stable" => Some(Self::Stable),
+            "nightly" => Some(Self::Nightly),
+            _ => None,
+        }
+    }
 }
 
 /// Whether `candidate_version` should replace `current_version` on the
