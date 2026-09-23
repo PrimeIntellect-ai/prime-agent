@@ -496,6 +496,10 @@ def main() -> int:
         needle = os.path.join(args.out_dir, agent_dir_name)
         batterylib.reap_daemons(
             socket_paths=[os.path.join(needle, "daemon.sock")],
+            # The detached session workers carry no harness path in their
+            # argv — only their cwd (the side's agent dir) — so the cwd
+            # roots are what lets the sweep reach them.
+            cwd_roots=[args.out_dir],
             needles=[needle, tmp_dir],
         )
         shutil.rmtree(tmp_dir, ignore_errors=True)
