@@ -239,10 +239,20 @@ impl AgentCronSchedulerHooks for QueueHooks {
         )
         .await
         {
-            // The turn ran (its result, whatever it was, is a run).
-            Ok(_) => Ok(None),
-            // The queued item was removed (cancel/clear) or the settle
-            // window expired: the fire did not run.
+            // The turn ran. A turn that settled with an error still
+            // counts as a run (the store bumps runCount and records
+            // lastError, the TS recordRunResult-with-error shape), but
+            // the error propagates to the scheduler so its failure
+            // backoff stretches the next fire (documented deviation: TS
+            // re-fires per schedule regardless of failures).
+            Ok(Ok(Ok(()))) => Ok(None),
+            Ok(Ok(Err(error))) => Err(anyhow::anyhow!(error)),
+            // The queued item was consumed without a settle handshake
+            // (its waiter dropped — a runner that died mid-turn, or the
+            // harness's direct pop): the fire ran as far as the queue
+            // could deliver it.
+            Ok(Err(_)) => Ok(None),
+            // The settle window expired: the fire did not run.
             Err(_) => Ok(Some("skipped")),
         }
     }
@@ -1175,6 +1185,62 @@ mod tests {
             let outcome = run.await.unwrap().expect("run_job");
             assert_eq!(outcome, None);
         }
+    }
+
+    /// The failure propagation behind the backoff (dogfood incident: a
+    /// failing heartbeat re-fired ~120x at its full cadence): a turn that
+    /// settles with an error surfaces it to the scheduler — still a run,
+    /// with the error riding it — instead of the old unconditional
+    /// success verdict.
+    #[tokio::test]
+    async fn a_failed_settle_reports_the_failure() {
+        let dir = std::env::temp_dir().join(format!("pa-sched-fail-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = write_active_session(&dir);
+        let core = Arc::new(std::sync::Mutex::new(
+            crate::worker::SessionCore::test_core(None, "/w".to_string()),
+        ));
+        let hooks = Arc::new(QueueHooks {
+            core: Arc::clone(&core),
+            work_notify: Arc::new(Notify::new()),
+            user_bash: Arc::new(crate::user_bash::UserBash::new()),
+            store: Arc::new(AgentCronJobStore::for_session_artifacts()),
+            recovery: Arc::new(std::sync::Mutex::new(None)),
+        });
+        let job = heartbeat_job("hb-1", "steer the mission", DeliveryMode::Steer, &session);
+        let hooks_for_run = Arc::clone(&hooks);
+        let spawned_job = job.clone();
+        let run = tokio::spawn(async move {
+            pa_core::cron::scheduler::AgentCronSchedulerHooks::run_job(
+                &*hooks_for_run,
+                &spawned_job,
+            )
+            .await
+        });
+        // The spawned fire parks its item before its settle wait; pop it
+        // and settle it as the runner would a provider-failed turn.
+        let park_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let settled_error = "404 No endpoints found that support tool use.".to_string();
+        loop {
+            let popped = {
+                let mut core = core.lock().unwrap();
+                core.steering
+                    .pop_front()
+                    .or_else(|| core.follow_up.pop_front())
+            };
+            if let Some(item) = popped {
+                let done = item.done.expect("a fire settles through done");
+                let _ = done.send(Err(settled_error.clone()));
+                break;
+            }
+            assert!(std::time::Instant::now() < park_deadline, "never parked");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let error = run
+            .await
+            .expect("run task")
+            .expect_err("the failed settle surfaces");
+        assert_eq!(error.to_string(), settled_error);
     }
 
     #[tokio::test]

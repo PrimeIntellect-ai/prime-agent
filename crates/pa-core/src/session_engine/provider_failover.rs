@@ -29,9 +29,9 @@ use pa_types::ai::Model;
 use super::auto_retry::{run_turn_with_auto_retry, AutoRetryEvent, RetryStartReason};
 use super::provider_retry::{
     is_agent_lifecycle_failure, is_context_overflow_failure, is_faux_provider_queue_exhausted,
-    is_permanent_provider_failure_kind, provider_retry_delay, provider_stream_failure_kind,
-    provider_stream_failure_retry_after_ms, provider_stream_failure_status, ProviderRetryDelay,
-    ProviderRetryPolicy,
+    is_permanent_provider_failure_kind, is_unsupported_tool_failure, provider_retry_delay,
+    provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
+    provider_stream_failure_status, ProviderRetryDelay, ProviderRetryPolicy,
 };
 
 /// The provider-failover policy: per-provider retry budget and backoff
@@ -179,6 +179,7 @@ where
             // A context overflow fails identically on every provider (TS
             // `_isRetryableError`): the compact-and-retry recovery owns it.
             || is_context_overflow_failure(&message, context_window)
+            || is_unsupported_tool_failure(&message)
             || is_permanent_provider_failure_kind(
                 provider_stream_failure_kind(&message).as_deref(),
                 total_retries,
@@ -629,6 +630,24 @@ mod tests {
             Some("invalid_request"),
             Some(400),
             "bad request",
+        )];
+        let harness = drive(&fast_failover(), &candidates, script).await;
+        assert_eq!(harness.attempts, 1);
+        assert!(harness.switches.is_empty());
+        assert!(harness.events.is_empty());
+    }
+
+    /// The router's tool-use 404 is permanent even though a plain 404 is
+    /// the documented transient exception: every provider serving the
+    /// model rejects tools identically, so walking the chain only stacks
+    /// ~16 minutes of doomed retries (the dogfood incident).
+    #[tokio::test]
+    async fn unsupported_tool_failures_never_walk_the_chain() {
+        let candidates = vec![model("backup-a")];
+        let script = vec![error_message(
+            Some("invalid_request"),
+            Some(404),
+            "404 No endpoints found that support tool use. Try disabling \"ipython\".",
         )];
         let harness = drive(&fast_failover(), &candidates, script).await;
         assert_eq!(harness.attempts, 1);

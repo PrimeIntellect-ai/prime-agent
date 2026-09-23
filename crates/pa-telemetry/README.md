@@ -16,8 +16,11 @@ pseudonymous installation identity for Prime Agent product analytics
   contract: never blocks, never panics, never fails the agent.
 - `TelemetrySink` trait + shipped sinks: `PostHogSink` (batched capture API,
   endpoint + project key from env/settings — nothing compiled in, empty
-  configuration resolves to `NoopSink`), `FlagsClient` (PostHog decide v3
-  feature flags with a 5-minute TTL cache, defaults offline),
+  configuration resolves to `NoopSink`; a 401 is terminal — bad or
+  missing-scope credentials disable the sink for the process instead of
+  re-requesting every flush), `FlagsClient` (PostHog decide v3
+  feature flags with a 5-minute TTL cache, defaults offline; a 401 stops
+  the decide polling the same way),
   `FileSink` (local JSONL transparency mirror at `<agentDir>/telemetry.jsonl`),
   `NoopSink` (opt-out fast path), `MockSink` (tests, also re-exported for
   downstream crate tests).
