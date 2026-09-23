@@ -1,0 +1,39 @@
+   Compiling tokio v1.53.1
+   Compiling tokio-util v0.7.19
+   Compiling tokio-rustls v0.26.5
+   Compiling tower v0.5.3
+   Compiling async-compression v0.4.47
+   Compiling tokio-tungstenite v0.28.0
+   Compiling pa-types v0.1.0 (/ws/prime-agent-rs/crates/pa-types)
+   Compiling h2 v0.4.19
+   Compiling tower-http v0.6.11
+   Compiling hyper v1.11.1
+   Compiling hyper-util v0.1.20
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.12.28
+   Compiling pa-agent v0.1.0 (/ws/prime-agent-rs/crates/pa-agent)
+   Compiling pa-telemetry v0.1.0 (/ws/prime-agent-rs/crates/pa-telemetry)
+   Compiling pa-ai v0.1.0 (/ws/prime-agent-rs/crates/pa-ai)
+   Compiling pa-models v0.1.0 (/ws/prime-agent-rs/crates/pa-models)
+   Compiling pa-core v0.1.0 (/ws/prime-agent-rs/crates/pa-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 27.44s
+     Running unittests src/lib.rs (target/debug/deps/pa_core-e06e1a42cf11646c)
+
+running 10 tests
+
+thread 'cron::scheduler::tests::a_panicking_dispatch_does_not_wedge_the_run_pass' (31320) panicked at crates/pa-core/src/cron/scheduler.rs:427:21:
+the first dispatch unwinds
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test cron::scheduler::tests::a_mutation_wake_during_an_in_flight_pass_does_not_wedge_the_flag ... ok
+test cron::scheduler::tests::claims_and_runs_due_jobs ... ok
+test cron::scheduler::tests::failure_backoff_doubles_then_caps ... ok
+test cron::scheduler::tests::a_panicking_dispatch_does_not_wedge_the_run_pass ... ok
+test cron::scheduler::tests::schedule_kind_from_create_is_interval ... ok
+test cron::scheduler::tests::lane_serializes_same_session_dispatches ... ok
+test cron::scheduler::tests::skip_outcomes_are_recorded ... ok
+test cron::scheduler::tests::the_timer_parks_on_an_empty_store_and_re_arms_on_wake ... ok
+test cron::scheduler::tests::wake_rearms_a_timer_for_a_job_created_after_start ... ok
+test cron::scheduler::tests::consecutive_failures_back_off_the_next_run ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 742 filtered out; finished in 4.72s
+

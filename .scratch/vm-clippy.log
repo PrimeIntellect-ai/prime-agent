@@ -1,0 +1,71 @@
+    Checking pa-core v0.1.0 (/ws/prime-agent-rs/crates/pa-core)
+    Checking pa-tui v0.1.0 (/ws/prime-agent-rs/crates/pa-tui)
+error: this method chain can be written more clearly with `if .. else ..`
+   --> crates/pa-tui/src/activity_panel.rs:440:25
+    |
+440 |           let kill_hint = self
+    |  _________________________^
+441 | |             .rows
+442 | |             .iter()
+443 | |             .any(|row| row.killable)
+444 | |             .then(|| " \u{00b7} k kill".to_string())
+445 | |             .unwrap_or_default();
+    | |________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#obfuscated_if_else
+    = note: `-D clippy::obfuscated-if-else` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::obfuscated_if_else)]`
+help: try
+    |
+440 ~         let kill_hint = if self
+441 +             .rows
+442 +             .iter()
+443 ~             .any(|row| row.killable) { " \u{00b7} k kill".to_string() } else { Default::default() };
+    |
+
+error: unnecessary closure used with `bool::then`
+   --> crates/pa-tui/src/session_ui.rs:976:27
+    |
+976 |           let goal_tokens = (goal.status == pa_types::goal::GoalStatus::Active)
+    |  ___________________________^
+977 | |             .then(|| (goal.tokens_used, goal.token_budget));
+    | |___________________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#unnecessary_lazy_evaluations
+    = note: `-D clippy::unnecessary-lazy-evaluations` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unnecessary_lazy_evaluations)]`
+help: use `then_some` instead
+    |
+977 -             .then(|| (goal.tokens_used, goal.token_budget));
+977 +             .then_some((goal.tokens_used, goal.token_budget));
+    |
+
+error: unnecessary closure used with `bool::then`
+    --> crates/pa-tui/src/session_ui.rs:5744:13
+     |
+5744 |             (!self.active_session_id.is_empty()).then(|| self.active_session_id.as_str()),
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#unnecessary_lazy_evaluations
+help: use `then_some` instead
+     |
+5744 -             (!self.active_session_id.is_empty()).then(|| self.active_session_id.as_str()),
+5744 +             (!self.active_session_id.is_empty()).then_some(self.active_session_id.as_str()),
+     |
+
+error: unnecessary closure used with `bool::then`
+    --> crates/pa-tui/src/session_ui.rs:5745:13
+     |
+5745 |             (!self.session_id.is_empty()).then(|| self.session_id.as_str()),
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#unnecessary_lazy_evaluations
+help: use `then_some` instead
+     |
+5745 -             (!self.session_id.is_empty()).then(|| self.session_id.as_str()),
+5745 +             (!self.session_id.is_empty()).then_some(self.session_id.as_str()),
+     |
+
+error: could not compile `pa-tui` (lib) due to 4 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `pa-tui` (lib test) due to 4 previous errors
