@@ -433,6 +433,7 @@ async fn the_picker_available_list_shows_a_fetched_entry_once_its_provider_auth_
         .get_available()
         .iter()
         .any(|model| model.id == LAYER_A_PROBE_ID));
+}
 
 /// The session-model restore (the revival race this crate's catalog wiring
 /// must cover): a saved private model missing from the cold registry
