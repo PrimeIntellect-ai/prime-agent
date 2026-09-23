@@ -1028,8 +1028,11 @@ impl AgentSessionEngine {
 
     /// Emit the daemon model-allowlist refusal's adoption event (schema
     /// v1 `model refused`) from any of this worker's enforcement seams.
+    /// The telemetry binds to the engine's live cwd, so a session that
+    /// moved directories reports through the current project scope.
     pub(crate) fn note_model_refused(&self, surface: &str, selector: &str) {
-        self.model_refusal_telemetry.note_refused(surface, selector);
+        self.model_refusal_telemetry
+            .note_refused(surface, selector, &self.cwd());
     }
 
     /// Resolve the model through the composed registry, then enforce the
@@ -1940,6 +1943,21 @@ impl SessionEngine for AgentSessionEngine {
     }
 
     fn switch_model(&self, selection: EngineModelSelection) -> bool {
+        // The allowlist gate on the switch candidate, before the selection
+        // slot mutates: a refused model must not poison the live selection
+        // (every later resolution would fail at the same gate). The wire
+        // seams (`set_model`, `cycle_model`) check first and own the user
+        // message and refusal event; this is the engine's total guard for
+        // any other caller.
+        if let (Some(provider), Some(model)) =
+            (selection.provider.as_deref(), selection.model.as_deref())
+        {
+            let selector = format!("{provider}/{model}");
+            let allowlist = crate::model_allowlist::load(&self.cwd(), &self.config.agent_dir);
+            if crate::model_allowlist::assert_allowed(allowlist.as_deref(), &selector).is_err() {
+                return false;
+            }
+        }
         self.configure_model(selection);
         let Ok(model) = self.resolve_model() else {
             return false;
@@ -3713,10 +3731,13 @@ impl AgentSessionEngine {
     }
 
     /// The failover chain for `model`: the other auth-configured providers
-    /// serving the same model id, in catalog order after the current one.
-    /// Faux-script sessions never fail over (their failures are
-    /// deterministic test fixtures, and a second provider would only
-    /// reroute the scripted queue).
+    /// serving the same model id, in catalog order after the current one,
+    /// filtered by the daemon model allowlist — a failover must never land
+    /// a turn on a provider the operator pinned out (the same
+    /// `allowedModels` gate as every other resolution). Faux-script
+    /// sessions never fail over (their failures are deterministic test
+    /// fixtures, and a second provider would only reroute the scripted
+    /// queue).
     fn failover_candidates(&self, model: &pa_types::ai::Model) -> Vec<pa_types::ai::Model> {
         if self.config.faux_script.is_some() {
             return Vec::new();
@@ -3727,7 +3748,20 @@ impl AgentSessionEngine {
         registry.load_private_authorization_from_cache();
         let available: Vec<pa_types::ai::Model> =
             registry.get_available().into_iter().cloned().collect();
-        pa_core::models::failover_candidates(model, &available)
+        let candidates = pa_core::models::failover_candidates(model, &available);
+        let allowlist = crate::model_allowlist::load(&self.cwd(), &self.config.agent_dir);
+        match allowlist {
+            None => candidates,
+            Some(allowlist) => candidates
+                .into_iter()
+                .filter(|candidate| {
+                    pa_core::models::model_allowed(
+                        &format!("{}/{}", candidate.provider, candidate.id),
+                        &allowlist,
+                    )
+                })
+                .collect(),
+        }
     }
 
     /// Run one turn, streaming assistant updates through `emit` as they
@@ -7468,6 +7502,61 @@ pub(crate) mod tests {
         .unwrap();
         let model = engine.resolve_registry_model().expect("resolved model");
         assert_eq!(model.provider, "battery");
+        assert_eq!(model.id, "mock-1");
+    }
+
+    /// The engine's switch guard: `switch_model` refuses an off-allowlist
+    /// candidate BEFORE the selection mutates, so a refused cycle or switch
+    /// never poisons the live selection (every later resolution would fail
+    /// at the same gate) — the session keeps resolving its current model.
+    #[test]
+    fn switch_model_never_poisons_the_selection_with_a_refused_candidate() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        write_custom_provider_models_json(&agent_dir, "http://127.0.0.1:9");
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            serde_json::json!({ "allowedModels": ["battery/mock-1"] }).to_string(),
+        )
+        .unwrap();
+        let engine = AgentSessionEngine::new(AgentEngineConfig {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: agent_dir.clone(),
+            provider: None,
+            model: None,
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: None,
+            faux_script: None,
+            supervisor_link: None,
+            telemetry_disabled: Some(true),
+            cron_store: None,
+            queued_steering_probe: None,
+        })
+        .unwrap();
+        let model = engine.resolve_registry_model().expect("resolved model");
+        assert_eq!(model.id, "mock-1");
+        // The switched-to model does not match the allowlist: the switch is
+        // refused and the selection keeps the resolvable model.
+        let switched = engine.switch_model(EngineModelSelection {
+            provider: Some("battery".to_string()),
+            model: Some("mock-2".to_string()),
+            api_key: None,
+            thinking: None,
+        });
+        assert!(!switched, "off-allowlist switch refused");
+        let model = engine.resolve_registry_model().expect("still resolvable");
+        assert_eq!(model.id, "mock-1");
+        // The allowed model still switches through.
+        let switched = engine.switch_model(EngineModelSelection {
+            provider: Some("battery".to_string()),
+            model: Some("mock-1".to_string()),
+            api_key: None,
+            thinking: None,
+        });
+        assert!(switched, "allowed switch proceeds");
+        let model = engine.resolve_registry_model().expect("resolved model");
         assert_eq!(model.id, "mock-1");
     }
 

@@ -175,14 +175,14 @@ session's current worker (the stale-id rebind).
 
 A daemon model resolution refused a model outside the settings
 `allowedModels` allowlist (Rust-only guardrail; the refusal surfaces as an
-error, never a fallback). Seams: the `set_model` command handler, the RLM
-spawn/create_session child-model resolution, and the worker's startup
-model chain. Categories and surface only — never the refused selector or
+error, never a fallback). Seams: the `set_model` and `cycle_model` command
+handlers, the RLM spawn/create_session child-model resolution, and the
+worker's startup model chain. Categories and surface only — never the refused selector or
 the configured patterns (the `catalog_refresh` rule: no model ids).
 
 | property | type | notes |
 |---|---|---|
-| `surface` | string | `set_model` / `spawn` / `create_session` / `session_start` |
+| `surface` | string | `set_model` / `cycle_model` / `spawn` / `create_session` / `session_start` |
 | `provider_category` | string | the refused model's provider category (`prime`, `anthropic`, ...) |
 | `model_category` | string | the refused model's category (`glm`, `claude`, ...) |
 

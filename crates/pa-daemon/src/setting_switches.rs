@@ -149,6 +149,27 @@ impl Worker {
         };
         let provider = next_model.provider.clone();
         let model_id = next_model.id.clone();
+        // The daemon model allowlist gate, before the switch attempt: an
+        // off-list candidate answers the cycle with the loud refusal (the
+        // engine's switch guard would also refuse it, but the response
+        // should say why) and emits the `model refused` event.
+        {
+            let selector = format!("{provider}/{model_id}");
+            let cwd = {
+                let core = self.core.lock().unwrap();
+                core.cwd.clone()
+            };
+            let allowlist =
+                crate::model_allowlist::load(std::path::Path::new(&cwd), &self.config.agent_dir);
+            if let Err(refusal) =
+                crate::model_allowlist::assert_allowed(allowlist.as_deref(), &selector)
+            {
+                if let Some(agent_engine) = &self.agent_engine {
+                    agent_engine.note_model_refused("cycle_model", &selector);
+                }
+                return response_failure(None, "cycle_model", &refusal.to_string(), None);
+            }
+        }
         let engine = std::sync::Arc::clone(&self.engine);
         let core = std::sync::Arc::clone(&self.core);
         let agent_dir = self.config.agent_dir.clone();
@@ -652,6 +673,44 @@ mod tests {
         assert_eq!(
             response.error.as_deref(),
             Some("This session does not support model switching")
+        );
+    }
+
+    /// `cycle_model` answers the daemon model-allowlist refusal with the
+    /// loud message (the refusal reason, not the generic non-switching
+    /// error) and never attempts the switch.
+    #[tokio::test]
+    async fn cycle_model_refuses_models_outside_the_allowlist() {
+        let dir = std::env::temp_dir().join(format!("pa-worker-cm3-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        models_fixture(&dir, 2);
+        std::fs::create_dir_all(dir.join("agent")).unwrap();
+        std::fs::write(
+            dir.join("agent").join("settings.json"),
+            json!({ "allowedModels": ["anthropic/*"] }).to_string(),
+        )
+        .unwrap();
+        let worker = Arc::new(Worker::new(worker_config(&dir), None));
+        let created = worker
+            .dispatch("create", &json!({ "noSession": true, "cwd": dir }))
+            .await;
+        assert!(created.success);
+        let response = worker
+            .dispatch(
+                "cycle_model",
+                &json!({ "activeSessionId": "switch-session" }),
+            )
+            .await;
+        assert!(!response.success);
+        assert_eq!(response.command, "cycle_model");
+        let error = response.error.expect("refusal message");
+        assert!(
+            error.contains("blocked by the daemon model allowlist"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("does not support model switching"),
+            "{error}"
         );
     }
 

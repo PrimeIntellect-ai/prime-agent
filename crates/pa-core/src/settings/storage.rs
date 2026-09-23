@@ -204,12 +204,9 @@ mod tests {
     }
 
     /// A relative agent dir (a relative `PRIME_AGENT_CODING_AGENT_DIR`)
-    /// locks and loads: the lock probe's `utimensat` must resolve relative
-    /// lock paths against `AT_FDCWD`. With an invalid `-1` dirfd Linux
-    /// rejected the probe with EBADF, the create self-removed the lock, and
-    /// every settings load under it fell back to the defaults (the
-    /// pr-2578 bisection: an absolute agent dir ignores the dirfd, so only
-    /// relative agent dirs broke).
+    /// locks and loads: the lock probe's `utimensat` resolves relative lock
+    /// paths against `AT_FDCWD`, and the settings document under it is
+    /// read back under the same lock.
     #[test]
     #[cfg(unix)]
     fn relative_agent_dir_locks_and_loads() {

@@ -5,10 +5,8 @@
 //! surfaces to the caller; the daemon never falls back to a different
 //! model) and emit the adoption event (`model refused`, schema v1).
 
-use std::path::Path;
-use std::sync::OnceLock;
-
 use anyhow::Result;
+use std::path::Path;
 
 use pa_core::models::ModelAllowlistRefusal;
 use pa_telemetry::TelemetryClient;
@@ -41,10 +39,9 @@ pub(crate) fn assert_allowed(allowlist: Option<&[String]>, selector: &str) -> Re
 /// telemetry when the create command opted the session out — the same
 /// gate the worker's session telemetry honors.
 pub struct ModelRefusalTelemetry {
-    cwd: std::path::PathBuf,
     agent_dir: std::path::PathBuf,
     enabled: bool,
-    client: OnceLock<TelemetryClient>,
+    client: std::sync::Mutex<Option<(std::path::PathBuf, TelemetryClient)>>,
 }
 
 impl ModelRefusalTelemetry {
@@ -53,24 +50,40 @@ impl ModelRefusalTelemetry {
         agent_dir: std::path::PathBuf,
         telemetry_disabled: bool,
     ) -> Self {
+        let _ = cwd;
         Self {
-            cwd,
             agent_dir,
             enabled: !telemetry_disabled,
-            client: OnceLock::new(),
+            client: std::sync::Mutex::new(None),
         }
     }
 
     /// Emit the refusal's `model refused` event (best-effort; no-op when
-    /// opted out).
-    pub fn note_refused(&self, surface: &str, selector: &str) {
+    /// opted out). The client binds to `cwd` — the settings posture is
+    /// scoped (the PostHog endpoint and local mirror read the project
+    /// scope), so a session that moved directories rebinds instead of
+    /// reporting through the old project.
+    pub fn note_refused(&self, surface: &str, selector: &str, cwd: &Path) {
         if !self.enabled {
             return;
         }
-        let client = self.client.get_or_init(|| {
-            let settings = pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir);
-            pa_core::session_engine::telemetry::build_client(&settings, &self.agent_dir)
-        });
+        let settings = pa_core::settings::SettingsManager::create(cwd, &self.agent_dir);
+        // The same gating as the supervisor's `daemon event`: the env
+        // override wins, else the merged settings' telemetry switch.
+        let enabled = match pa_telemetry::env_telemetry_override() {
+            Some(enabled) => enabled,
+            None => settings.get_telemetry_enabled(),
+        };
+        if !enabled {
+            return;
+        }
+        let mut slot = self.client.lock().expect("refusal telemetry lock");
+        if !slot.as_ref().is_some_and(|(bound_cwd, _)| bound_cwd == cwd) {
+            let client =
+                pa_core::session_engine::telemetry::build_client(&settings, &self.agent_dir);
+            *slot = Some((cwd.to_path_buf(), client));
+        }
+        let client = &slot.as_ref().expect("client bound").1;
         let (provider, model_id) = selector.split_once('/').unwrap_or((selector, ""));
         pa_core::session_engine::telemetry::track_model_refused(
             client, surface, provider, model_id,
@@ -148,15 +161,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refusal_telemetry_honors_the_opt_out() {
+    async fn refusal_telemetry_honors_both_opt_outs() {
         let dir = tempfile::tempdir().expect("tempdir");
+        // The create-command opt-out: no client ever.
         let disabled =
             ModelRefusalTelemetry::new(dir.path().to_path_buf(), dir.path().to_path_buf(), true);
-        disabled.note_refused("set_model", "zai/glm-5.3");
-        assert!(disabled.client.get().is_none(), "no client when opted out");
+        disabled.note_refused("set_model", "zai/glm-5.3", dir.path());
+        assert!(
+            disabled.client.lock().unwrap().is_none(),
+            "no client when the create command opted out"
+        );
+        // The settings opt-out (`telemetry.enabled: false`): no client.
+        let settings_gated =
+            ModelRefusalTelemetry::new(dir.path().to_path_buf(), dir.path().to_path_buf(), false);
+        write_settings(
+            &dir.path().join("agent"),
+            r#"{"telemetry": {"enabled": false}}"#,
+        );
+        settings_gated.note_refused("set_model", "zai/glm-5.3", dir.path());
+        assert!(
+            settings_gated.client.lock().unwrap().is_none(),
+            "no client when settings disable telemetry"
+        );
+        // No settings: the client builds on the first note.
         let enabled =
             ModelRefusalTelemetry::new(dir.path().to_path_buf(), dir.path().to_path_buf(), false);
-        enabled.note_refused("set_model", "zai/glm-5.3");
-        assert!(enabled.client.get().is_some(), "client built on first note");
+        enabled.note_refused("set_model", "zai/glm-5.3", dir.path());
+        assert!(
+            enabled.client.lock().unwrap().as_ref().is_some(),
+            "client built on first note"
+        );
+    }
+
+    #[tokio::test]
+    async fn refusal_telemetry_rebinds_when_the_cwd_moves() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let telemetry =
+            ModelRefusalTelemetry::new(dir.path().to_path_buf(), dir.path().join("agent"), false);
+        let first = dir.path().join("project-a");
+        std::fs::create_dir_all(&first).unwrap();
+        telemetry.note_refused("set_model", "zai/glm-5.3", &first);
+        assert_eq!(
+            telemetry.client.lock().unwrap().as_ref().unwrap().0,
+            first,
+            "client bound to the live cwd"
+        );
+        // A moved session rebinds to the new project scope.
+        let second = dir.path().join("project-b");
+        std::fs::create_dir_all(&second).unwrap();
+        telemetry.note_refused("spawn", "zai/glm-5.3", &second);
+        assert_eq!(
+            telemetry.client.lock().unwrap().as_ref().unwrap().0,
+            second,
+            "client rebound after the cwd move"
+        );
     }
 }
