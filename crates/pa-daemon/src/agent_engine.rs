@@ -810,7 +810,8 @@ impl AgentSessionEngine {
     fn startup_chain_model(&self, registry: &pa_core::models::ModelRegistry) -> Option<Model> {
         let available: Vec<Model> = registry.get_available().into_iter().cloned().collect();
         let all: Vec<Model> = registry.get_all().to_vec();
-        let settings = pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir);
+        let settings =
+            pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir);
         pa_core::models::find_initial_model(&pa_core::models::InitialModelOptions {
             cli_provider: None,
             cli_model: None,
@@ -827,11 +828,11 @@ impl AgentSessionEngine {
     /// The create-time session-model restore (see
     /// [`SessionEngine::restore_session_model`]): read the session
     /// file's saved model context, give the in-flight catalog/auth
-    /// refreshes the bounded readiness window, and pin the restored
-    /// model into the selection. Explicit wire flags win first (TS
-    /// `options.model`); a session with no saved model keeps the
-    /// startup chain; a restore that still misses after the window
-    /// records the fallback (`model_fallback_message`, never silent).
+    /// refreshes the bounded readiness window, and record the decision
+    /// for this file. Explicit wire flags win first (TS `options.model`);
+    /// a session with no saved model keeps the startup chain; a restore
+    /// that still misses after the window records the fallback
+    /// (`model_fallback_message`, never silent).
     async fn restore_session_model_at(&self, session_path: &std::path::Path) {
         if self.current_selection().model.is_some() {
             return;
@@ -1684,9 +1685,10 @@ impl SessionEngine for AgentSessionEngine {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()?;
-        (decision.session_file == current)
-            .then(|| decision.fallback_message)
-            .flatten()
+        if decision.session_file != current {
+            return None;
+        }
+        decision.fallback_message
     }
 
     /// The `compact` command path (TS `compact()`'s background
@@ -6650,18 +6652,20 @@ pub(crate) mod tests {
             &server.url("/catalog"),
             &server.url("/api/v1"),
         );
-        pa_core::models::install_catalog(&agent_dir.join("models.json"), std::sync::Arc::new(catalog));
+        pa_core::models::install_catalog(
+            &agent_dir.join("models.json"),
+            std::sync::Arc::new(catalog),
+        );
     }
 
     /// A session file whose last `model_change` row pins the private team
     /// model — what a revived worker reads at create.
     fn session_file_pinning_private_model(dir: &std::path::Path) -> std::path::PathBuf {
-        let mut session = crate::session_store::SessionFile::create(
-            dir.to_str().unwrap_or("/tmp"),
-            None,
-            0,
-        );
-        let path = dir.join(crate::session_store::session_file_name(session.session_id()));
+        let mut session =
+            crate::session_store::SessionFile::create(dir.to_str().unwrap_or("/tmp"), None, 0);
+        let path = dir.join(crate::session_store::session_file_name(
+            session.session_id(),
+        ));
         session.set_path(path.clone());
         session.append_model_change("prime-inference", "internal/glm-5.3-fast");
         session.rewrite().unwrap();
@@ -6722,13 +6726,19 @@ pub(crate) mod tests {
         let cold = engine.resolve_registry_model().expect("cold resolution");
         assert_eq!(cold.provider, "prime-inference");
         assert_eq!(cold.id, "z-ai/glm-5.3");
-        assert_eq!(server.request_count(), 0, "the cold resolution never fetches");
+        assert_eq!(
+            server.request_count(),
+            0,
+            "the cold resolution never fetches"
+        );
 
         // The create-time restore: the readiness window covers the fetch,
         // the pinned model restores and every later unflagged resolution
         // runs on it.
         engine.restore_session_model(&path).await;
-        let restored = engine.resolve_registry_model().expect("restored resolution");
+        let restored = engine
+            .resolve_registry_model()
+            .expect("restored resolution");
         assert_eq!(restored.provider, "prime-inference");
         assert_eq!(restored.id, "internal/glm-5.3-fast");
         assert!(
@@ -6798,9 +6808,9 @@ pub(crate) mod tests {
             None,
             0,
         );
-        let path = dir
-            .path()
-            .join(crate::session_store::session_file_name(session.session_id()));
+        let path = dir.path().join(crate::session_store::session_file_name(
+            session.session_id(),
+        ));
         session.set_path(path.clone());
         session.rewrite().unwrap();
         let engine = restore_test_engine(dir.path(), None, None);
@@ -6835,7 +6845,9 @@ pub(crate) mod tests {
         let engine = restore_test_engine(dir.path(), None, None);
         engine.set_session_file(pinned.clone());
         engine.restore_session_model(&pinned).await;
-        let restored = engine.resolve_registry_model().expect("restored resolution");
+        let restored = engine
+            .resolve_registry_model()
+            .expect("restored resolution");
         assert_eq!(restored.id, "internal/glm-5.3-fast");
 
         // The worker moves onto another file (a replacement flow that has

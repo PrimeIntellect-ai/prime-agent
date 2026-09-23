@@ -22,10 +22,7 @@ impl MockServer {
     /// Start a server answering with `responses` in order; the last
     /// response repeats when the queue drains.
     pub async fn start(responses: Vec<Vec<u8>>) -> Self {
-        Self::start_scripted(
-            responses.into_iter().map(Scripted::Response).collect(),
-        )
-        .await
+        Self::start_scripted(responses.into_iter().map(Scripted::Response).collect()).await
     }
 
     /// Start a server answering with `scripts` in order (raw, delayed, or

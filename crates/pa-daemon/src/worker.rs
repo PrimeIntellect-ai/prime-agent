@@ -5845,7 +5845,10 @@ mod tests {
     #[test]
     fn summary_lifecycle_is_message_based() {
         let empty = SessionCore::test_core(None, "/tmp".to_string());
-        assert_eq!(session_summary(&empty, "default", None, None).lifecycle, "draft");
+        assert_eq!(
+            session_summary(&empty, "default", None, None).lifecycle,
+            "draft"
+        );
         let mut subagent = SessionCore::test_core(None, "/tmp".to_string());
         subagent.runtime_kind = "subagent".to_string();
         assert_eq!(
@@ -5857,7 +5860,10 @@ mod tests {
         // reads the runtime's in-memory messages, which already hold it).
         let mut busy = SessionCore::test_core(None, "/tmp".to_string());
         busy.busy = true;
-        assert_eq!(session_summary(&busy, "default", None, None).lifecycle, "live");
+        assert_eq!(
+            session_summary(&busy, "default", None, None).lifecycle,
+            "live"
+        );
         let dir = std::env::temp_dir().join(format!("pa-worker-lc-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
