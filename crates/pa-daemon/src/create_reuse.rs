@@ -535,4 +535,60 @@ mod tests {
         let resident = resident_with(None, "live-id");
         assert!(!resident_process_alive(&resident).await);
     }
+
+    fn resident_with_identity(pid: u64, start_id: Option<&str>) -> Arc<ResidentWorker> {
+        let mut descriptor = serde_json::json!({
+            "version": 2,
+            "workerId": "w-1",
+            "pid": pid,
+            "socketPath": "/tmp/none.sock",
+            "recoveryJournalPath": "/tmp/none.jsonl",
+            "supervisorSocketPath": "/tmp/none.sock",
+            "authenticationToken": "test",
+            "rootActiveSessionId": "live-id",
+            "ownerClientId": serde_json::Value::Null,
+            "createdAt": "2026-09-23T00:00:00Z",
+            "updatedAt": "2026-09-23T00:00:00Z",
+            "lifecycle": "ready",
+            "createCommand": {},
+            "consecutiveFailures": 0,
+        });
+        if let Some(start_id) = start_id {
+            descriptor["processStartId"] = serde_json::json!(start_id);
+        }
+        ResidentWorker::new(
+            "w-1".to_string(),
+            serde_json::from_value(descriptor).expect("descriptor"),
+            std::path::PathBuf::from("/tmp/none"),
+        )
+    }
+
+    /// The spawn path's captured pair (pid + the holder's own start id,
+    /// `getProcessStartId(childPid)`) keeps a live holder alive.
+    #[tokio::test]
+    async fn the_spawned_identity_keeps_a_live_holder_alive() {
+        let pid = std::process::id();
+        let start_id = crate::lease::get_process_start_id(pid);
+        let resident = resident_with_identity(pid as u64, start_id.as_deref());
+        assert!(resident_process_alive(&resident).await);
+    }
+
+    /// A recycled pid is a DIFFERENT process: the descriptor still
+    /// answers with the original holder's start id, so the resident
+    /// counts as dead instead of waiting out the settle budget.
+    #[tokio::test]
+    async fn a_recycled_pid_counts_as_dead() {
+        let pid = std::process::id();
+        let resident = resident_with_identity(pid as u64, Some("1/1"));
+        assert!(!resident_process_alive(&resident).await);
+    }
+
+    /// A pid the platform cannot answer for (no stored identity) counts
+    /// as alive: a possibly-live worker is never orphaned.
+    #[tokio::test]
+    async fn an_unverifiable_identity_counts_as_alive() {
+        let pid = std::process::id();
+        let resident = resident_with_identity(pid as u64, None);
+        assert!(resident_process_alive(&resident).await);
+    }
 }

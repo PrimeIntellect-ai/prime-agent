@@ -1287,7 +1287,13 @@ impl Supervisor {
         }
         {
             let mut descriptor = resident.descriptor.lock().await;
-            descriptor.pid = child.id().unwrap_or(0) as u64;
+            // Capture the child's start identity alongside its pid (TS
+            // `getProcessStartId(childPid)` at spawn): the identity-aware
+            // holder checks can only recognize a recycled pid when the
+            // descriptor carries the start id the original holder had.
+            let child_pid = child.id().unwrap_or(0);
+            descriptor.pid = child_pid as u64;
+            descriptor.process_start_id = crate::protocol::process_start_id(child_pid);
             descriptor.lifecycle = DaemonWorkerLifecycle::Starting;
             let _ = persist_worker(&resident.descriptor_path, &descriptor);
         }
@@ -3280,6 +3286,15 @@ impl Supervisor {
                 return fail("Session worker authentication failed");
             }
             descriptor.pid = *pid;
+            // Refresh the identity from the live registrant (TS captures
+            // an identity while the process is known alive): a supervisor
+            // restart re-adopts the worker, and a pid that was recycled in
+            // between must not keep the old holder's identity. An
+            // unobservable start id keeps the previous value (a possibly
+            // live worker is never orphaned on a transient lookup failure).
+            if let Some(start_id) = crate::protocol::process_start_id(*pid as u32) {
+                descriptor.process_start_id = Some(start_id);
+            }
             descriptor.socket_path = socket_path.clone();
             descriptor.worker_instance_id = worker_instance_id.clone();
             if let Some(session_id) = &registration.session_id {
