@@ -612,11 +612,11 @@ mod tests {
     #[test]
     fn background_parses_strict_six_hex_after_var_resolution() {
         let json = serde_json::from_str::<ThemeJson>(
-            r#"{
+            r##"{
                 "name": "custom",
                 "vars": { "canvas": "#0A0B0C" },
                 "colors": { "background": "canvas", "text": "#f4f4f5" }
-            }"#,
+            }"##,
         )
         .expect("valid theme json");
         let theme = Theme::from_json(&json, ColorMode::TrueColor);
