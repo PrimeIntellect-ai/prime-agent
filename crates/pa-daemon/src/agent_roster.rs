@@ -20,16 +20,27 @@ pub(crate) struct AgentRoster {
     entries: HashMap<String, AgentRosterEntry>,
     agent_id_by_active_session_id: HashMap<String, String>,
     agent_id_by_session_file: HashMap<String, String>,
-    /// The newest roster-delta sequence applied per (worker id, worker
-    /// process instance): the Rust supervisor link dials one socket per
-    /// request, so deltas arrive unordered and the gate drops a delayed
-    /// older snapshot instead of letting it overwrite a newer one. The
-    /// instance keys the watermark because a replacement process reuses
-    /// the resident worker id but restarts its counter — the
-    /// predecessor's in-flight deltas stay gated against the
-    /// predecessor's watermark. The TS worker never needs this — its
-    /// roster deltas ride one ordered supervisor client socket.
-    delta_watermarks: HashMap<(String, String), u64>,
+    /// The stale-delta gate of one worker: a single bounded slot naming
+    /// the worker's CURRENT process generation (`instance`) and the
+    /// newest sequence applied from it. The Rust supervisor link dials
+    /// one socket per request, so deltas and pulls arrive unordered and
+    /// the gates drop a delayed older snapshot instead of letting it
+    /// overwrite a newer one. The slot is bounded (one entry per
+    /// worker, dropped on stop): a replacement registers a new instance
+    /// and restarts its counter, and [`AgentRoster::note_worker_generation`]
+    /// flips the slot to the replacement — every frame or pull of the
+    /// predecessor generation is then stale by construction and drops on
+    /// the generation mismatch, so retired generations never accumulate.
+    /// The TS worker never needs any of this — its roster deltas ride
+    /// one ordered supervisor client socket.
+    delta_watermarks: HashMap<String, DeltaWatermark>,
+}
+
+/// One worker's stale-delta slot: the process generation the watermark
+/// orders and the newest sequence applied from that generation.
+struct DeltaWatermark {
+    instance: String,
+    watermark: u64,
 }
 
 impl AgentRoster {
@@ -44,12 +55,14 @@ impl AgentRoster {
 
     /// The stale-delta gate for one worker's `worker_roster_delta`: a
     /// sequence below or equal to the newest applied one is stale (a
-    /// newer delta already reached the store) and must not write. The
-    /// watermark is keyed by the sending worker process instance — a
-    /// replacement reuses the resident worker id but restarts its
-    /// counter, so its fresh sequences are never compared against the
-    /// predecessor's. `0` means unsequenced (the caller did not stamp
-    /// one) and always applies.
+    /// newer delta already reached the store) and must not write. A
+    /// frame from a generation the slot no longer names — a replaced
+    /// process's delayed delivery — is stale by construction whatever
+    /// its sequence: the replacement restarts its counter under the new
+    /// instance and the registration's authoritative pull already wrote
+    /// the replacement's state, so the answer is still success (the
+    /// delta was delivered, just superseded). `0` means unsequenced
+    /// (the caller did not stamp one) and always applies.
     pub(crate) fn accept_delta_sequence(
         &mut self,
         worker_id: &str,
@@ -59,46 +72,116 @@ impl AgentRoster {
         if sequence == 0 {
             return true;
         }
-        let key = (worker_id.to_string(), instance.to_string());
-        match self.delta_watermarks.get(&key) {
-            Some(applied) if sequence <= *applied => false,
-            _ => {
-                self.delta_watermarks.insert(key, sequence);
+        match self.delta_watermarks.get_mut(worker_id) {
+            Some(slot) if slot.instance == instance => {
+                if sequence <= slot.watermark {
+                    false
+                } else {
+                    slot.watermark = sequence;
+                    true
+                }
+            }
+            // The slot names the current generation (only the
+            // registration path flips it), so any other generation is a
+            // predecessor's delayed frame.
+            Some(_) => false,
+            None => {
+                self.delta_watermarks.insert(
+                    worker_id.to_string(),
+                    DeltaWatermark {
+                        instance: instance.to_string(),
+                        watermark: sequence,
+                    },
+                );
                 true
             }
         }
     }
 
-    /// Raise one (worker, instance) watermark (never lower it): the
-    /// authoritative pulls — registration, create, refresh — write a
-    /// summary that embeds the worker's counter at snapshot time, so a
-    /// delta still in flight when the pull answered (sequence at or below
-    /// the embedded counter) is stale once the pull has applied.
-    pub(crate) fn raise_delta_watermark(&mut self, worker_id: &str, instance: &str, ceiling: u64) {
-        if ceiling == 0 {
-            return;
+    /// The gate for one authoritative pull (registration, adoption,
+    /// create, refresh): the pulled summary embeds the counter its
+    /// stamping process read at snapshot time, so the caller runs this
+    /// gate, the summary write, and the watermark raise in ONE
+    /// roster-lock critical section — a delta still in flight
+    /// (sequence below the counter) can never slip between the write
+    /// and the raise, and a delta stamped after the pull's snapshot
+    /// (sequence above the counter) stays fresher and still applies.
+    /// The pull applies when its counter is at or above the applied
+    /// watermark: the snapshot the counter orders is at least as fresh
+    /// as every delta the watermark names (equal means the pull
+    /// snapshotted after that delta stamped, so it carries the delta's
+    /// change and possibly more). A pull from a generation the slot no
+    /// longer names is a replaced process's delayed answer — stale by
+    /// construction, dropped. A counter of `0` (the summary carries no
+    /// sequence) is an unsequenced authoritative write and always
+    /// applies without touching the slot.
+    pub(crate) fn accept_roster_pull(
+        &mut self,
+        worker_id: &str,
+        instance: &str,
+        counter: u64,
+    ) -> bool {
+        if counter == 0 {
+            return true;
         }
-        let key = (worker_id.to_string(), instance.to_string());
-        let watermark = self.delta_watermarks.entry(key).or_insert(0);
-        if *watermark < ceiling {
-            *watermark = ceiling;
+        match self.delta_watermarks.get_mut(worker_id) {
+            Some(slot) if slot.instance == instance => {
+                if counter < slot.watermark {
+                    false
+                } else {
+                    slot.watermark = counter;
+                    true
+                }
+            }
+            // The slot names the current generation; the pull answered
+            // for a predecessor.
+            Some(_) => false,
+            None => {
+                self.delta_watermarks.insert(
+                    worker_id.to_string(),
+                    DeltaWatermark {
+                        instance: instance.to_string(),
+                        watermark: counter,
+                    },
+                );
+                true
+            }
         }
     }
 
-    /// Saturate the watermark of one retired worker process instance: a
-    /// replacement registered with a new instance, so every delta still
-    /// in flight from the predecessor is stale by construction.
-    pub(crate) fn retire_worker_instance(&mut self, worker_id: &str, instance: &str) {
-        self.delta_watermarks
-            .insert((worker_id.to_string(), instance.to_string()), u64::MAX);
+    /// Record the worker's current process generation (the registration
+    /// path is the single writer): a replacement registers a new
+    /// instance and restarts its counter, so the slot flips to the
+    /// replacement with a fresh watermark — the predecessor's delayed
+    /// frames and pulls then drop on the generation mismatch, and no
+    /// per-generation entry ever accumulates. A same-generation
+    /// re-register (a dropped link, a create replay) keeps the slot
+    /// untouched.
+    pub(crate) fn note_worker_generation(&mut self, worker_id: &str, instance: &str) {
+        let generation_flipped = match self.delta_watermarks.get(worker_id) {
+            Some(slot) => slot.instance != instance,
+            // A first registration (or a stop-and-restart cycle) starts
+            // the slot: the pull that follows the registration may never
+            // land (a timed-out route), and the slot alone must already
+            // gate the predecessor generation's in-flight frames.
+            None => true,
+        };
+        if generation_flipped {
+            self.delta_watermarks.insert(
+                worker_id.to_string(),
+                DeltaWatermark {
+                    instance: instance.to_string(),
+                    watermark: 0,
+                },
+            );
+        }
     }
 
-    /// Forget every watermark of one stopped worker (the stop path keeps
-    /// the map bounded; the worker's token no longer authenticates, so
-    /// its deltas cannot reach the gate anyway).
+    /// Forget the stale-delta slot of one stopped worker (the stop path
+    /// keeps the map bounded; the worker's token no longer
+    /// authenticates, so its deltas cannot reach the gate anyway).
     pub(crate) fn forget_worker_sequences(&mut self, worker_id: &str) {
-        self.delta_watermarks
-            .retain(|(worker, _), _| worker != worker_id);
+        self.delta_watermarks.remove(worker_id);
     }
 
     /// Classify and store one entry from a worker's slim summary. Returns
@@ -424,29 +507,83 @@ mod tests {
         // equal or lower sequences never overwrite the newer state.
         assert!(!roster.accept_delta_sequence("w1", "i1", 1));
         assert!(!roster.accept_delta_sequence("w1", "i1", 2));
-        // The watermark is keyed by worker process instance — another
-        // worker, or a replacement instance restarting the counter, is
-        // independent of w1's watermark.
-        assert!(roster.accept_delta_sequence("w2", "i1", 1));
-        assert!(roster.accept_delta_sequence("w1", "i2", 1));
         // Unsequenced (0 / absent) always applies.
         assert!(roster.accept_delta_sequence("w1", "i1", 0));
-        // The authoritative pulls raise the watermark to the summary's
-        // embedded counter: a delta still in flight when the pull answered
-        // (sequence at or below the counter) is stale afterward.
-        roster.raise_delta_watermark("w1", "i1", 5);
+        // Another worker's slot is independent.
+        assert!(roster.accept_delta_sequence("w2", "i1", 1));
+
+        // The replacement flow: a new generation registers (the
+        // registration path is the single writer of the slot's instance)
+        // and restarts its counter, so the slot flips with a fresh
+        // watermark and the PREDECESSOR's delayed frames drop on the
+        // generation mismatch whatever their sequence.
+        roster.note_worker_generation("w1", "i2");
+        assert!(!roster.accept_delta_sequence("w1", "i1", 9_000_000));
+        assert!(roster.accept_delta_sequence("w1", "i2", 1));
+        assert!(roster.accept_delta_sequence("w1", "i2", 2));
+        assert!(!roster.accept_delta_sequence("w1", "i2", 1));
+        // A same-generation re-register keeps the slot untouched (the
+        // counter never restarted, so the applied watermark still gates).
+        roster.note_worker_generation("w1", "i2");
+        assert!(!roster.accept_delta_sequence("w1", "i2", 1));
+        // The stop cleanup forgets the worker's slot.
+        roster.forget_worker_sequences("w1");
+        assert!(roster.accept_delta_sequence("w1", "i1", 1));
+        assert!(roster.accept_delta_sequence("w1", "i2", 1));
+    }
+
+    #[test]
+    fn pull_gate_orders_authoritative_writes_by_the_snapshot_counter() {
+        let roster = locked();
+        let mut roster = roster.lock().unwrap();
+        // An unsequenced summary (no embedded counter) is an
+        // authoritative write and applies without touching the slot.
+        assert!(roster.accept_roster_pull("w1", "i1", 0));
+        assert!(roster.accept_delta_sequence("w1", "i1", 1));
+        // The pull with the snapshot's counter applies and raises the
+        // watermark: a delta still in flight when the pull answered
+        // (sequence at or below the counter) never overwrites the pull.
+        assert!(roster.accept_roster_pull("w1", "i1", 5));
+        assert!(!roster.accept_delta_sequence("w1", "i1", 5));
         assert!(!roster.accept_delta_sequence("w1", "i1", 4));
         assert!(roster.accept_delta_sequence("w1", "i1", 6));
         // The raise never lowers the watermark.
-        roster.raise_delta_watermark("w1", "i1", 3);
-        assert!(!roster.accept_delta_sequence("w1", "i1", 5));
-        // A replacement registration saturates the PREDECESSOR instance's
-        // watermark: every predecessor delta still in flight is stale.
-        roster.retire_worker_instance("w1", "i1");
-        assert!(!roster.accept_delta_sequence("w1", "i1", 9_000_000));
-        assert!(roster.accept_delta_sequence("w1", "i2", 2));
-        // The stop cleanup forgets every watermark of the worker.
+        assert!(!roster.accept_roster_pull("w1", "i1", 3));
+        // A pull AT the applied watermark still applies: its snapshot
+        // was taken after that delta stamped, so it carries the delta's
+        // change and possibly more (a rename the deltas never push).
+        assert!(roster.accept_roster_pull("w1", "i1", 6));
+        // A pull whose counter is below the applied watermark is stale:
+        // a delta stamped after the pull's snapshot already applied.
+        assert!(roster.accept_delta_sequence("w1", "i1", 8));
+        assert!(!roster.accept_roster_pull("w1", "i1", 7));
+        // A pull from a replaced process's delayed answer drops on the
+        // generation mismatch (the registration noted the replacement).
+        roster.note_worker_generation("w1", "i2");
+        assert!(!roster.accept_roster_pull("w1", "i1", 9_000_000));
+        // The replacement's own pull is authoritative for the new
+        // generation: it applies from the fresh watermark.
+        assert!(roster.accept_roster_pull("w1", "i2", 3));
+        assert!(!roster.accept_delta_sequence("w1", "i2", 3));
+        assert!(roster.accept_delta_sequence("w1", "i2", 4));
+    }
+
+    #[test]
+    fn replacement_watermarks_stay_bounded() {
+        let roster = locked();
+        let mut roster = roster.lock().unwrap();
+        // Repeated replacements never grow the store: one slot per
+        // worker, flipped by the registration note, dropped on stop.
+        for generation in 1..=64 {
+            roster.note_worker_generation("w1", &format!("i{generation}"));
+            assert!(roster.accept_delta_sequence("w1", &format!("i{generation}"), 1));
+            assert!(roster.accept_roster_pull("w1", &format!("i{generation}"), 2));
+            assert_eq!(roster.delta_watermarks.len(), 1);
+            // Every earlier generation's delayed frames and pulls drop.
+            assert!(!roster.accept_delta_sequence("w1", &format!("i{}", generation - 1), 5));
+            assert!(!roster.accept_roster_pull("w1", &format!("i{}", generation - 1), 5));
+        }
         roster.forget_worker_sequences("w1");
-        assert!(roster.accept_delta_sequence("w1", "i1", 1));
+        assert!(roster.delta_watermarks.is_empty());
     }
 }

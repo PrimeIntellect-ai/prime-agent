@@ -23,8 +23,9 @@ use crate::supervisor::{ClientRouting, Supervisor, ROUTE_TIMEOUT_MS};
 /// slim session summary plus the stale-delta ordering fields — the
 /// worker's monotonic sequence (stamped under its push-order lock together
 /// with the snapshot) and the sending worker process instance (the
-/// watermark key: a replacement process restarts the counter under a new
-/// instance).
+/// generation the roster's stale-delta slot names; a replacement process
+/// restarts the counter under a new instance and the registration flips
+/// the slot to it).
 pub(crate) struct WorkerRosterDelta {
     pub worker_token: String,
     pub summary: Value,
@@ -182,14 +183,15 @@ impl Supervisor {
         // The stale-delta gate and the write share ONE roster lock
         // acquisition: two accepted deltas must never write in reverse
         // order (each supervisor connection runs its own task), so the
-        // accept order is the apply order. The gate keys the watermark by
-        // the sending worker process instance — the per-request links
-        // deliver deltas unordered, a replacement process restarts the
-        // counter under a new instance, and the supervisor answers
-        // success for a stale delta (delivered, just superseded). The
-        // summary write and any removals batch into the single frame the
-        // one push carries (TS `applyWorkerRosterDelta` + its coalescing
-        // `scheduleRosterPush`), never one push per mutation.
+        // accept order is the apply order. The gate drops both a delayed
+        // older snapshot (a newer sequence already applied) and any frame
+        // from a generation the roster's slot no longer names (a replaced
+        // process's delayed delivery — stale by construction), and the
+        // supervisor answers success for a stale delta (delivered, just
+        // superseded). The summary write and any removals batch into the
+        // single frame the one push carries (TS `applyWorkerRosterDelta`
+        // + its coalescing `scheduleRosterPush`), never one push per
+        // mutation.
         let mut changed = Vec::new();
         let mut removed_ids = Vec::new();
         {
@@ -214,50 +216,60 @@ impl Supervisor {
         response_success(Some(command_id), type_name, None)
     }
 
-    /// Write one summary into the roster and push the change to
-    /// subscribers. Returns the classified entry.
-    pub(crate) fn write_roster_summary(
-        &self,
-        summary: &Value,
-        worker_id: Option<&str>,
-    ) -> Option<AgentRosterEntry> {
-        let entry = self
-            .roster
-            .lock()
-            .unwrap()
-            .write_summary(summary.clone(), worker_id, None);
-        self.push_roster_update(vec![entry.clone()], Vec::new());
-        Some(entry)
-    }
-
     /// The authoritative pull write (registration, adoption, create,
-    /// refresh): write the resident's fresh `get_state` summary AND raise
-    /// the (worker, instance) stale-delta watermark to the counter the
-    /// summary embeds — every delta the worker stamped before the pull
-    /// carries a sequence at or below it, so a delta still in flight when
-    /// the pull answered is dropped instead of overwriting the pull's
-    /// fresher state.
+    /// refresh): write the resident's fresh `get_state` summary and gate
+    /// it against the stale-delta slot in ONE roster-lock critical
+    /// section — the gate, the summary write, and the watermark raise
+    /// are a single acquisition, so a delta still in flight (a sequence
+    /// below the summary's embedded counter) can never slip between the
+    /// write and the raise and overwrite the pull's fresher state, and a
+    /// delta stamped after the pull's snapshot (a sequence above the
+    /// counter) still applies afterward.
+    ///
+    /// The pull's generation comes from the summary's OWN stamp — the
+    /// `workerInstanceId` the answering process wrote next to its
+    /// `rosterDeltaSequence` — never from whichever process registered
+    /// last: a delayed pull answered by a replaced process drops on the
+    /// generation mismatch instead of pinning the replacement's
+    /// watermark above its restarted counter. A summary without the
+    /// stamp (an older worker build) falls back to the resident's
+    /// current descriptor instance, read BEFORE the roster lock so the
+    /// lock order stays descriptor-then-roster everywhere.
+    /// Returns the stored entry, or `None` when the gate dropped the
+    /// pull as stale (no push fires — subscribers keep the newer state
+    /// they already hold).
     pub(crate) async fn write_roster_summary_for_resident(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
         summary: &Value,
     ) -> Option<AgentRosterEntry> {
-        let entry = self.write_roster_summary(summary, Some(&resident.worker_id));
-        let instance = resident
-            .descriptor
-            .lock()
-            .await
-            .worker_instance_id
-            .clone()
-            .unwrap_or_default();
-        if let Some(counter) = summary
+        let stamped_instance = summary
+            .get("workerInstanceId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|stamped| !stamped.is_empty());
+        let instance = match stamped_instance {
+            Some(stamped) => stamped.to_string(),
+            None => resident
+                .descriptor
+                .lock()
+                .await
+                .worker_instance_id
+                .clone()
+                .unwrap_or_default(),
+        };
+        let counter = summary
             .get("rosterDeltaSequence")
             .and_then(serde_json::Value::as_u64)
-        {
+            .unwrap_or(0);
+        let entry = {
             let mut roster = self.roster.lock().unwrap();
-            roster.raise_delta_watermark(&resident.worker_id, &instance, counter);
-        }
-        entry
+            if !roster.accept_roster_pull(&resident.worker_id, &instance, counter) {
+                return None;
+            }
+            roster.write_summary(summary.clone(), Some(&resident.worker_id), None)
+        };
+        self.push_roster_update(vec![entry.clone()], Vec::new());
+        Some(entry)
     }
 
     /// Refresh one resident worker's entry from its live `get_state`
@@ -592,21 +604,18 @@ mod tests {
         let applied = delta(&supervisor, "seq-token", "low", Some(3), "i1").await;
         assert!(applied.success, "sequence 3 applies: {applied:?}");
         assert_eq!(entry_level(), serde_json::json!("low"));
-        // The authoritative pull raises the watermark to the summary's
-        // embedded counter (the get_state snapshot read the worker's
-        // counter): a delta still in flight when the pull answered is
-        // dropped instead of overwriting the pull's fresher state.
+        // The authoritative pull gates in the same lock section that
+        // writes: the summary's embedded counter (the get_state snapshot
+        // read the worker's counter, stamped with the answering
+        // instance) applies and raises the watermark, so a delta still in
+        // flight when the pull answered is dropped instead of
+        // overwriting the pull's fresher state.
         let mut pulled = summary("off");
         pulled["rosterDeltaSequence"] = serde_json::json!(4);
+        pulled["workerInstanceId"] = serde_json::json!("i1");
+        let resident = supervisor.registry.get("seq-worker").await.expect("resident");
         let pull = supervisor
-            .write_roster_summary_for_resident(
-                &supervisor
-                    .registry
-                    .get("seq-worker")
-                    .await
-                    .expect("resident"),
-                &pulled,
-            )
+            .write_roster_summary_for_resident(&resident, &pulled)
             .await;
         assert!(pull.expect("pull entry").summary["thinkingLevel"] == serde_json::json!("off"));
         assert_eq!(entry_level(), serde_json::json!("off"));
@@ -620,13 +629,55 @@ mod tests {
             serde_json::json!("off"),
             "a delta older than the pull never overwrites the pull"
         );
-        // A replacement process (a new instance, counter restarted)
-        // applies: its sequences are never compared against the
-        // predecessor's watermark.
+        // A pull whose counter is below the applied watermark is stale:
+        // a delta stamped after the pull's snapshot already applied, so
+        // the older in-flight refresh never overwrites it.
+        let mut stale_pull = summary("medium");
+        stale_pull["rosterDeltaSequence"] = serde_json::json!(3);
+        stale_pull["workerInstanceId"] = serde_json::json!("i1");
+        assert!(
+            supervisor
+                .write_roster_summary_for_resident(&resident, &stale_pull)
+                .await
+                .is_none(),
+            "an older in-flight refresh drops"
+        );
+        assert_eq!(entry_level(), serde_json::json!("off"));
+        // A replacement process registers (the registration notes the
+        // new generation) and its counter-restarted sequences apply —
+        // never compared against the predecessor's watermark.
+        supervisor
+            .roster
+            .lock()
+            .unwrap()
+            .note_worker_generation("seq-worker", "i2");
         let replacement = delta(&supervisor, "seq-token", "medium", Some(1), "i2").await;
         assert!(
             replacement.success,
             "the replacement applies: {replacement:?}"
+        );
+        assert_eq!(entry_level(), serde_json::json!("medium"));
+        // The predecessor's delayed frames drop on the generation
+        // mismatch whatever their sequence: the replacement's
+        // registration made them stale by construction.
+        let predecessor = delta(&supervisor, "seq-token", "high", Some(9_000_000), "i1").await;
+        assert!(
+            predecessor.success,
+            "a superseded frame still answers success: {predecessor:?}"
+        );
+        assert_eq!(entry_level(), serde_json::json!("medium"));
+        // A delayed pull answered by the replaced process drops the same
+        // way — its high counter never pins the replacement's restarted
+        // counter out of the roster.
+        let mut predecessor_pull = summary("low");
+        predecessor_pull["rosterDeltaSequence"] = serde_json::json!(9_000_000);
+        predecessor_pull["workerInstanceId"] = serde_json::json!("i1");
+        assert!(
+            supervisor
+                .write_roster_summary_for_resident(&resident, &predecessor_pull)
+                .await
+                .is_none(),
+            "a superseded pull drops"
         );
         assert_eq!(entry_level(), serde_json::json!("medium"));
         // An unsequenced delta applies (a caller that stamped nothing).

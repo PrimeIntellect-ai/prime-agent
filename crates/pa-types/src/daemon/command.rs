@@ -178,9 +178,10 @@ pub enum DaemonCommand {
         sequence: Option<u64>,
         /// The sending worker process instance: a replacement process
         /// reuses the resident worker id but restarts its sequence, so the
-        /// supervisor's stale-delta gate keys the watermark by
-        /// (worker id, instance) — a predecessor's in-flight deltas stay
-        /// gated against the predecessor's watermark.
+        /// supervisor's stale-delta gate names the current generation in
+        /// one bounded slot per worker (flipped at the replacement's
+        /// registration) — a predecessor's in-flight deltas drop on the
+        /// generation mismatch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         worker_instance_id: Option<String>,
         #[serde(flatten)]

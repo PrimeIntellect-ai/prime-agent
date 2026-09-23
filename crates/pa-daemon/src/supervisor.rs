@@ -3315,18 +3315,21 @@ impl Supervisor {
             (durable_session_id, previous_worker_instance_id)
         };
         let record = self.registry.record_registration(registration).await;
-        // A REPLACEMENT registration (a new worker process instance for the
-        // same resident worker id) saturates the predecessor's roster-delta
-        // watermark: the replacement restarts its monotonic counter, so a
-        // delta still in flight from the predecessor is stale by
-        // construction. A same-process re-register (a dropped supervisor
-        // link, a create replay) keeps the gate untouched — the counter did
-        // not restart, and clearing it would let the older in-flight
-        // deltas apply again.
+        // A REPLACEMENT registration (a new worker process instance for
+        // the same resident worker id) flips the roster's stale-delta
+        // slot to the replacement: the replacement restarts its monotonic
+        // counter, so the slot's watermark starts fresh and every frame
+        // or pull still in flight from the predecessor drops on the
+        // generation mismatch (stale by construction — the registration
+        // refresh below writes the replacement's authoritative state).
+        // A same-process re-register (a dropped supervisor link, a
+        // create replay) keeps the slot untouched — the counter did not
+        // restart, and clearing it would let the older in-flight deltas
+        // apply again.
         if previous_worker_instance_id.as_deref() != worker_instance_id.as_deref() {
-            let retired = previous_worker_instance_id.clone().unwrap_or_default();
+            let replacement = worker_instance_id.clone().unwrap_or_default();
             let mut roster = self.roster.lock().unwrap();
-            roster.retire_worker_instance(&resident.worker_id, &retired);
+            roster.note_worker_generation(&resident.worker_id, &replacement);
         }
         // A restore pass that owns this session's roster row can settle it
         // now (spec §10.4): the live worker serves the row's waiters

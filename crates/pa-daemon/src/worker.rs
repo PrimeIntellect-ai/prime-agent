@@ -2662,15 +2662,23 @@ impl Worker {
             status_label: None,
             summary: None,
             task_state: None,
-            // The worker's roster-delta counter at snapshot time: the
-            // supervisor's authoritative pulls raise their stale-delta
-            // watermark to it, so a delta still in flight when the pull
-            // answered is dropped instead of overwriting the pull's
-            // fresher state.
+            // The worker's roster-delta counter at snapshot time, and the
+            // process instance that read it — the pair is one snapshot:
+            // the supervisor's pull gate orders the summary against the
+            // watermark of the generation that took it, so a delta still
+            // in flight when the pull answered (a sequence at or below
+            // the counter) is dropped instead of overwriting the pull's
+            // fresher state. Both reads run under the caller's core
+            // lock, and every push stamps its snapshot after the state
+            // change it describes and before its counter increment, so
+            // a counter this summary embeds already includes every
+            // change the snapshot reflects.
             roster_delta_sequence: Some(
                 self.roster_delta_sequence
                     .load(std::sync::atomic::Ordering::SeqCst),
             ),
+            worker_instance_id: (!self.config.worker_instance_id.is_empty())
+                .then(|| self.config.worker_instance_id.clone()),
             // The engine's resolved model (the agents-view Model column:
             // TS roster summaries carry it; a not-yet-resolved engine
             // reports none).
@@ -6038,7 +6046,10 @@ fn session_summary(
         // Set by the caller when the snapshot backs a roster push (the
         // push-order lock reads the pre-stamp counter); authoritative
         // pulls embed the live counter in `summary_locked` instead.
+        // The push's sending instance rides the frame envelope, so the
+        // summary itself never carries one here.
         roster_delta_sequence: None,
+        worker_instance_id: None,
         model,
         model_fallback_message,
         runtime_kind: Some(core.runtime_kind.clone()),
