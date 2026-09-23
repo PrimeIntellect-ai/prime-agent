@@ -2639,11 +2639,17 @@ impl SessionUi {
                     return Ok(());
                 }
                 if arg == "off" || arg == "stable" {
-                    if let Some(settings) = &self.client_settings {
-                        if let Err(error) = settings.set_update_channel("stable") {
-                            self.error_row(&format!("{error:#}"), view);
-                            return Ok(());
-                        }
+                    // The pin persists through the client-settings seam; a
+                    // surface without the seam never claims the pin (TS
+                    // always has a settings manager, so the gate is this
+                    // client's honesty guard).
+                    let Some(settings) = &self.client_settings else {
+                        self.note("/nightly is not available in this client yet", view);
+                        return Ok(());
+                    };
+                    if let Err(error) = settings.set_update_channel("stable") {
+                        self.error_row(&format!("{error:#}"), view);
+                        return Ok(());
                     }
                     self.note(
                         "Updates now follow the stable channel. Run /update to install the latest stable release.",
