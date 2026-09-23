@@ -4255,6 +4255,15 @@ class Battery:
         # row shape and the focus text are the parity claim; the count is
         # per-implementation and can be under the 4-digit scrub above).
         text = re.sub(r"Compacted from [0-9,]+ tokens", "Compacted from <num> tokens", text)
+        # The heartbeat prompt row's glyph is a sanctioned divergence
+        # (operator directive 2026-09-23): the Rust side renders the ◷
+        # clock (the unified-activity-dock Heartbeats icon), the TS side
+        # the ♥ heart. Canonicalize the single chars (the battery frames
+        # are plain-text captures, so the row renders contiguously) so
+        # the f19 frame diff keeps covering the rest of the row; the
+        # fired-row check asserts each side's glyph separately.
+        text = text.replace("♥", "<HBICON>")
+        text = text.replace("◷", "<HBICON>")
         return text
 
 
@@ -5191,8 +5200,9 @@ class Battery:
 
     def f19_heartbeat(self) -> None:
         """/heartbeat visible surface: the set status row, the fired
-        heartbeat prompt row (♥ prefix + schedule label), and the
-        /heartbeats manager view."""
+        heartbeat prompt row (the glyph diverges by directive: ts renders
+        the ♥ heart, rust the ◷ clock — the unified-activity-dock
+        Heartbeats icon), and the /heartbeats manager view."""
         flow = "f19_heartbeat"
         reply = "f19 heartbeat fixture reply"
         frames: dict[str, dict[str, str]] = {"ts": {}, "rust": {}}
@@ -5229,24 +5239,39 @@ class Battery:
                     lane=FLOW_LANES[flow],
                 )
             # The heartbeat fires (10s schedule): the injected prompt row with
-            # the ♥ prefix and schedule label, plus its model turn.
+            # the glyph prefix and schedule label, plus its model turn. The
+            # glyph diverges by directive (2026-09-23): the TS side keeps
+            # the ♥ heart; the Rust side renders the ◷ clock — the unified
+            # activity dock's Heartbeats icon.
             fired = B.tmux_wait_text(tui, "Heartbeat prompt", timeout=60)
             side.evidence(flow, "02-heartbeat-fired.txt", fired)
             settled = self.settle_frame(tui, quiet_s=4.0, timeout=90)
             side.evidence(flow, "03-heartbeat-fired-settled.txt", settled)
             frames[side.name]["heartbeat-fired"] = settled
-            if "Heartbeat prompt" in settled:
+            glyph_row = (
+                "♥ Heartbeat prompt · every 10s"
+                if side.name == "ts"
+                else "◷ Heartbeat prompt · every 10s"
+            )
+            if "Heartbeat prompt" not in settled:
                 self.record(
                     flow, "behavior",
-                    f"{side.name}: a fired heartbeat renders the '♥ Heartbeat prompt · every 10s' row",
-                    gap=False,
+                    f"{side.name}: the fired heartbeat produced no visible 'Heartbeat prompt' row",
+                    evidence=side.root / flow / "03-heartbeat-fired-settled.txt",
+                    lane=FLOW_LANES[flow],
+                )
+            elif glyph_row not in settled:
+                self.record(
+                    flow, "behavior",
+                    f"{side.name}: the fired heartbeat row renders no '{glyph_row}' glyph row",
+                    evidence=side.root / flow / "03-heartbeat-fired-settled.txt",
+                    lane=FLOW_LANES[flow],
                 )
             else:
                 self.record(
                     flow, "behavior",
-                    f"{side.name}: the fired heartbeat produced no visible '♥ Heartbeat prompt' row",
-                    evidence=side.root / flow / "03-heartbeat-fired-settled.txt",
-                    lane=FLOW_LANES[flow],
+                    f"{side.name}: a fired heartbeat renders the '{glyph_row}' row",
+                    gap=False,
                 )
             # /heartbeats: the manager view.
             self.tui_send(tui, "/heartbeats")

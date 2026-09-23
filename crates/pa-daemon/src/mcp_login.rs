@@ -77,10 +77,11 @@ impl McpLoginUi for WorkerMcpLoginUi {
 
 /// Wire the worker login into a manager so its `mcp.begin_login` host
 /// request runs the full OAuth flow. Call before the session registers
-/// host handlers.
+/// host handlers. The worker passes its browser UI; tests inject a
+/// capture-only UI through the same seam.
 pub fn wire_worker_mcp_login(
     manager: &Arc<std::sync::Mutex<McpManager>>,
-    ui: Arc<WorkerMcpLoginUi>,
+    ui: Arc<dyn McpLoginUi>,
     http: Arc<dyn pa_core::mcp::OAuthHttp>,
 ) {
     pa_core::mcp::wire_begin_login(manager, ui, http);
@@ -156,10 +157,64 @@ mod tests {
         }
     }
 
+    /// The test login surface (the TS tests' capture-only `onAuth`): every
+    /// progress message and authorization URL lands in the record, and
+    /// nothing ever drives the platform browser — no test may open a real
+    /// one. The paste contract matches the worker's: no manual channel,
+    /// the fallback prompt refuses.
+    struct RecordingLoginUi {
+        auth_url_file: Option<PathBuf>,
+        progress: Arc<std::sync::Mutex<Vec<String>>>,
+        auth_urls: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl RecordingLoginUi {
+        fn new(auth_url_file: Option<PathBuf>) -> Self {
+            RecordingLoginUi {
+                auth_url_file,
+                progress: Arc::new(std::sync::Mutex::new(Vec::new())),
+                auth_urls: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl McpLoginUi for RecordingLoginUi {
+        fn on_progress(&self, message: &str) {
+            self.progress.lock().unwrap().push(message.to_string());
+        }
+
+        fn on_auth(&self, url: &str, _instructions: &str) {
+            self.auth_urls.lock().unwrap().push(url.to_string());
+            if let Some(path) = &self.auth_url_file {
+                if let Err(error) = std::fs::write(path, url) {
+                    eprintln!(
+                        "test MCP login could not record the authorization URL at {}: {error}",
+                        path.display()
+                    );
+                }
+            }
+        }
+
+        fn on_prompt(
+            &self,
+            _message: &str,
+            _placeholder: &str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send>> {
+            Box::pin(async { Err(anyhow!("Login cancelled")) })
+        }
+
+        fn on_manual_code_input(
+            &self,
+        ) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>>
+        {
+            None
+        }
+    }
+
     /// The fixture OAuth server's discovery/registration/token responses
-    /// answer through the scripted transport; the browser step is driven
-    /// from the recorded authorization URL (the real callback listener
-    /// catches the simulated redirect).
+    /// answer through the scripted transport; the capture-only test UI
+    /// records the authorization URL without a browser launch (the real
+    /// callback listener catches the simulated redirect).
     #[tokio::test]
     async fn worker_begin_login_persists_creds_and_unlocks_gating() -> Result<()> {
         let agent = tempfile::tempdir()?;
@@ -213,10 +268,12 @@ mod tests {
             "the fixture server starts gated without credentials"
         );
 
-        // The exact wiring the worker engine applies.
+        // The exact wiring the worker engine applies, with the
+        // capture-only test UI standing in for the browser surface.
+        let ui = Arc::new(RecordingLoginUi::new(Some(url_file.clone())));
         wire_worker_mcp_login(
             &manager,
-            Arc::new(WorkerMcpLoginUi::with_auth_url_file(Some(url_file.clone()))),
+            Arc::clone(&ui) as Arc<dyn McpLoginUi>,
             Arc::clone(&http) as Arc<dyn pa_core::mcp::OAuthHttp>,
         );
         let mut handlers = HostRequestHandlers::default();
@@ -277,6 +334,21 @@ mod tests {
 
         login.await??;
 
+        // The authorization surface was captured, never launched: the
+        // flow narrated through the UI and produced exactly the one URL
+        // the callback drive consumed.
+        assert!(
+            !ui.progress.lock().unwrap().is_empty(),
+            "the login narrated its steps through the UI"
+        );
+        let auth_urls = ui.auth_urls.lock().unwrap().clone();
+        assert_eq!(
+            auth_urls.len(),
+            1,
+            "one authorization URL, one browser launch"
+        );
+        assert_eq!(auth_urls[0], url);
+
         // The credential persisted (endpoint-bound, TS McpCredentials shape).
         let auth: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(agent.path().join("auth.json"))?)?;
@@ -336,7 +408,7 @@ mod tests {
         let manager = Arc::new(std::sync::Mutex::new(manager));
         wire_worker_mcp_login(
             &manager,
-            Arc::new(WorkerMcpLoginUi::with_auth_url_file(None)),
+            Arc::new(RecordingLoginUi::new(None)) as Arc<dyn McpLoginUi>,
             Arc::clone(&http) as Arc<dyn pa_core::mcp::OAuthHttp>,
         );
         let mut handlers = HostRequestHandlers::default();

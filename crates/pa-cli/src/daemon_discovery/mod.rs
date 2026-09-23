@@ -41,7 +41,7 @@ mod format;
 mod kill;
 pub(crate) mod plan;
 pub(crate) mod scan;
-mod stop;
+pub(crate) mod stop;
 
 pub(crate) use format::format_daemon_list_table;
 pub(crate) use stop::{run_ps, run_reap, run_shutdown_all};
@@ -71,11 +71,19 @@ pub(crate) struct DaemonStateRoot {
 /// `current_state_root()` resolve onto them, so root matching alone cannot
 /// be trusted. NOTE: `/tmp/prime-agent-1000` is also the product-default
 /// socket dir for uid 1000 — the exclusion is deliberate and mission-local;
-/// see PORTING-NOTES.md before changing it.
+/// see PORTING-NOTES.md before changing it. The `-0` entries are the uid-0
+/// twins: the product-default socket dir is `<tmpdir>/prime-agent-<uid>`,
+/// so on a root-user Linux box (uid 0 — the fleet's root-uid gate and
+/// mission topology) the ambient mission daemon lives under
+/// `/tmp/prime-agent-0` / `/tmp/mission-tmp/prime-agent-0`, and the guard
+/// must cover it exactly like the uid-1000 pair; without them the whole
+/// never-touch protection silently disappears at uid 0.
 pub(crate) const NEVER_TOUCH_SOCKET_DIRS: &[&str] = &[
     "/tmp/prime-agent-1000",
     "/tmp/mission-tmp/prime-agent-1000",
     "/tmp/mission-daemon",
+    "/tmp/prime-agent-0",
+    "/tmp/mission-tmp/prime-agent-0",
 ];
 
 /// True when `path` is or sits inside a never-touch directory.
@@ -635,8 +643,11 @@ mod tests {
     fn a_scan_rooted_on_a_never_touch_dir_surfaces_no_listeners() {
         // The ambient mission daemon's workers listen under these dirs and
         // are owned by real `prime-agent` processes: root matching alone
-        // would find them, the containment guard must not.
-        for dir in ["/tmp/mission-tmp/prime-agent-1000", "/tmp/prime-agent-1000"] {
+        // would find them, the containment guard must not. The loop covers
+        // every guarded dir — the uid-1000 mission paths on a devbox and
+        // their uid-0 twins on a root-user Linux box.
+        for dir in NEVER_TOUCH_SOCKET_DIRS {
+            let dir = *dir;
             let root = DaemonStateRoot {
                 agent_dir: PathBuf::from(dir),
                 socket_dir: PathBuf::from(dir),

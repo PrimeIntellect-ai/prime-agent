@@ -9,6 +9,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
@@ -65,11 +67,16 @@ fn trimmed_non_empty(value: String) -> Option<String> {
 
 /// The primary sink: batches to PostHog. Best-effort — any non-2xx response,
 /// transport error, or timeout drops the batch (offline-safe, no retries).
+/// A 401 is terminal instead of per-batch: bad or missing-scope credentials
+/// cannot succeed on a later batch, so the sink stops requesting until the
+/// process restarts (a 401 every flush is a retry loop the endpoint can
+/// never clear).
 #[derive(Clone)]
 pub struct PostHogSink {
     http: reqwest::Client,
     batch_url: String,
     api_key: String,
+    auth_terminal: Arc<AtomicBool>,
 }
 
 impl PostHogSink {
@@ -88,6 +95,7 @@ impl PostHogSink {
             http,
             batch_url: endpoint.batch_url(),
             api_key: endpoint.api_key.clone(),
+            auth_terminal: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -124,6 +132,9 @@ impl TelemetrySink for PostHogSink {
             if events.is_empty() {
                 return SinkOutcome::Sent;
             }
+            if self.auth_terminal.load(Ordering::Relaxed) {
+                return SinkOutcome::Dropped;
+            }
             let body = self.batch_body(install_id, &events);
             let response = self
                 .http
@@ -135,6 +146,16 @@ impl TelemetrySink for PostHogSink {
                 .await;
             match response {
                 Ok(response) if response.status().is_success() => SinkOutcome::Sent,
+                Ok(response) if response.status().as_u16() == 401 => {
+                    // Terminal, not retried: the key is bad or missing a
+                    // scope, so no later batch can succeed either.
+                    self.auth_terminal.store(true, Ordering::Relaxed);
+                    tracing::debug!(
+                        count = events.len(),
+                        "telemetry batch rejected with 401 (bad or missing-scope credentials), sink disabled"
+                    );
+                    SinkOutcome::Dropped
+                }
                 Ok(response) => {
                     tracing::debug!(
                         status = %response.status(),

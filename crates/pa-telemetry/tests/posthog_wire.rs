@@ -152,6 +152,33 @@ async fn non_success_status_drops_the_batch() {
 }
 
 #[tokio::test]
+async fn a_401_is_terminal_for_the_batch_sink() {
+    // The stub answers 401 once; the sink must never request again.
+    let (base, rx) = spawn_stub(vec![(
+        401,
+        serde_json::json!({ "error": "Missing scope required: ingestion" }),
+    )]);
+    let endpoint = PostHogEndpoint::new(&base, "phc-test-key");
+    let sink = PostHogSink::new(&endpoint);
+    assert_eq!(
+        sink.send_batch("install-1", vec![event("agent started")])
+            .await,
+        SinkOutcome::Dropped
+    );
+    let _ = rx.recv().expect("stub captured the rejected request");
+    // The clone shares the terminal latch: later batches drop without
+    // a request (no 401-per-flush retry loop for bad credentials).
+    let shared = sink.clone();
+    assert_eq!(
+        shared
+            .send_batch("install-1", vec![event("agent run completed")])
+            .await,
+        SinkOutcome::Dropped
+    );
+    assert!(rx.try_recv().is_err(), "no second request hit the stub");
+}
+
+#[tokio::test]
 async fn flags_client_decides_with_distinct_id() {
     let (base, rx) = spawn_stub(vec![(
         200,
@@ -176,4 +203,22 @@ async fn flags_client_decides_with_distinct_id() {
     assert_eq!(request.body["distinct_id"], "install-1");
     // Cache is now warm: a second lookup must not hit the stub again.
     assert!(flags.flag_enabled("new_engine", false).await);
+}
+
+#[tokio::test]
+async fn a_401_is_terminal_for_the_flags_client() {
+    // The decide endpoint answers 401 (missing scope): the client stops
+    // polling instead of re-asking every TTL.
+    let (base, rx) = spawn_stub(vec![(
+        401,
+        serde_json::json!({ "error": "Missing scope required: decide" }),
+    )]);
+    let endpoint = PostHogEndpoint::new(&base, "phc-test-key");
+    let flags = FlagsClient::new(&endpoint, "install-1");
+    assert!(!flags.flag_enabled("new_engine", false).await);
+    let _ = rx.recv().expect("stub captured the rejected decide");
+    // The later lookups serve the configured default without a request.
+    assert!(!flags.flag_enabled("legacy_mode", false).await);
+    assert!(flags.flag_enabled("other", true).await);
+    assert!(rx.try_recv().is_err(), "no second decide hit the stub");
 }

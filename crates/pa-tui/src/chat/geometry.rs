@@ -86,8 +86,11 @@ pub(crate) fn assistant_row_count(
         }
     }
     if let Some(error) = &message.error {
+        // Mirrors the render site: eligible login-recovery errors count as
+        // the merged inline line (TS `createErrorComponent`).
+        let merged = crate::error_summary::format_inline_login_recovery_message(error);
         count += 1 + crate::error_summary::collapsible_error_row_count(
-            error,
+            merged.as_deref().unwrap_or(error),
             None,
             detail.tool_output_expanded(),
             width,
@@ -135,7 +138,16 @@ mod tests {
                     for has_tool_calls in [false, true] {
                         for aborted in [false, true] {
                             for preceded in [false, true] {
-                                for error in [None, Some("Traceback (most recent call last):\n  File test.py\nError: words words".to_owned())] {
+                                for error in [
+                                    None,
+                                    Some("Traceback (most recent call last):\n  File test.py\nError: words words".to_owned()),
+                                    Some("Auth failed. \n\nRun /login to update credentials.".to_owned()),
+                                    Some("Auth failed\nfor provider.\n\nRun /login to update credentials.".to_owned()),
+                                    Some(
+                                        "Authentication failed for \"prime-inference\". Credentials may have expired or network is unavailable.\n\nRun /login to update credentials."
+                                            .to_owned(),
+                                    ),
+                                ] {
                                     let message = AssistantMessage { blocks: blocks.clone(), has_tool_calls, streaming: false, aborted, error };
                                     let mut cache = crate::markdown::MarkdownBlockCache::default();
                                     assert_eq!(super::super::assistant_row_count(&message, detail, &theme, "  ", width, preceded), super::super::render_assistant(&message, detail, &theme, "  ", width, preceded, &mut cache).len());

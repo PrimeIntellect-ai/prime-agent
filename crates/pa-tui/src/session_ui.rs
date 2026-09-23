@@ -110,6 +110,10 @@ pub(crate) struct CompactionAbortNote {
 /// `refreshHeartbeatCatalog`'s fetch result): the scoped, sorted rows, or
 /// the fetch error that keeps the last catalog (stale-while-revalidate).
 pub(crate) struct HeartbeatsUpdate {
+    /// The refresh epoch this snapshot belongs to: a response older than
+    /// the session's current epoch is stale and never overwrites a newer
+    /// catalog.
+    pub epoch: u64,
     pub heartbeats: Vec<HeartbeatEntry>,
     pub fetch_error: Option<String>,
 }
@@ -245,6 +249,14 @@ pub(crate) struct SessionUi {
     /// starts on and the command persists the preference (TS
     /// `settingsManager.setFullscreen`) and reports the TS status.
     fullscreen_enabled: bool,
+    /// The `/speed` display flag (TS `speedDisplayEnabled`): per-client
+    /// runtime state, never persisted; turning it off clears the stats and
+    /// the row.
+    speed_display_enabled: bool,
+    /// Per-session output tok/sec accumulation (TS `speedStats`): output
+    /// tokens and wall-clock span summed over completed responses.
+    /// `None` until the first recorded sample; a rebind restarts it.
+    speed_stats: Option<SpeedStats>,
     /// The session's effective service tier (TS `connectionState.serviceTier`),
     /// seeded from the attach state and kept live by `service_tier_changed`
     /// events; the `/fast` toggle reads it.
@@ -349,9 +361,20 @@ pub(crate) struct SessionUi {
     /// subscription, TS `rosterBar`): drives the subagent summary counts.
     roster: Vec<Value>,
     /// The scoped heartbeat catalog (TS `heartbeatCatalog` over
-    /// `getScopedHeartbeats`): drives the tray heartbeat label and seeds
-    /// the `/heartbeats` view; refreshed by `heartbeats_changed`.
+    /// `getScopedHeartbeats`): drives the activity dock's heartbeat
+    /// group and seeds the `/heartbeats` view; refreshed by
+    /// `heartbeats_changed`.
     heartbeat_catalog: Vec<HeartbeatEntry>,
+    /// At most one background heartbeat refresh runs at a time (the
+    /// daemon-wide broadcasts can burst); concurrent requests would
+    /// stack load on the supervisor.
+    heartbeat_refresh_in_flight: bool,
+    /// A burst arrived while a refresh was in flight: one trailing
+    /// coalesced refresh follows the landing response.
+    heartbeat_refresh_queued: bool,
+    /// Monotonic epoch of the newest heartbeat refresh; an older
+    /// response never overwrites a newer catalog.
+    heartbeat_refresh_epoch: u64,
     /// The current Python bash() registry snapshot from the owning kernel.
     bash_activities: Value,
     /// Monotonic id of the latest issued kernel-bash list request; a late
@@ -541,7 +564,7 @@ impl SessionUi {
         let active_session_id = match &options.session {
             SessionSelection::New => create_session(&client, options, None).await?,
             SessionSelection::Attach(id) => id.clone(),
-            SessionSelection::ContinueRecent | SessionSelection::Resume(_) => {
+            SessionSelection::Resume(_) => {
                 create_session(&client, options, Some(&options.session)).await?
             }
         };
@@ -574,6 +597,8 @@ impl SessionUi {
                 .map(|settings| settings.fullscreen())
                 .unwrap_or(true),
             service_tier: None,
+            speed_display_enabled: false,
+            speed_stats: None,
             client_settings: options.client_settings.clone(),
             active_side_question_id: None,
             side_question_counter: 0,
@@ -610,6 +635,9 @@ impl SessionUi {
             scoped_agents_view: None,
             roster: Vec::new(),
             heartbeat_catalog: Vec::new(),
+            heartbeat_refresh_in_flight: false,
+            heartbeat_refresh_queued: false,
+            heartbeat_refresh_epoch: 0,
             bash_activities: serde_json::json!({"activities": []}),
             bash_list_epoch: 0,
             bash_updates: activity_updates.bash,
@@ -942,17 +970,30 @@ impl SessionUi {
         self.subagent_counts = counts;
 
         let goal = &self.goal_view.goal;
-        let goal_tokens = (goal.status != pa_types::goal::GoalStatus::Idle).then(|| {
-            (
-                goal.status.slug().to_string(),
-                goal.tokens_used,
-                goal.token_budget,
-            )
-        });
+        // The dock carries the goal only while it is actively being
+        // pursued: a completed goal's token totals are stale bookkeeping,
+        // not a live activity (the tray's TS label still covers the
+        // paused and budget-limited states).
+        let goal_tokens = (goal.status == pa_types::goal::GoalStatus::Active)
+            .then(|| (goal.tokens_used, goal.token_budget));
+        // The dock's bash indicator counts only runs actively running
+        // right now (operator scoping): finished runs stay as dimmed rows
+        // inside the panel, never in the indicator. The feed itself is the
+        // current session's kernel registry — nested subagents' kernels
+        // are separate and never appear here. The total keeps the dock
+        // (and the panel's dimmed history) mounted when no run is live.
+        let bash_rows = crate::activity_panel::parse_bash_activities(&self.bash_activities);
+        let bash_running = bash_rows
+            .iter()
+            .filter(|activity| activity.running())
+            .count();
         let dock = crate::chrome::ActivityDock {
             subagents: counts.total,
+            subagents_running: counts.running,
             heartbeats: self.heartbeat_catalog.len(),
-            bash_total: crate::activity_panel::parse_bash_activities(&self.bash_activities).len(),
+            heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
+            bash_running,
+            bash_total: bash_rows.len(),
             goal_tokens,
             selected: self.activity_group,
             focused: self.subagents_focused,
@@ -990,6 +1031,10 @@ impl SessionUi {
                 self.return_to_agents_view && self.subagent_counts.total > 0
             }
             crate::chrome::ActivityGroup::Heartbeats => !self.heartbeat_catalog.is_empty(),
+            // Any catalogued bash row keeps the dock's bash group
+            // reachable — the dock stays mounted (bash_total) whenever a
+            // row exists, so a selected group never binds to a hidden
+            // surface, and the panel lists the dimmed finished rows.
             crate::chrome::ActivityGroup::Bash => {
                 !crate::activity_panel::parse_bash_activities(&self.bash_activities).is_empty()
             }
@@ -1075,9 +1120,13 @@ impl SessionUi {
             .unwrap_or_default();
         // A rebind replaces the whole view: the previous session's open
         // activity panel dies with its transcript instead of owning keys
-        // over the new session's sources.
+        // over the new session's sources. Sessions are independent (TS
+        // `rebindCurrentSession`): a rebind also restarts the tok/sec
+        // stats and clears the readout left over from the previous session.
         if matches!(kind, RebuildKind::Rebind) {
             view.activity_panel = None;
+            self.speed_stats = None;
+            view.chrome.speed_text = None;
         }
         view.clear_chat();
         // The rebuilt transcript invalidates the tracked status row.
@@ -1120,7 +1169,7 @@ impl SessionUi {
         // the goal state itself carries over (seeded at attach).
         self.goal_view.reset_row_tracking();
         self.sync_goal_tray(view);
-        self.sync_heartbeat_tray(view);
+        self.sync_activity_dock(view);
         view.pending_bash = held_bash;
         // The rebuild decides the mounted card's fate: a rebind drops it
         // with the old transcript (TS `resetCurrentSessionRenderState`
@@ -2306,6 +2355,34 @@ impl LoaderTokenTracker {
     }
 }
 
+/// Per-session output tok/sec accumulation for `/speed` (TS `speedStats`):
+/// output tokens and wall-clock spans summed over the session's completed
+/// responses.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+struct SpeedStats {
+    tokens: u64,
+    duration_ms: i64,
+    samples: u32,
+}
+
+impl SpeedStats {
+    /// The session-average rate in tok/s over the accumulated span (TS
+    /// `speedStats.tokens / (speedStats.durationMs / 1000)`).
+    fn average_rate(&self) -> f64 {
+        self.tokens as f64 / (self.duration_ms as f64 / 1000.0)
+    }
+}
+
+/// TS `formatRate`: whole numbers at 100 tok/s and above, one decimal
+/// below.
+fn format_rate(tokens_per_second: f64) -> String {
+    if tokens_per_second >= 100.0 {
+        format!("{tokens_per_second:.0}")
+    } else {
+        format!("{tokens_per_second:.1}")
+    }
+}
+
 impl SessionUi {
     /// Slash-command dispatch (the TS interactive submission ladder reduced
     /// to this client's surface): local client commands run here, builtin
@@ -2604,6 +2681,82 @@ impl SessionUi {
                 self.track_command_used("traces");
                 self.handle_traces_command(resolved, view).await?;
             }
+            // `/nightly [on|off|status]` (TS `interactive-mode.ts`
+            // 5455-5484): status resolves the effective channel,
+            // off/stable pins the settings channel to stable, and on (or
+            // bare) hands a `--self --nightly` update to the same parked
+            // plan `/update` builds (the update command owns the nightly
+            // warning, the channel switch, and the relaunch).
+            "nightly" => {
+                self.track_command_used("nightly");
+                let arg = resolved.args.trim().to_lowercase();
+                if arg == "status" {
+                    // The effective channel resolves through the
+                    // client-settings seam (pa-tui cannot reach the
+                    // update flow's resolver); a surface without the
+                    // seam never claims a channel.
+                    let Some(settings) = &self.client_settings else {
+                        self.note("/nightly is not available in this client yet", view);
+                        return Ok(());
+                    };
+                    let preferred = settings.update_channel();
+                    let channel = settings.effective_update_channel(&view.chrome.version);
+                    let source = if preferred.is_some() {
+                        "set in settings"
+                    } else {
+                        "inferred from the running version"
+                    };
+                    self.note(
+                        &format!(
+                            "Updates follow the {channel} channel ({source}). v{} installed.",
+                            view.chrome.version
+                        ),
+                        view,
+                    );
+                    return Ok(());
+                }
+                if arg == "off" || arg == "stable" {
+                    // The pin persists through the client-settings seam; a
+                    // surface without the seam never claims the pin (TS
+                    // always has a settings manager, so the gate is this
+                    // client's honesty guard).
+                    let Some(settings) = &self.client_settings else {
+                        self.note("/nightly is not available in this client yet", view);
+                        return Ok(());
+                    };
+                    if let Err(error) = settings.set_update_channel("stable") {
+                        self.error_row(&format!("{error:#}"), view);
+                        return Ok(());
+                    }
+                    self.note(
+                        "Updates now follow the stable channel. Run /update to install the latest stable release.",
+                        view,
+                    );
+                    return Ok(());
+                }
+                if !arg.is_empty() && arg != "on" {
+                    self.error_row("Usage: /nightly [on|off|status]", view);
+                    return Ok(());
+                }
+                // TS guards on compacting/streaming/bash: `turn_active`
+                // carries the streaming and compaction arms, and the
+                // user-bash slot (`!` runs) is its own state — a relaunch
+                // mid-run would interrupt either.
+                if self.turn_active || self.user_bash_running {
+                    self.note_as(
+                        "Wait for the current work to finish before updating.",
+                        StatusKind::Warning,
+                        view,
+                    );
+                    return Ok(());
+                }
+                let plan = crate::update_command::parse_update_args(&[
+                    "--self".to_string(),
+                    "--nightly".to_string(),
+                ]);
+                view.editor.set_text("");
+                self.pending_update = Some(plan);
+            }
             // `/update [source|--self|--extensions|--extension <source>
             // |--force|--rollback|--nightly|--stable]` (TS
             // `handleUpdateCommand`): the busy guard, then the child
@@ -2637,6 +2790,22 @@ impl SessionUi {
             // hook); the other management subcommands surface through the
             // `mcp` CLI command instead of the TUI.
             "mcp" => self.handle_mcp_command(resolved, view).await?,
+            // `/plugins [search]` (TS `handlePluginsCommand` ->
+            // `showServiceCatalogPicker`): the external-services catalog
+            // picker. This client folds the catalog into the `/mcp` view
+            // (the same resolved `services` cards the daemon serves both
+            // surfaces), so the command opens that view; an argument
+            // prefills its search field like TS's initial search.
+            "plugins" => {
+                self.track_command_used("plugins");
+                self.open_mcp_view("/plugins", view).await?;
+                let search = resolved.args.trim();
+                if !search.is_empty() {
+                    if let Some(mcp) = view.mcp_view.as_mut() {
+                        mcp.paste(search);
+                    }
+                }
+            }
             // TS `handleExportCommand`: an explicit `.jsonl` path exports
             // the current branch; anything else (including no argument)
             // exports HTML.
@@ -2931,6 +3100,23 @@ impl SessionUi {
                     _ => !self.fullscreen_enabled,
                 };
                 self.set_fullscreen_mode(enable, view);
+            }
+            // `/speed [on|off]` (TS `setSpeedDisplay`): toggle the footer
+            // tok/sec readout for this session — the dim dock row with the
+            // latest response's rate and the session average.
+            "speed" => {
+                self.track_command_used("speed");
+                let arg = resolved.args.trim().to_lowercase();
+                if !arg.is_empty() && arg != "on" && arg != "off" {
+                    self.error_row("Usage: /speed [on|off]", view);
+                    return Ok(());
+                }
+                let enable = match arg.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    _ => !self.speed_display_enabled,
+                };
+                self.set_speed_display(enable, view);
             }
             // `/reload` (TS `handleReloadCommand`): the guards first (a
             // streaming turn or compaction defers the reload), then the
@@ -3330,6 +3516,13 @@ impl SessionUi {
         let mut args = vec!["update".to_string()];
         args.extend(plan.flags.clone());
         let child_result = update.0.run_cli_child(args).await;
+        // TS skips the relaunch when the interactive child exits with the
+        // not-attempted code (75): a declined confirmation or a no-change
+        // skip keeps the running client as-is, so the session is not torn
+        // down and restarted for nothing.
+        if matches!(child_result, Ok(75)) {
+            return Ok(());
+        }
         match child_result {
             Err(error) => {
                 eprintln!("Update failed: {error}");
@@ -4023,6 +4216,71 @@ impl SessionUi {
         self.note(&status, view);
     }
 
+    /// `/speed on/off`: toggles the footer tok/sec readout for this
+    /// session (TS `setSpeedDisplay`): the flag lives on the client;
+    /// disabling clears the stats and the row (TS `resetSpeedStats`), and
+    /// the status row reports the TS wording either way.
+    fn set_speed_display(&mut self, enabled: bool, view: &mut AgentView) {
+        self.speed_display_enabled = enabled;
+        if !enabled {
+            self.speed_stats = None;
+            view.chrome.speed_text = None;
+        }
+        let status = if enabled {
+            "Speed display on — footer shows output tok/s per model response and a session average"
+        } else {
+            "Speed display off"
+        };
+        self.note(status, view);
+    }
+
+    /// Updates the footer tok/sec readout from a completed assistant
+    /// message (TS `recordSpeedSample`): output tokens over the
+    /// wall-clock span from the message timestamp (set at provider stream
+    /// start) to this message_end arrival. Timestamps keep the span true
+    /// even when buffered session events replay back-to-back on attach.
+    /// Aborted/failed responses and samples without a finite positive
+    /// span or token count are skipped: some providers only fill usage at
+    /// stream end, so they never produce a bogus rate.
+    fn record_speed_sample(&mut self, message: &Value, view: &mut AgentView) {
+        if !self.speed_display_enabled {
+            return;
+        }
+        let stop_reason = message
+            .get("stopReason")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if stop_reason == "aborted" || stop_reason == "error" {
+            return;
+        }
+        // TS reads `Number(message.timestamp)`: a frame without one is NaN
+        // in TS and fails its `> 0` guard, so it is skipped here too — a
+        // zero-default would span the epoch and poison the average.
+        let Some(timestamp) = message.get("timestamp").and_then(Value::as_i64) else {
+            return;
+        };
+        let duration_ms = crate::agents_view_state::now_ms() as i64 - timestamp;
+        let output_tokens = message
+            .get("usage")
+            .and_then(|usage| usage.get("output"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if duration_ms <= 0 || output_tokens == 0 {
+            return;
+        }
+        let stats = self.speed_stats.get_or_insert_with(SpeedStats::default);
+        stats.tokens += output_tokens;
+        stats.duration_ms += duration_ms;
+        stats.samples += 1;
+        let last = format_rate(output_tokens as f64 / (duration_ms as f64 / 1000.0));
+        let average = format_rate(stats.average_rate());
+        view.chrome.speed_text = Some(if stats.samples > 1 {
+            format!("{last} tok/s · avg {average}")
+        } else {
+            format!("{last} tok/s")
+        });
+    }
+
     /// `/reload` (TS `handleReloadCommand`): the reload box replaces the
     /// editor (TS swaps the editor container) while the daemon reload
     /// runs; the run loop folds the outcome in when it lands.
@@ -4611,7 +4869,7 @@ impl SessionUi {
     ) -> Result<()> {
         self.track_command_used("mcp");
         if resolved.args.trim().is_empty() {
-            return self.open_mcp_view(view).await;
+            return self.open_mcp_view("/mcp", view).await;
         }
         let Some(auth) = self.client_auth.clone() else {
             self.note("/mcp is not available in this client yet", view);
@@ -4626,7 +4884,9 @@ impl SessionUi {
     /// `get_mcp_connections` roster. The request carries the kernel's tool
     /// listing (it opens each connected generic server, bounded), so it
     /// gets the wider deadline.
-    async fn open_mcp_view(&mut self, view: &mut AgentView) -> Result<()> {
+    /// `command` names the entry the user ran (`/mcp` or `/plugins`), so a
+    /// failed roster load reports the command that failed.
+    async fn open_mcp_view(&mut self, command: &str, view: &mut AgentView) -> Result<()> {
         let data = match self
             .bounded_request(
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS * 4),
@@ -4640,7 +4900,7 @@ impl SessionUi {
         {
             Ok(data) => data,
             Err(error) => {
-                self.note(&format!("/mcp failed: {error:#}"), view);
+                self.note(&format!("{command} failed: {error:#}"), view);
                 return Ok(());
             }
         };
@@ -5500,9 +5760,10 @@ impl SessionUi {
                         if let Some(picker) = view.heartbeats_picker.as_mut() {
                             picker.apply_managed_job(job.clone(), stopped);
                         }
-                        // The tray label follows the same patch the manager
-                        // view applied (TS `manageHeartbeat` rewrites the
-                        // catalog entry, not just the open manager).
+                        // The activity dock follows the same patch the
+                        // manager view applied (TS `manageHeartbeat`
+                        // rewrites the catalog entry, not just the open
+                        // manager).
                         if stopped {
                             self.heartbeat_catalog
                                 .retain(|entry| entry.job.id != job_id);
@@ -5520,7 +5781,7 @@ impl SessionUi {
                         }
                     }
                 }
-                self.sync_heartbeat_tray(view);
+                self.sync_activity_dock(view);
                 self.spawn_heartbeat_refresh();
                 self.dirty = true;
             }
@@ -5556,40 +5817,37 @@ impl SessionUi {
         }
     }
 
-    /// Scope a fetched catalog to this session and its roster descendants
-    /// (TS `scopeHeartbeatsToSession` over the RLM child snapshots).
+    /// Scope a fetched catalog to THIS session only (operator scoping:
+    /// nested sessions' heartbeats do not surface in the dock, the
+    /// panel, or the `/heartbeats` view — a sanctioned divergence from
+    /// TS `scopeHeartbeatsToSession`, which also kept the RLM children's
+    /// jobs; the child ids stay empty here).
     fn scope_heartbeats(&self, heartbeats: Vec<HeartbeatEntry>) -> Vec<HeartbeatEntry> {
-        let identity = crate::subagents::SessionIdentity::new(
-            (!self.active_session_id.is_empty()).then(|| self.active_session_id.clone()),
-            (!self.session_id.is_empty()).then(|| self.session_id.clone()),
-            self.session_file.clone(),
-        );
-        let summaries: Vec<&Value> = self.roster.iter().collect();
-        let child_active_session_ids: Vec<String> =
-            crate::subagents::descendant_positions(&summaries, &identity)
-                .into_iter()
-                .filter_map(|position| {
-                    summaries[position]
-                        .get("activeSessionId")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .collect();
         scope_heartbeats(
             heartbeats,
-            identity.active_session_id.as_deref(),
-            identity.session_id.as_deref(),
-            &child_active_session_ids,
+            (!self.active_session_id.is_empty()).then(|| self.active_session_id.as_str()),
+            (!self.session_id.is_empty()).then(|| self.session_id.as_str()),
+            &[],
         )
     }
 
     /// Fire a background heartbeat-catalog refresh (TS
     /// `refreshHeartbeatCatalog`): the fetch lands through the run loop's
     /// channel into the open view; failures clear nothing — the next
-    /// `heartbeats_changed` event retries.
-    pub(crate) fn spawn_heartbeat_refresh(&self) {
+    /// `heartbeats_changed` event retries. At most one refresh runs in
+    /// flight with one queued trailing refresh (daemon-wide broadcasts can
+    /// burst; stacked concurrent requests would load the supervisor), and
+    /// every response carries the epoch it was issued under so a stale
+    /// one never overwrites a newer catalog.
+    pub(crate) fn spawn_heartbeat_refresh(&mut self) {
+        if self.heartbeat_refresh_in_flight {
+            self.heartbeat_refresh_queued = true;
+            return;
+        }
+        self.heartbeat_refresh_in_flight = true;
         let updates = self.heartbeat_updates.clone();
         let client = self.client.clone();
+        let epoch = self.heartbeat_refresh_epoch;
         tokio::spawn(async move {
             let request = DaemonCommand::HeartbeatsList {
                 id: None,
@@ -5604,18 +5862,21 @@ impl SessionUi {
             match fetched {
                 Ok(Ok(data)) => {
                     let _ = updates.send(HeartbeatsUpdate {
+                        epoch,
                         heartbeats: parse_heartbeats(&data),
                         fetch_error: None,
                     });
                 }
                 Ok(Err(error)) => {
                     let _ = updates.send(HeartbeatsUpdate {
+                        epoch,
                         heartbeats: Vec::new(),
                         fetch_error: Some(format!("{error:#}")),
                     });
                 }
                 Err(_) => {
                     let _ = updates.send(HeartbeatsUpdate {
+                        epoch,
                         heartbeats: Vec::new(),
                         fetch_error: Some(
                             "timed out waiting for the Prime Agent daemon response".to_string(),
@@ -5628,15 +5889,27 @@ impl SessionUi {
 
     /// Fold a landed heartbeat-catalog refresh into the session: re-scope
     /// and re-sort, keep the open view's selection, surface the fetch
-    /// error, and re-sync the tray label (TS `applyHeartbeatCatalog` over
+    /// error, and re-sync the activity dock (TS `applyHeartbeatCatalog` over
     /// both the manager and the tray's `getTrayHeartbeatLabel`).
     pub(crate) fn apply_heartbeat_update(
         &mut self,
         update: HeartbeatsUpdate,
         view: &mut AgentView,
     ) {
+        // The refresh slot frees whether the response landed, failed, or
+        // timed out; a burst's queued refresh runs next.
+        self.heartbeat_refresh_in_flight = false;
+        let queued = std::mem::take(&mut self.heartbeat_refresh_queued);
+        // A response from an older refresh never overwrites the newer
+        // catalog (an in-flight refresh raced a fresher epoch).
+        if update.epoch < self.heartbeat_refresh_epoch {
+            if queued {
+                self.spawn_heartbeat_refresh();
+            }
+            return;
+        }
         // TS stale-while-revalidate: a failed refresh keeps the last catalog
-        // (the tray keeps counting the heartbeats it knows; the daemon's
+        // (the dock keeps counting the heartbeats it knows; the daemon's
         // scheduler keeps firing while its catalog read times out), and the
         // failure surfaces only inside an open manager view.
         if let Some(error) = update.fetch_error {
@@ -5644,25 +5917,31 @@ impl SessionUi {
                 picker.set_fetch_error(Some(error));
             }
             self.dirty = true;
-            return;
+        } else {
+            let mut heartbeats = self.scope_heartbeats(update.heartbeats);
+            sort_heartbeats(&mut heartbeats);
+            self.heartbeat_catalog = heartbeats.clone();
+            if let Some(picker) = view.heartbeats_picker.as_mut() {
+                picker.apply_catalog(heartbeats, None);
+            }
+            self.sync_activity_dock(view);
+            self.dirty = true;
         }
-        let mut heartbeats = self.scope_heartbeats(update.heartbeats);
-        sort_heartbeats(&mut heartbeats);
-        self.heartbeat_catalog = heartbeats.clone();
-        if let Some(picker) = view.heartbeats_picker.as_mut() {
-            picker.apply_catalog(heartbeats, None);
+        if queued {
+            self.spawn_heartbeat_refresh();
         }
-        self.sync_heartbeat_tray(view);
-        self.dirty = true;
     }
 
     /// Fetch the scoped catalog and open the `/heartbeats` view over it
     /// (TS `showHeartbeatManager`): the fetch error opens over the cached
     /// catalog with the failure surfaced inside the view (stale-while-
-    /// revalidate), and the tray label follows the landed catalog.
+    /// revalidate), and the activity dock follows the landed catalog.
     /// `preselect` carries the activity panel's chosen heartbeat row into
     /// the view's selection.
     async fn open_heartbeats_view(&mut self, view: &mut AgentView, preselect: Option<String>) {
+        // The direct fetch is the newest snapshot: bump the epoch so an
+        // in-flight background response never overwrites this catalog.
+        self.heartbeat_refresh_epoch += 1;
         let (fetched, fetch_error) = self.fetch_scoped_heartbeats().await;
         let heartbeats = if fetch_error.is_some() {
             self.heartbeat_catalog.clone()
@@ -5676,18 +5955,14 @@ impl SessionUi {
             preselect,
             picker_viewport_rows(view.terminal_rows()),
         ));
-        self.sync_heartbeat_tray(view);
+        self.sync_activity_dock(view);
         self.dirty = true;
     }
 
-    /// The tray heartbeat label follows the scoped catalog (TS
-    /// `getTrayHeartbeatLabel`): `N heartbeats · M paused (Ctrl+R)`.
-    pub(crate) fn sync_heartbeat_tray(&mut self, view: &mut AgentView) {
-        let label = tray_heartbeat_label(&self.heartbeat_catalog, &self.keybindings);
-        if view.chrome.heartbeat_label != label {
-            view.chrome.heartbeat_label = label;
-            self.dirty = true;
-        }
+    /// The activity dock follows the scoped heartbeat catalog (TS
+    /// `getTrayHeartbeatLabel` moved into the dock: the tray no longer
+    /// carries a heartbeat count beside the model name).
+    pub(crate) fn sync_activity_dock(&mut self, view: &mut AgentView) {
         let previous = view.chrome.activity.clone();
         self.update_subagent_summary(view);
         if previous != view.chrome.activity {
@@ -6913,13 +7188,14 @@ impl SessionUi {
                 self.dirty = true;
             }
             // A heartbeat catalog change anywhere in the daemon (TS
-            // `broadcastGlobal`): an open `/heartbeats` view refreshes in
-            // the background through the update channel (TS
-            // `refreshHeartbeatCatalog`).
+            // `broadcastGlobal`): the scoped catalog refreshes in the
+            // background through the update channel (TS
+            // `refreshHeartbeatCatalog`) — an open `/heartbeats` view
+            // re-renders from the landed update, and the activity dock's
+            // counts follow the catalog even with the view closed
+            // (another client's pause/resume reaches the dock at once).
             DaemonClientEvent::HeartbeatsChanged => {
-                if view.heartbeats_picker.is_some() {
-                    self.spawn_heartbeat_refresh();
-                }
+                self.spawn_heartbeat_refresh();
             }
             // A worker replacement superseded the id this client holds:
             // the interactive loop re-attaches to the session's current id
@@ -7637,6 +7913,7 @@ impl SessionUi {
             }
         } else {
             self.working_tokens.settle(usage_output);
+            self.record_speed_sample(message, view);
         }
         if let Some(text) = blocks.iter().rev().find_map(|block| match block {
             MessageBlock::Text(text) => Some(text.clone()),
@@ -7949,29 +8226,14 @@ pub(crate) fn resume_hint_from_stats(stats: &Value) -> Option<String> {
 /// The picker's viewport row budget (TS `showConfigurationMenu` passes
 /// `min(20, rows - 3)` and `ConfigurationMenuComponent` subtracts one more
 /// row for its hint).
-/// TS `getTrayHeartbeatLabel`: `N heartbeats[ · M paused] (Ctrl+R)` over
-/// the scoped catalog; `None` when no heartbeat is in scope.
-fn tray_heartbeat_label(
-    heartbeats: &[HeartbeatEntry],
-    kb: &crate::keybindings::KeybindingsManager,
-) -> Option<String> {
-    if heartbeats.is_empty() {
-        return None;
-    }
-    let paused = heartbeats
+/// The dock's paused-heartbeat count over the scoped catalog: the count
+/// is label-independent (the dogfood repro: unlabeled agent heartbeats
+/// fire on schedule but a label-keyed count showed none of them).
+fn paused_heartbeat_count(heartbeats: &[HeartbeatEntry]) -> usize {
+    heartbeats
         .iter()
         .filter(|entry| entry.job.status == "paused")
-        .count();
-    let plural = if heartbeats.len() == 1 { "" } else { "s" };
-    let mut label = format!("{} heartbeat{plural}", heartbeats.len());
-    if paused > 0 {
-        label.push_str(&format!(" \u{b7} {paused} paused"));
-    }
-    if let Some(key) = kb.first_key("app.heartbeats.open") {
-        let key = crate::keybindings::format_key_text(&key);
-        label.push_str(&format!(" ({key})"));
-    }
-    Some(label)
+        .count()
 }
 
 fn picker_viewport_rows(terminal_rows: u16) -> usize {
@@ -7985,7 +8247,6 @@ async fn create_session(
     options: &InteractiveOptions,
     selection: Option<&SessionSelection>,
 ) -> Result<String> {
-    let continue_recent = matches!(selection, Some(SessionSelection::ContinueRecent));
     let session_path = match selection {
         Some(SessionSelection::Resume(path)) => Some(path.to_string_lossy().to_string()),
         _ => None,
@@ -7994,7 +8255,10 @@ async fn create_session(
         .request_ok(DaemonCommand::Create {
             id: None,
             session_path,
-            continue_recent: continue_recent.then_some(true),
+            // A create names its session (`sessionPath`) or opens one
+            // through the agents view; `continueRecent` stays absent
+            // (TS wire shape — the supervisor refuses it).
+            continue_recent: None,
             no_session: options.no_session.then_some(true),
             name: None,
             config: Some(options.create_config()),
@@ -8078,10 +8342,10 @@ mod bash_bang_tests {
 }
 
 #[cfg(test)]
-mod tray_heartbeat_label_tests {
-    use super::{tray_heartbeat_label, HeartbeatEntry};
-    use crate::heartbeats_picker::parse_heartbeat_job;
-    use crate::keybindings::KeybindingsManager;
+mod activity_dock_counts_tests {
+    use super::paused_heartbeat_count;
+    use crate::heartbeats_picker::{parse_heartbeat_job, HeartbeatEntry};
+    use serde_json::json;
 
     fn entry(job_json: serde_json::Value) -> HeartbeatEntry {
         HeartbeatEntry {
@@ -8092,7 +8356,7 @@ mod tray_heartbeat_label_tests {
     }
 
     fn job(id: &str, status: &str) -> serde_json::Value {
-        serde_json::json!({
+        json!({
             "id": id,
             "status": status,
             "source": "heartbeat",
@@ -8102,45 +8366,69 @@ mod tray_heartbeat_label_tests {
         })
     }
 
-    /// TS `getTrayHeartbeatLabel`: no heartbeat in scope renders no label,
-    /// counts carry the plural and the paused suffix, and the open-shortcut
-    /// hint trails the default binding.
+    /// The dock's paused count is the helper the dock reads (not a local
+    /// recount) and stays label-independent: unlabeled agent heartbeats
+    /// (the dogfood repro) count exactly like labeled ones.
     #[test]
-    fn label_counts_heartbeats_and_the_paused_suffix() {
-        let kb = KeybindingsManager::new();
-        assert_eq!(tray_heartbeat_label(&[], &kb), None);
-        let active = entry(job("a", "active"));
-        assert_eq!(
-            tray_heartbeat_label(std::slice::from_ref(&active), &kb).as_deref(),
-            Some("1 heartbeat (Ctrl+R)")
-        );
-        let paused = entry(job("b", "paused"));
-        assert_eq!(
-            tray_heartbeat_label(&[active, paused], &kb).as_deref(),
-            Some("2 heartbeats · 1 paused (Ctrl+R)")
-        );
-    }
-
-    /// The tray counts every in-scope heartbeat regardless of labels (the
-    /// dogfood repro: unlabeled agent heartbeats fire on schedule but a
-    /// label-keyed count showed none of them).
-    #[test]
-    fn label_counts_unlabeled_heartbeats_too() {
-        let kb = KeybindingsManager::new();
+    fn dock_counts_heartbeats_and_paused() {
         let labeled = entry(job("labeled", "active"));
         let mut unlabeled = job("unlabeled", "active");
         unlabeled["label"] = serde_json::Value::Null;
         let unlabeled = entry(unlabeled);
-        assert_eq!(
-            tray_heartbeat_label(&[labeled, unlabeled], &kb).as_deref(),
-            Some("2 heartbeats (Ctrl+R)")
+        let paused = entry(job("b", "paused"));
+        let catalog = vec![labeled, unlabeled, paused];
+        assert_eq!(catalog.len(), 3);
+        assert_eq!(paused_heartbeat_count(&catalog), 1);
+        // An all-active catalog renders no paused suffix.
+        let active = vec![entry(job("a", "active")), entry(job("c", "active"))];
+        assert_eq!(paused_heartbeat_count(&active), 0);
+    }
+
+    /// Operator scoping: the session wrapper passes no child session ids,
+    /// so a nested session's heartbeat drops while the session's own
+    /// rows stay (TS `scopeHeartbeatsToSession` kept the children's jobs
+    /// — the divergence lives in the caller).
+    #[test]
+    fn dock_heartbeats_scope_to_the_current_session_only() {
+        let own = entry(job("own", "active"));
+        // The child's durable session differs: with an empty child-id
+        // list it must drop even though its active id also differs.
+        let mut child = job("child", "active");
+        child["activeSessionId"] = json!("child-live");
+        child["sessionId"] = json!("sess-child");
+        let child = entry(child);
+        let scoped = crate::heartbeats_picker::scope_heartbeats(
+            vec![own, child],
+            Some("live-1"),
+            Some("sess-1"),
+            &[],
         );
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].job.id, "own");
+    }
+
+    /// Operator scoping: the dock's bash indicator counts only runs
+    /// actively running right now — finished runs stay in the panel as
+    /// dimmed rows, never in the count.
+    #[test]
+    fn dock_bash_counts_only_running_runs() {
+        let activities = crate::activity_panel::parse_bash_activities(&json!({"activities": [
+            {"id":"a","command":"sleep 1","status":"running"},
+            {"id":"b","command":"echo hi","status":"finished","exitCode":0},
+            {"id":"c","command":"sleep 2","status":"running"},
+        ]}));
+        let running = activities
+            .iter()
+            .filter(|activity| activity.running())
+            .count();
+        assert_eq!(running, 2, "finished runs never inflate the indicator");
+        assert_eq!(activities.len(), 3);
     }
 }
 
 #[cfg(test)]
 mod loader_token_tests {
-    use super::LoaderTokenTracker;
+    use super::{format_rate, LoaderTokenTracker, SpeedStats};
 
     /// The live count derives from the streamed message, so coalesced
     /// frames (one latest-snapshot wire frame per flush tick) count the
@@ -8186,5 +8474,31 @@ mod loader_token_tests {
         assert_eq!(tracker.current(), 250);
         tracker.reset();
         assert_eq!(tracker.current(), 0);
+    }
+
+    /// TS `formatRate`: whole numbers at 100 tok/s and above, one decimal
+    /// below.
+    #[test]
+    fn format_rate_matches_the_ts_boundaries() {
+        assert_eq!(format_rate(150.0), "150");
+        assert_eq!(format_rate(100.0), "100");
+        assert_eq!(format_rate(99.96), "100.0");
+        assert_eq!(format_rate(12.34), "12.3");
+        assert_eq!(format_rate(0.5), "0.5");
+    }
+
+    /// The session average sums tokens over the summed wall-clock span (TS
+    /// `speedStats`); it only reads once a positive-span sample exists.
+    #[test]
+    fn speed_stats_average_rate_sums_tokens_over_spans() {
+        let mut stats = SpeedStats {
+            tokens: 300,
+            duration_ms: 1500,
+            samples: 1,
+        };
+        assert_eq!(stats.average_rate(), 200.0);
+        stats.tokens += 100;
+        stats.duration_ms += 500;
+        assert_eq!(stats.average_rate(), 200.0);
     }
 }

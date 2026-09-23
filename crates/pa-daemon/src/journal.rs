@@ -379,6 +379,44 @@ impl WorkerRecoveryJournal {
             .unwrap_or(false)
     }
 
+    /// The newest `busy` record's `recorded_at`, when the journal proves
+    /// live work: the timestamp the boot-revival gate ages the evidence
+    /// against (an old busy record is residue of an era that already
+    /// ended, not interrupted work this boot must heal). A journal with
+    /// no busy record answers `None`.
+    pub fn latest_busy_recorded_at(path: &Path) -> Option<String> {
+        Self::read_latest(path)
+            .ok()?
+            .iter()
+            .filter(|record| record.busy)
+            .map(|record| record.recorded_at.clone())
+            .max()
+    }
+
+    /// Settle every busy session to idle with `operation` (the give-up
+    /// belt): a supervisor that gave up on a worker records the verdict
+    /// in the same journal a later boot would read as revival evidence —
+    /// stale busy evidence must not outlive the give-up that superseded
+    /// it, or every boot re-storms the slot the cap already condemned.
+    pub fn settle_busy_records(path: &Path, operation: &str) -> Result<()> {
+        let mut journal = Self::open(path)?;
+        let busy: Vec<WorkerRecoveryRecord> = journal
+            .get_latest()
+            .into_iter()
+            .filter(|record| record.busy)
+            .collect();
+        for record in busy {
+            journal.record(
+                &record.active_session_id,
+                &record.session_id,
+                record.session_file.as_deref(),
+                false,
+                operation,
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn record(
         &mut self,
         active_session_id: &str,

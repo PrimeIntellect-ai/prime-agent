@@ -138,6 +138,14 @@ pub enum EngineEvent {
     Compaction { entry: Value, event: Value },
     /// The prompt completed (successfully or not).
     Done(std::result::Result<(), String>),
+    /// The prompt settled as aborted: the run was aborted before an
+    /// assistant message was produced (a user abort or suspension).
+    /// Every consumer treats it like `Done(Err(..))` — the wire frames
+    /// carry the abort error — except the settle classification, which
+    /// must not read the (spoofable) error text: an aborted run is not
+    /// a provider failure (the scheduled-fire hook backs off on the
+    /// one, not the other).
+    DoneAborted,
     /// `goal_update`: the session goal state changed (TS wire event; the
     /// ACP adapter surfaces it as the namespaced `_meta.goal` update).
     /// The payload is the TS `GoalState` wire object.
@@ -1634,7 +1642,7 @@ mod tests {
                 seen_clone.fetch_add(1, Ordering::SeqCst);
                 match event {
                     EngineEvent::UserMessage(_) => false, // cancel right away
-                    EngineEvent::Done(_) => true,
+                    EngineEvent::Done(_) | EngineEvent::DoneAborted => true,
                     _ => true,
                 }
             },

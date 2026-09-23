@@ -9,16 +9,16 @@ use serde_json::Value;
 
 use crate::heartbeats_picker::{session_label, HeartbeatEntry};
 use crate::keybindings::{format_key_text, KeybindingsManager};
-use crate::menu_panel::{menu_list_layout, menu_row};
+use crate::menu_panel::{menu_list_layout, menu_row_trailing};
 use crate::subagents::{descendant_entries, entry_status, SessionIdentity};
 use crate::theme::{Theme, ThemeColor};
-use crate::width::truncate_line;
+use crate::width::{str_width, truncate_line};
 use crate::{Line, Span};
 use pa_types::daemon::agent_roster::AgentRosterStatus;
 
 const PREFERRED_VISIBLE: usize = 8;
-// rule, title, subtitle, blank, blank, detail title, blank, hint, rule.
-const RESERVED_ROWS: usize = 9;
+// rule, title+counts, blank, blank, detail block, blank, hint, rule.
+const RESERVED_ROWS: usize = 7;
 /// The detail pane's per-row line budget (a fetched bash tail rides it).
 const MAX_DETAIL_LINES: usize = 5;
 const MAX_TAIL_LINES: usize = 3;
@@ -112,8 +112,13 @@ pub struct ActivityPanelRow {
     pub id: String,
     pub label: String,
     pub status: String,
-    /// The detail pane's lines for this row.
-    pub detail: Vec<String>,
+    /// Whether the row's source is doing something right now (a running
+    /// subagent, an active heartbeat, a live bash process): idle rows
+    /// render dimmed so a long quiet roster never reads as uniformly
+    /// busy.
+    pub active: bool,
+    /// The detail pane's labeled lines for this row: `(label, value)`.
+    pub detail: Vec<(&'static str, String)>,
     /// A running kernel bash row the `k` action may kill.
     pub killable: bool,
 }
@@ -321,16 +326,17 @@ impl ActivityPanel {
                 "",
             )
         };
-        let mut lines = vec![border(), text(ThemeColor::Accent, "Activity".to_string())];
-        let hint = if self.rows.iter().any(|row| row.killable) {
-            "\u{2191}\u{2193} move \u{00b7} \u{2190}\u{2192} group \u{00b7} Enter open \u{00b7} k kill \u{00b7} Esc close"
-        } else {
-            "\u{2191}\u{2193} move \u{00b7} \u{2190}\u{2192} group \u{00b7} Enter open \u{00b7} Esc close"
-        };
-        lines.push(text(
+        // The title carries the live count (the picker idiom: one plain
+        // heading line, no accent color, no separate subtitle).
+        let mut title = vec![
+            Span::raw("  "),
+            theme.fg_span(ThemeColor::Text, "Activity".to_string()),
+        ];
+        title.push(theme.fg_span(
             ThemeColor::Muted,
-            format!("{} live \u{00b7} {hint}", self.rows.len()),
+            format!(" \u{00b7} {} live", self.rows.len()),
         ));
+        let mut lines = vec![border(), truncate_line(&title, width, "")];
         lines.push(Vec::new());
         let list_entries = self.rows.len() + self.groups.len();
         let visible = menu_list_layout(
@@ -362,7 +368,7 @@ impl ActivityPanel {
             if last_group != Some(row.group) {
                 let header_in_window = cursor >= start && cursor < start + visible;
                 if header_in_window {
-                    lines.push(text(ThemeColor::Accent, row.group.label().to_string()));
+                    lines.push(group_header(theme, width, row.group, &self.rows));
                 }
                 cursor += 1;
                 if cursor >= start + visible {
@@ -371,11 +377,19 @@ impl ActivityPanel {
                 last_group = Some(row.group);
             }
             if cursor >= start && cursor < start + visible {
-                lines.push(menu_row(
+                // Idle rows render dimmed; only actively running sources
+                // read at full strength.
+                let primary = if row.active {
+                    vec![Span::raw(clean_line(&row.label))]
+                } else {
+                    vec![theme.fg_span(ThemeColor::Dim, clean_line(&row.label))]
+                };
+                let trailing = vec![(status_color(row), clean_line(&row.status))];
+                lines.push(menu_row_trailing(
                     theme,
                     width,
-                    vec![Span::raw(clean_line(&row.label))],
-                    &[&clean_line(&row.status)],
+                    primary,
+                    &trailing,
                     row_index == self.selected,
                 ));
             }
@@ -392,46 +406,205 @@ impl ActivityPanel {
         }
         lines.push(Vec::new());
         if let Some(row) = self.rows.get(self.selected) {
-            lines.push(text(ThemeColor::Muted, "Selected".to_string()));
-            for detail in row.detail.iter().take(MAX_DETAIL_LINES) {
-                lines.push(text(ThemeColor::Muted, clean_line(detail)));
-            }
-            let tail_budget = self
-                .detail_budget()
-                .saturating_sub(row.detail.len().min(MAX_DETAIL_LINES))
-                .max(1);
+            // The detail pairs and the fetched tail share one budget: a
+            // collapsed viewport never overspends it (the tail is the
+            // explicitly requested output, so the pairs give way first;
+            // the heading and its lines never draw past the budget).
+            let budget = self.detail_budget();
             let tail = self.bash_tail.as_ref().filter(|(id, _)| {
                 self.rows
                     .get(self.selected)
                     .is_some_and(|row| row.group == ActivityPanelGroup::Bash && &row.id == id)
             });
+            let tail_rows = tail
+                .map(|(_, tail)| 1 + tail.len().min(MAX_TAIL_LINES))
+                .unwrap_or(0);
+            let detail_rows = budget.saturating_sub(tail_rows).min(MAX_DETAIL_LINES);
+            lines.extend(detail_lines(theme, width, row, detail_rows));
             if let Some((_, tail)) = tail {
+                let tail_budget = budget.saturating_sub(detail_rows);
                 lines.push(text(ThemeColor::Muted, "Output tail".to_string()));
-                for output in tail.iter().take(tail_budget) {
+                for output in tail.iter().take(tail_budget.saturating_sub(1)) {
                     lines.push(text(ThemeColor::Muted, output.clone()));
                 }
             }
         }
         lines.push(Vec::new());
+        // One bottom hint line carries every shortcut (the close key never
+        // repeats on a second row).
         let close_key = kb
             .get_keys("tui.select.cancel")
             .first()
             .map(|key| format_key_text(key))
             .unwrap_or_else(|| "Esc".to_string());
-        lines.push(text(ThemeColor::Dim, format!("{close_key} close")));
+        let kill_hint = self
+            .rows
+            .iter()
+            .any(|row| row.killable)
+            .then(|| " \u{00b7} k kill".to_string())
+            .unwrap_or_default();
+        lines.push(text(
+            ThemeColor::Dim,
+            format!(
+                "\u{2191}\u{2193} move \u{00b7} \u{2190}\u{2192} group \u{00b7} Enter open{kill_hint} \u{00b7} {close_key} close"
+            ),
+        ));
         lines.push(border());
         lines
     }
 
     fn detail_budget(&self) -> usize {
-        MAX_DETAIL_LINES
+        // The full detail area (pairs plus a fetched bash tail) shrinks
+        // on short viewports so the pane never clips: the frame rows and
+        // at least one list row always render first.
+        let full = MAX_DETAIL_LINES
             + self
                 .bash_tail
                 .as_ref()
                 // The rendered heading plus the bounded tail lines.
                 .map(|(_, tail)| 1 + tail.len().min(MAX_TAIL_LINES))
-                .unwrap_or(0)
+                .unwrap_or(0);
+        full.min(self.viewport_rows.saturating_sub(RESERVED_ROWS + 2))
+            .max(1)
     }
+}
+
+/// The status word's color (the TS summary box's status colors: running
+/// success, idle warning, inactive dim; paused heartbeats read as
+/// warning like the heartbeat manager's rows).
+fn status_color(row: &ActivityPanelRow) -> ThemeColor {
+    match row.group {
+        ActivityPanelGroup::Subagents => match row.status.as_str() {
+            "running" => ThemeColor::Success,
+            "idle" => ThemeColor::Warning,
+            _ => ThemeColor::Dim,
+        },
+        ActivityPanelGroup::Heartbeats => {
+            if row.status == "active" {
+                ThemeColor::Success
+            } else {
+                ThemeColor::Warning
+            }
+        }
+        ActivityPanelGroup::Bash => {
+            if row.status == "running" {
+                ThemeColor::Success
+            } else {
+                ThemeColor::Dim
+            }
+        }
+        ActivityPanelGroup::Goals => ThemeColor::Success,
+    }
+}
+
+/// One group header: the plain-text label with the group's status counts
+/// trailing flush right, so a long roster reads as `2 running · 93 idle`
+/// before a single row is inspected (TS `renderList` section headings
+/// carry their counts; the box body uses the same status colors).
+fn group_header(
+    theme: &Theme,
+    width: usize,
+    group: ActivityPanelGroup,
+    rows: &[ActivityPanelRow],
+) -> Line {
+    let count = |status: &str| {
+        rows.iter()
+            .filter(|row| row.group == group && row.status == status)
+            .count()
+    };
+    let mut counts: Vec<(ThemeColor, String)> = Vec::new();
+    match group {
+        ActivityPanelGroup::Subagents => {
+            let buckets = [
+                ("running", ThemeColor::Success),
+                ("idle", ThemeColor::Warning),
+                ("inactive", ThemeColor::Dim),
+            ];
+            for (status, color) in buckets {
+                let n = count(status);
+                if n > 0 {
+                    counts.push((color, format!("{n} {status}")));
+                }
+            }
+        }
+        ActivityPanelGroup::Heartbeats => {
+            for (status, color) in [
+                ("active", ThemeColor::Success),
+                ("paused", ThemeColor::Warning),
+            ] {
+                let n = count(status);
+                if n > 0 {
+                    counts.push((color, format!("{n} {status}")));
+                }
+            }
+        }
+        ActivityPanelGroup::Bash => {
+            let n = count("running");
+            if n > 0 {
+                counts.push((ThemeColor::Success, format!("{n} running")));
+            }
+        }
+        // The goal group is a single row: its own status trail carries it.
+        ActivityPanelGroup::Goals => {}
+    }
+    let mut line = vec![
+        Span::raw("  "),
+        theme.fg_span(ThemeColor::Text, group.label().to_string()),
+    ];
+    if counts.is_empty() {
+        return truncate_line(&line, width, "");
+    }
+    let joined_width = counts
+        .iter()
+        .map(|(_, text)| str_width(text) + 3)
+        .sum::<usize>()
+        .saturating_sub(3);
+    let gap = width
+        .saturating_sub(2 + group.label().chars().count() + 2 + joined_width)
+        .max(2);
+    line.push(Span::raw(" ".repeat(gap)));
+    for (index, (color, text)) in counts.iter().enumerate() {
+        if index > 0 {
+            line.push(theme.fg_span(ThemeColor::Muted, " \u{b7} ".to_string()));
+        }
+        line.push(theme.fg_span(*color, text.clone()));
+    }
+    truncate_line(&line, width, "")
+}
+
+/// The selected row's detail block: `(label, value)` pairs as an aligned
+/// two-column block — the dim label column against muted values (the
+/// `/model` picker's price block idiom), instead of a metadata run-on.
+fn detail_lines(theme: &Theme, width: usize, row: &ActivityPanelRow, cap: usize) -> Vec<Line> {
+    let details = row
+        .detail
+        .iter()
+        .take(cap.min(MAX_DETAIL_LINES))
+        .map(|(label, value)| (label, clean_line(value)))
+        .collect::<Vec<_>>();
+    if details.is_empty() {
+        return Vec::new();
+    }
+    let label_width = details
+        .iter()
+        .map(|(label, _)| label.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(20);
+    details
+        .iter()
+        .map(|(label, value)| {
+            truncate_line(
+                &vec![
+                    Span::raw("  "),
+                    theme.fg_span(ThemeColor::Dim, format!("{label:<label_width$}  ")),
+                    theme.fg_span(ThemeColor::Muted, value.clone()),
+                ],
+                width,
+                "",
+            )
+        })
+        .collect()
 }
 
 /// Keep every row one line and inert as terminal text: process-provided
@@ -475,23 +648,23 @@ fn subagent_rows(sources: &ActivityPanelSources<'_>) -> Vec<ActivityPanelRow> {
                 AgentRosterStatus::Inactive => "inactive",
             }
             .to_string();
-            let mut detail = vec![format!("status {status}")];
+            let mut detail = vec![("status", status.clone())];
             if let Some(activity) = summary_str(&summary, "activity") {
-                detail.push(format!("activity {activity}"));
+                detail.push(("activity", activity.to_string()));
             }
             if let Some(model) = summary.get("model") {
                 let mut model_label = format!(
-                    "model {}/{}",
+                    "{}/{}",
                     summary_str(model, "provider").unwrap_or_default(),
                     summary_str(model, "modelId").unwrap_or_default()
                 );
                 if let Some(level) = summary_str(&summary, "thinkingLevel") {
                     model_label.push_str(&format!(":{level}"));
                 }
-                detail.push(model_label);
+                detail.push(("model", model_label));
             }
             if let Some(cwd) = summary_str(&summary, "cwd") {
-                detail.push(format!("cwd {cwd}"));
+                detail.push(("cwd", cwd.to_string()));
             }
             ActivityPanelRow {
                 group: ActivityPanelGroup::Subagents,
@@ -500,6 +673,7 @@ fn subagent_rows(sources: &ActivityPanelSources<'_>) -> Vec<ActivityPanelRow> {
                     .unwrap_or_default()
                     .to_string(),
                 label,
+                active: status == "running",
                 status,
                 detail,
                 killable: false,
@@ -510,35 +684,42 @@ fn subagent_rows(sources: &ActivityPanelSources<'_>) -> Vec<ActivityPanelRow> {
 
 fn goal_rows(sources: &ActivityPanelSources<'_>) -> Vec<ActivityPanelRow> {
     let goal = sources.goal;
-    (goal.status != pa_types::goal::GoalStatus::Idle)
+    // Only an actively pursued goal is a live activity: a completed or
+    // error goal's token totals are bookkeeping, not something to act on
+    // (the tray's TS label still narrates paused and budget-limited).
+    (goal.status == pa_types::goal::GoalStatus::Active)
         .then(|| {
-            let mut detail = vec![format!("status {}", goal.status.slug())];
+            let mut detail = vec![("status", goal.status.slug().to_string())];
             if let Some(objective) = goal
                 .objective
                 .as_deref()
                 .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
                 .filter(|text| !text.is_empty())
             {
-                detail.push(format!("objective {objective}"));
+                detail.push(("objective", objective));
             }
             detail.push(match goal.token_budget {
-                Some(budget) => format!(
-                    "tokens {} / {}",
-                    crate::chrome::format_token_count(goal.tokens_used),
-                    crate::chrome::format_token_count(budget)
+                Some(budget) => (
+                    "tokens",
+                    format!(
+                        "{} / {}",
+                        crate::chrome::format_token_count(goal.tokens_used),
+                        crate::chrome::format_token_count(budget)
+                    ),
                 ),
-                None => format!(
-                    "tokens {}",
-                    crate::chrome::format_token_count(goal.tokens_used)
+                None => (
+                    "tokens",
+                    crate::chrome::format_token_count(goal.tokens_used),
                 ),
             });
             if let Some(reason) = goal.last_reason.as_deref().filter(|text| !text.is_empty()) {
-                detail.push(format!("last reason {reason}"));
+                detail.push(("last reason", reason.to_string()));
             }
             ActivityPanelRow {
                 group: ActivityPanelGroup::Goals,
                 id: goal.goal_id.clone().unwrap_or_else(|| "goal".to_string()),
                 label: "goal".to_string(),
+                active: true,
                 status: goal.status.slug().to_string(),
                 detail,
                 killable: false,
@@ -559,22 +740,22 @@ fn heartbeat_rows(sources: &ActivityPanelSources<'_>) -> Vec<ActivityPanelRow> {
                 .clone()
                 .unwrap_or_else(|| session_label(entry));
             let mut detail = vec![
-                format!("id {}", entry.job.id),
-                crate::heartbeats_picker::source_label(entry).to_string(),
-                format!("schedule {}", entry.job.schedule_expression),
-                format!(
-                    "delivery {}",
+                (
+                    "created",
+                    crate::heartbeats_picker::source_label(entry).to_string(),
+                ),
+                ("schedule", entry.job.schedule_expression.clone()),
+                (
+                    "delivery",
                     match entry.job.delivery_mode.as_deref() {
                         Some("follow_up") => "follow-up",
                         _ => "steer",
                     }
+                    .to_string(),
                 ),
             ];
             if let Some(next) = entry.job.next_run_at.as_deref() {
-                detail.push(format!(
-                    "next run {}",
-                    crate::heartbeats_picker::format_timestamp(next)
-                ));
+                detail.push(("next run", crate::heartbeats_picker::format_timestamp(next)));
             }
             if let Some(error) = entry
                 .job
@@ -582,12 +763,13 @@ fn heartbeat_rows(sources: &ActivityPanelSources<'_>) -> Vec<ActivityPanelRow> {
                 .as_deref()
                 .filter(|text| !text.is_empty())
             {
-                detail.push(format!("last error {error}"));
+                detail.push(("last error", error.to_string()));
             }
             ActivityPanelRow {
                 group: ActivityPanelGroup::Heartbeats,
                 id: entry.job.id.clone(),
                 label,
+                active: entry.job.status == "active",
                 status: entry.job.status.clone(),
                 detail,
                 killable: false,
@@ -601,26 +783,27 @@ fn bash_rows(sources: &ActivityPanelSources<'_>) -> Vec<ActivityPanelRow> {
         .into_iter()
         .map(|activity| {
             let running = activity.running();
-            let mut detail = vec![format!("id {}", activity.id)];
+            let mut detail = Vec::new();
             if let Some(pid) = activity.pid {
-                detail.push(format!("pid {pid}"));
+                detail.push(("pid", pid.to_string()));
             }
             if let Some(started) = activity.started_at.as_deref() {
-                detail.push(format!(
-                    "started {}",
-                    crate::heartbeats_picker::format_timestamp(started)
+                detail.push((
+                    "started",
+                    crate::heartbeats_picker::format_timestamp(started),
                 ));
             }
             if let Some(ms) = activity.duration_ms {
-                detail.push(format!("{ms}ms"));
+                detail.push(("duration", format!("{ms}ms")));
             }
             if let Some(code) = activity.exit_code {
-                detail.push(format!("exit {code}"));
+                detail.push(("exit", code.to_string()));
             }
             ActivityPanelRow {
                 group: ActivityPanelGroup::Bash,
                 id: activity.id,
                 label: activity.command,
+                active: running,
                 status: if running {
                     "running".to_string()
                 } else {
@@ -781,38 +964,51 @@ mod tests {
         let worker = &panel.rows[0];
         assert_eq!(worker.label, "worker-a");
         assert_eq!(worker.status, "running");
-        assert!(worker.detail.contains(&"model p/m:high".to_string()));
-        assert!(worker.detail.contains(&"cwd /tmp/project".to_string()));
+        assert!(worker.active, "a running subagent is an active row");
+        assert!(worker.detail.contains(&("model", "p/m:high".to_string())));
+        assert!(worker.detail.contains(&("cwd", "/tmp/project".to_string())));
         let unnamed = &panel.rows[1];
         assert_eq!(unnamed.label, "fix the bug");
+        assert!(!unnamed.active, "an idle subagent renders dimmed");
         let goal_row = &panel.rows[2];
         assert_eq!(goal_row.status, "active");
-        assert!(goal_row.detail.contains(&"tokens 18k / 40k".to_string()));
+        assert!(goal_row
+            .detail
+            .contains(&("tokens", "18k / 40k".to_string())));
         let heartbeat_row = &panel.rows[3];
         assert_eq!(heartbeat_row.label, "build-check");
         assert!(heartbeat_row
             .detail
-            .contains(&"schedule every 30m".to_string()));
+            .contains(&("schedule", "every 30m".to_string())));
         let running_bash = &panel.rows[4];
         assert_eq!(running_bash.status, "running");
         assert!(running_bash.killable);
-        assert!(running_bash.detail.contains(&"pid 42".to_string()));
+        assert!(running_bash.detail.contains(&("pid", "42".to_string())));
         let finished_bash = &panel.rows[5];
         assert!(!finished_bash.killable);
-        assert!(finished_bash.detail.contains(&"exit 0".to_string()));
+        assert!(finished_bash.detail.contains(&("exit", "0".to_string())));
     }
 
     #[test]
-    fn empty_groups_are_omitted_and_idle_goals_hide() {
+    fn empty_groups_are_omitted_and_non_active_goals_hide() {
         let roster = Vec::new();
-        let goal = goal(false);
         let heartbeats = Vec::new();
         let bash = json!({"activities": []});
         let identity = identity();
-        let src = sources(&identity, &roster, &goal, &heartbeats, &bash);
-        let panel = ActivityPanel::new(&src, None, 16);
-        assert!(panel.rows.is_empty());
-        assert!(panel.groups.is_empty());
+        for status in [
+            pa_types::goal::GoalStatus::Idle,
+            pa_types::goal::GoalStatus::Complete,
+            pa_types::goal::GoalStatus::Error,
+        ] {
+            let mut goal = goal(false);
+            goal.status = status;
+            let src = sources(&identity, &roster, &goal, &heartbeats, &bash);
+            let panel = ActivityPanel::new(&src, None, 16);
+            assert!(
+                panel.rows.is_empty() && panel.groups.is_empty(),
+                "{status:?} is bookkeeping, not a live activity"
+            );
+        }
     }
 
     #[test]
@@ -961,7 +1157,7 @@ mod tests {
     }
 
     #[test]
-    fn render_shows_headers_detail_and_bounded_window() {
+    fn render_shows_group_counts_labeled_detail_and_one_hint() {
         let (roster, goal, heartbeats, bash) = full_sources();
         let identity = identity();
         let src = sources(&identity, &roster, &goal, &heartbeats, &bash);
@@ -974,12 +1170,33 @@ mod tests {
             .flat_map(|line| line.iter())
             .map(|span| span.content.as_str())
             .collect::<String>();
+        assert!(rendered.contains("Activity"));
         assert!(rendered.contains("Subagents"));
         assert!(rendered.contains("Goals"));
         assert!(rendered.contains("Heartbeats"));
         assert!(rendered.contains("Bash"));
-        assert!(rendered.contains("Selected"));
+        // The group headers carry the status counts (active vs idle).
+        assert!(rendered.contains("1 running"));
+        assert!(rendered.contains("1 idle"));
+        assert!(rendered.contains("1 active"));
         assert!(rendered.contains("worker-a"));
+        // The detail block is a labeled two-column block, not a
+        // metadata run-on.
+        assert!(!rendered.contains("Selected"));
+        assert!(rendered.contains("status    running"));
+        assert!(rendered.contains("activity  working"));
+        // Exactly one close hint rides the bottom bar (the close key
+        // never repeats on a second row).
+        let close_count = lines
+            .iter()
+            .filter(|line| {
+                line.iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>()
+                    .contains("Esc close")
+            })
+            .count();
+        assert_eq!(close_count, 1, "one close hint, not two: {rendered}");
         // A short viewport windows the list and shows the position.
         for _ in 0..5 {
             panel.handle_key("down", &kb);
@@ -1000,6 +1217,26 @@ mod tests {
                 "every row fits the width"
             );
         }
+    }
+
+    /// A short viewport shrinks the detail block so the pane never
+    /// exceeds the terminal budget, and the bottom hint survives.
+    #[test]
+    fn short_viewports_shrink_the_detail_block() {
+        let (roster, goal, heartbeats, bash) = full_sources();
+        let identity = identity();
+        let src = sources(&identity, &roster, &goal, &heartbeats, &bash);
+        let panel = ActivityPanel::new(&src, None, 10);
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let kb = KeybindingsManager::new();
+        let lines = panel.render(&theme, 80, &kb);
+        assert!(lines.len() <= 10, "viewport 10 fits: {}", lines.len());
+        let rendered = lines
+            .iter()
+            .flat_map(|line| line.iter())
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert!(rendered.contains("Esc close"));
     }
 
     #[test]
