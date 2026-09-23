@@ -158,7 +158,7 @@ pub struct ThemeJson {
 /// Resolve one var reference (TS `resolveVarRefs`): empty and hex values pass
 /// through, any other name looks up `vars` once and stays as-is when unknown
 /// (it then fails hex parsing and the slot drops).
-fn resolve_var_ref<'a>(value: &'a str, vars: &BTreeMap<String, String>) -> &'a str {
+fn resolve_var_ref<'a>(value: &'a str, vars: &'a BTreeMap<String, String>) -> &'a str {
     if value.is_empty() || value.starts_with('#') {
         return value;
     }
