@@ -165,12 +165,11 @@ impl Supervisor {
         // is one push): the entry write and the removals batch into one
         // `roster_update`, the TS `applyWorkerRosterDelta` cadence (its
         // scheduleRosterPush coalesces the whole frame's mutations).
-        let changed = vec![
-            self.roster
-                .lock()
-                .unwrap()
-                .write_summary(summary, Some(&resident.worker_id), None),
-        ];
+        let changed = vec![self.roster.lock().unwrap().write_summary(
+            summary,
+            Some(&resident.worker_id),
+            None,
+        )];
         let mut removed_ids = Vec::new();
         for agent_id in removed {
             let mut roster = self.roster.lock().unwrap();
