@@ -155,6 +155,43 @@ pub fn is_permanent_provider_failure_kind(
     }
 }
 
+/// Jitter band on the computed backoff (SANCTIONED DIVERGENCE from TS
+/// `providerRetryDelay`, which has none): every retry wait stretches or
+/// shrinks by up to [`RETRY_JITTER_FRACTION`] on each side, so a fleet of
+/// sessions hammering one rate-limited provider does not re-converge on the
+/// same exponential-ladder ticks (the 429-storm operator incident: every
+/// session retried in lockstep). The jittered value is what the caller
+/// waits AND what `auto_retry_start` reports, so the live countdown stays
+/// honest.
+const RETRY_JITTER_FRACTION: f64 = 0.2;
+
+/// The retry wait for `delay_ms`, jittered by `rand01` (a uniform sample in
+/// `[0, 1]`; `0.5` is the no-change identity). Pure so tests stay
+/// deterministic: `jittered_delay_ms(1000, 0.0) == 800`,
+/// `jittered_delay_ms(1000, 1.0) == 1200`.
+pub fn jittered_delay_ms(delay_ms: u64, rand01: f64) -> u64 {
+    let rand01 = rand01.clamp(0.0, 1.0);
+    let factor = 1.0 + RETRY_JITTER_FRACTION * (2.0 * rand01 - 1.0);
+    ((delay_ms as f64) * factor).round() as u64
+}
+
+/// One uniform sample in `[0, 1]` for [`jittered_delay_ms`]: a time-seeded
+/// xorshift step (uniformity is not security here, only spread across
+/// concurrent processes).
+pub fn retry_jitter_rand01() -> f64 {
+    static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let count = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.subsec_nanos() as u64 ^ (duration.as_secs() << 32))
+        .unwrap_or(0);
+    let mut x = nanos ^ count.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    (x % 10_000) as f64 / 10_000.0
+}
+
 /// Delay before retry `attempt` (1-based), honoring a server-requested wait.
 pub fn provider_retry_delay(
     attempt: u32,
@@ -234,6 +271,7 @@ where
         let ProviderRetryDelay::Wait { delay_ms } = delay else {
             return Ok(message);
         };
+        let delay_ms = jittered_delay_ms(delay_ms, retry_jitter_rand01());
         if !wait(std::time::Duration::from_millis(delay_ms)).await {
             return Ok(with_stop_reason_aborted(message));
         }
@@ -302,6 +340,28 @@ mod tests {
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
+        }
+    }
+
+    /// The jitter band (SANCTIONED DIVERGENCE, operator ruling 2026-09-23):
+    /// the wait stretches/shrinks by up to ±20% around the computed backoff,
+    /// clamped inputs stay inside the band, and the mid-point sample is the
+    /// identity.
+    #[test]
+    fn jitter_stays_inside_the_band_and_mid_is_identity() {
+        assert_eq!(jittered_delay_ms(1000, 0.5), 1000);
+        assert_eq!(jittered_delay_ms(1000, 0.0), 800);
+        assert_eq!(jittered_delay_ms(1000, 1.0), 1200);
+        assert_eq!(jittered_delay_ms(1000, 7.5), 1200); // clamped high
+        assert_eq!(jittered_delay_ms(1000, -0.5), 800); // clamped low
+        assert_eq!(jittered_delay_ms(0, 0.1), 0);
+        assert_eq!(jittered_delay_ms(1, 0.5), 1);
+        assert_eq!(jittered_delay_ms(1, 0.1), 1); // 0.8 rounds to 1
+        assert_eq!(jittered_delay_ms(2, 0.0), 2); // 1.6 rounds to 2
+                                                  // The live rand stays a valid fraction.
+        for _ in 0..64 {
+            let sample = retry_jitter_rand01();
+            assert!((0.0..=1.0).contains(&sample), "sample {sample}");
         }
     }
 

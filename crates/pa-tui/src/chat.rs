@@ -535,11 +535,17 @@ impl RetryState {
             .as_secs()
     }
 
-    /// The loader message for this retry (TS `auto_retry_start` rendering).
+    /// The loader message for this retry. (SANCTIONED DIVERGENCE from the
+    /// TS `auto_retry_start` rendering, operator ruling 2026-09-23: the
+    /// quick-retry line names the ERROR too, not just the attempt — this
+    /// one transient line is the only error the chat shows while the
+    /// episode runs, updated in place with the retry count and the
+    /// time-until-next-retry countdown.)
     fn message(&self) -> String {
         match &self.reason {
             RetryStartReason::Quick => format!(
-                "Retrying ({}/{}) in {}s...",
+                "{} — retrying ({}/{}) in {}s...",
+                self.error_message,
                 self.attempt,
                 self.max_attempts,
                 self.seconds_left()
@@ -616,7 +622,12 @@ mod tests {
             .iter()
             .map(|s| s.content.as_str())
             .collect::<String>();
-        assert!(text.contains("Retrying (1/2) in 1s..."), "got: {text}");
+        // The quick-retry line names the error too (the one line the
+        // chat shows while the episode runs, updated in place).
+        assert!(
+            text.contains("provider down — retrying (1/2) in 1s..."),
+            "got: {text}"
+        );
     }
 
     /// TS `retryLoader` wraps the same `Loader` with muted spinner and
@@ -640,7 +651,7 @@ mod tests {
                 Span::styled(" ", Style::default()),
                 Span::styled(LOADER_FRAMES[0], muted),
                 Span::raw(" "),
-                Span::styled("Retrying (1/2) in 1s...", muted),
+                Span::styled("provider down — retrying (1/2) in 1s...", muted),
             ]
         );
     }

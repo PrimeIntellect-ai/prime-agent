@@ -35,8 +35,26 @@ struct FailingMock {
     port: u16,
 }
 
+/// How the mock rejects its first `failures` requests.
+#[derive(Clone, Copy)]
+enum MockRejection {
+    /// A plain 500 with an OpenAI-style server-error body.
+    ServerError,
+    /// The prime-inference storm shape: 429 with `Retry-After` and the
+    /// "Too many concurrent requests" body.
+    RateLimit { retry_after_secs: u64 },
+}
+
 impl FailingMock {
     fn start(failures: usize, answer: &'static str) -> FailingMock {
+        Self::start_with_rejection(failures, answer, MockRejection::ServerError)
+    }
+
+    fn start_with_rejection(
+        failures: usize,
+        answer: &'static str,
+        rejection: MockRejection,
+    ) -> FailingMock {
         let requests = Arc::new(Mutex::new(0usize));
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
         let port = listener.local_addr().expect("mock addr").port();
@@ -46,7 +64,7 @@ impl FailingMock {
                 let Ok(stream) = stream else { continue };
                 let requests = Arc::clone(&requests_for_thread);
                 std::thread::spawn(move || {
-                    let _ = serve(stream, failures, answer, requests);
+                    let _ = serve(stream, failures, answer, rejection, requests);
                 });
             }
         });
@@ -77,6 +95,7 @@ fn serve(
     mut stream: TcpStream,
     failures: usize,
     answer: &str,
+    rejection: MockRejection,
     requests: Arc<Mutex<usize>>,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -108,13 +127,31 @@ fn serve(
         *requests
     };
     if index <= failures {
-        let body = json!({
-            "error": { "message": "mock provider overloaded", "type": "server_error", "code": 500 }
-        })
-        .to_string();
+        let (status_line, headers, body) = match rejection {
+            MockRejection::ServerError => (
+                "HTTP/1.1 500 Internal Server Error",
+                String::new(),
+                json!({
+                    "error": { "message": "mock provider overloaded", "type": "server_error", "code": 500 }
+                })
+                .to_string(),
+            ),
+            MockRejection::RateLimit { retry_after_secs } => (
+                "HTTP/1.1 429 Too Many Requests",
+                format!("Retry-After: {retry_after_secs}\r\n"),
+                json!({
+                    "error": {
+                        "message": "429 Too many concurrent requests for this model (limit: 32). Try again shortly.",
+                        "type": "rate_limit_error",
+                        "code": 429
+                    }
+                })
+                .to_string(),
+            ),
+        };
         return stream.write_all(
             format!(
-                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "{status_line}\r\nContent-Type: application/json\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
             )
@@ -293,11 +330,22 @@ fn setup(
     failures: usize,
     answer: &'static str,
 ) -> (tempfile::TempDir, FailingMock, Supervisor, Client, String) {
+    setup_with_rejection(name, failures, answer, MockRejection::ServerError)
+}
+
+/// The shared harness with a choosable mock rejection mode (the 429 storm).
+#[allow(clippy::type_complexity)]
+fn setup_with_rejection(
+    name: &str,
+    failures: usize,
+    answer: &'static str,
+    rejection: MockRejection,
+) -> (tempfile::TempDir, FailingMock, Supervisor, Client, String) {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
-    let mock = FailingMock::start(failures, answer);
+    let mock = FailingMock::start_with_rejection(failures, answer, rejection);
     std::fs::write(
         agent_dir.join("models.json"),
         json!({
@@ -419,13 +467,22 @@ fn provider_failure_is_retried_then_surfaced_to_attached_clients() {
         .collect();
     assert_eq!(starts[0]["attempt"], 1);
     assert_eq!(starts[0]["maxAttempts"], 2);
-    assert_eq!(starts[0]["delayMs"], 50);
     assert!(starts[0]["errorMessage"]
         .as_str()
         .expect("error message")
         .contains("mock provider overloaded"));
     assert_eq!(starts[1]["attempt"], 2);
-    assert_eq!(starts[1]["delayMs"], 100);
+    // Each retry start's delay sits in the ±20% jitter band around its
+    // ladder step (50ms then 100ms: [40, 70] and [80, 140]).
+    let jitter_band = |base: u64| (base * 4 / 5, base * 7 / 5);
+    for (start, base) in starts.iter().zip([50u64, 100u64]) {
+        let delay = start["delayMs"].as_u64().expect("delayMs");
+        let (low, high) = jitter_band(base);
+        assert!(
+            (low..=high).contains(&delay),
+            "jittered delay {delay} outside [{low}, {high}]"
+        );
+    }
 
     // The loop closes with the final failure surfaced.
     let end = client
@@ -477,6 +534,156 @@ fn provider_failure_is_retried_then_surfaced_to_attached_clients() {
         Some(0),
         "the failed turn ran no tools"
     );
+
+    // The single-line retry UX (SANCTIONED DIVERGENCE, operator ruling
+    // 2026-09-23): the episode leaves ONE durable outcome row — the
+    // terminal line, broadcast after `auto_retry_end` as a custom-row
+    // message pair — instead of only the per-attempt error rows TS keeps.
+    let outcome_pair: Vec<&Value> = client
+        .events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.get("type").and_then(Value::as_str),
+                Some("message_start") | Some("message_end")
+            ) && event["message"]["role"] == "custom"
+                && event["message"]["customType"] == "provider_retry_outcome"
+        })
+        .collect();
+    assert_eq!(outcome_pair.len(), 2, "one outcome row pair: {types:?}");
+    let outcome = &outcome_pair[0]["message"];
+    assert_eq!(outcome["details"]["success"], false);
+    assert_eq!(outcome["details"]["attempts"], 2);
+    assert!(
+        outcome["content"]
+            .as_str()
+            .expect("outcome text")
+            .contains("Retry failed after 2 attempts"),
+        "outcome text: {outcome}"
+    );
+    assert!(outcome["content"]
+        .as_str()
+        .expect("outcome text")
+        .contains("mock provider overloaded"));
+}
+
+/// The 429-storm simulation (operator ruling 2026-09-23): a provider that
+/// rate-limits with `Retry-After` gets retried with bounded exponential
+/// backoff — requests cap at initial + maxRetries (never spam), the
+/// server-requested wait is honored (jittered band), the Retry-After
+/// wait wins over the tiny base delay, and the episode leaves exactly ONE
+/// durable outcome row while the per-attempt failures still persist and
+/// stream (full transcript fidelity; the TUI collapses the rows).
+#[test]
+fn storm_429_caps_requests_honors_retry_after_and_leaves_one_outcome_row() {
+    let (_dir, mock, _supervisor, mut client, session_id) = setup_with_rejection(
+        "storm429",
+        2,
+        "recovered answer",
+        MockRejection::RateLimit {
+            retry_after_secs: 1,
+        },
+    );
+    client.send_command(
+        "p1",
+        json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "hi" }),
+    );
+    let done = client.request("p1");
+    assert_eq!(done["success"], true, "prompt must recover: {done}");
+    client.drain_events(Duration::from_secs(1));
+
+    // The request cap: one initial request + maxRetries (2) retries. A
+    // storm can never spam the endpoint past the policy budget.
+    assert_eq!(mock.count(), 3, "requests: initial + 2 retries");
+
+    let types = event_types(&client.events);
+    // Both 429 attempts stream their failures (wire parity with TS), two
+    // retry starts pace the waits, and the loop closes recovered.
+    let failed_attempts = client
+        .events
+        .iter()
+        .filter(|event| {
+            event.get("type").and_then(Value::as_str) == Some("message_end")
+                && event["message"]["role"] == "assistant"
+                && event["message"]["stopReason"] == "error"
+        })
+        .count();
+    assert_eq!(
+        failed_attempts, 2,
+        "each attempt's failure streams: {types:?}"
+    );
+    assert!(
+        types.iter().filter(|t| *t == "auto_retry_start").count() == 2,
+        "two retry starts, events: {types:?}"
+    );
+    let starts: Vec<&Value> = client
+        .events
+        .iter()
+        .filter(|event| event.get("type").and_then(Value::as_str) == Some("auto_retry_start"))
+        .collect();
+    for start in &starts {
+        assert!(
+            start["errorMessage"]
+                .as_str()
+                .expect("error message")
+                .contains("Too many concurrent requests"),
+            "the 429 text: {start}"
+        );
+        // The server-requested wait (Retry-After: 1s) wins over the 50ms
+        // base delay; the jittered wait stays in [800, 1400]ms.
+        let delay = start["delayMs"].as_u64().expect("delayMs");
+        assert!(
+            (800..=1400).contains(&delay),
+            "Retry-After jittered delay {delay} outside [800, 1400]"
+        );
+    }
+    let end = client
+        .events
+        .iter()
+        .rev()
+        .find(|event| event.get("type").and_then(Value::as_str) == Some("auto_retry_end"))
+        .expect("auto_retry_end");
+    assert_eq!(end["success"], true);
+
+    // ONE durable outcome row: broadcast as the custom pair right after
+    // the auto_retry_end frame, naming the recovered error.
+    let outcome = client
+        .events
+        .iter()
+        .find(|event| {
+            event.get("type").and_then(Value::as_str) == Some("message_start")
+                && event["message"]["role"] == "custom"
+                && event["message"]["customType"] == "provider_retry_outcome"
+        })
+        .expect("the outcome row pair");
+    let text = outcome["message"]["content"].as_str().expect("content");
+    assert!(
+        text.contains("Recovered after 2 retries") && text.contains("Too many concurrent requests"),
+        "outcome text: {text}"
+    );
+    assert_eq!(outcome["message"]["details"]["success"], true);
+    assert_eq!(outcome["message"]["details"]["attempts"], 2);
+
+    // The transcript holds the per-attempt failures (full fidelity — the
+    // collapse is a TUI presentation rule) plus exactly ONE outcome row.
+    client.send_command(
+        "g1",
+        json!({ "type": "get_messages", "activeSessionId": session_id }),
+    );
+    let messages = client.request("g1");
+    let list = messages["data"]["messages"].as_array().expect("messages");
+    let persisted_failures = list
+        .iter()
+        .filter(|message| message["role"] == "assistant" && message["stopReason"] == "error")
+        .count();
+    assert_eq!(persisted_failures, 2, "full per-attempt fidelity: {list:?}");
+    let outcomes = list
+        .iter()
+        .filter(|message| {
+            message["role"] == "custom" && message["customType"] == "provider_retry_outcome"
+        })
+        .count();
+    assert_eq!(outcomes, 1, "exactly one outcome row: {list:?}");
 }
 
 /// A direct-transport client (thin-supervisor stage 2): ticket from the
