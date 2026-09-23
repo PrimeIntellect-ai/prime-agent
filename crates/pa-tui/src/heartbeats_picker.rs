@@ -358,6 +358,7 @@ impl HeartbeatsPicker {
     pub fn new(
         heartbeats: Vec<HeartbeatEntry>,
         fetch_error: Option<String>,
+        preselect: Option<String>,
         viewport_rows: usize,
     ) -> Self {
         let mut picker = HeartbeatsPicker {
@@ -368,7 +369,11 @@ impl HeartbeatsPicker {
             error: None,
             viewport_rows,
         };
-        picker.selected_heartbeat_id = picker.heartbeats.first().map(|entry| entry.job.id.clone());
+        // A carried selection (the activity panel's chosen row) survives the
+        // open; anything else lands on the first row (TS default).
+        picker.selected_heartbeat_id = preselect
+            .filter(|id| picker.heartbeats.iter().any(|entry| &entry.job.id == id))
+            .or_else(|| picker.heartbeats.first().map(|entry| entry.job.id.clone()));
         picker
     }
 
@@ -1001,6 +1006,23 @@ mod tests {
     }
 
     #[test]
+    fn a_carried_selection_opens_on_that_row() {
+        let catalog = entries();
+        let ids: Vec<_> = catalog.iter().map(|entry| entry.job.id.clone()).collect();
+        let picker = HeartbeatsPicker::new(catalog.clone(), None, Some(ids[1].clone()), 24);
+        assert_eq!(
+            picker.selected_heartbeat_id.as_deref(),
+            Some(ids[1].as_str())
+        );
+        // An id that is not in the catalog falls back to the first row.
+        let picker = HeartbeatsPicker::new(catalog, None, Some("missing".to_string()), 24);
+        assert_eq!(
+            picker.selected_heartbeat_id.as_deref(),
+            Some(ids[0].as_str())
+        );
+    }
+
+    #[test]
     fn parse_reads_the_wire_shape() {
         let parsed = entries();
         assert_eq!(parsed.len(), 2);
@@ -1049,7 +1071,7 @@ mod tests {
 
     #[test]
     fn the_list_renders_rows_status_and_hints() {
-        let picker = HeartbeatsPicker::new(entries(), None, 24);
+        let picker = HeartbeatsPicker::new(entries(), None, None, 24);
         let frame = picker.render(&theme(), 70, &kb());
         let text: Vec<String> = frame
             .iter()
@@ -1067,7 +1089,7 @@ mod tests {
 
     #[test]
     fn enter_opens_the_action_pane_and_runs_the_pause_action() {
-        let mut picker = HeartbeatsPicker::new(entries(), None, 24);
+        let mut picker = HeartbeatsPicker::new(entries(), None, None, 24);
         // The user row (first) is paused: its first action is resume.
         assert_eq!(
             picker.handle_key("enter", &kb()),
@@ -1103,7 +1125,7 @@ mod tests {
 
     #[test]
     fn back_returns_to_the_list_and_escape_closes() {
-        let mut picker = HeartbeatsPicker::new(entries(), None, 24);
+        let mut picker = HeartbeatsPicker::new(entries(), None, None, 24);
         picker.handle_key("enter", &kb());
         assert_eq!(
             picker.handle_key("left", &kb()),
@@ -1122,7 +1144,7 @@ mod tests {
 
     #[test]
     fn navigation_moves_the_selection_by_id() {
-        let mut picker = HeartbeatsPicker::new(entries(), None, 24);
+        let mut picker = HeartbeatsPicker::new(entries(), None, None, 24);
         assert_eq!(
             picker.handle_key("down", &kb()),
             HeartbeatsPickerAction::None
@@ -1134,7 +1156,7 @@ mod tests {
 
     #[test]
     fn a_managed_job_replaces_or_removes_its_row() {
-        let mut picker = HeartbeatsPicker::new(entries(), None, 24);
+        let mut picker = HeartbeatsPicker::new(entries(), None, None, 24);
         picker.handle_key("down", &kb());
         let mut updated = picker.heartbeats[1].job.clone();
         updated.status = "paused".to_string();
@@ -1159,7 +1181,7 @@ mod tests {
     /// the tray keeps counting, and only the in-view failure line appears.
     #[test]
     fn a_fetch_error_keeps_the_rows() {
-        let mut picker = HeartbeatsPicker::new(entries(), None, 24);
+        let mut picker = HeartbeatsPicker::new(entries(), None, None, 24);
         picker.set_fetch_error(Some("daemon busy".to_string()));
         assert_eq!(picker.heartbeats.len(), 2);
         assert_eq!(picker.fetch_error.as_deref(), Some("daemon busy"));
@@ -1176,7 +1198,7 @@ mod tests {
 
     #[test]
     fn a_catalog_refresh_keeps_the_surviving_selection() {
-        let mut picker = HeartbeatsPicker::new(entries(), None, 24);
+        let mut picker = HeartbeatsPicker::new(entries(), None, None, 24);
         picker.handle_key("down", &kb());
         assert_eq!(picker.selected_heartbeat_id.as_deref(), Some("agent-1"));
         let refreshed = picker.heartbeats.clone();

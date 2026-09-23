@@ -116,7 +116,24 @@ pub(crate) struct HeartbeatsUpdate {
 
 pub(crate) struct ActivityUpdates {
     pub heartbeats: mpsc::UnboundedSender<HeartbeatsUpdate>,
-    pub bash: mpsc::UnboundedSender<(String, Value)>,
+    pub bash: mpsc::UnboundedSender<BashActivityUpdate>,
+}
+
+/// Kernel-bash channel frames: list snapshots refresh the dock and panel,
+/// a landed tail feeds the open panel's selected row, and a failed
+/// background action surfaces as an error row.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum BashActivityUpdate {
+    List(String, Value),
+    Tail {
+        session: String,
+        activity_id: String,
+        tail: String,
+    },
+    Error {
+        session: String,
+        message: String,
+    },
 }
 
 /// A landed `get_model_catalog` refresh: the full catalog and the providers
@@ -318,7 +335,7 @@ pub(crate) struct SessionUi {
     heartbeat_catalog: Vec<HeartbeatEntry>,
     /// The current Python bash() registry snapshot from the owning kernel.
     bash_activities: Value,
-    bash_updates: mpsc::UnboundedSender<(String, Value)>,
+    bash_updates: mpsc::UnboundedSender<BashActivityUpdate>,
     /// The subagent summary line holds keyboard focus.
     subagents_focused: bool,
     activity_group: crate::chrome::ActivityGroup,
@@ -2920,7 +2937,7 @@ impl SessionUi {
                     return Ok(());
                 }
                 self.track_command_used("heartbeats");
-                self.open_heartbeats_view(view).await;
+                self.open_heartbeats_view(view, None).await;
             }
             other => {
                 self.note(
@@ -5117,7 +5134,7 @@ impl SessionUi {
         }
         let client = self.client.clone();
         let active_session_id = self.active_session_id.clone();
-        let active_session_id_for_update = active_session_id.clone();
+        let session_for_update = active_session_id.clone();
         let tx = self.bash_updates.clone();
         tokio::spawn(async move {
             if let Ok(data) = client
@@ -5128,24 +5145,42 @@ impl SessionUi {
                 })
                 .await
             {
-                let _ = tx.send((active_session_id_for_update, data));
+                let _ = tx.send(BashActivityUpdate::List(session_for_update, data));
             }
         });
     }
 
     /// A late poll from the previous session must not repaint the dock of
-    /// the newly attached one: the update carries the session it asked
-    /// about, and only that session's response lands.
-    pub(crate) fn apply_bash_activity(
-        &mut self,
-        (session, data): (String, Value),
-        view: &mut AgentView,
-    ) {
-        if session != self.active_session_id || self.bash_activities == data {
+    /// the newly attached one: every update carries the session it asked
+    /// about, and only that session's frames land.
+    pub(crate) fn apply_bash_activity(&mut self, update: BashActivityUpdate, view: &mut AgentView) {
+        let session = match &update {
+            BashActivityUpdate::List(session, _) => session,
+            BashActivityUpdate::Tail { session, .. } => session,
+            BashActivityUpdate::Error { session, .. } => session,
+        };
+        if session != &self.active_session_id {
             return;
         }
-        self.bash_activities = data;
-        self.update_subagent_summary(view);
+        match update {
+            BashActivityUpdate::List(_, data) => {
+                if self.bash_activities == data {
+                    return;
+                }
+                self.bash_activities = data;
+                self.update_subagent_summary(view);
+            }
+            BashActivityUpdate::Tail {
+                activity_id, tail, ..
+            } => {
+                if let Some(panel) = view.activity_panel.as_mut() {
+                    panel.set_bash_tail(&activity_id, &tail);
+                }
+            }
+            BashActivityUpdate::Error { message, .. } => {
+                self.error_row(&message, view);
+            }
+        }
         self.dirty = true;
     }
 
@@ -5201,7 +5236,7 @@ impl SessionUi {
             Some(ActivityPanelAction::Close) => {
                 view.activity_panel = None;
             }
-            Some(ActivityPanelAction::OpenGroup(group)) => {
+            Some(ActivityPanelAction::OpenGroup { group, selected_id }) => {
                 view.activity_panel = None;
                 match group {
                     ActivityPanelGroup::Subagents => {
@@ -5220,7 +5255,9 @@ impl SessionUi {
                     }
                     ActivityPanelGroup::Heartbeats => {
                         self.emit_activity_opened("heartbeats");
-                        self.open_heartbeats_view(view).await;
+                        // The panel's chosen row opens selected, not the
+                        // catalog's first entry.
+                        self.open_heartbeats_view(view, selected_id).await;
                     }
                     // Enter never opens these groups from the panel: the
                     // goal row is read-only and the bash rows fetch their
@@ -5230,45 +5267,79 @@ impl SessionUi {
             }
             Some(ActivityPanelAction::ViewBashOutput { id }) => {
                 self.emit_activity_opened("bash");
-                let result = self
-                    .bounded_request(
-                        Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                        DaemonCommand::TailKernelBash {
+                // The request runs off the key loop: a stalled daemon
+                // must not freeze the TUI behind the request bound. The
+                // tail lands on the open panel through the update channel.
+                let client = self.client.clone();
+                let session = self.active_session_id.clone();
+                let tx = self.bash_updates.clone();
+                tokio::spawn(async move {
+                    let response_id = id.clone();
+                    let result = client
+                        .request_ok(DaemonCommand::TailKernelBash {
                             id: None,
-                            active_session_id: self.active_session_id.clone(),
-                            activity_id: id.clone(),
+                            active_session_id: session.clone(),
+                            activity_id: id,
                             lines: Some(50),
                             rest: Default::default(),
-                        },
-                    )
-                    .await;
-                match result {
-                    Ok(data) => {
-                        if let Some(tail) = data.get("tail").and_then(Value::as_str) {
-                            if let Some(panel) = view.activity_panel.as_mut() {
-                                panel.set_bash_tail(&id, tail);
+                        })
+                        .await;
+                    match result {
+                        Ok(data) => {
+                            if let Some(tail) = data.get("tail").and_then(Value::as_str) {
+                                let _ = tx.send(BashActivityUpdate::Tail {
+                                    session,
+                                    activity_id: response_id,
+                                    tail: tail.to_string(),
+                                });
                             }
                         }
+                        Err(error) => {
+                            let _ = tx.send(BashActivityUpdate::Error {
+                                session,
+                                message: format!("Bash output: {error:#}"),
+                            });
+                        }
                     }
-                    Err(error) => self.error_row(&format!("Bash output: {error:#}"), view),
-                }
+                });
             }
             Some(ActivityPanelAction::KillBash { id }) => {
-                let result = self
-                    .bounded_request(
-                        Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                        DaemonCommand::KillKernelBash {
+                let client = self.client.clone();
+                let session = self.active_session_id.clone();
+                let tx = self.bash_updates.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .request_ok(DaemonCommand::KillKernelBash {
                             id: None,
-                            active_session_id: self.active_session_id.clone(),
+                            active_session_id: session.clone(),
                             activity_id: id,
                             rest: Default::default(),
-                        },
-                    )
-                    .await;
-                if let Err(error) = result {
-                    self.error_row(&format!("Could not kill bash command: {error:#}"), view);
-                }
-                self.spawn_bash_activity_refresh();
+                        })
+                        .await;
+                    match result {
+                        Ok(_) => {
+                            // The killed row settles immediately: refresh
+                            // the list while the spawn is already off the
+                            // key loop.
+                            let list = client
+                                .request_ok(DaemonCommand::ListKernelBash {
+                                    id: None,
+                                    active_session_id: session.clone(),
+                                    rest: Default::default(),
+                                })
+                                .await;
+                            if let Ok(data) = list {
+                                let _ = tx.send(BashActivityUpdate::List(session, data));
+                            }
+                        }
+                        Err(error) => {
+                            let _ = tx.send(BashActivityUpdate::Error {
+                                session,
+                                message: format!("Could not kill bash command: {error:#}"),
+                            });
+                        }
+                    }
+                });
             }
             Some(ActivityPanelAction::None) | None => {}
         }
@@ -5515,7 +5586,9 @@ impl SessionUi {
     /// (TS `showHeartbeatManager`): the fetch error opens over the cached
     /// catalog with the failure surfaced inside the view (stale-while-
     /// revalidate), and the tray label follows the landed catalog.
-    async fn open_heartbeats_view(&mut self, view: &mut AgentView) {
+    /// `preselect` carries the activity panel's chosen heartbeat row into
+    /// the view's selection.
+    async fn open_heartbeats_view(&mut self, view: &mut AgentView, preselect: Option<String>) {
         let (fetched, fetch_error) = self.fetch_scoped_heartbeats().await;
         let heartbeats = if fetch_error.is_some() {
             self.heartbeat_catalog.clone()
@@ -5526,6 +5599,7 @@ impl SessionUi {
         view.heartbeats_picker = Some(HeartbeatsPicker::new(
             heartbeats,
             fetch_error,
+            preselect,
             picker_viewport_rows(view.terminal_rows()),
         ));
         self.sync_heartbeat_tray(view);
@@ -6191,7 +6265,7 @@ impl SessionUi {
             .keybindings()
             .matches(&id, "app.heartbeats.open")
         {
-            self.open_heartbeats_view(view).await;
+            self.open_heartbeats_view(view, None).await;
             return Ok(());
         }
         if view.editor.keybindings().matches(&id, "app.input.clear") {

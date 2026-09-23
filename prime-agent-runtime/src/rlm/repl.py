@@ -1074,13 +1074,23 @@ def _cap_bash_activity_frame(frame: dict[str, Any]) -> None:
     if isinstance(tail, str):
         while len(json.dumps(frame)) > 16_384:
             excess = len(json.dumps(frame)) - 16_384
-            keep = max(1, len(tail) - excess // 6 - 1)
-            tail = tail[-keep:]
+            keep = max(0, len(tail) - excess // 6 - 1)
+            if keep >= len(tail):
+                # The frame cannot fit no matter how the payload shrinks
+                # (oversized request metadata): emit the smallest frame
+                # instead of looping forever on the reader thread.
+                frame["tail"] = ""
+                break
+            tail = tail[-keep:] if keep else ""
             frame["tail"] = tail
         return
     rows = frame.get("activities")
     while len(json.dumps(frame)) > 16_384 and isinstance(rows, list) and len(rows) > 1:
-        rows.pop(0)
+        victim = next(
+            (index for index, row in enumerate(rows) if row.get("status") != "running"),
+            0,
+        )
+        rows.pop(victim)
 
 
 
@@ -1136,6 +1146,11 @@ def _handle_request_line(raw: bytes, queue: asyncio.Queue[dict[str, Any]]) -> No
             return
         if req["action"] != "list" and not isinstance(req.get("activityId"), str):
             _protocol_error("bash activity tail/kill requires string activityId")
+            return
+        if len(req["id"]) > 256 or len(req.get("activityId") or "") > 256:
+            # Frame metadata rides every response: an unbounded id would
+            # leave no room for the capped payload.
+            _protocol_error("bash activity ids must stay under 256 characters")
             return
         # Like host_reply, this bypasses the cell FIFO. Handles remain owned
         # by the runtime, not by an arbitrary PID supplied by the client.

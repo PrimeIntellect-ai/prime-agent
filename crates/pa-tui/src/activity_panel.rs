@@ -123,9 +123,19 @@ pub struct ActivityPanelRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActivityPanelAction {
     Close,
-    OpenGroup(ActivityPanelGroup),
-    ViewBashOutput { id: String },
-    KillBash { id: String },
+    /// Open the group's management view; `selected_id` carries the panel's
+    /// chosen row so the destination view opens on it (the heartbeat
+    /// picker preselects; the agents view has no row preselection).
+    OpenGroup {
+        group: ActivityPanelGroup,
+        selected_id: Option<String>,
+    },
+    ViewBashOutput {
+        id: String,
+    },
+    KillBash {
+        id: String,
+    },
     None,
 }
 
@@ -285,7 +295,10 @@ impl ActivityPanel {
         if kb.matches(key, "tui.select.confirm") {
             return match row.group {
                 ActivityPanelGroup::Subagents | ActivityPanelGroup::Heartbeats => {
-                    ActivityPanelAction::OpenGroup(row.group)
+                    ActivityPanelAction::OpenGroup {
+                        group: row.group,
+                        selected_id: Some(row.id.clone()),
+                    }
                 }
                 // The goal group is read-only: the dock segment and the
                 // detail pane carry its state; Enter does nothing.
@@ -855,14 +868,20 @@ mod tests {
         panel.handle_key("left", &kb);
         assert_eq!(
             panel.handle_key("enter", &kb),
-            ActivityPanelAction::OpenGroup(ActivityPanelGroup::Heartbeats)
+            ActivityPanelAction::OpenGroup {
+                group: ActivityPanelGroup::Heartbeats,
+                selected_id: Some("hb1".into())
+            }
         );
         panel.handle_key("left", &kb);
         assert_eq!(panel.handle_key("enter", &kb), ActivityPanelAction::None);
         panel.handle_key("left", &kb);
         assert_eq!(
             panel.handle_key("enter", &kb),
-            ActivityPanelAction::OpenGroup(ActivityPanelGroup::Subagents)
+            ActivityPanelAction::OpenGroup {
+                group: ActivityPanelGroup::Subagents,
+                selected_id: Some("child-1".into())
+            }
         );
         assert_eq!(panel.handle_key("escape", &kb), ActivityPanelAction::Close);
     }

@@ -151,6 +151,13 @@ class ReplTest(unittest.TestCase):
         self.repl.send({"type": "interrupt", "id": "cell"})
         self.repl.until_done("cell")
 
+    def test_bash_activity_rejects_oversized_ids(self):
+        self.repl.send({"type": "bash_activity", "id": "x" * 300, "action": "list"})
+        event = self.repl.read_event()
+        self.assertEqual(event["event"], "error")
+        self.assertEqual(event["ename"], "ProtocolError")
+        self.assertIn("256", event["evalue"])
+
     def test_ready_handshake_and_startup_time(self):
         self.assertEqual(self.ready_event["event"], "ready")
         self.assertEqual(self.ready_event["protocol"], 3)

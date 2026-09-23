@@ -1248,10 +1248,16 @@ def activity_request(action: str, activity_id: str | None = None, lines: int = 5
             for key, handle in handles
         ]
         # The serialized list frame stays under the same 16 KiB cap as the
-        # tail: long commands are truncated per row first, and the oldest
-        # rows drop until the response fits.
+        # tail: long commands are truncated per row first, then rows drop
+        # until the response fits - finished rows drop before running ones,
+        # so live processes never fall off the activity list while they
+        # are still the ones the user can act on.
         while len(json.dumps({"activities": rows})) > 16_384 and len(rows) > 1:
-            rows.pop(0)
+            victim = next(
+                (index for index, row in enumerate(rows) if row["status"] != "running"),
+                0,
+            )
+            rows.pop(victim)
         return {"activities": rows}
     if action == "tail":
         if isinstance(lines, bool) or not isinstance(lines, int) or not 1 <= lines <= 200:
