@@ -660,6 +660,77 @@ class ReplTest(unittest.TestCase):
             events = self.repl.execute("chk", "'In' in dir()")
             self.assertEqual(one(events, "result")["text"], "False")
 
+    def test_restore_revives_functions_with_live_globals_pr2471(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "state.dill")
+            self.repl.execute("fn1", "G = 1\ndef reader():\n    return G\ndef prober():\n    return late")
+            # priv.__globals__ is the private exec dict pn, not ns: drives backfill.
+            self.repl.execute("fn0", "exec('SECRET = 42\\ndef priv():\\n    return SECRET', pn:={'__name__': '__main__'})\npriv = pn['priv']")
+            self.repl.send({"type": "snapshot", "id": "fn2", "path": path, "manifest_path": os.path.join(tmp, "state.json")})
+            self.repl.send({"type": "restore", "id": "fn3", "path": path})
+            self.assertEqual(one(self.repl.until_done("fn3"), "done")["status"], "ok")
+            events = self.repl.execute("fn4", "G = 2\nreader()")
+            self.assertEqual(one(events, "result")["text"], "2")
+            events = self.repl.execute("fn5", "late = 'live'\nprober()")
+            self.assertEqual(one(events, "result")["text"], "'live'")
+            events = self.repl.execute("fn6", "priv()")
+            self.assertEqual(one(events, "result")["text"], "42")
+
+    def test_restore_revives_partial_wrapped_functions_pr2471(self):
+        # dill revives a partial's wrapped __main__ function with frozen globals.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "state.dill")
+            self.repl.execute("pt1", "import functools\nG = 1\ndef base():\n    return G\nwrapped = functools.partial(base)")
+            self.repl.send({"type": "snapshot", "id": "pt2", "path": path, "manifest_path": os.path.join(tmp, "state.json")})
+            self.repl.send({"type": "restore", "id": "pt3", "path": path})
+            self.assertEqual(one(self.repl.until_done("pt3"), "done")["status"], "ok")
+            events = self.repl.execute("pt4", "G = 2\nwrapped()")
+            self.assertEqual(one(events, "result")["text"], "2")
+
+    def _snapshot_restore(self, rid: str, code: str, tmp: str) -> None:
+        self.assertEqual(one(self.repl.execute(rid + "0", code), "done")["status"], "ok")
+        self.repl.send({"type": "snapshot", "id": rid + "1", "path": os.path.join(tmp, "s.dill"), "manifest_path": os.path.join(tmp, "s.json")})
+        self.repl.send({"type": "restore", "id": rid + "2", "path": os.path.join(tmp, "s.dill")})
+        self.assertEqual(one(self.repl.until_done(rid + "2"), "done")["status"], "ok")
+
+    def test_restore_rebuilt_partial_keeps_attributes_and_args_pr2471(self):
+        code = (
+            "import functools\nG = 1\ndef helper():\n    return G\ndef apply(fn):\n    return fn()\n"
+            "wrapped = functools.partial(apply, helper)\nwrapped.label = 'x'"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            self._snapshot_restore("pa", code, tmp)
+            self.assertEqual(one(self.repl.execute("pa4", "wrapped.label"), "result")["text"], "'x'")
+            self.assertEqual(one(self.repl.execute("pa5", "G = 2\nwrapped()"), "result")["text"], "2")
+
+    def test_restore_backfill_skips_excluded_names_pr2471(self):
+        code = (
+            "exec('PUB = 1\\n_hidden = 2\\nIn = 3\\nOut = 4\\ndef user():\\n    return (PUB, _hidden, In, Out)', pn:={'__name__': '__main__'})\n"
+            "user = pn['user']"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            self._snapshot_restore("ex", code, tmp)
+            probe = "('PUB' in dir(), '_hidden' in dir(), 'In' in dir(), 'Out' in dir())"
+            self.assertEqual(one(self.repl.execute("ex4", probe), "result")["text"], "(True, False, False, False)")
+
+    def test_restore_revives_callables_in_defaults_and_closures_pr2471(self):
+        code = ("G = 1\ndef helper():\n    return G\nrun = lambda fn=helper: fn()\nrun2 = lambda *, fn=helper: fn()\nclosed = (lambda fn: lambda: fn())(helper)\n"
+                "def make():\n    n = 0\n    def get():\n        return n\n    def set(v):\n        nonlocal n\n        n = v\n    get.set = set\n    return get\ncounter = make()\nrun.callback = helper")
+        with tempfile.TemporaryDirectory() as tmp:
+            self._snapshot_restore("dc", code, tmp)
+            self.assertEqual(one(self.repl.execute("dc4", "G = 2\ncounter.set(5)\n(run(), run2(), closed(), counter(), run.callback())"), "result")["text"], "(2, 2, 2, 5, 2)")
+
+    def test_restore_publishes_rebuilt_partial_in_backfill_cycle_pr2471(self):
+        code = ("exec('import functools\\nG = 1\\ndef base():\\n    return G, wrapped\\nwrapped = functools.partial(base)\\n"
+                "def entry():\\n    return wrapped()', pn:={'__name__': '__main__'})\nentry = pn['entry']")
+        self._snapshot_restore("bp", code, self.enterContext(tempfile.TemporaryDirectory()))
+        self.assertEqual(one(self.repl.execute("bp4", "G = 2\nentry()[0]"), "result")["text"], "2")
+
+    def test_restore_revives_functions_inside_containers_pr2471(self):
+        code = "G = 1\ndef reader():\n    return G\ncallbacks = [reader]\nhandlers = {'read': reader}\npair = (reader,)"
+        self._snapshot_restore("ct", code, self.enterContext(tempfile.TemporaryDirectory()))
+        self.assertEqual(one(self.repl.execute("ct4", "G = 2\n(callbacks[0](), handlers['read'](), pair[0]())"), "result")["text"], "(2, 2, 2)")
+
     def test_snapshot_prune_oversized(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "kernel-state.dill")
@@ -2060,6 +2131,14 @@ class RestoreApplyShieldTest(unittest.TestCase):
         self.assertNotIn("error", result)
         self.assertEqual(result["restored"], ["a", "b"])
         self.assertEqual(dict(ns), {"a": 1, "b": 2})
+
+    def test_sigint_with_backfill_first_write_is_consumed(self):
+        from rlm.repl import _restore_state
+        exec("SECRET = 42\ndef reader():\n    return SECRET", source := {"__name__": "__main__"})
+        with tempfile.TemporaryDirectory() as tmp:
+            ns = self.SigintOnNthSet(fire_on=1)
+            result = _restore_state(ns, self._write_snapshot(tmp, {"reader": source["reader"]}))
+        self.assertEqual((result["restored"], ns["SECRET"]), (["reader"], 42))
 
     def _restore_with_sigint_at_unpark(self):
         """Real unparking swap, then the newly restored handler fires immediately."""

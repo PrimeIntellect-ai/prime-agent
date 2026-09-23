@@ -30,7 +30,7 @@ const DEFAULT_OVERVIEW_CONTENT_LIMIT = 180;
  * the shell flag was already false, i.e. identical renders), so equality
  * across the change is render-safe.
  */
-const HARNESS_DIGEST_FINGERPRINT_VERSION = 1;
+const HARNESS_DIGEST_FINGERPRINT_VERSION = 2;
 
 export type RefinementKind = "prompt" | "memory" | "skill" | "subagent";
 export type RefinementAction = "create" | "update" | "delete";
@@ -41,7 +41,7 @@ export interface HarnessEntry {
 	kind: RefinementKind;
 	title: string;
 	content: string;
-	path: string;
+	topic: string;
 	scope?: HarnessScope;
 	reference: Record<string, unknown>;
 	arguments: Record<string, unknown>;
@@ -73,7 +73,7 @@ export interface RefinementEdit {
 	id?: string;
 	title?: string;
 	content?: string;
-	path?: string;
+	topic?: string;
 	reference?: Record<string, unknown>;
 	arguments?: Record<string, unknown>;
 	metadata?: Record<string, unknown>;
@@ -148,7 +148,7 @@ Scope and persistence policy:
 - A caller may explicitly request global refinement. Global edits must be stable cross-session lessons, durable user preferences, reusable skills/subagents, or tool/environment facts that should affect future sessions.
 - Entry ids in the harness overview may carry a display-only \`local:\` or \`global:\` prefix. Always use the bare id (no prefix) in edits.
 - All edits in one refinement apply only to the requested scope's store. During a local refinement, global entries are read-only context: never propose update or delete edits for them; create a local entry instead when a session-specific override is genuinely needed.
-- Project/workspace-specific lessons may be persisted globally only when the title, path, or content explicitly names the project/workspace and the lesson is likely to be reused in future sessions for that project. Prefer local edits when the lesson only belongs in the current conversation.
+- Project/workspace-specific lessons may be persisted globally only when the title, topic, or content explicitly names the project/workspace and the lesson is likely to be reused in future sessions for that project. Prefer local edits when the lesson only belongs in the current conversation.
 - Use memory for declarative facts and preferences, skill for repeatable procedures exposed as Python calls, prompt for narrow behavioral policy addendums, and subagent for reusable delegation roles.
 - Create or update the smallest relevant component: repeated delegation roles should become subagent specs, repeated procedures should become skills, durable facts/preferences should become memories, and narrow behavioral policies should become prompt addendums.
 - When an edit is persisted, include metadata such as \`{"scope":"local"}\` or \`{"scope":"global"}\` when that helps future review understand the intended blast radius.
@@ -169,7 +169,7 @@ JSON only with this exact shape:
       "id": "stable id for update/delete, optional for create",
       "title": "required for create/update except delete",
       "content": "required for create/update except delete",
-      "path": "optional grouping path",
+      "topic": "optional grouping topic",
       "reference": {"type": "python", "import": "package.module", "callable": "function_name", "call_pattern": "await function_name(...)"},
       "arguments": {"name": {"type": "string", "required": true, "description": "accepted input"}},
       "metadata": {},
@@ -285,6 +285,12 @@ function objectRecord(value: unknown): Record<string, unknown> | undefined {
 	return value as Record<string, unknown>;
 }
 
+/** Grouping label of a stored entry, or undefined when it carries none. Older files spell it `path`. */
+function harnessTopic(entry: { topic?: unknown; path?: unknown }): string | undefined {
+	if (typeof entry.topic === "string") return entry.topic;
+	return typeof entry.path === "string" ? entry.path : undefined;
+}
+
 function normalizeHarnessScope(value: unknown, fallback: HarnessScope): HarnessScope {
 	return value === "global" || value === "local" ? value : fallback;
 }
@@ -350,8 +356,10 @@ export function loadHarnessState(
 			for (const [id, rawEntry] of Object.entries(records)) {
 				const entry = objectRecord(rawEntry);
 				if (!entry) continue;
+				const { path: _path, ...rest } = entry as unknown as HarnessEntry & { path?: unknown };
 				state.entries[kind][id] = {
-					...(entry as unknown as HarnessEntry),
+					...rest,
+					topic: harnessTopic(entry) ?? "general",
 					scope: normalizeHarnessScope(entry.scope, scope),
 					reference: objectRecord(entry.reference) ?? {},
 					arguments: objectRecord(entry.arguments) ?? {},
@@ -385,12 +393,28 @@ export function mergeHarnessStates(globalState: HarnessState, localState?: Harne
 	return merged;
 }
 
+/**
+ * Pre-topic builds rewriting the shared global store drop unknown keys; mirror the grouping under
+ * `path` so their rewrite round-trips it. Drop once no pre-topic build can reach a shared store.
+ */
+function serializeHarnessState(state: HarnessState): HarnessState {
+	const serialized = emptyHarnessState();
+	serialized.schema = state.schema;
+	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
+		for (const [id, entry] of Object.entries(state.entries[kind])) {
+			serialized.entries[kind][id] = { ...entry, path: entry.topic } as HarnessEntry;
+		}
+	}
+	serialized.refinements = state.refinements;
+	return serialized;
+}
+
 export function saveHarnessState(harnessStateDir: string, state: HarnessState): string {
 	const statePath = getHarnessStatePath(harnessStateDir);
 	mkdirSync(harnessStateDir, { recursive: true });
 	const targetPath = realpathIfPresentSync(statePath);
 	const mode = existsSync(targetPath) ? statSync(targetPath).mode & 0o777 : 0o600;
-	writeFileAtomicSync(targetPath, `${JSON.stringify(state, null, 2)}\n`, { mode });
+	writeFileAtomicSync(targetPath, `${JSON.stringify(serializeHarnessState(state), null, 2)}\n`, { mode });
 	return statePath;
 }
 
@@ -586,7 +610,7 @@ export function harnessQueryTermIdf(entries: HarnessEntry[], terms: HarnessQuery
 		documents += 1;
 		const title = searchableField(entry.title);
 		const content = searchableField(entry.content);
-		const identifier = `${searchableField(entry.path)} ${searchableField(entry.id)}`;
+		const identifier = `${searchableField(entry.topic)} ${searchableField(entry.id)}`;
 		for (const term of terms.keys()) {
 			if (title.includes(term) || content.includes(term) || identifier.includes(term)) {
 				matches.set(term, (matches.get(term) ?? 0) + 1);
@@ -612,13 +636,13 @@ export function scoreHarnessEntryForQuery(
 	if (terms.size === 0) return 0;
 	const title = searchableField(entry.title);
 	const content = searchableField(entry.content);
-	const identifier = `${searchableField(entry.path)} ${searchableField(entry.id)}`;
+	const identifier = `${searchableField(entry.topic)} ${searchableField(entry.id)}`;
 	let score = 0;
 	for (const [term, weight] of terms) {
 		// One match per field counts once per term: coverage over distinct
-		// fields matters more than repetition inside a single field. Path
+		// fields matters more than repetition inside a single field. Topic
 		// and id form a single identifier slot: the id is often embedded in
-		// the path, so matching both is one signal, not two.
+		// the topic, so matching both is one signal, not two.
 		let fields = 0;
 		if (title.includes(term)) fields += 1;
 		if (content.includes(term)) fields += 1;
@@ -638,10 +662,10 @@ function compareRankedHarnessEntries(
 ): number {
 	const scoreDifference = scoreHarnessEntryForQuery(b, terms, idf) - scoreHarnessEntryForQuery(a, terms, idf);
 	if (scoreDifference !== 0) return scoreDifference;
-	// Equal scores tie on stable identifier order (path, title, id), so
+	// Equal scores tie on stable identifier order (topic, title, id), so
 	// touching unrelated entries never reshuffles equal-score siblings and the
 	// rendered digest keeps a stable prefix for provider prompt-cache reuse.
-	return [a.path, a.title, a.id].join("\0").localeCompare([b.path, b.title, b.id].join("\0"));
+	return [a.topic, a.title, a.id].join("\0").localeCompare([b.topic, b.title, b.id].join("\0"));
 }
 
 export function formatHarnessStateForPrompt(
@@ -694,7 +718,7 @@ export function formatHarnessStateForPrompt(
 		const entries = ranked.sort((a, b) =>
 			queryTerms !== undefined && queryTerms.size > 0
 				? compareRankedHarnessEntries(a, b, queryTerms, idf)
-				: [a.path, a.title, a.id].join("\0").localeCompare([b.path, b.title, b.id].join("\0")),
+				: [a.topic, a.title, a.id].join("\0").localeCompare([b.topic, b.title, b.id].join("\0")),
 		);
 		totalEntries += entries.length;
 		// Render subagent specs as a task-shaped roster the model can match against — the
@@ -725,7 +749,7 @@ export function formatHarnessStateForPrompt(
 					? ` ref=${compactText(JSON.stringify(entry.reference), maxContentLength)}`
 					: "";
 			lines.push(
-				`- [${entry.scope ?? "global"}:${entry.id}] ${entry.title} (${entry.path}, v${entry.version})${referenceText}${argumentsText}: ${compactText(
+				`- [${entry.scope ?? "global"}:${entry.id}] ${entry.title} (${entry.topic}, v${entry.version})${referenceText}${argumentsText}: ${compactText(
 					entry.content,
 					maxContentLength,
 				)}`,
@@ -795,7 +819,7 @@ export function harnessDigestFingerprint(
 			kind: entry.kind,
 			id: entry.id,
 			title: entry.title,
-			path: entry.path,
+			topic: entry.topic,
 			version: entry.version,
 			content: entry.content,
 			// Only skills render the kernel call contract, so another kind can
@@ -853,7 +877,7 @@ function overviewForPrompt(state: HarnessState): string {
 					? ` ref=${JSON.stringify(entry.reference).slice(0, 240)}`
 					: "";
 			lines.push(
-				`- [${entry.scope ?? "global"}:${entry.id}] ${entry.title} (${entry.path}, v${entry.version})${referenceText}${argumentsText}: ${content}`,
+				`- [${entry.scope ?? "global"}:${entry.id}] ${entry.title} (${entry.topic}, v${entry.version})${referenceText}${argumentsText}: ${content}`,
 			);
 		}
 		if (entries.length > 40) {
@@ -968,7 +992,7 @@ export function normalizeRefinementProposal(value: unknown): RefinementProposal 
 				id: typeof edit.id === "string" ? edit.id : undefined,
 				title: typeof edit.title === "string" ? edit.title : undefined,
 				content: typeof edit.content === "string" ? edit.content : undefined,
-				path: typeof edit.path === "string" ? edit.path : undefined,
+				topic: harnessTopic(edit),
 				reference: objectRecord(edit.reference),
 				arguments: objectRecord(edit.arguments),
 				metadata:
@@ -1007,8 +1031,8 @@ function validateEdit(edit: RefinementEdit, computedId?: string): string | undef
 	if (edit.id !== undefined && (typeof edit.id !== "string" || edit.id.length === 0)) {
 		return `${edit.action} requires id to be a non-empty string when provided`;
 	}
-	if (edit.path !== undefined && (typeof edit.path !== "string" || edit.path.length === 0)) {
-		return `${edit.action} requires path to be a non-empty string when provided`;
+	if (edit.topic !== undefined && (typeof edit.topic !== "string" || edit.topic.length === 0)) {
+		return `${edit.action} requires topic to be a non-empty string when provided`;
 	}
 	if (
 		edit.action !== "delete" &&
@@ -1112,7 +1136,7 @@ export function applyRefinementProposal(
 			kind: edit.kind,
 			title: edit.title ?? before?.title ?? id,
 			content: edit.content ?? before?.content ?? "",
-			path: edit.path ?? before?.path ?? "general",
+			topic: edit.topic ?? before?.topic ?? "general",
 			scope: before?.scope ?? options.scope ?? "local",
 			reference: edit.reference ?? before?.reference ?? {},
 			arguments: edit.arguments ?? before?.arguments ?? {},
@@ -1160,7 +1184,7 @@ function rollbackProposal(target: RefinementResult): RefinementProposal {
 				id: edit.id,
 				title: edit.before.title,
 				content: edit.before.content,
-				path: edit.before.path,
+				topic: harnessTopic(edit.before),
 				reference: edit.before.reference,
 				arguments: edit.before.arguments,
 				metadata: edit.before.metadata,

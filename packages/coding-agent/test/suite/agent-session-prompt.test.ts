@@ -994,7 +994,7 @@ describe("Harness digest at cold boundaries", () => {
 			kind: "memory",
 			title,
 			content,
-			path: "general",
+			topic: "general",
 			scope,
 			reference: {},
 			arguments: {},

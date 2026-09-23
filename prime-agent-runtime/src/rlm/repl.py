@@ -869,6 +869,102 @@ def _snapshot_state(
     return result
 
 
+def _revive_with_live_globals(
+    value: Any,
+    ns: dict[str, Any],
+    backfill: list[tuple[str, Any]] | None = None,
+    memo: dict[int, Any] | None = None,
+) -> Any:
+    """Rebind restored __main__ callables onto the live namespace, collecting
+    names their saved globals carry but ns lacks as backfill for the caller
+    to apply at commit (live ns values always win)."""
+    import functools
+
+    if memo is None:
+        memo = {}
+    if id(value) in memo:
+        return memo[id(value)]
+
+    def revive(dep: Any) -> Any:
+        return _revive_with_live_globals(dep, ns, backfill, memo)
+
+    if isinstance(value, functools.partial):
+        # No placeholder memo entry: a partial is immutable, so it could never be patched;
+        # every cycle passes through a function, which is memoized before recursing.
+        rebuilt = revive(value.func)
+        changed = rebuilt is not value.func
+        args = []
+        keywords = {}
+        for arg in value.args:
+            revived = revive(arg)
+            changed = changed or revived is not arg
+            args.append(revived)
+        for key, arg in value.keywords.items():
+            revived = revive(arg)
+            changed = changed or revived is not arg
+            keywords[key] = revived
+        if not changed:
+            return memo.setdefault(id(value), value)
+        rebuilt_partial = functools.partial(rebuilt, *args, **keywords)
+        rebuilt_partial.__dict__.update(value.__dict__)
+        return memo.setdefault(id(value), rebuilt_partial)
+    atoms = (int, float, str, bytes, bool, type(None))
+    # dill loads __main__.__dict__ by reference, so a saved globals() IS the live ns: never walk it.
+    if value is ns:
+        return value
+    if isinstance(value, (list, dict)):
+        # Memoized before recursing and revived in place: cycles and identity come for free.
+        # Skipping atoms keeps the walk over million-element containers near dill.loads cost.
+        memo[id(value)] = value
+        for key, item in enumerate(value) if isinstance(value, list) else value.items():
+            revived = item if type(item) in atoms else revive(item)
+            if revived is not item:
+                value[key] = revived
+        return value
+    if type(value) is tuple:
+        items = tuple(item if type(item) in atoms else revive(item) for item in value)
+        if all(new is old for new, old in zip(items, value)):
+            items = value
+        return memo.setdefault(id(value), items)
+    if not isinstance(value, types.FunctionType) or value.__module__ != "__main__":
+        return value
+    # Defaults and cell contents are revived only after the rebound function is memoized, so a
+    # function reachable from its own defaults or closure resolves to it. Cells are revived in
+    # place: holders this walk never sees (attribute-held siblings) must keep sharing them.
+    rebound = types.FunctionType(value.__code__, ns, value.__name__, None, value.__closure__)
+    memo[id(value)] = rebound
+    if backfill is not None:
+        for name, dep in value.__globals__.items():
+            # Snapshots never save _-prefixed or skip-listed names; backfill must not smuggle them past that policy.
+            if name in ns or name.startswith("_") or name in _ALWAYS_SKIP or name in _RESTORE_SKIP:
+                continue
+            backfill.append((name, revive(dep)))
+    if value.__defaults__:
+        rebound.__defaults__ = tuple(revive(dep) for dep in value.__defaults__)
+    if value.__kwdefaults__:
+        rebound.__kwdefaults__ = {key: revive(dep) for key, dep in value.__kwdefaults__.items()}
+    for cell in value.__closure__ or ():
+        if id(cell) in memo:
+            continue
+        memo[id(cell)] = cell
+        try:
+            contents = cell.cell_contents
+        except ValueError:
+            continue
+        cell.cell_contents = revive(contents)
+    rebound.__doc__ = value.__doc__
+    rebound.__dict__.update({key: revive(attr) for key, attr in value.__dict__.items()})
+    rebound.__annotations__ = value.__annotations__
+    rebound.__qualname__ = value.__qualname__
+    rebound.__module__ = value.__module__
+    # PEP 695 generics carry their type params here on 3.12+; plain 3.11
+    # functions lack the attribute entirely, hence the getattr guard.
+    params = getattr(value, "__type_params__", None)
+    if params is not None:
+        rebound.__type_params__ = params
+    return rebound
+
+
 def _restore_state(
     ns: dict[str, Any], path: str, committed: list[dict[str, Any]] | None = None
 ) -> dict[str, Any]:
@@ -900,12 +996,26 @@ def _restore_state(
             staged[name] = dill.loads(blob)
         except Exception as err:  # noqa: BLE001 - revive every other name regardless
             failed.append({"name": name, "reason": f"{type(err).__name__}: {_safe_str(err)[:200]}"})
-    result = {"restored": sorted(staged), "failed": failed}
+    # Revive every staged name before parking: a failure must never abort the
+    # apply halfway and leave the namespace half old, half new.
+    prepared: dict[str, Any] = {}
+    backfill: list[tuple[str, Any]] = []
+    revive_failed: list[dict[str, str]] = []
+    for name, value in staged.items():
+        try:
+            prepared[name] = _revive_with_live_globals(value, ns, backfill)
+        except Exception as err:  # noqa: BLE001 - one broken revival must not abort the restore
+            revive_failed.append({"name": name, "reason": f"{type(err).__name__}: {_safe_str(err)[:200]}"})
+    result = {"restored": sorted(prepared), "failed": failed + revive_failed}
     # Park SIGINT across the whole apply so it is all-or-nothing; the parked interrupt is consumed by the commit (as in snapshot).
     previous = signal.signal(signal.SIGINT, lambda signum, frame: None)
     try:
-        for name, value in staged.items():
+        for name, value in prepared.items():
             ns[name] = value
+        for name, value in backfill:
+            # prepared names already sit in ns here: a restored value always beats backfill.
+            if name not in ns:
+                ns[name] = value
         # Publish while still parked: a later KeyboardInterrupt into this task finds the committed result (see _handle_state).
         if committed is not None:
             committed.append(result)
