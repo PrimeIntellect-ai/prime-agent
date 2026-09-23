@@ -576,6 +576,7 @@ mod tests {
             Some(&selector),
             Some("prime-inference/z-ai/glm-5.3"),
             "subagent",
+            None,
         )
         .unwrap();
         assert_eq!(resolved, selector);
@@ -584,6 +585,7 @@ mod tests {
             Some(PROBE_ID),
             Some("prime-inference/z-ai/glm-5.3"),
             "subagent",
+            None,
         )
         .unwrap();
         assert_eq!(resolved, selector);

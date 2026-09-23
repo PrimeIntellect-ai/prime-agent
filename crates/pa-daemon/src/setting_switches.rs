@@ -678,7 +678,9 @@ mod tests {
 
     /// `cycle_model` answers the daemon model-allowlist refusal with the
     /// loud message (the refusal reason, not the generic non-switching
-    /// error) and never attempts the switch.
+    /// error) and never attempts the switch. The scoped list pins the
+    /// cycle to the two fixture models, so the next candidate is the
+    /// off-allowlist mock.
     #[tokio::test]
     async fn cycle_model_refuses_models_outside_the_allowlist() {
         let dir = std::env::temp_dir().join(format!("pa-worker-cm3-{}", uuid::Uuid::new_v4()));
@@ -695,6 +697,19 @@ mod tests {
             .dispatch("create", &json!({ "noSession": true, "cwd": dir }))
             .await;
         assert!(created.success);
+        let scoped = worker
+            .dispatch(
+                "set_scoped_models",
+                &json!({
+                    "activeSessionId": "switch-session",
+                    "scopedModels": [
+                        { "model": { "provider": "prime-inference", "id": "mock-1" } },
+                        { "model": { "provider": "prime-inference", "id": "mock-2" } }
+                    ]
+                }),
+            )
+            .await;
+        assert!(scoped.success, "scoped fixture: {scoped:?}");
         let response = worker
             .dispatch(
                 "cycle_model",

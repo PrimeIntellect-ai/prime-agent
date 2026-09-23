@@ -216,6 +216,7 @@ fn resolve_available_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn worker_config(dir: &std::path::Path) -> crate::worker::WorkerConfig {
         crate::worker::WorkerConfig {

@@ -172,12 +172,10 @@ mod tests {
             "no client when the create command opted out"
         );
         // The settings opt-out (`telemetry.enabled: false`): no client.
+        let agent_dir = dir.path().join("agent");
         let settings_gated =
-            ModelRefusalTelemetry::new(dir.path().to_path_buf(), dir.path().to_path_buf(), false);
-        write_settings(
-            &dir.path().join("agent"),
-            r#"{"telemetry": {"enabled": false}}"#,
-        );
+            ModelRefusalTelemetry::new(dir.path().to_path_buf(), agent_dir.clone(), false);
+        write_settings(&agent_dir, r#"{"telemetry": {"enabled": false}}"#);
         settings_gated.note_refused("set_model", "zai/glm-5.3", dir.path());
         assert!(
             settings_gated.client.lock().unwrap().is_none(),
