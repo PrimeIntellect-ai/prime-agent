@@ -53,6 +53,7 @@ pub(crate) mod saved_session_commands;
 pub(crate) mod scheduled_jobs;
 pub(crate) mod scheduling_catalog;
 pub(crate) mod session_archive;
+pub(crate) mod session_bindings;
 pub(crate) mod session_catalog;
 pub(crate) mod session_commands;
 pub(crate) mod session_custom;
