@@ -526,10 +526,11 @@ mod tests {
         // counter never restarted, so the applied watermark still gates).
         roster.note_worker_generation("w1", "i2");
         assert!(!roster.accept_delta_sequence("w1", "i2", 1));
-        // The stop cleanup forgets the worker's slot.
+        // The stop cleanup forgets the worker's slot: the next frame
+        // starts a fresh slot (its generation becomes the named one).
         roster.forget_worker_sequences("w1");
         assert!(roster.accept_delta_sequence("w1", "i1", 1));
-        assert!(roster.accept_delta_sequence("w1", "i2", 1));
+        assert!(!roster.accept_delta_sequence("w1", "i2", 1));
     }
 
     #[test]
