@@ -380,3 +380,81 @@ fn reverse_reader_preserves_long_lines_and_unterminated_tail() {
     }
     assert_eq!(lines, vec!["last".to_owned(), long, "first".to_owned()]);
 }
+
+#[test]
+fn windowed_context_is_byte_identical_to_the_cold_parse() {
+    // The resumed worker's first model request is built from this context:
+    // the windowed open (cold scan and sidecar-warm alike) must reproduce
+    // the full parse byte for byte.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("byte-parity.jsonl");
+    let mut rows: Vec<serde_json::Value> = fixture()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    rows.push(serde_json::json!({"type":"model_change","id":"model","parentId":"leaf","provider":"openai","modelId":"gpt-5"}));
+    rows.push(serde_json::json!({"type":"message","id":"leaf2","parentId":"model","message":{"role":"user","content":"after the switch","timestamp":0}}));
+    let body: String = rows.into_iter().map(|row| row.to_string() + "\n").collect();
+    std::fs::write(&path, &body).unwrap();
+    let reference = build_session_context(&super::super::parse_session_entries(&body), None);
+    let reference_bytes = serde_json::to_vec(&(
+        &reference.messages,
+        &reference.thinking_level,
+        &reference.service_tier,
+        &reference.model,
+    ))
+    .unwrap();
+    for phase in ["cold", "warm"] {
+        let store = WindowedSessionStore::open(&path).unwrap().unwrap();
+        assert_eq!(store.read_stats().cache_hit, phase == "warm");
+        let context = store.context();
+        let bytes = serde_json::to_vec(&(
+            &context.messages,
+            &context.thinking_level,
+            &context.service_tier,
+            &context.model,
+        ))
+        .unwrap();
+        assert_eq!(
+            bytes, reference_bytes,
+            "{phase} open diverged from the full parse"
+        );
+    }
+}
+
+#[test]
+fn sequential_appends_keep_reopens_flat() {
+    // N leased appends must not make later opens rescan the growing suffix:
+    // the certified snapshot absorbs each row, so per-open file reads stay
+    // bounded by the first warm open instead of growing with N.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("flat.jsonl");
+    std::fs::write(&path, fixture()).unwrap();
+    WindowedSessionStore::open(&path).unwrap().unwrap();
+    let baseline = WindowedSessionStore::open(&path)
+        .unwrap()
+        .unwrap()
+        .read_stats()
+        .jsonl_bytes;
+    let mut parent = "leaf".to_owned();
+    for i in 0..40 {
+        let id = format!("n{i}");
+        let row = serde_json::json!({"type":"message","id":id,"parentId":parent,"message":{"role":"user","content":format!("appended {i}"),"timestamp":0}});
+        append_cached(
+            &path,
+            format!("{row}\n").as_bytes(),
+            AppendOwnership::SessionLeaseHeld,
+        )
+        .unwrap();
+        let store = WindowedSessionStore::open(&path).unwrap().unwrap();
+        let stats = store.read_stats();
+        assert!(stats.cache_hit, "append {i} invalidated the cache");
+        assert!(
+            stats.jsonl_bytes <= baseline,
+            "append {i} grew the reopen read: {} > {baseline}",
+            stats.jsonl_bytes
+        );
+        assert_eq!(store.leaf_id(), id, "append {i} lost the leaf");
+        parent = id;
+    }
+}

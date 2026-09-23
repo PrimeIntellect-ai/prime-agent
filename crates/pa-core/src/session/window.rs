@@ -640,6 +640,7 @@ impl WindowedSessionStore {
         &self.path
     }
 
+    #[cfg(test)]
     pub fn is_full_history(&self) -> bool {
         self.full
     }

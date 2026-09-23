@@ -383,6 +383,10 @@ impl SessionManager {
     /// Open only the compacted active window off the async executor. Use
     /// `active_context` until `ensure_full_history` completes before accessing
     /// historical entries, navigation, or exporting.
+    ///
+    /// Production windowed managers come from [`Self::adopt_window`]; this
+    /// constructor serves the window tests.
+    #[cfg(test)]
     pub async fn open_windowed(
         cwd: &Path,
         session_dir: &Path,
@@ -548,12 +552,14 @@ impl SessionManager {
         history
     }
 
+    #[cfg(test)]
     pub fn is_full_history(&self) -> bool {
         self.window.is_none()
     }
 
     /// Hydrate before historical reads or mutation. Loading uses a blocking
     /// worker; the selected leaf is retained and disk appends are preserved.
+    #[cfg(test)]
     pub async fn ensure_full_history(&mut self) -> anyhow::Result<()> {
         let Some(window) = self.window.as_mut() else {
             return Ok(());

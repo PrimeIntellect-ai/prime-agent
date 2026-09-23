@@ -757,7 +757,14 @@ impl SessionFile {
             self.window.is_none() || self.path.exists(),
             "window-backed session file is missing"
         );
-        let entry = SessionEntry::new(entry_type, self.leaf_id.clone(), &self.index_map(), fields);
+        let mut entry =
+            SessionEntry::new(entry_type, self.leaf_id.clone(), &self.index_map(), fields);
+        // A windowed index lacks the pre-window IDs, so the short minted ID
+        // could collide with unloaded history; a UUID cannot (same rule as
+        // `append_entry`).
+        if self.window.is_some() {
+            entry.id = uuid::Uuid::new_v4().to_string();
+        }
         let id = entry.id.clone();
         if !self.path.as_os_str().is_empty() && self.path.exists() {
             let mut bytes = Vec::new();
