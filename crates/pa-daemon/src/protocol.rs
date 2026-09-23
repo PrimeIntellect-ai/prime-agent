@@ -178,10 +178,16 @@ impl EnvelopeParseError {
 pub fn parse_daemon_command_line(line: &str) -> Result<DaemonCommandEnvelope, EnvelopeParseError> {
     let value: Value = serde_json::from_str(line)
         .map_err(|e| EnvelopeParseError::Invalid(format!("invalid JSON: {e}")))?;
+    parse_daemon_command_value(value)
+}
+
+fn parse_daemon_command_value(
+    mut value: Value,
+) -> Result<DaemonCommandEnvelope, EnvelopeParseError> {
     // Bare commands (no `type: "command"` envelope) are accepted directly.
     let (envelope_id, protocol, client_id, command_value) =
         if value.get("type").and_then(Value::as_str) == Some("command") {
-            let obj = value.as_object().ok_or_else(|| {
+            let obj = value.as_object_mut().ok_or_else(|| {
                 EnvelopeParseError::Invalid("command line is not an object".into())
             })?;
             let id = obj
@@ -206,6 +212,10 @@ pub fn parse_daemon_command_line(line: &str) -> Result<DaemonCommandEnvelope, En
                     DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION,
                 ));
             }
+            let protocol = DaemonProtocolInfo {
+                name: name.to_string(),
+                version,
+            };
             let client_id = match obj.get("clientId") {
                 None | Some(Value::Null) => None,
                 Some(Value::String(s)) => Some(s.clone()),
@@ -215,38 +225,27 @@ pub fn parse_daemon_command_line(line: &str) -> Result<DaemonCommandEnvelope, En
                     ))
                 }
             };
-            let command_value = obj.get("command").cloned().ok_or_else(|| {
+            let command_value = obj.remove("command").ok_or_else(|| {
                 EnvelopeParseError::Invalid("command envelope is missing command".into())
             })?;
-            (
-                id,
-                DaemonProtocolInfo {
-                    name: name.to_string(),
-                    version,
-                },
-                client_id,
-                command_value,
-            )
+            (id, protocol, client_id, command_value)
         } else {
-            (
-                value
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                current_protocol_info(),
-                None,
-                value.clone(),
-            )
+            let id = value
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            (id, current_protocol_info(), None, value)
         };
-    let command = match serde_json::from_value::<DaemonCommand>(command_value.clone()) {
+    let type_name = command_value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    // Keep the tag for the error after deserialization consumes the command value.
+    let type_name = type_name.to_string();
+    let command = match serde_json::from_value::<DaemonCommand>(command_value) {
         Ok(command) => command,
         Err(_) => {
-            let type_name = command_value
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_string();
             if !KNOWN_COMMAND_TYPES.contains(&type_name.as_str()) {
                 return Err(EnvelopeParseError::UnknownCommand(type_name));
             }
@@ -339,7 +338,7 @@ pub fn parse_supervisor_command_line(
             DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION,
         ));
     }
-    parse_daemon_command_line(line)
+    parse_daemon_command_value(value)
 }
 
 /// `proc:<start_time>` identity of a process (shared platform contract).
@@ -946,6 +945,48 @@ mod tests {
         let envelope = parse_daemon_command_line(line).expect("envelope parses");
         assert_eq!(envelope.id, "c1");
         assert!(matches!(envelope.command, DaemonCommand::List { .. }));
+    }
+
+    #[test]
+    fn supervisor_parser_preserves_envelope_and_bare_error_shapes() {
+        let cases = [
+            (
+                r#"{"type":"list"}"#,
+                "Daemon commands require protocol 7 or newer",
+            ),
+            (
+                r#"{"type":"command","protocol":{"name":"prime-agent.daemon","version":7},"command":{"type":"list"}}"#,
+                "Invalid daemon command: command envelope is missing id",
+            ),
+            (
+                r#"{"type":"command","id":"x","protocol":{"name":"prime-agent.daemon","version":7},"clientId":42,"command":{"type":"list"}}"#,
+                "Invalid daemon command: clientId must be a string",
+            ),
+            (
+                r#"{"type":"command","id":"x","protocol":{"name":"prime-agent.daemon","version":7}}"#,
+                "Invalid daemon command: command envelope is missing command",
+            ),
+            (
+                r#"{"type":"command","id":"x","protocol":{"name":"prime-agent.daemon","version":7},"command":{"type":"not-real"}}"#,
+                "Unknown daemon command: not-real",
+            ),
+            (
+                r#"{"type":"command","id":"x","protocol":{"name":"prime-agent.daemon","version":7},"command":{"type":"prompt"}}"#,
+                "Invalid daemon command: malformed prompt command",
+            ),
+        ];
+        for (line, expected) in cases {
+            assert_eq!(
+                parse_supervisor_command_line(line).unwrap_err().to_string(),
+                expected
+            );
+        }
+        let command = json!({"type":"prompt", "activeSessionId":"s", "message":"hello", "content":{"blocks":[{"text":"nested"}]}});
+        let line = json!({"type":"command", "id":"x", "clientId":"client", "protocol":{"name":"prime-agent.daemon","version":7}, "command":command}).to_string();
+        let parsed = parse_supervisor_command_line(&line).unwrap();
+        assert_eq!(parsed.id, "x");
+        assert_eq!(parsed.client_id.as_deref(), Some("client"));
+        assert_eq!(serde_json::to_value(parsed.command).unwrap(), command);
     }
 
     #[test]
