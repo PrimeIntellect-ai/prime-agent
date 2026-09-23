@@ -2613,7 +2613,15 @@ impl Supervisor {
         };
         // Refresh the durable identity from the live worker (the token was
         // issued by this supervisor; a mismatch is a rogue registration).
-        {
+        // The registration's durable id is optional on the wire: a
+        // re-registering worker that does not report it still owns its
+        // persisted descriptor, whose session-file stem addresses the same
+        // roster row (a fresh create's registration lands before the
+        // create replay assigns the session, so this reads the persisted
+        // path). Both reads share this one lock acquisition - the
+        // create path holds this mutex around its own replay steps, and a
+        // second acquisition here let the two race into a stall.
+        let durable_session_id = {
             let mut descriptor = resident.descriptor.lock().await;
             if token.as_str() != descriptor.authentication_token {
                 return fail("Session worker authentication failed");
@@ -2626,21 +2634,15 @@ impl Supervisor {
             }
             descriptor.lifecycle = DaemonWorkerLifecycle::Ready;
             let _ = persist_worker(&resident.descriptor_path, &descriptor);
-        }
-        // The registration's durable id is optional on the wire: a
-        // re-registering worker that does not report it still owns its
-        // persisted descriptor, whose session-file stem addresses the
-        // same roster row.
-        let durable_session_id = match registration.session_id.clone() {
-            Some(session_id) => Some(session_id),
-            None => resident
-                .descriptor
-                .lock()
-                .await
-                .session_file
-                .as_deref()
-                .and_then(|file| Path::new(file).file_stem())
-                .map(|stem| stem.to_string_lossy().to_string()),
+            match registration.session_id.clone() {
+                Some(session_id) => Some(session_id),
+                None => descriptor
+                    .session_file
+                    .clone()
+                    .as_deref()
+                    .and_then(|file| Path::new(file).file_stem())
+                    .map(|stem| stem.to_string_lossy().to_string()),
+            }
         };
         let record = self.registry.record_registration(registration).await;
         // A restore pass that owns this session's roster row can settle it
