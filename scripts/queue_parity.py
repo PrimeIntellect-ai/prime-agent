@@ -232,8 +232,13 @@ def run_queue_session(binary, sandbox, shared_cwd, script_path, size, out_dir, p
         "PRIME_AGENT_DISABLE_ANALYTICS=1"
     )
     if binary == "ts":
+        # The tmux server's inherited PATH may sit a Rust build at
+        # `prime-agent` (the box's release install): resolve the binary
+        # in THIS process's PATH (the operator points it at the TS
+        # release for the run) and launch the absolute path.
+        ts_bin = shutil.which("prime-agent") or "prime-agent"
         command = (
-            f"prime-agent --daemon-socket {sandbox['agent']}/daemon.sock "
+            f"{ts_bin} --daemon-socket {sandbox['agent']}/daemon.sock "
             f"--model {vp.TS_SCRIPT_MODEL}"
         )
     else:
@@ -296,6 +301,30 @@ def run_queue_session(binary, sandbox, shared_cwd, script_path, size, out_dir, p
     vp.tmux("send-keys", "-t", session, FIRST_PROMPT)
     vp.tmux("send-keys", "-t", session, "Enter")
     vp.wait_for(session, "streams slowly", timeout=60)
+
+    # (h) the streaming follow-up hint (TS `getTrayOverrideLabel`): early
+    # in the slow turn, type a draft without submitting — the tray row
+    # becomes `<followUp> to queue message`. Captured before the parking
+    # below (the parked prompts ride the same turn; the cleared draft
+    # leaves the editor exactly as the parking expects).
+    vp.tmux("send-keys", "-t", session, HINT_DRAFT)
+    try:
+        vp.wait_for(session, STREAMING_HINT_ROW, timeout=15)
+    except TimeoutError:
+        # Failure evidence: the pane at the miss, so the diff between the
+        # rendered tray and the expected row is visible post-run.
+        dump = vp.capture(session, escape=False)
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, f"{binary}-h-miss-plain.txt"), "w") as f:
+            f.write(dump)
+        raise
+    time.sleep(0.3)
+    frames["h_streaming_hint"] = vp.capture(session)
+    vp.tmux("send-keys", "-t", session, "Escape")
+    time.sleep(0.4)
+    vp.tmux("send-keys", "-t", session, "Escape")
+    wait_plain(session, STREAMING_HINT_ROW, gone=True, timeout=15)
+
     vp.tmux("send-keys", "-t", session, STEERING_PROMPT)
     vp.tmux("send-keys", "-t", session, "Enter")
     vp.tmux("send-keys", "-t", session, FOLLOW_UP_PROMPT)
@@ -305,20 +334,6 @@ def run_queue_session(binary, sandbox, shared_cwd, script_path, size, out_dir, p
     vp.wait_for(session, FOLLOW_UP_ROW, timeout=15)
     time.sleep(0.3)
     frames["q_queue_strip"] = vp.capture(session)
-
-    # (h) the streaming follow-up hint (TS `getTrayOverrideLabel`): while
-    # the turn still streams and a draft sits in the editor, the tray row
-    # becomes `<followUp> to queue message`. Type a draft without
-    # submitting, capture, then clear it — the hint leaves with the empty
-    # editor, and the browse state below starts from the clean editor.
-    vp.tmux("send-keys", "-t", session, HINT_DRAFT)
-    vp.wait_for(session, STREAMING_HINT_ROW, timeout=15)
-    time.sleep(0.3)
-    frames["h_streaming_hint"] = vp.capture(session)
-    vp.tmux("send-keys", "-t", session, "Escape")
-    time.sleep(0.4)
-    vp.tmux("send-keys", "-t", session, "Escape")
-    wait_plain(session, STREAMING_HINT_ROW, gone=True, timeout=15)
 
     # (b) the browse state: alt+up selects the newest parked message (the
     # follow-up) and shows the dim browse header.
@@ -386,8 +401,12 @@ def run_hotkeys_session(binary, sandbox, shared_cwd, script_path, out_dir, prefi
         "PRIME_AGENT_DISABLE_ANALYTICS=1"
     )
     if binary == "ts":
+        # (See the queue session above: resolve the TS binary in this
+        # process's PATH — the tmux server's inherited PATH may sit a
+        # Rust build at `prime-agent`.)
+        ts_bin = shutil.which("prime-agent") or "prime-agent"
         command = (
-            f"prime-agent --daemon-socket {sandbox['agent']}/daemon.sock "
+            f"{ts_bin} --daemon-socket {sandbox['agent']}/daemon.sock "
             f"--model {vp.TS_SCRIPT_MODEL}"
         )
     else:
