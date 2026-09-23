@@ -355,7 +355,7 @@ fn forked_branch_entries(entries: Vec<FileEntry>) -> Vec<FileEntry> {
                     },
                 );
             }
-            serde_json::from_value(value).unwrap_or_else(|_| entry)
+            serde_json::from_value(value).unwrap_or(entry)
         })
         .collect()
 }
@@ -2016,9 +2016,7 @@ mod tests {
         let headerless = tmp.path().join("headerless.jsonl");
         std::fs::write(
             &headerless,
-            format!(
-                "{{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":[],\"timestamp\":0}},\"id\":\"aaaa1\",\"parentId\":null}}\n"
-            ),
+            "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[],\"timestamp\":0},\"id\":\"aaaa1\",\"parentId\":null}\n",
         )
         .unwrap();
         let error =
