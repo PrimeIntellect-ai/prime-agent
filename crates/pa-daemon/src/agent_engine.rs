@@ -13,6 +13,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use crate::agent_messaging::{LinkAgentMessageController, LinkAgentObserveController};
+use crate::model_allowlist::DaemonAllowlist;
 use crate::overflow_compaction::{OverflowArmRun, OverflowRecovery};
 use pa_agent::abort::AbortController;
 use pa_agent::types::StopReason;
@@ -1043,8 +1044,14 @@ impl AgentSessionEngine {
         let model = self.resolve_registry_model_unchecked()?;
         let selector = format!("{}/{}", model.provider, model.id);
         let allowlist = crate::model_allowlist::load(&self.cwd(), &self.config.agent_dir);
+<<<<<<< HEAD
         if let Err(refusal) = crate::model_allowlist::assert_allowed(&allowlist, &selector) {
             if let Some(refusal) = refusal.downcast_ref::<pa_core::models::ModelAllowlistRefusal>() {
+=======
+        if let Err(refusal) = crate::model_allowlist::assert_allowed(Some(&allowlist), &selector) {
+            if let Some(refusal) = refusal.downcast_ref::<pa_core::models::ModelAllowlistRefusal>()
+            {
+>>>>>>> 11040b22c (fix(pa-daemon): the model allowlist fails closed on unreadable settings (Macroscope #2585))
                 self.note_model_refused("session_start", &refusal.selector);
             }
             return Err(refusal);
@@ -1953,7 +1960,7 @@ impl SessionEngine for AgentSessionEngine {
         {
             let selector = format!("{provider}/{model}");
             let allowlist = crate::model_allowlist::load(&self.cwd(), &self.config.agent_dir);
-            if crate::model_allowlist::assert_allowed(allowlist.as_deref(), &selector).is_err() {
+            if crate::model_allowlist::assert_allowed(Some(&allowlist), &selector).is_err() {
                 return false;
             }
         }
@@ -3748,18 +3755,20 @@ impl AgentSessionEngine {
         let available: Vec<pa_types::ai::Model> =
             registry.get_available().into_iter().cloned().collect();
         let candidates = pa_core::models::failover_candidates(model, &available);
-        let allowlist = crate::model_allowlist::load(&self.cwd(), &self.config.agent_dir);
-        match allowlist {
-            None => candidates,
-            Some(allowlist) => candidates
+        match crate::model_allowlist::load(&self.cwd(), &self.config.agent_dir) {
+            DaemonAllowlist::Unrestricted => candidates,
+            DaemonAllowlist::Allowed(patterns) => candidates
                 .into_iter()
                 .filter(|candidate| {
                     pa_core::models::model_allowed(
                         &format!("{}/{}", candidate.provider, candidate.id),
-                        &allowlist,
+                        &patterns,
                     )
                 })
                 .collect(),
+            // Fail closed on an unreadable policy: no failover candidate
+            // may bypass the configured allowlist.
+            DaemonAllowlist::Unreadable(_) => Vec::new(),
         }
     }
 

@@ -11,26 +11,61 @@ use std::path::Path;
 use pa_core::models::ModelAllowlistRefusal;
 use pa_telemetry::TelemetryClient;
 
-/// The daemon allowlist (settings `allowedModels`, global scope): `None`
-/// is unrestricted (TS parity).
-pub(crate) fn load(cwd: &Path, agent_dir: &Path) -> Option<Vec<String>> {
-    pa_core::settings::SettingsManager::create(cwd, agent_dir).get_allowed_models()
+/// The daemon allowlist's loaded state (settings `allowedModels`, global
+/// scope). A security guardrail fails CLOSED: a settings document that
+/// could not be loaded is an unknown policy, never an unrestricted one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonAllowlist {
+    /// No `allowedModels` configured: unrestricted (TS parity).
+    Unrestricted,
+    /// The configured patterns.
+    Allowed(Vec<String>),
+    /// The global settings document could not be loaded (lock contention,
+    /// read, or parse failure): the configured policy is unknown, so every
+    /// resolution fails loudly instead of bypassing it.
+    Unreadable(String),
+}
+
+/// Load the daemon allowlist state (settings `allowedModels`, global
+/// scope).
+pub(crate) fn load(cwd: &Path, agent_dir: &Path) -> DaemonAllowlist {
+    let settings = pa_core::settings::SettingsManager::create(cwd, agent_dir);
+    if let Some(error) = settings
+        .errors()
+        .iter()
+        .find(|error| error.scope == pa_core::settings::SettingsScope::Global)
+    {
+        return DaemonAllowlist::Unreadable(error.message.clone());
+    }
+    match settings.get_allowed_models() {
+        Some(patterns) => DaemonAllowlist::Allowed(patterns),
+        None => DaemonAllowlist::Unrestricted,
+    }
 }
 
 /// Enforce the allowlist on a resolved selector: `Ok(())` when allowed
-/// (and when no allowlist is configured), the loud typed refusal
-/// otherwise.
-pub(crate) fn assert_allowed(allowlist: Option<&[String]>, selector: &str) -> Result<()> {
-    let Some(allowlist) = allowlist else {
-        return Ok(());
-    };
-    if pa_core::models::model_allowed(selector, allowlist) {
-        return Ok(());
+/// (and when no allowlist is configured), the loud typed refusal for an
+/// off-allowlist model, and a fail-closed error when the configured
+/// policy could not be read.
+pub(crate) fn assert_allowed(allowlist: Option<&DaemonAllowlist>, selector: &str) -> Result<()> {
+    match allowlist {
+        None | Some(DaemonAllowlist::Unrestricted) => Ok(()),
+        Some(DaemonAllowlist::Allowed(patterns)) => {
+            if pa_core::models::model_allowed(selector, patterns) {
+                Ok(())
+            } else {
+                Err(ModelAllowlistRefusal {
+                    selector: selector.to_string(),
+                }
+                .into())
+            }
+        }
+        Some(DaemonAllowlist::Unreadable(error)) => Err(anyhow::anyhow!(
+            "The daemon model allowlist could not be read (settings load failed: {error}); \
+             refusing to resolve model \"{selector}\" — the daemon fails closed instead of \
+             bypassing the configured allowedModels policy. Fix settings.json and retry."
+        )),
     }
-    Err(ModelAllowlistRefusal {
-        selector: selector.to_string(),
-    }
-    .into())
 }
 
 /// The worker's refusal telemetry: one lazily-built client shared by the
@@ -114,12 +149,15 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let agent_dir = dir.path().join("agent");
         // No settings: unrestricted.
-        assert_eq!(load(dir.path(), &agent_dir), None);
+        assert!(matches!(
+            load(dir.path(), &agent_dir),
+            DaemonAllowlist::Unrestricted
+        ));
         // The global scope carries the allowlist.
         write_settings(&agent_dir, r#"{"allowedModels": ["prime-inference/*"]}"#);
         assert_eq!(
             load(dir.path(), &agent_dir),
-            Some(vec!["prime-inference/*".to_string()])
+            DaemonAllowlist::Allowed(vec!["prime-inference/*".to_string()])
         );
         // A project scope cannot weaken the global pin: the project dir is
         // the temp dir itself.
@@ -129,7 +167,7 @@ mod tests {
         );
         assert_eq!(
             load(dir.path(), &agent_dir),
-            Some(vec!["prime-inference/*".to_string()])
+            DaemonAllowlist::Allowed(vec!["prime-inference/*".to_string()])
         );
     }
 
@@ -143,30 +181,59 @@ mod tests {
         );
         assert_eq!(
             load(dir.path(), &agent_dir),
-            Some(vec!["prime-inference/internal/*".to_string()])
+            DaemonAllowlist::Allowed(vec!["prime-inference/internal/*".to_string()])
         );
         // A list that trims to empty behaves as unset.
         write_settings(&agent_dir, r#"{"allowedModels": [" ", ""]}"#);
-        assert_eq!(load(dir.path(), &agent_dir), None);
+        assert!(matches!(
+            load(dir.path(), &agent_dir),
+            DaemonAllowlist::Unrestricted
+        ));
     }
 
     #[test]
     fn assert_allowed_passes_without_an_allowlist_and_types_the_refusal() {
         // No allowlist: everything passes (TS parity).
         assert_allowed(None, "anything/model").unwrap();
+        assert_allowed(Some(&DaemonAllowlist::Unrestricted), "anything/model").unwrap();
         // Allowed by the allowlist.
-        assert_allowed(
-            Some(&["prime-inference/*".to_string()]),
-            "prime-inference/internal/glm-5.3-fast",
-        )
-        .unwrap();
+        let allow = DaemonAllowlist::Allowed(vec!["prime-inference/*".to_string()]);
+        assert_allowed(Some(&allow), "prime-inference/internal/glm-5.3-fast").unwrap();
         // Refused: the typed error downcasts for the telemetry seam.
-        let error = assert_allowed(Some(&["prime-inference/*".to_string()]), "zai/glm-5.3")
-            .expect_err("refused");
+        let error = assert_allowed(Some(&allow), "zai/glm-5.3").expect_err("refused");
         let refusal = error
             .downcast_ref::<ModelAllowlistRefusal>()
             .expect("typed refusal");
         assert_eq!(refusal.selector, "zai/glm-5.3");
+    }
+
+    /// A settings document that cannot be loaded fails CLOSED: the
+    /// configured policy is unknown, so the gate refuses every resolution
+    /// with a loud error instead of bypassing the allowlist.
+    #[test]
+    fn an_unreadable_settings_document_fails_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("settings.json"), "{ not json").unwrap();
+        let state = load(dir.path(), &agent_dir);
+        assert!(
+            matches!(state, DaemonAllowlist::Unreadable(ref message) if message.contains("expected"))
+        );
+        // The gate refuses a would-be-allowed model while unreadable...
+        let error =
+            assert_allowed(Some(&state), "prime-inference/mock-1").expect_err("fail closed");
+        let message = error.to_string();
+        assert!(message.contains("could not be read"), "{message}");
+        assert!(message.contains("fails closed"), "{message}");
+        assert!(
+            error.downcast_ref::<ModelAllowlistRefusal>().is_none(),
+            "fail-closed is not a pattern refusal"
+        );
+        // ...and passes nothing as Unrestricted when the document is gone.
+        std::fs::remove_file(agent_dir.join("settings.json")).unwrap();
+        let state = load(dir.path(), &agent_dir);
+        assert!(matches!(state, DaemonAllowlist::Unrestricted));
     }
 
     #[tokio::test]

@@ -1218,7 +1218,7 @@ fn resolve_child_model_allowlisted(
         reference,
         identity.model.as_deref(),
         target,
-        allowlist.as_deref(),
+        Some(&allowlist),
     ) {
         Ok(model) => Ok(model),
         Err(error) => {

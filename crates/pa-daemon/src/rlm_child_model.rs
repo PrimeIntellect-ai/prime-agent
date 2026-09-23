@@ -49,7 +49,7 @@ pub fn resolve_child_model(
     reference: Option<&str>,
     parent_model: Option<&str>,
     target: &str,
-    allowlist: Option<&[String]>,
+    allowlist: Option<&crate::model_allowlist::DaemonAllowlist>,
 ) -> Result<String> {
     let model = resolve_child_model_unchecked(agent_dir, reference, parent_model, target)?;
     crate::model_allowlist::assert_allowed(allowlist, &model)?;
@@ -284,7 +284,8 @@ mod tests {
     fn the_allowlist_refuses_resolved_models_loudly() {
         let dir = tempfile::TempDir::new().unwrap();
         write_catalog(dir.path());
-        let allow = vec!["prime-inference/*".to_string()];
+        let allow =
+            crate::model_allowlist::DaemonAllowlist::Allowed(vec!["prime-inference/*".to_string()]);
         // An explicit reference that resolves but sits outside the
         // allowlist fails with the typed refusal, never a fallback.
         let error = resolve_child_model(
@@ -327,7 +328,9 @@ mod tests {
             Some("test-provider/glm-5.3"),
             None,
             "subagent",
-            Some(&["test-provider/*".to_string()]),
+            Some(&crate::model_allowlist::DaemonAllowlist::Allowed(vec![
+                "test-provider/*".to_string(),
+            ])),
         )
         .unwrap();
         assert_eq!(resolved, "test-provider/glm-5.3");
