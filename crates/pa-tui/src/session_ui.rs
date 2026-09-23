@@ -136,6 +136,12 @@ pub(crate) enum BashActivityUpdate {
         activity_id: String,
         tail: String,
     },
+    /// A background action settled; re-issue the list from the main loop so
+    /// the request carries a fresh epoch (one issued mid-action must not
+    /// supersede the post-action snapshot).
+    Refresh {
+        session: String,
+    },
     Error {
         session: String,
         message: String,
@@ -5189,6 +5195,7 @@ impl SessionUi {
         let session = match &update {
             BashActivityUpdate::List { session, .. } => session,
             BashActivityUpdate::Tail { session, .. } => session,
+            BashActivityUpdate::Refresh { session } => session,
             BashActivityUpdate::Error { session, .. } => session,
         };
         if session != &self.active_session_id {
@@ -5217,6 +5224,12 @@ impl SessionUi {
             }
             BashActivityUpdate::Error { message, .. } => {
                 self.error_row(&message, view);
+            }
+            BashActivityUpdate::Refresh { .. } => {
+                // Issue a fresh list from the main loop; its own response
+                // lands through this channel with a current epoch.
+                self.spawn_bash_activity_refresh();
+                return;
             }
         }
         self.dirty = true;
@@ -5345,10 +5358,6 @@ impl SessionUi {
                 let client = self.client.clone();
                 let session = self.active_session_id.clone();
                 let tx = self.bash_updates.clone();
-                // The post-kill refresh lands as the newest issued list
-                // request; a concurrently issued poll supersedes it.
-                self.bash_list_epoch += 1;
-                let epoch = self.bash_list_epoch;
                 tokio::spawn(async move {
                     let result = client
                         .request_ok(DaemonCommand::KillKernelBash {
@@ -5360,23 +5369,12 @@ impl SessionUi {
                         .await;
                     match result {
                         Ok(_) => {
-                            // The killed row settles immediately: refresh
-                            // the list while the spawn is already off the
-                            // key loop.
-                            let list = client
-                                .request_ok(DaemonCommand::ListKernelBash {
-                                    id: None,
-                                    active_session_id: session.clone(),
-                                    rest: Default::default(),
-                                })
-                                .await;
-                            if let Ok(data) = list {
-                                let _ = tx.send(BashActivityUpdate::List {
-                                    session,
-                                    epoch,
-                                    data,
-                                });
-                            }
+                            // The killed row settles immediately: the
+                            // main loop re-issues the list under a fresh
+                            // epoch (the one stamped here predates any
+                            // poll that fired while the kill was in
+                            // flight).
+                            let _ = tx.send(BashActivityUpdate::Refresh { session });
                         }
                         Err(error) => {
                             let _ = tx.send(BashActivityUpdate::Error {
