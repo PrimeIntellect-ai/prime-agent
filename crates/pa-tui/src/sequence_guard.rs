@@ -18,9 +18,9 @@
 //!
 //! - a bare `Esc` press is held for [`HOLD`] (TS `StdinBuffer.timeout`);
 //! - continuation bytes reassemble the sequence; a complete one is
-//!   classified before any text insertion: SGR/X10 mouse reports decode
-//!   through `mouse`, recognized key sequences synthesize the event
-//!   crossterm's own single-read parse would have produced, and
+//!   classified before any text insertion: SGR/X10/rxvt mouse reports
+//!   decode through `mouse`, recognized key sequences synthesize the
+//!   event crossterm's own single-read parse would have produced, and
 //!   everything else is consumed (dropped);
 //! - a sequence still incomplete at the deadline is dropped whole — the
 //!   editor never sees escape bytes as text;
@@ -29,7 +29,8 @@
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 
 use crate::mouse::{self, MouseEvent as Report};
@@ -97,6 +98,16 @@ impl SequenceGuard {
                 _ => vec![GuardOutput::Event(event)],
             },
             Some(mut pending) => {
+                // The hold expired before this event arrived: the held
+                // `ESC` already stood alone (TS's timer flushed it), so the
+                // flush goes out first and the event is a fresh input —
+                // never a continuation (a late keystroke would otherwise
+                // arrive as Alt+<key>).
+                if now >= pending.deadline {
+                    let mut out = pending.flush();
+                    out.extend(self.feed(event, now));
+                    return out;
+                }
                 let Some(bytes) = continuation_bytes(&event) else {
                     // Not a continuation: the held `ESC` stood alone (or
                     // the sequence broke) — flush it, pass the event on.
@@ -173,17 +184,17 @@ fn continuation_bytes(event: &Event) -> Option<Vec<u8>> {
     }
 }
 
-/// crossterm's control-byte parse, reversed: the `Char` a raw control
-/// byte (0x00-0x1f, 0x7f via DEL) is reported as.
+/// crossterm's control-byte parse (`parse_event`), reversed: the `Char` a
+/// raw control byte is reported as, with `CONTROL`. Only the forms its
+/// parser produces are inverted — `ESC` itself opens a sequence instead,
+/// and the caret-notation forms (`^[`, `^\\`, ...) never survive it:
+/// 0x1c-0x1f arrive as `Char('4'..='7')`, so without those rows an
+/// Alt+Ctrl+digit combo after a read boundary would split wrong.
 fn control_byte(c: char) -> Option<u8> {
     match c {
         'a'..='z' => Some(c as u8 - b'a' + 1),
-        ' ' | '@' => Some(0),
-        '[' => Some(0x1b),
-        '\\' => Some(0x1c),
-        ']' => Some(0x1d),
-        '^' => Some(0x1e),
-        '_' => Some(0x1f),
+        ' ' => Some(0),
+        '4'..='7' => Some(c as u8 - b'4' + 0x1c),
         _ => None,
     }
 }
@@ -267,10 +278,74 @@ fn classify(pending: PendingEscape) -> Vec<GuardOutput> {
     if bytes.starts_with(b"\x1b[M") && bytes.len() == 6 {
         return decode_report(bytes, false);
     }
+    // rxvt mouse (`ESC [ cb ; cx ; cy (;) M`, mode 1015): crossterm's own
+    // single-read parse delivers it as a mouse event, so a reassembled
+    // one must decode the same way — the key classifier below would
+    // drop it, and clicks and drags would vanish only when a read
+    // boundary splits the report.
+    if bytes.starts_with(b"\x1b[") && bytes.ends_with(b"M") {
+        return decode_rxvt_report(bytes);
+    }
     if let Some(event) = classify_key(bytes, pending.first.as_ref()) {
         return vec![GuardOutput::Event(event)];
     }
     Vec::new()
+}
+
+/// An rxvt mouse report (crossterm `parse_csi_rxvt_mouse`): three
+/// semicolon fields behind `ESC [`, `M` at the end — `cb` one-based by
+/// 32 and the coordinates one-based, with no release form (the final
+/// byte is always `M`; the release distinction is SGR-only). Malformed
+/// fields (the same shapes crossterm rejects) decode to nothing.
+fn decode_rxvt_report(bytes: &[u8]) -> Vec<GuardOutput> {
+    let Ok(text) = std::str::from_utf8(&bytes[2..bytes.len() - 1]) else {
+        return Vec::new();
+    };
+    let mut fields = text.split(';');
+    let cb = fields
+        .next()
+        .and_then(|field| field.parse::<u8>().ok())
+        .and_then(|cb| cb.checked_sub(32));
+    let column = fields
+        .next()
+        .and_then(|field| field.parse::<u16>().ok())
+        .map(|x| x.saturating_sub(1));
+    let row = fields
+        .next()
+        .and_then(|field| field.parse::<u16>().ok())
+        .map(|y| y.saturating_sub(1));
+    let (Some(cb), Some(column), Some(row)) = (cb, column, row) else {
+        return Vec::new();
+    };
+    let Some(kind) = report_kind(cb, true) else {
+        return Vec::new();
+    };
+    let event = MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: report_modifiers(cb),
+    };
+    match mouse::from_crossterm(&event) {
+        Some(report) => vec![GuardOutput::Mouse(report)],
+        None => Vec::new(),
+    }
+}
+
+/// The modifier bits of a report's button byte (crossterm `parse_cb`):
+/// shift, alt (meta), control, above the button bits.
+fn report_modifiers(cb: u8) -> KeyModifiers {
+    let mut modifiers = KeyModifiers::empty();
+    if cb & 0b0000_0100 != 0 {
+        modifiers |= KeyModifiers::SHIFT;
+    }
+    if cb & 0b0000_1000 != 0 {
+        modifiers |= KeyModifiers::ALT;
+    }
+    if cb & 0b0001_0000 != 0 {
+        modifiers |= KeyModifiers::CONTROL;
+    }
+    modifiers
 }
 
 /// Decode a reassembled mouse report into the reader's report type: the
@@ -310,21 +385,11 @@ fn decode_report(bytes: &[u8], sgr: bool) -> Vec<GuardOutput> {
     let Some(kind) = report_kind(cb, press) else {
         return Vec::new();
     };
-    let mut modifiers = KeyModifiers::empty();
-    if cb & 0b0000_0100 != 0 {
-        modifiers |= KeyModifiers::SHIFT;
-    }
-    if cb & 0b0000_1000 != 0 {
-        modifiers |= KeyModifiers::ALT;
-    }
-    if cb & 0b0001_0000 != 0 {
-        modifiers |= KeyModifiers::CONTROL;
-    }
     let event = MouseEvent {
         kind,
         column,
         row,
-        modifiers,
+        modifiers: report_modifiers(cb),
     };
     match mouse::from_crossterm(&event) {
         Some(report) => vec![GuardOutput::Mouse(report)],
@@ -364,15 +429,23 @@ fn classify_key(bytes: &[u8], first: Option<&Event>) -> Option<Event> {
     match bytes {
         // crossterm's parse of a lone `ESC ESC`: one `Esc`.
         b"\x1b\x1b" => Some(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))),
-        // `ESC` + one byte: crossterm parses the byte's key with `ALT`.
-        [0x1b, _] => match first {
-            Some(Event::Key(key)) => {
-                let mut key = *key;
-                key.modifiers |= KeyModifiers::ALT;
-                Some(Event::Key(key))
+        // `ESC` + one character: crossterm re-parses the character's
+        // bytes and adds `ALT` — a single byte for the ASCII and control
+        // forms, the whole UTF-8 character otherwise (its parser never
+        // splits a character across events, so a longer tail is always
+        // one character). `first` is the event that carried it. The
+        // sequence openers (`[`, `]`, `P`, `_`, `O`, a second `ESC`) are
+        // excluded here so they fall to their own arms below.
+        [0x1b, byte, ..] if !matches!(byte, b'[' | b']' | b'P' | b'_' | b'O' | 0x1b) => {
+            match first {
+                Some(Event::Key(key)) => {
+                    let mut key = *key;
+                    key.modifiers |= KeyModifiers::ALT;
+                    Some(Event::Key(key))
+                }
+                _ => None,
             }
-            _ => None,
-        },
+        }
         [0x1b, b'O', fin] => ss3_key(*fin),
         _ if bytes.starts_with(b"\x1b[") => csi_key(&bytes[2..]),
         _ => None,
@@ -554,7 +627,7 @@ fn csi_u_key(body: &[u8]) -> Option<Event> {
     let mut fields = text.split(';');
     let mut codepoints = fields.next()?.split(':');
     let codepoint: u32 = codepoints.next()?.parse().ok()?;
-    let (mut modifiers, kind) = match fields.next() {
+    let (mut modifiers, kind, lock_state) = match fields.next() {
         Some(mods_field) => {
             let mut parts = mods_field.split(':');
             let mask = parts.next().unwrap_or_default().parse::<u8>().unwrap_or(1);
@@ -562,24 +635,68 @@ fn csi_u_key(body: &[u8]) -> Option<Event> {
                 .next()
                 .and_then(|k| k.parse::<u8>().ok())
                 .map_or(KeyEventKind::Press, parse_kind);
-            (parse_modifiers(mask), kind)
+            (parse_modifiers(mask), kind, lock_state(mask))
         }
-        None => (KeyModifiers::NONE, KeyEventKind::Press),
+        None => (KeyModifiers::NONE, KeyEventKind::Press, KeyEventState::empty()),
     };
-    let mut code = match codepoint {
-        0x1b => KeyCode::Esc,
-        0x0d => KeyCode::Enter,
+    let (mut code, state_from_keycode) = match codepoint {
+        // The keypad block of the kitty functional range (crossterm
+        // `translate_functional_key_code`): its characters, Enter, and
+        // navigation decode exactly like the unsplit parse — with the
+        // KEYPAD state it stamps on them — instead of vanishing on a
+        // split read. TS maps the same block
+        // (keys.ts KITTY_FUNCTIONAL_KEY_EQUIVALENTS).
+        57399..=57408 => (
+            KeyCode::Char(char::from_u32(codepoint - 57399 + u32::from(b'0'))?),
+            KeyEventState::KEYPAD,
+        ),
+        57409..=57413 => (
+            match codepoint {
+                57409 => KeyCode::Char('.'),
+                57410 => KeyCode::Char('/'),
+                57411 => KeyCode::Char('*'),
+                57412 => KeyCode::Char('-'),
+                _ => KeyCode::Char('+'),
+            },
+            KeyEventState::KEYPAD,
+        ),
+        57414 => (KeyCode::Enter, KeyEventState::KEYPAD),
+        57415..=57416 => (
+            match codepoint {
+                57415 => KeyCode::Char('='),
+                _ => KeyCode::Char(','),
+            },
+            KeyEventState::KEYPAD,
+        ),
+        57417..=57426 => (
+            match codepoint {
+                57417 => KeyCode::Left,
+                57418 => KeyCode::Right,
+                57419 => KeyCode::Up,
+                57420 => KeyCode::Down,
+                57421 => KeyCode::PageUp,
+                57422 => KeyCode::PageDown,
+                57423 => KeyCode::Home,
+                57424 => KeyCode::End,
+                57425 => KeyCode::Insert,
+                _ => KeyCode::Delete,
+            },
+            KeyEventState::KEYPAD,
+        ),
+        0x1b => (KeyCode::Esc, KeyEventState::empty()),
+        0x0d => (KeyCode::Enter, KeyEventState::empty()),
         // Raw mode is always on under this reader, so LF is not Enter
         // (crossterm's own raw-mode branch).
-        0x0a => KeyCode::Char('\n'),
-        0x09 if modifiers.contains(KeyModifiers::SHIFT) => KeyCode::BackTab,
-        0x09 => KeyCode::Tab,
-        0x7f => KeyCode::Backspace,
-        // Kitty functional keys (the protocol's private-use range): no
-        // surface this reader feeds dispatches them, and a split report
-        // must not turn into a text character.
+        0x0a => (KeyCode::Char('\n'), KeyEventState::empty()),
+        0x09 if modifiers.contains(KeyModifiers::SHIFT) => (KeyCode::BackTab, KeyEventState::empty()),
+        0x09 => (KeyCode::Tab, KeyEventState::empty()),
+        0x7f => (KeyCode::Backspace, KeyEventState::empty()),
+        // The rest of the kitty functional range: no surface this reader
+        // feeds dispatches those keys (F13+, media and modifier
+        // reports — TS drops them too), and a split report must not
+        // turn into a text character.
         c if (57344..=63743).contains(&c) => return None,
-        c => KeyCode::Char(char::from_u32(c)?),
+        c => (KeyCode::Char(char::from_u32(c)?), KeyEventState::empty()),
     };
     if modifiers.contains(KeyModifiers::SHIFT) {
         if let Some(shifted) = codepoints
@@ -591,7 +708,27 @@ fn csi_u_key(body: &[u8]) -> Option<Event> {
             modifiers.set(KeyModifiers::SHIFT, false);
         }
     }
-    Some(Event::Key(KeyEvent::new_with_kind(code, modifiers, kind)))
+    Some(Event::Key(KeyEvent::new_with_kind_and_state(
+        code,
+        modifiers,
+        kind,
+        state_from_keycode | lock_state,
+    )))
+}
+
+/// crossterm's `parse_modifiers_to_state`: the lock bits ride the mask
+/// above the modifier bits — caps lock and num lock, delivered as event
+/// state.
+fn lock_state(mask: u8) -> KeyEventState {
+    let mask = mask.saturating_sub(1);
+    let mut state = KeyEventState::empty();
+    if mask & 64 != 0 {
+        state |= KeyEventState::CAPS_LOCK;
+    }
+    if mask & 128 != 0 {
+        state |= KeyEventState::NUM_LOCK;
+    }
+    state
 }
 #[cfg(test)]
 mod tests {
@@ -718,14 +855,56 @@ mod tests {
     /// reaches (plain bytes, SGR/X10 mouse, CSI keys, kitty CSI-u).
     fn model_parse(buf: &[u8], more: bool) -> ModelParse {
         if buf[0] != 0x1b {
-            // `char_code_to_event`: uppercase bytes carry SHIFT.
-            let ch = char::from_u32(u32::from(buf[0])).expect("ascii corpus");
-            let modifiers = if ch.is_uppercase() {
-                KeyModifiers::SHIFT
-            } else {
-                KeyModifiers::NONE
+            if buf[0] >= 0x80 {
+                // `parse_utf8_char`: an incomplete code point keeps
+                // buffering (never an event), a complete one is the
+                // character (SHIFT only on uppercase, like
+                // `char_code_to_event`).
+                return match std::str::from_utf8(buf) {
+                    Ok(text) => {
+                        let ch = text.chars().next().expect("non-empty");
+                        let modifiers = if ch.is_uppercase() {
+                            KeyModifiers::SHIFT
+                        } else {
+                            KeyModifiers::NONE
+                        };
+                        ModelParse::Event(Event::Key(KeyEvent::new(
+                            KeyCode::Char(ch),
+                            modifiers,
+                        )))
+                    }
+                    Err(error) if error.error_len().is_none() => ModelParse::More,
+                    Err(_) => ModelParse::Invalid,
+                };
+            }
+            // The control rows of `parse_event`, then
+            // `char_code_to_event` (uppercase bytes carry SHIFT).
+            return match buf[0] {
+                b'\r' => ModelParse::Event(Event::Key(KeyCode::Enter.into())),
+                b'\t' => ModelParse::Event(Event::Key(KeyCode::Tab.into())),
+                0x7f => ModelParse::Event(Event::Key(KeyCode::Backspace.into())),
+                c @ 0x01..=0x1a => ModelParse::Event(Event::Key(KeyEvent::new(
+                    KeyCode::Char((c - 0x1 + b'a') as char),
+                    KeyModifiers::CONTROL,
+                ))),
+                c @ 0x1c..=0x1f => ModelParse::Event(Event::Key(KeyEvent::new(
+                    KeyCode::Char((c - 0x1c + b'4') as char),
+                    KeyModifiers::CONTROL,
+                ))),
+                0x00 => ModelParse::Event(Event::Key(KeyEvent::new(
+                    KeyCode::Char(' '),
+                    KeyModifiers::CONTROL,
+                ))),
+                c => {
+                    let ch = char::from_u32(u32::from(c)).expect("ascii corpus");
+                    let modifiers = if ch.is_uppercase() {
+                        KeyModifiers::SHIFT
+                    } else {
+                        KeyModifiers::NONE
+                    };
+                    ModelParse::Event(Event::Key(KeyEvent::new(KeyCode::Char(ch), modifiers)))
+                }
             };
-            return ModelParse::Event(Event::Key(KeyEvent::new(KeyCode::Char(ch), modifiers)));
         }
         if buf.len() == 1 {
             // The defect: a lone `ESC` at a partial-read tail commits.
@@ -792,11 +971,54 @@ mod tests {
                         modifiers: KeyModifiers::NONE,
                     }));
                 }
+                if payload[0] == b'[' {
+                    // `ESC [ [ <fin>`: parse_csi holds the three-byte
+                    // prefix for the fourth byte, then F1-F5 (any other
+                    // final byte is a parse error it drops whole).
+                    if buf.len() == 3 {
+                        return ModelParse::More;
+                    }
+                    return match last {
+                        val @ b'A'..=b'E' => {
+                            ModelParse::Event(Event::Key(KeyCode::F(1 + val - b'A').into()))
+                        }
+                        _ => ModelParse::Invalid,
+                    };
+                }
                 match last {
                     b'A' => ModelParse::Event(Event::Key(KeyCode::Up.into())),
                     b'B' => ModelParse::Event(Event::Key(KeyCode::Down.into())),
                     b'C' => ModelParse::Event(Event::Key(KeyCode::Right.into())),
                     b'D' => ModelParse::Event(Event::Key(KeyCode::Left.into())),
+                    // rxvt mouse (`parse_csi_rxvt_mouse`): `cb ; cx ; cy`
+                    // behind a digit-led CSI, `M` at the end.
+                    b'M' if payload[0].is_ascii_digit() => {
+                        let text = std::str::from_utf8(&payload[..payload.len() - 1])
+                            .expect("corpus is ascii");
+                        let mut fields = text.split(';');
+                        let cb = fields
+                            .next()
+                            .and_then(|field| field.parse::<u8>().ok())
+                            .and_then(|cb| cb.checked_sub(32))
+                            .expect("corpus buttons");
+                        let x: u16 = fields
+                            .next()
+                            .expect("corpus coordinates")
+                            .parse()
+                            .expect("corpus coordinates");
+                        let y: u16 = fields
+                            .next()
+                            .expect("corpus coordinates")
+                            .parse()
+                            .expect("corpus coordinates");
+                        let kind = report_kind(cb, true).expect("corpus buttons");
+                        ModelParse::Event(Event::Mouse(CtMouse {
+                            kind,
+                            column: x - 1,
+                            row: y - 1,
+                            modifiers: report_modifiers(cb),
+                        }))
+                    }
                     b'u' => {
                         let text = std::str::from_utf8(&payload[..payload.len() - 1])
                             .expect("corpus is ascii");
@@ -806,6 +1028,43 @@ mod tests {
                             .expect("non-empty")
                             .parse()
                             .expect("corpus");
+                        if (57399..=57426).contains(&codepoint) {
+                            // translate_functional_key_code: the keypad
+                            // block decodes to its characters, Enter, and
+                            // navigation, with the KEYPAD state.
+                            let code = match codepoint {
+                                c @ 57399..=57408 => {
+                                    KeyCode::Char(char::from_u32(c - 57399 + u32::from(b'0')).expect("digits"))
+                                }
+                                57409 => KeyCode::Char('.'),
+                                57410 => KeyCode::Char('/'),
+                                57411 => KeyCode::Char('*'),
+                                57412 => KeyCode::Char('-'),
+                                57413 => KeyCode::Char('+'),
+                                57414 => KeyCode::Enter,
+                                57415 => KeyCode::Char('='),
+                                57416 => KeyCode::Char(','),
+                                57417 => KeyCode::Left,
+                                57418 => KeyCode::Right,
+                                57419 => KeyCode::Up,
+                                57420 => KeyCode::Down,
+                                57421 => KeyCode::PageUp,
+                                57422 => KeyCode::PageDown,
+                                57423 => KeyCode::Home,
+                                57424 => KeyCode::End,
+                                57425 => KeyCode::Insert,
+                                57426 => KeyCode::Delete,
+                                _ => unreachable!("the keypad range is checked above"),
+                            };
+                            return ModelParse::Event(Event::Key(
+                                KeyEvent::new_with_kind_and_state(
+                                    code,
+                                    KeyModifiers::NONE,
+                                    KeyEventKind::Press,
+                                    KeyEventState::KEYPAD,
+                                ),
+                            ));
+                        }
                         match codepoint {
                             27 => ModelParse::Event(Event::Key(KeyCode::Esc.into())),
                             c => ModelParse::Event(Event::Key(KeyEvent::new(
@@ -818,7 +1077,52 @@ mod tests {
                     _ => ModelParse::Invalid,
                 }
             }
-            _ => ModelParse::Invalid,
+            // crossterm's ESC branch re-parses the remaining bytes and
+            // adds ALT: control bytes keep their control forms, ASCII and
+            // UTF-8 characters are their key.
+            _ => {
+                let inner = &buf[1..];
+                if inner[0] >= 0x80 {
+                    return match std::str::from_utf8(inner) {
+                        Ok(text) => {
+                            let ch = text.chars().next().expect("non-empty");
+                            let mut modifiers = KeyModifiers::ALT;
+                            if ch.is_uppercase() {
+                                modifiers |= KeyModifiers::SHIFT;
+                            }
+                            ModelParse::Event(Event::Key(KeyEvent::new(
+                                KeyCode::Char(ch),
+                                modifiers,
+                            )))
+                        }
+                        Err(error) if error.error_len().is_none() => ModelParse::More,
+                        Err(_) => ModelParse::Invalid,
+                    };
+                }
+                let (code, modifiers) = match inner[0] {
+                    b'\r' => (KeyCode::Enter, KeyModifiers::ALT),
+                    b'\t' => (KeyCode::Tab, KeyModifiers::ALT),
+                    0x7f => (KeyCode::Backspace, KeyModifiers::ALT),
+                    c @ 0x01..=0x1a => (
+                        KeyCode::Char((c - 0x1 + b'a') as char),
+                        KeyModifiers::CONTROL | KeyModifiers::ALT,
+                    ),
+                    c @ 0x1c..=0x1f => (
+                        KeyCode::Char((c - 0x1c + b'4') as char),
+                        KeyModifiers::CONTROL | KeyModifiers::ALT,
+                    ),
+                    0x00 => (KeyCode::Char(' '), KeyModifiers::CONTROL | KeyModifiers::ALT),
+                    c => {
+                        let ch = char::from_u32(u32::from(c)).expect("ascii corpus");
+                        let mut modifiers = KeyModifiers::ALT;
+                        if ch.is_uppercase() {
+                            modifiers |= KeyModifiers::SHIFT;
+                        }
+                        (KeyCode::Char(ch), modifiers)
+                    }
+                };
+                ModelParse::Event(Event::Key(KeyEvent::new(code, modifiers)))
+            }
         }
     }
 
@@ -1136,5 +1440,177 @@ mod tests {
     fn a_split_bracketed_paste_end_marker_is_consumed() {
         let outputs = run_guard(read_projection(b"\x1b[201~", &[1]));
         assert!(leaks(&outputs).is_empty());
+    }
+
+    // -- the review fixes: expiry, rxvt, keypad CSI-u, UTF-8 ALT ------
+
+    /// A continuation arriving after the hold expired is a fresh input,
+    /// never an Alt combo: the held `Esc` flushes first (TS's timer fired
+    /// before the event landed, and TS never lets a late keystroke join
+    /// a flushed buffer).
+    #[test]
+    fn an_expired_hold_flushes_the_esc_before_the_next_key() {
+        let mut guard = SequenceGuard::default();
+        let now = Instant::now();
+        assert!(guard.feed(esc_press(), now).is_empty());
+        assert_eq!(
+            guard.feed(char_press('a'), now + HOLD + Duration::from_millis(1)),
+            vec![
+                GuardOutput::Event(esc_press()),
+                GuardOutput::Event(char_press('a')),
+            ]
+        );
+    }
+
+    /// A half-assembled sequence at its deadline drops whole and the late
+    /// keystroke passes as text: TS's timer flushes the raw remainder and
+    /// its parser drops the escape form.
+    #[test]
+    fn an_expired_half_assembled_sequence_drops_and_the_key_types() {
+        let mut guard = SequenceGuard::default();
+        let now = Instant::now();
+        assert!(guard.feed(esc_press(), now).is_empty());
+        assert!(guard
+            .feed(char_press('['), now + Duration::from_millis(1))
+            .is_empty());
+        assert_eq!(
+            guard.feed(char_press('x'), now + HOLD + Duration::from_millis(2)),
+            vec![GuardOutput::Event(char_press('x'))]
+        );
+    }
+
+    /// rxvt mouse reports (`ESC [ cb ; cx ; cy ; M`, mode 1015) decode
+    /// through the same dispatch filter as SGR: crossterm's own parse
+    /// delivers them as mouse events, so every split of one must decode
+    /// the same instead of vanishing or typing its body.
+    #[test]
+    fn every_split_of_an_rxvt_report_decodes() {
+        // `cb ; cx ; cy` fields are the X10 button byte plus 32
+        // (parse_csi_rxvt_mouse): 32 is a plain left press, 64 the
+        // motion-bit drag form.
+        for (stream, motion) in [(b"\x1b[32;30;40;M".as_slice(), false), (b"\x1b[64;30;40;M".as_slice(), true)] {
+            let expected = vec![Report {
+                button: mouse::BUTTON_LEFT,
+                x: 30,
+                y: 40,
+                press: true,
+                motion,
+                shift: false,
+                alt: false,
+                ctrl: false,
+            }];
+            for split in 1..stream.len() {
+                let events = read_projection(stream, &[split]);
+                let outputs = run_guard(events.clone());
+                assert_eq!(
+                    reports(&outputs),
+                    expected,
+                    "rxvt report {stream:?} split at {split}: {events:?} as {outputs:?}"
+                );
+                assert!(
+                    leaks(&outputs).is_empty(),
+                    "rxvt report {stream:?} split at {split} leaked {outputs:?}"
+                );
+            }
+            // The unsplit form is the same report (the guard is invisible).
+            let outputs = run_guard(read_projection(stream, &[]));
+            assert_eq!(reports(&outputs), expected);
+            assert!(leaks(&outputs).is_empty());
+        }
+        // Malformed fields decode to nothing, like crossterm's parse.
+        let outputs = run_guard(read_projection(b"\x1b[0;0;0M", &[1]));
+        assert!(reports(&outputs).is_empty());
+        assert!(leaks(&outputs).is_empty());
+    }
+
+    /// A split kitty keypad report decodes as the key the unsplit parse
+    /// delivers (`CSI 57399u` is keypad-0, `CSI 57414u` keypad Enter)
+    /// with the KEYPAD state crossterm stamps on it — not swallowed by
+    /// the private-use blanket.
+    #[test]
+    fn a_split_keypad_csi_u_arrives_as_the_key() {
+        let outputs = run_guard(read_projection(b"\x1b[57399u", &[1]));
+        assert_eq!(
+            leaks(&outputs),
+            vec![Event::Key(KeyEvent::new_with_kind_and_state(
+                KeyCode::Char('0'),
+                KeyModifiers::NONE,
+                KeyEventKind::Press,
+                KeyEventState::KEYPAD,
+            ))]
+        );
+        let outputs = run_guard(read_projection(b"\x1b[57414u", &[1]));
+        assert_eq!(
+            leaks(&outputs),
+            vec![Event::Key(KeyEvent::new_with_kind_and_state(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+                KeyEventKind::Press,
+                KeyEventState::KEYPAD,
+            ))]
+        );
+        // The rest of the functional range stays consumed (TS drops it
+        // too, and no surface dispatches it).
+        let outputs = run_guard(read_projection(b"\x1b[57427u", &[1]));
+        assert!(leaks(&outputs).is_empty());
+        assert!(reports(&outputs).is_empty());
+    }
+
+    /// The legacy function-key form `ESC [ [ A` splits at its `ESC`
+    /// exactly the way TS's own `StdinBuffer` splits it: the buffer
+    /// completes the three-byte prefix `\x1b[[` at its
+    /// `isCompleteCsiSequence` boundary (the final byte `[` is in the
+    /// 0x40-0x7e range), TS's `parseKey` drops the prefix, and the
+    /// trailing byte types as text — so the split path stays TS-exact.
+    /// crossterm's unsplit parse holds the prefix for a fourth byte and
+    /// delivers F1; that TS/crossterm divergence is the products' own,
+    /// and this guard does not widen it either way.
+    #[test]
+    fn a_split_legacy_function_key_form_stays_ts_exact() {
+        let outputs = run_guard(read_projection(b"\x1b[[A", &[1]));
+        assert_eq!(
+            leaks(&outputs),
+            vec![Event::Key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT))]
+        );
+        assert!(reports(&outputs).is_empty());
+    }
+
+    /// `ESC` + a multi-byte character is the character with ALT: the
+    /// guard must reassemble the whole UTF-8 bytes, not drop the combo
+    /// for not being an ASCII single byte (crossterm never splits a
+    /// character across events, so the tail is always one character).
+    #[test]
+    fn a_split_alt_modified_character_keeps_the_alt() {
+        // Alt+é: `\x1b` then the two UTF-8 bytes of é.
+        let outputs = run_guard(read_projection("\x1b\u{e9}".as_bytes(), &[1]));
+        assert_eq!(
+            leaks(&outputs),
+            vec![Event::Key(KeyEvent::new(KeyCode::Char('\u{e9}'), KeyModifiers::ALT))]
+        );
+        // Alt+É arrives SHIFT-modified (crossterm adds SHIFT to
+        // uppercase characters).
+        let outputs = run_guard(read_projection("\x1b\u{c9}".as_bytes(), &[1]));
+        assert_eq!(
+            leaks(&outputs),
+            vec![Event::Key(KeyEvent::new(
+                KeyCode::Char('\u{c9}'),
+                KeyModifiers::ALT | KeyModifiers::SHIFT
+            ))]
+        );
+    }
+
+    /// `ESC` + a 0x1c-0x1f control byte is Ctrl+4..7 with ALT
+    /// (crossterm reports those bytes as `Char('4'..='7')` with
+    /// CONTROL): the guard's reverse map must know that row.
+    #[test]
+    fn a_split_alt_ctrl_digit_reconstructs_the_combo() {
+        let outputs = run_guard(read_projection(b"\x1b\x1c", &[1]));
+        assert_eq!(
+            leaks(&outputs),
+            vec![Event::Key(KeyEvent::new(
+                KeyCode::Char('4'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            ))]
+        );
     }
 }

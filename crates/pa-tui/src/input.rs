@@ -159,9 +159,16 @@ where
                     // Drain every event of this terminal write: a
                     // zero-timeout poll serves the rest of the same OS read
                     // without blocking, so the drain stops exactly at the
-                    // chunk boundary.
+                    // chunk boundary. The drain must also observe the stop
+                    // flag on every iteration: a continuously readable
+                    // stream keeps the zero-timeout poll `true` forever,
+                    // and a surface handoff would block forever in
+                    // `join()` waiting for this loop to end.
                     let mut events = Vec::new();
                     loop {
+                        if thread_stop.load(Ordering::Relaxed) {
+                            break;
+                        }
                         match crossterm::event::read() {
                             Ok(event) => {
                                 events.push(event);
