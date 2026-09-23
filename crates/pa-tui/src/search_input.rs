@@ -87,27 +87,36 @@ impl SearchInput {
             return;
         }
         if kb.matches(key, "tui.editor.deleteCharBackward") {
+            // TS `handleBackspace`: delete one whole grapheme cluster.
             self.last_action = LastAction::None;
             if self.cursor > 0 {
                 self.push_undo();
+                let mut boundary = 0usize;
+                for end in self.grapheme_ends() {
+                    if end < self.cursor {
+                        boundary = end;
+                    } else {
+                        break;
+                    }
+                }
                 let chars = self.chars();
-                let delete_from = self.cursor - 1;
-                self.value = chars[..delete_from]
+                self.value = chars[..boundary]
                     .iter()
                     .chain(chars[self.cursor..].iter())
                     .collect();
-                self.cursor = delete_from;
+                self.cursor = boundary;
             }
             return;
         }
         if kb.matches(key, "tui.editor.deleteCharForward") {
+            // TS `handleForwardDelete`: delete one whole grapheme cluster.
             self.last_action = LastAction::None;
-            if self.cursor < self.chars().len() {
+            if let Some(end) = self.grapheme_ends().into_iter().find(|e| *e > self.cursor) {
                 self.push_undo();
                 let chars = self.chars();
                 self.value = chars[..self.cursor]
                     .iter()
-                    .chain(chars[self.cursor + 1..].iter())
+                    .chain(chars[end..].iter())
                     .collect();
             }
             return;
@@ -170,14 +179,23 @@ impl SearchInput {
         }
         if kb.matches(key, "tui.editor.cursorLeft") {
             self.last_action = LastAction::None;
-            self.cursor = self.cursor.saturating_sub(1);
+            // TS `cursorLeft`: move over one whole grapheme cluster.
+            let mut boundary = 0usize;
+            for end in self.grapheme_ends() {
+                if end < self.cursor {
+                    boundary = end;
+                } else {
+                    break;
+                }
+            }
+            self.cursor = boundary;
             return;
         }
         if kb.matches(key, "tui.editor.cursorRight") {
             self.last_action = LastAction::None;
-            let len = self.chars().len();
-            if self.cursor < len {
-                self.cursor += 1;
+            // TS `cursorRight`: advance over one whole grapheme cluster.
+            if let Some(end) = self.grapheme_ends().into_iter().find(|e| *e > self.cursor) {
+                self.cursor = end;
             }
             return;
         }
@@ -282,53 +300,87 @@ impl SearchInput {
             .collect();
     }
 
-    /// Word-boundary walk (TS `moveWordBackwards`): trailing whitespace,
-    /// then punctuation or word characters.
+    /// Word-boundary walk (TS `moveWordBackwards`): grapheme by grapheme,
+    /// trailing whitespace first, then a punctuation or word run.
     fn move_word_backward(&mut self) {
-        let mut chars = self.chars();
-        while self.cursor > 0 && is_ws(chars[self.cursor - 1]) {
-            self.cursor -= 1;
-            chars.truncate(self.cursor);
+        let ends = self.grapheme_ends();
+        // The index of the grapheme the cursor sits after.
+        let mut idx = ends.partition_point(|e| *e < self.cursor);
+        while idx > 0 && self.grapheme_is_ws(idx - 1) {
+            idx -= 1;
         }
-        if chars.is_empty() {
+        if idx == 0 {
             return;
         }
-        let punctuation_run = is_punct(chars[self.cursor - 1]);
-        while self.cursor > 0 {
-            let last = chars[self.cursor - 1];
+        let punctuation_run = self.grapheme_is_punct(idx - 1);
+        while idx > 0 {
             if punctuation_run {
-                if !is_punct(last) {
+                if !self.grapheme_is_punct(idx - 1) {
                     break;
                 }
-            } else if is_ws(last) || is_punct(last) {
+            } else if self.grapheme_is_ws(idx - 1) || self.grapheme_is_punct(idx - 1) {
                 break;
             }
-            self.cursor -= 1;
-            chars.truncate(self.cursor);
+            idx -= 1;
         }
+        self.cursor = if idx == 0 { 0 } else { ends[idx - 1] };
     }
 
-    /// Word-boundary walk forward (TS `moveWordForwards`).
+    /// Word-boundary walk forward (TS `moveWordForwards`), grapheme by
+    /// grapheme.
     fn move_word_forward(&mut self) {
-        let chars = self.chars();
-        while self.cursor < chars.len() && is_ws(chars[self.cursor]) {
-            self.cursor += 1;
+        let ends = self.grapheme_ends();
+        let mut idx = ends.partition_point(|e| *e <= self.cursor);
+        while idx < ends.len() && self.grapheme_is_ws(idx) {
+            idx += 1;
         }
-        if self.cursor >= chars.len() {
+        if idx == ends.len() {
+            self.cursor = ends.last().copied().unwrap_or(self.cursor);
             return;
         }
-        let punctuation_run = is_punct(chars[self.cursor]);
-        while self.cursor < chars.len() {
-            let next = chars[self.cursor];
+        let punctuation_run = self.grapheme_is_punct(idx);
+        while idx < ends.len() {
             if punctuation_run {
-                if !is_punct(next) {
+                if !self.grapheme_is_punct(idx) {
                     break;
                 }
-            } else if is_ws(next) || is_punct(next) {
+            } else if self.grapheme_is_ws(idx) || self.grapheme_is_punct(idx) {
                 break;
             }
-            self.cursor += 1;
+            idx += 1;
         }
+        self.cursor = if idx == 0 { 0 } else { ends[idx - 1] };
+    }
+
+    /// Char offsets where each grapheme cluster of the value ends, in order.
+    fn grapheme_ends(&self) -> Vec<usize> {
+        use unicode_segmentation::UnicodeSegmentation;
+        let mut end = 0usize;
+        self.value
+            .graphemes(true)
+            .map(|g| {
+                end += g.chars().count();
+                end
+            })
+            .collect()
+    }
+
+    /// The `idx`-th grapheme cluster (a full segment, not one char).
+    fn grapheme_at(&self, idx: usize) -> String {
+        use unicode_segmentation::UnicodeSegmentation;
+        self.value
+            .graphemes(true)
+            .nth(idx)
+            .expect("index within the value")
+            .to_string()
+    }
+
+    fn grapheme_is_ws(&self, idx: usize) -> bool {
+        self.grapheme_at(idx).chars().any(is_ws)
+    }
+
+    fn grapheme_is_punct(&self, idx: usize) -> bool {
+        self.grapheme_at(idx).chars().any(is_punct)
     }
 }
 
@@ -473,5 +525,104 @@ mod tests {
         let mut input = typed("mo");
         input.paste("ck\t1\n2");
         assert_eq!(input.value(), "mock    12");
+    }
+
+    /// Grapheme-model parity (TS `Input`, components/input.ts:18): the
+    /// cursor, deletion, and word motion operate on whole grapheme
+    /// clusters, never single chars of a multi-char cluster.
+    #[test]
+    fn backspace_deletes_whole_grapheme_clusters() {
+        // e + combining acute is one cluster: one backspace removes both.
+        let mut input = typed("cafe\u{301}");
+        assert_eq!(input.value(), "cafe\u{301}");
+        input.handle_key("backspace", &kb());
+        assert_eq!(input.value(), "caf");
+        // A ZWJ family emoji is one cluster of 7 chars.
+        let mut emoji = typed("\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}x");
+        emoji.handle_key("backspace", &kb());
+        assert_eq!(
+            emoji.value(),
+            "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}"
+        );
+        emoji.handle_key("backspace", &kb());
+        assert_eq!(emoji.value(), "");
+    }
+
+    #[test]
+    fn forward_delete_removes_whole_clusters() {
+        let mut input = SearchInput::new();
+        input.set_value("a\u{301}b");
+        input.handle_key("home", &kb());
+        input.handle_key("delete", &kb());
+        assert_eq!(input.value(), "b");
+    }
+
+    #[test]
+    fn cursor_motion_steps_whole_clusters() {
+        let mut input = SearchInput::new();
+        input.set_value("ab\u{1f600}cd");
+        input.handle_key("end", &kb());
+        assert_eq!(input.cursor(), input.value().chars().count());
+        // Left over the astral emoji (one char, one grapheme), then 'c'.
+        input.handle_key("left", &kb());
+        input.handle_key("left", &kb());
+        assert_eq!(input.cursor(), 3);
+        input.handle_key("right", &kb());
+        assert_eq!(input.cursor(), 4);
+    }
+
+    #[test]
+    fn word_motion_walks_graphemes() {
+        // Word-right over a value with combining marks and an astral
+        // cluster: the run ends at the punctuation boundary, whole
+        // clusters at a time (TS moveWordForwards walks segmenter data).
+        let mut input = SearchInput::new();
+        input.set_value("wo\u{301}rd\u{1f600}  next");
+        input.handle_key("home", &kb());
+        // Word-right stops before the trailing spaces (TS moveWordForwards
+        // only skips LEADING whitespace).
+        input.handle_key("ctrl+right", &kb());
+        assert_eq!(
+            input
+                .value()
+                .chars()
+                .take(input.cursor())
+                .collect::<String>(),
+            "wo\u{301}rd\u{1f600}"
+        );
+        input.handle_key("ctrl+right", &kb());
+        assert_eq!(
+            input
+                .value()
+                .chars()
+                .take(input.cursor())
+                .collect::<String>(),
+            "wo\u{301}rd\u{1f600}  next"
+        );
+        // Word-left lands on the start of "next" (leading spaces skipped by
+        // the next move), then walks the whole word run to the start.
+        input.handle_key("ctrl+left", &kb());
+        assert_eq!(
+            input
+                .value()
+                .chars()
+                .skip(input.cursor())
+                .collect::<String>(),
+            "next"
+        );
+        input.handle_key("ctrl+left", &kb());
+        assert_eq!(input.cursor(), 0);
+    }
+
+    #[test]
+    fn word_delete_kills_whole_clusters() {
+        let mut input = SearchInput::new();
+        input.set_value("cafe\u{301} done");
+        input.handle_key("end", &kb());
+        input.handle_key("ctrl+w", &kb());
+        assert_eq!(input.value(), "cafe\u{301} ");
+        // The killed text is one kill-ring entry (the whole cluster run).
+        input.handle_key("ctrl+y", &kb());
+        assert_eq!(input.value(), "cafe\u{301} done");
     }
 }
