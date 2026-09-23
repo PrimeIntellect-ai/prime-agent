@@ -696,13 +696,23 @@ impl AgentSessionEngine {
     }
 
     /// Mark the session closed (TS `runtime.dispose`'s `_disposing`/`_disposed`
-    /// gates): the worker's kill and shutdown closes set it first, so every
-    /// continuation mint site and settle-hook retry bails — a stopped
+    /// gates) and retire the closed runtime's continuation mirrors: the
+    /// worker's kill, shutdown, and replacement closes set it first, so
+    /// every continuation mint site and settle-hook retry bails — a stopped
     /// session never continues (no mint, no goal-state churn, no queued
-    /// follow-up a later wake could run).
+    /// follow-up a later wake could run). The mirrors go with the marker:
+    /// the engine object outlives the close (the worker process may be
+    /// reused for a fresh create), and a stale settle callback must find
+    /// no goal runtime to mint through — the owed slot itself survives
+    /// the close in the durable state for a later resumed session.
     pub fn mark_session_closed(&self) {
         self.session_closed
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        *self.goal_runtime.lock().expect("goal runtime lock") = None;
+        *self
+            .autonomous_boundary
+            .lock()
+            .expect("autonomous boundary lock") = None;
     }
 
     /// The create path's live reset: a fresh (or replaced) session starts

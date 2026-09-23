@@ -168,7 +168,10 @@ impl AgentSessionEngine {
         };
         // TS `_getContinuationMessages`: new session input arriving
         // during the mint cancels it (the arrival-epoch restore).
-        if self.session_input_queued() {
+        // A close that lands during the mint cancels it the same way:
+        // the owed slot survives (a later resumed session retries), and
+        // the stopped session's durable state stays as the close left it.
+        if self.session_input_queued() || self.session_is_closed() {
             if let Err(error) = driver.rollback_continuation_mint(&mut session) {
                 // The restore hook must not reject: warn and re-owe anyway.
                 eprintln!("pa-daemon: goal mint rollback persist failed: {error:#}");

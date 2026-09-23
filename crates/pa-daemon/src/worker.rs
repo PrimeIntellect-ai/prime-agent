@@ -2969,6 +2969,14 @@ impl Worker {
     /// this: TS rebuilds the branch context in place and the kernel
     /// stays warm.
     pub(crate) async fn teardown_for_replacement(&self) -> anyhow::Result<()> {
+        // The retired session is closing: mark it before the children close,
+        // exactly like the kill/shutdown closes — each child's settle retry
+        // fires while the old runtime is still installed, and the marker
+        // keeps those retries from minting continuations into the retiring
+        // session (a replaced session never continues either).
+        if let Some(agent_engine) = &self.agent_engine {
+            agent_engine.mark_session_closed();
+        }
         {
             let mut core = self.core.lock().unwrap();
             core.steering.clear();

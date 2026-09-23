@@ -620,10 +620,12 @@ impl Supervisor {
             if alive {
                 // The worker outlived the crash and may never have received
                 // the kill (the crash window is between the tombstone and
-                // the forward): connect to it, tell it to shut down (its
-                // own close cancels its jobs and archives its file), then
-                // finish the durable half of the stop. A failed connect
-                // degrades to the dead-worker finalize below.
+                // the forward): connect to it and forward the ORIGINAL
+                // kill — the killed close is the stop's intent (it cancels
+                // its jobs, archives its file, and cascades its children
+                // with the same killed reason; a shutdown would keep the
+                // resume entries of workers the stop was killing). A failed
+                // connect degrades to the dead-worker finalize below.
                 resident.intentional_stop.store(true, Ordering::SeqCst);
                 if self
                     .connect_worker(&resident, worker_connect_deadline())
@@ -631,7 +633,7 @@ impl Supervisor {
                     .is_ok()
                 {
                     let _ = self
-                        .route_command(&resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
+                        .route_command(&resident, "kill", json!({}), ROUTE_TIMEOUT_MS)
                         .await;
                 }
             }
