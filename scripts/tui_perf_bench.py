@@ -230,10 +230,10 @@ def main():
             if time.monotonic() - t0 > 60:
                 raise RuntimeError("daemon socket never appeared")
             time.sleep(0.05)
-        bin_env = env(agent_dir)
         tmux("new-session", "-d", "-s", "bench", "-x", "200", "-y", "45", "-c", root,
              "env", "-u", "PRIME_AGENT_SESSION_DIR",
-             "PRIME_AGENT_CODING_AGENT_DIR=" + agent_dir, "TERM=xterm-256color",
+             "PRIME_AGENT_CODING_AGENT_DIR=" + agent_dir, "PRIME_AGENT_TELEMETRY=0",
+             "TERM=xterm-256color",
              args.bin, "--daemon-socket", socket, "--resume", target)
         results["open_cold_s"] = round(wait_for(
             lambda pane: SESSION_MARKER in pane, 90, "cold open session view", t0), 3)
