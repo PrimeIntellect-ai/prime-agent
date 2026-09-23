@@ -1,9 +1,0 @@
-{
- "id": "8c991e0e-2c05-40b8-b699-d73885d356c7",
- "status": "active",
- "nextRunAt": "2026-09-23T20:38:00.000Z",
- "lastRunAt": null,
- "runCount": 0,
- "updatedAt": "2026-09-23T20:37:45.312Z",
- "note": "created 20:37:45 with CORRECT next-run computed (20:38:00, 15s out); never claimed; frozen at creation values \u2014 timer-death, not write-corruption"
-}

@@ -4979,17 +4979,16 @@ pub(crate) fn admit_bash_completion_notice(
     };
     // TS `queueVisible: visibleQueued` + the schedule's execution policy:
     // busy sessions queue a visible row, idle sessions wake on an
-    // invisible injected turn.
-    let (policy, queue_visible) = {
-        let core_guard = core.lock().unwrap();
-        if core_guard.busy {
-            (TurnPolicy::Queued, true)
-        } else {
-            (TurnPolicy::Injected, false)
-        }
+    // invisible injected turn. The busy sample and the push share ONE
+    // critical section: a turn starting between a separate sample and
+    // the push would queue an invisible row for a busy session.
+    let mut core_guard = core.lock().unwrap();
+    let (policy, queue_visible) = if core_guard.busy {
+        (TurnPolicy::Queued, true)
+    } else {
+        (TurnPolicy::Injected, false)
     };
     {
-        let mut core_guard = core.lock().unwrap();
         core_guard.steering.push_back(QueuedItem {
             // TS `previewLabel` (`injectedMessagePreviewLabel` ->
             // `ASYNC_BASH_COMPLETION_PREVIEW_LABEL`): the queue strip
@@ -5011,6 +5010,9 @@ pub(crate) fn admit_bash_completion_notice(
             forced_batch: false,
         });
     }
+    // The checkpoint re-locks the core (documented order: recovery lock
+    // first), so the admission's guard must release first.
+    drop(core_guard);
     // The fire checkpoint (busy=true, TS's steering queue string): the
     // notice is undelivered live work until its turn settles — the same
     // evidence the goal/autonomous continuations record.

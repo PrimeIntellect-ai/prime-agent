@@ -290,15 +290,11 @@ impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
 impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
     /// (Re)start the wake timer to the next active run.
     ///
-    /// The timer task NEVER exits on an empty store: with no active runs
-    /// it parks on the wake notify until a catalog mutation re-arms it
-    /// (the TS `recomputeScheduledSessionWake` shape — every recompute
-    /// arms a fresh timer, so a mutation can always revive the schedule).
-    /// The task that returned on an empty store was a dead scheduler:
-    /// the parked `Notify` had no waiter, so the wake after a later job
-    /// creation notified nobody and the session never received its due
-    /// fires (the frozen-heartbeat re-adoption incident: a job rows as
-    /// active with a stale `nextRunAt` and `runCount` 0 forever).
+    /// The timer task parks on the wake notify while the store has no
+    /// active runs instead of exiting, so a catalog mutation's wake can
+    /// always re-arm it (the TS `recomputeScheduledSessionWake` shape:
+    /// every recompute arms a fresh timer). An exited task would leave
+    /// the notify with no waiter, and later wakes would reach nobody.
     async fn schedule_next(&self) {
         let mut timer = self.timer.lock().await;
         if let Some(previous) = timer.take() {
