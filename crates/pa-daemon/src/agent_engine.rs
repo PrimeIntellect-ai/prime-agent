@@ -171,7 +171,9 @@ pub struct AgentSessionEngine {
     /// built session's agent at build time, and switched live by the
     /// `set_steering_mode`/`set_follow_up_mode` commands (TS
     /// `setSteeringMode`/`setFollowUpMode` write the live agent). `None`
-    /// keeps the TS default ("one-at-a-time").
+    /// keeps the TS default ("one-at-a-time"); the daemon's create seeds
+    /// the settings value, whose steering default is "all" (Kevin's
+    /// batch spec — the deliberate divergence from the TS default).
     queue_modes: std::sync::Mutex<(Option<String>, Option<String>)>,
     /// The in-run autonomous consult's deadlock-free mirror (see
     /// [`crate::autonomous_continuation`]): the shared turn-boundary slot,
@@ -468,7 +470,9 @@ impl AgentSessionEngine {
         // The queue delivery modes arrive at session create (TS `sdk.ts`
         // builds the agent with the settings modes; the worker's create
         // seeds them through `set_queue_modes`), so the engine starts
-        // with the TS default ("one-at-a-time").
+        // unseeded (None keeps the TS default "one-at-a-time" until the
+        // create writes the settings modes — steering "all" by default,
+        // the deliberate divergence from the TS default).
         let queue_modes = std::sync::Mutex::new((None, None));
         Ok(Self {
             runtime,

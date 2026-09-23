@@ -251,7 +251,8 @@ async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEng
     // TS `sdk.ts` seeds the Agent's queue modes from the settings manager
     // (`steeringMode`/`followUpMode`): the print runtime reads the same
     // settings its telemetry does, so the agent-level queues drain per
-    // the configured modes (default "one-at-a-time").
+    // the configured modes (the steering default is "all", Kevin's batch
+    // spec; follow-ups keep "one-at-a-time").
     let queue_settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
     let queue_mode = |mode: pa_core::settings::QueueModeSetting| match mode {
         pa_core::settings::QueueModeSetting::All => pa_agent::agent::QueueMode::All,

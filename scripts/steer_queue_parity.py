@@ -18,6 +18,17 @@ three flows that define the queue/abort UX:
   (TS `_pumpSessionInputs`'s mode-gated gathering +
   `turnExecutionPoliciesEqual`) - one delivery `agent_start`, three user
   rows, one reply - on both binaries byte-compareably.
+- one-at-a-time multi-steer (mode seeded explicitly): three parked steers
+  deliver one per boundary on both binaries - the mode surface stays
+  byte-compareable under the rust port's new batched default.
+- default multi-steer (NO seed): THE DELIBERATE DIVERGENCE. The TS product
+  defaults `steeringMode: "one-at-a-time"` (one steer per boundary);
+  the rust port's product default is "all" - Kevin 2026-09-23: "if we
+  have many messages in the steer queue, then ALL of them should be sent
+  after the next tool call [co-delivered as one batch at the next
+  tool-call boundary]". The two traces differ BY DESIGN here, so this
+  flow records per-side shape findings and is EXCLUDED from the byte
+  diff; the seeded flows above keep the mode surface parity-exact.
 - abort settle: an abort during a running kernel cell settles the turn
   at once - tool_execution_end(isError) + the aborted toolResult row pair
   + turn_end + agent_end broadcast (and the toolResult row persists),
@@ -468,6 +479,97 @@ class Side:
         finally:
             wire.close()
 
+    def flow_multi_steer(self, seed: str | None) -> list:
+        """Three parked steers under the given queue-mode seed: the
+        one-at-a-time mode (seeded, or the TS default) delivers one steer
+        per boundary on both binaries; the rust port's default ("all",
+        Kevin's batch spec) co-delivers the prefix as ONE batched turn —
+        the deliberate divergence this flow records per side."""
+        work = self.root / ("work-m" if seed is None else f"work-m-{seed}")
+        work.mkdir()
+        # The wedge: tool one's cell holds the turn while the steers park,
+        # so the steering stop ends the run at tool one's boundary with
+        # the whole prefix queued. Replies cover both shapes: the batch
+        # consumes one, the drip-feed three.
+        self.queue_script(
+            [
+                {"toolCall": {"name": "ipython", "arguments": {"code": "import time\nprint('multi steer tool one done')\ntime.sleep(5)"}}},
+                {"toolCall": {"name": "ipython", "arguments": {"code": "import time\nprint('multi steer tool two done')\ntime.sleep(12)"}}},
+            ]
+            + [
+                {"text": f"multi steer reply {index}"}
+                for index in range(1, 5)
+            ]
+        )
+        wire = B.Wire(self.sock)
+        try:
+            created = wire.request("m-create", {"type": "create", "config": {"cwd": str(work), "model": "mock-1", "sessionDir": str(self.agent / "sessions")}})
+            assert created.get("success") is True, created
+            sid = created["data"]["id"]
+            wire.request("m-attach", {"type": "attach", "activeSessionId": sid})
+            prompt = wire.request("m-prompt", {"type": "prompt", "activeSessionId": sid, "message": PROMPT})
+            assert prompt.get("success") is True, prompt
+            first_end = self.wait_event(wire, lambda ev: ev.get("type") == "tool_execution_end")
+            self.record("the multi-steer wedge run started", first_end is not None)
+            for msg in BATCH_STEERS:
+                parked = wire.request(f"m-steer-{msg}", {"type": "steer", "activeSessionId": sid, "message": msg})
+                assert parked.get("success") is True, parked
+            for msg in BATCH_STEERS:
+                proj = self.wait_event(
+                    wire,
+                    lambda ev, m=msg: ev.get("type") == "session_action_update"
+                    and m in json.dumps(ev.get("actions") or {}),
+                    timeout=60,
+                )
+                assert proj is not None, "the parking projection never arrived"
+            self.record("three steers parked behind the busy turn", True)
+            # Wait out the wedge run's settle, then the delivery window.
+            last_reply = self.wait_event(
+                wire,
+                lambda ev: ev.get("type") == "message_end"
+                and any(
+                    f"multi steer reply {index}" in json.dumps(ev.get("message") or {})
+                    for index in range(1, 5)
+                ),
+                timeout=180,
+            )
+            self.record("the queued steers were delivered and answered", last_reply is not None)
+            if last_reply is not None:
+                self.wait_event(wire, lambda ev: ev.get("type") == "agent_end", timeout=180)
+                wire.drain(3.0)
+            types = self.session_event_types(wire)
+            # The delivery window: everything after the wedge run's
+            # agent_end (the FIRST agent_end — the fresh session's only
+            # earlier run; the drip shape's delivery turns each carry
+            # their own agent_end inside the window).
+            wedge_end = types.index("agent_end")
+            delivery = types[wedge_end + 1:]
+            starts = delivery.count("agent_start")
+            if seed is None:
+                # The default divergence: the rust port batches, the TS
+                # product drips. Record the shape each side must show.
+                if self.name == "rust":
+                    self.record(
+                        "the DEFAULT co-delivers the parked prefix as ONE batched turn (Kevin's batch spec)",
+                        starts == 1 and delivery.count("message_start") >= 4,
+                        json.dumps(delivery[:40]),
+                    )
+                else:
+                    self.record(
+                        "the TS DEFAULT delivers one steer per boundary (one-at-a-time)",
+                        starts == 3,
+                        json.dumps(delivery[:40]),
+                    )
+            else:
+                self.record(
+                    "queue mode one-at-a-time delivers one steer per boundary",
+                    starts == 3,
+                    json.dumps(delivery[:40]),
+                )
+            return self.raw_trace(wire)
+        finally:
+            wire.close()
+
     def flow_abort_settle(self) -> list:
         """The abort during a running kernel cell."""
         work = self.root / "work-a"
@@ -606,6 +708,26 @@ def run_side(name: str, binary: str, out: Path) -> int:
         traces["batch-delivery"] = side.flow_batch_delivery()
         side.evidence("trace-batch-delivery.json", json.dumps(traces["batch-delivery"], indent=1))
         side.stop_daemon()
+        # The one-at-a-time multi-steer mode stays byte-diffable on both
+        # binaries; the unseeded default flow records the deliberate
+        # divergence (the rust port batches, TS drips) and is excluded
+        # from the diff set.
+        side = Side(name, binary, out, steering_mode="one-at-a-time")
+        side.start_daemon()
+        traces["one-at-a-time-multi-steer"] = side.flow_multi_steer("one-at-a-time")
+        side.evidence(
+            "trace-one-at-a-time-multi-steer.json",
+            json.dumps(traces["one-at-a-time-multi-steer"], indent=1),
+        )
+        side.stop_daemon()
+        side = Side(name, binary, out)
+        side.start_daemon()
+        traces["default-multi-steer"] = side.flow_multi_steer(None)
+        side.evidence(
+            "trace-default-multi-steer.json",
+            json.dumps(traces["default-multi-steer"], indent=1),
+        )
+        side.stop_daemon()
         side = Side(name, binary, out)
         side.start_daemon()
         traces["abort-settle"] = side.flow_abort_settle()
@@ -629,7 +751,18 @@ def run_side(name: str, binary: str, out: Path) -> int:
 
 def run_diff(out: Path) -> int:
     failed = 0
-    for flow in ("queue-delivery", "batch-delivery", "abort-settle", "abort-ownership"):
+    # "default-multi-steer" is excluded BY DESIGN: the unseeded default is
+    # the deliberate divergence (Kevin's batch spec — the rust port
+    # co-delivers the parked prefix; the TS product's default
+    # one-at-a-time drips one steer per boundary). Its per-side shape
+    # findings live in summary.json.
+    for flow in (
+        "queue-delivery",
+        "batch-delivery",
+        "one-at-a-time-multi-steer",
+        "abort-settle",
+        "abort-ownership",
+    ):
         ts_path = out / "ts" / f"trace-{flow}.json"
         rust_path = out / "rust" / f"trace-{flow}.json"
         if not ts_path.exists() or not rust_path.exists():

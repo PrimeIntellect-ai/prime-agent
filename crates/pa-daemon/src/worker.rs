@@ -388,7 +388,12 @@ pub(crate) struct SessionCore {
     /// `priority` to `default` on models without fast mode.
     pub(crate) service_tier: Option<pa_types::ai::ServiceTier>,
     /// The queue delivery modes (TS `agent.steeringMode` / `followUpMode`):
-    /// `"all"` or `"one-at-a-time"`.
+    /// `"all"` or `"one-at-a-time"`. The steering default is `"all"`
+    /// (Kevin's batch spec: every queued steer co-delivers as ONE turn at
+    /// the next tool-call boundary — a deliberate divergence from the TS
+    /// default "one-at-a-time", which stays selectable via the setting);
+    /// the follow-up default keeps the TS "one-at-a-time" (follow-ups
+    /// drain when the session goes idle, one per turn).
     pub(crate) steering_mode: String,
     pub(crate) follow_up_mode: String,
     /// The one-shot forced steering batch (TS `_forcedAllSteeringActionIds`
@@ -466,7 +471,7 @@ impl SessionCore {
             parent_session_id: None,
             child_script: None,
             service_tier: None,
-            steering_mode: "one-at-a-time".to_string(),
+            steering_mode: "all".to_string(),
             follow_up_mode: "one-at-a-time".to_string(),
             forced_all_steering: false,
             scoped_models: Vec::new(),
@@ -863,7 +868,7 @@ impl Worker {
             parent_session_id: None,
             child_script: None,
             service_tier: None,
-            steering_mode: "one-at-a-time".to_string(),
+            steering_mode: "all".to_string(),
             follow_up_mode: "one-at-a-time".to_string(),
             forced_all_steering: false,
             scoped_models: Vec::new(),
@@ -8377,7 +8382,7 @@ mod turn_stream_tests {
             parent_session_id: None,
             child_script: None,
             service_tier: None,
-            steering_mode: "one-at-a-time".to_string(),
+            steering_mode: "all".to_string(),
             follow_up_mode: "one-at-a-time".to_string(),
             forced_all_steering: false,
             scoped_models: Vec::new(),
@@ -8605,8 +8610,57 @@ mod turn_stream_tests {
         );
     }
 
-    /// Queue mode "one-at-a-time" (the TS default): each queued steer is
-    /// its own turn — one reply each, delivered in order.
+    /// The product default (Kevin's batch spec): the steering lane's
+/// default mode co-delivers the queued same-class prefix as ONE batched
+/// turn at the boundary without any explicit mode set — the default
+/// change from the TS "one-at-a-time" is the deliberate divergence.
+#[tokio::test]
+async fn the_default_mode_co_delivers_the_queued_steering_prefix() {
+    let engine: Arc<dyn SessionEngine> = Arc::new(
+        ScriptedEngine::from_value(json!({ "responses": ["batched reply"] }))
+            .unwrap_or_default(),
+    );
+    let runner = burst_runner(Arc::clone(&engine));
+    {
+        let mut core = runner.core.lock().unwrap();
+        assert_eq!(core.steering_mode, "all", "the default is the batched mode");
+        core.steering
+            .push_back(queued_prompt("steer one", TurnPolicy::Queued));
+        core.steering
+            .push_back(queued_prompt("steer two", TurnPolicy::Queued));
+        core.steering
+            .push_back(queued_prompt("steer three", TurnPolicy::Queued));
+    }
+    let mut subscription = runner.events.subscribe();
+    let core = std::sync::Arc::clone(&runner.core);
+    let work_notify = std::sync::Arc::clone(&runner.work_notify);
+    let running = tokio::spawn(async move { runner.run().await });
+    drain_pump(&core, &work_notify).await;
+    running.abort();
+
+    let events = runner_events(&mut subscription);
+    let starts = events
+        .iter()
+        .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_start"))
+        .count();
+    assert_eq!(starts, 1, "the default batches the whole prefix: {events:?}");
+    let rows = delivered_rows(&events);
+    assert_eq!(
+        rows,
+        vec![
+            ("user".to_string(), "steer one".to_string()),
+            ("user".to_string(), "steer two".to_string()),
+            ("user".to_string(), "steer three".to_string()),
+            ("assistant".to_string(), "batched reply".to_string()),
+        ],
+        "the default mode co-delivers every parked steer: {rows:?}"
+    );
+}
+
+/// Queue mode "one-at-a-time" (selectable via the `steeringMode`
+    /// setting; the TS default — this port's product default is "all",
+    /// Kevin's batch spec): each queued steer is its own turn — one reply
+    /// each, delivered in order.
     #[tokio::test]
     async fn one_at_a_time_delivers_each_queued_steer_as_its_own_turn() {
         // The burst harness has no session store, so the scripted engine
@@ -8620,6 +8674,7 @@ mod turn_stream_tests {
         let runner = burst_runner(Arc::clone(&engine));
         {
             let mut core = runner.core.lock().unwrap();
+            core.steering_mode = "one-at-a-time".to_string();
             core.steering
                 .push_back(queued_prompt("steer one", TurnPolicy::Queued));
             core.steering
@@ -8653,8 +8708,9 @@ mod turn_stream_tests {
 
     /// The forced steering batch (TS `abortAndSendQueued`'s
     /// `_forcedAllSteeringActionIds`): the armed prefix co-delivers as ONE
-    /// turn even under queue mode "one-at-a-time"; an item queued after
-    /// the arm stays out of the batch and delivers next.
+    /// turn even under queue mode "one-at-a-time" (pinned explicitly —
+    /// the product default is "all"); an item queued after the arm stays
+    /// out of the batch and delivers next.
     #[tokio::test]
     async fn forced_batch_delivers_the_armed_prefix_as_one_turn() {
         // (The burst harness serves the first scripted response for every
@@ -8665,6 +8721,7 @@ mod turn_stream_tests {
         let runner = burst_runner(Arc::clone(&engine));
         {
             let mut core = runner.core.lock().unwrap();
+            core.steering_mode = "one-at-a-time".to_string();
             core.steering
                 .push_back(queued_prompt("armed one", TurnPolicy::Queued));
             core.steering
@@ -8800,9 +8857,10 @@ mod turn_stream_tests {
     /// abort of a streaming turn, ALL visible queued plain-user steering
     /// messages send together as the next batched turn — the follow-up
     /// lane stays queued behind it (never discarded, never merged), then
-    /// runs in order once the session goes idle; the default queue mode
-    /// ("one-at-a-time") is unchanged, and with nothing armable queued the
-    /// abort runs abort-only (the queue parks behind the suspension).
+    /// runs in order once the session goes idle; the arm co-delivers
+    /// under any mode (the product default is "all" now, Kevin's batch
+    /// spec), and with nothing armable queued the abort runs abort-only
+    /// (the queue parks behind the suspension).
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
     async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups() {
@@ -8880,7 +8938,8 @@ mod turn_stream_tests {
         assert!(follow.success, "follow_up failed: {follow:?}");
         // The funnel (the wire command's body — #2599's handler calls it):
         // arm the visible plain-user steering, abort the run, resume the
-        // pump. The default queue mode stays "one-at-a-time".
+        // pump. The arm carries the batch under any mode; the default
+        // itself is asserted below (the product default "all").
         let sent = worker.abort_and_send_queued();
         assert!(sent, "the armed steering batch sent with the abort");
         let idle = tokio::time::timeout(
@@ -8973,8 +9032,8 @@ mod turn_stream_tests {
                 "both lanes drained in order"
             );
             assert_eq!(
-                core.steering_mode, "one-at-a-time",
-                "the default mode is untouched"
+                core.steering_mode, "all",
+                "the default mode is the batched-at-the-boundary product default"
             );
         }
         let _ = std::fs::remove_dir_all(&dir);

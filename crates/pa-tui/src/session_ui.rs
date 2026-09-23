@@ -292,8 +292,9 @@ pub(crate) struct SessionUi {
     pub(crate) turn_active: bool,
     /// The session's queue delivery mode (TS `steeringMode`, the state's
     /// `steeringMode`): `all` delivers the queued steering prefix as one
-    /// batched turn at the boundary; `one-at-a-time` (the TS default) one
-    /// per turn. Cached at every connection-state read so the queued-input
+    /// batched turn at the boundary; `one-at-a-time` one per turn (the TS
+    /// default — this port's product default is `all`, Kevin's batch
+    /// spec). Cached at every connection-state read so the queued-input
     /// adoption event reports the mode without a synchronous fetch.
     pub(crate) steering_mode: String,
     /// The chat index of the assistant message still streaming.
@@ -590,7 +591,7 @@ impl SessionUi {
             cost_usd: None,
             list_rows: Vec::new(),
             turn_active: false,
-            steering_mode: "one-at-a-time".to_string(),
+            steering_mode: "all".to_string(),
             streaming_index: None,
             working_tokens: LoaderTokenTracker::default(),
             turn_error_shown: false,
@@ -3484,7 +3485,7 @@ impl SessionUi {
             steering_mode: state
                 .get("steeringMode")
                 .and_then(Value::as_str)
-                .unwrap_or("one-at-a-time")
+                .unwrap_or("all")
                 .to_string(),
             follow_up_mode: state
                 .get("followUpMode")

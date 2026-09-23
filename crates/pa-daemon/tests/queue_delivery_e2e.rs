@@ -440,10 +440,12 @@ fn queue_pickup_projection_reaches_clients_before_the_delivered_turn_starts() {
         event_types(&client.events)
     );
 
-    // Everything drains: four model requests (turn one + three deliveries).
+    // Everything drains: three model requests (turn one + the steers'
+    // ONE batched turn — the product default co-delivers the parked
+    // steering prefix, Kevin's batch spec — + the follow-up's own turn).
     let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
-        if mock.count() >= 4 {
+        if mock.count() >= 3 {
             break;
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -451,13 +453,13 @@ fn queue_pickup_projection_reaches_clients_before_the_delivered_turn_starts() {
     client.drain_events(Duration::from_secs(2));
     assert_eq!(
         mock.count(),
-        4,
-        "turn one plus three deliveries, requests: {:?}",
+        3,
+        "turn one, the steers' one batched turn, the follow-up's: {:?}",
         mock.request_log()
     );
 
-    // Delivery order: steering lane first, follow-up lane behind it, one
-    // user message per turn.
+    // Delivery order: steering lane first (both steers as the one batched
+    // turn), the follow-up lane behind it.
     let user_messages: Vec<String> = client
         .events
         .iter()
@@ -479,10 +481,12 @@ fn queue_pickup_projection_reaches_clients_before_the_delivered_turn_starts() {
         "the queue drains in lane order, one item per turn"
     );
 
-    // The pickup projection: each delivered item leaves the queue
-    // projection BEFORE its own turn starts (TS emits at the `preparing`
+    // The pickup projection: the delivered batch leaves the queue
+    // projection BEFORE its turn starts (TS emits at the `preparing`
     // transition). A delivered message that stays projected for the whole
     // turn renders as a stale strip row and poisons browse-edit addresses.
+    // Under the batched default BOTH steers leave the projection in the
+    // one pickup update ahead of the one batched turn.
     let agent_starts: Vec<usize> = client
         .events
         .iter()
@@ -492,24 +496,18 @@ fn queue_pickup_projection_reaches_clients_before_the_delivered_turn_starts() {
         .collect();
     assert_eq!(
         agent_starts.len(),
-        4,
-        "one agent_start per turn: {agent_starts:?}, events: {:?}",
+        3,
+        "turn one, the steers' one batched turn, the follow-up's: {agent_starts:?}, events: {:?}",
         event_types(&client.events)
     );
     let parked_at = parked[0];
-    let steer_a_start = agent_starts[1];
-    let steer_b_start = agent_starts[2];
-    let follow_c_start = agent_starts[3];
+    let batch_start = agent_starts[1];
+    let follow_c_start = agent_starts[2];
     assert!(
-        action_updates_with(&client.events[..steer_a_start], &["steer B"], &["follow C"])
+        action_updates_with(&client.events[..batch_start], &[], &["follow C"])
             .iter()
             .any(|index| *index > parked_at),
-        "steer A's pickup must project before its turn starts (events: {:?})",
-        event_types(&client.events)
-    );
-    assert!(
-        !action_updates_with(&client.events[..steer_b_start], &[], &["follow C"]).is_empty(),
-        "steer B's pickup must project before its turn starts (events: {:?})",
+        "the steer batch's pickup must project before the batched turn starts (events: {:?})",
         event_types(&client.events)
     );
     assert!(
@@ -558,10 +556,12 @@ fn multi_item_queue_delivers_every_item_in_lane_order() {
     let actions = &client.events[parked[0]]["actions"];
     assert_eq!(actions["queuedCount"], 6, "queuedCount counts both lanes");
 
-    // All seven turns run: the starter plus every parked item.
+    // Five turns run: the starter, the three steers' ONE batched turn
+    // (the product default co-delivers the parked steering prefix,
+    // Kevin's batch spec), then the follow-ups one per turn behind it.
     let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline {
-        if mock.count() >= 7 {
+        if mock.count() >= 5 {
             break;
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -569,8 +569,8 @@ fn multi_item_queue_delivers_every_item_in_lane_order() {
     client.drain_events(Duration::from_secs(2));
     assert_eq!(
         mock.count(),
-        7,
-        "the starter plus six deliveries, requests: {:?}",
+        5,
+        "the starter, the steers' one batched turn, three follow-ups: {:?}",
         mock.request_log()
     );
     let user_messages: Vec<String> = client
@@ -599,7 +599,7 @@ fn multi_item_queue_delivers_every_item_in_lane_order() {
             "follow two",
             "follow three",
         ],
-        "every queued item delivers, steering lane before follow-up lane"
+        "every queued item delivers, the steering lane's rows co-delivered ahead of the follow-up lane"
     );
 }
 
