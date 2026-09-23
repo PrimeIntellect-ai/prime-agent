@@ -655,16 +655,17 @@ mod tests {
     }
 
     fn goal(active: bool) -> GoalState {
-        let mut state = GoalState::default();
-        state.active = active;
-        state.status = if active {
-            GoalStatus::Active
-        } else {
-            GoalStatus::Idle
-        };
-        state.tokens_used = 18_000;
-        state.token_budget = Some(40_000);
-        state
+        GoalState {
+            active,
+            status: if active {
+                GoalStatus::Active
+            } else {
+                GoalStatus::Idle
+            },
+            tokens_used: 18_000,
+            token_budget: Some(40_000),
+            ..GoalState::default()
+        }
     }
 
     fn roster() -> Vec<Value> {
@@ -737,7 +738,7 @@ mod tests {
         SessionIdentity::new(Some("root".to_string()), None, None)
     }
 
-    fn full_sources<'a>() -> (Vec<Value>, GoalState, Vec<HeartbeatEntry>, Value) {
+    fn full_sources() -> (Vec<Value>, GoalState, Vec<HeartbeatEntry>, Value) {
         (roster(), goal(true), heartbeats(), bash())
     }
 
