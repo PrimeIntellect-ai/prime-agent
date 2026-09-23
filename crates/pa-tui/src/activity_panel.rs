@@ -10,18 +10,29 @@ use serde_json::Value;
 use crate::heartbeats_picker::{session_label, HeartbeatEntry};
 use crate::keybindings::{format_key_text, KeybindingsManager};
 use crate::menu_panel::{menu_list_layout, menu_row_trailing};
-use crate::subagents::{descendant_entries, entry_status, SessionIdentity};
+use crate::subagents::SessionIdentity;
 use crate::theme::{Theme, ThemeColor};
 use crate::width::{str_width, truncate_line};
 use crate::{Line, Span};
-use pa_types::daemon::agent_roster::AgentRosterStatus;
 
 const PREFERRED_VISIBLE: usize = 8;
 // rule, title+counts, blank, blank, detail block, blank, hint, rule.
 const RESERVED_ROWS: usize = 7;
 /// The detail pane's per-row line budget (a fetched bash tail rides it).
 const MAX_DETAIL_LINES: usize = 5;
+/// A subagent sheet carries the agents-view column set — status, age,
+/// last activity, cost, tokens, model, activity, cwd — so its line
+/// budget is wider than the other groups'.
+const SUBAGENT_DETAIL_LINES: usize = 8;
 const MAX_TAIL_LINES: usize = 3;
+
+/// The detail pane's line budget for one row's group.
+fn detail_cap(group: ActivityPanelGroup) -> usize {
+    match group {
+        ActivityPanelGroup::Subagents => SUBAGENT_DETAIL_LINES,
+        _ => MAX_DETAIL_LINES,
+    }
+}
 
 /// An opaque kernel bash id and its latest catalog metadata (the
 /// `list_kernel_bash` wire rows).
@@ -119,6 +130,12 @@ pub struct ActivityPanelRow {
     pub active: bool,
     /// The detail pane's labeled lines for this row: `(label, value)`.
     pub detail: Vec<(&'static str, String)>,
+    /// The row's tree indent (nested subagent rows indent two spaces per
+    /// level under their parent; every other row is 0).
+    pub indent: usize,
+    /// Extra trailing cells after the status word (the agents-view cost
+    /// and age cells of a subagent row; every other row carries none).
+    pub cells: Vec<(ThemeColor, String)>,
     /// A running kernel bash row the `k` action may kill.
     pub killable: bool,
 }
@@ -378,13 +395,26 @@ impl ActivityPanel {
             }
             if cursor >= start && cursor < start + visible {
                 // Idle rows render dimmed; only actively running sources
-                // read at full strength.
-                let primary = if row.active {
-                    vec![Span::raw(clean_line(&row.label))]
+                // read at full strength. Nested subagent rows indent two
+                // spaces per tree level ahead of the label.
+                let mut primary = if row.indent > 0 {
+                    vec![Span::raw("  ".repeat(row.indent))]
                 } else {
-                    vec![theme.fg_span(ThemeColor::Dim, clean_line(&row.label))]
+                    Vec::new()
                 };
-                let trailing = vec![(status_color(row), clean_line(&row.status))];
+                primary.push(if row.active {
+                    Span::raw(clean_line(&row.label))
+                } else {
+                    theme.fg_span(ThemeColor::Dim, clean_line(&row.label))
+                });
+                // The status word leads the trailing cluster; the
+                // agents-view cost and age cells follow on subagent rows.
+                let mut trailing = vec![(status_color(row), clean_line(&row.status))];
+                trailing.extend(
+                    row.cells
+                        .iter()
+                        .map(|(color, text)| (*color, clean_line(text))),
+                );
                 lines.push(menu_row_trailing(
                     theme,
                     width,
@@ -409,7 +439,7 @@ impl ActivityPanel {
             lines.extend(detail_lines(theme, width, row));
             let tail_budget = self
                 .detail_budget()
-                .saturating_sub(row.detail.len().min(MAX_DETAIL_LINES))
+                .saturating_sub(row.detail.len().min(detail_cap(row.group)))
                 .max(1);
             let tail = self.bash_tail.as_ref().filter(|(id, _)| {
                 self.rows
@@ -448,7 +478,10 @@ impl ActivityPanel {
     }
 
     fn detail_budget(&self) -> usize {
-        MAX_DETAIL_LINES
+        self.rows
+            .get(self.selected)
+            .map(|row| detail_cap(row.group))
+            .unwrap_or(MAX_DETAIL_LINES)
             + self
                 .bash_tail
                 .as_ref()
@@ -568,7 +601,7 @@ fn detail_lines(theme: &Theme, width: usize, row: &ActivityPanelRow) -> Vec<Line
     let details = row
         .detail
         .iter()
-        .take(MAX_DETAIL_LINES)
+        .take(detail_cap(row.group))
         .map(|(label, value)| (label, clean_line(value)))
         .collect::<Vec<_>>();
     if details.is_empty() {
@@ -607,68 +640,37 @@ fn clean_line(value: &str) -> String {
         .to_string()
 }
 
-fn summary_str<'a>(summary: &'a Value, field: &str) -> Option<&'a str> {
-    summary
-        .get(field)
-        .and_then(Value::as_str)
-        .filter(|text| !text.is_empty())
-}
-
 fn subagent_rows(sources: &ActivityPanelSources<'_>) -> Vec<ActivityPanelRow> {
-    descendant_entries(sources.roster, sources.identity)
-        .into_iter()
-        .map(|entry| {
-            let summary = entry.get("summary").cloned().unwrap_or(Value::Null);
-            let label = summary_str(&summary, "sessionName")
-                .map(str::to_string)
-                .or_else(|| {
-                    summary_str(&summary, "firstMessage")
-                        .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
-                })
-                .unwrap_or_else(|| {
-                    summary_str(&summary, "activeSessionId")
-                        .map(|id| id.chars().take(8).collect::<String>())
-                        .or_else(|| summary_str(&summary, "sessionId").map(str::to_string))
-                        .unwrap_or_else(|| "subagent".to_string())
-                });
-            let status = match entry_status(entry) {
-                AgentRosterStatus::Running => "running",
-                AgentRosterStatus::Idle => "idle",
-                AgentRosterStatus::Inactive => "inactive",
-            }
-            .to_string();
-            let mut detail = vec![("status", status.clone())];
-            if let Some(activity) = summary_str(&summary, "activity") {
-                detail.push(("activity", activity.to_string()));
-            }
-            if let Some(model) = summary.get("model") {
-                let mut model_label = format!(
-                    "{}/{}",
-                    summary_str(model, "provider").unwrap_or_default(),
-                    summary_str(model, "modelId").unwrap_or_default()
-                );
-                if let Some(level) = summary_str(&summary, "thinkingLevel") {
-                    model_label.push_str(&format!(":{level}"));
-                }
-                detail.push(("model", model_label));
-            }
-            if let Some(cwd) = summary_str(&summary, "cwd") {
-                detail.push(("cwd", cwd.to_string()));
-            }
-            ActivityPanelRow {
-                group: ActivityPanelGroup::Subagents,
-                id: summary_str(&summary, "activeSessionId")
-                    .or_else(|| summary_str(&summary, "sessionId"))
-                    .unwrap_or_default()
-                    .to_string(),
-                label,
-                active: status == "running",
-                status,
-                detail,
-                killable: false,
-            }
-        })
-        .collect()
+    // The Subagents group is the agents-view-esque viewer (the
+    // `subagent_viewer` module owns the nested tree and the time/cost/
+    // token cells); the status word keeps the group header's counts and
+    // the dock's dimmed-idle treatment over the same roster rows.
+    crate::subagent_viewer::tree_rows(
+        sources.roster,
+        sources.identity,
+        crate::agents_view_state::now_ms(),
+    )
+    .into_iter()
+    .map(|row| {
+        // The agents-view cost and age cells; a row without timestamps
+        // skips the empty age cell instead of rendering a bare dot.
+        let mut cells = vec![(ThemeColor::Dim, row.cost)];
+        if !row.age.is_empty() {
+            cells.push((ThemeColor::Dim, row.age));
+        }
+        ActivityPanelRow {
+            group: ActivityPanelGroup::Subagents,
+            id: row.id,
+            label: row.label,
+            active: row.status == "running",
+            status: row.status.to_string(),
+            detail: row.detail,
+            indent: row.depth,
+            cells,
+            killable: false,
+        }
+    })
+    .collect()
 }
 
 fn goal_rows(sources: &ActivityPanelSources<'_>) -> Vec<ActivityPanelRow> {
@@ -711,6 +713,8 @@ fn goal_rows(sources: &ActivityPanelSources<'_>) -> Vec<ActivityPanelRow> {
                 active: true,
                 status: goal.status.slug().to_string(),
                 detail,
+                indent: 0,
+                cells: Vec::new(),
                 killable: false,
             }
         })
@@ -761,6 +765,8 @@ fn heartbeat_rows(sources: &ActivityPanelSources<'_>) -> Vec<ActivityPanelRow> {
                 active: entry.job.status == "active",
                 status: entry.job.status.clone(),
                 detail,
+                indent: 0,
+                cells: Vec::new(),
                 killable: false,
             }
         })
@@ -799,6 +805,8 @@ fn bash_rows(sources: &ActivityPanelSources<'_>) -> Vec<ActivityPanelRow> {
                     activity.status
                 },
                 detail,
+                indent: 0,
+                cells: Vec::new(),
                 killable: running,
             }
         })
@@ -954,8 +962,17 @@ mod tests {
         assert_eq!(worker.label, "worker-a");
         assert_eq!(worker.status, "running");
         assert!(worker.active, "a running subagent is an active row");
-        assert!(worker.detail.contains(&("model", "p/m:high".to_string())));
+        // The agents-view sheet: TS formatSessionModel renders the bare
+        // model name plus the thinking level.
+        assert!(worker.detail.contains(&("model", "m:high".to_string())));
         assert!(worker.detail.contains(&("cwd", "/tmp/project".to_string())));
+        assert!(worker.detail.contains(&("cost", "$0.00".to_string())));
+        assert_eq!(
+            worker.cells,
+            vec![(ThemeColor::Dim, "$0.00".to_string())],
+            "a row without timestamps carries the cost cell and skips the empty age cell"
+        );
+        assert_eq!(worker.indent, 0);
         let unnamed = &panel.rows[1];
         assert_eq!(unnamed.label, "fix the bug");
         assert!(!unnamed.active, "an idle subagent renders dimmed");
@@ -998,6 +1015,124 @@ mod tests {
                 "{status:?} is bookkeeping, not a live activity"
             );
         }
+    }
+
+    #[test]
+    fn subagent_rows_nest_the_descendant_tree_with_usage_cells() {
+        let roster = vec![
+            json!({
+                "agentId": "p1",
+                "status": "running",
+                "summary": {
+                    "runtimeKind": "subagent",
+                    "sessionId": "p1",
+                    "activeSessionId": "p1-live",
+                    "sessionFile": "/sessions/p1.jsonl",
+                    "parentActiveSessionId": "root-live",
+                    "parentSessionId": "root-session",
+                    "parentSessionPath": "/sessions/root.jsonl",
+                    "sessionName": "parent",
+                    "messageCount": 2,
+                    "isStreaming": true,
+                    "created": "2026-09-23T00:00:00Z",
+                    "lastActivityAt": "2026-09-23T00:01:00Z",
+                    "usage": { "inputTokens": 1_500, "outputTokens": 500, "cost": 0.25 },
+                }
+            }),
+            json!({
+                "agentId": "gc1",
+                "status": "idle",
+                "summary": {
+                    "runtimeKind": "subagent",
+                    "sessionId": "gc1",
+                    "activeSessionId": "gc1-live",
+                    "sessionFile": "/sessions/gc1.jsonl",
+                    "parentActiveSessionId": "p1-live",
+                    "parentSessionId": "p1",
+                    "parentSessionPath": "/sessions/p1.jsonl",
+                    "sessionName": "grandchild",
+                    "messageCount": 1,
+                    "created": "2026-09-23T00:00:00Z",
+                    "usage": { "inputTokens": 500, "outputTokens": 100, "cost": 0.10 },
+                }
+            }),
+        ];
+        let identity = identity();
+        let goal = goal(false);
+        let heartbeats = Vec::new();
+        let bash = json!({"activities": []});
+        let src = sources(&identity, &roster, &goal, &heartbeats, &bash);
+        let panel = ActivityPanel::new(&src, None, 40);
+        assert_eq!(panel.rows.len(), 2);
+        let parent = &panel.rows[0];
+        assert_eq!(parent.label, "parent");
+        assert_eq!(parent.indent, 0);
+        // The recursive rollup reaches the grandchild (TS
+        // computeRecursiveRollups): 0.25 + 0.10.
+        assert!(parent
+            .cells
+            .contains(&(ThemeColor::Dim, "$0.35".to_string())));
+        let grandchild = &panel.rows[1];
+        assert_eq!(grandchild.label, "grandchild");
+        assert_eq!(grandchild.indent, 1, "children of children indent");
+        assert!(grandchild
+            .cells
+            .contains(&(ThemeColor::Dim, "$0.10".to_string())));
+        // The sheet carries the agents-view column set: status, age,
+        // last activity, cost, tokens, model-less rows skip the pair.
+        assert_eq!(
+            parent.detail.first(),
+            Some(&("status", "running".to_string()))
+        );
+        assert!(parent.detail.contains(&("cost", "$0.35".to_string())));
+        assert!(
+            parent
+                .detail
+                .iter()
+                .any(|(label, _)| *label == "last activity"),
+            "the sheet carries the last-activity time"
+        );
+        assert!(
+            parent.detail.iter().any(|(label, _)| *label == "age"),
+            "the sheet carries the elapsed time"
+        );
+        // The rendered rows: the grandchild line indents under the
+        // parent, and both rows carry the status/cost/age cluster.
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let kb = KeybindingsManager::new();
+        let lines = panel.render(&theme, 60, &kb);
+        let rendered: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.to_string())
+                    .collect::<String>()
+            })
+            .collect();
+        let parent_line = rendered
+            .iter()
+            .find(|line| line.contains("parent"))
+            .expect("the parent row renders");
+        assert!(
+            parent_line.contains("$0.35"),
+            "the row carries the recursive cost cell"
+        );
+        let grandchild_line = rendered
+            .iter()
+            .find(|line| line.contains("grandchild"))
+            .expect("the grandchild row renders");
+        assert!(
+            grandchild_line.starts_with("    grandchild"),
+            "the grandchild indents two spaces under its parent: {grandchild_line:?}"
+        );
+        // Enter on a nested row opens the group view with that row.
+        assert_eq!(
+            panel.handle_key("enter", &kb),
+            ActivityPanelAction::OpenGroup {
+                group: ActivityPanelGroup::Subagents,
+                selected_id: Some("p1-live".to_string()),
+            }
+        );
     }
 
     #[test]
@@ -1173,7 +1308,9 @@ mod tests {
         // metadata run-on.
         assert!(!rendered.contains("Selected"));
         assert!(rendered.contains("status    running"));
-        assert!(rendered.contains("activity  working"));
+        // The agents-view activity cell (TS formatActivityCell): the
+        // status label wins over the legacy activity word.
+        assert!(rendered.contains("activity  classifying"));
         // Exactly one close hint rides the bottom bar (the close key
         // never repeats on a second row).
         let close_count = lines
@@ -1210,8 +1347,8 @@ mod tests {
 
     #[test]
     fn multibyte_ids_never_panic_in_the_label_fallback() {
-        // A roster id with multibyte characters has a byte length that no
-        // longer licenses byte slicing: the fallback truncates by chars.
+        // A multibyte roster id never licenses byte slicing: the TS title
+        // fallback keeps the whole id and the row renderer clips it.
         let roster = vec![json!({
             "agentId": "a1",
             "status": "running",
@@ -1231,7 +1368,8 @@ mod tests {
         let row = panel.selected_row().expect("one row");
         assert_eq!(
             row.label,
-            "\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}"
+            "\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}",
+            "the TS title fallback keeps the whole id; the row renderer clips"
         );
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
         let kb = KeybindingsManager::new();
