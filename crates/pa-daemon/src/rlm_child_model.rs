@@ -38,11 +38,31 @@ pub fn catalog_models(agent_dir: &Path) -> Vec<RlmModelInfo> {
         .collect()
 }
 
-/// Resolve the child model reference. `None` inherits the parent model; a
-/// reference resolves exactly like the TS `_resolveRlmSubagentModel`:
-/// parent equality first, then an exact catalog selector, then a unique
-/// short-form match, else the TS unavailable-model error.
+/// Resolve the child model reference, then enforce the daemon
+/// `allowedModels` allowlist on the resolved selector (an inherited parent
+/// model included): a model outside the allowlist fails loudly with the
+/// typed refusal — never a fallback — so both `rlm.spawn` and
+/// `rlm.create_session` refuse instead of landing a child on a model the
+/// daemon may not resolve to.
 pub fn resolve_child_model(
+    agent_dir: &Path,
+    reference: Option<&str>,
+    parent_model: Option<&str>,
+    target: &str,
+    allowlist: Option<&[String]>,
+) -> Result<String> {
+    let model = resolve_child_model_unchecked(agent_dir, reference, parent_model, target)?;
+    if let Err(refusal) = crate::model_allowlist::assert_allowed(allowlist, &model) {
+        return Err(refusal);
+    }
+    Ok(model)
+}
+
+/// The TS `_resolveRlmSubagentModel` resolution before the allowlist gate.
+/// `None` inherits the parent model; a reference resolves exactly like
+/// the TS: parent equality first, then an exact catalog selector, then a
+/// unique short-form match, else the TS unavailable-model error.
+fn resolve_child_model_unchecked(
     agent_dir: &Path,
     reference: Option<&str>,
     parent_model: Option<&str>,
@@ -215,9 +235,14 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         write_catalog(dir.path());
         // No reference inherits the parent model.
-        let resolved =
-            resolve_child_model(dir.path(), None, Some("test-provider/glm-5.3"), "subagent")
-                .unwrap();
+        let resolved = resolve_child_model(
+            dir.path(),
+            None,
+            Some("test-provider/glm-5.3"),
+            "subagent",
+            None,
+        )
+        .unwrap();
         assert_eq!(resolved, "test-provider/glm-5.3");
         // Parent equality short-circuits even a catalog refresh miss.
         let resolved = resolve_child_model(
@@ -225,6 +250,7 @@ mod tests {
             Some("Test-Provider/GLM-5.3"),
             Some("test-provider/glm-5.3"),
             "subagent",
+            None,
         )
         .unwrap();
         assert_eq!(resolved, "test-provider/glm-5.3");
@@ -234,6 +260,7 @@ mod tests {
             Some("test-provider/glm-5.3-turbo"),
             Some("test-provider/glm-5.3"),
             "subagent",
+            None,
         )
         .unwrap();
         assert_eq!(resolved, "test-provider/glm-5.3-turbo");
@@ -243,15 +270,79 @@ mod tests {
             Some("glm-5.3-turbo"),
             Some("test-provider/glm-5.3"),
             "subagent",
+            None,
         )
         .unwrap();
         assert_eq!(resolved, "test-provider/glm-5.3-turbo");
         // No reference and no parent model: the TS no-model error.
-        let error = resolve_child_model(dir.path(), None, None, "subagent").unwrap_err();
+        let error = resolve_child_model(dir.path(), None, None, "subagent", None).unwrap_err();
         assert_eq!(
             error.to_string(),
             "No model selected. Use /model to pick one."
         );
+    }
+
+    #[test]
+    fn the_allowlist_refuses_resolved_models_loudly() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_catalog(dir.path());
+        let allow = vec!["prime-inference/*".to_string()];
+        // An explicit reference that resolves but sits outside the
+        // allowlist fails with the typed refusal, never a fallback.
+        let error = resolve_child_model(
+            dir.path(),
+            Some("test-provider/glm-5.3"),
+            None,
+            "subagent",
+            Some(&allow),
+        )
+        .unwrap_err();
+        let refusal = error
+            .downcast_ref::<pa_core::models::ModelAllowlistRefusal>()
+            .expect("typed refusal");
+        assert_eq!(refusal.selector, "test-provider/glm-5.3");
+        assert!(
+            error
+                .to_string()
+                .contains("blocked by the daemon model allowlist"),
+            "{error}"
+        );
+        // An inherited parent model outside the allowlist refuses too:
+        // inheritance is a resolution, not an exemption.
+        let error = resolve_child_model(
+            dir.path(),
+            None,
+            Some("test-provider/glm-5.3"),
+            "subagent",
+            Some(&allow),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<pa_core::models::ModelAllowlistRefusal>()
+                .is_some(),
+            "{error}"
+        );
+        // A reference matching the allowlist passes the gate.
+        let resolved = resolve_child_model(
+            dir.path(),
+            Some("test-provider/glm-5.3"),
+            None,
+            "subagent",
+            Some(&["test-provider/*".to_string()]),
+        )
+        .unwrap();
+        assert_eq!(resolved, "test-provider/glm-5.3");
+        // No allowlist configured keeps the TS behavior.
+        let resolved = resolve_child_model(
+            dir.path(),
+            Some("test-provider/glm-5.3"),
+            None,
+            "subagent",
+            None,
+        )
+        .unwrap();
+        assert_eq!(resolved, "test-provider/glm-5.3");
     }
 
     #[test]
@@ -267,6 +358,7 @@ mod tests {
             Some("test-provi"),
             Some("test-provider/glm-5.3"),
             "subagent",
+            None,
         )
         .unwrap_err();
         let message = error.to_string();
@@ -287,6 +379,7 @@ mod tests {
             Some("zzz"),
             Some("test-provider/glm-5.3"),
             "subagent",
+            None,
         )
         .unwrap_err();
         assert!(!error.to_string().contains("close matches:"), "{error}");
@@ -379,6 +472,7 @@ mod tests {
             Some("prime-inference/internal/glm-5.3-fast"),
             Some("prime-inference/z-ai/glm-5.3"),
             "subagent",
+            None,
         )
         .unwrap();
         assert_eq!(resolved, "prime-inference/internal/glm-5.3-fast");
@@ -387,6 +481,7 @@ mod tests {
             Some("internal/glm-5.3-fast"),
             Some("prime-inference/z-ai/glm-5.3"),
             "subagent",
+            None,
         )
         .unwrap();
         assert_eq!(resolved, "prime-inference/internal/glm-5.3-fast");

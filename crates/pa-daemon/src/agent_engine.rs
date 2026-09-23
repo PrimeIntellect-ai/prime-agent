@@ -328,6 +328,11 @@ pub struct AgentSessionEngine {
     /// run's duration, and [`SessionEngine::abort_auto_compaction`]
     /// aborts whatever run holds it.
     pub(crate) auto_compaction_abort: std::sync::Mutex<Option<std::sync::Arc<AbortController>>>,
+    /// The daemon model-allowlist refusal telemetry (`model refused`),
+    /// shared with the RLM children host so every enforcement seam in
+    /// this worker emits through one lazily-built client.
+    pub(crate) model_refusal_telemetry:
+        std::sync::Arc<crate::model_allowlist::ModelRefusalTelemetry>,
 }
 
 impl AgentSessionEngine {
@@ -362,11 +367,18 @@ impl AgentSessionEngine {
                 .map(|link_config| link_config.socket_path.clone())
                 .unwrap_or_default(),
         ));
+        let model_refusal_telemetry =
+            std::sync::Arc::new(crate::model_allowlist::ModelRefusalTelemetry::new(
+                config.cwd.clone(),
+                config.agent_dir.clone(),
+                config.telemetry_disabled == Some(true),
+            ));
         let children = config.supervisor_link.as_ref().map(|link_config| {
             Arc::new(SupervisorChildSessions::new(
                 Arc::clone(&link),
                 config.agent_dir.clone(),
                 link_config.active_session_id.clone(),
+                std::sync::Arc::clone(&model_refusal_telemetry),
             ))
         });
         let autonomous_driver = std::sync::RwLock::new(std::sync::Arc::new(
@@ -490,6 +502,7 @@ impl AgentSessionEngine {
             faux_model: std::sync::OnceLock::new(),
             overflow_recovery: std::sync::Mutex::new(OverflowRecovery::default()),
             auto_compaction_abort: std::sync::Mutex::new(None),
+            model_refusal_telemetry,
         })
     }
 
@@ -1012,7 +1025,35 @@ impl AgentSessionEngine {
     }
 
     /// Resolve the model through the composed registry.
+
+    /// Emit the daemon model-allowlist refusal's adoption event (schema
+    /// v1 `model refused`) from any of this worker's enforcement seams.
+    pub(crate) fn note_model_refused(&self, surface: &str, selector: &str) {
+        self.model_refusal_telemetry.note_refused(surface, selector);
+    }
+
+    /// Resolve the model through the composed registry, then enforce the
+    /// settings `allowedModels` allowlist: a resolution outside the
+    /// allowlist fails loudly here (the silent-fallback guarantee — the
+    /// startup chain never lands a session on a model the daemon may not
+    /// resolve to), and the refusal emits `model refused`. Script
     fn resolve_registry_model(&self) -> anyhow::Result<Model> {
+        let model = self.resolve_registry_model_unchecked()?;
+        let selector = format!("{}/{}", model.provider, model.id);
+        let allowlist = crate::model_allowlist::load(&self.cwd(), &self.config.agent_dir);
+        if let Err(refusal) = crate::model_allowlist::assert_allowed(&allowlist, &selector) {
+            if let Some(refusal) = refusal.downcast_ref::<pa_core::models::ModelAllowlistRefusal>() {
+                self.note_model_refused("session_start", &refusal.selector);
+            }
+            return Err(refusal);
+        }
+        Ok(model)
+    }
+
+    /// The registry resolution before the allowlist gate: the flagged-model
+    /// arm (TS `resolveCliModel`) or the TS `createAgentSession` startup
+    /// chain.
+    fn resolve_registry_model_unchecked(&self) -> anyhow::Result<Model> {
         let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
         let mut registry =
             pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
@@ -6875,6 +6916,28 @@ pub(crate) mod tests {
             agent_dir: dir.join("agent"),
             provider: provider.map(str::to_string),
             model: model.map(str::to_string),
+
+    /// The daemon model allowlist enforcement at the startup chain
+    /// (`resolve_registry_model`): a resolution outside settings
+    /// `allowedModels` fails loudly with the typed refusal — the chain
+    /// never lands a session on an off-list model (no silent fallback to
+    /// the featured default) — and an allowing allowlist keeps the
+    /// resolution.
+    #[test]
+    fn the_startup_chain_refuses_models_outside_the_allowlist() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        write_custom_provider_models_json(&agent_dir, "http://127.0.0.1:9");
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            serde_json::json!({ "allowedModels": ["anthropic/*"] }).to_string(),
+        )
+        .unwrap();
+        let engine = AgentSessionEngine::new(AgentEngineConfig {
+            cwd: dir.path().to_path_buf(),
+            agent_dir,
+            provider: None,
+            model: None,
             api_key: None,
             thinking: None,
             session_dir: None,
@@ -7381,6 +7444,31 @@ pub(crate) mod tests {
             Some("high"),
             "the replacement re-clamps the requested level against its restored model"
         );
+
+        .unwrap();
+        let error = engine
+            .resolve_registry_model()
+            .expect_err("off-allowlist model refused");
+        let refusal = error
+            .downcast_ref::<pa_core::models::ModelAllowlistRefusal>()
+            .expect("typed refusal");
+        assert_eq!(refusal.selector, "battery/mock-1");
+        assert!(
+            error
+                .to_string()
+                .contains("blocked by the daemon model allowlist"),
+            "{error}"
+        );
+
+        // An allowing allowlist opens the gate: the same engine resolves.
+        std::fs::write(
+            engine.config.agent_dir.join("settings.json"),
+            serde_json::json!({ "allowedModels": ["battery/*"] }).to_string(),
+        )
+        .unwrap();
+        let model = engine.resolve_registry_model().expect("resolved model");
+        assert_eq!(model.provider, "battery");
+        assert_eq!(model.id, "mock-1");
     }
 
     #[test]

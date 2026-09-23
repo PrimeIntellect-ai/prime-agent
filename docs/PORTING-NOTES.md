@@ -1084,3 +1084,66 @@ kept it working (billed model turns for a session nobody wanted alive).
   helpers), `supervisor.rs`/`ownership.rs`/`update_restore.rs` (the
   routes), `goal_continuation.rs`/`autonomous_continuation.rs` (the
   continuation gates).
+
+## Daemon model allowlist — `allowedModels` (lane metered-model-guardrail, 2026-09-23)
+
+### The settings key
+
+Rust-only settings key `allowedModels` (JSON): a list of model patterns
+restricting what the **daemon** may resolve a model to. No TS equivalent —
+this is a deliberate daemon guardrail motivated by two production
+incidents: a silent fallback that burned metered-route spend (a requested
+model unavailable on a client landed on an unintended paid route), and a
+session pinned to `prime-inference/internal/glm-5.3-fast` silently falling
+back to `z-ai/glm-5.3` on a catalog flap (the 400 `enable_thinking`
+fleet kill at 2026-09-23 05:57 UTC). Unset (or a list that trims to empty)
+keeps the TS behavior byte-for-byte; parity when unset is the contract.
+
+```json
+{ "allowedModels": ["prime-inference/internal/*", "prime-inference/z-ai/glm-5.3"] }
+```
+
+Semantics:
+
+- **Global scope only** (`~/.prime/agent/settings.json`), like
+  `idleEvictionMinutes`: a daemon policy a project scope cannot weaken.
+- **Pattern grammar** = the `--models` CLI scope vocabulary, matched
+  case-insensitively against the full selector `provider/model-id` and the
+  bare id: a pattern with wildcards (`*`, `?`, `[`) globs; a plain pattern
+  must match exactly. No `:level` suffixes (an allowlist entry is a
+  pattern, not a cycling scope entry).
+- **Enforced at every daemon model resolution**, with a loud typed error
+  (`ModelAllowlistRefusal`), never a fallback and never a silently
+  different model:
+  1. the `set_model` wire command (the `/model` switch): the response
+     carries the refusal before any switch side effect;
+  2. RLM child-model resolution (`rlm.spawn` and `rlm.create_session`,
+     both `SupervisorChildSessions` paths) — an inherited parent model is
+     a resolution too, so an off-list parent fails the spawn loudly;
+  3. the worker's startup model chain (`AgentSessionEngine::
+     resolve_registry_model`): the TS chain's fallbacks (settings default
+     → featured default `z-ai/glm-5.3` → first available) can no longer
+     land a session on an off-list model — the chain resolves, then the
+     gate refuses, so a broken pin surfaces as an error instead of a
+     session on the wrong model.
+- **Adoption telemetry**: every refusal emits `model refused` (schema v1;
+  `docs/telemetry-events.md`) — surface + provider/model categories only,
+  never the refused selector or the configured patterns.
+
+### Parity stance
+
+TS has no `allowedModels` key and no daemon-level allowlist; the Rust key
+is additive (TS ignores unknown settings keys, so a TS client reading the
+same `settings.json` is unaffected). With the key unset, all three seams
+behave exactly as the TS daemon does (verified by the seam tests passing
+`None`). The typed refusal is Rust-only vocabulary on the wire error
+surface: the daemon never sends it unless an operator opts into the
+allowlist.
+
+### Where the code lives
+
+- `pa-core`: `models::allowlist` (pattern matching + the typed refusal),
+  `settings` (the `allowedModels` key, `get_allowed_models`), and the
+  `track_model_refused` telemetry seam.
+- `pa-daemon`: `model_allowlist` (the enforcement helpers + the worker's
+  lazy refusal-telemetry client), with the three seams above.

@@ -342,6 +342,13 @@ pub struct Settings {
     pub terminal: Option<TerminalSettings>,
     pub images: Option<ImageSettings>,
     pub enabled_models: Option<Vec<String>>,
+    /// Rust-only daemon-level model allowlist: model patterns (the
+    /// `--models` CLI scope grammar) the daemon may resolve to. Enforced at
+    /// the daemon's model-resolution seams (`set_model`, RLM child-model
+    /// resolution, the worker startup chain); a model outside the allowlist
+    /// fails loudly instead of resolving, with no fallback. `None` is
+    /// unrestricted (the TS behavior).
+    pub allowed_models: Option<Vec<String>>,
     pub tree_filter_mode: Option<String>,
     pub thinking_budgets: Option<ThinkingBudgetsSettings>,
     pub editor_padding_x: Option<u64>,

@@ -349,6 +349,11 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
         Arc::clone(&link),
         agent_dir.clone(),
         parent_active_session_id.clone(),
+        std::sync::Arc::new(pa_daemon::model_allowlist::ModelRefusalTelemetry::new(
+            agent_dir.clone(),
+            agent_dir.clone(),
+            /*telemetry_disabled*/ true,
+        )),
     );
     children.set_identity(ParentIdentity {
         rlm_depth: 0,

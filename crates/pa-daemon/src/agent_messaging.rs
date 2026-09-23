@@ -732,6 +732,11 @@ mod controller_tests {
             Arc::new(SupervisorLink::new(socket.clone())),
             std::path::PathBuf::from("/agent"),
             "aaa111".to_string(),
+            std::sync::Arc::new(crate::model_allowlist::ModelRefusalTelemetry::new(
+                std::path::PathBuf::from("/agent"),
+                std::path::PathBuf::from("/agent"),
+                /*telemetry_disabled*/ true,
+            )),
         );
         let mut controller = controller(socket, own_summary);
         controller.children = Some(Arc::new(children));

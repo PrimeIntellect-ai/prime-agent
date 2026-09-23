@@ -550,6 +550,29 @@ pub fn track_daemon_event(client: &TelemetryClient, kind: &str, exit_reason: Opt
     client.track("daemon event", properties);
 }
 
+/// Track a daemon model-allowlist refusal (`model refused`, schema v1):
+/// a daemon model resolution (the `set_model` command, an RLM
+/// spawn/create_session resolution, or the worker's startup model chain)
+/// refused a model outside the settings `allowedModels` allowlist.
+/// Categories and surface only — never the refused selector, pattern
+/// content, or session payload (the `daemon event` catalog-refresh rule:
+/// no model ids).
+pub fn track_model_refused(
+    client: &TelemetryClient,
+    surface: &str,
+    provider: &str,
+    model_id: &str,
+) {
+    let mut properties = base_properties("daemon");
+    properties.set("surface", Value::from(surface));
+    properties.set(
+        "provider_category",
+        Value::from(provider_category(Some(provider))),
+    );
+    properties.set("model_category", Value::from(model_category(model_id)));
+    client.track("model refused", properties);
+}
+
 /// Track the disk-archive sweep's `daemon event` (schema v1, kind
 /// `sessions_archived`): a count only, never session payload.
 pub fn track_sessions_archived(client: &TelemetryClient, count: usize) {

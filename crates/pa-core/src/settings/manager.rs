@@ -477,6 +477,24 @@ impl SettingsManager {
         self.merged.auxiliary_model.as_deref()
     }
 
+    /// The daemon-level model allowlist (settings `allowedModels`): model
+    /// patterns the daemon may resolve to, enforced at every daemon
+    /// model resolution (`set_model`, RLM child-model resolution, the
+    /// worker startup chain) — a model outside the allowlist fails loudly,
+    /// never a fallback. Rust-only guardrail (no TS equivalent); `None` is
+    /// unrestricted. A daemon policy like `idleEvictionMinutes`: read from
+    /// the global scope only, so a project cannot weaken a box-level pin.
+    /// A list that trims to empty behaves as unset.
+    pub fn get_allowed_models(&self) -> Option<Vec<String>> {
+        let patterns = self.global.allowed_models.as_ref()?;
+        let patterns: Vec<String> = patterns
+            .iter()
+            .map(|pattern| pattern.trim().to_string())
+            .filter(|pattern| !pattern.is_empty())
+            .collect();
+        (!patterns.is_empty()).then_some(patterns)
+    }
+
     /// TS `setDefaultServiceTier`: the persisted default a fresh session
     /// starts from; the stored string is the same vocabulary
     /// `get_default_service_tier` parses.

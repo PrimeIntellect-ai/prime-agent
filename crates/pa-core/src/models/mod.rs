@@ -1,5 +1,6 @@
 //! Model subsystem: resolver and Prime Inference private models.
 
+pub use allowlist::{model_allowed, ModelAllowlistRefusal};
 pub use private_auth::{
     get_private_prime_inference_models, private_prime_authorization_fingerprint,
     read_private_prime_authorization_cache, write_private_prime_authorization_cache,
@@ -11,6 +12,7 @@ pub use catalog_chain::{
     catalog_for, install_catalog, prime_credentials_for_dir, spawn_hourly_refresh, startup_refresh,
 };
 
+pub mod allowlist;
 pub(crate) mod catalog_chain;
 pub(crate) mod custom;
 pub(crate) mod prime_inference;
