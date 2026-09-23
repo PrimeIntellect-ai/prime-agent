@@ -834,12 +834,17 @@ mod tests {
         let entries = parse_prime_inference_model_catalog(&value, false).expect("entries");
         assert_eq!(entries.len(), 1);
         assert_eq!(
-            entries[0].supported_parameters.as_deref(),
-            Some(&["max_tokens", "reasoning", "reasoning_effort", "tools"][..])
+            entries[0].supported_parameters,
+            Some(
+                ["max_tokens", "reasoning", "reasoning_effort", "tools"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            )
         );
         assert_eq!(
-            entries[0].reasoning_efforts.as_deref(),
-            Some(&["low", "high", "max"][..])
+            entries[0].reasoning_efforts,
+            Some(["low", "high", "max"].iter().map(|s| s.to_string()).collect())
         );
         assert_eq!(entries[0].reasoning_mandatory, Some(true));
     }
@@ -1036,7 +1041,7 @@ mod tests {
             .and_then(serde_json::Value::as_bool)
     }
 
-    fn compat_raw(model: &Model, key: &str) -> Option<&serde_json::Value> {
+    fn compat_raw<'a>(model: &'a Model, key: &str) -> Option<&'a serde_json::Value> {
         model
             .compat
             .as_ref()
