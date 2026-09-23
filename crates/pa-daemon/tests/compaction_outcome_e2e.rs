@@ -113,6 +113,21 @@ fn crossing_usage() -> Value {
     })
 }
 
+/// The dashboard status-line recap (`status_line.rs`) rides the same
+/// provider entry, so its request also lands on the mock. It summarizes
+/// the session's user-visible rows -- the outcome disclosure included --
+/// so the wire-purity scan over model-context requests must skip it.
+fn is_status_line_request(body: &Value) -> bool {
+    body["messages"].as_array().is_some_and(|messages| {
+        messages.iter().any(|message| {
+            message["role"] == "system"
+                && message["content"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("You generate a status line"))
+        })
+    })
+}
+
 fn is_summarizer_request(body: &Value) -> bool {
     body["messages"].as_array().is_some_and(|messages| {
         messages.iter().any(|message| {
@@ -562,7 +577,7 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
     let requests = mock.requests.lock().expect("mock lock").clone();
     let next_turn_request = requests[before_next..]
         .iter()
-        .find(|body| !is_summarizer_request(body))
+        .find(|body| !is_summarizer_request(body) && !is_status_line_request(body))
         .expect("the next turn reached the provider")
         .clone();
     let serialized = serde_json::to_string(&next_turn_request).expect("serialize request");
