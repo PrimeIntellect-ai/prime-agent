@@ -1999,7 +1999,7 @@ impl SessionUi {
                         if self.attach_session(&durable).await.is_ok() {
                             // The fresh attach snapshot owns the transcript;
                             // the replayed prompt renders on top of it.
-                            self.rebuild_view(view);
+                            self.rebuild_view(view, RebuildKind::Rebind);
                             continue;
                         }
                     }

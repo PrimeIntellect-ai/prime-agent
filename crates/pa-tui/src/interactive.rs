@@ -1185,7 +1185,10 @@ pub async fn run_interactive(
                         // re-attaches once a worker can serve the session.
                         if let Some(current) = session.pending_rebind.take() {
                             match session.attach_session(&current).await {
-                                Ok(()) => session.rebuild_view(&mut view),
+                                Ok(()) => session.rebuild_view(
+                                    &mut view,
+                                    crate::session_ui::RebuildKind::Rebind,
+                                ),
                                 Err(error) => session.note(
                                     &format!("session rebind failed: {error:#}"),
                                     &mut view,
