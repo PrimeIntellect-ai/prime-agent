@@ -458,6 +458,15 @@ def main() -> int:
     parser.add_argument("--out-dir", required=True, help="directory for the captured frames and report")
     parser.add_argument("--side", choices=["both", "ts", "rust"], default="both")
     args = parser.parse_args()
+    # The out-dir must resolve absolutely: every derived path (agent dirs,
+    # daemon sockets, faux scripts) rides it into the products' env, and a
+    # relative PRIME_AGENT_CODING_AGENT_DIR trips a pre-existing platform
+    # bug — the settings lock's mtime probe (utimensat(-1) on a relative
+    # path -> EBADF) turns every settings read into silent defaults, so
+    # the trace onboarding owns the pane and eats the /mcp keys (proven:
+    # a relative out-dir fails every rust cell, an absolute one passes).
+    # Real invocations always carry absolute agent dirs (HOME-derived).
+    args.out_dir = os.path.abspath(args.out_dir)
     # Each product resolves only when this run drives it: a single-side
     # capture must not exit before launching when the unselected product is
     # unavailable (the identity guard compares the pair, so it needs both).
