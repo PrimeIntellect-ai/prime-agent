@@ -150,7 +150,7 @@ impl pa_core::session_engine::rlm_usage::RlmChildUsageSink for ProducerUsageSink
         let producer = std::sync::Arc::clone(&self.0);
         let rlm_child_id = rlm_child_id.to_string();
         Box::pin(async move {
-            producer.forget_child(&rlm_child_id);
+            producer.forget_child(&rlm_child_id).await;
         })
     }
 }

@@ -186,6 +186,13 @@ impl RlmChildUsageAttributions {
                 }
             },
         };
+        // A report that raced the handoff can find its registration
+        // copied while the aggregate bases have not been — folding onto
+        // the default would break the durable chain (the bases copy's
+        // or_insert would keep the broken base). The retired side's
+        // frozen base is the true cumulative aggregate; a target that
+        // never had one was seeded at its spawn (register_spawn).
+        self.ensure_base(&target_id).await;
         let mut bases = self.bases.lock().await;
         for (origin, usage) in report.batches {
             let base = bases.get(&target_id).copied().unwrap_or_default();
@@ -301,17 +308,57 @@ impl RlmChildUsageAttributions {
         Some(target_id)
     }
 
+    /// The target's cumulative base when this map lacks it (a report
+    /// racing the adoption's bases copy): or-insert from the retired
+    /// side's frozen base. Lock order — the fallback's bases first, then
+    /// ours — matches [`Self::adopt_from_fallback`].
+    async fn ensure_base(&self, target_id: &str) {
+        if self.bases.lock().await.contains_key(target_id) {
+            return;
+        }
+        let fallback = self
+            .fallback
+            .lock()
+            .expect("rlm usage fallback lock")
+            .clone();
+        let Some(fallback) = fallback.and_then(std::sync::Weak::upgrade) else {
+            return;
+        };
+        let mut retired_bases = fallback.bases.lock().await;
+        if let Some(base) = retired_bases.get(target_id) {
+            let mut bases = self.bases.lock().await;
+            bases.entry(target_id.to_string()).or_insert(*base);
+        }
+    }
+
     /// Drop one child's registration: the child's final observation
     /// landed (it closed or was deleted — its last rows already
     /// emitted). TS keeps the per-child subscription alive only while
     /// the child lives; a session running sequential children must not
     /// accumulate their registrations. The aggregate base stays (TS's
-    /// `_rlmDurableParentUsage` entry lives with the assistant row).
-    pub fn forget_child(&self, rlm_child_id: &str) {
+    /// `_rlmDurableParentUsage` entry lives with the assistant row). The
+    /// retired side's copy is pruned too — a straggler report must not
+    /// resurrect the registration through the fallback consult.
+    pub async fn forget_child(&self, rlm_child_id: &str) {
         self.children
             .lock()
             .expect("rlm usage children lock")
             .remove(rlm_child_id);
+        let fallback = self
+            .fallback
+            .lock()
+            .expect("rlm usage fallback lock")
+            .clone();
+        if let Some(fallback) = fallback.and_then(std::sync::Weak::upgrade) {
+            // A separate lock section on purpose: nothing holds this
+            // producer's children map while touching the retired side's
+            // (the fallback consult takes them the other way around).
+            fallback
+                .children
+                .lock()
+                .expect("rlm usage children lock")
+                .remove(rlm_child_id);
+        }
     }
 }
 
@@ -569,7 +616,7 @@ mod tests {
         // The final observation landed: forget_child drops the
         // registration (a sequential child's successor never accumulates
         // its predecessor's entries).
-        fresh.forget_child("sub-rebuild1");
+        fresh.forget_child("sub-rebuild1").await;
         fresh
             .record_child_usage(RlmChildUsageReport {
                 rlm_child_id: "sub-rebuild1".to_string(),
@@ -606,6 +653,38 @@ mod tests {
                 batches: vec![(ChildUsageOrigin::SpawnTask, usage_block(2, 2, 0, 0, 4, 0.0))],
             })
             .await;
+        // A report racing the adoption's bases copy (the registration is
+        // copied but the base is not — simulated by dropping the copied
+        // base): the fold must NOT start from the default — the retired
+        // side's FROZEN handoff base is the true cumulative aggregate,
+        // so the durable chain continues (the frozen 1,010 + 5).
+        let target_of_second_for_base = fresh
+            .children
+            .lock()
+            .expect("children lock")
+            .get("sub-rebuild2")
+            .cloned()
+            .expect("sub-rebuild2 registered on the successor");
+        fresh.bases.lock().await.remove(&target_of_second_for_base);
+        fresh
+            .record_child_usage(RlmChildUsageReport {
+                rlm_child_id: "sub-rebuild2".to_string(),
+                batches: vec![(
+                    ChildUsageOrigin::AgentMessage,
+                    usage_block(5, 5, 0, 0, 10, 0.0),
+                )],
+            })
+            .await;
+        let rows_base_race = file_rows(&manager).await;
+        let base_race: Vec<&serde_json::Value> = rows_base_race
+            .iter()
+            .filter(|row| row["type"] == "child_usage_attributed")
+            .collect();
+        assert_eq!(
+            base_race.last().unwrap()["aggregateUsage"]["input"],
+            1_015,
+            "the raced report folds onto the frozen retired base, not the default"
+        );
         // A registration the adoption copy raced (a spawn that passed the
         // retired side's forward check mid-handoff — simulated by
         // inserting on the retired side directly): the successor's
@@ -634,12 +713,12 @@ mod tests {
             .collect();
         assert_eq!(
             raced.len(),
-            5,
-            "the forwarded spawn and the raced registration both attribute"
+            6,
+            "the forwarded spawn, the base race, and the raced registration all attribute"
         );
         // The raced registration continues the SAME cumulative chain (the
-        // fallback adopted the target's base): 1,020 + 3 input.
-        assert_eq!(raced[4]["aggregateUsage"]["input"], 1_023);
+        // fallback adopted the target's base): the raced 1,015 + 3 input.
+        assert_eq!(raced[5]["aggregateUsage"]["input"], 1_018);
     }
 
     /// Multiple children of one assistant row share the cumulative base
