@@ -194,4 +194,25 @@ describe("session image-model override", () => {
 			harness.dispose();
 		}
 	});
+
+	it("names the missing availability, not credentials, for a pin the available list omits", () => {
+		const harness = createImageTurnHarness({ settings: SET, served: "claude-haiku-4-5", textOnlySessionModel: true });
+		try {
+			const { session } = harness;
+			// The full catalog still offers claude-haiku-4-5, image-capable and
+			// authenticated, so the pin's real problem is that the list image turns
+			// are read from does not carry it (the entitlement gate a fixture model
+			// cannot reach). Telling the user to /login would name the wrong cause.
+			const available = session.modelRegistry.getAvailable.bind(session.modelRegistry);
+			session.modelRegistry.getAvailable = () => available().filter((model) => model.id !== "claude-haiku-4-5");
+			session.setImageModelOverride("claude-opus-4-7");
+			expect(() => session.setImageModelOverride("anthropic/claude-haiku-4-5")).toThrow(
+				/is not available to this session/,
+			);
+			expect(() => session.setImageModelOverride("anthropic/claude-haiku-4-5")).not.toThrow(/credentials/);
+			expect(session.imageModelOverride).toBe("claude-opus-4-7");
+		} finally {
+			harness.dispose();
+		}
+	});
 });
