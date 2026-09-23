@@ -235,6 +235,11 @@ def main():
         "new-session", "-d", "-s", session,
         "-x", str(args.width), "-y", str(args.height), "-c", "/tmp",
     )
+    # The raw pane stream: tmux >= 3.3 no longer surfaces OSC passthrough
+    # through `capture-pane -e`, so the OSC 52 copy is verified from the
+    # pane's byte stream instead.
+    stream_path = run_dir / "pane-stream.bin"
+    tmux("pipe-pane", "-t", session, "-o", f"cat > {stream_path}")
     command = (
         f"HOME={home} TMPDIR={tmp} PRIME_AGENT_CODING_AGENT_DIR={agent} "
         f"PI_PACKAGE_DIR={package_dir} {rust} "
@@ -256,11 +261,14 @@ def main():
         # Sweep 1: following the tail.
         follow_steps = sweep(session, run_dir, "follow", target_row, needle_col, NEEDLE)
 
-        # The release copies: the pane's raw stream carries the OSC 52
-        # write and the status row lands.
+        # The release copies: the raw pane stream (the pipe-pane capture)
+        # carries the OSC 52 write and the status row lands.
         wait_for(session, "Copied selection to clipboard", timeout=10)
         raw = capture(session)
-        copies = re.findall(r"\x1b\]52;c;([A-Za-z0-9+/=]+)\x07", raw)
+        copies = re.findall(
+            rb"\x1b\]52;c;([A-Za-z0-9+/=]+)(?:\x07|\x1b\\)",
+            stream_path.read_bytes(),
+        )
         if not copies:
             raise AssertionError("the release never wrote an OSC 52 copy")
         copied = base64.b64decode(copies[-1]).decode()
