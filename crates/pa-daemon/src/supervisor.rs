@@ -946,7 +946,7 @@ impl Supervisor {
         self: &Arc<Self>,
         create: &DaemonCommand,
         owner_client_id: Option<String>,
-    ) -> Result<Arc<ResidentWorker>> {
+    ) -> Result<(Arc<ResidentWorker>, Value)> {
         let DaemonCommand::Create {
             session_path,
             continue_recent,
@@ -1145,31 +1145,55 @@ impl Supervisor {
                 response.error.unwrap_or_default()
             ));
         }
+        // The create response is authoritative: a sessioned create must
+        // carry a non-empty session file before it can succeed (the
+        // descriptor, the spawn ledger, and respawn recovery all key on
+        // it; a create without it would admit a child the roster can
+        // never find again). `no_session` creates are in-memory by
+        // design and stay exempt.
+        let create_summary = response.data.clone().unwrap_or_else(|| {
+            json!({ "id": resident.worker_id.clone() })
+        });
+        if *no_session != Some(true) {
+            let has_session_file = create_summary
+                .get("sessionFile")
+                .and_then(Value::as_str)
+                .is_some_and(|file| !file.is_empty());
+            if !has_session_file {
+                // Never leave the spawned worker behind a degraded create.
+                let _ = self.stop_worker(&resident).await;
+                let _ = std::fs::remove_file(&descriptor_path);
+                return Err(anyhow!("session worker create returned no session file"));
+            }
+        }
         {
             let mut descriptor = resident.descriptor.lock().await;
             descriptor.lifecycle = DaemonWorkerLifecycle::Ready;
-            if let Some(summary) = &response.data {
-                descriptor.root_session_id = summary
-                    .get("sessionId")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                if let Some(session_file) = summary
-                    .get("sessionFile")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                {
-                    descriptor.session_file = Some(session_file.clone());
-                    // The durable create command must reopen the same session
-                    // file on relaunch, or a respawned worker would create a
-                    // fresh session and lose history.
-                    descriptor.create_command.session_path = Some(session_file.clone());
-                }
+            descriptor.root_session_id = create_summary
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            // An empty session file (an in-memory `no_session` session)
+            // must not overwrite the descriptor's session identity: the
+            // durable create stays pathless so a respawned worker
+            // replays the session as in-memory.
+            if let Some(session_file) = create_summary
+                .get("sessionFile")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .filter(|file| !file.is_empty())
+            {
+                descriptor.session_file = Some(session_file.clone());
+                // The durable create command must reopen the same session
+                // file on relaunch, or a respawned worker would create a
+                // fresh session and lose history.
+                descriptor.create_command.session_path = Some(session_file.clone());
             }
             persist_worker(&descriptor_path, &descriptor)?;
         }
         let pid = child.id().unwrap_or(0);
         self.spawn_monitor(Arc::clone(&resident), Some(child), pid as u64);
-        Ok(resident)
+        Ok((resident, create_summary))
     }
 
     // ------------------------------------------------------------------
@@ -2858,26 +2882,37 @@ impl Supervisor {
         {
             self.assert_session_name_available(name).await?;
         }
-        let resident = self.launch_worker(command, Some(client_id)).await?;
-        // Fresh get_state so the response matches attach/list rows exactly.
-        let response = self
-            .route_command(&resident, "get_state", json!({}), ROUTE_TIMEOUT_MS)
-            .await?;
-        let summary = response
-            .data
-            .unwrap_or_else(|| json!({ "id": resident.worker_id }));
+        let (resident, create_summary) = self.launch_worker(command, Some(client_id)).await?;
         // Spawn admission is the moment the supervisor knows the child's
         // edge firsthand. The ledger is the only topology store, so the
         // append's outcome is load-bearing: admission fails if the spawn
         // record cannot be made durable (a swallowed failure would admit a
         // child that listing and hydration can never find after
-        // passivation).
-        if let Err(error) = self.record_rlm_child_admission(command, &summary).await {
+        // passivation). Admission reads the CREATE response: it is
+        // authoritative (launch_worker rejects a sessioned create without
+        // a durable non-empty session file). A fresh get_state here races
+        // worker replacement (a rebooting worker mid-replay answers
+        // without the session file yet) and would tear down a healthy
+        // child on a stale miss.
+        if let Err(error) = self.record_rlm_child_admission(command, &create_summary).await {
             // Never leave an admitted-but-unrecorded child running: the
             // ledger is the only topology store.
             let _ = self.stop_worker(&resident).await;
             return Err(error);
         }
+        // The response still matches attach/list rows exactly: prefer a
+        // fresh get_state, but a degraded one falls back to the
+        // authoritative create summary instead of failing the spawn (the
+        // session is durable at this point; the child is healthy).
+        let summary = match self
+            .route_command(&resident, "get_state", json!({}), ROUTE_TIMEOUT_MS)
+            .await
+        {
+            Ok(response) if response.success => {
+                response.data.unwrap_or_else(|| create_summary.clone())
+            }
+            _ => create_summary.clone(),
+        };
         // The new session joins the agent roster immediately (subscribers
         // see the roster_update before their next list).
         self.write_roster_summary(&summary, Some(&resident.worker_id));
