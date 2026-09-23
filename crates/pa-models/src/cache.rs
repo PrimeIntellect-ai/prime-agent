@@ -388,12 +388,24 @@ async fn await_inflight<T: Clone>(inflight: Arc<InFlight<T>>) -> Option<T> {
     }
 }
 
-/// Atomic snapshot write: temp file + rename at mode 0600.
+/// Atomic snapshot write: temp file + rename at mode 0600. The temp file
+/// is unique per writer (`pid` + an in-process counter): the Rust daemon
+/// runs one supervisor and many worker processes against one agent dir,
+/// and a shared temp path would let concurrent fire-and-forget refreshes
+/// truncate each other's temp file and publish a malformed snapshot. With
+/// unique temps every rename publishes one writer's complete bytes (the
+/// TS single-process reference never races here; the multi-process port
+/// must).
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let temp = path.with_extension("tmp");
+    static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let temp = path.with_extension(format!(
+        "{}-{}.tmp",
+        std::process::id(),
+        TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     #[cfg(unix)]
     let write = || {
         use std::os::unix::fs::OpenOptionsExt;
@@ -417,4 +429,56 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     file.flush()?;
     file.sync_all()?;
     std::fs::rename(&temp, path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The multi-process snapshot-write invariant (Macroscope on #2576):
+    /// concurrent `write_atomic` writers publish one writer's complete
+    /// bytes each (unique temp + atomic rename), so a reader racing the
+    /// writers always parses a full document. The pre-fix shared temp path
+    /// let one writer truncate another's temp file after the rename had
+    /// already published it, tearing the published snapshot in place.
+    #[test]
+    fn concurrent_writers_never_publish_a_malformed_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("snapshot.json");
+        write_atomic(&path, br#"{"writer":0}"#).unwrap();
+        std::thread::scope(|scope| {
+            for writer in 0..4u8 {
+                let path = &path;
+                scope.spawn(move || {
+                    for round in 0..200usize {
+                        let payload = format!(
+                            r#"{{"writer":{writer},"round":{round},"padding":"{}"}}"#,
+                            "x".repeat(round % 7 * 512)
+                        );
+                        write_atomic(path, payload.as_bytes()).unwrap();
+                    }
+                });
+            }
+            scope.spawn(|| {
+                for _ in 0..500usize {
+                    let bytes = std::fs::read(&path).unwrap();
+                    let parsed: serde_json::Value = serde_json::from_slice(&bytes)
+                        .expect("the published snapshot always parses");
+                    assert!(parsed.get("writer").is_some());
+                    std::hint::spin_loop();
+                }
+            });
+        });
+        // Every rename consumed its temp: no writer litter remains.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name())
+            .filter(|name| name.to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+    }
 }
