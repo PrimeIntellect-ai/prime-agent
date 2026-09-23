@@ -2118,17 +2118,16 @@ impl Worker {
                             && entry.fields == disclosure.row
                             && entry.timestamp == disclosure.declared_at
                     });
-                    if !already_disclosed {
-                        if store
+                    if !already_disclosed
+                        && store
                             .persist_entry_at(
                                 "custom_message",
                                 disclosure.row.clone(),
                                 &disclosure.declared_at,
                             )
                             .is_err()
-                        {
-                            interrupted_compaction_persisted = false;
-                        }
+                    {
+                        interrupted_compaction_persisted = false;
                     }
                 }
             }
