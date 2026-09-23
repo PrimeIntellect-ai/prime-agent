@@ -23,12 +23,18 @@ impl MockServer {
     /// Start a server answering with `responses` in order; the last
     /// response repeats when the queue drains.
     pub async fn start(responses: Vec<Vec<u8>>) -> Self {
+        Self::start_scripted(responses.into_iter().map(Scripted::Response).collect()).await
+    }
+
+    /// Start a server answering with `scripts` in order (raw, delayed, or
+    /// held connections); the queue draining answers 500.
+    pub async fn start_scripted(scripts: Vec<Scripted>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind mock server");
         let port = listener.local_addr().unwrap().port();
         let requests: RequestLog = Arc::new(Mutex::new(Vec::new()));
-        let responses: ResponseQueue = Arc::new(Mutex::new(VecDeque::from(responses)));
+        let responses: ResponseQueue = Arc::new(Mutex::new(VecDeque::from(scripts)));
         let handle = tokio::spawn(run(listener, Arc::clone(&requests), responses));
         Self {
             port,
@@ -53,7 +59,15 @@ impl MockServer {
     }
 }
 
-type ResponseQueue = Arc<Mutex<VecDeque<Vec<u8>>>>;
+type ResponseQueue = Arc<Mutex<VecDeque<Scripted>>>;
+
+/// One scripted server behavior: raw bytes, raw bytes after a delay (a
+/// slow fetch), or a held connection that never answers.
+pub enum Scripted {
+    Response(Vec<u8>),
+    Delayed(Vec<u8>, std::time::Duration),
+    Hang,
+}
 
 async fn run(listener: TcpListener, requests: RequestLog, responses: ResponseQueue) {
     loop {
@@ -83,12 +97,26 @@ async fn run(listener: TcpListener, requests: RequestLog, responses: ResponseQue
             }
             let head = String::from_utf8_lossy(&buffer[..read]).to_string();
             requests.lock().unwrap().push(head);
-            let response =
-                responses.lock().unwrap().pop_front().unwrap_or_else(|| {
-                    b"HTTP/1.1 500 Drained\r\ncontent-length: 0\r\n\r\n".to_vec()
-                });
-            let _ = socket.write_all(&response).await;
-            let _ = socket.flush().await;
+            let scripted = responses.lock().unwrap().pop_front().unwrap_or_else(|| {
+                Scripted::Response(b"HTTP/1.1 500 Drained\r\ncontent-length: 0\r\n\r\n".to_vec())
+            });
+            match scripted {
+                Scripted::Response(response) => {
+                    let _ = socket.write_all(&response).await;
+                    let _ = socket.flush().await;
+                }
+                Scripted::Delayed(response, delay) => {
+                    tokio::time::sleep(delay).await;
+                    let _ = socket.write_all(&response).await;
+                    let _ = socket.flush().await;
+                }
+                // A held connection: the request records, the fetch never
+                // settles (a caller's bounded wait must return first).
+                Scripted::Hang => {
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                    let _ = socket.write_all(&[]).await;
+                }
+            }
         });
     }
 }

@@ -223,6 +223,16 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
             Gate::Gated => return cached,
             Gate::Start(inflight, previous, generation) => (inflight, previous, generation),
         };
+        // The driver owns the gate's settlement: a caller that drops
+        // `refresh` mid-fetch (a bounded wait timing out) must not leave
+        // the shared `pending` gate set with no settle left to run —
+        // coalesced callers would await a notify that never comes. The
+        // guard resolves the gate as a failed refresh and wakes every
+        // waiter, keeping the fire-and-forget-safe contract.
+        let _driver = SettleOnDrop {
+            cache: self,
+            inflight: Arc::clone(&inflight),
+        };
         let result = self.drive_refresh(scope, &opts, previous, generation).await;
         {
             let mut state = self.state.lock().unwrap();
@@ -371,6 +381,38 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
             payload: stored.payload,
             models,
         })
+    }
+}
+
+/// The driving refresh's settle guard: when the driver future is dropped
+/// before settling, the shared gate is resolved as a failed refresh
+/// (`None`) and every waiter is woken, so dropped refreshes can never
+/// poison the coalescing gate for later callers.
+struct SettleOnDrop<'a, T: Clone + Send + Sync + 'static> {
+    cache: &'a CatalogCache<T>,
+    inflight: Arc<InFlight<T>>,
+}
+
+impl<T: Clone + Send + Sync + 'static> Drop for SettleOnDrop<'_, T> {
+    fn drop(&mut self) {
+        // The happy path settles before dropping (no await between the
+        // settle and the scope exit), so an unset result means the driver
+        // was cancelled mid-fetch.
+        if self.inflight.result.get().is_some() {
+            return;
+        }
+        {
+            let mut state = self.cache.state.lock().unwrap();
+            if state
+                .pending
+                .as_ref()
+                .is_some_and(|pending| Arc::ptr_eq(pending, &self.inflight))
+            {
+                state.pending = None;
+            }
+        }
+        let _ = self.inflight.result.set(None);
+        self.inflight.notify.notify_waiters();
     }
 }
 

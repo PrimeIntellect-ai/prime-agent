@@ -189,6 +189,13 @@ pub struct AgentSessionEngine {
     /// re-restores at every session boot), and an explicit create flag
     /// wins end-to-end (the decision is never consulted).
     restored_model: std::sync::Mutex<Option<RestoredSessionModel>>,
+    /// The spawn-time selection (create config or worker env) the
+    /// runtime-config reset returns to at every session restore — TS
+    /// `switchSession` -> `createRuntime` rebuilds the runtime config
+    /// from the daemon's default session config merged with the create
+    /// command, so a mid-session `/model` switch belongs to the session
+    /// it switched, never to the moved-to one.
+    initial_selection: EngineModelSelection,
     /// The session's resolved effective thinking level, computed once when
     /// the create command adopts the selection and reused afterwards.
     /// Resolved at create time (before any turn) so summary/state polls
@@ -449,8 +456,9 @@ impl AgentSessionEngine {
             turn_agent: std::sync::Mutex::new(None),
             autonomous_boundary: std::sync::Mutex::new(None),
             session_file,
-            selection: std::sync::RwLock::new(selection),
+            selection: std::sync::RwLock::new(selection.clone()),
             restored_model: std::sync::Mutex::new(None),
+            initial_selection: selection,
             effective_thinking: std::sync::RwLock::new(None),
             service_tier: std::sync::RwLock::new(None),
             session: tokio::sync::Mutex::new(None),
@@ -825,15 +833,46 @@ impl AgentSessionEngine {
         .or_else(|| all.first().cloned())
     }
 
+    /// The runtime-config reset at every session restore (TS
+    /// `switchSession` -> `createRuntime` -> `createAgentSession`): the
+    /// session's model selection returns to the worker's spawn-time
+    /// fallback (the TS default session config), so a mid-session
+    /// `/model` switch belongs to the session it switched and never to
+    /// the moved-to one — whose own file pins what it should run on.
+    /// Spawn-time flags survive the reset exactly like TS's
+    /// `defaultSessionConfig` merge.
+    fn reset_selection_to_spawn_fallback(&self) {
+        {
+            let mut current = self.selection.write().expect("model selection lock");
+            if current.provider == self.initial_selection.provider
+                && current.model == self.initial_selection.model
+                && current.api_key == self.initial_selection.api_key
+                && current.thinking == self.initial_selection.thinking
+            {
+                return;
+            }
+            *current = self.initial_selection.clone();
+        }
+        // The cached thinking level was computed against the dropped
+        // selection; recompute it against the reset one.
+        *self
+            .effective_thinking
+            .write()
+            .expect("effective thinking lock") = None;
+        let _ = self.effective_thinking();
+    }
+
     /// The create-time session-model restore (see
-    /// [`SessionEngine::restore_session_model`]): read the session
-    /// file's saved model context, give the in-flight catalog/auth
-    /// refreshes the bounded readiness window, and record the decision
-    /// for this file. Explicit wire flags win first (TS `options.model`);
-    /// a session with no saved model keeps the startup chain; a restore
-    /// that still misses after the window records the fallback
-    /// (`model_fallback_message`, never silent).
+    /// [`SessionEngine::restore_session_model`]): reset the selection to
+    /// the spawn-time fallback (the TS runtime-config reset), read the
+    /// session file's saved model context, give the in-flight
+    /// catalog/auth refreshes the bounded readiness window, and record
+    /// the decision for this file. Explicit spawn flags win (TS
+    /// `options.model`); a session with no saved model keeps the startup
+    /// chain; a restore that still misses after the window records the
+    /// fallback (`model_fallback_message`, never silent).
     async fn restore_session_model_at(&self, session_path: &std::path::Path) {
+        self.reset_selection_to_spawn_fallback();
         if self.current_selection().model.is_some() {
             return;
         }
@@ -6870,6 +6909,58 @@ pub(crate) mod tests {
             engine.model_fallback_message().is_none(),
             "the old file's decision does not leak into the moved-to session"
         );
+    }
+
+    /// A mid-session `/model` switch belongs to the session it switched
+    /// (TS `switchSession` -> `createRuntime` rebuilds the runtime config
+    /// from the daemon default): a replacement onto another file drops
+    /// the switch and restores the moved-to file's own pin.
+    #[tokio::test]
+    async fn a_model_switch_never_leaks_into_the_replacement_session() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        write_prime_auth(&agent_dir);
+        write_custom_provider_models_json(&agent_dir, "http://127.0.0.1:9");
+        let pi = pi_payload();
+        let layer_a = serde_json::json!({ "schemaVersion": 1, "models": [] }).to_string();
+        let server = MockCatalogServer::start(vec![
+            catalog_ok_json(&layer_a),
+            catalog_ok_json(&pi),
+            catalog_ok_json(&pi),
+        ])
+        .await;
+        install_loopback_catalog(&agent_dir, &server);
+
+        // Session A pins the private model; the worker restores it.
+        let file_a = session_file_pinning_private_model(dir.path());
+        let engine = restore_test_engine(dir.path(), None, None);
+        engine.set_session_file(file_a.clone());
+        engine.restore_session_model(&file_a).await;
+        let restored = engine.resolve_registry_model().expect("restored");
+        assert_eq!(restored.id, "internal/glm-5.3-fast");
+
+        // A mid-session /model switch on session A.
+        assert!(engine.switch_model(EngineModelSelection {
+            provider: Some("battery".to_string()),
+            model: Some("mock-1".to_string()),
+            api_key: None,
+            thinking: None,
+        }));
+        let switched = engine.resolve_registry_model().expect("switched");
+        assert_eq!(switched.id, "mock-1");
+
+        // The replacement (switch_session/fork/import) onto another file
+        // that pins its own model: the switch does not leak — the
+        // moved-to session restores its own pin.
+        let file_b = session_file_pinning_private_model(dir.path());
+        engine.set_session_file(file_b.clone());
+        engine.restore_session_model(&file_b).await;
+        let moved = engine.resolve_registry_model().expect("moved resolution");
+        assert_eq!(
+            moved.id, "internal/glm-5.3-fast",
+            "the moved-to session's own file pin wins over the previous session's switch"
+        );
+        assert!(engine.model_fallback_message().is_none());
     }
 
     #[test]

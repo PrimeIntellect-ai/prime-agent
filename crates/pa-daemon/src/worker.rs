@@ -1812,10 +1812,13 @@ impl Worker {
         // before the startup chain. The bounded readiness wait covers the
         // daemon boot's catalog fetch, so the revived session keeps the
         // model it was running on instead of silently landing on the
-        // featured default while the catalog settles. Runs before the
-        // create-config selection: explicit wire flags win (the restore is
-        // a no-op when one is already set).
-        if !no_session {
+        // featured default while the catalog settles. An explicit model
+        // flag on the create wins instead (TS `options.model` takes
+        // priority over the saved session model): the restore is skipped
+        // entirely, so a flagged create never eats the readiness window or
+        // records a fallback that would not be used.
+        let flagged_model = payload.get("model").and_then(Value::as_str).is_some();
+        if !no_session && !flagged_model {
             if let Some(path) = &session_path {
                 if path.exists() {
                     // The engine owns the file from the restore on (the

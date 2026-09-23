@@ -544,3 +544,80 @@ async fn mid_session_refresh_never_retargets() {
     assert_eq!(active.id, "before-model");
     assert_eq!(active.api, "anthropic-messages");
 }
+
+/// Fire-and-forget safety (the header contract): a caller that drops its
+/// `refresh` mid-fetch — a bounded wait timing out — must not poison the
+/// coalescing gate. The dropped driver resolves the gate as a failed
+/// refresh, wakes any coalesced waiter, and the next refresh starts a
+/// fresh fetch instead of awaiting a notify that never comes.
+#[tokio::test]
+async fn a_dropped_refresh_resolves_the_gate_and_the_next_refresh_starts_fresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = common::MockServer::start_scripted(vec![
+        common::Scripted::Delayed(
+            common::ok_json(catalog_json(&["model-a"]), None),
+            std::time::Duration::from_secs(5),
+        ),
+        common::Scripted::Response(common::ok_json(catalog_json(&["model-b"]), None)),
+    ])
+    .await;
+    let cache = Arc::new(models_cache(dir.path(), server.url("/catalog")));
+
+    // A coalesced waiter joins the dropped driver: it must wake with a
+    // failed refresh (None), never hang on the abandoned gate. Both waits
+    // are bounded — pre-fix, the coalesced waiter hangs on the abandoned
+    // gate and the 2s bound fails the test instead of wedging it.
+    let dropped = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        cache.refresh(
+            PUBLIC_SCOPE,
+            RefreshOptions {
+                force: true,
+                ..Default::default()
+            },
+        ),
+    );
+    let joined = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        cache.refresh(
+            PUBLIC_SCOPE,
+            RefreshOptions {
+                force: true,
+                ..Default::default()
+            },
+        ),
+    );
+    let (dropped, joined) = tokio::join!(dropped, joined);
+    assert!(
+        dropped.is_err(),
+        "the bounded wait must return while the fetch is held"
+    );
+    let joined = joined.expect("the coalesced waiter wakes on the abandoned gate");
+    assert!(
+        joined.is_none(),
+        "a dropped refresh resolves as a failed one"
+    );
+
+    // The gate is clear: the next forced refresh starts a fresh fetch and
+    // lands (the second scripted response), instead of coalescing onto the
+    // abandoned in-flight gate forever.
+    let next = cache
+        .refresh(
+            PUBLIC_SCOPE,
+            RefreshOptions {
+                force: true,
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(next.is_some(), "the next refresh starts a fresh fetch");
+    assert!(
+        next.as_ref()
+            .is_some_and(|models| { models.iter().any(|model| model.id == "model-b") }),
+        "the fresh fetch lands"
+    );
+    assert!(
+        server.request_count() >= 2,
+        "a fresh fetch ran after the abandoned one"
+    );
+}
