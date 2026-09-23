@@ -121,8 +121,11 @@ impl AgentRoster {
     /// change and possibly more). A pull from a generation the slot no
     /// longer names is a replaced process's delayed answer — stale by
     /// construction, dropped. A counter of `0` (the summary carries no
-    /// sequence) is an unsequenced authoritative write and always
-    /// applies without touching the slot.
+    /// sequence) splits on the slot: no slot accepts (an unstamped
+    /// authoritative write), the slot's own generation accepts only
+    /// while its watermark is zero (a nonzero watermark means the
+    /// snapshot predates an applied push), and any other generation
+    /// drops (a replaced process's delayed answer).
     pub(crate) fn accept_roster_pull(
         &mut self,
         worker_id: &str,
@@ -130,7 +133,20 @@ impl AgentRoster {
         counter: u64,
     ) -> bool {
         if counter == 0 {
-            return true;
+            // A zero counter means the summary carries no sequence: either
+            // an unstamped authoritative write (an adoption's durable
+            // record, a create fallback), or a snapshot taken before this
+            // generation stamped its first push. The two cases split on the
+            // slot: no slot accepts; the slot's own generation accepts
+            // only while its watermark is still zero (the counter only
+            // grows, so a nonzero watermark means the pull's snapshot
+            // predates an applied push — stale); any other generation is
+            // a replaced process's delayed answer and drops.
+            return match self.delta_watermarks.get(worker_id) {
+                Some(slot) if slot.instance == instance => slot.watermark == 0,
+                Some(_) => false,
+                None => true,
+            };
         }
         match self.delta_watermarks.get_mut(worker_id) {
             Some(slot) if slot.instance == instance => {
@@ -575,6 +591,22 @@ mod tests {
         assert!(roster.accept_roster_pull("w1", "i2", 3));
         assert!(!roster.accept_delta_sequence("w1", "i2", 3));
         assert!(roster.accept_delta_sequence("w1", "i2", 4));
+        // A zero-counter pull from a superseded generation is a replaced
+        // process's unstamped delayed answer — it drops like a sequenced
+        // one, never overwriting the replacement's row.
+        assert!(!roster.accept_roster_pull("w1", "i1", 0));
+        // A zero-counter pull from the slot's own generation applies only
+        // while the watermark is still zero: the counter only grows, so a
+        // nonzero watermark means the pull's snapshot predates an applied
+        // push (the first-update race).
+        assert!(!roster.accept_roster_pull("w1", "i2", 0));
+        // A fresh generation's zero-counter registration pull applies (no
+        // push stamped yet, watermark zero).
+        roster.note_worker_generation("w1", "i3");
+        assert!(roster.accept_roster_pull("w1", "i3", 0));
+        // A worker with no slot at all accepts (an unstamped authoritative
+        // write — an adoption's durable record).
+        assert!(roster.accept_roster_pull("w-other", "", 0));
     }
 
     #[test]
