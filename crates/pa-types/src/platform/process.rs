@@ -9,17 +9,44 @@
 //! platform exposes no identity - owners then trust liveness checks alone,
 //! exactly like TS records with `processStartId: undefined`.
 
-/// `/proc/<pid>/stat` field 22 (starttime), formatted `proc:<starttime>`.
-/// `None` when the platform has no procfs identity.
+/// The pid-reuse identity: `/proc/<pid>/stat` field 22 (starttime) as
+/// `proc:<starttime>`, else the portable `ps -o lstart=` reading as
+/// `ps:<lstart>` (macOS/BSD - TS `getPsProcessStartId`). A recycled pid has
+/// a different start time, so a recorded identity that still matches proves
+/// the pid still names the same process. `None` only when the platform
+/// exposes neither - owners then trust liveness checks alone, exactly like
+/// TS records with `processStartId: undefined`.
 #[cfg(unix)]
 pub fn process_start_id(pid: u32) -> Option<String> {
     if pid == 0 {
         return None;
     }
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let command_end = stat.rfind(')')?;
-    let start_time = stat[command_end + 2..].split(' ').nth(19)?;
-    (!start_time.is_empty()).then(|| format!("proc:{start_time}"))
+    if let Some(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok() {
+        let command_end = stat.rfind(')')?;
+        let start_time = stat[command_end + 2..].split(' ').nth(19)?;
+        if !start_time.is_empty() {
+            return Some(format!("proc:{start_time}"));
+        }
+    }
+    ps_process_start_id(pid)
+}
+
+/// The `ps -p <pid> -o lstart=` fallback (TS `getPsProcessStartId`): `lstart`
+/// renders in the subprocess timezone and locale, so both are pinned for a
+/// durable identity. Formatted `ps:<lstart>` - the exact value the TS
+/// product records on macOS and BSD.
+#[cfg(unix)]
+pub fn ps_process_start_id(pid: u32) -> Option<String> {
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "lstart="])
+        .env("LC_ALL", "C")
+        .env("LC_TIME", "C")
+        .env("LANG", "C")
+        .env("TZ", "UTC")
+        .output()
+        .ok()?;
+    let start_time = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!start_time.is_empty()).then(|| format!("ps:{start_time}"))
 }
 
 /// Windows: the process creation time in 100ns ticks since 1601-01-01 UTC
