@@ -622,9 +622,56 @@ impl ReconnectLoop {
 
 /// Run the interactive UI until the user exits (terminal) or the plan
 /// completes (headless).
+///
+/// Every error return funnels through the one exit restore: an early `?`
+/// between the surface mount and the deliberate tail teardown (a draw
+/// failure, a key-handler transport error, a suspend/resume failure)
+/// must not hand the shell a terminal still in TUI state — raw mode,
+/// the alternate screen, the enhancement modes armed. The restore is
+/// idempotent, so a return after the tail already ran (the startup
+/// refusal path finishes the surface itself) only re-emits the two
+/// unconditional tail bytes.
 pub async fn run_interactive(
     options: InteractiveOptions,
     ui: UiMode,
+) -> Result<InteractiveOutcome> {
+    // The headless harness drives the same dispatch on plain pipes: it
+    // never owned the terminal, so its error returns must not run a
+    // restore (the mode gates it — the distinction the headless e2e
+    // binaries observe, not `restore_terminal`'s pipe no-op).
+    let owns_terminal = matches!(ui, UiMode::Terminal);
+    // A terminal-mode error that fired BEFORE this surface mounted (the
+    // daemon connection refused at the top) must not tear down whatever
+    // the CALLER had up: the restore runs only once this run's surface
+    // actually mounted.
+    let surface_mounted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mounted = std::sync::Arc::clone(&surface_mounted);
+    match run_interactive_surface(options, ui, mounted).await {
+        Ok(outcome) => Ok(outcome),
+        Err(error) => {
+            // Restore when THIS run changed the terminal state (the flag
+            // arms at the raw-mode entry inside `Renderer::setup`) OR
+            // when it entered on a pane already in TUI state (the
+            // agents-view preserve handoff: the adopting surface owns the
+            // release even when it fails before mounting — the process is
+            // exiting and no other writer remains). A fresh-pane
+            // pre-mount failure (the daemon refused the connect) has
+            // nothing to release and must not tear down the caller.
+            if owns_terminal
+                && (surface_mounted.load(std::sync::atomic::Ordering::SeqCst)
+                    || crate::altscreen::active())
+            {
+                crate::exit_restore::restore_terminal();
+            }
+            Err(error)
+        }
+    }
+}
+
+async fn run_interactive_surface(
+    options: InteractiveOptions,
+    ui: UiMode,
+    surface_mounted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<InteractiveOutcome> {
     // The TS theme emits raw ANSI color codes regardless of NO_COLOR; match
     // that so the same terminal renders the same frames either way.
@@ -689,7 +736,19 @@ pub async fn run_interactive(
     // Headless verification runs capture the OSC 52 clipboard channel
     // instead of writing it to the plain pipes.
     let headless = matches!(ui, UiMode::Headless(_));
-    let mut renderer = Renderer::setup(ui, ui_tx, exit_guard.clone(), options.fullscreen_mouse)?;
+    // A panic anywhere between the mount below and the deliberate
+    // teardown must still hand the terminal back whole: the unwind guard
+    // fires the one exit restore while the frame is dying (a set_hook
+    // cannot carry this — tokio catches task panics and the process
+    // would live on with a half-restored surface).
+    let _surface_restore = crate::exit_restore::SurfaceRestore::armed();
+    let mut renderer = Renderer::setup(
+        ui,
+        ui_tx,
+        exit_guard.clone(),
+        options.fullscreen_mouse,
+        &surface_mounted,
+    )?;
     if !headless {
         // TS `ui.start()` renders once before the session loads: the first
         // frame is the startup chrome (banner, editor, tray). The model
@@ -1833,10 +1892,17 @@ impl Renderer {
         ui_tx: mpsc::UnboundedSender<UiInput>,
         exit_guard: ExitGuard,
         mouse: bool,
+        surface_mounted: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<Renderer> {
         match ui {
             UiMode::Terminal => {
                 terminal::enable_raw_mode()?;
+                // The terminal state changed: every later setup step is
+                // fallible (the alt-screen enter, the mode enables, the
+                // terminal construction) and an error from any of them
+                // still owns the release. The flag arms here, not at the
+                // end of setup.
+                surface_mounted.store(true, std::sync::atomic::Ordering::SeqCst);
                 // Adopt the alternate screen the previous surface left in
                 // place (TS `pendingAltScreenHandoff`); only the first
                 // surface of the process enters it, so a view switch never
@@ -2008,9 +2074,11 @@ impl Renderer {
     /// Hand the terminal back to the process (raw mode off, alternate
     /// screen left and flushed, cursor visible) so an interactive client
     /// command can prompt on it. Headless verification runs keep their
-    /// plain pipes. The trailing cursor-show leaves the terminal with a
-    /// visible cursor (the TS teardown contract: the shell prompt that
-    /// follows must not sit on a hidden cursor).
+    /// plain pipes. The shared exit tail ends the hand-back — the same
+    /// whole-terminal contract every exit guarantees, so a poisoned
+    /// start cannot leave the client command prompting on a raw tty
+    /// (the TS teardown contract: the shell prompt that follows must
+    /// not sit on a hidden cursor or a broken mode).
     fn suspend(&mut self, view: &mut AgentView) -> Result<()> {
         match self {
             Renderer::Terminal { .. } => {
@@ -2023,8 +2091,7 @@ impl Renderer {
                 // flags popped); `resume` re-enables both.
                 let _ = crate::enhanced_keys::disable(&mut std::io::stdout());
                 self.flush_to_main_screen(view)?;
-                crossterm::execute!(std::io::stdout(), crossterm::cursor::Show)?;
-                terminal::disable_raw_mode()?;
+                crate::exit_restore::terminal_release_tail(&mut std::io::stdout());
                 Ok(())
             }
             Renderer::Headless { .. } => Ok(()),
@@ -2149,6 +2216,14 @@ impl Renderer {
     /// main screen, show the cursor, restore cooked mode — the resume hint
     /// the composition root prints next lands right below the flushed frame.
     fn finish(mut self, view: &mut AgentView, preserve_alt_screen: bool) -> Vec<String> {
+        // The exit that ends the process stands the kitty probe down
+        // FIRST: an answer landing after the pop below would re-arm
+        // CSI-u reporting on the parent shell (the "escape codes while
+        // typing" leak). A handoff (preserve) keeps the process alive
+        // and the next surface's probe — never released here.
+        if !preserve_alt_screen && self.is_terminal() {
+            crate::enhanced_keys::release_for_exit();
+        }
         // In-flight kitty key releases are consumed before the terminal is
         // restored (TS `drainInput` before `stop`): a release that lands
         // after raw mode is off would leak its escape sequence into the
@@ -2175,8 +2250,11 @@ impl Renderer {
                     crate::input::request_reader_stop();
                 } else {
                     let _ = self.flush_to_main_screen(view);
-                    let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
-                    let _ = terminal::disable_raw_mode();
+                    // The shared exit tail ends the parity teardown: the
+                    // synchronized-output release, the SGR reset, the
+                    // cursor show, and the cooked-tty verification end in
+                    // the same terminal state every exit path guarantees.
+                    crate::exit_restore::terminal_release_tail(&mut std::io::stdout());
                 }
                 Vec::new()
             }
@@ -2215,6 +2293,41 @@ fn exit_flush_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn headless_error_returns_never_touch_the_terminal() {
+        // A socket that never listens: the attach fails and the run
+        // returns Err. The headless harness never owned the terminal —
+        // the wrapper's restore is gated on the terminal ui mode, so a
+        // headless error return must not attempt one (the terminal-mode
+        // restore is the exit-restore e2e's error-exit scenario, driven
+        // on a real terminal).
+        let socket =
+            std::env::temp_dir().join(format!("tui-exit-restore-dead-{}.sock", std::process::id()));
+        let mut opts = options(ModelSelection::default());
+        opts.socket_path = socket;
+        // The attempts counter is process-global and the unwind-guard test
+        // also moves it: this reader holds the shared state lock across
+        // its whole read window.
+        let _state = crate::exit_restore::TEST_STATE_LOCK.lock();
+        let before =
+            crate::exit_restore::RESTORE_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst);
+        let result = run_interactive(
+            opts,
+            UiMode::Headless(HeadlessPlan {
+                steps: Vec::new(),
+                width: 80,
+                height: 24,
+            }),
+        )
+        .await;
+        assert!(result.is_err(), "the dead socket must error the run");
+        assert_eq!(
+            crate::exit_restore::RESTORE_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst),
+            before,
+            "the headless error return did not attempt a restore"
+        );
+    }
 
     #[test]
     fn flush_rows_write_crlf_and_keep_zone_markers() {
