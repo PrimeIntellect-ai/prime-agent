@@ -21,7 +21,7 @@ pub fn process_start_id(pid: u32) -> Option<String> {
     if pid == 0 {
         return None;
     }
-    if let Some(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok() {
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
         let command_end = stat.rfind(')')?;
         let start_time = stat[command_end + 2..].split(' ').nth(19)?;
         if !start_time.is_empty() {

@@ -10,7 +10,12 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+// `Context` is used by the linux `O_PATH` re-anchoring and the Windows
+// pipe-name error only; a bare import is an unused-import on every other
+// platform.
+#[cfg(any(target_os = "linux", windows))]
+use anyhow::Context;
 
 /// A full-duplex stream between a client and a daemon endpoint.
 ///
