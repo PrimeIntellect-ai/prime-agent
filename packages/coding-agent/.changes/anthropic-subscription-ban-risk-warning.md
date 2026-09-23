@@ -1,0 +1,1 @@
+- The Anthropic subscription-auth warning now names the ban risk: Anthropic's terms reserve subscription auth for its own apps, so third-party harness usage may violate them and can get the account restricted or banned; an API key avoids the risk.

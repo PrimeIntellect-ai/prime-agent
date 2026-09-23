@@ -81,44 +81,6 @@ function getCacheControl(
 	};
 }
 
-// Stealth mode: Mimic Claude Code's tool naming exactly
-const claudeCodeVersion = "2.1.261";
-
-// Claude Code 2.x tool names (canonical casing)
-// Source: https://cchistory.mariozechner.at/data/prompts-2.1.11.md
-// To update: https://github.com/badlogic/cchistory
-const claudeCodeTools = [
-	"Read",
-	"Write",
-	"Edit",
-	"Bash",
-	"Grep",
-	"Glob",
-	"AskUserQuestion",
-	"EnterPlanMode",
-	"ExitPlanMode",
-	"KillShell",
-	"NotebookEdit",
-	"Skill",
-	"Task",
-	"TaskOutput",
-	"TodoWrite",
-	"WebFetch",
-	"WebSearch",
-];
-
-const ccToolLookup = new Map(claudeCodeTools.map((t) => [t.toLowerCase(), t]));
-
-const toClaudeCodeName = (name: string) => ccToolLookup.get(name.toLowerCase()) ?? name;
-const fromClaudeCodeName = (name: string, tools?: Tool[]) => {
-	if (tools && tools.length > 0) {
-		const lowerName = name.toLowerCase();
-		const matchedTool = tools.find((tool) => tool.name.toLowerCase() === lowerName);
-		if (matchedTool) return matchedTool.name;
-	}
-	return name;
-};
-
 /**
  * Convert content blocks to Anthropic API format
  */
@@ -484,11 +446,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 
 		try {
 			let client: Anthropic;
-			let isOAuth: boolean;
 
 			if (options?.client) {
 				client = options.client;
-				isOAuth = false;
 			} else {
 				const apiKey = options?.apiKey ?? getEnvApiKey(model.provider) ?? "";
 
@@ -510,8 +470,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					copilotDynamicHeaders,
 					options?.sessionId,
 				);
-				client = created.client;
-				isOAuth = created.isOAuthToken;
+				client = created;
 			}
 			const { cacheControl } = getCacheControl(model, options?.cacheRetention);
 			const usesAnthropicCachePricing = hasStandardAnthropicCachePricing(model);
@@ -519,7 +478,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				cacheControl && usesAnthropicCachePricing
 					? getAnthropicCacheWriteCost(model.cost.input, cacheControl.ttl === "1h" ? "1h" : "5m")
 					: undefined;
-			let params = buildParams(model, context, isOAuth, options, cacheControl);
+			let params = buildParams(model, context, options, cacheControl);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as MessageCreateParamsStreaming;
@@ -591,9 +550,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 						const block: Block = {
 							type: "toolCall",
 							id: event.content_block.id,
-							name: isOAuth
-								? fromClaudeCodeName(event.content_block.name, context.tools)
-								: event.content_block.name,
+							name: event.content_block.name,
 							arguments: (event.content_block.input as Record<string, any>) ?? {},
 							partialJson: "",
 							index: event.index,
@@ -869,7 +826,7 @@ function createClient(
 	optionsHeaders?: Record<string, string>,
 	dynamicHeaders?: Record<string, string>,
 	sessionId?: string,
-): { client: Anthropic; isOAuthToken: boolean } {
+): Anthropic {
 	// Adaptive thinking models (Opus 4.6, Sonnet 4.6) have interleaved thinking built-in.
 	// The beta header is deprecated on Opus 4.6 and redundant on Sonnet 4.6, so skip it.
 	const needsInterleavedBeta = interleavedThinking && !supportsAdaptiveThinking(model.id);
@@ -902,7 +859,7 @@ function createClient(
 			),
 		});
 
-		return { client, isOAuthToken: false };
+		return client;
 	}
 
 	if (model.provider === "github-copilot") {
@@ -924,7 +881,7 @@ function createClient(
 			),
 		});
 
-		return { client, isOAuthToken: false };
+		return client;
 	}
 
 	if (isOAuthToken(apiKey)) {
@@ -938,16 +895,22 @@ function createClient(
 				{
 					accept: "application/json",
 					"anthropic-dangerous-direct-browser-access": "true",
-					"anthropic-beta": ["claude-code-20250219", "oauth-2025-04-20", ...betaFeatures].join(","),
-					"user-agent": `claude-cli/${claudeCodeVersion}`,
-					"x-app": "cli",
+					// Honest identity: Prime Agent is a third-party client. Anthropic's
+					// terms reserve subscription OAuth for its own apps and usage from
+					// third-party harnesses is classified server-side (extra usage,
+					// billed per token) regardless of the claimed client, so
+					// impersonating Claude Code buys nothing and adds ban risk plus a
+					// client-version gate treadmill. Keep the oauth beta: it is the
+					// token-auth mechanism, not a client identity.
+					"anthropic-beta": ["oauth-2025-04-20", ...betaFeatures].join(","),
+					"user-agent": "prime-agent",
 				},
 				model.headers,
 				optionsHeaders,
 			),
 		});
 
-		return { client, isOAuthToken: true };
+		return client;
 	}
 
 	const client = new Anthropic({
@@ -970,41 +933,25 @@ function createClient(
 		),
 	});
 
-	return { client, isOAuthToken: false };
+	return client;
 }
 
 function buildParams(
 	model: Model<"anthropic-messages">,
 	context: Context,
-	isOAuthToken: boolean,
 	options?: AnthropicOptions,
 	cacheControl?: CacheControlEphemeral,
 ): MessageCreateParamsStreaming {
 	const params: MessageCreateParamsStreaming = {
 		model: model.id,
-		messages: convertMessages(context.messages, model, isOAuthToken, cacheControl),
+		messages: convertMessages(context.messages, model, cacheControl),
 		max_tokens: options?.maxTokens || (model.maxTokens / 3) | 0,
 		stream: true,
 	};
 
-	// For OAuth tokens, we MUST include Claude Code identity
-	if (isOAuthToken) {
-		params.system = [
-			{
-				type: "text",
-				text: "You are Claude Code, Anthropic's official CLI for Claude.",
-				...(cacheControl ? { cache_control: cacheControl } : {}),
-			},
-		];
-		if (context.systemPrompt) {
-			params.system.push({
-				type: "text",
-				text: sanitizeSurrogates(context.systemPrompt),
-				...(cacheControl ? { cache_control: cacheControl } : {}),
-			});
-		}
-	} else if (context.systemPrompt) {
-		// Add cache control to system prompt for non-OAuth tokens
+	// Subscription (OAuth) requests send the same honest system prompt as
+	// API-key requests: no Claude Code identity prepend (see createClient).
+	if (context.systemPrompt) {
 		params.system = [
 			{
 				type: "text",
@@ -1023,7 +970,6 @@ function buildParams(
 	if (context.tools && context.tools.length > 0) {
 		params.tools = convertTools(
 			context.tools,
-			isOAuthToken,
 			getAnthropicCompat(model).supportsEagerToolInputStreaming,
 			cacheControl,
 		);
@@ -1086,7 +1032,6 @@ function normalizeToolCallId(id: string): string {
 function convertMessages(
 	messages: Message[],
 	model: Model<"anthropic-messages">,
-	isOAuthToken: boolean,
 	cacheControl?: CacheControlEphemeral,
 ): MessageParam[] {
 	const params: MessageParam[] = [];
@@ -1173,7 +1118,7 @@ function convertMessages(
 					blocks.push({
 						type: "tool_use",
 						id: block.id,
-						name: isOAuthToken ? toClaudeCodeName(block.name) : block.name,
+						name: block.name,
 						input: block.arguments ?? {},
 					});
 				}
@@ -1248,7 +1193,6 @@ function shouldUseFineGrainedToolStreamingBeta(model: Model<"anthropic-messages"
 
 function convertTools(
 	tools: Tool[],
-	isOAuthToken: boolean,
 	supportsEagerToolInputStreaming: boolean,
 	cacheControl?: CacheControlEphemeral,
 ): Anthropic.Messages.Tool[] {
@@ -1258,7 +1202,7 @@ function convertTools(
 		const schema = tool.parameters as { properties?: unknown; required?: string[] };
 
 		return {
-			name: isOAuthToken ? toClaudeCodeName(tool.name) : tool.name,
+			name: tool.name,
 			description: tool.description,
 			...(supportsEagerToolInputStreaming ? { eager_input_streaming: true } : {}),
 			input_schema: {
