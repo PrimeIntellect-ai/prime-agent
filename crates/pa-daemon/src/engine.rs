@@ -26,6 +26,19 @@ pub struct PromptRequest {
     /// the custom row, then runs the model on `message` (TS injected-prompt
     /// turns: RLM child terminal notices).
     pub custom_message: Option<Value>,
+    /// Co-delivered user rows of a batched turn (TS
+    /// `_startPreparedTurnActions`): the queue's batched actions ride the
+    /// same run as the primary message. Each row is accepted (persisted
+    /// and rendered) in order ahead of the model turn, and the loop
+    /// context carries every row as one `agent.prompt` message list.
+    pub batch: Vec<PromptBatchRow>,
+}
+
+/// One co-delivered user row of a batched prompt request.
+#[derive(Debug, Clone)]
+pub struct PromptBatchRow {
+    pub text: String,
+    pub images: Vec<pa_agent::types::ImageContent>,
 }
 
 /// Explicit model selection from a session's create config (the wire
@@ -278,6 +291,17 @@ pub trait SessionEngine: Send + Sync {
     /// aborted turn's events stay gated. Engines without a real agent
     /// loop have nothing in flight and keep the default no-op.
     fn abort_in_flight_turn(&self) {}
+
+    /// Switch the queue delivery modes live (TS `setSteeringMode` /
+    /// `setFollowUpMode` write the session's agent): the worker's
+    /// `set_steering_mode`/`set_follow_up_mode` commands apply the
+    /// persisted mode to the engine's agent-level queues too, so the
+    /// in-process steer/follow-up admissions drain per the new mode at
+    /// the loop boundary. Engines without agent-level queues keep the
+    /// default no-op.
+    fn set_queue_modes(&self, steering: Option<&str>, follow_up: Option<&str>) {
+        let _ = (steering, follow_up);
+    }
 
     /// Run one side question: a second LLM turn over a clone of the
     /// conversation with the serialized previous turns replayed, excluded
@@ -1099,6 +1123,7 @@ impl SessionEngine for ScriptedEngine {
         let goal = self.goal.as_ref()?;
         Some(crate::engine::GoalContinuation {
             request: crate::engine::PromptRequest {
+                batch: Vec::new(),
                 message: goal.message.clone(),
                 images: Vec::new(),
                 source: "user".to_string(),
@@ -1157,6 +1182,20 @@ impl SessionEngine for ScriptedEngine {
         if !emit(accepted) {
             emit(cancelled());
             return;
+        }
+        // The batched co-delivery rows (the real engine's one-run batch):
+        // one accepted user row per batched message, in delivery order,
+        // ahead of the single scripted reply.
+        for row in &request.batch {
+            let accepted_row = json!({
+                "role": "user",
+                "content": row.text,
+                "timestamp": crate::util::now_ms(),
+            });
+            if !emit(EngineEvent::UserMessage(accepted_row)) {
+                emit(cancelled());
+                return;
+            }
         }
         // The fixture's mid-turn goal announcement (the real engine's
         // `goal_update` emission path, TS `_setGoalState` ->
@@ -1532,6 +1571,7 @@ mod tests {
         )
         .unwrap();
         let request_for = |message: &str| PromptRequest {
+            batch: Vec::new(),
             images: Vec::new(),
             message: message.to_string(),
             source: "test".to_string(),
@@ -1564,6 +1604,7 @@ mod tests {
         engine.run_prompt(
             0,
             PromptRequest {
+                batch: Vec::new(),
                 images: Vec::new(),
                 message: "x".into(),
                 source: "test".into(),

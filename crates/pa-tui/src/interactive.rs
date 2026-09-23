@@ -1081,7 +1081,7 @@ pub async fn run_interactive(
                         // reaches the frame gate, and the inline paint
                         // clears `dirty` — an idle terminal would
                         // otherwise never show the armed hint.
-                        view.chrome.tray_override = session.tray_override();
+                        view.chrome.tray_override = session.tray_override(&view);
                         crate::app::draw(renderer, &mut view)?;
                         // The frame scheduler's bookkeeping follows the
                         // inline paint: the 16ms gate below now measures its
@@ -1530,13 +1530,14 @@ pub async fn run_interactive(
             hint_painted = false;
         }
 
-        // The tray override row (the Ctrl+C exit hint) follows the
-        // session's hint state on every frame. Refreshed here — after the
-        // select, right before the paint — because a loop-top refresh
-        // goes stale across the select's sleep: the expiry-deadline wake
-        // would repaint the hint with the pre-sleep value and the
-        // corrected tray would never get another paint.
-        view.chrome.tray_override = session.tray_override();
+        // The tray override row (the Ctrl+C exit hint, or the streaming
+        // follow-up hint over a draft) follows the session's hint state on
+        // every frame. Refreshed here — after the select, right before
+        // the paint — because a loop-top refresh goes stale across the
+        // select's sleep: the expiry-deadline wake would repaint the hint
+        // with the pre-sleep value and the corrected tray would never get
+        // another paint.
+        view.chrome.tray_override = session.tray_override(&view);
 
         // The frame gate (TS `scheduleRender`: at most one render per
         // MIN_RENDER_INTERVAL_MS): every state change inside the window

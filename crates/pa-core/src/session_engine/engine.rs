@@ -87,6 +87,13 @@ pub struct SessionEngineConfig {
     /// input (TS agent-session.ts's `_steeringStopPending`; the follow-up
     /// lane never stops the run — `when_run_idle` waits for the settle).
     pub queued_steering_probe: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// The session's queue delivery modes (TS `sdk.ts` passes
+    /// `settingsManager.getSteeringMode()`/`getFollowUpMode()` into the
+    /// Agent): the agent's steering/follow-up queues drain per the mode
+    /// at the loop boundary. `None` keeps the TS default
+    /// ("one-at-a-time").
+    pub steering_mode: Option<pa_agent::agent::QueueMode>,
+    pub follow_up_mode: Option<pa_agent::agent::QueueMode>,
     /// Boot the session's kernel in the background at creation (TS
     /// `prewarmIpythonKernel` from `createDefaultRuntimeFactory`): a main
     /// session (depth 0, the engine's gate like the TS `rlmDepth === 0`
@@ -624,6 +631,10 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             probe
         }),
         should_stop_before_turn: config.queued_steering_probe.clone(),
+        // TS `sdk.ts`: the Agent's steering/follow-up queues drain per
+        // the session's configured modes (default "one-at-a-time").
+        steering_mode: config.steering_mode,
+        follow_up_mode: config.follow_up_mode,
         ..Default::default()
     });
 
@@ -869,6 +880,8 @@ mod tests {
         let engine = create_session(SessionEngineConfig {
             cron_store: None,
             queued_steering_probe: None,
+            steering_mode: None,
+            follow_up_mode: None,
             cwd: cwd.clone(),
             agent_dir: tmp.path().join("agent"),
             mcp_manager: None,
@@ -976,6 +989,8 @@ mod tests {
             SessionEngineConfig {
                 cron_store: None,
                 queued_steering_probe: None,
+                steering_mode: None,
+                follow_up_mode: None,
                 cwd: cwd.to_path_buf(),
                 agent_dir: agent_dir.to_path_buf(),
                 mcp_manager: None,

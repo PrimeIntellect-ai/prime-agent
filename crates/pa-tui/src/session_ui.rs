@@ -1004,9 +1004,7 @@ impl SessionUi {
 
     /// The editor's Down and Alt+A hand focus to the compact dock.
     fn focus_subagents_summary(&mut self, view: &mut AgentView) -> bool {
-        if self.tray_override().is_some()
-            || (self.turn_active && !view.editor.get_text().trim().is_empty())
-        {
+        if self.tray_override(view).is_some() || !self.subagents_selectable() {
             return false;
         }
         if !self.activity_selectable(self.activity_group) {
@@ -4867,18 +4865,32 @@ impl SessionUi {
             .filter(|until| std::time::Instant::now() < *until)
     }
 
-    /// The tray override label while the exit hint is armed (TS
-    /// `getTrayOverrideLabel`: `Press Ctrl+C again to exit`).
-    pub(crate) fn tray_override(&self) -> Option<String> {
-        if !self.ctrl_c_hint_visible() {
+    /// The tray override label (TS `getTrayOverrideLabel`): the Ctrl+C
+    /// exit hint while armed, else — while the agent streams and a draft
+    /// sits in the editor — the streaming follow-up hint
+    /// (`<followUp> to queue message`). The inline pickers never reach
+    /// this from the key path (they own the whole dispatch before the
+    /// editor, TS `isInlinePickerOpen`), and the dock render skips the
+    /// tray while one is mounted.
+    pub(crate) fn tray_override(&self, view: &AgentView) -> Option<String> {
+        if self.ctrl_c_hint_visible() {
+            let key = self
+                .keybindings
+                .first_key("app.clear")
+                .map(|key| crate::keybindings::format_key_text(&key))
+                .unwrap_or_else(|| "Ctrl+C".to_string());
+            return Some(format!("Press {key} again to exit"));
+        }
+        let text = view.editor.get_expanded_text();
+        if !self.turn_active || text.trim().is_empty() {
             return None;
         }
-        let key = self
+        let follow_up = self
             .keybindings
-            .first_key("app.clear")
+            .first_key("app.message.followUp")
             .map(|key| crate::keybindings::format_key_text(&key))
-            .unwrap_or_else(|| "Ctrl+C".to_string());
-        Some(format!("Press {key} again to exit"))
+            .unwrap_or_default();
+        Some(format!("{follow_up} to queue message"))
     }
 
     /// One key press while the `/model` picker is open: Esc/Ctrl+C close

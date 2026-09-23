@@ -77,6 +77,19 @@ pub struct PromptOptions {
     pub expand_prompt_templates: Option<bool>,
     /// Queue instead of erroring when the session is busy (agent messages).
     pub queue_if_busy: bool,
+    /// Co-delivered user rows of a batched turn (TS
+    /// `_startPreparedTurnActions`: same-lane, same-policy queued
+    /// actions delivered as ONE run under queue mode "all" or a forced
+    /// steering batch). Each row rides the turn after the primary, with
+    /// its own text and images, like the primary.
+    pub batch: Vec<PromptBatchRow>,
+}
+
+/// One co-delivered user row of a batched prompt admission.
+#[derive(Debug, Clone)]
+pub struct PromptBatchRow {
+    pub text: String,
+    pub images: Vec<pa_agent::types::ImageContent>,
 }
 
 /// Which trailing assistant messages [`AgentSession::drop_trailing_assistant`]
@@ -712,6 +725,21 @@ impl AgentSession {
             }
             prompt_messages.extend(self.take_next_turn_rows().await);
             prompt_messages.push(user_prompt_message(&normalized, &images));
+            // The batched co-delivery rows (TS `_startPreparedTurnActions`'s
+            // `turns.flatMap(records)`): each batched action contributes its
+            // user row after the primary, through the same admission
+            // normalization (TS normalizes each submission at queue time;
+            // this engine normalizes every row at the shared admission).
+            for row in &options.batch {
+                let row_text = if expand {
+                    let (skill_expanded, _) =
+                        crate::skills::expand_skill_command(&row.text, &self.skills);
+                    crate::skills::expand_prompt_template(&skill_expanded, &self.prompt_templates)
+                } else {
+                    row.text.clone()
+                };
+                prompt_messages.push(user_prompt_message(&row_text, &row.images));
+            }
             self.agent
                 .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
                 .await?;

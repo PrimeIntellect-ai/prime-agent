@@ -207,6 +207,64 @@ const SIDE_QUESTION_SETTLE_TIMEOUT: Duration = Duration::from_secs(3);
 pub(crate) const QUEUED_INPUT_SUSPENDED: &str =
     "Cannot admit a session action while queued session input is suspended.";
 
+/// The item's turn-execution class (TS `TurnExecutionPolicy`, the
+/// `_pumpSessionInputs` batch-gathering's `turnExecutionPoliciesEqual`
+/// gate): items co-deliver as one batched turn only within the same
+/// class. Client-queued rows (the `steer`/`follow_up` commands and
+/// prompt admissions behind work, TS `"queued"`) batch together;
+/// injected rows (heartbeat fires, agent-message deliveries, goal and
+/// autonomous continuations, TS `"injected"`) batch among themselves;
+/// the idle session's direct-prompt hand-off (TS `"directPrompt"`)
+/// never joins a queue batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnPolicy {
+    Queued,
+    Injected,
+    Direct,
+}
+
+impl TurnPolicy {
+    /// The journal record's string form (`worker.recovery` queue
+    /// snapshots); the restore maps it back through the same names.
+    pub(crate) fn journal_value(self) -> &'static str {
+        match self {
+            TurnPolicy::Queued => "queued",
+            TurnPolicy::Injected => "injected",
+            TurnPolicy::Direct => "direct",
+        }
+    }
+}
+
+/// The turn-execution class restored from a wire `restore_actions`
+/// payload (TS `restoreSessionActions` restores the full
+/// `executionPolicy`): `nextTurnContextTiming` "commit" is the
+/// client-queued policy; "preparation" with a preserved empty
+/// extension prompt is injected; "preparation" without it is the
+/// direct-prompt hand-off. An absent or unknown policy restores as the
+/// dominant queued class.
+pub(crate) fn restored_turn_policy(payload: &Value) -> TurnPolicy {
+    let timing = payload
+        .get("executionPolicy")
+        .and_then(|policy| policy.get("nextTurnContextTiming"))
+        .and_then(Value::as_str);
+    match timing {
+        Some("commit") => TurnPolicy::Queued,
+        Some("preparation") => {
+            let preserved = payload
+                .get("executionPolicy")
+                .and_then(|policy| policy.get("preserveEmptyExtensionPrompt"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if preserved {
+                TurnPolicy::Injected
+            } else {
+                TurnPolicy::Direct
+            }
+        }
+        _ => TurnPolicy::Queued,
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct QueuedItem {
     pub(crate) message: String,
@@ -244,6 +302,16 @@ pub(crate) struct QueuedItem {
     /// admission stay invisible: the TS wire shows no queue rows or
     /// active phases for them.
     pub(crate) queue_visible: bool,
+    /// The item's turn-execution class (see [`TurnPolicy`]): the batch
+    /// gathering's compatibility gate.
+    pub(crate) policy: TurnPolicy,
+    /// Membership of the one-shot forced steering batch (TS
+    /// `_forcedAllSteeringActionIds`, armed by `abortAndSendQueued`):
+    /// armed items co-deliver as one batched turn even under queue mode
+    /// "one-at-a-time". Transient worker state — never journaled; a
+    /// restart between the abort and the delivery loses the forced batch
+    /// (the TS armed set is equally in-memory).
+    pub(crate) forced_batch: bool,
 }
 
 /// Parse the wire `images` array of a prompt-family command (each entry
@@ -323,6 +391,12 @@ pub(crate) struct SessionCore {
     /// `"all"` or `"one-at-a-time"`.
     pub(crate) steering_mode: String,
     pub(crate) follow_up_mode: String,
+    /// The one-shot forced steering batch (TS `_forcedAllSteeringActionIds`
+    /// on the session, armed by `abortAndSendQueued`): while armed, armed
+    /// steering items co-deliver as ONE batched turn at the next boundary
+    /// — even under queue mode "one-at-a-time". Disarms when no armed
+    /// item remains queued (TS `_forcedAllSteeringBatch`'s disarm read).
+    pub(crate) forced_all_steering: bool,
     /// The scoped model list (TS `_scopedModels`): wire entries
     /// `{ model, thinkingLevel? }` the model cycler cycles within.
     pub(crate) scoped_models: Vec<Value>,
@@ -392,8 +466,9 @@ impl SessionCore {
             parent_session_id: None,
             child_script: None,
             service_tier: None,
-            steering_mode: "all".to_string(),
-            follow_up_mode: "all".to_string(),
+            steering_mode: "one-at-a-time".to_string(),
+            follow_up_mode: "one-at-a-time".to_string(),
+            forced_all_steering: false,
             scoped_models: Vec::new(),
             retry_abort_requested: false,
             queued_input_suspended: false,
@@ -788,8 +863,9 @@ impl Worker {
             parent_session_id: None,
             child_script: None,
             service_tier: None,
-            steering_mode: "all".to_string(),
-            follow_up_mode: "all".to_string(),
+            steering_mode: "one-at-a-time".to_string(),
+            follow_up_mode: "one-at-a-time".to_string(),
+            forced_all_steering: false,
             scoped_models: Vec::new(),
             retry_abort_requested: false,
             queued_input_suspended: false,
@@ -2253,8 +2329,9 @@ impl Worker {
             }
             core.auto_compaction_enabled = auto_compaction_enabled;
             core.service_tier = restored_tier.unwrap_or(Some(service_tier));
-            core.steering_mode = steering_mode;
-            core.follow_up_mode = follow_up_mode;
+            core.steering_mode = steering_mode.clone();
+            core.follow_up_mode = follow_up_mode.clone();
+            core.forced_all_steering = false;
             core.scoped_models = Vec::new();
             core.retry_abort_requested = false;
             // The session's depth falls back to the opened file's header (TS
@@ -2279,6 +2356,12 @@ impl Worker {
             core.child_script = child_script.clone();
             (self.summary_locked(&core), rlm_depth)
         };
+        // TS `sdk.ts` seeds the Agent's queue modes from the settings
+        // manager at session create (`steeringMode`/`followUpMode`): the
+        // engine's agent-level queues drain per the same modes the worker
+        // lane delivers by. Scripted harness engines keep the no-op.
+        self.engine
+            .set_queue_modes(Some(&steering_mode), Some(&follow_up_mode));
         // Seed the engine's RLM identity: recursion depth and bound, this
         // session's persistence ids, the default thinking level its
         // children inherit, and the harness's child engine file.
@@ -2662,6 +2745,12 @@ impl Worker {
                 images: images.clone(),
                 done,
                 queue_visible: queued_behind_work,
+                policy: if queued_behind_work {
+                    TurnPolicy::Queued
+                } else {
+                    TurnPolicy::Direct
+                },
+                forced_batch: false,
             };
             match lane {
                 Lane::Steering => core.steering.push_back(item),
@@ -2720,6 +2809,8 @@ impl Worker {
             images,
             done: None,
             queue_visible: true,
+            policy: TurnPolicy::Queued,
+            forced_batch: false,
         });
         let snapshot = self.snapshot_locked(&core);
         let lanes = queue_lanes(&core);
@@ -2884,6 +2975,8 @@ impl Worker {
                 images: Vec::new(),
                 done: None,
                 queue_visible: true,
+                policy: TurnPolicy::Injected,
+                forced_batch: false,
             });
             let snapshot = self.snapshot_locked(&core);
             let lanes = queue_lanes(&core);
@@ -3292,6 +3385,32 @@ impl Worker {
         }
     }
 
+    /// Arm the one-shot forced steering batch (TS `abortAndSendQueued`'s
+    /// `_forcedAllSteeringActionIds = new Set(queuedSteering.map(...))`):
+    /// the visible plain-user steering items — queue-visible rows whose
+    /// delivery record is a user message, not an accepted agent message or
+    /// an injected custom row — deliver as ONE batched turn at the next
+    /// boundary, even under queue mode "one-at-a-time". Returns whether
+    /// anything armed; an empty lane (or an all-injected one) arms nothing
+    /// and the caller falls back to the plain abort (TS
+    /// `queuedSteering.length === 0 || !canResume`).
+    pub(crate) fn arm_forced_all_steering(&self) -> bool {
+        let mut core = self.core.lock().unwrap();
+        let armable = |item: &QueuedItem| {
+            item.queue_visible && item.agent_message.is_none() && item.custom_message.is_none()
+        };
+        if !core.steering.iter().any(armable) {
+            return false;
+        }
+        core.forced_all_steering = true;
+        for item in core.steering.iter_mut() {
+            if armable(item) {
+                item.forced_batch = true;
+            }
+        }
+        true
+    }
+
     /// TS `requestAbort()`: the abort funnel behind both abort commands
     /// (`abort` and `abort_and_send_queued`) - suspend queued-input
     /// admission, cancel the queue-invisible turn actions, abort the
@@ -3493,6 +3612,8 @@ impl Worker {
                                 images: continuation.request.images,
                                 done: None,
                                 queue_visible: false,
+                                policy: TurnPolicy::Injected,
+                                forced_batch: false,
                             });
                         }
                     }
@@ -4286,6 +4407,7 @@ pub(crate) fn queue_lanes(core: &SessionCore) -> QueueLanes {
                 custom_message: item.custom_message.clone(),
                 queue_key: item.queue_key.clone(),
                 queue_visible: item.queue_visible,
+                policy: item.policy.journal_value().to_string(),
             })
             .collect()
     }
@@ -4293,6 +4415,54 @@ pub(crate) fn queue_lanes(core: &SessionCore) -> QueueLanes {
         steering: items(&core.steering),
         follow_up: items(&core.follow_up),
     }
+}
+
+/// TS `_pumpSessionInputs`'s batch gathering: the lane's front item
+/// anchors the delivery; under queue mode "all" — or the forced steering
+/// batch armed by `abort_and_send_queued` (TS `abortAndSendQueued`'s
+/// `_forcedAllSteeringActionIds`) — the same-class prefix behind it joins
+/// as co-delivered rows of ONE turn (TS `turnExecutionPoliciesEqual` +
+/// the mode/armed-set gates).
+///
+/// Joining gates: the same turn-execution class; a plain user row (an
+/// injected custom row always delivers solo — it replaces its turn's
+/// user row); not a queued session command (TS batches only `turn`-kind
+/// actions); and membership of the armed set while the forced batch
+/// governs this delivery. The front item anchors regardless — a
+/// non-batchable front delivers solo, exactly like TS's `first`.
+fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<QueuedItem> {
+    let (items, mode) = match lane {
+        Lane::Steering => (&mut core.steering, core.steering_mode.as_str()),
+        Lane::FollowUp => (&mut core.follow_up, core.follow_up_mode.as_str()),
+    };
+    let Some(first) = items.front() else {
+        return Vec::new();
+    };
+    let first_policy = first.policy;
+    // TS `_forcedAllSteeringBatch(first)`: the armed set forces "all" only
+    // when the front item is armed; an un-armed front disarms the batch
+    // once no armed item remains queued (a delivered item leaves the lane
+    // with its flag, so the armed prefix exhausts itself).
+    let forced = lane == Lane::Steering && core.forced_all_steering && first.forced_batch;
+    let mut batch = vec![items.pop_front().expect("front checked")];
+    if lane == Lane::Steering && core.forced_all_steering && !forced
+        && !items.iter().any(|item| item.forced_batch)
+    {
+        core.forced_all_steering = false;
+    }
+    let all = forced || mode == "all";
+    while all {
+        let Some(next) = items.front() else { break };
+        if next.policy != first_policy
+            || next.custom_message.is_some()
+            || (forced && !next.forced_batch)
+            || crate::session_commands::parse_prompt_session_command(&next.message).is_some()
+        {
+            break;
+        }
+        batch.push(items.pop_front().expect("front checked"));
+    }
+    batch
 }
 
 /// Queue snapshot restore from the worker recovery journal (crash/respawn
@@ -4314,16 +4484,21 @@ fn restore_queue_snapshot(
         // runs and persists as the `heartbeat_prompt` component.
         lanes
             .into_iter()
-            .map(|record| QueuedItem {
-                preview: record.preview,
-                message: record.message,
-                custom_message: record.custom_message,
-                agent_message: None,
-                queue_key: record.queue_key,
-                admission_id: None,
-                images: Vec::new(),
-                done: None,
-                queue_visible: record.queue_visible,
+            .map(|record| {
+                let policy = record.policy();
+                QueuedItem {
+                    preview: record.preview,
+                    message: record.message,
+                    custom_message: record.custom_message,
+                    agent_message: None,
+                    queue_key: record.queue_key,
+                    admission_id: None,
+                    images: Vec::new(),
+                    done: None,
+                    queue_visible: record.queue_visible,
+                    policy,
+                    forced_batch: false,
+                }
             })
             .collect()
     }
@@ -4397,6 +4572,8 @@ pub(crate) fn admit_autonomous_follow_up(
             images: Vec::new(),
             done: None,
             queue_visible: false,
+            policy: TurnPolicy::Injected,
+            forced_batch: false,
         });
     }
     work_notify.notify_waiters();
@@ -4439,6 +4616,8 @@ pub(crate) fn admit_goal_follow_up(
             images: follow_up.request.images,
             done: None,
             queue_visible: false,
+            policy: TurnPolicy::Injected,
+            forced_batch: false,
         };
         match lane {
             Lane::Steering => core.steering.push_back(item),
@@ -4484,7 +4663,7 @@ impl TurnRunner {
     async fn run(self) {
         loop {
             let engine = self.engine.clone();
-            let item: Option<QueuedItem> = {
+            let item: Option<Vec<QueuedItem>> = {
                 let mut core = self.core.lock().unwrap();
                 if core.shutdown_requested {
                     drop(core);
@@ -4507,22 +4686,24 @@ impl TurnRunner {
                 if self.input_pauses.paused() || core.queued_input_suspended {
                     core.busy = false;
                     None
-                } else if let Some(item) = core.steering.pop_front() {
+                } else if core.steering.front().is_some() {
+                    let items = gather_delivery_batch(&mut core, Lane::Steering);
                     core.busy = true;
                     core.abort_requested = false;
                     core.retry_abort_requested = false;
-                    Some(item)
-                } else if let Some(item) = core.follow_up.pop_front() {
+                    Some(items)
+                } else if core.follow_up.front().is_some() {
+                    let items = gather_delivery_batch(&mut core, Lane::FollowUp);
                     core.busy = true;
                     core.abort_requested = false;
                     core.retry_abort_requested = false;
-                    Some(item)
+                    Some(items)
                 } else {
                     core.busy = false;
                     None
                 }
             };
-            if let Some(item) = item {
+            if let Some(items) = item {
                 // The pickup projection (TS `_pumpSessionInputs` emits the
                 // queue update at the action's `preparing` transition): the
                 // delivered item leaves the queue projection BEFORE its
@@ -4539,14 +4720,20 @@ impl TurnRunner {
                 // session's direct prompt admission, injected goal and
                 // autonomous continuations) projects the plain pickup like
                 // TS's `queueVisible` filter.
-                let queue_visible = item.queue_visible;
+                // The batch's active action is the first queue-visible row
+                // (TS `visibleSessionActionProjection(activeActions())[0]`):
+                // an all-invisible batch (injected continuations) projects
+                // nothing, like TS's `queueVisible` filter.
+                let visible_index = items.iter().position(|item| item.queue_visible);
+                let anchor = visible_index.map(|index| &items[index]);
+                let queue_visible = anchor.is_some();
                 {
                     let mut core = self.core.lock().unwrap();
-                    if queue_visible {
+                    if let Some(anchor) = anchor {
                         core.active_action = Some(crate::types::SessionActionActive {
                             kind: "turn".to_string(),
                             phase: "preparing".to_string(),
-                            label: Some(compact_action_label(&item.message)),
+                            label: Some(compact_action_label(&anchor.message)),
                         });
                     }
                     let snapshot = self.snapshot_from(&core);
@@ -4565,7 +4752,7 @@ impl TurnRunner {
                 // The busy flip reaches the supervisor's roster before the
                 // turn runs (TS pushes the same transition).
                 self.push_roster_delta();
-                self.run_turn(engine, item).await;
+                self.run_turn(engine, items).await;
             } else {
                 self.idle_notify.notify_waiters();
                 self.work_notify.notified().await;
@@ -4612,10 +4799,20 @@ impl TurnRunner {
         });
     }
 
-    async fn run_turn(&self, engine: std::sync::Arc<dyn SessionEngine>, item: QueuedItem) {
+    /// One delivery: a single item, or the batch the pump gathered (TS
+    /// `_startPreparedTurnActions`): the first item anchors the turn and
+    /// the rest ride as co-delivered user rows of the same run.
+    async fn run_turn(
+        &self,
+        engine: std::sync::Arc<dyn SessionEngine>,
+        items: Vec<QueuedItem>,
+    ) {
+        let Some((first, batched)) = items.split_first() else {
+            return;
+        };
         // An admitted prompt's turn started: its prompt admission commits
-        // (TS `commitAdmission`).
-        if let Some(admission_id) = &item.admission_id {
+        // (TS `commitAdmission`) — one per batched item, in delivery order.
+        for admission_id in items.iter().filter_map(|item| item.admission_id.as_ref()) {
             self.prompt_admissions.commit(admission_id);
         }
         self.emit_turn_event(json!({ "type": "agent_start" }));
@@ -4623,7 +4820,7 @@ impl TurnRunner {
         // `agent_start` (TS marks the action running once the primary
         // message starts the run): a queue-visible delivery projects it,
         // and every later queue snapshot mid-turn carries it too.
-        if item.queue_visible {
+        if items.iter().any(|item| item.queue_visible) {
             let mut core = self.core.lock().unwrap();
             if let Some(active) = core.active_action.as_mut() {
                 active.phase = "running".to_string();
@@ -4639,11 +4836,18 @@ impl TurnRunner {
             core.store.as_ref().map(|s| s.message_count()).unwrap_or(0) / 2
         };
         let request = PromptRequest {
-            message: item.message.clone(),
-            images: item.images.clone(),
+            batch: batched
+                .iter()
+                .map(|item| crate::engine::PromptBatchRow {
+                    text: item.message.clone(),
+                    images: item.images.clone(),
+                })
+                .collect(),
+            message: first.message.clone(),
+            images: first.images.clone(),
             source: "user".to_string(),
             agent_message_id: None,
-            custom_message: item.custom_message.clone(),
+            custom_message: first.custom_message.clone(),
         };
         // Live token-stream coalescing for this turn: the emit path parks
         // `message_update` frames in a single slot and a flusher task
@@ -4684,7 +4888,18 @@ impl TurnRunner {
         // the suspension gate queued it behind the (indefinite)
         // suspension instead of rejecting it — the f7 suspension
         // sequence's post-abort prompt hung exactly there.
-        let item_done = item.done;
+        // The batch's waiting prompts (TS `promptAndWait`): one waiter per
+        // queued `prompt_and_wait` item in the delivery, each resolved at
+        // the same fully-settled point. The settled admissions clear at the
+        // same point (collected before the items are consumed).
+        let settled_admissions: Vec<String> = items
+            .iter()
+            .filter_map(|item| item.admission_id.clone())
+            .collect();
+        let items_done: Vec<oneshot::Sender<Result<(), String>>> = items
+            .into_iter()
+            .filter_map(|item| item.done)
+            .collect();
         let turn_outcome = Arc::new(std::sync::Mutex::new(
             None::<std::result::Result<(), String>>,
         ));
@@ -5175,10 +5390,10 @@ impl TurnRunner {
         // (the runner debounces a burst into one request).
         let _ = self.status_notify.send(());
         self.idle_notify.notify_waiters();
-        // The settled prompt's admission clears (TS `clearAdmission` in
+        // The settled prompts' admissions clear (TS `clearAdmission` in
         // the prompt arm's finally).
-        if let Some(admission_id) = &item.admission_id {
-            self.prompt_admissions.clear(admission_id);
+        for admission_id in settled_admissions {
+            self.prompt_admissions.clear(&admission_id);
         }
         // The turn is fully unwound (idle flip, roster, boundary frames,
         // queue projection, admission bookkeeping): the waiting prompt now
@@ -5187,8 +5402,8 @@ impl TurnRunner {
         // the idle session.
         let settled_outcome = turn_outcome.lock().unwrap().take();
         if let Some(result) = settled_outcome {
-            if let Some(done) = item_done {
-                let _ = done.send(result);
+            for done in items_done {
+                let _ = done.send(result.clone());
             }
         }
     }
@@ -5488,6 +5703,8 @@ mod update_snapshot_tests {
                 images: Vec::new(),
                 done: None,
                 queue_visible: true,
+                policy: TurnPolicy::Injected,
+                forced_batch: false,
             });
             core.steering.push_back(QueuedItem {
                 message: "plain queued prompt".to_string(),
@@ -5499,6 +5716,8 @@ mod update_snapshot_tests {
                 images: Vec::new(),
                 done: None,
                 queue_visible: true,
+                policy: TurnPolicy::Queued,
+                forced_batch: false,
             });
         }
         let response = worker.dispatch("update_snapshot", &json!({})).await;
@@ -5802,6 +6021,8 @@ mod agent_message_tests {
                     images: Vec::new(),
                     done: None,
                     queue_visible: true,
+                    policy: TurnPolicy::Injected,
+                    forced_batch: false,
                 });
             }
         }
@@ -6476,6 +6697,8 @@ mod tests {
                 images: Vec::new(),
                 done: None,
                 queue_visible: true,
+                policy: TurnPolicy::Queued,
+                forced_batch: false,
             });
         }
         let compact = worker
@@ -7504,6 +7727,7 @@ mod tests {
             })),
             queue_key: Some("heartbeat:hb-1".to_string()),
             queue_visible: true,
+            policy: "injected".to_string(),
         };
         let plain = crate::journal::WorkerQueueItemRecord {
             message: "follow-me".to_string(),
@@ -7511,6 +7735,7 @@ mod tests {
             custom_message: None,
             queue_key: None,
             queue_visible: true,
+            policy: "queued".to_string(),
         };
         journal
             .record_queue_snapshot(
@@ -7571,6 +7796,7 @@ mod tests {
 
 #[cfg(test)]
 mod turn_stream_tests {
+    use super::session_events_since;
     use super::*;
     use crate::engine::{
         CompactionOutcome, CompactionRequest, PromptRequest, SessionEngine, SideQuestionOutcome,
@@ -7766,8 +7992,9 @@ mod turn_stream_tests {
             parent_session_id: None,
             child_script: None,
             service_tier: None,
-            steering_mode: "all".to_string(),
-            follow_up_mode: "all".to_string(),
+            steering_mode: "one-at-a-time".to_string(),
+            follow_up_mode: "one-at-a-time".to_string(),
+            forced_all_steering: false,
             scoped_models: Vec::new(),
             retry_abort_requested: false,
             queued_input_suspended: false,
@@ -7814,6 +8041,8 @@ mod turn_stream_tests {
                 images: Vec::new(),
                 done: Some(done_tx),
                 queue_visible: true,
+                policy: TurnPolicy::Queued,
+                forced_batch: false,
             });
         }
         let parked = std::sync::Arc::clone(&runner.core);
@@ -7843,6 +8072,322 @@ mod turn_stream_tests {
         running.abort();
     }
 
+
+    /// A queued plain-prompt item for the pump tests.
+    fn queued_prompt(message: &str, policy: TurnPolicy) -> QueuedItem {
+        QueuedItem {
+            preview: None,
+            message: message.to_string(),
+            custom_message: None,
+            agent_message: None,
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible: true,
+            policy,
+            forced_batch: false,
+        }
+    }
+
+    /// Run the pump until both lanes drain (the runner keeps idling; the
+    /// task is aborted by the test's end).
+    async fn drain_pump(core: &Arc<Mutex<SessionCore>>, work_notify: &Arc<Notify>) {
+        work_notify.notify_one();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            {
+                let core = core.lock().unwrap();
+                let drained = core.steering.is_empty()
+                    && core.follow_up.is_empty()
+                    && !core.busy;
+                if drained {
+                    return;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the pump never drained the lanes"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// The settled user/assistant rows of the session events, in wire
+    /// order (the `message_end` frames; the scripted engine carries the
+    /// text as a plain string content, the real engine as content parts).
+    fn delivered_rows(events: &[Value]) -> Vec<(String, String)> {
+        events
+            .iter()
+            .filter_map(|event| {
+                if event.get("type").and_then(Value::as_str) != Some("message_end") {
+                    return None;
+                }
+                let message = event.get("message")?;
+                let row_role = message.get("role").and_then(Value::as_str)?.to_string();
+                let content = message.get("content")?;
+                let text = content
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| {
+                        content
+                            .as_array()
+                            .and_then(|parts| parts.first())
+                            .and_then(|part| part.get("text"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .or_else(|| {
+                        content
+                            .as_array()
+                            .and_then(|parts| parts.iter().find(|part| part.get("type").and_then(Value::as_str) == Some("text")))
+                            .and_then(|part| part.get("text"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })?;
+                Some((row_role, text))
+            })
+            .collect()
+    }
+
+    /// TS `_pumpSessionInputs` under queue mode "all"
+    /// (`turnExecutionPoliciesEqual` + the mode gate): the same-lane
+    /// same-class prefix co-delivers as ONE batched turn — one
+    /// `agent_start`/`turn_start` pair, every user row in delivery order,
+    /// one assistant reply for the whole batch.
+    #[tokio::test]
+    async fn steering_mode_all_batches_the_queued_prefix_into_one_turn() {
+        let engine: Arc<dyn SessionEngine> = Arc::new(
+            ScriptedEngine::from_value(json!({ "responses": ["batched reply"] }))
+                .unwrap_or_default(),
+        );
+        let runner = burst_runner(Arc::clone(&engine));
+        {
+            let mut core = runner.core.lock().unwrap();
+            core.steering_mode = "all".to_string();
+            core.steering
+                .push_back(queued_prompt("steer one", TurnPolicy::Queued));
+            core.steering
+                .push_back(queued_prompt("steer two", TurnPolicy::Queued));
+            core.steering
+                .push_back(queued_prompt("steer three", TurnPolicy::Queued));
+        }
+        let mut subscription = runner.events.subscribe();
+        let core = std::sync::Arc::clone(&runner.core);
+        let work_notify = std::sync::Arc::clone(&runner.work_notify);
+        let running = tokio::spawn(async move { runner.run().await });
+        drain_pump(&core, &work_notify).await;
+        running.abort();
+
+        let events = session_events_since(&mut subscription);
+        let starts = events
+            .iter()
+            .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_start"))
+            .count();
+        let turn_starts = events
+            .iter()
+            .filter(|event| event.get("type").and_then(Value::as_str) == Some("turn_start"))
+            .count();
+        assert_eq!(starts, 1, "one agent_start for the whole batch");
+        assert_eq!(turn_starts, 1, "one turn_start for the whole batch");
+        let rows = delivered_rows(&events);
+        assert_eq!(
+            rows,
+            vec![
+                ("user".to_string(), "steer one".to_string()),
+                ("user".to_string(), "steer two".to_string()),
+                ("user".to_string(), "steer three".to_string()),
+                ("assistant".to_string(), "batched reply".to_string()),
+            ],
+            "the batched prefix delivered as one turn: {rows:?}"
+        );
+    }
+
+    /// Queue mode "one-at-a-time" (the TS default): each queued steer is
+    /// its own turn — one reply each, delivered in order.
+    #[tokio::test]
+    async fn one_at_a_time_delivers_each_queued_steer_as_its_own_turn() {
+        let engine: Arc<dyn SessionEngine> = Arc::new(
+            ScriptedEngine::from_value(json!({ "responses": ["reply one", "reply two"] }))
+                .unwrap_or_default(),
+        );
+        let runner = burst_runner(Arc::clone(&engine));
+        {
+            let mut core = runner.core.lock().unwrap();
+            core.steering
+                .push_back(queued_prompt("steer one", TurnPolicy::Queued));
+            core.steering
+                .push_back(queued_prompt("steer two", TurnPolicy::Queued));
+        }
+        let mut subscription = runner.events.subscribe();
+        let core = std::sync::Arc::clone(&runner.core);
+        let work_notify = std::sync::Arc::clone(&runner.work_notify);
+        let running = tokio::spawn(async move { runner.run().await });
+        drain_pump(&core, &work_notify).await;
+        running.abort();
+
+        let events = session_events_since(&mut subscription);
+        let starts = events
+            .iter()
+            .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_start"))
+            .count();
+        assert_eq!(starts, 2, "one agent_start per steer: {events:?}");
+        let rows = delivered_rows(&events);
+        assert_eq!(
+            rows,
+            vec![
+                ("user".to_string(), "steer one".to_string()),
+                ("assistant".to_string(), "reply one".to_string()),
+                ("user".to_string(), "steer two".to_string()),
+                ("assistant".to_string(), "reply two".to_string()),
+            ],
+            "one-at-a-time delivers in order, one turn each: {rows:?}"
+        );
+    }
+
+    /// The forced steering batch (TS `abortAndSendQueued`'s
+    /// `_forcedAllSteeringActionIds`): the armed prefix co-delivers as ONE
+    /// turn even under queue mode "one-at-a-time"; an item queued after
+    /// the arm stays out of the batch and delivers next.
+    #[tokio::test]
+    async fn forced_batch_delivers_the_armed_prefix_as_one_turn() {
+        let engine: Arc<dyn SessionEngine> = Arc::new(
+            ScriptedEngine::from_value(json!({
+                "responses": ["forced batch reply", "late steer reply"]
+            }))
+            .unwrap_or_default(),
+        );
+        let runner = burst_runner(Arc::clone(&engine));
+        {
+            let mut core = runner.core.lock().unwrap();
+            core.steering
+                .push_back(queued_prompt("armed one", TurnPolicy::Queued));
+            core.steering
+                .push_back(queued_prompt("armed two", TurnPolicy::Queued));
+            core.forced_all_steering = true;
+            for item in core.steering.iter_mut() {
+                item.forced_batch = true;
+            }
+            // An un-armed steer queued behind the armed prefix (a steer
+            // that arrived after the abort): it never joins the batch.
+            core.steering
+                .push_back(queued_prompt("late steer", TurnPolicy::Queued));
+        }
+        let mut subscription = runner.events.subscribe();
+        let core = std::sync::Arc::clone(&runner.core);
+        let work_notify = std::sync::Arc::clone(&runner.work_notify);
+        let running = tokio::spawn(async move { runner.run().await });
+        drain_pump(&core, &work_notify).await;
+        running.abort();
+
+        let events = session_events_since(&mut subscription);
+        let starts = events
+            .iter()
+            .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_start"))
+            .count();
+        assert_eq!(starts, 2, "the armed batch runs as one turn, the late steer its own");
+        let rows = delivered_rows(&events);
+        assert_eq!(
+            rows,
+            vec![
+                ("user".to_string(), "armed one".to_string()),
+                ("user".to_string(), "armed two".to_string()),
+                ("assistant".to_string(), "forced batch reply".to_string()),
+                ("user".to_string(), "late steer".to_string()),
+                ("assistant".to_string(), "late steer reply".to_string()),
+            ],
+            "the armed prefix batched; the late steer never joined: {rows:?}"
+        );
+    }
+
+    /// TS `turnExecutionPoliciesEqual`: mode "all" never batches across
+    /// turn-execution classes — a client steer and an injected heartbeat
+    /// row deliver as separate turns even under "all".
+    #[tokio::test]
+    async fn mode_all_never_batches_across_policy_classes() {
+        let engine: Arc<dyn SessionEngine> = Arc::new(
+            ScriptedEngine::from_value(json!({
+                "responses": ["steer reply", "heartbeat reply"]
+            }))
+            .unwrap_or_default(),
+        );
+        let runner = burst_runner(Arc::clone(&engine));
+        {
+            let mut core = runner.core.lock().unwrap();
+            core.steering_mode = "all".to_string();
+            core.steering
+                .push_back(queued_prompt("client steer", TurnPolicy::Queued));
+            core.steering
+                .push_back(queued_prompt("nudge the mission", TurnPolicy::Injected));
+        }
+        let mut subscription = runner.events.subscribe();
+        let core = std::sync::Arc::clone(&runner.core);
+        let work_notify = std::sync::Arc::clone(&runner.work_notify);
+        let running = tokio::spawn(async move { runner.run().await });
+        drain_pump(&core, &work_notify).await;
+        running.abort();
+
+        let events = session_events_since(&mut subscription);
+        let starts = events
+            .iter()
+            .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_start"))
+            .count();
+        assert_eq!(starts, 2, "policy classes never share a turn");
+        let rows = delivered_rows(&events);
+        assert_eq!(
+            rows,
+            vec![
+                ("user".to_string(), "client steer".to_string()),
+                ("assistant".to_string(), "steer reply".to_string()),
+                ("user".to_string(), "nudge the mission".to_string()),
+                ("assistant".to_string(), "heartbeat reply".to_string()),
+            ],
+            "each policy class delivered its own turn: {rows:?}"
+        );
+    }
+
+    /// The follow-up lane batches under its own mode (TS `followUpMode`):
+    /// two queued follow-ups co-deliver as one turn with "all".
+    #[tokio::test]
+    async fn follow_up_mode_all_batches_the_follow_up_lane() {
+        let engine: Arc<dyn SessionEngine> = Arc::new(
+            ScriptedEngine::from_value(json!({ "responses": ["follow-up batch reply"] }))
+                .unwrap_or_default(),
+        );
+        let runner = burst_runner(Arc::clone(&engine));
+        {
+            let mut core = runner.core.lock().unwrap();
+            core.follow_up_mode = "all".to_string();
+            core.follow_up
+                .push_back(queued_prompt("follow up one", TurnPolicy::Queued));
+            core.follow_up
+                .push_back(queued_prompt("follow up two", TurnPolicy::Queued));
+        }
+        let mut subscription = runner.events.subscribe();
+        let core = std::sync::Arc::clone(&runner.core);
+        let work_notify = std::sync::Arc::clone(&runner.work_notify);
+        let running = tokio::spawn(async move { runner.run().await });
+        drain_pump(&core, &work_notify).await;
+        running.abort();
+
+        let events = session_events_since(&mut subscription);
+        let starts = events
+            .iter()
+            .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_start"))
+            .count();
+        assert_eq!(starts, 1, "the follow-up lane batched under mode all");
+        let rows = delivered_rows(&events);
+        assert_eq!(
+            rows,
+            vec![
+                ("user".to_string(), "follow up one".to_string()),
+                ("user".to_string(), "follow up two".to_string()),
+                ("assistant".to_string(), "follow-up batch reply".to_string()),
+            ],
+            "the follow-up prefix batched into one turn: {rows:?}"
+        );
+    }
+
     /// The waiting prompt resolves only after the turn fully unwinds (TS
     /// `promptAndWait` settles the completion after the whole turn settle):
     /// the `done` waiter fires after the idle flip and the queue projection,
@@ -7863,7 +8408,7 @@ mod turn_stream_tests {
             runner
                 .run_turn(
                     engine,
-                    QueuedItem {
+                    vec![QueuedItem {
                         preview: None,
                         message: "burst".to_string(),
                         custom_message: None,
@@ -7873,7 +8418,9 @@ mod turn_stream_tests {
                         images: Vec::new(),
                         done: Some(done_tx),
                         queue_visible: true,
-                    },
+                        policy: TurnPolicy::Queued,
+                        forced_batch: false,
+                    }],
                 )
                 .await;
         });
@@ -7897,7 +8444,7 @@ mod turn_stream_tests {
         runner
             .run_turn(
                 engine,
-                QueuedItem {
+                vec![QueuedItem {
                     preview: None,
                     message: "burst".to_string(),
                     custom_message: None,
@@ -7907,7 +8454,9 @@ mod turn_stream_tests {
                     images: Vec::new(),
                     done: None,
                     queue_visible: true,
-                },
+                    policy: TurnPolicy::Queued,
+                    forced_batch: false,
+                }],
             )
             .await;
         let mut events = Vec::new();
@@ -7932,7 +8481,7 @@ mod turn_stream_tests {
         runner
             .run_turn(
                 engine,
-                QueuedItem {
+                vec![QueuedItem {
                     preview: None,
                     message: "[child-exited: no-reply child:lane]".to_string(),
                     custom_message: Some(custom_message),
@@ -7942,7 +8491,9 @@ mod turn_stream_tests {
                     images: Vec::new(),
                     done: None,
                     queue_visible: true,
-                },
+                    policy: TurnPolicy::Injected,
+                    forced_batch: false,
+                }],
             )
             .await;
         let mut events = Vec::new();
@@ -8069,7 +8620,7 @@ mod turn_stream_tests {
         );
         let runner = burst_runner(Arc::clone(&engine));
         let mut subscription = runner.events.subscribe();
-        runner.run_turn(engine, item).await;
+        runner.run_turn(engine, vec![item]).await;
         let mut events = Vec::new();
         while let Ok(frame) = subscription.try_recv() {
             if frame.outbound_type == "session_event" {

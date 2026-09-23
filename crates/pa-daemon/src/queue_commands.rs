@@ -314,6 +314,8 @@ mod tests {
                 images: Vec::new(),
                 done: None,
                 queue_visible: true,
+                policy: crate::worker::TurnPolicy::Injected,
+                forced_batch: false,
             });
         }
         let queue = worker.dispatch("get_queue", &json!({})).await;
@@ -376,6 +378,8 @@ mod tests {
                 images: Vec::new(),
                 done: None,
                 queue_visible: true,
+                policy: crate::worker::TurnPolicy::Injected,
+                forced_batch: false,
             });
         }
         let expected = "Heartbeat prompt: [heartbeat: every 10m run#0]\n\nnudge the mission";
@@ -592,6 +596,8 @@ mod tests {
                 images: Vec::new(),
                 done: Some(done_tx),
                 queue_visible: true,
+                policy: crate::worker::TurnPolicy::Queued,
+                forced_batch: false,
             });
         }
         let response = worker
@@ -656,6 +662,8 @@ mod tests {
                 images: Vec::new(),
                 done: None,
                 queue_visible: true,
+                policy: crate::worker::TurnPolicy::Queued,
+                forced_batch: false,
             });
 
         let replaced = worker

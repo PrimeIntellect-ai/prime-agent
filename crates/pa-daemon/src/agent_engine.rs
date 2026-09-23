@@ -165,6 +165,13 @@ pub struct AgentSessionEngine {
     /// abort request from the worker must reach the agent's run controller
     /// without locking it.
     turn_agent: std::sync::Mutex<Option<std::sync::Arc<pa_agent::agent::Agent>>>,
+    /// The session's queue delivery modes (TS `agent.steeringMode` /
+    /// `agent.followUpMode`): seeded from the start config, applied to the
+    /// built session's agent at build time, and switched live by the
+    /// `set_steering_mode`/`set_follow_up_mode` commands (TS
+    /// `setSteeringMode`/`setFollowUpMode` write the live agent). `None`
+    /// keeps the TS default ("one-at-a-time").
+    queue_modes: std::sync::Mutex<(Option<String>, Option<String>)>,
     /// The in-run autonomous consult's deadlock-free mirror (see
     /// [`crate::autonomous_continuation`]): the shared turn-boundary slot,
     /// agent, and compaction settings the consult reads without ever
@@ -446,6 +453,11 @@ impl AgentSessionEngine {
             std::sync::Arc::new(crate::mcp_login::WorkerMcpLoginUi::from_env()),
             std::sync::Arc::new(pa_core::mcp::ReqwestOAuthHttp::new()),
         );
+        // The queue delivery modes arrive at session create (TS `sdk.ts`
+        // builds the agent with the settings modes; the worker's create
+        // seeds them through `set_queue_modes`), so the engine starts
+        // with the TS default ("one-at-a-time").
+        let queue_modes = std::sync::Mutex::new((None, None));
         Ok(Self {
             runtime,
             config,
@@ -457,6 +469,7 @@ impl AgentSessionEngine {
             goal_admission_sink: std::sync::Mutex::new(None),
             goal_queue_purge: std::sync::Mutex::new(None),
             turn_agent: std::sync::Mutex::new(None),
+            queue_modes,
             autonomous_boundary: std::sync::Mutex::new(None),
             session_file,
             selection: std::sync::RwLock::new(selection.clone()),
@@ -1232,6 +1245,17 @@ impl AgentSessionEngine {
     async fn build_session(&self, model: &Model) -> anyhow::Result<CoreSessionEngine> {
         let agent_model =
             json_round_trip(model).ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
+        // The live queue-delivery modes (seeded from the start config or
+        // switched by `set_steering_mode`/`set_follow_up_mode`): read
+        // under a scoped lock — a std guard must never ride the build's
+        // awaits below.
+        let (steering_mode, follow_up_mode) = {
+            let modes = self.queue_modes.lock().expect("queue modes");
+            (
+                modes.0.as_deref().and_then(Self::queue_mode),
+                modes.1.as_deref().and_then(Self::queue_mode),
+            )
+        };
 
         // The session's stream reads its target from the engine's live slot:
         // `set_model` swaps the slot so the built session follows without a
@@ -1330,6 +1354,16 @@ impl AgentSessionEngine {
             // the stop hooks (a queued steer cuts the run at the next
             // turn boundary; the runner delivers it as the next turn).
             queued_steering_probe: self.config.queued_steering_probe.clone(),
+            // TS `sdk.ts` seeds the Agent's queue modes from the settings
+            // manager; the worker create reads the same settings (the
+            // engine-level queues drain per the mode at the loop
+            // boundary, mirroring the worker lane's delivery modes). The
+            // live switch (`set_steering_mode`/`set_follow_up_mode`)
+            // updates the same slot ahead of any later build. The lock
+            // is scoped to the read (a guard must never ride the build's
+            // awaits).
+            steering_mode,
+            follow_up_mode,
             // The worker's shared scheduled-jobs store with the session
             // identity the kernel binding needs: the live active session
             // id the supervisor routes commands by, and the durable session
@@ -1669,6 +1703,7 @@ impl SessionEngine for AgentSessionEngine {
             let goal_update = self.publish_goal_state(driver.state());
             Some((
                 crate::engine::PromptRequest {
+                    batch: Vec::new(),
                     message: message.content.text().to_string(),
                     images: Vec::new(),
                     source: "user".to_string(),
@@ -2895,11 +2930,38 @@ impl SessionEngine for AgentSessionEngine {
         if !emit(accepted) {
             return;
         }
+        // The batched co-delivery rows (TS `_startPreparedTurnActions`: each
+        // batched action's primary record emits before the run): one accepted
+        // user row per batched message, in delivery order, persisted and
+        // rendered like the primary. The batch only ever rides a plain user
+        // turn (the injected-custom turns deliver solo — the queue never
+        // batches a row that replaces the user row).
+        for row in &request.batch {
+            let mut content = vec![json!({ "type": "text", "text": row.text })];
+            for image in &row.images {
+                let mut block = match serde_json::to_value(image) {
+                    Ok(Value::Object(block)) => Value::Object(block),
+                    _ => continue,
+                };
+                if let Some(object) = block.as_object_mut() {
+                    object.insert("type".to_string(), json!("image"));
+                }
+                content.push(block);
+            }
+            if !emit(EngineEvent::UserMessage(json!({
+                "role": "user",
+                "content": content,
+                "timestamp": now_millis(),
+            }))) {
+                return;
+            }
+        }
         let turn_prompt = match injected {
             Some(custom) => TurnPrompt::Injected(custom),
             None => TurnPrompt::User {
                 text: request.message.clone(),
                 images: request.images.clone(),
+                batch: request.batch.clone(),
             },
         };
         self.run_turns(turn_prompt, aborted, &mut emit);
@@ -2916,9 +2978,46 @@ impl SessionEngine for AgentSessionEngine {
             agent.abort();
         }
     }
+
+    /// `set_steering_mode` / `set_follow_up_mode` (TS
+    /// `session.setSteeringMode`/`setFollowUpMode`): the queue delivery
+    /// mode switches live — the slot feeds any later session build, and
+    /// the built session's agent drains by the new mode from the next
+    /// boundary (`this.agent.steeringMode = mode`).
+    fn set_queue_modes(&self, steering: Option<&str>, follow_up: Option<&str>) {
+        {
+            let mut modes = self.queue_modes.lock().expect("queue modes");
+            if let Some(mode) = steering {
+                modes.0 = Some(mode.to_string());
+            }
+            if let Some(mode) = follow_up {
+                modes.1 = Some(mode.to_string());
+            }
+        }
+        let agent = self.turn_agent.lock().expect("turn agent lock").clone();
+        if let Some(agent) = agent {
+            if let Some(mode) = steering.and_then(Self::queue_mode) {
+                agent.set_steering_mode(mode);
+            }
+            if let Some(mode) = follow_up.and_then(Self::queue_mode) {
+                agent.set_follow_up_mode(mode);
+            }
+        }
+    }
 }
 
 impl AgentSessionEngine {
+    /// Map a wire/settings queue mode ("all"/"one-at-a-time") onto the
+    /// agent's `QueueMode`; an unknown value keeps the TS default
+    /// ("one-at-a-time").
+    fn queue_mode(mode: &str) -> Option<pa_agent::agent::QueueMode> {
+        match mode {
+            "all" => Some(pa_agent::agent::QueueMode::All),
+            "one-at-a-time" => Some(pa_agent::agent::QueueMode::OneAtATime),
+            _ => None,
+        }
+    }
+
     /// Drive one admitted prompt through the retry-driver model loop and
     /// emit the turn outcome (provider-failure retries + final-row
     /// surfacing). The user row — or a goal continuation's durable context
@@ -4029,11 +4128,33 @@ impl AgentSessionEngine {
                     // context holds ONE representation of the turn —
                     // the custom row — and the provider request carries
                     // its user-role view at the loop boundary).
-                    TurnPrompt::User { text, images } => engine
-                        .session
-                        .prompt_with_images(text, images.clone(), Default::default())
-                        .await
-                        .map(|_| ()),
+                    TurnPrompt::User {
+                        text,
+                        images,
+                        batch,
+                    } => {
+                        // The batched co-delivery rows ride the same
+                        // admission (TS `_startPreparedTurnActions`'s one
+                        // `agent.prompt(preparedMessages)`): one run over
+                        // the primary plus every batched user row.
+                        let options = pa_core::session_engine::PromptOptions {
+                            batch: batch
+                                .iter()
+                                .map(|row| {
+                                    pa_core::session_engine::PromptBatchRow {
+                                        text: row.text.clone(),
+                                        images: row.images.clone(),
+                                    }
+                                })
+                                .collect(),
+                            ..Default::default()
+                        };
+                        engine
+                            .session
+                            .prompt_with_images(text, images.clone(), options)
+                            .await
+                            .map(|_| ())
+                    }
                     TurnPrompt::Injected(message) => engine
                         .session
                         .prompt_injected_message(message)
@@ -4160,10 +4281,13 @@ enum TurnAdmission {
 /// user prompt, or an injected custom row the turn runs on.
 #[derive(Debug, Clone)]
 enum TurnPrompt {
-    /// A user prompt: text plus its image parts.
+    /// A user prompt: text plus its image parts, with the batched
+    /// co-delivery rows (same-lane, same-policy queue actions under mode
+    /// "all") riding the same run after the primary.
     User {
         text: String,
         images: Vec<pa_agent::types::ImageContent>,
+        batch: Vec<crate::engine::PromptBatchRow>,
     },
     /// An injected custom row (TS `_promptInjectedMessage` — goal
     /// continuations, RLM child terminal notices): the loop admission
@@ -4484,6 +4608,7 @@ pub(crate) mod tests {
         engine.run_prompt(
             0,
             PromptRequest {
+                batch: Vec::new(),
                 images: Vec::new(),
                 message,
                 source: "user".to_string(),
@@ -5264,6 +5389,7 @@ pub(crate) mod tests {
         engine.run_prompt(
             0,
             PromptRequest {
+                batch: Vec::new(),
                 images: Vec::new(),
                 message: notice_text.to_string(),
                 source: "user".to_string(),
@@ -6319,6 +6445,7 @@ pub(crate) mod tests {
             engine.run_prompt(
                 0,
                 PromptRequest {
+                    batch: Vec::new(),
                     images: Vec::new(),
                     message,
                     source: "user".to_string(),
@@ -6618,6 +6745,7 @@ pub(crate) mod tests {
         engine.run_prompt(
             0,
             PromptRequest {
+                batch: Vec::new(),
                 images: Vec::new(),
                 message: "a small turn".to_string(),
                 source: "user".to_string(),
@@ -6651,6 +6779,7 @@ pub(crate) mod tests {
         engine.run_prompt(
             0,
             PromptRequest {
+                batch: Vec::new(),
                 images: vec![pa_agent::types::ImageContent {
                     data: "QUJD".to_string(),
                     mime_type: "image/png".to_string(),
@@ -7480,6 +7609,7 @@ pub(crate) mod tests {
         engine.run_prompt(
             0,
             PromptRequest {
+                batch: Vec::new(),
                 images: Vec::new(),
                 message: "hi".to_string(),
                 source: "user".to_string(),
@@ -7620,6 +7750,7 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
         turn_engine.run_prompt(
             0,
             PromptRequest {
+                batch: Vec::new(),
                 images: Vec::new(),
                 message: "hello".to_string(),
                 source: "user".to_string(),
@@ -8037,6 +8168,7 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
         turn_engine.run_prompt(
             0,
             PromptRequest {
+                batch: Vec::new(),
                 images: Vec::new(),
                 message: "held turn".to_string(),
                 source: "user".to_string(),
@@ -8269,6 +8401,7 @@ fn abort_in_flight_turn_cancels_a_running_kernel_cell() {
             engine.run_prompt(
                 0,
                 PromptRequest {
+                    batch: Vec::new(),
                     images: Vec::new(),
                     message: "run the wedge cell".to_string(),
                     source: "user".to_string(),
@@ -8343,6 +8476,7 @@ fn run_prompts(
         engine.run_prompt(
             0,
             PromptRequest {
+                batch: Vec::new(),
                 images: Vec::new(),
                 message: prompt.to_string(),
                 source: "user".to_string(),
@@ -8669,6 +8803,7 @@ fn assistant_updates_stream_live_while_the_turn_runs() {
     engine.run_prompt(
         0,
         PromptRequest {
+            batch: Vec::new(),
             images: Vec::new(),
             message: "hi".to_string(),
             source: "user".to_string(),
@@ -8953,6 +9088,7 @@ fn autonomous_gate_pass_and_failure_drive_the_loop() {
         engine.run_prompt(
             0,
             PromptRequest {
+                batch: Vec::new(),
                 images: Vec::new(),
                 message: prompt.to_string(),
                 source: "user".to_string(),
@@ -9076,6 +9212,7 @@ fn the_turn_loop_is_driven_by_the_driver_trait() {
     engine.run_prompt(
         0,
         PromptRequest {
+            batch: Vec::new(),
             images: Vec::new(),
             message: "go".to_string(),
             source: "user".to_string(),
@@ -9138,6 +9275,7 @@ fn agent_engine_streams_updates_and_final_message() {
     engine.run_prompt(
         0,
         PromptRequest {
+            batch: Vec::new(),
             images: Vec::new(),
             message: "hi".to_string(),
             source: "user".to_string(),
