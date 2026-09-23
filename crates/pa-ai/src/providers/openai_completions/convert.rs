@@ -603,8 +603,11 @@ mod tests {
     fn openrouter_byok_upstream_cost_replaces_catalog_estimate() {
         let model = model("openrouter", 0.5, 0.5);
         // Credits charged by OpenRouter plus the upstream provider's bill.
-        let usage =
-            parse_chunk_usage(&raw_usage(0.003, ByokBilling::WithUpstreamBill(0.2)), &model, None);
+        let usage = parse_chunk_usage(
+            &raw_usage(0.003, ByokBilling::WithUpstreamBill(0.2)),
+            &model,
+            None,
+        );
         assert!((usage.cost.input.as_f64() - 0.1015).abs() < 1e-9);
         assert!((usage.cost.output.as_f64() - 0.1015).abs() < 1e-9);
         assert!((usage.cost.total.as_f64() - 0.203).abs() < 1e-9);
