@@ -1489,9 +1489,12 @@ mod tests {
                 }),
             ),
         ];
-        let fixture_records = reconcile_unified_sessions(&fixture_roster, std::slice::from_ref(&saved_parent));
+        let fixture_records =
+            reconcile_unified_sessions(&fixture_roster, std::slice::from_ref(&saved_parent));
         let fixture_rollups = compute_rollups(&fixture_records);
-        let fixture_parent = fixture_rollups.get("file:/x/p.jsonl").expect("parent rollup");
+        let fixture_parent = fixture_rollups
+            .get("file:/x/p.jsonl")
+            .expect("parent rollup");
         assert!(
             (fixture_parent.cost - 1.00).abs() < 1e-9,
             "own 0 + deleted bucket 0.50 + live child subtree 0.50 = 1.00, got {}",

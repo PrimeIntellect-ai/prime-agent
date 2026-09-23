@@ -1,3 +1,49 @@
+## Deleted-subagent spend: the durable capture ahead of TS (lane deleted-child-spend, 2026-09-23)
+
+**The ahead-of-TS exception (Kevin's directive, 2026-09-23).** TS PR
+#2506 (open at time of writing) adds `deletedDescendantUsage` to
+saved-session rows so agents-view subtree costs stop dropping deleted
+subagents' spend — but its bucket re-reads each tombstoned child's
+transcript via `readSessionInfo`, and a normal delete removes the
+`.jsonl` before that read runs, so the field publishes $0 for every
+actually-deleted subagent (the Macroscope review of 2f9ddd17, open
+thread). The Rust port ships the same wire surface WITH the fix the TS
+PR still lacks: the deletion lifecycle captures the child's final own
+usage DURABLY BEFORE any unlink and the bucket reads the snapshot, so
+the spend survives the transcript's removal, a saved-session delete,
+and daemon restarts.
+
+**What shipped (Rust-only until TS follows):**
+- The ledger delete record carries an optional own-usage snapshot (the
+  post-settlement amendment); replay merges it into the tombstoned edge
+  (sticky across idempotent re-tombstones, last-wins on retried
+  captures). No record-version bump: `v:1` readers skip unknown fields.
+- `finalize_worker_stop` captures from the frozen transcript AFTER the
+  kill reply (the worker's close settled the aborted row, mid-turn
+  partial usage durable) and BEFORE the artifact sweep; the adoption
+  finalize reconstructs the delete from the ledger tombstone alone, so a
+  supervisor crash between tombstone and sweep loses nothing (restart
+  coverage).
+- The saved-session delete captures while the file is alive (the
+  Rust-side instance of the same race: `tombstone_saved_session_delete`
+  runs pre-unlink).
+- The agents-view rollup bills the bucket to the parent's own cost
+  (TS #2506's `computeRecursiveRollups` delta), and the rollup walk's
+  BFS order bound now re-evaluates — a `0..order.len()` range captured
+  the roots' length once, silently dropping every depth-2+ descendant's
+  cost from recursive totals (pre-existing, load-bearing for the
+  numeric fixture).
+- Daemon schema revision 29 → 30 (Rust's numbering already diverged
+  from TS's 27; TS #2506 proposes TS-side 28 — the field name/shape
+  matches its `SessionUsageSummary {inputTokens, outputTokens, cost}`
+  exactly, so the products agree once it lands).
+
+**Documented historical gap (no fabricated backfill):** tombstones that
+predate the capture carry no snapshot; the bucket falls back to the
+transcript while it exists and bills zero once it is gone. Spend from
+children deleted before this change is irrecoverable when their
+transcripts are gone — recorded, never invented.
+
 ## Compaction arms coverage matrix — print/ACP/daemon reconciliation (lane print-arms-audit, 2026-09-20)
 
 ### The #229 flag, reconciled

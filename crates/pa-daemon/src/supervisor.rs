@@ -4385,17 +4385,13 @@ impl Supervisor {
                             let deleted_child = rest
                                 .get("rlmLedgerDelete")
                                 .and_then(Value::as_str)
-                                .and_then(
-                                    crate::rlm_ledger::RlmLedgerDeleteReason::from_wire,
-                                )
-                                .map(|_| {
-                                    crate::stop_cleanup::DeletedChild {
-                                        child_id: rest
-                                            .get("rlmChildId")
-                                            .and_then(Value::as_str)
-                                            .unwrap_or_default()
-                                            .to_string(),
-                                    }
+                                .and_then(crate::rlm_ledger::RlmLedgerDeleteReason::from_wire)
+                                .map(|_| crate::stop_cleanup::DeletedChild {
+                                    child_id: rest
+                                        .get("rlmChildId")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_string(),
                                 });
                             self.finalize_worker_stop(&resident, deleted_child.as_ref())
                                 .await;
@@ -4851,6 +4847,40 @@ mod tests {
     /// `list_saved_sessions` catalog row) carry the persisted thinking
     /// level: the agents-view Model column renders "model:level" for
     /// sessions without a live worker, top-level and subagent alike.
+    /// TS #2506's `serializeSavedSessionInfo`: the listing arm's bucket
+    /// attach publishes `deletedDescendantUsage` on the saved row - the
+    /// agents-view recursive rollup's deleted-descendant term. Absent
+    /// rows (no tombstoned descendants) carry no field, matching the
+    /// optional wire shape.
+    #[test]
+    fn saved_session_rows_publish_deleted_descendant_usage() {
+        let dir = std::env::temp_dir().join(format!("pa-saved-dd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
+        let path = dir.join(format!("{}.jsonl", session.session_id()));
+        session.set_path(path.clone());
+        session.rewrite().unwrap();
+        let mut info = crate::session_store::read_session_info(&path).unwrap();
+        assert!(
+            info.deleted_descendant_usage.is_none(),
+            "the file scan never sets the ledger-derived field"
+        );
+        info.deleted_descendant_usage = Some(crate::session_usage::SessionUsageSummary {
+            input_tokens: 1_100,
+            output_tokens: 110,
+            cost: 0.5,
+        });
+        let row = saved_session_row(&info);
+        assert_eq!(
+            row["deletedDescendantUsage"],
+            json!({ "inputTokens": 1_100, "outputTokens": 110, "cost": 0.5 })
+        );
+        // Absent again: the field never rides as a null.
+        info.deleted_descendant_usage = None;
+        let row = saved_session_row(&info);
+        assert!(row.get("deletedDescendantUsage").is_none());
+    }
+
     #[test]
     fn saved_session_rows_carry_the_persisted_thinking_level() {
         let dir = std::env::temp_dir().join(format!("pa-saved-tl-{}", uuid::Uuid::new_v4()));

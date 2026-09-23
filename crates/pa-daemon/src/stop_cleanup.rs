@@ -417,9 +417,15 @@ impl Supervisor {
                 // capture never fails the stop (the transcript
                 // survives the sweep, so the bucket's lazy fallback
                 // still reads it).
-                self.capture_deleted_child_usage(&root_session_file, &deleted.child_id, "rlm_delete")
-                    .await;
-                crate::saved_session_commands::remove_session_artifacts(Path::new(&root_session_file));
+                self.capture_deleted_child_usage(
+                    &root_session_file,
+                    &deleted.child_id,
+                    "rlm_delete",
+                )
+                .await;
+                crate::saved_session_commands::remove_session_artifacts(Path::new(
+                    &root_session_file,
+                ));
             }
             None => {
                 // The adoption finalize (an interrupted stop re-runs
@@ -780,11 +786,8 @@ mod tests {
                 .unwrap();
             writeln!(file, "{usage_row}").unwrap();
         }
-        let captured = append_deleted_child_usage_amendments(
-            &ledger,
-            &child_file.to_string_lossy(),
-            "sub-1",
-        );
+        let captured =
+            append_deleted_child_usage_amendments(&ledger, &child_file.to_string_lossy(), "sub-1");
         assert_eq!(captured, Some(1), "the one tombstoned edge is amended");
         let edges = ledger.edges(true).unwrap();
         assert_eq!(edges.len(), 1);
@@ -862,14 +865,16 @@ mod tests {
             }
         }
         let totals = crate::session_usage::read_session_usage(&child_file).unwrap();
-        assert!((totals.total.cost.total.as_f64() - 0.50).abs() < 1e-9, "the file's fold");
-        assert!((totals.own.cost.total.as_f64() - 0.40).abs() < 1e-9, "the own read");
-        append_deleted_child_usage_amendments(
-            &ledger,
-            &child_file.to_string_lossy(),
-            "sub-1",
-        )
-        .unwrap();
+        assert!(
+            (totals.total.cost.total.as_f64() - 0.50).abs() < 1e-9,
+            "the file's fold"
+        );
+        assert!(
+            (totals.own.cost.total.as_f64() - 0.40).abs() < 1e-9,
+            "the own read"
+        );
+        append_deleted_child_usage_amendments(&ledger, &child_file.to_string_lossy(), "sub-1")
+            .unwrap();
         let snapshot = ledger.edges(true).unwrap()[0]
             .deleted_usage
             .clone()
@@ -904,11 +909,7 @@ mod tests {
         // Still live: no capture (kill-failure retryability — the child
         // keeps its transcript, its row, and its retryability).
         assert_eq!(
-            append_deleted_child_usage_amendments(
-                &ledger,
-                &child_file.to_string_lossy(),
-                "sub-1"
-            ),
+            append_deleted_child_usage_amendments(&ledger, &child_file.to_string_lossy(), "sub-1"),
             None
         );
         // A path the ledger never knew: nothing to capture.

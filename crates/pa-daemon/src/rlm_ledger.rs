@@ -117,7 +117,11 @@ fn parse_deleted_usage(
     usage: &Value,
     line_no: usize,
 ) -> Result<crate::session_usage::SessionUsageSummary> {
-    let invalid = || anyhow::Error::msg(format!("malformed RLM ledger line {line_no}: invalid delete usage"));
+    let invalid = || {
+        anyhow::Error::msg(format!(
+            "malformed RLM ledger line {line_no}: invalid delete usage"
+        ))
+    };
     let input_tokens = usage
         .get("inputTokens")
         .and_then(Value::as_u64)
@@ -541,8 +545,7 @@ impl RlmSpawnLedger {
                 continue;
             }
             let parent = canonical(&edge.parent);
-            snapshot_by_path
-                .insert(child.clone(), edge.deleted_usage.clone());
+            snapshot_by_path.insert(child.clone(), edge.deleted_usage.clone());
             children_by_parent.entry(parent).or_default().push(child);
         }
         let zero = || SessionUsageSummary {
@@ -585,8 +588,7 @@ impl RlmSpawnLedger {
                             children
                                 .iter()
                                 .filter(|path| {
-                                    !contribution.contains_key(*path)
-                                        && !on_stack.contains(*path)
+                                    !contribution.contains_key(*path) && !on_stack.contains(*path)
                                 })
                                 .cloned()
                                 .collect()
@@ -1632,11 +1634,7 @@ mod tests {
             .position(|line| line.contains("\"childId\":\"c1\"") && line.contains("\"usage\""))
             .expect("the c1 amendment");
         ledger_lines[amend] = ledger_lines[amend].replace("\"cost\":0.4}", "\"cost\":0.5}");
-        fs::write(
-            ledger.ledger_path(),
-            ledger_lines.join("\n") + "\n",
-        )
-        .unwrap();
+        fs::write(ledger.ledger_path(), ledger_lines.join("\n") + "\n").unwrap();
         let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
         let over_billed = bucket.get(&parent_key).unwrap().cost;
         assert!(
@@ -1729,10 +1727,7 @@ mod tests {
                 "childId": "x2", "child": child.to_string_lossy(), "reason": "user",
             }),
         ];
-        let body: String = lines
-            .iter()
-            .map(|line| format!("{line}\n"))
-            .collect();
+        let body: String = lines.iter().map(|line| format!("{line}\n")).collect();
         let path = rlm_ledger_path(&dir, &sessions);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, body).unwrap();
@@ -1744,7 +1739,10 @@ mod tests {
         let key_b = crate::lease::canonical_session_path(&parent_b)
             .to_string_lossy()
             .to_string();
-        assert!(bucket.contains_key(&key_a), "the first tombstone claims the path");
+        assert!(
+            bucket.contains_key(&key_a),
+            "the first tombstone claims the path"
+        );
         assert!(
             !bucket.contains_key(&key_b),
             "the second parent never bills the same path"
@@ -1794,4 +1792,3 @@ mod tests {
         assert!(bucket.is_empty(), "a live path never bills the bucket");
     }
 }
-
