@@ -335,27 +335,28 @@ pub fn tree_rows(roster: &[Value], identity: &SessionIdentity, now: u64) -> Vec<
     .flatten()
     .collect();
 
-    // Parent linkage: the first parent key that names the root (the row
-    // is a direct child) or another descendant names the parent. The
-    // `descendant_entries` walk guarantees every row links on the path
-    // from the root, so no parent stays unresolved in well-formed data;
-    // an unmatched row renders as a direct child.
+    // Parent linkage (TS `isDirectScopeChild` first): a parent key that
+    // names the root makes the row a direct child no matter which key
+    // matched — a stale id in an earlier parent key must not redirect
+    // the row to another descendant. Only a row with no root key nests
+    // under the first descendant its keys name (TS `findParentRow`'s
+    // first-match). The `descendant_entries` walk guarantees every row
+    // links on the path from the root, so no parent stays unresolved in
+    // well-formed data; an unmatched row renders as a direct child.
     for index in 0..nodes.len() {
         let summary = descendants[index].get("summary").unwrap_or(&Value::Null);
-        let mut parent = None;
-        for key in summary_parent_keys(summary) {
-            if root_keys.contains(&key) {
-                parent = Some(None);
-                break;
-            }
-            if let Some(&candidate) = by_key.get(&key) {
-                if candidate != index {
-                    parent = Some(Some(candidate));
-                    break;
-                }
-            }
-        }
-        if let Some(parent) = parent.flatten() {
+        let keys = summary_parent_keys(summary);
+        let parent = if keys.iter().any(|key| root_keys.contains(key)) {
+            None
+        } else {
+            keys.iter().find_map(|key| {
+                by_key
+                    .get(key)
+                    .filter(|&&candidate| candidate != index)
+                    .copied()
+            })
+        };
+        if let Some(parent) = parent {
             nodes[index].parent = Some(parent);
             nodes[parent].children.push(index);
         }
@@ -366,21 +367,46 @@ pub fn tree_rows(roster: &[Value], identity: &SessionIdentity, now: u64) -> Vec<
     // rollups (a child always appears after its parent in level
     // order, so the reverse visits children first — deep chains stay
     // iterative like the #2597 tally).
-    let mut queue: Vec<usize> = nodes
-        .iter()
-        .enumerate()
-        .filter(|(_, node)| node.parent.is_none())
-        .map(|(index, _)| index)
-        .collect();
-    let mut cursor = 0;
-    while cursor < queue.len() {
-        let index = queue[cursor];
-        let child_depth = nodes[index].depth + 1;
-        for &child in &nodes[index].children {
-            nodes[child].depth = child_depth;
-            queue.push(child);
+    fn level_order(nodes: &mut [Node]) -> Vec<usize> {
+        let mut queue: Vec<usize> = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.parent.is_none())
+            .map(|(index, _)| index)
+            .collect();
+        let mut visited = vec![false; nodes.len()];
+        for &root in &queue {
+            visited[root] = true;
         }
-        cursor += 1;
+        let mut cursor = 0;
+        while cursor < queue.len() {
+            let index = queue[cursor];
+            let child_depth = nodes[index].depth + 1;
+            for &child in &nodes[index].children {
+                if !visited[child] {
+                    visited[child] = true;
+                    nodes[child].depth = child_depth;
+                    queue.push(child);
+                }
+            }
+            cursor += 1;
+        }
+        queue
+    }
+    let mut queue = level_order(&mut nodes);
+    // A stale-id linkage cycle leaves its rows unreachable from the
+    // direct children (they would vanish from the viewer while the
+    // dock still counts them). They reached the descendant walk, so
+    // they render as direct children instead of disappearing.
+    if queue.len() != nodes.len() {
+        for index in 0..nodes.len() {
+            if !queue.contains(&index) {
+                if let Some(old_parent) = nodes[index].parent.take() {
+                    nodes[old_parent].children.retain(|&child| child != index);
+                }
+            }
+        }
+        queue = level_order(&mut nodes);
     }
 
     // Recursive rollups (TS `computeRecursiveRollups`): own usage plus
@@ -455,6 +481,84 @@ mod tests {
             "parentSessionId": parent_id,
             "parentSessionPath": format!("/sessions/{parent_id}.jsonl"),
         })
+    }
+
+    #[test]
+    fn a_root_matching_parent_key_wins_over_a_stale_id() {
+        // TS `isDirectScopeChild`: any parent key naming the scope root
+        // lifts the row to a direct child — a stale first key that
+        // happens to name another descendant must not nest the row.
+        let roster = vec![
+            entry("p", "running", {
+                let mut summary = child_summary("p", "root-session");
+                summary["sessionName"] = json!("p");
+                summary["messageCount"] = json!(1);
+                summary
+            }),
+            entry("stale", "idle", {
+                let mut summary = child_summary("stale", "root-session");
+                // The first parent key names p's live id; the second names
+                // the root session — the root wins.
+                summary["parentActiveSessionId"] = json!("p-live");
+                summary["sessionName"] = json!("stale-id row");
+                summary["messageCount"] = json!(1);
+                summary
+            }),
+        ];
+        let rows = tree_rows(&roster, &root_identity(), NOW);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].label, "p");
+        assert_eq!(
+            rows[1].depth, 0,
+            "the root-matching key lifts the row over the stale id: {:?}",
+            rows[1]
+        );
+        assert_eq!(rows[1].label, "stale-id row");
+    }
+
+    #[test]
+    fn a_stale_id_cycle_renders_as_direct_children_instead_of_vanishing() {
+        // Two rows whose first parent keys name each other: the walk
+        // reaches both through a shared legitimate parent, so the viewer
+        // must never drop them (the dock still counts them).
+        let roster = vec![
+            entry("p", "running", {
+                let mut summary = child_summary("p", "root-session");
+                summary["sessionName"] = json!("p");
+                summary["messageCount"] = json!(1);
+                summary
+            }),
+            entry("a", "idle", {
+                let mut summary = child_summary("a", "root-session");
+                summary["parentActiveSessionId"] = json!("b-live");
+                summary["parentSessionId"] = json!("p");
+                summary["parentSessionPath"] = json!("/sessions/p.jsonl");
+                summary["sessionName"] = json!("a");
+                summary["messageCount"] = json!(1);
+                summary
+            }),
+            entry("b", "idle", {
+                let mut summary = child_summary("b", "root-session");
+                summary["parentActiveSessionId"] = json!("a-live");
+                summary["parentSessionId"] = json!("p");
+                summary["parentSessionPath"] = json!("/sessions/p.jsonl");
+                summary["sessionName"] = json!("b");
+                summary["messageCount"] = json!(1);
+                summary
+            }),
+        ];
+        let rows = tree_rows(&roster, &root_identity(), NOW);
+        assert_eq!(
+            rows.len(),
+            3,
+            "the cycled rows render instead of disappearing: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|row| row.depth == 0),
+            "the recovered rows list as direct children"
+        );
+        let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
+        assert_eq!(labels, vec!["p", "a", "b"]);
     }
 
     #[test]
