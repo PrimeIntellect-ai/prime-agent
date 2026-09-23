@@ -6566,13 +6566,15 @@ mod tests {
         let moved_child = json!({
             "activeSessionId": "hhh888",
             "runtimeKind": "subagent",
-            "parentSessionPath": "/old/root/sessions/sess-a.jsonl",
+            "parentSessionPath": "/old/root/sessions/01a0d0a5-e954-71b7-8479-8dc7980768a1.jsonl",
         });
         assert!(sender_parent_edge_is(
             &moved_child,
             Some("sess-a"),
             "aaa111",
-            Some(std::path::Path::new("/new/root/sessions/sess-a.jsonl")),
+            Some(std::path::Path::new(
+                "/new/root/sessions/01a0d0a5-e954-71b7-8479-8dc7980768a1.jsonl"
+            )),
         ));
     }
 

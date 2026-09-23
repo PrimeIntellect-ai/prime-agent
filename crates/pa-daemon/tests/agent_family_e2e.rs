@@ -747,6 +747,25 @@ async fn family_edges_never_cross_families_end_to_end() {
         let roster = children.list_subagents().await.expect("child roster");
         let row = roster.first().expect("one child row");
         assert_eq!(row.session_name, kid_name);
+        // The spawn row can settle in the admission-to-turn-pop window (the
+        // watcher's stability re-check), before the child's first turn
+        // writes its session file; the durable artifact is the proof, so
+        // wait for it (bounded) before reading.
+        let kid_session_id = row.session_id.clone().expect("child persisted id");
+        let artifact_dir = agent_dir
+            .join("session-artifacts")
+            .join(session)
+            .join(format!("sub-{}", handle.rlm_child_id));
+        let expected_file = artifact_dir.join(format!("{kid_session_id}.jsonl"));
+        let artifact_deadline = Instant::now() + Duration::from_secs(15);
+        while !expected_file.is_file() {
+            assert!(
+                Instant::now() < artifact_deadline,
+                "kid session file never appeared: {}",
+                expected_file.display()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
         // The kid's own session file (the grandchild's durable parent
         // edge): the spawn's per-child artifact dir holds exactly one.
         let kid_files: Vec<std::fs::DirEntry> = std::fs::read_dir(

@@ -103,7 +103,7 @@ pub(crate) fn same_session_file(left: &str, right: &str) -> bool {
 /// stem), when the stem parses as a uuid-shaped session id.
 fn session_file_id(path: &str) -> Option<String> {
     let stem = Path::new(path).file_stem()?.to_string_lossy().to_string();
-    (!stem.is_empty()).then_some(stem)
+    (!stem.is_empty() && uuid::Uuid::parse_str(&stem).is_ok()).then_some(stem)
 }
 
 /// Whether `row` is the parent of the session `identity` describes: the
@@ -122,7 +122,13 @@ fn row_is_parent(row: &Value, identity: &FamilyIdentity) -> bool {
         }
     }
     if let Some(parent_path) = identity.parent_session_path.as_deref() {
-        if row_str(row, "sessionFile").is_some_and(|file| same_session_file(file, parent_path)) {
+        // The peers roster (`list_agent_peers` -> `agent_peer_summary`)
+        // carries the session file under `sessionPath`; the supervisor's
+        // own roster rows carry `sessionFile`.
+        if row_str(row, "sessionFile")
+            .or_else(|| row_str(row, "sessionPath"))
+            .is_some_and(|file| same_session_file(file, parent_path))
+        {
             return true;
         }
     }
@@ -297,10 +303,18 @@ impl AgentMessageController for LinkAgentMessageController {
             // Child member (keyed by its RLM child id and persisted session
             // id as aliases, so every identifier form the roster exposes
             // addresses it).
-            if let Some(position) = children
-                .iter()
-                .position(|child| child.active_session_id == active_session_id)
-            {
+            let row_rlm_child_id = row_str(&session, "rlmChildId").map(str::to_string);
+            if let Some(position) = children.iter().position(|child| {
+                // The join is durable-keyed so a child worker replacement
+                // (a new live id, the same rlm child id / persisted session
+                // id) consumes its registry record here instead of leaving
+                // it for the leftover loop below to append twice.
+                child.active_session_id == active_session_id
+                    || row_rlm_child_id
+                        .as_deref()
+                        .is_some_and(|id| id == child.rlm_child_id)
+                    || ((!session_id.is_empty()) && child.session_id.as_deref() == Some(session_id))
+            }) {
                 let child = children.swap_remove(position);
                 child_members.push(child_member(&child, name));
                 continue;
@@ -1378,16 +1392,22 @@ mod controller_tests {
     #[test]
     fn same_session_file_resolves_the_storage_root_alias() {
         assert!(same_session_file(
-            "/agent/sessions/sess-abc.jsonl",
-            "/agent/sessions/sess-abc.jsonl",
+            "/agent/sessions/01a0d0a5-e954-71b7-8479-8dc7980768a1.jsonl",
+            "/agent/sessions/01a0d0a5-e954-71b7-8479-8dc7980768a1.jsonl",
         ));
         assert!(same_session_file(
-            "/old-agent-root/sessions/sess-abc.jsonl",
-            "/agent/session-artifacts/sess-p/sub-1/sess-abc.jsonl",
+            "/old-agent-root/sessions/01a0d0a5-e954-71b7-8479-8dc7980768a1.jsonl",
+            "/agent/session-artifacts/sess-p/sub-1/01a0d0a5-e954-71b7-8479-8dc7980768a1.jsonl",
         ));
         assert!(!same_session_file(
-            "/agent/sessions/sess-abc.jsonl",
-            "/agent/sessions/sess-other.jsonl",
+            "/agent/sessions/01a0d0a5-e954-71b7-8479-8dc7980768a1.jsonl",
+            "/agent/sessions/21b1e1b6-f065-4288-9fa0-9ec8980768a2.jsonl",
+        ));
+        // The durable id is uuid-shaped: a shared NON-uuid stem (arbitrary
+        // create-provided sessionPath values) never aliases across families.
+        assert!(!same_session_file(
+            "/project-a/session.jsonl",
+            "/project-b/session.jsonl",
         ));
     }
 
@@ -1503,6 +1523,76 @@ mod controller_tests {
             .any(|s| s.active_session_id.as_deref() == Some("child999")));
     }
 
+    /// The peers roster (`list_agent_peers` -> `agent_peer_summary`) carries
+    /// the session file under `sessionPath`, not `sessionFile`: a
+    /// passivated parent resolves by the alias on the peers shape too.
+    #[tokio::test]
+    async fn family_resolves_a_moved_parent_by_the_peers_roster_alias() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("sup.sock");
+        spawn_fake_supervisor(
+            socket.clone(),
+            json!({ "sessions": [
+                { "activeSessionId": "aaa111", "sessionId": "sess-a" },
+                { "activeSessionId": "rrr777", "sessionId": "sess-p", "sessionName": "papa",
+                  "sessionPath": "/agent/session-artifacts/sess-g/sub-9/01a0d0a5-e954-71b7-8479-8dc7980768a1.jsonl" },
+            ]}),
+            None,
+        )
+        .await;
+        let own_summary = Some(json!({
+            "activeSessionId": "aaa111",
+            "sessionId": "sess-a",
+            "parentActiveSessionId": "stale-parent",
+            "parentSessionPath": "/old-agent-root/sessions/01a0d0a5-e954-71b7-8479-8dc7980768a1.jsonl",
+        }));
+        let controller = controller(socket, own_summary);
+        let family = controller.family().await.unwrap();
+        assert_eq!(family.len(), 1, "{family:?}");
+        assert_eq!(family[0].relationship, AgentFamilyRelationship::Parent);
+        assert_eq!(family[0].id, "rrr777");
+    }
+
+    /// A child worker replacement (a new live id, the same rlm child id and
+    /// persisted session id) joins its registry record by the durable ids:
+    /// the family lists the child ONCE, never the roster row plus the
+    /// leftover registry entry.
+    #[tokio::test]
+    async fn family_joins_a_replaced_child_by_its_durable_ids() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("sup.sock");
+        spawn_fake_supervisor(
+            socket.clone(),
+            json!({ "sessions": [
+                { "activeSessionId": "aaa111", "sessionId": "sess-a" },
+                { "activeSessionId": "new999", "sessionId": "sess-kid",
+                  "sessionName": "kid", "rlmChildId": "sub-kid1",
+                  "parentActiveSessionId": "aaa111", "parentSessionId": "sess-a" },
+            ]}),
+            None,
+        )
+        .await;
+        let controller = controller_with_children(socket, own_summary());
+        admit_child(
+            &controller,
+            RlmChildIdentity {
+                rlm_child_id: "sub-kid1".to_string(),
+                active_session_id: "ddd444".to_string(),
+                session_id: Some("sess-kid".to_string()),
+                session_name: "kid".to_string(),
+            },
+        )
+        .await;
+        let family = controller.family().await.unwrap();
+        let children: Vec<_> = family
+            .iter()
+            .filter(|member| member.relationship == AgentFamilyRelationship::Child)
+            .collect();
+        assert_eq!(children.len(), 1, "{family:?}");
+        assert_eq!(children[0].id, "new999");
+        assert!(children[0].aliases.contains(&"sub-kid1".to_string()));
+    }
+
     /// The family roster resolves a parent whose worker was replaced (the
     /// live id went stale) through the durable persisted id, and a
     /// parent whose recorded path moved (the storage-root migration)
@@ -1517,7 +1607,7 @@ mod controller_tests {
             json!({ "sessions": [
                 { "activeSessionId": "aaa111", "sessionId": "sess-a" },
                 { "activeSessionId": "rrr777", "sessionId": "sess-p", "sessionName": "papa",
-                  "sessionFile": "/agent/session-artifacts/sess-g/sub-9/sess-p.jsonl" },
+                  "sessionFile": "/agent/session-artifacts/sess-g/sub-9/01a0d0a5-e954-71b7-8479-8dc7980768a1.jsonl" },
             ]}),
             None,
         )
@@ -1526,7 +1616,7 @@ mod controller_tests {
             "activeSessionId": "aaa111",
             "sessionId": "sess-a",
             "parentActiveSessionId": "stale-parent",
-            "parentSessionPath": "/old-agent-root/sessions/sess-p.jsonl",
+            "parentSessionPath": "/old-agent-root/sessions/01a0d0a5-e954-71b7-8479-8dc7980768a1.jsonl",
         }));
         let controller = controller(socket, own_summary);
         let family = controller.family().await.unwrap();
