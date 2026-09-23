@@ -8114,8 +8114,11 @@ mod activity_dock_counts_tests {
     #[test]
     fn dock_heartbeats_scope_to_the_current_session_only() {
         let own = entry(job("own", "active"));
+        // The child's durable session differs: with an empty child-id
+        // list it must drop even though its active id also differs.
         let mut child = job("child", "active");
         child["activeSessionId"] = json!("child-live");
+        child["sessionId"] = json!("sess-child");
         let child = entry(child);
         let scoped = crate::heartbeats_picker::scope_heartbeats(
             vec![own, child],
