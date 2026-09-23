@@ -455,7 +455,9 @@ mod tests {
         let late = manager.start(&start_payload("sq-2", "client-1"));
         assert!(!late.success, "a start after the close began is rejected");
         assert!(
-            late.error.as_deref().is_some_and(|message| message.contains("is closing")),
+            late.error
+                .as_deref()
+                .is_some_and(|message| message.contains("is closing")),
             "the rejection says the session is closing: {late:?}"
         );
     }
