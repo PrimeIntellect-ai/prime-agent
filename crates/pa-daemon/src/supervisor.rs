@@ -74,6 +74,11 @@ const WORKER_CONNECT_BACKOFF_MS: u64 = 2_000;
 pub(crate) const ROUTE_TIMEOUT_MS: u64 = 30_000;
 pub(crate) const LONG_ROUTE_TIMEOUT_MS: u64 = 600_000;
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+/// A crash-path child that lived at least this long proved health: its death
+/// resets the failure count (a fresh count) instead of accumulating toward
+/// the give-up cap. Below it, a spawn-dies-fast child counts as another
+/// consecutive failure - the restart storm's counter could never grow.
+const STABLE_LIFETIME_MS: u64 = 30_000;
 const BASE_BACKOFF_MS: u64 = 250;
 const MAX_BACKOFF_MS: u64 = 30_000;
 
@@ -428,6 +433,22 @@ impl Supervisor {
     }
 
     /// Watch a worker process: on unexpected exit, restart with backoff.
+    /// The crash path's failure-count update: a child that lived past the
+    /// stable window was healthy, so its death starts a fresh count; a
+    /// spawn-dies-fast child (or an adopted pid with no spawn time of our
+    /// own) accumulates toward the give-up cap - the storm's counter could
+    /// never grow while relaunch-spawns kept resetting it.
+    fn next_failure_count(resident: &ResidentWorker, now_ms: u64) -> u32 {
+        let spawned_at = resident.spawned_at_ms.load(Ordering::SeqCst);
+        let stable = spawned_at > 0 && now_ms.saturating_sub(spawned_at) >= STABLE_LIFETIME_MS;
+        if stable {
+            resident.consecutive_failures.store(1, Ordering::SeqCst);
+            1
+        } else {
+            resident.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1
+        }
+    }
+
     fn spawn_monitor(
         self: &Arc<Self>,
         resident: Arc<ResidentWorker>,
@@ -489,7 +510,11 @@ impl Supervisor {
             // never resumes beside an orphaned child worker (TS children
             // die with the in-process parent).
             self.close_children_of_dead_parent(&resident).await;
-            let failures = resident.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis() as u64)
+                .unwrap_or(0);
+            let failures = Self::next_failure_count(&resident, now_ms);
             if failures > MAX_CONSECUTIVE_FAILURES {
                 let mut descriptor = resident.descriptor.lock().await;
                 descriptor.lifecycle = DaemonWorkerLifecycle::Failed;
@@ -516,7 +541,10 @@ impl Supervisor {
             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             match self.relaunch_worker(&resident).await {
                 Ok(new_child) => {
-                    resident.consecutive_failures.store(0, Ordering::SeqCst);
+                    // No counter reset on a successful relaunch: a spawn
+                    // that dies fast must accumulate toward the give-up cap
+                    // (the reset now comes only from a stable lifetime on
+                    // the crash path).
                     self.note_daemon_event("worker_restarted", None);
                     child = Some(new_child);
                 }
@@ -600,7 +628,8 @@ impl Supervisor {
         }
         let mut descriptor = resident.descriptor.lock().await;
         descriptor.lifecycle = DaemonWorkerLifecycle::Ready;
-        descriptor.consecutive_failures = 0;
+        // The persisted failure count stays: the give-up cap and any
+        // adoption decision read the real history, not a relaunch-blanked one.
         let _ = persist_worker(&resident.descriptor_path, &descriptor);
         Ok(child)
     }
@@ -651,6 +680,11 @@ impl Supervisor {
         let child = command
             .spawn()
             .with_context(|| format!("spawn session worker {}", resident.worker_id))?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or(0);
+        resident.spawned_at_ms.store(now_ms, Ordering::SeqCst);
         if std::env::var("PA_DAEMON_DEBUG").is_ok() {
             eprintln!("[supervisor] spawned worker pid {:?}", child.id());
         }
@@ -3566,6 +3600,49 @@ const WORKER_EXIT_POLL: Duration = Duration::from_millis(250);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The crash-path failure count: spawn-dies-fast churn accumulates to
+    /// the give-up cap (the storm's counter could never grow while
+    /// relaunch-spawns kept resetting it); a child that lived past the
+    /// stable window was healthy, so its death starts a fresh count.
+    #[test]
+    fn churn_accumulates_and_a_stable_lifetime_resets() {
+        let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+            "version": 2,
+            "workerId": "test-worker",
+            "pid": 0,
+            "socketPath": "/tmp/none.sock",
+            "recoveryJournalPath": "/tmp/none.jsonl",
+            "supervisorSocketPath": "/tmp/none.sock",
+            "authenticationToken": "test",
+            "rootActiveSessionId": "none",
+            "createdAt": "2026-09-23T00:00:00Z",
+            "updatedAt": "2026-09-23T00:00:00Z",
+            "lifecycle": "ready",
+            "createCommand": {},
+            "consecutiveFailures": 0,
+        }))
+        .expect("descriptor");
+        let resident = ResidentWorker::new(
+            "test-worker".to_string(),
+            descriptor,
+            std::path::PathBuf::from("/tmp/none"),
+        );
+        let now = 1_000_000_000u64;
+        // No spawn time (an adopted pid): plain accumulation.
+        assert_eq!(Supervisor::next_failure_count(&resident, now), 1);
+        assert_eq!(Supervisor::next_failure_count(&resident, now), 2);
+        // A stable lifetime: the healthy death starts a fresh count.
+        resident
+            .spawned_at_ms
+            .store(now - STABLE_LIFETIME_MS - 1, Ordering::SeqCst);
+        assert_eq!(Supervisor::next_failure_count(&resident, now), 1);
+        // A spawn that lived past the stable window but died young still accumulates.
+        resident
+            .spawned_at_ms
+            .store(now - STABLE_LIFETIME_MS + 10_000, Ordering::SeqCst);
+        assert_eq!(Supervisor::next_failure_count(&resident, now), 2);
+    }
 
     /// The saved-session surfaces (the `list --all` summary row and the
     /// `list_saved_sessions` catalog row) carry the persisted thinking
