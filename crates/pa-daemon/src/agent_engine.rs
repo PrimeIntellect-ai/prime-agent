@@ -5194,9 +5194,7 @@ pub(crate) mod tests {
             (drifted.provider.as_str(), drifted.id.as_str()),
             ("drift", "drift-1")
         );
-        let session = engine
-            .session_model()
-            .expect("the session model resolves");
+        let session = engine.session_model().expect("the session model resolves");
         assert_eq!(
             (session.provider.as_str(), session.id.as_str()),
             ("faux", "faux-1")
