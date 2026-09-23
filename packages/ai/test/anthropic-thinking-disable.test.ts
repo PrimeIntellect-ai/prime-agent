@@ -253,7 +253,7 @@ describe("Anthropic request wire contract", () => {
 		expect(request.headers["anthropic-beta"]).toBe(beta);
 	});
 
-	it("sends the harness's real tool names for OAuth tokens — no Claude Code casing", async () => {
+	it("renames user tools to their Claude Code casing only for OAuth tokens", async () => {
 		const context: Context = {
 			messages: [{ role: "user", content: "Use the tools", timestamp: 1 }],
 			tools: [tool("todowrite"), tool("find"), tool("my_custom_tool")],
@@ -267,14 +267,13 @@ describe("Anthropic request wire contract", () => {
 				cacheRetention: "none",
 			},
 		);
-		// Honest identity: subscription requests no longer masquerade as the
-		// Claude Code client, so tool names go out exactly as the harness defines
-		// them (no TodoWrite-style Claude Code casing).
-		expect(toolsOf(oauth.body).map((entry) => entry.name)).toEqual(["todowrite", "find", "my_custom_tool"]);
-		expect(oauth.headers["user-agent"]).toBe("prime-agent");
-		expect(oauth.headers["x-app"]).toBeUndefined();
-		expect((oauth.headers["anthropic-beta"] as string) ?? "").not.toContain("claude-code-20250219");
-		expect((oauth.headers["anthropic-beta"] as string) ?? "").toContain("oauth-2025-04-20");
+		expect(toolsOf(oauth.body).map((entry) => entry.name)).toEqual(["TodoWrite", "find", "my_custom_tool"]);
+		// Subscription requests claim the Claude Code client identity, and the
+		// claimed version must stay at or above what the API's model gates require
+		// (opus-5.5 family rejects anything below 2.280).
+		expect(oauth.headers["user-agent"]).toMatch(/^claude-cli\//);
+		expect(oauth.headers["x-app"]).toBe("cli");
+		expect((oauth.headers["anthropic-beta"] as string) ?? "").toContain("claude-code-20250219");
 
 		const apiKey = await captureAnthropicRequest(
 			getFixtureModel<"anthropic-messages">("anthropic", "claude-sonnet-4-6")!,

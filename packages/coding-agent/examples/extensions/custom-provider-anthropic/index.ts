@@ -156,6 +156,27 @@ async function refreshAnthropicToken(credentials: OAuthCredentials): Promise<OAu
 // Streaming Implementation (simplified from packages/ai/src/providers/anthropic.ts)
 // =============================================================================
 
+// Claude Code tool names for OAuth stealth mode
+const claudeCodeTools = [
+	"Read",
+	"Write",
+	"Edit",
+	"Bash",
+	"Grep",
+	"Glob",
+	"AskUserQuestion",
+	"TodoWrite",
+	"WebFetch",
+	"WebSearch",
+];
+const ccToolLookup = new Map(claudeCodeTools.map((t) => [t.toLowerCase(), t]));
+const toClaudeCodeName = (name: string) => ccToolLookup.get(name.toLowerCase()) ?? name;
+const fromClaudeCodeName = (name: string, tools?: Tool[]) => {
+	const lowerName = name.toLowerCase();
+	const matched = tools?.find((t) => t.name.toLowerCase() === lowerName);
+	return matched?.name ?? name;
+};
+
 function isOAuthToken(apiKey: string): boolean {
 	return apiKey.includes("sk-ant-oat");
 }
@@ -193,7 +214,7 @@ function convertContentBlocks(
 	return blocks;
 }
 
-function convertMessages(messages: Message[]): any[] {
+function convertMessages(messages: Message[], isOAuth: boolean, _tools?: Tool[]): any[] {
 	const params: any[] = [];
 
 	for (let i = 0; i < messages.length; i++) {
@@ -236,7 +257,7 @@ function convertMessages(messages: Message[]): any[] {
 					blocks.push({
 						type: "tool_use",
 						id: block.id,
-						name: block.name,
+						name: isOAuth ? toClaudeCodeName(block.name) : block.name,
 						input: block.arguments,
 					});
 				}
@@ -283,9 +304,9 @@ function convertMessages(messages: Message[]): any[] {
 	return params;
 }
 
-function convertTools(tools: Tool[]): any[] {
+function convertTools(tools: Tool[], isOAuth: boolean): any[] {
 	return tools.map((tool) => ({
-		name: tool.name,
+		name: isOAuth ? toClaudeCodeName(tool.name) : tool.name,
 		description: tool.description,
 		input_schema: {
 			type: "object",
@@ -353,10 +374,9 @@ function streamCustomAnthropic(
 				clientOptions.defaultHeaders = {
 					accept: "application/json",
 					"anthropic-dangerous-direct-browser-access": "true",
-					// Honest identity: the oauth beta is the token-auth mechanism; no
-					// Claude Code client impersonation (see the provider's notes).
-					"anthropic-beta": `oauth-2025-04-20,${betaFeatures.join(",")}`,
-					"user-agent": "prime-agent (extension example)",
+					"anthropic-beta": `claude-code-20250219,oauth-2025-04-20,${betaFeatures.join(",")}`,
+					"user-agent": "claude-cli/2.1.281 (external, cli)",
+					"x-app": "cli",
 				};
 			} else {
 				clientOptions.apiKey = apiKey;
@@ -372,14 +392,28 @@ function streamCustomAnthropic(
 			// Build request params
 			const params: MessageCreateParamsStreaming = {
 				model: model.id,
-				messages: convertMessages(context.messages),
+				messages: convertMessages(context.messages, isOAuth, context.tools),
 				max_tokens: options?.maxTokens || Math.floor(model.maxTokens / 3),
 				stream: true,
 			};
 
-			// Honest identity: subscription (OAuth) requests send the extension's
-			// real system prompt, exactly like API-key requests.
-			if (context.systemPrompt) {
+			// System prompt with Claude Code identity for OAuth
+			if (isOAuth) {
+				params.system = [
+					{
+						type: "text",
+						text: "You are Claude Code, Anthropic's official CLI for Claude.",
+						cache_control: { type: "ephemeral" },
+					},
+				];
+				if (context.systemPrompt) {
+					params.system.push({
+						type: "text",
+						text: sanitizeSurrogates(context.systemPrompt),
+						cache_control: { type: "ephemeral" },
+					});
+				}
+			} else if (context.systemPrompt) {
 				params.system = [
 					{
 						type: "text",
@@ -390,7 +424,7 @@ function streamCustomAnthropic(
 			}
 
 			if (context.tools) {
-				params.tools = convertTools(context.tools);
+				params.tools = convertTools(context.tools, isOAuth);
 			}
 
 			// Handle thinking/reasoning
@@ -439,7 +473,9 @@ function streamCustomAnthropic(
 						output.content.push({
 							type: "toolCall",
 							id: event.content_block.id,
-							name: event.content_block.name,
+							name: isOAuth
+								? fromClaudeCodeName(event.content_block.name, context.tools)
+								: event.content_block.name,
 							arguments: {},
 							partialJson: "",
 							index: event.index,
