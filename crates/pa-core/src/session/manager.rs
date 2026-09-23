@@ -324,7 +324,13 @@ fn forked_branch_entries(entries: Vec<FileEntry>) -> Vec<FileEntry> {
     }
     let live_parent = |parent: &Option<String>| -> Option<String> {
         let mut current = parent.clone();
+        let mut visited = std::collections::HashSet::new();
         while let Some(id) = &current {
+            // A parent cycle inside malformed git_state rows must
+            // terminate: stop at the first id the walk repeats.
+            if !visited.insert(id.clone()) {
+                break;
+            }
             match dropped_parent.get(id) {
                 Some(next) => current = next.clone(),
                 None => break,
@@ -474,19 +480,11 @@ impl SessionManager {
             rlm_depth: Some(rlm_depth),
         });
         let branch = forked_branch_entries(entries);
-        let has_assistant = branch.iter().any(|entry| {
-            matches!(
-                entry,
-                FileEntry::Message {
-                    message: AgentMessage::Assistant(_),
-                    ..
-                }
-            )
-        });
-        forked.adopt_entries(branch);
         // The copied rows' assistant entries keep the append path durable
-        // from the first new entry (TS writes the whole fork synchronously).
-        forked.has_assistant_entry = has_assistant;
+        // from the first new entry (TS writes the whole fork synchronously):
+        // one predicate for the durable-append rule.
+        forked.refresh_has_assistant_entry(&branch);
+        forked.adopt_entries(branch);
         forked.flush_now().map_err(|error| error.to_string())?;
         Ok(forked)
     }
@@ -1882,8 +1880,48 @@ mod tests {
         assert!(after.lines().count() > before.lines().count());
     }
 
-    /// TS `forkFrom`'s failure contract: an empty source file and a file
-    /// with no header error out instead of silently starting fresh.
+    /// Malformed-but-parseable git_state parents can form a cycle (a's
+    /// dropped parent is b, b's is a): the fork's parent walk terminates at
+    /// the first repeated id instead of looping forever.
+    #[test]
+    fn fork_from_terminates_on_cyclic_git_state_parents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+        // A hand-written source: a valid header, two git_state rows that
+        // parent at each other, and a surviving custom row under one of them.
+        let file = dir.join("cyclic.jsonl");
+        let header = "{\"type\":\"session\",\"id\":\"cyc-head\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/tmp\"}";
+        let git_a = "{\"type\":\"git_state\",\"git\":{},\"id\":\"cyc01\",\"parentId\":\"cyc02\",\"timestamp\":\"2024-01-01T00:00:00.000Z\"}";
+        let git_b = "{\"type\":\"git_state\",\"git\":{},\"id\":\"cyc02\",\"parentId\":\"cyc01\",\"timestamp\":\"2024-01-01T00:00:00.000Z\"}";
+        let custom = "{\"type\":\"custom\",\"customType\":\"survivor\",\"data\":{},\"id\":\"cyc03\",\"parentId\":\"cyc01\",\"timestamp\":\"2024-01-01T00:00:00.000Z\"}";
+        std::fs::write(&file, format!("{header}\n{git_a}\n{git_b}\n{custom}\n")).unwrap();
+
+        let target_dir = tmp.path().join("fork-sessions");
+        let forked = SessionManager::fork_from(&file, tmp.path(), &target_dir)
+            .expect("the cycle terminates and the fork completes");
+        let entries = forked.get_all_entries();
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| matches!(entry, FileEntry::GitState { .. })),
+            "the git_state rows dropped"
+        );
+        let survivor = entries
+            .iter()
+            .find(|entry| entry.id() == Some("cyc03"))
+            .expect("the surviving custom row copied");
+        // The walk stopped at the first repeated id (cyc01), so the survivor
+        // keeps its (dropped) parent instead of spinning on the cycle.
+        assert_eq!(survivor.parent_id(), Some("cyc01"));
+    }
+
+    /// TS `forkFrom`'s failure contract: the loader (TS
+    /// `loadEntriesFromFile` -> `finalizeLoadedEntries`) returns no entries
+    /// for a missing file, an empty file, AND a file without a valid leading
+    /// header, so all three shapes take the "empty or invalid" arm (the
+    /// no-header error stays as TS-faithful defense-in-depth — its own
+    /// `forkFrom` finds the header only after the same finalize).
     #[test]
     fn fork_from_rejects_empty_and_headerless_sources() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1911,9 +1949,14 @@ mod tests {
         assert_eq!(
             error,
             format!(
-                "Cannot fork: source session has no header: {}",
+                "Cannot fork: source session file is empty or invalid: {}",
                 headerless.display()
-            )
+            ),
+            "the loader finalizes a headerless file to zero entries"
         );
+        let missing = tmp.path().join("absent.jsonl");
+        let error = SessionManager::fork_from(&missing, tmp.path(), tmp.path().join("sessions"))
+            .unwrap_err();
+        assert!(error.starts_with("Cannot fork: source session file is empty or invalid:"));
     }
 }
