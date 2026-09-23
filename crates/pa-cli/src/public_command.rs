@@ -122,11 +122,11 @@ pub fn handle_public_command(args: &[String]) -> PublicCommandResult {
     if !public.contains(command) {
         return continue_with(args.clone());
     }
-    if command == "update" && std::env::var(SELF_UPDATE_INTERACTIVE_CHILD_ENV).as_deref() == Ok("1")
-    {
-        handle_package_command(&args);
-        return handled();
-    }
+    // TS routes a marker-carrying `update` child into package-manager-cli's
+    // update case — which in TS IS the self-update implementation. The
+    // Rust port split self-updates (`prime-agent update`) from package
+    // updates, so the marker child must fall through to `run_update` (the
+    // self-update flow) instead of the extensions-only package command.
     if command == "update"
         && args
             .iter()
@@ -719,11 +719,17 @@ fn run_update(args: &[String]) -> PublicCommandResult {
         Ok(code) => {
             // TS `commitChannel`: a completed run persists an explicit
             // switch (Complete and Skipped alike — a channel pin applies
-            // even when no newer release was needed) and reports it.
+            // even when no newer release was needed) and reports it. The
+            // not-attempted exit (75) reaches here only as the child-mode
+            // no-change skip: a declined confirmation returns earlier and
+            // never runs the update flow.
             let flag_wire = options
                 .channel
                 .map(pa_core::update::version::UpdateChannel::wire_name);
-            if code == 0 && flag_wire.is_some() && flag_wire != persisted_wire.as_deref() {
+            if (code == 0 || code == 75)
+                && flag_wire.is_some()
+                && flag_wire != persisted_wire.as_deref()
+            {
                 let wire = flag_wire.unwrap_or_default();
                 if let Ok(cwd) = std::env::current_dir() {
                     let settings_channel = match wire {
