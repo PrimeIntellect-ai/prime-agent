@@ -311,19 +311,31 @@ pub async fn execute_refinement(
     if target_scope == HarnessScope::Global {
         append_global_refinement(global_harness_dir, &result)?;
     }
-    // Audit entry first; failures there abort the whole refinement.
-    session.append_custom_entry(
+    // Session rows follow the TS refine arm's write choreography: the audit
+    // append is attempted first and a failed write is caught (the row stays
+    // live-indexed, so the in-process history sees the refinement), the
+    // outcome row still records, and only then does the audit error surface
+    // — the harness edits are already durable, and reporting the audit
+    // failure after the outcome keeps the user's view and the durable stores
+    // from diverging on the next retry.
+    let (_, audit_write) = session.append_custom_entry_retained(
         REFINEMENT_AUDIT_CUSTOM_TYPE,
         Some(serde_json::to_value(&result)?),
-    )?;
+    );
     // Outcome for the TUI; notice for the model (only when edits applied).
     let outcome = create_refinement_outcome_message(&result);
-    session.append_custom_message(
+    let (_, outcome_write) = session.append_custom_message_retained(
         &outcome.custom_type,
         outcome.content.clone(),
         outcome.display,
         outcome.details.clone(),
-    )?;
+    );
+    if let Some(error) = audit_write {
+        anyhow::bail!("refinement audit row not persisted: {error}");
+    }
+    if let Some(error) = outcome_write {
+        anyhow::bail!("refinement outcome row not persisted: {error}");
+    }
     if result.applied_edits.iter().any(|edit| edit.applied) {
         let notice = create_refinement_notice_message(&result, source);
         session.append_custom_message(
@@ -655,6 +667,63 @@ Reviewer instructions: record it"
         assert_eq!(custom_messages.len(), 2);
         // History merges session results for the next refinement.
         assert_eq!(load_refinement_history(&session, &global_dir).len(), 1);
+    }
+
+    /// A failed audit write still reports the refinement error after the
+    /// durable writes (the TS refine arm's catch/rethrow choreography), and
+    /// the failed rows stay live-indexed so the in-process history sees the
+    /// refinement that the harness store already applied.
+    #[tokio::test]
+    async fn audit_write_failure_reports_after_durable_edits() {
+        let dir = TempDir::new().unwrap();
+        let mut session = persisted_session(&dir);
+        // Bootstrap the flush rule: rows only persist after the first
+        // assistant entry (persist_entry defers them until then).
+        session
+            .append_message(AgentMessage::Assistant(text_assistant("seed")))
+            .unwrap();
+        let global_dir = dir.path().join("harness");
+        let reply = r#"{"summary":"lesson","edits":[{"action":"create","kind":"memory","id":"m9","title":"Lesson","content":"durable"}]}"#;
+        // Fail every session-file write: the path becomes a directory (the
+        // harness stores live under a sibling dir and stay writable).
+        let file = session.get_session_file().unwrap().to_path_buf();
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        let error = execute_refinement(
+            &mut session,
+            RefinementTranscript {
+                messages: &[user_message("x")],
+                historical_entries: &[],
+            },
+            &global_dir,
+            &test_model(),
+            &RefineOptions::default(),
+            RefinementSource::User,
+            seam(reply),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("audit row not persisted"),
+            "the audit error surfaces after the durable writes: {error:#}"
+        );
+        // The harness edits are durable.
+        let harness_dir =
+            crate::refinement::get_local_harness_state_dir(Some(session.get_session_dir()))
+                .unwrap();
+        let state = load_harness_state(&harness_dir, HarnessScope::Local);
+        assert!(state.entries[&crate::refinement::RefinementKind::Memory].contains_key("m9"));
+        // The audit + outcome rows stay live-indexed for the in-process
+        // history; the notice is ordered after the audit rethrow in TS.
+        let entries = session.get_all_entries().to_vec();
+        assert_eq!(session_refinement_history(&entries).len(), 1);
+        assert!(
+            !entries.iter().any(
+                |entry| matches!(entry, FileEntry::CustomMessage { payload, .. }
+                    if payload.custom_type == REFINEMENT_NOTICE_CUSTOM_TYPE)
+            ),
+            "the notice is ordered after the audit rethrow in TS"
+        );
     }
 
     #[tokio::test]
