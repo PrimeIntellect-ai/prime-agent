@@ -34,23 +34,27 @@ TS reference: `git show org/main:packages/coding-agent/src/core/mcp/service-cata
    catalog_views.rs:553) is deliberately NOT gated: it follows the pin (TS-main parity, action-time only).
 
 ## REMAINING STEPS
-4. Update manager_catalog.rs tests (seam builders) + add the 3 hint-matrix unit tests:
-   pinned+catalog_available(no service)=hint shows; pinned+no snapshot=hidden, connectable=false;
-   service in snapshot=no pin, no hint.
-5. Fix pa-daemon/tests/mcp_catalog_e2e.rs: seed the cache as the REAL envelope (wrap REAL_CATALOG fixture
-   in {url,scope,fetchedAt,payload}); add the daemon e2e matrix (cache present: hint shows on the vanished
-   row; cache absent: no hint, row still there, connectable false). Keep predecessor's shutdown_daemon + mutex.
-6. scripts/mcp_hint_parity.py: tmux-level verifier, TS release binary
-   (~/.local/share/prime-agent/releases/0.9.5-linux-x64-*/prime-agent, ts_identity fail-fast) vs my build;
-   matrix: records for a real catalog service + a vanished one; Rust cache present vs absent; byte-compare
-   the hint string.
-7. Telemetry: check docs/telemetry-events.md for an /mcp event; add adoption event if the surface warrants one.
-8. Sandbox gates (VM rust:1-bookworm per proven recipe; NOT on the box). BASE RED: org/rust tip currently
-   FAILS clippy (#2562 match_result_ok in pa-types process.rs); heal PR #2565 is OPEN — wait for it to
-   merge, git fetch org rust, rebase, then gates. Do not fix the base red myself.
+4. DONE (committed ffd8ff0fa): 3 hint-matrix unit tests in manager_catalog.rs
+   (pinned_hint_shows_when_a_snapshot_proves_the_service_gone / stays_silent_without_a_snapshot /
+   stays_hidden_when_the_snapshot_defines_the_service).
+5. DONE (committed ffd8ff0fa): mcp_catalog_e2e.rs seeded as the REAL envelope + the daemon e2e
+   pinned_hint_needs_a_snapshot_to_claim_the_source_unavailable; pa-models dev-dep; DAEMON_E2E mutex;
+   shutdown_daemon; spawn_supervisor env_remove(PI_PACKAGE_DIR). pa-daemon --tests compile green on box.
+6. scripts/mcp_hint_parity.py WRITTEN (this session; respawned session lost the draft, rewrote from the
+   captured frames + mcp_view_parity/visual_parity conventions): 6-cell tmux matrix
+   (ts_vanished/ts_linear via /plugins on the 0.9.5 release binary; rust_vanished_cached/uncached +
+   rust_linear_cached/uncached via /mcp on my build), ts_identity fail-fast, batterylib daemon reap,
+   records seeded byte-identical both sides, cache = snapshot envelope wrapping the REAL fixture.
+   TS-side validation run vs the predecessor-captured ground-truth frames: IN FLIGHT. Release build
+   (cargo build --release -p pa-cli) for the Rust side: IN FLIGHT.
+7. Telemetry: DONE (checked): no new event warranted — the /mcp dispatch already emits
+   `agent command used` (command_name=mcp) and connector actions emit `mcp connector used`; this change
+   gates an existing hint's visibility, it adds no new action/surface. State this in the PR body.
+8. Sandbox gates (VM rust:1 per proven recipe; NOT on the box). Base = f68799ea4 (#2550 tip; #2565's
+   transport.rs hazard is fixed centrally — Context import now cfg-gated, no restore needed).
 9. Push: NEW branch -> git-data API (blobs->trees base_tree=<tip tree>->commits->refs) + gh pr create
-   IMMEDIATELY (refs can vanish). PR body: parity-diff evidence (tmux frames + source cites), ownership
-   compliance, telemetry event. Then: non-benchmark checks green, zero unresolved Bugbot/Macroscope threads,
+   IMMEDIATELY. PR body: parity-diff evidence (the 6-cell report + frame cites), ownership compliance,
+   telemetry statement. Then: non-benchmark checks green, zero unresolved Bugbot/Macroscope threads,
    merge --squash --admin, verify state==MERGED, goal.complete().
 
 ## FACTS
@@ -59,3 +63,20 @@ TS reference: `git show org/main:packages/coding-agent/src/core/mcp/service-cata
 - pa-core depends on pa-models (Cargo.toml) — MCP_SERVICE_CATALOG_URL + PUBLIC_SCOPE are pa-models publics.
 - mcp_view_parity.py = the /mcp frame-diff harness convention to follow for the tmux verifier.
 - Predecessor session artifacts: ~/.prime/agent/session-artifacts/01a0a7fa-6fda-75dc-8c7b-e3e00614a6f6/sub-0a4af267/.
+
+## TS-SIDE PARITY RECIPE (proven this session, after 4 failed attempts)
+- The deployed 0.9.5 release binary PREDATES the service catalog (#2330): it has NO /plugins, NO
+  pinned hint. The predecessor's ground-truth frames came from the TS-MAIN CLI BUNDLE:
+  `node ~/prime-agent/packages/coding-agent/dist/bundle/cli.js` (built Sep 21 at 3fc5d967e,
+  reports 0.9.5, INCLUDES #2330: /plugins + hint + ServiceCatalogPicker).
+- The frames' layout (row + BLANK spacer + ONE detail line + "Enter manage accounts") matches
+  TS-main's picker; the Rust /mcp view has an extra detail-head line (sanctioned extension).
+- PROVEN boot recipe (visual_parity/queue_edit_parity conventions): faux provider both sides —
+  TS via <agent>/extensions/*.js (scripts/ts_faux_extension.js) + PRIME_AGENT_FAUX_SCRIPT,
+  Rust natively reads PRIME_AGENT_FAUX_SCRIPT; `--model faux-1`; isolated HOME+TMPDIR; explicit
+  --daemon-socket; boot needle "mode (Ctrl+O to expand)" (TS-main=Details mode, Rust=Collapsed).
+- WRONG (all caused TUI failures/wrong surface): PI_OFFLINE=1 on TS (blocks kernel venv), real
+  --model anthropic/... (provider auth errors), no TMPDIR isolation (hits the SHARED box daemon
+  with 13 fleet sessions - NEVER), bare PATH prime-agent (Rust dogfood).
+- tmux quirks: pane startup prints a bun-art banner (harmless noise); capture with plain -p
+  (-e splits escapes at wrap boundaries); C-u clears the TS editor.
