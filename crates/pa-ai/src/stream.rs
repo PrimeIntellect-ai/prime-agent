@@ -24,7 +24,10 @@ fn resolve_provider(api: &str) -> Result<Arc<dyn crate::registry::Provider>, Pro
 /// conservative policy the session engine's compaction estimator applies
 /// (`pa-core` cannot be a dependency here, so the heuristic is restated).
 fn estimated_input_tokens(context: &Context) -> u64 {
-    let mut chars = context.system_prompt.as_deref().map_or(0, str::len) as u64;
+    let mut chars = context
+        .system_prompt
+        .as_deref()
+        .map_or(0, |text| text.chars().count()) as u64;
     // Tool definitions serialize into every request (the provider sends
     // each schema on every call), so they claim input room like the
     // tool-call arguments below.
