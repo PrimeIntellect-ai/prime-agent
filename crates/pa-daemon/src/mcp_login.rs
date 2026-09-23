@@ -205,7 +205,8 @@ mod tests {
 
         fn on_manual_code_input(
             &self,
-        ) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>> {
+        ) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>>
+        {
             None
         }
     }
@@ -341,7 +342,11 @@ mod tests {
             "the login narrated its steps through the UI"
         );
         let auth_urls = ui.auth_urls.lock().unwrap();
-        assert_eq!(auth_urls.len(), 1, "one authorization URL, one browser launch");
+        assert_eq!(
+            auth_urls.len(),
+            1,
+            "one authorization URL, one browser launch"
+        );
         assert_eq!(auth_urls[0], url);
 
         // The credential persisted (endpoint-bound, TS McpCredentials shape).
