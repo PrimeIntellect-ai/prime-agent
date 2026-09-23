@@ -1062,7 +1062,7 @@ mod tests {
         let heartbeats = Vec::new();
         let bash = json!({"activities": []});
         let src = sources(&identity, &roster, &goal, &heartbeats, &bash);
-        let panel = ActivityPanel::new(&src, None, 40);
+        let mut panel = ActivityPanel::new(&src, None, 40);
         assert_eq!(panel.rows.len(), 2);
         let parent = &panel.rows[0];
         assert_eq!(parent.label, "parent");
@@ -1367,8 +1367,7 @@ mod tests {
         let panel = ActivityPanel::new(&src, None, 16);
         let row = panel.selected_row().expect("one row");
         assert_eq!(
-            row.label,
-            "\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}",
+            row.label, "\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}",
             "the TS title fallback keeps the whole id; the row renderer clips"
         );
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
