@@ -47,6 +47,7 @@ pub(crate) mod queue_commands;
 pub(crate) mod recovery_pacing;
 pub mod registration;
 pub(crate) mod registry;
+mod revival_gate;
 pub mod rlm_child_model;
 pub mod rlm_children;
 pub mod rlm_ledger;

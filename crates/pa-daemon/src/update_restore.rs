@@ -630,6 +630,23 @@ async fn wake_saved_session(
     {
         return Ok(());
     }
+    // One owning daemon: the session-lease table is the one cross-daemon
+    // ownership record a shared agent dir offers. A live holder — this
+    // daemon's own surviving process, or another daemon's worker serving
+    // the same file — owns the session and its scheduler; waking a rival
+    // would either fail on the lease (the 6-strike storm) or, with leases
+    // off, double-serve the file. The wake skips; the owner's own
+    // scheduler fires the job.
+    if let Some(owner) = crate::lease::live_lease_owner(
+        &supervisor.options.agent_dir,
+        std::path::Path::new(session_file),
+    ) {
+        supervisor.log_line(&format!(
+            "scheduled-work re-arm skipped {session_file}: a live worker (pid {}) holds its session lease",
+            owner.pid
+        ));
+        return Ok(());
+    }
     let command = DaemonCommand::Create {
         id: None,
         session_path: Some(session_file.to_string()),

@@ -828,6 +828,35 @@ impl Supervisor {
                 ));
                 return AdoptionOutcome::SkippedIdle;
             }
+            // The revival ownership gate: the busy-evidence filter above
+            // answered "did the journal ever prove live work?"; this gate
+            // answers "is that proof still a genuine interruption THIS
+            // boot must heal?" A give-up verdict (lifecycle `failed`), a
+            // stopped session (the #2592 archived belt), a live session
+            // lease held by another worker (this daemon's or another
+            // daemon's, on a shared agent dir), or busy evidence older
+            // than the freshness bound each vetoes the relaunch: the
+            // descriptor stays down and the session reopens through the
+            // next client create. Without the gate a boot re-storms the
+            // same dead slots (stale journals outliving their era) and
+            // resurrects stopped sessions as active workers.
+            let busy_recorded_at =
+                crate::journal::WorkerRecoveryJournal::latest_busy_recorded_at(&journal_path);
+            let gated = resident.descriptor.lock().await;
+            let veto = crate::revival_gate::revival_veto(
+                &self.options.agent_dir,
+                &gated,
+                kept,
+                busy_recorded_at.as_deref(),
+            );
+            drop(gated);
+            if let Some(veto) = veto {
+                self.log_line(&format!(
+                    "session worker {worker_id} not revived: {}",
+                    veto.log_reason()
+                ));
+                return AdoptionOutcome::SkippedIdle;
+            }
             // Dead worker with journal-proven live work (or a kept
             // worker on an update boot): relaunch from the durable
             // create command. The worker rehydrates the session store,
@@ -959,8 +988,23 @@ impl Supervisor {
                 let mut descriptor = resident.descriptor.lock().await;
                 descriptor.lifecycle = DaemonWorkerLifecycle::Failed;
                 descriptor.last_failure_at = Some(util::now_iso());
+                let journal_path = descriptor.recovery_journal_path.clone();
                 let _ = persist_worker(&resident.descriptor_path, &descriptor);
                 drop(descriptor);
+                // The give-up settles its own revival evidence (the storm
+                // cycle's breaker): the journal's busy records are what a
+                // later boot reads as "interrupted live work" — the
+                // verdict that gave up must outlive them, or every boot
+                // re-storms this same slot (the 12:00 → 17:07 recurrence).
+                if let Err(error) = crate::journal::WorkerRecoveryJournal::settle_busy_records(
+                    std::path::Path::new(&journal_path),
+                    "worker_gave_up",
+                ) {
+                    self.log_line(&format!(
+                        "session worker {} give-up journal settle failed: {error:#}",
+                        resident.worker_id
+                    ));
+                }
                 // The give-up is final: routes waiting out this worker's
                 // replacement must fail fast instead of parking.
                 resident.note_retired();

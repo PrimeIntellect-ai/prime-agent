@@ -374,6 +374,36 @@ impl SessionLease {
     }
 }
 
+/// The live owner of a session file's runtime lease, when one exists: the
+/// process identity another supervisor — or a surviving worker of any
+/// daemon sharing this agent dir — would collide with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveLeaseOwner {
+    pub pid: u32,
+    pub active_session_id: Option<String>,
+}
+
+/// Whether a live process holds the session file's runtime lease: read the
+/// shared `session-leases` ownership record (never acquiring, never
+/// reclaiming) and keep only a provably-live owner. The lease table is the
+/// one cross-daemon ownership record a shared agent dir offers, so the
+/// automatic revival paths (boot adoption, the scheduled-work re-arm)
+/// probe it before spawning a rival worker over a file another daemon's
+/// worker already serves — one owning daemon. A dead owner, a missing
+/// record, or an unreadable one answers `None` (a stale record is not
+/// live ownership).
+pub fn live_lease_owner(agent_dir: &Path, session_path: &Path) -> Option<LiveLeaseOwner> {
+    let directory = lease_directory(agent_dir, session_path);
+    let owner = read_owner(&directory).ok()??;
+    if !owner_alive(&owner) {
+        return None;
+    }
+    Some(LiveLeaseOwner {
+        pid: owner.pid,
+        active_session_id: owner.active_session_id,
+    })
+}
+
 /// Acquire the lease for one session file. Returns `None` when leases are
 /// disabled (default) or `session_path` is empty.
 pub fn acquire_session_lease(
