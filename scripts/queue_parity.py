@@ -75,7 +75,15 @@ QUEUE_FAUX_SCRIPT = {
             "content": [
                 {
                     "type": "text",
-                    "text": "The first turn streams slowly and keeps going for a good while so the parked preview strip has plenty of time to render before this turn settles and the queue drains.",
+                    # Long enough that the streaming-hint state AND the
+                    # parked strip both fit inside the turn at the faux's
+                    # 6 tokens/second (the hint capture + clear, then the
+                    # two parked prompts, all before the settle).
+                    "text": "The first turn streams slowly and keeps going for a good long while, "
+                    "certainly long enough that the streaming follow-up hint can be captured over "
+                    "a draft while the turn is still live, and then the parked preview strip has "
+                    "plenty of time to render with both of its rows before this turn finally "
+                    "settles and the queue drains the parked prompts as their own turns.",
                 }
             ]
         },
