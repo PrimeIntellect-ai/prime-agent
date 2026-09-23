@@ -139,7 +139,7 @@ function seedEntry(state: HarnessState, kind: RefinementKind, id = `${kind}_entr
 				id,
 				title: `${kind} title`,
 				content: `${kind} content`,
-				topic: `${kind}/topic`,
+				path: `${kind}/path`,
 				...(kind === "skill" ? skillContract : {}),
 				metadata: { seeded: true },
 			},
@@ -226,7 +226,7 @@ describe("harness refinement", () => {
 					id,
 					title: `${kind} title`,
 					content: `${kind} content`,
-					topic: `${kind}/created`,
+					path: `${kind}/created`,
 					...skillFields,
 					metadata: { kind },
 				},
@@ -241,7 +241,7 @@ describe("harness refinement", () => {
 			kind,
 			title: `${kind} title`,
 			content: `${kind} content`,
-			topic: `${kind}/created`,
+			path: `${kind}/created`,
 			metadata: { kind },
 			source: "refine",
 			version: 1,
@@ -256,7 +256,7 @@ describe("harness refinement", () => {
 					id,
 					title: `${kind} title updated`,
 					content: `${kind} content updated`,
-					topic: `${kind}/updated`,
+					path: `${kind}/updated`,
 					...skillFields,
 					metadata: { updated: kind },
 				},
@@ -268,7 +268,7 @@ describe("harness refinement", () => {
 		expect(state.entries[kind][id]).toMatchObject({
 			title: `${kind} title updated`,
 			content: `${kind} content updated`,
-			topic: `${kind}/updated`,
+			path: `${kind}/updated`,
 			metadata: { updated: kind },
 			version: 2,
 		});
@@ -281,7 +281,7 @@ describe("harness refinement", () => {
 		expect(state.refinements.at(-1)?.changes).toEqual([`delete ${kind}:${id}`]);
 	});
 
-	it("creates ids from titles and uses default topic and metadata when omitted", () => {
+	it("creates ids from titles and uses default path and metadata when omitted", () => {
 		const state = loadHarnessState(makeTempDir());
 
 		const result = applyRefinementProposal(
@@ -295,7 +295,7 @@ describe("harness refinement", () => {
 		expect(result.appliedEdits[0]).toMatchObject({
 			applied: true,
 			id: "native_check",
-			after: { id: "native_check", topic: "general", reference: skillReference, metadata: {}, version: 1 },
+			after: { id: "native_check", path: "general", reference: skillReference, metadata: {}, version: 1 },
 		});
 	});
 
@@ -440,9 +440,9 @@ describe("harness refinement", () => {
 			error: "create requires reference to be an object when provided",
 		},
 		{
-			label: "a create with a numeric topic",
-			edit: editWith("create", "memory", "bad_topic", { topic: 7 }),
-			error: "create requires topic to be a non-empty string when provided",
+			label: "a create with a numeric path",
+			edit: editWith("create", "memory", "bad_path", { path: 7 }),
+			error: "create requires path to be a non-empty string when provided",
 		},
 		{
 			label: "a skill with list arguments",
@@ -558,23 +558,6 @@ describe("harness refinement", () => {
 		},
 	);
 
-	it("loads an entry that stores the grouping as path and resaves it as topic", () => {
-		const dir = makeTempDir();
-		writeFileSync(
-			getHarnessStatePath(dir),
-			'{"schema":1,"entries":{"memory":{"legacy":{"id":"legacy","kind":"memory","title":"Legacy","content":"c","path":"repo/testing"}}}}',
-			"utf8",
-		);
-
-		const state = loadHarnessState(dir, "local");
-		expect(state.entries.memory.legacy.topic).toBe("repo/testing");
-
-		saveHarnessState(dir, state);
-		const saved = JSON.parse(readFileSync(getHarnessStatePath(dir), "utf8")).entries.memory.legacy;
-		expect(saved.topic).toBe("repo/testing");
-		expect(saved.path).toBe("repo/testing");
-	});
-
 	it("extracts well-formed refinement history from custom session entries", () => {
 		const result: RefinementResult = {
 			id: "refine_1",
@@ -610,7 +593,6 @@ describe("harness refinement", () => {
 			id: "native_validation",
 			title: "Native validation",
 			content: "Run validation through the target project environment.",
-			path: "validation",
 		};
 		completeSimpleMock.mockResolvedValueOnce(
 			assistantText(JSON.stringify({ summary: "s", rationale: "r", expectedOutcome: "o", edits: [edit] })),
@@ -636,7 +618,7 @@ describe("harness refinement", () => {
 			headers: { "x-test-header": "1" },
 		});
 		expect(result.appliedEdits[0]).toMatchObject({ kind: "memory", id: "native_validation", applied: true });
-		expect(state.entries.memory.native_validation).toMatchObject({ content: edit.content, topic: "validation" });
+		expect(state.entries.memory.native_validation.content).toBe(edit.content);
 	});
 
 	it("caps the refinement output budget by the policy ceiling for wide models", async () => {
@@ -710,7 +692,7 @@ describe("harness refinement", () => {
 					id: "kept_memory",
 					title: "Updated memory",
 					content: "Updated memory content",
-					topic: "updated/topic",
+					path: "updated/path",
 					metadata: { updated: true },
 				},
 				{ action: "delete", kind: "skill", id: "deleted_skill" },
@@ -718,9 +700,7 @@ describe("harness refinement", () => {
 			{ id: "refine_target" },
 		);
 
-		// An older build recorded the edit snapshots with the legacy field name.
-		const recorded = JSON.parse(JSON.stringify(target).replaceAll('"topic":', '"path":')) as RefinementResult;
-		const rollback = await refineHarness([], state, [recorded], {} as never, "api-key", {
+		const rollback = await refineHarness([], state, [target], {} as never, "api-key", {
 			rollbackId: "refine_target",
 		});
 
@@ -734,7 +714,7 @@ describe("harness refinement", () => {
 		expect(state.entries.prompt.created_prompt).toBeUndefined();
 		expect(state.entries.memory.kept_memory).toMatchObject({
 			content: "memory content",
-			topic: "memory/topic",
+			path: "memory/path",
 			metadata: { seeded: true },
 			version: 3,
 		});
@@ -753,6 +733,80 @@ describe("harness refinement", () => {
 		await expect(
 			refineHarness([], state, [], {} as never, "api-key", { rollbackId: "missing_refinement" }),
 		).rejects.toThrow("Refinement missing_refinement not found");
+	});
+});
+
+describe("topic-era harness state migration", () => {
+	it("loads a persisted entry whose grouping is spelled topic and saves it back under path", () => {
+		const harnessStateDir = makeTempDir();
+		writeFileSync(
+			getHarnessStatePath(harnessStateDir),
+			`${JSON.stringify({
+				schema: 1,
+				entries: {
+					prompt: {},
+					memory: {
+						topic_entry: {
+							id: "topic_entry",
+							kind: "memory",
+							title: "Topic entry",
+							content: "Window-era content.",
+							topic: "window/era",
+							scope: "local",
+							reference: {},
+							arguments: {},
+							metadata: {},
+							version: 1,
+						},
+					},
+					skill: {},
+					subagent: {},
+				},
+				refinements: [],
+			})}\n`,
+		);
+
+		const state = loadHarnessState(harnessStateDir, "local");
+
+		expect(state.entries.memory.topic_entry?.path).toBe("window/era");
+		expect(formatHarnessStateForPrompt(state)).toContain("(window/era, v1)");
+		const persisted = readFileSync(saveHarnessState(harnessStateDir, state), "utf8");
+		expect(persisted).toContain('"path": "window/era"');
+		expect(persisted).not.toContain('"topic"');
+	});
+
+	it("rolls back a legacy snapshot whose recorded before state carries only topic", async () => {
+		const state = loadHarnessState(makeTempDir());
+		seedEntry(state, "memory", "grouped_memory");
+		const target = applyRefinementProposal(
+			state,
+			proposal("Target refinement", [
+				{
+					action: "update",
+					kind: "memory",
+					id: "grouped_memory",
+					title: "Updated memory",
+					content: "Updated memory content",
+					path: "updated/path",
+				},
+			]),
+			{ id: "refine_topic_snapshot" },
+		);
+		// Record the pre-edit snapshot the way a build that spelled the grouping `topic` wrote it.
+		for (const applied of target.appliedEdits) {
+			if (!applied.before) continue;
+			const before: Record<string, unknown> = { ...applied.before };
+			before.topic = before.path;
+			delete before.path;
+			applied.before = before as unknown as HarnessEntry;
+		}
+
+		const rollback = await refineHarness([], state, [target], {} as never, "api-key", {
+			rollbackId: "refine_topic_snapshot",
+		});
+
+		expect(rollback.appliedEdits.map((applied) => applied.applied)).toEqual([true]);
+		expect(state.entries.memory.grouped_memory).toMatchObject({ content: "memory content", path: "memory/path" });
 	});
 });
 
@@ -802,7 +856,7 @@ describe("global refinement history", () => {
 				kind: "memory" as const,
 				title: "Legacy global memory",
 				content: "created globally",
-				topic: "general",
+				path: "general",
 				scope: "global" as const,
 				reference: {},
 				arguments: {},
@@ -949,7 +1003,7 @@ describe("harness digest relevance ranking", () => {
 			kind: "memory",
 			title,
 			content,
-			topic: "memory",
+			path: "memory",
 			scope: "global",
 			reference: {},
 			arguments: {},
@@ -1069,7 +1123,7 @@ describe("harness digest relevance ranking", () => {
 			maxEntriesPerKind: 1,
 			queryTerms: new Map([["worktree", 1]]),
 		});
-		// Equal scores render in stable identifier order ([topic, title, id]);
+		// Equal scores render in stable identifier order ([path, title, id]);
 		// updated_at recency must not hoist the newer entry into the window.
 		expect(ranked).toContain("[global:aaa]");
 		expect(ranked).not.toContain("[global:zzz]");
