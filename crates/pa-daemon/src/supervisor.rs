@@ -830,6 +830,13 @@ impl Supervisor {
         // commands must wait for the replayed session (the replacement-
         // aware route gates on this until the replay answers).
         resident.note_session_replaying();
+        // The old worker is gone for good: a run with a pending abort is
+        // declared terminal HERE, before the create payload is built, so
+        // the journal record deterministically rides this replay even when
+        // the dead connection's EOF is late (a stale reader declares
+        // nothing).
+        self.declare_compaction_terminal(resident, || resident.compaction.observe_worker_gone())
+            .await;
         let deadline = worker_connect_deadline();
         let child = self.spawn_worker_process(resident, deadline).await?;
         if let Err(error) = self.connect_worker(resident, deadline).await {
@@ -904,10 +911,10 @@ impl Supervisor {
                 .compaction_journal
                 .lock()
                 .expect("compaction journal lock")
-                .mark_injected(&root_active_session_id)
+                .consume(&root_active_session_id)
             {
                 self.log_line(&format!(
-                    "terminal compaction journal inject mark failed for {root_active_session_id}: {error:#}"
+                    "terminal compaction journal consume failed for {root_active_session_id}: {error:#}"
                 ));
             }
         }
@@ -1141,7 +1148,17 @@ impl Supervisor {
                         // any pending terminal record — the worker landed
                         // the outcome itself, so a replacement must never
                         // replay it).
-                        if let Some(event) = payload.get("event") {
+                        // Only the live connection's frames may drive the
+                        // token: a superseded connection still draining
+                        // must not arm over — or settle — the replacement
+                        // connection's run. The journal lock spans the
+                        // token settle and the record clear, pairing with
+                        // `declare_compaction_terminal`'s take-then-write
+                        // under the same lock.
+                        if let Some(event) = payload
+                            .get("event")
+                            .filter(|_| reader_resident.connection_is_current(connection_epoch))
+                        {
                             match event.get("type").and_then(Value::as_str) {
                                 Some("compaction_start") => {
                                     reader_resident.compaction.arm(
@@ -1153,13 +1170,13 @@ impl Supervisor {
                                     );
                                 }
                                 Some("compaction_end") => {
+                                    let mut journal = reader_supervisor
+                                        .compaction_journal
+                                        .lock()
+                                        .expect("compaction journal lock");
                                     reader_resident.compaction.observe_end();
                                     if let Some(active_session_id) = active_session_id.as_deref() {
-                                        let _ = reader_supervisor
-                                            .compaction_journal
-                                            .lock()
-                                            .expect("compaction journal lock")
-                                            .clear(active_session_id);
+                                        let _ = journal.clear(active_session_id);
                                     }
                                 }
                                 _ => {}
@@ -1212,9 +1229,19 @@ impl Supervisor {
                 reader_resident.note_connection_lost(connection_epoch);
                 // The connection ended (EOF or frame error): a run without
                 // an abort request dies with the worker and rides the
-                // normal recovery flow; an abort-requested run stays armed
-                // so its watch task can still declare the terminal state.
-                reader_resident.compaction.observe_worker_gone();
+                // normal recovery flow; an abort-requested run is declared
+                // terminal immediately — the worker can never land its own
+                // end now, and the record must be durable before the
+                // relaunch replays the create. A stale reader (a newer
+                // connection already installed its own epoch) touches
+                // nothing.
+                if reader_resident.connection_is_current(connection_epoch) {
+                    reader_supervisor
+                        .declare_compaction_terminal(&reader_resident, || {
+                            reader_resident.compaction.observe_worker_gone()
+                        })
+                        .await;
+                }
             });
         }
         *resident.cmd_tx.lock().await = Some(cmd_tx);
@@ -1291,7 +1318,7 @@ impl Supervisor {
             .insert(request_id.clone(), reply_tx);
         cmd_tx
             .send(WorkerRequest {
-                request_id,
+                request_id: request_id.clone(),
                 command_type: command_type.to_string(),
                 payload,
             })
@@ -1307,7 +1334,14 @@ impl Supervisor {
             }
             Ok(Ok(response)) => Ok(response),
             Ok(Err(_)) => Err(anyhow!("Session worker dropped the request")),
-            Err(_) => Err(anyhow!("Session worker timed out")),
+            Err(_) => {
+                // A timed-out request's reply slot must not sit in the
+                // pending map forever (a wedged worker never answers, and
+                // repeated bounded-timeout routes would otherwise grow the
+                // map without bound).
+                resident.pending.lock().await.remove(&request_id);
+                Err(anyhow!("Session worker timed out"))
+            }
         }
     }
 

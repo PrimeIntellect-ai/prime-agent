@@ -713,7 +713,7 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
     .expect("write models.json");
     std::fs::write(
         agent_dir.join("settings.json"),
-        json!({ "compaction": {"enabled": true, "reserveTokens": 127500, "keepRecentTokens": 10} })
+        json!({ "compaction": {"enabled": true, "reserveTokens": 500, "keepRecentTokens": 10} })
             .to_string(),
     )
     .expect("write settings.json");
@@ -769,6 +769,23 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
         mock.request_count() > summarizer_index,
         "the compaction summarizer request never arrived"
     );
+
+    // The forwarded `compaction_start` must reach an attached client
+    // before the freeze: the client's loader is up exactly because that
+    // frame flowed through the supervisor — which is also what arms the
+    // supervisor's token.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !client
+        .events
+        .iter()
+        .any(|event| event["type"] == "compaction_start")
+    {
+        client.drain_events(100);
+        assert!(
+            Instant::now() < deadline,
+            "the compaction_start broadcast never arrived"
+        );
+    }
 
     // The second client attaches while the worker still answers (the
     // loader-holding TUI in the real flow), then the worker freezes: a
@@ -833,7 +850,6 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
     assert_eq!(record["type"], "terminal_compaction");
     assert_eq!(record["activeSessionId"], session_id.as_str());
     assert_eq!(record["reason"], "threshold");
-    assert!(record.get("injectedAt").is_none(), "{record}");
 
     // Kill the frozen worker: the supervisor relaunches it, and the create
     // replay discloses the aborted run — the same durable
@@ -873,24 +889,21 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
         json!({"reason": "threshold", "outcome": "cancelled"})
     );
 
-    // The replay consumed the record: the journal's latest state for the
-    // session carries `injectedAt`, so a later relaunch never replays it
-    // again.
+    // The replay consumed the record: the journal drops it, so a later
+    // relaunch never replays it again.
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let journal = std::fs::read_to_string(&journal_path).expect("read journal");
-        let injected = journal
+        let consumed = !journal
             .lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .filter(|record| record["activeSessionId"] == session_id.as_str())
-            .next_back()
-            .is_some_and(|record| record.get("injectedAt").is_some_and(|at| !at.is_null()));
-        if injected {
+            .any(|record| record["activeSessionId"] == session_id.as_str());
+        if consumed {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "the journal record was never marked injected"
+            "the journal record was never consumed by the replay"
         );
         std::thread::sleep(Duration::from_millis(100));
     }

@@ -476,6 +476,29 @@ impl DaemonClient {
                 Err(DirectRequestError::Wait(error)) => return Err(error),
             }
         }
+        self.request_supervisor(command, timeout_ms).await
+    }
+
+    /// Send one command envelope to the supervisor, bypassing any direct
+    /// worker link, and require `success: true`. The supervisor-owned arms
+    /// (`abort_compaction`) must reach the supervisor even when a direct
+    /// link serves the session: the direct link IS the wedged worker in
+    /// the case the supervisor arm exists for.
+    pub async fn request_ok_via_supervisor(&self, command: DaemonCommand) -> Result<Value> {
+        let name = command_type_debug(&command);
+        let response = self
+            .request_supervisor(command, DEFAULT_REQUEST_TIMEOUT_MS)
+            .await?;
+        response_data_or_error(&name, response)
+    }
+
+    /// The supervisor leg of [`Self::request_with_timeout`]: one JSONL
+    /// envelope on the supervisor connection.
+    async fn request_supervisor(
+        &self,
+        command: DaemonCommand,
+        timeout_ms: u64,
+    ) -> Result<DaemonResponse> {
         let id = format!(
             "daemon_{}",
             self.next_request_id.fetch_add(1, Ordering::SeqCst) + 1
@@ -515,15 +538,7 @@ impl DaemonClient {
     pub async fn request_ok(&self, command: DaemonCommand) -> Result<Value> {
         let name = command_type_debug(&command);
         let response = self.request(command).await?;
-        if !response.success {
-            return Err(anyhow!(
-                "the daemon rejected the {name} request: {}",
-                response
-                    .error
-                    .unwrap_or_else(|| "unknown error".to_string())
-            ));
-        }
-        Ok(response.data.unwrap_or(Value::Null))
+        response_data_or_error(&name, response)
     }
 
     /// Whether a session-plane command for the direct link's session may
@@ -685,6 +700,20 @@ impl DaemonClient {
 enum DirectRequestError {
     NotSent,
     Wait(anyhow::Error),
+}
+
+/// Unwrap a settled response into its `data`, surfacing the daemon error
+/// string on failure.
+fn response_data_or_error(name: &str, response: DaemonResponse) -> Result<Value> {
+    if !response.success {
+        return Err(anyhow!(
+            "the daemon rejected the {name} request: {}",
+            response
+                .error
+                .unwrap_or_else(|| "unknown error".to_string())
+        ));
+    }
+    Ok(response.data.unwrap_or(Value::Null))
 }
 
 /// Wire `type` tag of a command, for error messages.

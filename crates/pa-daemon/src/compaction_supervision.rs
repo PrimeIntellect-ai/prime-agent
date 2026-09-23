@@ -48,6 +48,10 @@ pub(crate) const ABORT_FORWARD_TIMEOUT_MS: u64 = 5_000;
 #[derive(Debug, Default)]
 pub(crate) struct CompactionSupervision {
     state: Mutex<Option<InFlightCompaction>>,
+    /// The monotonic abort-epoch source: every armed run takes a fresh
+    /// epoch, so a watch task never matches a run it did not observe
+    /// (slot clears must not recycle epochs).
+    next_epoch: std::sync::atomic::AtomicU64,
 }
 
 /// One armed run: the wire identity of the session (as the
@@ -79,14 +83,50 @@ impl CompactionSupervision {
     /// slot from a run that never settled is replaced — the new run owns
     /// the newest abort, like the worker's own slot replacement.
     pub(crate) fn arm(&self, active_session_id: &str, reason: &str) {
+        let epoch = self
+            .next_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut state = self.state.lock().expect("compaction supervision lock");
         *state = Some(InFlightCompaction {
             active_session_id: active_session_id.to_string(),
             reason: reason.to_string(),
-            abort_epoch: state.as_ref().map_or(0, |run| run.abort_epoch + 1),
+            abort_epoch: epoch,
             abort_requested_at_epoch: None,
             terminal: false,
         });
+    }
+
+    /// Arm the fallback run of an abort that found no observed run and no
+    /// answering worker (the empty-slot wedge: a supervisor restart or a
+    /// dropped run while the client still holds a loader). A live run that
+    /// armed during the probe wait is never stomped — the abort lands on
+    /// it instead; a terminal leftover yields no fallback (that run was
+    /// already declared). The fallback's reason is `manual` — the abort is
+    /// user-initiated and a manual record replays no durable row — and the
+    /// abort is already requested. Returns the epoch to watch, or `None`.
+    pub(crate) fn arm_aborted_fallback(&self, active_session_id: &str) -> Option<u64> {
+        let mut state = self.state.lock().expect("compaction supervision lock");
+        match state.as_mut() {
+            Some(run) if run.terminal => None,
+            Some(run) => {
+                let epoch = run.abort_epoch;
+                run.abort_requested_at_epoch = Some(epoch);
+                Some(epoch)
+            }
+            None => {
+                let epoch = self
+                    .next_epoch
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                *state = Some(InFlightCompaction {
+                    active_session_id: active_session_id.to_string(),
+                    reason: "manual".to_string(),
+                    abort_epoch: epoch,
+                    abort_requested_at_epoch: Some(epoch),
+                    terminal: false,
+                });
+                Some(epoch)
+            }
+        }
     }
 
     /// A `compaction_end` frame flowed through: the run settled on its
@@ -98,16 +138,23 @@ impl CompactionSupervision {
 
     /// The worker connection ended: a run without an abort request dies
     /// with the worker and rides the normal recovery flow; a run with a
-    /// pending abort stays armed so its watch task can still declare the
-    /// terminal state.
-    pub(crate) fn observe_worker_gone(&self) {
+    /// pending abort is declared terminal immediately — the worker can
+    /// never land its own end now, and the declaration must be durable
+    /// before the relaunch replays the create.
+    pub(crate) fn observe_worker_gone(&self) -> Option<TerminalCompaction> {
         let mut state = self.state.lock().expect("compaction supervision lock");
-        let keep = state
-            .as_ref()
-            .is_some_and(|run| run.abort_requested_at_epoch.is_some());
-        if !keep {
-            *state = None;
-        }
+        let declared = match state.as_mut() {
+            Some(run) if run.abort_requested_at_epoch.is_some() && !run.terminal => {
+                run.terminal = true;
+                Some(TerminalCompaction {
+                    active_session_id: run.active_session_id.clone(),
+                    reason: run.reason.clone(),
+                })
+            }
+            _ => None,
+        };
+        *state = None;
+        declared
     }
 
     /// An `abort_compaction` landed at the supervisor: mark the armed run
@@ -155,8 +202,6 @@ pub(crate) struct TerminalCompactionRecord {
     pub(crate) session_file: Option<String>,
     pub(crate) reason: String,
     pub(crate) declared_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) injected_at: Option<String>,
 }
 
 /// The terminal-compaction journal: one append-only JSONL next to the
@@ -207,42 +252,41 @@ impl TerminalCompactionJournal {
         Ok(())
     }
 
+    /// Drop a session's record and rewrite the journal. The in-memory row
+    /// goes only after the rewrite landed, so a failed rewrite stays
+    /// retryable and memory never diverges from disk.
+    fn remove(&mut self, active_session_id: &str) -> Result<()> {
+        if !self.latest.contains_key(active_session_id) {
+            return Ok(());
+        }
+        let records = self
+            .latest
+            .values()
+            .filter(|record| record.active_session_id != active_session_id)
+            .map(serde_json::to_value)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        crate::journal::rewrite_records(&self.path, &records, crate::journal::Finalize::Bare)?;
+        self.latest.remove(active_session_id);
+        Ok(())
+    }
+
     /// The run settled after all (`compaction_end` landed): drop the
     /// record so a later replacement never replays a stale abort.
     pub(crate) fn clear(&mut self, active_session_id: &str) -> Result<()> {
-        if self.latest.remove(active_session_id).is_none() {
-            return Ok(());
-        }
-        let records: Vec<_> = self.latest.values().cloned().collect();
-        crate::journal::rewrite_records(
-            &self.path,
-            &records
-                .iter()
-                .map(serde_json::to_value)
-                .collect::<std::result::Result<Vec<_>, _>>()?,
-            crate::journal::Finalize::Bare,
-        )
+        self.remove(active_session_id)
     }
 
     /// The unconsumed declaration for a session, if one is pending: the
     /// replacement worker's create replay carries it so the rebuilt
     /// transcript discloses the abort.
     pub(crate) fn pending(&self, active_session_id: &str) -> Option<&TerminalCompactionRecord> {
-        self.latest
-            .get(active_session_id)
-            .filter(|record| record.injected_at.is_none())
+        self.latest.get(active_session_id)
     }
 
     /// The create replay carried the record: it is consumed and never
-    /// replays again.
-    pub(crate) fn mark_injected(&mut self, active_session_id: &str) -> Result<()> {
-        let Some(record) = self.latest.get_mut(active_session_id) else {
-            return Ok(());
-        };
-        record.injected_at = Some(crate::util::now_iso());
-        let record = record.clone();
-        crate::journal::append_record(&self.path, &serde_json::to_value(&record)?)?;
-        Ok(())
+    /// replays again (the journal stays bounded by live declarations).
+    pub(crate) fn consume(&mut self, active_session_id: &str) -> Result<()> {
+        self.remove(active_session_id)
     }
 }
 
@@ -260,7 +304,9 @@ impl crate::supervisor::Supervisor {
     /// wedged. The abort still forwards best-effort so a healthy worker
     /// aborts its own run and emits the real `compaction_end`; a run that
     /// stays armed past the grace window gets the supervisor's terminal
-    /// declaration instead.
+    /// declaration instead. An abort with no observed run probes the
+    /// forward: an answering worker is the TS silent no-op, an unanswering
+    /// one gets a fallback run so the client's loader still resolves.
     pub(crate) async fn handle_abort_compaction(
         self: &Arc<Self>,
         command: &pa_types::daemon::DaemonCommand,
@@ -284,28 +330,73 @@ impl crate::supervisor::Supervisor {
                 )
             }
         };
-        let resident = match self
-            .resolve_session_plane_target(&selector, command_id, type_name)
-            .await
-        {
+        // No restore wait here: a routed command may queue behind an
+        // in-flight restore pass for up to its full window, but the abort's
+        // contract is the immediate acknowledgment. An unknown or
+        // still-restoring session fails fast — the client's local recovery
+        // clears the loader on the failure.
+        let resident = match self.registry.resolve(&selector).await {
             Ok(resident) => resident,
-            Err(lines) => return (lines, false),
+            Err(_) => {
+                let message = self
+                    .restore_failure_for(&selector)
+                    .unwrap_or_else(|| format!("Unknown active session: {selector}"));
+                return (
+                    vec![crate::protocol::response_line(
+                        &crate::protocol::response_failure(
+                            Some(command_id),
+                            type_name,
+                            &message,
+                            None,
+                        ),
+                    )],
+                    false,
+                );
+            }
         };
         // The supervisor-visible token takes the abort even when the
         // worker cannot answer; the best-effort forward below is what a
         // healthy worker still sees. TS `abortCompaction` always replies
         // success — wedged or idle alike.
         let watch_epoch = resident.compaction.request_abort();
-        self.forward_abort_compaction_best_effort(&resident, command, client_id);
-        if let Some(epoch) = watch_epoch {
-            let supervisor = Arc::clone(self);
-            let resident = Arc::clone(&resident);
-            tokio::spawn(async move {
-                supervisor
-                    .watch_unresolved_compaction_abort(resident, epoch)
-                    .await;
-            });
-        }
+        let forward = self.forward_abort_compaction(&resident, command, client_id);
+        let supervisor = Arc::clone(self);
+        let resident = Arc::clone(&resident);
+        tokio::spawn(async move {
+            let epoch = match watch_epoch {
+                Some(epoch) => {
+                    // The armed path never gates on the forward: it runs
+                    // concurrently and the real `compaction_end` it may
+                    // produce clears the token through the reader hook.
+                    tokio::spawn(forward);
+                    epoch
+                }
+                None => {
+                    // No observed run. A worker that answers the forward is
+                    // the TS silent no-op; one that does not (wedged, or a
+                    // token lost to a supervisor restart) gets the fallback
+                    // run, so the abort still resolves the client's loader.
+                    // A real run that armed during the probe wait takes the
+                    // abort instead of being stomped.
+                    if matches!(forward.await, Some(Ok(_))) {
+                        return;
+                    }
+                    let active_session_id = resident
+                        .descriptor
+                        .lock()
+                        .await
+                        .root_active_session_id
+                        .clone();
+                    match resident.compaction.arm_aborted_fallback(&active_session_id) {
+                        Some(epoch) => epoch,
+                        None => return,
+                    }
+                }
+            };
+            supervisor
+                .watch_unresolved_compaction_abort(resident, epoch)
+                .await;
+        });
         (
             vec![crate::protocol::response_line(
                 &crate::protocol::response_success(Some(command_id), type_name, None),
@@ -314,74 +405,106 @@ impl crate::supervisor::Supervisor {
         )
     }
 
-    /// Forward the abort to the worker without waiting on it: a healthy
-    /// worker aborts its run and emits the real `compaction_end` (which
-    /// clears the token through the forwarded-events hook); a wedged
-    /// worker never answers, and the forward's bounded timeout retires
-    /// the pending request without touching the client's acknowledgment.
-    fn forward_abort_compaction_best_effort(
+    /// Forward the abort to the worker without gating the acknowledgment:
+    /// a healthy worker aborts its run and emits the real `compaction_end`
+    /// (which clears the token through the forwarded-events hook); a
+    /// wedged worker never answers and the bounded timeout retires the
+    /// pending request. The returned future settles with the forward's
+    /// outcome (`None` when the command never serialized).
+    fn forward_abort_compaction(
         self: &Arc<Self>,
         resident: &Arc<crate::registry::ResidentWorker>,
         command: &pa_types::daemon::DaemonCommand,
         client_id: &str,
-    ) {
-        let Ok((_worker_command, payload)) =
-            crate::supervisor::client_command_payload(command, client_id)
-        else {
-            return;
-        };
+    ) -> impl std::future::Future<Output = Option<Result<pa_types::daemon::DaemonResponse>>> + Send
+    {
+        let payload = crate::supervisor::client_command_payload(command, client_id)
+            .ok()
+            .map(|(_type_name, payload)| payload);
         let supervisor = Arc::clone(self);
         let resident = Arc::clone(resident);
-        tokio::spawn(async move {
-            let _ = supervisor
-                .route_command(
-                    &resident,
-                    "abort_compaction",
-                    payload,
-                    ABORT_FORWARD_TIMEOUT_MS,
-                )
-                .await;
-        });
+        async move {
+            let payload = payload?;
+            Some(
+                supervisor
+                    .route_command(
+                        &resident,
+                        "abort_compaction",
+                        payload,
+                        ABORT_FORWARD_TIMEOUT_MS,
+                    )
+                    .await
+                    .and_then(|response| {
+                        if response.success {
+                            Ok(response)
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "abort_compaction forward failed: {}",
+                                response.error.unwrap_or_default()
+                            ))
+                        }
+                    }),
+            )
+        }
     }
 
     /// The grace-window watch over an abort the token still holds armed:
     /// when the worker never lands its own `compaction_end`, declare the
-    /// run terminal — the durable record in the supervisor's journal plus
-    /// the synthetic `compaction_end` broadcast that clears every
-    /// attached loader. One declaration per abort epoch.
+    /// run terminal. One declaration per abort epoch.
     async fn watch_unresolved_compaction_abort(
         self: &Arc<Self>,
         resident: Arc<crate::registry::ResidentWorker>,
         epoch: u64,
     ) {
         tokio::time::sleep(abort_grace()).await;
-        let Some(terminal) = resident.compaction.declare_terminal_if_unresolved(epoch) else {
-            return;
-        };
+        self.declare_compaction_terminal(&resident, || {
+            resident.compaction.declare_terminal_if_unresolved(epoch)
+        })
+        .await;
+    }
+
+    /// Land one terminal declaration: the durable record in the
+    /// supervisor's journal (before the broadcast, so a supervisor crash
+    /// between the two still leaves the state on disk for the
+    /// replacement), the adoption count, and the synthetic aborted
+    /// `compaction_end` broadcast that clears every attached loader.
+    ///
+    /// `take` claims the token's declaration and runs UNDER the journal
+    /// lock, so a real `compaction_end` landing concurrently either
+    /// empties the token first (nothing is taken, nothing written) or
+    /// clears the just-written record right after — a stale record can
+    /// never survive a run that actually settled.
+    pub(crate) async fn declare_compaction_terminal(
+        self: &Arc<Self>,
+        resident: &Arc<crate::registry::ResidentWorker>,
+        take: impl FnOnce() -> Option<TerminalCompaction>,
+    ) {
         let session_file = resident.descriptor.lock().await.session_file.clone();
         let declared = crate::util::now_iso();
-        let record = TerminalCompactionRecord {
-            version: 1,
-            r#type: TERMINAL_COMPACTION_RECORD_TYPE.to_string(),
-            active_session_id: terminal.active_session_id.clone(),
-            session_file,
-            reason: terminal.reason.clone(),
-            declared_at: declared.clone(),
-            injected_at: None,
+        let terminal = {
+            let mut journal = self
+                .compaction_journal
+                .lock()
+                .expect("compaction journal lock");
+            let Some(terminal) = take() else {
+                return;
+            };
+            let record = TerminalCompactionRecord {
+                version: 1,
+                r#type: TERMINAL_COMPACTION_RECORD_TYPE.to_string(),
+                active_session_id: terminal.active_session_id.clone(),
+                session_file,
+                reason: terminal.reason.clone(),
+                declared_at: declared.clone(),
+            };
+            if let Err(error) = journal.declare(record) {
+                self.log_line(&format!(
+                    "terminal compaction journal declare failed for {}: {error:#}",
+                    terminal.active_session_id
+                ));
+            }
+            terminal
         };
-        // Durable before the broadcast, so a supervisor crash between the
-        // two still leaves the terminal state on disk for the replacement.
-        if let Err(error) = self
-            .compaction_journal
-            .lock()
-            .expect("compaction journal lock")
-            .declare(record)
-        {
-            self.log_line(&format!(
-                "terminal compaction journal declare failed for {}: {error:#}",
-                terminal.active_session_id
-            ));
-        }
         self.note_compaction_abort_declared();
         // The synthetic `compaction_end`: an abort carries `aborted: true`
         // with no error message, and the `errorSeverity` mirrors the end
@@ -480,27 +603,84 @@ mod tests {
     }
 
     /// A worker death without an abort takes the run with it (the normal
-    /// recovery flow owns the surface); an abort-requested run stays
-    /// armed for its watch task.
+    /// recovery flow owns the surface); an abort-requested run is
+    /// declared terminal on the spot, once — the late watch task finds
+    /// nothing left to declare.
     #[test]
-    fn worker_gone_keeps_only_aborted_runs() {
+    fn worker_gone_declares_only_aborted_runs() {
         let plain = supervision_with_run("manual");
-        plain.observe_worker_gone();
+        assert_eq!(plain.observe_worker_gone(), None);
         assert_eq!(plain.request_abort(), None, "the slot cleared");
 
         let aborted = supervision_with_run("manual");
         let epoch = aborted.request_abort().expect("armed run");
-        aborted.observe_worker_gone();
         assert_eq!(
             aborted
-                .declare_terminal_if_unresolved(epoch)
+                .observe_worker_gone()
                 .map(|declared| declared.active_session_id),
             Some("session-a".to_string())
         );
+        assert_eq!(
+            aborted.declare_terminal_if_unresolved(epoch),
+            None,
+            "the watch never redeclares a worker-gone declaration"
+        );
+    }
+
+    /// The fallback arm (an abort with no observed run and no answering
+    /// worker): armed, already abort-requested, reason `manual`.
+    #[test]
+    fn fallback_arm_is_abort_requested_manual() {
+        let supervision = CompactionSupervision::default();
+        let epoch = supervision
+            .arm_aborted_fallback("session-a")
+            .expect("empty slot arms");
+        assert_eq!(
+            supervision.declare_terminal_if_unresolved(epoch),
+            Some(TerminalCompaction {
+                active_session_id: "session-a".to_string(),
+                reason: "manual".to_string(),
+            })
+        );
+    }
+
+    /// The fallback never stomps a run that armed during the probe wait:
+    /// the abort lands on the live run (its epoch, its reason), and a
+    /// terminal leftover yields no fallback at all.
+    #[test]
+    fn fallback_arm_respects_a_live_run() {
+        let supervision = supervision_with_run("threshold");
+        let epoch = supervision
+            .arm_aborted_fallback("session-a")
+            .expect("live run takes the abort");
+        assert_eq!(
+            supervision
+                .declare_terminal_if_unresolved(epoch)
+                .map(|declared| declared.reason),
+            Some("threshold".to_string())
+        );
+        assert_eq!(
+            supervision.arm_aborted_fallback("session-a"),
+            None,
+            "a terminal leftover arms nothing"
+        );
+    }
+
+    /// Epochs never recycle across slot clears: a watch from a settled
+    /// run cannot match a later run that reused the slot.
+    #[test]
+    fn epochs_stay_monotonic_across_clears() {
+        let supervision = supervision_with_run("manual");
+        let first = supervision.request_abort().expect("armed run");
+        supervision.observe_end();
+        supervision.arm("session-a", "manual");
+        let second = supervision.request_abort().expect("re-armed run");
+        assert_ne!(first, second);
+        assert_eq!(supervision.declare_terminal_if_unresolved(first), None);
     }
 
     /// The journal round-trip: declare persists, pending reads it back
-    /// after a reopen (a supervisor restart), injection consumes it, and
+    /// after a reopen (a supervisor restart), consumption removes it, and
     /// a settled end clears it.
     #[test]
     fn journal_survives_restart_until_consumed_or_cleared() {
@@ -517,7 +697,6 @@ mod tests {
                     session_file: Some("/sessions/a.jsonl".to_string()),
                     reason: "threshold".to_string(),
                     declared_at: "2026-09-23T00:00:00Z".to_string(),
-                    injected_at: None,
                 })
                 .unwrap();
             let pending = journal.pending("session-a").expect("declared record");
@@ -527,8 +706,8 @@ mod tests {
         {
             let mut journal = TerminalCompactionJournal::open(&path).unwrap();
             assert!(journal.pending("session-a").is_some());
-            journal.mark_injected("session-a").unwrap();
-            assert_eq!(journal.pending("session-a"), None, "injected consumes it");
+            journal.consume("session-a").unwrap();
+            assert_eq!(journal.pending("session-a"), None, "consumed");
         }
         {
             let journal = TerminalCompactionJournal::open(&path).unwrap();
@@ -545,7 +724,6 @@ mod tests {
                     session_file: None,
                     reason: "manual".to_string(),
                     declared_at: "2026-09-23T00:00:01Z".to_string(),
-                    injected_at: None,
                 })
                 .unwrap();
             journal.clear("session-b").unwrap();

@@ -92,8 +92,12 @@ pub(crate) type ReloadNote = Result<(), String>;
 /// recovery): a failed abort request surfaces as the transcript note and
 /// clears the stuck compaction loader locally — when even the abort could
 /// not reach the daemon, the loader must not hang waiting for a
-/// `compaction_end` that will never come.
-pub(crate) type CompactionAbortNote = Result<(), String>;
+/// `compaction_end` that will never come. The session id keeps a stale
+/// outcome from touching another session after `/switch` or `/new`.
+pub(crate) struct CompactionAbortNote {
+    pub(crate) active_session_id: String,
+    pub(crate) outcome: Result<(), String>,
+}
 
 /// A landed heartbeat-catalog refresh for the `/heartbeats` view (TS
 /// `refreshHeartbeatCatalog`'s fetch result): the scoped, sorted rows, or
@@ -5533,28 +5537,39 @@ impl SessionUi {
         let active_session_id = self.active_session_id.clone();
         let abort_notes = self.compaction_abort_notes.clone();
         tokio::spawn(async move {
+            // Via the supervisor even when a direct link serves the
+            // session: the direct link IS the wedged worker in the case
+            // the supervisor's abort arm exists for.
             let result = client
-                .request_ok(DaemonCommand::AbortCompaction {
+                .request_ok_via_supervisor(DaemonCommand::AbortCompaction {
                     id: None,
-                    active_session_id,
+                    active_session_id: active_session_id.clone(),
                     rest: Default::default(),
                 })
                 .await;
             if let Err(error) = result {
-                let _ = abort_notes.send(Err(format!("{error:#}")));
+                let _ = abort_notes.send(CompactionAbortNote {
+                    active_session_id,
+                    outcome: Err(format!("{error:#}")),
+                });
             }
         });
     }
 
     /// Apply one backgrounded compaction-abort outcome: the failed note
     /// surfaces as a transcript row and the compaction loader clears —
-    /// the local recovery when the abort never reached the daemon.
+    /// the local recovery when the abort never reached the daemon. An
+    /// outcome from a session this UI no longer shows (`/switch`, `/new`
+    /// mid-request) touches nothing.
     pub(crate) fn apply_compaction_abort_outcome(
         &mut self,
-        outcome: CompactionAbortNote,
+        note: CompactionAbortNote,
         view: &mut AgentView,
     ) {
-        if let Err(error) = outcome {
+        if note.active_session_id != self.active_session_id {
+            return;
+        }
+        if let Err(error) = note.outcome {
             self.note(&format!("the compaction abort failed: {error:#}"), view);
             view.compaction = None;
         }

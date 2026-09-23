@@ -176,6 +176,16 @@ impl ResidentWorker {
         epoch
     }
 
+    /// Whether `epoch` is still the live connection's epoch: the abort
+    /// supervision's end-of-stream handling acts only on the current
+    /// connection's word.
+    pub(crate) fn connection_is_current(&self, epoch: u64) -> bool {
+        epoch
+            == self
+                .connection_epoch
+                .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// A connection's pumps ended (worker death or socket close). Stale
     /// epochs (a superseded connection ending late) never flip the state.
     pub(crate) fn note_connection_lost(&self, epoch: u64) {
