@@ -436,18 +436,23 @@ impl ActivityPanel {
         }
         lines.push(Vec::new());
         if let Some(row) = self.rows.get(self.selected) {
-            lines.extend(detail_lines(theme, width, row));
-            let tail_budget = self
-                .detail_budget()
-                .saturating_sub(row.detail.len().min(detail_cap(row.group)))
-                .max(1);
+            let budget = self.detail_budget();
             let tail = self.bash_tail.as_ref().filter(|(id, _)| {
                 self.rows
                     .get(self.selected)
                     .is_some_and(|row| row.group == ActivityPanelGroup::Bash && &row.id == id)
             });
+            let tail_rows = tail
+                .map(|(_, tail)| 1 + tail.len().min(MAX_TAIL_LINES))
+                .unwrap_or(0);
+            let detail_rows = budget
+                .saturating_sub(tail_rows)
+                .max(1)
+                .min(detail_cap(row.group));
+            lines.extend(detail_lines(theme, width, row, detail_rows));
             if let Some((_, tail)) = tail {
                 lines.push(text(ThemeColor::Muted, "Output tail".to_string()));
+                let tail_budget = budget.saturating_sub(detail_rows).max(1);
                 for output in tail.iter().take(tail_budget) {
                     lines.push(text(ThemeColor::Muted, output.clone()));
                 }
@@ -478,7 +483,13 @@ impl ActivityPanel {
     }
 
     fn detail_budget(&self) -> usize {
-        self.rows
+        // The full detail area (pairs plus a fetched bash tail) shrinks
+        // on short viewports so the pane never clips: the frame rows and
+        // at least one list row always render first. A subagent sheet's
+        // full set is wider than the other groups' (the agents-view
+        // column set).
+        let full = self
+            .rows
             .get(self.selected)
             .map(|row| detail_cap(row.group))
             .unwrap_or(MAX_DETAIL_LINES)
@@ -487,7 +498,9 @@ impl ActivityPanel {
                 .as_ref()
                 // The rendered heading plus the bounded tail lines.
                 .map(|(_, tail)| 1 + tail.len().min(MAX_TAIL_LINES))
-                .unwrap_or(0)
+                .unwrap_or(0);
+        full.min(self.viewport_rows.saturating_sub(RESERVED_ROWS + 2))
+            .max(1)
     }
 }
 
@@ -597,11 +610,11 @@ fn group_header(
 /// The selected row's detail block: `(label, value)` pairs as an aligned
 /// two-column block — the dim label column against muted values (the
 /// `/model` picker's price block idiom), instead of a metadata run-on.
-fn detail_lines(theme: &Theme, width: usize, row: &ActivityPanelRow) -> Vec<Line> {
+fn detail_lines(theme: &Theme, width: usize, row: &ActivityPanelRow, cap: usize) -> Vec<Line> {
     let details = row
         .detail
         .iter()
-        .take(detail_cap(row.group))
+        .take(cap.min(detail_cap(row.group)))
         .map(|(label, value)| (label, clean_line(value)))
         .collect::<Vec<_>>();
     if details.is_empty() {
@@ -1343,6 +1356,26 @@ mod tests {
                 "every row fits the width"
             );
         }
+    }
+
+    /// A short viewport shrinks the detail block so the pane never
+    /// exceeds the terminal budget, and the bottom hint survives.
+    #[test]
+    fn short_viewports_shrink_the_detail_block() {
+        let (roster, goal, heartbeats, bash) = full_sources();
+        let identity = identity();
+        let src = sources(&identity, &roster, &goal, &heartbeats, &bash);
+        let panel = ActivityPanel::new(&src, None, 10);
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let kb = KeybindingsManager::new();
+        let lines = panel.render(&theme, 80, &kb);
+        assert!(lines.len() <= 10, "viewport 10 fits: {}", lines.len());
+        let rendered = lines
+            .iter()
+            .flat_map(|line| line.iter())
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert!(rendered.contains("Esc close"));
     }
 
     #[test]

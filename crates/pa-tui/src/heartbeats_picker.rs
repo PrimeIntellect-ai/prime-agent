@@ -20,10 +20,9 @@ use crate::{Line, Span};
 /// `PREFERRED_VISIBLE_HEARTBEATS`).
 const PREFERRED_VISIBLE: usize = 8;
 
-/// Rows the list reserves outside its items (TS
-/// `HEARTBEAT_LIST_RESERVED_ROWS` adapted to the inline geometry: rule,
-/// title line, blank, blank, the detail block, blank, hint, rule).
-const LIST_RESERVED_ROWS: usize = 7 + MAX_DETAIL_ROWS;
+/// Rows the list reserves outside its items and the detail block (the
+/// inline geometry: rule, title line, blank, blank, blank, hint, rule).
+const LIST_FRAME_ROWS: usize = 7;
 
 /// The selection's detail-block row budget.
 const MAX_DETAIL_ROWS: usize = 6;
@@ -620,9 +619,20 @@ impl HeartbeatsPicker {
         }
     }
 
+    /// The selection's detail-block row budget, shrinking on short
+    /// viewports so the pane never clips: the frame rows, the scroll
+    /// indicator, and at least one list row always render first (frame
+    /// 7 + scroll 1 + list 1 = 9 ride outside the budget).
+    fn detail_cap(&self) -> usize {
+        MAX_DETAIL_ROWS
+            .min(self.viewport_rows.saturating_sub(9))
+            .max(1)
+    }
+
     /// The list's visible-row budget (TS `getListLayout`, inline shape).
     fn visible_items(&self) -> usize {
-        let reserved = LIST_RESERVED_ROWS
+        let reserved = LIST_FRAME_ROWS
+            + self.detail_cap()
             + if self.error.is_some() || self.fetch_error.is_some() {
                 2
             } else {
@@ -686,12 +696,13 @@ impl HeartbeatsPicker {
                 .filter(|_| self.selected_heartbeat_id.is_some())
             {
                 lines.push(Vec::new());
+                let cap = self.detail_cap();
                 lines.extend(detail_block_lines(
                     theme,
                     width,
                     &detail_pairs(entry)
                         .into_iter()
-                        .take(MAX_DETAIL_ROWS)
+                        .take(cap)
                         .collect::<Vec<_>>(),
                 ));
             }
@@ -750,7 +761,22 @@ impl HeartbeatsPicker {
             .unwrap_or_else(|| default_heartbeat_name(entry).to_string());
         let prompt = single_line(&entry.job.prompt);
         let mut lines = pane_header_lines(theme, width, &name, &[], Some(&prompt));
-        lines.extend(detail_block_lines(theme, width, &detail_pairs(entry)));
+        // The action pane has no list window to absorb a shortage: the
+        // detail block shrinks on short viewports so the pane never
+        // clips (its frame rows, the two action rows, and the hint
+        // always render first; the error block adds two rows).
+        let error_rows = if self.error.is_some() { 2 } else { 0 };
+        let cap = MAX_DETAIL_ROWS
+            .min(self.viewport_rows.saturating_sub(10 + error_rows))
+            .max(1);
+        lines.extend(detail_block_lines(
+            theme,
+            width,
+            &detail_pairs(entry)
+                .into_iter()
+                .take(cap)
+                .collect::<Vec<_>>(),
+        ));
         if let Some(error) = &self.error {
             lines.push(Vec::new());
             lines.push(error_line(theme, width, error));
@@ -1279,6 +1305,42 @@ mod tests {
         assert!(text
             .iter()
             .any(|row| row.contains("Heartbeat refresh failed: daemon down")));
+    }
+
+    /// A short viewport shrinks the detail block so the pane never
+    /// exceeds the terminal budget, and the hint line survives the
+    /// squeeze (it is never the clipped row).
+    #[test]
+    fn short_viewports_never_clip_the_list_pane() {
+        for viewport_rows in [10usize, 12, 14] {
+            let picker = HeartbeatsPicker::new(entries(), None, None, viewport_rows);
+            let frame = picker.render(&theme(), 70, &kb());
+            assert!(
+                frame.len() <= viewport_rows,
+                "viewport {viewport_rows} fits: pane is {} rows",
+                frame.len()
+            );
+            let text: Vec<String> = frame
+                .iter()
+                .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+                .collect();
+            assert!(
+                text.iter().any(|row| row.contains("Esc close")),
+                "the hint survives a {viewport_rows}-row viewport"
+            );
+            assert!(text.iter().any(|row| row.contains("tick user-1")));
+        }
+        // The action pane fits too: the fixed rows (name, prompt, two
+        // action rows, hint) always render, the detail block gives way.
+        let mut picker = HeartbeatsPicker::new(entries(), None, None, 12);
+        picker.handle_key("enter", &kb());
+        let frame = picker.render(&theme(), 70, &kb());
+        assert!(frame.len() <= 12, "action pane fits: {}", frame.len());
+        let text: Vec<String> = frame
+            .iter()
+            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+            .collect();
+        assert!(text.iter().any(|row| row.contains("Stop heartbeat")));
     }
 
     #[test]

@@ -72,10 +72,6 @@ pub struct ChromeState {
     /// while active, `Goal paused (0s)`, ...); `None` for idle/complete/error
     /// goals. Joins the tray context label first, before the model.
     pub goal_label: Option<String>,
-    /// The tray's heartbeat label (TS `getTrayHeartbeatLabel`) is not
-    /// ported: the activity dock under the tray already carries the
-    /// heartbeat counts, so the tray never repeats them beside the model.
-
     /// Tray override label (TS `getTrayOverrideLabel`): while the Ctrl+C
     /// exit hint is armed, it replaces the tray's location label.
     pub tray_override: Option<String>,
@@ -112,6 +108,10 @@ pub struct ActivityDock {
     /// kernel registry only): finished runs never inflate the indicator
     /// — they stay as dimmed rows inside the panel.
     pub bash_running: usize,
+    /// Every catalogued kernel-bash run, finished ones included: this
+    /// keeps the dock (and so the panel's dimmed history) reachable when
+    /// no run is live; the rendered indicator count stays `bash_running`.
+    pub bash_total: usize,
     /// The active goal's token progress `(used, budget)`; `None` unless
     /// the goal is actively being pursued (a completed or idle goal
     /// carries no dock segment).
@@ -124,7 +124,7 @@ impl ActivityDock {
     pub fn visible(&self) -> bool {
         self.subagents > 0
             || self.heartbeats > 0
-            || self.bash_running > 0
+            || self.bash_total > 0
             || self.goal_tokens.is_some()
     }
 }
@@ -581,6 +581,7 @@ mod tests {
             heartbeats: 3,
             heartbeats_paused: 1,
             bash_running: 1,
+            bash_total: 2,
             goal_tokens: Some((18_000, Some(40_000))),
             ..ActivityDock::default()
         };
@@ -605,6 +606,7 @@ mod tests {
         let dock = ActivityDock {
             subagents: 2,
             heartbeats: 1,
+            bash_total: 3,
             ..ActivityDock::default()
         };
         let frame = render_activity_dock(&dock, &theme, 100).unwrap();
@@ -616,6 +618,19 @@ mod tests {
             text,
             " ◆ 2 subagents · 0 running  ·  ◷ 1 heartbeat  ·  ▸ 0 bash"
         );
+        // Finished-only bash rows keep the dock mounted (the panel's
+        // dimmed history stays reachable) while the indicator reads
+        // zero live runs.
+        let dock = ActivityDock {
+            bash_total: 2,
+            ..ActivityDock::default()
+        };
+        let frame = render_activity_dock(&dock, &theme, 100).unwrap();
+        let text = frame[1]
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert!(text.contains("▸ 0 bash"));
         assert!(render_activity_dock(&ActivityDock::default(), &theme, 100).is_none());
     }
 

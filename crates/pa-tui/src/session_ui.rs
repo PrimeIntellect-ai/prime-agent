@@ -952,8 +952,10 @@ impl SessionUi {
         // right now (operator scoping): finished runs stay as dimmed rows
         // inside the panel, never in the indicator. The feed itself is the
         // current session's kernel registry — nested subagents' kernels
-        // are separate and never appear here.
-        let bash_running = crate::activity_panel::parse_bash_activities(&self.bash_activities)
+        // are separate and never appear here. The total keeps the dock
+        // (and the panel's dimmed history) mounted when no run is live.
+        let bash_rows = crate::activity_panel::parse_bash_activities(&self.bash_activities);
+        let bash_running = bash_rows
             .iter()
             .filter(|activity| activity.running())
             .count();
@@ -961,12 +963,9 @@ impl SessionUi {
             subagents: counts.total,
             subagents_running: counts.running,
             heartbeats: self.heartbeat_catalog.len(),
-            heartbeats_paused: self
-                .heartbeat_catalog
-                .iter()
-                .filter(|entry| entry.job.status == "paused")
-                .count(),
+            heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
             bash_running,
+            bash_total: bash_rows.len(),
             goal_tokens,
             selected: self.activity_group,
             focused: self.subagents_focused,
@@ -1004,6 +1003,10 @@ impl SessionUi {
                 self.return_to_agents_view && self.subagent_counts.total > 0
             }
             crate::chrome::ActivityGroup::Heartbeats => !self.heartbeat_catalog.is_empty(),
+            // Any catalogued bash row keeps the dock's bash group
+            // reachable — the dock stays mounted (bash_total) whenever a
+            // row exists, so a selected group never binds to a hidden
+            // surface, and the panel lists the dimmed finished rows.
             crate::chrome::ActivityGroup::Bash => {
                 !crate::activity_panel::parse_bash_activities(&self.bash_activities).is_empty()
             }
@@ -6911,13 +6914,14 @@ impl SessionUi {
                 self.dirty = true;
             }
             // A heartbeat catalog change anywhere in the daemon (TS
-            // `broadcastGlobal`): an open `/heartbeats` view refreshes in
-            // the background through the update channel (TS
-            // `refreshHeartbeatCatalog`).
+            // `broadcastGlobal`): the scoped catalog refreshes in the
+            // background through the update channel (TS
+            // `refreshHeartbeatCatalog`) — an open `/heartbeats` view
+            // re-renders from the landed update, and the activity dock's
+            // counts follow the catalog even with the view closed
+            // (another client's pause/resume reaches the dock at once).
             DaemonClientEvent::HeartbeatsChanged => {
-                if view.heartbeats_picker.is_some() {
-                    self.spawn_heartbeat_refresh();
-                }
+                self.spawn_heartbeat_refresh();
             }
             // A worker replacement superseded the id this client holds:
             // the interactive loop re-attaches to the session's current id
@@ -7947,6 +7951,16 @@ pub(crate) fn resume_hint_from_stats(stats: &Value) -> Option<String> {
 /// The picker's viewport row budget (TS `showConfigurationMenu` passes
 /// `min(20, rows - 3)` and `ConfigurationMenuComponent` subtracts one more
 /// row for its hint).
+/// The dock's paused-heartbeat count over the scoped catalog: the count
+/// is label-independent (the dogfood repro: unlabeled agent heartbeats
+/// fire on schedule but a label-keyed count showed none of them).
+fn paused_heartbeat_count(heartbeats: &[HeartbeatEntry]) -> usize {
+    heartbeats
+        .iter()
+        .filter(|entry| entry.job.status == "paused")
+        .count()
+}
+
 fn picker_viewport_rows(terminal_rows: u16) -> usize {
     let terminal_rows = terminal_rows as usize;
     let menu_rows = 20.min(terminal_rows.saturating_sub(3).max(1));
@@ -8052,6 +8066,7 @@ mod bash_bang_tests {
 
 #[cfg(test)]
 mod activity_dock_counts_tests {
+    use super::paused_heartbeat_count;
     use crate::heartbeats_picker::{parse_heartbeat_job, HeartbeatEntry};
     use serde_json::json;
 
@@ -8074,10 +8089,9 @@ mod activity_dock_counts_tests {
         })
     }
 
-    /// The dock counts every in-scope heartbeat regardless of labels (the
-    /// dogfood repro: unlabeled agent heartbeats fire on schedule but a
-    /// label-keyed count showed none of them), and the paused count
-    /// feeds the dock's `M paused` suffix.
+    /// The dock's paused count is the helper the dock reads (not a local
+    /// recount) and stays label-independent: unlabeled agent heartbeats
+    /// (the dogfood repro) count exactly like labeled ones.
     #[test]
     fn dock_counts_heartbeats_and_paused() {
         let labeled = entry(job("labeled", "active"));
@@ -8086,14 +8100,11 @@ mod activity_dock_counts_tests {
         let unlabeled = entry(unlabeled);
         let paused = entry(job("b", "paused"));
         let catalog = vec![labeled, unlabeled, paused];
-        assert_eq!(
-            catalog
-                .iter()
-                .filter(|entry| entry.job.status == "paused")
-                .count(),
-            1
-        );
         assert_eq!(catalog.len(), 3);
+        assert_eq!(paused_heartbeat_count(&catalog), 1);
+        // An all-active catalog renders no paused suffix.
+        let active = vec![entry(job("a", "active")), entry(job("c", "active"))];
+        assert_eq!(paused_heartbeat_count(&active), 0);
     }
 
     /// Operator scoping: the session wrapper passes no child session ids,
