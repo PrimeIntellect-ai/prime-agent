@@ -4991,10 +4991,11 @@ impl SessionUi {
     }
 
     /// One key press while the `/mcp` connections view is open: Esc or
-    /// Ctrl+C close it; Enter resolves to the selected connection's login
-    /// (dispatched as a client command after the key returns, so the auth
-    /// flow keeps the terminal-suspension bracket); everything else
-    /// navigates or edits the search field.
+    /// Ctrl+C close it; Enter (or the paste panel) resolves the selected
+    /// connection by parking `pending_mcp_auth`, which the input loop
+    /// runs once the key handler returns (so the auth flow keeps the
+    /// terminal-suspension bracket); everything else navigates or edits
+    /// the search field.
     async fn handle_mcp_view_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
@@ -7011,6 +7012,10 @@ impl SessionUi {
             && !view.editor.is_showing_autocomplete()
         {
             if let Some((command, partial)) = view.editor.picker_argument_context() {
+                // The menu takes the Tab: a completion request parked by
+                // this same press (before the idle tick) must not
+                // materialize a dropdown over the menu on the next tick.
+                view.editor.cancel_autocomplete();
                 match command.as_str() {
                     "model" => {
                         self.open_model_picker(view, partial.trim()).await?;
