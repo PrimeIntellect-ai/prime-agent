@@ -278,7 +278,7 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
         Ok(())
     }
     fn update_channel(&self) -> Option<String> {
-        *self.update_channel.lock().expect("channel lock")
+        self.update_channel.lock().expect("channel lock").clone()
     }
     fn set_update_channel(&self, channel: &str) -> Result<()> {
         *self.update_channel.lock().expect("channel lock") = Some(channel.to_string());
