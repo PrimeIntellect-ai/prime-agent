@@ -1347,8 +1347,9 @@ mod tests {
 
     #[test]
     fn multibyte_ids_never_panic_in_the_label_fallback() {
-        // A multibyte roster id never licenses byte slicing: the TS title
-        // fallback keeps the whole id and the row renderer clips it.
+        // A multibyte roster id never licenses byte slicing: the TS
+        // title chain (name, first message, cwd, then the session ids)
+        // keeps the whole id and the row renderer clips it safely.
         let roster = vec![json!({
             "agentId": "a1",
             "status": "running",
@@ -1356,7 +1357,8 @@ mod tests {
                 "runtimeKind": "subagent",
                 "lifecycle": "live",
                 "parentActiveSessionId": "root",
-                "activeSessionId": "\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}"
+                "activeSessionId": "\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}-live",
+                "sessionId": "\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}"
             }
         })];
         let goal = goal(false);

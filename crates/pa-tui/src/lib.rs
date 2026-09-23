@@ -70,7 +70,7 @@ pub mod session_ui;
 pub mod settings_menu;
 pub mod side_question;
 pub mod snapshot;
-pub mod subagent_viewer;
+mod subagent_viewer;
 pub mod subagents;
 mod suspend;
 mod terminal_image;

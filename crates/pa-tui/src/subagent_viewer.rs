@@ -20,7 +20,7 @@
 //!   cell (the Rust roster has no `progressNote` yet, so the recap is
 //!   the whole note);
 //! - `modes/interactive/agent-activity.ts` `formatTokenCount` — compact
-//!   token counts.
+//!   token counts (via the shared `chrome::format_token_count` port).
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -39,10 +39,10 @@ use pa_types::daemon::agent_roster::AgentRosterStatus;
 /// reads/writes, so the viewer's input/output pair is the whole token
 /// story the roster publishes).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct SubagentUsage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cost: f64,
+struct SubagentUsage {
+    input_tokens: u64,
+    output_tokens: u64,
+    cost: f64,
 }
 
 impl SubagentUsage {
@@ -76,32 +76,12 @@ pub struct SubagentViewerRow {
     pub status: &'static str,
     /// Elapsed time, TS `formatSessionDuration`.
     pub age: String,
-    /// Relative time since the summary's `lastActivityAt`.
-    pub last_activity: String,
     /// Own cost plus every descendant's (the #2526 rollup scope),
     /// rendered like the agents view's Cost column: `$X.XX`.
     pub cost: String,
     /// The detail sheet's labeled lines (the #2526 column set for the
     /// fields the Rust roster publishes).
     pub detail: Vec<(&'static str, String)>,
-}
-
-/// Compact token count (TS `agent-activity.ts` `formatTokenCount`):
-/// `999`, `1.5k`, `12k`, `1.5M`, `15M`.
-pub fn format_token_count(count: u64) -> String {
-    if count < 1_000 {
-        return count.to_string();
-    }
-    if count < 10_000 {
-        return format!("{:.1}k", count as f64 / 1_000.0);
-    }
-    if count < 1_000_000 {
-        return format!("{}k", (count as f64 / 1_000.0).round() as u64);
-    }
-    if count < 10_000_000 {
-        return format!("{:.1}M", count as f64 / 1_000_000.0);
-    }
-    format!("{}M", (count as f64 / 1_000_000.0).round() as u64)
 }
 
 fn get_str<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
@@ -294,8 +274,8 @@ fn viewer_row(node: &Node, depth: usize) -> SubagentViewerRow {
             "tokens",
             format!(
                 "{} in / {} out",
-                format_token_count(node.recursive_usage.input_tokens),
-                format_token_count(node.recursive_usage.output_tokens)
+                crate::chrome::format_token_count(node.recursive_usage.input_tokens),
+                crate::chrome::format_token_count(node.recursive_usage.output_tokens)
             ),
         ));
     }
@@ -314,7 +294,6 @@ fn viewer_row(node: &Node, depth: usize) -> SubagentViewerRow {
         label: node.title.clone(),
         status,
         age: node.age.clone(),
-        last_activity: node.last_activity.clone(),
         cost,
         detail,
     }
@@ -476,17 +455,6 @@ mod tests {
             "parentSessionId": parent_id,
             "parentSessionPath": format!("/sessions/{parent_id}.jsonl"),
         })
-    }
-
-    #[test]
-    fn token_counts_match_the_ts_table() {
-        assert_eq!(format_token_count(0), "0");
-        assert_eq!(format_token_count(999), "999");
-        assert_eq!(format_token_count(1_500), "1.5k");
-        assert_eq!(format_token_count(2_000), "2.0k");
-        assert_eq!(format_token_count(12_345), "12k");
-        assert_eq!(format_token_count(1_500_000), "1.5M");
-        assert_eq!(format_token_count(15_000_000), "15M");
     }
 
     #[test]
