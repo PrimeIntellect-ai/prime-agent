@@ -13,12 +13,19 @@ sequences typed into the editor" defect, TS `packages/tui/src/stdin-buffer.ts`):
     next chunk completes the sequence (within its 10 ms window) or proves
     it stood alone. The Rust side ports that discipline as the reader's
     `SequenceGuard` (crates/pa-tui/src/sequence_guard.rs);
-  - the injection reproduces the boundary deterministically: the opening
-    `ESC` is written alone, the continuation ~2 ms later (inside the hold
-    window, across two OS reads). Every report of the drag corpus
-    (press, drags, a three-way split, wheel, release) must reach the
-    editor as NOTHING — no report body may render on either binary, and
-    no turn may start on its own;
+  - the injection reproduces the boundary: the opening `ESC` is written
+    alone, the continuation ~4 ms later (inside the hold window, across
+    two OS reads). The split is a timing bet, so a full run is gated on
+    a positive control (`--defect-control PRE_FIX_BINARY`): the same
+    split discipline against a pre-fix build MUST leak — a committed
+    lone `ESC` is the only path that types a report body, so the
+    control's leak is per-run proof the read boundary happened (no leak
+    is a setup failure, never a vacuous pass) — and every recorded gap
+    must stay under 8 ms (a stretched gap drifts toward the flush
+    contract). Every report of the drag corpus (press, drags, a
+    three-way split, wheel, release) must reach the editor as NOTHING —
+    no report body may render on either binary, and no turn may start
+    on its own;
   - the reader must stay healthy after the drag: typing `hi` + Enter
     submits exactly `hi` (the submission is the leak detector — anything
     the drag had typed would ride along) and runs the scripted turn once;
@@ -96,9 +103,19 @@ REPORT_BODIES = [
 
 # The gap between the `ESC` write and its continuation: well inside the
 # 10 ms hold (TS StdinBuffer.timeout == SequenceGuard::HOLD) so the
-# sequence reassembles, but across two OS reads so the boundary the lane
-# fixes actually happens.
-SPLIT_GAP_S = 0.0012
+# sequence reassembles, but far enough apart that the reader thread
+# (blocked in `read`, woken by the first byte) has scheduled and consumed
+# it in its own OS read. The gap alone is still a timing bet — the
+# per-run proof that the boundary really happened is the defect control
+# (`--defect-control`, below): a pre-fix build MUST leak under the same
+# split discipline, because a committed lone `ESC` is the only way its
+# parser types a report body.
+SPLIT_GAP_S = 0.004
+# A gap stretched toward the hold flips the scenario into the
+# late-continuation contract (both products flush the `ESC` and type the
+# body), so a run whose worst gap passes this line is a setup failure,
+# not a divergence.
+SPLIT_GAP_LIMIT_S = 0.008
 
 
 class PtyCapture:
@@ -190,13 +207,18 @@ class PtyCapture:
         2026-09-22: a 2 ms sleep exceeded the 10 ms hold, both products
         then correctly flush the `ESC` and type the body — the
         late-continuation contract, not a divergence), which would turn
-        the in-hold reassembly case into the flush case.
+        the in-hold reassembly case into the flush case. The gap is a
+        timing bet, so the run is only trusted when the defect control
+        confirms it per-run (a pre-fix build must leak under this same
+        discipline — the committed lone ESC is the only path that types
+        a report body) and when every recorded gap stayed under
+        SPLIT_GAP_LIMIT_S; anything else fails the run as a setup error.
         """
         for index, chunk in enumerate(chunks):
             if index:
                 start = time.perf_counter()
                 target = start + gap
-                time.sleep(gap * 0.5)
+                time.sleep(gap * 0.25)
                 while time.perf_counter() < target:
                     pass
                 self.gaps.append(time.perf_counter() - start)
@@ -379,6 +401,12 @@ def main():
         default=None,
         help="run the drag scenario against a pre-fix Rust build and print the leak signals it emits (exit 0)",
     )
+    parser.add_argument(
+        "--defect-control",
+        metavar="PRE_FIX_BINARY",
+        default=None,
+        help="gate the run on a positive control: the drag scenario against this pre-fix Rust build MUST leak (a committed lone ESC is the only path that types a report body), proving this run's split writes really landed the read boundary; no leak fails the run as a setup error instead of a false pass",
+    )
     args = parser.parse_args()
 
     import tempfile
@@ -412,6 +440,31 @@ def main():
         batterylib.reap_daemons(needles=[base], cwd_roots=[base])
         return 0
 
+    # The positive control: the split writes are a timing bet, so the
+    # run is only trustworthy when a pre-fix build leaks under the very
+    # same discipline in this same run - a committed lone `ESC` is the
+    # only path that types a report body, so a leak is direct evidence
+    # the read boundary happened (no leak: report a setup failure, never
+    # a vacuous pass).
+    if args.defect_control:
+        script_path = os.path.join(base, "faux-control.json")
+        with open(script_path, "w") as f:
+            json.dump(FAUX_SCRIPT, f, indent=2)
+        command, env = build_command("rust", sandboxes["rust"], script_path)
+        command[0] = args.defect_control
+        print(f"defect control: {args.defect_control}")
+        stages, _ = run_drag_scenario(command, env, shared_cwd)
+        hits = leak_scan(stages)
+        if not hits:
+            print(
+                "SETUP FAILURE: the pre-fix control build did NOT leak under this "
+                "run's split writes - the committed-ESC read boundary did not "
+                "happen, so a parity pass would say nothing. Rerun the verifier."
+            )
+            batterylib.reap_daemons(needles=[base], cwd_roots=[base])
+            return 1
+        print(f"  control leak confirmed ({len(hits)} signals): the read boundary happened in this run")
+
     failures = {}
     binaries = ("ts", "rust") if not args.binary else (args.binary,)
     for binary in binaries:
@@ -438,6 +491,13 @@ def main():
             stages, gaps = runner(command, env, shared_cwd)
             worst = max(gaps, default=0.0)
             print(f"  ({binary}/{scenario}: {len(gaps)} split gaps, worst {worst*1000:.2f} ms vs 10 ms hold)")
+            if worst > SPLIT_GAP_LIMIT_S:
+                failures[binary].append(
+                    f"setup: worst split gap {worst*1000:.2f} ms passed "
+                    f"{SPLIT_GAP_LIMIT_S*1000:.0f} ms (drifting toward the 10 ms "
+                    "hold - this scenario tested the flush contract, not the "
+                    "in-hold reassembly)"
+                )
             failures[binary] += check_stages(
                 f"{binary}/{scenario}", stages, scenario, binary, out_dir,
                 "" if scenario == "drag" else "-esc",

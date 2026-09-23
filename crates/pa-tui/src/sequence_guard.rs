@@ -436,16 +436,15 @@ fn classify_key(bytes: &[u8], first: Option<&Event>) -> Option<Event> {
         // one character). `first` is the event that carried it. The
         // sequence openers (`[`, `]`, `P`, `_`, `O`, a second `ESC`) are
         // excluded here so they fall to their own arms below.
-        [0x1b, byte, ..] if !matches!(byte, b'[' | b']' | b'P' | b'_' | b'O' | 0x1b) => {
-            match first {
-                Some(Event::Key(key)) => {
-                    let mut key = *key;
-                    key.modifiers |= KeyModifiers::ALT;
-                    Some(Event::Key(key))
-                }
-                _ => None,
+        [0x1b, byte, ..] if !matches!(byte, b'[' | b']' | b'P' | b'_' | b'O' | 0x1b) => match first
+        {
+            Some(Event::Key(key)) => {
+                let mut key = *key;
+                key.modifiers |= KeyModifiers::ALT;
+                Some(Event::Key(key))
             }
-        }
+            _ => None,
+        },
         [0x1b, b'O', fin] => ss3_key(*fin),
         _ if bytes.starts_with(b"\x1b[") => csi_key(&bytes[2..]),
         _ => None,
@@ -637,7 +636,11 @@ fn csi_u_key(body: &[u8]) -> Option<Event> {
                 .map_or(KeyEventKind::Press, parse_kind);
             (parse_modifiers(mask), kind, lock_state(mask))
         }
-        None => (KeyModifiers::NONE, KeyEventKind::Press, KeyEventState::empty()),
+        None => (
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+            KeyEventState::empty(),
+        ),
     };
     let (mut code, state_from_keycode) = match codepoint {
         // The keypad block of the kitty functional range (crossterm
@@ -688,7 +691,9 @@ fn csi_u_key(body: &[u8]) -> Option<Event> {
         // Raw mode is always on under this reader, so LF is not Enter
         // (crossterm's own raw-mode branch).
         0x0a => (KeyCode::Char('\n'), KeyEventState::empty()),
-        0x09 if modifiers.contains(KeyModifiers::SHIFT) => (KeyCode::BackTab, KeyEventState::empty()),
+        0x09 if modifiers.contains(KeyModifiers::SHIFT) => {
+            (KeyCode::BackTab, KeyEventState::empty())
+        }
         0x09 => (KeyCode::Tab, KeyEventState::empty()),
         0x7f => (KeyCode::Backspace, KeyEventState::empty()),
         // The rest of the kitty functional range: no surface this reader
@@ -868,10 +873,7 @@ mod tests {
                         } else {
                             KeyModifiers::NONE
                         };
-                        ModelParse::Event(Event::Key(KeyEvent::new(
-                            KeyCode::Char(ch),
-                            modifiers,
-                        )))
+                        ModelParse::Event(Event::Key(KeyEvent::new(KeyCode::Char(ch), modifiers)))
                     }
                     Err(error) if error.error_len().is_none() => ModelParse::More,
                     Err(_) => ModelParse::Invalid,
@@ -1033,9 +1035,9 @@ mod tests {
                             // block decodes to its characters, Enter, and
                             // navigation, with the KEYPAD state.
                             let code = match codepoint {
-                                c @ 57399..=57408 => {
-                                    KeyCode::Char(char::from_u32(c - 57399 + u32::from(b'0')).expect("digits"))
-                                }
+                                c @ 57399..=57408 => KeyCode::Char(
+                                    char::from_u32(c - 57399 + u32::from(b'0')).expect("digits"),
+                                ),
                                 57409 => KeyCode::Char('.'),
                                 57410 => KeyCode::Char('/'),
                                 57411 => KeyCode::Char('*'),
@@ -1111,7 +1113,10 @@ mod tests {
                         KeyCode::Char((c - 0x1c + b'4') as char),
                         KeyModifiers::CONTROL | KeyModifiers::ALT,
                     ),
-                    0x00 => (KeyCode::Char(' '), KeyModifiers::CONTROL | KeyModifiers::ALT),
+                    0x00 => (
+                        KeyCode::Char(' '),
+                        KeyModifiers::CONTROL | KeyModifiers::ALT,
+                    ),
                     c => {
                         let ch = char::from_u32(u32::from(c)).expect("ascii corpus");
                         let mut modifiers = KeyModifiers::ALT;
@@ -1488,7 +1493,10 @@ mod tests {
         // `cb ; cx ; cy` fields are the X10 button byte plus 32
         // (parse_csi_rxvt_mouse): 32 is a plain left press, 64 the
         // motion-bit drag form.
-        for (stream, motion) in [(b"\x1b[32;30;40;M".as_slice(), false), (b"\x1b[64;30;40;M".as_slice(), true)] {
+        for (stream, motion) in [
+            (b"\x1b[32;30;40;M".as_slice(), false),
+            (b"\x1b[64;30;40;M".as_slice(), true),
+        ] {
             let expected = vec![Report {
                 button: mouse::BUTTON_LEFT,
                 x: 30,
@@ -1570,7 +1578,10 @@ mod tests {
         let outputs = run_guard(read_projection(b"\x1b[[A", &[1]));
         assert_eq!(
             leaks(&outputs),
-            vec![Event::Key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT))]
+            vec![Event::Key(KeyEvent::new(
+                KeyCode::Char('A'),
+                KeyModifiers::SHIFT
+            ))]
         );
         assert!(reports(&outputs).is_empty());
     }
@@ -1585,7 +1596,10 @@ mod tests {
         let outputs = run_guard(read_projection("\x1b\u{e9}".as_bytes(), &[1]));
         assert_eq!(
             leaks(&outputs),
-            vec![Event::Key(KeyEvent::new(KeyCode::Char('\u{e9}'), KeyModifiers::ALT))]
+            vec![Event::Key(KeyEvent::new(
+                KeyCode::Char('\u{e9}'),
+                KeyModifiers::ALT
+            ))]
         );
         // Alt+É arrives SHIFT-modified (crossterm adds SHIFT to
         // uppercase characters).
