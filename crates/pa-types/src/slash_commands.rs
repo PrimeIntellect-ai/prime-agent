@@ -108,6 +108,13 @@ impl SlashCommandRegistry {
         }
     }
 
+    /// Shared immutable builtin registry for read-only hot paths such as TUI rendering.
+    /// `builtin()` remains available to callers that expect an owned registry.
+    pub fn builtin_cached() -> &'static Self {
+        static REGISTRY: std::sync::OnceLock<SlashCommandRegistry> = std::sync::OnceLock::new();
+        REGISTRY.get_or_init(Self::builtin)
+    }
+
     pub fn all(&self) -> &'static [BuiltinSlashCommand] {
         self.commands
     }
@@ -246,6 +253,26 @@ mod tests {
         // /clear remains the no-argument alias.
         assert!(!registry.takes_argument("clear"));
         assert!(registry.takes_argument("new"));
+    }
+
+    #[test]
+    fn cached_registry_matches_owned_registry() {
+        let owned = SlashCommandRegistry::builtin();
+        let cached = SlashCommandRegistry::builtin_cached();
+        assert!(std::ptr::eq(cached, SlashCommandRegistry::builtin_cached()));
+        assert_eq!(cached.all(), owned.all());
+        assert_eq!(
+            cached.suggestion_candidates(),
+            owned.suggestion_candidates()
+        );
+        for name in owned.suggestion_candidates().into_iter().chain(["unknown"]) {
+            assert_eq!(cached.resolve_name(name), owned.resolve_name(name));
+            assert_eq!(cached.get(name), owned.get(name));
+            assert_eq!(cached.is_builtin(name), owned.is_builtin(name));
+            assert_eq!(cached.takes_argument(name), owned.takes_argument(name));
+            let input = format!("/{name} -- example");
+            assert_eq!(cached.parse(&input), owned.parse(&input));
+        }
     }
 
     #[test]

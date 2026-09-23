@@ -1013,7 +1013,7 @@ impl AgentView {
         // TS `CustomEditor.render`: a bare `--` separator highlights only
         // while the first line opens with an argument-taking slash command.
         let editor_lines = self.editor.get_lines();
-        let registry = SlashCommandRegistry::builtin();
+        let registry = SlashCommandRegistry::builtin_cached();
         let include_bare_separator = editor_lines
             .first()
             .and_then(|first| command_token(first))

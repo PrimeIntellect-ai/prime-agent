@@ -146,7 +146,7 @@ pub fn style_argument_tokens(
 /// The TS recognition check also admits daemon-registered connection
 /// commands; the Rust strip recognizes builtin commands (aliases included).
 pub fn style_queued_message_preview(theme: &Theme, message: &str, label: &str) -> Line {
-    let registry = SlashCommandRegistry::builtin();
+    let registry = SlashCommandRegistry::builtin_cached();
     let preview = crate::queued::format_queued_message_preview(message, label);
     // TS `isLeadingSlashCommand`: a leading `/name` naming a known command.
     let leading = parse_slash_command(message).filter(|(name, _)| registry.is_builtin(name));
@@ -196,7 +196,7 @@ pub fn leading_slash_command(text: &str) -> Option<(&str, &str)> {
 /// daemon-registered connection commands; this client recognizes builtins
 /// (the same reduction the queued-strip preview makes).
 pub fn user_message_command_span(text: &str) -> (usize, bool) {
-    let registry = SlashCommandRegistry::builtin();
+    let registry = SlashCommandRegistry::builtin_cached();
     let Some((name, _)) = leading_slash_command(text) else {
         return (0, false);
     };
@@ -223,7 +223,7 @@ pub struct SourceSpan {
 /// segment accents for any leading `/name`, recognized or not; a bare `--`
 /// separator highlights only for argument-taking commands.
 pub fn slash_command_source_spans(text: &str) -> Vec<SourceSpan> {
-    let registry = SlashCommandRegistry::builtin();
+    let registry = SlashCommandRegistry::builtin_cached();
     match leading_slash_command(text) {
         Some((name, _)) => {
             let command_end = name.chars().count() + 1;
