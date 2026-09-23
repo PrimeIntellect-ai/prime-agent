@@ -141,8 +141,17 @@ class ReplTest(unittest.TestCase):
         listed = self.repl.until_done("list")[-1]
         self.assertEqual(listed["status"], "ok")
         self.assertEqual(next(row for row in listed["activities"] if row["id"] == activity_id)["status"], "running")
-        self.repl.send({"type": "bash_activity", "id": "tail", "action": "tail", "activityId": activity_id})
-        tail = self.repl.until_done("tail")[-1]
+        # The tail can race the child's first output flush: poll the
+        # bounded tail until the marker lands (the handle's own test does
+        # the same wait).
+        deadline = time.time() + 10
+        tail = {}
+        while time.time() < deadline:
+            self.repl.send({"type": "bash_activity", "id": "tail", "action": "tail", "activityId": activity_id})
+            tail = self.repl.until_done("tail")[-1]
+            if "ready" in tail["tail"]:
+                break
+            time.sleep(0.05)
         self.assertIn("ready", tail["tail"])
         self.repl.send({"type": "bash_activity", "id": "bad", "action": "kill", "activityId": "unknown"})
         self.assertEqual(self.repl.until_done("bad")[-1]["status"], "error")
