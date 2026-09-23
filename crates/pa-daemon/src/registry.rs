@@ -66,7 +66,7 @@ pub(crate) struct ResidentWorker {
 /// catalog generation they were read at (TS `worker.heartbeatSnapshot`):
 /// the rows are only trustworthy while their generation is still current
 /// (TS `worker.heartbeatSnapshotStale !== true`).
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkerHeartbeatSnapshot {
     pub(crate) rows: Vec<Value>,
     pub(crate) generation: u64,
@@ -108,6 +108,25 @@ impl ResidentWorker {
             .unwrap_or_default()
             .to_string();
         (descriptor.root_active_session_id.clone(), file_stem, name)
+    }
+
+    /// Store a catalog read as the worker's last-good heartbeat snapshot.
+    ///
+    /// The store is generation-monotonic: a read whose captured generation
+    /// is older than the stored snapshot's never replaces it, so a late
+    /// in-flight read cannot retag a newer snapshot as stale (freshness is
+    /// `stored.generation == current`) or drop the last-good rows a
+    /// busy-worker fallback serves. A read in the stored generation still
+    /// refreshes the rows, because the catalog is constant within a
+    /// generation.
+    pub(crate) async fn store_heartbeat_snapshot(&self, rows: Vec<Value>, generation: u64) {
+        let mut snapshot = self.heartbeat_snapshot.lock().await;
+        if snapshot
+            .as_ref()
+            .is_none_or(|stored| generation >= stored.generation)
+        {
+            *snapshot = Some(WorkerHeartbeatSnapshot { rows, generation });
+        }
     }
 }
 
@@ -440,5 +459,43 @@ mod tests {
             "second guard waited for the first"
         );
         let _ = first.await;
+    }
+
+    #[tokio::test]
+    async fn an_older_catalog_read_never_poisons_the_stored_snapshot() {
+        use serde_json::json;
+
+        let worker = resident("poison");
+        worker
+            .store_heartbeat_snapshot(vec![json!({"job": {"id": "first"}})], 5)
+            .await;
+        worker
+            .store_heartbeat_snapshot(vec![json!({"job": {"id": "second"}})], 6)
+            .await;
+        // A late read that captured generation 5 returning after the
+        // generation-6 store must not retag the newer snapshot as stale.
+        worker
+            .store_heartbeat_snapshot(vec![json!({"job": {"id": "late"}})], 5)
+            .await;
+        let snapshot = worker.heartbeat_snapshot.lock().await.clone();
+        assert_eq!(
+            snapshot,
+            Some(WorkerHeartbeatSnapshot {
+                rows: vec![json!({"job": {"id": "second"}})],
+                generation: 6,
+            })
+        );
+        // A read in the stored generation refreshes the rows.
+        worker
+            .store_heartbeat_snapshot(vec![json!({"job": {"id": "refreshed"}})], 6)
+            .await;
+        let snapshot = worker.heartbeat_snapshot.lock().await.clone();
+        assert_eq!(
+            snapshot,
+            Some(WorkerHeartbeatSnapshot {
+                rows: vec![json!({"job": {"id": "refreshed"}})],
+                generation: 6,
+            })
+        );
     }
 }

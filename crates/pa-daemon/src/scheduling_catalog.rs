@@ -281,12 +281,14 @@ impl Supervisor {
             // The stored snapshot carries the generation captured before
             // the forward: an invalidation that landed during the read bumps
             // the current generation past it, so the store lands already
-            // stale instead of clearing the newer invalidation.
-            *resident.heartbeat_snapshot.lock().await =
-                Some(crate::registry::WorkerHeartbeatSnapshot {
-                    rows: list.clone(),
-                    generation,
-                });
+            // stale instead of clearing the newer invalidation. The store
+            // itself is generation-monotonic: an older in-flight read
+            // returning after a newer read already stored never replaces
+            // the stored snapshot, so a late read cannot retag it as stale
+            // and busy-worker fallbacks keep serving the last-good rows.
+            resident
+                .store_heartbeat_snapshot(list.clone(), generation)
+                .await;
             for heartbeat in list {
                 let Some(id) = heartbeat
                     .get("job")
