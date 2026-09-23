@@ -854,3 +854,215 @@ fn print_mode_json_streams_the_threshold_compaction_pair() {
         "the compaction persisted"
     );
 }
+
+/// Run the binary in the isolated HOME but a different working directory
+/// (a "different project" for session-cwd resolution).
+fn run_in_home_cwd(
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+    args: &[&str],
+    script: &serde_json::Value,
+) -> (String, String, i32) {
+    let bin = env!("CARGO_BIN_EXE_prime-agent");
+    let output = Command::new(bin)
+        .args(args)
+        .env("HOME", home)
+        .env("PRIME_AGENT_FAUX_SCRIPT", script.to_string())
+        .env_remove("PRIME_AGENT_CODING_AGENT_DIR")
+        .env_remove("PRIME_AGENT_SESSION_DIR")
+        .env_remove("PRIME_AGENT_CODING_AGENT_SESSION_DIR")
+        .env_remove("RLM_DEPTH")
+        .current_dir(cwd)
+        .output()
+        .expect("binary present");
+    (
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        output.status.code().unwrap_or(-1),
+    )
+}
+
+/// TS `createSessionManager`'s fork arm: `--fork <selector>` copies the
+/// source session into a NEW session file (TS `SessionManager.forkFrom`),
+/// the run continues the copy — the source keeps its rows untouched — and
+/// the fork header parents at the source.
+#[test]
+fn print_mode_fork_copies_the_session_into_a_new_file() {
+    let home = isolated_home();
+    let script = serde_json::json!({ "responses": ["first answer"] });
+    let (stdout, _, code) = run_in_home(home.path(), &["-p", "first"], &script);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "first answer\n");
+    let files = session_files(home.path());
+    assert_eq!(files.len(), 1);
+    let source = &files[0];
+    let session_id = read_entries(source)[0]["id"].as_str().unwrap().to_string();
+
+    // Fork by the same prefix selector shape resume uses.
+    let selector = session_id[..8].to_string();
+    let script = serde_json::json!({ "responses": ["second answer"] });
+    let (stdout, stderr, code) = run_in_home(
+        home.path(),
+        &["--fork", selector.as_str(), "-p", "second"],
+        &script,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout, "second answer\n");
+
+    // A new session file; the source is untouched.
+    let after = session_files(home.path());
+    assert_eq!(after.len(), 2, "fork creates a new session file");
+    let fork = after
+        .iter()
+        .find(|path| path != source)
+        .expect("the fork file");
+    let source_entries = read_entries(source);
+    assert!(
+        !source_entries
+            .iter()
+            .any(|entry| entry["message"]["content"][0]["text"] == "second"),
+        "the source keeps its rows untouched"
+    );
+    let fork_entries = read_entries(fork);
+    // Fresh header: new id, the source path as parentSession.
+    assert_ne!(fork_entries[0]["id"], session_id.as_str());
+    assert_eq!(
+        fork_entries[0]["parentSession"],
+        source.display().to_string()
+    );
+    // The copied branch answers the follow-up.
+    let texts: Vec<&str> = fork_entries
+        .iter()
+        .filter(|entry| entry["type"] == "message")
+        .filter_map(|entry| entry["message"]["content"][0]["text"].as_str())
+        .collect();
+    assert!(texts.contains(&"first"));
+    assert!(texts.contains(&"second"));
+    assert!(texts.contains(&"second answer"));
+}
+
+/// `--fork` is the cross-project path: a session saved under another
+/// project's cwd forks into the CURRENT one (the TS GLOBAL resolution
+/// arm), while `--resume` still refuses it with the fork hint.
+#[test]
+fn print_mode_fork_imports_a_global_session_into_this_cwd() {
+    let home = isolated_home();
+    let project = home.join("other-project");
+    std::fs::create_dir_all(&project).expect("project dir");
+    let script = serde_json::json!({ "responses": ["global answer"] });
+    let (stdout, _, code) = run_in_home(home.path(), &["-p", "origin"], &script);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "global answer\n");
+    let files = session_files(home.path());
+    assert_eq!(files.len(), 1);
+    let session_id = read_entries(&files[0])[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let selector = session_id[..8].to_string();
+
+    // The same session is GLOBAL for the other project: resume refuses.
+    let script = serde_json::json!({ "responses": ["no"] });
+    let (stdout, stderr, code) = run_in_home_cwd(
+        home.path(),
+        &project,
+        &["--resume", selector.as_str(), "-p", "refused"],
+        &script,
+    );
+    assert_eq!(code, 1);
+    assert!(stdout.is_empty());
+    assert!(
+        stderr.contains(&format!(
+            "session {selector} belongs to a different project"
+        )),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains(&format!("Pass --fork {selector}")));
+
+    // ...and --fork imports it into this cwd.
+    let script = serde_json::json!({ "responses": ["forked into the project"] });
+    let (stdout, stderr, code) = run_in_home_cwd(
+        home.path(),
+        &project,
+        &["--fork", selector.as_str(), "-p", "continue here"],
+        &script,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout, "forked into the project\n");
+    let after = session_files(home.path());
+    assert_eq!(after.len(), 2);
+    let fork = after
+        .iter()
+        .find(|path| path != &files[0])
+        .expect("the fork file");
+    let fork_entries = read_entries(fork);
+    assert_eq!(
+        fork_entries[0]["cwd"],
+        project.display().to_string(),
+        "the fork adopts the TARGET cwd"
+    );
+    assert_eq!(
+        fork_entries[0]["parentSession"],
+        files[0].display().to_string()
+    );
+    let texts: Vec<&str> = fork_entries
+        .iter()
+        .filter(|entry| entry["type"] == "message")
+        .filter_map(|entry| entry["message"]["content"][0]["text"].as_str())
+        .collect();
+    assert!(texts.contains(&"origin"));
+    assert!(texts.contains(&"continue here"));
+}
+
+/// TS `forkFrom`'s failure contract on the CLI: an empty source file
+/// errors with the TS message instead of silently starting fresh, and
+/// `--fork` still refuses its conflicting flags.
+#[test]
+fn print_mode_fork_rejects_empty_sources_and_conflicting_flags() {
+    let home = isolated_home();
+    // An empty session file, addressed by path (TS forkFrom's empty
+    // source error).
+    let sessions = home.join(".prime/agent/sessions");
+    std::fs::create_dir_all(&sessions).expect("sessions dir");
+    let empty = sessions.join("empty-session.jsonl");
+    std::fs::write(&empty, "").expect("empty session");
+    let script = serde_json::json!({ "responses": ["never"] });
+    let (stdout, stderr, code) = run_in_home(
+        home.path(),
+        &["--fork", empty.display().to_string().as_str(), "-p", "hi"],
+        &script,
+    );
+    assert_eq!(code, 1);
+    assert!(stdout.is_empty());
+    assert!(
+        stderr.contains("Cannot fork: source session file is empty or invalid:"),
+        "stderr: {stderr}"
+    );
+
+    // The flag conflicts still refuse (TS validateForkFlags).
+    let (stdout, stderr, code) = run_in_home(
+        home.path(),
+        &[
+            "--fork",
+            "empty-session",
+            "--resume",
+            "empty-session",
+            "-p",
+            "hi",
+        ],
+        &script,
+    );
+    assert_eq!(code, 1);
+    assert!(stdout.is_empty());
+    assert!(
+        stderr.contains("--fork cannot be combined with --resume"),
+        "stderr: {stderr}"
+    );
+    // No fork file materialized for the refused runs.
+    assert!(
+        session_files(home.path()).is_empty() || {
+            let files = session_files(home.path());
+            files.iter().all(|path| *path == empty)
+        }
+    );
+}

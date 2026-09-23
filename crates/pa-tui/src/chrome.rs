@@ -72,15 +72,16 @@ pub struct ChromeState {
     /// while active, `Goal paused (0s)`, ...); `None` for idle/complete/error
     /// goals. Joins the tray context label first, before the model.
     pub goal_label: Option<String>,
-    /// The tray's heartbeat label (TS `getTrayHeartbeatLabel`):
-    /// `N heartbeats · M paused (Ctrl+R)` over the session-scoped catalog;
-    /// `None` when no heartbeat is in scope. Joins between goal and model.
-    pub heartbeat_label: Option<String>,
     /// Tray override label (TS `getTrayOverrideLabel`): while the Ctrl+C
     /// exit hint is armed, it replaces the tray's location label.
     pub tray_override: Option<String>,
     /// Compact, borderless activity dock under the editor.
     pub activity: Option<ActivityDock>,
+    /// The footer's tok/sec readout (TS `FooterComponent` under `/speed`):
+    /// the dim bottom row's text; `None` renders no row. The client keeps
+    /// `None` until the first completed response while the display is on
+    /// (TS renders nothing when enabled without text).
+    pub speed_text: Option<String>,
     /// Hide the splash `cwd` line (TS `getSplashCwd` returns `undefined`
     /// for the scoped agents view, so its metadata rows stay centered
     /// against the logo without the cwd row).
@@ -98,10 +99,28 @@ pub enum ActivityGroup {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActivityDock {
+    /// The session's live descendant subagents (the whole tree —
+    /// subagents of subagents count).
     pub subagents: usize,
+    /// How many of those descendants are actively running.
+    pub subagents_running: usize,
+    /// The CURRENT session's heartbeats (nested sessions' jobs do not
+    /// surface here, operator scoping).
     pub heartbeats: usize,
+    /// How many of the scoped heartbeats are paused.
+    pub heartbeats_paused: usize,
+    /// Bash processes actively running right now (the current session's
+    /// kernel registry only): finished runs never inflate the indicator
+    /// — they stay as dimmed rows inside the panel.
+    pub bash_running: usize,
+    /// Every catalogued kernel-bash run, finished ones included: this
+    /// keeps the dock (and so the panel's dimmed history) reachable when
+    /// no run is live; the rendered indicator count stays `bash_running`.
     pub bash_total: usize,
-    pub goal_tokens: Option<(String, u64, Option<u64>)>,
+    /// The active goal's token progress `(used, budget)`; `None` unless
+    /// the goal is actively being pursued (a completed or idle goal
+    /// carries no dock segment).
+    pub goal_tokens: Option<(u64, Option<u64>)>,
     pub selected: ActivityGroup,
     pub focused: bool,
 }
@@ -406,12 +425,6 @@ pub fn render_tray(state: &ChromeState, theme: &Theme, width: usize) -> Line {
     if let Some(goal) = &state.goal_label {
         right.push(Span::styled(goal.clone(), dim));
     }
-    if let Some(heartbeats) = &state.heartbeat_label {
-        if !right.is_empty() {
-            right.push(Span::styled(" \u{00b7} ".to_string(), dim));
-        }
-        right.push(Span::styled(heartbeats.clone(), dim));
-    }
     if let Some(model) = &state.model_id {
         let mut label = model.clone();
         if let Some(suffix) = &state.thinking_suffix {
@@ -487,29 +500,42 @@ fn truncate_spans_to_width(spans: &[crate::Span], width: usize) -> Vec<crate::Sp
     out
 }
 
-/// One borderless row with three actionable groups and read-only goal progress.
-pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) -> Option<Line> {
+/// The framed activity dock: a muted separator rule above one row of
+/// three actionable groups and the active goal's token progress. The TS
+/// summary line wraps its content in an accent-colored box
+/// (`╭─ subagents ─╮`); the inline design language keeps the separation
+/// with the same muted `─` rule that frames the pickers' search fields,
+/// not an accent box.
+///
+/// The row differentiates active from idle: subagents trail
+/// `N running` and heartbeats trail `M paused` (the tray carries no
+/// heartbeat label; the dock owns the count).
+pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) -> Option<Vec<Line>> {
     if !dock.visible() || width == 0 {
         return None;
     }
+    let mut subagents = format!(
+        "◆ {} subagent{}",
+        dock.subagents,
+        if dock.subagents == 1 { "" } else { "s" }
+    );
+    if dock.subagents > 0 {
+        subagents.push_str(&format!(" · {} running", dock.subagents_running));
+    }
+    let mut heartbeats = format!(
+        "◷ {} heartbeat{}",
+        dock.heartbeats,
+        if dock.heartbeats == 1 { "" } else { "s" }
+    );
+    if dock.heartbeats_paused > 0 {
+        heartbeats.push_str(&format!(" · {} paused", dock.heartbeats_paused));
+    }
     let groups = [
-        (
-            ActivityGroup::Subagents,
-            format!(
-                "◆ {} subagent{}",
-                dock.subagents,
-                if dock.subagents == 1 { "" } else { "s" }
-            ),
-        ),
-        (
-            ActivityGroup::Heartbeats,
-            format!(
-                "◷ {} heartbeat{}",
-                dock.heartbeats,
-                if dock.heartbeats == 1 { "" } else { "s" }
-            ),
-        ),
-        (ActivityGroup::Bash, format!("▸ {} bash", dock.bash_total)),
+        (ActivityGroup::Subagents, subagents),
+        (ActivityGroup::Heartbeats, heartbeats),
+        // Only live bash runs count in the dock's indicator (operator
+        // scoping); the panel keeps the dimmed finished rows.
+        (ActivityGroup::Bash, format!("▸ {} bash", dock.bash_running)),
     ];
     let mut line = vec![Span::raw(" ")];
     for (index, (group, text)) in groups.iter().enumerate() {
@@ -525,20 +551,32 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
         };
         line.push(Span::styled(text.clone(), style));
     }
-    if let Some((status, used, budget)) = &dock.goal_tokens {
+    if let Some((used, budget)) = &dock.goal_tokens {
         line.push(theme.fg_span(ThemeColor::Dim, "  ·  "));
         let goal = match budget {
             Some(budget) => format!(
-                "goal {} {}/{}",
-                status,
+                "goal {}/{}",
                 format_token_count(*used),
                 format_token_count(*budget)
             ),
-            None => format!("goal {status}"),
+            None => format!("goal {}", format_token_count(*used)),
         };
         line.push(theme.fg_span(ThemeColor::Dim, goal));
     }
-    Some(truncate_spans_to_width(&line, width))
+    let frame = vec![
+        vec![theme.fg_span(ThemeColor::BorderMuted, "─".repeat(width))],
+        truncate_spans_to_width(&line, width),
+    ];
+    Some(frame)
+}
+
+/// The footer's tok/sec row (TS `FooterComponent::render` under `/speed`):
+/// one dim line — the dock's last row — truncated with no ellipsis when it
+/// overflows the width.
+pub fn render_speed_footer(text: &str, theme: &Theme, width: usize) -> Line {
+    let dim = theme.fg_style(ThemeColor::Dim);
+    let text = truncate_to_width(text, width, "");
+    vec![Span::styled(text, dim)]
 }
 
 /// The editor surface background: `userMessageBg` (TS `getEditorTheme`).
@@ -549,26 +587,86 @@ pub fn editor_background(theme: &Theme) -> ratatui::style::Style {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn activity_dock_is_one_borderless_row_with_goal_last() {
+    fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
         let dock = ActivityDock {
-            subagents: 2,
-            heartbeats: 1,
-            bash_total: 1,
-            goal_tokens: Some(("active".to_string(), 18_000, Some(40_000))),
+            subagents: 95,
+            subagents_running: 2,
+            heartbeats: 3,
+            heartbeats_paused: 1,
+            bash_running: 1,
+            bash_total: 2,
+            goal_tokens: Some((18_000, Some(40_000))),
             ..ActivityDock::default()
         };
-        let row = render_activity_dock(&dock, &theme, 100).unwrap();
-        let text = row
+        let frame = render_activity_dock(&dock, &theme, 100).unwrap();
+        assert_eq!(frame.len(), 2, "a muted separator rule plus the row");
+        let rule = frame[0]
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert_eq!(rule.chars().next(), Some('─'));
+        assert_eq!(rule.chars().count(), 100);
+        let text = frame[1]
             .iter()
             .map(|span| span.content.as_str())
             .collect::<String>();
         assert_eq!(
             text,
-            " ◆ 2 subagents  ·  ◷ 1 heartbeat  ·  ▸ 1 bash  ·  goal active 18k/40k"
+            " ◆ 95 subagents · 2 running  ·  ◷ 3 heartbeats · 1 paused  ·  ▸ 1 bash  ·  goal 18k/40k"
         );
-        assert!(!text.contains('╭'));
+        // A running count of zero still renders: a long idle roster must
+        // read as quiet, not as uniformly busy.
+        let dock = ActivityDock {
+            subagents: 2,
+            heartbeats: 1,
+            bash_total: 3,
+            ..ActivityDock::default()
+        };
+        let frame = render_activity_dock(&dock, &theme, 100).unwrap();
+        let text = frame[1]
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert_eq!(
+            text,
+            " ◆ 2 subagents · 0 running  ·  ◷ 1 heartbeat  ·  ▸ 0 bash"
+        );
+        // Finished-only bash rows keep the dock mounted (the panel's
+        // dimmed history stays reachable) while the indicator reads
+        // zero live runs.
+        let dock = ActivityDock {
+            bash_total: 2,
+            ..ActivityDock::default()
+        };
+        let frame = render_activity_dock(&dock, &theme, 100).unwrap();
+        let text = frame[1]
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert!(text.contains("▸ 0 bash"));
         assert!(render_activity_dock(&ActivityDock::default(), &theme, 100).is_none());
+    }
+
+    /// The `/speed` footer row (TS `FooterComponent::render`): one dim row
+    /// with the readout, truncated with no ellipsis when it overflows.
+    #[test]
+    fn speed_footer_is_one_dim_row_truncated_to_width() {
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let row = render_speed_footer("188 tok/s · avg 200", &theme, 100);
+        let text = row
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert_eq!(text, "188 tok/s · avg 200");
+        assert_eq!(row.len(), 1);
+        let narrow = render_speed_footer("188 tok/s · avg 200", &theme, 10);
+        let text = narrow
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert_eq!(text.chars().count(), 10);
+        assert!(!text.contains("…"));
     }
 
     use super::*;
@@ -657,11 +755,11 @@ mod tests {
         assert_eq!(str_width(&text), 120);
     }
 
-    /// The tray's heartbeat label joins between goal and model (TS
-    /// `getTrayContextLabel`:
-    /// `[goalLabel, heartbeatLabel, modelContextLabel]`).
+    /// The tray carries no heartbeat label (TS `getTrayHeartbeatLabel` is
+    /// not ported): the activity dock below owns the counts, so the tray
+    /// joins goal straight to model.
     #[test]
-    fn tray_heartbeat_label_joins_between_goal_and_model() {
+    fn tray_never_repeats_the_heartbeat_counts() {
         let state = ChromeState {
             show_manage: true,
             model_id: Some("mock-1".to_string()),
@@ -670,14 +768,13 @@ mod tests {
                 context_window: 128_000,
             }),
             goal_label: Some("Pursuing goal (0s)".to_string()),
-            heartbeat_label: Some("2 heartbeats · 1 paused (Ctrl+R)".to_string()),
             ..Default::default()
         };
         let line = render_tray(&state, &theme(), 120);
         let text = line.iter().map(|s| s.content.as_str()).collect::<String>();
-        assert!(text.contains(
-            "Pursuing goal (0s) \u{b7} 2 heartbeats \u{b7} 1 paused (Ctrl+R) \u{b7} mock-1 \u{b7} 190 (0%)"
-        ));
+        assert!(text.contains("Pursuing goal (0s) \u{b7} mock-1 \u{b7} 190 (0%)"));
+        assert!(!text.contains("heartbeat"));
+        assert!(!text.contains("Ctrl+R"));
         assert_eq!(str_width(&text), 120);
     }
 

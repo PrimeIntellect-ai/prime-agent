@@ -20,9 +20,9 @@ use pa_agent::types::{AssistantMessage, StopReason};
 
 use super::provider_retry::{
     is_agent_lifecycle_failure, is_context_overflow_failure, is_faux_provider_queue_exhausted,
-    is_permanent_provider_failure_kind, provider_retry_delay, provider_stream_failure_kind,
-    provider_stream_failure_retry_after_ms, provider_stream_failure_status, ProviderRetryDelay,
-    ProviderRetryPolicy,
+    is_permanent_provider_failure_kind, is_unsupported_tool_failure, provider_retry_delay,
+    provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
+    provider_stream_failure_status, ProviderRetryDelay, ProviderRetryPolicy,
 };
 
 /// Why one `auto_retry_start` fired (the TS wire `reason` field).
@@ -111,6 +111,7 @@ where
             // A context overflow can never succeed unchanged (TS
             // `_isRetryableError`): the compact-and-retry recovery owns it.
             || is_context_overflow_failure(&message, context_window)
+            || is_unsupported_tool_failure(&message)
             || is_permanent_provider_failure_kind(
                 provider_stream_failure_kind(&message).as_deref(),
                 retries_performed,
@@ -601,5 +602,43 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error.to_string(), "turn crashed");
+    }
+
+    /// The router's tool-use 404 ("No endpoints found that support tool
+    /// use") is a permanent capability mismatch: the turn surfaces with
+    /// no retry events, exactly like the other non-retryable kinds.
+    #[tokio::test]
+    async fn unsupported_tool_failures_surface_without_retry_events() {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_emit = Arc::clone(&events);
+        let message = run_turn_with_auto_retry(
+            &fast_policy(),
+            0,
+            None,
+            || {
+                let attempts = Arc::clone(&attempts);
+                async move {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let mut unsupported = error_message(Some("invalid_request"), Some(404), None);
+                    unsupported.error_message =
+                        Some("404 No endpoints found that support tool use.".to_string());
+                    Ok(unsupported)
+                }
+            },
+            move |event| {
+                let events = Arc::clone(&events_for_emit);
+                async move {
+                    events.lock().unwrap().push(event);
+                    Ok(())
+                }
+            },
+            |_| async { true },
+        )
+        .await
+        .unwrap();
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(message.stop_reason, StopReason::Error);
+        assert!(events.lock().unwrap().is_empty());
     }
 }

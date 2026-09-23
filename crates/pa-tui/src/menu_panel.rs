@@ -11,6 +11,29 @@ use crate::{Line, Span};
 /// The field prompt (TS `Input` renders `"> "`).
 const FIELD_PROMPT: &str = "> ";
 
+/// Reduce colored trailing segments the same way the plain cluster
+/// shrinks (TS `reduceInlineTrailingSegments`): drop from the front
+/// while the joined width is still over the budget, but never the last.
+fn reduce_trailing_pairs<'a>(
+    segments: &'a [(ThemeColor, String)],
+    budget: usize,
+) -> &'a [(ThemeColor, String)] {
+    let join = |slice: &'a [(ThemeColor, String)]| -> String {
+        slice
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>()
+            .join(" · ")
+    };
+    for start in 0..segments.len() {
+        let slice = &segments[start..];
+        if slice.len() == 1 || str_width(&join(slice)) <= budget {
+            return slice;
+        }
+    }
+    segments
+}
+
 /// Trailing segments are joined with `" · "` and shrink from the front when
 /// the row is too narrow (TS `reduceInlineTrailingSegments`).
 fn reduce_trailing_segments<'a>(segments: &[&'a str], budget: usize) -> Vec<&'a str> {
@@ -50,6 +73,29 @@ pub(crate) fn trailing_spans(theme: &Theme, segments: &[&str], inner_width: usiz
     let mut line = vec![theme.fg_span(ThemeColor::Muted, reduced.join(" · "))];
     line = truncate_line(&line, budget, "\u{2026}");
     line
+}
+
+/// Render a colored trailing cluster: each segment carries its own
+/// foreground color (separators stay muted), shrunk from the front and
+/// truncated to the row's trailing budget.
+fn trailing_spans_colored(
+    theme: &Theme,
+    trailing: &[(ThemeColor, String)],
+    inner_width: usize,
+) -> Line {
+    let budget = inner_width.saturating_sub(5).max(1);
+    let reduced = reduce_trailing_pairs(trailing, budget);
+    if reduced.is_empty() {
+        return Vec::new();
+    }
+    let mut line: Line = Vec::with_capacity(reduced.len() * 2);
+    for (index, (color, text)) in reduced.iter().enumerate() {
+        if index > 0 {
+            line.push(theme.fg_span(ThemeColor::Muted, " \u{b7} ".to_string()));
+        }
+        line.push(theme.fg_span(*color, text.clone()));
+    }
+    truncate_line(&line, budget, "\u{2026}")
 }
 
 /// One inline menu row (TS `MenuRow.renderContent`, inline mode): the `›`
@@ -92,6 +138,52 @@ pub(crate) fn menu_row(
         row.push(Span::raw(" ".repeat(filler_width)));
     }
     row.extend(trailing);
+    finish_menu_row(theme, row, width, selected)
+}
+
+/// One inline menu row with a colored trailing cluster (the same
+/// geometry as [`menu_row`]; each trailing segment carries its own
+/// foreground color).
+pub(crate) fn menu_row_trailing(
+    theme: &Theme,
+    width: usize,
+    primary: Line,
+    trailing: &[(ThemeColor, String)],
+    selected: bool,
+) -> Line {
+    let inner_width = width.saturating_sub(2).max(1);
+    let trailing = trailing_spans_colored(theme, trailing, inner_width);
+    let trailing_width = crate::width::spans_width(&trailing);
+    let gap = if trailing_width > 0 { 2 } else { 0 };
+    let primary_width = inner_width.saturating_sub(trailing_width + gap).max(1);
+    let mut primary = primary;
+    if selected {
+        primary = primary
+            .into_iter()
+            .map(|mut span| {
+                span.style = span.style.add_modifier(ratatui::style::Modifier::BOLD);
+                span
+            })
+            .collect();
+    }
+    let primary = truncate_line(&primary, primary_width, "\u{2026}");
+    let filler_width = inner_width
+        .saturating_sub(crate::width::spans_width(&primary))
+        .saturating_sub(trailing_width);
+    let mut row: Line = Vec::with_capacity(primary.len() + trailing.len() + 4);
+    row.push(Span::raw(if selected { "\u{203a}" } else { " " }));
+    row.push(Span::raw(" "));
+    row.extend(primary);
+    if filler_width > 0 {
+        row.push(Span::raw(" ".repeat(filler_width)));
+    }
+    row.extend(trailing);
+    finish_menu_row(theme, row, width, selected)
+}
+
+/// The shared row finish: truncate to the width, pad so the selection
+/// band spans the row, and patch the soft selection background.
+fn finish_menu_row(theme: &Theme, row: Line, width: usize, selected: bool) -> Line {
     let mut row = truncate_line(&row, width, "");
     // Pad to the full width so the selection band spans the row.
     let used = crate::width::spans_width(&row);

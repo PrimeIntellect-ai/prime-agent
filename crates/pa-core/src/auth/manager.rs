@@ -675,15 +675,10 @@ impl AuthStorage {
                 (!trimmed.is_empty()).then_some(trimmed)
             })
             .or_else(|| {
-                // Stored team selection: only when the stored credential is the
-                // active source (runtime/env overrides win over the stored team).
-                let source = self.get_auth_status(provider_id).source;
-                if matches!(
-                    source,
-                    Some(AuthSource::Runtime) | Some(AuthSource::Environment)
-                ) {
-                    return None;
-                }
+                // Stored team selection: the stored primeTeam survives runtime
+                // and environment API-key overrides (fleet P5) — an ambient
+                // `PRIME_API_KEY` supplies the key, never the team, so the
+                // stored login's team still scopes the header.
                 match self.data.credential(provider_id) {
                     Some(AuthCredential::ApiKey { prime_team, .. }) => {
                         prime_team.as_ref().map(|team| team.team_id.clone())
@@ -979,8 +974,12 @@ impl AuthStorage {
     }
 
     /// TS `getPrimeInferenceTeamSelection`: the stored team selection, or
-    /// [`StoredPrimeTeam::NotSelected`] when `PRIME_TEAM_ID` or a
-    /// runtime/environment source overrides it.
+    /// [`StoredPrimeTeam::NotSelected`] when `PRIME_TEAM_ID` pins the team
+    /// or no api-key credential is stored. Fleet divergence (P5): the stored
+    /// primeTeam survives runtime and environment API-key overrides — TS
+    /// returns `undefined` when those are the active source, which forced
+    /// dogfood daemons to pin `PRIME_TEAM_ID` in the environment; the stored
+    /// login's team is used with whichever key is active instead.
     pub fn get_prime_inference_team_selection(&self) -> StoredPrimeTeam {
         if self
             .env_credentials
@@ -991,13 +990,6 @@ impl AuthStorage {
             })
             .is_some()
         {
-            return StoredPrimeTeam::NotSelected;
-        }
-        let source = self.get_auth_status(PRIME_INFERENCE_PROVIDER_ID).source;
-        if matches!(
-            source,
-            Some(AuthSource::Runtime) | Some(AuthSource::Environment)
-        ) {
             return StoredPrimeTeam::NotSelected;
         }
         match self.data.credential(PRIME_INFERENCE_PROVIDER_ID) {
@@ -1162,9 +1154,7 @@ mod tests {
                 "primeTeam": { "teamId": "team-1", "name": "Team 1" }
             }
         }));
-        // Stored team selection surfaces as the team header when the stored
-        // credential is the active source (the scripted env has no
-        // PRIME_API_KEY, so nothing hides the stored team).
+        // Stored team selection surfaces as the team header.
         let headers = auth
             .get_provider_headers(PRIME_INFERENCE_PROVIDER_ID)
             .unwrap();
@@ -1174,6 +1164,53 @@ mod tests {
         );
         // Other providers have no headers.
         assert!(auth.get_provider_headers("anthropic").is_none());
+        // The stored team survives an ambient environment key (the dogfood
+        // box posture): PRIME_API_KEY supplies the key, the stored login's
+        // team still scopes the header.
+        let mut auth = storage_with_env(
+            serde_json::json!({
+                "prime-inference": {
+                    "type": "api_key",
+                    "key": "pi-key",
+                    "primeTeam": { "teamId": "team-1", "name": "Team 1" }
+                }
+            }),
+            ScriptedEnv(HashMap::from([(
+                "PRIME_API_KEY".to_string(),
+                "env-key".to_string(),
+            )])),
+        );
+        assert_eq!(
+            auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID).as_deref(),
+            Some("env-key")
+        );
+        let headers = auth
+            .get_provider_headers(PRIME_INFERENCE_PROVIDER_ID)
+            .unwrap();
+        assert_eq!(
+            headers.get("X-Prime-Team-ID").map(String::as_str),
+            Some("team-1")
+        );
+        // The stored team survives a runtime API-key override too.
+        let mut auth = storage_with(serde_json::json!({
+            "prime-inference": {
+                "type": "api_key",
+                "key": "pi-key",
+                "primeTeam": { "teamId": "team-1", "name": "Team 1" }
+            }
+        }));
+        auth.set_runtime_api_key(PRIME_INFERENCE_PROVIDER_ID, "runtime-key".to_string());
+        assert_eq!(
+            auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID).as_deref(),
+            Some("runtime-key")
+        );
+        let headers = auth
+            .get_provider_headers(PRIME_INFERENCE_PROVIDER_ID)
+            .unwrap();
+        assert_eq!(
+            headers.get("X-Prime-Team-ID").map(String::as_str),
+            Some("team-1")
+        );
         // PRIME_TEAM_ID env wins over the stored selection.
         let auth = storage_with_env(
             serde_json::json!({
@@ -1387,7 +1424,8 @@ mod tests {
             auth.get_prime_inference_team_selection(),
             StoredPrimeTeam::PersonalAccount
         );
-        // PRIME_TEAM_ID hides the stored selection.
+        // PRIME_TEAM_ID hides the stored selection (the env pin owns the
+        // team).
         let auth = storage_with_env(
             serde_json::json!({
                 "prime-inference": {
@@ -1403,12 +1441,16 @@ mod tests {
             auth.get_prime_inference_team_selection(),
             StoredPrimeTeam::NotSelected
         );
-        // An environment key (the active source for prime-inference) hides
-        // it too.
+        // An environment key (the active source for prime-inference) does
+        // NOT hide the stored selection: the stored primeTeam survives the
+        // override (fleet P5, the dogfood daemon posture — no PRIME_TEAM_ID
+        // pin needed).
         let auth = storage_with_env(
             serde_json::json!({
                 "prime-inference": {
-                    "type": "api_key", "key": "pi-key", "primeTeam": null
+                    "type": "api_key",
+                    "key": "pi-key",
+                    "primeTeam": { "teamId": "team-1", "name": "Team 1" }
                 }
             }),
             ScriptedEnv(HashMap::from([(
@@ -1418,18 +1460,20 @@ mod tests {
         );
         assert_eq!(
             auth.get_prime_inference_team_selection(),
-            StoredPrimeTeam::NotSelected
+            StoredPrimeTeam::Team(team("team-1", "Team 1"))
         );
-        // A runtime override (the active source) hides it as well.
+        // A runtime override (the active source) does not hide it either.
         let mut auth = storage_with(serde_json::json!({
             "prime-inference": {
-                "type": "api_key", "key": "pi-key", "primeTeam": null
+                "type": "api_key",
+                "key": "pi-key",
+                "primeTeam": { "teamId": "team-1", "name": "Team 1" }
             }
         }));
         auth.set_runtime_api_key(PRIME_INFERENCE_PROVIDER_ID, "runtime-key".to_string());
         assert_eq!(
             auth.get_prime_inference_team_selection(),
-            StoredPrimeTeam::NotSelected
+            StoredPrimeTeam::Team(team("team-1", "Team 1"))
         );
     }
 }

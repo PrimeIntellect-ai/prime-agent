@@ -172,7 +172,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     ),
     CommandSpec::new(
         &["update"],
-        "update [--force] [--rollback] [--nightly|--stable]",
+        "update [--force] [--rollback] [--nightly|--stable] [--archive <path> --source <url>]",
         "Update Prime Agent",
     )
     .options(&[
@@ -180,6 +180,8 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "--rollback  Restore the previous compiled release",
         "--nightly   Switch updates to the nightly channel (unreleased builds, may be broken)",
         "--stable    Return updates to the stable channel",
+        "--archive <path>  Install a local release payload (a release archive or a payload directory) instead of resolving the channel",
+        "--source <url>     The https:// origin recorded as the release's install source (required with --archive)",
     ]),
     CommandSpec::new(&["model"], "model list [search]", "Inspect available models"),
     CommandSpec::new(&["model", "list"], "model list [search]", "List available models"),

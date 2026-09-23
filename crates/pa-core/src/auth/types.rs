@@ -29,8 +29,10 @@ pub enum PrimeTeamAssignment {
 
 /// The stored Prime team selection (TS `getPrimeInferenceTeamSelection`'s
 /// `PrimeTeamCredential | null | undefined`): `undefined` means no stored
-/// selection applies (`PRIME_TEAM_ID` is set, or the active auth source is
-/// not the stored credential).
+/// selection applies (`PRIME_TEAM_ID` is set, or no api-key credential is
+/// stored). Fleet divergence (P5): a runtime or environment API-key
+/// override does not hide the stored team — it survives, so daemons on
+/// boxes with ambient `PRIME_API_KEY` need no `PRIME_TEAM_ID` pin.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StoredPrimeTeam {
     /// TS `undefined`.
